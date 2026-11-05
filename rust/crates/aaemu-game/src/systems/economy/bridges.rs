@@ -1537,11 +1537,20 @@ impl ItemSkillHooks for EconomyForSkills {
                 let Some(player) = player_caster(args) else {
                     return true;
                 };
+                // An item cast names its template on the caster; the source item may already
+                // have been debited out of its container. Only a non-item cast uses the
+                // effect's own craft.
+                let item_template_id = match args.caster_caster {
+                    SkillCaster::Item {
+                        item_template_id, ..
+                    } => Some(item_template_id),
+                    _ => None,
+                };
                 match super::craft_learning::train_craft(
                     server,
                     player,
                     *craft_id,
-                    args.source.source_item.as_deref(),
+                    item_template_id,
                 ) {
                     super::craft_learning::TrainOutcome::Learned(crafts) => {
                         tracing::debug!(

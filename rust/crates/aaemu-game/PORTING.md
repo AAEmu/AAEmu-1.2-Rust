@@ -5586,9 +5586,13 @@ teaches the fixed craft 169 for thousands of items, the learned craft comes from
 `item_recipes.item_id` -> `craft_id` for the cast's source item; only a `TrainCraftEffect` with
 no source item (the 131 plain training skills) uses `train_craft_effects.craft_id`. The loader
 is `systems/economy/craft_learning.rs`; it skips the 49 recipe rows (48 distinct crafts) and 1
-effect row whose craft is missing from `crafts` (with one warning) and builds the learn-gated set as the union of both
-tables (2,762 valid crafts of the 7,010 in compact; the other crafts have no learn source, so
-they stay ungated).
+effect row whose craft is missing from `crafts` (with one warning). The learn-gated set holds only
+crafts with a reachable source: an `item_recipes` row whose item exists and whose `use_skill_id`
+carries `TrainCraftEffect`, or a `train_craft_effects` row carried by a skill another table grants,
+requires or commands (`default_skills`, `slash_commands`, `skill_req_skills`, the quest supply /
+accept grants). That is 2,412 of the 2,762 candidate crafts in compact; the other 350 (222 with
+no training effect, 128 whose training skills nothing references) would otherwise be locked
+forever, so they stay ungated. The counts are logged once at load.
 
 Learn: the effect inserts the craft into `Character::learned_crafts` under one character lock;
 the skill pipeline consumes the source item as before (`use_skill_as_reagent = 't'` on every
@@ -5602,8 +5606,12 @@ data has 9 training skills using it (crafts 3, 4, 6, 8, 9, 10, 11, 169, 182). Th
 INFERRED rule, recorded as a deviation from the C#.
 
 Persistence: `character_crafts(character_id, craft_id, learned_at)` (SQL update + base schema) is
-loaded in `db_character::load_character_details` and written with `INSERT IGNORE` from
-`save_character` (after the `characters` REPLACE; no FK, so `learned_at` survives saves). The
+loaded in `db_character::load_character_details`. A learn adds the craft to
+`Character::learned_crafts_unsaved`; the character save writes only those ids in one multi-row
+`INSERT ... ON DUPLICATE KEY UPDATE` with `UTC_TIMESTAMP()`, and the save ack clears them from the
+live character (like the removed-list fields). A pending learn also makes
+`SaveManager::is_financially_dirty` true, so the recipe-item deletion and the learned-craft row
+commit in the same snapshot. The
 gate is `Crafting.RequireLearnedRecipes` (`Configurations/Crafting.json`, default **false**):
 when true, `craft::craft` refuses a gated unlearned craft with
 `CraftCantActAnyMore`/`craft_not_learned` (0x82 = 130; `x2game.dll.c:1136028`). The default is

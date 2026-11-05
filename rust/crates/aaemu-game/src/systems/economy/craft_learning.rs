@@ -22,7 +22,6 @@ use sqlx::{MySql, Transaction};
 use crate::data::sqlite::for_each_row;
 use crate::data::GameDataError;
 use crate::error::Result;
-use crate::models::item::Item;
 use crate::server::GameServer;
 use crate::systems::DataLoadCtx;
 use crate::world::PlayerRef;
@@ -31,7 +30,9 @@ use crate::world::PlayerRef;
 /// (`server.game_data.systems.economy.craft_learning`).
 #[derive(Debug, Default)]
 pub struct CraftRecipes {
-    /// Crafts that appear in `item_recipes` or `train_craft_effects` (`crafts.id`).
+    /// Crafts with at least one reachable source. Only these are gated: a craft whose
+    /// `item_recipes` item is missing or has no `TrainCraftEffect` use skill, and whose training
+    /// skills are not referenced anywhere, would be locked forever.
     pub gated: HashSet<u32>,
     /// `item_recipes`: recipe item template id -> the craft ids it teaches.
     pub item_crafts: HashMap<u32, Vec<u32>>,
@@ -39,9 +40,22 @@ pub struct CraftRecipes {
     pub effect_crafts: HashMap<u32, u32>,
 }
 
+/// Player-castable references to a skill (the skill book / a command / a quest grant / a
+/// prerequisite). An item `use_skill_id` is not one: an item cast has a source item, so
+/// `train_craft` takes the craft from `item_recipes`, never from the effect row.
+const TRAINING_REFERENCE_QUERIES: &[&str] = &[
+    "SELECT DISTINCT skill_id AS skill_id FROM default_skills WHERE skill_id <> 0",
+    "SELECT DISTINCT skill_id AS skill_id FROM slash_commands WHERE skill_id <> 0",
+    "SELECT DISTINCT skill_id AS skill_id FROM skill_req_skills WHERE skill_id <> 0",
+    "SELECT DISTINCT skill_id AS skill_id FROM quest_act_supply_skills WHERE skill_id <> 0",
+    "SELECT DISTINCT skill_id AS skill_id FROM quest_act_con_accept_skills WHERE skill_id <> 0",
+];
+
 impl CraftRecipes {
-    /// Loads `item_recipes` + `train_craft_effects`. Rows whose craft is missing from `crafts`
-    /// are skipped with one warning (49 recipe rows / 1 effect row in the shipped compact DB).
+    /// Loads `item_recipes` + `train_craft_effects` and keeps only crafts with a reachable
+    /// source. Rows whose craft is missing from `crafts`, or whose item is missing, are
+    /// skipped; training skills counted as reachable are the ones another table grants,
+    /// requires or commands (none in the shipped 1.2 data). The counts are logged once.
     pub fn load(ctx: &DataLoadCtx<'_>) -> std::result::Result<Self, GameDataError> {
         let mut crafts = HashSet::new();
         for_each_row(ctx.conn, "SELECT id FROM crafts", [], |r| {
@@ -49,52 +63,103 @@ impl CraftRecipes {
             Ok(())
         })?;
 
-        let mut d = Self::default();
-        let mut skipped = 0usize;
+        // `effect actual_id` carried by a skill: `skill_effects.effect_id` is the `effects.id`
+        // row, whose `actual_id` is the `train_craft_effects.id`.
+        let mut effect_skills: HashMap<u32, HashSet<u32>> = HashMap::new();
+        let mut skills_by_effect: HashMap<u32, HashSet<u32>> = HashMap::new();
         for_each_row(
             ctx.conn,
-            "SELECT item_id, craft_id FROM item_recipes",
+            "SELECT DISTINCT se.skill_id AS skill_id, e.actual_id AS effect_id \
+             FROM skill_effects se JOIN effects e ON e.id = se.effect_id \
+             WHERE e.actual_type = 'TrainCraftEffect'",
+            [],
+            |r| {
+                let skill_id = r.u32("skill_id")?;
+                let effect_id = r.u32("effect_id")?;
+                effect_skills.entry(skill_id).or_default().insert(effect_id);
+                skills_by_effect
+                    .entry(effect_id)
+                    .or_default()
+                    .insert(skill_id);
+                Ok(())
+            },
+        )?;
+
+        let mut castable_skills = HashSet::new();
+        for query in TRAINING_REFERENCE_QUERIES {
+            for_each_row(ctx.conn, query, [], |r| {
+                castable_skills.insert(r.u32("skill_id")?);
+                Ok(())
+            })?;
+        }
+
+        let mut d = Self::default();
+        let mut candidates = HashSet::new();
+        let mut item_gated = HashSet::new();
+        let mut training_gated = HashSet::new();
+        let mut skipped = 0usize;
+
+        for_each_row(
+            ctx.conn,
+            "SELECT r.item_id AS item_id, r.craft_id AS craft_id, \
+                    (i.id IS NOT NULL) AS item_exists, COALESCE(i.use_skill_id, 0) AS use_skill_id \
+             FROM item_recipes r LEFT JOIN items i ON i.id = r.item_id",
             [],
             |r| {
                 let item_id = r.u32("item_id")?;
                 let craft_id = r.u32("craft_id")?;
-                if !crafts.contains(&craft_id) {
+                if !r.bool("item_exists")? || !crafts.contains(&craft_id) {
                     skipped += 1;
                     return Ok(());
                 }
-                d.gated.insert(craft_id);
+                candidates.insert(craft_id);
                 let list = d.item_crafts.entry(item_id).or_default();
                 if !list.contains(&craft_id) {
                     list.push(craft_id);
                 }
+                let use_skill = r.u32("use_skill_id")?;
+                if use_skill != 0 && effect_skills.contains_key(&use_skill) {
+                    item_gated.insert(craft_id);
+                }
                 Ok(())
             },
         )?;
+
         for_each_row(
             ctx.conn,
             "SELECT id, craft_id FROM train_craft_effects",
             [],
             |r| {
-                let id = r.u32("id")?;
+                let effect_id = r.u32("id")?;
                 let craft_id = r.u32("craft_id")?;
                 if !crafts.contains(&craft_id) {
                     skipped += 1;
                     return Ok(());
                 }
-                d.gated.insert(craft_id);
-                d.effect_crafts.insert(id, craft_id);
+                candidates.insert(craft_id);
+                d.effect_crafts.insert(effect_id, craft_id);
+                let castable = skills_by_effect.get(&effect_id).is_some_and(|skills| {
+                    skills.iter().any(|skill| castable_skills.contains(skill))
+                });
+                if castable {
+                    training_gated.insert(craft_id);
+                }
                 Ok(())
             },
         )?;
-        if skipped > 0 {
-            tracing::warn!(
-                skipped,
-                "craft learning: skipped rows whose craft is not in `crafts`"
-            );
-        }
+
+        d.gated = item_gated.union(&training_gated).copied().collect();
         for list in d.item_crafts.values_mut() {
             list.sort_unstable();
         }
+        tracing::info!(
+            gated_crafts = d.gated.len(),
+            item_sources = item_gated.len(),
+            training_sources = training_gated.len(),
+            skipped_rows = skipped,
+            unreachable_crafts = candidates.len().saturating_sub(d.gated.len()),
+            "craft learning: loaded item_recipes / train_craft_effects"
+        );
         Ok(d)
     }
 
@@ -108,7 +173,7 @@ impl CraftRecipes {
         self.effect_crafts.get(&effect_id).copied()
     }
 
-    /// Whether the craft is in the learn-gated set (`item_recipes` or `train_craft_effects`).
+    /// Whether the craft must be learned before it can be executed.
     pub fn requires_learning(&self, craft_id: u32) -> bool {
         self.gated.contains(&craft_id)
     }
@@ -125,25 +190,22 @@ pub enum TrainOutcome {
     NoRecipe { item_template_id: Option<u32> },
 }
 
-/// Teaches the craft(s) of a `TrainCraftEffect` to the player. `source_item` is the item cast's
-/// source (a recipe item); without one the effect's own craft id applies (plain training
-/// skills). The check and the insert happen under one character lock.
+/// Teaches the craft(s) of a `TrainCraftEffect` to the player. An item cast (`item_template_id`
+/// from `SkillCaster::Item`) uses its `item_recipes` row; only a non-item cast falls back to the
+/// effect's own craft id (plain training skills). The check and the insert happen under one
+/// character lock.
 pub fn train_craft(
     server: &GameServer,
     player: &PlayerRef,
     effect_craft_id: u32,
-    source_item: Option<&Item>,
+    item_template_id: Option<u32>,
 ) -> TrainOutcome {
     let economy = &server.game_data.systems.economy;
-    let mut item_template_id = None;
-    let crafts = match source_item {
-        Some(item) => {
-            item_template_id = Some(item.template_id);
-            match economy.craft_learning.crafts_for_item(item.template_id) {
-                Some(crafts) => crafts.to_vec(),
-                None => return TrainOutcome::NoRecipe { item_template_id },
-            }
-        }
+    let crafts = match item_template_id {
+        Some(template_id) => match economy.craft_learning.crafts_for_item(template_id) {
+            Some(crafts) => crafts.to_vec(),
+            None => return TrainOutcome::NoRecipe { item_template_id },
+        },
         None => vec![effect_craft_id],
     };
     let valid: Vec<u32> = crafts
@@ -157,7 +219,7 @@ pub fn train_craft(
     let mut character = player.data();
     let mut learned = Vec::new();
     for craft_id in valid {
-        if character.learned_crafts.insert(craft_id) {
+        if character.learn_craft(craft_id) {
             learned.push(craft_id);
         }
     }
@@ -200,25 +262,29 @@ pub async fn load_character_crafts(pool: &MySqlPool, character_id: u32) -> Resul
     Ok(crafts)
 }
 
-/// Persists the learned set (`Character.Save`). `INSERT IGNORE` keeps the first `learned_at`
-/// and is a no-op for a craft that is already stored.
+/// Persists the crafts learned since the last committed save (`Character.Save`), in one
+/// multi-row statement. `learned_at` is UTC; a retried snapshot updates the row instead of
+/// relying on `INSERT IGNORE`.
 pub async fn save_character_crafts(
     tx: &mut Transaction<'_, MySql>,
     character_id: u32,
     crafts: &HashSet<u32>,
 ) -> Result<()> {
+    if crafts.is_empty() {
+        return Ok(());
+    }
     let mut ids: Vec<u32> = crafts.iter().copied().collect();
     ids.sort_unstable();
+    let values = vec!["(?, ?, UTC_TIMESTAMP())"; ids.len()].join(", ");
+    let sql = format!(
+        "INSERT INTO `character_crafts` (`character_id`, `craft_id`, `learned_at`) VALUES {values} \
+         ON DUPLICATE KEY UPDATE `learned_at` = VALUES(`learned_at`)"
+    );
+    let mut query = sqlx::query(&sql);
     for craft_id in ids {
-        sqlx::query(
-            "INSERT IGNORE INTO `character_crafts` (`character_id`, `craft_id`, `learned_at`) \
-             VALUES (?, ?, NOW())",
-        )
-        .bind(character_id)
-        .bind(craft_id)
-        .execute(&mut **tx)
-        .await?;
+        query = query.bind(character_id).bind(craft_id);
     }
+    query.execute(&mut **tx).await?;
     Ok(())
 }
 

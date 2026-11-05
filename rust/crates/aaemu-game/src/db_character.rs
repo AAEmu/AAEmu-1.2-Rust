@@ -1223,9 +1223,13 @@ pub async fn save_character(
     // Achievements (records + progress). Written after the `characters` REPLACE above, so its
     // ON DELETE CASCADE cannot drop the rows this snapshot re-inserts.
     crate::systems::social::achievement_persistence::save_character_achievements(tx, c).await?;
-    // Learned crafts (`character_crafts`; no FK, `INSERT IGNORE` keeps the first learned_at).
-    crate::systems::economy::craft_learning::save_character_crafts(tx, c.id, &c.learned_crafts)
-        .await?;
+    // Learned crafts (`character_crafts`; only the ids added since the last committed save).
+    crate::systems::economy::craft_learning::save_character_crafts(
+        tx,
+        c.id,
+        &c.learned_crafts_unsaved,
+    )
+    .await?;
     // Later phase: Mates.Save.
     Ok(())
 }
@@ -1467,6 +1471,9 @@ async fn save_directly(
     .await;
     match res {
         Ok(()) => {
+            // The direct save committed the rows this snapshot carried; drop them so the next
+            // snapshot does not rewrite them.
+            saved.learned_crafts_unsaved.clear();
             *c = saved;
             true
         }
@@ -1708,6 +1715,68 @@ mod tests {
             .unwrap();
             assert_eq!(saved, (i64::from(expected.0), i64::from(expected.1), 6));
         }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_learned_crafts_survive_character_reload() {
+        use crate::data::character_templates::CharacterTemplate;
+        use crate::data::GameData;
+        use crate::test_support::test_server_with;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let mut data = GameData::empty();
+        data.characters.templates.insert(
+            17,
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                creatable: true,
+                ..Default::default()
+            },
+        );
+        let mut server = test_server_with(data);
+        server.db = pool.clone();
+
+        let mut character = Character::new(1, 1, UnitCustomModelParams::default());
+        character.race = 1;
+        character.gender = 1;
+        character.unit.name = "CraftReload".into();
+        character.created = Utc::now().timestamp();
+        assert!(character.learn_craft(987));
+        assert!(character.learn_craft(480));
+        assert_eq!(character.learned_crafts_unsaved.len(), 2);
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let mut loaded = Character::new(1, 1, UnitCustomModelParams::default());
+        loaded.race = 1;
+        loaded.gender = 1;
+        load_character_details(&server, &mut loaded).await.unwrap();
+        assert_eq!(
+            loaded.learned_crafts,
+            std::collections::HashSet::from([987u32, 480])
+        );
+        assert!(loaded.learned_crafts_unsaved.is_empty());
         pool.close().await;
     }
 
