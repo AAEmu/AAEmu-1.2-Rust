@@ -463,8 +463,8 @@ pub fn complete_effect(server: &GameServer, args: &EffectArgs<'_>) {
         Some(player),
     );
     // The attackers captured the territory: credit kinds 57 (attackers) and 60 (defenders)
-    // once. The report queues here because the economy operation scope is held; the packet
-    // dispatcher flushes it after the handler releases the scope.
+    // once. This function holds only the reentrant operation scope, not the economy ops lock,
+    // so the facade writes the records immediately.
     super::credit::credit_siege_outcome(server, &state);
 }
 

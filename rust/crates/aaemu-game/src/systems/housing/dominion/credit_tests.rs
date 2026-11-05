@@ -402,6 +402,7 @@ async fn a_restart_keeps_the_credited_marker_and_does_not_credit_again() {
     assert!(state.siege.as_ref().unwrap().outcome_credited);
 
     // Restart: the authority is restored from the persisted snapshots (the marker included).
+    let siege_id = state.siege.as_ref().unwrap().siege_id;
     let restarted = super::super::state::DominionManager::default();
     restarted
         .restore(f.server.systems.housing.dominions.snapshots())
@@ -412,7 +413,8 @@ async fn a_restart_keeps_the_credited_marker_and_does_not_credit_again() {
         restored.siege.as_ref().unwrap().status,
         SiegeStatus::Finished
     );
-    assert!(!credit_siege_outcome(&f.server, &restored));
+    // The restored marker refuses a second check-and-set for the same siege id.
+    assert_eq!(restarted.mark_outcome_credited(ZONE, siege_id), Ok(None));
     for index in 0..ATTACKERS.len() {
         assert_eq!(value(&f, index, RECORD_LOSE_ATTACK), 1, "attacker {index}");
     }
@@ -423,4 +425,16 @@ async fn a_restart_keeps_the_credited_marker_and_does_not_credit_again() {
             "defender {offset}"
         );
     }
+}
+
+#[tokio::test]
+async fn an_offline_participant_targets_the_authored_zone_record() {
+    let f = fixture(true);
+    let matcher = crate::systems::social::achievement_hooks::RecordMatch::Value1(ZONE);
+    let ids = crate::systems::social::achievement_hooks::increment_record_ids(
+        &f.server,
+        char_record_kind::LOSE_ATTACK_SIEGE,
+        matcher,
+    );
+    assert_eq!(ids, [RECORD_LOSE_ATTACK]);
 }
