@@ -360,6 +360,35 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
 | `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is accepted now and enables the lobby edit, and the game's `Characters:MaxPerAccount` / `Characters:PreSelectPeriod` must equal `Login:MaxCharactersPerAccount` / `Login:PreSelectCharacterPeriod` (documented pairs, no cross-process check; each server logs its effective values at startup). |
 
+#### Honor gain / loss attributes and NPC-kill honor (WP-3, 2026-11-05)
+
+`UnitAttribute` 126-135 (and `HonorPointLoseMul` 125) existed but were never read. Evidence:
+`unit_modifiers` has 37 rows on those attributes (all type 0 `Value`), all carried by buffs; the
+test buffs 6266/6267 "Honor test buff 1/2" put +100 on 128/130/132/134 and +100 on their `Mul`
+twins and -100 on 125; buff 6303 (rice ball) has only `HonorPointLoseMul = -100` with the
+description "honor points are protected ... effect is not lost on death"; buff 6442 "Akalife"
+(+1 on 128 and 132) says "+1 honor per monster hunted; +10 at the end of a battlefield; +1 during
+conflict/siege; +4 during war". The add-then-multiply order mirrors `LivingPointGain`
+(`round(change + add)`, then `round(change * (mul + 100) / 100)`), clamped at 0 for gains.
+
+| Area | Rust | Status | Notes |
+|---|---|---|---|
+| Honor source attribute pairs | `systems/skills/progress.rs` (`HonorSource`, `honor_gain`, `grant_honor_locked`, `grant_honor`) | added | NpcKill 128/129, Trial 130/131, War 132/133, Quest 134/135, BattleField 126/127. **Sources mapped by name and buff 6442's text (INFERRED):** 128 = monster hunt, 132 = conflict/siege/war PvP kill; 134 follows the Quest name. |
+| Quest honor (`QuestActSupplyHonorPoint`, 73 real rows) | `systems/quests/hooks.rs` (`grant_quest_honor`), `bridges.rs`, `acts.rs` | added | `round(World.HonorRate * point)` then the Quest pair. `World.HonorRate` is the same rate `GiveHonorPoint` (special 100) already applies; it is read live from `server.config`, so a GM `honorrate` change applies on the next reward. Special 100 itself has no evidenced source and stays on the generic `change_game_points` path (UNCHANGED). |
+| NPC-kill honor (`npcs.honor_point`) | `systems/npcs/npc/death.rs` (`before_death`) | added | 54 boss templates have `honor_point > 0` (2 x level; max 100); the value was loaded and never read (the C# also never used it). Each player with kill-exp eligibility (the `kill_exp_for` window, or the killer when nobody holds tagging rights) gets `round(World.HonorRate * honor_point)` through the NpcKill pair. **INFERRED** that the column is the killer's honor (name + values); **UNKNOWN** whether retail splits it in a party: no split here, conservative (the same eligibility as kill exp). TagShare contributors get no honor (they get no exp either). |
+| PvP kill honor | `systems/skills/combat.rs` (`award_pvp_honor`) | added | Routed through the War pair. The per-state amounts (Conflict 10 solo / 6 + 4 assists, War 20 / 16 + 4) and `World.PvPHonorRate` are unchanged. |
+| Battlefield end honor | `systems/instances/instant_game.rs` (`pay_awards`) | added | Routed through the BattleField pair. |
+| War-zone death loss | `systems/skills/progress.rs` (`lose_honor_on_death`), `systems/skills/combat.rs` | added | The existing flat 10 is scaled by `(HonorPointLoseMul + 100) / 100`, clamped at 0 and at the current honor; the read and the debit happen under one character lock. Buff 6303 (`-100`) therefore removes the loss. **UNKNOWN** the base loss outside War; no new loss is added there (the C# had none; the conflict test asserts no victim packet). |
+| Trial honor | `HonorSource::Trial` wired | unused | **UNKNOWN** which 1.2 flow grants Trial honor (jury pay or similar); no grant site exists in the current server, so the enum variant and its attribute pair stay unused (documented, not invented). |
+
+Tests: `systems::integration_tests::{quest_honor_without_modifiers_is_unchanged,
+quest_honor_applies_world_rate_and_the_quest_attributes,
+boss_kill_grants_honor_point_times_honor_rate_to_every_eligible_killer,
+npc_kill_honor_applies_the_npc_kill_attribute_pair,
+honor_point_lose_mul_minus_100_removes_the_war_death_loss}`; the existing
+`solo_pvp_kill_in_a_conflict_zone_awards_honor`, `war_zone_kill_splits_honor_with_assists_and_costs_the_victim_honor`
+and `battlefield_end_awards_bonus_honor` are the no-modifier regressions.
+
 #### Delayed `DisturbCasting` / `SCCastingDelayed` (2026-11-05)
 
 `systems::skills`: 1.2 packet `SCCastingDelayed` 0x0a6 (S->C, reader `FUN_397ca570`,
