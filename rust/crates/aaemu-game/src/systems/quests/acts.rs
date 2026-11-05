@@ -304,13 +304,7 @@ impl Ctx<'_> {
                 true
             }
             SupplyHonorPoint { point } => {
-                hooks.change_game_points(
-                    self.server,
-                    player.as_ref(),
-                    self.c,
-                    game_point::HONOR,
-                    *point,
-                );
+                hooks.grant_quest_honor(self.server, player.as_ref(), self.c, *point);
                 true
             }
             SupplyItem {

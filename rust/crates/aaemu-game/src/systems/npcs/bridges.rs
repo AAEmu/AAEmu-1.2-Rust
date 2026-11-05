@@ -492,9 +492,15 @@ impl NpcSkillHooks for NpcSkills {
         skill_item: &crate::systems::skills::types::SkillCaster,
         placement: Option<crate::systems::skills::ext::SummonPlacement>,
         max_range: f32,
+        client_spawn: Option<bool>,
     ) {
         crate::systems::vehicles::slaves::create_from_skill(
-            server, player, skill_item, placement, max_range,
+            server,
+            player,
+            skill_item,
+            placement,
+            max_range,
+            client_spawn,
         );
     }
 
@@ -1227,6 +1233,16 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         let Some(_operation) = super::doodad::phase::Operation::enter(doodad) else {
             return;
         };
+        let caster = WorldObject::from(player);
+        // The doodad store checkout distance (`CSBuyItems`: 3 m); resolved here so the
+        // `blocked_child_doodads` refusal runs before any purchase side effect.
+        let Some(world) = crate::systems::economy::store::parent_world(server, player) else {
+            return;
+        };
+        if super::doodad::phase::refuse_blocked_child_doodad(server, &world, doodad, Some(&caster))
+        {
+            return;
+        }
         let data = &server.game_data.systems.npcs.doodad;
         let group = doodad.data().func_group_id;
         let Some(func) = data.func(id) else {
@@ -1261,13 +1277,9 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
             );
             return;
         }
-        // The doodad store checkout distance (`CSBuyItems`: 3 m).
-        let Some(world) = crate::systems::economy::store::parent_world(server, player) else {
-            return;
-        };
         if crate::systems::economy::store::world_distance(
             &world,
-            &WorldObject::from(player),
+            &caster,
             &WorldObject::from(doodad),
         ) > crate::systems::economy::store::SHOP_RANGE
         {
@@ -1279,7 +1291,6 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         let Some(ctx) = super::doodad::runtime::DoodadCtx::of(server, doodad) else {
             return;
         };
-        let caster = WorldObject::from(player);
         // The C# only ran the template (its `CSBuyCoinItemPacket` never advanced the phase);
         // 301 of the 468 purchase rows carry a `next_phase`, so a granted purchase moves the
         // doodad through the normal phase machinery (phase funcs + `SCDoodadPhaseChangedPacket`).

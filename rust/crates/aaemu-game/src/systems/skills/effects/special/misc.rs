@@ -623,12 +623,19 @@ pub fn spawn_slave(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         .source
         .skill()
         .map_or(0.0, |s| s.template.max_range as f32);
+    // `CSSpawnSlave` builds the cast with an internal `SkillObject::Unk5(hideSpawnEffect)`
+    // marker; a real client summon-item cast carries no skill object.
+    let client_spawn = match args.skill_object {
+        SkillObject::Unk5(hide) => Some(*hide != 0),
+        _ => None,
+    };
     server.systems.skills.ext.npcs().spawn_slave(
         server,
         p,
         &args.caster_caster,
         placement,
         max_range,
+        client_spawn,
     );
 }
 

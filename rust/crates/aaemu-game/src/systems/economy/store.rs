@@ -398,6 +398,19 @@ impl CSBuyItemsPacket {
             None
         };
 
+        // `blocked_child_doodads`: no checkout (and no purchase-func phase advance) from a
+        // child doodad whose parent unit carries the blocking buff.
+        if let Some(d) = &doodad {
+            if crate::systems::npcs::doodad::phase::refuse_blocked_child_doodad(
+                server,
+                &world,
+                d,
+                Some(&WorldObject::from(&p)),
+            ) {
+                return;
+            }
+        }
+
         // If a Doodad was provided, check if we're near it and whether it is a shop. The C#
         // only checked the distance and sold any template (TODO "validate doodad shop").
         if self.doodad_obj_id != 0 {

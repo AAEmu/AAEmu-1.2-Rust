@@ -8,7 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard};
 
-use crate::data::world_templates::{WorldTemplate, CELL_SIZE, SECTORS_PER_CELL};
+use crate::data::world_templates::{WorldTemplate, CELL_SIZE, REGION_SIZE, SECTORS_PER_CELL};
 use crate::systems::skills::controllers::{calculate_distance, Vec3};
 
 use super::bai::{
@@ -93,6 +93,10 @@ pub struct AiGeoData {
     /// `CellX` / `CellY`.
     pub cell_x: i32,
     pub cell_y: i32,
+    /// `ZoneKeyByRegions` (the same sector grid `WorldTemplate::zone_id_at` uses), copied once.
+    zone_key_by_regions: Vec<u32>,
+    /// `regions_y` (`CellY * SECTORS_PER_CELL`) for the sector index of [`Self::zone_key_of`].
+    regions_y: i32,
     /// `ZoneKeyByRegions[cellX * 16, cellY * 16]` for every cell (`x * cell_y + y`).
     cell_zone_keys: Vec<u32>,
     zone_keys: Vec<u32>,
@@ -147,6 +151,8 @@ impl AiGeoData {
             world_name: template.name.clone(),
             cell_x: template.cell_x,
             cell_y: template.cell_y,
+            zone_key_by_regions: template.zone_key_by_regions().to_vec(),
+            regions_y: template.regions_y(),
             cell_zone_keys,
             zone_keys: template.zone_keys.clone(),
             zone_origins: template
@@ -273,12 +279,37 @@ impl AiGeoData {
         }))
     }
 
+    /// `WorldTemplate.GetZoneId(x, y)`: the zone key of the 64 m sector containing `pos` (0 when
+    /// the sector is outside the world), the same lookup `WorldTemplate::zone_id_at` uses.
+    fn zone_key_of(&self, pos: Vec3) -> u32 {
+        let sx = (pos.x / REGION_SIZE as f32) as i32;
+        let sy = (pos.y / REGION_SIZE as f32) as i32;
+        let regions_x = self.cell_x * SECTORS_PER_CELL;
+        if sx < 0 || sy < 0 || sx >= regions_x || sy >= self.regions_y {
+            return 0;
+        }
+        self.zone_key_by_regions
+            .get((sx * self.regions_y + sy) as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// `WorldTemplate.GetBaiByPos(pos)` (`Err` = `IndexOutOfRangeException` for a cell outside
     /// the world).
     pub fn bai_by_pos(&self, pos: Vec3) -> Result<Option<BaiRef>, GeoError> {
         let zones = self.zone_bai();
-        if let Some((_, l)) = zones.first() {
-            return Ok(Some(l.clone())); // TODO (C#): pick the actually correct zone
+        if !zones.is_empty() {
+            let zone_key = self.zone_key_of(pos);
+            if let Some((_, l)) = zones.iter().find(|(k, _)| *k == zone_key) {
+                return Ok(Some(l.clone()));
+            }
+            // The position's zone ships no zone `.bai` of its own: keep the inherited C# TODO
+            // behaviour (the first loaded zone) rather than returning no navmesh at all.
+            tracing::debug!(
+                "{} has zone bai files but none for zone {zone_key}; using the first zone",
+                self.world_name
+            );
+            return Ok(zones.first().map(|(_, l)| l.clone()));
         }
         let (cx, cy) = to_cell_index(pos);
         if cx < 0 || cy < 0 || cx >= self.cell_x || cy >= self.cell_y {
@@ -770,7 +801,156 @@ pub fn distance_2d(a: Vec3, b: Vec3) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use super::super::bai::test_files::{net_mission_full, TNode};
     use super::*;
+    use crate::data::world_templates::{WorldSpawnPosition, XmlWorldZone};
+
+    /// An in-memory client file set for the `.bai` loaders.
+    struct MemFiles(HashMap<String, Vec<u8>>);
+
+    impl BaiFiles for MemFiles {
+        fn files_in_directory(&self, dir: &str, pattern: &str) -> Vec<String> {
+            let dir = dir.to_lowercase();
+            let pat = pattern.to_lowercase().replace('*', "");
+            let (pre, post) = pat.split_once('.').unwrap_or((&pat, ""));
+            let suffix = format!(".{post}");
+            let mut v: Vec<String> = self
+                .0
+                .keys()
+                .filter(|k| k.to_lowercase().starts_with(&dir))
+                .filter(|k| {
+                    let name = k.rsplit('/').next().unwrap_or("").to_lowercase();
+                    name.starts_with(pre) && name.ends_with(&suffix)
+                })
+                .cloned()
+                .collect();
+            v.sort();
+            v
+        }
+        fn file_exists(&self, name: &str) -> bool {
+            self.0.contains_key(name)
+        }
+        fn read_file(&self, name: &str) -> Option<Vec<u8>> {
+            self.0.get(name).cloned()
+        }
+    }
+
+    fn zone_bai_geo() -> AiGeoData {
+        let mut t = WorldTemplate::synthetic(0, "w", 2, 2, 100);
+        // Sector x=16 (1024..1087 m), y=0 is zone 200; every other sector stays zone 100.
+        assert!(t.set_zone_key_at(16, 0, 200));
+        t.zone_keys.push(200);
+        t.xml_world.zones.insert(
+            200,
+            XmlWorldZone {
+                zone_key: 200,
+                name: "two".into(),
+                origin_x: 0,
+                origin_y: 0,
+                cells: Default::default(),
+                spawn_position: WorldSpawnPosition::default(),
+            },
+        );
+        let mut files = HashMap::new();
+        files.insert(
+            "game/worlds/w/zone/100/netmission0.bai".into(),
+            net_mission_full(&[TNode::tri(1, [10.0, 10.0, 5.0], [0, 1, 2])], &[]),
+        );
+        files.insert(
+            "game/worlds/w/zone/200/netmission0.bai".into(),
+            net_mission_full(&[TNode::tri(1, [1030.0, 10.0, 7.0], [0, 1, 2])], &[]),
+        );
+        AiGeoData::new(
+            &t,
+            true,
+            Arc::new(MemFiles(files)),
+            Arc::new(UsedAreaNames::default()),
+            None,
+        )
+    }
+
+    /// WP-5c: `GetBaiByPos` picks the zone `.bai` of the position's sector, not the first zone.
+    #[test]
+    fn bai_by_pos_uses_the_position_zone() {
+        let g = zone_bai_geo();
+        assert_eq!(g.zone_key_of(Vec3::new(10.0, 10.0, 0.0)), 100);
+        assert_eq!(g.zone_key_of(Vec3::new(1030.0, 10.0, 0.0)), 200);
+        assert_eq!(
+            g.bai_by_pos(Vec3::new(10.0, 10.0, 0.0))
+                .unwrap()
+                .unwrap()
+                .folder,
+            "100"
+        );
+        assert_eq!(
+            g.bai_by_pos(Vec3::new(1030.0, 10.0, 0.0))
+                .unwrap()
+                .unwrap()
+                .folder,
+            "200"
+        );
+    }
+
+    /// Step 0 / real data: the 1.2 pak ships zone `.bai` files (`instance_library`: zones
+    /// 296-298 and 303-306); the zone of a position selects its loader. Needs the real pak:
+    /// `AAEMU_GAME_PAK=D:/AA1.2/game_pak cargo test -p aaemu-game real_zone_bai -- --ignored`.
+    #[test]
+    #[ignore = "needs AAEMU_GAME_PAK"]
+    fn real_zone_bai_files_are_selected_by_position() {
+        let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+            return;
+        };
+        let app = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app");
+        let files = Arc::new(crate::data::client_files::ClientFileManager::from_sources(
+            &[pak],
+            &app,
+        ));
+        let worlds =
+            crate::data::world_templates::WorldTemplates::load(&files, &app).expect("worlds");
+        let library = worlds
+            .get_world_template_by_name("instance_library")
+            .expect("instance_library");
+        // Step 0 through the client file manager: how many worlds ship zone `.bai` files.
+        let all_bai = files.files_in_directory("game/worlds", "*.bai", true);
+        let zone_bai: Vec<&String> = all_bai
+            .iter()
+            .filter(|n| n.to_lowercase().contains("/zone/"))
+            .collect();
+        let worlds: std::collections::BTreeSet<&str> = zone_bai
+            .iter()
+            .filter_map(|n| n.split('/').nth(2))
+            .collect();
+        println!(
+            "zone bai files: {} in {} worlds: {:?}",
+            zone_bai.len(),
+            worlds.len(),
+            worlds
+        );
+        assert_eq!(zone_bai.len(), 161);
+        assert_eq!(worlds.len(), 16);
+        let bai: Arc<dyn BaiFiles + Send + Sync> =
+            Arc::new(crate::systems::ai::geodata::ClientBaiFiles(files.clone()));
+        let g = AiGeoData::new(library, true, bai, Arc::new(UsedAreaNames::default()), None);
+        let zones = g.zone_bai();
+        println!(
+            "instance_library zone bai: {:?}",
+            zones.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+        );
+        assert_eq!(zones.len(), 7, "zones 296-298, 303-306");
+        let (sx, sy) = (0..library.regions_x())
+            .flat_map(|x| (0..library.regions_y()).map(move |y| (x, y)))
+            .find(|&(x, y)| library.zone_key_at(x, y) == Some(306))
+            .expect("zone 306 sector");
+        let pos = Vec3::new(
+            (sx as f32 + 0.5) * REGION_SIZE as f32,
+            (sy as f32 + 0.5) * REGION_SIZE as f32,
+            0.0,
+        );
+        assert_eq!(g.zone_key_of(pos), 306);
+        assert_eq!(g.bai_by_pos(pos).unwrap().unwrap().folder, "306");
+    }
 
     fn v(x: f32, y: f32) -> Vec3 {
         Vec3::new(x, y, 0.0)

@@ -1409,11 +1409,17 @@ fn dead_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     npc::stop_movement(c.server, &c.npc);
     combat::npc_clear_all_aggro(c);
     npc::set_alertness(&c.npc, MoveTypeAlertness::IDLE);
+    // The set is over (release); a window still open on the dying NPC is closed, as for a
+    // despawn (INFERRED, see PORTING.md WP-5b).
+    super::interaction::release(c);
+    super::interaction::end_open_interactions(c, c.npc.obj_id);
     super::npc_events::on_death(c);
     c.st(k).enter = true;
 }
 
 fn despawning_enter(c: &mut AiCtx<'_>) {
+    super::interaction::release(c);
+    super::interaction::end_open_interactions(c, c.npc.obj_id);
     super::npc_events::on_despawn(c);
 }
 
@@ -1566,6 +1572,8 @@ fn follow_unit_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     });
     let Some(follow) = follow.filter(|_| alive) else {
         c.ai.follow_unit = None;
+        // A `FollowUnit` AI command's set ends with the follow (INFERRED, see PORTING.md).
+        super::interaction::release(c);
         c.go_to_idle();
         return;
     };
@@ -1858,7 +1866,28 @@ fn run_command_set_tick(c: &mut AiCtx<'_>, delta_ms: i64) {
         tick_current_ai_command(c, delta_ms);
         return;
     }
+    super::interaction::release(c);
     c.go_to_idle();
+}
+
+/// `FollowUnit`'s search radius for the fallback target (INFERRED from
+/// `DoFollowNearestNpc(..., 100f)`).
+const FOLLOW_UNIT_RANGE: f32 = 100.0;
+
+/// The nearest player within `range` of the NPC (`DoFollowNearestNpc`'s search, filtered to
+/// players).
+fn nearest_player(c: &AiCtx<'_>, range: f32) -> Option<WorldObject> {
+    let mut nearest: Option<(f32, WorldObject)> = None;
+    for o in npc::around(c.server, &c.obj, range, true) {
+        if o.as_player().is_none() {
+            continue;
+        }
+        let dist = npc::distance_to(c.server, &c.obj, &o, false);
+        if nearest.as_ref().is_none_or(|(closest, _)| dist < *closest) {
+            nearest = Some((dist, o));
+        }
+    }
+    nearest.map(|(_, o)| o)
 }
 
 /// `RunCommandSetBehavior.TickCurrentAiCommand(aiCommand, delta)`.
@@ -1885,16 +1914,24 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
         cmd.param1,
         cmd.param2
     );
+    // WP-5b: `ai_command_sets.can_interact` (INFERRED rule, see PORTING.md).
+    super::interaction::apply_command_set(c, cmd.cmd_set_id);
     match cmd.cmd_id {
         Cmd::FollowUnit => {
-            tracing::warn!(
-                "AI Command: {:?} not implemented, NPC {}, CommandSet {}, P1 {}, P2 {}",
-                cmd.cmd_id,
+            // `ai.follow_unit` (set by the quest bridge or an earlier command) wins; otherwise
+            // follow the nearest player within 100 m, like `DoFollowNearestNpc`. `param1` is 1
+            // in all three shipped rows and its meaning is UNKNOWN: log it and ignore it.
+            tracing::debug!(
+                "NPC {}: FollowUnit param1 {} is UNKNOWN and ignored",
                 c.npc.obj_id,
-                cmd.cmd_set_id,
-                cmd.param1,
-                cmd.param2
+                cmd.param1
             );
+            if c.ai.follow_unit.is_none() {
+                c.ai.follow_unit = nearest_player(c, FOLLOW_UNIT_RANGE);
+            }
+            if c.ai.follow_unit.is_some() {
+                c.go_to_follow_unit();
+            }
         }
         Cmd::FollowPath => {
             // The command names its own route. The C# loaded `AiFileName` (the *previous*

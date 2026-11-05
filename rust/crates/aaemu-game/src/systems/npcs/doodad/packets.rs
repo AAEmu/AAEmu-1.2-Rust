@@ -296,6 +296,16 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
                 );
                 return Ok(());
             }
+            // `blocked_child_doodads`: a player cannot start the child doodad's phase funcs
+            // while its parent unit carries the blocking buff.
+            if super::phase::refuse_blocked_child_doodad(
+                server,
+                &world,
+                &doodad,
+                Some(&WorldObject::from(&me)),
+            ) {
+                return Ok(());
+            }
             // Same refusal as `Doodad.Use` (phase.rs): a doodad scheduled for despawn must not
             // change phase.
             if server
@@ -373,7 +383,7 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
 /// allowance the cast target check adds; a skill-less / unknown / unbounded func gets the 5 m
 /// doodad interaction distance (`portal::NAVI_USE_RANGE`, also `looting::LOOT_TAKE_RANGE`) plus
 /// that allowance.
-fn in_func_reach(
+pub(crate) fn in_func_reach(
     server: &GameServer,
     player: &crate::world::PlayerRef,
     doodad: &crate::world::DoodadRef,

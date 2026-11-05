@@ -834,20 +834,14 @@ fn character_death_tail(
                     true,
                 );
             }
-            // Victim loses honor in War zone (clamped >= 0)
-            let honor_point = victim_p.data().honor_point;
-            if zone_state == conflict_type::WAR && honor_point > 0 {
-                let loss = WAR_ZONE_HONOR_LOSS.min(honor_point);
-                super::progress::change_game_points(
-                    server,
-                    victim_p,
-                    super::progress::GAME_POINT_HONOR,
-                    -loss,
-                );
-                tracing::debug!(
-                    "PvP Death: {} lost {loss} honor (War zone death)",
-                    victim_p.data().unit.name
-                );
+            // Victim loses honor in War zone: the flat loss scaled by `HonorPointLoseMul`,
+            // clamped at 0 and at the current honor (one lock inside the helper).
+            if zone_state == conflict_type::WAR {
+                let name = victim_p.data().unit.name.clone();
+                let loss = super::progress::lose_honor_on_death(victim_p, WAR_ZONE_HONOR_LOSS);
+                if loss > 0 {
+                    tracing::debug!("PvP Death: {name} lost {loss} honor (War zone death)");
+                }
             }
         } else {
             // Friendly-fire kill -> generate crime evidence (unless retaliation)
@@ -1032,7 +1026,8 @@ fn award_pvp_honor(
         .collect();
     let round = |share: i32| (f64::from(share) * rate).round_ties_even() as i32;
     let gain = |p: &PlayerRef, honor: i32| {
-        super::progress::change_game_points(server, p, super::progress::GAME_POINT_HONOR, honor);
+        // PvP / conflict honor is the War source; `pvp_honor_rate` stays in the shares above.
+        super::progress::grant_honor(server, p, super::progress::HonorSource::War, honor);
         let total = {
             let mut c = p.data();
             c.honor_gained_in_combat = c.honor_gained_in_combat.wrapping_add(honor as u32);
