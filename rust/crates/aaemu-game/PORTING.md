@@ -801,7 +801,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy, rename, national tax, monument) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-4 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. Stage 4 adds the nation rename (`SCNationShowRenameUI` 0x010 + the `CSRenameExpedition` nation half), the national tax (`CSUpdateNationalTaxRate` 0x013 -> `SCNationalTaxRate` 0x021) and the territory-statue monument (`SCNationalMonumentChanged` 0x022). See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). The temporary Red / Blue team faction also goes to each participant's active mates and owned slaves (they copy the owner's faction at spawn and `Character.SetFaction` never updates them) through `combat::set_faction_with_temp`, and is restored with the owner's at the end / disconnect; a mate or slave summoned during the duel is restored as well. Test: `mate_and_slave_follow_the_duel_faction_and_get_it_back`. |
-| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
+| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board answers the empty list by default and the pledge rows behind `Social.BountyBoard` (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
 | `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. The dominion `SCDominionDeleted` / `TaxBalanced` / `NonPvPStarted` / `NonPvPStopped` notifications now have senders (see the `systems::housing / systems::social` notification bullet under Phase 3). |
 | `RankingGameData` (later C# history), 1.2 ranking packets | `systems/social/ranking_{data,packets,runtime,manager,persistence}.rs` | done (arena + fishing boards) | Not in the 1.2 C#; Rust only. Request path, MySQL persistence (`character_rank_scores`, `rank_period_payouts`), score hooks and period-close reward letters: see "Ranking boards" under Known deviations. |
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
@@ -6098,10 +6098,23 @@ Policy decisions / capture-pending (each also a case id in the code):
   A deleted character's pledges are never refunded and stay in the table for its id. Arena and
   instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
   these have 1.2 evidence; they are safe defaults.
-* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The row layout is verified (M10), but the
-  C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
-  The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the
-  original client first.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The empty `(0, 0)` list stays the
+  default: the C# comment records that a filled list broke the 1.2 client Lua, the cause was
+  never found and the row layout was only verified later (M10, reader `FUN_397bebf0`), so the
+  real-client check is **capture-pending**. `Social.BountyBoard` (default `false`, shipped in
+  `Configurations/Social.json`) enables the filled answer:
+  `SCBountyList{total, count, rows}` where `total` is every character with an unpaid pledge and
+  the rows are capped at the client's 20 entries (`0x14`, `MAX_BOUNTY_LIST_ENTRIES`), highest
+  total first (ties by character id; the order is a server policy, not client evidence, and only
+  decides which rows the cap keeps). Online rows read name, level, race, crime point, zone and
+  position from the live character with `is_live = true`; offline rows read the same fields plus
+  the arrest / trial counters from its `characters` row (`deleted = 0`) with `is_live = false`.
+  A missing or unreadable character row is skipped and no longer counted in `total`, so the
+  client can still complete its id-keyed row map. The row's `type` field (`+184` in the reader,
+  meaning UNKNOWN) is `1`, the value of the C# dummy row (C#-only); `seconds` is `0` (no 1.2
+  meaning known, no timer is invented). `total > count` only while more than 20 characters have
+  pledges. The switch must stay `false` until an original-client run (hidden client, bounty
+  board doodad) opens the board without a Lua error.
 
 * **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
   `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is
