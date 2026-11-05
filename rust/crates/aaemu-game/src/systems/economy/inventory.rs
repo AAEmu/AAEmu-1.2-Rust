@@ -21,7 +21,7 @@ use crate::models::container::{
     equip_slot, slot_type, ContainerRef, ItemContainer, ItemEnv, ItemRules,
 };
 use crate::models::item::{Item, ItemClass};
-use crate::models::item_task::{task_type, ItemFxList, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
 use crate::world::{PlayerRef, WorldObject};
@@ -103,7 +103,7 @@ impl<'a> ItemTxn<'a> {
 
     /// Queue for the character packets sent during this operation.
     pub fn out(&mut self) -> Out<'_> {
-        Out::Queue(&mut self.env.fx)
+        Out::Queue(self.server, &mut self.env.fx)
     }
 
     /// Ends the operation now (same as dropping it).
@@ -1627,10 +1627,12 @@ pub fn send_error_message_to(out: &mut Out<'_>, player: &PlayerRef, error: i16) 
 
 /// Where a character's own packets go: straight to its connection, or queued with the item
 /// effects of the running [`ItemTxn`] (the C# sends everything inline, so the order of item
-/// task packets and these packets must be kept).
+/// task packets and these packets must be kept). Both variants carry the server, because an
+/// upward money change reports the `MY_GOLD` achievement through it (queued in the item effects
+/// or in the achievement deferral, never under the character or operation lock).
 pub enum Out<'a> {
-    Direct,
-    Queue(&'a mut ItemFxList),
+    Direct(&'a GameServer),
+    Queue(&'a GameServer, &'a mut ItemFxList),
 }
 
 impl Out<'_> {
@@ -1640,8 +1642,8 @@ impl Out<'_> {
         packet: impl crate::net::packet::ServerPacket + 'static,
     ) {
         match self {
-            Out::Direct => player.send(packet),
-            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Packet {
+            Out::Direct(_) => player.send(packet),
+            Out::Queue(_, fx) => fx.push(ItemFx::Packet {
                 owner: player.character_id,
                 packet: Box::new(packet),
             }),
@@ -1660,8 +1662,10 @@ pub fn change_money(
     task: u8,
 ) -> bool {
     let mut tasks = Vec::new();
+    let mut gold_report = None;
     {
         let mut c = player.data();
+        let before = c.money;
         match from {
             slot_type::INVENTORY => {
                 if i64::from(amount) > c.money {
@@ -1693,6 +1697,24 @@ pub fn change_money(
                 tasks.push(ItemTask::MoneyChangeBank(amount));
             }
             _ => {}
+        }
+        // `MY_GOLD` is a high-water record: only an upward change of the carried purse is
+        // reported. The character lock is released here; the report itself runs from the item
+        // effects (`Out::Queue`) or the achievement deferral (`Out::Direct`), never inside this
+        // function's lock.
+        if c.money > before {
+            gold_report = Some(c.money);
+        }
+    }
+    if let Some(money) = gold_report {
+        match &mut *out {
+            Out::Direct(server) => {
+                crate::systems::social::achievement_hooks::report_gold(server, player, money);
+            }
+            Out::Queue(_, fx) => fx.push(ItemFx::Money {
+                owner: player.character_id,
+                money,
+            }),
         }
     }
     out.send(
@@ -1840,12 +1862,12 @@ pub fn change_labor(
             // Inside an `ItemTxn` (the ops lock is held): `AddExp` ends in quest events, which
             // take the non-reentrant ops lock themselves. Queue it behind the item tasks;
             // `fx::flush` applies it after the lock is released, before the labor packet below.
-            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Exp {
+            Out::Queue(_, fx) => fx.push(ItemFx::Exp {
                 owner: player.character_id,
                 exp: xp_to_add,
                 add_ability_exp: true,
             }),
-            Out::Direct => {
+            Out::Direct(_) => {
                 if let Some(h) = server.systems.economy.hooks.progression.get() {
                     h.add_exp(server, player, xp_to_add, true);
                 }

@@ -240,7 +240,7 @@ pub(crate) fn transfer_gender(server: &GameServer, player: &crate::world::Player
                 .is_some_and(|t| t.char_gender != 0 && t.char_gender != new_gender)
         });
         if blocked {
-            let mut out = Out::Direct;
+            let mut out = Out::Direct(server);
             send_error_message_to(
                 &mut out,
                 player,

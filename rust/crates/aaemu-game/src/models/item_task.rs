@@ -546,6 +546,10 @@ pub enum ItemFx {
         exp: i32,
         add_ability_exp: bool,
     },
+    /// The character's carried copper after an **upward** money change. `fx::flush` hands it to
+    /// the achievement facade's `MY_GOLD` (kind 14) report, which needs the locks released (it
+    /// takes the character lock and the economy operation lock).
+    Money { owner: u32, money: i64 },
     /// `EquipmentContainer.OnEnterContainer` (`SCUnitEquipmentsChanged` to the neighbours of
     /// the parent unit + `UpdateGearBonuses(item, null)`). `mate_id` > 0 for mate gear.
     EquipEnter {

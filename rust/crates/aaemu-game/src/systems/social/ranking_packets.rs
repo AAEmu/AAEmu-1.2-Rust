@@ -39,8 +39,9 @@
 //!   already knows that character.
 //!
 //! Scores are signed (`v1`/`v2` are read with `cvtsi2ss`, treated as `i32`), timestamps are unix
-//! seconds. `SCRankAlarmPacket` (0x205) is already ported in `packets/g2c_misc.rs` and is not
-//! repeated here.
+//! seconds. `SCRankAlarmPacket` (0x205) is ported in `packets/g2c_misc.rs` and is not repeated
+//! here; [`ranking_manager`](super::ranking_manager) sends it when the once-a-minute clock
+//! crosses an authored board alarm (kind 0 = start, 1 = end, INFERRED from the client handler).
 //!
 //! This module is wire-only: no manager, no registry wiring, no score state. It is not declared in
 //! `systems/social/mod.rs` yet (the snapshot request has no handler until the board manager

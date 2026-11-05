@@ -761,7 +761,7 @@ impl EconomyForSkills {
             )
         };
         tracing::debug!("Player {name}");
-        let mut out = Out::Direct;
+        let mut out = Out::Direct(server);
         if recoverable <= 0 {
             // Is this one correct?
             send_error_message_to(
@@ -3488,6 +3488,7 @@ impl crate::systems::quests::hooks::QuestHooks for EconomyForQuests {
     ) {
         // ChangeMoney(SlotType.None, SlotType.Inventory, amount) (DepositMoney)
         c.money += i64::from(amount);
+        let money = c.money;
         let mut fx = ItemFxList::default();
         fx.send(
             c.id,
@@ -3496,6 +3497,11 @@ impl crate::systems::quests::hooks::QuestHooks for EconomyForQuests {
                 vec![ItemTask::MoneyChange(amount)],
             ),
         );
+        // A quest reward deposit is an upward money change like any other: `fx::flush` reports
+        // the absolute `MY_GOLD` value after the character lock is released.
+        if amount > 0 {
+            fx.push(ItemFx::Money { owner: c.id, money });
+        }
         Self::defer(server, c.id, fx);
     }
 

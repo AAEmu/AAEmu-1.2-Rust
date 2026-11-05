@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 69,
-    "never_sent": 49
+    "never_sent": 48
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -113,7 +113,6 @@
     "SCRaceCondPacket",
     "SCRacingPacket",
     "SCRacingResultPacket",
-    "SCRankAlarmPacket",
     "SCSearchListPacket",
     "SCSpamReportedPacket",
     "SCSuspectGoingBotTrial",

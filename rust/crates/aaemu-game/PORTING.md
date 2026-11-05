@@ -4070,7 +4070,7 @@ The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `
 - **Persistence.** `character_rank_scores` (one row per character, board and period) and `rank_period_payouts` (periods already paid), loaded at startup and upserted by every `SaveManager` pass (`AfterCharacters`). Every row is rewritten on each save (idempotent, so a rolled-back save loses nothing); `Character::ranking_state` is unused (standings need offline characters, so the store is global).
 - **Events.** The arena board scores at the end of an instant game (`instant_game::record_rankings`, once per game): win/lose/draw/invalid points are `game_rule_sets.rank_*_point` (only rule set 28, the gladiator duel in zone group 77: win 4, lose 1). Because `EndGame` leaves both corps `LOSE` when the timer runs out (mirrored C# bug), a timed-out duel scores both players as losers. The two fishing boards score each trophy fish a player lands (`fishing::record_catch`, from `DoodadFuncConvertFish` and the equipped-fish conversion) in the player's zone group; they only count inside the board's authored window, which ended in 2014, so on the shipped data no catch scores. The racing board is never recorded.
 - **Period close.** A once-a-minute task (first tick at start-up) mails every closed, unpaid period: place -> `rank_scope_links` band -> `rank_rewards` item (count and grade as authored) as a `SYS_EXPRESS` letter (offline winners included), then `SCRankRewardMailPacket` to online winners. The period is marked paid before the letters are built, inside the economy operation gate; a crash between the letters and the next save can therefore lose (never duplicate) the mark. `rank_rewards.weeks` (how long the reward lasts) and appellation rewards (none authored) are not applied.
-- **Not sent.** `SCRankAlarmPacket` (0x205): only the fishing contest authors alarms (`start_time_alarm` -5 / `end_time_alarm` 0 and message strings), that board ended in 2014 and the packet's `kind` / `rank_alarm_kind` values are unresolved, so no trigger is invented.
+- **Alarms.** The once-a-minute task also broadcasts `SCRankAlarmPacket` (0x205) `{ board id, kind }` to every online character when the tick crosses an authored alarm: `start_time_alarm` / `end_time_alarm` are signed minutes relative to the contest window start / end (next to the daily slot hours in `ranks`), and an authored message string is required (a board without one sends nothing). Each `(board, kind, period)` is sent once in memory. Only the fishing contest authors alarms (`-5` / `0` with messages) and its authored window ended in 2014, so on the shipped data nothing fires; the code follows data or a clock that puts a board in its window. `rank_alarm_kind` numbering is INFERRED (CAP-UI-4): the client's handler branches on `1` for the end text and otherwise the start text, matching the SQL column order (0 start / 1 end); no capture proves it. The alarm moment uses the contest slot, not the weekly period anchor: the authored start message announces the contest five minutes before its Saturday 20:00 slot.
 
 ### Startup warnings (Rust only)
 
@@ -5074,6 +5074,15 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
   `ItemTxn`, a quest operation) are queued and flushed when it is released; events raised under the
   team / family / expedition managers' own locks use `refresh_achievements_later` and run when the
   packet handler returns. `economy::OpsGuard` tracks the holding thread.
+* **MY_GOLD (k14)** reports the absolute carried gold (`money / 10000`, high-water) after every
+  upward money change through `inventory::change_money` (the item-operation variant queues
+  `ItemFx::Money`; the `Out::Direct` callers report through the achievement deferral) and through
+  the quest reward deposit and equipped-fish sale. The report runs from `fx::flush` / the packet
+  end, after the character and economy locks are released, and is throttled to one per character
+  per second; a value suppressed by the throttle is kept and reported by a later flush. Money
+  paths that assign `Character::money` directly (player trade, buyback, expedition refunds, GM
+  commands) do not report; the entry snapshot and the next money change still back-credit the
+  high-water value.
 * **Repeatable quests** (kinds 27/28) credit +1 per completed run on top of the entry back-credit of 1
   per distinct quest (audit Q3). Category counts therefore count repeats live.
 * **ENCHANT_FAILURE** credits only a plain FAIL result; BREAK and DOWNGRADE are not proven to be "failures"

@@ -403,7 +403,7 @@ impl CSDepositMoneyPacket {
             return;
         }
         inventory::change_money(
-            &mut inventory::Out::Direct,
+            &mut inventory::Out::Direct(server),
             &p,
             slot_type::INVENTORY,
             slot_type::BANK,
@@ -435,7 +435,7 @@ impl CSWithdrawMoneyPacket {
             return;
         }
         inventory::change_money(
-            &mut inventory::Out::Direct,
+            &mut inventory::Out::Direct(server),
             &p,
             slot_type::BANK,
             slot_type::INVENTORY,

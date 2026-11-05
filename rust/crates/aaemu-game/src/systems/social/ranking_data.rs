@@ -288,6 +288,72 @@ impl RankDefinition {
         self.window_at(moment).is_some()
     }
 
+    /// The authored windows around `moment` (UTC): the slots of the day before, the day and the
+    /// day after, each clipped to the scoring period it belongs to.
+    ///
+    /// A weekly board only contributes the slot of its authored `day_of_week_id`, a board with
+    /// no day bound contributes one per day, and a board with neither a day nor a time window
+    /// runs for the whole scoring period (the periods within a day of `moment` are returned).
+    /// This is the neighbourhood the ranking alarm clock needs: an authored alarm offset is in
+    /// minutes, so the window an alarm belongs to always lies within a day of the crossing.
+    pub fn windows_near(&self, moment: DateTime<Utc>) -> Vec<RankWindow> {
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        if !day_of_week::is_weekday(self.day_of_week_id) && self.start_time == self.end_time {
+            let mut windows = Vec::new();
+            for days in [-1_i64, 0, 1] {
+                let Some(probe) = moment.checked_add_signed(TimeDelta::days(days)) else {
+                    continue;
+                };
+                if let Some(period) = self.period_at(probe) {
+                    if !windows.contains(&period) {
+                        windows.push(period);
+                    }
+                }
+            }
+            return windows;
+        }
+        let Some(midnight) = moment
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .map(|time| time.and_utc())
+        else {
+            return Vec::new();
+        };
+        let mut windows = Vec::new();
+        for days in [-1_i64, 0, 1] {
+            let Some(day) = midnight.checked_add_signed(TimeDelta::days(days)) else {
+                continue;
+            };
+            if day_of_week::is_weekday(self.day_of_week_id) {
+                let Some(wanted) = weekday_from_id(self.day_of_week_id) else {
+                    continue;
+                };
+                if day.weekday() != wanted {
+                    continue;
+                }
+            }
+            let Some(slot) = self.slot_on(day) else {
+                continue;
+            };
+            // Probe the slot's middle, so a slot that straddles a period boundary still finds
+            // the period it mostly runs in; the window is then clipped to that period.
+            let Some(period) = self.period_at(slot.start + slot.duration() / 2) else {
+                continue;
+            };
+            let start = slot.start.max(period.start);
+            let end = slot.end.min(period.end);
+            if start < end {
+                let window = RankWindow { start, end };
+                if !windows.contains(&window) {
+                    windows.push(window);
+                }
+            }
+        }
+        windows
+    }
+
     /// The authored recurring slot that contains `moment` (UTC): the weekly `day_of_week_id` slot
     /// when the board names a day, a daily one when it names none. A board with neither a day nor
     /// a time window is always in its slot (its window is then the period itself), which is how

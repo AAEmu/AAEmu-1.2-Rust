@@ -167,6 +167,11 @@ pub fn flush_with(server: &GameServer, fx: ItemFxList, reequip: bool) {
                     h.add_exp(server, &p, exp, add_ability_exp);
                 }
             }
+            ItemFx::Money { owner: o, money } => {
+                if let Some(p) = owner(o) {
+                    crate::systems::social::achievement_hooks::report_gold(server, &p, money);
+                }
+            }
             ItemFx::EquipEnter {
                 owner: o,
                 mate_id,

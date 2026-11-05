@@ -339,7 +339,7 @@ mod tests {
     async fn economy_labor_spend_also_keeps_regeneration() {
         let server = test_server();
         let (_client, p) = labor_player(&server, 1000);
-        let mut out = crate::systems::economy::inventory::Out::Direct;
+        let mut out = crate::systems::economy::inventory::Out::Direct(&server);
         crate::systems::economy::inventory::change_labor(&mut out, &server, &p, -100, 0);
         assert_eq!(p.data().labor_power, 900);
         do_add_labor(&server, 1001, MAX_LABOR, p.conn.id, 10).await;
