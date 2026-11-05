@@ -76,6 +76,14 @@ pub mod sort_order {
     pub const DESC: u8 = 1;
 }
 
+/// `AuctionSearch.filter` of the client's declare-siege tab: `X2Auction.SearchDeclareSiege`
+/// zeroes the search block, sets `filter = 1` and sends it (EVIDENCED, client decompile).
+pub const SEARCH_FILTER_DECLARE_SIEGE: i32 = 1;
+
+/// `auction_a_categories` id 11 (`declare_siege`): the six Siege Camp items that the declare
+/// tab lists.
+pub const DECLARE_SIEGE_CATEGORY: i32 = 11;
+
 /// `AuctionLot`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuctionLot {
@@ -1373,6 +1381,18 @@ impl AuctionManager {
         search: &AuctionSearch,
     ) {
         let names = &server.game_data.systems.economy.auction;
+        // `SearchDeclareSiege` is the same search packet with `filter = 1`: the declare tab
+        // lists only the siege camps. The normal tab (`filter == 0`) is unchanged; no other
+        // value is known from the 1.2 client, so it is treated as 0.
+        if search.filter != 0 && search.filter != SEARCH_FILTER_DECLARE_SIEGE {
+            static UNKNOWN_FILTER_LOGGED: std::sync::Once = std::sync::Once::new();
+            UNKNOWN_FILTER_LOGGED.call_once(|| {
+                tracing::warn!(
+                    "Auction search filter {} is unknown; treating it as 0",
+                    search.filter
+                );
+            });
+        }
         let mut searched = Vec::new();
         for lot in self.lots().values() {
             // C#: lot.Item.Template throws for lots without item / template.
@@ -1380,6 +1400,11 @@ impl AuctionManager {
             let Some(template) = server.game_data.items.template(item.template_id) else {
                 continue;
             };
+            if search.filter == SEARCH_FILTER_DECLARE_SIEGE
+                && template.auction_category_a != DECLARE_SIEGE_CATEGORY
+            {
+                continue;
+            }
             // Check by ClientId
             if search.client_id != 0 && lot.client_id != search.client_id {
                 continue;

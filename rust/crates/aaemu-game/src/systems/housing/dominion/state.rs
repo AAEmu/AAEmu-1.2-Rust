@@ -170,6 +170,11 @@ pub struct SiegeState {
     /// held-castle count mid-siege does not move them.
     pub defender_ni: u8,
     pub defender_nr: u8,
+    /// The `char_records` kinds 57-60 credit for this siege's outcome has been applied. Only a
+    /// finished siege with a non-`Pending` outcome is ever marked; `Cancelled` credits nothing.
+    /// Persisted so a repeated tick, a capture racing the tick or a restart cannot credit one
+    /// siege id twice.
+    pub outcome_credited: bool,
     pub participants: BTreeMap<u32, SiegeParticipant>,
 }
 
@@ -847,6 +852,7 @@ impl DominionManager {
             reinforced: false,
             defender_ni: limits.ni,
             defender_nr: limits.nr,
+            outcome_credited: false,
             participants: BTreeMap::new(),
         });
         inner.channels.retain(|(zone, _), _| *zone != zone_group_id);
@@ -993,6 +999,37 @@ impl DominionManager {
         }
         let revision = next_revision(&inner)?;
         siege.reinforced = true;
+        replace(&mut inner, state.clone(), revision);
+        Ok(Some(state))
+    }
+
+    /// Check-and-sets the kinds 57-60 outcome-credit marker for a finished siege. The caller
+    /// credits the roster only on `Some`; `Ok(None)` means the marker belongs to another siege,
+    /// the outcome is still pending / cancelled, or the credit was already applied.
+    pub fn mark_outcome_credited(
+        &self,
+        zone_group_id: u32,
+        siege_id: u64,
+    ) -> Result<Option<DominionState>, DominionError> {
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        let Some(siege) = state.siege.as_mut() else {
+            return Ok(None);
+        };
+        if siege.siege_id != siege_id
+            || siege.status != SiegeStatus::Finished
+            || siege.outcome == SiegeOutcome::Pending
+            || siege.outcome_credited
+        {
+            return Ok(None);
+        }
+        let revision = next_revision(&inner)?;
+        siege.outcome_credited = true;
         replace(&mut inner, state.clone(), revision);
         Ok(Some(state))
     }

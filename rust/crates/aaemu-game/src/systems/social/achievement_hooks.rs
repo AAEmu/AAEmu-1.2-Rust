@@ -283,6 +283,23 @@ pub fn report_inputs(
     report
 }
 
+/// The `char_records` ids an [`AchievementInput::Increment`] of `kind_id` would move: the
+/// content rows the matcher selects, ascending. For a character that is not loaded (an offline
+/// siege participant) a producer persists the increment to these rows, so the next entry's
+/// [`initial_snapshot`] evaluates the record like any other loaded one.
+pub fn increment_record_ids(server: &GameServer, kind_id: u32, matcher: RecordMatch) -> Vec<u32> {
+    let content = AchievementContent::new(&server.game_data.systems.social.achievements);
+    let mut ids: Vec<u32> = content
+        .data()
+        .char_records
+        .values()
+        .filter(|record| record.kind_id == kind_id && matcher.matches(record))
+        .map(|record| record.id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// Re-reports everything the character's **current** state can prove (the entry back-credit
 /// units: level, ability levels, actability points, hours online, carried gold, the current
 /// party / raid / family / expedition memberships and the completed quest bitset) and evaluates
