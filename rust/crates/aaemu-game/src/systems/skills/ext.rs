@@ -671,6 +671,23 @@ pub trait ItemSkillHooks: Send + Sync {
         0
     }
 
+    /// `Inventory.Bag.ConsumeItem(taskType, templateId, amount, item)`: verify and consume
+    /// `amount` from the one bag item `item_id`, under one container lock. `Some(true)` when
+    /// exactly `amount` was consumed; `Some(false)` when the item is not the player's bag item
+    /// with `expected_template_id` or is secure; `None` when the implementation does not track
+    /// items (tests / hooks).
+    fn consume_bag_item_by_id(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _task_type: u8,
+        _item_id: u64,
+        _expected_template_id: u32,
+        _amount: i32,
+    ) -> Option<bool> {
+        None
+    }
+
     /// `ItemManager.GetItemByItemId(sourceItemId)` and, when it exists,
     /// `UccManager.CreateStamp(player, sourceItem)` (`GainItemWithEmblemImprint`).
     /// `source_item` is the cast's pre-debit snapshot (the live item is already gone).

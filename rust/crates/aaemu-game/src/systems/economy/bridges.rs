@@ -1677,6 +1677,35 @@ impl ItemSkillHooks for EconomyForSkills {
         result
     }
 
+    fn consume_bag_item_by_id(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        task_type: u8,
+        item_id: u64,
+        expected_template_id: u32,
+        amount: i32,
+    ) -> Option<bool> {
+        let container = Inv::of(player).bag();
+        let mut txn = ItemTxn::begin(server);
+        let mut guard = lock(&container);
+        let matches = guard.get_item_by_id(item_id).is_some_and(|item| {
+            item.template_id == expected_template_id
+                && item.owner_id == u64::from(player.character_id)
+        });
+        if !matches || amount <= 0 {
+            return Some(false);
+        }
+        let consumed = guard.consume_item(
+            task_type,
+            expected_template_id,
+            amount,
+            Some(item_id),
+            &mut txn.env,
+        );
+        Some(consumed == amount)
+    }
+
     fn ucc_create_stamp(
         &self,
         server: &GameServer,
