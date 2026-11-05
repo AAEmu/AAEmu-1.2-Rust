@@ -2862,6 +2862,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   The client's per-controller `CSCreateSkillController` flag stays logged only and is not
   trusted. Tests: `systems::skills::fall_damage_tests`, `collision::fall::tests`,
   `collision::flow_tests::a_landing_in_water_forwards_the_client_value_and_never_heals`.
+* systems::skills (damage immunity, 2026-11-05): the C# `Buffs.CheckDamageImmune` treated every
+  buff with a matching melee / spell / ranged / siege flag as total immunity and never read
+  `immune_damage`. The 1.2 data has 229 flagged buffs with `immune_damage = 0` (full immunity,
+  e.g. 131 Invincible) and six flagged buffs with a positive value — 275 (50), 276 (100), 176
+  (137), 2071 (2000), 3615 (1 000 000), 4609 (9 999 999) — whose descriptions say "ignore hits of
+  N or less". Rust keeps `check_damage_immune` for the zero-threshold buffs and adds
+  `damage_immune_threshold`: `damage_with_aoe` computes the final post-mitigation hit, and when
+  it is `<=` the best matching buff's threshold it sends `SCUnitDamaged` hit type `Immune` and
+  applies no HP loss, reflection, threat or steal. Buff 3642 (a threshold without a type flag) is
+  left unchanged because no flag selects a damage type. The client loads the column
+  (`LoadBuffDescs`, dll.c:1579862, read at `dll.c:1580052`), but its consumer is not traced
+  further; the threshold meaning comes from the six descriptions. Tests:
+  `systems::skills::effects::damage_pipeline_tests` (below / at / above 50, a melee-only buff
+  against magic, and a zero-threshold flag against a 1 000 000 hit).
 * systems::ai: calls into an NPC's AI from outside its tick (skills, aggro, npcs hooks) are queued and run right after the current AI step instead of re-entering it (`manager::post`); the AI tick runs on a blocking thread every ~100 ms; behaviour instances are kept per AI and accessed by kind. `UpdateAggroHelp` reaching a helper NPC without an AI logs and continues (the C# throws a `NullReferenceException` that cuts the whole behaviour tick short). `Npc.OnDamageReceived` on an AI-less NPC does nothing (C# NRE).
 * systems::ai: deletion marks an AI removed without waiting for its state mutex; the current holder detaches its owner and discards queued callbacks. This permits an NPC skill to delete its own caster and avoids the spawn-lock / AI-lock inversion during despawn. The global tick skips an AI whose state mutex is busy and retries on the next tick, so one external AI call cannot freeze movement and combat for every NPC.
 * systems::ai physics: Jitter's narrow phase (`MprEpa`) and contact solver are replaced by a box-vs-heightmap-triangle SAT with one contact per triangle and sequential impulses (Jitter's default friction / bias); the integration itself is exact. One physics world per instance is created with the first ship (C# starts a thread per instance at boot). Add / remove / helm / driver changes go through the pending queue (next tick); hull damage, movement packets and transform writes are applied after the tick; readers use per-tick snapshots. Water is kept per world template and a cell's `object.dat` is ingested when the physics or a water query sees the cell loaded. A height lookup error counts as height 0 (the C# exception skips the rest of that ship's tick). A ship whose game object is gone is skipped. Ship–ship harpoon tow resolves an explicit hook basis among the ships simulated this tick.

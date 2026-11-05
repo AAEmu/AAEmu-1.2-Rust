@@ -214,7 +214,20 @@ pub fn check_buff_immune(server: &GameServer, owner: &WorldObject, buff_id: u32)
         .any(|t| data.buffs_by_tag(t).is_some_and(|l| l.contains(&buff_id)))
 }
 
-/// `Buffs.CheckDamageImmune(damageType)`.
+/// Whether a buff template marks the given damage type as immune.
+fn has_immune_flag(t: &BuffTemplate, dt: Option<DamageType>) -> bool {
+    match dt {
+        Some(DamageType::Melee) => t.melee_immune,
+        Some(DamageType::Magic) => t.spell_immune,
+        Some(DamageType::Ranged) => t.ranged_immune,
+        Some(DamageType::Siege) => t.siege_immune,
+        _ => false,
+    }
+}
+
+/// `Buffs.CheckDamageImmune(damageType)`: full immunity from a flagged buff that has no
+/// `immune_damage` threshold (229 real rows). A flagged buff with a positive `immune_damage`
+/// only ignores hits up to that amount; see [`damage_immune_threshold`].
 pub fn check_damage_immune(
     server: &GameServer,
     owner: &WorldObject,
@@ -225,14 +238,28 @@ pub fn check_damage_immune(
         owner.with_base_unit(|b| b.buffs().effects.iter().map(|e| e.template.id).collect());
     ids.into_iter().any(|id| {
         let Some(t) = data.buff(id) else { return false };
-        match dt {
-            Some(DamageType::Melee) => t.melee_immune,
-            Some(DamageType::Magic) => t.spell_immune,
-            Some(DamageType::Ranged) => t.ranged_immune,
-            Some(DamageType::Siege) => t.siege_immune,
-            _ => false,
-        }
+        t.immune_damage <= 0 && has_immune_flag(t, dt)
     })
+}
+
+/// The largest `buffs.immune_damage` threshold among the owner's live buffs that flag `dt`.
+/// The six threshold buffs (275, 276, 176, 2071, 3615, 4609) ignore only a hit whose final
+/// amount is at or below their value, unlike the `immune_damage == 0` full immunity above.
+/// The 1.2 client loads the column (`LoadBuffDescs`, dll.c:1579862) and reads it at column
+/// `0x42` (dll.c:1580052); their descriptions say "ignore hits of N or less".
+pub fn damage_immune_threshold(
+    server: &GameServer,
+    owner: &WorldObject,
+    dt: Option<DamageType>,
+) -> Option<i64> {
+    let data = &server.game_data.systems.skills;
+    let ids: Vec<u32> =
+        owner.with_base_unit(|b| b.buffs().effects.iter().map(|e| e.template.id).collect());
+    ids.into_iter()
+        .filter_map(|id| data.buff(id))
+        .filter(|t| t.immune_damage > 0 && has_immune_flag(t, dt))
+        .map(|t| i64::from(t.immune_damage))
+        .max()
 }
 
 // ------------------------------------------------------------------ AddBuff
