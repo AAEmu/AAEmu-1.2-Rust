@@ -430,6 +430,36 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### Item and craft notification packet definitions (2026-11-05)
+
+`systems/economy/item_notify_packets.rs` defines the four S->C packets the former C# port never
+wrote, from the 1.2 client readers only:
+
+* `SCCraftItemUnlockPacket` 0x0f5: two single bytes, reader `FUN_397b4c60`
+  (`x2game.dll.c:1708523`). The handler `FUN_391d9700` packs them into an item-slot reference,
+  so (slot type, slot index) is INFERRED.
+* `SCItemAcquisitionPacket` 0x097: `u8 type, string charName (<=128), u8 count, count x Item`,
+  reader `FUN_397c1f80` (`x2game.dll.c:1717976`); the item records use the standard reader
+  `FUN_3961f500` (`x2game.dll.c:1301392`), the same record `SCItemTaskSuccessPacket` writes.
+  The handler acts only for type 1 (an item link line naming `charName`), which is INFERRED to
+  be a party/raid member announcement.
+* `SCItemDetailUpdatedPacket` 0x093: `u64 itemId, u8 x, u8 index, ItemDetail`, reader
+  `FUN_397b3840` (`x2game.dll.c:1707583`); `ItemDetail` is the `FUN_3961edf0`
+  (`x2game.dll.c:1301101`) `u8 detailType` plus its fixed body. The two zeroed bytes between the
+  fields are not read, hence not written.
+* `SCItemTaskNotifyPacket` 0x091: `u32, u8 action, u8 count, count x ItemTask, u8
+  forceRemoveCount, forceRemoveCount x u64, u32`, reader `FUN_397b3810`
+  (`x2game.dll.c:1707572`) followed by the `SCItemTaskSuccessPacket` reader `FUN_397d1d00`
+  (`x2game.dll.c:1729938`).
+
+All four are **capture-pending** and deliberately never sent, because no 1.2 zone code or capture
+shows their triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft
+materials), **ITEM-NOTIFY-2** (acquisition: which grades/sources announce is unknown),
+**ITEM-NOTIFY-3** (detail update) and **ITEM-NOTIFY-4** (task notify: probably item tasks for an
+owner other than the viewer). Their byte layouts are test-locked in the module; the types are
+listed in `rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent, and a future
+trigger must remove them from that list.
+
 #### Item use gates from data (2026-11-04)
 
 `items.actability_requirement` and `items.actability_group_id` are loaded into `ItemTemplate`
@@ -457,6 +487,81 @@ is **unverified** until a capture.
 inherited grade keeps the C# TODO (capture-pending **ITEM-LOOT-GRADE**): the 1.2 client only
 parses the descriptor (`FUN_396e91c0`), not the retail rule. `item_secure_exceptions` was
 already loaded and used by `item_security::is_lockable` (`FUN_394df4a0`); unchanged.
+
+#### Mate equipment rules (2026-11-05)
+
+`CSChangeMateEquipmentPacket` now enforces the mate's slot permission from
+`mate_equip_slot_packs` (`systems/economy/mate_equipment_data.rs`, loaded into
+`server.game_data.systems.economy.mate_equipment`; the mate's NPC template names the row through
+`npcs.mate_equip_slot_pack_id`; when the template exists but the pack is 0/NULL or its row is
+missing, every slot is refused like `FUN_3933a9c0` returning 0. Only a mate template the server
+data does not know (test fixtures) stays unrestricted). EVIDENCED from the 1.2 client:
+`LoadMateEquipSlotPackDescs` (`FUN_396ce630`, `dll.c:1479277`) fills chest `+0`, feet `+1`, head `+2`, waist `+8` from
+`SELECT id, chest, feet, head, name, waist FROM mate_equip_slot_packs`, and `IsMateEquipableSlot`
+(`FUN_3933a9c0`, `dll.c:667569`) allows exactly equip slots head 0 (row `+2`), chest 2 (`+0`),
+waist 3 (`+8`) and feet 6 (`+1`); the equip-drag validation `FUN_394e41f0` calls it with the
+item's slot at `dll.c:1021546`. The server derives the item's slot from
+`ItemTemplate::gear_slot_type` + `allowed_gear_slots` (armor slot type 1 -> head 0, 3 -> chest 2,
+4 -> waist 3, 7 -> feet 6, the same mapping the data uses). A refused item stays in the bag and is
+answered with `SCMateEquipmentChangedPacket{success:false}` plus `ITEM_NOT_FOR_PET` (204);
+unequipping to the bag is always allowed, and a bag item swapped onto the mate during an
+unequip follows the same two checks. The client's whitelist failure falls to error `0xcc` (204,
+`dll.c:1021556`), the slot-check failure uses `0x22f` (559) whose 1.2 `ErrorMessageType` text is
+not the pet-equip message; the server uses `ITEM_NOT_FOR_PET` for both (capture-pending
+**MATE-EQUIP-1** for the exact slot-refusal text).
+
+`mate_equip_pack_groups` x `mate_equip_pack_items` (the per-mate item list) is loaded through the
+same join the client runs (`FUN_395fbbc0`, SQL at `0x399f9490`) and is enforced only while
+FeatureSet bit 78 (`flag_9_6`) is set. The client's `FUN_395ac760` (`dll.c:1198859`) call from the
+equip validation `FUN_394e41f0` (`dll.c:1021538`) is gated on `(*(DAT_39b02294 + 0x1c) & 0x4000)`,
+the client's copy of the server FeatureSet: dword `+0x1c` bit 14 = fset byte 9 bit 6 = feature 78,
+server-controlled and clear in `DEFAULT_FSET` (`0x0c`). The server checks
+`server.systems.services.features(server).check_bit(78)` per request. The real data also joins
+4660 group/item rows of which 1058 name an item whose equip slot the mate's own slot pack forbids
+(e.g. effect pack 2 on a combat mate with a waist item); with the feature on this reproduces the
+client's list exactly, with the feature off (the default) the list is not applied.
+
+Tests: `mate_equipment_riding_pack_allows_head_waist_and_feet`,
+`mate_equipment_riding_pack_refuses_chest_and_keeps_the_item`,
+`mate_equipment_combat_pack_refuses_waist_and_keeps_the_item`,
+`mate_equipment_pet_pack_refuses_every_slot_and_keeps_the_items`,
+`mate_equipment_missing_slot_pack_refuses_every_slot`,
+`mate_equipment_pet_pack_still_unequips_to_the_bag`,
+`mate_equipment_item_outside_the_client_list_is_still_allowed_when_the_feature_is_off`,
+`mate_equipment_item_outside_the_client_list_is_refused_when_the_feature_is_on`,
+`mate_equipment_swap_onto_an_occupied_slot` and
+`mate_equipment_unequip_swap_checks_the_bag_item` (both swap directions), the loader's in-memory
+tests and the `AAEMU_COMPACT_DB`-gated `real_compact_db_mate_equipment`.
+
+#### Mate equipment expiry (2026-11-05)
+
+`SCMateEquipmentExpiredPacket` (0x127) is now defined and sent. `ItemManager.UpdateItemTimers` also
+ticks every persistent `EQUIPMENT_MATE` container of an online owner (the C# only ticked equipment,
+bag and warehouse; it had the opcode constant but never sent the packet), and an expired item leaves
+the container through the same `remove_item_task` path as player equipment (release id + the
+container leave event, which updates the mate mirror and broadcasts `SCUnitEquipmentsChanged`) but
+with `ItemTaskType.Invalid`, so no bag / equipment item task is sent. The owner instead gets
+`SCMateEquipmentExpiredPacket(mate_tl, EQUIPMENT_MATE, slot)`, queued before the leave event.
+
+EVIDENCED from the 1.2 client: the reader `FUN_397b5530` (`dll.c:1708939`, vtable
+`PTR_LAB_399b390c`) transfers `u16` (stream slot 0x40), `u8` (0x44) and `u8` (0x44) with no padding
+bytes; `OnMateEquipmentExpired` `FUN_391db280` (`dll.c:368834`) calls `FUN_394e5a90`
+(`dll.c:1022714`), which acts only when the slot-type byte at struct `+1` is 0xFC
+(`slot_type::EQUIPMENT_MATE`), the packet's tl id equals the local player's current pet
+(`FUN_3933f5e0`) and the index at struct `+3` is below 0x1c (28).
+
+A mate that is not spawned still has its container (`MateEquipmentContainer` outlives the spawn,
+`CharacterMates.SpawnMount` only finds-or-creates it), so its gear ticks and expires too; no packet
+is sent in that case because the client has no current pet to apply it to. An offline owner is
+skipped, matching the bag rule. None of the 62 `mate_equip_pack_items` items has an expiry in the
+shipped data, so this only runs for cash / event gear or GM-set lifespans; whether retail also sends
+a lifespan sync for a mate-container item is UNKNOWN (the client path needs only the new packet).
+
+Tests: `mate_equipment_expired_layout` (independent literal bytes), the flow test
+`mate_equipment_expires_and_notifies_the_owner` (past end time removes the item, keeps an unexpired
+one and sends exactly the expired packet plus the leave broadcast),
+`mate_equipment_expiry_skips_the_packet_for_an_unspawned_mate` and
+`mate_equipment_timers_skip_an_offline_owner`.
 
 #### Limited-sale purchase limits (2026-11-03)
 
@@ -1950,9 +2055,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `LootingContainer.MaxLootingRange` (200 m) only for loot *eligibility* at generation and never
   checked the take; 5 m matches the other NPC service interactions (`store::SERVICE_RANGE`,
   `portal::NAVI_USE_RANGE`). Refusals answer `SCLootItemFailedPacket(TooFarAway)`.
-* systems::economy: `CSSetCraftingPayPacket`, `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
+* systems::economy: `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
-  1.2 client never sends them. The `Specialty` config section is now read at startup (ratios,
+  1.2 client never sends them. (`CSSetCraftingPayPacket` is not one of these any more: the
+  owner approved its 1.2 opcode `0x8d` on 2026-11-05, see the craft grade section.) The `Specialty` config section is now read at startup (ratios,
   ticks and `TradePackMailDelayInMinutes`), so those values no longer come from the C# defaults
   alone. `CSSpecialtyRecordLoadPacket` is still not registered: the 1.2 client has no request
   opcode for the history, and the server deliberately sends no `SCSpecialtyRecordsPacket`
@@ -5594,6 +5700,66 @@ type-8 water entity whose flag bit 1 is set (`vt+0x150 & 1`, likely a NoFishing 
 Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
 (`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
 check at all; this follows only the 1.2 client.
+
+## Craft material grades and product grade (2026-11-05)
+
+`craft_materials.require_grade`, `craft_materials.main_grade` and `craft_products.use_grade`
+are now honoured at craft execution (WP-I2 A/B; `systems::economy::{craft,craft_data}`).
+
+- **`require_grade` (14 rows in `compact.sqlite3`: crafts 6184-6191 material 30803, crafts
+  6889-6894 material 34275, amount 1).** The client loader reads the column
+  (`LoadCraftMaterialDescs` `0x3982E4D0`, `x2game.dll.c:1825263`). `GetCraftMaterialInfo`
+  (`0x39462600`, `x2game.dll.c:914799`) counts a bag stack only when
+  `require_grade == -1 || require_grade == item.grade`, and `GetExecutableCraftCount`
+  (`0x394d3cc0`, `:1005386`) passes `require_grade` as the grade argument of
+  `FUN_3961fbc0`, which compares `param_3 == item.grade` (`:1301667`). The port therefore uses
+  **exact equality** (`-1` = any), not `>=`: a lower grade does not count and neither does a
+  higher one. Rows that require a grade are counted, checked at cast start and again before the
+  hand-out, and **consumed only from stacks of that grade**
+  (`ItemContainer::consume_item_by_grade`, `models/container.rs`). A refusal sends the client's
+  `not_enough_required_item` (722; error-name case `0x2d2`, `x2game.dll.c:1137158`) after the
+  usual `craft_cant_act_any_more` (148) and changes nothing.
+- **`main_grade` (101 rows).** The flagged material's grade is the inherited product grade
+  (`X2Craft.GetCraftMaterialInfo` emits `mainGrade`/`itemGrade`; the client's
+  `crafting_renewal.alb` proto 9.14 (lines 556-573) takes the `mainGrade` material's
+  `itemGrade`). All 101 rows sit on crafts whose product has `use_grade = 'f'`, so the flag
+  alone drives the inheritance; before this change they went through the C# "first equipment
+  material" heuristic. The inherited grade keeps the C# `FreeRegrade` roll (5 %, `rand(0,20)`).
+  Only the main material is consumed in the inherited grade; its first (lowest-slot) stack is
+  the grade source, matching the consumption order.
+- **`use_grade` (356 products).** The client flag is what the craft window uses to show a
+  material grade, but the port keeps the C# "first equipment material" heuristic for *every*
+  product when no `main_grade` row exists (audit review, 2026-11-05): restricting it to
+  `use_grade` products made ~484 gear-upgrade crafts without grade rows (e.g. 4993, 5285,
+  5086) lose the inherited grade and the `FreeRegrade` roll. Order: `main_grade` ->
+  equipment-material heuristic -> `item_grade_id` -> `-1`. The C# "proper" branch that read
+  these flags was commented out (`CharacterCraft.cs`, `a2ab80abd^`). Open, capture-pending:
+  the client Lua also inherits from a material of the product's item implementation
+  (`info.item_impl`, proto 9.14 lines 561-571); the port keeps the equipment-material fallback
+  until a capture shows the same-impl rule's effect on the result.
+- **Repeated rows.** Rows that name the same item and effective grade share the stacks
+  (9 crafts list one item twice, e.g. craft 370 material 8318 x3 + x1, craft 1200 material
+  8320 x1 twice). The check sums the rows' required units before comparing, so a craft cannot
+  start with 3 units for a 4-unit requirement.
+- **`CSSetCraftingPayPacket` (owner-approved 2026-11-05).** The 1.2 Lua `X2Craft.SetCraftingPay`
+  sends CS `0x8d` (`FUN_394d7230`, `local_14 = 0x8d`; the doodad obj id at packet `+0xc` and
+  the money at `+0x10` through `FUN_397b0ca0`). The opcode table entry is now `0x08d` (was
+  `0xfff`) and the packet is registered; the handler reads `(bc objId, i32 money)`, rejects a
+  negative amount and otherwise logs only. Pay rules are UNKNOWN, so it changes no state
+  (capture-pending).
+
+Tests: `craft_material_requires_its_grade` (low and high grades refused, exact grade pays and
+only that stack is consumed; refusals keep the stacks), `craft_main_grade_sets_the_product_grade`
+(the flag works on a `use_grade = 'f'` product), `craft_equipment_material_grade_inherits_for_any_product`
+and `craft_unflagged_upgrade_inherits_the_equipment_grade` (the restored gear-upgrade
+inheritance), `craft_material_rows_of_one_item_are_summed` (craft 370's 3 + 1 shape),
+`craft_main_material_lowest_slot_decides_and_is_consumed`, `craft_secured_right_grade_material_is_locked_only`
+(`ITEM_SECURE_CONDITION`), `craft_grade_lost_before_the_hand_out_keeps_the_materials`, the
+`CSSetCraftingPayPacket` byte test (`bench_tests::set_crafting_pay_reads_the_client_writer_body`),
+plus the extended real-data `real_compact_db_craft_and_store_tables` (14 `require_grade` rows).
+Each fails on its mutation (grade filter `-1`, main-grade branch removed, equipment fallback
+removed, per-row instead of summed counts, highest instead of lowest slot, `LockedOnly`
+downgraded to `Missing`, hand-out grade filter removed).
 
 ## Recipe learning and the learned-craft gate (2026-11-04)
 
