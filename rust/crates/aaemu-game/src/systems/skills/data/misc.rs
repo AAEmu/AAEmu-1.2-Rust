@@ -322,18 +322,9 @@ impl BuffGameData {
     }
 }
 
-/// `content_configs.value` for `id` (`LoadContentConfigValueArray`). The client's value array is
-/// zero-initialised, so an absent row reads as 0.
-pub fn load_content_config(conn: &Connection, id: u32) -> rusqlite::Result<i32> {
-    use rusqlite::OptionalExtension;
-    conn.query_row(
-        "SELECT value FROM content_configs WHERE id = ?1",
-        [id],
-        |r| r.get::<_, i32>(0),
-    )
-    .optional()
-    .map(|v| v.unwrap_or(0))
-}
+/// `content_configs.value` for `id` (`LoadContentConfigValueArray`); the one loader lives in
+/// [`crate::data::content_configs`], this re-export keeps the existing callers' path.
+pub use crate::data::content_configs::load_content_config;
 
 /// `TagsGameData` npc tags: tag id -> npc template ids.
 pub fn load_npc_tags(conn: &Connection) -> rusqlite::Result<HashMap<u32, Vec<u32>>> {

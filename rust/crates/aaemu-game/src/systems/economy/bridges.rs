@@ -3691,20 +3691,14 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         count: i32,
     ) -> bool {
         use crate::systems::housing::hooks::item_task;
-        use crate::systems::housing::manager::APPRAISAL_CERTIFICATE;
+        let certificate = crate::systems::housing::manager::appraisal_certificate(server);
         let mut txn = ItemTxn::begin(server);
         let bag = Inv::of(player).bag();
         let mut bag = lock(&bag);
-        if count <= 0 || bag.items_by_template(APPRAISAL_CERTIFICATE, -1).1 < count {
+        if count <= 0 || bag.items_by_template(certificate, -1).1 < count {
             return false;
         }
-        bag.consume_item(
-            item_task::BUY_HOUSE,
-            APPRAISAL_CERTIFICATE,
-            count,
-            None,
-            &mut txn.env,
-        ) == count
+        bag.consume_item(item_task::BUY_HOUSE, certificate, count, None, &mut txn.env) == count
     }
 
     fn pay_house_construction(
