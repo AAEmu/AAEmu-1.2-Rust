@@ -92,6 +92,9 @@ pub enum Kind {
     #[serde(rename = "craft")]
     Craft,
     /// Ad-hoc live checks driven by the command file `$AAEMU_SCRIPT` (see `scenario/script.rs`).
+    /// Server-select reconnect round trip (game `SCReconnectAuth` -> login `CARequestReconnect`).
+    #[serde(rename = "reconnect")]
+    Reconnect,
     /// GM account.
     #[serde(rename = "script")]
     Script,
@@ -121,6 +124,7 @@ impl std::str::FromStr for Kind {
             "lunafrost" => Self::Lunafrost,
             "portal" => Self::Portal,
             "craft" => Self::Craft,
+            "reconnect" => Self::Reconnect,
             "script" => Self::Script,
             "busy" => Self::Busy,
             _ => bail!(
@@ -137,6 +141,12 @@ pub struct BotConfig {
     pub login: String,
     pub user: String,
     pub password: String,
+    /// OTP for an account with two-factor authentication (`ACEnterOtpPacket`).
+    #[serde(default)]
+    pub otp: Option<String>,
+    /// `reconnect` scenario: present this cookie instead of the real token and expect a denial.
+    #[serde(default)]
+    pub reconnect_cookie: Option<u32>,
     /// Character name used when the account has none.
     pub character: String,
     /// Require creation of `character`, even if the account already has other characters.
@@ -496,7 +506,9 @@ async fn open_lobby(
     // ---- login server ----
     let s = r.begin("login.auth");
     let mut login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
-    let account_id = login.auth_trion(&cfg.user, &cfg.password).await?;
+    let account_id = login
+        .auth_trion_with_otp(&cfg.user, &cfg.password, cfg.otp.as_deref())
+        .await?;
     ensure!(account_id != 0, "account id 0");
     r.var("account_id", account_id);
     r.end(s, format!("account {account_id}"));
@@ -841,9 +853,43 @@ async fn run_inner(
     r: &mut Runner<'_>,
     script_input: Option<&ScriptInput<'_>>,
 ) -> anyhow::Result<()> {
-    let Some((mut game, stream, _login)) = open_lobby(kind, cfg, r).await? else {
+    let Some((mut game, stream, login)) = open_lobby(kind, cfg, r).await? else {
         return Ok(());
     };
+
+    if kind == Kind::Reconnect {
+        let s = r.begin("login.reconnect");
+        let account_id = login.account_id;
+        // At the server list, the client asks the game server for a reconnect token.
+        game.leave_world(2).await?;
+        let packet = game.wait_sc(sc::SCReconnectAuthPacket).await?;
+        let token = packet.stream().read_u32()?;
+        ensure!(token != 0, "empty reconnect token");
+        // The client then presents it to the login server on a fresh connection.
+        let mut reconnect_login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
+        if let Some(forged) = cfg.reconnect_cookie {
+            match reconnect_login
+                .auth_reconnect(account_id, cfg.game_server_id, forged)
+                .await
+            {
+                Ok(_) => bail!("forged reconnect cookie {forged} was accepted"),
+                Err(_) => {
+                    r.end(s, format!("forged cookie {forged} refused"));
+                    return Ok(());
+                }
+            }
+        }
+        let reconnected = reconnect_login
+            .auth_reconnect(account_id, cfg.game_server_id, token)
+            .await?;
+        ensure!(
+            reconnected == account_id,
+            "reconnect authenticated account {reconnected}, expected {account_id}"
+        );
+        r.var("reconnect_token", u64::from(token));
+        r.end(s, format!("token {token:#010x}, account {reconnected}"));
+        return Ok(());
+    }
 
     let s = r.begin("game.create");
     let created = if cfg.create_new_character || game.state.characters.is_empty() {

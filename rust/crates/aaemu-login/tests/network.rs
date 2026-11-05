@@ -2,14 +2,18 @@
 //! reconnection token, answers the character request and the enter-world request, while a fake
 //! client authenticates with the token, lists worlds and enters the world.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use aaemu_commons::net::FrameCodec;
 use aaemu_commons::PacketStream;
+use aaemu_login::backend::AuthBackend;
 use aaemu_login::config::{lowercase_keys, AppConfig};
-use aaemu_login::models::{AccountId, ConnectionId, GameServerId, GsLoad, LoginCharacterInfo};
+use aaemu_login::models::{
+    AccountId, ConnectionId, GameServerId, GsLoad, KoreaAuthInfo, LoginCharacterInfo,
+    LoginDeniedReason, LoginResult, TwoFactorRequirements,
+};
 use aaemu_login::packets::g2l::{
     GlGameServerLoad, GlPlayerEnter, GlPlayerReconnect, GlRegisterGameServer, GlRequestInfo,
 };
@@ -18,13 +22,85 @@ use aaemu_login::packets::l2g::{
 };
 use aaemu_login::packets::{l2c, split_opcode, OutgoingPacket};
 use aaemu_login::server::LoginServer;
+use aaemu_login::services::password::Password;
+use aaemu_login::services::two_factor::{ArsSession, FactorValidation};
 use aaemu_login::{db, network};
+use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
 
 type Conn = Framed<TcpStream, FrameCodec>;
+
+/// The reconnect path asks for the ban status; this test has no database, so answer "not
+/// banned" and refuse any flow that would need one.
+struct NoDbAuth;
+
+impl AuthBackend for NoDbAuth {
+    fn login<'a>(
+        &'a self,
+        _username: &'a str,
+        _password: &'a Password,
+        _ip: IpAddr,
+    ) -> BoxFuture<'a, anyhow::Result<LoginResult>> {
+        Box::pin(async { anyhow::bail!("no database auth in this test") })
+    }
+
+    fn get_korea_auth_info<'a>(
+        &'a self,
+        _username: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<Option<KoreaAuthInfo>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn check_ban_status(
+        &self,
+        _account_id: AccountId,
+    ) -> BoxFuture<'_, anyhow::Result<(bool, LoginDeniedReason)>> {
+        Box::pin(async { Ok((false, LoginDeniedReason::default())) })
+    }
+
+    fn get_two_factor_requirements(
+        &self,
+        _account_id: AccountId,
+    ) -> BoxFuture<'_, anyhow::Result<TwoFactorRequirements>> {
+        Box::pin(async { Ok(TwoFactorRequirements::NONE) })
+    }
+
+    fn validate_otp<'a>(
+        &'a self,
+        _account_id: AccountId,
+        _code: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>> {
+        Box::pin(async { Ok(FactorValidation::Invalid) })
+    }
+
+    fn validate_pc_cert<'a>(
+        &'a self,
+        _account_id: AccountId,
+        _pin: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>> {
+        Box::pin(async { Ok(FactorValidation::Invalid) })
+    }
+
+    fn record_login<'a>(
+        &'a self,
+        _account_id: AccountId,
+        _username: &'a str,
+        _ip: IpAddr,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn create_ars_session(
+        &self,
+        _account_id: AccountId,
+        _timeout_seconds: i32,
+    ) -> BoxFuture<'_, anyhow::Result<ArsSession>> {
+        Box::pin(async { anyhow::bail!("no ARS in this test") })
+    }
+}
 
 async fn recv(c: &mut Conn) -> (u16, PacketStream) {
     let frame = tokio::time::timeout(Duration::from_secs(5), c.next())
@@ -58,9 +134,13 @@ async fn start_server() -> (Arc<LoginServer>, SocketAddr, SocketAddr, Cancellati
     .unwrap();
     // Lazy pool: never connects in this test (no DB-backed flow is used).
     let pool = db::create_pool(db::connect_options(&config).unwrap());
-    let server = LoginServer::new(config, pool);
+    let server = LoginServer::with_auth_backend(config, pool, Arc::new(NoDbAuth));
     server.requests.initialize();
     server.games.load(&server.config).await;
+    // A completed login from the loopback address, so reconnect tokens can be bound.
+    server
+        .logins
+        .set_last_login_ip_for_test(AccountId(42), "127.0.0.1".parse().unwrap());
 
     let shutdown = CancellationToken::new();
     let internal = network::internal::bind("127.0.0.1", 0).await.unwrap();
@@ -269,7 +349,13 @@ async fn reconnect_list_world_and_enter_world() {
     .await;
     let (op, s) = recv(&mut client2).await;
     assert_eq!(op, l2c::opcodes::AC_LOGIN_DENIED);
-    assert_eq!(s.as_bytes()[2], 2); // BadResponse
+    // The earlier reconnect consumed the only token, so the world has no token table left.
+    assert_eq!(
+        s.as_bytes()[2],
+        aaemu_login::models::ReconnectFailure::GameServerUnavailable
+            .reason()
+            .0
+    );
 
     // --- game server disconnect unregisters it
     drop(gs);
@@ -362,7 +448,13 @@ async fn unauthorized_internal_tokens_are_rejected_over_sockets() {
             l2c::opcodes::AC_LOGIN_DENIED,
             "unauthorized internal token authenticated a client"
         );
-        assert_eq!(body.as_bytes()[2], 2); // BadResponse
+        // No token table exists for the world, so the typed reason is "game server unavailable".
+        assert_eq!(
+            body.as_bytes()[2],
+            aaemu_login::models::ReconnectFailure::GameServerUnavailable
+                .reason()
+                .0
+        );
         assert!(!token_acknowledged, "unauthorized token was acknowledged");
     }
     shutdown.cancel();

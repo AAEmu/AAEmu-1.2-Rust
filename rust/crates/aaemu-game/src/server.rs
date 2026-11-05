@@ -132,6 +132,18 @@ impl GameServer {
         self.next_connection_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// A random nonzero reconnect token that no live session currently owns. It is handed to the
+    /// login server and the client (`SCReconnectAuth`); the login server binds it to the account
+    /// and client IP and accepts it once.
+    pub fn new_reconnect_token(&self) -> u32 {
+        loop {
+            let token = rand::random::<u32>();
+            if token != 0 && self.connections.get_by_reconnect_token(token).is_none() {
+                return token;
+            }
+        }
+    }
+
     /// `LoadTask.Execute`: 0 = LOW, 1 = MIDDLE, 2 = HIGH.
     pub fn load_level(&self) -> u8 {
         let rate = self.accounts.count() as f64 / f64::from(self.config.network.num_connections);

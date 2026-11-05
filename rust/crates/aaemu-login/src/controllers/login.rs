@@ -1,7 +1,8 @@
 //! `LoginController`: account lookup/creation, password checks, reconnection tokens.
 
 use std::net::IpAddr;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
+use std::time::Instant;
 
 use anyhow::Context;
 use dashmap::DashMap;
@@ -9,15 +10,17 @@ use regex::Regex;
 use sqlx::MySqlPool;
 
 use super::game::GameController;
-use crate::config::KoreaAuthOptions;
+use crate::config::{KoreaAuthOptions, ReconnectOptions};
 use crate::models::{
-    AccountId, GameServerId, KoreaAuthInfo, LoginDeniedReason, LoginResult, ReconnectResult,
+    AccountId, GameServerId, KoreaAuthInfo, LoginDeniedReason, LoginResult, ReconnectFailure,
+    ReconnectResult,
 };
 use crate::network::internal::InternalConnection;
 use crate::packets::l2g::LgPlayerReconnect;
 use crate::services::password::{
     Password, PasswordKind, PasswordService, PasswordVerificationResult,
 };
+use crate::services::two_factor::TwoFactorService;
 use crate::services::{korea, sha256_crypt};
 
 /// Allows Unicode letters and digits (any script), plus `_ . - @`.
@@ -47,13 +50,26 @@ fn log_safe(s: &str) -> String {
 /// The columns of `users` the login path uses.
 type UserRow = (u64, Option<String>, Option<String>, i64, i64);
 
+/// One issued reconnect token. The token itself is the map key.
+struct ReconnectToken {
+    account_id: AccountId,
+    /// The client IP of the fully authenticated login that the token was issued for.
+    client_ip: IpAddr,
+    expires_at: Instant,
+    created_at: Instant,
+}
+
 pub struct LoginController {
     pool: MySqlPool,
     passwords: PasswordService,
     auto_account: bool,
     korea: KoreaAuthOptions,
-    /// gsId -> (token -> accountId)
-    tokens: DashMap<GameServerId, Arc<DashMap<u32, AccountId>>>,
+    two_factor: TwoFactorService,
+    reconnect: ReconnectOptions,
+    /// (game server, token) -> token binding. Tokens are single-use and expire.
+    tokens: DashMap<(GameServerId, u32), ReconnectToken>,
+    /// Client IP of the last fully authenticated login, for token binding.
+    last_login_ip: DashMap<AccountId, IpAddr>,
 }
 
 impl LoginController {
@@ -62,13 +78,18 @@ impl LoginController {
         passwords: PasswordService,
         auto_account: bool,
         korea: KoreaAuthOptions,
+        two_factor: TwoFactorService,
+        reconnect: ReconnectOptions,
     ) -> Self {
         Self {
             pool,
             passwords,
             auto_account,
             korea,
+            two_factor,
+            reconnect,
             tokens: DashMap::new(),
+            last_login_ip: DashMap::new(),
         }
     }
 
@@ -123,13 +144,14 @@ impl LoginController {
             return Ok(LoginResult::denied(LoginDeniedReason::BAD_ACCOUNT));
         }
 
-        if banned != 0 {
+        let account_id = AccountId(id as u32);
+        // The account's verified factors are always enforced by the authentication flow. The ban
+        // check then happens after them, like the Korea flow, so a password holder who lacks a
+        // factor learns nothing about the account.
+        let two_factor = self.two_factor.get_requirements(account_id).await?;
+        if banned != 0 && !two_factor.any_required() {
             return Ok(LoginResult::denied(LoginDeniedReason(ban_reason as u8)));
         }
-
-        let account_id = AccountId(id as u32);
-        let now = unix_now();
-        tracing::info!("{} connected.", log_safe(username));
 
         // Determine what needs rehashing, which is only possible when we have a plaintext password
         let plaintext = password.kind == PasswordKind::Plaintext;
@@ -142,61 +164,77 @@ impl LoginController {
                 Some(h) => sha256_crypt::parse_rounds(h)? != self.korea.rounds,
             };
 
-        let ip_s = ip.to_string();
+        let now = unix_now();
         let result = if rehash_pbkdf2 && korea_rehash_needed {
             let hash = self.hash_for_storage(password).await?;
             let korea_hash = self.korea_hash(&password.value).await?;
             sqlx::query(
-                "UPDATE `users` SET password = ?, korea_challenge_hash = ?, last_ip = ?, last_login = ?, updated_at = ? WHERE id = ?",
+                "UPDATE `users` SET password = ?, korea_challenge_hash = ?, updated_at = ? WHERE id = ?",
             )
             .bind(hash)
             .bind(korea_hash)
-            .bind(&ip_s)
-            .bind(now)
             .bind(now)
             .bind(account_id.0)
             .execute(&self.pool)
             .await?
         } else if rehash_pbkdf2 {
             let hash = self.hash_for_storage(password).await?;
-            sqlx::query("UPDATE `users` SET password = ?, last_ip = ?, last_login = ?, updated_at = ? WHERE id = ?")
+            sqlx::query("UPDATE `users` SET password = ?, updated_at = ? WHERE id = ?")
                 .bind(hash)
-                .bind(&ip_s)
-                .bind(now)
                 .bind(now)
                 .bind(account_id.0)
                 .execute(&self.pool)
                 .await?
         } else if korea_rehash_needed {
             let korea_hash = self.korea_hash(&password.value).await?;
-            sqlx::query(
-                "UPDATE `users` SET korea_challenge_hash = ?, last_ip = ?, last_login = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(korea_hash)
-            .bind(&ip_s)
-            .bind(now)
-            .bind(now)
-            .bind(account_id.0)
-            .execute(&self.pool)
-            .await?
+            sqlx::query("UPDATE `users` SET korea_challenge_hash = ?, updated_at = ? WHERE id = ?")
+                .bind(korea_hash)
+                .bind(now)
+                .bind(account_id.0)
+                .execute(&self.pool)
+                .await?
         } else {
-            sqlx::query(
-                "UPDATE `users` SET last_ip = ?, last_login = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(&ip_s)
-            .bind(now)
-            .bind(now)
-            .bind(account_id.0)
-            .execute(&self.pool)
-            .await?
+            // `last_ip` / `last_login` are written by `record_login` once every factor passed.
+            sqlx::query("UPDATE `users` SET updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(account_id.0)
+                .execute(&self.pool)
+                .await?
         };
+        if result.rows_affected() != 1 {
+            tracing::warn!("Database update failed, error occurred while updating the account");
+        }
+
+        Ok(LoginResult::ok_with_two_factor(account_id, two_factor))
+    }
+
+    /// Records a fully authenticated login after every required factor passed: the account's
+    /// `last_ip` / `last_login` / `updated_at` and the "connected" log line.
+    pub async fn record_login(
+        &self,
+        account_id: AccountId,
+        username: &str,
+        ip: IpAddr,
+    ) -> anyhow::Result<()> {
+        let now = unix_now();
+        let ip_s = ip.to_string();
+        let result = sqlx::query(
+            "UPDATE `users` SET last_ip = ?, last_login = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&ip_s)
+        .bind(now)
+        .bind(now)
+        .bind(account_id.0)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() != 1 {
             tracing::warn!(
                 "Database update failed, error occurred while updating account login IP and time"
             );
         }
-
-        Ok(LoginResult::ok(account_id))
+        self.last_login_ip.insert(account_id, ip);
+        tracing::info!("{} connected.", log_safe(username));
+        Ok(())
     }
 
     /// The Korea challenge-response material for `username`, or `None` if the account does not
@@ -306,60 +344,236 @@ impl LoginController {
         Box::pin(self.login(username, password, ip)).await
     }
 
-    /// Stores a reconnection token for `account_id` on `gs_id` and acknowledges it to the game
-    /// server.
-    pub fn add_reconnection_token(
+    /// Stores a reconnection token for `account_id` on `gs_id`, bound to the client IP of the
+    /// last fully authenticated login, and acknowledges it to the game server.
+    pub async fn add_reconnection_token(
         &self,
         connection: &InternalConnection,
         gs_id: GameServerId,
         account_id: AccountId,
         token: u32,
-    ) {
-        let tokens = self.tokens.entry(gs_id).or_default().clone();
-        tokens.entry(token).or_insert(account_id);
+    ) -> anyhow::Result<()> {
+        let Some(client_ip) = self.lookup_last_login_ip(account_id).await? else {
+            tracing::warn!(
+                "No completed login from account {}; not issuing a reconnect token",
+                account_id
+            );
+            return Ok(());
+        };
+        let now = Instant::now();
+        self.tokens.retain(|_, t| t.expires_at > now);
+        let cap = self.reconnect.max_tokens_per_account as usize;
+        while self
+            .tokens
+            .iter()
+            .filter(|e| e.value().account_id == account_id)
+            .count()
+            >= cap
+        {
+            let oldest = self
+                .tokens
+                .iter()
+                .filter(|e| e.value().account_id == account_id)
+                .min_by_key(|e| e.value().created_at)
+                .map(|e| *e.key());
+            let Some(oldest) = oldest else { break };
+            self.tokens.remove(&oldest);
+        }
+        self.tokens.insert(
+            (gs_id, token),
+            ReconnectToken {
+                account_id,
+                client_ip,
+                expires_at: now + self.reconnect.token_ttl,
+                created_at: now,
+            },
+        );
         connection.send_packet(&LgPlayerReconnect { token });
+        Ok(())
     }
 
-    /// Validates a reconnection token. An `Err` mirrors the C# `KeyNotFoundException` when the
-    /// game server is a mirror whose parent has no tokens.
+    /// The client IP of the account's last fully authenticated login. Falls back to
+    /// `users.last_ip` (written by [`Self::record_login`]) after a login-server restart.
+    async fn lookup_last_login_ip(&self, account_id: AccountId) -> anyhow::Result<Option<IpAddr>> {
+        if let Some(ip) = self.last_login_ip.get(&account_id) {
+            return Ok(Some(*ip));
+        }
+        let row: Option<(String,)> = sqlx::query_as("SELECT last_ip FROM users WHERE id = ?")
+            .bind(account_id.0)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|(ip,)| ip.parse().ok()))
+    }
+
+    /// Validates and consumes a reconnection token. A token is single-use: it is removed before
+    /// any check, so a failed attempt (wrong account/IP, expired) cannot be retried. An `Err`
+    /// mirrors a database failure; ordinary denials are `ReconnectFailure` values.
     pub fn reconnect(
         &self,
         games: &GameController,
         gs_id: GameServerId,
         account_id: AccountId,
         token: u32,
+        client_ip: IpAddr,
     ) -> anyhow::Result<ReconnectResult> {
-        let fail = ReconnectResult {
-            success: false,
-            account_id: AccountId::default(),
-        };
         let mut gs_id = gs_id;
-        if !self.tokens.contains_key(&gs_id) {
+        if !self.tokens.iter().any(|e| e.key().0 == gs_id) {
             match games.try_get_parent_id(gs_id) {
                 Some(parent) => gs_id = parent,
-                None => return Ok(fail), // TODO ...
+                None => {
+                    return Ok(ReconnectResult::failed(
+                        ReconnectFailure::GameServerUnavailable,
+                    ))
+                }
             }
         }
-        let tokens = self
-            .tokens
-            .get(&gs_id)
-            .map(|t| t.clone())
-            .with_context(|| {
-                format!("The given key '{gs_id}' was not present in the dictionary.")
-            })?;
-        Ok(match tokens.get(&token).map(|v| *v) {
-            Some(v) if v == account_id => ReconnectResult {
-                success: true,
-                account_id,
-            },
-            _ => fail, // TODO ...
-        })
+        let Some((_, entry)) = self.tokens.remove(&(gs_id, token)) else {
+            return Ok(ReconnectResult::failed(ReconnectFailure::InvalidToken));
+        };
+        if entry.expires_at <= Instant::now() {
+            return Ok(ReconnectResult::failed(ReconnectFailure::ExpiredToken));
+        }
+        if entry.account_id != account_id {
+            return Ok(ReconnectResult::failed(ReconnectFailure::AccountMismatch));
+        }
+        if entry.client_ip != client_ip {
+            return Ok(ReconnectResult::failed(ReconnectFailure::IpMismatch));
+        }
+        Ok(ReconnectResult::success(account_id))
+    }
+
+    /// Test hook: pretend `account_id` completed a login from `ip`, so the reconnect binding can
+    /// be exercised without a database-backed `record_login`.
+    #[doc(hidden)]
+    pub fn set_last_login_ip_for_test(&self, account_id: AccountId, ip: IpAddr) {
+        self.last_login_ip.insert(account_id, ip);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+
+    use crate::network::internal::InternalConnection;
+    use crate::server::LoginServer;
+    use crate::test_support::{test_config, test_server, MockBackend};
+
+    const TEST_ACCOUNT: AccountId = AccountId(42);
+    const TEST_GS: GameServerId = GameServerId(1);
+    const TEST_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    const OTHER_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+
+    fn reconnect_server(ttl: Duration, cap: i32) -> Arc<LoginServer> {
+        // `parse_timespan` reads the fraction as a fraction of a second: .020 = 20 ms.
+        let ttl = format!("00:00:00.{:03}", ttl.as_millis());
+        let server = test_server(
+            test_config(serde_json::json!({
+                "Reconnect": { "TokenTtl": ttl, "MaxTokensPerAccount": cap }
+            })),
+            Arc::new(MockBackend::default()),
+        );
+        server
+            .logins
+            .set_last_login_ip_for_test(TEST_ACCOUNT, TEST_IP);
+        server
+    }
+
+    async fn seed(server: &LoginServer, account: AccountId, token: u32) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let conn = InternalConnection::new(TEST_IP, tx);
+        server
+            .logins
+            .add_reconnection_token(&conn, TEST_GS, account, token)
+            .await
+            .unwrap();
+    }
+
+    fn check(
+        server: &LoginServer,
+        account: AccountId,
+        token: u32,
+        ip: IpAddr,
+    ) -> Option<ReconnectFailure> {
+        let r = server
+            .logins
+            .reconnect(&server.games, TEST_GS, account, token, ip)
+            .unwrap();
+        assert_eq!(r.success, r.failure.is_none());
+        r.failure
+    }
+
+    #[tokio::test]
+    async fn sequential_reconnect_tokens_are_refused() {
+        let server = reconnect_server(Duration::from_secs(60), 5);
+        seed(&server, TEST_ACCOUNT, 0xDEAD_BEEF).await;
+        for token in 1..=1000 {
+            assert_eq!(
+                check(&server, TEST_ACCOUNT, token, TEST_IP),
+                Some(ReconnectFailure::InvalidToken),
+                "sequential token {token} was accepted"
+            );
+        }
+        assert_eq!(check(&server, TEST_ACCOUNT, 0xDEAD_BEEF, TEST_IP), None);
+    }
+
+    #[tokio::test]
+    async fn reconnect_token_is_single_use() {
+        let server = reconnect_server(Duration::from_secs(60), 5);
+        seed(&server, TEST_ACCOUNT, 777).await;
+        assert_eq!(check(&server, TEST_ACCOUNT, 777, TEST_IP), None);
+        // The consumed token left no table for this world, so the retry is the "unavailable"
+        // denial; either way the same token is never accepted twice.
+        assert_eq!(
+            check(&server, TEST_ACCOUNT, 777, TEST_IP),
+            Some(ReconnectFailure::GameServerUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_reconnect_token_is_refused() {
+        let server = reconnect_server(Duration::from_millis(20), 5);
+        seed(&server, TEST_ACCOUNT, 777).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            check(&server, TEST_ACCOUNT, 777, TEST_IP),
+            Some(ReconnectFailure::ExpiredToken)
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_token_is_bound_to_the_account_and_login_ip() {
+        let server = reconnect_server(Duration::from_secs(60), 5);
+        seed(&server, TEST_ACCOUNT, 777).await;
+        assert_eq!(
+            check(&server, AccountId(43), 777, TEST_IP),
+            Some(ReconnectFailure::AccountMismatch)
+        );
+        seed(&server, TEST_ACCOUNT, 778).await;
+        assert_eq!(
+            check(&server, TEST_ACCOUNT, 778, OTHER_IP),
+            Some(ReconnectFailure::IpMismatch)
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_tokens_are_capped_per_account() {
+        let server = reconnect_server(Duration::from_secs(60), 2);
+        for token in [11, 12, 13] {
+            seed(&server, TEST_ACCOUNT, token).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        // The oldest token was evicted; the two newest still work.
+        assert_eq!(
+            check(&server, TEST_ACCOUNT, 11, TEST_IP),
+            Some(ReconnectFailure::InvalidToken)
+        );
+        assert_eq!(check(&server, TEST_ACCOUNT, 12, TEST_IP), None);
+        assert_eq!(check(&server, TEST_ACCOUNT, 13, TEST_IP), None);
+    }
 
     #[test]
     fn username_rules_match_dotnet_regex() {
