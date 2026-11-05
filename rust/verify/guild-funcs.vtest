@@ -60,6 +60,8 @@ gm setfaction 161
 expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${leader}'" 0 15
 expectdb "SELECT role FROM expedition_members WHERE name = '${member}'" 255 10
 expectdb "SELECT COUNT(*) FROM expeditions e JOIN expedition_members m ON m.character_id = e.owner WHERE m.name = '${member}'" 1 10
+# Restore the faction so the suite can be rerun (the peer may be out of sight now).
+targetself
 gm setfaction 101
 
 [member]
