@@ -3,6 +3,28 @@
 use super::prelude::*;
 use crate::world::zone_conflicts::{self, ZONE_CONFLICT_TYPE_NAMES};
 
+/// A `ZoneConflictType` name (any case) or its number (0-7).
+fn parse_zone_state(text: &str) -> Option<u8> {
+    let t = text.trim();
+    if let Ok(n) = t.parse::<u8>() {
+        return (usize::from(n) < ZONE_CONFLICT_TYPE_NAMES.len()).then_some(n);
+    }
+    ZONE_CONFLICT_TYPE_NAMES
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(t))
+        .map(|i| i as u8)
+}
+
+/// `Tension (0), Danger (1), ...`.
+fn valid_states() -> String {
+    ZONE_CONFLICT_TYPE_NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{n} ({i})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `TestZoneState`.
 pub struct TestZoneState;
 
@@ -46,11 +68,21 @@ impl Command for TestZoneState {
             return Ok(());
         }
 
-        // Enum.TryParse(args[0], out ZoneConflictType) (byte enum)
-        let mut zonestate = 0u8; // Tension
-        if let Some(v) = enum_try_parse(&args[0], &ZONE_CONFLICT_TYPE_NAMES, 0, 255) {
-            zonestate = v as u8;
-        }
+        // Deviation from the C# (`Enum.TryParse(args[0], out ZoneConflictType)` is
+        // case-sensitive and an unparsable argument left the state at Tension, so `zonestate war`
+        // silently set Tension): the name is case-insensitive and an unknown state is an error.
+        let Some(zonestate) = parse_zone_state(&args[0]) else {
+            CommandManager::send_error_text(
+                self,
+                out,
+                &format!(
+                    "Unknown zone state '{}'. Valid states: {}",
+                    args[0],
+                    valid_states()
+                ),
+            );
+            return Ok(());
+        };
 
         let mut zonegroupid = 0u16;
         if args.len() > 1 {
@@ -102,11 +134,11 @@ impl Command for TestZoneState {
     }
 
     fn get_command_line_help(&self) -> String {
-        "<StateId> [ZoneId]".into()
+        "<State> [ZoneId]".into()
     }
 
     fn get_command_help_text(&self) -> String {
-        "Changes a zone's state (0=Tension, 1=Danger, 2=Dispute, 3=Unrest, 4=Crisis, 5=Conflict, 6=War, 7=Peace). If ZoneId is ommited, your current zone is used.".into()
+        "Changes a zone's state (0=Tension, 1=Danger, 2=Dispute, 3=Unrest, 4=Crisis, 5=Conflict, 6=War, 7=Peace; the name or the number, any case). If ZoneId is ommited, your current zone is used.".into()
     }
 }
 
@@ -197,6 +229,43 @@ mod tests {
             4
         );
 
+        // Names are case-insensitive: `zonestate war 7` sets War (it used to set Tension)
+        let (_, out) = harness::run(&server, &gm.p, "zonestate war 7").await;
+        assert_eq!(
+            out,
+            [harness::normal(
+                "zonestate",
+                "Changed ZoneGroup: 7 to State: War"
+            )]
+        );
+        assert_eq!(
+            server
+                .world
+                .zone_conflicts
+                .get(&server, 7)
+                .unwrap()
+                .current_state,
+            6
+        );
+        let (_, out) = harness::run(&server, &gm.p, "zonestate PEACE").await;
+        assert_eq!(
+            out,
+            [harness::normal(
+                "zonestate",
+                "Changed ZoneGroup: 7 to State: Peace"
+            )]
+        );
+        assert_eq!(
+            server
+                .world
+                .zone_conflicts
+                .get(&server, 7)
+                .unwrap()
+                .current_state,
+            7
+        );
+        gm.packets();
+
         // By number and explicit group: War has a timer
         let before = chrono::Utc::now().timestamp();
         let (_, out) = harness::run(&server, &gm.p, "zone_state 6 7").await;
@@ -214,14 +283,41 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].1, state_body(7, 6, c.next_state_time));
 
-        // Unknown name: Tension; group without a conflict
-        let (_, out) = harness::run(&server, &gm.p, "zonestate nope 8").await;
+        // Group without a conflict
+        let (_, out) = harness::run(&server, &gm.p, "zonestate tension 8").await;
         assert_eq!(
             out,
             [harness::error(
                 "zonestate",
                 "ZoneGroup: Arcadian Sea (8) does not have a conflict state defined in the game database and thus cannot be changed"
             )]
+        );
+        // An unknown state is an error with the valid states, not Tension
+        let before = server
+            .world
+            .zone_conflicts
+            .get(&server, 7)
+            .unwrap()
+            .current_state;
+        for bad in ["nope 7", "8 7", "256 7", "-1 7"] {
+            let (_, out) = harness::run(&server, &gm.p, &format!("zonestate {bad}")).await;
+            let state = bad.split(' ').next().unwrap();
+            assert_eq!(
+                out,
+                [harness::error(
+                    "zonestate",
+                    &format!("Unknown zone state '{state}'. Valid states: Tension (0), Danger (1), Dispute (2), Unrest (3), Crisis (4), Conflict (5), War (6), Peace (7)")
+                )]
+            );
+        }
+        assert_eq!(
+            server
+                .world
+                .zone_conflicts
+                .get(&server, 7)
+                .unwrap()
+                .current_state,
+            before
         );
         // Unknown group: NullReferenceException
         gm.chat();

@@ -493,6 +493,16 @@ pub fn reference_height(
     }
 }
 
+/// How far below its current level a walker can find its floor in one step (m): a steep slope or a
+/// ledge. The ground probe reaches [`crate::systems::ai::collision::GROUND_PROBE_DOWN`] down, and
+/// where the floor a unit stands on is not in the collision world, the only thing it hits is the
+/// terrain far below: the halls of the instance dungeons are models of the world's `object.dat` /
+/// `big_object.dat`, which the collision loader does not read, so the NPCs of Kroloal Cradle (about
+/// 191 m above their world's terrain), Howling Abyss (86 m), Sharpwind Mines (138 m), the Library
+/// (77 m) and others fell to that terrain with their first step. A floor deeper than this is not the
+/// ground under the walker.
+pub const WALKER_MAX_DROP: f32 = 12.0;
+
 /// [`reference_height`] with the zone's ground: an NPC that walks (not flying, not holding /
 /// idling at its spawner) stands on the physics ground (static geometry + terrain, the
 /// collision service) under its position, like the zone's NPC living entities; the C#
@@ -501,7 +511,10 @@ pub fn reference_height(
 /// A walker is never resolved above its current level plus the collision service's step-up
 /// allowance ([`crate::systems::ai::collision::GROUND_PROBE_UP`], 2 m): a cave's heightmap
 /// column is the surface above its roof, so accepting that (or the spawner Z) would teleport
-/// the walker out of the cave. With no reachable floor the current level is kept.
+/// the walker out of the cave. Nor is it resolved more than [`WALKER_MAX_DROP`] below its
+/// level: the terrain under an instance hall is not its floor. A probe hit out of that range is
+/// no floor, and the navigation height (the navmesh with `GeoDataMode`) decides next. With no
+/// reachable floor the current level is kept.
 #[allow(clippy::too_many_arguments)]
 pub fn reference_height_in(
     server: &GameServer,
@@ -519,6 +532,7 @@ pub fn reference_height_in(
         return reference_height(server, Some(a), x, y, z, zone_id);
     }
     let step_limit = a.world_z + crate::systems::ai::collision::GROUND_PROBE_UP;
+    let drop_limit = a.world_z - WALKER_MAX_DROP;
     // Prefer the actual collision floor below / within the step range: the probe starts at
     // the current level + 2 m, so a hit is always reachable, and a hit at Z = 0 is a valid
     // surface. A missed probe is not a floor; its terrain fallback (in a cave the surface
@@ -532,14 +546,14 @@ pub fn reference_height_in(
         crate::systems::ai::collision::GROUND_PROBE_UP,
         crate::systems::ai::collision::GROUND_PROBE_DOWN,
     ) {
-        if g <= step_limit {
+        if g <= step_limit && g >= drop_limit {
             return g;
         }
     }
     // Terrain / navigation fallback (heightmap or navmesh): only a known, reachable floor
     // (0 = unknown, as in `GetHeight`).
     let terrain = crate::systems::npcs::heightmap::get_height(server, zone_id, x, y, z);
-    if terrain != 0.0 && terrain <= step_limit {
+    if terrain != 0.0 && terrain <= step_limit && terrain >= drop_limit {
         return terrain;
     }
     // No reachable floor: keep the walker at its current level instead of the spawner Z.

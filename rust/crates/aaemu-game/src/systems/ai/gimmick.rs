@@ -54,11 +54,12 @@ pub fn npc_gimmick(
     npc_obj: &WorldObject,
 ) -> Option<std::sync::Arc<ActiveGimmick>> {
     let world_id = npc_obj.transform().instance_id;
+    // A read: it must not create the registry of an instance that has no gimmicks (or is gone).
     server
         .systems
         .npcs
         .gimmicks
-        .for_world(world_id)
+        .existing(world_id)?
         .active()
         .into_iter()
         .filter(|g| g.gimmick.data().spawner_unit_id == npc_obj.obj_id())

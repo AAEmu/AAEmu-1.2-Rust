@@ -40,6 +40,17 @@ pub mod error {
     pub const CHAT_PRIVATE_CHANNEL: i16 = 272;
     pub const CHAT_WRONG_PASSWORD: i16 = 273;
     pub const CHAT_NOT_JOINED_CHANNEL: i16 = 467;
+
+    // The rest come straight from the generated `ErrorMessageType` table (the 1.2 client's
+    // `ui_texts` carry the matching texts), so the values cannot drift.
+    pub use crate::systems::economy::error_message::{
+        EXPEDITION_NO_TARGET, EXPEDITION_OTHER_EXPEDITION, EXPEDITION_OTHER_INVITATION,
+        EXPEDITION_OWNER_CANNOT_LEAVE, FACTION_INVITE_OFFLINE, FACTION_INVITE_REJECTED,
+        FACTION_INVITE_RIGHTS, FACTION_INVITE_SAME, FACTION_INVITE_SELF, FACTION_JOIN,
+        FACTION_JOIN_NO_INVITOR, FACTION_KICK_RIGHTS, INVITATION_CANCELED_TIMEOUT,
+        TEAM_INVITEE_IN_TEAM, TEAM_INVITEE_MEMBER, TEAM_INVITEE_OFFLINE, TEAM_INVITOR_OFFLINE,
+        TEAM_JOIN, TEAM_JOIN_ALONE, TEAM_NO_RIGHTS, TEAM_YOURSELF,
+    };
 }
 
 /// `Character.SendErrorMessage(type)` (`SCErrorMsgPacket(type, 0, true)`).
