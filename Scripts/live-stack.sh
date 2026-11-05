@@ -20,7 +20,12 @@
 # Every path is an environment variable so another machine can override it (e.g. AAEMU_DB_USER, the
 # MySQL user in generated lane configs, default aaemu; AAEMU_DRIVER_DLL / AAEMU_DRIVER_OUT). Secrets (DB and test
 # account passwords) live only in $LIVE/cfg and the runtime Config.Local.json files, never in git.
+#
+# The servers inherit this script's environment: RUST_LOG, NO_COLOR and AAEMU_LOG_MS=1 (log times as
+# HH:MM:SS.ffffff, to line the server log up with a client trace) are passed through to login and game.
 set -euo pipefail
+# Passed on to the servers as is (the default stays HH:MM:SS); exported explicitly so it is never lost.
+[ -z "${AAEMU_LOG_MS:-}" ] || export AAEMU_LOG_MS
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 LANES=${AAEMU_LANES:-D:/aaemu-lanes}

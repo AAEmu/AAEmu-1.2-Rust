@@ -159,6 +159,11 @@ impl TransferManagers {
         self.managers.iter().map(|e| e.value().clone()).collect()
     }
 
+    /// Drops the manager of a removed instance (`false` = it had none).
+    pub fn remove_world(&self, instance_id: u32) -> bool {
+        self.managers.remove(&instance_id).is_some()
+    }
+
     /// `transfer.Spawner`.
     pub fn spawner_of(&self, obj_id: u32) -> Option<Arc<TransferSpawner>> {
         let id = *self.spawner_of.get(&obj_id)?;

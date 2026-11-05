@@ -902,6 +902,12 @@ impl GameClient {
     /// Close both game socket halves, without sending `CSLeaveWorldPacket`.
     /// Awaiting the aborted reader confirms that its socket half was dropped.
     pub async fn disconnect_hard(mut self) {
+        self.hang_up().await;
+    }
+
+    /// [`Self::disconnect_hard`] on a client the caller keeps (the `hangup` script command): the
+    /// server sees the socket close without a `CSLeaveWorldPacket`.
+    pub async fn hang_up(&mut self) {
         drop(self.writer.take());
         self.reader.close().await;
         // Earlier accepted events are already flushed. Drain already-delivered evidence

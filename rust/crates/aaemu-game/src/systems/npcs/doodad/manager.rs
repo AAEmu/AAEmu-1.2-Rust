@@ -451,7 +451,7 @@ fn create_player_doodad_with_labor(
         let c = player.data();
         (c.id, c.unit.name.clone(), c.unit.transform.zone_id)
     };
-    tracing::warn!("{char_name} is placing a doodad {id} at position {x} {y} {z}");
+    tracing::debug!("{char_name} is placing a doodad {id} at position {x} {y} {z}");
     let Some(world) = server.world.world_of(&pobj) else {
         tracing::warn!("{char_name}: doodad {id} not placed: character is in no world");
         return None;
@@ -636,7 +636,7 @@ fn create_player_doodad_with_labor(
 
 /// `CSCreateDoodadPacket.Read` body.
 pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreateDoodadPacket) {
-    tracing::warn!(
+    tracing::debug!(
         "CreateDoodad, Id: {}, X: {}, Y: {}, Z: {}, zRot: {}  ItemId: {}",
         p.id,
         p.x,

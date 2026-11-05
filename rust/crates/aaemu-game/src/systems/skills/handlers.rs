@@ -645,7 +645,20 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         super::glider::end_flight(server, &me);
     }
     if result != skill_result::SUCCESS {
-        tracing::debug!(skill_id, result, value, "Client skill failed");
+        if matches!(target, SkillCastTarget::Doodad(_)) {
+            // A refused doodad use (a dungeon door among them) shows up in the log as the
+            // `StartSkill` line alone otherwise; the client only gets the result code.
+            tracing::info!(
+                character = %player.data().unit.name,
+                skill_id,
+                result,
+                value,
+                doodad = target.obj_id(),
+                "Client doodad skill refused"
+            );
+        } else {
+            tracing::debug!(skill_id, result, value, "Client skill failed");
+        }
         send_cast_failed(
             &player,
             skill_id,

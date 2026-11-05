@@ -1392,7 +1392,7 @@ impl CSCancelTradePacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!("CancelTrade, Reason: {}", self.reason);
+        tracing::debug!("CancelTrade, Reason: {}", self.reason);
         let Some(p) = active(conn) else { return };
         cancel_trade(server, p.obj_id, self.reason, 0);
     }

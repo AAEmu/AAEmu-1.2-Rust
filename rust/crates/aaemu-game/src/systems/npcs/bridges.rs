@@ -677,22 +677,39 @@ fn spawn_effect(
     let Some(world) = server.world.world_of(caster) else {
         return;
     };
-    let target = match &args.target {
-        Target::Obj(o) => o.clone(),
-        Target::Pos(_) => caster.clone(),
+    // A plot "Location" target is a position unit: the NPC appears there (the C# spawner reads
+    // the target's transform). Stand-ins of the caster were used before, which put a
+    // projectile-style summon (the rift summoners) on top of the summoner instead of at its
+    // landing point.
+    let (target, target_pos) = match &args.target {
+        Target::Obj(o) => (o.clone(), None),
+        Target::Pos(p) => (caster.clone(), Some(*p)),
     };
     let manager = server.systems.npcs.spawns.get_or_create(&world);
-    let Some(spawner) = manager.get_npc_spawner_at(server, e.sub_type, &target) else {
+    let spawner = match &target_pos {
+        None => manager.get_npc_spawner_at(server, e.sub_type, &target),
+        Some(p) => manager.get_npc_spawner_at_pos(
+            server,
+            e.sub_type,
+            p.instance_id,
+            p.zone_id,
+            &ground_level_for(server, e.sub_type, p),
+        ),
+    };
+    let Some(spawner) = spawner else {
         tracing::info!("SpawnEffect: SubType={} not found in spawners.", e.sub_type);
         return;
     };
     // dir id 1 = relative to target/spawner, 2 = relative to caster.
     let rel = |id: u32| match id {
-        1 => Some(&target),
-        2 => Some(caster),
+        1 => Some(match &target_pos {
+            Some(p) => ground_level_for(server, e.sub_type, p),
+            None => world.world_pos_rot(&target),
+        }),
+        2 => Some(world.world_pos_rot(caster)),
         _ => None,
     };
-    let (Some(pos_rel), Some(ori_rel)) = (rel(e.pos_dir_id), rel(e.ori_dir_id)) else {
+    let (Some(p), Some(o)) = (rel(e.pos_dir_id), rel(e.ori_dir_id)) else {
         tracing::warn!(
             "SpawnEffect: Unhandled PosDirId {} or OriDirId {}",
             e.pos_dir_id,
@@ -700,8 +717,6 @@ fn spawn_effect(
         );
         return;
     };
-    let p = world.world_pos_rot(pos_rel);
-    let o = world.world_pos_rot(ori_rel);
     let (xx, yy) = add_distance_to_front_deg(e.pos_distance, p.x, p.y, e.pos_angle);
     let mut position = spawner.position();
     position.x = xx;
@@ -717,6 +732,32 @@ fn spawn_effect(
         life_time: e.life_time,
     };
     spawner.do_spawn_effect(server, spawner.id, &params, Some(caster), Some(&target));
+}
+
+/// The position a summon at a plot location appears at: the location itself for a flying or
+/// swimming template, else the ground below it (the plots of the rift summoners place their
+/// location 500 m above the landing point of a falling projectile).
+fn ground_level_for(
+    server: &GameServer,
+    template_id: u32,
+    p: &crate::systems::skills::geometry::PosUnit,
+) -> PositionAndRotation {
+    let mut pos = p.pos;
+    let npcs = &server.game_data.systems.npcs.npc;
+    let flyer = npcs
+        .template(template_id)
+        .is_some_and(|t| npcs.is_fly_or_swim(t.model_id));
+    if !flyer {
+        pos.z = crate::systems::ai::collision::ground_height_or(
+            server,
+            p.instance_id,
+            pos.x,
+            pos.y,
+            pos.z,
+            || crate::systems::npcs::heightmap::get_height(server, p.zone_id, pos.x, pos.y, pos.z),
+        );
+    }
+    pos
 }
 
 /// `SpawnFishEffect.Apply`: a fish from the fish school near the fishing character is spawned

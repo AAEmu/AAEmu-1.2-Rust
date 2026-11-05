@@ -211,7 +211,7 @@ impl ClientPacket for CSChangeDoodadDataPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
+            tracing::debug!(
                 "ChangeDoodadData, ObjId: {}, Data: {}",
                 self.obj_id,
                 self.data
@@ -450,7 +450,7 @@ impl ClientPacket for CSSaveDoodadUccStringPacket {
         _conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("SaveDoodadUccString, ObjId: {}", self.obj_id);
+            tracing::debug!("SaveDoodadUccString, ObjId: {}", self.obj_id);
             Ok(())
         })
     }

@@ -218,6 +218,76 @@ async fn outdoor_walker_still_follows_the_terrain_within_a_step() {
     assert!((z - 100.0).abs() < 0.1, "{z}");
 }
 
+/// Kroloal Cradle: the NPCs stand at 192-194 m, the terrain under the hall is at 2-5 m and the
+/// hall's own floor model is not in the collision world, so the ground probe only finds that
+/// terrain 191 m below. It is not the ground under the walker: the first step used to drop it
+/// there, out of everyone's reach.
+#[tokio::test]
+async fn hall_walker_does_not_drop_to_the_terrain_far_below() {
+    let server = cave_server(2.0);
+    let g = crate::systems::ai::collision::ground_height(&server, 0, 500.0, 500.0, 193.0)
+        .expect("service on");
+    assert!(
+        (g - 2.0).abs() < 0.1,
+        "the probe finds the far terrain: {g}"
+    );
+    // Keeps its level, not the terrain, not the spawner Z.
+    let z = reference_height_in(
+        &server,
+        0,
+        Some(walker(193.0, 150.0)),
+        500.0,
+        500.0,
+        193.0,
+        TEST_ZONE,
+    );
+    assert_eq!(z, 193.0);
+}
+
+#[tokio::test]
+async fn walker_steps_down_a_ledge_but_not_to_a_floor_beyond_the_drop_limit() {
+    let server = cave_server(100.0);
+    let drop = super::WALKER_MAX_DROP;
+    // A floor exactly one drop limit below is reachable ...
+    let z = walker_towards_surface(&server, 100.0 + drop - 0.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+    // ... one beyond it is another floor: the walker keeps its level.
+    let z = walker_towards_surface(&server, 100.0 + drop + 0.5);
+    assert_eq!(z, 100.0 + drop + 0.5);
+}
+
+/// The navigation height (`GeoDataMode`) is the floor of an instance hall: with the physics
+/// terrain far below, the walker takes the navmesh height next to it.
+#[tokio::test]
+async fn hall_walker_takes_the_navmesh_height_when_the_terrain_is_far_below() {
+    let server = test_server_with(GameData::empty());
+    let t = WorldHeightmap::with_size(0, "main_world", 2, 2, COEF);
+    let value = (2.0 * COEF) as u16;
+    assert!(t.insert_cell(0, 0, vec![value; CELL_POINTS]));
+    let hm = Arc::new(HeightmapWorlds::from_parts(
+        Arc::new(ClientFileManager::new()),
+        vec![t],
+        HashMap::from([(TEST_ZONE, 0)]),
+        HeightmapConfig {
+            heightmaps_enable: true,
+            geo_data_mode: true,
+            ..Default::default()
+        },
+    ));
+    hm.install_geo_data(Arc::new(|_template, _x, _y, _z| 192.4));
+    server.systems.npcs.heightmaps.install(hm);
+    let z = reference_height_in(
+        &server,
+        0,
+        Some(walker(193.0, 193.0)),
+        500.0,
+        500.0,
+        193.0,
+        TEST_ZONE,
+    );
+    assert_eq!(z, 192.4, "the navmesh floor next to the walker");
+}
+
 #[tokio::test]
 async fn walking_without_a_service_or_heightmap_keeps_the_level() {
     // No heightmaps installed and no collision service: the heightmap fallback is unknown
