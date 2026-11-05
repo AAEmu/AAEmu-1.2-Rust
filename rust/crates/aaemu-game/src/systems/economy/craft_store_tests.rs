@@ -9,7 +9,7 @@ use crate::data::items::{backpack_type, EquipTemplate, ItemTemplate, TemplateKin
 use crate::data::GameData;
 use crate::models::container::{equip_slot, slot_type};
 use crate::models::doodad::Doodad;
-use crate::models::item::Item;
+use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemTask};
 use crate::models::npc::Npc;
 use crate::opcodes::sc;
@@ -658,9 +658,8 @@ async fn craft_loaded_grade_recipes_create_expected_inventory() {
         ("t", "f", STACK, 3, -1, true, 3),
         ("f", "t", SWORD, 0, -1, true, 4),
         ("f", "t", STACK, 0, -1, true, 4),
-        // No main_grade and no use_grade: the equipment-material heuristic no longer runs,
-        // the product uses item_grade_id / the default grade.
-        ("f", "f", SWORD, 0, -1, true, 0),
+        // Keep the 1.2 equipment-material heuristic when the main_grade flag is unset.
+        ("f", "f", SWORD, 0, -1, true, 4),
         ("t", "f", STACK, 3, 2, false, 2),
         ("f", "f", STACK, 0, -1, true, 0),
     ] {
@@ -827,10 +826,11 @@ async fn craft_main_grade_sets_the_product_grade() {
 }
 
 #[tokio::test]
-async fn craft_use_grade_gates_the_material_grade_inheritance() {
-    // `use_grade` products take the 1.2 equipment-material heuristic; unflagged products use
-    // `item_grade_id` / the default grade.
-    for (use_grade, expected) in [("t", 2), ("f", 0)] {
+async fn craft_equipment_material_grade_inherits_for_any_product() {
+    // The 1.2 equipment-material heuristic runs whenever no `main_grade` row exists, whatever
+    // `use_grade` says: ~484 gear-upgrade crafts without grade rows (4993, 5285, 5086, ...)
+    // keep their inherited grade and the free-regrade roll.
+    for use_grade in ["t", "f"] {
         let mut d = data();
         d.systems.economy.craft = load_craft_sql(&format!(
             "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', '{use_grade}', 0);
@@ -863,10 +863,151 @@ async fn craft_use_grade_gates_the_material_grade_inheritance() {
         let bag = bag.lock().unwrap();
         assert_eq!(
             (bag.items[0].template_id, bag.items[0].grade),
-            (PRODUCT, expected),
+            (PRODUCT, 2),
             "use_grade = {use_grade}"
         );
     }
+}
+
+#[tokio::test]
+async fn craft_unflagged_upgrade_inherits_the_equipment_grade() {
+    // An upgrade recipe with no `main_grade` row and `use_grade = 'f'` (the bulk of the gear
+    // upgrade crafts) still takes the equipment material's grade.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 7000, 1, 'f', -1);",
+    );
+    d.items.grades.insert(
+        4,
+        crate::data::items::GradeTemplate {
+            grade: 4,
+            grade_order: 4,
+            durability: 1.0,
+        },
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    let id = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .grade = 4;
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let bag = Inv::of(&pa).bag();
+    let bag = bag.lock().unwrap();
+    assert_eq!((bag.items[0].template_id, bag.items[0].grade), (PRODUCT, 4));
+}
+
+#[tokio::test]
+async fn craft_material_rows_of_one_item_are_summed() {
+    // Craft 370's shape: the same item twice (8318 x3 + x1). Three units must not satisfy 4.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES
+            (1, 1, 1000, 3, 'f', -1), (2, 1, 1000, 1, 'f', -1);",
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+    assert_eq!(Inv::of(&pa).items_count(STACK, -1), 3);
+
+    give(&w, &pa, slot_type::INVENTORY, STACK, 1, 1);
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let inv = Inv::of(&pa);
+    assert_eq!(inv.items_count(STACK, -1), 0);
+    assert_eq!(inv.items_count(PRODUCT, -1), 1);
+}
+
+#[tokio::test]
+async fn craft_main_material_lowest_slot_decides_and_is_consumed() {
+    // Two units of the main material at different grades in different slots: the lowest slot
+    // is the grade source (consume_item's order) and only it is consumed.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 7000, 1, 't', -1);",
+    );
+    for grade in [2i32, 3] {
+        d.items.grades.insert(
+            grade,
+            crate::data::items::GradeTemplate {
+                grade,
+                grade_order: grade,
+                durability: 1.0,
+            },
+        );
+    }
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    // Insertion order puts grade 2 first; slot 0 holds grade 3.
+    let high = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 5);
+    let low = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    {
+        let bag = Inv::of(&pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(high).unwrap().grade = 2;
+        bag.get_item_by_id_mut(low).unwrap().grade = 3;
+    }
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let inv = Inv::of(&pa);
+    assert_eq!(inv.items_count(SWORD, 2), 1, "the higher-slot stack stays");
+    assert_eq!(inv.items_count(SWORD, 3), 0, "the lowest slot paid");
+    let bag = inv.bag();
+    let bag = bag.lock().unwrap();
+    let product = bag.items.iter().find(|i| i.template_id == PRODUCT).unwrap();
+    assert_eq!(product.grade, 3);
+}
+
+#[tokio::test]
+async fn craft_secured_right_grade_material_is_locked_only() {
+    // A secured stack of the right grade cannot pay; the refusal says ITEM_SECURE_CONDITION.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 1000, 1, 'f', 2);",
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 1, 0);
+    {
+        let bag = Inv::of(&pa).bag();
+        let mut bag = bag.lock().unwrap();
+        let item = bag.get_item_by_id_mut(id).unwrap();
+        item.grade = 2;
+        item.flags |= ITEM_FLAG_SECURE;
+    }
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 664, 0, false))]
+    );
+    assert_eq!(Inv::of(&pa).items_count(STACK, 2), 1);
 }
 
 #[tokio::test]

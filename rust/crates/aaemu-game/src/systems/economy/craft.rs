@@ -751,12 +751,6 @@ fn material_grade(material: &CraftMaterial, main_grade: Option<u8>) -> i32 {
     }
 }
 
-/// The grade-filtered unlocked units of `material` in `bag` (`-1` = any grade).
-fn material_units(bag: &ItemContainer, material: &CraftMaterial, main_grade: Option<u8>) -> i32 {
-    bag.items_by_template_unlocked(material.item_id, material_grade(material, main_grade))
-        .1
-}
-
 /// The grade of the first (lowest-slot, the order `consume_item` takes) unit that may pay for
 /// the craft's `main_grade` material.
 fn main_material_grade(bag: &ItemContainer, craft: &Craft) -> Option<u8> {
@@ -806,17 +800,23 @@ fn material_payout(inv: &Inv, craft: &Craft, items: &ItemData) -> MaterialPayout
     let bag = inv.bag();
     let bag = bag.lock().expect("container poisoned");
     let main_grade = main_material_grade(&bag, craft);
-    let availability = if craft.craft_materials.is_empty()
-        || craft
-            .craft_materials
-            .iter()
-            .all(|m| material_units(&bag, m, main_grade) >= m.amount)
-    {
+    // Rows that name the same item and effective grade share the stacks: 9 crafts list one
+    // item twice (e.g. craft 370: 8318 x3 + x1), so each row must not be checked against the
+    // whole stack separately.
+    let mut required: HashMap<(u32, i32), i32> = HashMap::new();
+    for m in &craft.craft_materials {
+        *required
+            .entry((m.item_id, material_grade(m, main_grade)))
+            .or_default() += m.amount;
+    }
+    let availability = if required.is_empty()
+        || required.iter().all(|(&(item_id, grade), &amount)| {
+            bag.items_by_template_unlocked(item_id, grade).1 >= amount
+        }) {
         MaterialAvailability::Ok
-    } else if craft.craft_materials.iter().any(|m| {
-        let grade = material_grade(m, main_grade);
-        bag.items_by_template_unlocked(m.item_id, grade).1 < m.amount
-            && bag.items_by_template(m.item_id, grade).1 >= m.amount
+    } else if required.iter().any(|(&(item_id, grade), &amount)| {
+        bag.items_by_template_unlocked(item_id, grade).1 < amount
+            && bag.items_by_template(item_id, grade).1 >= amount
     }) {
         MaterialAvailability::LockedOnly
     } else {
@@ -845,7 +845,7 @@ fn material_payout(inv: &Inv, craft: &Craft, items: &ItemData) -> MaterialPayout
 }
 
 /// The grade a product is handed out with: the flagged main material's grade (`main_grade`), else
-/// for a `use_grade` product the 1.2 equipment-material heuristic, else the fixed
+/// the 1.2 equipment-material heuristic (any product, as before), else the fixed
 /// `item_grade_id`, else the default `-1`. Inherited grades keep the C# free-regrade roll.
 fn product_grade(
     server: &GameServer,
@@ -853,13 +853,8 @@ fn product_grade(
     main_grade: Option<u8>,
     equipment_grade: Option<u8>,
 ) -> i32 {
-    if let Some(grade) = main_grade {
+    if let Some(grade) = main_grade.or(equipment_grade) {
         return free_regrade(server, i32::from(grade));
-    }
-    if product.use_grade {
-        if let Some(grade) = equipment_grade {
-            return free_regrade(server, i32::from(grade));
-        }
     }
     if product.item_grade_id > 0 {
         product.item_grade_id as i32
@@ -1131,8 +1126,11 @@ pub fn free_regrade_with(server: &GameServer, base_grade: i32, lucky_roll: u32) 
 // -------------------------------------------------------------------------------------------
 
 pub fn register(reg: &mut PacketRegistry) {
-    // Not registered in the 1.2 `GameNetwork` (no opcode): `CSSetCraftingPayPacket`.
     reg.register::<CSExecuteCraft>(LEVEL_PLAIN, cs::CSExecuteCraft);
+    // 1.2 Lua `X2Craft.SetCraftingPay` -> `FUN_394d7230` (`local_14 = 0x8d`; the doodad obj
+    // id at `+0xc` and the money at `+0x10` via `FUN_397b0ca0`). Pay rules are UNKNOWN
+    // (capture-pending), so the handler only validates and logs.
+    reg.register::<CSSetCraftingPayPacket>(LEVEL_PLAIN, cs::CSSetCraftingPayPacket);
 }
 
 /// `CSExecuteCraft`.
@@ -1165,7 +1163,9 @@ impl CSExecuteCraft {
 }
 sync_client_packet!(CSExecuteCraft);
 
-/// `CSSetCraftingPayPacket` (only logged in C#).
+/// `CSSetCraftingPayPacket`. The 1.2 client writer `FUN_394d7230` sends opcode `0x8d` with the
+/// crafting doodad's obj id (`+0xc`) and the money (`+0x10`) through `FUN_397b0ca0`, in that
+/// order (bc, i32). The C# only logged it; here it is a validated no-op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSetCraftingPayPacket {
     pub obj_id: u32,
@@ -1180,11 +1180,24 @@ impl CSSetCraftingPayPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(player) = active(conn) else { return };
+        if self.money_amount < 0 {
+            tracing::warn!(
+                char_id = player.character_id,
+                obj_id = self.obj_id,
+                money = self.money_amount,
+                "SetCraftingPay: negative money, ignored (pay rules UNKNOWN, capture-pending)"
+            );
+            return;
+        }
+        let obj_exists = server.world.object(self.obj_id).is_some();
         tracing::warn!(
-            "SetCraftingPay, ObjId: {}, MoneyAmount: {}",
-            self.obj_id,
-            self.money_amount
+            char_id = player.character_id,
+            obj_id = self.obj_id,
+            money = self.money_amount,
+            obj_exists,
+            "SetCraftingPay logged, no state change (pay rules UNKNOWN, capture-pending)"
         );
     }
 }
