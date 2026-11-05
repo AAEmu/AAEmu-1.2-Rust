@@ -690,6 +690,117 @@ async fn tower_def_war_event_runs_once_per_war_and_stops_on_peace() {
     assert!(infos(&server, 0).is_empty());
 }
 
+/// `/towerdef list` names why a definition is unavailable in the GM's zone group: its
+/// controllers stand in another zone group, or the spawn data has no position for them at all.
+#[tokio::test]
+async fn tower_def_preflight_names_where_missing_controllers_stand() {
+    let mut server = fixture();
+    let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();
+    data.zones.zones.insert(
+        999,
+        Zone {
+            id: 78,
+            zone_key: 999,
+            group_id: 6,
+            ..Default::default()
+        },
+    );
+    data.systems.npcs.npc.templates.insert(
+        502,
+        NpcTemplate {
+            id: 502,
+            ..Default::default()
+        },
+    );
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![
+            NpcSpawnerTemplate::with_member(10, 500),
+            NpcSpawnerTemplate::with_member(20, 600),
+            NpcSpawnerTemplate::with_member(25, 502),
+            NpcSpawnerTemplate::with_member(26, 502),
+        ],
+        vec![
+            NpcSpawnerNpc {
+                id: 1,
+                ..NpcSpawnerNpc::with_member(10, 500)
+            },
+            NpcSpawnerNpc {
+                id: 2,
+                ..NpcSpawnerNpc::with_member(20, 600)
+            },
+            NpcSpawnerNpc {
+                id: 3,
+                ..NpcSpawnerNpc::with_member(25, 502)
+            },
+            NpcSpawnerNpc {
+                id: 4,
+                ..NpcSpawnerNpc::with_member(26, 502)
+            },
+        ],
+    )
+    .unwrap();
+    let wave = |id| TowerDefProgSpawnTarget {
+        id: 9,
+        spawn_target_id: id,
+        spawn_target_type: "NpcSpawner".into(),
+        despawn_on_next_step: false,
+    };
+    data.systems
+        .instances
+        .tower_defs
+        .progs
+        .get_mut(&70)
+        .unwrap()
+        .spawn_targets
+        .push(wave(25));
+    let error = start(&server, KEY, TEST_ZONE).unwrap_err().to_string();
+    assert!(
+        error.contains("Missing NPC spawner 25 positions in zone group 5")
+            && error.contains("the spawn data has none"),
+        "{error}"
+    );
+
+    let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();
+    data.systems
+        .instances
+        .tower_defs
+        .progs
+        .get_mut(&70)
+        .unwrap()
+        .spawn_targets = vec![wave(26)];
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(0)
+        .unwrap()
+        .add_npc_spawner(
+            &server,
+            NpcSpawnerDef {
+                base: SpawnerBase {
+                    unit_id: 502,
+                    position: WorldSpawnPosition {
+                        zone_id: 999,
+                        x: 100.0,
+                        y: 100.0,
+                        z: 100.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                count: 1,
+                npc_spawner_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+    let error = start(&server, KEY, TEST_ZONE).unwrap_err().to_string();
+    assert!(
+        error.contains("Missing NPC spawner 26 positions in zone group 5")
+            && error.contains("authored in zone group 6"),
+        "{error}"
+    );
+}
+
 fn active_ids(server: &GameServer) -> Vec<u32> {
     manager(server)
         .state

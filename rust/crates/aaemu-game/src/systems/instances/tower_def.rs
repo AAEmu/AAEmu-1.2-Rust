@@ -286,9 +286,9 @@ fn prepare(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Result<E
         doodad_plans.insert(id, copies);
     }
     for id in spawn_ids {
-        let sources: Vec<_> = spawns
-            .tower_def_spawners(id)
-            .into_iter()
+        let authored = spawns.tower_def_spawners(id);
+        let sources: Vec<_> = authored
+            .iter()
             .filter(|s| {
                 server
                     .game_data
@@ -296,11 +296,29 @@ fn prepare(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Result<E
                     .zone_by_key(s.position().zone_id)
                     .is_some_and(|z| z.group_id == u32::from(key.zone_group_id))
             })
+            .cloned()
             .collect();
         if sources.is_empty() {
+            // Say where the controllers stand (another zone group) or that the data has none.
+            let elsewhere: std::collections::BTreeSet<u32> = authored
+                .iter()
+                .filter_map(|s| server.game_data.zones.zone_by_key(s.position().zone_id))
+                .map(|z| z.group_id)
+                .collect();
+            if elsewhere.is_empty() {
+                bail!(
+                    "Missing NPC spawner {id} positions in zone group {} (the spawn data has none)",
+                    key.zone_group_id
+                );
+            }
             bail!(
-                "Missing NPC spawner {id} positions in zone group {}",
-                key.zone_group_id
+                "Missing NPC spawner {id} positions in zone group {} (authored in zone group {})",
+                key.zone_group_id,
+                elsewhere
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         let mut copies = Vec::new();
