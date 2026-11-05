@@ -59,6 +59,8 @@
         "reloadconfig": 100,
         "rotate": 100,
         "scripts": 100,
+        "allowguildrename": 100,
+        "renameguild": 100,
         "setfaction": 100,
         "setlevel": 100,
         "settitle": 100,

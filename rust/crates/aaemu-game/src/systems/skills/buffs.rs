@@ -237,14 +237,29 @@ pub fn check_damage_immune(
 
 // ------------------------------------------------------------------ AddBuff
 
+/// Longest transform chain followed in one `AddBuff` call. The data chains are two links
+/// (4152 -> 4752 -> 4101 and 5378 -> 5379 -> 5380); a longer chain is treated as bad data.
+const MAX_TRANSFORM_CHAIN: usize = 8;
+
 /// `Buffs.AddBuff(buff, index, forcedDuration)`: tolerance, duration modifiers, stack rules,
 /// then the start behaviour (through the buff events) and a final tolerance buff.
 pub fn add_buff(
     server: &GameServer,
     owner: &WorldObject,
+    buff: Buff,
+    index: u32,
+    forced_duration: i32,
+) {
+    add_buff_inner(server, owner, buff, index, forced_duration, &mut Vec::new());
+}
+
+fn add_buff_inner(
+    server: &GameServer,
+    owner: &WorldObject,
     mut buff: Buff,
     index: u32,
     forced_duration: i32,
+    transform_chain: &mut Vec<u32>,
 ) {
     let data = &server.game_data.systems.skills;
     let now = now_ms();
@@ -377,14 +392,28 @@ pub fn add_buff(
     }
     buff.duration = duration;
 
-    let (skill_caster, caster_obj, skill_id, skill_level) = (
+    let (skill_caster, caster_obj, skill_id, skill_level, ab_level) = (
         buff_skill_caster(&buff),
         buff.caster_obj_id,
         buff.skill_id,
         buff.skill_level,
+        buff.ab_level,
     );
     owner.with_base_unit(|b| b.buffs_mut().add_buff_with_duration(buff, index, now));
     crate::systems::dispatch_buff_events(server, owner);
+    transform_at_max_stack(
+        server,
+        owner,
+        &template,
+        &BuffApplication {
+            caster_obj,
+            skill_caster: &skill_caster,
+            skill_id,
+            skill_level,
+            ab_level,
+        },
+        transform_chain,
+    );
 
     if final_tolerance_buff > 0 {
         if let Some(t) = data.buff(final_tolerance_buff).cloned() {
@@ -404,6 +433,91 @@ pub fn add_buff(
             add_buff(server, owner, b, 0, 0);
         }
     }
+}
+
+/// The application of an accepted buff, carried into its transform replacement.
+struct BuffApplication<'a> {
+    caster_obj: u32,
+    skill_caster: &'a SkillCaster,
+    skill_id: u32,
+    skill_level: u8,
+    ab_level: u32,
+}
+
+/// Replace `template`'s stacks with `transform_buff_id` once the application that reaches
+/// `max_stack` has landed.
+///
+/// Evidence (1.2 tooltips): buff 1757 (`max_stack` 2) "Two stacks turn it into Nymph's Flame",
+/// buff 2214 (`max_stack` 4) "Stacks up to 3 times. A 4th stack Stuns", buff 2407
+/// (`max_stack` 5) "Petrifies upon reaching 5 stacks": the transform happens on the
+/// `max_stack`-th application, not the one after it. All 66 rows are `stack_rule_id` 4 with
+/// `max_stack >= 2` (compact `buffs`). The stacks are removed through the normal removal path
+/// (Dispel hooks and `SCBuffRemovedPacket`) and the replacement keeps the caster, skill and
+/// ability level of the triggering application, then goes through the normal add path so a
+/// transform that reaches its own cap transforms again (4152 -> 4752 -> 4101).
+fn transform_at_max_stack(
+    server: &GameServer,
+    owner: &WorldObject,
+    template: &Arc<BuffTemplate>,
+    application: &BuffApplication<'_>,
+    transform_chain: &mut Vec<u32>,
+) {
+    if template.transform_buff_id == 0 || template.max_stack <= 0 {
+        return;
+    }
+    let stacks = owner.with_base_unit(|b| b.buffs().buff_count_by_id(template.id));
+    if stacks < template.max_stack {
+        return;
+    }
+    let data = &server.game_data.systems.skills;
+    let Some(transform) = data.buff(template.transform_buff_id).cloned() else {
+        // `Data::load_from` warns once and clears such ids; a synthetic template keeps today's
+        // refresh-at-cap behaviour.
+        return;
+    };
+    if transform_chain.len() >= MAX_TRANSFORM_CHAIN || transform_chain.contains(&transform.id) {
+        tracing::warn!(
+            buff = template.id,
+            transform = transform.id,
+            depth = transform_chain.len(),
+            "AddBuff: transform chain does not terminate; keeping the stacks"
+        );
+        return;
+    }
+    let indices: Vec<u32> = owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| e.template.id == template.id)
+            .map(|e| e.index)
+            .collect()
+    });
+    for index in indices {
+        exit(server, owner, index, false);
+    }
+    // Same caster / skill as the application that reached the cap (inferred; the 1.2 data and
+    // tooltips only establish the replacement itself).
+    let caster = find_obj(server, application.caster_obj);
+    let skill = (application.skill_id != 0)
+        .then(|| data.skill(application.skill_id).cloned())
+        .flatten()
+        .map(|t| SkillRun::new(t, application.skill_level));
+    let mut b = new_buff(
+        server,
+        &transform,
+        caster.as_ref(),
+        application.skill_caster,
+        skill.as_deref(),
+        now_ms(),
+    );
+    b.ab_level = application.ab_level;
+    // Keep the source application's skill even when its template is not loaded (a synthetic
+    // template or a removed skill row); `new_buff` only fills these from a `SkillRun`.
+    b.skill_id = application.skill_id;
+    b.skill_level = application.skill_level;
+    transform_chain.push(template.id);
+    add_buff_inner(server, owner, b, 0, 0, transform_chain);
+    transform_chain.pop();
 }
 
 /// `Buffs.AddBuff(buffId, caster, forcedDuration)`.
@@ -506,17 +620,21 @@ pub fn buff_ab_level(
 /// `UnitHooks.on_buff_event`: the inline C# behaviour around `_effects` changes.
 pub fn on_buff_event(server: &GameServer, owner: &WorldObject, event: &BuffEvent) {
     match event {
-        BuffEvent::Started(b) | BuffEvent::Refreshed(b) => {
+        BuffEvent::Started(b) => {
             // An earlier event in the same batch can already have removed this effect.
-            if current_buff(owner, b).is_none() {
-                return;
-            }
-            if matches!(event, BuffEvent::Started(_)) {
+            if current_buff(owner, b).is_some() {
                 on_started(server, owner, b);
-            } else {
-                on_refreshed(server, owner, b);
+                remove_broken_buffs(server, owner);
             }
-            remove_broken_buffs(server, owner);
+        }
+        BuffEvent::Refreshed {
+            buff,
+            previous_caster_obj_id,
+        } => {
+            if current_buff(owner, buff).is_some() {
+                on_refreshed(server, owner, buff, *previous_caster_obj_id);
+                remove_broken_buffs(server, owner);
+            }
         }
         BuffEvent::Removed(b) => on_removed(server, owner, b),
     }
@@ -632,6 +750,8 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let Some(b) = resume_started_buff(server, owner, &b) else {
         return;
     };
+    // 10.x NpcAggroTable::TauntedBy on buff creation (10x-ONLY; see PORTING.md).
+    combat::on_taunt_buff_applied(server, owner, &b);
     if b.duration > 0 || !template.tick_effects.is_empty() {
         // SetInUse(true, false) -> ScheduleEffect(false)
         schedule_effect(server, owner, b.index, false);
@@ -642,6 +762,7 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
         });
         start(server, owner, b.index);
     }
+    super::aura::on_buff_started(server, owner, &b);
     let tags = data.buff_tags(template.id);
     if (tags.contains(&tags::NO_FIGHT) || tags.contains(&tags::RETURNING)) && owner.is_unit() {
         combat::clear_all_aggro(server, owner);
@@ -662,13 +783,16 @@ fn resume_started_buff(server: &GameServer, owner: &WorldObject, b: &Buff) -> Op
     Some(live)
 }
 
-fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff, previous_caster_obj_id: u32) {
     // SetInUse(true, true) -> UpdateEffect
     let template = full_template(server, &b.template);
     start(server, owner, b.index);
     if !current_buff(owner, b).is_some_and(|live| !live.is_ended()) {
         return;
     }
+    // Re-stamp the taunt on refresh (TAUNT-1: the 10x refresh path is unknown); a refresh by a
+    // different caster also releases the previous caster's stamp.
+    combat::on_taunt_buff_refreshed(server, owner, b, previous_caster_obj_id);
     let now = now_ms();
     let Some(gen) = set_buff(owner, b.index, |e| {
         if e.duration == 0 {
@@ -717,6 +841,9 @@ fn remove_modifiers(server: &GameServer, owner: &WorldObject, buff_id: u32) {
 }
 
 fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    // An aura / crowd source unregisters and strips what it applied before the rest of the
+    // removal behaviour runs (AURA-3 / AURA-6 / CROWD-4).
+    super::aura::on_buff_removed(server, owner, b);
     let template = full_template(server, &b.template);
     let caster = find_obj(server, b.caster_obj_id);
     if b.state == effect_state::FINISHED {
@@ -733,6 +860,10 @@ fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
         unsubscribe_triggers(server, owner, b);
         restore_faction(server, owner, &template);
         remove_modifiers(server, owner, template.id);
+    }
+    if template.taunt {
+        // 10x CancelTauntedBy, after Dispelled has run (10x-ONLY; see PORTING.md).
+        combat::cancel_taunted_by(server, owner, b.caster_obj_id);
     }
     super::stats::refresh_cached_stats(server, owner);
 }
@@ -1631,8 +1762,45 @@ enum Claim {
     Taken,
 }
 
+/// Whether `owner` carries an active buff whose 1.2 template is a stealth effect
+/// (`buffs.stealth`). The 1.2 client hides a unit by this column (`ClientUnit::ApplyStealth` /
+/// `CanDetect`, x2game `FUN_3935c270` / `FUN_3935a2b0`), not by buff tag 100 (`TagsEnum.Stealth`);
+/// 30 of the 71 stealth buffs lack tag 100 and 10 tag-100 buffs are not stealth.
+pub fn has_stealth(server: &GameServer, owner: &WorldObject) -> bool {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .any(|e| data.buff(e.template.id).is_some_and(|t| t.stealth))
+    })
+}
+
 /// `Buffs.TriggerRemoveOn(on, value)`.
 pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemoveOn, value: u32) {
+    trigger_remove_on_inner(server, owner, on, value, false)
+}
+
+/// `Buffs.TriggerRemoveOn` from a skill whose template keeps stealth (`skills.keep_stealth`):
+/// the skill-start / skill-use triggers do not remove the owner's active stealth buffs.
+/// Without this a stealth skill (10082 "Stealth", 10496 "Shadow Strike", the stealth potions)
+/// removed the stealth buff it was meant to keep through its own `cancel_ongoing_buffs` loop.
+pub fn trigger_remove_on_keep_stealth(
+    server: &GameServer,
+    owner: &WorldObject,
+    on: BuffRemoveOn,
+    value: u32,
+) {
+    trigger_remove_on_inner(server, owner, on, value, true)
+}
+
+fn trigger_remove_on_inner(
+    server: &GameServer,
+    owner: &WorldObject,
+    on: BuffRemoveOn,
+    value: u32,
+    keep_stealth: bool,
+) {
     let data = &server.game_data.systems.skills;
     let effects: Vec<(u32, u32, u32)> = owner.with_base_unit(|b| {
         b.buffs()
@@ -1684,6 +1852,12 @@ pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemov
             exit(server, owner, index, false);
             continue;
         }
+        // `skills.keep_stealth`: the skill keeps the caster's stealth buffs through its own
+        // start/use cancel loop (only these two triggers; attacking and damage still break
+        // stealth through the buff's own remove flags).
+        if keep_stealth && t.stealth && matches!(on, R::StartSkill | R::UseSkill) {
+            continue;
+        }
         if t.remove_on_start_skill && on == R::StartSkill {
             if value == 0 || !data.buff_tags(id).contains(&value) {
                 exit(server, owner, index, false);
@@ -1713,6 +1887,51 @@ pub fn absorption_effects(server: &GameServer, owner: &WorldObject) -> Vec<u32> 
     })
 }
 
+/// One live reflection buff of an owner whose `reflection_type_id` is the incoming hit's
+/// `DamageType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReflectionBuff {
+    pub index: u32,
+    pub buff_id: u32,
+    /// `reflection_chance` (percent, 0-100).
+    pub chance: i32,
+    /// `reflection_target_ratio` (percent of the received damage returned to the attacker).
+    pub target_ratio: i32,
+}
+
+/// The owner's live reflection buffs that match an incoming hit, in buff order.
+///
+/// `reflection_type_id` is the `DamageType` of the hit to reflect (1 Melee, 2 Magic, 3 Siege,
+/// 4 Ranged; verified against the 1.2 rows and their tooltips). `reflection_chance` is the
+/// percent chance to reflect and `reflection_target_ratio` the percent of the received damage
+/// that is returned; `reflection_ratio` has no settled meaning and is not read here
+/// (REFLECT-1, capture-pending; see `PORTING.md`).
+pub fn reflection_effects(
+    server: &GameServer,
+    owner: &WorldObject,
+    damage_type: DamageType,
+) -> Vec<ReflectionBuff> {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| !e.is_ended())
+            .filter_map(|e| {
+                let t = data.buff(e.template.id)?;
+                (t.reflection_chance > 0 && t.reflection_type_id == damage_type as u32).then_some(
+                    ReflectionBuff {
+                        index: e.index,
+                        buff_id: t.id,
+                        chance: t.reflection_chance,
+                        target_ratio: t.reflection_target_ratio,
+                    },
+                )
+            })
+            .collect()
+    })
+}
+
 // ------------------------------------------------------------------ triggers
 
 /// One subscribed `BuffTrigger` (`BuffTriggersHandler._triggers` entry).
@@ -1727,6 +1946,9 @@ pub struct TriggerSub {
     pub template: BuffTriggerTemplate,
     /// `DamagedBuffTrigger` (else the generic `BuffTrigger`).
     pub damaged: bool,
+    /// `DamageBuffTrigger` (event 3, damage dealt by the owner): it carries the event amount
+    /// like `damaged`, but targets the owner as the C# trigger does.
+    pub damage: bool,
 }
 
 /// `BuffTriggersHandler.SubscribeEvents`.
@@ -1755,11 +1977,11 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
     use BuffEventTriggerKind as K;
     for t in templates {
         let kind = K::from_raw(i64::from(t.kind));
-        let (unit_event, damaged) = match kind {
+        let (unit_event, damaged, damage) = match kind {
+            Some(K::Damage) => (true, false, true),
             Some(
                 K::Attack
                 | K::Attacked
-                | K::Damage
                 | K::Death
                 | K::Landing
                 | K::ChannelingCancel
@@ -1769,12 +1991,12 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
                 | K::DamagedCollision
                 | K::Immotality
                 | K::Time,
-            ) => (true, false),
+            ) => (true, false, false),
             Some(
                 K::Damaged | K::DamagedMelee | K::DamagedRanged | K::DamagedSpell | K::DamagedSiege,
-            ) => (true, true),
+            ) => (true, true, false),
             Some(K::Dispelled | K::Timeout | K::Started | K::RemoveOnMove | K::RemoveOnDamage) => {
-                (false, false)
+                (false, false, false)
             }
             _ => {
                 tracing::trace!("Unimplemented BuffTrigger[\"{:?}\"]", kind);
@@ -1788,6 +2010,7 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
             buff_instance_id: b.instance_id,
             template: t.clone(),
             damaged,
+            damage,
         });
     }
 }
@@ -1917,7 +2140,11 @@ fn execute_trigger(
     }
     let template = full_template(server, &b.template);
     let skill_object = SkillObject::None;
-    let (effect_caster, source_info) = if s.damaged {
+    // `DamagedBuffTrigger` and `DamageBuffTrigger` both apply the effect from the owner with
+    // the buff template as the source and the event's damage amount. The C# `DamageBuffTrigger`
+    // uses `args.Attacker`, which `OnDamageArgs` fills with the damage caster itself, so the
+    // target stays the owner here too.
+    let (effect_caster, source_info) = if s.damaged || s.damage {
         (
             Some(owner.clone()),
             EffectSource {
@@ -1925,6 +2152,7 @@ fn execute_trigger(
                 buff: Some(template.clone()),
                 amount,
                 is_trigger: true,
+                use_damage_amount: t.use_damage_amount,
                 always_hit: false,
                 source_item: None,
                 source_item_debited: false,
@@ -1938,6 +2166,7 @@ fn execute_trigger(
                 buff: None,
                 amount: 0,
                 is_trigger: false,
+                use_damage_amount: t.use_damage_amount,
                 always_hit: false,
                 source_item: None,
                 source_item_debited: false,
@@ -1975,3 +2204,7 @@ mod buff_removal_tests;
 #[cfg(test)]
 #[path = "buff_breaker_tests.rs"]
 mod buff_breaker_tests;
+
+#[cfg(test)]
+#[path = "buff_transform_tests.rs"]
+mod buff_transform_tests;

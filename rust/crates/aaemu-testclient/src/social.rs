@@ -42,12 +42,14 @@ pub enum SocialEvent {
         faction_id: u32,
         faction_name: String,
     },
-    /// `SCFactionRenamedPacket` (guild / nation rename result).
-    FactionRenamed { id: u32, name: String, by_gm: bool },
-    /// `SCFactionRetryRenamePacket`: the rename dialog is re-opened with this name.
-    FactionRetryRename {
+    /// `SCExpeditionShowRenameUIPacket` (the guild leader may rename the guild).
+    GuildShowRename,
+    /// `SCFactionRenamedPacket`.
+    GuildRenamed { id: u32, name: String, by_gm: bool },
+    /// `SCFactionRetryRenamePacket` (a refused guild name); `is_expedition` false = nation.
+    GuildRenameRetry {
         is_expedition: bool,
-        error_message: i16,
+        error: i16,
         name: String,
     },
 }
@@ -90,14 +92,15 @@ fn decode_inner(p: &Packet) -> anyhow::Result<Option<SocialEvent>> {
             faction_id: s.read_u32()?,
             faction_name: s.read_string()?,
         },
-        sc::SCFactionRenamedPacket => SocialEvent::FactionRenamed {
+        sc::SCExpeditionShowRenameUIPacket => SocialEvent::GuildShowRename,
+        sc::SCFactionRenamedPacket => SocialEvent::GuildRenamed {
             id: s.read_u32()?,
             name: s.read_string()?,
             by_gm: s.read_bool()?,
         },
-        sc::SCFactionRetryRenamePacket => SocialEvent::FactionRetryRename {
+        sc::SCFactionRetryRenamePacket => SocialEvent::GuildRenameRetry {
             is_expedition: s.read_bool()?,
-            error_message: s.read_i16()?,
+            error: s.read_i16()?,
             name: s.read_string()?,
         },
         _ => return Ok(None),
@@ -162,18 +165,18 @@ pub fn create_expedition(name: &str) -> (u16, Vec<u8>) {
     (cs::CSCreateExpeditionPacket, b.into_bytes())
 }
 
+/// `CSRenameExpeditionPacket` (`is_expedition` false = the nation variant).
+pub fn rename_expedition(id: u32, name: &str, is_expedition: bool) -> (u16, Vec<u8>) {
+    let mut b = PacketStream::new();
+    b.write_u32(id).write_str(name).write_bool(is_expedition);
+    (cs::CSRenameExpeditionPacket, b.into_bytes())
+}
+
 /// `CSInviteToExpeditionPacket`.
 pub fn invite_to_expedition(name: &str) -> (u16, Vec<u8>) {
     let mut b = PacketStream::new();
     b.write_str(name);
     (cs::CSInviteToExpeditionPacket, b.into_bytes())
-}
-
-/// `CSRenameExpeditionPacket` (`id` = the caller's guild; `is_expedition` = true).
-pub fn rename_expedition(id: u32, name: &str) -> (u16, Vec<u8>) {
-    let mut b = PacketStream::new();
-    b.write_u32(id).write_str(name).write_bool(true);
-    (cs::CSRenameExpeditionPacket, b.into_bytes())
 }
 
 /// `CSReplyExpeditionInvitationPacket` (`id` = the faction id of the invitation).
@@ -241,7 +244,7 @@ mod tests {
             )
         );
         assert_eq!(
-            rename_expedition(7, "Ab"),
+            rename_expedition(7, "Ab", true),
             (
                 cs::CSRenameExpeditionPacket,
                 vec![7, 0, 0, 0, 2, 0, b'A', b'b', 1]
@@ -293,28 +296,51 @@ mod tests {
     }
 
     #[test]
-    fn faction_rename_events_decode() {
+    fn guild_rename_events_decode() {
+        assert_eq!(
+            decode(&pkt(sc::SCExpeditionShowRenameUIPacket, vec![])),
+            Some(SocialEvent::GuildShowRename)
+        );
         assert_eq!(
             decode(&pkt(
                 sc::SCFactionRenamedPacket,
-                vec![7, 0, 0, 0, 5, 0, b'T', b'a', b'k', b'e', b'n', 0]
+                vec![5, 0, 0, 0, 1, 0, b'G', 1]
             )),
-            Some(SocialEvent::FactionRenamed {
-                id: 7,
-                name: "Taken".into(),
-                by_gm: false
+            Some(SocialEvent::GuildRenamed {
+                id: 5,
+                name: "G".into(),
+                by_gm: true
             })
         );
         assert_eq!(
             decode(&pkt(
                 sc::SCFactionRetryRenamePacket,
-                vec![1, 0x2b, 0x01, 3, 0, b'A', b'b', b'c']
+                vec![1, 0x29, 0x01, 1, 0, b'G']
             )),
-            Some(SocialEvent::FactionRetryRename {
+            Some(SocialEvent::GuildRenameRetry {
                 is_expedition: true,
-                error_message: 299,
+                error: 297,
+                name: "G".into()
+            })
+        );
+        // The nation half carries is_expedition = false; the error is still reported.
+        assert_eq!(
+            decode(&pkt(
+                sc::SCFactionRetryRenamePacket,
+                vec![0, 0x2b, 0x01, 3, 0, b'A', b'b', b'c']
+            )),
+            Some(SocialEvent::GuildRenameRetry {
+                is_expedition: false,
+                error: 299,
                 name: "Abc".into()
             })
+        );
+        assert_eq!(
+            rename_expedition(5, "G", true),
+            (
+                cs::CSRenameExpeditionPacket,
+                vec![5, 0, 0, 0, 1, 0, b'G', 1]
+            )
         );
     }
 

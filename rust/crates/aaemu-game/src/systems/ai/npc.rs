@@ -28,7 +28,6 @@ use crate::world::{now_ms, NpcRef, WorldObject};
 
 /// `TagsEnum` values the AI checks.
 pub mod tags {
-    pub const STEALTH: u32 = 100;
     pub const RETURNING: u32 = 148;
     pub const NO_FIGHT: u32 = 345;
     pub const RIGHT: u32 = 1020;
@@ -242,11 +241,15 @@ pub fn is_dead(obj: &WorldObject) -> bool {
 }
 
 /// `BaseUnit.CanSeeTarget(target)`: visible and not stealthed.
+///
+/// Deviation from the C#: `CanSeeTarget` tested buff tag 100 (`TagsEnum.Stealth`), but the 1.2
+/// client hides a unit from `buffs.stealth` (the buff table it ships), so the server uses the
+/// same column (71 stealth buffs; 30 lack tag 100, 10 tag-100 buffs are not stealth).
 pub fn can_see_target(server: &GameServer, target: &WorldObject) -> bool {
     if !target.is_visible() {
         return false;
     }
-    !buffs::check_buff_tag(server, target, tags::STEALTH)
+    !buffs::has_stealth(server, target)
 }
 
 /// `BaseUnit.UnitIsVisible(unit)`: the unit's region is one of the owner's neighbour regions.

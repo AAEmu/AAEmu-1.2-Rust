@@ -306,6 +306,7 @@ CREATE TABLE IF NOT EXISTS `expeditions` (
   `owner_name` varchar(128) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
   `name` varchar(128) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
   `mother` int NOT NULL,
+  `allow_change_name` tinyint unsigned NOT NULL DEFAULT 0 COMMENT '1 = the leader may rename the guild once',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Guilds';

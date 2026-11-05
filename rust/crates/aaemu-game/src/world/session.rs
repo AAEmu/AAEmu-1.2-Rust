@@ -967,6 +967,8 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
                 .guild_chat(e.faction.id, &e.faction.name, &server.ids.chat)
                 .join(&p);
         }
+        // A granted guild rename is still pending: show the leader the dialog again.
+        crate::systems::social::expedition::prompt_rename_if_allowed(server, &p);
     }
     // Connection.ActiveChar.UpdateGearBonuses(null, null)
     crate::systems::skills::stats::update_gear_bonuses(server, &p, None, None);
@@ -1513,12 +1515,14 @@ pub async fn return_to_world_list(server: &GameServer, conn: &mut GameConnection
     }
     if conn.account_id() != 0 {
         tracing::info!("Shutdown: session {} is asked for the world list", conn.id);
+        let token = server.new_reconnect_token();
+        conn.set_reconnect_token(token);
         server
             .login
             .send(&crate::login::packets::GLPlayerReconnectPacket {
                 gs_id: server.config.id,
                 account_id: conn.account_id(),
-                connection_id: conn.id,
+                token,
             });
     }
     false

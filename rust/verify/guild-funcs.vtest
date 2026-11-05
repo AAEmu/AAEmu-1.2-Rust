@@ -1,0 +1,87 @@
+# Guild functions (systems/social/expedition.rs, systems/services/commands/scripts/guild_rename.rs):
+#   * ChangeOwner / ChangeMemberRole / ChangeRolePolicy failures are answered (32, 70, 309, 328)
+#     and a role-policy edit stores only what the 1.2 dialog edits (leader only, roles below it);
+#   * a GM grants the guild a rename (/allowguildrename): the leader gets the rename dialog, a
+#     bad name reopens it (SCFactionRetryRename), a good one is saved, broadcast
+#     (SCFactionRenamed) and spends the right; a member cannot rename (807);
+#   * a faction change into another alliance (/setfaction 161, the pirates) removes the leader
+#     from the guild, which passes to the remaining member.
+#
+# The suite creates a two-member guild: Scripts/verify.sh lowers Expedition.Create to
+# Cost 0 / Level 1 / PartyMemberCount 2 in the lane's runtime config only.
+#
+# Bots:
+#   leader    GM: founds the guild with the member and runs everything above
+#   member    founding member: tries the leader-only actions, sees the rename
+
+suite guild-funcs
+bot leader gm
+bot member
+
+[leader]
+waitpeer 120 ${member}
+partyinvite ${member}
+await TeamJoined 30
+gcreate Funcs Guild
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
+pump 2
+sync guild-ready 2
+# ChangeOwner to somebody who is not in the guild, ChangeMemberRole of an unknown character.
+rawcs 008 00000000
+expectseen 328 5
+rawcs 007 0100000000
+expectseen 309 5
+# Policies: not the leader's own, a bad role name; then a real edit (name + expel only: the
+# dismiss flag the packet carries must stay 0).
+rawcs 006 GUILDff0a004c69657574656e616e74010101010101010101
+expectseen 70 5
+rawcs 006 GUILD0202007831010101010101010101
+expectseen 296 5
+rawcs 006 GUILD020a004c69657574656e616e74010101010101010101
+expectdb "SELECT COUNT(*) FROM expedition_role_policies p JOIN expedition_members m ON m.expedition_id = p.expedition_id WHERE m.name = '${leader}' AND p.role = 2 AND p.name = 'Lieutenant' AND p.expel = 1 AND p.dismiss = 0" 1 10
+sync policies-done 2
+# Rename: the right comes from a GM command, the dialog follows, a bad name reopens it.
+sync member-refused 2
+gm allowguildrename Funcs Guild
+await GuildShowRename 10
+grename x1
+await GuildRenameRetry 10
+expectdb "SELECT COUNT(*) FROM expeditions WHERE name = 'Funcs Guild' AND allow_change_name = 1" 1
+grename Renamed Guild
+await GuildRenamed 10
+expectdb "SELECT COUNT(*) FROM expeditions WHERE name = 'Renamed Guild' AND allow_change_name = 0" 1 10
+sync renamed 2
+# The right is spent: a second rename is refused (32).
+grename Third Guild
+expectseen 32 5
+# A faction change into the pirates' alliance removes the leader; the member inherits the guild.
+targetpeer ${member}
+gm setfaction 161
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${leader}'" 0 15
+expectdb "SELECT role FROM expedition_members WHERE name = '${member}'" 255 10
+expectdb "SELECT COUNT(*) FROM expeditions e JOIN expedition_members m ON m.character_id = e.owner WHERE m.name = '${member}'" 1 10
+# Restore the faction so the suite can be rerun (the peer may be out of sight now).
+targetself
+gm setfaction 101
+
+[member]
+waitpeer 120 ${leader}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
+pump 2
+sync guild-ready 2
+# Not the leader: owner change (32), role change and policy edit (70).
+rawcs 008 00000000
+expectseen 32 5
+rawcs 007 0100000000
+expectseen 70 5
+rawcs 006 GUILD020a004c69657574656e616e74010101010101010101
+expectseen 70 5
+sync policies-done 2
+# Not the leader: renaming is refused (807) before the right is even looked at.
+grename Member Guild
+expectseen 807 5
+sync member-refused 2
+await GuildRenamed 40
+sync renamed 2
+expectdb "SELECT role FROM expedition_members WHERE name = '${member}'" 255 30

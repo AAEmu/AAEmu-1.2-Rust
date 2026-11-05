@@ -155,8 +155,9 @@ pub fn player_relation(server: &GameServer, me: &PlayerRef, other: &PlayerRef) -
 
 /// `Character.SetFaction(factionId)` (+ `Unit.SetFaction`): broadcasts
 /// `SCUnitFactionChangedPacket`, adds / removes the Contemptuous buff, updates owned houses,
-/// removes the character from a guild of another mother faction
-/// (`expedition::remove_member_for_faction_change`) and from its party.
+/// removes the character from a guild of another alliance (`expedition::leave_forced`; the C#
+/// `Kick(p, p)` removed nobody) and from its party
+/// (`team::TeamManager::member_remove_for_faction_change`).
 pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
     let (old, exp) = {
         let c = p.data();
@@ -182,12 +183,15 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
         .update_owned_housing_faction(server, p.character_id, faction_id);
     if exp != 0 {
         if let Some(e) = server.expeditions.get(exp) {
-            if e.faction.mother_id != faction_id {
-                crate::systems::social::expedition::remove_member_for_faction_change(server, p)
-                    .await;
+            if crate::systems::social::util::alliance_id(server, e.faction.mother_id)
+                != crate::systems::social::util::alliance_id(server, faction_id)
+            {
+                crate::systems::social::expedition::leave_forced(server, p).await;
             }
         }
     }
+    // Looked up by membership, not `in_party`: the login infamy conversion runs before
+    // `UpdateAtLogin` (see `member_remove_for_faction_change`).
     server
         .systems
         .social
@@ -223,12 +227,14 @@ pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u3
             .expeditions
             .get(expedition)
             .map(|e| e.faction.mother_id);
-        if mother.is_some_and(|m| m != faction_id) {
+        if mother.is_some_and(|m| {
+            crate::systems::social::util::alliance_id(server, m)
+                != crate::systems::social::util::alliance_id(server, faction_id)
+        }) {
             if let Some(s) = server.self_arc() {
                 let p = p.clone();
                 tokio::spawn(async move {
-                    crate::systems::social::expedition::remove_member_for_faction_change(&s, &p)
-                        .await;
+                    crate::systems::social::expedition::leave_forced(&s, &p).await;
                 });
             }
         }
