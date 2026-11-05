@@ -5994,8 +5994,15 @@ prepare_save`) and written by `social::System::save(AfterCharacters)` in the sam
 `Character.Save`; `commit_financial_snapshot` clears the dirty set only after the transaction
 commits, so a rolled-back save is retried instead of losing the pledge. A save with no dirty rows
 writes nothing. `CharacterLoad` sends the character's own active total in the verified
-`SCCharacterState.bountyMoney` field (X2G 1302074-1302079); `SCUnitBountyMoney` is not sent
-(BOUNTY-3).
+`SCCharacterState.bountyMoney` field (X2G 1302074-1302079).
+
+`SCUnitBountyMoney` (`systems/social/bounty.rs`, `packets/trial.rs`): the writer is located
+(`FUN_397b3b50` -> `bc objId ; i64 moneyAmount`, client handler `FUN_391d6680`), so the packet is
+sent with the **whole** total, never a delta: after a successful pledge to every viewer of the
+target (and the target), to a viewer whose client just received the target's entry `SCUnitState`
+(both entry paths: `world::session::spawn` and `instances::worlds::instance_loaded`), and 0 after
+the payout. A total of 0 sends nothing on entry. When the client draws the value is INFERRED
+(`OnUnitBountyMoney`), so sending it after both entry paths is harmless (BOUNTY-3).
 
 Policy decisions / capture-pending (each also a case id in the code):
 
@@ -6008,10 +6015,12 @@ Policy decisions / capture-pending (each also a case id in the code):
   payer's logout and a restart, and is paid whenever the target is arrested later. Whether 1.2
   allowed an offline target, and whether `bountyTime` (`SCCharacterState`, still 0) means an
   expiry, is unknown; the permit TTL is our bounded-map policy, not client behaviour.
-* **BOUNTY-3** `SCUnitBountyMoney` (`0x0bb`). The handler `FUN_391d6680` and its `+0xc` id /
-  `+0x10` i64 offsets are known, but the packet **writer** was not located, so the wire layout is
-  unconfirmed. Nothing is sent (not even on a total change or on visibility) rather than guessing
-  a layout; a live capture of a 1.2 server is needed.
+* **BOUNTY-3** `SCUnitBountyMoney` (`0x0bb`). No longer open for the layout: the writer
+  `FUN_397b3b50` (`dll.c:375748`) serializes `bc objId ; i64 moneyAmount`, the same bytes our
+  struct writes, and the handler `FUN_391d6680` reads the id at `+0xc` and the i64 at `+0x10`.
+  The senders are the pledge broadcast, the two entry paths and the payout 0 (see above). Which
+  widget uses the value is INFERRED (`OnUnitBountyMoney`); a live capture would confirm when the
+  client displays it, not the wire format.
 * **BOUNTY-4** `SCBountyPaid` recipients and the no-arrest case. The client's chat text
   (`ui_text` 4764) names the hunter, the arrested and the amount; the recipient scope (hunter /
   zone / faction) is unknown. It is sent to the arresting player only. Whether a pirate killed in

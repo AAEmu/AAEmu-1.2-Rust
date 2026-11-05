@@ -91,7 +91,7 @@ async fn add_friend_refusals_answer_unknown_self_and_duplicate() {
         a.frames(),
         vec![(sc::SCAddFriendPacket, {
             let mut s = PacketStream::new();
-            let mut c = b.p.data();
+            let c = b.p.data();
             let info = crate::systems::social::friend::format_friend(&c, c.in_party);
             drop(c);
             use aaemu_commons::Marshal;

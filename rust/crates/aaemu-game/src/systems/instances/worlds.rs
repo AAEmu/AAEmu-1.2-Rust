@@ -408,6 +408,9 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
         server.world.leave_other_instance(&obj, world.id);
         let changes = world.add_visible_object(&obj, &server.view_ctx());
         session::handle_zone_changes(server, changes);
+        // The arrival's `SCUnitState` exchange is done: resend the bounty totals of the wanted
+        // characters now in sight, and this character's total to its viewers (WP-SL3a).
+        crate::systems::social::bounty::on_character_entered(server, p);
     }
     // `SC 0x207` after the load: the client only accepts the index when the instance and zone
     // match the ones the load just set, so it waits for this confirmation.

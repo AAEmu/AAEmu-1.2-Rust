@@ -950,6 +950,9 @@ pub fn spawn(server: &GameServer, p: &PlayerRef) {
     server.world.try_add_character(p);
     let changes = world.show(p, &server.view_ctx());
     handle_zone_changes(server, changes);
+    // The entry `SCUnitState` exchange is done: tell the viewers this character's bounty total
+    // and this client the totals of the wanted characters it now sees (WP-SL3a).
+    crate::systems::social::bounty::on_character_entered(server, p);
 }
 
 /// `CSNotifyInGamePacket.Execute`.
