@@ -457,6 +457,39 @@ Decisions from the 2026-11-02 combat-ai analysis (`WP-9`), no behaviour change:
   implement. `skill_synergy_icons` and `tooltip_skill_effects` are client tooltip data, and
   `pcbang_buffs` is already handled by `systems/services/premium.rs`.
 
+#### Resurrection buffs (WP-2b, 2026-11-05)
+
+`buffs.resurrection_health` / `resurrection_mana` / `resurrection_percent` were loaded but
+never read (the C# also only loaded them). The 1.2 `compact.sqlite3` has exactly one row with
+either column set: buff 239 "Nui's Favor" (`resurrection_health 10`, `resurrection_mana 10`,
+`resurrection_percent 't'`, 30 min, `remove_on_death 't'`), whose description says it
+resurrects the character in place once with 10 % life / vitality for 30 minutes and recovers
+the experience reduced on death (EVIDENCED: `buffs` row + description).
+
+Rule now implemented (`systems::skills::combat::apply_resurrection_buff`,
+`systems::skills::buffs::take_resurrection_buff`): on a PLAYER death after the death losses
+and `DoDie`, an active buff with a non-zero `resurrection_*` is consumed (one critical
+section under the owner's data lock; the effect then exits through the normal buff removal),
+hp / mp are set to the columns (`resurrection_percent 't'`: percent of `max_hp` / `max_mp`;
+`'f'`: absolute values — **INFERRED**, no 1.2 row uses it; both are clamped to the pools),
+this death's experience loss is refunded through the `RecoverExpEffect` packet / `AddExp`
+path with no priest and no labor, and `SCCharacterResurrectedPacket` is broadcast at the
+corpse position followed by `SCUnitPointsPacket`. The death's `recoverable_exp` entry is
+cleared so a priest cannot refund the same loss twice. The one-death-per-life claim is
+unchanged: after the resurrection a second lethal hit without the buff dies normally.
+
+**UNKNOWN / capture-pending:** the timing and animation of the self-resurrection (no 1.2
+capture; no extra delay is added), and whether retail refunds the whole loss or only the
+80 % `RecoverableExp` portion (the description names the decreased experience, so the whole
+this-death loss is refunded; the audit's alternative reading is `RecoverableExp`). The
+`remove_on_death 't'` flag on the buff is handled by consuming it explicitly before
+`RemoveEffectsOnDeath`; a death that takes the C# killer-less path never reaches `DoDie` and
+does not consume it.
+
+Tests: `systems::skills::resurrection_buff_tests` (buff 239 in-place resurrection with hp /
+mp / refund / packet order and buff removal, second death kills normally, death without the
+buff unchanged, absolute-value inference, real-compact loader for the three columns).
+
 ### systems::npcs
 
 | Area (C#) | Rust | Status | Notes |
@@ -464,7 +497,7 @@ Decisions from the 2026-11-02 combat-ai analysis (`WP-9`), no behaviour change:
 | `NpcManager.Load` (customs, body parts, templates, equip packs, postures, unit modifiers, initial buffs, merchants / goods) | `npc/data.rs` | done | 13 382 templates on the real DB. Creatures.xml names, `LoadAiParams` not ported. Also loads `aggro_links` / `npc_aggro_links` (130 groups, 643 rows, 572 NPC templates, rows with a missing NPC / group skipped) into `NpcData::aggro_links`; the rule that reads them is `systems::ai` (see below). |
 | `NpcManager.Create`, `LoadCustom` (.NET `Random(123456789)` parity), `Npc` stats (Str..KillExp from the unit formulas + template bonuses), `InitializeSpawnBuffs`, `AnimActionId` | `npc/manager.rs`, `npc/stats.rs` | done | Every real template creates without error. The AI is created through `server.systems.hooks.ai` (`systems::ai`). |
 | `Npc.DoDie` | `npc/death.rs` | done | Kill exp (team eligibility, `PlayerExpModifier`, mate exp, TagShare contributors), quest kill events, loot (`LootManager.GenerateLoot` through the economy), aggro / tagger clean-up, spawner despawn, `Ai.GoToDead()` (`systems::ai`). |
-| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCNpcInteractionStatusChanged, SCNpcInteractionEndedByZone, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests (the two interaction-state layouts from the 1.2 readers `FUN_397b4b00` / `FUN_397b4aa0`). `CSStartInteractionPacket` is refused silently for an NPC whose `interactable` flag is off (see the WP-5b note under "systems::ai"); the C# had no such guard. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
+| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCNpcInteractionStatusChanged, SCNpcInteractionEndedByZone, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests (the two interaction-state layouts from the 1.2 readers `FUN_397b4b00` / `FUN_397b4aa0`). `CSStartInteractionPacket` is refused silently for an NPC whose `interactable` flag is off (see the WP-5b note under "systems::ai") and for one farther than the 1.2 client's 3.0 m interaction-window reach plus `Interaction.NpcReachToleranceMeters` (default 2.0, INFERRED slack; `Interaction.NpcReachCheck`, default true); the C# had neither guard. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
 | `NpcGameData` (npc_spawners, npc_spawner_npcs, member index, generated spawners) | `npc/spawner_data.rs` | done | |
 | `NpcGroupGameData` (`npc_groups`, `npc_group_members`) | `npc/group_data.rs` | done | 158 groups / 571 member rows on the real DB; every one of the 147 `NpcGroup` spawner rows resolves to a group whose 531 member NPC templates exist. A `"NpcGroup"` spawner member expands into all group members at the spawner position plus `formation_offset_*` (see deviations). |
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
@@ -473,7 +506,7 @@ Decisions from the 2026-11-02 combat-ai analysis (`WP-9`), no behaviour change:
 | `Doodad` phase machine (`Use`, `DoFunc`, `DoPhaseFuncs`, `DoChangePhase`, `InitDoodad`, `OnSkillHit`, `FuncGroupId` setter, ToD triggers), 42 phase funcs, func tasks, `DoodadManager` runtime (Create, CreatePlayerDoodad, ChangeDoodadData, coffers), persistence (`doodads` table) | `doodad/{phase,phase_funcs,tasks,manager,db,logic}.rs` | partial | Serialized interactions, per-object counters, generation and handle guards for timers, ToD transitions, ordered MySQL persistence. Authored immediate logic/family pulses, spawn management groups and moving gimmicks are implemented. FlowGraph runs in the client. Logic delay descriptors 2/3 lack timing semantics; spawn groups 73–76 lack authored membership in shipped data. |
 | `blocked_child_doodads` (buff id -> child doodad template id) | `systems/skills/data/mod.rs` (loader), `doodad/{phase,interactions,packets}.rs`, `npcs/{bridges,portal/mod}.rs`, `economy/store.rs` (use entry guards) | added | The C# did not load this table; the 1.2 client does (`dll.c` `39a0c158` / `39a0c460`: `SELECT owner_type, owner_id, doodad_id FROM blocked_child_doodads`). The two rows are buff 6064 -> doodad 6560 (fishing boat crane) and buff 6245 -> doodad 3446 (backpack storage box). While such a buff is active on the child doodad's parent unit, a player's use is refused with the existing `NO_INTERACTION_AVAILABLE` error (no new packet) and `Character.SkillCancelled`, so a running cast refunds its item / labor cost. Only `owner_type = 'Buff'` is handled (the only evidenced value; other / NULL values are skipped at debug, NULL ids too). Covered player entries: `Doodad.Use` (skills `InteractionEffect` / `ScopedFEffect`, `CSHang`, harpoon, loot bag; `funcs::use_func` is reached through it), world interactions (`execute_interaction_with`, incl. the `CSLootOpenBag` recover path and `CheckGrowth`), `CSChangeDoodadPhase`, the `CSBuyCoinItem` and `CSBuyItems` purchase paths, and navi open / teleport. Doodads without a parent are unchanged and internal phase changes (timers, ToD, func chaining, instance events, GM phase commands, crime-evidence loot) are not gated. Who casts 6064 / 6245 in the live flow is UNKNOWN. Tests: `blocked_child_tests` (refused with the buff, allowed without / unrelated buff, parentless doodad) and gated `blocked_child_doodads_real_compact_db`. |
 | 79 non-phase funcs, 41 world interactions (`execute_interaction` for the skills InteractionEffect), coffers, bond / seats | `doodad/funcs/`, `doodad/interactions.rs`, `doodad/coffer.rs` | done | Items, loot, coffers through the economy `EconomyBridge`; skills, quests, housing through the bridges; instance funcs (`systems::instances`), `BindSlave` (`systems::vehicles`). Sticky parents are not modelled. |
-| SCDoodad* packets, doodad C->S packets (CSChangeDoodadData/Phase, CSCreateDoodad, CSSetLogicDoodad, CSSaveDoodadUccString, CSUnbondDoodad, CSCofferInteraction) | `doodad/packets.rs`, `doodad/coffer.rs` | done | Byte-exact tests. |
+| SCDoodad* packets, doodad C->S packets (CSChangeDoodadData/Phase, CSCreateDoodad, CSSetLogicDoodad, CSSaveDoodadUccString, CSUnbondDoodad, CSCofferInteraction) | `doodad/packets.rs`, `doodad/coffer.rs` | done | Byte-exact tests. `SCWorldInteractionCanceledPacket` 0x07f (`bc unitObjId, u32 doodadObjId`, reader `FUN_397c6540`) is defined and byte-tested but never sent: its trigger is capture-pending (CAP-INT-1). |
 | `CSCreateDoodadPacket` placement checks / 1.2 seed-builder rules | `doodad/manager.rs` (`handle_create_doodad`, `create_player_doodad`, `create_player_doodad_server_spawned`), `doodad/placement.rs` | deviation | **Deviation:** the C# checked only the source item, public farm (`CanPlace`), house permission and labor, and several refusals were silent. The Rust applies the 1.2 client's seed-builder validation (`FUN_393a8fa0`; research `s3-farm-plant-harvest.md`, capture `2026-10-30-capture-farm-cinema.md`) to the one planting entry path, `CSCreateDoodadPacket` (`handle_create_doodad` -> checked `create_player_doodad`), through `placement::refusal`. The fake-trial GM command and crime evidence (bloodstains / footprints) spawn server-side doodads and use `create_player_doodad_server_spawned` through `SocialHooks::create_player_doodad`, so they are not planting paths and are not validated; item-use backpacks (`spawn_backpack_doodad`) and skill `SpawnDoodad` effects are also not plantings. Rules, in `FUN_393a8fa0` order: (1) `restrict_zone_id` mismatch -> `DOODAD_SIM_AREA` 276 (F11: the client shows "Can't be installed here."); (2) water: group 40 (marine crops) must stand in water and every other group refuses it, `DOODAD_SIM_AREA` 276 — the server's `WorldInstance.IsWater` with the client PR's `surface > z + 0.3 m` margin (the decompiled `worldvtbl+0xf4` test and F5 were not decoded: capture-pending); (3) range: at most 30 m in 3D, `TOO_FAR_AWAY` 154 — `FUN_393a8fa0` (~761319) refuses only `900.0 < d²`, so exactly 30 m is allowed (F1's screen-projected sweep cannot pin the boundary). The server measures from its own player position, which lags a moving client; the code base has no placement-range allowance (the 15 m `DOODAD_RANGE_ALLOWANCE` in `systems::skills` covers cast targets, not placement), so none is added; (4) doodads: sphere test `dist3D < r_new + r_other` only when both are round (`FUN_3983b360`: groups 2, 3, 5, 12, 40, 80, template 1219, group 38), radius `max(sim_radius / 1000, 0.1)` m, `DOODAD_SIM_TOO_CLOSE_TO_OTHER_DOODAD` 277. Every mixed/non-round pair uses oriented boxes (`FUN_390318f0` / `FUN_39030ae0`) that are not decoded, and non-round units use a physics collider (`FUN_39180d50`), so those pairs are skipped: the server is permissive, never stricter than the client (real group 72 plantables 5287–5290 / 6591 with 3 m and group 69 3596 with 2 m stay placeable); (5) round doodads against units inside their radius -> `DOODAD_SIM_TOO_CLOSE_TO_OTHER_UNIT` 278. Silent drops answer `FAILED_TO_USE_ITEM` 207 for a missing / foreign item or an unknown template — **inference**, not a capture: the 1.2 client uses the same code when a seed use is cancelled, but no server->client answer was captured (a zone-banned item keeps its 440 `ITEM_CANNOT_USE_HERE`). Malformed positions (non-finite / scale outside 0..10) stay silent: they are anti-cheat guards, not a 1.2 client path. Open client steps not implemented: the ±6 m footprint height spread (step 2, `FUN_393a7720`; skipped for groups 2, 3, 5, 12, 37, 40, 80 — footprint sampling undecoded and F7 not driven); the house/farm area rule of step 0 (the server keeps its own house/public-farm checks); the area-box test `FUN_393287c0` (0x114); the dominion check (0x2ed); the overlap skip list `FUN_397a7cc0` / `FUN_397a7ce0` (it compares four template pointers whose ids are not initialized in the decompile); and the farm-plot radius call `FUN_3983b280(..,1)` (the decompiled body ignores the second argument). The hard-coded farm zones vs `common_farms` (S5) belong to slice 11 and are unchanged. Concurrency (Greptile P1 on #25): the final check and the doodad's insertion into the grid are one critical section under `WorldInstance::placement_guard`, so two plantings at the same empty spot cannot both pass the overlap check; the seed is consumed only after the insert succeeds and a failed consumption deletes the doodad again. **Deviation:** C# consumed the seed before `Spawn()`, which left the check-then-spawn window open; the refusal error and the economy callbacks run after the guard is dropped. |
 | Heightmaps (`WorldCell` heightmap.dat, `GetHeight`, `GetReferenceHeight`), NPC reference height in `SCUnitStatePacket` | `heightmap.rs`, `world/unit_state.rs` | done | Lazy per cell (`PreLoadTerrain`); with `GeoDataMode` the navmesh height of `systems::ai::geodata` comes first. Median error 0.098 m vs 4 002 real spawn Z values. Used by the skill controllers / displacements, plots and NPC spawns. |
 | `GimmickManager`, `GimmickGameData`, `GimmickSpawner`, movement handlers | `gimmick/` | done | |
@@ -1169,11 +1202,55 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | Party dungeon admission/reset and 1.2 mentor/mentee sealed chest quests | `indun.rs`, `dungeon.rs`, `mentoring.rs`, `scripts/dungeon.rs` | extended | Serialized run selection, pending-entry capacity, one charge per character/run, owner/leader-only empty resets, safe destruction; four paired daily quests use actual chest phases/seal items and existing inventory/quest rewards. See `Docs/wiki/Dungeons.md`. |
 | `Models/Game/Indun/Events/*`, `Actions/*`, `WorldInstance.Events` (`OnUnitSpawn`, `OnDoodadSpawn`, `OnUnitKilled`, `OnUnitCombatStart/End`, `OnAreaClear`), `CharacterEvents` (`OnTeamJoin/Leave/Kick`, `OnDungeonLeave`, `OnDisconnect`), `UnitEvents.OnKill` | `events.rs` | done | Raised from `npcs` spawners, `skills::combat` (`PostUpdateCurrentHp` / `DoDie`), `social::team`, `world::session::on_disconnect`. |
 | `InstantGameManager`, `InstantGame` (+ `InstantGameEvents`, team members / results) | `instant_game.rs` | done | Queue / matchmaking / invite / join / enter / start / kills / scores / end / leave; `Character.SetFaction` override (housing hook, guild kick, party kick); `ResetAllSkillCooldowns`. |
-| Packets: `CSInstanceLoaded`, `CSUnknownInstance`, `CSApplyToInstantGame`, `CSCancelInstantGame`, `CSJoinInstantGame`, `CSEnteredInstantGameWorld`, `CSLeaveInstantGame`; `SCProcessingInstance`, `SCAppliedToInstantGame`, `SCInviteToInstantGame`, `SCInstantGameJoined/Start/End/AddPoint/Kill/Killstreak`, `SCInstantGameRemainTime` (`SCInstantGameUnkPacket` opcode), `SCTowerDefList/Start/End/WaveStart`, `SCSkillCooldownReset`; the unsent `SCRaceCond/SCRacing/SCRacingResult` (see the racing bullet below) | `packets.rs` | done | Byte-exact tests. `SCLoadInstancePacket` is the npcs portal one. |
-| Doodad funcs `EnterInstance`, `EnterSysInstance`, `ExitIndun`, `RemoveInstance`; skills hooks `leave_instance` (`ExitArchemall`) / `main_world_position` (`Return`); portal `UsePortal` court check | `npcs/doodad/funcs/world.rs`, `skills/ext.rs` (default bodies), `npcs/portal/mod.rs` | done | |
+| Packets: `CSInstanceLoaded`, `CSUnknownInstance`, `CSSelectSysInstanceChannel` (0x13d), `CSApplyToInstantGame`, `CSCancelInstantGame`, `CSJoinInstantGame`, `CSEnteredInstantGameWorld`, `CSLeaveInstantGame`; `SCProcessingInstance`, `SCSystemDungeonState`/`SCSystemDungeonChannel` (0x206/0x207), `SCAppliedToInstantGame`, `SCInviteToInstantGame`, `SCInstantGameJoined/Start/End/AddPoint/Kill/Killstreak`, `SCInstantGameRemainTime` (`SCInstantGameUnkPacket` opcode), `SCTowerDefList/Start/End/WaveStart`, `SCSkillCooldownReset`, the unsent `SCRaceCond/SCRacing/SCRacingResult` (see the racing bullet below) | `packets.rs` | done | Byte-exact tests. `SCLoadInstancePacket` is the npcs portal one. See "System-dungeon channel select (WP-X1)". |
+| Doodad funcs `EnterInstance`, `EnterSysInstance`, `ExitIndun`, `RemoveInstance`; skills hooks `leave_instance` (`ExitArchemall`) / `main_world_position` (`Return`); portal `UsePortal` court check | `npcs/doodad/funcs/world.rs`, `skills/ext.rs` (default bodies), `npcs/portal/mod.rs` | done | `DoodadFuncEnterSysInstance.selective` drives the channel list; see "System-dungeon channel select (WP-X1)". |
 | Tower defense runtime, `TowerDefenseAttackerAiCharacter` | `tower_def.rs`, `config.rs`, `scripts/tower_def.rs`, `ai/framework.rs` | extended | Rust adds event start/end, first-wave delay, timed/kill AND/OR progression, NPC controller/summon cleanup preserving normal corpse timers, client lists, GM controls and opt-in game-time/war schedules. The attacker's C# behavior graph already matches `AiKind::TowerDefenseAttacker`. Unsupported target kinds and absent spawn positions fail preflight; rewards/victory event chains are not added. |
 
 Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` checks the summoned vehicle (`systems::vehicles`); dungeon entry items use the economy's checked `EconomyBridge::bag_consume_item`; the permanent `Character.SetFaction` updates the owned houses (`SocialHooks::update_owned_housing_faction`, housing). Battlefield corps factions are temporary and skip every side effect (see the RPA-09 deviation below).
+
+#### System-dungeon channel select (WP-X1)
+
+`systems::instances` / `npcs::doodad::funcs::world` — extended. The C# `DoodadFuncEnterSysInstance`
+always entered channel 0 and had no CS 0x13d handler, no 0x206 list and no 0x207 answer. The 1.2
+client picks the channel with CS 0x13d `{u32 instId, bc doodadObjId}` (writer `FUN_397bca60`,
+x2game.dll.c:1714704), after the server fills the dialog cache with SC 0x206 `{u32 zoneKey,
+i32 count, count x {i32 index, u32 instId, i32 restrict, i32 current}}` (reader `FUN_397b8c30`,
+x2game.dll.c:1711542; the client clamps the count to 0x20). The row `instId` is a world instance
+id and `index` is 0-based (the client shows index+1). CS 0x13e is only the post-load notice of
+the world instance the client is in (writer `FUN_397bcad0`; sender dll.c:379135 after the world
+load when the zone group has `select_channel` and the current instance id is non-zero), not a
+channel pick; it stays read-and-ignore. This corrects content.md WP-X1 section 1.4, as
+`re-indun-interact.md` shows.
+
+Rules (all **INFERRED** from the client decompile; no 1.2-server capture):
+* A selective `DoodadFuncEnterSysInstance` (`doodad_func_enter_sys_instances.selective`, rows
+  2-9 in the 1.2 data, now loaded) of a `select_channel` zone group sends SC 0x206 with the
+  dungeon's live instances (world id order, enumerated 0-based `index`, `restrict =
+  indun_zones.max_players` — 190 for the library, `current` = players inside) and does not move
+  the player. Non-selective entrances and groups without `select_channel` enter channel 0 as
+  before. With no live instance the first player creates channel 0 and enters it as before;
+  what the original server listed for an empty channel is UNKNOWN (only live instances here).
+* The 0x206 `zoneKey` is the entrance func's `zone_id` (`zones.id`, 209/210/211): the client's
+  `GetSystemDungeonName` looks it up in a table keyed by `zones.id` and compares the record's
+  `zone_key` with the current zone (`FUN_397f2140`, x2game.dll.c:1823669/1823723).
+* CS 0x13d is validated like the client's `FUN_3930c420`: the doodad exists, its template's
+  first `DoodadFuncEnterSysInstance` func (client `FUN_3983c230`) is selective, the sender is
+  within the server's doodad interaction reach (`in_func_reach`: the func's skill range, else
+  5 m, plus the 15 m doodad allowance; the client checks 2.1 m itself), its zone group has
+  `select_channel`, and `instId` is a live instance of that zone group (any live instance, also
+  one created after the list was sent). Unknown / stale ids are ignored. The player is queued
+  into the instance through the normal `QueuePlayer` / `SCLoadInstance` flow, so a full instance
+  answers the normal `INSTANCE_QUOTA` (471) error. Both entrance paths save the same
+  `MainWorldPosition` (`ensure_main_world_position`: when it was never set or the player is still
+  in the default instance); the pick saves it after every check, so a refused pick (bad doodad,
+  out of reach, non-selective, stale id) leaves an existing return point untouched.
+* SC 0x207 `{i32 zoneId, u32 instanceId, i32 instanceIndex}` (reader `FUN_397b03b0`) answers the
+  pick with the zone the load sent (`SCLoadInstance.zoneId`, the dungeon zone key), the world
+  instance id and the 0-based index. It is sent directly after `SCLoadInstance` when the channel
+  was already loaded, otherwise after the client's `CSInstanceLoaded`; the client only stores
+  the index when the instance and zone match its current ones. INFERRED: no capture shows the
+  original server's reply to CS 0x13d beyond the load. A pending answer is dropped if a later
+  load targets a different instance id.
 
 ### systems::vehicles
 
@@ -1748,6 +1825,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     UNKNOWN (`SCNpcInteractionSkillList` writes `1`); this code assumes interactable unless the
     AI says otherwise. Capture-pending WP-5B-1: whether retail also sends these packets for
     command sets, and whether a non-interactable NPC answers with an error.
+
+* systems::npcs (2026-11-05, NPC interaction reach): the 1.2 client measures the NPC interaction
+  window against the target's shape, not before sending `CSStartInteraction` (decompile:
+  `FUN_393bef10` opens and `FUN_3932a3b0` keeps the window, both compare with `sqrt(9.0)` =
+  3.0 m through `FUN_39093860` / `FUN_39093800`; the send `FUN_393be030` has no position test).
+  A forged request can therefore arrive from any distance, and the server now refuses one
+  farther than 3.0 m plus `Interaction.NpcReachToleranceMeters` (default 2.0 m, **INFERRED**
+  slack for movement / latency) with a `debug!` and no reply: no 1.2 error for this case is
+  evidenced. `Interaction.NpcReachCheck` (default `true`) turns the gate off and restores the C#
+  behaviour. The distance is `skills::geometry::distance_to` (both scaled actor radii subtracted,
+  the same helper the skill range checks and the doodad func reach use). The C# had a
+  `// TODO: Distance-check` and answered every target. Doodads, mates, slaves and stale ids are
+  unchanged. The doodad-side `SCWorldInteractionCanceledPacket` 0x07f (`bc interactedUnitId,
+  u32 interactedDoodadId`, reader `FUN_397c6540`) is defined with a byte test but never sent:
+  its trigger is capture-pending (CAP-INT-1).
 
 * systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
   the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
@@ -5773,6 +5865,45 @@ Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id
 `UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
 `COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
 adds both.
+
+## Trial cancellation and jury verdict-count packets (2026-11-05)
+
+The 1.2 client registers `TRIAL_CANCELED` in `usertrial/trial_status.alb` and `VERDICT_COUNT`
+in `verdict.alb`; the C# trial flow sent neither packet. Both are now sent from the existing
+trial state machine (`systems/social/trial.rs`); their layouts are read from the client:
+
+* `SCTrialCanceledPacket` 0x183, reader `FUN_397afa30`: `u32 trialId`.
+* `SCChangeJuryVerdictCountPacket` 0x17a, reader `FUN_397af940`: `i32 count ; i32 total`.
+
+Rules and **INFERRED** audiences (no capture of the 1.2 server has these packets yet):
+
+* `SCTrialCanceled` goes out when the trial reaches `TrialStep.TrialCancelled` (the active jury
+  count dropped to 0) and when the defendant sends `CSCancelTrialPacket`, before
+  `SCRulingClosed`. The audience is the `TrialData::send_packets` set (the defendant and every
+  seated jury member), because the C# defined `SendPackets` as the trial audience and sent
+  nothing here.
+* `SCChangeJuryVerdictCount` goes to every seated juror who has not voted yet: once when the
+  `JuryVerdict` step starts (count 0) and after every accepted vote. `count` is the number of
+  votes cast and `total` the number of seated jurors (a seat with a `jury_member`), matching the
+  `SCRulingStatus(count, total)` numbers the same step already sends. The audience is INFERRED
+  from `verdict.alb`'s "remaining" display.
+
+`CSJurySummonedPacket` is the client's acknowledgement after `SCSummonJury`. It changes no
+server state; the handler only checks that the sender holds the seat
+(`trial.jury[jury].jury_member`) and logs the result at debug (the C# logged a warning).
+
+GM `crime points <player>` (the no-change stats branch) now prints the trial history from the
+`characters` table columns (`arrest_count`, `accept_trial_count`, `accept_guilty_count`,
+`guilty_count`, `not_guilty_count`) and the number of the player's judged records in the `crime`
+table (`judgement_time` set by `TrialData.ArchiveEvidence` when `Justice.KeepHistory` is on).
+
+Tests: `trial_canceled_and_verdict_count_match_the_1_2_readers` (byte layouts),
+`defendant_cancel_sends_trial_canceled_before_ruling_closed`,
+`trial_without_jury_is_cancelled_with_the_default_sentence` (empty-jury auto-cancel),
+`verdict_count_asks_only_the_jurors_who_still_have_to_vote`,
+`jury_summoned_requires_the_seat_holder_and_changes_nothing`, and
+`crime_root_help_and_points` (trial/archive counts). The bot suspect/arrest effects 84/88/89
+remain capture-pending and are not implemented.
 
 ## Wanted-player bounty (2026-11-02)
 
