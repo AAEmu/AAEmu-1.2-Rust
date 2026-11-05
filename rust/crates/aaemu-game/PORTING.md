@@ -3818,6 +3818,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and `spawn_mount` refuses it with `MATE_CANNOT_SPAWN_WHILE_CORPSE`; because the same item is
   the dismiss toggle, the corpse flag also blocks dismissing the corpse. Known, not fixed.
 
+* systems::vehicles (siege catapult kill, WP-SD6b, 2026-11-05): destroying slave template 2
+  (the siege catapult) during an active siege credits `char_records` kind 26 with `value1 = 2`
+  (the authored row's slave id), `value2 = 1` to the killer when the killer and the catapult's
+  owner are on opposing roster sides (`record` text 상대진영; the `value2 = 1` meaning is
+  INFERRED). Own side, non-participants and a kill outside an active siege credit nothing. The
+  C# had no producer.
+
 * systems::services (account payment / premium, WP-B, 2026-11-03): the C# read the payment from a
   permanent `AccountPayment` default (Premium, 0 .. 2030-01-01) in five places. Rust stores
   `pay_method`, `pay_location`, `pay_start`, `pay_end` (unix seconds) and `premium_point` on

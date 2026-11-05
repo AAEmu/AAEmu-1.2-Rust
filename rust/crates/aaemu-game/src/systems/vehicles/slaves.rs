@@ -39,6 +39,8 @@ use crate::systems::skills::packets_special::{
 use crate::systems::skills::types::{
     BuffEventTriggerKind, BuffRemoveOn, KillReason, SkillCastTarget, SkillCaster,
 };
+use crate::systems::social::achievement::char_record_kind;
+use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{Entity, PlayerRef, SlaveRef, WorldInstance, WorldObject};
 
 use super::data::{attach_point, ShipModel, SlaveTemplate};
@@ -4919,6 +4921,61 @@ pub fn do_hp_change_trigger(server: &GameServer, slave: &SlaveRef, trigger_value
     update_slave_repair_points(server, slave);
 }
 
+/// KILL_SLAVE (kind 26, `value1` 2 = the siege catapult, `value2` 1 = the opposing side,
+/// INFERRED): destroying an enemy-side siege catapult during an active siege credits its
+/// killer. The authored achievement text asks for the opposing siege camp, so both characters
+/// must be on the roster and on different sides; a catapult outside a siege or killed by its
+/// own side credits nothing.
+fn credit_siege_catapult_kill(server: &GameServer, slave: &SlaveRef, killer: Option<&WorldObject>) {
+    const SIEGE_CATAPULT: u32 = 2;
+    let (template_id, owner_id, zone_id) = {
+        let d = slave.data();
+        (
+            d.unit.template_id,
+            d.unit.owner_id,
+            d.unit.transform.zone_id,
+        )
+    };
+    if template_id != SIEGE_CATAPULT || owner_id == 0 {
+        return;
+    }
+    let Some(killer) = killer.and_then(WorldObject::as_player) else {
+        return;
+    };
+    let Some(zone_group_id) = server
+        .game_data
+        .zones
+        .zone_by_key(zone_id)
+        .map(|zone| zone.group_id)
+    else {
+        return;
+    };
+    let Some(state) = server.systems.housing.dominions.get(zone_group_id) else {
+        return;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let Some(siege) = state.siege.as_ref().filter(|siege| siege.active_at(now)) else {
+        return;
+    };
+    let victim_side = siege.participants.get(&owner_id).map(|p| p.side);
+    let killer_side = siege.participants.get(&killer.character_id).map(|p| p.side);
+    if victim_side.is_none() || victim_side == killer_side {
+        return;
+    }
+    crate::systems::report_achievement(
+        server,
+        killer,
+        AchievementInput::Increment {
+            kind_id: char_record_kind::KILL_SLAVE,
+            amount: 1,
+            matcher: RecordMatch::Value1And2 {
+                value1: SIEGE_CATAPULT,
+                value2: 1,
+            },
+        },
+    );
+}
+
 /// `Slave.DoDie(killer, killReason)`.
 pub fn do_die(
     server: &GameServer,
@@ -4928,6 +4985,7 @@ pub fn do_die(
 ) {
     let _items = server.systems.economy.operation_scope();
     let _publication = server.systems.vehicles.slave_summons.publication_scope();
+    credit_siege_catapult_kill(server, slave, killer);
     let obj = WorldObject::from(slave);
     if let Some(world) = server.world.world_of(&obj) {
         audit_retirement(server, &world, slave);
@@ -8866,3 +8924,7 @@ fn refund_summon_cooldown(owner: &PlayerRef, cooldown: Option<SummonCooldownToke
 #[cfg(test)]
 #[path = "slave_repair_tests.rs"]
 mod slave_repair_tests;
+
+#[cfg(test)]
+#[path = "siege_kill_tests.rs"]
+mod siege_kill_tests;
