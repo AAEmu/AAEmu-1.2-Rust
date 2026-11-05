@@ -25,6 +25,9 @@ pub const RADAR_UPDATE_DELAY_MS: u64 = 1000;
 pub const UNITS_PER_PACKET: usize = 10;
 /// `TemplateId == 46`: carriage boardings are ignored.
 const CARRIAGE_BOARDING_TEMPLATE: u32 = 46;
+/// Range (`100_000` m) applied to every list for a character at or above
+/// `World.RadarGmAccessLevel`.
+const GM_RADAR_RANGE: f32 = 100_000.0;
 
 /// `SCTransferTelescopeToggledPacket(on, range)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -324,7 +327,9 @@ impl RadarManager {
         };
 
         let all_fish = server.systems.npcs.fish_schools.all_fish_schools();
-        // TODO (C#): Add Shipyards
+        // Shipyards are not part of `SCTelescopeUnits`: the 1.2 client has no shipyard list
+        // format (its telescope carries transfers, fish schools and the slave/ship list only),
+        // so the C# "Add Shipyards" TODO is closed as "no retail wire format".
         let mut all_transfers = Vec::new();
         let mut all_ships: BTreeMap<u32, Vec<SlaveRef>> = BTreeMap::new();
         let ship_hooks = self.ships.get();
@@ -338,13 +343,12 @@ impl RadarManager {
         }
 
         for entry in entries {
-            // TODO (C#): Make a proper GM flag
-            let gm_range =
-                if super::character::effective_access_level(server, &entry.player).await >= 100 {
-                    100_000.0f32
-                } else {
-                    0.0
-                };
+            let access = super::character::effective_access_level(server, &entry.player).await;
+            let gm_range = if access >= server.config.world.radar_gm_access_level {
+                GM_RADAR_RANGE
+            } else {
+                0.0
+            };
             let player_obj = WorldObject::from(&entry.player);
             let Some(world) = server.world.world_of(&player_obj) else {
                 continue;
@@ -607,5 +611,49 @@ mod tests {
                 sc::SCTransferTelescopeToggledPacket
             ]
         );
+    }
+
+    /// The GM range comes from `World.RadarGmAccessLevel` (default 100), not a hard-coded
+    /// access level: a character at the configured level sees a transfer far outside the
+    /// registered range, and raising the configured level above the character hides it again.
+    #[tokio::test]
+    async fn gm_range_comes_from_config() {
+        let server = test_server();
+        let mut client = TestClient::new(&server, 1, 1);
+        let p = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Bob", 10.0, 10.0),
+            0x100,
+        );
+        p.data().access_level = 100;
+        client.drain();
+        // A carriage 500 m away: outside the 1 m registered range, inside the GM range.
+        let world = server.world.world(0).unwrap();
+        let mut t = crate::models::transfer::Transfer::new(66);
+        t.unit.model_id = 66;
+        t.unit.tl_id = 1;
+        t.unit.transform.instance_id = 0;
+        t.unit.transform.set_xyz(510.0, 10.0, 100.0);
+        let t = crate::world::Entity::new(0x500, t);
+        world.spawn(&t, &server.view_ctx());
+        let radar = &server.systems.services.radar;
+        radar.register_for_public_transport(&p, 1.0);
+        client.drain();
+
+        radar.radar_tick(&server).await;
+        assert!(
+            client
+                .drain_ops()
+                .contains(&sc::SCTransferTelescopeUnitsPacket),
+            "access 100 >= the default RadarGmAccessLevel 100"
+        );
+
+        // The configured level is now above the character: no GM range.
+        server
+            .config
+            .update(|c| c.world.radar_gm_access_level = 101);
+        radar.radar_tick(&server).await;
+        assert!(client.drain_ops().is_empty());
     }
 }

@@ -75,7 +75,7 @@ mod tests {
                 *opcode != 0xfff && *opcode != crate::opcodes::cs::CSICSBuyAAPointPacket
             })
             .collect();
-        assert_eq!(supported.len(), 254);
+        assert_eq!(supported.len(), 255);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -153,11 +153,15 @@ mod tests {
             // `CSUpdateNationalTaxRatePacket` is the owner-approved native 1.2 0x013
             // (`FUN_392f42f0`; handled by `systems::social::packets::misc`); the C# left it at
             // 0xfff (opcodes.rs comment).
+            // `CSSetCraftingPayPacket` is the owner-approved native 1.2 0x08d
+            // (`FUN_394d7230`; handled by `systems::economy::craft` as a validated no-op); the
+            // C# left it at 0xfff.
             // `CSCreate/Change/Clear/CheckSecondPasswordPacket` (0x126..=0x129) are the 1.2
             // client's second password packets (serializers FUN_397b14d0 / FUN_397b1560 /
             // FUN_397b1650 / FUN_397b16e0); the C# never registered them.
             let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
                 || opcode == crate::opcodes::cs::CSUpdateNationalTaxRatePacket
+                || opcode == crate::opcodes::cs::CSSetCraftingPayPacket
                 || matches!(
                     opcode,
                     0x11f | 0x120 | 0x126 | 0x127 | 0x128 | 0x129 | 0x130 | 0x133

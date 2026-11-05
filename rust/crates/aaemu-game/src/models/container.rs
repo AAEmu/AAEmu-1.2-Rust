@@ -837,11 +837,37 @@ impl ItemContainer {
         &mut self,
         task: u8,
         template_id: u32,
+        amount: i32,
+        preferred_item: Option<u64>,
+        env: &mut ItemEnv<'_>,
+    ) -> i32 {
+        self.consume_item_filtered(task, template_id, -1, amount, preferred_item, env)
+    }
+
+    /// [`consume_item`](Self::consume_item) restricted to items of `grade` (`-1` = any grade),
+    /// for craft materials that name a `require_grade` or inherit a main material's grade.
+    pub fn consume_item_by_grade(
+        &mut self,
+        task: u8,
+        template_id: u32,
+        grade: i32,
+        amount: i32,
+        preferred_item: Option<u64>,
+        env: &mut ItemEnv<'_>,
+    ) -> i32 {
+        self.consume_item_filtered(task, template_id, grade, amount, preferred_item, env)
+    }
+
+    fn consume_item_filtered(
+        &mut self,
+        task: u8,
+        template_id: u32,
+        grade: i32,
         mut amount: i32,
         preferred_item: Option<u64>,
         env: &mut ItemEnv<'_>,
     ) -> i32 {
-        let (mut found, _) = self.items_by_template_unlocked(template_id, -1);
+        let (mut found, _) = self.items_by_template_unlocked(template_id, grade);
         if found.is_empty() {
             return 0; // Nothing found
         }
@@ -850,7 +876,10 @@ impl ItemContainer {
         if let Some(pid) = preferred_item {
             // Preferred item template did not match / is not in this container, or it is locked.
             match self.get_item_by_id(pid) {
-                Some(p) if p.template_id == template_id && !p.has_flag(ITEM_FLAG_SECURE) => {}
+                Some(p)
+                    if p.template_id == template_id
+                        && (grade < 0 || grade == i32::from(p.grade))
+                        && !p.has_flag(ITEM_FLAG_SECURE) => {}
                 _ => return 0,
             }
             if amount > 0 {

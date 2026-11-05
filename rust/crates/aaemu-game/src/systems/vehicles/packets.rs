@@ -422,8 +422,8 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSBoardingTransferPacket` (log only in C#): paperdoll board (`ap` = seat 2..7) and
-    /// unboard (`ap = 0`, `UnBoardingTransfer`).
+    /// `CSBoardingTransferPacket`: paperdoll board (`ap` = seat 2..7) and unboard
+    /// (`ap = 0`, `UnBoardingTransfer`).
     CSBoardingTransferPacket { tl: u16, ap: u8 }
     read |s| { Ok(Self { tl: s.read_u16()?, ap: s.read_u8()? }) }
     handle |self, server, conn| {

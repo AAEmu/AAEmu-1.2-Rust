@@ -14,8 +14,8 @@
 //!    `CharacterTagging.ClearAllTaggers()`, `CurrentAggroTarget = null`,
 //!    `Spawner?.DoDespawn(this)` (`spawn_manager::on_npc_died`). `Ai?.GoToDead()` is the AI's.
 //!
-//! Not ported here: mate experience (`MateManager.GetActiveMates` + "Pet gained .. XP"
-//! messages, owned by the mates subsystem).
+//! Not ported here: mate experience (`MateManager.GetActiveMates`, owned by the mates
+//! subsystem).
 
 use crate::server::GameServer;
 use crate::systems::skills::combat::MAX_LOOTING_RANGE;

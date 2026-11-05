@@ -520,6 +520,10 @@ pub struct WorldConfig {
     pub days_for_tax_payment: u32,
     #[serde(rename = "ignorefalldamageaccesslevel", deserialize_with = "lenient")]
     pub ignore_fall_damage_access_level: i32,
+    /// Minimum effective access level at which the radar / telescope shows every object in the
+    /// world regardless of the registered range (`RadarManager`, the C# had this hard-coded).
+    #[serde(rename = "radargmaccesslevel", deserialize_with = "lenient")]
+    pub radar_gm_access_level: i32,
     #[serde(rename = "godmode", deserialize_with = "lenient")]
     pub god_mode: bool,
     /// `GeoDataMode` (navmesh heights and A* paths, `systems::ai::geodata`).
@@ -597,6 +601,7 @@ impl Default for WorldConfig {
             growth_rate: 1.0,
             days_for_tax_payment: 7,
             ignore_fall_damage_access_level: 100,
+            radar_gm_access_level: 100,
             god_mode: false,
             geo_data_mode: false,
             pre_load_terrain: false,
@@ -1592,7 +1597,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("Configurations/World.json"),
-            r#"{ "World": { "ExpRate": 2.0, "WindModel": "realistic" } }"#,
+            r#"{ "World": { "ExpRate": 2.0, "WindModel": "realistic", "RadarGmAccessLevel": 90 } }"#,
         )
         .unwrap();
         let secrets = dir.join("secrets.json");
@@ -1601,6 +1606,7 @@ mod tests {
         let cfg = AppConfig::load_from(&dir, Some(&secrets), Vec::new(), &[]).unwrap();
         assert_eq!(cfg.world.exp_rate, 3.0);
         assert_eq!(cfg.world.wind_model, WindModelType::Realistic);
+        assert_eq!(cfg.world.radar_gm_access_level, 90);
         assert_eq!(cfg.discord_token.as_deref(), Some("tok"));
         // Environment beats secrets; unknown top-level variables are ignored.
         let env = vec![
@@ -1624,6 +1630,7 @@ mod tests {
         assert!(cfg.web_api_network.is_none());
         assert_eq!(cfg.labor_offline.tick_minutes, 5);
         assert_eq!(cfg.world.target_physics_tps, 25.0);
+        assert_eq!(cfg.world.radar_gm_access_level, 100);
         assert!(cfg.dungeons.auto_cleanup_after_kick);
         assert_eq!(cfg.specialty.ratio_decrease_per_pack, f64::from(0.5f32));
         assert_eq!(cfg.credits.get_tick_amount(true), 0);
