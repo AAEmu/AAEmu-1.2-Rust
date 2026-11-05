@@ -93,6 +93,24 @@ fn risky(team_id: u32, target: u32, action: u8) -> PacketStream {
     s
 }
 
+fn direct_leave(team_id: u32) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_u32(team_id);
+    s
+}
+
+fn direct_kick(team_id: u32, member_id: u32) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_u32(team_id).write_u32(member_id);
+    s
+}
+
+fn direct_dismiss(team_id: u32) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_u32(team_id);
+    s
+}
+
 fn chat(t: i16, msg: &str) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_i16(t)
@@ -771,6 +789,161 @@ async fn risky_team_actions_require_member_owner_and_known_action() {
         assert!(!member.p.data().in_party);
     }
     assert!(server.systems.social.teams.active_team(team_id).is_none());
+}
+
+/// Runs one team action on a fresh party of three (A owner, B, C): the direct packet
+/// (0x7d / 0x7e / 0x84) and the `CSAskRiskyTeamAction` it is the confirmation of. Returns
+/// every member's frames so the two paths can be compared byte for byte.
+async fn team_action_frames(action: u8, direct: bool) -> [Vec<(u16, Vec<u8>)>; 3] {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    a.send(&server, cs::CSInviteToTeamPacket, invite(team_id, "Cy"))
+        .await;
+    c.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply(team_id, a.p.character_id, false),
+    )
+    .await;
+    settle(&mut [&mut a, &mut b, &mut c]);
+
+    let target = match action {
+        risky_action::LEAVE => b.p.character_id,
+        risky_action::KICK => c.p.character_id,
+        risky_action::DISMISS => a.p.character_id,
+        _ => unreachable!(),
+    };
+    if direct {
+        match action {
+            risky_action::LEAVE => {
+                b.send(&server, cs::CSLeaveTeamPacket, direct_leave(team_id))
+                    .await
+            }
+            risky_action::KICK => {
+                a.send(
+                    &server,
+                    cs::CSKickTeamMemberPacket,
+                    direct_kick(team_id, target),
+                )
+                .await
+            }
+            _ => {
+                a.send(&server, cs::CSDismissTeamPacket, direct_dismiss(team_id))
+                    .await
+            }
+        }
+    } else {
+        let actor = if action == risky_action::LEAVE {
+            &mut b
+        } else {
+            &mut a
+        };
+        actor
+            .send(
+                &server,
+                cs::CSAskRiskyTeamActionPacket,
+                risky(team_id, target, action),
+            )
+            .await;
+    }
+    [a.frames(), b.frames(), c.frames()]
+}
+
+/// The 1.2 client's confirmation callback sends `CSLeaveTeam` / `CSKickTeamMember` /
+/// `CSDismissTeam` (`FUN_39309670` -> `FUN_393095c0`); each must perform the same action,
+/// with the same frames, as the `CSAskRiskyTeamAction` it confirms.
+#[tokio::test]
+async fn direct_team_packets_match_risky_action_frames() {
+    for action in [
+        risky_action::LEAVE,
+        risky_action::KICK,
+        risky_action::DISMISS,
+    ] {
+        let direct = team_action_frames(action, true).await;
+        let risky = team_action_frames(action, false).await;
+        assert_eq!(direct, risky, "action {action}");
+    }
+}
+
+/// The direct packets keep the risky path's permission checks: only the owner may kick or
+/// dismiss, and a kick target must be a team member.
+#[tokio::test]
+async fn direct_team_kick_and_dismiss_require_owner() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    a.send(&server, cs::CSInviteToTeamPacket, invite(team_id, "Cy"))
+        .await;
+    c.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply(team_id, a.p.character_id, false),
+    )
+    .await;
+    settle(&mut [&mut a, &mut b, &mut c]);
+
+    // B is not the owner: neither kick nor dismiss has any effect.
+    b.send(
+        &server,
+        cs::CSKickTeamMemberPacket,
+        direct_kick(team_id, c.p.character_id),
+    )
+    .await;
+    b.send(&server, cs::CSDismissTeamPacket, direct_dismiss(team_id))
+        .await;
+    assert!(a.ops().is_empty() && b.ops().is_empty() && c.ops().is_empty());
+    // The owner cannot kick a non-member.
+    a.send(
+        &server,
+        cs::CSKickTeamMemberPacket,
+        direct_kick(team_id, 99),
+    )
+    .await;
+    assert!(a.ops().is_empty() && b.ops().is_empty() && c.ops().is_empty());
+    let team = server
+        .systems
+        .social
+        .teams
+        .active_team(team_id)
+        .expect("team preserved");
+    assert_eq!(team.owner_id, a.p.character_id);
+    assert_eq!(team.members_count(), 3);
+    assert!(a.p.data().in_party && b.p.data().in_party && c.p.data().in_party);
+
+    // The owner's direct kick still works.
+    a.send(
+        &server,
+        cs::CSKickTeamMemberPacket,
+        direct_kick(team_id, c.p.character_id),
+    )
+    .await;
+    assert_eq!(
+        c.frames(),
+        vec![(
+            sc::SCLeavedTeamPacket,
+            body(&SCLeavedTeamPacket {
+                team_id,
+                kicked: true,
+                dismissed: false
+            })
+        )]
+    );
+    assert!(!c.p.data().in_party);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .teams
+            .active_team(team_id)
+            .expect("team")
+            .members_count(),
+        2
+    );
 }
 
 #[tokio::test]

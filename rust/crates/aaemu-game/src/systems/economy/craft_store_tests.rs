@@ -1355,13 +1355,19 @@ impl NpcEconomyHooks for Shops {
     fn shop_info(&self, _server: &GameServer, npc: &NpcRef) -> Option<NpcShopInfo> {
         Some(NpcShopInfo {
             merchant: npc.data().unit.template_id == 1234,
-            merchant_pack_id: 7,
+            merchant_pack_ids: vec![7],
             ..NpcShopInfo::default()
         })
     }
 
-    fn merchant_sells(&self, _server: &GameServer, pack_id: u32, item_id: u32, grade: u8) -> bool {
-        pack_id == 7 && item_id == STACK && grade == 0
+    fn merchant_sells(
+        &self,
+        _server: &GameServer,
+        pack_ids: &[u32],
+        item_id: u32,
+        grade: u8,
+    ) -> bool {
+        pack_ids.contains(&7) && item_id == STACK && grade == 0
     }
 }
 
@@ -1399,7 +1405,7 @@ fn catalog_world(mut d: GameData, stock: &[(u32, u8)]) -> World {
         crate::systems::npcs::npc::data::NpcTemplate {
             id: 1234,
             merchant: true,
-            merchant_pack_id: 7,
+            merchant_pack_ids: vec![7],
             ..Default::default()
         },
     );
@@ -1453,6 +1459,47 @@ async fn shop_catalog_grades_create_distinct_paid_inventory() {
     assert_eq!(inv.items_count(SWORD, 4), 1);
     let c = w.pa.data();
     assert_eq!((c.money, c.honor_point, c.vocation_point), (960, 91, 0));
+}
+
+/// `merchants` rows are additive: the 1.2 client joins `merchants` x `merchant_goods` per
+/// NPC (`strings.txt:13227`), so an NPC with two packs sells the union. Pack 7 comes first
+/// (`STACK`), pack 8 last (`POWDER`): a last-wins loader would refuse the first purchase.
+#[tokio::test]
+async fn shop_npc_sells_items_from_every_merchant_pack() {
+    let mut d = data();
+    d.items.templates.get_mut(&POWDER).unwrap().price = 100;
+    let mut first = crate::systems::npcs::npc::data::MerchantGoods {
+        id: 7,
+        items: Vec::new(),
+    };
+    first.add_item_to_stock(STACK, 0);
+    let mut second = crate::systems::npcs::npc::data::MerchantGoods {
+        id: 8,
+        items: Vec::new(),
+    };
+    second.add_item_to_stock(POWDER, 0);
+    d.systems.npcs.npc.goods.insert(7, first);
+    d.systems.npcs.npc.goods.insert(8, second);
+    d.systems.npcs.npc.templates.insert(
+        1234,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1234,
+            merchant: true,
+            merchant_pack_ids: vec![7, 8],
+            ..Default::default()
+        },
+    );
+    let mut w = world_with_data(d);
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    w.pa.data().money = 1000;
+
+    // The item of the first pack is sold; so is the item of the last pack.
+    buy_grade(&mut w, STACK, 0, 1, shop_currency_type::MONEY).await;
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    buy_grade(&mut w, POWDER, 0, 1, shop_currency_type::MONEY).await;
+    assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 1);
+    assert_eq!(w.pa.data().money, 1000 - 10 - 100);
 }
 
 #[tokio::test]

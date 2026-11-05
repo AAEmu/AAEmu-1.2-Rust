@@ -15,7 +15,6 @@
     "SCDemoCharResetItemPacket",
     "SCDemoCharResetLocPacket",
     "SCDemoResetActionSlotPacket",
-    "SCDoodadPhaseMsgPacket",
     "SCDoodadPuzzleScenePacket",
     "SCDoodadReqBattleFieldPacket",
     "SCDoodadUccDataPacket",
