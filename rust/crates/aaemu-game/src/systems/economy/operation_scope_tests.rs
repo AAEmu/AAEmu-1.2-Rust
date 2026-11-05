@@ -4,7 +4,7 @@ use crate::data::GameData;
 use crate::models::character::Inventory;
 use crate::models::container::slot_type;
 use crate::models::house::House;
-use crate::models::item_task::ItemFx;
+use crate::models::item_task::{AcquiredSource, ItemFx};
 use crate::systems::housing;
 use crate::test_support::{
     spawn_player, test_character, test_server, test_server_with, TestClient,
@@ -105,6 +105,8 @@ async fn item_callbacks_reenter_the_outer_scope_after_releasing_ops() {
         owner: 1,
         template_id: 1,
         count: 1,
+        added: 1,
+        source: AcquiredSource::NewItem,
     });
     drop(txn);
     assert_eq!(callback.0.load(Ordering::SeqCst), 1);
@@ -176,6 +178,8 @@ fn contend_with_publication(
         owner: 1,
         template_id: 1,
         count: 1,
+        added: 1,
+        source: AcquiredSource::NewItem,
     });
     drop(txn);
     assert_eq!(callback.calls.load(Ordering::SeqCst), 1);

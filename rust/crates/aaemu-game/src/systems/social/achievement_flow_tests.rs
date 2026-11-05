@@ -7,12 +7,15 @@ use aaemu_commons::PacketStream;
 
 use crate::data::items::ItemTemplate;
 use crate::data::GameData;
-use crate::models::container::slot_type;
+use crate::models::container::{slot_type, ContainerKind, ContainerRef, ItemContainer};
+use crate::models::item::Item;
 use crate::models::item_task::task_type;
 use crate::net::packet::encode_raw;
 use crate::opcodes::{cs, sc};
 use crate::server::GameServer;
-use crate::systems::economy::inventory::{add_money, subtract_money, Inv, ItemTxn};
+use crate::systems::economy::inventory::{add_money, lock_pair, subtract_money, Inv, ItemTxn};
+use crate::systems::economy::loot::{give_loot_pack, GeneratedLoot, ScriptedRng};
+use crate::systems::economy::loot_data::LootPack;
 use crate::systems::skills::progress::{add_exp_world_tail, ExpGain};
 use crate::systems::social::achievement::{
     char_record_kind, AchievementGameData, AchievementObjectives, Achievements, CharRecords,
@@ -445,4 +448,378 @@ async fn a_queued_refresh_runs_when_the_packet_is_handled() {
             sc::SCAchievementCompletedPacket
         ]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// GET_ITEM_TYPE (kind 29): genuine item acquisitions only.
+// ---------------------------------------------------------------------------------------------
+
+/// The item the acquisition records name.
+const GET_ITEM: u32 = 7100;
+/// An item no record names.
+const OTHER_ITEM: u32 = 7101;
+/// The `char_records` row id used by the acquisition tests.
+const GET_ITEM_RECORD: u32 = 29;
+
+fn acquisition_server(complete_num: u32) -> Arc<GameServer> {
+    let mut game_data = GameData::empty();
+    for id in [GET_ITEM, OTHER_ITEM] {
+        game_data
+            .items
+            .templates
+            .insert(id, ItemTemplate::plain(id, 20));
+    }
+    game_data.systems.social.achievements = one_achievement(
+        1,
+        complete_num,
+        0,
+        GET_ITEM_RECORD,
+        char_record_kind::GET_ITEM_TYPE,
+        GET_ITEM,
+        u32::MAX,
+    );
+    let server = Arc::new(test_server_with(game_data));
+    server.set_self();
+    crate::systems::social::install_hooks(&server);
+    server
+}
+
+/// Acquires through the same `AcquireDefaultItem` path ground pick-up, loot, craft products,
+/// quest rewards and shop purchases use.
+fn acquire_items(server: &GameServer, player: &PlayerRef, template_id: u32, count: i32) -> bool {
+    let inv = Inv::of(player);
+    let bag = inv.bag();
+    let mut txn = ItemTxn::begin(server);
+    let ok = {
+        let mut bag = bag.lock().expect("container poisoned");
+        bag.acquire_default_item(task_type::GM, template_id, count, 0, 0, &mut txn.env)
+    };
+    drop(txn);
+    ok
+}
+
+/// Puts an already owned item into one of the character's containers without raising any item
+/// effect (the state a saved character loads with).
+fn seed_owned_item(
+    server: &GameServer,
+    player: &PlayerRef,
+    st: u8,
+    template_id: u32,
+    count: i32,
+) -> u64 {
+    let container = Inv::of(player).get(st).expect("container");
+    seed_into(server, &container, st, template_id, count)
+}
+
+/// [`seed_owned_item`] into a container that is not one of `Inv`'s slots (a house coffer).
+fn seed_into(
+    server: &GameServer,
+    container: &ContainerRef,
+    st: u8,
+    template_id: u32,
+    count: i32,
+) -> u64 {
+    let id = u64::from(server.ids.item.get_next_id().unwrap());
+    let template = server
+        .game_data
+        .items
+        .template(template_id)
+        .expect("item template");
+    let mut item = Item::create(id, template, count, 0, 1, &server.game_data.items, 0);
+    let mut c = container.lock().expect("container poisoned");
+    item.slot_type = st;
+    item.slot = c.get_unused_slot(-1);
+    item.owner_id = u64::from(c.owner_id);
+    c.items.push(item);
+    c.update_free_slot_count();
+    id
+}
+
+/// `AddOrMoveExistingItem` from one container into another.
+fn move_item_between(
+    server: &GameServer,
+    from: &ContainerRef,
+    to: &ContainerRef,
+    item_id: u64,
+    preferred_slot: i32,
+) -> bool {
+    let mut txn = ItemTxn::begin(server);
+    let ok = {
+        let (mut target, mut source) = lock_pair(to, from);
+        match source.as_mut() {
+            Some(source) => target.move_item_from(
+                source,
+                task_type::INVALID,
+                item_id,
+                preferred_slot,
+                &server.game_data.items,
+                &mut txn.env.fx,
+            ),
+            None => false,
+        }
+    };
+    drop(txn);
+    ok
+}
+
+/// [`move_item_between`] between two of the character's own containers.
+fn move_between(
+    server: &GameServer,
+    player: &PlayerRef,
+    from: u8,
+    to: u8,
+    item_id: u64,
+    preferred_slot: i32,
+) -> bool {
+    let inv = Inv::of(player);
+    let from = inv.get(from).expect("source container");
+    let to = inv.get(to).expect("target container");
+    move_item_between(server, &from, &to, item_id, preferred_slot)
+}
+
+#[tokio::test]
+async fn a_new_item_credits_get_item_type_and_completes_the_record() {
+    let server = acquisition_server(3);
+    let (mut client, player) = player_of(&server);
+
+    assert!(acquire_items(&server, &player, GET_ITEM, 3));
+
+    assert_eq!(
+        achievement_ops(client.drain_ops()),
+        [
+            sc::SCAchievementChangedPacket,
+            sc::SCAchievementCompletedPacket
+        ]
+    );
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        3
+    );
+    assert!(player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn a_loot_pack_grant_credits_get_item_type() {
+    let server = acquisition_server(2);
+    let (_client, player) = player_of(&server);
+    let pack = LootPack {
+        id: 77,
+        ..Default::default()
+    };
+
+    let mut txn = ItemTxn::begin(&server);
+    let given = give_loot_pack(
+        &mut txn,
+        &player,
+        &pack,
+        0,
+        task_type::LOOT,
+        Some(vec![GeneratedLoot {
+            item_id: GET_ITEM,
+            count: 2,
+            grade: 0,
+            group: 0,
+        }]),
+        None,
+        &mut ScriptedRng::default(),
+    );
+    drop(txn);
+
+    assert!(given);
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        2
+    );
+    assert!(player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn a_template_without_a_matching_get_item_record_does_not_credit() {
+    let server = acquisition_server(2);
+    let (mut client, player) = player_of(&server);
+
+    assert!(acquire_items(&server, &player, OTHER_ITEM, 5));
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        0
+    );
+    assert!(achievement_ops(client.drain_ops()).is_empty());
+
+    assert!(acquire_items(&server, &player, GET_ITEM, 2));
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        2
+    );
+    assert!(player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn new_units_merged_into_an_owned_stack_credit_only_the_delta() {
+    let server = acquisition_server(8);
+    let (mut client, player) = player_of(&server);
+    seed_owned_item(&server, &player, slot_type::INVENTORY, GET_ITEM, 5);
+
+    assert!(acquire_items(&server, &player, GET_ITEM, 3));
+
+    // The quest event carries the new total (8); the achievement counts the 3 new units.
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        3
+    );
+    assert!(!player.data().achievement_state.is_complete(1));
+    assert_eq!(
+        achievement_ops(client.drain_ops()),
+        [sc::SCAchievementChangedPacket]
+    );
+}
+
+#[tokio::test]
+async fn moving_between_the_characters_own_containers_does_not_credit() {
+    let server = acquisition_server(1);
+    let (_client, player) = player_of(&server);
+    let id = seed_owned_item(&server, &player, slot_type::INVENTORY, GET_ITEM, 4);
+
+    assert!(move_between(
+        &server,
+        &player,
+        slot_type::INVENTORY,
+        slot_type::BANK,
+        id,
+        -1
+    ));
+    assert!(move_between(
+        &server,
+        &player,
+        slot_type::BANK,
+        slot_type::INVENTORY,
+        id,
+        -1
+    ));
+
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        0
+    );
+    assert!(!player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn taking_an_item_out_of_mail_credits_get_item_type() {
+    let server = acquisition_server(2);
+    let (_client, player) = player_of(&server);
+    let id = seed_owned_item(&server, &player, slot_type::MAIL, GET_ITEM, 2);
+
+    assert!(move_between(
+        &server,
+        &player,
+        slot_type::MAIL,
+        slot_type::INVENTORY,
+        id,
+        -1
+    ));
+
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        2
+    );
+    assert!(player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn merging_an_owned_stack_into_another_counts_nothing() {
+    let server = acquisition_server(1);
+    let (_client, player) = player_of(&server);
+    seed_owned_item(&server, &player, slot_type::INVENTORY, GET_ITEM, 5);
+    let bank_id = seed_owned_item(&server, &player, slot_type::BANK, GET_ITEM, 4);
+
+    // Slot 0 holds the existing stack, so this is a merge, not a new slot.
+    assert!(move_between(
+        &server,
+        &player,
+        slot_type::BANK,
+        slot_type::INVENTORY,
+        bank_id,
+        0
+    ));
+
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        0
+    );
+    assert!(!player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn receiving_an_item_from_another_character_credits_get_item_type() {
+    let server = acquisition_server(2);
+    let (mut client, player) = player_of(&server);
+    let mut giver_client = TestClient::new(&server, 2, 1002);
+    let giver = spawn_player(
+        &server,
+        &giver_client,
+        test_character(2, "Giver", 101.0, 100.0),
+        0x101,
+    );
+    let source = Inv::of(&giver).bag();
+    let target = Inv::of(&player).bag();
+    let id = seed_into(&server, &source, slot_type::INVENTORY, GET_ITEM, 2);
+
+    assert!(move_item_between(&server, &source, &target, id, -1));
+
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        2
+    );
+    assert!(player.data().achievement_state.is_complete(1));
+    let _ = giver_client.drain();
+    client.drain();
+}
+
+#[tokio::test]
+async fn a_house_coffer_withdrawal_does_not_credit() {
+    let server = acquisition_server(1);
+    let (_client, player) = player_of(&server);
+    // A coffer is a `Coffer` container whose slot type is TRADE; it is the character's own
+    // storage, not a trade with another character.
+    let coffer = ItemContainer::new(ContainerKind::Coffer, 2, slot_type::TRADE, 999).into_ref();
+    let bag = Inv::of(&player).bag();
+    let id = seed_into(&server, &coffer, slot_type::TRADE, GET_ITEM, 4);
+
+    assert!(move_item_between(&server, &coffer, &bag, id, -1));
+
+    assert_eq!(
+        player
+            .data()
+            .achievement_state
+            .record_value(GET_ITEM_RECORD),
+        0
+    );
+    assert!(!player.data().achievement_state.is_complete(1));
 }

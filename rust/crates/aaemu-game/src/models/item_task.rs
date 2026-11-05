@@ -506,6 +506,35 @@ impl Marshal for ItemTask {
     }
 }
 
+/// Where the units of an [`ItemFx::Acquired`] came from. The quest `OnAcquiredItem` event fires
+/// for all of them (the C# behaviour), but an achievement that counts acquired items must only
+/// count units the character did not already own: a bag <-> bank/coffer move or a re-stack of an
+/// owned stack is not an acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquiredSource {
+    /// A newly created item (loot, craft product, quest reward, purchase, GM, ...).
+    NewItem,
+    /// Newly created units added to an existing stack of the character's items.
+    NewUnits,
+    /// Taken out of the mail container.
+    MailTake,
+    /// Received from another character's container (trade).
+    Trade,
+    /// Moved between the character's own containers (bag <-> bank/coffer) or re-slotted.
+    Transfer,
+}
+
+impl AcquiredSource {
+    /// Whether the units are a genuine acquisition (`GET_ITEM_TYPE`, kind 29) rather than a
+    /// container shuffle of items the character already owned.
+    pub fn is_acquisition(self) -> bool {
+        matches!(
+            self,
+            Self::NewItem | Self::NewUnits | Self::MailTake | Self::Trade
+        )
+    }
+}
+
 /// One deferred side effect of an item operation (see the module docs).
 #[derive(Debug)]
 pub enum ItemFx {
@@ -527,10 +556,15 @@ pub enum ItemFx {
     },
     /// `Owner?.Inventory.OnAcquiredItem(item, count)`; `count` is what the C# hands to
     /// `QuestManager.DoItemsAcquiredEvents` (the item's count, not the added amount).
+    /// `added` is the number of units that entered the receiving container, and `source` says
+    /// whether they are a genuine acquisition or a move of items the character already owned
+    /// (see [`AcquiredSource`]).
     Acquired {
         owner: u32,
         template_id: u32,
         count: i32,
+        added: i32,
+        source: AcquiredSource,
     },
     /// `Owner?.Inventory.OnConsumedItem(item, count)`.
     Consumed {

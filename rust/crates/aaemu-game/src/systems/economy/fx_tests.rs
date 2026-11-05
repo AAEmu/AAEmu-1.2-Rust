@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::data::items::ItemTemplate;
 use crate::models::item::Item;
-use crate::models::item_task::{ItemFx, ItemFxList};
+use crate::models::item_task::{AcquiredSource, ItemFx, ItemFxList};
 use crate::server::GameServer;
 use crate::systems::economy::hooks::QuestItemHooks;
 use crate::systems::economy::inventory::ItemTxn;
@@ -56,6 +56,8 @@ fn queue_effects(txn: &mut ItemTxn<'_>, removed: u64, loose: u64) {
         owner: 1,
         template_id: 500,
         count: 3,
+        added: 3,
+        source: AcquiredSource::NewItem,
     });
     txn.env.fx.push(ItemFx::ReleaseId(removed));
     txn.env.fx.push(ItemFx::Consumed {

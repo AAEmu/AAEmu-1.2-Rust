@@ -1198,6 +1198,17 @@ fn create_trial_case(
     Some(id)
 }
 
+/// Why [`TrialManager::force_summon_jury`] refused to seat a player. The GM command maps
+/// these to chat messages; no packet is sent for a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceJuryError {
+    NoTrial,
+    NotSummoning,
+    NotInMainWorld,
+    AlreadyInTrial,
+    NoSeat,
+}
+
 impl TrialManager {
     fn st(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("trial manager poisoned")
@@ -1561,6 +1572,57 @@ impl TrialManager {
     }
 
     /// `ProcessTrialInviteReply(player, accept, trialId)`.
+    /// GM `/set_jury` (retail command, WP-SL6b): seats `player` in the first free jury seat
+    /// of `trial_id` without an invitation or queue entry. The structural checks of
+    /// `ProcessTrialInviteReply` still apply (step, main world, no other trial); the
+    /// invitation / queue / eligibility checks are deliberately skipped for the GM command.
+    pub fn force_summon_jury(
+        &self,
+        server: &GameServer,
+        trial_id: u32,
+        player: &PlayerRef,
+        now_ms: i64,
+    ) -> Result<(), ForceJuryError> {
+        let mut fx = Vec::new();
+        let res = {
+            let mut st = self.st();
+            let State {
+                rooms,
+                trials,
+                queues,
+                ..
+            } = &mut *st;
+            let Some(t) = trials.get(&trial_id) else {
+                return Err(ForceJuryError::NoTrial);
+            };
+            if t.step != trial_step::AWAITING_JURY_SUMMONS {
+                return Err(ForceJuryError::NotSummoning);
+            }
+            if player.data().unit.transform.instance_id != 0 {
+                return Err(ForceJuryError::NotInMainWorld);
+            }
+            if trials.values().any(|t| {
+                t.jury.values().any(|j| {
+                    j.jury_member
+                        .as_ref()
+                        .is_some_and(|m| Arc::ptr_eq(m, player))
+                })
+            }) {
+                return Err(ForceJuryError::AlreadyInTrial);
+            }
+            let Some(t) = trials.get_mut(&trial_id) else {
+                return Err(ForceJuryError::NoTrial);
+            };
+            if summon_jury_member(server, rooms, queues, t, player, now_ms, &mut fx) {
+                Ok(())
+            } else {
+                Err(ForceJuryError::NoSeat)
+            }
+        };
+        run_effects(server, fx);
+        res
+    }
+
     pub fn process_trial_invite_reply(
         &self,
         server: &GameServer,
