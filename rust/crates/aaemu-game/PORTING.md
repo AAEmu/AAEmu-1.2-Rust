@@ -2241,6 +2241,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   3047/3048. Deviation: the outbid refund uses `MailType.AucBidFail` (17, the client's
   `AUCITON_BID_FAIL`) instead of the C# `AucOffFail` (15), so its mailbox label is the
   bid-failure one.
+* systems::economy (auction declare tab, 2026-11-05): the 1.2 client's declare-siege tab is the
+  normal `CSAuctionSearch` with `filter = 1` (`X2Auction.SearchDeclareSiege`, EVIDENCED in the
+  client decompile): it lists only lots whose item template has `auction_a_category_id = 11`
+  (`declare_siege`, the six Siege Camps). `filter = 0` is unchanged and still lists every lot
+  (whether retail also hid the camps from the normal tab is UNKNOWN); any other value is
+  treated as 0 and logged once. The C# ignored `filter`.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
