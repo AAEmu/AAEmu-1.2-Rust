@@ -39,7 +39,6 @@
 //! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex are
 //!                                    the object ids, `GUILD` the bot's guild id as a u32)
 //! targetpeer [name]                 select the peer (GM commands that act on the target)
-//! targetself                        select the bot's own unit
 //! pkill [name]                       `/kill` with the peer targeted (GM)
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
@@ -1349,12 +1348,6 @@ async fn run_lines(
                 let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(60);
                 let e = await_event(game, &mut consumed, kind, secs).await?;
                 println!("    awaited: {e:?}");
-            }
-            "targetself" => {
-                let own = game.state.self_obj;
-                game.change_target(own).await?;
-                game.drain(Duration::from_millis(300), Duration::from_secs(1))
-                    .await?;
             }
             "targetpeer" => {
                 let target = peer(game, parts.first().copied())?;
