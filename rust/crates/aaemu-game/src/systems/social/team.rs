@@ -584,7 +584,7 @@ impl TeamManager {
             .filter(|p| {
                 let pos = util::world_position(server, p);
                 let (dx, dy) = (pos.0 - me.0, pos.1 - me.1);
-                dx * dx + dy * dy <= 100.0 * 100.0
+                p.character_id != owner.character_id && dx * dx + dy * dy <= 100.0 * 100.0
             })
             .collect();
         for c in around {

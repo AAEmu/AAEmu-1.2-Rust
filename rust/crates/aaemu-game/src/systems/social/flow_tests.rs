@@ -1834,7 +1834,8 @@ async fn invite_area_skips_party_members_and_hostiles() {
     assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
     // 200 m away: outside the 100 m radius.
     assert!(far.ops().is_empty());
-    let _ = a.ops();
+    // The inviter hears nothing (no "invite yourself" error for being around itself).
+    assert!(a.ops().is_empty());
 }
 
 /// Guild invitations must be pending and unexpired, a member cannot join a second guild, and
