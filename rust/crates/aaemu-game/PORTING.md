@@ -5090,9 +5090,17 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
   performs the last build action. **Auction** and **jury** credits go to online characters only.
 * **GET_FACTION** is state-derived (entry back-credit plus the crossing of the infamy threshold in
   `CrimeManager::add_crime_points`); other faction changes do not credit (Q8).
-* **GET_ITEM_TYPE (k29), KILL_SLAVE (k26), MY_DISHONORABLE_POINT (k49), siege results (k57-60)** stay
-  unwired (see the audit for why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is
-  deliberately never sent.
+* **GET_ITEM_TYPE (k29)** counts only genuine acquisitions. `ItemFx::Acquired` now carries the
+  `added` unit count and an `AcquiredSource`: a newly created item (loot, craft product, quest
+  reward, shop purchase), new units merged into an owned stack, a mail take, or an item received
+  from another character (trade). Moves between the character's own containers (bag <-> bank, a
+  house coffer, re-slotting) and merges of already owned stacks are tagged `Transfer` and never
+  credit, so warehouse shuffling cannot complete a collection achievement. The report runs from
+  `economy::fx::flush` with the same lock rules as the other producers (queued while the economy
+  lock is held). All 216 authored records use the `-1` any-grade wildcard, so the event carries no
+  grade (a `value2 >= 0` row would need one). `KILL_SLAVE (k26)`,
+  `MY_DISHONORABLE_POINT (k49)` and the siege results (k57-60) stay unwired (see the audit for
+  why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is deliberately never sent.
 
 ## PvP duel fixes (duel disconnect, GM faction, quit relog)
 
