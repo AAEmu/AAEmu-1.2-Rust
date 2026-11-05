@@ -32,13 +32,16 @@
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex are
+//!                                    the object ids, `GUILD` the bot's guild id as a u32)
+//! targetpeer [name]                 select the peer (GM commands that act on the target)
 //! pkill [name]                       `/kill` with the peer targeted (GM)
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
 //! partyaccept                        wait for SCAskToJoinTeam and accept it
 //! gcreate <name>                     CSCreateExpedition
 //! ginvite [name]                     CSInviteToExpedition to the peer
+//! grename <name>                     CSRenameExpedition for the bot's own guild
 //! gaccept                            wait for the guild invitation and join
 //! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
 //! hangup                            hard disconnect (socket closed, no CSLeaveWorld); ends the script
@@ -1133,6 +1136,12 @@ async fn run_lines(
                 let e = await_event(game, &mut consumed, kind, secs).await?;
                 println!("    awaited: {e:?}");
             }
+            "targetpeer" => {
+                let target = peer(game, parts.first().copied())?;
+                game.change_target(target.obj_id).await?;
+                game.drain(Duration::from_millis(300), Duration::from_secs(1))
+                    .await?;
+            }
             "pkill" => {
                 let target = peer(game, parts.first().copied())?;
                 clock += 1500;
@@ -1164,7 +1173,17 @@ async fn run_lines(
                 } else {
                     String::new()
                 };
+                // `GUILD` is the bot's guild id as a little-endian u32.
                 let hex = raw
+                    .replace(
+                        "GUILD",
+                        &game
+                            .state
+                            .guild_id
+                            .to_le_bytes()
+                            .map(|b| format!("{b:02x}"))
+                            .concat(),
+                    )
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
                 anyhow::ensure!(
@@ -1241,6 +1260,16 @@ async fn run_lines(
                 let (op, body) = social::create_expedition(rest.trim());
                 game.send_cs(op, &body).await?;
                 game.drain(Duration::from_millis(800), Duration::from_secs(4))
+                    .await?;
+            }
+            "grename" => {
+                let id = game.state.guild_id;
+                if id == 0 {
+                    bail!("grename: the bot has not seen its guild yet");
+                }
+                let (op, body) = social::rename_expedition(id, rest.trim(), true);
+                game.send_cs(op, &body).await?;
+                game.drain(Duration::from_millis(800), Duration::from_secs(3))
                     .await?;
             }
             "ginvite" => {

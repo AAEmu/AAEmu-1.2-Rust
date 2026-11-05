@@ -595,6 +595,9 @@ pub struct GameState {
     /// Party / guild notifications in arrival order ([`crate::social`]), so `await` also sees
     /// packets an earlier `drain` already read.
     pub social: Vec<crate::social::SocialEvent>,
+    /// Id of the guild the bot is in (from `SCFactionCreated` / `SCExpeditionMemberList`); 0 =
+    /// none seen.
+    pub guild_id: u32,
     /// Position of the last `SCTeleportUnitPacket` (a GM `/move` only tells the client to go
     /// there; the server adopts the position from the client's next movement packet).
     pub last_teleport: Option<(f32, f32, f32)>,
@@ -607,6 +610,18 @@ impl GameState {
         self.observation_seq += 1;
         if let Some(ev) = crate::social::decode(p) {
             self.social.push(ev);
+        }
+        if p.level == LEVEL_GAME {
+            let mut g = p.stream();
+            if p.opcode == sc::SCFactionCreatedPacket {
+                if let Ok(id) = g.read_u32() {
+                    self.guild_id = id;
+                }
+            } else if p.opcode == sc::SCExpeditionMemberListPacket {
+                if let (Ok(_), Ok(_), Ok(id)) = (g.read_u32(), g.read_u8(), g.read_u32()) {
+                    self.guild_id = id;
+                }
+            }
         }
         let mut s = p.stream();
         let st = self;
