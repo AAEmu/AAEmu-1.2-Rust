@@ -182,6 +182,27 @@ fn show(packets: &[Packet]) {
             } else {
                 println!("    SCDoodadCompleteQuest (unreadable)");
             }
+        } else if p.is_sc(sc::SCRaceCondPacket) {
+            let mut s = p.stream();
+            match (s.read_u8(), s.read_u32(), s.read_u32()) {
+                (Ok(rc), Ok(track), Ok(after)) => {
+                    println!("    SCRaceCond rc {rc} track {track} after {after} ms");
+                }
+                _ => println!("    SCRaceCond (unreadable)"),
+            }
+        } else if p.is_sc(sc::SCRacingPacket) {
+            let mut s = p.stream();
+            match (s.read_u8(), s.read_u32(), s.read_i32()) {
+                (Ok(rc), Ok(record), Ok(v1)) => {
+                    println!("    SCRacing rc {rc} record {record} ms v1 {v1}");
+                }
+                _ => println!("    SCRacing (unreadable)"),
+            }
+        } else if p.is_sc(sc::SCRacingResultPacket) {
+            match decode_racing_result(&mut p.stream()) {
+                Ok(rows) => println!("    SCRacingResult rows {rows:?}"),
+                Err(_) => println!("    SCRacingResult (unreadable)"),
+            }
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {
             let t = parse_item_task(&p.body);
             let items: Vec<String> = t
@@ -555,6 +576,17 @@ fn decode_auction_message(s: &mut aaemu_commons::PacketStream) -> anyhow::Result
 /// `SCCraftItemUnlock` as the client reads it (`FUN_397b4c60`): two u8s (slot type, index).
 fn decode_craft_unlock(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<(u8, u8)> {
     Ok((s.read_u8()?, s.read_u8()?))
+}
+
+/// `SCRacingResult` as the client reads it (`FUN_397b0340`): i32 count, then `min(count, 10)`
+/// rows of `{u32 type, u32 record}` (`FUN_397a8870`).
+fn decode_racing_result(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<Vec<(u32, u32)>> {
+    let count = s.read_i32()?;
+    let mut rows = Vec::new();
+    for _ in 0..count.clamp(0, 10) {
+        rows.push((s.read_u32()?, s.read_u32()?));
+    }
+    Ok(rows)
 }
 
 /// `SCCraftFailed` as the client reads it (`FUN_397b8110`): u32 id, i32 count (clamped to 20),
@@ -2944,6 +2976,21 @@ mod tests {
         assert_eq!(
             super::decode_craft_failed(&mut s).unwrap(),
             (7, 2, vec![100, 200])
+        );
+        assert_eq!(s.remaining(), 0);
+    }
+
+    #[test]
+    fn racing_result_decodes_the_client_reader_layout() {
+        // `FUN_397b0340`: i32 count, then min(count, 10) rows of {u32 type, u32 record}.
+        let mut s = aaemu_commons::PacketStream::from_bytes(vec![
+            0x02, 0x00, 0x00, 0x00, // count
+            0x02, 0x00, 0x00, 0x00, 0x88, 0x13, 0x00, 0x00, // type 2, record 5000
+            0x07, 0x00, 0x00, 0x00, 0x60, 0xEA, 0x00, 0x00, // type 7, record 60000
+        ]);
+        assert_eq!(
+            super::decode_racing_result(&mut s).unwrap(),
+            vec![(2, 5000), (7, 60000)]
         );
         assert_eq!(s.remaining(), 0);
     }
