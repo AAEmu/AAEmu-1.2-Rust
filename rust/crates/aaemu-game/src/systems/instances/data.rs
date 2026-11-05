@@ -610,6 +610,13 @@ pub struct GameRuleSet {
     pub rank_draw_point: i32,
     /// `time_unearned_win` (seconds; 0 on every shipped row but the Gladiator's 60).
     pub time_unearned_win: i32,
+    /// `time_resurrection_delay`: how long the battlefield waits before resurrecting a dead
+    /// member. The 1.2 rows author 15 s for every rule set and 5 s for the Gladiator (28).
+    /// Unit INFERRED as seconds: the values fit the match timings (`time_unearned_win` 60,
+    /// `time_playing` minutes) and the 1.2 client loads the column with the rest of the rule
+    /// set (`LoadGameRuleSetDescs`, string 39a16a28). `0` / NULL (a hand-built rule set) means
+    /// no authored delay.
+    pub time_resurrection_delay: i32,
 }
 
 impl GameRuleSet {
@@ -775,6 +782,11 @@ impl BattlefieldData {
                 rank_draw_point: rank_point(r, "rank_draw_point")?,
                 time_unearned_win: if r.has("time_unearned_win") {
                     r.i32_or("time_unearned_win", 0)?
+                } else {
+                    0
+                },
+                time_resurrection_delay: if r.has("time_resurrection_delay") {
+                    r.i32_or("time_resurrection_delay", 0)?
                 } else {
                     0
                 },

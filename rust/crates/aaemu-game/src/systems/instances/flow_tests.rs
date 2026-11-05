@@ -1502,6 +1502,7 @@ fn camp_server_with(
         30,
         2,
         false,
+        7,
         tweak,
     )
 }
@@ -1522,6 +1523,7 @@ fn camp_server_with_score(
         kill_score,
         assist_score,
         false,
+        7,
         tweak,
     )
 }
@@ -1529,7 +1531,7 @@ fn camp_server_with_score(
 /// [`camp_server`] in the arena ranking board's zone group (77) with the gladiator duel's
 /// authored points (win 4, lose 1).
 fn camp_server_ranked(corps_size: u32, victory_score: i32) -> Arc<GameServer> {
-    camp_server_build(corps_size, victory_score, 0, 30, 2, true, |r| {
+    camp_server_build(corps_size, victory_score, 0, 30, 2, true, 7, |r| {
         r.rank_win_point = 4;
         r.rank_lose_point = 1;
     })
@@ -1543,6 +1545,7 @@ fn camp_server_build(
     kill_score: i32,
     assist_score: i32,
     ranked: bool,
+    battlefield_id: u32,
     tweak: impl FnOnce(&mut GameRuleSet),
 ) -> Arc<GameServer> {
     let mut data = GameData::empty();
@@ -1574,7 +1577,7 @@ fn camp_server_build(
         time_ending: 0,
         time_playing: 15,
         victory_score,
-        battlefield_id: 7,
+        battlefield_id,
         victory_kill_count,
         killstreak_skills: [0; 24],
         ..GameRuleSet::default()
@@ -1594,7 +1597,7 @@ fn camp_server_build(
         .battlefields
         .battlefield_buffs
         .insert(
-            7,
+            battlefield_id,
             vec![BattleFieldBuff {
                 id: 27,
                 buff_id: 8246,
@@ -1624,12 +1627,12 @@ fn camp_server_build(
         ],
     );
     data.systems.instances.battlefields.battlefields = HashMap::from([(
-        7,
+        battlefield_id,
         Battlefield {
-            id: 7,
+            id: battlefield_id,
             zone_key: CAMP_ZONE,
             spawns: Some(BattlefieldSpawns {
-                battlefield_id: 7,
+                battlefield_id,
                 corps1_spawn: Some(point(1101.1, 401.5)),
                 corps2_spawn: Some(point(1229.0, 530.0)),
             }),
@@ -2111,10 +2114,18 @@ async fn battlefield_entered_requires_actual_instance_and_subscribes_kills_once(
 
 /// Two players matched, joined and entered on battlefield 7; the game has started.
 async fn started_1v1(server: &Arc<GameServer>) -> (Pc, Pc, Arc<instant_game::InstantGame>) {
+    started_1v1_on(server, 7).await
+}
+
+/// [`started_1v1`] on the given battlefield (7 = Drill Camp, 11 = Gladiator).
+async fn started_1v1_on(
+    server: &Arc<GameServer>,
+    battlefield_id: u32,
+) -> (Pc, Pc, Arc<instant_game::InstantGame>) {
     let mut a = Pc::new(server, 5, "Echo", 100.0, 100.0);
     let mut b = Pc::new(server, 6, "Foxtrot", 120.0, 100.0);
     for pc in [&a, &b] {
-        instant_game::apply_to_battlefield(server, 7, corps::ANY, &pc.p);
+        instant_game::apply_to_battlefield(server, battlefield_id, corps::ANY, &pc.p);
     }
     instant_game::battlefield_tick(server);
     let game = server.systems.instances.instant_games.games()[0].clone();
@@ -2398,6 +2409,122 @@ async fn a_battlefield_result_scores_the_arena_ranking_board() {
     // The result is offered once: the destroy that follows does not score again.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(ranking.score_of(5, 1, period).unwrap().v1, 4);
+}
+
+/// The battlefield resurrects the victim after the running rule set's
+/// `time_resurrection_delay` (the 1.2 rows author 15 s), not after the C# hard-coded 6 s.
+#[tokio::test(start_paused = true)]
+async fn battlefield_resurrection_waits_the_rule_set_delay() {
+    let server = camp_server_with(1, 60, 0, |r| r.time_resurrection_delay = 15);
+    let (a, mut b, game) = started_1v1(&server).await;
+    assert_eq!(game.rule_set.time_resurrection_delay, 15);
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(14)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must still be dead 14 s after the kill"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must be resurrected 15 s after the kill"
+    );
+}
+
+/// The Gladiator rule set (28) authors a 5 s delay.
+#[tokio::test(start_paused = true)]
+async fn gladiator_resurrection_waits_five_seconds() {
+    let server = camp_server_build(1, 60, 0, 30, 2, false, 11, |r| {
+        r.id = 28;
+        r.time_resurrection_delay = 5;
+    });
+    let (a, mut b, game) = started_1v1_on(&server, 11).await;
+    assert_eq!(game.battlefield.id, instant_game::game_type::GLADIATOR);
+    assert_eq!(game.rule_set.time_resurrection_delay, 5);
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(4)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must still be dead 4 s after the kill"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must be resurrected 5 s after the kill"
+    );
+}
+
+/// A rule set without an authored delay (0 / NULL) keeps the old 6 s.
+#[tokio::test(start_paused = true)]
+async fn battlefield_resurrection_without_delay_keeps_six_seconds() {
+    let server = camp_server(1, 60);
+    let (a, mut b, game) = started_1v1(&server).await;
+    assert_eq!(game.rule_set.time_resurrection_delay, 0);
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(5)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "without an authored delay the victim must not resurrect before 6 s"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "without an authored delay the victim must be resurrected at 6 s"
+    );
 }
 
 // ---- Return effect (world gates) inside instances ----
