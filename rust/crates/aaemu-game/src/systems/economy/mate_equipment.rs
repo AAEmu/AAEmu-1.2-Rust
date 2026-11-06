@@ -548,8 +548,9 @@ impl CSRepairPetItemsPacket {
 }
 sync_client_packet!(CSRepairPetItemsPacket);
 
-/// `CSRepairSlaveItemsPacket`: the repairman restores destroyed slave summon items (log only
-/// in the 1.2 C#; the client's cost preview and locale strings define the service).
+/// `CSRepairSlaveItemsPacket`: the repairman restores destroyed slave summon items. The 1.2
+/// C# only logged it; the client's cost preview (`GetTotalRepairsForSlaveItems`) and locale
+/// strings define the service, and `vehicles::slaves::repair_slave_items` implements it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRepairSlaveItemsPacket {
     pub npc_id: u32,

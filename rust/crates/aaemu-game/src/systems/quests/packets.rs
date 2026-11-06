@@ -530,10 +530,12 @@ pub enum QuestStartWithTail {
     Unknown,
 }
 
-/// `CSQuestStartWithPacket` (logged only): `u32 quest, u32 component, u32 act, u8 type` and a
-/// typed tail. The 1.2 client writer `FUN_397c5450` / `FUN_397be540` builds it at
-/// `dll.c:720031` for type 2 = a player level reached, i.e. a `QuestActConAcceptLevelUp` start;
-/// the server starts those quests itself on level up (`events::on_level_up`).
+/// `CSQuestStartWithPacket` (logged only at debug): `u32 quest, u32 component, u32 act,
+/// u8 type` and a typed tail. The 1.2 client writer `FUN_397c5450` / `FUN_397be540` builds it
+/// at `dll.c:720031` for type 2 = a player level reached, i.e. a `QuestActConAcceptLevelUp`
+/// start; the server starts those quests itself on level up (`events::on_level_up`), so the
+/// packet is an acknowledgement. The meanings of types 1 / 3 / 4 are unknown and
+/// capture-pending (`QUEST-START-WITH-1`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSQuestStartWithPacket {
     pub quest: u32,

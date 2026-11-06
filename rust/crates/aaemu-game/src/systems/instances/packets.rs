@@ -216,7 +216,9 @@ impl ClientPacket for CSSelectSysInstanceChannelPacket {
 }
 
 /// `CSUnknownInstancePacket` 0x13e: a post-load notice of the world instance the client is in,
-/// not a channel pick (the pick is CS 0x13d; re-indun-interact Q1d). Read and ignored.
+/// not a channel pick (the pick is CS 0x13d; re-indun-interact Q1d). It is client-local: the
+/// server already knows the instance, so the notice is read and ignored at debug
+/// (`MISC-CS-1`; capture-pending if it ever needs an answer).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CSUnknownInstancePacket {
     pub kind: u16,
