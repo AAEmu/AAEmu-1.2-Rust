@@ -77,6 +77,7 @@ fn measure_main_world_block() {
             heightmaps_enable: true,
             geo_data_mode: false,
             pre_load_terrain: false,
+            placement_strict_surface: false,
         },
     ));
     let base = CUR.load(Ordering::Relaxed);
