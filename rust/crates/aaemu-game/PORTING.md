@@ -593,7 +593,12 @@ deltas in one `SCItemTaskSuccess`. INFERRED from the client texts `ask_use_aa_po
 a short AA purse keeps the caller's existing error and charges nothing. Consumers: the house-tax
 billing mail (`PayChargeMoney`), `CSCreateShipyard` (taxation) and `CSCreateHouse` (construction
 quote). Tax certificates still pay no gold and therefore never use AA. Cash-shop AA prices,
-`CSICSBuyAAPoint` and the bank/store/trade consumers stay under WP-AA2 / AA3a/b/d.
+`CSICSBuyAAPoint` and the bank/store/trade consumers stay under WP-AA2 / AA3a/b/d. Tests:
+`gold_or_aa_shortage_cover_debits_both_purses_in_one_task`,
+`house_tax_aa_shortage_cover_pays_the_shortage_and_books_the_aa_revenue_share`,
+`house_tax_refusals_leave_gold_aa_house_and_treasury_untouched_when_aa_is_short_or_the_flag_is_off`,
+`house_construction_aa_shortage_cover_builds_and_a_refusal_keeps_gold_aa_and_design`,
+`aa_shortage_cover_builds_the_shipyard_and_refusals_keep_money_aa_and_item`.
 
 #### Item and craft notification packet definitions (2026-11-05)
 
