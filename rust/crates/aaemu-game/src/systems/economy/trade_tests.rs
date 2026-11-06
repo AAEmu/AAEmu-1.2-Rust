@@ -40,6 +40,14 @@ fn i32_frame(op: u16, v: i32) -> (u16, Vec<u8>) {
     (op, v.to_le_bytes().to_vec())
 }
 
+/// `content_configs` id 3 decides the trade-money currency: `3` = AA points, the shipped
+/// `100` = gold.
+fn trade_world(content_config_id3: i64) -> World {
+    let mut data = crate::systems::economy::tests::test_data();
+    data.content_configs.insert(3, content_config_id3);
+    world_with(data)
+}
+
 /// Alice (0x100) asks Bob (0x101), Bob accepts: Alice is the owner.
 fn start(w: &mut World) {
     run::<CSCanStartTradePacket>(w, 0, &bc(0x101));
@@ -650,6 +658,230 @@ async fn full_trade_items_and_money() {
     );
     assert!(w.server.systems.economy.trade.trades().is_empty());
     assert_eq!(item.id, id);
+}
+
+#[tokio::test]
+async fn trade_money_stays_gold_with_the_shipped_content_config() {
+    let mut w = trade_world(100);
+    let pa = w.pa.clone();
+    let pb = w.pb.clone();
+    {
+        let mut c = pa.data();
+        c.money = 1000;
+        c.aa_point = 7000;
+    }
+    {
+        let mut c = pb.data();
+        c.money = 500;
+        c.aa_point = 8000;
+    }
+    start(&mut w);
+
+    putup_money(&mut w, 0, 200);
+    assert_eq!(
+        w.a.drain(),
+        vec![i32_frame(sc::SCTradeMoneyPutupPacket, 200)]
+    );
+    assert_eq!(
+        w.b.drain(),
+        vec![i32_frame(sc::SCOtherTradeMoneyPutupPacket, 200)]
+    );
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 0);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+
+    let (a_money, a_aa) = {
+        let c = pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((a_money, a_aa), (800, 7000));
+    let (b_money, b_aa) = {
+        let c = pb.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((b_money, b_aa), (700, 8000));
+    let fa = w.a.drain();
+    let fb = w.b.drain();
+    let made = |tasks: Vec<ItemTask>| {
+        body_of(&SCTradeMadePacket {
+            action: task_type::TRADE,
+            tasks,
+            force_remove: Vec::new(),
+        })
+    };
+    assert_eq!(fa[0], pair(sc::SCTradeOkUpdatePacket, true, true));
+    assert_eq!(
+        fa[1],
+        (
+            sc::SCTradeMadePacket,
+            made(vec![ItemTask::MoneyChange(-200)])
+        )
+    );
+    assert_eq!(fb[0], pair(sc::SCTradeOkUpdatePacket, true, true));
+    assert_eq!(
+        fb[1],
+        (
+            sc::SCTradeMadePacket,
+            made(vec![ItemTask::MoneyChange(200)])
+        )
+    );
+}
+
+#[tokio::test]
+async fn aa_trade_moves_both_wallets_atomically() {
+    let mut w = trade_world(3);
+    let pa = w.pa.clone();
+    let pb = w.pb.clone();
+    pa.data().aa_point = 500;
+    pb.data().aa_point = 100;
+    start(&mut w);
+
+    // The wire layout is unchanged: the same single i32 amount, now AA points.
+    putup_money(&mut w, 0, 100);
+    assert_eq!(
+        w.a.drain(),
+        vec![i32_frame(sc::SCTradeMoneyPutupPacket, 100)]
+    );
+    assert_eq!(
+        w.b.drain(),
+        vec![i32_frame(sc::SCOtherTradeMoneyPutupPacket, 100)]
+    );
+    putup_money(&mut w, 1, 40);
+    w.a.drain();
+    w.b.drain();
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 0);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+
+    let (a_aa, a_money) = {
+        let c = pa.data();
+        (c.aa_point, c.money)
+    };
+    assert_eq!((a_aa, a_money), (440, 0));
+    let (b_aa, b_money) = {
+        let c = pb.data();
+        (c.aa_point, c.money)
+    };
+    assert_eq!((b_aa, b_money), (160, 0));
+    let fa = w.a.drain();
+    let fb = w.b.drain();
+    let made = |tasks: Vec<ItemTask>| {
+        body_of(&SCTradeMadePacket {
+            action: task_type::TRADE,
+            tasks,
+            force_remove: Vec::new(),
+        })
+    };
+    assert_eq!(fa[0], pair(sc::SCTradeOkUpdatePacket, true, true));
+    assert_eq!(
+        fa[1],
+        (
+            sc::SCTradeMadePacket,
+            made(vec![
+                ItemTask::AaPointUpdate(-100),
+                ItemTask::AaPointUpdate(40)
+            ])
+        )
+    );
+    assert_eq!(fb[0], pair(sc::SCTradeOkUpdatePacket, true, true));
+    assert_eq!(
+        fb[1],
+        (
+            sc::SCTradeMadePacket,
+            made(vec![
+                ItemTask::AaPointUpdate(100),
+                ItemTask::AaPointUpdate(-40)
+            ])
+        )
+    );
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn aa_trade_refuses_insufficient_aa_at_put_up() {
+    let mut w = trade_world(3);
+    w.pa.data().aa_point = 50;
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+
+    putup_money(&mut w, 0, 100);
+    assert_eq!(w.a.drain(), vec![error_frame(707)]);
+    assert!(w.b.drain().is_empty());
+    let t = w.server.systems.economy.trade.trades();
+    assert_eq!(t[0].owner_money_putup, 0);
+    drop(t);
+
+    // The trade survives the refused put-up: the affordable amount is accepted.
+    putup_money(&mut w, 0, 50);
+    assert_eq!(
+        w.a.drain(),
+        vec![i32_frame(sc::SCTradeMoneyPutupPacket, 50)]
+    );
+    assert_eq!(
+        w.b.drain(),
+        vec![i32_frame(sc::SCOtherTradeMoneyPutupPacket, 50)]
+    );
+    assert_eq!(w.pa.data().aa_point, 50);
+}
+
+#[tokio::test]
+async fn aa_trade_refuses_insufficient_aa_at_completion_without_moving_either_wallet() {
+    let mut w = trade_world(3);
+    let pa = w.pa.clone();
+    let pb = w.pb.clone();
+    pa.data().aa_point = 100;
+    pb.data().aa_point = 100;
+    start(&mut w);
+    putup_money(&mut w, 0, 100);
+    w.a.drain();
+    w.b.drain();
+
+    // Spent between the put-up and the completion (the put-up does not reserve points).
+    pa.data().aa_point = 99;
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 0);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+
+    let (a_aa, b_aa) = {
+        let a = pa.data().aa_point;
+        let b = pb.data().aa_point;
+        (a, b)
+    };
+    assert_eq!((a_aa, b_aa), (99, 100));
+    let fa = w.a.drain();
+    let fb = w.b.drain();
+    assert_eq!(
+        fa,
+        vec![
+            pair(sc::SCTradeOkUpdatePacket, true, true),
+            error_frame(707),
+            canceled(0, true)
+        ]
+    );
+    assert_eq!(
+        fb,
+        vec![
+            pair(sc::SCTradeOkUpdatePacket, true, true),
+            canceled(0, false)
+        ]
+    );
+    assert!(w.server.systems.economy.trade.trades().is_empty());
 }
 
 /// The giving side of a trade gets a Consumed event (deviation from C#: only the receiver's
