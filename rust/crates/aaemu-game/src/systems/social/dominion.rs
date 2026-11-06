@@ -487,6 +487,12 @@ pub fn apply_released(server: &GameServer, previous: &DominionState, released: &
 /// Ownership delta followed by the authoritative snapshot: the native delta resets national
 /// tax to 500 independently, which must not replace the server's persisted value.
 pub fn broadcast_owner_change(server: &GameServer, state: &DominionState) {
+    broadcast_owner_change_with(server, state, false);
+}
+
+/// [`broadcast_owner_change`] with the client's announcement choice (`true` = bestowed,
+/// `false` = declared/captured).
+pub fn broadcast_owner_change_with(server: &GameServer, state: &DominionState, bestowed: bool) {
     let Some(dominion) = snapshot(server, state, Utc::now().timestamp()) else {
         return;
     };
@@ -503,7 +509,7 @@ pub fn broadcast_owner_change(server: &GameServer, state: &DominionState) {
             id: dominion.zone_id,
             unk_id: state.owner_expedition_id,
             rst: state.reign_start_at as u64,
-            bestowed: false,
+            bestowed,
         });
     server.world.broadcast_to_server(&SCDominionDataPacket {
         dominion,

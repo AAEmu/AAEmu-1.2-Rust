@@ -866,6 +866,63 @@ impl DominionManager {
         Ok(state)
     }
 
+    /// Administrative owner change / bestowal (WP-SL6a). One locked check-and-set: the
+    /// target expedition's owned-territory limit is counted under the same lock, so two
+    /// transfers cannot both pass. A transfer is not a fresh claim (`claimed_at = 0`, so the
+    /// `var_delay_siege_x_days_after_dominion_declare` protection does not start), and an
+    /// unfinished siege is refused because its frozen defender would stop matching the owner.
+    /// The caller broadcasts the owner change.
+    pub fn transfer_owner(
+        &self,
+        zone_group_id: u32,
+        expedition_id: u32,
+        now_seconds: i64,
+        limit: u32,
+    ) -> Result<DominionState, DominionError> {
+        if expedition_id == 0 || now_seconds < 0 {
+            return Err(DominionError::InvalidIdentity);
+        }
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        if state.owner_expedition_id == expedition_id {
+            return Ok(state);
+        }
+        if state
+            .siege
+            .as_ref()
+            .is_some_and(|siege| siege.status != SiegeStatus::Finished)
+        {
+            return Err(DominionError::SiegeInProgress);
+        }
+        let owned = inner
+            .states
+            .values()
+            .filter(|e| !e.state.ephemeral && e.state.owner_expedition_id == expedition_id)
+            .count();
+        if u64::try_from(owned).unwrap_or(u64::MAX) >= u64::from(limit) {
+            return Err(DominionError::TooManyOwned);
+        }
+        let revision = next_revision(&inner)?;
+        state.ownership_generation = state
+            .ownership_generation
+            .checked_add(1)
+            .ok_or(DominionError::Overflow)?;
+        state.owner_expedition_id = expedition_id;
+        state.reign_start_at = now_seconds;
+        state.claimed_at = 0;
+        state.non_pvp_start_at = 0;
+        state.non_pvp_duration_min = 0;
+        state.declaration = None;
+        state.clear_national_monument_fields();
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
     /// Marks a test-only state as never persisted (see [`DominionState::ephemeral`]).
     pub fn mark_ephemeral(&self, zone_group_id: u32) {
         let mut inner = self.lock();
