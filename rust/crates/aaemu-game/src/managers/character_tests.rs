@@ -1443,6 +1443,14 @@ async fn private_mysql_lobby_edit_rebuilds_and_persists_the_appearance_name_and_
         .unwrap();
     client.drain();
     let id = client.conn.characters[0].id;
+    // A GM can mute a never-played character while it is offline; the edit rebuild must keep it.
+    let mute_until = chrono::Utc::now().timestamp() + 1_800;
+    sqlx::query("UPDATE characters SET chat_restricted_until = ? WHERE id = ?")
+        .bind(crate::db::from_unix(mute_until))
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let old_items: Vec<u64> = sqlx::query_scalar("SELECT CAST(id AS UNSIGNED) FROM items")
         .fetch_all(&pool)
         .await
@@ -1476,6 +1484,17 @@ async fn private_mysql_lobby_edit_rebuilds_and_persists_the_appearance_name_and_
     assert_eq!(
         (db_name.as_str(), db_hair, db_ability, db_level),
         ("Renamed", 7, 1, 1)
+    );
+    let db_mute: chrono::NaiveDateTime =
+        sqlx::query_scalar("SELECT chat_restricted_until FROM characters WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        crate::db::unix(Some(db_mute)),
+        mute_until,
+        "the rebuild keeps the persisted chat mute"
     );
     assert_eq!(server.names.get_character_id("Renamed"), id);
     assert!(!server.names.name_exists("Editable"));

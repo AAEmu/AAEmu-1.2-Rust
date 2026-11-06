@@ -339,6 +339,8 @@ struct BuildInputs<'a> {
     created: Option<i64>,
     labor_power: i16,
     labor_power_modified: i64,
+    /// The persisted chat mute (`characters.chat_restricted_until`); a new character has none.
+    chat_restricted_until: i64,
     /// `Inventory::new` (create, the persistent containers) or `Inventory::standalone` (edit,
     /// so a rejected edit leaves the persistent containers untouched).
     inventory: Inventory,
@@ -365,6 +367,7 @@ fn build_lobby_character(
         created,
         labor_power,
         labor_power_modified,
+        chat_restricted_until,
         inventory,
     } = inputs;
     let data = &server.game_data;
@@ -391,6 +394,7 @@ fn build_lobby_character(
     c.access_level = access_level;
     c.labor_power = labor_power;
     c.labor_power_modified = labor_power_modified;
+    c.chat_restricted_until = chat_restricted_until;
     c.num_inventory_slots = template.num_inventory_slot;
     c.num_bank_slots = template.num_bank_slot;
     c.inventory = inventory;
@@ -586,6 +590,7 @@ pub async fn create(
             created: None,
             labor_power: account.labor,
             labor_power_modified: crate::db::unix(account.last_updated),
+            chat_restricted_until: 0,
             inventory,
         },
         &mut creation.created_items,
@@ -745,6 +750,7 @@ pub async fn edit(
     let row = sqlx::query(concat!(
         "SELECT CAST(online_time AS SIGNED) AS online_time, ",
         "CAST(UNIX_TIMESTAMP(leave_time) AS SIGNED) AS leave_time, ",
+        "CAST(UNIX_TIMESTAMP(chat_restricted_until) AS SIGNED) AS chat_restricted_until, ",
         "CAST(UNIX_TIMESTAMP(delete_request_time) AS SIGNED) AS delete_request_time, ",
         "CAST(UNIX_TIMESTAMP(delete_time) AS SIGNED) AS delete_time ",
         "FROM characters WHERE id = ? AND account_id = ? AND deleted = 0"
@@ -769,6 +775,11 @@ pub async fn edit(
     };
     let online_time: i64 = row.try_get("online_time")?;
     let leave_time: i64 = row.try_get::<Option<i64>, _>("leave_time")?.unwrap_or(0);
+    // A GM may have muted the character while it was offline; the row, not the stale lobby copy,
+    // is authoritative. `UNIX_TIMESTAMP` of the minimum date is NULL.
+    let chat_restricted_until: i64 = row
+        .try_get::<Option<i64>, _>("chat_restricted_until")?
+        .unwrap_or(0);
     let delete_request_time: i64 = row
         .try_get::<Option<i64>, _>("delete_request_time")?
         .unwrap_or(0);
@@ -851,6 +862,7 @@ pub async fn edit(
             created: Some(created),
             labor_power,
             labor_power_modified,
+            chat_restricted_until,
             inventory,
         },
         &mut edited.created_items,
