@@ -1321,6 +1321,38 @@ async fn destroy_partial_and_full() {
     assert!(w.a.drain().is_empty());
 }
 
+/// `porting-md#10`: a non-positive `CSDestroyItem` count is a Sus cheating report with the
+/// exact C# text, and the whole stack is destroyed as in C#.
+#[tokio::test]
+async fn destroy_negative_count_logs_a_sus_entry() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 10, 0);
+    let mut s = PacketStream::new();
+    s.write_u64(id).write_u8(2).write_u8(0).write_i32(-1);
+    run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
+    let expected = format!(
+        "CSDestroyItemPacket, player Alice attempted to destroy a negative amount of items -1 for item: template {STACK}, id {id}"
+    );
+    let mut entries = Vec::new();
+    for _ in 0..100 {
+        entries = w.server.systems.services.sus.recent_activities();
+        if !entries.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert_eq!(
+        entries,
+        vec![(
+            crate::systems::services::sus::CATEGORY_CHEATING.to_string(),
+            1,
+            expected
+        )]
+    );
+    assert!(item_at(&pa, slot_type::INVENTORY, 0).is_none());
+}
+
 /// A partial `CSDestroyItem` raises `OnConsumedItem` for the destroyed units (deviation from
 /// C#), so `ItemGather` objectives drop with them; a full destroy raises it once for the stack.
 #[tokio::test]

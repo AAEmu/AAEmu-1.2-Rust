@@ -106,6 +106,9 @@ pub struct AppConfig {
     /// `Quest` (Rust only: quest reward scaling, default off).
     #[serde(rename = "quest")]
     pub quest: crate::systems::quests::config::QuestConfig,
+    /// `Music` (`systems::services::music`: user song upload sanity).
+    #[serde(rename = "music")]
+    pub music: crate::systems::services::music::MusicConfig,
     #[serde(rename = "clientdata")]
     pub client_data: ClientDataConfig,
     /// `Specialty`.
@@ -189,6 +192,7 @@ impl Default for AppConfig {
             ics: Default::default(),
             loot: Default::default(),
             quest: Default::default(),
+            music: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
             scripts: ScriptsConfig::default(),

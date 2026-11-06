@@ -89,7 +89,12 @@ pub enum ChatRefusal {
     /// Below `Chat.MinLevelByChatType` for this chat type.
     LevelTooLow,
     /// `characters.chat_restricted_until` is still in the future (`/restrict_chat`).
-    Muted,
+    /// `remaining_seconds` is `until - now` at the refusal (the client shows
+    /// `duration / 60 + 1` minutes), `until` the persisted end.
+    Muted {
+        remaining_seconds: u32,
+        until: UnixTime,
+    },
 }
 
 /// The SL4b gate: the configured per-type minimum level (GMs exempt) and the persisted mute.
@@ -107,7 +112,12 @@ pub fn chat_refusal(
         return Some(ChatRefusal::LevelTooLow);
     }
     if c.chat_restricted(now) {
-        return Some(ChatRefusal::Muted);
+        let remaining_seconds =
+            u32::try_from(c.chat_restricted_until.saturating_sub(now)).unwrap_or(u32::MAX);
+        return Some(ChatRefusal::Muted {
+            remaining_seconds,
+            until: c.chat_restricted_until,
+        });
     }
     None
 }
@@ -115,8 +125,10 @@ pub fn chat_refusal(
 /// Tells the sender why the message was dropped. The level refusal is
 /// `CHAT_CANNOT_SEND_SINCE_LEVEL_LOW` 786 (the localized text asks for `$1`, the level; the
 /// `SCErrorMsgPacket` argument mechanism is UNKNOWN, so no argument is sent). The mute refusal
-/// is a plain system message: retail's rule and error for `/restrict_chat` are UNKNOWN
-/// (INFERRED, `CHAT-RESTRICT-1`).
+/// is `SCRestrictInfoPacket`, which the client's `FUN_393c4170` turns into the
+/// `restrict_remain_time` system line ("chat banned, released in `$1` minutes") using the
+/// remaining seconds. Retail's trigger for that notice is UNKNOWN; the refused chat attempt is
+/// INFERRED (`CHAT-RESTRICT-1`).
 pub fn send_chat_refusal(p: &PlayerRef, refusal: ChatRefusal) {
     match refusal {
         ChatRefusal::LevelTooLow => p.send(SCErrorMsgPacket::new(
@@ -124,8 +136,20 @@ pub fn send_chat_refusal(p: &PlayerRef, refusal: ChatRefusal) {
             0,
             true,
         )),
-        ChatRefusal::Muted => {
-            super::util::send_message(p, chat_type::SYSTEM, "You are muted and cannot chat.")
+        ChatRefusal::Muted {
+            remaining_seconds,
+            until,
+        } => {
+            let chname = p.data().unit.name.clone();
+            p.send(super::packets::chat::SCRestrictInfoPacket {
+                chname,
+                index: 0,
+                code: 0,
+                duration: remaining_seconds,
+                // The mute start is not persisted; the client ignores both dates (INFERRED).
+                start: until.saturating_sub(i64::from(remaining_seconds)),
+                end: until,
+            })
         }
     }
 }

@@ -698,6 +698,24 @@ today's unscaled values.
 {
   "Quest": {
     "RewardScaling": true
+
+## Music upload limits (`Music`)
+
+`CSSaveUserMusicNotes` is stored only when it could come from the 1.2 client: the
+`song_size` field must equal the song's UTF-16 code-unit length, `item_id` must
+be an item the character owns whose template is in `instrument_sounds` (the
+shipped table has 199 instruments), and the song must stay within the server
+cap. A refused upload sends no packet (the client has no evidenced failure
+path); the server logs a warning and keeps the previous queued song.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `Music.MaxSongChars` | `3000` | Longest accepted `song` string, in UTF-16 code units. The client enforces its own `music_note_limits`; keep this value above the lengths your players compose. |
+
+```json
+{
+  "Music": {
+    "MaxSongChars": 3000
   }
 }
 ```
@@ -711,6 +729,9 @@ values. **Capture-pending (`porting-md#2`):** complete a degree-2 quest and a
 quest far below the character's level with the real client, compare the quest
 window's reward with the exp / copper actually gained, and only then consider
 turning the default on. Details in `rust/crates/aaemu-game/PORTING.md`.
+
+Override it in `Config.Local.json` or with `Music__MaxSongChars`. The note
+grammar is not parsed; see `rust/crates/aaemu-game/PORTING.md` (WP-M1).
 
 ## Territory property tax
 

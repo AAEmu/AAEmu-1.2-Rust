@@ -758,10 +758,15 @@ impl ClientPacket for CSUpdateActionSlotPacket {
     }
 }
 
-/// `CSRestrictCheckPacket`. This is the client's generic restriction check (answered with
-/// `SCResultRestrictCheckPacket`); the unrelated `SCRestrictInfo` 0x1c8 is a per-character
-/// penalty record (chat ban etc.) and has no server-side store, so it is not sent (WP-J,
-/// `ACCOUNT-SCRESTRICTINFO-1`).
+/// `CSRestrictCheckPacket`: `u32 characterId ; u8 code`, answered with
+/// `SCResultRestrictCheckPacket`. The client's handler `FUN_391e0ea0` reads `code` (+0x10) and
+/// `result` (+0x14): `code 0` is the chat restriction (`result 1` -> chat flag off +
+/// `restrict_start`, `result 0` -> flag on + `restrict_end`), `code 1` is the character-select
+/// connection check (`result 1` blocks the enter with `error_character_connection_restrict`).
+/// The stock client sends only code 1 itself when entering the world from the lobby and never
+/// code 0; a modified client can. Code 0 answers the persisted `chat_restricted_until` mute;
+/// code 1 always answers 0 because the server has no login-restriction store yet (a separate
+/// moderation feature).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRestrictCheckPacket {
     pub character_id: u32,
@@ -780,14 +785,22 @@ impl ClientPacket for CSRestrictCheckPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
+        server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let result = if self.code == 0 {
+                match server.world.character_by_id(self.character_id) {
+                    Some(p) => u8::from(p.data().chat_restricted(chrono::Utc::now().timestamp())),
+                    None => 0,
+                }
+            } else {
+                0
+            };
             conn.send(&SCResultRestrictCheckPacket {
                 character_id: self.character_id,
                 code: self.code,
-                result: 0,
+                result,
             });
             Ok(())
         })
@@ -893,6 +906,61 @@ mod tests {
                 result: 0
             }),
             e.into_bytes()
+        );
+    }
+
+    async fn restrict_check(server: &GameServer, conn: &mut GameConnection, code: u8) {
+        use crate::net::packet::encode_raw;
+        let mut s = PacketStream::new();
+        s.write_u32(1).write_u8(code);
+        server
+            .handle_frame(
+                conn,
+                &encode_raw(1, cs::CSRestrictCheckPacket, s.as_bytes()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restrict_check_answers_the_persisted_chat_mute() {
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Al", 10.0, 10.0), 0x100);
+        a.conn.active_char = Some(pa.clone());
+        a.drain();
+
+        // Code 0 (chat): a live mute answers result 1.
+        pa.data().chat_restricted_until = chrono::Utc::now().timestamp() + 120;
+        restrict_check(&server, &mut a.conn, 0).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 0, 1])]
+        );
+
+        // An expired mute is cleared by the same check and answers result 0.
+        pa.data().chat_restricted_until = chrono::Utc::now().timestamp() - 1;
+        restrict_check(&server, &mut a.conn, 0).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 0, 0])]
+        );
+        assert_eq!(pa.data().chat_restricted_until, 0, "expired mute cleared");
+
+        // Code 1 is the lobby connection check: no store, always allowed.
+        pa.data().chat_restricted_until = chrono::Utc::now().timestamp() + 120;
+        restrict_check(&server, &mut a.conn, 1).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 1, 0])]
+        );
+
+        // Unmuted: result 0.
+        pa.data().chat_restricted_until = 0;
+        restrict_check(&server, &mut a.conn, 0).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 0, 0])]
         );
     }
 
