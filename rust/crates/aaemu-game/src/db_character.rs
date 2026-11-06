@@ -1005,7 +1005,7 @@ pub async fn save_character(
         `num_inv_slot`,`num_bank_slot`,`expanded_expert`,`slots`,`created_at`,`updated_at`,`return_district`,`online_time`,\
         `arrest_count`, `accept_guilty_count`, `accept_trial_count`, `not_guilty_count`, `guilty_count`, `evidence_reported_count`, `bot_reported_count`, `reported_as_bot_count`,\
         `offline_guilty_time`,`offline_guilty_region`) VALUES \
-        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,? ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
+        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
     )
     .bind(c.id)
     .bind(c.account_id)
@@ -1727,9 +1727,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn private_mysql_aa_point_wallet_survives_character_reload() {
-        use crate::data::character_templates::CharacterTemplate;
-        use crate::data::GameData;
-        use crate::test_support::test_server_with;
+        use crate::test_support::{test_character, test_experience, test_server_with};
 
         let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
             return;
@@ -1747,23 +1745,13 @@ mod tests {
             .expect("private MySQL");
         shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
 
-        let mut data = GameData::empty();
-        data.characters.templates.insert(
-            17,
-            CharacterTemplate {
-                race: 1,
-                gender: 1,
-                creatable: true,
-                ..Default::default()
-            },
-        );
+        let mut data = crate::data::GameData::empty();
+        data.experience = test_experience(55);
         let mut server = test_server_with(data);
         server.db = pool.clone();
 
-        let mut character = Character::new(1, 1, UnitCustomModelParams::default());
-        character.race = 1;
-        character.gender = 1;
-        character.unit.name = "AaPointReload".into();
+        let mut character = test_character(1, "AaPointReload", 100.0, 100.0);
+        character.account_id = 1;
         character.created = Utc::now().timestamp();
         character.aa_point = 1_234;
         character.bank_aa_point = 42;
@@ -1790,10 +1778,10 @@ mod tests {
             .unwrap();
         transaction.commit().await.unwrap();
 
-        let mut loaded = Character::new(1, 1, UnitCustomModelParams::default());
-        loaded.race = 1;
-        loaded.gender = 1;
-        load_character_details(&server, &mut loaded).await.unwrap();
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
         assert_eq!((loaded.aa_point, loaded.bank_aa_point), (4_321, 24));
         pool.close().await;
     }
