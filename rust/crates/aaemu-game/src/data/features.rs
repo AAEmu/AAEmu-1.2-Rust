@@ -124,7 +124,8 @@ pub struct FeatureSetConfig {
     pub auction_post_buff: bool,
     /// AA-point bit 44. The client reads it for AA-point amounts in price/currency displays
     /// (`x2game.dll.c:66363` `grade_enchant_cost` / `grade_enchant_currency`, `:633707`,
-    /// `:659611`, `:733342`); it is not one of `GetFeatureSet()`'s Lua keys.
+    /// `:659611`, `:733342`); it is not one of `GetFeatureSet()`'s Lua keys. AA points are not
+    /// supported, so the key must stay `false`.
     #[serde(rename = "aapoint", deserialize_with = "lenient")]
     pub aa_point: bool,
     /// Explicit overrides for bits without a named switch (the unnamed `flag_x_y` members).

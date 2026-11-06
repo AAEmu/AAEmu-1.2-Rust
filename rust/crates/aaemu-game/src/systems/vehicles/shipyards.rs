@@ -90,7 +90,6 @@ pub fn create(
     z_rot: f32,
     design_item: u64,
     step: i32,
-    auto_use_aa_point: bool,
 ) -> Option<ShipyardRef> {
     let template = server
         .game_data
@@ -161,14 +160,7 @@ pub fn create(
 
     // we will make checks for the availability of money and items to create a shipyard;
     // `remove_required_items` sends the one refusal error itself.
-    if !remove_required_items(
-        server,
-        owner,
-        &template,
-        design_item,
-        design_template_id,
-        auto_use_aa_point,
-    ) {
+    if !remove_required_items(server, owner, &template, design_item, design_template_id) {
         server.ids.object.release_id(obj_id);
         server.ids.shipyard.release_id(ship_id);
         return None;
@@ -283,7 +275,6 @@ fn remove_required_items(
     template: &super::data::ShipyardTemplate,
     design_item: u64,
     design_template_id: u32,
-    auto_use_aa_point: bool,
 ) -> bool {
     let items = server.systems.skills.ext.items();
     let design_id = design_template_id;
@@ -302,15 +293,7 @@ fn remove_required_items(
         );
         return false;
     };
-    let Ok(money_owed) = i32::try_from(money_owed) else {
-        error(character, error::NOT_ENOUGH_MONEY);
-        return false;
-    };
-    if !crate::systems::economy::inventory::can_afford_gold_or_aa(
-        character,
-        money_owed,
-        auto_use_aa_point,
-    ) {
+    if character.data().money < i64::from(money_owed) {
         error(character, error::NOT_ENOUGH_MONEY);
         return false;
     }
@@ -384,22 +367,14 @@ fn remove_required_items(
             i32::from(p.amount),
         );
     }
-    // SubtractMoney(SlotType.Inventory, moneyOwed, ItemTaskType.Shipyard), with
-    // `CSCreateShipyard.autoUseAAPoint` covering a gold shortage 1:1 from the AA wallet. The
-    // balance check and both debits happen under one character lock; the check above ran before
-    // any item was consumed.
-    if crate::systems::economy::inventory::try_take_gold_or_aa(
-        &mut crate::systems::economy::inventory::Out::Direct(server),
-        character,
-        money_owed,
-        auto_use_aa_point,
-        item_task::SHIPYARD,
-    )
-    .is_none()
-    {
-        error(character, error::NOT_ENOUGH_MONEY);
-        return false;
-    }
+    // SubtractMoney(SlotType.Inventory, moneyOwed, ItemTaskType.Shipyard)
+    character.data().money -= i64::from(money_owed);
+    character.send(
+        crate::systems::social::packets::expedition::item_task_money_packet(
+            item_task::SHIPYARD,
+            -(money_owed as i32),
+        ),
+    );
     true
 }
 

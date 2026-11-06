@@ -556,39 +556,13 @@ impl CSBuyItemsPacket {
             money = sum;
             items_buy_back.push(item.id);
         }
-        // `useAAPoint` pays a short gold total from the carried AA purse 1:1 (the 1.2 client
-        // asks `ask_use_aa_point` before it sets the flag). The flag only covers the money
-        // total; honor / vocation lines still need their own balances. No shipped data marks
-        // an item as refusing AA (`STORE_CANT_BUY_WITH_AA_POINT` 709 stays unused), so only
-        // the shortage rule applies. The debit is applied below under this same character
-        // lock, which is already held from the preflight through the container commit;
-        // `inventory::try_take_gold_or_aa` takes the character lock itself and cannot be used
-        // there, and dropping the lock would reopen the checkout race.
-        let money_total = i64::from(money);
-        let gold_short = money_total - character.money;
-        let aa_needed = if self.use_aa_point && gold_short > 0 {
-            match i32::try_from(gold_short) {
-                Ok(needed) => needed,
-                Err(_) => return,
-            }
-        } else {
-            0
-        };
-        if gold_short > 0 && (!self.use_aa_point || i64::from(aa_needed) > character.aa_point) {
-            if self.use_aa_point {
-                // AA is short too: refuse with the wallet's error, changing nothing.
-                drop(buyback);
-                drop(bag);
-                drop(character);
-                inventory::send_error_message(&p, error_message::NOT_ENOUGH_AA_POINT, 0, true);
-            }
+        if i64::from(money) > character.money
+            || honor_points > character.honor_point
+            || vocation_badges > character.vocation_point
+        {
             return;
         }
-        if honor_points > character.honor_point || vocation_badges > character.vocation_point {
-            return;
-        }
-        let gold_paid = money_total - i64::from(aa_needed);
-        let Some(next_money) = character.money.checked_sub(gold_paid) else {
+        let Some(next_money) = character.money.checked_sub(i64::from(money)) else {
             return;
         };
         let Some(next_honor) = character.honor_point.checked_sub(honor_points) else {
@@ -680,15 +654,11 @@ impl CSBuyItemsPacket {
         *bag = staged_bag;
         *buyback = staged_buyback;
         character.money = next_money;
-        character.aa_point -= i64::from(aa_needed);
         character.honor_point = next_honor;
         character.vocation_point = next_vocation;
         drop(buyback);
         drop(bag);
         drop(character);
-        if aa_needed > 0 {
-            tasks.push(ItemTask::AaPointUpdate(-aa_needed));
-        }
         {
             let mut out = txn.out();
             if honor_points > 0 {
@@ -709,14 +679,12 @@ impl CSBuyItemsPacket {
                     },
                 );
             }
-            if gold_paid > 0 {
-                // The gold total is a non-negative i32 (`money` itself fits one).
-                let gold_paid = i32::try_from(gold_paid).expect("gold paid fits i32");
+            if money > 0 {
                 out.send(
                     &p,
                     SCItemTaskSuccessPacket {
                         action: task_type::DEPOSIT_MONEY,
-                        tasks: vec![ItemTask::MoneyChange(-gold_paid)],
+                        tasks: vec![ItemTask::MoneyChange(-money)],
                         force_remove: Vec::new(),
                     },
                 );
