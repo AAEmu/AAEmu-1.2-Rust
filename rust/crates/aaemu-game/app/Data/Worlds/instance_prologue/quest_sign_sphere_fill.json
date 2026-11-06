@@ -1,0 +1,26 @@
+[
+  {
+    "quest_id": 6039,
+    "component_id": 26000,
+    "sphere_id": 2262,
+    "zone": 300,
+    "x": 111.27,
+    "y": 488.33,
+    "z": 105.68,
+    "radius": 1.5,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  },
+  {
+    "quest_id": 6050,
+    "component_id": 26033,
+    "sphere_id": 2264,
+    "zone": 300,
+    "x": 917.03,
+    "y": 1644.92,
+    "z": 176.463,
+    "radius": 12.0,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  }
+]

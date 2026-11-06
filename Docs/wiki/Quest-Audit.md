@@ -91,13 +91,32 @@ Sphere trigger additions are deduplicated, pending additions are removed on
 cleanup, all starters see the same prior position, and authored sphere flags use
 the text boolean loader.
 
-The merged ledger marks **29 distinct records** as content blocked: the ten
+The merged ledger marked **29 distinct records** as content blocked: the ten
 contexts without components above, plus **19 quests containing 21 sphere acts**
 without matching geometry in the available 1.2 client pack: **1012, 1024, 1033,
 1039, 1372, 1392, 1398, 1400, 1650, 1897, 5272, 5439, 5716, 5898, 5979, 6039,
 6050, 6213, 6216**. Missing accept-sphere geometry remains review evidence because
 some acceptance is client driven. Quest 1033 also references q1033_ande, which
 is absent from the available runtime's 13 path files.
+
+**WP-QU4 (2026-11-06)** imported the missing objective-sphere geometry of **7 of
+the 19 quests** from the 10.x pak: **1650, 5716, 5979, 6039, 6050, 6213, 6216**
+(8 spheres; `Data/Worlds/<world>/quest_sign_sphere_fill.json`, converted by
+`rust/tools/quest_sign_sphere_import/`). Source: the 10.x
+`world_server/quest_area_sphere.g` (`stype` = `spheres.id`) and client
+`quest_sign_sphere.g` (`qtype`/`ctype`), both zone-local. Version guards: the
+10.x and 1.2 `spheres`/`sphere_quests` rows must name the same detail id and
+quest id, the 1.2 component must have a `QuestActObjSphere` or
+`QuestActCheckSphere` act for that `sphere_id`, the zone must exist in the 1.2
+world and be open (`zones.closed = 'f'`), a 1.2 client sign sphere is never
+overridden, and a 1.2 `mission_mission0.xml` `AreaSphere` with the same id at the
+same place must agree on the radius. Dropped: 1012, 1024, 1033 and 1039 because
+the 10.x sphere row was reused for another quest; 1400 because its 10.x component
+id differs; 1372, 1392, 1398, 1897, 5272, 5439 and 5898 because the sphere has no
+block in the 10.x files; the extra blocks of 5716 (zone 159, quest authored in
+186) and of 6039/6050 (zone 348, not in 1.2). The ten contexts without
+components are untouched. Remaining blocked by geometry: 12 of the 19 quests
+above (missing accept-sphere geometry is still review evidence).
 
 Other reviews remain explicit in the ledger: missing item/NPC/prerequisite
 references, action/phase-specific doodad interactions, component acceptance
