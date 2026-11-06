@@ -2852,10 +2852,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   917 of the 1,569 quests with such an act give exp 0 and copper 0 through it, 376 of them in
   `quest_categories` 79 ("탐험", exploration; all 402 quests of the category are level 50, and
   377 carry the acts): the act is what makes them pay nothing, and the C# sum would hand each of
-  them the full level-50 `quest_supplies` exp / copper on top. Open suspect: the
-  client decompile also scales the level supply by `quest_contexts.degree` (x0.5..x1.5),
-  but the 2014 site shows unscaled values for all 221 non-degree-3 quests; degree scaling
-  is not implemented until that conflict is resolved.
+  them the full level-50 `quest_supplies` exp / copper on top.
+* systems::quests (reward scaling, `Quest:RewardScaling`, default `false`; `porting-md#2`,
+  capture-pending): the 1.2 client's quest window scales its displayed reward — the
+  `quest_supplies` fallback by `quest_contexts.degree` in `FUN_397d5eb0` / `FUN_397d5dd0`
+  (0 / 1 -> x0.5, 2 -> x0.75, 3 -> x1.0, 4 -> x1.25, 5 and above -> x1.5; a NULL degree
+  reads as 0), then exp (the Reward act value or the scaled fallback) by the quest-vs-player
+  level gap in `FUN_397d3810` (`g = ((int)((p+1)*0.2+0.5) > 4) ? p : 5`, `d = g - p + q`:
+  full for `d >= 0`, 50 % for `d < -4`, otherwise `(int)(d*base*0.1 + base)`; from player
+  level 22 the reduction is disabled). Copper has no gap factor, an act value is never
+  degree-scaled, and the let-it-done ratios are unchanged. `systems/quests/reward_scale.rs`
+  implements exactly that; `engine.rs` applies it to the `quest_supplies` fallback and
+  `acts.rs` (`SupplyExp`) to the exp act. **Server authority is EVIDENCED** (the quest
+  packets carry no reward amount; the client formula only decides the displayed number), but
+  whether the original zone server applied the same factors is **INFERRED** from the client
+  UI: showing a number different from the payout would be a visible bug on every degree != 3
+  quest. The 2014 archeagedatabase.net export still lists unscaled supply values for the 221
+  non-degree-3 quests, but it is a database dump, not a grant record, so it cannot settle the
+  question. The flag keeps today's unscaled payout until the live check decides the default:
+  read `X2Quest.GetQuestContextRewardExp/Copper` in the 1.2 quest window for a degree-2 quest
+  and for a quest far below the character's level, complete them, and compare with the exp /
+  copper actually gained (`SCExpChanged` / money). Equal with the flag on means the retail
+  server paid the displayed number; the lean is then to default the flag on.
 * systems::quests: the October 2026 quest audit corrects timer event isolation, explicit NPC
   reporting, per-quest NPC/doodad reporting, doodad reward selection/finalization, and OR
   requirement evaluation. Timed saved deadlines, aggro credit, CheckSphere, and authored

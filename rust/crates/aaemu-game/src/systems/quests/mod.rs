@@ -16,12 +16,14 @@
 pub mod acts;
 pub mod bridges;
 pub mod cinema;
+pub mod config;
 pub mod data;
 pub mod engine;
 pub mod events;
 pub mod hooks;
 pub mod model;
 pub mod packets;
+pub mod reward_scale;
 pub mod spheres;
 pub mod state;
 pub mod templates;

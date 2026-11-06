@@ -15,6 +15,7 @@ use super::packets::{
     SCQuestContextResetPacket, SCQuestContextStartedPacket, SCQuestContextUpdatedPacket,
     SCQuestRewardedByMailPacket, SCQuestUnitReqFailedPacket,
 };
+use super::reward_scale::{gap_exp, scaled_supply_copper, scaled_supply_exp};
 use super::state::{
     ActPath, CinemaMark, Quest, QuestActState, QuestComponentState, QuestHandle, QuestState,
     QuestStepState,
@@ -1092,9 +1093,9 @@ impl<'a> Ctx<'a> {
 
         // Add quest level based rewards
         let data = self.data;
-        let (level, let_it_done) = data
+        let (level, let_it_done, degree) = data
             .template(template_id)
-            .map_or((0, false), |t| (t.level, t.let_it_done));
+            .map_or((0, false, 0), |t| (t.level, t.let_it_done, t.degree));
         let step = self.quest(h).map_or(0, |q| q.step);
         // Retail 1.2 replaces the level based supply with the Reward component's own
         // `QuestActSupplyExp` / `QuestActSupplyCopper` act instead of adding both (the client's
@@ -1132,13 +1133,28 @@ impl<'a> Ctx<'a> {
                 } else {
                     1f32
                 };
+                // `Quest:RewardScaling`: the client scales the supplies fallback by the quest
+                // degree and exp by the quest-vs-player level gap (see `reward_scale`). The
+                // act values replace the fallback per field, so each keeps its own path.
+                let scaling = self.server.config.get().quest.reward_scaling;
+                let player_level = self.c.unit.level;
                 if let Some(q) = self.quest_mut(h) {
                     q.reward_ratio = f64::from(ratio);
                     if !reward_exp_act {
-                        q.reward_exp = q.reward_exp.wrapping_add(lb.exp);
+                        let exp = if scaling {
+                            gap_exp(scaled_supply_exp(lb.exp, degree), level, player_level)
+                        } else {
+                            lb.exp
+                        };
+                        q.reward_exp = q.reward_exp.wrapping_add(exp);
                     }
                     if !reward_copper_act {
-                        q.reward_coins = q.reward_coins.wrapping_add(lb.copper);
+                        let copper = if scaling {
+                            scaled_supply_copper(lb.copper, degree)
+                        } else {
+                            lb.copper
+                        };
+                        q.reward_coins = q.reward_coins.wrapping_add(copper);
                     }
                 }
             }
