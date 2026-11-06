@@ -4427,6 +4427,54 @@ The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `
 - **Orphan tower defense waves.** The shipped `compact.sqlite3` has `tower_def_progs` rows for `tower_def_id` 9, 22 and 33 with no `tower_defs` parent (20 waves). The C# `return`s at the first one; the Rust loader skips them (see the instances section) and now logs one info summary with the count and the distinct parent ids; the per-row line is `debug`.
 - **Client sources not found.** `Configurations/ClientData.json` lists four default sources and array settings merge by index (as in Microsoft.Extensions.Configuration), so a `Config.Local.json` with two sources leaves the last two defaults in place. `ClientFileManager::from_sources` logs a source that does not exist at `info` while at least one source is valid, and at `warn` for each (plus the existing error) when none is. `add_source` itself only logs not-found at `debug`.
 
+## Client FeatureSet configuration (Rust only, 2026-11-06)
+
+The client FeatureSet is the 11-byte blob in `SCInitialConfig.fsets` (`FeatureSet::write`, a
+`u16` length prefix plus the bytes). The 1.2 client keeps it at `DAT_39b02294 + 0x14`, and
+`FUN_39496b20` (`x2game.dll.c:956456`) builds the Lua table behind `X2Player:GetFeatureSet()`
+from it; bit = byte * 8 + bit (byte N = struct offset `0x14 + N`). `DEFAULT_FSET` plus the
+`FeatureSet::initialized` overrides are the C# `FeaturesManager.Initialize` bytes; a retail
+capture has not been found, so whether they equal retail is UNKNOWN (see
+`D:/aaemu-audits/gap-audit-2026-11-02/research/live-in-1.2.md`).
+
+Rust adds `Configurations/FeatureSet.json` (section `FeatureSet`), applied in `main.rs` with
+`FeatureSet::apply_config` right after `GameData::load`. This is a Rust-only deviation: the C#
+had no FeatureSet configuration. Every named key is one `GetFeatureSet()` switch, and turning
+it on or off sets exactly its bit; `ExtraBits` is a `bit -> bool` map that overrides unnamed
+bits (and can turn a default-on bit off). The shipped defaults reproduce the current bytes
+exactly, so an absent section or the shipped file changes no behaviour. `levelLimit` (byte 1)
+and `mateLevelLimit` (byte 8) still come from the `levels` table through `GameData::load` and
+are not configurable here. `SecondPassword:Enabled` still turns bits 46/55 on at startup and
+the GM `/feature set` command still changes the runtime copy; the config is the baseline.
+
+| Key | Bit | Default | What the client uses it for |
+| --- | --- | --- | --- |
+| `siege` | 0 | on | Siege / dominion UI (`FUN_39496b20:956485`). The Lua key is read by the siege UI; the exact window is INFERRED. |
+| `premium` | 4 | on | Premium / Patron HUD and labor UI (C++ reads at `x2game.dll.c:703203`, `708636`). |
+| `itemSecure` | 45 | on | Item-secure / lock handling (`FUN_397cc350`, item byte flag `0x4`). |
+| `secondpass` | 46 | off | Second-password entry and its opcode path (`x2game.dll.c:45293`, `617228`, `108647`). |
+| `ranking` | 36 | on | Ranking window (the `ranking` UI calls `GetFeatureSet`). |
+| `slave_customize` | 48 | on | Vehicle / ship customization UI (INFERRED from the key and the customizing UI callers). |
+| `bm_mileage` | 43 | on | Cash-shop mileage display (INFERRED; Korean business model). |
+| `ingamecashshop` | 38 | on | In-game cash-shop open guards (`x2game.dll.c:62540`, `62632`). |
+| `customsaveload` | 40 | on | Custom UI save/load (INFERRED). |
+| `beautyshopBypass` | 52 | on | Beauty-salon bypass entry (customizing UI; INFERRED). |
+| `ingameshopSecondpass` | 55 | off | Second-password gate on cash-shop purchases (INFERRED). |
+| `backpackProfitShare` | 56 | on | Trade-pack sale profit share and sale mails (`systems/economy/specialty.rs`; the later note in this file). |
+| `sensitiveOpeartion` | 58 | off | Sensitive-operation confirmation prompts (INFERRED; the key's spelling is the client's). |
+| `taxItem` | 59 | on | Tax-item payment UI (the server also gates `TaxItem` behavior on this bit). |
+| `achievement` | 63 | on | Achievement window. |
+| `dwarfWarborn` | 74 | off | Dwarf / Warborn race selection. The shipped `characters` data has races 7/8 `creatable = 'f'`, so turning the bit on does not by itself make those races creatable. |
+| `mailCoolTime` | 75 | on | Mail send cooldown display (INFERRED). |
+| `hudAuctionButton` | 81 | on | Auction-house button in the HUD. |
+| `auctionPostBuff` | 83 | on | Auction posting buff / UI (INFERRED). |
+| `aaPoint` | 44 | off | AA-point amounts in price and currency displays (`x2game.dll.c:66363` sets `grade_enchant_cost` / `grade_enchant_currency`, also `633707`, `659611`, `733342`). The server has no AA-point wallet; keep it off. |
+| `ExtraBits` | any | `{}` | Override map for the unnamed `flag_x_y` bits, `0..=87`. The C++ reads unnamed bits 32, 34, 41, 42, 47, 60 and 73 (purpose unresolved); 78 is the mate equipment whitelist (`PORTING.md`, mate equipment). Defaults: 32 on (plus inherited 16-19, 24-27, 35, 37, 49); 34, 41, 42, 47, 60, 73 and 78 off. |
+
+The C#-named bits that have no `GetFeatureSet()` Lua key (`allowFamilyChanges` 1, `houseSale` 3,
+`nations` 6, `customUiButton` 39, `freeLpRaise` 53, `houseTaxPrepay` 84) have no named config
+switch; they keep their current defaults and `ExtraBits` can override them like any other bit.
+
 ## Live testing (phase 5): fixes and deliberate deviations
 
 Found by running the servers against MySQL, the real `compact.sqlite3` / `game_pak` and the
