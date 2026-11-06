@@ -1057,7 +1057,7 @@ mod tests {
             crime_points: 60,
             is_live: true,
             player_race: 3,
-            type184: 1,
+            faction_id: 0x1122_3344,
             arrest_count: 2,
             accept_guilty_count: 3,
             accept_trial_count: 4,
@@ -1077,7 +1077,7 @@ mod tests {
                 .write_i16(60)
                 .write_bool(true)
                 .write_u8(3)
-                .write_i32(1)
+                .write_u32(0x1122_3344) // faction id (the client's "type" at +0xb8)
                 .write_i32(2)
                 .write_i32(3)
                 .write_i32(4)
@@ -1102,6 +1102,37 @@ mod tests {
             }),
             vec![0, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn bounty_list_faction_id_is_at_the_client_faction_offset() {
+        // The client's `GetBountyData` record 9 (the left frame's faction name) is
+        // `FUN_392f8120(id, 1)` of the u32 read at `FUN_397bebf0` +0xb8. With an empty name the
+        // row is: 4 id + 2 name length + 0 name + 1 level + 4 zone + 8 x + 8 y + 4 z + 8 bounty
+        // + 2 crime + 1 live + 1 race = 43 bytes, so the faction field starts at body offset
+        // 5 + 43.
+        let b = BountyDescription {
+            player_id: 0x0102_0304,
+            player_name: String::new(),
+            player_level: 50,
+            zone_id: 129,
+            pos: (0.0, 0.0, 0.0),
+            bounty_amount: 1,
+            crime_points: 0,
+            is_live: false,
+            player_race: 1,
+            faction_id: 0x1122_3344,
+            ..BountyDescription::default()
+        };
+        let p = body(&SCBountyListPacket {
+            total: 1,
+            count: 1,
+            bounties: vec![b],
+        });
+        // 71-byte row: the 43 bytes above plus the faction u32 and six i32 counters, then the
+        // 5-byte packet header.
+        assert_eq!(p.len(), 5 + 71);
+        assert_eq!(&p[5 + 43..5 + 47], &[0x44, 0x33, 0x22, 0x11]);
     }
 
     #[test]

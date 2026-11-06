@@ -185,9 +185,9 @@ fn online_board_row(server: &GameServer, target_id: u32, amount: i64) -> Option<
         crime_points: c.crime_point,
         is_live: true,
         player_race: c.race,
-        // The client reads this field as "type" (`FUN_397bebf0`, +184); its meaning is unknown.
-        // 1 is the value of the C# dummy row (C#-only, BOUNTY-board).
-        type184: 1,
+        // The client turns this id into the left frame's faction name (`FUN_39080c00` field 9 ->
+        // `FUN_392f8120(id, 1)`; the same call fills `"faction"` in `FUN_3907e830`).
+        faction_id: c.unit.faction_id,
         arrest_count: c.arrest_count,
         accept_guilty_count: c.accept_guilty_count,
         accept_trial_count: c.accept_trial_count,
@@ -210,6 +210,7 @@ async fn offline_board_row(
          CAST(`zone_id` AS SIGNED) AS zone_id, `x`, `y`, `z`, \
          CAST(`crime_point` AS SIGNED) AS crime_point, \
          CAST(`race` AS SIGNED) AS race, \
+         CAST(`faction_id` AS SIGNED) AS faction_id, \
          CAST(`arrest_count` AS SIGNED) AS arrest_count, \
          CAST(`accept_guilty_count` AS SIGNED) AS accept_guilty_count, \
          CAST(`accept_trial_count` AS SIGNED) AS accept_trial_count, \
@@ -257,7 +258,10 @@ async fn offline_board_row(
             .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16,
         is_live: false,
         player_race: row.try_get::<i64, _>("race").ok()?.clamp(0, 255) as u8,
-        type184: 1,
+        faction_id: row
+            .try_get::<i64, _>("faction_id")
+            .ok()?
+            .clamp(0, i64::from(u32::MAX)) as u32,
         arrest_count: count("arrest_count"),
         accept_guilty_count: count("accept_guilty_count"),
         accept_trial_count: count("accept_trial_count"),
@@ -469,10 +473,12 @@ impl BountyManager {
     /// as `total`, and up to [`MAX_BOUNTY_LIST_ENTRIES`] rows (the client's cap).
     ///
     /// The board is only filled with `Social.BountyBoard = true`; the default keeps the empty
-    /// list the C# server sent because a filled board broke the 1.2 client Lua (BOUNTY-board,
-    /// capture-pending). Online characters are read from the live unit; an offline target's
-    /// name, level, zone and position come from its `characters` row. A missing or unreadable
-    /// row is skipped instead of failing the whole board.
+    /// list the C# server sent because the 1.2 client's `usertrial/bounty_bullet.alb` itself
+    /// passes numeric counters to `LocalizeUiText` and indexes an undefined global `listCtrl`
+    /// (see BOUNTY-board and the 2026-11-06 real-client log), so no row value can render it.
+    /// Online characters are read from the live unit; an offline target's name, level, race,
+    /// faction, zone and position come from its `characters` row. A missing or unreadable row is
+    /// skipped instead of failing the whole board.
     pub async fn board(&self, server: &GameServer) -> BountyBoard {
         if !server.config.social.bounty_board {
             return BountyBoard::default();

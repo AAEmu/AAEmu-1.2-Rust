@@ -202,7 +202,7 @@ fn paid(body: &[u8]) -> (String, String, i64) {
 }
 
 /// One `SCBountyList` row as the 1.2 client reads it (`FUN_397bebf0`: id, name, level, zone,
-/// fixed-point x / y, float z, bounty, crime points, live flag, race, type, arrest / trial
+/// fixed-point x / y, float z, bounty, crime points, live flag, race, faction id, arrest / trial
 /// counters, seconds; notGuilty before guilty).
 fn read_board_row(s: &mut PacketStream) -> BountyDescription {
     BountyDescription {
@@ -219,7 +219,7 @@ fn read_board_row(s: &mut PacketStream) -> BountyDescription {
         crime_points: s.read_i16().unwrap(),
         is_live: s.read_bool().unwrap(),
         player_race: s.read_u8().unwrap(),
-        type184: s.read_i32().unwrap(),
+        faction_id: s.read_u32().unwrap(),
         arrest_count: s.read_i32().unwrap(),
         accept_guilty_count: s.read_i32().unwrap(),
         accept_trial_count: s.read_i32().unwrap(),
@@ -244,7 +244,7 @@ fn board_row_bytes(id: u32, name: &str, x: f32, y: f32, z: f32, bounty: u64) -> 
         .write_i16(0)
         .write_bool(true)
         .write_u8(1)
-        .write_i32(1)
+        .write_u32(101) // every `test_character` is faction 101 (Nuia)
         .write_i32(0)
         .write_i32(0)
         .write_i32(0)
@@ -804,6 +804,12 @@ async fn bounty_board_writes_two_rows_highest_total_first() {
     expected.extend(board_row_bytes(3, "Alpha", 103.0, 100.0, 100.0, 900));
     expected.extend(board_row_bytes(2, "Bravo", 102.0, 100.0, 100.0, 500));
     assert_eq!(body, expected);
+    // The +0xb8 field is the live character's faction id, not the C# dummy 1.
+    let (_, _, rows) = board_entries(&body);
+    assert_eq!(
+        rows.iter().map(|row| row.faction_id).collect::<Vec<_>>(),
+        vec![101, 101]
+    );
 }
 
 #[tokio::test]
