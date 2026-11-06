@@ -5,7 +5,9 @@
 //! dependencies (both are passed per call); construction has no side effects: no songs, no
 //! queued uploads, no MIDI cache.
 
-use super::{CSRequestMusicNotesPacket, MusicManager, SongData, BUFF_SCORE_MEMORIZED};
+use super::{
+    CSRequestMusicNotesPacket, InstrumentSounds, MusicManager, SongData, BUFF_SCORE_MEMORIZED,
+};
 use crate::data::GameData;
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
@@ -289,4 +291,160 @@ fn native_request_flag_bytes_and_truncation() {
             );
         }
     }
+}
+
+const INSTRUMENT: u32 = 20480; // a real `instrument_sounds` item id
+const OTHER_ITEM: u32 = 1000;
+
+/// A player with a plain item and an owned instrument, and `instrument_sounds` containing only
+/// the instrument template.
+fn upload_fixture() -> (GameServer, TestClient, PlayerRef, u64, u64) {
+    use crate::data::items::ItemTemplate;
+    use crate::systems::economy::inventory::Inv;
+
+    let mut data = GameData::empty();
+    data.systems.services.instrument_sounds = InstrumentSounds::from_ids([INSTRUMENT]);
+    for id in [INSTRUMENT, OTHER_ITEM] {
+        data.items
+            .templates
+            .insert(id, ItemTemplate::plain(id, 1000));
+    }
+    let server = test_server_with(data);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Composer", 10.0, 10.0),
+        1,
+    );
+    client.conn.active_char = Some(player.clone());
+    let give = |template: u32, slot: i32| {
+        let item = server
+            .items
+            .create(
+                template,
+                1,
+                0,
+                1,
+                &server.game_data.items,
+                &server.ids.item,
+                0,
+            )
+            .expect("item");
+        let id = item.id;
+        assert!(Inv::of(&player)
+            .bag()
+            .lock()
+            .unwrap()
+            .add_new_item(item, slot, &server.game_data.items)
+            .is_ok());
+        id
+    };
+    let instrument = give(INSTRUMENT, 0);
+    let other = give(OTHER_ITEM, 1);
+    client.drain();
+    (server, client, player, instrument, other)
+}
+
+async fn upload(
+    server: &GameServer,
+    client: &mut TestClient,
+    song_size: u32,
+    item_id: u64,
+    song: &str,
+) {
+    super::CSSaveUserMusicNotesPacket {
+        song_size,
+        item_id,
+        value2: 0,
+        title: "Song".into(),
+        song: song.into(),
+    }
+    .handle(server, &mut client.conn)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn upload_accepts_an_owned_instrument_and_matching_size() {
+    let (server, mut client, _player, instrument, _) = upload_fixture();
+    upload(&server, &mut client, 3, instrument, "abc").await;
+    let queued = server
+        .systems
+        .services
+        .music
+        .queued_upload(1)
+        .expect("accepted upload");
+    assert_eq!(
+        (queued.title.as_str(), queued.song.as_str()),
+        ("Song", "abc")
+    );
+    assert_eq!(queued.source_item_id, instrument);
+    assert!(client.drain().is_empty());
+}
+
+#[tokio::test]
+async fn upload_accepts_exactly_max_song_chars() {
+    let (server, mut client, _player, instrument, _) = upload_fixture();
+    let song = "a".repeat(server.config.music.max_song_chars);
+    upload(&server, &mut client, song.len() as u32, instrument, &song).await;
+    assert!(server.systems.services.music.queued_upload(1).is_some());
+}
+
+#[tokio::test]
+async fn upload_rejects_a_mismatched_song_size() {
+    let (server, mut client, _player, instrument, _) = upload_fixture();
+    upload(&server, &mut client, 4, instrument, "abc").await;
+    assert!(server.systems.services.music.queued_upload(1).is_none());
+}
+
+#[tokio::test]
+async fn upload_rejects_an_unowned_item() {
+    let (server, mut client, _player, instrument, _) = upload_fixture();
+    upload(&server, &mut client, 3, instrument + 100, "abc").await;
+    assert!(server.systems.services.music.queued_upload(1).is_none());
+}
+
+#[tokio::test]
+async fn upload_rejects_an_owned_non_instrument() {
+    let (server, mut client, _player, _, other) = upload_fixture();
+    upload(&server, &mut client, 3, other, "abc").await;
+    assert!(server.systems.services.music.queued_upload(1).is_none());
+}
+
+#[tokio::test]
+async fn upload_rejects_a_song_over_max_song_chars() {
+    let (server, mut client, _player, instrument, _) = upload_fixture();
+    let song = "a".repeat(server.config.music.max_song_chars + 1);
+    upload(&server, &mut client, song.len() as u32, instrument, &song).await;
+    assert!(server.systems.services.music.queued_upload(1).is_none());
+}
+
+#[test]
+fn max_song_chars_binds_from_config_and_defaults_to_3000() {
+    let default = crate::config::AppConfig::default();
+    assert_eq!(default.music.max_song_chars, 3000);
+    let config = crate::config::AppConfig::from_value(serde_json::json!({
+        "Music": { "MaxSongChars": "4000" }
+    }))
+    .unwrap();
+    assert_eq!(config.music.max_song_chars, 4000);
+}
+
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn instrument_sounds_real_compact_db() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let sounds = InstrumentSounds::load(&conn).unwrap();
+    assert_eq!(sounds.len(), 199);
+    assert!(sounds.contains(20480));
+    assert!(
+        !sounds.contains(4045),
+        "the teleport scroll is not an instrument"
+    );
 }
