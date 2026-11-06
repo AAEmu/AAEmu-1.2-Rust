@@ -6872,16 +6872,23 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
 
 ## Static-table and feature verdicts (2026-11-06, recorded so they are not reopened)
 
-* **`equip_slot_groups` (24 rows) is not read; `equip_slot_group_maps` (48 rows) is.**
-  Equipping keeps the hard-coded `allowed_gear_slots` (`models/container.rs:93`, the C#
-  `EquipmentContainer.GetAllowedGearSlots`); the maps are read only by the lunagem check
-  (`item_sockets.equip_slot_group_id` -> `equip_slot_group_maps` -> target slot type,
-  `data/items.rs:1154-1159`, `systems/economy/item_effects.rs:755`). The optional data guard
-  (every map row matches the hard-coded table) is not needed until the group table gains a
-  consumer.
+* **`equip_slot_groups` (24 rows) is loaded; `equip_slot_group_maps` has 48 rows, 47 loaded.**
+  The group table is the parent of the maps, and the lunagem check now requires it
+  (`item_sockets.equip_slot_group_id` -> `equip_slot_groups` + `equip_slot_group_maps` ->
+  target slot type, `data/items.rs`, `systems/economy/item_effects.rs`). Map 10 names the
+  missing group 9 and is skipped at load, like the orphan `item_sockets` rows. Equipping keeps
+  the hard-coded `allowed_gear_slots` (`models/container.rs`, the C#
+  `EquipmentContainer.GetAllowedGearSlots`): the data has no target equip-slot column, so it
+  cannot express that rule. The real-data guard
+  `real_compact_equip_slot_groups_guard_the_hard_coded_slots` checks that every mapped slot
+  type is one the hard-coded table accepts and that the nine base groups still name the same
+  equip slots.
 * **`item_bags` has 5 rows whose ids do not resolve** (no item template references them). The
   1.2 client loads the table itself (`strings.txt:13953`); there is no reachable template and
   no known server rule, so there is nothing to load. Do not reopen.
+* **`item_tools` (130 rows) is client-side**: the 1.2 client loads `item_id, asset_id` for the
+  tool visual (`strings.txt` 13836), and `crafts.tool_id` is 0 in all 7 010 rows, so no server
+  check uses it.
 * **`expert_limits` prices are empty:** every `up_price` / `down_price` is 0 and `advantage` is
   a client display value (31 rows checked). The server uses the limit columns for
   labor/expand steps and charges the configured items, so there is no price to enforce.

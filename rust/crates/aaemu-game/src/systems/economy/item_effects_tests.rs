@@ -6,9 +6,9 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::formulas::FormulaManager;
 use crate::data::items::{
-    EquipSlotGroupMap, EquipTemplate, FullGradeTemplate, ItemCapScale, ItemGradeEnchantingSupport,
-    ItemSocket, ItemSocketLevelLimit, ItemSocketNumLimit, ItemTemplate, TemplateKind,
-    ITEM_CREST_STAMP, ITEM_DAWN_STONE,
+    EquipSlotGroup, EquipSlotGroupMap, EquipTemplate, FullGradeTemplate, ItemCapScale,
+    ItemGradeEnchantingSupport, ItemSocket, ItemSocketLevelLimit, ItemSocketNumLimit, ItemTemplate,
+    TemplateKind, ITEM_CREST_STAMP, ITEM_DAWN_STONE,
 };
 use crate::data::GameData;
 use crate::managers::chat::chat_type;
@@ -278,6 +278,15 @@ fn data() -> GameData {
             equip_slot_type_id: 6,
         }],
     );
+    for (id, name) in [(23, "socket_chest"), (18, "socket_hands")] {
+        d.items.equip_slot_groups.insert(
+            id,
+            EquipSlotGroup {
+                id,
+                name: name.to_string(),
+            },
+        );
+    }
     // A rechargeable equip (the 1.2 "costume wash" mechanic: recharge_buff_id + charge window).
     let mut rechargeable = ItemTemplate::new(
         RECHARGEABLE,
