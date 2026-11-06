@@ -59,6 +59,17 @@ fn body(p: &dyn ServerPacket) -> Vec<u8> {
     encode(p)[6..].to_vec()
 }
 
+/// The `qualified_id` of the last `SCInviteToInstantGame` in `frames` (body layout:
+/// `zone_instance_id`, `ruleset_id`, `corps`, `qualified_id`).
+fn invite_qualified_id(frames: &[(u16, Vec<u8>)]) -> u64 {
+    let (_, b) = frames
+        .iter()
+        .rev()
+        .find(|(op, _)| *op == sc::SCInviteToInstantGamePacket)
+        .expect("an instant game invitation");
+    u64::from_le_bytes(b[13..21].try_into().expect("qualified id"))
+}
+
 fn zone(id: u32, key: u32, group: u32) -> Zone {
     Zone {
         id,
@@ -2228,23 +2239,30 @@ async fn battlefield_queue_match_join_score_and_end() {
             zone_instance_id: zid,
             ruleset_id: 22,
             corps: c,
-            qualified_id: 1,
+            qualified_id: 0,
         })
     };
-    assert_eq!(
-        e.frames(),
-        vec![(sc::SCInviteToInstantGamePacket, invite(corps::CORPS2))]
-    );
-    assert_eq!(
-        f.frames(),
-        vec![(sc::SCInviteToInstantGamePacket, invite(corps::CORPS1))]
-    );
+    let e_invite = e.frames();
+    let f_invite = f.frames();
+    assert_eq!(e_invite.len(), 1);
+    assert_eq!(f_invite.len(), 1);
+    assert_eq!(e_invite[0].0, sc::SCInviteToInstantGamePacket);
+    assert_eq!(f_invite[0].0, sc::SCInviteToInstantGamePacket);
+    // The invitation body is unchanged up to the qualified id, which is per invitation.
+    assert_eq!(&e_invite[0].1[..13], &invite(corps::CORPS2)[..13]);
+    assert_eq!(&f_invite[0].1[..13], &invite(corps::CORPS1)[..13]);
+    let e_id = invite_qualified_id(&e_invite);
+    let f_id = invite_qualified_id(&f_invite);
+    assert_ne!(e_id, 0);
+    assert_ne!(e_id, f_id, "each invitation carries its own id");
 
     // ---- Both accept (CSJoinInstantGame) and are moved to their corps spawn.
-    let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
-    e.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
-    f.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    let mut e_join = vec![1];
+    e_join.extend_from_slice(&e_id.to_le_bytes());
+    e.frame(&server, cs::CSJoinInstantGamePacket, &e_join).await;
+    let mut f_join = vec![1];
+    f_join.extend_from_slice(&f_id.to_le_bytes());
+    f.frame(&server, cs::CSJoinInstantGamePacket, &f_join).await;
     assert!(e.frames().contains(&(
         sc::SCLoadInstancePacket,
         load_instance(100, CAMP_ZONE, 1229.0, 530.0, 199.0, (0.0, 0.0, 0.0))
@@ -2257,9 +2275,12 @@ async fn battlefield_queue_match_join_score_and_end() {
     assert!(e.p.data().main_world_position.is_some());
 
     // ---- Entered: joined packet + corps faction; the second entry starts the game.
-    let entered = 1u64.to_le_bytes();
-    e.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
+    e.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &e_id.to_le_bytes(),
+    )
+    .await;
     let ef = e.frames();
     assert_eq!(ef[0].0, sc::SCInstantGameJoinedPacket);
     assert_eq!(
@@ -2272,8 +2293,12 @@ async fn battlefield_queue_match_join_score_and_end() {
     );
     assert_eq!(e.p.data().unit.faction_id, 160);
     assert_eq!(e.p.data().unit.origin_faction_id, 101);
-    f.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
+    f.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &f_id.to_le_bytes(),
+    )
+    .await;
     let ff = f.frames();
     assert!(ff.iter().any(|(op, _)| *op == sc::SCInstantGameStartPacket));
     assert!(e
@@ -2420,14 +2445,11 @@ async fn battlefield_decline_requeues() {
     // Not full (drill camp): kept in the queue list.
     assert!(!game.is_full());
     assert_eq!(mgr.queue_list().len(), 1);
-    assert!(h
-        .frames()
-        .iter()
-        .any(|(op, _)| *op == sc::SCInviteToInstantGamePacket));
+    let invite_id = invite_qualified_id(&h.frames());
     // Decline: removed from the game, applied again (no Cancel: that would reset the 1.2
     // client to not-applied).
     let mut decline = vec![0];
-    decline.extend_from_slice(&1u64.to_le_bytes());
+    decline.extend_from_slice(&invite_id.to_le_bytes());
     h.frame(&server, cs::CSJoinInstantGamePacket, &decline)
         .await;
     assert!(!game.has_player(&h.p));
@@ -2447,6 +2469,231 @@ async fn battlefield_decline_requeues() {
     h.frame(&server, cs::CSCancelInstantGamePacket, &[]).await;
     assert!(!game.has_player(&h.p));
     assert!(!instant_game::player_can_enter(&server, &h.p) || h.instance() == 0);
+}
+
+/// `SCInviteToInstantGame.qualified_id` is per game + invitation: a join / entered-world
+/// response that echoes another value is stale and ignored.
+#[tokio::test]
+async fn battlefield_stale_qualified_ids_are_ignored() {
+    let server = camp_server(1, 60);
+    let mut p = Pc::new(&server, 7, "Invited", 100.0, 100.0);
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    let invite_id = invite_qualified_id(&p.frames());
+    let stale_id = invite_id.wrapping_add(1);
+    let mut stale = vec![1];
+    stale.extend_from_slice(&stale_id.to_le_bytes());
+
+    p.frame(&server, cs::CSJoinInstantGamePacket, &stale).await;
+    assert!(p.frames().is_empty(), "a stale join is ignored");
+    assert_eq!(p.instance(), 0);
+
+    let mut join = vec![1];
+    join.extend_from_slice(&invite_id.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    assert_eq!(p.instance(), game.world_id);
+    p.frames();
+
+    p.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &stale_id.to_le_bytes(),
+    )
+    .await;
+    assert!(p.frames().is_empty(), "a stale entered-world is ignored");
+    assert!(game.st().members.is_empty());
+
+    p.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &invite_id.to_le_bytes(),
+    )
+    .await;
+    assert!(p.ops().contains(&sc::SCInstantGameJoinedPacket));
+    assert_eq!(game.st().members.len(), 1);
+}
+
+/// Declining replaces the invitation: the previous id is stale and ignored.
+#[tokio::test]
+async fn battlefield_reinvite_replaces_the_qualified_id() {
+    let server = camp_server(1, 60);
+    let mut p = Pc::new(&server, 7, "Reinvited", 100.0, 100.0);
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    let first = invite_qualified_id(&p.frames());
+    let mut decline = vec![0];
+    decline.extend_from_slice(&first.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &decline)
+        .await;
+    p.frames();
+    instant_game::battlefield_tick(&server);
+    let second = invite_qualified_id(&p.frames());
+    assert_ne!(first, second);
+
+    let mut stale = vec![1];
+    stale.extend_from_slice(&first.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &stale).await;
+    assert!(p.frames().is_empty(), "the previous invitation is stale");
+    assert_eq!(p.instance(), 0);
+
+    let mut join = vec![1];
+    join.extend_from_slice(&second.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    assert_eq!(p.instance(), game.world_id);
+}
+
+/// `PlayerCanEnter` now gates `ApplyToBattlefield`: a duelling, seated-jury or jailed
+/// character cannot queue (the C# had the checks but never called them).
+#[tokio::test]
+async fn battlefield_apply_refuses_a_duel_jury_or_jail() {
+    use crate::systems::social::crime::buff;
+
+    let server = camp_server(1, 60);
+    let mut duelist = Pc::new(&server, 7, "Duelist", 100.0, 100.0);
+    let opponent = Pc::new(&server, 8, "Opponent", 110.0, 100.0);
+    server
+        .systems
+        .social
+        .duels
+        .duel_request(&server, &duelist.p, opponent.p.character_id);
+    assert!(!instant_game::player_can_enter(&server, &duelist.p));
+    assert!(!instant_game::player_can_enter(&server, &opponent.p));
+    duelist.frames();
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &duelist.p);
+    assert_eq!(server.systems.instances.instant_games.queued(7), None);
+    assert!(duelist.frames().is_empty());
+
+    // A seated juror (`JURY` 3621) and the jail states of the crime system.
+    for (id, buff_id) in [
+        (9, buff::JURY),
+        (10, buff::FORCIBLY_AWAITING_TRIAL),
+        (11, buff::PRISONER_NUIAN),
+        (12, buff::PRISONER_HARANYAN),
+    ] {
+        let mut pc = Pc::new(&server, id, &format!("Held{id}"), 100.0, 100.0);
+        pc.frames();
+        assert!(instant_game::player_can_enter(&server, &pc.p));
+        {
+            let mut c = pc.p.data();
+            c.unit.buffs.add_buff(
+                crate::models::buff::Buff::new(
+                    BuffTemplate::simple(buff_id, BuffKind::Good),
+                    crate::models::buff::SkillCaster::default(),
+                    None,
+                    0,
+                ),
+                0,
+                0,
+                0,
+            );
+        }
+        assert!(
+            !instant_game::player_can_enter(&server, &pc.p),
+            "buff {buff_id}"
+        );
+        instant_game::apply_to_battlefield(&server, 7, corps::ANY, &pc.p);
+        assert_eq!(
+            server.systems.instances.instant_games.queued(7),
+            None,
+            "buff {buff_id}"
+        );
+        assert!(pc.frames().is_empty(), "buff {buff_id}");
+    }
+}
+
+/// A kill teleport restarts the victim's (and the Gladiator killer's) ZWUnitFell tracker at
+/// the spawn, so a fall from before the death cannot deal damage after the respawn.
+#[tokio::test(start_paused = true)]
+async fn battlefield_kill_teleport_resets_fall_tracking() {
+    use crate::systems::ai::collision::fall::zone_fall_vel;
+
+    let server = camp_server_build(1, 60, 0, 30, 2, false, 11, |r| {
+        r.id = 28;
+        r.time_resurrection_delay = 1;
+    });
+    let (a, mut b, game) = started_1v1_on(&server, 11).await;
+    assert_eq!(game.battlefield.id, instant_game::game_type::GLADIATOR);
+    let fall = &server.systems.ai.collision.fall;
+    // Both units were falling from high above before the kill.
+    for p in [&a.p, &b.p] {
+        assert_eq!(fall.sample(p.obj_id, 1000.0, Some(0.0), 0), None);
+        assert!(fall.state(p.obj_id).unwrap().airborne);
+    }
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(b
+        .frames()
+        .iter()
+        .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket));
+    // The victim and the Gladiator killer respawn at their corps spawn (z 199 in this fixture).
+    for p in [&a.p, &b.p] {
+        let state = fall.state(p.obj_id).expect("fall state");
+        assert!(!state.airborne, "the teleport restarts the fall grounded");
+        assert_eq!(state.max_down_vel, 0.0);
+        assert_eq!(state.start_z, 199.0, "restarted at the spawn z");
+        assert_eq!(fall.sample(p.obj_id, 199.0, Some(199.0), 2000), None);
+        // The zone gate cannot see the old fall any more: no ZWUnitFell, no fall damage.
+        assert_eq!(zone_fall_vel(32000, state.start_z, 199.0), None);
+    }
+}
+
+/// Ending a game unbinds the members' `OnKill` handlers even when a member has no origin
+/// faction (the `LeaveInstantGame` faction check returns early): removal itself unbinds.
+#[tokio::test]
+async fn battlefield_end_unbinds_kill_events_without_an_origin_faction() {
+    let server = camp_server(1, 60);
+    let mut p = Pc::new(&server, 7, "Allied", 100.0, 100.0);
+    // The drill camp's first player takes corps 2 (faction 160): give that faction up front,
+    // so entering makes no temporary change and the character has no origin faction.
+    p.p.data().unit.faction_id = 160;
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    let id = invite_qualified_id(&p.frames());
+    let mut join = vec![1];
+    join.extend_from_slice(&id.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    p.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &id.to_le_bytes(),
+    )
+    .await;
+    assert_eq!(game.st().members.len(), 1);
+    assert_eq!(p.p.data().unit.origin_faction_id, 0);
+    assert_eq!(
+        server
+            .systems
+            .instances
+            .events
+            .characters
+            .count(&p.p, CharEvent::Kill),
+        1
+    );
+    instant_game::destroy_game(&server, &game);
+    assert_eq!(
+        server
+            .systems
+            .instances
+            .events
+            .characters
+            .count(&p.p, CharEvent::Kill),
+        0
+    );
+    assert!(server.systems.instances.instant_games.games().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2564,9 +2811,9 @@ async fn battlefield_entered_requires_actual_instance_and_subscribes_kills_once(
         .instant_games
         .current(&p.p)
         .unwrap();
-    p.frames();
+    let invite_id = invite_qualified_id(&p.frames());
     let original_faction = p.p.data().unit.faction_id;
-    let entered = 1u64.to_le_bytes();
+    let entered = invite_id.to_le_bytes();
     p.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
         .await;
     assert!(p.frames().is_empty());
@@ -2638,15 +2885,26 @@ async fn started_1v1_on(
     }
     instant_game::battlefield_tick(server);
     let game = server.systems.instances.instant_games.games()[0].clone();
+    let a_id = invite_qualified_id(&a.frames());
+    let b_id = invite_qualified_id(&b.frames());
     let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
+    join.extend_from_slice(&a_id.to_le_bytes());
     a.frame(server, cs::CSJoinInstantGamePacket, &join).await;
+    join.truncate(1);
+    join.extend_from_slice(&b_id.to_le_bytes());
     b.frame(server, cs::CSJoinInstantGamePacket, &join).await;
-    let entered = 1u64.to_le_bytes();
-    a.frame(server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
-    b.frame(server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
+    a.frame(
+        server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &a_id.to_le_bytes(),
+    )
+    .await;
+    b.frame(
+        server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &b_id.to_le_bytes(),
+    )
+    .await;
     a.frames();
     b.frames();
     (a, b, game)
@@ -2692,13 +2950,17 @@ async fn battlefield_kill_and_assist_scores_come_from_game_score_rules() {
     instant_game::battlefield_tick(&server);
     let game = server.systems.instances.instant_games.games()[0].clone();
     assert_eq!(game.rule_set.id, 8);
-    let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
-    let entered = 1u64.to_le_bytes();
     for pc in [&mut a, &mut b, &mut c] {
+        let id = invite_qualified_id(&pc.frames());
+        let mut join = vec![1];
+        join.extend_from_slice(&id.to_le_bytes());
         pc.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
-        pc.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-            .await;
+        pc.frame(
+            &server,
+            cs::CSEnteredInstantGameWorldPacket,
+            &id.to_le_bytes(),
+        )
+        .await;
         pc.frames();
     }
     assert_eq!(game.st().members.len(), 3);
@@ -2883,13 +3145,17 @@ async fn a_battlefield_result_scores_the_arena_ranking_board() {
         instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
     }
     instant_game::battlefield_tick(&server);
-    let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
-    let entered = 1u64.to_le_bytes();
     for p in [&mut e, &mut f] {
+        let id = invite_qualified_id(&p.frames());
+        let mut join = vec![1];
+        join.extend_from_slice(&id.to_le_bytes());
         p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
-        p.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-            .await;
+        p.frame(
+            &server,
+            cs::CSEnteredInstantGameWorldPacket,
+            &id.to_le_bytes(),
+        )
+        .await;
     }
     // Nothing is scored while the game runs.
     let ranking = &server.systems.social.ranking;
