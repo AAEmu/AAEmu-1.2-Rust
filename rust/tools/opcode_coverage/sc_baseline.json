@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 68,
-    "never_sent": 46
+    "never_sent": 45
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -94,7 +94,6 @@
     "SCHouseBuildPayChangedPacket",
     "SCHouseFarmPacket",
     "SCHouseOwnerNameChangedPacket",
-    "SCICSExchangeRatioPacket",
     "SCIdleKickPacket",
     "SCInstantGameRemainTimePacket",
     "SCItemDetailUpdatedPacket",

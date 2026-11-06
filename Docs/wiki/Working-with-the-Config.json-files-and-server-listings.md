@@ -266,8 +266,33 @@ evidenced; the tabs, SKUs, prices, stock limits and currencies are server-owner
 policy. `SQL/examples/example-ics-default-en.sql` is an optional example catalogue
 (English labels and example prices) that can be imported and edited; it is not part
 of the base schema or the required updates. Check each SKU's `currency` (credits,
-AA points, loyalty or coins) and price before importing. AA-priced SKUs need the
-AA-point wallet.
+AA points, loyalty or coins) and price before importing. AA-priced SKUs debit the
+per-character AA-point wallet; a short wallet is refused with
+`INGAME_SHOP_NOT_ENOUGH_AA_POINT` (592).
+
+### AA point exchange (`Configurations/Ics.json`)
+
+`CSICSBuyAAPoint` (cash -> AA points) is disabled by default. The ratio is AA
+points per credit spent:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `AaPointExchangeRatio` | `0` | `0` (or negative) keeps the exchange off: the request is answered with the shop's AA failure and nothing is debited. A positive value debits the requested credits (guarded against overdraft), credits `cash × ratio` AA points and sends the new AA balance, the new credit balance and the ratio to the client. The product must fit a 32-bit signed value. The retail ratio is UNKNOWN; this is operator policy. |
+
+```json
+{
+  "Ics": {
+    "AaPointExchangeRatio": 3
+  }
+}
+```
+
+Override it in `Config.Local.json` or with `Ics__AaPointExchangeRatio`. The same
+ratio is sent to the client when the cash shop opens and in the premium service
+list, so AA prices display consistently. An AA-priced premium service is charged
+from the wallet (`PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when short). The
+reply form of the exchange is INFERRED from the 1.2 client; see
+`rust/crates/aaemu-game/PORTING.md` (WP-AA2).
 
 ## Account restrictions and idle kick (`Account:Restrictions`, `Account:IdleKickTime`)
 
