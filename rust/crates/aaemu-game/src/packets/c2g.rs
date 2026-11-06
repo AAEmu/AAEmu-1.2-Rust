@@ -86,9 +86,6 @@ pub async fn enter_world_login(
 
     conn.set_account_id(account_id);
     conn.state = GameState::Lobby;
-    // A world login starts a new second-password session: nothing is passed yet and any
-    // tables of a previous session on this connection are gone.
-    conn.second_password = Default::default();
 
     // `AccountManager.Add` refuses an account that is already registered (C# `Add` returns
     // early). `EnterWorldManager.AddAccount` normally catches this when the login server asks
@@ -201,8 +198,6 @@ impl ClientPacket for CSListCharacterPacket {
             let extra_slots = crate::db::extra_character_slots(&server.db, conn.account_id()).await;
             conn.send(&SCGetSlotCountPacket { sc: extra_slots });
             load_account(server, conn).await?;
-            // The second password state must be known before the client renders the lobby.
-            crate::systems::services::second_password::send_state(server, conn).await?;
             let characters = std::mem::take(&mut conn.characters);
             send_character_list(conn, &characters);
             crate::systems::housing::send_login_houses(server, conn);

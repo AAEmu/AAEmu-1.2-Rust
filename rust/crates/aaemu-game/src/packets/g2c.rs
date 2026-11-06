@@ -168,9 +168,6 @@ pub struct SCInitialConfigPacket {
     /// `Account:Restrictions:<effective payment method>` (Rust only, WP-J). The seven flags are
     /// the ones the client reader `FUN_397b1fb0` names; all `true` by default.
     pub restrictions: RestrictionFlags,
-    /// `SecondPassword:MaxFailCount` (0 when the feature is disabled). The client compares it
-    /// with the failed count from `SCSecondPassSetted` before it requests key tables.
-    pub second_password_max_fail_count: u8,
     /// `Account:IdleKickTime` (raw `u16`, 0 = off; Rust only, WP-J). Unit UNKNOWN: the client
     /// reader `FUN_397b2a00` reads it as a `u16` and the client performs the kick itself.
     pub idle_kick_time: u16,
@@ -200,7 +197,7 @@ impl Marshal for SCInitialConfigPacket {
             .write_bool(self.restrictions.can_use_bank)
             .write_bool(self.restrictions.can_use_copper);
         s.write_u8(2) // secondPriceType (2 = na loyalty token; region constant)
-            .write_u8(self.second_password_max_fail_count) // secondPasswordMaxFailCount
+            .write_u8(0) // secondPasswordMaxFailCount
             .write_u16(self.idle_kick_time); // idleKickTime (unit UNKNOWN)
     }
 }
@@ -465,7 +462,6 @@ mod tests {
         let b = encode(&SCInitialConfigPacket {
             fsets: f.clone(),
             restrictions: RestrictionFlags::default(),
-            second_password_max_fail_count: 0,
             idle_kick_time: 0,
         });
         let mut want = hex("DD 01 00 00 06 00");
@@ -477,25 +473,6 @@ mod tests {
             "00 00 00 00  32 00 00 00  01 01 01 01 01 01 01  02  00  00 00",
         ));
         assert_eq!(b, want);
-    }
-
-    #[test]
-    fn initial_config_carries_second_password_max_fail_count() {
-        let b = encode(&SCInitialConfigPacket {
-            fsets: FeatureSet::initialized(0, 0),
-            restrictions: RestrictionFlags::default(),
-            second_password_max_fail_count: 5,
-            idle_kick_time: 0,
-        });
-        // Tail: secondPriceType 2, secondPasswordMaxFailCount, idleKickTime u16.
-        assert_eq!(&b[b.len() - 4..], &[2, 5, 0, 0]);
-        let zero = encode(&SCInitialConfigPacket {
-            fsets: FeatureSet::initialized(0, 0),
-            restrictions: RestrictionFlags::default(),
-            second_password_max_fail_count: 0,
-            idle_kick_time: 0,
-        });
-        assert_eq!(&zero[zero.len() - 4..], &[2, 0, 0, 0]);
     }
 
     /// The reader (`FUN_397b2a00` -> `FUN_397b1fb0`) takes the seven booleans in this order,
@@ -515,10 +492,9 @@ mod tests {
         let b = encode(&SCInitialConfigPacket {
             fsets: FeatureSet::initialized(0, 0),
             restrictions,
-            second_password_max_fail_count: 7,
             idle_kick_time: 0x1234,
         });
-        assert_eq!(&b[b.len() - 11..], &[0, 1, 0, 1, 0, 1, 0, 2, 7, 0x34, 0x12]);
+        assert_eq!(&b[b.len() - 11..], &[0, 1, 0, 1, 0, 1, 0, 2, 0, 0x34, 0x12]);
     }
 
     #[test]
