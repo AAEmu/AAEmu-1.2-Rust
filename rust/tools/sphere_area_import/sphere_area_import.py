@@ -13,15 +13,27 @@ blocks of the form
         radius 15
 
 `stype` is the `spheres.id` / `sphere_detail_id` numbering of the 1.2 compact `spheres` table.
-The output is one `<out>/<world>/sphere_area_fill.json` per 1.2 world with the kept blocks:
+`pos` is zone-local, not world: the 10.x `quest_area_sphere.g` positions are in the same
+zone-local frame as the 1.2 `quest_sign_sphere.g` positions (662 same-quest pairs in the same
+zone agree; 165 of them within 5 m). The committed output holds WORLD coordinates:
 
-    [{"sphere_id": 2245, "zone": 141, "x": 2679.69, "y": 3384.23, "z": 132.562, "radius": 15.0}]
+    [{"sphere_id": 2245, "zone": 141, "x": 11851.69, "y": 7192.23, "z": 132.562, "radius": 15.0}]
+
+with `x = source_zone_origin_x * 1024 + local_x`, `y = source_zone_origin_y * 1024 + local_y`
+and `z` unchanged: exactly the formula the 1.2 sign-sphere loader applies
+(`systems/quests/spheres.rs`: zone origin cell * 1024 + local). The origin cell comes from the
+10.x `world.xml` of the zone, because the 10.x file is anchored at the 10.x origin. That differs
+from the 1.2 origin in 10 zones (e.g. zones 192 and 193 gained a cell row in 10.x; using the 1.2
+origin would move their spheres a cell south, outside the 1.2 zone). The 1.2 `world.xml`
+supplies the target zone rectangle.
 
 Data-version guard (the 10.x world is newer than 1.2): a block is kept only when
 
   * its world exists in the 1.2 client worlds (`game/worlds/<world>/world.xml`),
   * its zone key exists in that 1.2 `world.xml`,
   * its `stype` exists in the 1.2 `compact.sqlite3` `spheres` table,
+  * the converted world position lies inside the 1.2 zone's cell rectangle
+    (`position_outside_zone` otherwise: a 10.x zone may own cells the 1.2 zone does not),
 
 and it is not an exact duplicate of an earlier kept block of the same world. Dropped blocks are
 reported per reason. A block with a malformed missing field is `invalid_block`.
@@ -47,6 +59,7 @@ import re
 import sqlite3
 import sys
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opcode_coverage"))
@@ -61,13 +74,44 @@ POS_RE = re.compile(
     re.I,
 )
 
+#: `WorldManager.CELL_SIZE`: the zone origin cell is this many metres wide/tall.
+CELL_SIZE = 1024
+
 DROP_REASONS = (
     "world_not_in_1_2",
     "zone_not_in_1_2",
+    "zone_frame_missing",
+    "position_outside_zone",
     "sphere_not_in_1_2",
     "invalid_block",
     "duplicate",
 )
+
+
+@dataclass(frozen=True)
+class ZoneFrame:
+    """One `world.xml` `<Zone>`: origin cell and the cells it owns."""
+
+    origin_x: int
+    origin_y: int
+    cells: tuple[tuple[int, int], ...] = ()
+
+    def to_world(self, x: float, y: float) -> tuple[float, float]:
+        """Zone-local (x, y) plus the origin cell; the caller keeps z as is."""
+        return (self.origin_x * CELL_SIZE + x, self.origin_y * CELL_SIZE + y)
+
+    def contains_world(self, x: float, y: float) -> bool:
+        """Is world (x, y) inside the zone's cell rectangle? A zone without cells accepts."""
+        if not self.cells:
+            return True
+        min_x = min(c[0] for c in self.cells)
+        min_y = min(c[1] for c in self.cells)
+        max_x = max(c[0] for c in self.cells)
+        max_y = max(c[1] for c in self.cells)
+        return (
+            min_x * CELL_SIZE <= x <= (max_x + 1) * CELL_SIZE
+            and min_y * CELL_SIZE <= y <= (max_y + 1) * CELL_SIZE
+        )
 
 
 def parse_area_spheres(text: str) -> list[dict]:
@@ -124,35 +168,62 @@ def pak_read(pak: Pak, index: dict[str, tuple[int, int]], name: str) -> bytes:
     return pak.f.read(size)
 
 
-def parse_zone_keys(data: bytes) -> set[int]:
-    """Zone keys of a 1.2 `world.xml` (`<Zone .. id="129" ..>`)."""
+def parse_zone_frames(data: bytes) -> dict[int, ZoneFrame]:
+    """Zone key -> origin cell and cells of a `world.xml`."""
     try:
         root = ET.fromstring(data)
     except ET.ParseError:
-        return {int(z) for z in re.findall(rb'<Zone\b[^>]*\bid="(\d+)"', data)}
-    return {
-        int(zone.get("id", "0"))
-        for zone in root.iter()
-        if zone.tag == "Zone" and zone.get("id")
-    }
+        out: dict[int, ZoneFrame] = {}
+        for m in re.finditer(rb"<Zone\b([^>]*)>(.*?)</Zone>", data, re.S):
+            attrs = {
+                k.decode(): v.decode()
+                for k, v in re.findall(rb'(\w+)="([^"]*)"', m.group(1))
+            }
+            if "id" not in attrs:
+                continue
+            cells = tuple(
+                (int(x), int(y))
+                for x, y in re.findall(rb'<cell\s+x="(\d+)"\s+y="(\d+)"', m.group(2))
+            )
+            out[int(attrs["id"])] = ZoneFrame(
+                int(attrs.get("originX", "0")),
+                int(attrs.get("originY", "0")),
+                cells,
+            )
+        return out
+    out = {}
+    for zone in root.iter():
+        if zone.tag != "Zone" or not zone.get("id"):
+            continue
+        cells = tuple(
+            (int(cell.get("x", "0")), int(cell.get("y", "0")))
+            for cell in zone.iter()
+            if cell.tag == "cell"
+        )
+        out[int(zone.get("id", "0"))] = ZoneFrame(
+            int(zone.get("originX", "0")),
+            int(zone.get("originY", "0")),
+            cells,
+        )
+    return out
 
 
-def load_12_zone_keys(
-    pak12: Pak | None,
-    index12: dict[str, tuple[int, int]] | None,
-    client12: Path | None,
-) -> dict[str, set[int]]:
-    """`lower-cased world directory name -> zone keys` from the 1.2 `world.xml` files."""
-    worlds: dict[str, set[int]] = {}
-    if pak12 is not None and index12 is not None:
-        for name in index12:
+def load_world_frames(
+    pak: Pak | None,
+    index: dict[str, tuple[int, int]] | None,
+    client: Path | None,
+) -> dict[str, dict[int, ZoneFrame]]:
+    """`lower-cased world directory name -> zone frames` from the `world.xml` files."""
+    worlds: dict[str, dict[int, ZoneFrame]] = {}
+    if pak is not None and index is not None:
+        for name in index:
             parts = name.split("/")
             if len(parts) == 4 and parts[0] == "game" and parts[1] == "worlds" and parts[3] == "world.xml":
-                worlds[parts[2]] = parse_zone_keys(pak_read(pak12, index12, name))
+                worlds[parts[2]] = parse_zone_frames(pak_read(pak, index, name))
     else:
-        assert client12 is not None
-        for path in sorted(client12.glob("game/worlds/*/world.xml")):
-            worlds[path.parent.name.lower()] = parse_zone_keys(path.read_bytes())
+        assert client is not None
+        for path in sorted(client.glob("game/worlds/*/world.xml")):
+            worlds[path.parent.name.lower()] = parse_zone_frames(path.read_bytes())
     return worlds
 
 
@@ -189,7 +260,10 @@ def convert(
     compact: Path,
 ) -> tuple[dict[str, list[dict]], dict[str, int], dict[str, dict[str, int]]]:
     """Returns `(kept by world, drops by reason, drops by reason per world)`."""
-    zone_keys = load_12_zone_keys(pak12, index12, client12)
+    zones12 = load_world_frames(pak12, index12, client12)
+    # The 10.x `pos` is anchored at the 10.x zone origin cell. That frame is the source of the
+    # local coordinates (the 1.2 origin differs for some zones, e.g. 192/193).
+    zones10 = load_world_frames(pak10, index10, None)
     sphere_ids = load_sphere_ids(compact)
     kept: dict[str, list[dict]] = {}
     drops = {reason: 0 for reason in DROP_REASONS}
@@ -205,10 +279,11 @@ def convert(
             drops[reason] += 1
             world_drops[reason] += 1
 
-        if world not in zone_keys:
+        if world not in zones12:
             drop("world_not_in_1_2")
             continue
-        if zone not in zone_keys[world]:
+        target = zones12[world].get(zone)
+        if target is None:
             drop("zone_not_in_1_2")
             continue
         if not {"stype", "pos", "radius"} <= block.keys() or block["radius"] <= 0:
@@ -218,9 +293,20 @@ def convert(
         if sphere_id not in sphere_ids:
             drop("sphere_not_in_1_2")
             continue
-        x, y, z = block["pos"]
+        frame = zones10.get(world, {}).get(zone)
+        if frame is None:
+            drop("zone_frame_missing")
+            continue
+        local_x, local_y, z = block["pos"]
+        x, y = frame.to_world(local_x, local_y)
+        if not target.contains_world(x, y):
+            drop("position_outside_zone")
+            continue
+        # The source has at most 5 decimals; adding the integer origin cell would otherwise
+        # print binary-float noise (15981.119999999999).
+        x, y = round(x, 5), round(y, 5)
         radius = block["radius"]
-        key = (sphere_id, round(x, 3), round(y, 3), round(z, 3), round(radius, 3))
+        key = (zone, sphere_id, round(x, 5), round(y, 5), round(z, 5), round(radius, 3))
         if key in seen.setdefault(world, set()):
             drop("duplicate")
             continue

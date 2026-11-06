@@ -161,7 +161,6 @@ impl ClientPacket for FinishStatePacket {
                     // WP-J selects the restriction flags by the effective payment method.
                     let state =
                         crate::systems::services::accounts::state(server, conn.account_id());
-                    let second_password = &server.config.second_password;
                     conn.send(&SCInitialConfigPacket {
                         fsets: server.systems.services.features(server),
                         restrictions: *server
@@ -169,11 +168,6 @@ impl ClientPacket for FinishStatePacket {
                             .account
                             .restrictions
                             .for_payment(state.payment.method),
-                        second_password_max_fail_count: if second_password.enabled {
-                            second_password.max_fail_count
-                        } else {
-                            0
-                        },
                         idle_kick_time: server.config.account.idle_kick_time,
                     });
                     let trion = &server.config.account.trion;

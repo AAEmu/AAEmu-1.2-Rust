@@ -25,52 +25,8 @@ pub(crate) fn body_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// The `body=` text of the opt-in C->S trace. The second password packets carry the typed
-/// password and the virtual-keyboard tables, so their bodies are never logged.
-pub(crate) fn trace_body(level: u8, opcode: u16, bytes: &[u8]) -> String {
-    if level == crate::net::packet::LEVEL_PLAIN
-        && matches!(
-            opcode,
-            crate::opcodes::cs::CSCreateSecondPasswordPacket
-                | crate::opcodes::cs::CSChangeSecondPasswordPacket
-                | crate::opcodes::cs::CSClearSecondPasswordPacket
-                | crate::opcodes::cs::CSCheckSecondPasswordPacket
-        )
-    {
-        return "<redacted: second password>".to_string();
-    }
-    body_hex(bytes)
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn trace_body_redacts_the_second_password_packets() {
-        use crate::net::packet::LEVEL_PLAIN;
-        use crate::opcodes::cs;
-
-        for opcode in [
-            cs::CSCreateSecondPasswordPacket,
-            cs::CSChangeSecondPasswordPacket,
-            cs::CSClearSecondPasswordPacket,
-            cs::CSCheckSecondPasswordPacket,
-        ] {
-            assert_eq!(
-                super::trace_body(LEVEL_PLAIN, opcode, b"secret-password"),
-                "<redacted: second password>"
-            );
-        }
-        assert_eq!(
-            super::trace_body(LEVEL_PLAIN, cs::CSRankCharacterPacket, &[0xAB]),
-            "ab "
-        );
-        assert_eq!(
-            super::trace_body(0, cs::CSCheckSecondPasswordPacket, &[0xAB]),
-            "ab ",
-            "only the plain level carries the game's second password packets"
-        );
-    }
-
     #[test]
     fn body_hex_is_not_capped() {
         let bytes: Vec<u8> = (0..100).collect();

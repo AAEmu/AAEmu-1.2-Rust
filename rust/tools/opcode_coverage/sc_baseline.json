@@ -1,7 +1,7 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 60,
+    "typeless": 68,
     "never_sent": 53
   },
   "typeless": [
@@ -38,6 +38,14 @@
     "SCPlaySequencePacket",
     "SCPlotProcessingTimePacket",
     "SCQuestListPacket",
+    "SCSecondPassAccountLockedPacket",
+    "SCSecondPassChangedPacket",
+    "SCSecondPassCheckOverFailedPacket",
+    "SCSecondPassCheckedPacket",
+    "SCSecondPassClearedPacket",
+    "SCSecondPassCreatedPacket",
+    "SCSecondPassKeyTablesPacket",
+    "SCSecondPassSettedPacket",
     "SCShowDemoModeUiPacket",
     "SCSoundAreaEventPacket",
     "SCSpecialtyRecordsPacket",

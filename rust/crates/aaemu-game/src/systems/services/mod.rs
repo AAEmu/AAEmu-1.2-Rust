@@ -45,7 +45,6 @@ pub mod models;
 pub mod music;
 pub mod premium;
 pub mod radar;
-pub mod second_password;
 pub mod shutdown;
 pub mod sus;
 pub mod tasks;
@@ -111,8 +110,6 @@ pub struct System {
     pub radar: radar::RadarManager,
     /// `SusManager`.
     pub sus: sus::SusManager,
-    /// 1.2 second password state, storage and hashing (`SecondPassword`).
-    pub second_password: second_password::SecondPasswordManager,
     /// Account payment persistence (WP-B); MySQL when nothing is installed.
     pub premium_store: HookSlot<dyn premium::PremiumStore>,
     /// `WebApiService`.
@@ -152,7 +149,6 @@ impl System {
         accounts::initialize(server);
         timed_rewards::initialize(server);
         premium::initialize(server);
-        second_password::initialize(server);
         radar::RadarManager::initialize(server);
         Ok(())
     }
@@ -210,7 +206,6 @@ impl System {
 /// Registers this subsystem's C->S packets.
 pub fn register(reg: &mut PacketRegistry) {
     character_packets::register(reg);
-    second_password::register(reg);
     expands::register(reg);
     reg.register::<character::CSRollDicePacket>(LEVEL_PLAIN, cs::CSRollDicePacket);
     reg.register::<beauty_salon::CSEnterBeautySalonPacket>(

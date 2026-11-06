@@ -130,8 +130,8 @@ The login server tells the client how many characters an account has:
   before playing; world entry (`CSSelectCharacter`) is refused until the period
   ends. The login reports this value to the game server when it registers, and
   the game applies it, so the two servers cannot disagree. Only the account's
-  own, not-deleted character that never entered the world can be edited; the
-  second-password gate applies. Leave it off for normal play.
+  own, not-deleted character that never entered the world can be edited. Leave it off for
+  normal play.
 
 Purchased character slots (`accounts.extra_character_slots`, from the slot
 increase item) are sent by the game server's `SCGetSlotCount` as the purchased
@@ -638,14 +638,14 @@ with the environment form `FeatureSet__Siege=false`.
 | `siege` | 0 | `true` | Siege / dominion UI. The exact window is INFERRED from the Lua key. |
 | `premium` | 4 | `true` | Premium / Patron HUD and labor UI. |
 | `itemSecure` | 45 | `true` | Item-secure / lock handling and UI. |
-| `secondpass` | 46 | `false` | Second-password entry and its opcode path. `SecondPassword:Enabled` still turns this bit on at startup. |
+| `secondpass` | 46 | `false` | Second-password entry and its opcode path. The second password is not supported, so keep it off. |
 | `ranking` | 36 | `true` | Ranking window. |
 | `slave_customize` | 48 | `true` | Vehicle / ship customization UI (INFERRED). |
 | `bm_mileage` | 43 | `true` | Cash-shop mileage display (INFERRED; Korean business model). |
 | `ingamecashshop` | 38 | `true` | In-game cash-shop entry and open guards. |
 | `customsaveload` | 40 | `true` | Custom UI save/load (INFERRED). |
 | `beautyshopBypass` | 52 | `true` | Beauty-salon bypass entry (INFERRED). |
-| `ingameshopSecondpass` | 55 | `false` | Second-password gate on cash-shop purchases (INFERRED). |
+| `ingameshopSecondpass` | 55 | `false` | Second-password gate on cash-shop purchases (INFERRED). Not supported, so keep it off. |
 | `backpackProfitShare` | 56 | `true` | Trade-pack sale profit share and sale mails. |
 | `sensitiveOpeartion` | 58 | `false` | Sensitive-operation confirmation prompts (INFERRED; the key's spelling is the client's). |
 | `taxItem` | 59 | `true` | Tax-item payment UI; the server also uses this bit for its tax-item behavior. |
