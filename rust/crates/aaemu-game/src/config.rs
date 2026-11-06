@@ -103,6 +103,9 @@ pub struct AppConfig {
     /// `Loot` (`Configurations/Loot.json`: party loot announcements).
     #[serde(rename = "loot")]
     pub loot: crate::systems::economy::config::LootAnnounceConfig,
+    /// `Quest` (Rust only: quest reward scaling, default off).
+    #[serde(rename = "quest")]
+    pub quest: crate::systems::quests::config::QuestConfig,
     /// `Music` (`systems::services::music`: user song upload sanity).
     #[serde(rename = "music")]
     pub music: crate::systems::services::music::MusicConfig,
@@ -188,6 +191,7 @@ impl Default for AppConfig {
             crafting: Default::default(),
             ics: Default::default(),
             loot: Default::default(),
+            quest: Default::default(),
             music: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),

@@ -9,6 +9,7 @@ use super::model::{
     acceptor, game_point, item_task, kind, sphere_trigger, ItemCreationDefinition, ObjectiveStatus,
 };
 use super::packets::{quest_error, SCAppellationGainedPacket};
+use super::reward_scale::gap_exp;
 use super::state::{ActPath, EventKind, QuestHandle};
 use super::templates::ActKind;
 use crate::models::container::slot_type;
@@ -300,7 +301,14 @@ impl Ctx<'_> {
                 true
             }
             SupplyExp { exp } => {
-                hooks.add_exp(self.server, player.as_ref(), self.c, *exp, true);
+                // `Quest:RewardScaling`: the act value has no degree factor, but the client
+                // applies the quest-vs-player level gap to the reward exp (see `reward_scale`).
+                let exp = if self.server.config.get().quest.reward_scaling {
+                    gap_exp(*exp, t.level, self.c.unit.level)
+                } else {
+                    *exp
+                };
+                hooks.add_exp(self.server, player.as_ref(), self.c, exp, true);
                 true
             }
             SupplyHonorPoint { point } => {

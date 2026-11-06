@@ -684,6 +684,21 @@ Override it in `Config.Local.json` or with `Loot__AnnounceToParty`. The kind-1
 semantics and the loot sources are INFERRED from the 1.2 client (WP-IT1), not
 evidenced; see `rust/crates/aaemu-game/PORTING.md`.
 
+## Quest reward scaling (`Quest:RewardScaling`)
+
+Rust-only switch that makes the paid quest exp / copper match the number the 1.2
+client's quest window shows. It is off by default: with `false` the server pays
+today's unscaled values.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `RewardScaling` | `false` | Scale the level-based `quest_supplies` exp and copper by the quest degree (0 / 1 -> x0.5, 2 -> x0.75, 3 -> x1.0, 4 -> x1.25, 5 and above -> x1.5), and exp (a Reward component's `SupplyExp` act or the scaled supply) by the quest-vs-player level gap. The gap pays in full when the quest is at most 5 levels below the player (up to player level 21), then 90 / 80 / 70 / 60 %, and 50 % at 10+ levels below; from player level 22 it never reduces. A `SupplyCopper` act is paid unchanged; copper has no gap factor. The let-it-done ratios are unchanged. |
+
+```json
+{
+  "Quest": {
+    "RewardScaling": true
+
 ## Music upload limits (`Music`)
 
 `CSSaveUserMusicNotes` is stored only when it could come from the 1.2 client: the
@@ -704,6 +719,16 @@ path); the server logs a warning and keeps the previous queued song.
   }
 }
 ```
+
+Override it in `Config.Local.json` or with `Quest__RewardScaling`. The server
+decides the paid amount (the quest packets carry no reward figure; the client
+formula only computes the displayed number). Whether the original zone server
+applied the same factors is **inferred**, not captured: the 1.2 client scales
+its window, but the 2014 archeagedatabase.net export lists unscaled supply
+values. **Capture-pending (`porting-md#2`):** complete a degree-2 quest and a
+quest far below the character's level with the real client, compare the quest
+window's reward with the exp / copper actually gained, and only then consider
+turning the default on. Details in `rust/crates/aaemu-game/PORTING.md`.
 
 Override it in `Config.Local.json` or with `Music__MaxSongChars`. The note
 grammar is not parsed; see `rust/crates/aaemu-game/PORTING.md` (WP-M1).
