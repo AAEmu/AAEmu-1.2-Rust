@@ -520,25 +520,43 @@ pub fn validate_house(
     Ok(())
 }
 
+/// The `housing_groups` rows of the housing areas that contain `transform`'s position, in area
+/// order. `None` when the world instance / world template / housing polygons are unknown, the
+/// same cases in which [`can_extend_house`] refuses.
+fn groups_at<'a>(
+    server: &'a GameServer,
+    transform: &crate::models::transform::Transform,
+) -> Option<Vec<&'a super::data::HousingGroup>> {
+    let world = server.world.world(transform.instance_id)?;
+    let data = &server.game_data.systems.housing;
+    let pos = transform.local();
+    let areas =
+        subzone::get_housing_zone_by_position(&server.game_data, &world.template, pos.x, pos.y)
+            .ok()?;
+    Some(
+        areas
+            .iter()
+            .filter_map(|id| data.areas.get(id))
+            .filter_map(|id| data.groups.get(id))
+            .collect(),
+    )
+}
+
+/// The first `housing_groups` row containing the house (area order, like [`validate_groups`]).
+/// Overlapping polygons resolve first-wins; the shipped areas of one house normally share one
+/// group.
+pub fn house_group<'a>(
+    server: &'a GameServer,
+    transform: &crate::models::transform::Transform,
+) -> Option<&'a super::data::HousingGroup> {
+    groups_at(server, transform)?.into_iter().next()
+}
+
 /// Beginner plots in the original data (`housing_groups.can_extend = false`) expire rather
 /// than accepting another weekly payment. Ordinary or unclassified plots retain normal taxes.
 pub fn can_extend_house(server: &GameServer, house: &crate::world::HouseRef) -> bool {
     let transform = house.data().unit.transform;
-    let Some(world) = server.world.world(transform.instance_id) else {
-        return false;
-    };
-    let data = &server.game_data.systems.housing;
-    let pos = transform.local();
-    let Ok(areas) =
-        subzone::get_housing_zone_by_position(&server.game_data, &world.template, pos.x, pos.y)
-    else {
-        return false;
-    };
-    !areas
-        .iter()
-        .filter_map(|id| data.areas.get(id))
-        .filter_map(|id| data.groups.get(id))
-        .any(|group| !group.can_extend)
+    groups_at(server, &transform).is_some_and(|groups| groups.iter().all(|group| group.can_extend))
 }
 
 #[cfg(test)]

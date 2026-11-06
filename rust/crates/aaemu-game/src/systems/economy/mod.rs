@@ -89,6 +89,7 @@ pub(crate) mod tests;
 pub mod trade;
 #[cfg(test)]
 mod trade_tests;
+pub mod ucc_data;
 pub mod wiring;
 
 use std::collections::HashMap;

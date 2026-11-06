@@ -1,0 +1,25 @@
+{
+    "FeatureSet": {
+        "siege": true,
+        "premium": true,
+        "itemSecure": true,
+        "secondpass": false,
+        "ranking": true,
+        "slave_customize": true,
+        "bm_mileage": true,
+        "ingamecashshop": true,
+        "customsaveload": true,
+        "beautyshopBypass": true,
+        "ingameshopSecondpass": false,
+        "backpackProfitShare": true,
+        "sensitiveOpeartion": false,
+        "taxItem": true,
+        "achievement": true,
+        "dwarfWarborn": false,
+        "mailCoolTime": true,
+        "hudAuctionButton": true,
+        "auctionPostBuff": true,
+        "aaPoint": false,
+        "ExtraBits": {}
+    }
+}

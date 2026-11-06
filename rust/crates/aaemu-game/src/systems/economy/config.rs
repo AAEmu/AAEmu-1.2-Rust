@@ -1,5 +1,5 @@
-//! `Crafting`, `Ics` and `Loot` configuration (`Configurations/Crafting.json`,
-//! `Configurations/Ics.json`, `Configurations/Loot.json`).
+//! `Crafting` and `Loot` configuration (`Configurations/Crafting.json`,
+//! `Configurations/Loot.json`).
 
 use serde::Deserialize;
 
@@ -15,20 +15,6 @@ pub struct CraftingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub require_learned_recipes: bool,
-}
-
-/// `Ics` (`Configurations/Ics.json`).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct IcsConfig {
-    /// AA points granted per account credit spent through `CSICSBuyAAPointPacket` (0 = the
-    /// exchange is disabled). The retail value is UNKNOWN; the 1.2 client only multiplies the
-    /// cash amount by the `SCICSExchangeRatio` it is sent. The product is computed in `i64`.
-    #[serde(
-        rename = "aapointexchangeratio",
-        deserialize_with = "crate::config::lenient"
-    )]
-    pub aa_point_exchange_ratio: i32,
 }
 
 /// `Loot` (`Configurations/Loot.json`).

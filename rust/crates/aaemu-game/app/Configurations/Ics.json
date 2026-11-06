@@ -1,7 +1,0 @@
-{
-	"Ics": {
-		// AA points granted per account credit spent through CSICSBuyAAPoint (0 = off).
-		// The retail value is UNKNOWN; the 1.2 client only uses the ratio the server sends.
-		"AaPointExchangeRatio": 0
-	}
-}

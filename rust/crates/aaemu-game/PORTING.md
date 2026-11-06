@@ -170,7 +170,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Core/Managers/NameManager` | `managers/name.rs` | done | Load, ValidateCharacterName (`CharacterNameRegex` plus the 1.2 `allowed_name_chars` whitelist and `blocked_texts` `check_name` rules), Add/Remove, NormalizeName. See "Character names" below. |
 | `Core/Managers/ItemManager` (templates + user items) | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `models/container.rs` | done | See `systems::economy`. |
 | `Models/Game/Items/Containers` (ItemContainer, EquipmentContainer, MateEquipmentContainer, CofferContainer, LootingContainer) | `models/container.rs`, `systems/economy/looting.rs` | done | See `systems::economy`. |
-| `Core/Managers/UnitManagers/CharacterManager` | `data/character_templates.rs`, `managers/character.rs`, `db_character.rs` | partial | Load (templates, body parts, buffs, supplies, equip packs, appellations, actabilities, expert limits, CharTemplates.json), Create, SetDeleteCharacter, SetRestoreCharacter, CheckForDeletedCharacters(+Deletion) with the delete task, IsCharacterPendingDeletion, LoadCharacters. Bag expands, beauty salon, rolls, online tracking todo. |
+| `Core/Managers/UnitManagers/CharacterManager` | `data/character_templates.rs`, `managers/character.rs`, `db_character.rs` | partial | Load (templates, body parts, buffs, supplies, `default_action_bar_actions`, equip packs, appellations, actabilities, expert limits, CharTemplates.json), Create, SetDeleteCharacter, SetRestoreCharacter, CheckForDeletedCharacters(+Deletion) with the delete task, IsCharacterPendingDeletion, LoadCharacters. `default_action_bar_actions` is Rust-only (the C# did not read it): the starter supplies use the authored slots (see the Create deviation). Bag expands, beauty salon, rolls, online tracking todo. |
 | `Models/Game/Char` (Character, Inventory, Abilities, Actability, Skills, Appellations, Portals, Friends, Blocked, Quests (rows), VisualOptions, ActionSlot) | `models/character.rs`, `models/char_data.rs`, `db_character.rs` | partial | Character.Load (both variants' columns), Character.Load() sub-loads, Save / SaveDirectlyToDatabase (characters, options, abilities, actabilities, appellations, active buffs, portals, friends, blocked, skills, quests), Write, CheckWantedThreshold (buffs + pirate faction). Mates, craft, combat, events todo. |
 | `Models/Game/Units/Buffs`, `Models/Game/Skills/Buff` | `models/buff.rs`, `systems/mod.rs` | partial | Indices, stack rules, GetAllBuffs, CheckBuff(s), GetEffectByIndex / FromBuffId, GetBuffCountById, RemoveBuff / RemoveEffect (index, template+skill) / RemoveAllEffects, persistence (SaveActiveBuffs / LoadActiveBuffs), the NetBuff wire format and `BuffEvent`s (started / refreshed / removed) dispatched to `systems::UnitHooks`. Effects (`Start` / `Dispel`), tolerance, triggers, `TriggerRemoveOn`, tag checks, timers, buff packets: skills subsystem. |
 | `Models/Game/World/GameObject`, `Models/Game/Units/{BaseUnit,Unit,IBaseUnit,IUnit,BaseUnitType,UnitTypeFlag,ModelPostureType}` | `models/unit.rs`, `world/object.rs` | partial | All data members (`UnitBase`), `Hpp`, `IsDead`, `NeedsRegen`, trigger counts, `CalculateWithBonuses`, `UnitData` / `BaseUnitData` traits, handles (`Entity<D>`, `WorldObject`). Behaviour (`ReduceCurrentHp`, `DoDie`, `CanAttack`, regen, aggro, `UseSkill`, `SetFaction`, `UpdateGearBonuses`, the `SetPosition` underwater state) lives in the phase-3 subsystems (`systems::skills`). |
@@ -192,7 +192,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Core/Managers/TimeManager` (+ `TimeOfDayObserver`) | `managers/time.rs` | done | `Get` / `Set` / `Stop` added (phase 4). Storm-ship time override (`ResolveClientTimeOfDayHours`) per observer (`subscribe_with`). |
 | `Core/Managers/SaveManager` | `managers/save.rs` | partial | Periodic + final save of items and online characters; the subsystems' rows through `systems::save_stage` (`BeforeItems`: houses, mails; `AfterItems`: auction, crimes; `AfterCharacters`: slaves). |
 | `Core/Managers/World/StreamManager` | `managers/stream.rs`, `stream/cells.rs` | done | AddToken/RemoveToken/Login (wrong account removes the token, as C#), RequestCell/ContinueCell incl. the C# `next - 1` copy off-by-one. |
-| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | done | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation, `CreateStamp` / `ApplyStamp` (`economy/item_effects.rs`, the `GainItemWithEmblemImprint` effect and `economy/bridges.rs`). **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's `consume_money` (and, for a custom image, the row's `consume_item_id` x `consume_count`, 1x 11127) — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The charge is the row's `consume_money` (50000 for 3038, 10000 for 1470; the old `UCC_PRICE` constant is gone); `confirm_default_ucc` re-checks money / reagent (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked money debit, the reagent consume (`ItemTaskType.IMPRINT_UCC`) and the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 (capture-pending):** whether a custom upload also costs money (the Lua info helper shows only the item) — the money charge is kept on that path as before. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. |
+| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | done | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation, `CreateStamp` / `ApplyStamp` (`economy/item_effects.rs`, the `GainItemWithEmblemImprint` effect and `economy/bridges.rs`). **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's cost for the upload kind the client selected — a default pattern's `consume_money` (50000 for 3038, 10000 for 1470) or a custom image's `consume_item_id` x `consume_count` (1x 11127 Crest Brainstorm) and **no money** — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The split is the client's own: `X2Ucc.GetMakeUccConsumeInfo` (`FUN_394b5e80`, x2game.dll.c:981806) returns item + count for a user image and otherwise formats the row's money, matching `ui_texts` 4206 "You need 1 Crest Brainstorm to create a custom crest." and 4207 "Crest Ink costs the following amount to craft". `confirm_default_ucc` re-checks the same cost (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked default-pattern money debit, or the custom-image reagent consume (`ItemTaskType.IMPRINT_UCC`) with no money, plus the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 resolved (2026-11-06 Part B reassessment, B9):** the client decompile shows a custom upload costs the item only; the C# money charge on that path is dropped. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. **Imprint validation (WP-U2, housing-farm-ucc#3 / tables-unused-2#10):** `ImprintUccEffect` refuses (`Outcome::Cancelled`, the existing missing-operand path, so the stamp and the target keep their UCCs and the skill keeps its reagent) when the target template is not a `ucc_applicables` kind-2 `actual_id` (80 shipped item rows) or when the stamp's UCC (`UccManager.get_ucc`) carries a non-zero `pattern1` / `pattern2` that is not an `emblem_patterns.id` (57 shipped rows). Kinds 1 (18 slave template ids) and 3 (30 flag doodad ids) are INFERRED and not enforced; the pattern id space is INFERRED (CAP-UCC-1). A table with no matching rows stays permissive (the pre-WP-U2 behaviour), so an older compact still loads. The other `tables-unused-2#10` tables (`world_groups`, `world_spec_configs`) stay documented-only in the no-package list. |
 | `Core/Managers/TimedRewardsManager` | `systems/services/timed_rewards.rs` | done | `TimedRewardsTask` every minute, daily login reward, offline labor. |
 | `Core/Managers/HousingManager`, `Models/Game/Housing` | `systems/housing/` | done | See "Phase 3 subsystems". |
 | `Core/Managers/CrimeManager` | `db_character.rs` | partial | CheckWantedThreshold thresholds only. |
@@ -563,135 +563,20 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
-#### AA-point wallet (WP-AA1, 2026-11-06)
+#### AA points: not supported (owner decision 2026-11-06)
 
-The 1.2 client reads the two AA balances from the in-world character state:
-`X2Util.GetMyAAPointString` / `GetMyBankAAPointString` (`FUN_394c9580` / `FUN_394c9640`) print
-`+0xc330` / `+0xc338` of the inventory object, and the character-state reader fills four `i64`
-moneyAmount fields in the order money, bank money, AA point, bank AA point (the inventory object
-starts at the first one, so `0x1860 + 0xc330 = 0xdb90`). `SCCharacterStatePacket` writes
-`Character::aa_point` / `bank_aa_point` there; the two zeroes it wrote before this change are
-exactly the 0-balance bytes. The balances are per character (the shop dialog debits the same
-field) and persist as `characters.aa_point` / `bank_aa_point` (`bigint`, default 0), saved with
-money in the same financial snapshot (the departure dirty rule covers all four wallet fields).
-`systems::economy::inventory` owns the wallet: `add_aa_point` / `try_take_aa_point` (and the bank
-pair, plus absolute `set_*` for the GM command) check and change the balance under one character
-lock, make a negative balance impossible, and send `SCItemTaskSuccessPacket` with `ItemTask` 16
-(`ChangeAaPoint`) / 17 (`ChangeBankAaPoint`); a short purse sends `NOT_ENOUGH_AA_POINT` 707 /
-`NOT_ENOUGH_BANK_AA_POINT` 708. That the task amount is a **delta** is INFERRED from the client's
-task switch (`FUN_397d1030`), which applies 16 / 17 through the money path; a real-client display
-check is still pending (AA1-DELTA-1). The cash shop and the premium service shop spend AA
-points since WP-AA2 (below). `/aapoint <add|set|show> [bank] <amount>` is a debug
-source: the 1.2 data has no player-reachable AA grant (`quest_act_supply_aa_points` has 0 rows).
-The kind-35 `AAPointMaxLimitByLevel` cap is not enforced (balance cap or per-period cap is
-UNKNOWN).
-
-WP-AA3c (2026-11-06) spends the wallet where the 1.2 packets carry `autoUseAAPoint`:
-`inventory::try_take_gold_or_aa` pays a cost from carried gold first and covers the rest 1:1
-from carried AA points, checking and debiting both under one character lock and sending both
-deltas in one `SCItemTaskSuccess`. INFERRED from the client texts `ask_use_aa_point` /
-`auto_use_aa_point` ("not enough gold; use AA points for the missing amount?"): the flag opts in,
-a short AA purse keeps the caller's existing error and charges nothing. Consumers: the house-tax
-billing mail (`PayChargeMoney`), `CSCreateShipyard` (taxation) and `CSCreateHouse` (construction
-quote). Tax certificates still pay no gold and therefore never use AA. Cash-shop AA prices,
-`CSICSBuyAAPoint` and the bank/store/trade consumers stay under WP-AA2 / AA3a/b/d. Tests:
-`gold_or_aa_shortage_cover_debits_both_purses_in_one_task`,
-`house_tax_aa_shortage_cover_pays_the_shortage_and_books_the_aa_revenue_share`,
-`house_tax_refusals_leave_gold_aa_house_and_treasury_untouched_when_aa_is_short_or_the_flag_is_off`,
-`house_construction_aa_shortage_cover_builds_and_a_refusal_keeps_gold_aa_and_design`,
-`aa_shortage_cover_builds_the_shipyard_and_refusals_keep_money_aa_and_item`.
-
-#### AA points as a gold-shortage purse (WP-AA3a, 2026-11-06)
-
-`CSRepairSingleEquipmentPacket`, `CSRepairAllEquipmentsPacket` and `CSExpandSlotsPacket` carry
-`autoUseAAPoint`; the C# parsed it and ignored it. With the flag set and the carried gold short,
-the repair / expansion pays the shortage from the carried AA purse 1:1 and sends the money and
-AA tasks together (`ItemTask::MoneyChange` + `ItemTask::AaPointUpdate`). The rule is INFERRED
-from the client text `ask_use_aa_point` ("not enough gold; use AA points for the missing
-amount?") and the `lost_aa_point` task path; neither the rate nor the "shortage only" part is
-capture-proven (AA3-PURSE-1). The gold and AA checks and both debits run under one character
-lock (`inventory::take_money_and_aa_point`), so a refusal cannot make a partial charge; when the
-AA purse is short too the operation is refused with `NOT_ENOUGH_MONEY` 26 and nothing is
-repaired, consumed or expanded. A repair-all whose combined purses cannot pay every eligible
-item is refused whole (a deviation from the C# gold-only loop, which repairs only the items the
-gold covers). With the flag false both packets behave exactly as before. The AA task amount is
-a delta (see the wallet section above).
-
-`CSDepositMoneyPacket` / `CSWithdrawMoneyPacket` carry an `aa_point` amount next to the gold
-amount (WP-AA3b). An AA deposit moves the carried AA purse to the bank purse and an AA
-withdrawal moves it back, in the same direction as the gold amount; the direction is INFERRED
-from the packet's own gold semantics (AA3-PURSE-1). Both the gold and the AA checks and moves
-run under one character lock (`inventory::transfer_bank_money_and_aa_point`), so a short gold
-or AA purse changes neither; the AA errors are `NOT_ENOUGH_AA_POINT` 707 (carried) and
-`NOT_ENOUGH_BANK_AA_POINT` 708 (bank), while a short gold purse keeps `NOT_ENOUGH_MONEY` 26.
-With `aa_point = 0` the handler takes the unchanged `ChangeMoney` path. Mail AA attachments
-(`SCAttachmentTaken.aa_point`, `CSSendMail money0..2`) stay out: the 1.2 client has no
-evidenced meaning for them (mail AA is UNKNOWN).
-
-#### Store purchases and player trades in AA points (WP-AA3d, 2026-11-06)
-
-`CSBuyItemsPacket.useAAPoint` was parsed and ignored by the C#. With the flag set and the gold
-total short, the checkout pays the shortage from the carried AA purse 1:1 (all gold first) and
-the `STORE_BUY` task packet carries the `AaPointUpdate` delta next to the item tasks; the gold
-part keeps its `DEPOSIT_MONEY` packet. The rule is INFERRED from the same `ask_use_aa_point`
-text as WP-AA3a. A short AA purse is refused with `NOT_ENOUGH_AA_POINT` 707 and changes nothing;
-with the flag false the checkout is exactly the old gold one. The debit runs under the
-character lock that was taken before the item preflight, so the wallet and the bag commit in the
-same operation (the shared `inventory::try_take_gold_or_aa` takes that lock itself and therefore
-cannot be called there). No shipped 1.2 data marks an item as refusing AA:
-`STORE_CANT_BUY_WITH_AA_POINT` 709 and `STORE_CANT_BUY_WITH_MONEY_WITH_AA_POINT` 710 have no
-consumer in the `items` or merchant tables, so only the shortage rule is implemented
-(AA3-AA-REFUSAL-1). Tests: `store_aa_point_pays_the_gold_shortage_one_to_one`,
-`store_aa_point_short_refuses_and_leaves_everything_unchanged`,
-`store_without_the_aa_flag_keeps_todays_gold_refusal`,
-`store_aa_flag_does_not_spend_aa_when_gold_covers_the_total`.
-
-Player trade carries one i32 `moneyAmount` and no AA field (WP-RE1 section 3). The 1.2 client
-picks the currency of that amount from `content_configs` id 3 (`FUN_394b4380` /
-`FUN_394b4810` / `FUN_394b4990` read `FUN_39744420(3)`); the shipped value is 100, so today's
-trade is gold. When the value is 3 the server treats the same i32 as AA points: put-up and
-completion are guarded with `NOT_ENOUGH_AA_POINT` 707 (a refused put-up keeps the trade; a
-refused completion cancels it), and each side's `SCTradeMade` carries `ItemTask::AaPointUpdate`
-deltas instead of `MoneyChange`. The two purses are changed one character lock at a time, with
-the first side refunded if the second fails, so a completed trade moves both wallets or
-neither. That the tasks use action 16 inside `SCTradeMade` is INFERRED from the shared task
-container (AA3-TRADE-1). The client also needs its own 0x1000 feature flag, which the server
-cannot observe; the content config alone selects the mode. Tests:
-`trade_money_stays_gold_with_the_shipped_content_config`,
-`aa_trade_moves_both_wallets_atomically`, `aa_trade_refuses_insufficient_aa_at_put_up`,
-`aa_trade_refuses_insufficient_aa_at_completion_without_moving_either_wallet`.
-
-#### Cash-shop AA prices and the cash -> AA purchase (WP-AA2, 2026-11-06)
-
-An AA-priced SKU (`ics_skus.currency = 1`) is now purchasable. The cart total is checked against
-the wallet before anything is created, and a short purse is refused with
-`INGAME_SHOP_NOT_ENOUGH_AA_POINT` 592 while nothing changes. The authoritative check-and-take runs
-in the transaction loop under one character lock (`CashShopBuyTask` pattern), inside the same
-`ItemTxn` as the coin path; if a concurrent spend makes it fail, the entry is refused with 592 and
-the allocated item ids are released. `SCICSBuyResultPacket.chargeAA` carries the cart's AA total
-(0 only when a pre-transaction check fails). The AA debit and the item grant roll back together:
-the commercial-mail grant failure path (the only failure after the debit) returns the currency and
-the reserved stock, as the stock-update failure path already did.
-
-`CSICSBuyAAPointPacket` 0x137 (`i32 cashMoney`; client writer `FUN_397b17f0`, sender
-`FUN_39187800`) is registered; the C# never registered it. The exchange is gated by the new
-configuration key `Ics:AaPointExchangeRatio` (`Configurations/Ics.json`, default **0** = off).
-With a ratio of 0, a negative ratio, a non-positive cash amount, an `i64` product outside `i32`
-or a short credit balance the request is refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 778 (short
-credits: `INGAME_SHOP_NOT_ENOUGH_AA_CASH` 591) and nothing is debited. With a positive ratio the
-credits are debited with the guarded SQL statement, `cashMoney * ratio` AA is credited, and the
-reply is `SCItemTaskSuccessPacket` task type `BUY_AA_POINT` 116 with `AaPointUpdate`,
-`SCICSCashPointPacket` with the new credits, then `SCICSExchangeRatioPacket`. The reply form is
-**INFERRED** (the client's buy dialog and `GetExchangeRatio` are read, but no 1.2 server reply was
-captured); the ratio value is **UNKNOWN** (server policy). `SCICSExchangeRatioPacket` 0x1d7 is
-sent right after `SCICSCashPointPacket` whenever the cash balance is sent on shop open
-(`CSICSMoneyRequestPacket`), and the premium service list carries the same configured ratio
-(INFERRED).
-
-The premium service shop now accepts an AA price: the wallet is charged before the MySQL grant
-(one character lock, `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when short) and refunded if the
-grant fails. The debit and the grant are not crash-atomic (the wallet is in memory, the grant in
-MySQL); a crash between them keeps the AA debit without the premium window.
+AA points are not supported: the per-character wallet, `/aapoint`, the cash -> AA exchange, the
+AA prices in the cash / premium shops and the AA shortage cover are gone, and every former AA
+path behaves as it did before AA existed (AA-priced cash-shop SKUs are refused with
+`INGAME_SHOP_BUY_FAIL_AA_POINT` 592, AA-priced premium services with
+`PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775, and `CSICSBuyAAPointPacket` has no handler). The
+client still carries AA: `SCCharacterState` reads its third / fourth `i64` moneyAmount as AA and
+bank AA (`FUN_394c9580` / `FUN_394c9640` read `+0xc330` / `+0xc338`; the server writes `0, 0`),
+`ItemTask` 16 / 17 (`ChangeAaPoint` / `ChangeBankAaPoint`) apply signed deltas through the
+client's money task switch (`FUN_397d1030`), and the AA amount is displayed only in the
+inventory window (`X2Util.GetMyAAPointString` / `GetMyBankAAPointString`). Confirmed with the
+real client 2026-11-06. The `FeatureSet.aaPoint` key (bit 44) stays available but must remain
+`false`.
 
 #### Item and craft notification packet definitions (2026-11-05)
 
@@ -1347,8 +1232,8 @@ owner's statue through the same ordered path.
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `HousingGameData` (`item_housings`, `housings`, `housing_binding_doodads` + `Data/housing_bindings*.json`, `housing_build_steps`, `housing_decorations`, `item_housing_decorations`, `PostLoad`), `TaxationsManager` (`taxations`) | `systems/housing/data.rs` | done | Gated real-DB test `housing_real_compact_db` (row counts, bindings positioned). Duplicate build steps fail the load (C# `Dictionary.Add`). |
-| `HousingManager` (all methods), `House` behaviour (`CurrentStep` setter + bound doodads, `AddBuildAction`, `Spawn` / `Delete` / visibility of `AttachedDoodads`, `AllowedToInteract`, `OnDeath`, `Save`), `HousingTaxTask`, `MailForTax` content | `systems/housing/{manager,ops,db}.rs` | done | Build (tax certificates or gold), permission, rename, recover toggle, demolish (+ `ReturnHouseItemsToOwner` mails), sale / sale markers / cancel / buy (+ mails, furniture owner), decoration, taxes (bills, untouchable / removal buffs, demolition timer every 10 s), death, `GetHouseAtLocation`, act-ability bonus. Items / money / mail go through `housing::hooks::HousingEconomyHooks` (economy installs it). |
+| `HousingGameData` (`item_housings`, `housings`, `housing_binding_doodads` + `Data/housing_bindings*.json`, `housing_build_steps`, `housing_decorations`, `item_housing_decorations`, `housing_groups` incl. `allowed_tax_delay_week`, `PostLoad`), `TaxationsManager` (`taxations`) | `systems/housing/data.rs` | done | Gated real-DB test `housing_real_compact_db` (row counts, bindings positioned, shipped tax delays). Duplicate build steps fail the load (C# `Dictionary.Add`). A NULL / missing `allowed_tax_delay_week` column loads as `None` (WP-H1). |
+| `HousingManager` (all methods), `House` behaviour (`CurrentStep` setter + bound doodads, `AddBuildAction`, `Spawn` / `Delete` / visibility of `AttachedDoodads`, `AllowedToInteract`, `OnDeath`, `Save`), `HousingTaxTask`, `MailForTax` content | `systems/housing/{manager,ops,db}.rs` | done | Build (tax certificates or gold), permission, rename, recover toggle, demolish (+ `ReturnHouseItemsToOwner` mails), sale / sale markers / cancel / buy (+ mails, furniture owner), decoration, taxes (bills, untouchable / removal buffs, demolition timer every 10 s), death, `GetHouseAtLocation`, act-ability bonus. Items / money / mail go through `housing::hooks::HousingEconomyHooks` (economy installs it). **Tax grace (WP-H1, housing-farm-ucc#4 / tables-ignored-columns#8):** `tax_due_date` is `protection_end - allowed_tax_delay_week * 7 d` of the housing group containing the house (resolved like placement, first area/group wins); a missing group / area / world / column, or a negative value, keeps the C# fixed 7 days. Shipped data: only group 13 authors 0 and it is `can_extend = false`, so it never receives a bill and keeps its authored 7-day lifetime; its `SCHouseTaxInfo` plaque no longer counts the last week as an unpaid week (`weeks_without_pay` stays -1 until the protection end). Every other shipped group authors 1, so billing, removal and mail dates are unchanged. `MailForTax` (economy) carries the resolved `allowed_tax_delay_week` the same way. |
 | Housing packets (11 CS, 14 SC incl. `SCLoginCharInfoHouse`, `SCMyHouse`) | `systems/housing/packets.rs` | done | Byte-exact tests. `CSChangeHousePayPacket` has opcode 0xfff in 1.2 (not registered). `SCHouseOwnerNameChangedPacket` is social's (`packets/misc.rs`). |
 | `CraftEffect` (`WorldInteractionGroup.Building`) | `systems/housing/mod.rs::apply_effect` | done | Routed first by `skills::ext::ExtHooks::route_effect`; quest `DoDoodadInteractionEvents` after it. |
 | `SpawnManager.Load` / `SpawnPersistentDoodads` housing parts, `LoadAccount` / `CSListCharacter` / `CSSelectCharacter` / `Character.Load` / `DeleteCharacterAssets` housing parts | `npcs/spawn_manager.rs`, `packets/c2g.rs`, `world/session.rs`, `db_character.rs` (one call each) | done | `LoadPlayerHousing` + `SpawnAll` before the persistent doodads, house parenting + bound doodads, `ReconcileBoundDoodads` (`UsePersistentHouseDoodads`). |
@@ -1461,7 +1346,7 @@ Rules (all **INFERRED** from the client decompile; no 1.2-server capture):
 | `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check - a non-driver point must be declared by the slave's model in `model_bindings` - client reach and reservation run under the slave's one lock; a missing or taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). `ApplySlaveBonuses` stores the flat `unit_modifiers.value`; all 452 Slave rows of the 1.2 data have `linear_level_bonus = 0`, so the unused C# `LinearLevelBonus` term cannot change a bonus (gated test `real_slave_unit_modifiers_have_no_linear_level_bonus` pins that data assumption). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
 | `CSBoardingTransferPacket` 0x067 (board / unboard) | `systems/vehicles/{packets,transfers}.rs`, `models/transfer.rs`, `world/visibility.rs` | done / capture-pending server side | The 1.2 client sends `tl` = the transfer's `TlId` (u16, shared by the motor and its boarding part) and `ap`: the first free seat 2..7 of the targeted transfer (`FUN_393565c0` + `FUN_393546b0`) when boarding, or 0 from `UnBoardingTransfer` (`FUN_39440d30`). The server resolves the part whose model declares `ap` in `model_bindings` (motor 654 has only point 30; the carriage part 653 has 2/3; the floating ship 314 has 2..8), checks liveness, that the player is not on a slave/mate/another transfer or bonded to a doodad seat, a free seat and the client's 3 m range to the requested seat itself (`DAT_39ac79fc` = 9.0 is the squared range `FUN_39093860` compares with `SQRT(param)`; `FUN_3989bf90` measures to the target's bounds). The seat position is the bench doodad parented to the part, else the C# Passenger0/1 local offsets; an unresolved seat falls back to 3 m + the `ship_models` half extent, else 9 m. It then reserves the seat under the transfer's one lock. The attachment state is adopted only while the seat is still reserved after the broadcast; if it was released in between, a compensating `SCUnitDetached` is broadcast. The confirmation is `SCUnitAttachedPacket(child, ap, BOARD_TRANSFER 7, transfer)`; unboarding removes the seat, detaches the transform and broadcasts `SCUnitDetachedPacket`. A late viewer gets the seat from the transfer's visibility add. Cleanup: `force_dismount` (instance-change / GM `/move` / `/teleport`) plus `session::teleport_ended`, which every same-world `SCTeleportUnit` sender reaches (same-instance portals, the NPC teleporter, dominion / instant-game / move-all / nudge / sphere teleports), death, logout, disconnect and transfer despawn detach the passengers; a boarded passenger cannot mount a mate, bind a slave or take a doodad bench seat (refused with `slave_unbind_first` 102), and `detach_passenger` clears `attached_point` only when it still holds the removed seat and clears a sticky parent that still points at the transfer. **Deviation:** C# `Transfer.AttachedCharacters` was a `List<Character>` with no seat and the packet was log-only; the Rust keeps `(point, obj_id)` because the client needs the point (the C# never sent `SCUnitAttached` for a transfer). **Capture-pending (transfer-boarding-1):** the original 1.2 server's answers for a taken / undeclared seat and an out-of-range board are unknown; the Rust uses the client's clearing codes `slave_already_has_master` 97, `slave_cannot_bind` 96, `slave_unbind_first` 102 and `too_far_away` 154 (all in `FUN_393457e0`'s pending-bind clear set) and the client's `TRANSFER_BOARDING` / `TRANSFER_UNBOARDING` events confirm the attach / detach UI. Tests: `boarding_a_transfer_seats_the_player_on_the_boarding_part`, `boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_request`, `unboarding_a_transfer_detaches_the_passenger_and_is_idempotent`, `a_late_viewer_receives_the_transfer_passenger_seat`, `a_server_teleport_frees_the_transfer_seat`, `logout_and_disconnect_free_the_transfer_seat`, `death_frees_the_transfer_seat`, `a_transfer_despawn_frees_the_passenger`, `a_boarded_passenger_cannot_mount_a_mate_or_bind_a_slave`, `a_bonded_bench_seat_refuses_transfer_boarding`, `unboarding_keeps_a_different_attachment_point`, `boarding_measures_to_the_seat_not_the_transfer_origin`, `a_same_world_teleport_ended_frees_the_seat`, `a_boarded_passenger_cannot_take_a_doodad_bench`, `unboarding_clears_a_stale_sticky_parent_without_detaching_another_parent`, `a_gm_move_frees_the_transfer_seat`. |
-| `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). **Design item:** `CSCreateShipyard.designItem` is the bag item object id the client placed (u64, a bag item id, not a template id); `create` validates ownership + `SlotType.Inventory` and maps its template through `item_shipyards` (fallback `origin_item_id` only when the shipyard has no row and it is nonzero), then consumes exactly that item under one bag lock (`ItemSkillHooks::consume_bag_item_by_id`) before reagents / money. A mismatch or a missing / foreign item is refused with `NotEnoughItem` and nothing is consumed; this is what makes shipyards 2-4 and 10 / 11 (`origin_item_id` 0; 16163 -> 2, 15687 -> 3, 15564 -> 4, 18124 -> 10, 18149 -> 11) buildable. Shipyard 14's design item (28013) maps to its duplicate 15, so 14 itself stays unbuildable (the 1.2 data has no row for it); shipyard 1 has neither. **Rewards:** `shipyard_rewards` (9 rows, all doodad 1330) spawns `count` debris doodads inside `radius` of the shipyard on `on_death` (`spawn_rewards`); the trigger is INFERRED from the schema (wreckage), not capture-proven, so normal completion spawns nothing until a capture shows otherwise. Debris is temporary (not persisted). Doodad 1330 keeps its authored phase chain (2146 Timer 1159: 300 s -> 2147 LootItem 740 -> 2147 Final 451: 120 s, which deletes it); the spawn only adds a delete task for a template with no Timer/Final phase func (`doodad_almighties.min_time`-`max_time` or a 600 s fallback, not the authored lifetime). `on_water` rows return the water surface when the computed ground is in water / below it, otherwise the collision / heightmap ground. `ShipyardData.Type` still carries `origin_item_id` (capture-pending: the C# value; the 1.2 client meaning is unproven). The AABB remains ignored (AABB use UNKNOWN) and is logged. `autoUseAAPoint` covers a gold shortage on the taxation 1:1 from the carried AA wallet (`inventory::try_take_gold_or_aa`, WP-AA3c); a short AA purse keeps `NotEnoughMoney`, and the balance is checked before any reagent / design item is consumed. Tests: `shipyards_10_and_11_build_from_their_item_and_consume_it_exactly_once`, `wrong_missing_or_foreign_design_item_is_refused_and_kept`, `origin_item_id_is_the_fallback_without_an_item_shipyards_row`, `real_use_skill_14879_requires_and_consumes_its_reagents`, `destroyed_shipyard_spawns_the_reward_doodads`, `on_water_reward_uses_the_water_surface_over_a_seabed`, `reward_points_are_inside_the_radius`, and the gated `real_data_reward_doodad_keeps_its_authored_phase_chain`. |
+| `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). **Design item:** `CSCreateShipyard.designItem` is the bag item object id the client placed (u64, a bag item id, not a template id); `create` validates ownership + `SlotType.Inventory` and maps its template through `item_shipyards` (fallback `origin_item_id` only when the shipyard has no row and it is nonzero), then consumes exactly that item under one bag lock (`ItemSkillHooks::consume_bag_item_by_id`) before reagents / money. A mismatch or a missing / foreign item is refused with `NotEnoughItem` and nothing is consumed; this is what makes shipyards 2-4 and 10 / 11 (`origin_item_id` 0; 16163 -> 2, 15687 -> 3, 15564 -> 4, 18124 -> 10, 18149 -> 11) buildable. Shipyard 14's design item (28013) maps to its duplicate 15, so 14 itself stays unbuildable (the 1.2 data has no row for it); shipyard 1 has neither. **Rewards:** `shipyard_rewards` (9 rows, all doodad 1330) spawns `count` debris doodads inside `radius` of the shipyard on `on_death` (`spawn_rewards`); the trigger is INFERRED from the schema (wreckage), not capture-proven, so normal completion spawns nothing until a capture shows otherwise. Debris is temporary (not persisted). Doodad 1330 keeps its authored phase chain (2146 Timer 1159: 300 s -> 2147 LootItem 740 -> 2147 Final 451: 120 s, which deletes it); the spawn only adds a delete task for a template with no Timer/Final phase func (`doodad_almighties.min_time`-`max_time` or a 600 s fallback, not the authored lifetime). `on_water` rows return the water surface when the computed ground is in water / below it, otherwise the collision / heightmap ground. `ShipyardData.Type` still carries `origin_item_id` (capture-pending: the C# value; the 1.2 client meaning is unproven). The AABB remains ignored (AABB use UNKNOWN) and is logged. `CSCreateShipyard.autoUseAAPoint` is parsed and ignored (AA points are not supported). Tests: `shipyards_10_and_11_build_from_their_item_and_consume_it_exactly_once`, `wrong_missing_or_foreign_design_item_is_refused_and_kept`, `origin_item_id_is_the_fallback_without_an_item_shipyards_row`, `real_use_skill_14879_requires_and_consumes_its_reagents`, `destroyed_shipyard_spawns_the_reward_doodads`, `on_water_reward_uses_the_water_surface_over_a_seabed`, `reward_points_are_inside_the_radius`, and the gated `real_data_reward_doodad_keeps_its_authored_phase_chain`. |
 | `ShipHarpoonRopeController`, `CSUnhangPacket` | `systems/vehicles/harpoon.rs` | done | Tow forces are physics (`ShipHarpoonTowPhysics`): the per-tick entry points are exposed for the physics port. |
 | `CSMoveUnitPacket` vehicle branches (ship request, vehicle, mate xp, riding, standing on objects) | `systems/vehicles/movement.rs`, `world/session.rs` | done | Ship-deck support accepts the actor standing flag independently of the movement header, preserving valid GC-relative positions and the current-parent sentinel during controller updates. This corrects the mirrored C# header-only attachment test; clearing both support flags still disembarks. A unit no longer hanging (`HangingFromObject` unset) loses its sticky parent unless it is boarded on a transfer. Mate-movement authority is enforced in `world::session::move_unit` (only the character itself or its owned mate may submit unit motion), before `on_mate_unit_move`. |
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
@@ -1530,10 +1415,10 @@ live acceptance remain pending.
 | `ExpressTextManager`, `CSExpressEmotionPacket`, `SCEmotionExpressedPacket` | `systems/services/express_text.rs` | done | Deviation: an emote whose sender object id is not the sender's own character is dropped (the C# broadcast the client-supplied id). |
 | `LocalizationManager` | `systems/services/localization.rs` | done | 263 635 rows / 8 locales on the real DB. |
 | `ModelManager`, `Models/Game/Models/*` | `systems/services/models.rs` | done | Counts checked against compact.sqlite3 (gated test). |
-| `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). |
+| `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). Upload sanity is Rust-only (`Music.MaxSongChars`, UTF-16 size check, owned item in `instrument_sounds`; see the deviation below). |
 | `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). The radar / telescope feature is ported, not missing (gap-audit 2026-11-02 research `stealth.md` §0.1). Open items, none of them a port gap: shipyards are not sent in `SCTelescopeUnits` because the 1.2 client has no shipyard list wire format (only transfers, fish schools and the slave/ship list), so the C# "Add Shipyards" TODO is closed; the GM range is `World.RadarGmAccessLevel` (default `100`, the previous hard-coded value) instead of a hard-coded access-level check (`radar.rs` `gm_range_comes_from_config`); `evade_telescope` (buffs 4887 / 4950, "free from the telescope's gaze") is not consumed, as in the C# (which unit carries the buff is UNKNOWN). |
 | `Models/Tasks/ShutdownTask`, `SCNoticeMessagePacket` | `systems/services/shutdown.rs` | done | Count-down notices, final save, process exit; held in `server.systems.services.shutdown_task` (`SaveManager.ShutdownTask`). Buy-back wipe through `BUYBACK_WIPE` (economy). **Deviation:** the C# saved and exited without telling the clients (every client showed a disconnect error and quit). At T-0 the Rust task first broadcasts "The server is shutting down for maintenance.", refuses world entries (`GameServer::is_shutting_down`: `X2EnterWorld` / `CSSelectCharacter` / `CSSpawnCharacter` get `SCKicked(2)` + close), sends every connection `ConnCommand::ReturnToWorldList` (in-world: `LeaveWorldTask` to character select with no timer, i.e. save + `SCLeaveWorldGranted(1)` + `ChangeState(0)`; the client stays on its game connection and loads the lobby, so the world list request follows 2 s later: `GLPlayerReconnect` -> `LGPlayerReconnect` -> `SCReconnectAuth`, the `CSLeaveWorld(ServerSelect)` path, re-sent every 2 s to every connection still there, new ones included), waits up to 10 s for the clients to disconnect, kicks the rest with `SCKicked(2, "Server maintenance")`, then does the final save (3 tries), `shutdown::stop_server` (shared with the Ctrl+C path in `main.rs`) and the exit. A failed final save aborts the shutdown (as before: no exit) and reopens world entry; `/scripts shutdown cancel` is refused once T-0 passed. `/scripts forcedshutdown` still exits at once. |
-| `SusManager` | `systems/services/sus.rs` | done | `audit_char_sus` log + speed analysis; the 5 s `FinalizeTransform` caller and the social / npcs log calls are not wired yet (see deviations). |
+| `SusManager` | `systems/services/sus.rs` | done | `audit_char_sus` log + speed analysis. All 12 C# `LogActivity` sites are wired: crime / trial / coffer through `social::crime::sus_log`, `CSDestroyItem` (negative count) through `SusManager::log_activity_player_deferred` (`porting-md#10`). The 5 s `FinalizeTransform` caller runs from the move handler (see deviations). |
 | `GameData/Framework` (`GameDataManager`, `IGameDataLoader`, `GameDataAttribute`) | `data/mod.rs`, `systems::SystemsData::load` | done (by design) | The reflection-driven loader list is the explicit `GameData::load` + per-subsystem `Data::load`; `Load` / `PostLoad` order is the call order there. |
 | `Models/Tasks/SaveTask/SaveTickStartTask` | `managers/save.rs` | done (by design) | The periodic save is a Tokio interval instead of a `TaskManager` task (not counted in `GetQueueCount`). |
 | `Utils/{MathUtil, NumericExtensions, Converters/*, DB/HoldablesSchemaCheck}` | `utils/` | done | `Utils/DB/SQLite*` = `data::sqlite`, `Utils/IdManager` = `managers::id`. `SphereCommandUtil` / `QuestCommandUtil`: `services::commands::scripts::{sphere, quest_cmd}`. |
@@ -2143,6 +2028,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   differ between zero-extended sheet IDs and sign-extended native cache keys.
   No evidence establishes a safe ID-width or ownership-policy change here.
 
+* systems::services (music uploads, WP-M1, 2026-11-06): the C# stored any `CSSaveUserMusicNotes`
+  body. The Rust refuses (warn only, nothing queued, no packet — the 1.2 client has no evidenced
+  failure path) when `song_size` is not `song.encode_utf16().count()`, when the song exceeds
+  `Music.MaxSongChars` (default 3000, so normal uploads are unchanged), or when `item_id` is not
+  an item owned by the player whose template is in `instrument_sounds`. The client resolves the
+  same item before sending (`FUN_39079640` -> `FUN_3961e9a0`, item id at the packet's second
+  field) and loads `instrument_sounds` itself (`dll.c:1559064`). The note grammar is still not
+  parsed: no server-side format is evidenced.
+
 * systems::skills (music): the C# (and this port) send `SCSkillStarted` only for casts with a
   cast time. The play (22213), pause (22214) and close-the-score (22217) skills are instant
   (`casting_time` 0, `effect_delay` 200 ms), so the 1.2 client never received the own
@@ -2207,8 +2101,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   cancels a siege keeps the owner and sends nothing. A successful property-tax collection
   (`/collectdominion <zoneGroupId>` -> `tax::collect_locked`, the only existing settlement
   path) sends `SCDominionTaxBalanced` (0x023; Deserialize `0x397B7B60`: zone group, peace-fund
-  money, peace-fund AA points) with the current peace-fund values and no accrual. Peace Fund
-  rates, sources, the AA-point split and the historical automatic payout remain UNKNOWN (see
+  money, peace-fund AA points) with the current peace-fund values and no accrual (the AA field is
+  written from the treasury column, which stays 0 because AA points are not supported). Peace
+  Fund rates, sources and the historical automatic payout remain UNKNOWN (see
   the property-tax bullet above). Known, not fixed: 0x023 has no sender after a weekly
   settlement because no settlement hook exists yet (the calendar changes periods only);
   `tax::collect_locked` reads `authority_for_zone` before the collection call, so the
@@ -2740,12 +2635,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   of 60 minutes and `0` = lift are INFERRED) writes `characters.chat_restricted_until` (UTC):
   an online character through its live state (saved by the save manager), an offline one with
   a direct row UPDATE. Both outgoing chat paths (`send_chat_message` and the user-channel
-  `send_user_chat`) refuse a muted sender with a plain system message (retail's mute error is
-  UNKNOWN; INFERRED, `CHAT-RESTRICT-1`), and the mute lifts itself when the timestamp passes.
-  `chat_restricted_until` is loaded and saved with the character. Retail's per-type levels are
-  not evidenced (**capture-pending CHAT-LEVEL-1**). Tests: level gate / default off / GM
-  exemption, mute + expiry, user-channel bypass, `restrict_chat` online / offline / non-GM,
-  and the MySQL character round trip.
+  `send_user_chat`) refuse a muted sender with `SCRestrictInfoPacket` 0x1c8: the 1.2 reader
+  `FUN_397c4570` -> `FUN_397beb40` is `chname (max 11) ; i32 index ; u8 restrictCode ; u32
+  duration ; i64 startDate ; i64 endDate`, and the handler `FUN_391e0be0` passes only `duration`
+  to `FUN_393c4170`, which shows `restrict_remain_time` with `duration / 60 + 1` minutes
+  (so `duration` is remaining seconds). The client reads neither `index`, `restrictCode` nor
+  the dates; the server sends `index 0`, `code 0` (chat), `duration` = `chat_restricted_until
+  - now`, `start` = that now and `end` = `chat_restricted_until` (the mute start is not
+  persisted; INFERRED, ignored by the client). Retail's trigger for the notice is UNKNOWN and
+  the refused chat attempt is INFERRED (**`CHAT-RESTRICT-1`**). Starting or lifting a mute of an
+  online target sends `SCResultRestrictCheckPacket(code 0, result 1 / 0)`; `FUN_391e0ea0` turns
+  result 1 into the client's chat-restriction flag plus `restrict_start`, and 0 into the flag
+  restore plus `restrict_end`. The push is not sent when the mute expires on its own (no timer;
+  the client's flag/label is only restored by a lift packet or a relog) and is not persisted
+  across a relog. `CSRestrictCheck(code 0)` answers from the same persisted mute; `code 1` (the
+  lobby connection check, the only code the stock client sends) always answers 0 because there
+  is no login-restriction store yet. `chat_restricted_until` is loaded and saved with the
+  character. Retail's per-type levels are not evidenced (**capture-pending CHAT-LEVEL-1**).
+  Tests: level gate / default off / GM exemption, mute + expiry (the notice carries the
+  remaining seconds), user-channel bypass, `restrict_chat` online / offline / non-GM (online
+  start/lift send result 1/0), `CSRestrictCheck` code 0 muted/unmuted/expired and code 1, the
+  packet byte layout, and the MySQL character round trip.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /
@@ -2872,10 +2782,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   917 of the 1,569 quests with such an act give exp 0 and copper 0 through it, 376 of them in
   `quest_categories` 79 ("탐험", exploration; all 402 quests of the category are level 50, and
   377 carry the acts): the act is what makes them pay nothing, and the C# sum would hand each of
-  them the full level-50 `quest_supplies` exp / copper on top. Open suspect: the
-  client decompile also scales the level supply by `quest_contexts.degree` (x0.5..x1.5),
-  but the 2014 site shows unscaled values for all 221 non-degree-3 quests; degree scaling
-  is not implemented until that conflict is resolved.
+  them the full level-50 `quest_supplies` exp / copper on top.
+* systems::quests (reward scaling, `Quest:RewardScaling`, default `false`; `porting-md#2`,
+  capture-pending): the 1.2 client's quest window scales its displayed reward — the
+  `quest_supplies` fallback by `quest_contexts.degree` in `FUN_397d5eb0` / `FUN_397d5dd0`
+  (0 / 1 -> x0.5, 2 -> x0.75, 3 -> x1.0, 4 -> x1.25, 5 and above -> x1.5; a NULL degree
+  reads as 0), then exp (the Reward act value or the scaled fallback) by the quest-vs-player
+  level gap in `FUN_397d3810` (`g = ((int)((p+1)*0.2+0.5) > 4) ? p : 5`, `d = g - p + q`:
+  full for `d >= 0`, 50 % for `d < -4`, otherwise `(int)(d*base*0.1 + base)`; from player
+  level 22 the reduction is disabled). Copper has no gap factor, an act value is never
+  degree-scaled, and the let-it-done ratios are unchanged. `systems/quests/reward_scale.rs`
+  implements exactly that; `engine.rs` applies it to the `quest_supplies` fallback and
+  `acts.rs` (`SupplyExp`) to the exp act. **Server authority is EVIDENCED** (the quest
+  packets carry no reward amount; the client formula only decides the displayed number), but
+  whether the original zone server applied the same factors is **INFERRED** from the client
+  UI: showing a number different from the payout would be a visible bug on every degree != 3
+  quest. The 2014 archeagedatabase.net export still lists unscaled supply values for the 221
+  non-degree-3 quests, but it is a database dump, not a grant record, so it cannot settle the
+  question. The flag keeps today's unscaled payout until the live check decides the default:
+  read `X2Quest.GetQuestContextRewardExp/Copper` in the 1.2 quest window for a degree-2 quest
+  and for a quest far below the character's level, complete them, and compare with the exp /
+  copper actually gained (`SCExpChanged` / money). Equal with the flag on means the retail
+  server paid the displayed number; the lean is then to default the flag on.
 * systems::quests: the October 2026 quest audit corrects timer event isolation, explicit NPC
   reporting, per-quest NPC/doodad reporting, doodad reward selection/finalization, and OR
   requirement evaluation. Timed saved deadlines, aggro credit, CheckSphere, and authored
@@ -3195,6 +3123,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::instances: the dungeon loader awaits the spawn tasks before registering the indun events again (C# does not await `Task.WhenAll`, a race) and reads the spawn files there instead of in `CreateWorldInstance`; `DestroyInstantGame` cleans the instance up and releases its id right away (C#: the finalizer, later); `Environment.TickCount` is a process-relative monotonic clock; the `World.Template.SpawnPosition` mutation in `MoveCharacterTo*` is a local value; paths that throw in C# (missing action / room / zone / rule set, `_members[x]` of a non-member, a destroyed dungeon's `World`) log and return, keeping the side effects done before the throw; `EndGame().Start()` throwing after a victory is modelled as "the rest of `OnKill` (respawn) does not run"; the cross-instance region switch removes the object from every old neighbour once (no double notification of its own sector).
 * systems::instances (battlefield rules, 2026-10-19): `game_score_rules` is now loaded instead of the hard-coded 30-point kill. A kill uses event 200 (`event_value` 0) and an assist event 204; a corps-bound row wins over the `rule_set_corps = -1` row. Shipped rows: rule set 28 (Gladiator) event 200 -> 30 (id 93); rule sets 8/17/22/26/27 event 200 -> 3 and events 202/203/204 -> 2 (ids 26/53/68/73/76 and 81-92); rule set 2 authors no kill row, so its kills award 0. The assist rows do not distinguish healer / dealer in 1.2, so one 204 row is paid per assist (the three rows carry the same value). `game_rule_events` is loaded (rule set 28: 4 rows; 8/17/22/26/27: 1 each) but has no consumer with defined semantics in the 1.2 C#, in the 10.x zone decompile (loader only) or in the 1.2 client UI, so no behaviour is invented for `condition_id` / `kind_id` / `param1` / `param2`. `battle_field_buffs` is applied at match start (after the reset that clears buffs) with the row's `value` as the buff charge and removed on leave / disconnect: battlefield 7 has 8 rows (6266/100, 7006/1, 7007/2, 7061/3, 7062/4, 8246/1, 8247/1, 8000007/10) and battlefield 11 has 3 (8246/1, 8247/1, 8000007/1); the 3.0 successor `battle_field_honor_buffs.basic_value` repeats the same buff ids and values. Regression: `battlefield_kill_and_assist_scores_come_from_game_score_rules`, `battlefield_buffs_are_granted_at_start_and_removed_on_leave`, `battlefield_data_loads_with_json_quirks` and `real_instances_data`.
 * systems::instances (battlefield resurrection delay, 2026-11-05): `game_rule_sets.time_resurrection_delay` replaces the C# hard-coded 6 s wait before `OnKill` resurrects the victim. The 1.2 rows author 15 s for every rule set and 5 s for the Gladiator (28); the unit is INFERRED as seconds (the client loads the column with the rest of the rule set, `LoadGameRuleSetDescs`, but its death countdown comes from `SCUnitDeathPacket.resurrect_wait_time`). A rule set with 0 / NULL keeps the 6 s fallback. Tested by `instances::flow_tests::battlefield_resurrection_waits_the_rule_set_delay`, `gladiator_resurrection_waits_five_seconds`, `battlefield_resurrection_without_delay_keeps_six_seconds` and `instances::tests::battlefield_rule_set_loads_kill_conditions`.
+* systems::instances (instant game hardening, 2026-11-06): (1) `SCInviteToInstantGame.qualified_id` is now the game's zone instance (`zone_id << 32 | instance_id`) plus a per-game invitation counter instead of the constant `1`; `CSJoinInstantGame` and `CSEnteredInstantGameWorld` ignore a value that no longer matches the live invitation (a re-invite replaces it, a removal drops it, an expired invitation's timer only acts on its own value) and log at `debug`. What the client echoes is the invite value; no other meaning is evidenced. (2) `InstantGameManager.PlayerCanEnter` (present in the C# but never called) now gates `ApplyToBattlefield` with its existing checks (combat, instanced world, dead, tradepack, rebirth trauma, summoned vehicle) plus the C# TODO's states via the existing state: a duel (`DuelManager`), a seated juror (`JURY` buff 3621) and jail (`FORCIBLY_AWAITING_TRIAL` 3619, `PRISONER_NUIAN` 631, `PRISONER_HARANYAN` 2028); the refusal sends no packet because no 1.2 error id is evidenced. (3) The kill teleport restarts the `ZWUnitFell` fall tracker at the spawn z for the victim and (Gladiator) the killer (`FallTracker::reset_at`), so a fall from before the death cannot be measured across the respawn (`Prevent fall damage for both killer and victim on teleport`). (4) A player removed from a game unbinds its `OnKill` handler in `remove_player`, so every removal path (leave, decline, re-invite) and `DestroyInstantGame` leave no `CharacterEvents` subscription behind. (5) A game that never fills has no start expiry: only the 60 s invitation timeout exists, because no shipped rule set carries such a value (`game_rule_sets` has no such column), and none is invented. Tests: `instances::flow_tests::battlefield_stale_qualified_ids_are_ignored`, `battlefield_reinvite_replaces_the_qualified_id`, `battlefield_apply_refuses_a_duel_jury_or_jail`, `battlefield_kill_teleport_resets_fall_tracking`, `battlefield_end_unbinds_kill_events_without_an_origin_faction` and `systems::ai::collision::fall::tests::reset_at_restarts_a_fall_at_the_teleport_z`.
 * systems::instances / systems::social (RPA-09 temporary factions): duel Red / Blue team and battlefield corps factions are temporary. `UnitBase::faction_temporary` marks them, `SCUnitFactionChangedPacket.temp` is `true`, and they skip `Character.SetFaction`'s housing update, guild kick and party removal. `db_character::persisted_faction` writes the origin faction, so an autosave, logout or crash during a duel / battlefield never stores the temporary faction; the faction is also restored on duel end, battlefield leave and departure/save (`world::session::save_and_remove_from_world`). A duel applies the same temporary faction to each participant's active mates and owned slaves and restores it with the owner's (they copy the owner's faction at spawn and are not covered by `Character.SetFaction`). Tested by `duel::tests::temporary_team_factions_keep_guild_and_restore`, `disconnect_during_a_duel_restores_the_origin_faction`, `mate_and_slave_follow_the_duel_faction_and_get_it_back`, `instances::flow_tests::battlefield_entered_requires_actual_instance_and_subscribes_kills_once` and `db_character::tests::a_temporary_faction_is_never_persisted`.
 * systems::instances (tower defense): the C# command only sent packets to its caller and hard-coded zone group 5. The Rust runtime reserves controller positions from the existing NPC JSON by compact spawner membership; these controllers no longer spawn permanently. Manual controls affect the caller's instance/group. Automatic schedules are disabled by default and validate every selected event at startup. Orphan waves/targets no longer truncate later valid rows. Kill notifications use only `DoDie`, deduplicate the NPC handle and retain id-reuse semantics. Timers use monotonic real seconds; `tod` uses the accelerated game clock and day intervals count from scheduler startup. Spawn effects carry explicit event ownership for cleanup even when Unit.OwnerId is zero. Unsupported `DoodadAlmighty` targets, NPC groups without authored controller positions and reward/victory chains remain unavailable rather than being synthesized.
 * systems::instances (dungeons/mentoring): replaces the mirrored double entry-item charge and unsafe dungeon destruction below. Each character pays once per run; re-entry is free, capacity counts pending admissions, and creation obeys `World.MaxInstances` including concurrent requests. Empty owner/leader resets remove the whole run binding; destruction cancels its loader and returns occupants before removing their world. Party join grants access without inserting a player into another world's object table. Mentor eligibility is captured at boss death for nearby living party members with complementary active quests, rechecked during interactions, and bound to selected chest participants. Four explicit 1.2 quest/chest bindings are verified by a gated real-data test. Missing reward chests use the authored templates at the boss position (two metres apart for the two-chest dungeons); this placement fallback and qualification policy are emulator extensions, not claimed native-server execution parity. Authored phases grant seal items through existing inventory/quest hooks and daily persistence; Gilda is not issued directly by mentoring.
@@ -3445,8 +3374,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::services: `AppConfiguration.Instance` mutations (World set commands,
   `ReloadConfiguration`) replace the `ConfigCell` snapshot; subsystems that copied values at
   start (skills config, doodad growth rate) are updated by the World set commands only.
-* systems::services: `SusManager` analysis runs only where callers pass positions (no
-  `FinalizeTransform`); the social and coffer `LogActivity` calls insert their row as a task.
+* systems::services: `SusManager` analysis runs from the move handler's 5 s
+  `FinalizeTransform`; every `LogActivity` call (social, coffer, trial, `CSDestroyItem`) inserts
+  its row as a task because the C# sites are synchronous. `CSDestroyItem` with `count <= 0`
+  reports `CategoryCheating` with the C# text and then destroys the whole stack
+  (`systems/economy/item_handlers.rs`; `porting-md#10`).
 * systems::services (commands): a command whose C# body is synchronous but calls an async Rust API
   (saves, reloads, DB, mails) runs through `execute_async`; `ReloadConfigs` replaces the whole
   configuration (C# `Bind` keeps runtime values of keys absent from the files) and refreshes the
@@ -4299,9 +4231,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   payment). An explicit payment row becomes `Premium`. `premium_point` is
   `max(details.premium_point, premium_configs.connect_point).clamp(0, max_point)` - a stored
   higher point is never lowered. Credits and loyalty are debited in the transaction; an AA
-  price is taken from the per-character wallet before the grant (WP-AA2) and returned if the
-  grant fails, with `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when the wallet is short. Other
-  currencies are refused with 773. A loyalty debit also sets the buyer's `bm_point` and sends
+  price is refused with `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 (AA points are not supported).
+  Other currencies are refused with 773. A loyalty debit also sets the buyer's `bm_point` and sends
   `SCBmPointPacket`. The buy result has no dedicated 1.2 SC: the client's error handler
   (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
   0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
@@ -4401,6 +4332,54 @@ The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `
 - **Orphan tower defense waves.** The shipped `compact.sqlite3` has `tower_def_progs` rows for `tower_def_id` 9, 22 and 33 with no `tower_defs` parent (20 waves). The C# `return`s at the first one; the Rust loader skips them (see the instances section) and now logs one info summary with the count and the distinct parent ids; the per-row line is `debug`.
 - **Client sources not found.** `Configurations/ClientData.json` lists four default sources and array settings merge by index (as in Microsoft.Extensions.Configuration), so a `Config.Local.json` with two sources leaves the last two defaults in place. `ClientFileManager::from_sources` logs a source that does not exist at `info` while at least one source is valid, and at `warn` for each (plus the existing error) when none is. `add_source` itself only logs not-found at `debug`.
 
+## Client FeatureSet configuration (Rust only, 2026-11-06)
+
+The client FeatureSet is the 11-byte blob in `SCInitialConfig.fsets` (`FeatureSet::write`, a
+`u16` length prefix plus the bytes). The 1.2 client keeps it at `DAT_39b02294 + 0x14`, and
+`FUN_39496b20` (`x2game.dll.c:956456`) builds the Lua table behind `X2Player:GetFeatureSet()`
+from it; bit = byte * 8 + bit (byte N = struct offset `0x14 + N`). `DEFAULT_FSET` plus the
+`FeatureSet::initialized` overrides are the C# `FeaturesManager.Initialize` bytes; a retail
+capture has not been found, so whether they equal retail is UNKNOWN (see
+`D:/aaemu-audits/gap-audit-2026-11-02/research/live-in-1.2.md`).
+
+Rust adds `Configurations/FeatureSet.json` (section `FeatureSet`), applied in `main.rs` with
+`FeatureSet::apply_config` right after `GameData::load`. This is a Rust-only deviation: the C#
+had no FeatureSet configuration. Every named key is one `GetFeatureSet()` switch, and turning
+it on or off sets exactly its bit; `ExtraBits` is a `bit -> bool` map that overrides unnamed
+bits (and can turn a default-on bit off). The shipped defaults reproduce the current bytes
+exactly, so an absent section or the shipped file changes no behaviour. `levelLimit` (byte 1)
+and `mateLevelLimit` (byte 8) still come from the `levels` table through `GameData::load` and
+are not configurable here. `SecondPassword:Enabled` still turns bits 46/55 on at startup and
+the GM `/feature set` command still changes the runtime copy; the config is the baseline.
+
+| Key | Bit | Default | What the client uses it for |
+| --- | --- | --- | --- |
+| `siege` | 0 | on | Siege / dominion UI (`FUN_39496b20:956485`). The Lua key is read by the siege UI; the exact window is INFERRED. |
+| `premium` | 4 | on | Premium / Patron HUD and labor UI (C++ reads at `x2game.dll.c:703203`, `708636`). |
+| `itemSecure` | 45 | on | Item-secure / lock handling (`FUN_397cc350`, item byte flag `0x4`). |
+| `secondpass` | 46 | off | Second-password entry and its opcode path (`x2game.dll.c:45293`, `617228`, `108647`). |
+| `ranking` | 36 | on | Ranking window (the `ranking` UI calls `GetFeatureSet`). |
+| `slave_customize` | 48 | on | Vehicle / ship customization UI (INFERRED from the key and the customizing UI callers). |
+| `bm_mileage` | 43 | on | Cash-shop mileage display (INFERRED; Korean business model). |
+| `ingamecashshop` | 38 | on | In-game cash-shop open guards (`x2game.dll.c:62540`, `62632`). |
+| `customsaveload` | 40 | on | Custom UI save/load (INFERRED). |
+| `beautyshopBypass` | 52 | on | Beauty-salon bypass entry (customizing UI; INFERRED). |
+| `ingameshopSecondpass` | 55 | off | Second-password gate on cash-shop purchases (INFERRED). |
+| `backpackProfitShare` | 56 | on | Trade-pack sale profit share and sale mails (`systems/economy/specialty.rs`; the later note in this file). |
+| `sensitiveOpeartion` | 58 | off | Sensitive-operation confirmation prompts (INFERRED; the key's spelling is the client's). |
+| `taxItem` | 59 | on | Tax-item payment UI (the server also gates `TaxItem` behavior on this bit). |
+| `achievement` | 63 | on | Achievement window. |
+| `dwarfWarborn` | 74 | off | Dwarf / Warborn race selection. The shipped `characters` data has races 7/8 `creatable = 'f'`, so turning the bit on does not by itself make those races creatable. |
+| `mailCoolTime` | 75 | on | Mail send cooldown display (INFERRED). |
+| `hudAuctionButton` | 81 | on | Auction-house button in the HUD. |
+| `auctionPostBuff` | 83 | on | Auction posting buff / UI (INFERRED). |
+| `aaPoint` | 44 | off | AA-point amounts in price and currency displays (`x2game.dll.c:66363` sets `grade_enchant_cost` / `grade_enchant_currency`, also `633707`, `659611`, `733342`). AA points are not supported; keep it off. |
+| `ExtraBits` | any | `{}` | Override map for the unnamed `flag_x_y` bits, `0..=87`. The C++ reads unnamed bits 32, 34, 41, 42, 47, 60 and 73 (purpose unresolved); 78 is the mate equipment whitelist (`PORTING.md`, mate equipment). Defaults: 32 on (plus inherited 16-19, 24-27, 35, 37, 49); 34, 41, 42, 47, 60, 73 and 78 off. |
+
+The C#-named bits that have no `GetFeatureSet()` Lua key (`allowFamilyChanges` 1, `houseSale` 3,
+`nations` 6, `customUiButton` 39, `freeLpRaise` 53, `houseTaxPrepay` 84) have no named config
+switch; they keep their current defaults and `ExtraBits` can override them like any other bit.
+
 ## Live testing (phase 5): fixes and deliberate deviations
 
 Found by running the servers against MySQL, the real `compact.sqlite3` / `game_pak` and the
@@ -4486,6 +4465,7 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   item task packets queued earlier (the C# sends those inline first too). `quests::events::with_quests`
   logs an error and returns `None` when the thread already holds the ops lock instead of hanging.
 
+* `CharacterManager.Create` (starter action bar, WP-N1, 2026-11-06): the C# assigned every supply sequentially from slot 10 in `character_supplies` order, so the teleport scroll and the two emote items landed at 10 / 11 / 12 while the 1.2 client's `default_action_bar_actions` authors 18791 -> 10, 18792 -> 11, 4045 -> 12. The Rust loads that table (`data/character_templates.rs`) and places the granted supplies at the authored slots; supplies without a row take the next free slot from 13 on (417 -> 13 in the shipped data), so class supplies no longer share the default bar. The client also loads the table itself (`dll.c:1688905`); its use there is UNKNOWN (likely the reset action-bar button), so matching the authored slots is the safe reading.
 * `CharacterManager.Create` saved only the `characters` row (`SaveDirectlyToDatabase`); the starting supplies (`item_containers` / `items`) waited for the next `SaveManager` run or the departure save. A server stop or crash in that window kept the character but lost its items, and the next select built empty containers. `db_character::save_new_character_locked` now writes the new character's dirty containers and items in the same transaction (`ItemManager::prepare_save_for_owner`). Creation holds the save transaction lock from before inventory registration through commit or cleanup; setup errors and failed saves discard the rejected containers/items before releasing the name and character ID, without consuming other owners' changes or queued deletions. Canceled item deletions are recorded at each starter allocation, including IDs another owner releases after setup begins, and restored on rollback. Suite `rust/verify/newchar-items.vtest` uses a fresh character on every run, including reruns of its provisioned account.
 
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
@@ -5082,12 +5062,11 @@ and in NPC wandering / buff remaining times.
     `/collectdominion <zoneGroupId>` (ordinary-player access, current guild leader only),
     receiving the original eleven-argument balance-receipt
     mail. Repeated empty collection creates no mail, failed staged delivery retains revenue,
-    and Peace Fund remains untouched. Hunting tax was removed by Trion's 1.2 notes. Since
-    WP-AA3c a tax bill paid with the `autoUseAAPoint` flag books its AA share of the collected
-    property surcharge in `cur_house_tax_aa_point` and the rest in `cur_house_tax_money`, in the
-    proportions of the payment (INFERRED server policy: the ledgers only say which purse the
-    revenue arrived in). `peace_tax_aa_point` stays untouched like `peace_tax_money`, because no
-    gold Peace Fund accrual is defined; Peace Fund percentages, nation splits and historical
+    and Peace Fund remains untouched. Hunting tax was removed by Trion's 1.2 notes. A tax
+    bill's `autoUseAAPoint` flag is parsed and ignored (AA points are not supported); the
+    collected property surcharge is booked in `cur_house_tax_money` only, and the
+    `cur_house_tax_aa_point` / `peace_tax_aa_point` ledger columns stay 0 like `peace_tax_money`,
+    because no Peace Fund accrual is defined; Peace Fund percentages, nation splits and historical
     automatic payout scheduling are not invented. Original one-hour territory tax change
     cooldown uses wire error488/UI3544.
   Floors/walls/roofs use every normal-state prefab element and are synchronized when
@@ -5202,11 +5181,10 @@ Additional world-side fixes from the same audit:
 
 * Cash-shop checkout charges the effective discounted price, validates templates and checked
   cart totals before fulfillment, serializes stock updates, and uses guarded SQL credit and
-  loyalty debits. Gold still uses the inventory transaction path. AA-priced SKUs now debit the
-  per-character wallet (`characters.aa_point` / `bank_aa_point`, WP-AA1) under the same
-  one-character-lock rule and report `INGAME_SHOP_NOT_ENOUGH_AA_POINT` 592 when short (WP-AA2,
-  see the economy section). A failed grant refunds the AA debit. `money2` is bank gold, not an
-  AA Points balance. Unit flows and private-MySQL tests cover failed debits, limits and
+  loyalty debits. Gold still uses the inventory transaction path. AA-priced SKUs
+  are refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 592 (AA points are not supported). A failed
+  grant refunds the currency and the reserved stock. `money2` is bank gold, not an AA Points
+  balance. Unit flows and private-MySQL tests cover failed debits, limits and
   concurrent overdraft attempts. Debit, audit and commercial-mail delivery do not yet form one
   crash-atomic transaction/outbox.
 * Temporary USER chat channels implement the existing join/leave packets and packed eight-byte
@@ -6558,23 +6536,47 @@ Policy decisions / capture-pending (each also a case id in the code):
   A deleted character's pledges are never refunded and stay in the table for its id. Arena and
   instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
   these have 1.2 evidence; they are safe defaults.
-* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The empty `(0, 0)` list stays the
-  default: the C# comment records that a filled list broke the 1.2 client Lua, the cause was
-  never found and the row layout was only verified later (M10, reader `FUN_397bebf0`), so the
-  real-client check is **capture-pending**. `Social.BountyBoard` (default `false`, shipped in
-  `Configurations/Social.json`) enables the filled answer:
-  `SCBountyList{total, count, rows}` where `total` is every character with an unpaid pledge and
-  the rows are capped at the client's 20 entries (`0x14`, `MAX_BOUNTY_LIST_ENTRIES`), highest
-  total first (ties by character id; the order is a server policy, not client evidence, and only
-  decides which rows the cap keeps). Online rows read name, level, race, crime point, zone and
-  position from the live character with `is_live = true`; offline rows read the same fields plus
-  the arrest / trial counters from its `characters` row (`deleted = 0`) with `is_live = false`.
-  A missing or unreadable character row is skipped and no longer counted in `total`, so the
-  client can still complete its id-keyed row map. The row's `type` field (`+184` in the reader,
-  meaning UNKNOWN) is `1`, the value of the C# dummy row (C#-only); `seconds` is `0` (no 1.2
-  meaning known, no timer is invented). `total > count` only while more than 20 characters have
-  pledges. The switch must stay `false` until an original-client run (hidden client, bounty
-  board doodad) opens the board without a Lua error.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. A filled list still breaks the 1.2
+  client UI, and the 2026-11-06 real-client run (one wanted row, client log
+  `ArcheAge-bounty.log` lines 1077-1099) shows the cause is in the client's own
+  `usertrial/bounty_bullet.alb`, not in the row values:
+  * On every open it logs `?:6422 LocalizeUiText() expect parameter 4 of type String (Provided
+    type Number)`. `FillLeftFrame` (lines 42-43) calls
+    `locale.trial.trialChoice(tostring(record[12]), record[11])` and
+    `rulingChoice(tostring(record[14]), record[13])`; record 11/13 are the numeric
+    `acceptGuilty` / `notGuilty` counters built by the client's `GetBountyData`
+    (`FUN_39080c00` indexes 11 and 13, type tag 4 = number), and the wrappers
+    `baselib/locale_helper.alb:6418/6422` pass them as parameters 3/4 of
+    `X2Locale.LocalizeUiText`, which requires strings. The sibling trial scripts
+    `crime_records.alb` (0.17) and `bot_records.alb` (0.10) call `tostring()` on both counters;
+    `bounty_bullet.alb` omits the second one. No server field can turn a numeric row column into
+    a Lua string.
+  * Then it logs `?:115 attempt to index global 'listCtrl' (a nil value)`:
+    `bounty_bullet.alb` FillData line 115 calls `listCtrl.InsertData`, but no `.alb` in the
+    client ever assigns a global `listCtrl` (the page list owns `listCtrl` as
+    `wnd.listCtrl` / `pageListCtrl.listCtrl`, and the sibling scripts call
+    `pageListCtrl:InsertData`). The row insert therefore aborts for every row.
+  * Clicking a board button logs `?:53 attempt to compare number with nil`: the handler compares
+    the global `curSelected`, which is never assigned either; the selection handler updates the
+    `CUR_SELECTED` upvalue instead.
+  The board stays behind `Social.BountyBoard` (default `false`, shipped in
+  `Configurations/Social.json`) until the client script is fixed, because the real 1.2 client
+  cannot render the rows. When enabled, `SCBountyList{total, count, rows}` reports `total` as
+  every character with an unpaid pledge and caps the rows at the client's 20 entries (`0x14`,
+  `MAX_BOUNTY_LIST_ENTRIES`), highest total first (ties by character id; the order is a server
+  policy, not client evidence, and only decides which rows the cap keeps). Online rows read
+  name, level, race, faction, crime point, zone and position from the live character with
+  `is_live = true`; offline rows read the same fields plus the arrest / trial counters from its
+  `characters` row (`deleted = 0`) with `is_live = false`. A missing or unreadable character row
+  is skipped and no longer counted in `total`, so the client can still complete its id-keyed row
+  map. The row's `+0xb8` field (called `Type184` in the C#, whose dummy row sent `1`) is the
+  **faction id**: the client's `GetBountyData` record 9 feeds it to `FUN_392f8120(id, 1)` and
+  uses the result as the left frame's faction name (`FUN_39080c00`; the same call fills the
+  field literally named `"faction"` in `FUN_3907e830`). Online rows now send
+  `unit.faction_id`, offline rows `characters.faction_id`, instead of the C# dummy. `seconds`
+  is `0` (no 1.2 meaning known, no timer is invented). `total > count` only while more than 20
+  characters have pledges. The real-client check stays open until a client `bounty_bullet.alb`
+  that uses `pageListCtrl.listCtrl` and `tostring()` on both counters is available.
 
 * **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
   `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is

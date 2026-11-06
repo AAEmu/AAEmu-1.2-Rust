@@ -70,7 +70,7 @@ impl TestHouse {
                 };
                 let (tax_due_date, protection_end_date) = {
                     let h = house.data();
-                    (housing::tax_due_date(&h), h.protection_end_date)
+                    (housing::tax_due_date(server, &h), h.protection_end_date)
                 };
                 let now = housing::now();
                 if now >= tax_due_date {
@@ -478,7 +478,7 @@ mod tests {
                 &format!("Set {name} to demolished in about 20 seconds")
             )]
         );
-        let due = manager::tax_due_date(&house.data());
+        let due = manager::tax_due_date(&server, &house.data());
         let (_, out) = harness::run(&server, &gm.p, "house info").await;
         assert_eq!(out.len(), 2);
         assert_eq!(

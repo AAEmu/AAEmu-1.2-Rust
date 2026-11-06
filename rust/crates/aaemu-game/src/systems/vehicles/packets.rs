@@ -492,18 +492,7 @@ cs_packet!(
         );
         // `Connection.ActiveChar` null throws in `Create` (only this packet ends).
         let p = active_char!(conn);
-        shipyards::create(
-            server,
-            &p,
-            self.id,
-            self.x,
-            self.y,
-            self.z,
-            self.z_rot,
-            self.design_item,
-            0,
-            self.auto_use_aa_point,
-        );
+        shipyards::create(server, &p, self.id, self.x, self.y, self.z, self.z_rot, self.design_item, 0);
         Ok(())
     }
 );

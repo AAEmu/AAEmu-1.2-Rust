@@ -38,7 +38,8 @@ pub const CREST_STAMP_SKILL: u32 = 14_435;
 /// The `doodad_func_stamp_makers` row of the crest printer's current func group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CrestPrinterCost {
-    /// Copper charged by `ConfirmDefaultUcc`.
+    /// Copper charged for a default pattern (`ConfirmDefaultUcc`); a custom image charges only
+    /// [`Self::consume_item_id`].
     pub consume_money: i32,
     /// Item the client charges for a custom image (0 = none).
     pub consume_item_id: u32,
@@ -66,20 +67,23 @@ pub fn crest_printer_cost(data: &DoodadData, func_group_id: u32) -> Option<Crest
     None
 }
 
-/// Whether the character can pay the printer row now: the money for both upload kinds and, for a
-/// custom upload, the reagent. `custom` selects the client's item rule (`useUserImage`).
+/// Whether the character can pay the printer row now. The client picks the cost by upload kind
+/// (`X2Ucc.GetMakeUccConsumeInfo`, `FUN_394b5e80`, x2game.dll.c:981806): a user image
+/// (`useUserImage` = `data_size > 0`) needs the row's item + count ("You need 1 Crest Brainstorm
+/// to create a custom crest.", `ui_texts` 4206), otherwise the row's `consume_money` ("Crest Ink
+/// costs the following amount to craft", `ui_texts` 4207). A custom image is therefore never
+/// refused for a short money balance.
 pub fn can_pay(player: &PlayerRef, cost: &CrestPrinterCost, custom: bool) -> bool {
-    if player.data().money < i64::from(cost.consume_money) {
-        return false;
+    if custom {
+        return cost.consume_item_id == 0
+            || cost.consume_count <= 0
+            || Inv::of(player).check_items(
+                slot_type::INVENTORY,
+                cost.consume_item_id,
+                cost.consume_count,
+            );
     }
-    if custom && cost.consume_item_id != 0 && cost.consume_count > 0 {
-        return Inv::of(player).check_items(
-            slot_type::INVENTORY,
-            cost.consume_item_id,
-            cost.consume_count,
-        );
-    }
-    true
+    player.data().money >= i64::from(cost.consume_money)
 }
 
 /// `UccIdManager`: `IdManager("UccIdManager", 0x00000001, 0x00FFFFFF, {{"uccs","id"}})`.
@@ -504,11 +508,11 @@ impl UccManager {
     }
 
     /// `ConfirmDefaultUcc(connection)`: assigns an id, registers the UCC, sends
-    /// `TCEmblemStreamRecvStatus(End)`, then, in the C# order: `ActiveChar.ChangeMoney(
-    /// Inventory, -50000)` (no balance check: the money may go negative), creates the Crest Ink
-    /// with the new `UccId`, saves the row and puts the ink in the bag (`GainItemWithUcc`).
+    /// `TCEmblemStreamRecvStatus(End)`, then charges the re-checked cost (a default pattern: the
+    /// row's money; a custom image: the row's reagent only, see [`can_pay`]), creates the Crest
+    /// Ink with the new `UccId`, saves the row and puts the ink in the bag (`GainItemWithUcc`).
     /// A failed save (C# MySqlException) or a missing Crest Ink template (C# NRE) ends the
-    /// operation with an error after the money was taken.
+    /// operation with an error after the cost was taken.
     pub async fn confirm_default_ucc(
         &self,
         server: &GameServer,
@@ -534,7 +538,7 @@ impl UccManager {
         let custom = ucc.is_custom();
         if !can_pay(&player, &cost, custom) {
             tracing::warn!(
-                "UccManager.ConfirmDefaultUcc: stream connection {} can no longer pay the crest printer (money or reagent changed); upload dropped",
+                "UccManager.ConfirmDefaultUcc: stream connection {} can no longer pay the crest printer (money for a default pattern, reagent for a custom image, changed); upload dropped",
                 conn.id
             );
             return Ok(());
@@ -581,10 +585,11 @@ pub(crate) fn active_player(server: &GameServer, conn: &StreamConnection) -> Res
     })
 }
 
-/// The part of `ConfirmDefaultUcc` before `Save(ucc)`, in **one** item transaction: the checked
-/// money debit (`ChangeMoney(Inventory, -consume_money)` ->
-/// `SCItemTaskSuccess(DepositMoney, [MoneyChange(-consume_money)])`, sent now), the reagent
-/// (`consume_item_id` x `consume_count`, custom uploads only) and
+/// The part of `ConfirmDefaultUcc` before `Save(ucc)`, in **one** item transaction: for a default
+/// pattern the checked money debit (`ChangeMoney(Inventory, -consume_money)` ->
+/// `SCItemTaskSuccess(DepositMoney, [MoneyChange(-consume_money)])`, sent now); for a custom
+/// image (`consume_item`) the reagent (`consume_item_id` x `consume_count`) and no money, as the
+/// client's `GetMakeUccConsumeInfo` shows item cost only; then
 /// `(UccItem)ItemManager.Create(Item.CrestInk, 1, 0, true)` with `UccId = ucc_id`. `None` when a
 /// check or the item creation fails, before anything is charged.
 pub fn charge_and_create_crest_ink(
@@ -607,11 +612,12 @@ pub fn charge_and_create_crest_ink(
     {
         return None;
     }
-    if player.data().money < i64::from(cost.consume_money) {
+    if !consume_item && player.data().money < i64::from(cost.consume_money) {
         return None;
     }
     // The debit re-checks the balance under the character lock (`change_money`).
-    if cost.consume_money > 0
+    if !consume_item
+        && cost.consume_money > 0
         && !inventory::change_money(
             &mut txn.out(),
             player,

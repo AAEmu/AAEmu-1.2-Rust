@@ -97,12 +97,15 @@ pub struct AppConfig {
     /// `Crafting` (recipe learning gate).
     #[serde(rename = "crafting")]
     pub crafting: crate::systems::economy::config::CraftingConfig,
-    /// `Ics` (`Configurations/Ics.json`: cash -> AA point exchange ratio).
-    #[serde(rename = "ics")]
-    pub ics: crate::systems::economy::config::IcsConfig,
     /// `Loot` (`Configurations/Loot.json`: party loot announcements).
     #[serde(rename = "loot")]
     pub loot: crate::systems::economy::config::LootAnnounceConfig,
+    /// `Quest` (Rust only: quest reward scaling, default off).
+    #[serde(rename = "quest")]
+    pub quest: crate::systems::quests::config::QuestConfig,
+    /// `Music` (`systems::services::music`: user song upload sanity).
+    #[serde(rename = "music")]
+    pub music: crate::systems::services::music::MusicConfig,
     #[serde(rename = "clientdata")]
     pub client_data: ClientDataConfig,
     /// `Specialty`.
@@ -154,6 +157,9 @@ pub struct AppConfig {
     /// `Physics` (`systems::ai::collision::config`, Rust only: the CryPhysics collision world).
     #[serde(rename = "physics")]
     pub physics: crate::systems::ai::collision::config::PhysicsConfig,
+    /// `FeatureSet` (`Configurations/FeatureSet.json`: the client feature switches).
+    #[serde(rename = "featureset")]
+    pub feature_set: crate::data::features::FeatureSetConfig,
     /// `FileManager.AppPath`: the directory holding `Config.json` and `Data/compact.sqlite3`.
     #[serde(skip)]
     pub app_path: PathBuf,
@@ -183,8 +189,9 @@ impl Default for AppConfig {
             world: WorldConfig::default(),
             housing: Default::default(),
             crafting: Default::default(),
-            ics: Default::default(),
             loot: Default::default(),
+            quest: Default::default(),
+            music: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
             scripts: ScriptsConfig::default(),
@@ -203,6 +210,7 @@ impl Default for AppConfig {
             interaction: Default::default(),
             heightmaps_enable: false,
             physics: Default::default(),
+            feature_set: Default::default(),
             app_path: PathBuf::from("."),
         }
     }
@@ -885,8 +893,9 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 34] = [
+const TOP_LEVEL_KEYS: [&str; 35] = [
     "physics",
+    "featureset",
     "id",
     "additionalesid",
     "secretkey",
@@ -1680,12 +1689,50 @@ mod tests {
         assert_eq!(cfg.account.name_regex, "^[a-zA-Z0-9]{1,18}$");
         assert_eq!(cfg.scripts.load_strategy, LoadStrategyType::Reflection);
         assert_eq!(cfg.client_data.sources.len(), 4);
-        // Ics.json: the AA point exchange is off unless the operator sets a ratio.
-        assert_eq!(cfg.ics.aa_point_exchange_ratio, 0);
         // Events.json / Config.json: the Halloween window defaults to the yearly roll.
         assert!(cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "");
         assert_eq!(cfg.events.halloween.end, "");
+        // FeatureSet.json: the shipped switches are the current bytes (data::features), and the
+        // unnamed-bit override list starts empty.
+        assert!(cfg.feature_set.siege);
+        assert!(!cfg.feature_set.aa_point);
+        assert!(!cfg.feature_set.dwarf_warborn);
+        assert!(cfg.feature_set.extra_bits.is_empty());
+        // The shipped file applied to the stock level caps is exactly the current fset bytes.
+        let mut fset = crate::data::FeatureSet::initialized(55, 50);
+        fset.apply_config(&cfg.feature_set);
+        assert_eq!(
+            fset.bytes(),
+            &[0x5B, 55, 0x0F, 0x0F, 0xF9, 0x29, 0x33, 0x89, 50, 0x08, 0x1a]
+        );
+    }
+
+    #[test]
+    fn feature_set_section_binds_switches_and_extra_bits() {
+        let cfg = AppConfig::from_value(json!({
+            "FeatureSet": {
+                "Siege": false,
+                "DwarfWarborn": "true",
+                "aaPoint": true,
+                "ExtraBits": { "78": true, "32": "false" }
+            }
+        }))
+        .unwrap();
+        assert!(!cfg.feature_set.siege);
+        assert!(cfg.feature_set.dwarf_warborn);
+        assert!(cfg.feature_set.aa_point);
+        assert_eq!(cfg.feature_set.extra_bits.get(&78), Some(&true));
+        assert_eq!(cfg.feature_set.extra_bits.get(&32), Some(&false));
+
+        // The section is a top-level key, so the `FeatureSet__Key` environment form binds too.
+        let mut value = json!({});
+        apply_env(
+            &mut value,
+            [("FeatureSet__Siege".to_string(), "true".to_string())],
+        );
+        let cfg = AppConfig::from_value(value).unwrap();
+        assert!(cfg.feature_set.siege);
     }
 
     #[test]
@@ -1817,17 +1864,6 @@ mod tests {
         }))
         .unwrap();
         assert!(cfg.loot.announce_to_party);
-    }
-
-    #[test]
-    fn ics_aa_point_exchange_ratio_defaults_off_and_binds_leniently() {
-        let cfg = AppConfig::from_value(json!({})).unwrap();
-        assert_eq!(cfg.ics.aa_point_exchange_ratio, 0);
-        let cfg = AppConfig::from_value(json!({
-            "Ics": { "AaPointExchangeRatio": "3" }
-        }))
-        .unwrap();
-        assert_eq!(cfg.ics.aa_point_exchange_ratio, 3);
     }
 
     #[test]

@@ -184,8 +184,6 @@ CREATE TABLE IF NOT EXISTS `characters` (
   `chat_restricted_until` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `money` bigint NOT NULL DEFAULT '0',
   `money2` bigint NOT NULL DEFAULT '0',
-  `aa_point` bigint NOT NULL DEFAULT '0',
-  `bank_aa_point` bigint NOT NULL DEFAULT '0',
   `honor_point` int NOT NULL DEFAULT '0',
   `vocation_point` int NOT NULL DEFAULT '0',
   `crime_point` int NOT NULL DEFAULT '0',

@@ -979,6 +979,145 @@ async fn reward_supply_acts_replace_level_supplies() {
     );
 }
 
+/// Start (auto-complete) -> Reward with no supply acts: the reward is the level-based
+/// `quest_supplies` exp / copper.
+fn fallback_reward_quest(d: &mut QuestData, id: u32, level: u8, degree: i32) {
+    d.add_template(QuestTemplate {
+        level,
+        degree,
+        ..quest(id)
+    });
+    d.add_component(component(id * 10 + 1, id, kind::START));
+    d.add_act(
+        id * 10 + 1,
+        id * 10 + 1,
+        id * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    d.add_component(component(id * 10 + 2, id, kind::REWARD));
+}
+
+#[tokio::test]
+async fn reward_scaling_off_pays_the_unscaled_supply() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        // Degree 2, player level 10: the flag off keeps today's unscaled payout.
+        fallback_reward_quest(d, 120, 10, 2);
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 980 true", "money 152"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_degree_two_supply_pays_seventy_five_percent() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        fallback_reward_quest(d, 120, 10, 2);
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    // (int)(980 * 0.75) and (int)(152 * 0.75); player level 10 / quest level 10 has no gap.
+    assert_eq!(rec.take(), vec!["exp 735 true", "money 114"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_level_gap_reduces_supply_exp_but_not_copper() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            2,
+            QuestSupplies {
+                id: 2,
+                level: 2,
+                exp: 1000,
+                copper: 100,
+            },
+        );
+        // Player level 10, quest level 2: d = -3 -> 70 % exp; degree 3 leaves the supply as is.
+        fallback_reward_quest(d, 120, 2, 3);
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 700 true", "money 100"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_gap_applies_to_the_exp_act_and_leaves_copper_act_alone() {
+    let (server, rec) = server_with(|d| {
+        fallback_reward_quest(d, 120, 2, 3);
+        // The Reward component's own acts replace the level supply: exp 1000 is gap-reduced,
+        // copper 50 has no gap factor.
+        d.add_act(1202, 1202, 1202, 0, ActKind::SupplyExp { exp: 1000 });
+        d.add_act(1202, 1203, 1203, 0, ActKind::SupplyCopper { amount: 50 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 700 true", "money 50"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_applies_the_degree_factor_to_the_copper_fallback_only() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        // An exp act replaces the exp fallback; the copper stays the level supply, scaled by
+        // the degree-4 factor (x1.25) and not by the level gap (player level 10, quest 10).
+        fallback_reward_quest(d, 120, 10, 4);
+        d.add_act(1202, 1202, 1202, 0, ActKind::SupplyExp { exp: 1000 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 1000 true", "money 190"]);
+}
+
 #[tokio::test]
 async fn add_quest_rules() {
     let (server, rec) = server_with(|d| {

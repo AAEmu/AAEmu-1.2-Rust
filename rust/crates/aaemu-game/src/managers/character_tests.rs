@@ -2101,3 +2101,71 @@ async fn private_mysql_lobby_edit_keeps_mail_and_mate_equipment_rows() {
     assert_eq!(hair, 7, "the edit itself was applied");
     pool.close().await;
 }
+
+/// `services-misc#7` (WP-N1): the starter supplies follow `default_action_bar_actions`
+/// (18791 -> 10, 18792 -> 11, 4045 -> 12 in the 1.2 data); the general supply without a row
+/// (417) keeps the next free slot, 13.
+#[tokio::test]
+async fn new_character_default_action_bar_uses_authored_slots() {
+    use crate::data::character_templates::{AbilityItems, AbilitySupplyItem};
+    use crate::data::items::ItemTemplate;
+    use crate::models::character::Inventory;
+
+    let mut data = creation_data();
+    // The shipped `character_supplies` has only ability 0 rows: the class supply list is empty.
+    data.characters
+        .ability_items
+        .get_mut(&7)
+        .unwrap()
+        .supplies
+        .clear();
+    for id in [4045, 18791, 18792, 417] {
+        data.items
+            .templates
+            .insert(id, ItemTemplate::plain(id, 1000));
+    }
+    data.characters.default_action_bar_actions = vec![(18791, 10), (18792, 11), (4045, 12)];
+    data.characters.ability_items.insert(
+        0,
+        AbilityItems {
+            supplies: [4045, 18791, 18792, 417]
+                .into_iter()
+                .map(|id| AbilitySupplyItem {
+                    id,
+                    amount: 1,
+                    grade: 0,
+                })
+                .collect(),
+            ..Default::default()
+        },
+    );
+    let server = test_server_with(data);
+    let template = server.game_data.characters.template(1, 1).unwrap().clone();
+    let request = creation_request("ActionBar");
+    let mut created_items = Vec::new();
+    let c = super::build_lobby_character(
+        super::BuildInputs {
+            server: &server,
+            name: "ActionBar",
+            request: &request,
+            template: &template,
+            id: 1,
+            account_id: 1001,
+            connection_id: 1,
+            ip: "127.0.0.1:12345".parse().unwrap(),
+            access_level: 0,
+            level: 1,
+            created: None,
+            labor_power: 0,
+            labor_power_modified: 0,
+            chat_restricted_until: 0,
+            inventory: Inventory::new(1, 50, 50, &server.items, &server.ids.container),
+        },
+        &mut created_items,
+    )
+    .unwrap();
+    for (slot, item) in [(10, 18791), (11, 18792), (12, 4045), (13, 417)] {
+        assert_eq!(c.slots[slot].kind, ActionSlotType::ItemType, "slot {slot}");
+        assert_eq!(c.slots[slot].action_id, item, "slot {slot}");
+    }
+}
