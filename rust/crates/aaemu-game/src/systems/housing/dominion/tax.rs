@@ -146,11 +146,12 @@ pub(crate) fn quote(
 }
 
 /// The caller holds housing.operation_lock, then this operation takes authority before
-/// economy. A failed debit or overflowing/stale ledger leaves both unchanged.
+/// economy. A failed debit or overflowing/stale ledger leaves both unchanged. `charge` returns
+/// the wallet composition of the payment (`None` refuses it).
 pub fn charge_with(
     server: &GameServer,
     quote: &TaxQuote,
-    charge: impl FnOnce() -> bool,
+    charge: impl FnOnce() -> Option<crate::systems::economy::inventory::PaymentSplit>,
 ) -> Result<Option<DominionState>, DominionError> {
     match &quote.authority {
         Some(state) => server
@@ -159,8 +160,10 @@ pub fn charge_with(
             .dominions
             .credit_property_tax_with(state, quote.property_revenue, charge)
             .map(Some),
-        None if charge() => Ok(None),
-        None => Err(DominionError::Resources),
+        None => match charge() {
+            Some(_) => Ok(None),
+            None => Err(DominionError::Resources),
+        },
     }
 }
 
