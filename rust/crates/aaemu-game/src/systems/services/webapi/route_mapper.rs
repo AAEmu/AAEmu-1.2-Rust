@@ -223,8 +223,10 @@ impl RouteMapper {
         self.discover_routes_from_type::<AuctionController>()?;
         self.discover_routes_from_type::<CharacterController>()?;
         self.discover_routes_from_type::<CommandController>()?;
+        self.discover_routes_from_type::<DominionController>()?;
         self.discover_routes_from_type::<ExpeditionController>()?;
         self.discover_routes_from_type::<MailController>()?;
+        self.discover_routes_from_type::<OnlineController>()?;
         self.discover_routes_from_type::<StatusController>()?;
         self.discover_routes_from_type::<WorldController>()?;
         Ok(())
@@ -425,9 +427,11 @@ mod tests {
     fn game_server_routes_are_unique_and_unambiguous() {
         let mut mapper = RouteMapper::new();
         mapper.discover_routes().unwrap();
-        assert_eq!(mapper.len(), 12);
+        assert_eq!(mapper.len(), 14);
         for (url, method) in [
             ("/status", "GET"),
+            ("/online", "GET"),
+            ("/dominions", "GET"),
             ("/api/world/logged-characters", "GET"),
             ("/api/expedition/list", "GET"),
             ("/api/character/list?Name=x", "GET"),
