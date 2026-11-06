@@ -8,13 +8,16 @@
 //! direct row update. `world::session::send_chat_message` refuses every outgoing message while
 //! the value is in the future, and the expiry lifts the mute automatically.
 //!
-//! The error shown to a muted sender and the retail duration are UNKNOWN, so the mute refusal
-//! is a plain system message and the default duration is INFERRED (`CHAT-RESTRICT-1`).
+//! The retail duration is UNKNOWN, so the default is INFERRED (`CHAT-RESTRICT-1`). Starting or
+//! lifting a mute of an online target also sends `SCResultRestrictCheck(code 0, result 1 / 0)`,
+//! which the 1.2 client turns into its chat-restriction flag and the `restrict_start` /
+//! `restrict_end` system line (`FUN_391e0ea0`).
 
 use futures::future::BoxFuture;
 
 use super::prelude::*;
 use super::retail;
+use crate::systems::services::character_packets::SCResultRestrictCheckPacket;
 
 /// Duration applied when `<minutes>` is omitted: one hour (the retail argument is UNKNOWN).
 pub const DEFAULT_MINUTES: i64 = 60;
@@ -84,7 +87,8 @@ impl Command for RestrictChat {
                     .timestamp()
                     .saturating_add(minutes.saturating_mul(60))
             };
-            match retail::online(server, name) {
+            let target = retail::online(server, name);
+            match &target {
                 // The live character is saved by the save manager; no second DB write that a
                 // concurrent character save could race.
                 Some(target) => target.data().chat_restricted_until = until,
@@ -98,6 +102,16 @@ impl Command for RestrictChat {
                     .execute(&server.db)
                     .await?;
                 }
+            }
+            // The client's `SCResultRestrictCheck` handler `FUN_391e0ea0` turns `code 0,
+            // result 1` into its chat-restriction flag plus `restrict_start`, and `result 0`
+            // into `restrict_end`; only a connected target can receive it.
+            if let Some(target) = &target {
+                target.send(SCResultRestrictCheckPacket {
+                    character_id,
+                    code: 0,
+                    result: u8::from(minutes != 0),
+                });
             }
             let target_name = retail::character_name(server, character_id);
             if minutes == 0 {
@@ -139,7 +153,7 @@ mod tests {
         server.names.add_character(1, "Gm", 1001);
         server.names.add_character(2, "Crook", 1002);
         let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
-        let crook = harness::pc(&server, 2, "Crook", 110.0, 100.0);
+        let mut crook = harness::pc(&server, 2, "Crook", 110.0, 100.0);
         let before = chrono::Utc::now().timestamp();
 
         let (handled, out) = harness::run(&server, &gm.p, "restrict_chat Crook 30").await;
@@ -156,6 +170,15 @@ mod tests {
             (before + 1_800..=before + 1_801).contains(&until),
             "{until}"
         );
+        // The target's own connection gets `SCResultRestrictCheck(character, code 0, result 1)`
+        // (`FUN_391e0ea0` -> chat restriction flag + `restrict_start`).
+        assert_eq!(
+            crook.frames(),
+            vec![(
+                crate::opcodes::sc::SCResultRestrictCheckPacket,
+                vec![2, 0, 0, 0, 0, 1]
+            )]
+        );
 
         let (_, out) = harness::run(&server, &gm.p, "restrict_chat Crook 0").await;
         assert_eq!(
@@ -166,6 +189,14 @@ mod tests {
             )]
         );
         assert_eq!(crook.p.data().chat_restricted_until, 0);
+        // Lifting sends `result 0` (chat flag restored + `restrict_end`).
+        assert_eq!(
+            crook.frames(),
+            vec![(
+                crate::opcodes::sc::SCResultRestrictCheckPacket,
+                vec![2, 0, 0, 0, 0, 0]
+            )]
+        );
     }
 
     #[tokio::test]
