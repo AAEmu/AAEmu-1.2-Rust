@@ -2331,6 +2331,12 @@ fn ucc_world() -> World {
 }
 
 fn ucc_world_with(as_reagent: bool) -> World {
+    ucc_world_with_tables(as_reagent, &[], &[])
+}
+
+/// [`ucc_world_with`] with the WP-U2 tables: `applicable` = `ucc_applicables` kind-2 template
+/// ids, `patterns` = `emblem_patterns` ids (empty = permissive).
+fn ucc_world_with_tables(as_reagent: bool, applicable: &[u32], patterns: &[u32]) -> World {
     use crate::systems::skills::data::{EffectKind, EffectTemplate};
     let mut d = data();
     // Authentic 1.2 Crest Ink / Crest Bleach are use-skill reagents. Their effect rows
@@ -2351,9 +2357,34 @@ fn ucc_world_with(as_reagent: bool) -> World {
         EffectTemplate::CleanupUcc { id: 1 },
         0,
     );
+    for id in applicable {
+        d.systems.economy.ucc.insert_applicable_item(*id);
+    }
+    for id in patterns {
+        d.systems.economy.ucc.insert_pattern(*id);
+    }
     let w = world_with_data(d);
     super::bridges::install(&w.server);
     w
+}
+
+/// A stamp item carrying `ucc_id`, registered in the `UccManager` with the given patterns.
+fn ucc_stamp(w: &World, slot: i32, ucc_id: u64, pattern1: u32, pattern2: u32) -> u64 {
+    use crate::stream::models::{Ucc, UccType};
+    let stamp = give(w, &w.pa, slot_type::INVENTORY, STACK, 1, slot);
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(stamp)
+        .unwrap()
+        .set_ucc(ucc_id);
+    let mut ucc = Ucc::new(UccType::Simple, 1);
+    ucc.id = ucc_id as u32;
+    ucc.pattern1 = pattern1;
+    ucc.pattern2 = pattern2;
+    w.server.streams.ucc.insert(ucc);
+    stamp
 }
 
 fn ucc_source_template(cleanup: bool) -> u32 {
@@ -2806,6 +2837,77 @@ async fn ucc_imprint_cleanup_and_stamp() {
             tasks(task_type::GAIN_ITEM_WITH_UCC, vec![ItemTask::add(&crest)])
         )]
     );
+}
+
+#[tokio::test]
+async fn ucc_imprint_accepts_an_applicable_item_with_known_patterns() {
+    let w = ucc_world_with_tables(true, &[ARMOR], &[3, 7]);
+    let stamp = ucc_stamp(&w, 0, 0xABCD, 3, 7);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    assert_eq!(
+        imprint_ucc(
+            &w.server,
+            Some(&w.pa),
+            Some(SkillItem {
+                item_id: stamp,
+                item_template_id: STACK,
+            }),
+            None,
+            Some(target),
+        ),
+        Outcome::Done
+    );
+    assert_eq!(item(&w, target).unwrap().ucc_id, 0xABCD);
+}
+
+#[tokio::test]
+async fn ucc_imprint_refuses_a_non_applicable_item_and_keeps_it_unchanged() {
+    let mut w = ucc_world_with_tables(true, &[STACK], &[]);
+    let stamp = ucc_stamp(&w, 0, 0xABCD, 0, 0);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    let target_before = ucc_item_values(&w, target);
+    let stamp_before = ucc_item_values(&w, stamp);
+    assert_eq!(
+        imprint_ucc(
+            &w.server,
+            Some(&w.pa),
+            Some(SkillItem {
+                item_id: stamp,
+                item_template_id: STACK,
+            }),
+            None,
+            Some(target),
+        ),
+        Outcome::Cancelled
+    );
+    assert_eq!(ucc_item_values(&w, target), target_before);
+    assert_eq!(ucc_item_values(&w, stamp), stamp_before);
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test]
+async fn ucc_imprint_refuses_an_unknown_emblem_pattern_and_keeps_item_and_ucc() {
+    let mut w = ucc_world_with_tables(true, &[ARMOR], &[3]);
+    let stamp = ucc_stamp(&w, 0, 0xABCD, 3, 99);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    let target_before = ucc_item_values(&w, target);
+    let stamp_before = ucc_item_values(&w, stamp);
+    assert_eq!(
+        imprint_ucc(
+            &w.server,
+            Some(&w.pa),
+            Some(SkillItem {
+                item_id: stamp,
+                item_template_id: STACK,
+            }),
+            None,
+            Some(target),
+        ),
+        Outcome::Cancelled
+    );
+    assert_eq!(ucc_item_values(&w, target), target_before);
+    assert_eq!(ucc_item_values(&w, stamp), stamp_before);
+    assert!(w.a.drain().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
