@@ -1767,6 +1767,84 @@ pub fn subtract_money(
     change_money(out, player, slot_type::NONE, location, -amount, task)
 }
 
+/// The composition of one payment: the gold part and the 1:1 AA-point shortage cover.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaymentSplit {
+    pub gold: i32,
+    pub aa_point: i32,
+}
+
+impl PaymentSplit {
+    pub fn total(self) -> i64 {
+        i64::from(self.gold) + i64::from(self.aa_point)
+    }
+}
+
+/// Whether the carried gold purse can pay `amount`, covering a shortage from the AA wallet
+/// when `auto_use_aa_point` is set. A read-only pre-check for callers that must refuse before
+/// another mutation (e.g. housing extending the tax protection); the charge itself is
+/// [`try_take_gold_or_aa`].
+pub fn can_afford_gold_or_aa(player: &PlayerRef, amount: i32, auto_use_aa_point: bool) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    let c = player.data();
+    if c.money < 0 || c.aa_point < 0 {
+        return false;
+    }
+    let available = c.money + if auto_use_aa_point { c.aa_point } else { 0 };
+    available >= i64::from(amount)
+}
+
+/// Pays `amount` from the carried gold purse. With `auto_use_aa_point`, a gold shortage is
+/// covered 1:1 from the carried AA wallet (INFERRED from the `ask_use_aa_point` /
+/// `auto_use_aa_point` client texts; the flag is what the 1.2 packets carry). All gold is spent
+/// before AA points, the balance check and both debits happen under one character lock, and a
+/// single `SCItemTaskSuccessPacket` carries the money and AA deltas. `None` means neither purse
+/// changed and no packet was sent; the caller sends its own existing error.
+pub fn try_take_gold_or_aa(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    amount: i32,
+    auto_use_aa_point: bool,
+    task: u8,
+) -> Option<PaymentSplit> {
+    if amount < 0 {
+        return None;
+    }
+    let split = {
+        let mut c = player.data();
+        if c.money < 0 || c.aa_point < 0 {
+            return None;
+        }
+        let owed = i64::from(amount);
+        let gold = c.money.min(owed);
+        let aa_point = owed - gold;
+        if aa_point > 0 && (!auto_use_aa_point || aa_point > c.aa_point) {
+            return None;
+        }
+        c.money -= gold;
+        c.aa_point -= aa_point;
+        PaymentSplit {
+            gold: gold as i32,
+            aa_point: aa_point as i32,
+        }
+    };
+    let mut tasks = vec![ItemTask::MoneyChange(-split.gold)];
+    if split.aa_point > 0 {
+        tasks.push(ItemTask::AaPointUpdate(-split.aa_point));
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    Some(split)
+}
+
 /// Sends the wallet update of an AA-point change (`ItemTask` 16 / 17). The 1.2 client applies
 /// these with the same delta path as `MoneyChange` / `MoneyChangeBank` (`FUN_397d1030`); that
 /// the amount is a delta and not the new balance is INFERRED from that symmetry.
