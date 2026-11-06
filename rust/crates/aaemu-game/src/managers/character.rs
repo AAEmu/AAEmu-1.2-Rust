@@ -3,6 +3,7 @@
 //! `CharacterDeleteTask` scheduling) and `ItemContainer.AcquireDefaultItem`, which character
 //! creation uses for the starting supplies.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -443,8 +444,39 @@ fn build_lobby_character(
     // Nobody is in the world to receive these (`Character.Connection` is null in C#).
     let _ = c.unit.buffs.take_events();
 
-    let mut slot = 10usize;
     let bag = c.inventory.bag().clone();
+    // `default_action_bar_actions` (1.2 data: 18791 -> 10, 18792 -> 11, 4045 -> 12) is loaded
+    // by the client for its own action-bar reset. Place those supplies at the authored slots;
+    // every other supply takes the next free slot from 13 on. Deviation from C#: it assigned
+    // every supply sequentially from slot 10 in table order (4045 -> 10, 18791 -> 11,
+    // 18792 -> 12, 417 -> 13).
+    let default_bar: HashSet<u32> = data
+        .characters
+        .default_action_bar_actions
+        .iter()
+        .map(|&(item_id, _)| item_id)
+        .collect();
+    let default_slots: HashSet<usize> = data
+        .characters
+        .default_action_bar_actions
+        .iter()
+        .map(|&(_, slot)| usize::from(slot))
+        .collect();
+    let mut next_free = 13usize;
+    let mut place_other_supply = |c: &mut Character, item_id: u32| {
+        if default_bar.contains(&item_id) {
+            return;
+        }
+        while default_slots.contains(&next_free)
+            || c.slots
+                .get(next_free)
+                .is_some_and(|s| s.kind != ActionSlotType::None)
+        {
+            next_free += 1;
+        }
+        c.set_action(next_free, ActionSlotType::ItemType, u64::from(item_id));
+        next_free += 1;
+    };
     for s in &items.supplies {
         acquire_default_item_recorded(
             server,
@@ -454,8 +486,7 @@ fn build_lobby_character(
             i32::from(s.grade),
             created_items,
         )?;
-        c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
-        slot += 1;
+        place_other_supply(&mut c, s.id);
     }
     let general = data
         .characters
@@ -472,8 +503,14 @@ fn build_lobby_character(
             i32::from(s.grade),
             created_items,
         )?;
-        c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
-        slot += 1;
+        place_other_supply(&mut c, s.id);
+    }
+    for &(item_id, slot) in &data.characters.default_action_bar_actions {
+        c.set_action(
+            usize::from(slot),
+            ActionSlotType::ItemType,
+            u64::from(item_id),
+        );
     }
 
     c.abilities = CharacterAbilities::default();
