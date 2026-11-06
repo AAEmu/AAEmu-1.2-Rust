@@ -1368,7 +1368,13 @@ struct SurfaceFixture {
     server: GameServer,
     player: PlayerRef,
     client: TestClient,
-    _root: PathBuf,
+    root: PathBuf,
+}
+
+impl Drop for SurfaceFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 /// Templates: 4010 grass-only (kind 2), 4011 sand/mud-only (kind 4), 4012 no place skins,
@@ -1433,7 +1439,7 @@ fn surface_fixture(with_surface_xml: bool) -> SurfaceFixture {
         server,
         player,
         client,
-        _root: root,
+        root,
     }
 }
 
