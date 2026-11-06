@@ -422,6 +422,61 @@ To disable the API even when the shipped config contains the section, set
 section also disables it. Existing clients must add the Bearer header to every
 `/api` request; local `/status` checks continue to work without credentials.
 
+### Read-only monitoring endpoints
+
+Two tooling routes, added in Rust only (the 1.2 client has no web API), also require
+the same Bearer credential as the `/api` routes:
+
+* `GET /online` — the characters currently in the world:
+
+  ```json
+  {
+    "Count": 2,
+    "Characters": [
+      {
+        "Id": 1,
+        "Name": "Example",
+        "Level": 55,
+        "Race": 1,
+        "FactionId": 101,
+        "FactionName": "",
+        "ExpeditionId": 7,
+        "ExpeditionName": "Example Guild",
+        "ZoneId": 15
+      }
+    ]
+  }
+  ```
+
+  Characters ordered by id. `ExpeditionName` is `null` without a guild. Only the
+  zone id is exposed — no account data, addresses or positions.
+
+* `GET /dominions` — one object per persisted dominion zone group, ordered by zone
+  group id:
+
+  ```json
+  [
+    {
+      "ZoneGroupId": 25,
+      "ZoneGroupName": "Solzreed",
+      "OwnerExpeditionId": 7,
+      "OwnerExpeditionName": "Example Guild",
+      "SiegePeriod": 3,
+      "NextSiegeStart": "2026-11-08T20:30:00Z",
+      "NextSiegeEnd": "2026-11-08T22:30:00Z",
+      "DeclarationAttacker": { "ExpeditionId": 9, "Name": "Challengers" }
+    }
+  ]
+  ```
+
+  `OwnerExpeditionId` / `OwnerExpeditionName` are `null` for an unowned territory
+  (`SiegePeriod` 0). `SiegePeriod` is the 1.2 period id: 0 no dominion, 1 auction,
+  2 declare, 3 warmup, 4 siege, 5 peace. `NextSiegeStart` / `NextSiegeEnd` describe
+  an explicit scheduled siege, or the declared calendar cycle's authored siege
+  window, and are `null` when neither applies. `DeclarationAttacker` is `null` when
+  no expedition has an accepted declaration. These endpoints are read-only and do
+  not change any manager state.
+
 ## Tower defense event schedules
 
 Tower defense controllers are reserved for events instead of spawning permanently.

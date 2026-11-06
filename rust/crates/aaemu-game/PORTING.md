@@ -1434,7 +1434,7 @@ live acceptance remain pending.
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `Services/WebApi/**` (`WebApiService`, `WebApiServer`, `WebApiSession`, `RouteMapper`, `RouteDefinition`, `WebApiGet/PostAttribute`, `IController`, controllers, models) | `systems/services/webapi/` | done | axum (HTTP/1.1) listener on `WebApiNetwork` (`*` = any); every request goes through `on_received_request` (`OnReceivedRequest`): unanchored, case-insensitive regex routes on the raw URL, `MatchCollection` with .NET group order, 404 "Not found", 500 HTML page. Responses use the Newtonsoft defaults (`json::JValue`), requests the System.Text.Json defaults (`json::Stj`). Status, World, Expedition, Character (MySQL), Command, Mail, Auction controllers. Ports of `RouteMapperTests` and `WebApiSessionTests` (+ controller tests). |
+| `Services/WebApi/**` (`WebApiService`, `WebApiServer`, `WebApiSession`, `RouteMapper`, `RouteDefinition`, `WebApiGet/PostAttribute`, `IController`, controllers, models) | `systems/services/webapi/` | done | axum (HTTP/1.1) listener on `WebApiNetwork` (`*` = any); every request goes through `on_received_request` (`OnReceivedRequest`): unanchored, case-insensitive regex routes on the raw URL, `MatchCollection` with .NET group order, 404 "Not found", 500 HTML page. Responses use the Newtonsoft defaults (`json::JValue`), requests the System.Text.Json defaults (`json::Stj`). Status, World, Expedition, Character (MySQL), Command, Mail, Auction controllers, plus the additive read-only tooling routes `GET /online` and `GET /dominions` (WP-SL7; see the deviation below). Ports of `RouteMapperTests` and `WebApiSessionTests` (+ controller tests). |
 | `Services/DiscordBotService` | `systems/services/discord.rs` | done | twilight gateway + HTTP, unprivileged intents, "Playing with N other players" every 5 s, `/online`. Not started without `DiscordToken`. |
 | `GameService`, `Program.UpTime`, `ManagerOrchestrator` | `systems/services/game_service.rs`, `main.rs` | done | Port of `GameServiceTests` and `ManagerOrchestratorTests`. |
 | `TickManager` (+ `TickEventHandler`) | `systems/services/tick.rs` | done | Thread loop (20 ms), sync / async subscribers, busy skip. Port of `TickManagerTests`. |
@@ -3316,6 +3316,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CreatedAt` of characters created in the running session is written without the `Z` of a
   `DateTimeKind.Utc` value. The auction controllers serialise the lot's `Item` with its stored fields only
   (Id, TemplateId, Count, Grade, OwnerId, SlotType, Slot).
+* systems::services (WebApi tooling, 2026-11-06): the C# has no `GET /online` or `GET /dominions`.
+  They are additive Rust-only read-only routes behind the existing Bearer auth (WP-SL7):
+  `OnlineController` lists the world's online characters by id (id, name, level, race,
+  faction id/name, expedition id/name, zone id; no account data, addresses or positions;
+  `is_online` follows the session's `Character.IsOnline` flag), and `DominionController`
+  reports each persisted dominion zone group (name, owner expedition id/name or null, 1.2
+  siege period id, the next siege window from an unfinished explicit siege record or the
+  declared calendar cycle, and the declaration attacker). GM-seeded ephemeral dominions are
+  not reported.
 * systems::services (WebApi security, 2026-10-25): unlike C#, the HTTP listener defaults to
   loopback and rejects non-loopback binds without a configured `WebApiNetwork.ApiKey`.
   Every route except read-only `GET /status` requires a Bearer credential, compared using
