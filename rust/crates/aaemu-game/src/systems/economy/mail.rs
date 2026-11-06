@@ -1645,9 +1645,9 @@ pub fn pay_housing_tax(
     let mut effects = None;
     let result = crate::systems::housing::dominion::tax::charge_with(server, &quote, || {
         let mut txn = ItemTxn::begin(server);
-        let paid = pay_charge_money(&mut txn, character, mail_id, auto_use_aa_point);
+        let payment = pay_charge_money(&mut txn, character, mail_id, auto_use_aa_point);
         effects = Some(txn.into_fx());
-        paid
+        payment
     });
     drop(operation);
     if let Some(effects) = effects {
@@ -1674,13 +1674,13 @@ pub fn pay_charge_money(
     txn: &mut ItemTxn<'_>,
     character: &PlayerRef,
     mail_id: i64,
-    _auto_use_aa_point: bool,
-) -> bool {
+    auto_use_aa_point: bool,
+) -> Option<inventory::PaymentSplit> {
     let server = txn.server;
     let mails = &server.systems.economy.mail;
     let Some(mail) = mails.get_mail_by_id(mail_id) else {
         inventory::send_error_message_to(&mut txn.out(), character, error_message::MAIL_INVALID);
-        return false;
+        return None;
     };
     // Only an unpaid, delivered tax bill addressed to this character may be paid.
     if mail.mail_type != mail_type::BILLING
@@ -1692,7 +1692,7 @@ pub fn pay_charge_money(
         || mail.body.recv_date > now()
     {
         inventory::send_error_message_to(&mut txn.out(), character, error_message::MAIL_INVALID);
-        return false;
+        return None;
     }
     let (_zone_group, house_id) = extract_extra_for_house(mail.header.extra);
     let housing = mails.hooks.housing.get();
@@ -1710,7 +1710,7 @@ pub fn pay_charge_money(
             character,
             error_message::INVALID_HOUSE_INFO,
         );
-        return false;
+        return None;
     }
 
     let tax_items = server.game_data.features.check(Feature::TaxItem);
@@ -1728,17 +1728,18 @@ pub fn pay_charge_money(
                 character,
                 error_message::MAIL_NOT_ENOUGH_MONEY_TO_PAY_TAXES,
             );
-            return false;
+            return None;
         }
         user_bound_tax_count
     } else {
-        if i64::from(mail.body.billing_amount) > character.data().money {
+        if !inventory::can_afford_gold_or_aa(character, mail.body.billing_amount, auto_use_aa_point)
+        {
             inventory::send_error_message_to(
                 &mut txn.out(),
                 character,
                 error_message::MAIL_NOT_ENOUGH_MONEY_TO_PAY_TAXES,
             );
-            return false;
+            return None;
         }
         0
     };
@@ -1755,7 +1756,7 @@ pub fn pay_charge_money(
             || m.body.billing_amount != mail.body.billing_amount
     }) {
         inventory::send_error_message_to(&mut txn.out(), character, error_message::MAIL_INVALID);
-        return false;
+        return None;
     }
     if !housing.is_some_and(|h| h.pay_weekly_tax_for(server, house_id, character.character_id)) {
         inventory::send_error_message_to(
@@ -1763,9 +1764,11 @@ pub fn pay_charge_money(
             character,
             error_message::INVALID_HOUSE_INFO,
         );
-        return false;
+        return None;
     }
 
+    // Tax certificates pay no gold, so they never produce an AA shortage cover either.
+    let mut payment = inventory::PaymentSplit::default();
     if tax_items {
         let inv = Inv::of(character);
         let bag = inv.bag();
@@ -1801,14 +1804,22 @@ pub fn pay_charge_money(
             );
         }
     } else {
-        // use gold as payment
-        inventory::subtract_money(
+        // Gold first, then the AA shortage cover (both in one wallet packet). The balance was
+        // pre-checked above inside the same ItemTxn; a refusal here leaves the bill unpaid.
+        let Some(taken) = inventory::try_take_gold_or_aa(
             &mut txn.out(),
             character,
-            slot_type::INVENTORY,
             mail.body.billing_amount,
+            auto_use_aa_point,
             task_type::DEPOSIT_MONEY,
-        );
+        ) else {
+            tracing::error!(
+                "House tax debit for mailId {} failed after its balance pre-check",
+                mail.id
+            );
+            return None;
+        };
+        payment = taken;
     }
 
     {
@@ -1835,7 +1846,7 @@ pub fn pay_charge_money(
         drop(st);
         super::mail_character::send_unread_mail_count(&mut txn.env.fx, character);
     }
-    true
+    Some(payment)
 }
 
 /// `DeleteHouseMails(houseId)`.

@@ -1524,6 +1524,57 @@ async fn aa_point_wallet_takes_under_one_lock_and_refuses_overdraft() {
     assert!(w.a.drain().is_empty());
 }
 
+#[tokio::test]
+async fn gold_or_aa_shortage_cover_debits_both_purses_in_one_task() {
+    let mut w = world();
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 100;
+    w.a.drain();
+
+    let mut out = inventory::Out::Direct(&w.server);
+    let split =
+        inventory::try_take_gold_or_aa(&mut out, &w.pa, 100, true, task_type::HOUSE_CREATION)
+            .expect("the AA wallet covers the gold shortage");
+    assert_eq!(
+        split,
+        inventory::PaymentSplit {
+            gold: 40,
+            aa_point: 60
+        }
+    );
+    assert_eq!(w.pa.data().money, 0);
+    assert_eq!(w.pa.data().aa_point, 40);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::HOUSE_CREATION,
+                vec![ItemTask::MoneyChange(-40), ItemTask::AaPointUpdate(-60)]
+            )
+        )]
+    );
+
+    // Flag off: the AA wallet is never a gold purse, so the same payment is refused.
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 100;
+    w.a.drain();
+    assert!(
+        inventory::try_take_gold_or_aa(&mut out, &w.pa, 100, false, task_type::INVALID).is_none()
+    );
+    assert_eq!(w.pa.data().money, 40);
+    assert_eq!(w.pa.data().aa_point, 100);
+    assert!(w.a.drain().is_empty());
+
+    // Both purses short: refused, unchanged, and no task packet (the caller sends its error).
+    assert!(
+        inventory::try_take_gold_or_aa(&mut out, &w.pa, 141, true, task_type::INVALID).is_none()
+    );
+    assert_eq!(w.pa.data().money, 40);
+    assert_eq!(w.pa.data().aa_point, 100);
+    assert!(w.a.drain().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_aa_point_takes_never_overdraw() {
     let server = std::sync::Arc::new(test_server_with(test_data()));
