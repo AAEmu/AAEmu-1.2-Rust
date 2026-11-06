@@ -235,11 +235,11 @@ mod tests {
         let (_, out) = harness::run(&server, &gm.p, "scripts reload").await;
         assert_eq!(out, ["[scripts] [Scripts] Reload - Success"]);
         // Rust-only additions: `/premium`, `/secondpassword`, `/mail`, the seven retail
-        // tax / crime / social commands of WP-SL6b, the two auction GM keys and the seven
-        // siege / dominion commands of WP-SL6a, plus `/aapoint`.
+        // tax / crime / social commands of WP-SL6b, `/restrict_chat` of WP-SL4b, the two
+        // auction GM keys and the seven siege / dominion commands of WP-SL6a, plus `/aapoint`.
         assert_eq!(
             server.systems.services.commands.get_command_keys().len(),
-            119
+            120
         );
         let (_, out) = harness::run(&server, &gm.p, "scripts what").await;
         assert_eq!(out, [harness::error("scripts", "Undefined action...")]);
