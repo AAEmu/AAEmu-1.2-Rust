@@ -2025,11 +2025,8 @@ impl ClientPacket for CSICSBuyAAPointPacket {
                 return Ok(());
             };
             let ratio = server.config.ics.aa_point_exchange_ratio;
-            // Every refusal uses 778 `INGAME_SHOP_BUY_FAIL_AA_POINT`: the client's error
-            // dispatcher raises `BUY_RESULT_AA_POINT` (success = false) only for this id
-            // (`FUN_39040000`, x2game.dll.c:62124); 591 `INGAME_SHOP_NOT_ENOUGH_AA_CASH` is a
-            // generic shop error that leaves the exchange dialog open. Both balances stay
-            // untouched.
+            // The reply form is INFERRED (no 1.2 capture): a refused exchange uses the shop's
+            // AA failure and leaves both balances untouched.
             let Some(aa_points) = aa_points_for_cash(self.cash_money, ratio) else {
                 send_error(&buyer, error_message::INGAME_SHOP_BUY_FAIL_AA_POINT);
                 return Ok(());
@@ -2042,7 +2039,7 @@ impl ClientPacket for CSICSBuyAAPointPacket {
                 .add_credits(server, account_id, -self.cash_money)
                 .await
             {
-                send_error(&buyer, error_message::INGAME_SHOP_BUY_FAIL_AA_POINT);
+                send_error(&buyer, error_message::INGAME_SHOP_NOT_ENOUGH_AA_CASH);
                 return Ok(());
             }
             let mut wallet_out = inventory::Out::Direct(server);
@@ -2059,15 +2056,6 @@ impl ClientPacket for CSICSBuyAAPointPacket {
             });
             buyer.send(SCICSExchangeRatioPacket {
                 exchange_ratio: ratio,
-            });
-            // `OnInGameCashShopBuyResult` (`FUN_391e12c0`, x2game.dll.c:373676) raises
-            // `BUY_RESULT_AA_POINT` with the AA amount only for `buyMode == 2`; the reader
-            // (`FUN_397b83c0`) is `success, buyMode, receiverName, chargeAAPoint`.
-            buyer.send(SCICSBuyResultPacket {
-                success: true,
-                buy_mode: 2,
-                receiver_name: String::new(),
-                charge_aa_point: aa_points,
             });
             Ok(())
         })

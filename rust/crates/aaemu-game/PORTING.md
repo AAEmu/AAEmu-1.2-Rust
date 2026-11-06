@@ -677,19 +677,13 @@ the reserved stock, as the stock-update failure path already did.
 `FUN_39187800`) is registered; the C# never registered it. The exchange is gated by the new
 configuration key `Ics:AaPointExchangeRatio` (`Configurations/Ics.json`, default **0** = off).
 With a ratio of 0, a negative ratio, a non-positive cash amount, an `i64` product outside `i32`
-or a short credit balance the request is refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 778 and
-nothing is debited: 778 is the only id whose error path raises the client's `BUY_RESULT_AA_POINT`
-with success = false (`FUN_39040000`, x2game.dll.c:62124), while the generic shop error 591
-`INGAME_SHOP_NOT_ENOUGH_AA_CASH` does not. With a positive ratio the credits are debited with the
-guarded SQL statement, `cashMoney * ratio` AA is credited, and the reply is
-`SCItemTaskSuccessPacket` task type `BUY_AA_POINT` 116 with `AaPointUpdate`,
-`SCICSCashPointPacket` with the new credits, `SCICSExchangeRatioPacket`, then
-`SCICSBuyResultPacket` `{success: true, buyMode: 2, receiverName: "", chargeAAPoint}`: the
-client's `OnInGameCashShopBuyResult` (`FUN_391e12c0`, x2game.dll.c:373676) raises
-`BUY_RESULT_AA_POINT` with the AA amount only for `buyMode == 2`, and its reader
-(`FUN_397b83c0`, x2game.dll.c:1711121) is `bool success, u8 buyMode, string receiverName, i32
-chargeAAPoint` (2026-11-06 Part B reassessment, B2). The ratio value is **UNKNOWN** (server
-policy); the client's 9,999,999 cap is not mirrored. `SCICSExchangeRatioPacket` 0x1d7 is
+or a short credit balance the request is refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 778 (short
+credits: `INGAME_SHOP_NOT_ENOUGH_AA_CASH` 591) and nothing is debited. With a positive ratio the
+credits are debited with the guarded SQL statement, `cashMoney * ratio` AA is credited, and the
+reply is `SCItemTaskSuccessPacket` task type `BUY_AA_POINT` 116 with `AaPointUpdate`,
+`SCICSCashPointPacket` with the new credits, then `SCICSExchangeRatioPacket`. The reply form is
+**INFERRED** (the client's buy dialog and `GetExchangeRatio` are read, but no 1.2 server reply was
+captured); the ratio value is **UNKNOWN** (server policy). `SCICSExchangeRatioPacket` 0x1d7 is
 sent right after `SCICSCashPointPacket` whenever the cash balance is sent on shop open
 (`CSICSMoneyRequestPacket`), and the premium service list carries the same configured ratio
 (INFERRED).
