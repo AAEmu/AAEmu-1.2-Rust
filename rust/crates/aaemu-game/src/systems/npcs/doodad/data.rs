@@ -68,6 +68,10 @@ pub struct DoodadData {
     pub consume_changer_items: Vec<DoodadFuncConsumeChangerItem>,
     /// `_doodadGroups`.
     pub doodad_groups: HashMap<u32, DoodadGroups>,
+    /// `doodad_place_skins` by doodad template id: the place kinds the 1.2 client's place-skin
+    /// rule accepts (`doodad_place_skin_kind_id`; 2,361 rows on the 1.2 data). Duplicate rows are
+    /// kept, like the client's vector.
+    pub place_skins: HashMap<u32, Vec<u32>>,
 }
 
 fn data_err(msg: String) -> GameDataError {
@@ -1530,6 +1534,7 @@ impl DoodadData {
         tracing::info!("Finished loading doodad functions ...");
         d.load_all_func_groups(conn)?;
         d.load_doodad_templates(conn)?;
+        d.load_place_skins(conn)?;
         tracing::info!("Loaded {} doodad templates", d.templates.len());
 
         d.create_template_caches();
@@ -1780,6 +1785,28 @@ impl DoodadData {
                 template.func_groups.push(group.clone());
             }
         }
+        Ok(())
+    }
+
+    /// `doodad_place_skins`: the place kinds the 1.2 client's place-skin rule accepts for a
+    /// doodad template. The client keys them by `doodad_almighty_id` and keeps every row; a
+    /// template without a row cannot be planted on terrain (outside the house-box skip).
+    fn load_place_skins(&mut self, conn: &Connection) -> Result<(), GameDataError> {
+        tracing::info!("Loading doodad place skins ...");
+        let mut rows = 0usize;
+        for_each_row(conn, "SELECT * FROM doodad_place_skins", [], |r| {
+            let almighty = r.u32_or("doodad_almighty_id", 0)?;
+            let kind = r.u32_or("doodad_place_skin_kind_id", 0)?;
+            if almighty == 0 || !(1..=4).contains(&kind) {
+                // A bad row must not fail the whole catalog (LESSONS.md).
+                tracing::warn!("doodad_place_skins: skipping invalid kind {kind} for {almighty}");
+                return Ok(());
+            }
+            self.place_skins.entry(almighty).or_default().push(kind);
+            rows += 1;
+            Ok(())
+        })?;
+        tracing::info!("Loaded {rows} doodad place skins");
         Ok(())
     }
 
@@ -2554,6 +2581,24 @@ mod tests {
         let n_phase: usize = d.phase_funcs.values().map(Vec::len).sum();
         assert_eq!(n_phase, count(&c, "doodad_phase_funcs"));
         assert_eq!(d.doodad_groups.len(), count(&c, "doodad_groups"));
+        // WP-W1: `doodad_place_skins` (2,361 rows, 755 doodads; 2 duplicate almighty+kind rows).
+        let place_skin_rows: usize = d.place_skins.values().map(Vec::len).sum();
+        assert_eq!(place_skin_rows, 2_361);
+        assert_eq!(place_skin_rows, count(&c, "doodad_place_skins"));
+        assert_eq!(d.place_skins.len(), 755);
+        let kind_count = |kind: u32| {
+            d.place_skins
+                .values()
+                .flatten()
+                .filter(|&&value| value == kind)
+                .count()
+        };
+        assert_eq!(kind_count(1), 748);
+        assert_eq!(kind_count(2), 584);
+        assert_eq!(kind_count(3), 585);
+        assert_eq!(kind_count(4), 444);
+        let kinds = d.place_skins.get(&1677).cloned().unwrap_or_default();
+        assert_eq!(kinds, vec![1, 2, 3, 4]);
         assert_eq!(
             d.consume_changer_items.len(),
             count(&c, "doodad_func_consume_changer_items")

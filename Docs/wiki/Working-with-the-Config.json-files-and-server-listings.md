@@ -819,6 +819,32 @@ only, not from a capture of the retail server. Keep the switch off until an orig
 capture shows how the retail shop behaved. The implementation and the open question are
 recorded in `rust/crates/aaemu-game/PORTING.md` (WP-SD4a).
 
+## Strict doodad placement surface check
+
+The 1.2 client checks the terrain material under a player doodad placement (its
+"place skin" step): the terrain detail material must be one of the four place
+kinds the doodad template lists in `doodad_place_skins`. The server can make the
+same check from the client files. It is off by default and keeps the previous
+placement behaviour:
+
+```json
+{
+  "Housing": {
+    "PlacementStrictSurface": true
+  }
+}
+```
+
+With the switch on, a placement whose terrain material is not allowed by the
+template is refused with `DOODAD_SIM_AREA` (276, "Can't be installed here.") and
+the seed item is kept. The existing skips stay: templates 1218/1219, group 37,
+and a spot inside a house box the player may build on. Worlds without surface
+data, cells without a heightmap, terrain holes and unknown surface ids are
+allowed (permissive). The check reads `game/worlds/<world>/surface.xml` and the
+detail material `.mtl` files lazily; see `rust/crates/aaemu-game/PORTING.md`
+(D1d place-skin section) for the evidence, the documented permissive deviation
+(`mat_sand_dry` / `mat_mud` count as kind 4) and the memory cost.
+
 ## Migration note from old setup docs
 
 Older instructions referenced `aaemu_login.game_servers` and SQL inserts.

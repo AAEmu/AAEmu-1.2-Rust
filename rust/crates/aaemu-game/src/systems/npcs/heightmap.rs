@@ -25,6 +25,7 @@ use tracing::{debug, error, info};
 use crate::data::client_files::ClientFileManager;
 use crate::data::world_templates::{WorldTemplate, WorldTemplates, CELL_SIZE, SECTORS_PER_CELL};
 use crate::server::GameServer;
+use crate::systems::npcs::terrain_surface::{SurfaceMaterial, WorldSurfaceTable};
 use crate::world::{WorldInstance, WorldObject};
 
 /// `WorldManager.SECTOR_HMAP_RESOLUTION` (`REGION_SIZE / 2`).
@@ -128,6 +129,22 @@ pub mod hmap {
             self.pos = (self.pos + count as usize).min(self.data.len());
             Ok(())
         }
+
+        /// The 32-entry world-surface id table at file offset 32 (`version >= 24`). It advances
+        /// exactly the 128 bytes the reader used to skip; a short table is clamped to the end of
+        /// the stream like `ReadBytes` and the missing entries stay 0.
+        fn read_surface_table(&mut self) -> [u32; 32] {
+            let start = self.pos;
+            let _ = self.read_bytes(128);
+            let mut table = [0u32; 32];
+            for (i, value) in table.iter_mut().enumerate() {
+                let at = start + i * 4;
+                if let Some(bytes) = self.data.get(at..at + 4) {
+                    *value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                }
+            }
+            table
+        }
     }
 
     /// `AABB`.
@@ -151,6 +168,10 @@ pub mod hmap {
         pub sectors_table_size_in_sectors: i32,
         pub heightmap_z_ratio: f32,
         pub ocean_water_level: f32,
+        /// The 32 world-surface ids of the cell (`heightmap.dat` offset 32..159,
+        /// `version >= 24`). The reader used to skip these 128 bytes; the byte count is
+        /// unchanged. `None` before version 24.
+        pub surface_table: Option<[u32; 32]>,
         pub nodes: Vec<NodeCell>,
     }
 
@@ -172,10 +193,11 @@ pub mod hmap {
                 sectors_table_size_in_sectors: br.i32()?,
                 heightmap_z_ratio: br.f32()?,
                 ocean_water_level: br.f32()?,
+                surface_table: None,
                 nodes: Vec::new(),
             };
             if h.version >= 24 {
-                br.read_bytes(128)?; // unk?
+                h.surface_table = Some(br.read_surface_table());
             }
             while i64::try_from(br.position()).unwrap_or(i64::MAX) != i64::from(h.chunk_size) {
                 match NodeCell::read(&mut br, disabled_re_calc) {
@@ -431,9 +453,16 @@ pub mod hmap {
 /// Result of `WorldCell.LoadCellHeightMapFromClientData`.
 #[derive(Debug)]
 enum CellLoad {
-    /// Returned `true`: the heightmap (`None` = all zeros: no file in the client data) and the
-    /// terrain-hole bitmap (`None` = no holes).
-    Loaded(Option<Box<[u16]>>, Option<Box<[u64]>>),
+    /// Returned `true`: the heightmap (`None` = all zeros: no file in the client data), the
+    /// terrain-hole bitmap (`None` = no holes), the 32-entry world-surface id table (`None`
+    /// before `heightmap.dat` version 24) and the per-sample local surface ids (`None` unless
+    /// the strict placement surface check keeps them).
+    Loaded(
+        Option<Box<[u16]>>,
+        Option<Box<[u64]>>,
+        Option<Box<[u32; 32]>>,
+        Option<Box<[u8]>>,
+    ),
     /// Returned `false` (`Hmap.Read` failed): `Loaded` stays false, the zeroed array is used
     /// and the next lookup tries again.
     Failed,
@@ -448,15 +477,16 @@ fn load_cell_height_map(
     cell_x: i32,
     cell_y: i32,
     height_max_coefficient: f64,
+    keep_surface: bool,
 ) -> CellLoad {
     let file = format!(
         "game/worlds/{world_name}/cells/{cell_x:03}_{cell_y:03}/client/terrain/heightmap.dat"
     );
     if !files.file_exists(&file) {
-        return CellLoad::Loaded(None, None);
+        return CellLoad::Loaded(None, None, None, None);
     }
     let Some(bytes) = files.read_file(&file) else {
-        return CellLoad::Loaded(None, None);
+        return CellLoad::Loaded(None, None, None, None);
     };
     let hmap = match hmap::Hmap::read(&bytes, false) {
         Ok(Some(h)) => h,
@@ -466,9 +496,11 @@ fn load_cell_height_map(
         }
         Err(e) => return CellLoad::Exception(e.to_string()),
     };
+    let surface_table = hmap.surface_table.map(Box::new);
     let sorted = hmap.sorted_nodes();
     let mut heights = vec![0u16; CELL_POINTS].into_boxed_slice();
     let mut holes: Option<Box<[u64]>> = None;
+    let mut surface_ids = keep_surface.then(|| vec![0u8; CELL_POINTS].into_boxed_slice());
     for sector_x in 0..SECTORS_PER_CELL {
         for sector_y in 0..SECTORS_PER_CELL {
             // sortedNodes[sectorX * SECTORS_PER_CELL + sectorY] (ArgumentOutOfRange when short)
@@ -496,11 +528,16 @@ fn load_cell_height_map(
                             .get_or_insert_with(|| vec![0u64; CELL_POINTS.div_ceil(64)].into());
                         words[bit / 64] |= 1 << (bit % 64);
                     }
+                    if let Some(ids) = surface_ids.as_mut() {
+                        if let Some(&local) = node.surface.get((unit_x * 33 + unit_y) as usize) {
+                            ids[(o_x * CELL_HMAP_RESOLUTION + o_y) as usize] = local;
+                        }
+                    }
                 }
             }
         }
     }
-    CellLoad::Loaded(Some(heights), holes)
+    CellLoad::Loaded(Some(heights), holes, surface_table, surface_ids)
 }
 
 /// `WorldCell` (heightmap part).
@@ -510,6 +547,13 @@ struct CellSlot {
     loaded: OnceLock<Option<Box<[u16]>>>,
     /// Terrain holes of the cell (bit `x * 512 + y`, set before `loaded`); `None` = none.
     holes: OnceLock<Option<Box<[u64]>>>,
+    /// The cell's 32-entry world-surface id table (`heightmap.dat` offset 32..159); `None`
+    /// before version 24 or without a heightmap.
+    surface_table: OnceLock<Option<Box<[u32; 32]>>>,
+    /// Per-sample local surface ids (512 x 512, x-major); kept only when
+    /// [`HeightmapConfig::placement_strict_surface`] is on (`None` otherwise). 256 KiB per
+    /// loaded cell.
+    surface_ids: OnceLock<Option<Box<[u8]>>>,
     /// `_loadLock`.
     load_lock: Mutex<()>,
 }
@@ -524,18 +568,29 @@ pub struct WorldHeightmap {
     pub cell_y: i32,
     /// `HeightMaxCoefficient`.
     pub height_max_coefficient: f64,
+    /// Whether the per-sample surface ids are kept for the strict placement surface check
+    /// (`Housing.PlacementStrictSurface`).
+    keep_surface: bool,
+    /// `surface.xml` + detail `.mtl` of this world, parsed lazily on the first placement check.
+    surfaces: OnceLock<Option<WorldSurfaceTable>>,
     /// `Cells[x, y]` at `x * cell_y + y`.
     cells: Vec<CellSlot>,
 }
 
 impl WorldHeightmap {
     pub fn new(template: &WorldTemplate) -> Self {
-        Self::with_size(
+        Self::new_with_surface(template, false)
+    }
+
+    /// [`new`](Self::new) with the strict placement surface ids enabled.
+    pub fn new_with_surface(template: &WorldTemplate, keep_surface: bool) -> Self {
+        Self::with_size_surface(
             template.id,
             &template.name,
             template.cell_x,
             template.cell_y,
             template.height_max_coefficient,
+            keep_surface,
         )
     }
 
@@ -546,6 +601,25 @@ impl WorldHeightmap {
         cell_y: i32,
         height_max_coefficient: f64,
     ) -> Self {
+        Self::with_size_surface(
+            template_id,
+            name,
+            cell_x,
+            cell_y,
+            height_max_coefficient,
+            false,
+        )
+    }
+
+    /// [`with_size`](Self::with_size) with the strict placement surface ids enabled.
+    pub fn with_size_surface(
+        template_id: u32,
+        name: &str,
+        cell_x: i32,
+        cell_y: i32,
+        height_max_coefficient: f64,
+        keep_surface: bool,
+    ) -> Self {
         let count = (cell_x.max(0) as usize) * (cell_y.max(0) as usize);
         Self {
             template_id,
@@ -553,6 +627,8 @@ impl WorldHeightmap {
             cell_x,
             cell_y,
             height_max_coefficient,
+            keep_surface,
+            surfaces: OnceLock::new(),
             cells: (0..count).map(|_| CellSlot::default()).collect(),
         }
     }
@@ -596,6 +672,27 @@ impl WorldHeightmap {
             let _ = s.holes.set(Some(words.into()));
         }
         self.insert_cell(cell_x, cell_y, heights)
+    }
+
+    /// [`insert_cell`](Self::insert_cell) with the cell's surface table and per-sample local
+    /// surface ids (`512 * 512`, x-major; tests and tools).
+    pub fn insert_cell_with_surface(
+        &self,
+        cell_x: i32,
+        cell_y: i32,
+        heights: Vec<u16>,
+        surface_table: [u32; 32],
+        surface_ids: Vec<u8>,
+    ) -> bool {
+        let Some(s) = self.slot(cell_x, cell_y) else {
+            return false;
+        };
+        if heights.len() != CELL_POINTS || surface_ids.len() != CELL_POINTS {
+            return false;
+        }
+        let _ = s.surface_table.set(Some(Box::new(surface_table)));
+        let _ = s.surface_ids.set(Some(surface_ids.into_boxed_slice()));
+        s.loaded.set(Some(heights.into_boxed_slice())).is_ok()
     }
 
     /// Whether grid point `(ix, iy)` of the whole world (2 m grid) is a terrain hole (surface id
@@ -672,9 +769,12 @@ impl WorldHeightmap {
             cell_x,
             cell_y,
             self.height_max_coefficient,
+            self.keep_surface,
         ) {
-            CellLoad::Loaded(h, holes) => {
+            CellLoad::Loaded(h, holes, surface_table, surface_ids) => {
                 let _ = slot.holes.set(holes);
+                let _ = slot.surface_table.set(surface_table);
+                let _ = slot.surface_ids.set(surface_ids);
                 let _ = slot.loaded.set(h);
                 Ok(slot.loaded.get().and_then(|h| h.as_deref()))
             }
@@ -801,6 +901,56 @@ impl WorldHeightmap {
         }
     }
 
+    /// The world-surface id of grid point `(ix, iy)` (2 m grid, the lower-left sample of its
+    /// square, like [`grid_is_hole`](Self::grid_is_hole)): the cell's 32-entry table at the
+    /// sample's local surface id (`raw & 0x1F`; `& 0xF` from node version 7). `None` outside the
+    /// map, in a cell without `heightmap.dat` or version < 24, for a terrain hole (local id 31)
+    /// and when the surface ids are not kept.
+    pub fn grid_surface_id(&self, files: &ClientFileManager, ix: i32, iy: i32) -> Option<u32> {
+        if ix < 0 || iy < 0 {
+            return None;
+        }
+        let (cx, cy) = (ix / CELL_HMAP_RESOLUTION, iy / CELL_HMAP_RESOLUTION);
+        if cx >= self.cell_x || cy >= self.cell_y {
+            return None;
+        }
+        self.verify_cell_loaded(files, cx, cy).ok()?;
+        let slot = self.slot(cx, cy)?;
+        let table = slot.surface_table.get()?.as_ref()?;
+        let ids = slot.surface_ids.get()?.as_ref()?;
+        let local = ids[((ix % CELL_HMAP_RESOLUTION) * CELL_HMAP_RESOLUTION
+            + iy % CELL_HMAP_RESOLUTION) as usize];
+        if local == hmap::HOLE_SURFACE_ID {
+            return None;
+        }
+        table.get(local as usize).copied()
+    }
+
+    /// The client's terrain place material at world `(x, y)` for the strict placement surface
+    /// check: the cell's `surface.xml`/detail `.mtl` name -> place kind. [`SurfaceMaterial::Unknown`]
+    /// (the rule does nothing) when the world has no surface data, the cell has no heightmap,
+    /// the sample is a hole or the surface id is not in `surface.xml`. `(x / 2).floor()` is the
+    /// lower-left 2 m sample of the spot's square (the client ray's sample between grid lines is
+    /// INFERRED, see PORTING.md).
+    pub fn material_at(&self, files: &ClientFileManager, x: f32, y: f32) -> SurfaceMaterial {
+        if !self.keep_surface || !x.is_finite() || !y.is_finite() {
+            return SurfaceMaterial::Unknown;
+        }
+        let ix = (x / 2.0).floor() as i32;
+        let iy = (y / 2.0).floor() as i32;
+        let Some(world_surface_id) = self.grid_surface_id(files, ix, iy) else {
+            return SurfaceMaterial::Unknown;
+        };
+        let Some(table) = self
+            .surfaces
+            .get_or_init(|| WorldSurfaceTable::load(files, &self.name))
+            .as_ref()
+        else {
+            return SurfaceMaterial::Unknown;
+        };
+        table.material(world_surface_id, files)
+    }
+
     /// `VerifyCellLoaded` for every cell (`PreLoadTerrain`). Returns the number of cells whose
     /// load threw.
     pub fn preload_all(&self, files: &ClientFileManager) -> usize {
@@ -855,6 +1005,9 @@ pub struct HeightmapConfig {
     pub geo_data_mode: bool,
     /// `World.PreLoadTerrain`.
     pub pre_load_terrain: bool,
+    /// `Housing.PlacementStrictSurface`: keep the per-sample surface ids of every loaded cell
+    /// (256 KiB per cell) so [`WorldHeightmap::material_at`] can answer.
+    pub placement_strict_surface: bool,
 }
 
 /// What `WorldManager.GetReferenceHeight` reads from an `NpcAi` (`ai != null`).
@@ -905,7 +1058,10 @@ impl HeightmapWorlds {
         let mut templates = HashMap::new();
         let mut zone_worlds = HashMap::new();
         for t in worlds.templates() {
-            templates.insert(t.id, WorldHeightmap::new(t));
+            templates.insert(
+                t.id,
+                WorldHeightmap::new_with_surface(t, config.placement_strict_surface),
+            );
             for &zone_key in &t.zone_keys {
                 if let Some(w) = worlds.get_world_template_by_zone_key(zone_key) {
                     zone_worlds.insert(zone_key, w.id);
@@ -1156,6 +1312,7 @@ pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
         heightmaps_enable: server.config.heightmaps_enable,
         geo_data_mode: server.config.world.geo_data_mode,
         pre_load_terrain: server.config.world.pre_load_terrain,
+        placement_strict_surface: server.config.housing.placement_strict_surface,
     };
     let sources = server.config.client_data.sources.clone();
     let app_path = server.config.app_path.clone();
@@ -1381,18 +1538,56 @@ mod tests {
     }
 
     fn file(nodes: &[Vec<u8>]) -> Vec<u8> {
-        let mut f = vec![23u8, 0, 0, 0];
-        let chunk = 4 + 5 * 4 + 8 + nodes.iter().map(Vec::len).sum::<usize>();
+        file_with(23, None, nodes)
+    }
+
+    fn file_with(version: u8, table: Option<[u32; 32]>, nodes: &[Vec<u8>]) -> Vec<u8> {
+        let mut f = vec![version, 0, 0, 0];
+        let table_len = if version >= 24 { 128 } else { 0 };
+        let chunk = 4 + 5 * 4 + 8 + table_len + nodes.iter().map(Vec::len).sum::<usize>();
         f.extend_from_slice(&(chunk as i32).to_le_bytes());
         for v in [0i32, 0, 0, 0] {
             f.extend_from_slice(&v.to_le_bytes());
         }
         f.extend_from_slice(&1.5f32.to_le_bytes());
         f.extend_from_slice(&0.0f32.to_le_bytes());
+        if let Some(table) = table {
+            for value in table {
+                f.extend_from_slice(&value.to_le_bytes());
+            }
+        }
         for n in nodes {
             f.extend_from_slice(n);
         }
         f
+    }
+
+    #[test]
+    fn version_24_keeps_the_32_entry_surface_table_without_moving_the_nodes() {
+        let table = std::array::from_fn(|i| 1000 + i as u32);
+        let n1 = node_bytes(7, 2, 10.0, 0.01, &[16, 32, 48, 64], (5.0, 0.0));
+        let n2 = node_bytes(7, 0, 0.0, 0.0, &[], (1.0, 0.0));
+        let with_table = file_with(24, Some(table), &[n1.clone(), n2.clone()]);
+        let without = file_with(23, None, &[n1, n2]);
+        let a = hmap::Hmap::read(&with_table, false).unwrap().unwrap();
+        let b = hmap::Hmap::read(&without, false).unwrap().unwrap();
+        assert_eq!(a.surface_table, Some(table));
+        assert_eq!(b.surface_table, None);
+        // The 128-byte table advances the reader exactly like the old skip: same nodes, heights
+        // and surfaces.
+        assert_eq!(a.nodes.len(), b.nodes.len());
+        for (na, nb) in a.nodes.iter().zip(b.nodes.iter()) {
+            assert_eq!(na.n_size, nb.n_size);
+            assert_eq!(na.p_hm_data, nb.p_hm_data);
+            assert_eq!(na.surface, nb.surface);
+            // A sample in the node's range decodes to the same height.
+            let i = na.p_hm_data.len().saturating_sub(1) as u32;
+            assert_eq!(na.get_height_by_index(i), nb.get_height_by_index(i));
+        }
+        // A truncated table keeps the old clamping: the table stays, the nodes fail to read.
+        let short = &with_table[..40];
+        let h = hmap::Hmap::read(short, false).unwrap();
+        assert!(h.is_none());
     }
 
     #[test]
