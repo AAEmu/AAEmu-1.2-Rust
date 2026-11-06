@@ -350,8 +350,9 @@ client_packet!(
 impl CTStartUploadEmblemStreamPacket {
     /// `bc` must be a live doodad of the player's instance whose current func group is a crest
     /// printer (`DoodadFuncStampMaker` creating Crest Ink), the player must be in reach of it,
-    /// and the printer row's money (plus, for a custom image, its reagent) must be there
-    /// **before** any upload queue entry is made. A refusal is a warning and a drop: the 1.2
+    /// and the printer row's cost must be there **before** any upload queue entry is made: the
+    /// money for a default pattern, the reagent for a custom image (`data_size > 0`), as the
+    /// client's `GetMakeUccConsumeInfo` shows. A refusal is a warning and a drop: the 1.2
     /// refusal reply is UNKNOWN (CAP-UCC-1) and the stream connection stays open.
     pub async fn handle(self, server: &GameServer, conn: &mut StreamConnection) -> Result<()> {
         tracing::warn!(
@@ -423,8 +424,10 @@ impl CTStartUploadEmblemStreamPacket {
         let custom = self.data_size > 0;
         if !can_pay(&player, &cost, custom) {
             tracing::warn!(
-                "CTStartUploadEmblemStream refused: not enough money ({}) or the reagent for crest printer {} (stream connection {})",
+                "CTStartUploadEmblemStream refused: the default-pattern money ({}) or the custom-image reagent ({} x {}) is missing for crest printer {} (stream connection {})",
                 cost.consume_money,
+                cost.consume_item_id,
+                cost.consume_count,
                 self.bc,
                 conn.id
             );
