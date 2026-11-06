@@ -6633,23 +6633,47 @@ Policy decisions / capture-pending (each also a case id in the code):
   A deleted character's pledges are never refunded and stay in the table for its id. Arena and
   instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
   these have 1.2 evidence; they are safe defaults.
-* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The empty `(0, 0)` list stays the
-  default: the C# comment records that a filled list broke the 1.2 client Lua, the cause was
-  never found and the row layout was only verified later (M10, reader `FUN_397bebf0`), so the
-  real-client check is **capture-pending**. `Social.BountyBoard` (default `false`, shipped in
-  `Configurations/Social.json`) enables the filled answer:
-  `SCBountyList{total, count, rows}` where `total` is every character with an unpaid pledge and
-  the rows are capped at the client's 20 entries (`0x14`, `MAX_BOUNTY_LIST_ENTRIES`), highest
-  total first (ties by character id; the order is a server policy, not client evidence, and only
-  decides which rows the cap keeps). Online rows read name, level, race, crime point, zone and
-  position from the live character with `is_live = true`; offline rows read the same fields plus
-  the arrest / trial counters from its `characters` row (`deleted = 0`) with `is_live = false`.
-  A missing or unreadable character row is skipped and no longer counted in `total`, so the
-  client can still complete its id-keyed row map. The row's `type` field (`+184` in the reader,
-  meaning UNKNOWN) is `1`, the value of the C# dummy row (C#-only); `seconds` is `0` (no 1.2
-  meaning known, no timer is invented). `total > count` only while more than 20 characters have
-  pledges. The switch must stay `false` until an original-client run (hidden client, bounty
-  board doodad) opens the board without a Lua error.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. A filled list still breaks the 1.2
+  client UI, and the 2026-11-06 real-client run (one wanted row, client log
+  `ArcheAge-bounty.log` lines 1077-1099) shows the cause is in the client's own
+  `usertrial/bounty_bullet.alb`, not in the row values:
+  * On every open it logs `?:6422 LocalizeUiText() expect parameter 4 of type String (Provided
+    type Number)`. `FillLeftFrame` (lines 42-43) calls
+    `locale.trial.trialChoice(tostring(record[12]), record[11])` and
+    `rulingChoice(tostring(record[14]), record[13])`; record 11/13 are the numeric
+    `acceptGuilty` / `notGuilty` counters built by the client's `GetBountyData`
+    (`FUN_39080c00` indexes 11 and 13, type tag 4 = number), and the wrappers
+    `baselib/locale_helper.alb:6418/6422` pass them as parameters 3/4 of
+    `X2Locale.LocalizeUiText`, which requires strings. The sibling trial scripts
+    `crime_records.alb` (0.17) and `bot_records.alb` (0.10) call `tostring()` on both counters;
+    `bounty_bullet.alb` omits the second one. No server field can turn a numeric row column into
+    a Lua string.
+  * Then it logs `?:115 attempt to index global 'listCtrl' (a nil value)`:
+    `bounty_bullet.alb` FillData line 115 calls `listCtrl.InsertData`, but no `.alb` in the
+    client ever assigns a global `listCtrl` (the page list owns `listCtrl` as
+    `wnd.listCtrl` / `pageListCtrl.listCtrl`, and the sibling scripts call
+    `pageListCtrl:InsertData`). The row insert therefore aborts for every row.
+  * Clicking a board button logs `?:53 attempt to compare number with nil`: the handler compares
+    the global `curSelected`, which is never assigned either; the selection handler updates the
+    `CUR_SELECTED` upvalue instead.
+  The board stays behind `Social.BountyBoard` (default `false`, shipped in
+  `Configurations/Social.json`) until the client script is fixed, because the real 1.2 client
+  cannot render the rows. When enabled, `SCBountyList{total, count, rows}` reports `total` as
+  every character with an unpaid pledge and caps the rows at the client's 20 entries (`0x14`,
+  `MAX_BOUNTY_LIST_ENTRIES`), highest total first (ties by character id; the order is a server
+  policy, not client evidence, and only decides which rows the cap keeps). Online rows read
+  name, level, race, faction, crime point, zone and position from the live character with
+  `is_live = true`; offline rows read the same fields plus the arrest / trial counters from its
+  `characters` row (`deleted = 0`) with `is_live = false`. A missing or unreadable character row
+  is skipped and no longer counted in `total`, so the client can still complete its id-keyed row
+  map. The row's `+0xb8` field (called `Type184` in the C#, whose dummy row sent `1`) is the
+  **faction id**: the client's `GetBountyData` record 9 feeds it to `FUN_392f8120(id, 1)` and
+  uses the result as the left frame's faction name (`FUN_39080c00`; the same call fills the
+  field literally named `"faction"` in `FUN_3907e830`). Online rows now send
+  `unit.faction_id`, offline rows `characters.faction_id`, instead of the C# dummy. `seconds`
+  is `0` (no 1.2 meaning known, no timer is invented). `total > count` only while more than 20
+  characters have pledges. The real-client check stays open until a client `bounty_bullet.alb`
+  that uses `pageListCtrl.listCtrl` and `tostring()` on both counters is available.
 
 * **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
   `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is
