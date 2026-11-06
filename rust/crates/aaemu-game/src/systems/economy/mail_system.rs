@@ -238,6 +238,208 @@ fn discard_items_by_id(server: &GameServer, ids: &[u64]) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Tax-rate notices
+// ---------------------------------------------------------------------------------------------
+
+/// The 1.2 client resolves a sender name that starts with `.` through
+/// `locale.mail.<name>.sender` (`GetMailText`); `.houseTax` is the shipped example
+/// (`systems/housing/manager.rs`). The rate mail locale tables are `taxRateChange` and
+/// `nationalTaxRate` (`x2ui/baselib/locale_helper.alb`).
+pub const TAX_RATE_CHANGED_SENDER: &str = ".taxRateChange";
+pub const NATION_TAX_RATE_SENDER: &str = ".nationalTaxRate";
+
+/// `locale.mail.taxRateChange.body(old_tax_rate, new_tax_rate)` (proto 79 of
+/// `x2ui/baselib/locale_helper.alb`). The client displays the two percentages and derives the
+/// new tax breakdown from `X2House.GetTaxations(new_tax_rate)`.
+pub fn tax_rate_changed_text(old_rate: i32, new_rate: i32) -> String {
+    format!("body('{old_rate}','{new_rate}')")
+}
+
+/// `locale.mail.nationalTaxRate.body(factionId, zoneGroupType, newTaxRate, oldTaxRate, day)`
+/// (proto 110). The parameter order is the client's body parser's, not the display order:
+/// `read_mail.alb` reads `oldTaxRate`/`newTaxRate` from the resulting table.
+pub fn nation_tax_rate_text(
+    nation_id: u32,
+    zone_group_id: u16,
+    new_rate: u16,
+    old_rate: u16,
+    changed_at: i64,
+) -> String {
+    format!("body('{nation_id}','{zone_group_id}','{new_rate}','{old_rate}','{changed_at}')")
+}
+
+/// Stores one `TAXRATE_CHANGED` (8) notice for a property owner in the territory.
+pub fn send_tax_rate_changed_mail(
+    txn: &mut ItemTxn<'_>,
+    receiver_id: u32,
+    zone_group_id: u16,
+    old_rate: i32,
+    new_rate: i32,
+) -> bool {
+    mail::send_system_mail(
+        txn,
+        mail_type::TAXRATE_CHANGED,
+        TAX_RATE_CHANGED_SENDER,
+        receiver_id,
+        &format!("title({zone_group_id})"),
+        &tax_rate_changed_text(old_rate, new_rate),
+        0,
+        Vec::new(),
+    )
+}
+
+/// Stores one `NATION_TAX_RATE` (23) notice for a citizen of `nation_id`.
+#[allow(clippy::too_many_arguments)]
+pub fn send_nation_tax_rate_mail(
+    txn: &mut ItemTxn<'_>,
+    receiver_id: u32,
+    nation_id: u32,
+    zone_group_id: u16,
+    new_rate: u16,
+    old_rate: u16,
+    changed_at: i64,
+) -> bool {
+    mail::send_system_mail(
+        txn,
+        mail_type::NATION_TAX_RATE,
+        NATION_TAX_RATE_SENDER,
+        receiver_id,
+        &format!("title({zone_group_id})"),
+        &nation_tax_rate_text(nation_id, zone_group_id, new_rate, old_rate, changed_at),
+        0,
+        Vec::new(),
+    )
+}
+
+/// The owners of the houses in `zone_group_id`, deduplicated. The 1.2 `TAXRATE_CHANGED` mail
+/// shows the property-tax breakdown (`X2House.GetTaxations`), so the affected residents are the
+/// property owners of the territory. This recipient set is INFERRED from the client body
+/// function and the existing house-tax bill path (`MailForTax` also addresses house owners);
+/// the exact 1.2 server audience is capture-pending (`TAX-RATE-MAIL-1`).
+pub fn tax_rate_changed_recipients(server: &GameServer, zone_group_id: u32) -> Vec<u32> {
+    let mut owners = Vec::new();
+    for house in server.systems.housing.manager.all() {
+        let h = house.data();
+        let owner = h.unit.owner_id;
+        if owner == 0 || owners.contains(&owner) {
+            continue;
+        }
+        if server
+            .game_data
+            .zones
+            .zone_by_key(h.unit.transform.zone_id)
+            .is_some_and(|zone| zone.group_id == zone_group_id)
+        {
+            owners.push(owner);
+        }
+    }
+    owners
+}
+
+/// Sends the `TAXRATE_CHANGED` (8) notice to the property owners of the territory. Returns the
+/// number of stored mails. The caller must not hold the housing operation lock (the mail store
+/// is an economy lock).
+pub fn send_tax_rate_changed_mails(
+    server: &GameServer,
+    zone_group_id: u16,
+    old_rate: i32,
+    new_rate: i32,
+) -> usize {
+    let recipients = tax_rate_changed_recipients(server, u32::from(zone_group_id));
+    if recipients.is_empty() {
+        return 0;
+    }
+    let mut txn = ItemTxn::begin(server);
+    let mut sent = 0;
+    for id in recipients {
+        if send_tax_rate_changed_mail(&mut txn, id, zone_group_id, old_rate, new_rate) {
+            sent += 1;
+        }
+    }
+    sent
+}
+
+/// Online citizens of a nation (the same membership test as `nation::online_nation_members`).
+fn online_nation_members(server: &GameServer, nation_id: u32) -> Vec<u32> {
+    server
+        .world
+        .all_characters()
+        .iter()
+        .filter(|p| p.data().unit.faction_id == nation_id)
+        .map(|p| p.character_id)
+        .collect()
+}
+
+/// Sends the `NATION_TAX_RATE` (23) notice to the nation's online citizens and stores it for
+/// the offline ones. The client body carries the nation id and the zone group
+/// (`X2Nation.GetNationName` / `X2Dominion.GetZoneGroupName`), so the audience is the nation's
+/// citizens; the exact 1.2 audience is INFERRED and capture-pending (`NATION-TAX-MAIL-1`).
+pub fn send_nation_tax_rate_mails(
+    server: &GameServer,
+    nation_id: u32,
+    zone_group_id: u16,
+    new_rate: u16,
+    old_rate: u16,
+    changed_at: i64,
+) {
+    let online = online_nation_members(server, nation_id);
+    if !online.is_empty() {
+        let mut txn = ItemTxn::begin(server);
+        for id in &online {
+            send_nation_tax_rate_mail(
+                &mut txn,
+                *id,
+                nation_id,
+                zone_group_id,
+                new_rate,
+                old_rate,
+                changed_at,
+            );
+        }
+    }
+    // Offline citizens need the same notice. The query runs after the caller released its
+    // housing lock; the online set is skipped because those mails are already stored.
+    let Some(server) = server.self_arc() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(id AS SIGNED) FROM characters WHERE faction_id = ? AND deleted = 0",
+        )
+        .bind(i64::from(nation_id))
+        .fetch_all(&server.db)
+        .await;
+        let Ok(ids) = rows else {
+            tracing::warn!(
+                nation_id,
+                "could not load the offline citizens for the national tax notice"
+            );
+            return;
+        };
+        let offline: Vec<u32> = ids
+            .into_iter()
+            .map(|id| id as u32)
+            .filter(|id| !online.contains(id))
+            .collect();
+        if offline.is_empty() {
+            return;
+        }
+        let mut txn = ItemTxn::begin(&server);
+        for id in offline {
+            send_nation_tax_rate_mail(
+                &mut txn,
+                id,
+                nation_id,
+                zone_group_id,
+                new_rate,
+                old_rate,
+                changed_at,
+            );
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

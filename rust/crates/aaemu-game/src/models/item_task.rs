@@ -725,20 +725,6 @@ mod tests {
         assert_eq!(s.as_bytes(), w.as_bytes());
     }
 
-    /// The 1.2 task switch applies `ChangeAaPoint` (16) and `ChangeBankAaPoint` (17) like the
-    /// money tasks: one action byte and one `i32` delta. That the amount is a delta is
-    /// INFERRED by symmetry with `MoneyChange`; the wallet sends signed deltas.
-    #[test]
-    fn aa_point_tasks_write_action_16_17_and_the_delta() {
-        let mut s = PacketStream::new();
-        ItemTask::AaPointUpdate(0x0102_0304).write(&mut s);
-        assert_eq!(s.as_bytes(), [16, 0x04, 0x03, 0x02, 0x01]);
-
-        let mut s = PacketStream::new();
-        ItemTask::ChangeBankAaPoint(-2).write(&mut s);
-        assert_eq!(s.as_bytes(), [17, 0xFE, 0xFF, 0xFF, 0xFF]);
-    }
-
     #[test]
     fn item_add_pads_details_to_128() {
         let i = item();

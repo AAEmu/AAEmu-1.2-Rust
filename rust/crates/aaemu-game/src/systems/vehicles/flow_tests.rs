@@ -4275,19 +4275,8 @@ async fn shipyard_build_steps_progress() {
     a.drain();
     b.drain();
 
-    let sy = shipyards::create(
-        &server,
-        &pa,
-        3,
-        120.0,
-        120.0,
-        100.0,
-        0.5,
-        DESIGN_ITEM,
-        0,
-        false,
-    )
-    .expect("shipyard");
+    let sy = shipyards::create(&server, &pa, 3, 120.0, 120.0, 100.0, 0.5, DESIGN_ITEM, 0)
+        .expect("shipyard");
     assert_eq!(pa.data().money, 4000);
     assert_eq!(
         *hooks.consumed.lock().unwrap(),
@@ -4393,19 +4382,8 @@ async fn shipyard_row_round_trips_and_removal_queues_delete() {
     pa.data().money = 5000;
     give_item(&server, &pa, DESIGN_ITEM, 7000);
 
-    let sy = shipyards::create(
-        &server,
-        &pa,
-        3,
-        120.0,
-        130.0,
-        100.0,
-        0.5,
-        DESIGN_ITEM,
-        0,
-        false,
-    )
-    .expect("shipyard");
+    let sy = shipyards::create(&server, &pa, 3, 120.0, 130.0, 100.0, 0.5, DESIGN_ITEM, 0)
+        .expect("shipyard");
     // Two actions finish step 0, one more is the first action of step 1.
     for _ in 0..3 {
         shipyards::add_build_action(&server, &sy);

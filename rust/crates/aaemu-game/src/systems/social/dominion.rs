@@ -583,6 +583,7 @@ pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_r
     {
         return;
     }
+    let prev = state.tax_rate;
     let state = match server.systems.housing.dominions.set_tax_rate(
         u32::from(zone),
         state.owner_expedition_id,
@@ -604,6 +605,15 @@ pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_r
         .broadcast_to_server(&SCDominionTaxRatePacket { id: zone, tax_rate });
     crate::systems::housing::dominion::tax::refresh_bills(server, u32::from(zone));
     broadcast_snapshot(server, &state, false);
+    drop(_operation);
+    if prev != state.tax_rate {
+        crate::systems::economy::mail_system::send_tax_rate_changed_mails(
+            server,
+            zone,
+            prev,
+            state.tax_rate,
+        );
+    }
 }
 
 /// `CSUpdateNationalTaxRatePacket` (0x013): the nation king sets the national tax rate of a
@@ -693,6 +703,15 @@ pub fn update_national_tax_rate(server: &GameServer, player: &PlayerRef, zone: u
         server,
         u32::from(zone),
         state.national_tax_rate,
+        state.last_national_tax_rate_changed_at,
+    );
+    drop(_operation);
+    crate::systems::economy::mail_system::send_nation_tax_rate_mails(
+        server,
+        nation.id,
+        zone,
+        state.national_tax_rate,
+        prev,
         state.last_national_tax_rate_changed_at,
     );
 }
@@ -3124,6 +3143,21 @@ mod authority_tests {
     async fn tax_packet_requires_current_owner_leader_and_native_range() {
         let mut f = fixture();
         owned(&f);
+        f.server.names.add_character(1, "Lord", 1001);
+        f.server.names.add_character(2, "Member", 1002);
+        // An ordinary property owned by the member, so the tax-rate notice has a resident.
+        let mut ordinary = House::new(14, DESIGN);
+        ordinary.current_step = -1;
+        ordinary.unit.owner_id = 2;
+        ordinary.unit.tl_id = 13;
+        ordinary.unit.hp = 1000;
+        ordinary.unit.max_hp = 1000;
+        ordinary.unit.transform.set_xyz(106.0, 100.0, 100.0);
+        ordinary.unit.transform.zone_id = TEST_ZONE;
+        ordinary.place_date = Utc::now().timestamp() - 86_400;
+        ordinary.protection_end_date = Utc::now().timestamp() + 30 * 86_400;
+        let ordinary = Entity::new(0x201, ordinary);
+        assert!(f.server.systems.housing.manager.insert(&ordinary));
         let now = Utc::now().timestamp();
         f.server
             .systems
@@ -3176,6 +3210,26 @@ mod authority_tests {
             vec![sc::SCDominionTaxRatePacket, sc::SCDominionDataPacket]
         );
         assert_eq!(packets[0].1, vec![25, 0, 50, 0, 0, 0]);
+        let notice = f
+            .server
+            .systems
+            .economy
+            .mail
+            .state()
+            .all
+            .iter()
+            .find(|(_, m)| {
+                m.header.receiver_id == 2
+                    && m.mail_type == crate::systems::economy::mail::mail_type::TAXRATE_CHANGED
+            })
+            .map(|(_, m)| m.clone())
+            .expect("the property owner gets the tax-rate notice");
+        assert_eq!(notice.title, "title(25)");
+        assert_eq!(notice.body.text, "body('0','50')");
+        assert_eq!(
+            notice.header.sender_name,
+            crate::systems::economy::mail_system::TAX_RATE_CHANGED_SENDER
+        );
         CSUpdateDominionTaxRatePacket {
             id: ZONE as u16,
             tax_rate: 25,

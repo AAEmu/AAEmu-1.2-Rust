@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 60,
-    "never_sent": 52
+    "never_sent": 53
   },
   "typeless": [
     "SCAiDebugPacket",
@@ -87,6 +87,7 @@
     "SCHouseBuildPayChangedPacket",
     "SCHouseFarmPacket",
     "SCHouseOwnerNameChangedPacket",
+    "SCICSExchangeRatioPacket",
     "SCIdleKickPacket",
     "SCInstantGameRemainTimePacket",
     "SCItemDetailUpdatedPacket",

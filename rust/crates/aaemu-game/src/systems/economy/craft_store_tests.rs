@@ -21,7 +21,6 @@ use crate::systems::economy::craft::{self, CSExecuteCraft, CraftHooks, SCCraftFa
 use crate::systems::economy::craft_data::{
     Craft, CraftData, CraftMaterial, CraftProduct, CraftSkill,
 };
-use crate::systems::economy::error_message;
 use crate::systems::economy::hooks::{NpcEconomyHooks, NpcShopInfo};
 use crate::systems::economy::inventory::Inv;
 use crate::systems::economy::item_packets::{
@@ -1380,10 +1379,6 @@ impl NpcEconomyHooks for Shops {
 }
 
 fn buy_body(npc: u32, buy: &[(u32, i32, u8)], buy_back: &[i32]) -> Vec<u8> {
-    buy_body_aa(npc, buy, buy_back, false)
-}
-
-fn buy_body_aa(npc: u32, buy: &[(u32, i32, u8)], buy_back: &[i32], use_aa_point: bool) -> Vec<u8> {
     let mut s = PacketStream::new();
     s.write_bc(npc)
         .write_bc(0)
@@ -1399,7 +1394,7 @@ fn buy_body_aa(npc: u32, buy: &[(u32, i32, u8)], buy_back: &[i32], use_aa_point:
     for i in buy_back {
         s.write_i32(*i);
     }
-    s.write_bool(use_aa_point);
+    s.write_bool(false);
     s.into_bytes()
 }
 
@@ -1851,121 +1846,6 @@ async fn shop_checkout_rejects_money_only_and_mixed_currency_shortages() {
         assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().items, before);
         assert!(w.a.drain().is_empty());
     }
-}
-
-#[tokio::test]
-async fn store_aa_point_pays_the_gold_shortage_one_to_one() {
-    let mut w = world();
-    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
-    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
-    {
-        let mut c = w.pa.data();
-        c.money = 100;
-        c.aa_point = 75;
-    }
-    // 15 x 10 = 150: every copper of gold (100) plus the 50-point shortage.
-    run::<CSBuyItemsPacket>(
-        &mut w,
-        0,
-        &buy_body_aa(MERCHANT_NPC, &[(STACK, 15, 0)], &[], true),
-    );
-    let c = w.pa.data();
-    assert_eq!((c.money, c.aa_point), (0, 25));
-    drop(c);
-    assert_eq!(item_at(&w.pa, 2, 0).unwrap().count, 15);
-    let frames = w.a.drain();
-    assert!(frames.contains(&(
-        sc::SCItemTaskSuccessPacket,
-        task_body(task_type::DEPOSIT_MONEY, vec![ItemTask::MoneyChange(-100)])
-    )));
-    assert!(frames.contains(&(
-        sc::SCItemTaskSuccessPacket,
-        task_body(task_type::STORE_BUY, vec![ItemTask::AaPointUpdate(-50)])
-    )));
-}
-
-#[tokio::test]
-async fn store_aa_point_short_refuses_and_leaves_everything_unchanged() {
-    let mut w = world();
-    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
-    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
-    {
-        let mut c = w.pa.data();
-        c.money = 5;
-        c.aa_point = 10;
-    }
-    // 2 x 10 = 20: the 15-point shortage is more than the 10 AA points held.
-    let before = Inv::of(&w.pa).bag().lock().unwrap().items.clone();
-    run::<CSBuyItemsPacket>(
-        &mut w,
-        0,
-        &buy_body_aa(MERCHANT_NPC, &[(STACK, 2, 0)], &[], true),
-    );
-    let c = w.pa.data();
-    assert_eq!((c.money, c.aa_point), (5, 10));
-    drop(c);
-    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().items, before);
-    assert_eq!(
-        w.a.drain(),
-        vec![(
-            sc::SCErrorMsgPacket,
-            err_bytes(
-                error_message::NOT_ENOUGH_AA_POINT,
-                error_message::NOT_ENOUGH_AA_POINT,
-                0,
-                true
-            )
-        )]
-    );
-}
-
-#[tokio::test]
-async fn store_without_the_aa_flag_keeps_todays_gold_refusal() {
-    let mut w = world();
-    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
-    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
-    {
-        let mut c = w.pa.data();
-        c.money = 5;
-        c.aa_point = 1000;
-    }
-    let before = Inv::of(&w.pa).bag().lock().unwrap().items.clone();
-    run::<CSBuyItemsPacket>(
-        &mut w,
-        0,
-        &buy_body_aa(MERCHANT_NPC, &[(STACK, 2, 0)], &[], false),
-    );
-    let c = w.pa.data();
-    assert_eq!((c.money, c.aa_point), (5, 1000));
-    drop(c);
-    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().items, before);
-    assert!(w.a.drain().is_empty());
-}
-
-#[tokio::test]
-async fn store_aa_flag_does_not_spend_aa_when_gold_covers_the_total() {
-    let mut w = world();
-    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
-    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
-    {
-        let mut c = w.pa.data();
-        c.money = 500;
-        c.aa_point = 1000;
-    }
-    run::<CSBuyItemsPacket>(
-        &mut w,
-        0,
-        &buy_body_aa(MERCHANT_NPC, &[(STACK, 5, 0)], &[], true),
-    );
-    let c = w.pa.data();
-    assert_eq!((c.money, c.aa_point), (450, 1000));
-    drop(c);
-    let frames = w.a.drain();
-    // Paying entirely in gold keeps the store task list free of an AA update.
-    assert!(frames.contains(&(
-        sc::SCItemTaskSuccessPacket,
-        task_body(task_type::STORE_BUY, vec![])
-    )));
 }
 
 #[tokio::test]

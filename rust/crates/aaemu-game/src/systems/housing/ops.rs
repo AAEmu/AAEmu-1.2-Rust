@@ -289,23 +289,14 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
     let mut payment_error = None;
     let mut payment_effects = None;
     let revenue = super::dominion::tax::charge_with(server, &quote, || {
-        match hooks.pay_house_construction_deferred(
-            server,
-            player,
-            source,
-            total,
-            tax_item,
-            p.auto_use_aa_point,
-        ) {
-            Ok(Some((effects, payment))) => {
-                payment_effects = Some(effects);
-                Some(payment)
+        match hooks.pay_house_construction_deferred(server, player, source, total, tax_item) {
+            Ok(effects) => {
+                payment_effects = effects;
+                true
             }
-            // A hook without queued effects cannot report a split; its payment is gold-only.
-            Ok(None) => Some(crate::systems::economy::inventory::PaymentSplit::default()),
             Err(error) => {
                 payment_error = Some(error);
-                None
+                false
             }
         }
     });
