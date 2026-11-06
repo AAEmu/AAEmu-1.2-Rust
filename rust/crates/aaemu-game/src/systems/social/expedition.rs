@@ -24,6 +24,7 @@ use crate::packets::world::{
 use crate::server::GameServer;
 use crate::systems::social::nation::Nation;
 use crate::systems::social::packets::expedition::*;
+use crate::systems::social::packets::misc::{invitation_canceled_kind, SCInvitationCanceledPacket};
 use crate::systems::social::rename;
 use crate::systems::social::util::{self, error, send_error};
 use crate::world::{broadcast, PlayerRef};
@@ -205,7 +206,9 @@ pub struct ExpeditionManager {
 const LEADER_ROLE: u8 = 255;
 
 /// How long a guild invitation can be answered (same as the party / raid invitations).
-const INVITATION_TIMEOUT_MS: i64 = 60_000;
+pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
+/// How often the guild-invitation expiry sweep runs (the C# pruned only on the next invite).
+const INVITATION_SWEEP_MS: u64 = 1_000;
 
 /// Upper bound of pending rename offers (GM-triggered); a full set is cleared so it never grows
 /// without bound when characters leave without a logout packet.
@@ -417,6 +420,37 @@ impl ExpeditionManager {
             .lock()
             .expect("expedition invitations poisoned")
             .remove(&character_id);
+    }
+
+    /// Sweeps the unanswered guild invitations: removes the ones older than
+    /// `INVITATION_TIMEOUT_MS` and sends `SCInvitationCanceled` (kind 4) to each invitee.
+    ///
+    /// The invitation map is keyed by invitee and never holds a second invitation for the same
+    /// character, so no other expedition invitation (popup type 3) can still be pending for an
+    /// expired invitee.
+    pub(crate) fn expire_invitations(&self, server: &GameServer, now_ms: i64) {
+        let expired: Vec<u32> = {
+            let mut invitations = self
+                .invitations
+                .lock()
+                .expect("expedition invitations poisoned");
+            let ids: Vec<u32> = invitations
+                .iter()
+                .filter(|(_, p)| p.time_ms + INVITATION_TIMEOUT_MS < now_ms)
+                .map(|(&id, _)| id)
+                .collect();
+            for id in &ids {
+                invitations.remove(id);
+            }
+            ids
+        };
+        for id in expired {
+            if let Some(invitee) = server.world.character_by_id(id) {
+                invitee.send(SCInvitationCanceledPacket {
+                    kind: invitation_canceled_kind::EXPEDITION,
+                });
+            }
+        }
     }
 
     /// `GetExpeditionOfCharacter(characterId)` (0 = none).
@@ -1085,6 +1119,24 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
         faction_id: e.id(),
         faction_name: e.faction.name.clone(),
     });
+}
+
+/// Subscribes the guild-invitation expiry sweep to the shared `TickManager` (1 s; the C# only
+/// pruned the map on the next invite, which left the invitee's popup open).
+pub fn start_tick(server: &std::sync::Arc<GameServer>) {
+    let weak = std::sync::Arc::downgrade(server);
+    server.systems.services.tick.on_tick.subscribe(
+        move |_delta| {
+            let Some(server) = weak.upgrade() else {
+                return;
+            };
+            server
+                .expeditions
+                .expire_invitations(&server, util::now_ms());
+        },
+        std::time::Duration::from_millis(INVITATION_SWEEP_MS),
+        false,
+    );
 }
 
 /// `ExpeditionManager.ReplyInvite(connection, id1, id2, reply)`.

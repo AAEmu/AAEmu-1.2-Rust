@@ -1,13 +1,12 @@
 //! Port of `Core/Managers/CashShopManager.cs`, `Models/Game/CashShop/*` (`IcsItem`, `IcsSku`,
-//! `IcsMenu`, `PremiumDetail`, `AuditIcsSale`), `Models/Tasks/CashShop/CashShopBuyTask.cs`, the
-//! account credit / loyalty members of `AccountManager` the shop uses, and the packets
-//! `CSICSMenuListPacket`, `CSICSGoodsListPacket`, `CSICSBuyGoodPacket`,
-//! `CSICSMoneyRequestPacket`, `CSPremiumServiceBuyPacket`, `CSPremiumServiceListPacket`,
-//! `CSPremiumServiceMsgPacket`, `SCICSMenuListPacket`, `SCICSGoodListPacket`,
-//! `SCICSGoodDetailPacket`, `SCICSCheckTimePacket`, `SCICSBuyResultPacket`,
+//! `IcsMenu`, `AuditIcsSale`), `Models/Tasks/CashShop/CashShopBuyTask.cs`, the account credit /
+//! loyalty members of `AccountManager` the shop uses, and the packets `CSICSMenuListPacket`,
+//! `CSICSGoodsListPacket`, `CSICSBuyGoodPacket`, `CSICSMoneyRequestPacket`, `SCICSMenuListPacket`,
+//! `SCICSGoodListPacket`, `SCICSGoodDetailPacket`, `SCICSCheckTimePacket`, `SCICSBuyResultPacket`,
 //! `SCICSSyncGoodPacket`, `SCICSCashPointPacket`, `SCICSExchangeRatioPacket`,
-//! `SCPremiumServiceListPacket`, `SCPremiumPointChangedPacket`, `SCBmPointPacket`,
-//! `SCAccountWarnedPacket` (`SCUpdatePremiumPointPacket` lives in `packets::g2c`).
+//! `SCPremiumPointChangedPacket`, `SCBmPointPacket`, `SCAccountWarnedPacket`
+//! (`SCUpdatePremiumPointPacket` lives in `packets::g2c`). The premium service shop (WP-C) lives
+//! in [`super::premium_service`]; its types are re-exported below.
 //!
 //! The shop tables come from MySQL (`ics_skus`, `ics_shop_items`, `ics_menu`), loaded in
 //! `System::start`. Account values and the sales audit go through [`CashShopDb`] (MySQL by
@@ -30,7 +29,7 @@ use crate::db::{self, AccountDetails};
 use crate::error::Result;
 use crate::models::container::slot_type;
 use crate::models::item::Item;
-use crate::models::item_task::task_type;
+use crate::models::item_task::{task_type, ItemTask};
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::{ClientPacket, PacketRegistry};
@@ -168,35 +167,12 @@ pub struct AuditIcsSale {
     pub description: String,
 }
 
-/// `PremiumDetail`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PremiumDetail {
-    pub c_id: i32,
-    pub c_name: String,
-    pub p_id: u16,
-    pub is_sell: u8,
-    pub is_hidden: u8,
-    pub p_time: i32,
-    pub p_type: u8,
-    pub price: i32,
-    pub id: u32,
-    pub b_count: i32,
-}
-
-impl Marshal for PremiumDetail {
-    fn write(&self, s: &mut PacketStream) {
-        s.write_i32(self.c_id)
-            .write_str(&self.c_name)
-            .write_u16(self.p_id)
-            .write_u8(self.is_sell)
-            .write_u8(self.is_hidden)
-            .write_i32(self.p_time)
-            .write_u8(self.p_type)
-            .write_i32(self.price)
-            .write_u32(self.id)
-            .write_i32(self.b_count);
-    }
-}
+// The premium shop moved to `systems::economy::premium_service` (WP-C). The old paths stay
+// available for callers of the cash shop module.
+pub use super::premium_service::{
+    CSPremiumServiceBuyPacket, CSPremiumServiceListPacket, CSPremiumServiceMsgPacket,
+    PremiumDetail, SCPremiumServiceListPacket,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Game data: item names (`LocalizationManager.Get("items", "name", id)`)
@@ -896,6 +872,40 @@ fn fail(buyer: &PlayerRef, error: i16, buy_mode: u8, target_name: &str) {
     });
 }
 
+/// Check-and-take AA points under one character lock. The wallet lives in memory, so there is
+/// no SQL guard to lean on: the check and the debit are one critical section, which is what
+/// keeps two concurrent takes from overdrawing. A short purse sends `short_error` (the caller's
+/// shop error, not the wallet API's 707) and changes nothing.
+pub(crate) fn take_aa_points(
+    out: &mut inventory::Out<'_>,
+    player: &PlayerRef,
+    amount: i32,
+    task: u8,
+    short_error: i16,
+) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    {
+        let mut c = player.data();
+        if i64::from(amount) > c.aa_point {
+            drop(c);
+            inventory::send_error_message_to(out, player, short_error);
+            return false;
+        }
+        c.aa_point -= i64::from(amount);
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks: vec![ItemTask::AaPointUpdate(-amount)],
+            force_remove: Vec::new(),
+        },
+    );
+    true
+}
+
 /// `DateTime.UtcNow`.
 fn utc_now() -> NaiveDateTime {
     Utc::now().naive_utc()
@@ -912,7 +922,7 @@ pub async fn execute_buy(
     let mgr = manager(server);
     let _purchase = mgr.purchases.lock().await;
     let store = mgr.store();
-    let (buyer_name, buyer_id, buyer_account, buyer_level, buyer_money) = {
+    let (buyer_name, buyer_id, buyer_account, buyer_level, buyer_money, buyer_aa_point) = {
         let c = buyer.data();
         (
             c.unit.name.clone(),
@@ -920,6 +930,7 @@ pub async fn execute_buy(
             c.account_id,
             c.unit.level,
             c.money,
+            c.aa_point,
         )
     };
     let (target_name, target_id, target_account) = {
@@ -941,16 +952,6 @@ pub async fn execute_buy(
     let mut costs = [0u32; currency::MAX as usize];
     let mut quantities = HashMap::<u32, u32>::new();
     for sku in cart {
-        // The 1.2 AA-point wallet is not implemented. It is distinct from bank money2.
-        if sku.currency == currency::AA_POINTS {
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL_AA_POINT,
-                buy_mode,
-                &target_name,
-            );
-            return;
-        }
         if sku.item_count == 0
             || sku.item_count > i32::MAX as u32
             || sku.bonus_item_count > i32::MAX as u32
@@ -1031,6 +1032,17 @@ pub async fn execute_buy(
         fail(
             buyer,
             error_message::NOT_ENOUGH_COIN,
+            buy_mode,
+            &target_name,
+        );
+        return;
+    }
+    // Check AA Points. This snapshot keeps the shop's error (592) and refuses before anything
+    // is created; the guarded take in the transaction loop re-checks under the wallet lock.
+    if i64::from(costs[currency::AA_POINTS as usize]) > buyer_aa_point {
+        fail(
+            buyer,
+            error_message::INGAME_SHOP_NOT_ENOUGH_AA_POINT,
             buy_mode,
             &target_name,
         );
@@ -1232,6 +1244,16 @@ pub async fn execute_buy(
                         task_type::STORE_BUY,
                     )
                 }
+                currency::AA_POINTS => {
+                    let mut txn = ItemTxn::begin(server);
+                    take_aa_points(
+                        &mut txn.out(),
+                        buyer,
+                        price,
+                        task_type::BUY_AA_POINT,
+                        error_message::INGAME_SHOP_NOT_ENOUGH_AA_POINT,
+                    )
+                }
                 _ => false,
             }
         };
@@ -1239,7 +1261,11 @@ pub async fn execute_buy(
             for item in &items {
                 server.ids.item.release_id(item.id as u32);
             }
-            send_error(buyer, error_message::INGAME_SHOP_BUY_FAIL);
+            // The AA take already reported its own (shop) error; the legacy paths report the
+            // generic buy failure.
+            if sku.currency != currency::AA_POINTS {
+                send_error(buyer, error_message::INGAME_SHOP_BUY_FAIL);
+            }
             continue;
         }
 
@@ -1337,8 +1363,44 @@ pub async fn execute_buy(
             }
         };
         if !sent {
-            // Sending this mail should actually never be able to fail.
+            // The grant failed: no goods left the shop, so return the currency and the stock
+            // reserved above. The debit and the grant must roll back together (the AA wallet
+            // included), as the stock-update failure path already does.
+            refund_checkout_price(
+                server,
+                store.as_ref(),
+                buyer,
+                buyer_account,
+                sku.currency,
+                price,
+            )
+            .await;
+            if shop_item.remaining >= 0 {
+                let restored = {
+                    let mut st = mgr.state();
+                    st.shop_items.get_mut(&shop_item.shop_id).map(|si| {
+                        si.remaining += sku.item_count as i32;
+                        si.remaining
+                    })
+                };
+                if let Some(remaining) = restored {
+                    if !store
+                        .update_remaining_stock(server, shop_item.shop_id, remaining)
+                        .await
+                    {
+                        tracing::error!(
+                            "Cash shop could not restore stock for {} after a failed grant",
+                            shop_item.shop_id
+                        );
+                    }
+                    buyer.send(SCICSSyncGoodPacket {
+                        cash_shop_id: shop_item.shop_id as i32,
+                        remain_count: remaining,
+                    });
+                }
+            }
             send_error(target, error_message::INGAME_SHOP_BUY_FAIL);
+            continue;
         }
 
         entries_sold += 1;
@@ -1426,6 +1488,10 @@ async fn refund_checkout_price(
                 price,
                 task_type::STORE_BUY,
             )
+        }
+        currency::AA_POINTS => {
+            let mut txn = ItemTxn::begin(server);
+            inventory::add_aa_point(&mut txn.out(), buyer, price, task_type::BUY_AA_POINT)
         }
         _ => false,
     };
@@ -1679,27 +1745,6 @@ impl Marshal for SCICSExchangeRatioPacket {
     }
 }
 
-/// `SCPremiumServiceListPacket(isEnd, size, detail, exchangeRatio)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SCPremiumServiceListPacket {
-    pub is_end: bool,
-    pub size: u8,
-    pub detail: PremiumDetail,
-    pub exchange_ratio: i32,
-}
-packet_def!(
-    SCPremiumServiceListPacket,
-    level = LEVEL_PLAIN,
-    opcode = sc::SCPremiumServiceListPacket
-);
-impl Marshal for SCPremiumServiceListPacket {
-    fn write(&self, s: &mut PacketStream) {
-        s.write_bool(self.is_end).write_u8(self.size);
-        self.detail.write(s);
-        s.write_i32(self.exchange_ratio);
-    }
-}
-
 /// `SCPremiumPointChangedPacket(objId, point)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCPremiumPointChangedPacket {
@@ -1759,9 +1804,8 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSICSGoodsListPacket>(LEVEL_PLAIN, cs::CSICSGoodsListPacket);
     reg.register::<CSICSBuyGoodPacket>(LEVEL_PLAIN, cs::CSICSBuyGoodPacket);
     reg.register::<CSICSMoneyRequestPacket>(LEVEL_PLAIN, cs::CSICSMoneyRequestPacket);
-    reg.register::<CSPremiumServiceBuyPacket>(LEVEL_PLAIN, cs::CSPremiumServiceBuyPacket);
-    reg.register::<CSPremiumServiceListPacket>(LEVEL_PLAIN, cs::CSPremiumServiceListPacket);
-    reg.register::<CSPremiumServiceMsgPacket>(LEVEL_PLAIN, cs::CSPremiumServiceMsgPacket);
+    reg.register::<CSICSBuyAAPointPacket>(LEVEL_PLAIN, cs::CSICSBuyAAPointPacket);
+    super::premium_service::register(reg);
 }
 
 /// `CSICSMenuListPacket` (empty body).
@@ -1937,82 +1981,83 @@ impl ClientPacket for CSICSMoneyRequestPacket {
             conn.send(&SCICSCashPointPacket {
                 point: points.credits,
             });
+            // The shop open sends the cash balance; the AA exchange dialog needs the ratio.
+            conn.send(&SCICSExchangeRatioPacket {
+                exchange_ratio: server.config.ics.aa_point_exchange_ratio,
+            });
             Ok(())
         })
     }
 }
 
-/// `CSPremiumServiceBuyPacket` (logged only).
+/// `CSICSBuyAAPointPacket` (`i32 cashMoney`; client writer `FUN_397b17f0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSPremiumServiceBuyPacket {
-    pub c_id: i32,
+pub struct CSICSBuyAAPointPacket {
+    pub cash_money: i32,
 }
 
-impl CSPremiumServiceBuyPacket {
-    fn read_body(s: &mut PacketStream) -> Result<Self> {
+/// AA points for a cash purchase: both values must be positive and the `i64` product must fit
+/// the `i32` of the item task. `None` means "refuse, nothing debited".
+pub(crate) fn aa_points_for_cash(cash_money: i32, ratio: i32) -> Option<i32> {
+    if cash_money <= 0 || ratio <= 0 {
+        return None;
+    }
+    let aa_points = i64::from(cash_money).checked_mul(i64::from(ratio))?;
+    i32::try_from(aa_points).ok()
+}
+
+impl ClientPacket for CSICSBuyAAPointPacket {
+    const NAME: &'static str = "CSICSBuyAAPointPacket";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
         Ok(Self {
-            c_id: s.read_i32()?,
+            cash_money: s.read_i32()?,
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::debug!("PremiumServiceBuy, CId: {}", self.c_id);
-    }
-}
-sync_client_packet!(CSPremiumServiceBuyPacket);
-
-/// The fixed entry `CSPremiumServiceListPacket` answers with.
-pub fn premium_detail() -> PremiumDetail {
-    PremiumDetail {
-        c_id: 8000001,
-        c_name: "Премиум-подпиcка (30 дней)".into(),
-        p_id: 1,
-        p_time: 720, // hours
-        price: 300,
-        ..PremiumDetail::default()
-    }
-}
-
-/// `CSPremiumServiceListPacket` (empty body).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSPremiumServiceListPacket;
-
-impl CSPremiumServiceListPacket {
-    fn read_body(_s: &mut PacketStream) -> Result<Self> {
-        Ok(Self)
-    }
-
-    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!("PremiumServiceList");
-        conn.send(&SCPremiumServiceListPacket {
-            is_end: true,
-            size: 1,
-            detail: premium_detail(),
-            exchange_ratio: 0,
-        });
-    }
-}
-sync_client_packet!(CSPremiumServiceListPacket);
-
-/// `CSPremiumServiceMsgPacket`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSPremiumServiceMsgPacket {
-    pub stage: i32,
-}
-
-impl CSPremiumServiceMsgPacket {
-    fn read_body(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            stage: s.read_i32()?,
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let Some(buyer) = active(conn) else {
+                return Ok(());
+            };
+            let ratio = server.config.ics.aa_point_exchange_ratio;
+            // The reply form is INFERRED (no 1.2 capture): a refused exchange uses the shop's
+            // AA failure and leaves both balances untouched.
+            let Some(aa_points) = aa_points_for_cash(self.cash_money, ratio) else {
+                send_error(&buyer, error_message::INGAME_SHOP_BUY_FAIL_AA_POINT);
+                return Ok(());
+            };
+            let account_id = conn.account_id();
+            let store = manager(server).store();
+            // Guarded SQL debit (`credits >= ?` in the UPDATE), the same check-and-take the
+            // credit checkout uses.
+            if !store
+                .add_credits(server, account_id, -self.cash_money)
+                .await
+            {
+                send_error(&buyer, error_message::INGAME_SHOP_NOT_ENOUGH_AA_CASH);
+                return Ok(());
+            }
+            let mut wallet_out = inventory::Out::Direct(server);
+            if !inventory::add_aa_point(&mut wallet_out, &buyer, aa_points, task_type::BUY_AA_POINT)
+            {
+                // `aa_points` is positive, so this cannot fail; return the cash if it does.
+                store.add_credits(server, account_id, self.cash_money).await;
+                send_error(&buyer, error_message::INGAME_SHOP_BUY_FAIL_AA_POINT);
+                return Ok(());
+            }
+            let after = store.account_details(server, account_id).await;
+            buyer.send(SCICSCashPointPacket {
+                point: after.credits,
+            });
+            buyer.send(SCICSExchangeRatioPacket {
+                exchange_ratio: ratio,
+            });
+            Ok(())
         })
     }
-
-    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
-        tracing::info!("PremiumServieceMsg, stage {}", self.stage);
-        conn.send(&SCAccountWarnedPacket {
-            source: 2,
-            msg: "Premium ...".into(),
-        });
-    }
 }
-sync_client_packet!(CSPremiumServiceMsgPacket);

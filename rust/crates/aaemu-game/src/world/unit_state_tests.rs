@@ -583,3 +583,97 @@ async fn real_compact_db_npc_unit_state_faction() {
         assert_eq!(npc_unit_state_faction(&p.body), faction_id);
     }
 }
+
+/// `SCEditCharacterResponsePacket` (0x03a): the create response's character-info block
+/// (`Character.Write`, 1.2 client serializer `FUN_397ab170` -> `FUN_39620030`). The body is
+/// spelled out field by field so an accidental reorder or width change fails here.
+#[test]
+fn edit_character_response_is_the_create_block_with_opcode_0x03a() {
+    use crate::models::character::Character;
+    use crate::net::packet::{encode, LEVEL_PLAIN};
+    use crate::opcodes::sc;
+
+    let mut c = Character::new(0x1122_3344, 7, UnitCustomModelParams::default());
+    c.unit.name = "Ab".into();
+    c.race = 1;
+    c.gender = 2;
+    c.unit.level = 7;
+    c.unit.hp = 100;
+    c.unit.mp = 50;
+    c.unit.transform.zone_id = 3;
+    c.unit.faction_id = 4;
+    c.ability1 = 1;
+    c.ability2 = 11;
+    c.ability3 = 11;
+
+    let mut expected = PacketStream::new();
+    expected
+        .write_u32(0x1122_3344) // character id
+        .write_str("Ab") // name
+        .write_u8(1) // race
+        .write_u8(2) // gender
+        .write_u8(7) // level
+        .write_i32(100) // hp
+        .write_i32(50) // mp
+        .write_u32(3) // zone
+        .write_u32(4) // faction
+        .write_str("") // faction name
+        .write_u32(0) // expedition
+        .write_u32(0); // family
+    for _ in 0..28 {
+        expected.write_i32(0); // equipment slots
+    }
+    expected.write_u8(1).write_u8(11).write_u8(11); // abilities
+    expected
+        .write_i64(0) // x
+        .write_i64(0) // y
+        .write_f32(0.0); // z
+    UnitCustomModelParams::default().write(&mut expected);
+    expected
+        .write_i16(0) // laborPower
+        .write_i64(0) // lastLaborPowerModified
+        .write_i16(0) // deadCount
+        .write_i64(0) // deadTime
+        .write_i32(0) // rezWaitDuration
+        .write_i64(0) // rezTime
+        .write_i32(0) // rezPenaltyDuration
+        .write_i64(0) // lastWorldLeaveTime
+        .write_i64(0) // moneyAmount
+        .write_i64(0) // moneyAmount
+        .write_i16(0) // crimePoint
+        .write_i32(0) // crimeRecord
+        .write_i16(0) // crimeScore
+        .write_i64(0) // deleteRequestedTime
+        .write_i64(0) // transferRequestedTime
+        .write_i64(0) // deleteDelay
+        .write_i32(0) // consumedLp
+        .write_i64(0) // bmPoint
+        .write_i64(0) // moneyAmount
+        .write_i64(0) // moneyAmount
+        .write_bool(false) // autoUseAApoint
+        .write_i32(0) // prevPoint
+        .write_i32(0) // point
+        .write_i32(0) // ?
+        .write_i64(0) // updated
+        .write_u8(0); // forceNameChange
+
+    let mut frame = PacketStream::new();
+    frame
+        .write_u8(0xDD)
+        .write_u8(LEVEL_PLAIN)
+        .write_u8(0)
+        .write_u8(0)
+        .write_u16(sc::SCEditCharacterResponsePacket)
+        .write_raw(expected.as_bytes());
+    let edit = encode(&edit_character_response(&c));
+    assert_eq!(edit, frame.into_bytes());
+
+    // The create response reuses the block; only the leading opcode differs.
+    let create = encode(&create_character_response(&c));
+    assert_eq!(edit[..4], create[..4]);
+    assert_eq!(edit[6..], create[6..]);
+    assert_eq!(
+        &edit[4..6],
+        &sc::SCEditCharacterResponsePacket.to_le_bytes()
+    );
+}

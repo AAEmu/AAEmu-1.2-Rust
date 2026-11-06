@@ -6,9 +6,11 @@
 //! `ExpeditionManager.Load` throw on `new Regex(null)`); the Rust defaults are the values of the
 //! shipped `Expedition.json` so tests and minimal configurations work.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
-use crate::config::lenient;
+use crate::config::{lenient, lenient_map};
 use crate::systems::social::expedition::ExpeditionRolePolicy;
 
 /// `WorldSpawnPosition` (the members the configuration uses).
@@ -252,6 +254,23 @@ pub struct ChatConfig {
     /// `SCChatSpamDelayPacket.detectConfig` (retail contents unknown).
     #[serde(rename = "detectconfig")]
     pub detect_config: String,
+    /// Answer a channel-bound chat failure with `SCChatFailedPacket(error, channel name)`
+    /// instead of the `SCErrorMsgPacket` toast.
+    ///
+    /// Default `false`: which failures retail 1.2 answered with `SCChatFailed` is not captured
+    /// (`CHAT-FAILED-1`, capture-pending), so the default keeps the previous frames.
+    #[serde(rename = "chatfailedpacket", deserialize_with = "lenient")]
+    pub chat_failed_packet: bool,
+    /// Minimum character level for each chat type (the 1.2 `ChatType`, e.g. `"0"` Say, `"1"`
+    /// Shout, `"-3"` Whisper); a missing entry or `0` means no gate (the previous behaviour).
+    ///
+    /// A sender below the configured level is refused with
+    /// `CHAT_CANNOT_SEND_SINCE_LEVEL_LOW` 786 and the message is not routed. Characters with
+    /// `access_level >= 100` (the same GM threshold as the closed-zone bypass) are exempt.
+    /// Retail's per-type levels are not evidenced, so the shipped `Chat.json` leaves the map
+    /// empty (capture-pending `CHAT-LEVEL-1`).
+    #[serde(rename = "minlevelbychattype", deserialize_with = "lenient_map")]
+    pub min_level_by_chat_type: BTreeMap<i16, u8>,
 }
 
 impl Default for ChatConfig {
@@ -265,6 +284,8 @@ impl Default for ChatConfig {
             chat_group_delays_ms: vec![0; 15],
             apply_config: String::new(),
             detect_config: String::new(),
+            chat_failed_packet: false,
+            min_level_by_chat_type: BTreeMap::new(),
         }
     }
 }
@@ -281,6 +302,14 @@ impl ChatConfig {
     /// Delay of a group; missing entries mean "no limit".
     pub fn delay_ms(&self, group: usize) -> u32 {
         self.chat_group_delays_ms.get(group).copied().unwrap_or(0)
+    }
+
+    /// `MinLevelByChatType` for a chat type; missing = `0` = no gate.
+    pub fn min_level(&self, chat_type: i16) -> u8 {
+        self.min_level_by_chat_type
+            .get(&chat_type)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The 15 group bytes written by `SCChatSpamDelayPacket`.
@@ -302,6 +331,19 @@ impl ChatConfig {
     }
 }
 
+/// The Rust-only `Social` section (`Configurations/Social.json`): feature switches for social
+/// content whose 1.2 behaviour is not fully evidenced yet.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SocialConfig {
+    /// Fill the `CSNaviOpenBounty` answer from the bounty ledger instead of the empty list.
+    ///
+    /// Default `false`: the C# comment records that a filled board broke the 1.2 client Lua and
+    /// the cause was never confirmed on the original client (`PORTING.md`, BOUNTY-board).
+    #[serde(rename = "bountyboard", deserialize_with = "lenient")]
+    pub bounty_board: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
@@ -314,6 +356,7 @@ mod tests {
             "Configurations/Expedition.json",
             "Configurations/Justice.json",
             "Configurations/Chat.json",
+            "Configurations/Social.json",
         ] {
             let text = std::fs::read_to_string(root.join(f)).expect("config file");
             let v: serde_json::Value = serde_json::from_str(&crate::config::relax_json(
@@ -356,6 +399,25 @@ mod tests {
         // The shipped limits are off: the retail delays are not evidenced (CHAT-SPAM-1).
         assert!(c.chat_group_delays_ms.iter().all(|&ms| ms == 0));
         assert!(c.packet_delays().iter().all(|&s| s == 0.0));
+        // Retail's SCChatFailed failures are not captured (CHAT-FAILED-1): the toast stays.
+        assert!(!c.chat_failed_packet);
+        // Retail's per-type levels are not evidenced (CHAT-LEVEL-1): no gate.
+        assert!(c.min_level_by_chat_type.is_empty());
+        assert_eq!(c.min_level(1), 0);
+        // The bounty board stays off until an original-client run passes (BOUNTY-board).
+        assert!(!cfg.social.bounty_board);
+    }
+
+    #[test]
+    fn min_level_map_binds_numeric_keys_and_string_values() {
+        let cfg: super::ChatConfig = serde_json::from_value(serde_json::json!({
+            "minlevelbychattype": { "1": 15, "-3": "20", "0": 0 }
+        }))
+        .expect("bind");
+        assert_eq!(cfg.min_level(1), 15);
+        assert_eq!(cfg.min_level(-3), 20);
+        assert_eq!(cfg.min_level(0), 0);
+        assert_eq!(cfg.min_level(7), 0);
     }
 
     #[test]

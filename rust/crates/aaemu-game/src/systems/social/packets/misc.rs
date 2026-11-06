@@ -229,6 +229,8 @@ cs_packet!(
 
 sc_packet!(
     /// `SCCharacterRenamedPacket(characterId, oldName, newName)` (not sent by the 1.2 C#).
+    /// Client serializer `FUN_397b7820`; handler `FUN_391df6e0`. Sent by
+    /// `systems::services::character_rename` on a GM rename.
     SCCharacterRenamedPacket { character_id: u32, old_name: String, new_name: String } |self, s| {
         s.write_u32(self.character_id)
             .write_str(&self.old_name)
@@ -381,6 +383,45 @@ impl SCAchievementResetedPacket {
     }
 }
 
+/// The `SCInvitationCanceled` kinds, as mapped by the 1.2 client `FUN_39182930` (RE-UI1).
+///
+/// EVIDENCED (client decompile): `kind -> popup type` is `1,2 -> 2`, `3 -> 4`, `4 -> 3`,
+/// `5 -> 9`, `6 -> 6`, `7 -> 0x29`, and the handler closes **every** popup of that type (there
+/// is no invitation id on the wire). The invitation each popup type belongs to follows from
+/// the handler that creates it: type 2 = `SCAskToJoinTeam` / `SCAskToJoinTeamArea`, type 3 =
+/// `SCExpeditionInvitation`, type 4 = `SCFamilyInvitation`, type 6 = `SCInviteJury`, type 9 =
+/// `SCDuelRequested`, type 0x29 = `SCFactionImmigrateInvite`.
+///
+/// The 1-vs-2 split between the named and the area team invitation is UNKNOWN: both kinds close
+/// the same popup type, so the client cannot tell them apart. This server sends kind 1 for a
+/// named and kind 2 for an area invitation (INFERRED).
+pub mod invitation_canceled_kind {
+    /// A named team / raid invitation (`SCAskToJoinTeam`).
+    pub const TEAM: u8 = 1;
+    /// An area team invitation (`SCAskToJoinTeamArea`); INFERRED, see the module docs.
+    pub const TEAM_AREA: u8 = 2;
+    /// A family invitation (`SCFamilyInvitation`). Never sent: 1.2 has no server timeout and
+    /// the trigger is unknown.
+    pub const FAMILY: u8 = 3;
+    /// An expedition (guild) invitation (`SCExpeditionInvitation`).
+    pub const EXPEDITION: u8 = 4;
+    /// A duel challenge (`SCDuelRequested`).
+    pub const DUEL: u8 = 5;
+    /// A jury / trial invitation (`SCInviteJury`). Never sent: the trigger is unknown.
+    pub const JURY: u8 = 6;
+    /// A nation (faction) immigrate invitation (`SCFactionImmigrateInvite`).
+    pub const NATION: u8 = 7;
+}
+
+sc_packet!(
+    /// `SCInvitationCanceled(kind)`: closes the invitee's popup of the popup type the kind maps
+    /// to. Reader `FUN_397b8490` takes exactly one `u8`; handler `FUN_391d6930` ->
+    /// `FUN_39182930`. See [`invitation_canceled_kind`] for the mapping and the evidence.
+    SCInvitationCanceledPacket { kind: u8 } |self, s| {
+        s.write_u8(self.kind);
+    }
+);
+
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSUpdateDominionTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateDominionTaxRatePacket)
         .register::<CSUpdateNationalTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateNationalTaxRatePacket);
@@ -398,6 +439,28 @@ mod tests {
 
     fn t(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(secs, 0).unwrap()
+    }
+
+    /// `SCInvitationCanceled`: one `u8` kind, matching the client reader `FUN_397b8490`.
+    #[test]
+    fn invitation_canceled_is_one_kind_byte() {
+        assert_eq!(
+            SCInvitationCanceledPacket::OPCODE,
+            sc::SCInvitationCanceledPacket
+        );
+        for kind in [
+            invitation_canceled_kind::TEAM,
+            invitation_canceled_kind::TEAM_AREA,
+            invitation_canceled_kind::EXPEDITION,
+            invitation_canceled_kind::DUEL,
+            invitation_canceled_kind::NATION,
+        ] {
+            assert_eq!(body(&SCInvitationCanceledPacket { kind }), vec![kind]);
+        }
+        // The client reader consumes exactly one byte (slot 0x44).
+        let mut s = PacketStream::from_bytes(vec![invitation_canceled_kind::EXPEDITION]);
+        assert_eq!(s.read_u8().unwrap(), invitation_canceled_kind::EXPEDITION);
+        assert_eq!(s.remaining(), 0);
     }
 
     #[test]

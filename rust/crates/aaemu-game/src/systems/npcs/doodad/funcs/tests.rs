@@ -241,6 +241,164 @@ async fn to_next_phase_funcs_and_stubs() {
 }
 
 #[tokio::test]
+async fn gather_funcs_advance_only_a_player_with_an_authored_next_phase() {
+    use crate::models::npc::Npc;
+    use crate::systems::npcs::doodad::{phase, runtime::DoodadCtx};
+
+    const SKILL: u32 = 4242;
+
+    let kinds = gather_kinds();
+
+    // A player advances every gather kind to its authored next phase.
+    let fx = fixture_with(Rec::default(), gather_chain_data(&kinds, 5));
+    for (index, template) in kinds.iter().enumerate() {
+        let group = 100 + index as u32;
+        fx.doodad.data().func_group_id = group;
+        let caster = fx.caster();
+        let ctx = DoodadCtx::new(
+            &fx.server,
+            fx.server.world.world(0).unwrap(),
+            fx.doodad.clone(),
+        );
+        phase::use_doodad(&ctx, Some(&caster), SKILL, 0);
+        assert_eq!(
+            fx.doodad.data().func_group_id,
+            5,
+            "{} must advance",
+            template.func_type()
+        );
+    }
+
+    // No authored next phase (`NULL`/`-1`/0): the phase stays and the doodad is not
+    // despawned (a `-1` row must not take the `DoFunc` despawn path).
+    let fx = fixture_with(Rec::default(), gather_chain_data(&kinds, -1));
+    for (index, template) in kinds.iter().enumerate() {
+        let group = 100 + index as u32;
+        fx.doodad.data().func_group_id = group;
+        let caster = fx.caster();
+        let ctx = DoodadCtx::new(
+            &fx.server,
+            fx.server.world.world(0).unwrap(),
+            fx.doodad.clone(),
+        );
+        phase::use_doodad(&ctx, Some(&caster), SKILL, 0);
+        assert_eq!(
+            fx.doodad.data().func_group_id,
+            group,
+            "{} must stay without a next phase",
+            template.func_type()
+        );
+        assert!(
+            !fx.doodad.data().phase.deleted,
+            "{} must not despawn a `-1` row",
+            template.func_type()
+        );
+    }
+
+    // A non-player caster does not advance an authored next phase.
+    let fx = fixture_with(Rec::default(), gather_chain_data(&kinds, 5));
+    let npc = Entity::new(0x300, Npc::new(1));
+    fx.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&npc, &fx.server.view_ctx());
+    let caster = WorldObject::from(&npc);
+    for (index, template) in kinds.iter().enumerate() {
+        let group = 100 + index as u32;
+        fx.doodad.data().func_group_id = group;
+        let ctx = DoodadCtx::new(
+            &fx.server,
+            fx.server.world.world(0).unwrap(),
+            fx.doodad.clone(),
+        );
+        phase::use_doodad(&ctx, Some(&caster), SKILL, 0);
+        assert_eq!(
+            fx.doodad.data().func_group_id,
+            group,
+            "{} must not advance for a non-player caster",
+            template.func_type()
+        );
+    }
+}
+
+/// Every gather / collect kind of WP-K1.
+fn gather_kinds() -> Vec<FuncTemplate> {
+    vec![
+        FuncTemplate::Butcher(DoodadFuncButcher::default()),
+        FuncTemplate::Catch(DoodadFuncCatch::default()),
+        FuncTemplate::CerealHarvest(DoodadFuncCerealHarvest::default()),
+        FuncTemplate::CropHarvest(DoodadFuncCropHarvest::default()),
+        FuncTemplate::CrystalCollect(DoodadFuncCrystalCollect::default()),
+        FuncTemplate::DairyCollect(DoodadFuncDairyCollect::default()),
+        FuncTemplate::Dig(DoodadFuncDig::default()),
+        FuncTemplate::DigTerrain(DoodadFuncDigTerrain::default()),
+        FuncTemplate::DyeingredientCollect(DoodadFuncDyeingredientCollect::default()),
+        FuncTemplate::Feed(DoodadFuncFeed::default()),
+        FuncTemplate::FiberCollect(DoodadFuncFiberCollect::default()),
+        FuncTemplate::FruitPick(DoodadFuncFruitPick::default()),
+        FuncTemplate::GassExtract(DoodadFuncGassExtract::default()),
+        FuncTemplate::MachinePartsCollect(DoodadFuncMachinePartsCollect::default()),
+        FuncTemplate::MedicalingredientMine(DoodadFuncMedicalingredientMine::default()),
+        FuncTemplate::Mow(DoodadFuncMow::default()),
+        FuncTemplate::PlantCollect(DoodadFuncPlantCollect::default()),
+        FuncTemplate::SeedCollect(DoodadFuncSeedCollect::default()),
+        FuncTemplate::SkinOff(DoodadFuncSkinOff::default()),
+        FuncTemplate::SoilCollect(DoodadFuncSoilCollect::default()),
+        FuncTemplate::SpiceCollect(DoodadFuncSpiceCollect::default()),
+        FuncTemplate::TreeByProductsCollect(DoodadFuncTreeByProductsCollect::default()),
+    ]
+}
+
+/// A `DoodadData` with one group per kind (group `100 + index`), each holding that func with
+/// `next_phase` and no phase funcs. The fixture doodad's template `1000` gets a normal group so
+/// `HasOnlyGroupKindStart` does not mask a wrong `-1` despawn.
+fn gather_chain_data(kinds: &[FuncTemplate], next_phase: i32) -> GameData {
+    let mut data = GameData::empty();
+    let doodads = &mut data.systems.npcs.doodad;
+    let normal = DoodadFuncGroups {
+        id: 900,
+        almighty: 1000,
+        group_kind_id: 2,
+        ..DoodadFuncGroups::default()
+    };
+    doodads
+        .all_func_groups_index
+        .insert(normal.id, doodads.all_func_groups.len());
+    doodads.all_func_groups.push(normal.clone());
+    let mut fixture = DoodadTemplate {
+        id: 1000,
+        ..DoodadTemplate::default()
+    };
+    fixture.func_groups.push(normal);
+    doodads.template_order.push(fixture.id);
+    doodads.templates.insert(fixture.id, fixture);
+    for (index, template) in kinds.iter().cloned().enumerate() {
+        let (class, id) = (template.func_type(), template.id());
+        doodads
+            .func_templates
+            .entry(class)
+            .or_default()
+            .insert(id, template);
+        let func = DoodadFunc {
+            group_id: 100 + index as u32,
+            func_id: id,
+            func_key: index as u32 + 1,
+            func_type: class.into(),
+            next_phase,
+            ..DoodadFunc::default()
+        };
+        doodads.funcs_by_id.insert(func.func_key, func.clone());
+        doodads
+            .funcs_by_groups
+            .entry(func.group_id)
+            .or_default()
+            .push(func);
+    }
+    data
+}
+
+#[tokio::test]
 async fn open_farm_info_sends_one_sign_position_to_the_interacting_player() {
     let mut data = GameData::empty();
     data.systems.npcs.public_farm.common_farms.push(

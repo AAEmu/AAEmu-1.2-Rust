@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use aaemu_commons::PacketStream;
 
+use crate::data::character_templates::CharacterTemplate;
 use crate::data::skills::{BuffKind, BuffTemplate};
 use crate::data::world_data::SystemFaction;
 use crate::data::GameData;
@@ -86,6 +87,16 @@ fn justice_server_with(configure: impl FnOnce(&mut JusticeConfig)) -> Arc<GameSe
             ..SystemFaction::default()
         });
     }
+    data.characters.templates.insert(
+        0x11,
+        CharacterTemplate {
+            race: 1,
+            gender: 1,
+            creatable: true,
+            faction_id: 101,
+            ..Default::default()
+        },
+    );
     let s = test_server_with(data);
     let mut justice = JusticeConfig {
         court_rooms: vec![CourtRoomConfig {
@@ -180,6 +191,18 @@ fn trial_frames(client: &mut TestClient) -> Vec<(u16, Vec<u8>)> {
         .collect()
 }
 
+/// Waits for a spawned faction-change side effect (the guild removal of
+/// `set_faction_persistent` runs on the runtime; a test must let it finish before checking).
+async fn wait_for(what: &str, cond: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
 fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
     frames
         .iter()
@@ -225,6 +248,36 @@ fn states(frames: &[(u16, Vec<u8>)]) -> Vec<(u8, i32)> {
         .iter()
         .map(|b| (b[4], i32::from_le_bytes([b[5], b[6], b[7], b[8]])))
         .collect()
+}
+
+/// Everything `CSJurySummoned` must leave untouched.
+type SeatState = (
+    u8,
+    i64,
+    Option<u32>,
+    u32,
+    Vec<(i32, Option<u32>, bool, i32)>,
+);
+
+fn trial_seat_state(server: &GameServer, tid: u32) -> SeatState {
+    let t = server.systems.social.trials.get_trial(tid).expect("trial");
+    (
+        t.step,
+        t.current_step_end_ms,
+        t.court_room,
+        t.defendant_id,
+        t.jury
+            .iter()
+            .map(|(seat, j)| {
+                (
+                    *seat,
+                    j.jury_member.as_ref().map(|m| m.character_id),
+                    j.confirm_testimony,
+                    j.selected_sentence,
+                )
+            })
+            .collect(),
+    )
 }
 
 #[tokio::test]
@@ -962,6 +1015,7 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
     assert_eq!(
         ops(&f),
         vec![
+            sc::SCTrialCanceledPacket,
             sc::SCChangeTrialStatePacket,
             sc::SCLeavedChatChannelPacket,
             sc::SCCrimeChangedPacket,
@@ -969,7 +1023,8 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
             sc::SCRulingClosedPacket,
         ]
     );
-    assert_eq!(&f[0].1[..9], state_bytes(tid, trial_step::END_TRIAL, 0));
+    assert_eq!(f[0].1, body(&SCTrialCanceledPacket { trial_id: tid }));
+    assert_eq!(&f[1].1[..9], state_bytes(tid, trial_step::END_TRIAL, 0));
     // No evidence: 0 minutes -> the 10 s minimum.
     assert_eq!(
         d.p.data()
@@ -981,6 +1036,151 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
         10_000
     );
     assert!(trials.trial_ids().is_empty());
+}
+
+#[tokio::test]
+async fn defendant_cancel_sends_trial_canceled_before_ruling_closed() {
+    let (server, mut d, mut jury, tid) = summoned_trial(1).await;
+    send(&server, &mut d, cs::CSCancelTrialPacket, |s| {
+        s.write_u32(tid);
+    })
+    .await;
+    let canceled = body(&SCTrialCanceledPacket { trial_id: tid });
+    let mut defendant_frames = trial_frames(&mut d.client);
+    assert_eq!(defendant_frames[0].0, sc::SCTrialCanceledPacket);
+    assert_eq!(defendant_frames[0].1, canceled);
+    assert_eq!(
+        server.systems.social.trials.get_trial(tid).unwrap().step,
+        trial_step::PLEAD_GUILTY
+    );
+    let mut juror_frames = trial_frames(&mut jury[0].client);
+    assert_eq!(
+        find(&juror_frames, sc::SCTrialCanceledPacket),
+        vec![canceled.clone()]
+    );
+
+    // The ruling closes on the next tick, after the cancellation.
+    server
+        .systems
+        .social
+        .trials
+        .update_tick(&server, util::now_ms() + 1)
+        .await;
+    defendant_frames.extend(trial_frames(&mut d.client));
+    juror_frames.extend(trial_frames(&mut jury[0].client));
+    for frames in [&defendant_frames, &juror_frames] {
+        let canceled_at = frames
+            .iter()
+            .position(|f| f.0 == sc::SCTrialCanceledPacket)
+            .expect("SCTrialCanceled");
+        let closed_at = frames
+            .iter()
+            .position(|f| f.0 == sc::SCRulingClosedPacket)
+            .expect("SCRulingClosed");
+        assert!(canceled_at < closed_at);
+    }
+}
+
+#[tokio::test]
+async fn verdict_count_asks_only_the_jurors_who_still_have_to_vote() {
+    let (server, mut d, mut jury, tid) = summoned_trial(2).await;
+    advance_to_verdict(&server, &mut d, &mut jury, tid).await;
+
+    // The verdict step starts with no votes: every seated juror gets 0 of 2.
+    let start = body(&SCChangeJuryVerdictCountPacket { count: 0, total: 2 });
+    for juror in &mut jury {
+        assert_eq!(
+            find(
+                &trial_frames(&mut juror.client),
+                sc::SCChangeJuryVerdictCountPacket
+            ),
+            vec![start.clone()]
+        );
+    }
+    assert!(find(
+        &trial_frames(&mut d.client),
+        sc::SCChangeJuryVerdictCountPacket
+    )
+    .is_empty());
+
+    // The first vote updates the second juror only; the voter keeps getting SCRulingStatus.
+    send(&server, &mut jury[0], cs::CSJuryVerdictPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_u8(5);
+    })
+    .await;
+    let voted = trial_frames(&mut jury[0].client);
+    assert!(find(&voted, sc::SCChangeJuryVerdictCountPacket).is_empty());
+    assert_eq!(
+        find(&voted, sc::SCRulingStatusPacket),
+        vec![body(&SCRulingStatusPacket {
+            count: 1,
+            total: 2,
+            sentence_type: 0,
+            sentence_time: 0,
+        })]
+    );
+    let waiting = trial_frames(&mut jury[1].client);
+    assert_eq!(
+        find(&waiting, sc::SCChangeJuryVerdictCountPacket),
+        vec![body(&SCChangeJuryVerdictCountPacket { count: 1, total: 2 })]
+    );
+    assert!(find(&waiting, sc::SCRulingStatusPacket).is_empty());
+    assert!(find(
+        &trial_frames(&mut d.client),
+        sc::SCChangeJuryVerdictCountPacket
+    )
+    .is_empty());
+
+    // With every seated juror voted there is nobody left to ask.
+    send(&server, &mut jury[1], cs::CSJuryVerdictPacket, |s| {
+        s.write_u32(tid).write_i32(2).write_u8(5);
+    })
+    .await;
+    for juror in &mut jury {
+        assert!(find(
+            &trial_frames(&mut juror.client),
+            sc::SCChangeJuryVerdictCountPacket
+        )
+        .is_empty());
+    }
+    assert!(find(
+        &trial_frames(&mut d.client),
+        sc::SCChangeJuryVerdictCountPacket
+    )
+    .is_empty());
+}
+
+#[tokio::test]
+async fn jury_summoned_requires_the_seat_holder_and_changes_nothing() {
+    let (server, mut d, mut jury, tid) = summoned_trial(2).await;
+    let trials = &server.systems.social.trials;
+    assert!(trials.jury_summoned(&jury[0].p, tid, 1));
+    assert!(trials.jury_summoned(&jury[1].p, tid, 2));
+    assert!(!trials.jury_summoned(&jury[1].p, tid, 1));
+    assert!(!trials.jury_summoned(&jury[0].p, tid, 2));
+    assert!(!trials.jury_summoned(&jury[0].p, tid + 100, 1));
+    assert!(!trials.jury_summoned(&d.p, tid, 1));
+
+    let before = trial_seat_state(&server, tid);
+    // A non-seat-holder, a juror claiming the other seat and the real seat holder: none
+    // changes the trial and none sends a packet.
+    send(&server, &mut d, cs::CSJurySummonedPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_i32(1);
+    })
+    .await;
+    send(&server, &mut jury[0], cs::CSJurySummonedPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_i32(2);
+    })
+    .await;
+    send(&server, &mut jury[0], cs::CSJurySummonedPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_i32(1);
+    })
+    .await;
+    assert_eq!(trial_seat_state(&server, tid), before);
+    assert!(trial_frames(&mut d.client).is_empty());
+    for juror in &mut jury {
+        assert!(trial_frames(&mut juror.client).is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1067,7 +1267,7 @@ async fn summoned_trial(count: u32) -> (Arc<GameServer>, Pc, Vec<Pc>, u32) {
     (server, defendant, jurors, tid)
 }
 
-async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc], tid: u32) {
+async fn advance_to_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc], tid: u32) {
     for (i, juror) in jurors.iter_mut().enumerate() {
         send(server, juror, cs::CSJuryEndTestimonyPacket, |s| {
             s.write_u32(tid).write_i32(i as i32 + 1);
@@ -1084,6 +1284,11 @@ async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc]
         s.write_u32(tid);
     })
     .await;
+    // Drop the confirm/closing frames so the verdict-step frames are the only ones left.
+    defendant.client.drain();
+    for juror in jurors.iter_mut() {
+        juror.client.drain();
+    }
     server
         .systems
         .social
@@ -1094,6 +1299,10 @@ async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc]
         server.systems.social.trials.get_trial(tid).unwrap().step,
         trial_step::JURY_VERDICT
     );
+}
+
+async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc], tid: u32) {
+    advance_to_verdict(server, defendant, jurors, tid).await;
     defendant.client.drain();
     for juror in jurors {
         juror.client.drain();
@@ -2029,6 +2238,10 @@ async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
         .report_crime(&server, &reporter.p, &evidence, 1, 0, 0, "seen")
         .await;
     assert!(event.is_some());
+    wait_for("the guild removal", || {
+        criminal.p.data().unit.expedition_id == 0
+    })
+    .await;
 
     let expected = SCUnitFactionChangedPacket {
         obj_id: criminal.p.obj_id,
@@ -2116,6 +2329,7 @@ fn guild_dominion() -> crate::systems::housing::dominion::state::DominionState {
         tower_destroyed: false,
         tower_hp: None,
         last_siege_id: 1,
+        declaration: None,
         siege: Some(SiegeState {
             siege_id: 1,
             attacker_expedition_id: 88,
@@ -2127,6 +2341,12 @@ fn guild_dominion() -> crate::systems::housing::dominion::state::DominionState {
             starts_at: 200,
             ends_at: 300,
             ended_at: 0,
+            reinforced: false,
+            defender_ni: 100,
+            defender_nr: 100,
+            outcome_credited: false,
+            materialised_from_declaration: false,
+            calendar_cycle: 0,
             participants: Default::default(),
         }),
     }
@@ -2234,6 +2454,10 @@ async fn a_pirate_guild_owner_hands_the_guild_to_the_next_member() {
         .report_crime(&server, &cmdr_old.p, &evidence, 1, 0, 0, "seen")
         .await;
     assert!(event.is_some());
+    wait_for("the owner removal", || {
+        owner.p.data().unit.expedition_id == 0
+    })
+    .await;
 
     // The owner is kicked like any member and the leadership moves to CmdrOld.
     assert_eq!(owner.p.data().unit.faction_id, 161);
@@ -2478,6 +2702,10 @@ async fn a_pirate_guild_owner_who_was_the_last_member_dismisses_and_releases_the
         .report_crime(&server, &reporter.p, &evidence, 1, 0, 0, "seen")
         .await;
     assert!(event.is_some());
+    wait_for("the guild dismissal", || {
+        server.expeditions.get(77).is_some_and(|g| g.is_disbanded)
+    })
+    .await;
 
     let dismissed = SCExpeditionDismissedPacket {
         id: 77,
@@ -2695,11 +2923,11 @@ async fn a_duelling_pirates_crime_report_keeps_the_duel_and_the_party() {
     );
 }
 
-/// The guilty verdict runs while the trial mutex is held; its `SetFaction(Pirate)` is collected
-/// as an `Effect` and runs after the lock is released (trial.rs module rule). The deferral is
-/// observable: the defendant still has the old faction when `result_is_guilty` returns.
+/// The guilty verdict runs while the trial mutex is held; its faction change is collected as an
+/// `Effect` and runs after the lock is released (trial.rs module rule), through the same shared
+/// helper as every other crime threshold. The public call returns once that effect has run.
 #[tokio::test]
-async fn the_guilty_verdict_defers_the_pirate_faction_until_the_trial_lock_is_released() {
+async fn the_guilty_verdict_sets_the_pirate_faction_after_the_trial_lock() {
     let (server, d, _jury, tid) = summoned_trial(1).await;
     d.p.data().infamy_point = crate::systems::social::crime::PIRATE_CRIME_POINT_THRESHOLD;
     server
@@ -2709,14 +2937,57 @@ async fn the_guilty_verdict_defers_the_pirate_faction_until_the_trial_lock_is_re
         .result_is_guilty(&server, &d.p, tid, true, util::now_ms());
     assert_eq!(
         d.p.data().unit.faction_id,
-        101,
-        "SetFaction waits until the trial lock is released"
+        161,
+        "the effect ran after the trial lock was released"
     );
-    for _ in 0..50 {
-        if d.p.data().unit.faction_id == 161 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(d.p.data().unit.faction_id, 161);
+}
+
+/// A pirate not-guilty verdict whose infamy reaches 0 returns to the race/gender template
+/// faction through the same shared helper as every other infamy decrease (the old trial-only
+/// special case is gone). The 1.2 client prints ui_text 2297 from this faction change.
+#[tokio::test]
+async fn not_guilty_verdict_pardons_a_pirate_at_zero_infamy() {
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let server = justice_server();
+    let trials = &server.systems.social.trials;
+    trials.initialize_doodads(&[("justice.1.seat.1".into(), seat(0x900, 400.0))]);
+    let mut d = player(&server, 1, "Pirate", |c| {
+        c.unit.faction_id = 161;
+        c.crime_point = 70;
+        c.infamy_point = 70;
+    });
+    let mut j = player(&server, 2, "Juror", |c| c.jury_point = 3);
+    trials.update_jury_queues(&server);
+    let tid = trials.arrest_criminal(&server, &d.p, None).unwrap();
+    trials.reply_imprison_or_trial(&server, &d.p, true, util::now_ms());
+    trials.update_tick(&server, util::now_ms() + 1).await;
+    assert!(trials.process_trial_invite_reply(&server, &j.p, true, tid, util::now_ms()));
+    trials.update_tick(&server, util::now_ms() + 1).await; // ConfirmCriminalRecord
+    trials.jury_end_testimony(&j.p, tid, 1, util::now_ms());
+    trials.update_tick(&server, util::now_ms() + 1).await; // ClosingStatement
+    trials.update_tick(&server, util::now_ms() + 61_000).await; // JuryVerdict
+    trial_frames(&mut d.client);
+    trial_frames(&mut j.client);
+    trials.jury_verdict(&j.p, tid, 1, 1, util::now_ms());
+    trial_frames(&mut d.client);
+    trials.update_tick(&server, util::now_ms() + 1).await;
+
+    assert_eq!(d.p.data().infamy_point, 0);
+    assert_eq!(d.p.data().unit.faction_id, 101);
+    assert_eq!(crate::db_character::persisted_faction(&d.p.data()), 101);
+    let frames = trial_frames(&mut d.client);
+    let expected = crate::systems::social::packets::body(&SCUnitFactionChangedPacket {
+        obj_id: 0x101,
+        unit_name: "Pirate".into(),
+        id: 161,
+        id2: 101,
+        temp: false,
+    });
+    assert!(
+        frames
+            .iter()
+            .any(|(op, body)| *op == sc::SCUnitFactionChangedPacket && *body == expected),
+        "the trial pardon must broadcast the faction change: {frames:x?}"
+    );
 }

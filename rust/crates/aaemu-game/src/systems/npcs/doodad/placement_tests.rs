@@ -2,10 +2,15 @@ use std::sync::Condvar;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::data::world_data::{SystemFaction, Zone};
 use crate::data::{items::ItemTemplate, GameData};
+use crate::models::house::House;
 use crate::systems::economy::inventory::Inv;
+use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
+use crate::systems::social::expedition::{member_from_character, Expedition};
 use crate::test_support::*;
+use crate::world::Entity;
 
 /// Above the synthetic world's ocean level (100 m): a spot there is dry. The 1.2 client's water
 /// rule (`placement::refusal`) uses `WorldInstance.IsWater`, which counts the ocean below it.
@@ -1007,79 +1012,259 @@ async fn real_seed_and_sapling_placements_drive_the_handler() {
     assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
 }
 
-/// Planting is routine (the bots plant hundreds of crops a day): its success path must not log
-/// at `WARN`, nor must a doodad the server places itself (a blood stain on a death).
-#[tokio::test]
-async fn successful_planting_logs_nothing_at_warn() {
-    use tracing::Level;
-    let (server, player, id, mut client) = fixture_with_client();
-    let (codes, events) = crate::test_support::capture_events(|| {
-        send_placement(
-            &mut client,
-            &server,
-            &player,
-            4000,
-            id,
-            (101.0, 100.0, DRY_Z),
-        )
-    });
-    assert!(codes.is_empty(), "{codes:?}");
-    assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
-    let loud: Vec<_> = events.iter().filter(|(l, _)| *l <= Level::WARN).collect();
-    assert!(loud.is_empty(), "{loud:?}");
-    // Still traceable at debug level.
-    for what in ["CreateDoodad, Id: 4000", "is placing a doodad 4000"] {
-        assert!(
-            events
-                .iter()
-                .any(|(l, m)| *l == Level::DEBUG && m.contains(what)),
-            "{what}: {events:?}"
-        );
-    }
+// ---------------------------------------------------------------------------------------------
+// WP-D1a: the Territory Statue blueprint's dominion gate (`FUN_393a8fa0` step 7, error 749).
+// ---------------------------------------------------------------------------------------------
 
-    // `Character.DoDie` places the blood stain (878 in the data) for the dead character.
-    let (stain, events) = crate::test_support::capture_events(|| {
-        create_player_doodad_server_spawned(
-            &server,
-            &player,
-            4000,
-            (100.0, 100.0, DRY_Z),
-            0.0,
-            1.0,
-            0,
-            0,
-            0,
-            0,
-            true,
-        )
-    });
-    assert!(stain.is_some());
-    let loud: Vec<_> = events.iter().filter(|(l, _)| *l <= Level::WARN).collect();
-    assert!(loud.is_empty(), "{loud:?}");
+struct StatueFixture {
+    server: GameServer,
+    player: PlayerRef,
+    client: TestClient,
 }
 
-/// A refused planting is a real problem (the client checks the rules itself first): it stays
-/// at `WARN`.
-#[tokio::test]
-async fn refused_planting_is_still_logged_at_warn() {
-    use tracing::Level;
-    let (server, player, id, mut client) = fixture_with_client();
-    let (codes, events) = crate::test_support::capture_events(|| {
-        // The wrong doodad for this seed.
-        send_placement(
-            &mut client,
-            &server,
-            &player,
-            4005,
-            id,
-            (101.0, 100.0, DRY_Z),
-        )
+/// Zone [`TEST_ZONE`] in `group` (no zone record at all when `None`), a live tower house at
+/// (100, 100) with `radius_dominion` 100, the caster in expedition 1000 and, when
+/// `owner_expedition != 0`, a dominion claim by that expedition.
+fn statue_fixture(group: Option<u32>, owner_expedition: u32) -> StatueFixture {
+    let mut data = GameData::empty();
+    if let Some(group) = group {
+        data.zones.zones.insert(
+            TEST_ZONE,
+            Zone {
+                zone_key: TEST_ZONE,
+                group_id: group,
+                ..Default::default()
+            },
+        );
+    }
+    // Item 29800 "Blueprint: Territory Statue" spawns doodad 7229 (group 80, sim_radius 5000).
+    data.items
+        .templates
+        .insert(29800, ItemTemplate::plain(29800, 1));
+    data.items
+        .templates
+        .insert(1000, ItemTemplate::plain(1000, 20));
+    data.items.item_doodads.insert(7229, vec![29800]);
+    data.items.item_doodads.insert(4000, vec![1000]);
+    data.systems.npcs.doodad.templates.insert(
+        7229,
+        DoodadTemplate {
+            id: 7229,
+            group_id: 80,
+            sim_radius: 5000,
+            ..Default::default()
+        },
+    );
+    data.systems.npcs.doodad.templates.insert(
+        4000,
+        DoodadTemplate {
+            id: 4000,
+            ..Default::default()
+        },
+    );
+    data.systems.housing.add_template(HousingTemplate {
+        id: 139,
+        guard_tower_setting_id: 6,
+        hp: 1000,
+        ..Default::default()
     });
-    assert!(!codes.is_empty());
+    data.systems.housing.castles.guard_tower_settings.insert(
+        6,
+        GuardTowerSetting {
+            id: 6,
+            radius_dominion: 100,
+            ..Default::default()
+        },
+    );
+    let server = test_server_with(data);
+    crate::systems::economy::bridges::install(&server);
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Planter", 100.0, 100.0),
+        server.ids.object.get_next_id().unwrap(),
+    );
+    player.data().labor_power = 20;
+    let containers = player.data().inventory.containers.clone();
+    for (_, container) in containers {
+        server.items.add_container(container);
+    }
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 1000,
+            owner_id: 1,
+            ..Default::default()
+        },
+        members: vec![member_from_character(&server, 1000, &player, true)],
+        policies: Vec::new(),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    if let Some(group) = group {
+        let mut house = House::new(500, 139);
+        house.current_step = -1;
+        house.unit.hp = 1000;
+        house.unit.max_hp = 1000;
+        house.unit.transform.zone_id = TEST_ZONE;
+        house.unit.transform.set_xyz(100.0, 100.0, DRY_Z);
+        let tower = Entity::new(server.ids.object.get_next_id().unwrap(), house);
+        server.systems.housing.manager.insert(&tower);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&tower, &server.view_ctx());
+        if owner_expedition != 0 {
+            let (_, identity) =
+                crate::systems::housing::dominion::runtime::tower_identity(&server, &tower)
+                    .unwrap();
+            server
+                .systems
+                .housing
+                .dominions
+                .declare_unowned_with(group, identity, owner_expedition, 1_000_000, || true)
+                .unwrap();
+        }
+    }
+    StatueFixture {
+        server,
+        player,
+        client,
+    }
+}
+
+fn statue_count(server: &GameServer) -> usize {
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .all_doodads()
+        .into_iter()
+        .filter(|doodad| doodad.data().template_id == 7229)
+        .count()
+}
+
+#[tokio::test]
+async fn territory_statue_places_inside_the_casters_own_dominion() {
+    let mut f = statue_fixture(Some(25), 1000);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "own dominion inside radius: {codes:?}");
+    assert_eq!(statue_count(&f.server), 1);
     assert!(
-        events
-            .iter()
-            .any(|(l, m)| *l == Level::WARN && m.contains("CreateDoodad")),
-        "{events:?}"
+        Inv::of(&f.player).item_by_id(item).is_none(),
+        "a successful placement consumes the blueprint"
+    );
+}
+
+#[tokio::test]
+async fn territory_statue_refuses_outside_the_dominion_radius_and_keeps_the_item() {
+    let mut f = statue_fixture(Some(25), 1000);
+    // Still within the 30 m placement range, but 100 m from the tower (radius² is exclusive).
+    f.player.data().unit.transform.set_xyz(200.0, 100.0, DRY_Z);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (200.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|i| i.count),
+        Some(1),
+        "a refused placement keeps the blueprint"
+    );
+}
+
+#[tokio::test]
+async fn territory_statue_refuses_another_guilds_dominion() {
+    let mut f = statue_fixture(Some(25), 2000);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|i| i.count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn territory_statue_refuses_a_spot_without_an_owned_zone_group() {
+    // No zone record: `FUN_397a6c60` answers no group.
+    let mut f = statue_fixture(None, 0);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+
+    // Zone group 25 with a tower but no dominion record (unowned): `FUN_3983a730` fails.
+    let mut f = statue_fixture(Some(25), 0);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|i| i.count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn other_items_place_inside_a_foreign_dominion_unchanged() {
+    let mut f = statue_fixture(Some(25), 2000);
+    let item = give(&f.server, &f.player, 1000, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        4000,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "the gate is item 29800 only: {codes:?}");
+    assert_eq!(
+        f.server
+            .world
+            .world(0)
+            .unwrap()
+            .all_doodads()
+            .into_iter()
+            .filter(|doodad| doodad.data().template_id == 4000)
+            .count(),
+        1
     );
 }

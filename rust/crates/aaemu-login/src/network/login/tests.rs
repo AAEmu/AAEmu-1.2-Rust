@@ -32,7 +32,8 @@ use crate::services::password::{Password, PasswordKind};
 use crate::services::sha256_crypt;
 use crate::services::two_factor::FactorValidation;
 use crate::test_support::{
-    test_config, test_connection, test_server, LoginBehavior, MockBackend, PacketLog,
+    test_config, test_connection, test_connection_with, test_server, LoginBehavior, MockBackend,
+    PacketLog,
 };
 
 const TEST_ACCOUNT_ID: AccountId = AccountId(100);
@@ -149,6 +150,51 @@ async fn authenticate_async_success_sends_join_then_auth_response() {
         vec![l2c_op::AC_JOIN_RESPONSE, l2c_op::AC_AUTH_RESPONSE]
     );
     assert_eq!(f.conn.state(), LoginState::Authenticated);
+}
+
+/// `Login:MaxCharactersPerAccount` / `AdditionalCharactersPerServer` /
+/// `PreSelectCharacterPeriod` reach `ACJoinResponse`, and the same base slot count reaches
+/// `ACAuthResponse` (the game server enforces base + its `SCGetSlotCount`).
+#[tokio::test]
+async fn auth_success_advertises_configured_character_limits() {
+    let backend = Arc::new(MockBackend::default());
+    let server = test_server(test_config(serde_json::json!({})), backend.clone());
+    backend.set_login(LoginBehavior::Result(LoginResult::ok(TEST_ACCOUNT_ID)));
+    let (conn, mut sent) = test_connection_with(
+        TEST_IP,
+        crate::config::LoginConfig {
+            max_characters_per_account: 8,
+            additional_characters_per_server: 2,
+            pre_select_character_period: true,
+        },
+    );
+
+    let flow = AuthFlow::Password(PasswordAuthFlow {
+        username: Some("testuser".to_string()),
+        password: Some(Password::from_plaintext("pw")),
+        client_ip: TEST_IP,
+    });
+    conn.authenticate(&server, flow).await.unwrap();
+
+    let packets = sent.drain();
+    assert_eq!(packets.len(), 2);
+    assert_eq!(
+        crate::test_support::opcode_of(&packets[0]),
+        l2c_op::AC_JOIN_RESPONSE
+    );
+    // [reason u16 = 0][afs u64, client layout: byte0 slots 8 | byte1 additional 2 |
+    // byte2 bit0 pre-select]
+    assert_eq!(
+        &packets[0][2..],
+        &[0, 0, 0x08, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+    assert_eq!(
+        crate::test_support::opcode_of(&packets[1]),
+        l2c_op::AC_AUTH_RESPONSE
+    );
+    // [accountId u32][wsk u16 length + 32 bytes][slotCount u8]
+    assert_eq!(packets[1].len(), 2 + 4 + 2 + 32 + 1);
+    assert_eq!(packets[1].last(), Some(&8));
 }
 
 #[tokio::test]
@@ -400,7 +446,7 @@ async fn complete_enter_world_gs_id_mismatch_ignored() {
     assert_eq!(f.conn.state(), LoginState::EnteringWorld);
 
     // Clean up: cancel to avoid timeout firing later
-    f.conn.cancel_enter_world();
+    f.conn.cancel_enter_world(&f.server).await;
     f.await_enter_world_task().await;
 }
 
@@ -414,7 +460,7 @@ async fn cancel_enter_world_while_entering_cancels_operation() {
         .initiate_enter_world(&f.server, TEST_GS_ID)
         .await
         .unwrap();
-    f.conn.cancel_enter_world();
+    f.conn.cancel_enter_world(&f.server).await;
     f.await_enter_world_task().await;
 
     assert!(f.sent.drain().is_empty());
@@ -426,7 +472,7 @@ async fn cancel_enter_world_not_entering_ignored() {
     let mut f = fixture();
     f.authenticate_successfully().await;
 
-    f.conn.cancel_enter_world();
+    f.conn.cancel_enter_world(&f.server).await;
 
     assert!(f.sent.drain().is_empty());
     assert_eq!(f.conn.state(), LoginState::Authenticated);
@@ -479,7 +525,14 @@ fn loopback(port: u16) -> SocketAddr {
 
 fn create(ids: &Arc<SimpleIdManager>, local: SocketAddr, remote: SocketAddr) -> LoginConnection {
     let (tx, _rx) = mpsc::unbounded_channel();
-    LoginConnection::create(ids, Some(local.ip()), remote.ip(), tx).unwrap()
+    LoginConnection::create(
+        ids,
+        Some(local.ip()),
+        remote.ip(),
+        tx,
+        crate::config::LoginConfig::default(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -1049,4 +1102,402 @@ async fn banned_account_cannot_reconnect() {
     );
     assert_eq!(sent[0][2], reason.0);
     assert_eq!(f.conn.state(), LoginState::Disconnected);
+}
+
+// ---- World login queue (WP-H) -------------------------------------------------------------
+
+use crate::models::GsLoad;
+use crate::packets::g2l::{G2lPacket, GlGameServerLoad, GlPlayerEnter};
+use crate::test_support::test_connection_on;
+
+struct QueueFixture {
+    server: Arc<LoginServer>,
+    gs: Arc<InternalConnection>,
+    gs_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+/// A login server with one active world. `max_concurrent` is `GameServers[].MaxConcurrent`.
+async fn queue_fixture(max_concurrent: u32, queue_limit: u16) -> QueueFixture {
+    let backend = Arc::new(MockBackend::default());
+    let server = test_server(
+        test_config(serde_json::json!({
+            "EnterWorldTimeout": "00:00:00.500",
+            "GameServers": [ {
+                "Id": 1,
+                "Name": "Queue",
+                "Host": "127.0.0.1",
+                "Port": 1234,
+                "MaxConcurrent": max_concurrent,
+                "QueueLimit": queue_limit
+            } ]
+        })),
+        backend,
+    );
+    server.games.load(&server.config).await;
+    let (tx, rx) = mpsc::unbounded_channel();
+    let gs = Arc::new(InternalConnection::new(IpAddr::V4(Ipv4Addr::LOCALHOST), tx));
+    server.games.add(TEST_GS_ID, vec![], &gs);
+    QueueFixture {
+        server,
+        gs,
+        gs_rx: rx,
+    }
+}
+
+/// A login server with a parent world (1) and a mirror (2); the game registers mirror 2.
+async fn mirror_queue_fixture() -> QueueFixture {
+    let backend = Arc::new(MockBackend::default());
+    let server = test_server(
+        test_config(serde_json::json!({
+            "EnterWorldTimeout": "00:00:00.500",
+            "GameServers": [
+                { "Id": 1, "Name": "Parent", "Host": "127.0.0.1", "Port": 1234,
+                  "MaxConcurrent": 1, "QueueLimit": 10 },
+                { "Id": 2, "Name": "Mirror", "Host": "127.0.0.1", "Port": 1235,
+                  "MaxConcurrent": 1, "QueueLimit": 10 }
+            ]
+        })),
+        backend,
+    );
+    server.games.load(&server.config).await;
+    let (tx, rx) = mpsc::unbounded_channel();
+    let gs = Arc::new(InternalConnection::new(IpAddr::V4(Ipv4Addr::LOCALHOST), tx));
+    server.games.add(TEST_GS_ID, vec![GameServerId(2)], &gs);
+    QueueFixture {
+        server,
+        gs,
+        gs_rx: rx,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QueueView {
+    world_id: u8,
+    is_premium: bool,
+    my_turn: u16,
+    normal_length: u16,
+    premium_length: u16,
+}
+
+fn queue_updates(log: &mut PacketLog) -> Vec<QueueView> {
+    log.drain()
+        .into_iter()
+        .filter_map(|p| {
+            let op = u16::from_le_bytes([p[0], p[1]]);
+            if op != l2c_op::AC_WORLD_QUEUE {
+                return None;
+            }
+            assert_eq!(p.len(), 10, "ACWorldQueuePacket is opcode + 8 body bytes");
+            Some(QueueView {
+                world_id: p[2],
+                is_premium: p[3] != 0,
+                my_turn: u16::from_le_bytes([p[4], p[5]]),
+                normal_length: u16::from_le_bytes([p[6], p[7]]),
+                premium_length: u16::from_le_bytes([p[8], p[9]]),
+            })
+        })
+        .collect()
+}
+
+fn view(my_turn: u16, normal_length: u16) -> QueueView {
+    view_at(TEST_GS_ID, my_turn, normal_length)
+}
+
+fn view_at(world_id: GameServerId, my_turn: u16, normal_length: u16) -> QueueView {
+    QueueView {
+        world_id: world_id.0,
+        is_premium: false,
+        my_turn,
+        normal_length,
+        premium_length: 0,
+    }
+}
+
+impl QueueFixture {
+    fn connection(&self) -> (Arc<LoginConnection>, PacketLog) {
+        let (conn, log) = test_connection_on(&self.server, TEST_IP);
+        // Authentication itself is covered by the tests above; the queue tests start at the
+        // character-select state the client reaches after ACJoinResponse/ACAuthResponse.
+        conn.session.lock().unwrap().state = LoginState::Authenticated;
+        self.server.connections.add(conn.clone()).unwrap();
+        (conn, log)
+    }
+
+    async fn set_online(&self, online: u32) {
+        self.set_online_seq(online, 0).await;
+    }
+
+    async fn set_online_seq(&self, online: u32, sequence: u32) {
+        crate::handlers::handle_g2l(
+            &self.server,
+            &self.gs,
+            G2lPacket::GameServerLoad(GlGameServerLoad {
+                load: GsLoad::LOW,
+                online,
+                sequence,
+                has_online: true,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn enter(&self, conn: &Arc<LoginConnection>) {
+        self.enter_at(conn, TEST_GS_ID).await;
+    }
+
+    async fn enter_at(&self, conn: &Arc<LoginConnection>, gs_id: GameServerId) {
+        crate::handlers::handle_c2l(
+            &self.server,
+            conn,
+            C2lPacket::EnterWorld(CaEnterWorld { flag: 0, gs_id }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn cancel(&self, conn: &Arc<LoginConnection>) {
+        crate::handlers::handle_c2l(
+            &self.server,
+            conn,
+            C2lPacket::CancelEnterWorld(crate::packets::c2l::CaCancelEnterWorld {
+                world_id: TEST_GS_ID.0,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The game server's answer to the login server's `LGPlayerEnterPacket`.
+    async fn complete_enter(&self, conn: &Arc<LoginConnection>, result: u8, online: u32) {
+        crate::handlers::handle_g2l(
+            &self.server,
+            &self.gs,
+            G2lPacket::PlayerEnter(GlPlayerEnter {
+                connection_id: conn.id(),
+                gs_id: TEST_GS_ID,
+                result,
+                online,
+                sequence: 0,
+                has_online: true,
+            }),
+        )
+        .await
+        .unwrap();
+        if let Some(task) = conn.take_enter_world_task() {
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("enter-world background task completes")
+                .unwrap();
+        }
+    }
+
+    fn last_lg_player_enter(&mut self) -> Option<u32> {
+        loop {
+            let p = self.gs_rx.try_recv().ok()?;
+            let op = u16::from_le_bytes([p[0], p[1]]);
+            if op == crate::packets::l2g::opcodes::LG_PLAYER_ENTER && p.len() >= 10 {
+                return Some(u32::from_le_bytes([p[6], p[7], p[8], p[9]]));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn world_queue_queues_when_full_positions_move_and_head_enters() {
+    let mut f = queue_fixture(1, 10).await;
+    f.set_online(1).await;
+    let (a, mut a_log) = f.connection();
+    let (b, mut b_log) = f.connection();
+
+    f.enter(&a).await;
+    assert_eq!(a.state(), LoginState::Queued);
+    assert_eq!(queue_updates(&mut a_log), vec![view(1, 1)]);
+    assert_eq!(
+        f.last_lg_player_enter(),
+        None,
+        "a queued client sends nothing to the game"
+    );
+
+    f.enter(&b).await;
+    assert_eq!(b.state(), LoginState::Queued);
+    // The new entry updates every position: A stays first, B is second.
+    assert_eq!(queue_updates(&mut a_log), vec![view(1, 2)]);
+    assert_eq!(queue_updates(&mut b_log), vec![view(2, 2)]);
+    assert_eq!(f.last_lg_player_enter(), None);
+
+    // A slot frees: the head gets the final position 0 and the normal enter-world request.
+    f.set_online(0).await;
+    assert_eq!(queue_updates(&mut a_log), vec![view(0, 1)]);
+    assert_eq!(queue_updates(&mut b_log), vec![view(1, 1)]);
+    assert_eq!(a.state(), LoginState::EnteringWorld);
+    assert_eq!(f.last_lg_player_enter(), Some(a.id().0));
+
+    // The game answers A: its world cookie follows and B still waits (capacity 1 is used).
+    f.complete_enter(&a, 0, 1).await;
+    assert_eq!(a.state(), LoginState::Authenticated);
+    assert_eq!(a_log.opcodes(), vec![l2c_op::AC_WORLD_COOKIE]);
+    assert_eq!(b.state(), LoginState::Queued);
+    assert_eq!(f.last_lg_player_enter(), None);
+
+    // A leaves; B is admitted.
+    f.set_online(0).await;
+    assert_eq!(queue_updates(&mut b_log), vec![view(0, 0)]);
+    assert_eq!(f.last_lg_player_enter(), Some(b.id().0));
+    f.complete_enter(&b, 0, 1).await;
+    assert_eq!(b.state(), LoginState::Authenticated);
+    assert_eq!(b_log.opcodes(), vec![l2c_op::AC_WORLD_COOKIE]);
+}
+
+#[tokio::test]
+async fn cancelled_queue_entry_leaves_and_the_next_moves_up() {
+    let f = queue_fixture(1, 10).await;
+    f.set_online(1).await;
+    let (a, mut a_log) = f.connection();
+    let (b, mut b_log) = f.connection();
+    f.enter(&a).await;
+    f.enter(&b).await;
+    queue_updates(&mut a_log);
+    queue_updates(&mut b_log);
+
+    f.cancel(&a).await;
+    assert_eq!(a.state(), LoginState::Authenticated);
+    // The client hides its own queue window; the server only updates the remaining entries.
+    assert!(queue_updates(&mut a_log).is_empty());
+    assert_eq!(queue_updates(&mut b_log), vec![view(1, 1)]);
+    assert_eq!(b.state(), LoginState::Queued);
+}
+
+#[tokio::test]
+async fn disconnected_queue_entry_is_removed() {
+    let f = queue_fixture(1, 10).await;
+    f.set_online(1).await;
+    let (a, mut a_log) = f.connection();
+    let (b, mut b_log) = f.connection();
+    f.enter(&a).await;
+    f.enter(&b).await;
+    queue_updates(&mut a_log);
+    queue_updates(&mut b_log);
+
+    // The real connection handler removes the client from the table, then tells the controller.
+    f.server.connections.remove(a.id());
+    f.server.games.connection_closed(a.id());
+
+    assert_eq!(queue_updates(&mut b_log), vec![view(1, 1)]);
+}
+
+#[tokio::test]
+async fn a_full_queue_refuses_new_clients() {
+    let f = queue_fixture(1, 1).await;
+    f.set_online(1).await;
+    let (a, mut a_log) = f.connection();
+    let (b, mut b_log) = f.connection();
+    f.enter(&a).await;
+    assert_eq!(a.state(), LoginState::Queued);
+    assert_eq!(queue_updates(&mut a_log), vec![view(1, 1)]);
+
+    f.enter(&b).await;
+    assert_eq!(b.state(), LoginState::Authenticated);
+    // The evidenced refusal: ACEnterWorldDenied (the 1.2 handler ignores the reason byte).
+    assert_eq!(b_log.opcodes(), vec![l2c_op::AC_ENTER_WORLD_DENIED]);
+}
+
+#[tokio::test]
+async fn default_config_never_queues() {
+    let mut f = queue_fixture(0, 100).await;
+    f.set_online(1_000_000).await;
+    let (a, mut a_log) = f.connection();
+
+    f.enter(&a).await;
+
+    assert_eq!(a.state(), LoginState::EnteringWorld);
+    assert!(queue_updates(&mut a_log).is_empty());
+    assert_eq!(f.last_lg_player_enter(), Some(a.id().0));
+}
+
+#[tokio::test]
+async fn queue_survives_a_game_server_restart() {
+    let mut f = queue_fixture(1, 10).await;
+    f.set_online(1).await;
+    let (a, mut a_log) = f.connection();
+    f.enter(&a).await;
+    assert_eq!(a.state(), LoginState::Queued);
+    queue_updates(&mut a_log);
+
+    // The game link closes: the waiting client is refused, but the queue's capacity survives.
+    f.server.games.remove(TEST_GS_ID, &f.gs);
+    assert_eq!(a.state(), LoginState::Authenticated);
+    assert_eq!(a_log.opcodes(), vec![l2c_op::AC_ENTER_WORLD_DENIED]);
+
+    // A restarted game server registers again; a full world must still queue.
+    let (tx, rx) = mpsc::unbounded_channel();
+    let gs = Arc::new(InternalConnection::new(IpAddr::V4(Ipv4Addr::LOCALHOST), tx));
+    f.server.games.add(TEST_GS_ID, vec![], &gs);
+    f.gs = gs;
+    f.gs_rx = rx;
+    f.set_online(1).await;
+    let (b, mut b_log) = f.connection();
+    f.enter(&b).await;
+    assert_eq!(b.state(), LoginState::Queued);
+    assert_eq!(queue_updates(&mut b_log), vec![view(1, 1)]);
+}
+
+#[tokio::test]
+async fn a_mirror_shares_the_parent_queue_and_releases_its_reservation() {
+    let mut f = mirror_queue_fixture().await;
+    f.set_online(1).await;
+    let (a, mut a_log) = f.connection();
+    f.enter_at(&a, GameServerId(2)).await;
+    assert_eq!(a.state(), LoginState::Queued);
+    assert_eq!(
+        queue_updates(&mut a_log),
+        vec![view_at(GameServerId(2), 1, 1)]
+    );
+
+    f.set_online(0).await;
+    assert_eq!(
+        queue_updates(&mut a_log),
+        vec![view_at(GameServerId(2), 0, 0)]
+    );
+    assert_eq!(f.last_lg_player_enter(), Some(a.id().0));
+    // The game answers with its own (parent) id; the mirror's reservation is released and the
+    // cookie points at the selected mirror world.
+    f.complete_enter(&a, 0, 1).await;
+    assert_eq!(a_log.opcodes(), vec![l2c_op::AC_WORLD_COOKIE]);
+
+    // With the parent's occupancy full again, a second mirror entry queues; it is only admitted
+    // if the first reservation was released.
+    f.set_online(1).await;
+    let (b, mut b_log) = f.connection();
+    f.enter_at(&b, GameServerId(2)).await;
+    assert_eq!(
+        queue_updates(&mut b_log),
+        vec![view_at(GameServerId(2), 1, 1)]
+    );
+    f.set_online(0).await;
+    assert_eq!(
+        queue_updates(&mut b_log),
+        vec![view_at(GameServerId(2), 0, 0)]
+    );
+    assert_eq!(f.last_lg_player_enter(), Some(b.id().0));
+}
+
+#[tokio::test]
+async fn a_stale_occupancy_report_does_not_admit_the_queue() {
+    let mut f = queue_fixture(1, 10).await;
+    f.set_online_seq(1, 10).await;
+    let (a, mut a_log) = f.connection();
+    f.enter(&a).await;
+    assert_eq!(a.state(), LoginState::Queued);
+    queue_updates(&mut a_log);
+
+    // A report generated before the full one says empty; the sequence makes it harmless.
+    f.set_online_seq(0, 9).await;
+    assert_eq!(a.state(), LoginState::Queued);
+    assert!(queue_updates(&mut a_log).is_empty());
+    assert_eq!(f.last_lg_player_enter(), None);
+
+    f.set_online_seq(0, 11).await;
+    assert_eq!(queue_updates(&mut a_log), vec![view(0, 0)]);
+    assert_eq!(f.last_lg_player_enter(), Some(a.id().0));
 }

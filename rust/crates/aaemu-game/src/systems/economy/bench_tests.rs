@@ -541,3 +541,15 @@ async fn real_compact_db_bench_craft_packs_include_every_tax_plaque_phase() {
         );
     }
 }
+
+#[test]
+fn set_crafting_pay_reads_the_client_writer_body() {
+    // 1.2 Lua `X2Craft.SetCraftingPay` -> `FUN_394d7230` (opcode 0x8d); `FUN_397b0ca0` stores
+    // the doodad obj id at +0xc and the money at +0x10, and the serializer writes them in that
+    // order as (bc, i32).
+    let mut s = PacketStream::new();
+    s.write_bc(0x1234).write_i32(100_000);
+    let p = super::CSSetCraftingPayPacket::read_body(&mut s).unwrap();
+    assert_eq!((p.obj_id, p.money_amount), (0x1234, 100_000));
+    assert_eq!(s.remaining(), 0);
+}

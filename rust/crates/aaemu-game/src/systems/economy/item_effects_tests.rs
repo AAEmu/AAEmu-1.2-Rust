@@ -27,15 +27,18 @@ use crate::systems::economy::item_effects::*;
 use crate::systems::economy::item_packets::{
     SCItemTaskSuccessPacket, SCUnitEquipmentsChangedPacket,
 };
+use crate::systems::economy::item_timers;
 use crate::systems::economy::items_data::{ItemConversionProduct, ItemConversionReagent};
 use crate::systems::economy::loot::ScriptedRng;
 use crate::systems::economy::mate_equipment::*;
+use crate::systems::economy::mate_equipment_data::MateSlotPack;
 use crate::systems::economy::tests::{give, item_at, test_data, World, STACK};
+use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::skills::data::effects::SpecialEffect;
 use crate::systems::skills::data::{EffectKind, EffectTemplate, SkillEffect, SkillTemplate};
 use crate::systems::skills::handlers::CSStartSkillPacket;
 use crate::systems::skills::packets::SCExpChangedPacket;
-use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, PlayerRef};
 
@@ -44,6 +47,7 @@ const NON_ENCHANTABLE_ARMOR: u32 = 2101; // chest, `grade_enchantable` false
 const WEAPON: u32 = 2102; // one-hand weapon, `grade_enchantable` true
 const SOCKET_ARMOR: u32 = 2110; // chest, level 20, level requirement 50
 const LOW_ARMOR: u32 = 2111; // chest, level 20, level requirement 40
+const FORBIDDEN_SCALE_ARMOR: u32 = 2120; // chest listed in `item_cap_scale_forbids`
 const SCROLL: u32 = 5000;
 const CHARM: u32 = 5100;
 const GEM: u32 = 5200; // chest lunagem, requires a level-50 item
@@ -58,6 +62,17 @@ const PACK: u32 = 5510; // a trade pack (back slot)
 const GLIDER_HI: u32 = 5520; // another glider template
 const RECHARGEABLE: u32 = 5700;
 const TL: u16 = 0x77;
+// Mate gear slot pack fixtures: the same four armour slot types the 1.2 packs use (head 1,
+// chest 3, waist 4, feet 7; `item_armors.slot_type_id = equip slot + 1`).
+const HEAD_ARMOR: u32 = 2130;
+const WAIST_ARMOR: u32 = 2131;
+const FEET_ARMOR: u32 = 2132;
+// NPC templates with the 1.2 `mate_equip_slot_packs` ids (1 riding, 2 combat, 3 pet; 0 = a
+// template whose pack is missing, which the client refuses every slot for).
+const MATE_RIDING: u32 = 501;
+const MATE_COMBAT: u32 = 502;
+const MATE_PET: u32 = 503;
+const MATE_NO_PACK: u32 = 504;
 
 /// Sets `ItemFlag.Secure` on a bag item without going through the packet handler.
 fn set_locked(w: &World, id: u64) {
@@ -354,6 +369,20 @@ fn data() -> GameData {
             scale_max: 100,
         },
     );
+    let mut forbidden = ItemTemplate::new(
+        FORBIDDEN_SCALE_ARMOR,
+        TemplateKind::Armor(EquipTemplate {
+            slot_type_id: 3,
+            coverage: 10,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            ..EquipTemplate::default()
+        }),
+    );
+    forbidden.max_count = 1;
+    forbidden.level = 10;
+    d.items.templates.insert(FORBIDDEN_SCALE_ARMOR, forbidden);
+    d.items.item_cap_scale_forbids.insert(FORBIDDEN_SCALE_ARMOR);
     let conv = &mut d.systems.economy.items.conversion;
     conv.reagents.push(ItemConversionReagent {
         conversion_id: 8,
@@ -377,6 +406,74 @@ fn data() -> GameData {
         .item_effects
         .repairable_slaves
         .insert(3, 42);
+    d
+}
+
+/// [`data`] plus the mate equipment tables: three slot packs and mate templates 501-504, with
+/// the client's per-mate item list naming only [`WAIST_ARMOR`] for the riding mate.
+fn mate_pack_data() -> GameData {
+    let mut d = data();
+    for (template, slot_type_id) in [(HEAD_ARMOR, 1_u32), (WAIST_ARMOR, 4), (FEET_ARMOR, 7)] {
+        let mut armor = ItemTemplate::new(
+            template,
+            TemplateKind::Armor(EquipTemplate {
+                slot_type_id,
+                coverage: 10,
+                durability_ratio: 1.0,
+                durability_multiplier: 100,
+                ..EquipTemplate::default()
+            }),
+        );
+        armor.max_count = 1;
+        armor.level = 1;
+        d.items.templates.insert(template, armor);
+    }
+    for (id, pack_id) in [
+        (MATE_RIDING, 1),
+        (MATE_COMBAT, 2),
+        (MATE_PET, 3),
+        (MATE_NO_PACK, 0),
+    ] {
+        d.systems.npcs.npc.templates.insert(
+            id,
+            NpcTemplate {
+                id,
+                mate_equip_slot_pack_id: pack_id,
+                ..NpcTemplate::default()
+            },
+        );
+    }
+    let rules = &mut d.systems.economy.mate_equipment;
+    rules.slot_packs.insert(
+        1,
+        MateSlotPack {
+            head: true,
+            chest: false,
+            waist: true,
+            feet: true,
+        },
+    );
+    rules.slot_packs.insert(
+        2,
+        MateSlotPack {
+            head: true,
+            chest: true,
+            waist: false,
+            feet: true,
+        },
+    );
+    rules.slot_packs.insert(3, MateSlotPack::default());
+    rules
+        .pack_items
+        .insert(MATE_RIDING, [WAIST_ARMOR].into_iter().collect());
+    d
+}
+
+/// [`mate_pack_data`] with the FeatureSet bit the client gates the mate item list on (78 =
+/// fset byte 9 bit 6, clear in `DEFAULT_FSET`).
+fn mate_pack_data_with_whitelist(enabled: bool) -> GameData {
+    let mut d = mate_pack_data();
+    d.features.set_bit(78, enabled);
     d
 }
 
@@ -430,6 +527,39 @@ fn error(e: i16) -> (u16, Vec<u8>) {
         sc::SCErrorMsgPacket,
         body(&SCErrorMsgPacket::new(e, 0, true)),
     )
+}
+
+fn error_with_kind(e: i16, kind: u32) -> (u16, Vec<u8>) {
+    (
+        sc::SCErrorMsgPacket,
+        body(&SCErrorMsgPacket::new(e, kind, true)),
+    )
+}
+
+/// The `SkillResult` byte of the first `SCSkillStartedPacket` in `frames` (`None` when the cast
+/// did not answer with a started packet).
+fn started_skill_result(frames: &[(u16, Vec<u8>)]) -> Option<u8> {
+    let (_, body) = frames
+        .iter()
+        .find(|(op, _)| *op == sc::SCSkillStartedPacket)?;
+    let mut s = PacketStream::from_bytes(body.clone());
+    s.read_u32().ok()?;
+    s.read_u16().ok()?;
+    let caster = s.read_u8().ok()?;
+    SkillCaster::read(caster, &mut s).ok()?;
+    let target = s.read_u8().ok()?;
+    SkillCastTarget::read(target, &mut s).ok()?;
+    let object = s.read_u8().ok()?;
+    SkillObject::read(object, &mut s).ok()?;
+    s.read_u16().ok()?;
+    s.read_u16().ok()?;
+    s.read_u8().ok()?;
+    let flags = s.read_u8().ok()?;
+    if flags & 1 == 0 {
+        Some(0)
+    } else {
+        s.read_u8().ok()
+    }
 }
 
 fn item(w: &World, id: u64) -> Option<Item> {
@@ -1606,6 +1736,327 @@ async fn lunastone_cap_scale_and_reset() {
     );
 }
 
+/// `item_cap_scale_forbids` (1.2 client `FUN_395a72d0`, the item's "scalable" property;
+/// the cap-scale target check `FUN_3939dc20` answers SkillResult INVALID_TARGET 0x22): a listed
+/// template cannot be tempered or reset, and the refusal cancels the cast so the source item
+/// (the temper) is refunded.
+const WRAPPED_ROD: u32 = 2740;
+const ROD_SKILL: u32 = 6200;
+const ROD_EFFECT: u32 = 6201;
+
+/// The wrapped fishing rods use an item skill that consumes the wrapped item and gives the
+/// unwrapped rod (effect type 27); the use action is gated by `items.actability_requirement`.
+fn rod_cast_world(mut data: GameData) -> World {
+    let mut rod = ItemTemplate::new(WRAPPED_ROD, TemplateKind::Item);
+    rod.max_count = 1;
+    rod.use_skill_id = ROD_SKILL;
+    rod.actability_group_id = 7;
+    rod.actability_requirement = 10000;
+    data.items.templates.insert(WRAPPED_ROD, rod);
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: ROD_EFFECT,
+            special_effect_type_id: 27,
+            value1: STACK as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        ROD_EFFECT,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        id: ROD_SKILL,
+        target_type: 0,
+        effects: vec![SkillEffect {
+            effect_id: ROD_EFFECT,
+            template: Some((EffectKind::SpecialEffect, ROD_EFFECT)),
+            weight: 0,
+            start_level: 0,
+            end_level: 255,
+            friendly: true,
+            non_friendly: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            source_buff_tag_id: 0,
+            source_no_buff_tag_id: 0,
+            chance: 100,
+            front: false,
+            back: false,
+            target_npc_tag_id: 0,
+            application_method: 1,
+            consume_source_item: true,
+            consume_item_id: 0,
+            consume_item_count: 1,
+            always_hit: true,
+            item_set_id: 0,
+            interaction_success_hit: false,
+        }],
+        ..SkillTemplate::default()
+    });
+    let w = world_with_data(data);
+    crate::systems::skills::bind(&w.server);
+    super::bridges::install(&w.server);
+    w
+}
+
+async fn cast_wrapped_rod(w: &mut World, item_id: u64) {
+    CSStartSkillPacket {
+        skill_id: ROD_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id,
+            item_template_id: WRAPPED_ROD,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Unit(w.pa.obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+    .handle(&w.server, &mut w.a.conn)
+    .await
+    .unwrap();
+}
+
+const CAP_SCALE_SKILL: u32 = 900;
+const CAP_SCALE_EFFECT: u32 = 9100;
+
+/// A skill world where `SCROLL` carries the real cap-scale use skill: special effect 112, item
+/// target, source item consumed. `data()` already has the `item_cap_scales` row for skill 900
+/// and `FORBIDDEN_SCALE_ARMOR` in `item_cap_scale_forbids`.
+fn cap_scale_cast_world(mut data: GameData) -> World {
+    {
+        let temper = data
+            .items
+            .templates
+            .get_mut(&SCROLL)
+            .expect("temper template");
+        temper.use_skill_id = CAP_SCALE_SKILL;
+    }
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: CAP_SCALE_EFFECT,
+            special_effect_type_id: 112,
+            value1: 0,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        CAP_SCALE_EFFECT,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        id: CAP_SCALE_SKILL,
+        target_type: 9,
+        max_range: 4,
+        effects: vec![SkillEffect {
+            effect_id: CAP_SCALE_EFFECT,
+            template: Some((EffectKind::SpecialEffect, CAP_SCALE_EFFECT)),
+            weight: 0,
+            start_level: 0,
+            end_level: 255,
+            friendly: true,
+            non_friendly: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            source_buff_tag_id: 0,
+            source_no_buff_tag_id: 0,
+            chance: 100,
+            front: false,
+            back: false,
+            target_npc_tag_id: 0,
+            application_method: 1,
+            consume_source_item: true,
+            consume_item_id: 0,
+            consume_item_count: 1,
+            always_hit: true,
+            item_set_id: 0,
+            interaction_success_hit: false,
+        }],
+        ..SkillTemplate::default()
+    });
+    let w = world_with_data(data);
+    crate::systems::skills::bind(&w.server);
+    super::bridges::install(&w.server);
+    w
+}
+
+async fn cast_cap_scale(w: &mut World, temper: u64, target: u64) {
+    CSStartSkillPacket {
+        skill_id: CAP_SCALE_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id: temper,
+            item_template_id: SCROLL,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Item {
+            obj_id: w.pa.obj_id,
+            id: target,
+            type1: 0,
+            type2: 0,
+        },
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+    .handle(&w.server, &mut w.a.conn)
+    .await
+    .unwrap();
+}
+
+/// The 1.2 client refuses the cap-scale cast on an `item_cap_scale_forbids` target with
+/// SkillResult INVALID_TARGET 0x22 (`FUN_3939dc20`); the server answers the same result and
+/// keeps the temper item.
+#[tokio::test]
+async fn item_cap_scale_cast_fails_with_invalid_target_for_forbidden_items() {
+    let mut w = cap_scale_cast_world(data());
+    let temper = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        FORBIDDEN_SCALE_ARMOR,
+        1,
+        1,
+    );
+    mark_clean(&w, target);
+    w.a.drain();
+    cast_cap_scale(&mut w, temper, target).await;
+    let frames = w.a.drain();
+    assert_eq!(
+        started_skill_result(&frames),
+        Some(skill_result::INVALID_TARGET)
+    );
+    assert_eq!(
+        item(&w, temper).expect("the temper is kept").count,
+        2,
+        "a refused cap-scale cast must not consume the temper"
+    );
+    let after = item(&w, target).unwrap();
+    assert_eq!(
+        (after.details.temper_physical, after.details.temper_magical),
+        (0, 0)
+    );
+    assert!(!after.dirty);
+}
+
+#[tokio::test]
+async fn item_cap_scale_cast_tempers_an_allowed_target() {
+    let mut w = cap_scale_cast_world(data());
+    let temper = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    w.a.drain();
+    cast_cap_scale(&mut w, temper, target).await;
+    assert_eq!(
+        item(&w, temper).expect("temper").count,
+        1,
+        "an accepted cap-scale cast consumes one temper"
+    );
+    assert!(item(&w, target).expect("target").dirty);
+}
+
+/// The wrapped rod's use skill is refused below `actability_requirement` (client
+/// `FUN_394e1a90`, error 508) and the wrapped item is kept; at the requirement it is consumed
+/// and the unwrapped item is given.
+#[tokio::test]
+async fn using_a_wrapped_fishing_rod_requires_its_actability_points() {
+    let mut w = rod_cast_world(data());
+    let wrapped = give(&w, &w.pa.clone(), slot_type::INVENTORY, WRAPPED_ROD, 1, 0);
+    w.a.drain();
+    cast_wrapped_rod(&mut w, wrapped).await;
+    let frames = w.a.drain();
+    assert!(
+        frames.contains(&error_with_kind(
+            error_message::ACTABILITY_NOT_ENOUGH_POINT,
+            7
+        )),
+        "the use below the requirement shows error 508 with the fishing group"
+    );
+    assert_eq!(item(&w, wrapped).expect("the wrapped rod is kept").count, 1);
+
+    w.pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 7,
+            point: 10000,
+            step: 1,
+        });
+    cast_wrapped_rod(&mut w, wrapped).await;
+    assert!(
+        item(&w, wrapped).is_none(),
+        "the accepted use consumes the wrapped rod"
+    );
+    assert!(
+        Inv::of(&w.pa)
+            .bag()
+            .lock()
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.template_id == STACK),
+        "the use gives the unwrapped item"
+    );
+}
+
+#[tokio::test]
+async fn item_cap_scale_refuses_forbidden_targets() {
+    let mut w = world();
+    let id = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        FORBIDDEN_SCALE_ARMOR,
+        1,
+        0,
+    );
+    let caster = Some(SkillItem {
+        item_id: 1,
+        item_template_id: GEM,
+    });
+    mark_clean(&w, id);
+    w.pa.data().skill_char.skill_cancelled = false;
+    let mut rng = ScriptedRng::new(&[], &[]);
+    item_cap_scale(&w.server, &w.pa, caster, Some(id), 900, [0; 4], &mut rng);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+    assert!(
+        rng.int_calls.is_empty(),
+        "the refusal must happen before the scale roll"
+    );
+    let after = item(&w, id).unwrap();
+    assert_eq!(
+        (after.details.temper_physical, after.details.temper_magical),
+        (0, 0)
+    );
+    assert!(!after.dirty, "a refused temper must not dirty the item");
+    assert!(
+        w.a.drain().is_empty(),
+        "the cast validation is what reports INVALID_TARGET; the direct call is silent"
+    );
+
+    // The reset tool is refused by the same set and leaves the existing temper untouched.
+    {
+        let c = Inv::of(&w.pa).bag();
+        let mut c = c.lock().unwrap();
+        let it = c.get_item_by_id_mut(id).unwrap();
+        it.details.temper_physical = 5;
+        it.details.temper_magical = 6;
+        it.dirty = false;
+    }
+    w.pa.data().skill_char.skill_cancelled = false;
+    item_cap_scale_reset(&w.server, &w.pa, caster, Some(id), [0; 4]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+    let after = item(&w, id).unwrap();
+    assert_eq!(
+        (after.details.temper_physical, after.details.temper_magical),
+        (5, 6)
+    );
+    assert!(!after.dirty);
+    assert!(w.a.drain().is_empty());
+}
+
 #[tokio::test]
 async fn cleanup_look_convert_flow() {
     let mut w = world();
@@ -1871,6 +2322,12 @@ fn ucc_world() -> World {
 }
 
 fn ucc_world_with(as_reagent: bool) -> World {
+    ucc_world_with_tables(as_reagent, &[], &[])
+}
+
+/// [`ucc_world_with`] with the WP-U2 tables: `applicable` = `ucc_applicables` kind-2 template
+/// ids, `patterns` = `emblem_patterns` ids (empty = permissive).
+fn ucc_world_with_tables(as_reagent: bool, applicable: &[u32], patterns: &[u32]) -> World {
     use crate::systems::skills::data::{EffectKind, EffectTemplate};
     let mut d = data();
     // Authentic 1.2 Crest Ink / Crest Bleach are use-skill reagents. Their effect rows
@@ -1891,9 +2348,34 @@ fn ucc_world_with(as_reagent: bool) -> World {
         EffectTemplate::CleanupUcc { id: 1 },
         0,
     );
+    for id in applicable {
+        d.systems.economy.ucc.insert_applicable_item(*id);
+    }
+    for id in patterns {
+        d.systems.economy.ucc.insert_pattern(*id);
+    }
     let w = world_with_data(d);
     super::bridges::install(&w.server);
     w
+}
+
+/// A stamp item carrying `ucc_id`, registered in the `UccManager` with the given patterns.
+fn ucc_stamp(w: &World, slot: i32, ucc_id: u64, pattern1: u32, pattern2: u32) -> u64 {
+    use crate::stream::models::{Ucc, UccType};
+    let stamp = give(w, &w.pa, slot_type::INVENTORY, STACK, 1, slot);
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(stamp)
+        .unwrap()
+        .set_ucc(ucc_id);
+    let mut ucc = Ucc::new(UccType::Simple, 1);
+    ucc.id = ucc_id as u32;
+    ucc.pattern1 = pattern1;
+    ucc.pattern2 = pattern2;
+    w.server.streams.ucc.insert(ucc);
+    stamp
 }
 
 fn ucc_source_template(cleanup: bool) -> u32 {
@@ -2348,6 +2830,77 @@ async fn ucc_imprint_cleanup_and_stamp() {
     );
 }
 
+#[tokio::test]
+async fn ucc_imprint_accepts_an_applicable_item_with_known_patterns() {
+    let w = ucc_world_with_tables(true, &[ARMOR], &[3, 7]);
+    let stamp = ucc_stamp(&w, 0, 0xABCD, 3, 7);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    assert_eq!(
+        imprint_ucc(
+            &w.server,
+            Some(&w.pa),
+            Some(SkillItem {
+                item_id: stamp,
+                item_template_id: STACK,
+            }),
+            None,
+            Some(target),
+        ),
+        Outcome::Done
+    );
+    assert_eq!(item(&w, target).unwrap().ucc_id, 0xABCD);
+}
+
+#[tokio::test]
+async fn ucc_imprint_refuses_a_non_applicable_item_and_keeps_it_unchanged() {
+    let mut w = ucc_world_with_tables(true, &[STACK], &[]);
+    let stamp = ucc_stamp(&w, 0, 0xABCD, 0, 0);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    let target_before = ucc_item_values(&w, target);
+    let stamp_before = ucc_item_values(&w, stamp);
+    assert_eq!(
+        imprint_ucc(
+            &w.server,
+            Some(&w.pa),
+            Some(SkillItem {
+                item_id: stamp,
+                item_template_id: STACK,
+            }),
+            None,
+            Some(target),
+        ),
+        Outcome::Cancelled
+    );
+    assert_eq!(ucc_item_values(&w, target), target_before);
+    assert_eq!(ucc_item_values(&w, stamp), stamp_before);
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test]
+async fn ucc_imprint_refuses_an_unknown_emblem_pattern_and_keeps_item_and_ucc() {
+    let mut w = ucc_world_with_tables(true, &[ARMOR], &[3]);
+    let stamp = ucc_stamp(&w, 0, 0xABCD, 3, 99);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    let target_before = ucc_item_values(&w, target);
+    let stamp_before = ucc_item_values(&w, stamp);
+    assert_eq!(
+        imprint_ucc(
+            &w.server,
+            Some(&w.pa),
+            Some(SkillItem {
+                item_id: stamp,
+                item_template_id: STACK,
+            }),
+            None,
+            Some(target),
+        ),
+        Outcome::Cancelled
+    );
+    assert_eq!(ucc_item_values(&w, target), target_before);
+    assert_eq!(ucc_item_values(&w, stamp), stamp_before);
+    assert!(w.a.drain().is_empty());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Slaves / backpacks
 // ---------------------------------------------------------------------------------------------
@@ -2777,8 +3330,12 @@ async fn glider_reequip_in_an_unlocked_transaction_waits_for_the_drain() {
 // ---------------------------------------------------------------------------------------------
 
 fn spawn_mate(w: &mut World) -> crate::world::MateRef {
+    spawn_mate_with(w, 500)
+}
+
+fn spawn_mate_with(w: &mut World, template_id: u32) -> crate::world::MateRef {
     install_default_summon_hooks(&w.server);
-    let mut m = Mate::new(77, 500);
+    let mut m = Mate::new(77, template_id);
     m.unit.tl_id = TL;
     m.owner_obj_id = w.pa.obj_id;
     m.unit.transform.set_xyz(100.5, 100.0, 100.0);
@@ -2982,6 +3539,561 @@ async fn mate_equipment_equip_unequip_and_refusal() {
     body[4] = 0x99;
     run_mate(&mut w, &body);
     assert!(w.a.drain().is_empty());
+}
+
+/// The shipped data has no timed mate item, so this gives an equipped one an end time in the
+/// past: `update_item_timers` removes it from the mate container, answers the owner with
+/// `SCMateEquipmentExpired` and keeps an unexpired item in the same container.
+#[tokio::test]
+async fn mate_equipment_expires_and_notifies_the_owner() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate(&mut w);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 3);
+    let wire = item(&w, id).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&wire), None, 3, equip_slot::CHEST as u8),
+    );
+    w.a.drain();
+    w.b.drain();
+    let container = w
+        .server
+        .items
+        .find_container_for_character(w.pa.character_id, slot_type::EQUIPMENT_MATE, 77)
+        .expect("mate equipment container");
+    let kept = w
+        .server
+        .items
+        .create(
+            WAIST_ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("item");
+    let kept_id = kept.id;
+    {
+        let mut c = container.lock().unwrap();
+        c.get_item_by_id_mut(id).unwrap().expiration_time = 1000;
+        assert!(c
+            .add_new_item(kept, equip_slot::WAIST, &w.server.game_data.items)
+            .is_ok());
+        c.get_item_by_id_mut(kept_id).unwrap().expiration_time = 3_000_000;
+    }
+
+    w.server.systems.economy.item_timers.reset(1_000_000);
+    assert_eq!(item_timers::update_item_timers(&w.server, 2_000_000), 1);
+
+    {
+        let c = container.lock().unwrap();
+        assert!(c.get_item_by_id(id).is_none());
+        assert_eq!(c.get_item_by_id(kept_id).map(|i| i.id), Some(kept_id));
+    }
+    assert!(w.server.items.item_by_id(id).is_none());
+    assert!(mate.data().equipment[equip_slot::CHEST as usize].is_none());
+    assert_eq!(
+        w.a.drain(),
+        vec![
+            (
+                sc::SCMateEquipmentExpiredPacket,
+                body(&SCMateEquipmentExpiredPacket {
+                    mate_tl_id: TL,
+                    slot_type: slot_type::EQUIPMENT_MATE,
+                    slot_index: equip_slot::CHEST as u8,
+                })
+            ),
+            (
+                sc::SCUnitEquipmentsChangedPacket,
+                body(&SCUnitEquipmentsChangedPacket {
+                    obj_id: mate.obj_id,
+                    items: vec![(equip_slot::CHEST as u8, None)],
+                })
+            ),
+        ]
+    );
+    assert_eq!(
+        w.b.drain(),
+        vec![(
+            sc::SCUnitEquipmentsChangedPacket,
+            body(&SCUnitEquipmentsChangedPacket {
+                obj_id: mate.obj_id,
+                items: vec![(equip_slot::CHEST as u8, None)],
+            })
+        )]
+    );
+}
+
+/// A mate that is not spawned keeps its persistent container, so its timed gear still expires;
+/// the packet is skipped because the client only acts on its current pet.
+#[tokio::test]
+async fn mate_equipment_expiry_skips_the_packet_for_an_unspawned_mate() {
+    let mut w = world();
+    let container = w.server.items.container_for_character(
+        w.pa.character_id,
+        slot_type::EQUIPMENT_MATE,
+        999,
+        &w.server.ids.container,
+    );
+    let item = w
+        .server
+        .items
+        .create(
+            ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("item");
+    let id = item.id;
+    {
+        let mut c = container.lock().unwrap();
+        assert!(c
+            .add_new_item(item, equip_slot::CHEST, &w.server.game_data.items)
+            .is_ok());
+        c.get_item_by_id_mut(id).unwrap().expiration_time = 1000;
+    }
+    w.server.systems.economy.item_timers.reset(1_000_000);
+    assert_eq!(item_timers::update_item_timers(&w.server, 2_000_000), 1);
+    assert!(container.lock().unwrap().items.is_empty());
+    assert!(w.server.items.item_by_id(id).is_none());
+    assert!(w.a.drain().is_empty());
+    assert!(w.b.drain().is_empty());
+}
+
+/// The bag rule for offline owners applies to mate gear too.
+#[tokio::test]
+async fn mate_equipment_timers_skip_an_offline_owner() {
+    let mut w = world();
+    let container = w.server.items.container_for_character(
+        w.pa.character_id,
+        slot_type::EQUIPMENT_MATE,
+        999,
+        &w.server.ids.container,
+    );
+    let item = w
+        .server
+        .items
+        .create(
+            ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("item");
+    let id = item.id;
+    {
+        let mut c = container.lock().unwrap();
+        assert!(c
+            .add_new_item(item, equip_slot::CHEST, &w.server.game_data.items)
+            .is_ok());
+        c.get_item_by_id_mut(id).unwrap().expiration_time = 1000;
+    }
+    assert!(w.server.world.try_remove_character(w.pa.obj_id));
+    w.server.systems.economy.item_timers.reset(1_000_000);
+    assert_eq!(item_timers::update_item_timers(&w.server, 2_000_000), 0);
+    assert_eq!(container.lock().unwrap().items.len(), 1);
+    assert!(w.a.drain().is_empty());
+}
+
+/// The riding pack (`mate_equip_slot_packs` 1) allows head, waist and feet.
+#[tokio::test]
+async fn mate_equipment_riding_pack_allows_head_waist_and_feet() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    for (template, slot) in [
+        (HEAD_ARMOR, equip_slot::HEAD),
+        (WAIST_ARMOR, equip_slot::WAIST),
+        (FEET_ARMOR, equip_slot::FEET),
+    ] {
+        let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, template, 1, 3);
+        let wire = item(&w, id).unwrap();
+        run_mate(&mut w, &mate_body(Some(&wire), None, 3, slot as u8));
+        assert!(item_at(&w.pa, slot_type::INVENTORY, 3).is_none());
+        assert_eq!(
+            mate.data().equipment[slot as usize].as_ref().map(|i| i.id),
+            Some(id)
+        );
+        assert!(w
+            .a
+            .drain()
+            .iter()
+            .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+        assert!(w
+            .b
+            .drain()
+            .iter()
+            .any(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket));
+    }
+}
+
+/// The combat pack (`mate_equip_slot_packs` 2) has a chest slot but no waist slot.
+#[tokio::test]
+async fn mate_equipment_combat_pack_refuses_waist_and_keeps_the_item() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_COMBAT);
+    let chest = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 3);
+    let chest_wire = item(&w, chest).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&chest_wire), None, 3, equip_slot::CHEST as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::CHEST as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(chest)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    let waist = give(&w, &w.pa.clone(), slot_type::INVENTORY, WAIST_ARMOR, 1, 4);
+    let waist_wire = item(&w, waist).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&waist_wire), None, 4, equip_slot::WAIST as u8),
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 4).unwrap().id, waist);
+    assert!(mate.data().equipment[equip_slot::WAIST as usize].is_none());
+    let frames = w.a.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+    assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w.b.drain().is_empty());
+}
+
+/// The riding pack has no chest slot: the item stays in the bag and the client gets the
+/// rejected-move packet plus the error.
+#[tokio::test]
+async fn mate_equipment_riding_pack_refuses_chest_and_keeps_the_item() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 3);
+    let wire = item(&w, id).unwrap();
+    w.a.drain();
+    w.b.drain();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&wire), None, 3, equip_slot::CHEST as u8),
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 3).unwrap().id, id);
+    assert!(mate.data().equipment[equip_slot::CHEST as usize].is_none());
+    let frames = w.a.drain();
+    assert!(frames.contains(&(
+        sc::SCMateEquipmentChangedPacket,
+        body(&SCMateEquipmentChangedPacket {
+            item_on_pet: ItemAndLocation {
+                item: Some(wire.clone()),
+                slot_type: slot_type::INVENTORY,
+                slot: 3,
+            },
+            item_in_bag: ItemAndLocation {
+                item: None,
+                slot_type: slot_type::EQUIPMENT_MATE,
+                slot: equip_slot::CHEST as u8,
+            },
+            mate_tl_id: TL,
+            character_id: 1,
+            passenger_id: 0,
+            bts: false,
+            success: false,
+        })
+    )));
+    assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w.b.drain().is_empty());
+}
+
+/// The pet pack (`mate_equip_slot_packs` 3) allows no gear slot at all.
+#[tokio::test]
+async fn mate_equipment_pet_pack_refuses_every_slot_and_keeps_the_items() {
+    for (template, slot) in [
+        (HEAD_ARMOR, equip_slot::HEAD),
+        (ARMOR, equip_slot::CHEST),
+        (WAIST_ARMOR, equip_slot::WAIST),
+        (FEET_ARMOR, equip_slot::FEET),
+    ] {
+        let mut w = world_with_data(mate_pack_data());
+        let mate = spawn_mate_with(&mut w, MATE_PET);
+        let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, template, 1, 3);
+        let wire = item(&w, id).unwrap();
+        w.a.drain();
+        w.b.drain();
+        run_mate(&mut w, &mate_body(Some(&wire), None, 3, slot as u8));
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 3).unwrap().id, id);
+        assert!(mate.data().equipment[slot as usize].is_none());
+        let frames = w.a.drain();
+        assert!(frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+        assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+        assert!(w.b.drain().is_empty());
+    }
+}
+
+/// Unequipping to the bag is always allowed, even with a pack that permits no slot.
+#[tokio::test]
+async fn mate_equipment_pet_pack_still_unequips_to_the_bag() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_PET);
+    let container = w
+        .server
+        .systems
+        .economy
+        .item_effects
+        .hooks()
+        .mate_equipment(&w.server, &mate)
+        .unwrap();
+    let item = w
+        .server
+        .items
+        .create(
+            ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .unwrap();
+    let id = item.id;
+    assert!(container
+        .lock()
+        .unwrap()
+        .add_new_item(item, equip_slot::CHEST, &w.server.game_data.items)
+        .is_ok());
+    let worn = container
+        .lock()
+        .unwrap()
+        .get_item_by_slot(equip_slot::CHEST)
+        .cloned()
+        .unwrap();
+    mate.data().equipment[equip_slot::CHEST as usize] = Some(worn.clone());
+    w.a.drain();
+    w.b.drain();
+
+    run_mate(
+        &mut w,
+        &mate_body(None, Some(&worn), 7, equip_slot::CHEST as u8),
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 7).unwrap().id, id);
+    assert!(mate.data().equipment[equip_slot::CHEST as usize].is_none());
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+    assert!(w
+        .b
+        .drain()
+        .iter()
+        .any(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket));
+}
+
+/// The per-mate item list is the client's whitelist, gated on FeatureSet bit 78. With the bit
+/// off (`DEFAULT_FSET`) an item the list does not name is accepted and only logged.
+#[tokio::test]
+async fn mate_equipment_item_outside_the_client_list_is_still_allowed_when_the_feature_is_off() {
+    let mut w = world_with_data(mate_pack_data());
+    assert!(!w.server.systems.services.features(&w.server).check_bit(78));
+    let rules = &w.server.game_data.systems.economy.mate_equipment;
+    assert!(rules.pack_items[&MATE_RIDING].contains(&WAIST_ARMOR));
+    assert!(!rules.pack_items[&MATE_RIDING].contains(&FEET_ARMOR));
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let wire = item(&w, id).unwrap();
+    w.a.drain();
+    w.b.drain();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 3).is_none());
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(id)
+    );
+    let frames = w.a.drain();
+    assert!(!frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w
+        .b
+        .drain()
+        .iter()
+        .any(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket));
+}
+
+/// With FeatureSet bit 78 on, the client's `mate_equip_pack_groups` list is enforced: the named
+/// item is accepted in an allowed slot, an unnamed one is refused and stays in the bag.
+#[tokio::test]
+async fn mate_equipment_item_outside_the_client_list_is_refused_when_the_feature_is_on() {
+    let mut w = world_with_data(mate_pack_data_with_whitelist(true));
+    assert!(w.server.systems.services.features(&w.server).check_bit(78));
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+
+    let waist = give(&w, &w.pa.clone(), slot_type::INVENTORY, WAIST_ARMOR, 1, 3);
+    let waist_wire = item(&w, waist).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&waist_wire), None, 3, equip_slot::WAIST as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::WAIST as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(waist)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    let feet = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let feet_wire = item(&w, feet).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&feet_wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 3).unwrap().id, feet);
+    assert!(mate.data().equipment[equip_slot::FEET as usize].is_none());
+    let frames = w.a.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+    assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w.b.drain().is_empty());
+}
+
+/// A mate template whose slot pack is 0 / missing refuses every slot (`FUN_3933a9c0` returns 0).
+#[tokio::test]
+async fn mate_equipment_missing_slot_pack_refuses_every_slot() {
+    for (template, slot) in [
+        (HEAD_ARMOR, equip_slot::HEAD),
+        (ARMOR, equip_slot::CHEST),
+        (WAIST_ARMOR, equip_slot::WAIST),
+        (FEET_ARMOR, equip_slot::FEET),
+    ] {
+        let mut w = world_with_data(mate_pack_data());
+        let mate = spawn_mate_with(&mut w, MATE_NO_PACK);
+        let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, template, 1, 3);
+        let wire = item(&w, id).unwrap();
+        w.a.drain();
+        w.b.drain();
+        run_mate(&mut w, &mate_body(Some(&wire), None, 3, slot as u8));
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 3).unwrap().id, id);
+        assert!(mate.data().equipment[slot as usize].is_none());
+        let frames = w.a.drain();
+        assert!(frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+        assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+        assert!(w.b.drain().is_empty());
+    }
+}
+
+/// Equipping into a slot that already holds a mate item swaps both items.
+#[tokio::test]
+async fn mate_equipment_swap_onto_an_occupied_slot() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    let first = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let first_wire = item(&w, first).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&first_wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(first)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    let second = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 4);
+    let second_wire = item(&w, second).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&second_wire), None, 4, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(second)
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 4).unwrap().id, first);
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 3).is_none());
+}
+
+/// Unequipping into an occupied bag slot swaps the bag item onto the mate; an allowed bag item
+/// swaps through, a disallowed one refuses the whole move and keeps both items in place.
+#[tokio::test]
+async fn mate_equipment_unequip_swap_checks_the_bag_item() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    let worn = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let worn_wire = item(&w, worn).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&worn_wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(worn)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    // Allowed swap: another feet item in bag slot 4 lands on the mate.
+    let allowed = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 4);
+    run_mate(
+        &mut w,
+        &mate_body(None, Some(&worn_wire), 4, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(allowed)
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 4).unwrap().id, worn);
+    w.a.drain();
+    w.b.drain();
+
+    // Disallowed swap: a chest item in bag slot 5 would land on the mate, so the move is
+    // refused and both items stay where they are.
+    let chest = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 5);
+    let chest_wire = item(&w, chest).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(None, Some(&chest_wire), 5, equip_slot::FEET as u8),
+    );
+    // The wire item only selects the direction; the actual mate item is still `allowed`.
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(allowed)
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 5).unwrap().id, chest);
+    let frames = w.a.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+    assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w.b.drain().is_empty());
 }
 
 #[test]

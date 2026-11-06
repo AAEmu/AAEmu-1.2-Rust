@@ -43,6 +43,7 @@ pub mod rename;
 pub mod session;
 pub mod team;
 pub mod trial;
+pub mod ui_packets;
 pub mod util;
 pub mod zone_conflict;
 
@@ -56,6 +57,8 @@ mod bounty_flow_tests;
 mod expedition_rename_tests;
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod friend_flow_tests;
 #[cfg(test)]
 mod guild_flow_tests;
 #[cfg(test)]
@@ -150,6 +153,7 @@ impl System {
             .await
             .context("FamilyManager")?;
         team::TeamManager::start_tick(server);
+        expedition::start_tick(server);
         // CrimeManager.Load, TrialManager.Load (court rooms + the 5 s TrialUpdateTask).
         server.systems.social.crimes.load(server).await?;
         server

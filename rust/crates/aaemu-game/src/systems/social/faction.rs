@@ -7,7 +7,10 @@ use std::collections::HashMap;
 
 use crate::data::world_data::{factions, FactionData};
 use crate::data::GameDataError;
+use crate::db_character::CrimeFactionChange;
 use crate::server::GameServer;
+use crate::systems::social::achievement::char_record_kind;
+use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::systems::DataLoadCtx;
 use crate::world::PlayerRef;
 
@@ -199,10 +202,16 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
         .member_remove_for_faction_change(server, p);
 }
 
-/// `Character.SetFaction` for a synchronous caller (the GM `/setfaction`): a **persistent**
-/// change (saved to `characters.faction_id`, ends any temporary faction) with the character
-/// side effects of [`set_faction`] - owned houses, the guild removal (spawned) and party
-/// removal.
+/// `Character.SetFaction` for a synchronous caller (the GM `/setfaction`, the pirate
+/// conversion / pardon): a **persistent** change (saved to `characters.faction_id`, ends any
+/// temporary faction) with the character side effects of [`set_faction`] - owned houses, the
+/// guild removal (spawned) and party removal.
+///
+/// Guild owner (PIRATE-1): [`expedition::leave_forced`] hands the leadership to a same-faction
+/// successor and removes the owner; only an owner who was the last eligible member dismisses
+/// the guild. A returning pirate guild owner therefore passes the pirate guild on and leaves it
+/// (the guild's mother faction 161 differs from the home faction); the guild keeps its
+/// territory / siege / nation.
 pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u32) {
     // One short lock: a second `p.data()` in the same expression would self-deadlock.
     let (current, temporary) = {
@@ -244,6 +253,56 @@ pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u3
         .social
         .teams
         .member_remove_for_faction_change(server, p);
+}
+
+/// Applies the faction consequences of a crime-point change once the caller released the
+/// character's data lock (the decision is made by
+/// [`Character::check_wanted_threshold`](crate::db_character::Character::check_wanted_threshold)):
+///
+/// * `became_pirate`: `SetFaction(Pirate)`.
+/// * `pardoned`: return to the faction of the character's race/gender template - the home
+///   faction, exactly what the trial's not-guilty path did (`trial.rs`, now folded into this
+///   helper). Position is unchanged; the house / guild / party handling of
+///   [`set_faction_persistent`] applies as-is. The 1.2 client prints ui_text 2297
+///   `pardon_pirate` itself when the `SCUnitFactionChangedPacket` it receives has old faction
+///   161 and a non-pirate new faction (`x2game.dll.c:617340-617367`); the server has no
+///   separate ui-text packet on this or the trial path. Then the "Repentant" achievement
+///   record (kind 49 `MY_DISHONORABLE_POINT`, `char_records` 2401) is reported so achievement
+///   1380 completes.
+///
+/// Evidence: item 32212's description ("reach 0 Infamy Points to leave the pirate alliance and
+/// rejoin your original faction") and the C# trial verdict check (`TrialManager.cs:818`,
+/// `a2ab80abd^`); the every-decrease check and the kept position are INFERRED from the item
+/// text plus the C# `SetFaction` having no teleport (research `pirate-return.md`).
+pub fn apply_crime_faction_change(server: &GameServer, p: &PlayerRef, change: CrimeFactionChange) {
+    if change.became_pirate {
+        set_faction_persistent(server, p, factions::PIRATE);
+    }
+    if !change.pardoned {
+        return;
+    }
+    let (race, gender) = {
+        let c = p.data();
+        (c.race, c.gender)
+    };
+    match server.game_data.characters.template(race, gender) {
+        Some(template) => {
+            set_faction_persistent(server, p, template.faction_id);
+            crate::systems::report_achievement(
+                server,
+                p,
+                AchievementInput::Absolute {
+                    kind_id: char_record_kind::MY_DISHONORABLE_POINT,
+                    value: 1,
+                    matcher: RecordMatch::Any,
+                },
+            );
+        }
+        None => tracing::error!(
+            "Pardon: no character template for race {race} / gender {gender} (character {})",
+            p.character_id
+        ),
+    }
 }
 
 /// A temporary faction change (duel Red / Blue team, battlefield corps) that is **not**
@@ -392,5 +451,67 @@ mod tests {
         assert!(!r.is_empty());
         // Nuia and Haranya are hostile in 1.2.
         assert_eq!(r.get(148, 149), Some(relation_state::HOSTILE));
+    }
+
+    /// The pardon returns the character through [`set_faction_persistent`], so its existing
+    /// house / guild / party handling still runs: an owned house follows the returned pirate to
+    /// the home faction. (Guild owner: see the `set_faction_persistent` doc.)
+    #[tokio::test]
+    async fn a_pardoned_pirate_takes_the_set_faction_house_handling() {
+        use crate::data::character_templates::CharacterTemplate;
+        use crate::data::GameData;
+        use crate::db_character::CrimeFactionChange;
+        use crate::models::house::House;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        let mut data = GameData::empty();
+        for id in [101u32, factions::PIRATE] {
+            data.factions.add(SystemFaction {
+                id,
+                ..SystemFaction::default()
+            });
+        }
+        data.characters.templates.insert(
+            0x11,
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                creatable: true,
+                faction_id: 101,
+                ..Default::default()
+            },
+        );
+        let server = std::sync::Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::social::install_hooks(&server);
+
+        let mut client = TestClient::new(&server, 1, 1001);
+        let mut character = test_character(1, "Pirate", 100.0, 100.0);
+        character.unit.faction_id = factions::PIRATE;
+        let p = spawn_player(&server, &client, character, 0x100);
+        client.drain();
+
+        let mut house = House::new(1, 100);
+        house.unit.owner_id = p.character_id;
+        house.unit.faction_id = factions::PIRATE;
+        let house = Entity::new(0x500, house);
+        assert!(server.systems.housing.manager.insert(&house));
+
+        apply_crime_faction_change(
+            &server,
+            &p,
+            CrimeFactionChange {
+                pardoned: true,
+                ..CrimeFactionChange::default()
+            },
+        );
+
+        assert_eq!(p.data().unit.faction_id, 101);
+        assert_eq!(
+            house.data().unit.faction_id,
+            101,
+            "owned houses follow the new faction"
+        );
     }
 }

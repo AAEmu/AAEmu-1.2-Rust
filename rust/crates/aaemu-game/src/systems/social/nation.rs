@@ -41,6 +41,7 @@ use super::packets::faction::{
     SCFactionIndependencePacket, SCFactionKickToOriginResultPacket, SCFactionOwnerChangedPacket,
     SCFactionRelationExpiredPacket, SCFactionSetRelationStatePacket,
 };
+use super::packets::misc::{invitation_canceled_kind, SCInvitationCanceledPacket};
 use super::util::{now_ms, send_error};
 
 /// Skill "국가 독립" (declare independence), 20 s cast, CASTLE_CLAIM backpack (equip slot 26).
@@ -476,6 +477,20 @@ impl NationManager {
         invites.push(pending);
     }
 
+    /// Removes the invitations whose timeout passed and returns their invitee character ids.
+    /// The list holds at most one invitation per invitee (`add_invite` replaces), so no other
+    /// nation invitation (popup type 0x29) can still be pending for an expired invitee.
+    pub fn expire_invites(&self, now_ms: i64) -> Vec<u32> {
+        let mut invites = self.invites.lock().unwrap_or_else(PoisonError::into_inner);
+        let expired: Vec<u32> = invites
+            .iter()
+            .filter(|i| !i.is_valid_at(now_ms))
+            .map(|i| i.invitee_character_id)
+            .collect();
+        invites.retain(|i| i.is_valid_at(now_ms));
+        expired
+    }
+
     /// Consumes the pending invite of `invitee_character_id`. `None` when there is none, it has
     /// expired, or it names another nation (a forged / replayed reply, NATION-11).
     pub fn take_invite(
@@ -806,6 +821,21 @@ impl NationManager {
     pub fn relation_chunks(&self) -> Vec<Vec<FactionRelation>> {
         let rows = self.relation_rows();
         rows.chunks(200).map(<[FactionRelation]>::to_vec).collect()
+    }
+
+    /// Updates the cached owner name of a renamed king. Returns the number of changed nations.
+    /// The caller owns `SaveManager::transaction_lock`, so the periodic save cannot write the
+    /// old name back after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut nations = self.write();
+        let mut changed = 0;
+        for nation in nations.iter_mut() {
+            if nation.owner_character_id == character_id && nation.owner_name != new_name {
+                nation.owner_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
     }
 
     pub fn add(&self, nation: Nation) {
@@ -2156,6 +2186,17 @@ pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -
     true
 }
 
+/// Closes the popups of the immigration invitations that timed out (kind 7).
+pub fn sweep_expired_invites(server: &GameServer, now_ms: i64) {
+    for invitee_id in server.systems.social.nations.expire_invites(now_ms) {
+        if let Some(invitee) = server.world.character_by_id(invitee_id) {
+            invitee.send(SCInvitationCanceledPacket {
+                kind: invitation_canceled_kind::NATION,
+            });
+        }
+    }
+}
+
 /// The periodic nation tick (subscribed to the existing `TickManager`, NATION-17): applies due
 /// relation expiries, persists them, and sends the treaty-request mails that became due.
 pub fn run_periodic(server: &GameServer) {
@@ -2415,7 +2456,9 @@ pub(crate) async fn persist_expiries(
     Ok(())
 }
 
-/// Subscribes the nation periodic check to the shared `TickManager` (60 s; NATION-17).
+/// Subscribes the nation periodic check to the shared `TickManager` (60 s; NATION-17) and the
+/// immigration-invite expiry sweep (1 s; the invite timeout is 60 s and the list was otherwise
+/// pruned only when the invitee answered).
 pub fn start_tick(server: &std::sync::Arc<GameServer>) {
     let weak = std::sync::Arc::downgrade(server);
     server.systems.services.tick.on_tick.subscribe(
@@ -2427,6 +2470,17 @@ pub fn start_tick(server: &std::sync::Arc<GameServer>) {
         },
         std::time::Duration::from_secs(60),
         true,
+    );
+    let weak = std::sync::Arc::downgrade(server);
+    server.systems.services.tick.on_tick.subscribe(
+        move |_delta| {
+            let Some(server) = weak.upgrade() else {
+                return;
+            };
+            sweep_expired_invites(&server, now_ms());
+        },
+        std::time::Duration::from_secs(1),
+        false,
     );
 }
 
@@ -2656,6 +2710,9 @@ pub fn invite_citizen(server: &GameServer, king: &PlayerRef, invitee_name: &str)
         return;
     }
     let now = now_ms();
+    // Close the popups of expired invites first: `add_invite` drops them silently and the
+    // sweep would no longer see them (the cancel also precedes the new invitation).
+    sweep_expired_invites(server, now);
     if server
         .systems
         .social

@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `divine_clock_time` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Time that has been passed already',
   `divine_clock_taken` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of clicks taken today',
   `extra_character_slots` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Purchased character slots beyond the base account slots',
+  `second_password_hash` TEXT NULL DEFAULT NULL COMMENT 'PBKDF2 (ASP.NET Identity V3) hash of the 1.2 second password; NULL = not set',
+  `second_password_failed` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Consecutive failed second-password checks',
+  `second_password_locked_until` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds until second-password checks are refused; 0 = not locked',
+  `pay_method` TINYINT NOT NULL DEFAULT 0 COMMENT '1 Premium, 3 Demo, 5 None; 0 = Account:DefaultPayment',
+  `pay_location` INT NOT NULL DEFAULT 1,
+  `pay_start` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds',
+  `pay_end` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds',
+  `premium_point` INT NOT NULL DEFAULT 0 COMMENT 'Premium point; grade = premium_grades lookup',
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Account specific values not related to login';
 
@@ -121,6 +129,14 @@ CREATE TABLE IF NOT EXISTS `character_active_buffs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Stores active buffs across player sessions';
 
 
+CREATE TABLE IF NOT EXISTS `character_crafts` (
+  `character_id` INT UNSIGNED NOT NULL COMMENT 'Character who learned the craft',
+  `craft_id`     INT UNSIGNED NOT NULL COMMENT 'crafts.id from compact.sqlite3',
+  `learned_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'UTC timestamp of the first learn',
+  PRIMARY KEY (`character_id`, `craft_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Crafts learned from recipe items / TrainCraftEffect';
+
+
 CREATE TABLE IF NOT EXISTS `character_cooldowns` (
   `character_id`  INT UNSIGNED NOT NULL COMMENT 'Character who owns this cooldown',
   `cooldown_type` TINYINT UNSIGNED NOT NULL COMMENT '0 = skill id, 1 = shared cooldown tag',
@@ -165,8 +181,11 @@ CREATE TABLE IF NOT EXISTS `characters` (
   `rez_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `rez_penalty_duration` int NOT NULL,
   `leave_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
+  `chat_restricted_until` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `money` bigint NOT NULL DEFAULT '0',
   `money2` bigint NOT NULL DEFAULT '0',
+  `aa_point` bigint NOT NULL DEFAULT '0',
+  `bank_aa_point` bigint NOT NULL DEFAULT '0',
   `honor_point` int NOT NULL DEFAULT '0',
   `vocation_point` int NOT NULL DEFAULT '0',
   `crime_point` int NOT NULL DEFAULT '0',
@@ -678,6 +697,25 @@ ENGINE=InnoDB
 ;
 
 
+CREATE TABLE IF NOT EXISTS `premium_services` (
+    `c_id` INT NOT NULL COMMENT 'CSPremiumServiceBuy.cId and SCPremiumServiceList.cId',
+    `name` VARCHAR(400) NOT NULL DEFAULT '' COMMENT 'SCPremiumServiceList.cname (client max 400 bytes)',
+    `premium_id` SMALLINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'SCPremiumServiceList.pId',
+    `hours` INT NOT NULL DEFAULT '0' COMMENT 'Premium hours granted by a purchase (SCPremiumServiceList.ptime)',
+    `price_type` TINYINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Credits(0), AAPoints(1), Loyalty(2), Coins(3)',
+    `price` INT NOT NULL DEFAULT '0' COMMENT 'Price in price_type units',
+    `grade` TINYINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Copied to SCPremiumServiceList.id; meaning UNKNOWN, display only',
+    `is_sell` TINYINT(1) NOT NULL DEFAULT '0' COMMENT 'Buy allowed (1 = for sale)',
+    `is_hidden` TINYINT(1) NOT NULL DEFAULT '0' COMMENT 'SCPremiumServiceList.isHidden',
+    `buy_max` INT NOT NULL DEFAULT '0' COMMENT 'Copied to SCPremiumServiceList.bcount; not enforced (meaning UNKNOWN)',
+    PRIMARY KEY (`c_id`) USING BTREE
+)
+COMMENT='Premium service shop catalogue (WP-C)'
+COLLATE='utf8mb4_general_ci'
+ENGINE=InnoDB
+;
+
+
 CREATE TABLE IF NOT EXISTS `audit_char_sus` (
 	`id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
 	`sus_date` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Time of incident',
@@ -761,8 +799,18 @@ CREATE TABLE IF NOT EXISTS `dominions` (
   `siege_starts_at` bigint NOT NULL DEFAULT 0,
   `siege_ends_at` bigint NOT NULL DEFAULT 0,
   `siege_ended_at` bigint NOT NULL DEFAULT 0,
+  `siege_reinforced` tinyint(1) NOT NULL DEFAULT 0,
+  `siege_defender_ni` tinyint unsigned NOT NULL DEFAULT 100,
+  `siege_defender_nr` tinyint unsigned NOT NULL DEFAULT 100,
+  `siege_outcome_credited` tinyint(1) NOT NULL DEFAULT 0,
   `non_pvp_start_at` bigint NOT NULL DEFAULT 0,
   `non_pvp_duration_min` smallint unsigned NOT NULL DEFAULT 0,
+  `declaration_attacker` int unsigned NOT NULL DEFAULT 0,
+  `declaration_at` bigint NOT NULL DEFAULT 0,
+  `declaration_cycle` bigint NOT NULL DEFAULT 0,
+  `declaration_hq_x` float NOT NULL DEFAULT 0,
+  `declaration_hq_y` float NOT NULL DEFAULT 0,
+  `declaration_hq_z` float NOT NULL DEFAULT 0,
   PRIMARY KEY (`zone_group_id`),
   UNIQUE KEY `dominions_tower` (`tower_house_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

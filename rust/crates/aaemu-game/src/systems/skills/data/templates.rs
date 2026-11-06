@@ -583,8 +583,11 @@ fn read_buff(r: &SqlRow<'_, '_>) -> rusqlite::Result<BuffTemplate> {
             &r.string_or("skill_controller_id", "0")?,
             "skill_controller_id",
         )? as u32,
-        resurrection_health: r.i32("resurrection_health")?,
-        resurrection_mana: r.i32("resurrection_mana")?,
+        // NULL-tolerant: only buff 239 sets these columns in the 1.2 data, the rest of the
+        // catalog leaves them NULL. `resurrection_percent` is the usual `'t'`/`'f'` text
+        // column (`bool_str`: NULL -> false, `'t'` / `'1'` -> true).
+        resurrection_health: r.i32_or("resurrection_health", 0)?,
+        resurrection_mana: r.i32_or("resurrection_mana", 0)?,
         resurrection_percent: r.bool_str("resurrection_percent")?,
         level_duration: r.i32("level_duration")?,
         reflection_ratio: r.i32("reflection_ratio")?,

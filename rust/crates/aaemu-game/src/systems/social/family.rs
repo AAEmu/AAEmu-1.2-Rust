@@ -209,6 +209,20 @@ impl FamilyManager {
         self.lock().families.get(&id).cloned()
     }
 
+    /// Updates a member's cached name (character rename); returns the family id (0 = none).
+    pub fn rename_member(&self, character_id: u32, new_name: &str) -> u32 {
+        let mut st = self.lock();
+        let Some(family_id) = st.family_members.get(&character_id).copied() else {
+            return 0;
+        };
+        if let Some(family) = st.families.get_mut(&family_id) {
+            if let Some(member) = family.members.iter_mut().find(|m| m.id == character_id) {
+                member.name = new_name.to_string();
+            }
+        }
+        family_id
+    }
+
     /// `GetFamilyOfCharacter(characterId)` (0 = none).
     pub fn family_of_character(&self, character_id: u32) -> u32 {
         self.lock()

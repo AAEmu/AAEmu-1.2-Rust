@@ -508,6 +508,23 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             }
             return;
         };
+        // `siege_items` situations (WP-SD3): the 1.2 client pre-checks them and shows the
+        // row's USAGE text for 431; this is the server's defence in depth for a forged cast.
+        // The refusal runs before `skill::use_skill`, so the item is not consumed.
+        if crate::systems::housing::dominion::siege_items::refused(server, &player, template_id) {
+            tracing::info!(
+                character = %player.data().unit.name,
+                item_template_id = template_id,
+                "Client item cast refused: the siege item is not usable in this situation"
+            );
+            crate::systems::economy::inventory::send_error_message(
+                &player,
+                crate::systems::economy::error_message::CANNOT_USE_SIEGE_ITEM,
+                0,
+                true,
+            );
+            return;
+        }
         let Some(skill) = template_skill(server, skill_id) else {
             return;
         };
@@ -530,6 +547,15 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             if data.skills.is_item_only_skill(skill_id) {
                 send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
             }
+            return;
+        }
+        // `items.actability_requirement` (fishing rods): the 1.2 client refuses the use action
+        // below the actability points of `items.actability_group_id` (`FUN_394e1a90`, shown by
+        // `FUN_39428370(0x1fc)` as `actability_not_enough_point` 508). A forged cast is refused
+        // before the source item is taken, so the item stays with the character.
+        if crate::systems::economy::inventory::refuse_item_actability(server, &player, template_id)
+        {
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
             return;
         }
         // Continue with the server-resolved template: `skill::use_skill` validates and consumes

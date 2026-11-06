@@ -5,6 +5,7 @@
 use aaemu_commons::{Marshal, PacketStream};
 
 use super::packet_def;
+use crate::config::RestrictionFlags;
 use crate::data::FeatureSet;
 use crate::models::character::Character;
 use crate::models::item::UnixTime;
@@ -164,6 +165,15 @@ impl SCCharacterListPacket {
 pub struct SCInitialConfigPacket {
     /// `FeaturesManager.Fsets`.
     pub fsets: FeatureSet,
+    /// `Account:Restrictions:<effective payment method>` (Rust only, WP-J). The seven flags are
+    /// the ones the client reader `FUN_397b1fb0` names; all `true` by default.
+    pub restrictions: RestrictionFlags,
+    /// `SecondPassword:MaxFailCount` (0 when the feature is disabled). The client compares it
+    /// with the failed count from `SCSecondPassSetted` before it requests key tables.
+    pub second_password_max_fail_count: u8,
+    /// `Account:IdleKickTime` (raw `u16`, 0 = off; Rust only, WP-J). Unit UNKNOWN: the client
+    /// reader `FUN_397b2a00` reads it as a `u16` and the client performs the kick itself.
+    pub idle_kick_time: u16,
 }
 packet_def!(
     SCInitialConfigPacket,
@@ -181,13 +191,17 @@ impl Marshal for SCInitialConfigPacket {
         self.fsets.write(s); // fset
         s.write_i32(0) // count // candidatelist.lua
             .write_i32(50); // initLp
-        for _ in 0..7 {
-            // canPlaceHouse, canPayTax, canUseAuction, canTrade, canSendMail, canUseBank, canUseCopper
-            s.write_bool(true);
-        }
-        s.write_u8(2) // secondPriceType (2 = na loyalty token)
-            .write_u8(0) // secondPasswordMaxFailCount
-            .write_u16(0); // idleKickTime
+                            // The client reader FUN_397b1fb0 names these seven booleans in this order.
+        s.write_bool(self.restrictions.can_place_house)
+            .write_bool(self.restrictions.can_pay_tax)
+            .write_bool(self.restrictions.can_use_auction)
+            .write_bool(self.restrictions.can_trade)
+            .write_bool(self.restrictions.can_send_mail)
+            .write_bool(self.restrictions.can_use_bank)
+            .write_bool(self.restrictions.can_use_copper);
+        s.write_u8(2) // secondPriceType (2 = na loyalty token; region constant)
+            .write_u8(self.second_password_max_fail_count) // secondPasswordMaxFailCount
+            .write_u16(self.idle_kick_time); // idleKickTime (unit UNKNOWN)
     }
 }
 
@@ -448,7 +462,12 @@ mod tests {
     #[test]
     fn initial_config_layout() {
         let f = FeatureSet::initialized(55, 50);
-        let b = encode(&SCInitialConfigPacket { fsets: f.clone() });
+        let b = encode(&SCInitialConfigPacket {
+            fsets: f.clone(),
+            restrictions: RestrictionFlags::default(),
+            second_password_max_fail_count: 0,
+            idle_kick_time: 0,
+        });
         let mut want = hex("DD 01 00 00 06 00");
         want.extend_from_slice(&hex("0B 00"));
         want.extend_from_slice(b"aaemu.local");
@@ -458,6 +477,48 @@ mod tests {
             "00 00 00 00  32 00 00 00  01 01 01 01 01 01 01  02  00  00 00",
         ));
         assert_eq!(b, want);
+    }
+
+    #[test]
+    fn initial_config_carries_second_password_max_fail_count() {
+        let b = encode(&SCInitialConfigPacket {
+            fsets: FeatureSet::initialized(0, 0),
+            restrictions: RestrictionFlags::default(),
+            second_password_max_fail_count: 5,
+            idle_kick_time: 0,
+        });
+        // Tail: secondPriceType 2, secondPasswordMaxFailCount, idleKickTime u16.
+        assert_eq!(&b[b.len() - 4..], &[2, 5, 0, 0]);
+        let zero = encode(&SCInitialConfigPacket {
+            fsets: FeatureSet::initialized(0, 0),
+            restrictions: RestrictionFlags::default(),
+            second_password_max_fail_count: 0,
+            idle_kick_time: 0,
+        });
+        assert_eq!(&zero[zero.len() - 4..], &[2, 0, 0, 0]);
+    }
+
+    /// The reader (`FUN_397b2a00` -> `FUN_397b1fb0`) takes the seven booleans in this order,
+    /// then `secondPriceType` and `secondPasswordMaxFailCount` as bytes and `idleKickTime` as a
+    /// `u16` (`FUN_39017bf0` masks the value with `0xffff`).
+    #[test]
+    fn initial_config_carries_configured_restrictions_and_idle_kick_time() {
+        let restrictions = RestrictionFlags {
+            can_place_house: false,
+            can_pay_tax: true,
+            can_use_auction: false,
+            can_trade: true,
+            can_send_mail: false,
+            can_use_bank: true,
+            can_use_copper: false,
+        };
+        let b = encode(&SCInitialConfigPacket {
+            fsets: FeatureSet::initialized(0, 0),
+            restrictions,
+            second_password_max_fail_count: 7,
+            idle_kick_time: 0x1234,
+        });
+        assert_eq!(&b[b.len() - 11..], &[0, 1, 0, 1, 0, 1, 0, 2, 7, 0x34, 0x12]);
     }
 
     #[test]

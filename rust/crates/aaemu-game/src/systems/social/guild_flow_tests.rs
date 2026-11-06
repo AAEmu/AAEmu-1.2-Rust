@@ -288,6 +288,12 @@ fn register_siege(server: &GameServer, owner: u32, attacker: u32) {
             starts_at: 4_000_000_000,
             ends_at: 4_000_007_200,
             ended_at: 0,
+            reinforced: false,
+            defender_ni: 100,
+            defender_nr: 100,
+            outcome_credited: false,
+            materialised_from_declaration: false,
+            calendar_cycle: 0,
             participants: Default::default(),
         });
     }

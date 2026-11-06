@@ -22,7 +22,8 @@ use crate::models::transfer::Transfer;
 use crate::models::unit::{attach_point, BaseUnitType, ModelPostureType, UnitBase, UnitData};
 use crate::models::unit_model::UnitCustomModelType;
 use crate::packets::world::{
-    SCCharacterStatePacket, SCCreateCharacterResponsePacket, SCUnitStatePacket,
+    SCCharacterStatePacket, SCCreateCharacterResponsePacket, SCEditCharacterResponsePacket,
+    SCUnitStatePacket,
 };
 
 /// `SCUnitState` character flags bit3: force attack (Bloodlust). 1.2 client chain: `397c9480`
@@ -35,9 +36,12 @@ const BASE_UNIT_TYPE_CHARACTER: u8 = 0;
 const ATTACH_POINT_SYSTEM: u8 = 255;
 /// `ModelPostureType.None`.
 const MODEL_POSTURE_NONE: u8 = 0;
-/// The patron / auction-license buffs `SCUnitStatePacket` force-adds to characters
-/// ("TODO Wrong place" in C#).
-pub const UNIT_STATE_FORCED_BUFFS: [u32; 2] = [8_000_011, 8_000_012];
+/// The buffs `SCUnitStatePacket` still force-adds to characters ("TODO Wrong place" in C#).
+/// 8000012 is the auction-license buff (see `systems::economy::account_attributes`). The VIP
+/// buff 8000011 is no longer forced on everyone: since WP-B it is the `active = 't'`
+/// `pcbang_buffs` row of premium grade 2 and is applied by
+/// `systems::services::premium::apply_login_buffs` / `apply_grade_buffs`.
+pub const UNIT_STATE_FORCED_BUFFS: [u32; 1] = [8_000_012];
 
 /// `SCCharacterStatePacket(character)`.
 pub fn character_state(c: &Character, bounty_money: i64) -> SCCharacterStatePacket {
@@ -66,8 +70,11 @@ pub fn character_state(c: &Character, bounty_money: i64) -> SCCharacterStatePack
         .write_i16(c.num_bank_slots)
         .write_i64(c.money)
         .write_i64(c.money2)
-        .write_i64(0)
-        .write_i64(0)
+        // The client's character-state reader takes four `i64` moneyAmount fields in order:
+        // money, bank money, AA point, bank AA point (`FUN_394c9580` / `FUN_394c9640` read
+        // `+0xc330` / `+0xc338` of the inventory object that starts at the first one).
+        .write_i64(c.aa_point)
+        .write_i64(c.bank_aa_point)
         .write_bool(c.auto_use_aa_point)
         .write_i32(c.jury_point)
         .write_i32(0) // jailSeconds
@@ -88,6 +95,17 @@ pub fn create_character_response(c: &Character) -> SCCreateCharacterResponsePack
     let mut s = PacketStream::new();
     c.write(&mut s);
     SCCreateCharacterResponsePacket {
+        body: s.into_bytes(),
+    }
+}
+
+/// `SCEditCharacterResponsePacket(character)`: the same character-info block as
+/// `SCCreateCharacterResponsePacket` (1.2 client serializer `FUN_397ab170` -> `FUN_39620030`,
+/// read by `FUN_391eb910`), with the 0x03a opcode.
+pub fn edit_character_response(c: &Character) -> SCEditCharacterResponsePacket {
+    let mut s = PacketStream::new();
+    c.write(&mut s);
+    SCEditCharacterResponsePacket {
         body: s.into_bytes(),
     }
 }
@@ -200,7 +218,9 @@ fn write_unit_state(c: &mut Character, data: &GameData, now_ms: i64, s: &mut Pac
         );
         return;
     };
-    s.write_i32(1); // premium
+    // `premium` (`1` / `0`): the account payment state cached on the character (WP-B). The C#
+    // wrote a literal 1 for every character.
+    s.write_i32(i32::from(c.premium));
     for _ in 0..6 {
         s.write_i32(0); // pStat
     }
@@ -777,8 +797,41 @@ mod tests {
             p.body.len(),
             head + mid + piscs + abilities + 6 + 4 + 4 + 24
         );
+        // The premium i32 is the first of the final 28 bytes (then the six pStat i32s); it now
+        // carries the account payment state instead of the C# literal 1.
+        let at = p.body.len() - 28;
+        assert_eq!(p.body[at..at + 4], [0, 0, 0, 0]);
+        c.premium = true;
+        let premium = unit_state(&mut c, &data, 0);
+        let at = premium.body.len() - 28;
+        assert_eq!(premium.body[at..at + 4], [1, 0, 0, 0]);
         let cs = character_state(&c, 0);
         assert_eq!(cs.body[4..6], [16, 0]);
         assert_eq!(cs.body[6..22], c.guid);
+    }
+
+    #[test]
+    fn character_state_wallet_has_aa_points_after_the_two_purses() {
+        let mut c = Character::new(5, 1, UnitCustomModelParams::default());
+        c.money = 0x0102_0304_0506_0708;
+        c.money2 = 0x1112_1314_1516_1718;
+        c.aa_point = 0x2122_2324_2526_2728;
+        c.bank_aa_point = 0x3132_3334_3536_3738;
+        let body = character_state(&c, 0).body;
+        // The four moneyAmount i64 end 46 bytes before the packet end: autoUseAAPoint (1),
+        // jury (4), jail (4), bounty (8), bounty time (8), reported (4), suspected (4),
+        // play time (4), created (8), expandedExpert (1).
+        let base = body.len() - 78;
+        assert_eq!(body[base..base + 8], c.money.to_le_bytes());
+        assert_eq!(body[base + 8..base + 16], c.money2.to_le_bytes());
+        assert_eq!(body[base + 16..base + 24], c.aa_point.to_le_bytes());
+        assert_eq!(body[base + 24..base + 32], c.bank_aa_point.to_le_bytes());
+
+        // 0 AA points (the pre-wallet default) writes the zero bytes the packet had.
+        c.aa_point = 0;
+        c.bank_aa_point = 0;
+        let body = character_state(&c, 0).body;
+        let base = body.len() - 78;
+        assert_eq!(body[base + 16..base + 32], [0u8; 16]);
     }
 }

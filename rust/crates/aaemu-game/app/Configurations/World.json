@@ -16,6 +16,7 @@
         "GrowthRate": 1.0,
         "DaysForTaxPayment": 7,
         "IgnoreFallDamageAccessLevel": 100,
+        "RadarGmAccessLevel": 100,
         "GodMode": false,
         "GeoDataMode": true,
         "PreLoadTerrain": false,

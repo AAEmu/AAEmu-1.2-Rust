@@ -68,6 +68,15 @@ fn fixture(warmup: bool) -> Fixture {
         guard_tower_setting_id: 6,
         ..Default::default()
     });
+    for id in [OFFENSE_HQ_TEMPLATE, DEFENSE_HQ_TEMPLATE] {
+        data.systems.npcs.doodad.templates.insert(
+            id,
+            crate::systems::npcs::doodad::templates::DoodadTemplate {
+                id,
+                ..Default::default()
+            },
+        );
+    }
     for id in [OFFENSE_TELEPORT_SKILL, DEFENSE_TELEPORT_SKILL] {
         data.systems.skills.skills.insert(
             id,
@@ -218,6 +227,166 @@ fn bind_both(f: &Fixture) {
         .headquarters
         .bind(&f.server, GROUP, SiegeSide::Defender, &f.defense)
         .unwrap();
+}
+
+#[tokio::test]
+async fn declaration_camp_becomes_the_offense_hq_and_survives_a_rebind() {
+    let f = fixture(false);
+    let now = chrono::Utc::now().timestamp();
+    let manager = &f.server.systems.housing.dominions;
+    manager.cancel_siege(GROUP, now).unwrap();
+    let position = f.offense.data().transform.local();
+    manager
+        .declare(
+            GROUP,
+            20,
+            now,
+            now,
+            f.offense.obj_id,
+            (position.x, position.y, position.z),
+        )
+        .unwrap();
+    f.server
+        .systems
+        .housing
+        .headquarters
+        .bind_declaration(&f.server, GROUP, &f.offense)
+        .unwrap();
+    let state = manager.get(GROUP).unwrap();
+    let hq = f
+        .server
+        .systems
+        .housing
+        .headquarters
+        .snapshot(&f.server, &state, SiegeSide::Attacker)
+        .expect("camp is the offense HQ");
+    assert_eq!(hq.obj_id, f.offense.obj_id);
+
+    // Boot drops the runtime binding; the retained camp is found by position again.
+    f.server.systems.housing.headquarters.clear_all();
+    assert!(f
+        .server
+        .systems
+        .housing
+        .headquarters
+        .snapshot(&f.server, &state, SiegeSide::Attacker)
+        .is_none());
+    f.server
+        .systems
+        .housing
+        .headquarters
+        .restore_declarations(&f.server);
+    let restored = manager.get(GROUP).unwrap();
+    assert_eq!(restored.declaration.unwrap().hq_obj_id, f.offense.obj_id);
+    let hq = f
+        .server
+        .systems
+        .housing
+        .headquarters
+        .snapshot(&f.server, &restored, SiegeSide::Attacker)
+        .expect("reloaded declaration keeps its HQ");
+    assert_eq!(hq.obj_id, f.offense.obj_id);
+}
+
+#[tokio::test]
+async fn a_materialised_declaration_keeps_the_offense_hq_and_the_teleport_works() {
+    let mut f = fixture(false);
+    let now = chrono::Utc::now().timestamp();
+    let manager = &f.server.systems.housing.dominions;
+    manager.cancel_siege(GROUP, now).unwrap();
+    let position = f.offense.data().transform.local();
+    manager
+        .declare(
+            GROUP,
+            20,
+            now,
+            now,
+            f.offense.obj_id,
+            (position.x, position.y, position.z),
+        )
+        .unwrap();
+    f.server
+        .systems
+        .housing
+        .headquarters
+        .bind_declaration(&f.server, GROUP, &f.offense)
+        .unwrap();
+    let materialised = manager
+        .materialise_declaration(
+            GROUP,
+            now,
+            now - 500,
+            now + 1000,
+            now - 600,
+            super::state::SiegeLimits::NATIVE,
+        )
+        .unwrap()
+        .expect("materialised");
+    f.server
+        .systems
+        .housing
+        .headquarters
+        .bind_materialised(&f.server, &materialised);
+    manager
+        .register_participant(GROUP, 1, 20, SiegeSide::Attacker, now)
+        .unwrap();
+    manager
+        .register_participant(GROUP, 2, 10, SiegeSide::Defender, now)
+        .unwrap();
+    teleport_effect(&f.server, &args(&f.attacker, &f.offense_skill));
+    let packets = f.attacker_client.drain();
+    let teleport = packets
+        .iter()
+        .find(|packet| packet.0 == sc::SCTeleportUnitPacket)
+        .expect("offense teleport");
+    let mut expected = PacketStream::new();
+    expected
+        .write_u8(TELEPORT_REASON_OFFENSE_HQ)
+        .write_i16(0)
+        .write_position(position.x, position.y, position.z)
+        .write_f32(position.rot_z);
+    assert_eq!(teleport.1, expected.into_bytes());
+}
+
+#[tokio::test]
+async fn defense_hq_spawns_only_with_a_configured_lodestone_offset() {
+    let f = fixture(false);
+    let now = chrono::Utc::now().timestamp();
+    let manager = &f.server.systems.housing.dominions;
+    manager.cancel_siege(GROUP, now).unwrap();
+    let position = f.offense.data().transform.local();
+    manager
+        .declare(
+            GROUP,
+            20,
+            now,
+            now,
+            f.offense.obj_id,
+            (position.x, position.y, position.z),
+        )
+        .unwrap();
+    let materialised = manager
+        .materialise_declaration(
+            GROUP,
+            now,
+            now - 500,
+            now + 1000,
+            now - 600,
+            super::state::SiegeLimits::NATIVE,
+        )
+        .unwrap()
+        .expect("materialised");
+    let headquarters = &f.server.systems.housing.headquarters;
+    assert!(headquarters
+        .spawn_defense_hq(&f.server, &materialised)
+        .is_none());
+    f.server
+        .config
+        .update(|config| config.housing.defense_hq_offset = [10.0, 0.0, 0.0]);
+    let spawned = headquarters
+        .spawn_defense_hq(&f.server, &materialised)
+        .expect("defense HQ spawned");
+    assert_eq!(spawned.data().template_id, DEFENSE_HQ_TEMPLATE);
 }
 
 #[tokio::test]

@@ -7,12 +7,26 @@ use std::sync::Arc;
 use aaemu_commons::PacketStream;
 
 use super::*;
+use crate::data::items::{ItemTemplate, TemplateKind};
+use crate::data::GameData;
+use crate::models::container::slot_type;
 use crate::models::doodad::Doodad;
+use crate::models::item::Item;
+use crate::models::slave::Slave;
+use crate::models::unit::BaseUnitType;
 use crate::net::packet::encode_raw;
 use crate::opcodes::{cs, sc};
+use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::social::hooks::SocialHooks;
-use crate::test_support::{spawn_player, test_character, test_server, TestClient, TEST_ZONE};
+use crate::systems::vehicles::mates;
+use crate::test_support::{
+    spawn_player, test_character, test_experience, test_server_with, TestClient, TEST_ZONE,
+};
 use crate::world::Entity;
+
+/// The mate template / summon item of the duel fixtures (one horse).
+const MATE_NPC: u32 = 900;
+const MATE_ITEM: u32 = 5000;
 
 /// Spawns a plain combat flag doodad; the terrain is flat at Z = 90.
 struct FlagHooks;
@@ -43,6 +57,91 @@ impl SocialHooks for FlagHooks {
     }
 }
 
+/// The minimal vehicles data the mate fixture needs: one horse template + summon item, the mate
+/// pool formulas and an experience table (`spawn_mount` / `add_exp`).
+fn duel_data() -> GameData {
+    let mut d = GameData::empty();
+    d.experience = test_experience(3);
+    d.formulas = crate::systems::vehicles::stats::tests::formulas(
+        &[
+            (1, "1000", 14, 2),
+            (2, "100", 15, 2),
+            (3, "500", 14, 4),
+            (4, "800 + level", 14, 5),
+            (5, "300", 15, 5),
+            (6, "2000", 14, 6),
+        ],
+        &[],
+    );
+    d.systems.npcs.npc.templates.insert(
+        MATE_NPC,
+        NpcTemplate {
+            id: MATE_NPC,
+            name: "Horse".into(),
+            level: 1,
+            model_id: 77,
+            scale: 1.0,
+            ..NpcTemplate::default()
+        },
+    );
+    d.items.templates.insert(
+        MATE_ITEM,
+        ItemTemplate {
+            kind: TemplateKind::SummonMate { npc_id: MATE_NPC },
+            ..ItemTemplate::plain(MATE_ITEM, 1)
+        },
+    );
+    d
+}
+
+/// Puts a summon item of `template_id` in the player's bag and returns its item id.
+fn give_summon_item(server: &GameServer, p: &PlayerRef, item_id: u64, template_id: u32) -> u64 {
+    let t = server
+        .game_data
+        .items
+        .template(template_id)
+        .expect("summon item template")
+        .clone();
+    let mut item = Item::create(item_id, &t, 1, 0, 1, &server.game_data.items, 0);
+    item.owner_id = u64::from(p.data().id);
+    item.slot_type = slot_type::INVENTORY;
+    item.slot = 0;
+    let bag = p
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .cloned()
+        .unwrap();
+    bag.lock().unwrap().items.push(item);
+    item_id
+}
+
+/// Spawns a slave owned by `owner` directly in instance 0 (the summon flow is vehicles' own
+/// test area); it copies the owner's faction like `create_for_owner` does.
+fn spawn_owned_slave(
+    server: &GameServer,
+    owner: &PlayerRef,
+    obj_id: u32,
+) -> crate::world::SlaveRef {
+    let world = server.world.world(0).expect("instance 0");
+    let mut s = Slave::new(obj_id, 68);
+    s.summoner_id = owner.character_id;
+    s.summoner_obj_id = owner.obj_id;
+    s.owner_type = BaseUnitType::Character;
+    {
+        let o = owner.data();
+        s.unit.faction_id = o.unit.faction_id;
+        s.unit.transform.instance_id = 0;
+        s.unit
+            .transform
+            .set_xyz(o.unit.transform.x + 2.0, o.unit.transform.y, 100.0);
+        s.unit.transform.world_id = o.unit.transform.world_id;
+    }
+    let e = Entity::new(obj_id, s);
+    world.spawn(&e, &server.view_ctx());
+    e
+}
+
 struct Fixture {
     server: Arc<GameServer>,
     a: TestClient,
@@ -61,7 +160,7 @@ impl Fixture {
     }
 
     fn with_delays(with_flag: bool, start: Duration, check: Duration) -> Self {
-        let server = Arc::new(test_server());
+        let server = Arc::new(test_server_with(duel_data()));
         server.set_self();
         server.systems.social.duels.set_delays(DuelDelays {
             start,
@@ -86,6 +185,9 @@ impl Fixture {
         }
         a.conn.active_char = Some(pa.clone());
         b.conn.active_char = Some(pb.clone());
+        // The fixtures use the object ids 0x100 / 0x101 explicitly; reserve them so a spawned
+        // mate / slave from the object id manager cannot collide with a player.
+        server.ids.object.initialize_with(&[0x100, 0x101]);
         a.drain();
         b.drain();
         Self {
@@ -696,6 +798,67 @@ async fn duel_inside_a_temporary_faction_returns_to_it() {
     assert!(!f.pa.data().unit.faction_temporary);
 }
 
+/// RPA-09 follow-up (WP7): the temporary duel faction also goes to the participant's active
+/// mates and owned slaves, and is restored like the owner's at the end. A mate / slave summoned
+/// during the duel (it copies the team faction at spawn) is restored as well.
+#[tokio::test]
+async fn mate_and_slave_follow_the_duel_faction_and_get_it_back() {
+    use crate::systems::social::packets::body;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let mut f = Fixture::new(true);
+    let item_id = give_summon_item(&f.server, &f.pa, 0x8000, MATE_ITEM);
+    mates::spawn_mount(&f.server, &f.pa, item_id);
+    let mate = mates::first_active_mate(&f.server, &f.pa).expect("active mate");
+    let slave = spawn_owned_slave(&f.server, &f.pa, 0x8100);
+    assert_eq!(mate.data().unit.faction_id, 101);
+    assert_eq!(slave.data().unit.faction_id, 101);
+
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    let fa = f.a.drain();
+    for (obj_id, name) in [(mate.obj_id, "Horse"), (slave.obj_id, "")] {
+        assert!(
+            find(&fa, sc::SCUnitFactionChangedPacket).contains(&body(
+                &SCUnitFactionChangedPacket {
+                    obj_id,
+                    unit_name: name.into(),
+                    id: 101,
+                    id2: FACTION_RED_TEAM,
+                    temp: true,
+                }
+            )),
+            "no faction change for {obj_id:x} in {:x?}",
+            ops(&fa)
+        );
+    }
+    assert_eq!(mate.data().unit.faction_id, FACTION_RED_TEAM);
+    assert!(mate.data().unit.faction_temporary);
+    assert_eq!(slave.data().unit.faction_id, FACTION_RED_TEAM);
+    assert!(slave.data().unit.faction_temporary);
+
+    // Summoned while the owner shows the team faction: it spawns red and is restored too.
+    let late = spawn_owned_slave(&f.server, &f.pa, 0x8101);
+    assert_eq!(late.data().unit.faction_id, FACTION_RED_TEAM);
+
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    for unit in [
+        WorldObject::from(&mate),
+        WorldObject::from(&slave),
+        WorldObject::from(&late),
+    ] {
+        let (faction_id, temporary) = unit
+            .with_unit(|u| (u.unit().faction_id, u.unit().faction_temporary))
+            .expect("unit");
+        assert_eq!(faction_id, 101);
+        assert!(!temporary);
+    }
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+}
+
 #[tokio::test]
 async fn real_timers_start_and_end_the_duel() {
     let mut f = Fixture::with_delays(true, Duration::from_millis(20), Duration::from_millis(20));
@@ -911,6 +1074,10 @@ async fn stale_request_timeout_after_accept_keeps_the_duel() {
     f.b.drain();
     // The expiry task raced the accept and runs afterwards.
     f.duels().request_expired(&duel, 1);
+    assert!(
+        find(&f.b.drain(), sc::SCInvitationCanceledPacket).is_empty(),
+        "an accepted challenge must not close the popup"
+    );
     assert!(f.duels().duel_of(1).unwrap().started);
     assert!(f.pa.data().unit.is_in_duel && f.pb.data().unit.is_in_duel);
     assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
@@ -922,6 +1089,25 @@ async fn stale_request_timeout_after_accept_keeps_the_duel() {
         .await;
     assert_eq!(f.pa.data().unit.faction_id, 101);
     assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(f.duels().is_empty());
+}
+
+/// An unanswered challenge closes the challenged player's popup with kind 5
+/// (`SCDuelRequested`, popup type 9).
+#[tokio::test]
+async fn request_timeout_closes_the_challenged_popup() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.a.drain();
+    f.b.drain();
+    f.duels().request_expired(&duel, 1);
+    let frames = f.b.drain();
+    assert_eq!(
+        find(&frames, sc::SCInvitationCanceledPacket),
+        vec![vec![5]],
+        "the challenged player gets exactly one cancellation"
+    );
     assert!(f.duels().is_empty());
 }
 

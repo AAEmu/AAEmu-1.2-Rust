@@ -17,9 +17,8 @@ use super::hooks::{
 };
 use super::manager::{
     self, broadcast, error_message as err, now, send_error, set_permission, tax_due_date,
-    template_of, update_house_faction, update_tax_info, world_of, APPRAISAL_CERTIFICATE,
-    BOUND_TAX_CERTIFICATE, COPPER_PER_CERTIFICATE, FACTION_MONSTROSITY, FOR_SALE_MARKER_DOODAD_ID,
-    HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE,
+    template_of, update_house_faction, update_tax_info, world_of, BOUND_TAX_CERTIFICATE,
+    FACTION_MONSTROSITY, FOR_SALE_MARKER_DOODAD_ID, HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE,
 };
 use super::packets::{
     CSCreateHousePacket, CSDecorateHousePacket, SCConstructHouseTaxPacket,
@@ -290,14 +289,23 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
     let mut payment_error = None;
     let mut payment_effects = None;
     let revenue = super::dominion::tax::charge_with(server, &quote, || {
-        match hooks.pay_house_construction_deferred(server, player, source, total, tax_item) {
-            Ok(effects) => {
-                payment_effects = effects;
-                true
+        match hooks.pay_house_construction_deferred(
+            server,
+            player,
+            source,
+            total,
+            tax_item,
+            p.auto_use_aa_point,
+        ) {
+            Ok(Some((effects, payment))) => {
+                payment_effects = Some(effects);
+                Some(payment)
             }
+            // A hook without queued effects cannot report a split; its payment is gold-only.
+            Ok(None) => Some(crate::systems::economy::inventory::PaymentSplit::default()),
             Err(error) => {
                 payment_error = Some(error);
-                false
+                None
             }
         }
     });
@@ -948,9 +956,10 @@ pub fn return_house_items_with_payment(
 // Sale
 // ---------------------------------------------------------------------------------------------
 
-/// `CalculateSaleCertifcates(house, salePrice)`: one appraisal certificate per 100 gold.
-pub fn calculate_sale_certificates(sale_price: u32) -> i32 {
-    let n = (f64::from(sale_price) / COPPER_PER_CERTIFICATE).ceil() as i32;
+/// `CalculateSaleCertifcates(house, salePrice)`: one appraisal certificate per
+/// `content_configs` 37 copper (100 gold with the shipped 1,000,000).
+pub fn calculate_sale_certificates(server: &GameServer, sale_price: u32) -> i32 {
+    let n = (f64::from(sale_price) / manager::copper_per_certificate(server)).ceil() as i32;
     n.max(1)
 }
 
@@ -1130,7 +1139,7 @@ pub fn set_for_sale(
         }
     }
     if let Some(seller) = seller {
-        let cert = calculate_sale_certificates(price);
+        let cert = calculate_sale_certificates(server, price);
         let hooks = server.systems.housing.hooks.get();
         if !hooks.pay_house_sale_certificates(server, seller, cert) {
             send_error(seller, err::HOUSE_CANNOT_SELL_AS_NOT_ENOUGH_SEAL);
@@ -1197,7 +1206,8 @@ pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificate
     if h.sell_price == 0 {
         return true;
     }
-    let cert = calculate_sale_certificates(h.sell_price);
+    let cert = calculate_sale_certificates(server, h.sell_price);
+    let cert_item = manager::appraisal_certificate(server);
     let owner = server.world.character_by_id(h.unit.owner_id);
     // Can only return certificates if owner is online and is the one resetting the sale
     if cert > 0 && return_certificates {
@@ -1212,24 +1222,21 @@ pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificate
                 zone_group_text(server, &h),
                 quote_arg(&h.unit.name)
             ),
-            text: format!(
-                "body('{}', {APPRAISAL_CERTIFICATE}, {cert})",
-                quote_arg(&h.unit.name)
-            ),
+            text: format!("body('{}', {cert_item}, {cert})", quote_arg(&h.unit.name)),
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
             ..HouseMail::default()
         };
         let hooks = server.systems.housing.hooks.get();
         if let Some(owner) = &owner {
-            if !hooks.send_mail_with_new_items(server, owner, mail, APPRAISAL_CERTIFICATE, cert) {
+            if !hooks.send_mail_with_new_items(server, owner, mail, cert_item, cert) {
                 tracing::warn!("CancelForSale - Failed to create Appraisal Certificates for mail");
                 return false;
             }
         } else {
             let mut mail = mail;
             mail.attachments.push(MailAttachment::NewItem {
-                template_id: APPRAISAL_CERTIFICATE,
+                template_id: cert_item,
                 count: cert,
                 grade: 0,
                 owner_id: h.unit.owner_id,

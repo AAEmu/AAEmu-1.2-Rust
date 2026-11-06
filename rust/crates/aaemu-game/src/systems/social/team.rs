@@ -14,6 +14,7 @@ use crate::packets::world::SCUnitsRemovedPacket;
 use crate::server::GameServer;
 use crate::systems::social::faction::{self, relation_state};
 use crate::systems::social::friend;
+use crate::systems::social::packets::misc::{invitation_canceled_kind, SCInvitationCanceledPacket};
 use crate::systems::social::packets::team::*;
 use crate::systems::social::util::{self, error, send_error};
 use crate::world::{PlayerRef, WorldObject};
@@ -613,11 +614,12 @@ impl TeamManager {
             .collect();
         let now = util::now_ms();
         let mut st = self.lock();
-        prune_expired_invitations(&mut st, now);
+        let mut canceled = prune_expired_invitations(&mut st, now);
         st.area_invite_until.retain(|_, until| *until > now);
         if let Some(until) = st.area_invite_until.get(&owner.character_id) {
             let remaining = (*until - now).clamp(0, i64::from(u32::MAX)) as u32;
             drop(st);
+            send_invitation_canceled(canceled);
             owner.send(SCTeamAreaInvitedPacket {
                 r: remaining,
                 s: false,
@@ -641,6 +643,8 @@ impl TeamManager {
         if let Some((_, team_is_party, team_owner, marked, _)) = team {
             let allowed = team_owner == owner.character_id || (!team_is_party && marked);
             if !allowed {
+                drop(st);
+                send_invitation_canceled(canceled);
                 send_error(owner, error::TEAM_NO_RIGHTS);
                 return;
             }
@@ -673,7 +677,11 @@ impl TeamManager {
             owner.character_id,
             invited
         );
+        // An expired invitee that was invited again in this loop already has a new popup;
+        // do not close it (the cancellation has no invitation id).
+        canceled.retain(|(target, _)| !st.invitations.contains_key(&target.character_id));
         drop(st);
+        send_invitation_canceled(canceled);
         owner.send(SCTeamAreaInvitedPacket { r: 0, s: true });
     }
 
@@ -705,7 +713,7 @@ impl TeamManager {
             },
         };
         let mut st = self.lock();
-        prune_expired_invitations(&mut st, util::now_ms());
+        let mut canceled = prune_expired_invitations(&mut st, util::now_ms());
         // The invitation belongs to the inviter's current team; the client-sent team id is
         // ignored so a stale/crafted id cannot invite into someone else's team.
         let team = Self::team_id_by_unit(&st, owner.character_id)
@@ -729,6 +737,11 @@ impl TeamManager {
             &target,
             false,
         );
+        // The target may be the same character whose expired invitation was pruned above; a
+        // new popup is open, so the cancellation must not close it.
+        canceled.retain(|(target, _)| !st.invitations.contains_key(&target.character_id));
+        drop(st);
+        send_invitation_canceled(canceled);
     }
 
     /// The invitation body of `AskToJoin` (the caller holds the manager lock): block list,
@@ -977,7 +990,8 @@ impl TeamManager {
     }
 
     /// Drops the invitations nobody answered within [`INVITATION_TIMEOUT_MS`] (the 500 ms tick
-    /// calls this); the inviter is told that the invitation was cancelled.
+    /// calls this); the inviter is told that the invitation was cancelled and the invitee's
+    /// popup is closed with `SCInvitationCanceled`.
     pub fn expire_invitations(&self, now_ms: i64) {
         let mut st = self.lock();
         let expired: Vec<u32> = st
@@ -986,11 +1000,15 @@ impl TeamManager {
             .filter(|(_, i)| i.expired(now_ms))
             .map(|(target, _)| *target)
             .collect();
+        let mut canceled = Vec::with_capacity(expired.len());
         for target in expired {
             if let Some(inv) = st.invitations.remove(&target) {
                 send_error(&inv.owner, error::INVITATION_CANCELED_TIMEOUT);
+                canceled.push((inv.target, inv.is_area));
             }
         }
+        drop(st);
+        send_invitation_canceled(canceled);
     }
 
     /// Forgets the invitations of a character that went offline: the ones it received, and the
@@ -1006,6 +1024,13 @@ impl TeamManager {
             if let Some(inv) = st.invitations.remove(&target) {
                 if inv.owner.character_id == character_id {
                     send_error(&inv.target, error::TEAM_INVITOR_OFFLINE);
+                    inv.target.send(SCInvitationCanceledPacket {
+                        kind: if inv.is_area {
+                            invitation_canceled_kind::TEAM_AREA
+                        } else {
+                            invitation_canceled_kind::TEAM
+                        },
+                    });
                 }
             }
         }
@@ -1679,9 +1704,11 @@ impl TeamManager {
         let mut st = self.lock();
         // Pending invitations expire after 60 s; the 500 ms tick sweeps them so a target that
         // never answers cannot hold its slot (and the map stays bounded).
-        prune_expired_invitations(&mut st, now_ms);
+        let canceled = prune_expired_invitations(&mut st, now_ms);
         st.area_invite_until.retain(|_, until| *until > now_ms);
         if st.teams.is_empty() {
+            drop(st);
+            send_invitation_canceled(canceled);
             return;
         }
         let ids: Vec<u32> = st.teams.keys().copied().collect();
@@ -1731,6 +1758,7 @@ impl TeamManager {
             }
         }
         drop(st);
+        send_invitation_canceled(canceled);
         if disbanded {
             server.chat.clean_up_channels(&server.ids.chat);
         }
@@ -1887,10 +1915,43 @@ fn try_claim_snapshot(
     true
 }
 
-/// Drops the invitations older than `INVITATION_TIMEOUT_MS`.
-fn prune_expired_invitations(st: &mut State, now_ms: i64) {
-    st.invitations
-        .retain(|_, inv| inv.time_ms + INVITATION_TIMEOUT_MS >= now_ms);
+/// Drops the invitations older than `INVITATION_TIMEOUT_MS` and returns the invitees whose popup
+/// must be closed: `(target, is_area)`.
+///
+/// The map holds at most one team invitation per target (a new invitation replaces an area one
+/// and a named one is refused while any is pending), so an expired invitation never shares its
+/// invitee with another still-pending invitation of the same popup type (type 2, shared by
+/// kinds 1 and 2).
+fn prune_expired_invitations(st: &mut State, now_ms: i64) -> Vec<(PlayerRef, bool)> {
+    let expired: Vec<u32> = st
+        .invitations
+        .iter()
+        .filter(|(_, inv)| inv.time_ms + INVITATION_TIMEOUT_MS < now_ms)
+        .map(|(&target_id, _)| target_id)
+        .collect();
+    let mut canceled = Vec::with_capacity(expired.len());
+    for target_id in expired {
+        if let Some(inv) = st.invitations.remove(&target_id) {
+            if !st.invitations.contains_key(&target_id) {
+                canceled.push((inv.target, inv.is_area));
+            }
+        }
+    }
+    canceled
+}
+
+/// Sends `SCInvitationCanceled` for the invitations collected under the manager lock. Kind 1 is
+/// the named and kind 2 the area team invitation: the 1-vs-2 split is UNKNOWN in the client
+/// (both kinds close the same popup type 2), so this mapping is INFERRED.
+fn send_invitation_canceled(canceled: Vec<(PlayerRef, bool)>) {
+    for (target, is_area) in canceled {
+        let kind = if is_area {
+            invitation_canceled_kind::TEAM_AREA
+        } else {
+            invitation_canceled_kind::TEAM
+        };
+        target.send(SCInvitationCanceledPacket { kind });
+    }
 }
 
 /// `ClearSyncState(characterId)`.

@@ -21,6 +21,7 @@ pub mod sub;
 mod tests;
 pub mod util;
 
+pub mod aa_point;
 pub mod add_badges;
 pub mod add_buff;
 pub mod add_gold;
@@ -30,12 +31,15 @@ pub mod add_xp;
 pub mod announce;
 pub mod appellation;
 pub mod around;
+pub mod auction_siege;
 pub mod build_house;
 pub mod change_level;
 pub mod clear_combat;
+pub mod clear_crime_status;
 pub mod coffer_actions;
 pub mod damage;
 pub mod de_spawn_all;
+pub mod delay_tax_due_date;
 pub mod despawn;
 pub mod disconnect_me;
 pub mod dist;
@@ -54,11 +58,13 @@ pub mod height;
 pub mod help;
 pub mod house_binding_move;
 pub mod ignore_cooldowns;
+pub mod imprison;
 pub mod in_game_cash_shop;
 pub mod invisible;
 pub mod kick;
 pub mod kill;
 pub mod kit;
+pub mod mail;
 pub mod move_all;
 pub mod move_cmd;
 pub mod move_to;
@@ -69,19 +75,29 @@ pub mod object_position;
 pub mod object_rotation;
 pub mod online;
 pub mod ping_position;
+pub mod premium_cmd;
 pub mod quest_cmd;
 pub mod reload_auction;
 pub mod reload_configs;
+pub mod rename;
+pub mod resend_house_tax_mail;
 pub mod reset_skill_cooldowns;
+pub mod restrict_chat;
+pub mod retail;
 pub mod revive;
 pub mod rotate;
 pub mod run;
 pub mod scripts_cmd;
+pub mod second_password_cmd;
 pub mod send_packet;
+pub mod set_bounty_money;
+pub mod set_crime_value;
 pub mod set_faction;
+pub mod set_jury;
 pub mod set_trade_pack_mail_delay;
 pub mod ship_barrier_cmd;
 pub mod show_inventory;
+pub mod siege_alias;
 pub mod snow;
 pub mod solo_party;
 pub mod spawn;
@@ -512,6 +528,92 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["waterdebug", "water_debug"],
             Arc::new(water_debug_cmd::WaterDebugCmd::new(env)),
+        ),
+        // Premium (Rust only, WP-B: grant / remove premium with an end time)
+        (
+            &["premium", "setpremium"],
+            Arc::new(premium_cmd::Premium::new(env)),
+        ),
+        // SecondPassword (Rust only: admin recovery for the 1.2 second password)
+        (
+            &["secondpassword", "secondpass", "clearsecondpassword"],
+            Arc::new(second_password_cmd::SecondPassword::new(env)),
+        ),
+        // AAPoint (Rust only, WP-AA1: grant / set the per-character AA-point wallet)
+        (
+            &["aapoint", "aa_point"],
+            Arc::new(aa_point::AaPoint::new(env)),
+        ),
+        // Mail (Rust only: `/mail admin` system letter to an online or offline character)
+        (&["mail"], Arc::new(mail::MailCommand::new(env))),
+        // Rename (Rust only: GM character rename, online or offline)
+        (&["rename"], Arc::new(rename::Rename::new(env))),
+        // Retail GM commands (WP-SL6b: tax / crime / social command names the 1.2 client
+        // knows; the C# server had no equivalents).
+        (
+            &["delay_tax_due_date"],
+            Arc::new(delay_tax_due_date::DelayTaxDueDate::new(env)),
+        ),
+        (
+            &["resend_house_tax_mail"],
+            Arc::new(resend_house_tax_mail::ResendHouseTaxMail::new(env)),
+        ),
+        (
+            &["set_bounty_money"],
+            Arc::new(set_bounty_money::SetBountyMoney::new(env)),
+        ),
+        (
+            &["clear_crime_status"],
+            Arc::new(clear_crime_status::ClearCrimeStatus::new(env)),
+        ),
+        (
+            &["set_crime_value"],
+            Arc::new(set_crime_value::SetCrimeValue::new(env)),
+        ),
+        (&["set_jury"], Arc::new(set_jury::SetJury::new(env))),
+        (&["imprison"], Arc::new(imprison::Imprison::new(env))),
+        // Retail chat mute (WP-SL4b: the 1.2 client knows the name; Rust only)
+        (
+            &["restrict_chat"],
+            Arc::new(restrict_chat::RestrictChat::new(env)),
+        ),
+        // Retail GM auction commands (names from the 1.2 client; Rust only)
+        (
+            &["auction_post_siege_items", "auction_post_siege"],
+            Arc::new(auction_siege::AuctionPostSiegeItems::new(env)),
+        ),
+        (
+            &["auction_cancel"],
+            Arc::new(auction_siege::AuctionCancel::new(env)),
+        ),
+        // Retail GM siege / dominion aliases (WP-SL6a: names the 1.2 client knows; Rust only)
+        (
+            &["schedule_siege"],
+            Arc::new(siege_alias::ScheduleSiege::new(env)),
+        ),
+        (
+            &["stop_siege", "off_siege"],
+            Arc::new(siege_alias::StopSiege::new(env)),
+        ),
+        (
+            &["delete_dominion"],
+            Arc::new(siege_alias::DeleteDominion::new(env)),
+        ),
+        (
+            &["change_dominion_owner"],
+            Arc::new(siege_alias::ChangeDominionOwner::new(env)),
+        ),
+        (
+            &["bestow_dominion"],
+            Arc::new(siege_alias::BestowDominion::new(env)),
+        ),
+        (
+            &["set_dominion_non_pvp"],
+            Arc::new(siege_alias::SetDominionNonPvp::new(env)),
+        ),
+        (
+            &["set_dominion_limit"],
+            Arc::new(siege_alias::SetDominionLimit::new(env)),
         ),
         // WorldCmd.cs
         (&["world"], Arc::new(roots::world_cmd())),

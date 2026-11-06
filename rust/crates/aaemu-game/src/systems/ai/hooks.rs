@@ -78,6 +78,9 @@ impl AiHooks for AiSubsystemHooks {
     fn npc_deleted(&self, server: &GameServer, obj_id: u32) {
         server.systems.ai.ais.remove(obj_id);
         server.systems.ai.simulations.remove(&obj_id);
+        // WP-5b (INFERRED): a despawned NPC closes a player's open interaction window; the NPC
+        // is still in the world here, before `world.delete`.
+        super::interaction::end_open_interactions_for(server, obj_id);
     }
 
     fn npc_faction_set(&self, server: &GameServer, npc: &NpcRef) {

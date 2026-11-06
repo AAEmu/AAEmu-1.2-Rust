@@ -33,9 +33,21 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCBotSuspectArrestedPacket(reporter, suspect)`.
-    SCBotSuspectArrestedPacket { reporter: String, suspect: String }
-    |self, s| { s.write_str(&self.reporter).write_str(&self.suspect); }
+    /// `SCBotSuspectArrestedPacket(sheriffId, suspectId, sheriffName, suspectName)`: the 1.2
+    /// client reader (`FUN_397b6d10`, dll.c:1710108-1710128) takes two `u32` ids before the two
+    /// names, each read into a 0x80-byte buffer. Still unsent (the bot flow is capture-pending).
+    SCBotSuspectArrestedPacket {
+        sheriff_id: u32,
+        suspect_id: u32,
+        sheriff_name: String,
+        suspect_name: String
+    }
+    |self, s| {
+        s.write_u32(self.sheriff_id)
+            .write_u32(self.suspect_id)
+            .write_str(&self.sheriff_name)
+            .write_str(&self.suspect_name);
+    }
 );
 
 /// The most entries the client's bounty list holds (its record array cap).
@@ -381,7 +393,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCUnitBountyMoneyPacket(objId, moneyAmount)`.
+    /// `SCUnitBountyMoneyPacket(objId, moneyAmount)`. Serializer `FUN_397b3b50` (constructor
+    /// `dll.c:375748`): `bc objId ; i64 moneyAmount`; the client handler is `FUN_391d6680`.
     SCUnitBountyMoneyPacket { obj_id: u32, money_amount: i64 }
     |self, s| { s.write_bc(self.obj_id).write_i64(self.money_amount); }
 );
@@ -469,11 +482,19 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSJurySummonedPacket` (logged only).
+    /// `CSJurySummonedPacket`: the client's acknowledgement after `SCSummonJury`. It changes
+    /// no server state; the handler checks that the sender holds the seat and logs at debug.
     CSJurySummonedPacket { trial: u32, court: i32, jury: i32 }
     read |s| { Ok(Self { trial: s.read_u32()?, court: s.read_i32()?, jury: s.read_i32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("JurySummoned, Trial: {}, Court: {}, Jury: {}", self.trial, self.court, self.jury);
+        let p = active_char!(conn);
+        let seat_holder = server.systems.social.trials.jury_summoned(&p, self.trial, self.jury);
+        tracing::debug!(
+            "JurySummoned, Trial: {}, Court: {}, Jury: {}, seat holder: {seat_holder}",
+            self.trial,
+            self.court,
+            self.jury
+        );
         Ok(())
     }
 );
@@ -614,14 +635,20 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSNaviOpenBountyPacket`: answers with an empty `SCBountyListPacket` (filled lists break
-    /// the client's lua, see the C# comment).
+    /// `CSNaviOpenBountyPacket`: answers with `SCBountyListPacket` of the characters that have
+    /// an unpaid bounty. The list is empty unless `Social.BountyBoard` is on (the default keeps
+    /// the C# empty list because a filled board broke the 1.2 client Lua, BOUNTY-board).
     CSNaviOpenBountyPacket { obj_id: u32 }
     read |s| { Ok(Self { obj_id: s.read_bc()? }) }
     handle |self, server, conn| {
-        tracing::warn!("NaviOpenBounty, ObjId: {}", self.obj_id);
+        tracing::trace!("NaviOpenBounty, ObjId: {}", self.obj_id);
         let p = active_char!(conn);
-        p.send(SCBountyListPacket { total: 0, count: 0, bounties: Vec::new() });
+        let board = server.systems.social.bounties.board(server).await;
+        p.send(SCBountyListPacket {
+            total: board.total,
+            count: board.rows.len() as u8,
+            bounties: board.rows,
+        });
         Ok(())
     }
 );
@@ -787,10 +814,17 @@ mod tests {
         );
         assert_eq!(
             body(&SCBotSuspectArrestedPacket {
-                reporter: "A".into(),
-                suspect: "Bc".into()
+                sheriff_id: 0x0102_0304,
+                suspect_id: 0x0A0B_0C0D,
+                sheriff_name: "Sheriff".into(),
+                suspect_name: "Suspect".into()
             }),
-            vec![1, 0, b'A', 2, 0, b'B', b'c']
+            vec![
+                0x04, 0x03, 0x02, 0x01, // sheriff id
+                0x0D, 0x0C, 0x0B, 0x0A, // suspect id
+                0x07, 0x00, b'S', b'h', b'e', b'r', b'i', b'f', b'f', // sheriff name
+                0x07, 0x00, b'S', b'u', b's', b'p', b'e', b'c', b't', // suspect name
+            ]
         );
         assert_eq!(
             body(&SCBotSuspectReportedPacket {
@@ -1346,6 +1380,29 @@ mod tests {
             format!("{}\u{FFFD}", "a".repeat(199))
         );
         assert_eq!(record_msg(" hi "), " hi ");
+    }
+
+    #[test]
+    fn trial_canceled_and_verdict_count_match_the_1_2_readers() {
+        // SCTrialCanceled (0x183), reader FUN_397afa30: u32 trialId.
+        assert_eq!(
+            body(&SCTrialCanceledPacket {
+                trial_id: 0x0102_0304
+            }),
+            vec![0x04, 0x03, 0x02, 0x01]
+        );
+        // SCChangeJuryVerdictCount (0x17a), reader FUN_397af940: i32 count ; i32 total.
+        assert_eq!(
+            body(&SCChangeJuryVerdictCountPacket { count: 1, total: 2 }),
+            vec![1, 0, 0, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            body(&SCChangeJuryVerdictCountPacket {
+                count: -1,
+                total: 0x0102_0304
+            }),
+            vec![0xFF, 0xFF, 0xFF, 0xFF, 0x04, 0x03, 0x02, 0x01]
+        );
     }
 
     fn decode<P: ClientPacket>(f: impl FnOnce(&mut PacketStream)) -> P {

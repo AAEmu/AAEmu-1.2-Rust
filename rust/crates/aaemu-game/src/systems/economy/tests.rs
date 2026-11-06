@@ -7,6 +7,7 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{bind_type, EquipTemplate, ItemTemplate, TemplateKind};
 use crate::data::GameData;
+use crate::models::char_data::Actability;
 use crate::models::container::{equip_slot, slot_type, ContainerKind, ItemContainer};
 use crate::models::item::{Item, ItemClass, ITEM_FLAG_SOUL_BOUND};
 use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
@@ -14,6 +15,7 @@ use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::data::Expand;
+use crate::systems::economy::error_message;
 use crate::systems::economy::inventory::{self, Inv, ItemTxn};
 use crate::systems::economy::item_handlers::*;
 use crate::systems::economy::item_packets::SCItemTaskSuccessPacket;
@@ -24,6 +26,7 @@ pub const STACK: u32 = 1000; // max 20
 pub const ARMOR: u32 = 2000; // chest, bind on equip
 pub const TIMED: u32 = 3000; // 60 minutes absolute lifetime
 pub const SINGLE: u32 = 4000; // max 1
+pub const ACTABILITY_ROD: u32 = 2730; // mainhand, actability group 7 needs 10000 points
 
 #[tokio::test]
 async fn unpack_rejects_another_characters_item() {
@@ -80,6 +83,19 @@ pub fn test_data() -> GameData {
     d.items
         .templates
         .insert(SINGLE, ItemTemplate::plain(SINGLE, 1));
+    let mut rod = ItemTemplate::new(
+        ACTABILITY_ROD,
+        TemplateKind::Weapon(EquipTemplate {
+            slot_type_id: 14,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            ..EquipTemplate::default()
+        }),
+    );
+    rod.max_count = 1;
+    rod.actability_group_id = 7;
+    rod.actability_requirement = 10000;
+    d.items.templates.insert(ACTABILITY_ROD, rod);
     d.systems.economy.expands.insert(
         0,
         vec![
@@ -145,6 +161,62 @@ pub fn world_with(data: GameData) -> World {
         b,
         pb,
     }
+}
+
+/// A world where a finished house at the player's position carries a +1000 act-ability
+/// decoration for fishing (group 7). The client adds this bonus in `FUN_394e1a90`.
+fn world_with_house_bonus() -> World {
+    use crate::models::doodad::{doodad_owner_type, Doodad};
+    use crate::models::unit::attach_point;
+    use crate::systems::housing::data::{HousingDecoration, HousingTemplate};
+    use crate::systems::housing::manager;
+    use crate::systems::npcs::doodad::templates::DoodadTemplate;
+    use crate::world::Entity;
+    let mut data = test_data();
+    data.systems.housing.add_template(HousingTemplate {
+        id: 300,
+        garden_radius: 8.0,
+        main_model_id: 700,
+        ..Default::default()
+    });
+    data.systems.npcs.doodad.templates.insert(
+        4001,
+        DoodadTemplate {
+            id: 4001,
+            ..Default::default()
+        },
+    );
+    data.systems
+        .housing
+        .add_decoration(HousingDecoration {
+            id: 40,
+            doodad_id: 4001,
+            actability_group_id: 7,
+            actability_up: 1000,
+            ..Default::default()
+        })
+        .unwrap();
+    let w = world_with(data);
+    let world = w.server.world.world(0).expect("world 0");
+    let house = manager::create(&w.server, 300, 0, &world, 0, 0).expect("house");
+    {
+        let mut h = house.data();
+        h.id = 1;
+        h.account_id = 1001;
+        h.unit.owner_id = 1;
+        h.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    }
+    assert!(w.server.systems.housing.manager.insert(&house));
+    manager::spawn_house(&w.server, &house);
+    let mut deco = Doodad::new(4001);
+    deco.owner_type = doodad_owner_type::HOUSING;
+    deco.owner_db_id = 1;
+    deco.attach_point = attach_point::NONE;
+    deco.transform.instance_id = 0;
+    deco.transform.set_xyz(100.0, 100.0, 100.0);
+    let deco = Entity::new(0x400, deco);
+    world.spawn(&deco, &w.server.view_ctx());
+    w
 }
 
 /// NPC templates of the bank / auction service tests.
@@ -277,6 +349,437 @@ fn move_body(from: u64, to: u64, fst: u8, fs: u8, tst: u8, ts: u8) -> PacketStre
         .write_u8(tst)
         .write_u8(ts);
     s
+}
+
+fn error_body(error: i16, kind: u32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    crate::packets::world::SCErrorMsgPacket::new(error, kind, true).write(&mut s);
+    s.into_bytes()
+}
+
+/// The 1.2 client refuses the use/equip below `items.actability_requirement` of the item's
+/// `actability_group_id` (`FUN_394e1a90` through the equip validation `FUN_394e41f0`) with
+/// `actability_not_enough_point` 508 and keeps the item. The client's own check is authoritative;
+/// the server repeats it for a forged request.
+#[tokio::test]
+async fn equipping_an_item_requires_its_actability_points() {
+    let mut w = world();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.a.drain();
+    let body = move_body(
+        rod,
+        0,
+        slot_type::INVENTORY,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+
+    // No actability rows: 0 < 10000, the rod stays in the bag.
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+
+    // 9999 is still one point short.
+    w.pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 7,
+            point: 9999,
+            step: 1,
+        });
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+
+    // Exactly the requirement: the equip goes through.
+    w.pa.data().actability.actabilities[0].point = 10000;
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("rod equipped")
+            .template_id,
+        ACTABILITY_ROD
+    );
+    w.a.drain();
+}
+
+/// The client's `DoEquipInEmptySlot` form: it sends the empty equipment slot as the source and
+/// the bag item as the target. The target item moves into the equipment slot, so it is gated.
+#[tokio::test]
+async fn equipping_from_the_empty_equipment_slot_checks_the_target_item() {
+    let mut w = world();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.a.drain();
+    let body = move_body(
+        0,
+        rod,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+        slot_type::INVENTORY,
+        0,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+}
+
+/// The swap bypass: an equipped item (id != 0) dragged onto an occupied bag / bank slot moves
+/// the target item into the vacated equipment slot. The target item must pass the same gate.
+#[tokio::test]
+async fn swapping_an_equipped_item_onto_an_occupied_slot_checks_the_target_item() {
+    let mut w = world();
+    // Two rods (max_count 1) so the swap is a `DoSwap`, not a merge; the equipped copy is
+    // placed directly and only the target copy that would enter the equipment slot is gated.
+    let equipped = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ACTABILITY_ROD,
+        1,
+        equip_slot::MAINHAND,
+    );
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.a.drain();
+    let body = move_body(
+        equipped,
+        rod,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+        slot_type::INVENTORY,
+        0,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("the old item stays equipped")
+            .id,
+        equipped
+    );
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 0)
+            .expect("the rod stays in the bag")
+            .id,
+        rod
+    );
+}
+
+/// The core move (without the packet pre-check) refuses the same swap direction, so an internal
+/// caller cannot equip the target item around the gate.
+#[tokio::test]
+async fn core_move_refuses_the_equipment_swap_bypass() {
+    let w = world();
+    let equipped = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ACTABILITY_ROD,
+        1,
+        equip_slot::MAINHAND,
+    );
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    let inv = Inv::of(&w.pa);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(!inventory::split_or_move_item_ex(
+            &mut txn,
+            &inv,
+            task_type::SWAP_ITEMS,
+            Some(inv.equipment()),
+            Some(inv.bag()),
+            equipped,
+            slot_type::EQUIPMENT,
+            equip_slot::MAINHAND as u8,
+            rod,
+            slot_type::INVENTORY,
+            0,
+            0,
+        ));
+    }
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("the equipped item stays")
+            .id,
+        equipped
+    );
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 0)
+            .expect("the rod stays in the bag")
+            .id,
+        rod
+    );
+}
+
+/// Unequipping into an empty slot is not an equip: it is allowed even below the requirement.
+#[tokio::test]
+async fn unequipping_a_rod_into_an_empty_slot_is_allowed() {
+    let mut w = world();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ACTABILITY_ROD,
+        1,
+        equip_slot::MAINHAND,
+    );
+    w.a.drain();
+    let body = move_body(
+        rod,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+        slot_type::INVENTORY,
+        1,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .all(|(op, _)| *op != sc::SCErrorMsgPacket));
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 1)
+            .expect("the rod is back in the bag")
+            .id,
+        rod
+    );
+}
+
+/// A house decoration adds its act-ability bonus (`FUN_390b3a80`) to the check: 8999 points
+/// plus a 1000-point decoration is still short, 9000 + 1000 meets the rod's 10000.
+#[tokio::test]
+async fn house_actability_bonus_counts_towards_the_requirement() {
+    let mut w = world_with_house_bonus();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.pa.data().actability.actabilities.push(Actability {
+        id: 7,
+        point: 8999,
+        step: 1,
+    });
+    w.a.drain();
+    let body = move_body(
+        rod,
+        0,
+        slot_type::INVENTORY,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+
+    w.pa.data().actability.actabilities[0].point = 9000;
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_some(),
+        "the house bonus covers the 1000-point shortfall"
+    );
+    w.a.drain();
+}
+
+/// A coffer (TRADE) item is not in `Inv`; the handler must resolve it through the server item
+/// manager so the 508 is sent instead of the core silently refusing the move.
+#[tokio::test]
+async fn coffer_item_to_equipment_is_refused_below_actability() {
+    use crate::models::doodad::{Doodad, DoodadCofferState};
+    use crate::models::house::housing_permission;
+    use crate::world::Entity;
+    let mut w = world();
+    w.server.names.add_character(1, "Alice", 1001);
+    let container = w
+        .server
+        .items
+        .new_coffer_container(1, &w.server.ids.container);
+    let container_id = container.lock().unwrap().container_id;
+    let item = Item::create(
+        901,
+        w.server.game_data.items.template(ACTABILITY_ROD).unwrap(),
+        1,
+        0,
+        1,
+        &w.server.game_data.items,
+        0,
+    );
+    container
+        .lock()
+        .unwrap()
+        .add_new_item(item, 0, &w.server.game_data.items)
+        .unwrap();
+    let mut d = Doodad::new(100);
+    d.owner_id = 1;
+    d.data = i32::from(housing_permission::PRIVATE);
+    d.transform.set_xyz(100.0, 100.0, 100.0);
+    d.coffer = Some(DoodadCofferState {
+        container_id,
+        capacity: 10,
+        opened_by: Some(1),
+    });
+    let doodad = Entity::new(0x300, d);
+    w.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&doodad, &w.server.view_ctx());
+    w.a.drain();
+    let mut body = move_body(
+        901,
+        0,
+        slot_type::TRADE,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+    body.write_u64(container_id);
+    run::<CSSwapCofferItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(container.lock().unwrap().get_item_by_id(901).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+}
+
+/// The equip gate against the real 1.2 row (27309, group 7, requirement 10000).
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_fishing_rod_row_requires_its_actability_points() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let real = crate::data::items::ItemData::load(&conn).unwrap();
+    let rod = real.template(27309).expect("iron fishing rod").clone();
+    assert_eq!(
+        (rod.actability_group_id, rod.actability_requirement),
+        (7, 10000)
+    );
+    let mut data = test_data();
+    data.items.templates.insert(27309, rod);
+    let mut w = world_with(data);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, 27309, 1, 0);
+    w.a.drain();
+    let body = move_body(
+        id,
+        0,
+        slot_type::INVENTORY,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    w.pa.data().actability.actabilities.push(Actability {
+        id: 7,
+        point: 10000,
+        step: 1,
+    });
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("equipped at the real requirement")
+            .template_id,
+        27309
+    );
+    w.a.drain();
+}
+
+#[tokio::test]
+async fn expanding_expert_without_a_limit_row_reports_store_unknown_error() {
+    let mut w = world();
+    w.a.drain();
+    run::<crate::systems::economy::store::CSExpandExpertPacket>(&mut w, 0, &[]);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::STORE_UNKNOWN_ERROR, 0),
+        )]
+    );
 }
 
 #[tokio::test]
@@ -818,6 +1321,38 @@ async fn destroy_partial_and_full() {
     assert!(w.a.drain().is_empty());
 }
 
+/// `porting-md#10`: a non-positive `CSDestroyItem` count is a Sus cheating report with the
+/// exact C# text, and the whole stack is destroyed as in C#.
+#[tokio::test]
+async fn destroy_negative_count_logs_a_sus_entry() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 10, 0);
+    let mut s = PacketStream::new();
+    s.write_u64(id).write_u8(2).write_u8(0).write_i32(-1);
+    run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
+    let expected = format!(
+        "CSDestroyItemPacket, player Alice attempted to destroy a negative amount of items -1 for item: template {STACK}, id {id}"
+    );
+    let mut entries = Vec::new();
+    for _ in 0..100 {
+        entries = w.server.systems.services.sus.recent_activities();
+        if !entries.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert_eq!(
+        entries,
+        vec![(
+            crate::systems::services::sus::CATEGORY_CHEATING.to_string(),
+            1,
+            expected
+        )]
+    );
+    assert!(item_at(&pa, slot_type::INVENTORY, 0).is_none());
+}
+
 /// A partial `CSDestroyItem` raises `OnConsumedItem` for the destroyed units (deviation from
 /// C#), so `ItemGather` objectives drop with them; a full destroy raises it once for the stack.
 #[tokio::test]
@@ -882,6 +1417,231 @@ async fn deposit_and_withdraw_money() {
 }
 
 #[tokio::test]
+async fn aa_point_wallet_takes_under_one_lock_and_refuses_overdraft() {
+    let mut w = world();
+    w.pa.data().aa_point = 100;
+    w.pa.data().bank_aa_point = 30;
+    w.a.drain();
+
+    let mut out = inventory::Out::Direct(&w.server);
+    assert!(inventory::try_take_aa_point(
+        &mut out,
+        &w.pa,
+        40,
+        task_type::BUY_AA_POINT
+    ));
+    assert_eq!(w.pa.data().aa_point, 60);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::BUY_AA_POINT, vec![ItemTask::AaPointUpdate(-40)])
+        )]
+    );
+
+    // One point short: refused, unchanged, and the client gets NOT_ENOUGH_AA_POINT.
+    assert!(!inventory::try_take_aa_point(
+        &mut out,
+        &w.pa,
+        61,
+        task_type::INVALID
+    ));
+    assert_eq!(w.pa.data().aa_point, 60);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_AA_POINT, 0)
+        )]
+    );
+
+    // Bank purse: same rule with its own error.
+    assert!(inventory::try_take_bank_aa_point(
+        &mut out,
+        &w.pa,
+        30,
+        task_type::WITHDRAW_MONEY
+    ));
+    assert_eq!(w.pa.data().bank_aa_point, 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::WITHDRAW_MONEY,
+                vec![ItemTask::ChangeBankAaPoint(-30)]
+            )
+        )]
+    );
+    assert!(!inventory::try_take_bank_aa_point(
+        &mut out,
+        &w.pa,
+        1,
+        task_type::INVALID
+    ));
+    assert_eq!(w.pa.data().bank_aa_point, 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_BANK_AA_POINT, 0)
+        )]
+    );
+
+    // Grants and absolute sets report their signed delta.
+    assert!(inventory::add_aa_point(
+        &mut out,
+        &w.pa,
+        25,
+        task_type::BUY_AA_POINT
+    ));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::BUY_AA_POINT, vec![ItemTask::AaPointUpdate(25)])
+        )]
+    );
+    assert!(inventory::set_aa_point(
+        &mut out,
+        &w.pa,
+        5,
+        task_type::INVALID
+    ));
+    assert_eq!(w.pa.data().aa_point, 5);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::INVALID, vec![ItemTask::AaPointUpdate(-80)])
+        )]
+    );
+    assert!(inventory::set_bank_aa_point(
+        &mut out,
+        &w.pa,
+        9,
+        task_type::INVALID
+    ));
+    let (aa_point, bank_aa_point) = {
+        let c = w.pa.data();
+        (c.aa_point, c.bank_aa_point)
+    };
+    assert_eq!((aa_point, bank_aa_point), (5, 9));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::INVALID, vec![ItemTask::ChangeBankAaPoint(9)])
+        )]
+    );
+
+    // Negative amounts never reach the balance.
+    assert!(!inventory::add_aa_point(
+        &mut out,
+        &w.pa,
+        -1,
+        task_type::INVALID
+    ));
+    assert!(!inventory::set_aa_point(
+        &mut out,
+        &w.pa,
+        -1,
+        task_type::INVALID
+    ));
+    let (aa_point, bank_aa_point) = {
+        let c = w.pa.data();
+        (c.aa_point, c.bank_aa_point)
+    };
+    assert_eq!((aa_point, bank_aa_point), (5, 9));
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test]
+async fn gold_or_aa_shortage_cover_debits_both_purses_in_one_task() {
+    let mut w = world();
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 100;
+    w.a.drain();
+
+    let mut out = inventory::Out::Direct(&w.server);
+    let split =
+        inventory::try_take_gold_or_aa(&mut out, &w.pa, 100, true, task_type::HOUSE_CREATION)
+            .expect("the AA wallet covers the gold shortage");
+    assert_eq!(
+        split,
+        inventory::PaymentSplit {
+            gold: 40,
+            aa_point: 60
+        }
+    );
+    assert_eq!(w.pa.data().money, 0);
+    assert_eq!(w.pa.data().aa_point, 40);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::HOUSE_CREATION,
+                vec![ItemTask::MoneyChange(-40), ItemTask::AaPointUpdate(-60)]
+            )
+        )]
+    );
+
+    // Flag off: the AA wallet is never a gold purse, so the same payment is refused.
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 100;
+    w.a.drain();
+    assert!(
+        inventory::try_take_gold_or_aa(&mut out, &w.pa, 100, false, task_type::INVALID).is_none()
+    );
+    assert_eq!(w.pa.data().money, 40);
+    assert_eq!(w.pa.data().aa_point, 100);
+    assert!(w.a.drain().is_empty());
+
+    // Both purses short: refused, unchanged, and no task packet (the caller sends its error).
+    assert!(
+        inventory::try_take_gold_or_aa(&mut out, &w.pa, 141, true, task_type::INVALID).is_none()
+    );
+    assert_eq!(w.pa.data().money, 40);
+    assert_eq!(w.pa.data().aa_point, 100);
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_aa_point_takes_never_overdraw() {
+    let server = std::sync::Arc::new(test_server_with(test_data()));
+    server.set_self();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x100,
+    );
+    player.data().aa_point = 100;
+
+    let take = |server: std::sync::Arc<GameServer>, player: PlayerRef| {
+        tokio::task::spawn_blocking(move || {
+            let mut out = inventory::Out::Direct(&server);
+            inventory::try_take_aa_point(&mut out, &player, 100, task_type::INVALID)
+        })
+    };
+    let (first, second) = tokio::join!(
+        take(server.clone(), player.clone()),
+        take(server.clone(), player.clone())
+    );
+    let results = [first.unwrap(), second.unwrap()];
+    assert_eq!(results.iter().filter(|took| **took).count(), 1);
+    assert_eq!(player.data().aa_point, 0);
+    // Exactly one success packet: the loser sent only its refusal.
+    let mut ops = client.drain_ops();
+    ops.sort_unstable();
+    let mut expected = vec![sc::SCItemTaskSuccessPacket, sc::SCErrorMsgPacket];
+    expected.sort_unstable();
+    assert_eq!(ops, expected);
+}
+
+#[tokio::test]
 async fn bank_refuses_non_positive_amounts_and_missing_banker() {
     let mut w = world();
     w.pa.data().money = 500;
@@ -933,6 +1693,188 @@ async fn bank_refuses_non_positive_amounts_and_missing_banker() {
         let c = w.pa.data();
         assert_eq!((c.money, c.money2), (500, 100));
     }
+}
+
+#[tokio::test]
+async fn deposit_and_withdraw_aa_points() {
+    let mut w = world();
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
+    w.pa.data().money = 500;
+    w.pa.data().aa_point = 100;
+    w.pa.data().bank_aa_point = 30;
+    w.a.drain();
+
+    // Deposit AA only: the carried purse -> the bank purse.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(40);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (500, 0, 60, 70)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::DEPOSIT_MONEY,
+                vec![
+                    ItemTask::AaPointUpdate(-40),
+                    ItemTask::ChangeBankAaPoint(40)
+                ]
+            )
+        )]
+    );
+
+    // Withdraw AA only: the bank purse -> the carried purse.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(25);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (500, 0, 85, 45)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::WITHDRAW_MONEY,
+                vec![
+                    ItemTask::ChangeBankAaPoint(-25),
+                    ItemTask::AaPointUpdate(25)
+                ]
+            )
+        )]
+    );
+
+    // Gold and AA move in the same guarded operation in both directions.
+    let mut s = PacketStream::new();
+    s.write_i32(200).write_i32(10);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (300, 200, 75, 55)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::DEPOSIT_MONEY,
+                vec![
+                    ItemTask::MoneyChange(-200),
+                    ItemTask::MoneyChangeBank(200),
+                    ItemTask::AaPointUpdate(-10),
+                    ItemTask::ChangeBankAaPoint(10)
+                ]
+            )
+        )]
+    );
+    let mut s = PacketStream::new();
+    s.write_i32(50).write_i32(5);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (350, 150, 80, 50)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::WITHDRAW_MONEY,
+                vec![
+                    ItemTask::MoneyChangeBank(-50),
+                    ItemTask::MoneyChange(50),
+                    ItemTask::ChangeBankAaPoint(-5),
+                    ItemTask::AaPointUpdate(5)
+                ]
+            )
+        )]
+    );
+}
+
+#[tokio::test]
+async fn bank_aa_refusals_change_neither_purse() {
+    let mut w = world();
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
+    w.pa.data().money = 500;
+    w.pa.data().money2 = 0;
+    w.pa.data().aa_point = 100;
+    w.pa.data().bank_aa_point = 30;
+    w.a.drain();
+    let unchanged = |w: &World, expected: (i64, i64, i64, i64), what: &str| {
+        let c = w.pa.data();
+        let got = (c.money, c.money2, c.aa_point, c.bank_aa_point);
+        assert_eq!(got, expected, "{what}");
+    };
+
+    // A short carried AA purse on a deposit: 707, and gold does not move either.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(101);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "deposit AA");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_AA_POINT, 0)
+        )]
+    );
+
+    // A short bank AA purse on a withdrawal: 708.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(31);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "withdraw AA");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_BANK_AA_POINT, 0)
+        )]
+    );
+
+    // A short gold purse refuses before the AA part moves (no partial deposit).
+    let mut s = PacketStream::new();
+    s.write_i32(600).write_i32(10);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "deposit gold");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_MONEY, 0)
+        )]
+    );
+
+    // Same on a withdrawal whose bank gold is empty.
+    let mut s = PacketStream::new();
+    s.write_i32(100).write_i32(10);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "withdraw gold");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_MONEY, 0)
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1066,6 +2008,77 @@ async fn expand_bag_and_bank() {
         f.iter().map(|x| x.0).collect::<Vec<_>>(),
         vec![sc::SCItemTaskSuccessPacket, sc::SCInvenExpandedPacket]
     );
+}
+
+#[tokio::test]
+async fn expand_slot_pays_a_gold_shortage_with_aa_points() {
+    let mut w = world();
+    // The bag step costs 100; the carried gold pays 40 and AA points pay the 60 shortage.
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 60;
+    let mut s = PacketStream::new();
+    s.write_i32(2).write_bool(true);
+    run::<CSExpandSlotsPacket>(&mut w, 0, s.as_bytes());
+    let (money, aa_point) = {
+        let c = w.pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((money, aa_point), (0, 0));
+    assert_eq!(w.pa.data().num_inventory_slots, 60);
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 60);
+    let f = w.a.drain();
+    assert_eq!(f.len(), 2);
+    assert_eq!(
+        f[0].1,
+        task_body(
+            task_type::EXPAND_BAG,
+            vec![ItemTask::MoneyChange(-40), ItemTask::AaPointUpdate(-60)]
+        )
+    );
+    assert_eq!(f[1].0, sc::SCInvenExpandedPacket);
+    assert_eq!(f[1].1, vec![2, 60]);
+}
+
+#[tokio::test]
+async fn expand_slot_refuses_when_aa_points_are_short_too() {
+    let mut w = world();
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 59;
+    let mut s = PacketStream::new();
+    s.write_i32(2).write_bool(true);
+    run::<CSExpandSlotsPacket>(&mut w, 0, s.as_bytes());
+    let (money, aa_point) = {
+        let c = w.pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((money, aa_point), (40, 59));
+    assert_eq!(w.pa.data().num_inventory_slots, 50);
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 50);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_MONEY, 0)
+        )]
+    );
+}
+
+#[tokio::test]
+async fn expand_slot_ignores_aa_points_when_the_flag_is_false() {
+    let mut w = world();
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 1000;
+    let mut s = PacketStream::new();
+    s.write_i32(2).write_bool(false);
+    run::<CSExpandSlotsPacket>(&mut w, 0, s.as_bytes());
+    let (money, aa_point) = {
+        let c = w.pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((money, aa_point), (40, 1000));
+    assert_eq!(w.pa.data().num_inventory_slots, 50);
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 50);
+    assert!(w.a.drain().is_empty());
 }
 
 #[tokio::test]

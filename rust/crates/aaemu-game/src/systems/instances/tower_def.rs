@@ -786,6 +786,7 @@ pub fn owns_npc(server: &GameServer, npc: &NpcRef) -> bool {
 /// Registers `npc` as owned by a bare running event (tests of the subsystems that ask
 /// [`owns_npc`] without starting a whole event).
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn adopt_for_test(server: &GameServer, key: EventKey, npc: &NpcRef) {
     let now = spawn_manager::now();
     let mut state = manager(server)

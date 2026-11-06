@@ -268,9 +268,13 @@ pub async fn on_disconnect(server: &Arc<GameServer>, conn: &mut GameConnection) 
     // previous session is still writing it. Deviation from the C# (`Remove` first), see
     // PORTING.md.
     crate::world::session::on_disconnect(server, conn).await;
-    server.accounts.remove_if_owned(account_id, conn.id);
+    // `AccountManager.Remove` + the `premium_configs.disconnect_point` transition (WP-B).
+    crate::systems::services::accounts::end_session(server, account_id, conn.id).await;
     server.streams.remove_token(conn.id);
     server.connections.remove(conn.id);
+    // A slot just freed: tell the login server so its world queue admits the head now instead
+    // of at the next periodic load tick.
+    crate::login::report_load(server);
     // AccountManager.UpdateLoginTime(AccountId, UtcNow), fire and forget. Deviation: C# also runs
     // it for connections that never entered (AccountId 0), which inserts an `accounts` row with
     // id 0 via GetAccountDetailsInternal; that is skipped here.

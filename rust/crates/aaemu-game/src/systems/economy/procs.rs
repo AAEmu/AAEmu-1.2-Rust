@@ -143,12 +143,6 @@ impl UnitProcs {
         }
     }
 
-    /// Whether the unit has no active proc (the common case; lets the damage path skip the
-    /// per-kind rolls).
-    pub fn is_empty(&self) -> bool {
-        self.procs.is_empty()
-    }
-
     /// The active proc template ids, in registration order.
     pub fn active_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.procs.iter().map(|p| p.template_id)
@@ -320,16 +314,12 @@ pub fn roll_damage(
     if proc_casting() {
         return;
     }
-    let has_procs = |o: &WorldObject| {
-        o.with_unit(|u| !u.unit().item_procs.is_empty())
-            .unwrap_or(false)
-    };
-    if attacker.is_unit() && has_procs(attacker) {
+    if attacker.is_unit() {
         for kind in attacker_kinds(damage_type, hit_type) {
             roll_for_kind_with(server, attacker, kind, victim, now_ms());
         }
     }
-    if victim.is_unit() && has_procs(victim) {
+    if victim.is_unit() {
         for kind in victim_kinds(damage_type, hit_type) {
             roll_for_kind_with(server, victim, kind, attacker, now_ms());
         }

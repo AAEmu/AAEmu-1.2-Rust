@@ -201,7 +201,8 @@ pub struct NpcTemplate {
     /// From `characters` (by `model_id`), 0 when the model is not a player model.
     pub race: u8,
     pub gender: u8,
-    pub merchant_pack_id: u32,
+    /// Every `merchants` row of the NPC (the 1.2 client unions the packs).
+    pub merchant_pack_ids: Vec<u32>,
     pub equip_bodies_id: u32,
     pub equip_cloths_id: u32,
     pub equip_weapons_id: u32,
@@ -294,7 +295,7 @@ impl Default for NpcTemplate {
             crowd_effect: false,
             race: 0,
             gender: 0,
-            merchant_pack_id: 0,
+            merchant_pack_ids: Vec::new(),
             equip_bodies_id: 0,
             equip_cloths_id: 0,
             equip_weapons_id: 0,
@@ -972,14 +973,28 @@ impl NpcData {
             Ok(())
         })?;
 
-        // Load merchant list
-        for_each_row(conn, "SELECT * FROM merchants", [], |r| {
-            let id = r.u32("npc_id")?;
-            if let Some(t) = d.templates.get_mut(&id) {
-                t.merchant_pack_id = r.u32("merchant_pack_id")?;
-            }
-            Ok(())
-        })?;
+        // Load merchant lists. The rows are additive: the 1.2 client joins `merchants` and
+        // `merchant_goods` per NPC (`strings.txt:13227`), so every pack of the NPC sells.
+        // Keep the `merchants.id` order and collapse repeated pack ids (NPC 11413 has two
+        // rows for pack 145). Pack 0 is not a catalog.
+        for_each_row(
+            conn,
+            "SELECT npc_id, merchant_pack_id FROM merchants ORDER BY id",
+            [],
+            |r| {
+                let id = r.u32("npc_id")?;
+                let pack_id = r.u32("merchant_pack_id")?;
+                if pack_id == 0 {
+                    return Ok(());
+                }
+                if let Some(t) = d.templates.get_mut(&id) {
+                    if !t.merchant_pack_ids.contains(&pack_id) {
+                        t.merchant_pack_ids.push(pack_id);
+                    }
+                }
+                Ok(())
+            },
+        )?;
         tracing::info!("Loaded {} npc templates", d.templates.len());
 
         tracing::info!("Loading merchant packs...");
@@ -1438,6 +1453,26 @@ mod tests {
         );
     }
 
+    /// `merchants` rows are additive: every pack of an NPC is kept, in `merchants.id` order,
+    /// with repeated pack ids collapsed (NPC 11413 has two rows for pack 145). Row order does
+    /// not decide which packs sell: the 1.2 client joins `merchants` x `merchant_goods`
+    /// (`strings.txt:13227`).
+    #[test]
+    fn merchants_union_all_packs_of_an_npc() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(TEST_SCHEMA).unwrap();
+        c.execute_batch(
+            "INSERT INTO merchants VALUES (2, 100, 78), (3, 100, 77), (4, 100, 78),
+             (5, 101, 78), (6, 101, 77);",
+        )
+        .unwrap();
+        let d = NpcData::load_conn(&c, "en_us").unwrap();
+        // NPC 100: the schema row 77 comes first, then 78; the repeated 78 is collapsed.
+        assert_eq!(d.template(100).unwrap().merchant_pack_ids, vec![77, 78]);
+        // NPC 101: the same two packs inserted in the opposite order are both kept.
+        assert_eq!(d.template(101).unwrap().merchant_pack_ids, vec![78, 77]);
+    }
+
     #[test]
     fn merchant_goods_validate_native_purchase_grade() {
         let mut g = MerchantGoods::default();
@@ -1513,7 +1548,7 @@ mod tests {
         );
         assert_eq!(t.buffs, vec![900]);
         assert_eq!(t.bonuses.len(), 1);
-        assert_eq!(t.merchant_pack_id, 77);
+        assert_eq!(t.merchant_pack_ids, vec![77]);
         assert_eq!(t.skills.len(), 2);
         assert_eq!(t.skills[0].1.len(), 2);
         assert_eq!(t.passive_buffs.len(), 1);
@@ -1597,8 +1632,29 @@ mod tests {
         let merchants = d
             .templates
             .values()
-            .filter(|t| t.merchant_pack_id > 0)
+            .filter(|t| !t.merchant_pack_ids.is_empty())
             .count();
+        // Every pack of an NPC sells (the 1.2 client joins `merchants` x `merchant_goods`,
+        // `strings.txt:13227`). NPC 626 has an empty `npc.626` pack 9 and the 26 horses of
+        // pack 154; NPC 1196 has goods in both 149 and 266.
+        let pack_items = |npc_id: u32| -> Vec<u32> {
+            let t = d.template(npc_id).expect("merchant npc");
+            let mut items: Vec<u32> = t
+                .merchant_pack_ids
+                .iter()
+                .filter_map(|p| d.goods(*p))
+                .flat_map(|g| g.items.iter().map(|i| i.item_template_id))
+                .collect();
+            items.sort_unstable();
+            items.dedup();
+            items
+        };
+        // `merchants.id` order: row 9 names the empty own pack, row 363 the horse pack.
+        assert_eq!(d.template(626).unwrap().merchant_pack_ids, vec![9, 154]);
+        assert_eq!(pack_items(626).len(), 26);
+        assert!(pack_items(626).contains(&23090));
+        assert!(pack_items(1196).contains(&4045));
+        assert!(pack_items(1196).contains(&2142));
         // `npcs.no_penalty`: guards, siege cannons and battlefield pets are the 88 rows.
         let no_penalty = d.templates.values().filter(|t| t.no_penalty).count();
         assert_eq!(

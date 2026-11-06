@@ -9,13 +9,13 @@ use crate::world::{now_ms, WorldObject};
 
 use super::super::super::buffs;
 use super::super::super::combat as unit_combat;
-use super::super::super::packets::SCSkillCooldownResetPacket;
+use super::super::super::packets::{SCCastingDelayedPacket, SCSkillCooldownResetPacket};
 use super::super::super::packets_special::SCNotifyResurrectionPacket;
 use super::super::super::progress;
 use super::super::super::skill::{
-    apply_skill_modifiers, mana_level_scale, start_auto_skill, use_skill,
+    apply_skill_modifiers, delay_cast, mana_level_scale, start_auto_skill, use_skill,
 };
-use super::super::super::state::SkillRun;
+use super::super::super::state::{SkillRun, SkillTaskKind};
 use super::super::super::stats::{stat, StatKind};
 use super::super::super::types::{BuffRemoveOn, SkillCastTarget};
 use super::super::{rand_int, EffectArgs};
@@ -110,11 +110,45 @@ pub fn disturb_casting(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) 
         return;
     };
     if v[1] > 0 {
-        super::super::super::tasks::schedule(server, i64::from(v[1]), move |server| {
-            if super::super::super::geometry::is_live_object(&server, &target) {
-                super::super::super::skill::interrupt_skills(&server, &target);
+        // WP-1: a delayed disturb extends a running direct cast instead of interrupting it
+        // (the 1.2 client adds the delay to the cast bar, `SCCastingDelayed`). Only the victim
+        // is told: whether viewers also receive it is capture-pending.
+        if let Some(skill_id) = delay_cast(&target, i64::from(v[1])) {
+            if let Some(p) = target.as_player() {
+                p.send(SCCastingDelayedPacket {
+                    skill_id: skill_id as u16,
+                    plot_id: 0,
+                    delay: v[1] as u32,
+                });
             }
-        });
+            return;
+        }
+        let (channeling, plotting) = target
+            .with_unit(|u| {
+                let s = &u.unit().skill_state;
+                (
+                    s.skill_task
+                        .as_ref()
+                        .is_some_and(|t| matches!(t.kind, SkillTaskKind::EndChanneling { .. })),
+                    s.active_plot.is_some(),
+                )
+            })
+            .unwrap_or((false, false));
+        if channeling || plotting {
+            // Neither a channel nor a plot cast has a 1.2 delay packet, so how a delayed
+            // disturb affects them is capture-pending: keep the old delayed interrupt.
+            tracing::debug!(
+                "Special effects: DisturbCasting {} ms on a channel or plot cast (it cannot be delayed, capture-pending); interrupting after the delay",
+                v[1]
+            );
+            super::super::super::tasks::schedule(server, i64::from(v[1]), move |server| {
+                if super::super::super::geometry::is_live_object(&server, &target) {
+                    super::super::super::skill::interrupt_skills(&server, &target);
+                }
+            });
+        }
+        // No cast, channel or plot: nothing to disturb (the old code armed an interrupt that
+        // could hit a cast started during the delay).
     } else {
         super::super::super::skill::interrupt_skills(server, &target);
     }

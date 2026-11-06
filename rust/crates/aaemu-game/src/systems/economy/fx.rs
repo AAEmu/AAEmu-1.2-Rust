@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use crate::models::item_task::{ItemFx, ItemFxList};
 use crate::server::GameServer;
+use crate::systems::social::achievement::char_record_kind;
+use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{PlayerRef, WorldObject};
 
 use super::item_packets::{
@@ -141,11 +143,37 @@ pub fn flush_with(server: &GameServer, fx: ItemFxList, reequip: bool) {
                 owner: o,
                 template_id,
                 count,
+                added,
+                source,
             } => {
                 // OnAcquiredItem: only when count > 0
                 if count > 0 {
                     if let (Some(p), Some(h)) = (owner(o), hooks.quests.get()) {
                         h.on_items_acquired(server, &p, template_id, count);
+                    }
+                }
+                // GET_ITEM_TYPE (kind 29): the added units, and only when they are a genuine
+                // acquisition. `report_achievement` takes the character lock, so keep it out of
+                // a flush that still runs under one (an unlocked transaction); while the
+                // economy lock is held it queues instead. All 1.2 rows use the any-grade
+                // wildcard (`value2 = -1`), so the event carries no grade.
+                if added > 0
+                    && source.is_acquisition()
+                    && (reequip || super::System::ops_held_on_this_thread())
+                {
+                    if let Some(p) = owner(o) {
+                        crate::systems::report_achievement(
+                            server,
+                            &p,
+                            AchievementInput::Increment {
+                                kind_id: char_record_kind::GET_ITEM_TYPE,
+                                amount: i64::from(added),
+                                matcher: RecordMatch::GradeWildcard {
+                                    value1: template_id,
+                                    grade: None,
+                                },
+                            },
+                        );
                     }
                 }
             }
@@ -165,6 +193,11 @@ pub fn flush_with(server: &GameServer, fx: ItemFxList, reequip: bool) {
             } => {
                 if let (Some(p), Some(h)) = (owner(o), hooks.progression.get()) {
                     h.add_exp(server, &p, exp, add_ability_exp);
+                }
+            }
+            ItemFx::Money { owner: o, money } => {
+                if let Some(p) = owner(o) {
+                    crate::systems::social::achievement_hooks::report_gold(server, &p, money);
                 }
             }
             ItemFx::EquipEnter {

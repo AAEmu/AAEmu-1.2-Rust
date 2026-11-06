@@ -48,6 +48,8 @@ const SLAVE_TEMPLATE: u32 = 68;
 const SLAVE_ITEM: u32 = 5001;
 /// Player obj ids outside the range the object id manager hands out in the tests.
 const PA: u32 = 0x00F0_0001;
+/// The design item object id the shipyard create tests name (`item_shipyards` 7000 -> 3).
+const DESIGN_ITEM: u64 = 0x0000_0000_0000_9100;
 const PB: u32 = 0x00F0_0002;
 
 #[path = "cinema_mate_tests.rs"]
@@ -210,7 +212,14 @@ fn data() -> GameData {
 }
 
 fn server_with(d: GameData) -> Arc<GameServer> {
-    let s = Arc::new(test_server_with(d));
+    server_with_world(
+        d,
+        WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
+    )
+}
+
+fn server_with_world(d: GameData, world: WorldTemplate) -> Arc<GameServer> {
+    let s = Arc::new(crate::test_support::test_server_with_world(d, world));
     s.set_self();
     // This synthetic server has no MySQL. Explicitly supply an empty saved-hull store;
     // persistence/error regressions use their own loader or private temporary tables.
@@ -4184,6 +4193,25 @@ impl ItemSkillHooks for ShipItems {
             .push((task_type, template_id, amount));
         amount
     }
+    fn consume_bag_item_by_id(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        task_type: u8,
+        item_id: u64,
+        expected_template_id: u32,
+        amount: i32,
+    ) -> Option<bool> {
+        // The one named bag item, not just any item of the template.
+        if item_id != DESIGN_ITEM || expected_template_id != 7000 {
+            return Some(false);
+        }
+        self.consumed
+            .lock()
+            .unwrap()
+            .push((task_type, expected_template_id, amount));
+        Some(true)
+    }
     fn acquire_default_item(
         &self,
         _server: &GameServer,
@@ -4233,6 +4261,8 @@ async fn shipyard_build_steps_progress() {
         },
     );
     d.systems.vehicles.taxations.insert(2, 1000);
+    d.systems.vehicles.item_shipyards.insert(7000, 3);
+    d.items.templates.insert(7000, ItemTemplate::plain(7000, 1));
     let server = server_with(d);
     let hooks = Arc::new(ShipItems::default());
     server.systems.skills.ext.items.install(hooks.clone());
@@ -4241,10 +4271,23 @@ async fn shipyard_build_steps_progress() {
     let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
     spawn_player(&server, &b, test_character(2, "B", 110.0, 110.0), PB);
     pa.data().money = 5000;
+    give_item(&server, &pa, DESIGN_ITEM, 7000);
     a.drain();
     b.drain();
 
-    let sy = shipyards::create(&server, &pa, 3, 120.0, 120.0, 100.0, 0.5, 0, 0).expect("shipyard");
+    let sy = shipyards::create(
+        &server,
+        &pa,
+        3,
+        120.0,
+        120.0,
+        100.0,
+        0.5,
+        DESIGN_ITEM,
+        0,
+        false,
+    )
+    .expect("shipyard");
     assert_eq!(pa.data().money, 4000);
     assert_eq!(
         *hooks.consumed.lock().unwrap(),
@@ -4340,14 +4383,29 @@ async fn shipyard_row_round_trips_and_removal_queues_delete() {
         },
     );
     d.systems.vehicles.taxations.insert(2, 1000);
+    d.systems.vehicles.item_shipyards.insert(7000, 3);
+    d.items.templates.insert(7000, ItemTemplate::plain(7000, 1));
     let server = server_with(d);
     let hooks = Arc::new(ShipItems::default());
     server.systems.skills.ext.items.install(hooks.clone());
     let a = TestClient::new(&server, 1, 1);
     let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
     pa.data().money = 5000;
+    give_item(&server, &pa, DESIGN_ITEM, 7000);
 
-    let sy = shipyards::create(&server, &pa, 3, 120.0, 130.0, 100.0, 0.5, 0, 0).expect("shipyard");
+    let sy = shipyards::create(
+        &server,
+        &pa,
+        3,
+        120.0,
+        130.0,
+        100.0,
+        0.5,
+        DESIGN_ITEM,
+        0,
+        false,
+    )
+    .expect("shipyard");
     // Two actions finish step 0, one more is the first action of step 1.
     for _ in 0..3 {
         shipyards::add_build_action(&server, &sy);
@@ -4607,6 +4665,95 @@ async fn spawn_effect_creates_an_ownerless_test_slave() {
     ));
 }
 
+/// `SpawnEffect` (slave) dir ids: pos 1 = relative to the effect target, 2 = relative to the
+/// caster, with `pos_angle`; ori 1 = the target's yaw, 2 = the caster's, plus `ori_angle`.
+#[tokio::test]
+async fn spawn_effect_slave_honours_pos_and_ori_dirs() {
+    use crate::systems::skills::data::effects::SpawnEffect;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::SkillCastTarget;
+
+    let server = server_with(slave_data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "P1", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "P2", 140.0, 100.0), PB);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    pa.data().unit.transform.rot_z = 0.0;
+    pb.data().unit.transform.rot_z = std::f32::consts::FRAC_PI_2;
+    a.drain();
+    b.drain();
+    let me = WorldObject::from(&pa);
+    let so = Default::default();
+    let args = effect_args(
+        &me,
+        Target::Obj(WorldObject::from(&pb)),
+        SkillCastTarget::Unit(PB),
+        &so,
+    );
+    let effect = |pos_dir_id, ori_dir_id| {
+        EffectTemplate::Spawn(SpawnEffect {
+            id: 1,
+            owner_type_id: 2,
+            sub_type: SLAVE_TEMPLATE,
+            pos_dir_id,
+            pos_angle: 0.0,
+            pos_distance: 10.0,
+            ori_dir_id,
+            ori_angle: 0.0,
+            use_summoner_faction: false,
+            life_time: 0.0,
+            despawn_on_creator_death: false,
+            use_summoner_aggro_target: false,
+            mate_state_id: 3,
+        })
+    };
+    // Position relative to the target, yaw from the target.
+    assert!(super::effects::apply_effect(
+        &server,
+        EffectKind::SpawnEffect,
+        &effect(1, 1),
+        &args
+    ));
+    // Position relative to the caster, yaw from the caster.
+    assert!(super::effects::apply_effect(
+        &server,
+        EffectKind::SpawnEffect,
+        &effect(2, 2),
+        &args
+    ));
+    let slaves = slaves::all_slaves(&world);
+    let at = |x: f32, y: f32| {
+        slaves
+            .iter()
+            .find(|s| {
+                let t = s.data().unit.transform;
+                (t.x - x).abs() < 1e-4 && (t.y - y).abs() < 1e-4
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no slave at ({x},{y}): {:?}",
+                    slaves
+                        .iter()
+                        .map(|s| s.data().unit.transform)
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let from_target = at(130.0, 100.0);
+    assert!(
+        (from_target.data().unit.transform.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-5,
+        "ori dir 1 uses the target's yaw"
+    );
+    let from_caster = at(100.0, 110.0);
+    assert!(
+        from_caster.data().unit.transform.rot_z.abs() < 1e-5,
+        "ori dir 2 uses the caster's yaw"
+    );
+}
+
 #[tokio::test]
 async fn destroy_and_spawn_slave_replaces_a_spawner_slave_and_destroys_an_orphan() {
     use crate::systems::skills::geometry::Target;
@@ -4708,11 +4855,12 @@ async fn kill_exp_death_despawn_and_force_dismount() {
     let mate = mates::first_active_mate(&server, &pa).unwrap();
     let tl = u32::from(mate.data().unit.tl_id);
     a.drain();
-    // Npc kill exp: every active mate + a message.
+    // Npc kill exp: every active mate gets its own SCExpChanged; the client formats the localized
+    // pet-exp chat line from it, so no server "Pet gained" chat is sent (WP7).
     mates::reward_kill_exp(&server, &pa, 100);
     let f = a.drain();
     assert!(ops(&f).contains(&sc::SCExpChangedPacket));
-    assert!(ops(&f).contains(&sc::SCChatMessagePacket));
+    assert!(!ops(&f).contains(&sc::SCChatMessagePacket));
     assert_eq!(mate.data().experience, 100);
     // Team.IsObjMember helper.
     assert_eq!(
@@ -4944,6 +5092,20 @@ fn real_compact_db_vehicle_tables() {
             .sum::<usize>(),
         85
     );
+    // `item_shipyards` maps the design items to their shipyards; 2-4 and 10 / 11 have no
+    // `origin_item_id` and exist only through these rows.
+    assert_eq!(d.item_shipyards.len(), 13);
+    assert_eq!(d.item_shipyards.get(&16163), Some(&2));
+    assert_eq!(d.item_shipyards.get(&15687), Some(&3));
+    assert_eq!(d.item_shipyards.get(&15564), Some(&4));
+    assert_eq!(d.item_shipyards.get(&18124), Some(&10));
+    assert_eq!(d.item_shipyards.get(&18149), Some(&11));
+    assert_eq!(d.shipyard_rewards.values().map(Vec::len).sum::<usize>(), 9);
+    assert!(d
+        .shipyard_rewards
+        .values()
+        .flatten()
+        .all(|r| r.doodad_id == 1330 && r.on_water && r.count > 0));
     assert_eq!(d.taxations.len(), 11);
     // Bindings land on their templates.
     let bindings: usize = d
@@ -5027,6 +5189,40 @@ fn real_compact_db_vehicle_tables() {
             points.iter().any(|(p, _)| *p == point),
             "slave {slave} model {model} point {point}"
         );
+    }
+}
+
+/// The 1.2 `spawn_effects` slave rows: only the implemented dir ids 1/2 (position) and 1/2/3
+/// (orientation) occur, and every `sub_type` is a real slave template.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_spawn_effect_slave_dirs_and_templates() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let mut stmt = conn
+        .prepare("SELECT id, sub_type, pos_dir_id, ori_dir_id FROM spawn_effects WHERE owner_type_id = 2")
+        .unwrap();
+    let rows: Vec<(u32, u32, u32, u32)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 36);
+    for (id, sub_type, pos_dir, ori_dir) in rows {
+        assert!(matches!(pos_dir, 1 | 2), "effect {id}: PosDirId {pos_dir}");
+        assert!(matches!(ori_dir, 1..=3), "effect {id}: OriDirId {ori_dir}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM slaves WHERE id = ?1",
+                [sub_type],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "effect {id}: slave {sub_type}");
     }
 }
 
@@ -5830,6 +6026,14 @@ async fn hang_and_unhang_packets_only_mutate_the_authenticated_character() {
 const SUMMON_POS_SKILL: u32 = 58_003;
 const SLAVE_PART: u32 = 5002;
 
+/// A world whose ocean is far below the synthetic terrain fallback, so land placements are not
+/// mistaken for sea-floor spots (the default test world's ocean level is 100).
+fn low_ocean_world() -> WorldTemplate {
+    let mut world = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
+    world.ocean_level = -1000.0;
+    world
+}
+
 fn summon_pos_data(spawn_range: u32) -> GameData {
     use crate::systems::skills::data::effects::{EffectTemplate, SpecialEffect};
     use crate::systems::skills::data::{EffectKind, SkillTemplate};
@@ -5941,7 +6145,7 @@ async fn wait_for_slave(world: &Arc<crate::world::WorldInstance>) -> crate::worl
 
 #[tokio::test]
 async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
-    let server = server_with(summon_pos_data(50));
+    let server = server_with_world(summon_pos_data(50), low_ocean_world());
     crate::systems::economy::bridges::install(&server);
     crate::systems::npcs::install_hooks(&server);
     super::install_hooks(&server);
@@ -5965,7 +6169,7 @@ async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
 
 #[tokio::test]
 async fn summon_pos_outside_the_valid_area_errors_without_spawning() {
-    let server = server_with(summon_pos_data(10));
+    let server = server_with_world(summon_pos_data(10), low_ocean_world());
     crate::systems::economy::bridges::install(&server);
     crate::systems::npcs::install_hooks(&server);
     super::install_hooks(&server);
@@ -9307,4 +9511,36 @@ async fn unboarding_keeps_a_different_attachment_point() {
     assert!(part.data().attached_characters.is_empty());
     assert_eq!(pa.data().attached_point, 5);
     assert!(f.iter().any(|x| x.0 == sc::SCUnitDetachedPacket));
+}
+
+/// `ApplySlaveBonuses` stores the flat `unit_modifiers.value`; the C# `LinearLevelBonus` term is
+/// unused. All 452 Slave rows of the shipped data have `linear_level_bonus = 0`, so ignoring it
+/// cannot change a bonus today. This pins that data assumption: a future row with a non-zero
+/// term must be noticed (and the stat code revisited).
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_slave_unit_modifiers_have_no_linear_level_bonus() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unit_modifiers WHERE owner_type = 'Slave'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("Slave rows");
+    assert_eq!(total, 452);
+    let with_bonus: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unit_modifiers WHERE owner_type = 'Slave' \
+             AND linear_level_bonus != 0",
+            [],
+            |r| r.get(0),
+        )
+        .expect("Slave linear level bonus rows");
+    assert_eq!(with_bonus, 0);
 }

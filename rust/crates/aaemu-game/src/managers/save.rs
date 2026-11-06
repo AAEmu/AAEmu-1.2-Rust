@@ -213,7 +213,7 @@ mod tests {
         let leaving = spawn_player(&s, &client, test_character(1, "Leaver", 1.0, 1.0), 0x100);
         let clean = spawn_player(&s, &client, test_character(2, "Clean", 2.0, 2.0), 0x101);
         let _unknown = spawn_player(&s, &client, test_character(3, "Unknown", 3.0, 3.0), 0x102);
-        s.save.seed_committed_money(&clean);
+        s.save.seed_committed_wallet(&clean);
         s.save.remember_departing(&leaving);
         s.world.try_remove_character(leaving.obj_id);
 
@@ -223,7 +223,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn departure_snapshot_includes_counterpart_with_changed_money_or_labor() {
+    async fn a_learned_craft_puts_a_clean_character_in_the_departure_snapshot() {
+        let s = test_server();
+        let client = TestClient::new(&s, 1, 1);
+        let learner = spawn_player(&s, &client, test_character(1, "Learner", 1.0, 1.0), 0x100);
+        s.save.seed_committed_wallet(&learner);
+        assert!(capture_financial_snapshot_for(&s, SnapshotScope::Departure)
+            .characters
+            .is_empty());
+        learner.data().learn_craft(987);
+        let snapshot = capture_financial_snapshot_for(&s, SnapshotScope::Departure);
+        assert_eq!(captured_ids(&snapshot), vec![1]);
+        assert!(snapshot.characters[0]
+            .1
+            .learned_crafts_unsaved
+            .contains(&987));
+    }
+
+    #[tokio::test]
+    async fn departure_snapshot_includes_counterpart_with_changed_wallet_or_labor() {
         let s = test_server();
         let client = TestClient::new(&s, 1, 1);
         let leaving = spawn_player(&s, &client, test_character(1, "Leaver", 1.0, 1.0), 0x100);
@@ -231,7 +249,7 @@ mod tests {
         let laborer = spawn_player(&s, &client, test_character(3, "Laborer", 3.0, 3.0), 0x102);
         let clean = spawn_player(&s, &client, test_character(4, "Clean", 4.0, 4.0), 0x103);
         for p in [&trader, &laborer, &clean] {
-            s.save.seed_committed_money(p);
+            s.save.seed_committed_wallet(p);
         }
         s.save.remember_departing(&leaving);
         s.world.try_remove_character(leaving.obj_id);
@@ -243,13 +261,18 @@ mod tests {
         assert_eq!(captured_ids(&snapshot), vec![1, 2, 3]);
 
         // The committed ack makes the trader clean again.
-        let money = {
+        let wallet = {
             let c = trader.data();
-            (c.money, c.money2)
+            (c.money, c.money2, c.aa_point, c.bank_aa_point)
         };
-        s.save.set_committed_money(2, money);
+        s.save.set_committed_wallet(2, wallet);
         let snapshot = capture_financial_snapshot_for(&s, SnapshotScope::Departure);
         assert_eq!(captured_ids(&snapshot), vec![1, 3]);
+
+        // The AA balances are part of the same wallet: a grant makes the trader dirty again.
+        trader.data().aa_point += 10;
+        let snapshot = capture_financial_snapshot_for(&s, SnapshotScope::Departure);
+        assert_eq!(captured_ids(&snapshot), vec![1, 2, 3]);
     }
 
     #[tokio::test]
@@ -258,8 +281,8 @@ mod tests {
         let client = TestClient::new(&s, 1, 1);
         let a = spawn_player(&s, &client, test_character(1, "A", 1.0, 1.0), 0x100);
         let b = spawn_player(&s, &client, test_character(2, "B", 2.0, 2.0), 0x101);
-        s.save.seed_committed_money(&a);
-        s.save.seed_committed_money(&b);
+        s.save.seed_committed_wallet(&a);
+        s.save.seed_committed_wallet(&b);
         let snapshot = capture_financial_snapshot(&s);
         assert_eq!(captured_ids(&snapshot), vec![1, 2]);
     }
@@ -269,10 +292,13 @@ struct CharacterSaveAck {
     player: PlayerRef,
     updated: i64,
     removed: [Vec<u32>; 4],
-    money: (i64, i64),
+    /// `(money, money2, aa_point, bank_aa_point)` written by `save_character`.
+    wallet: (i64, i64, i64, i64),
     /// The captured clone's `labor_power_unsaved` when `save_character` ran (flushed into
     /// `accounts.labor` by it).
     labor: i32,
+    /// The captured clone's learned crafts written by `save_character`.
+    learned_crafts: Vec<u32>,
 }
 
 pub(crate) struct FinancialSaveReceipt {
@@ -334,6 +360,9 @@ pub(crate) async fn write_financial_snapshot(
         // Captured before the save: `save_character` flushes this delta into `accounts.labor`
         // and clears it on the clone.
         let labor = character.labor_power_unsaved;
+        let mut learned_crafts: Vec<u32> =
+            character.learned_crafts_unsaved.iter().copied().collect();
+        learned_crafts.sort_unstable();
         if let Err(error) = save_character(tx, &mut character, Utc::now().timestamp()).await {
             tracing::error!(
                 "Failed to save character {} - {}: {error}",
@@ -346,8 +375,14 @@ pub(crate) async fn write_financial_snapshot(
             player,
             updated: character.updated,
             removed,
-            money: (character.money, character.money2),
+            wallet: (
+                character.money,
+                character.money2,
+                character.aa_point,
+                character.bank_aa_point,
+            ),
             labor,
+            learned_crafts,
         });
     }
     systems += save_stage(server, tx, SaveStage::AfterCharacters).await?;
@@ -373,21 +408,25 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
     for ack in receipt.characters {
         server
             .save
-            .set_committed_money(ack.player.character_id, ack.money);
+            .set_committed_wallet(ack.player.character_id, ack.wallet);
         let mut live = ack.player.data();
-        let unchanged_money = (live.money, live.money2) == ack.money;
+        let unchanged_wallet =
+            (live.money, live.money2, live.aa_point, live.bank_aa_point) == ack.wallet;
         live.updated = ack.updated;
         let [friends, blocked, skills, quests] = ack.removed;
         live.removed_friends.retain(|id| !friends.contains(id));
         live.removed_blocked.retain(|id| !blocked.contains(id));
         live.skills.removed.retain(|id| !skills.contains(id));
         live.quests.removed.retain(|id| !quests.contains(id));
+        let learned_crafts = ack.learned_crafts;
+        live.learned_crafts_unsaved
+            .retain(|id| !learned_crafts.contains(id));
         // The saved snapshot flushed `ack.labor` into `accounts.labor`; whatever the live
         // character spent since the capture stays pending for the next save.
         live.labor_power_unsaved -= ack.labor;
         let labor_pending = live.labor_power_unsaved != 0;
         drop(live);
-        if unchanged_money && !labor_pending {
+        if unchanged_wallet && !labor_pending {
             let mut departing = server
                 .save
                 .departing
@@ -399,7 +438,7 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
             {
                 departing.remove(&ack.player.character_id);
                 drop(departing);
-                server.save.forget_committed_money(ack.player.character_id);
+                server.save.forget_committed_wallet(ack.player.character_id);
                 if server
                     .world
                     .character_by_obj_id(ack.player.obj_id)
@@ -422,49 +461,57 @@ pub struct SaveManager {
     transactions: tokio::sync::Mutex<()>,
     /// Keep departed wallets available for a full transaction retry after database failure.
     departing: Mutex<HashMap<u32, PlayerRef>>,
-    /// `(money, money2)` last committed to (or loaded from) the database per online character.
-    /// A character without an entry counts as financially dirty. Never held with a data lock.
-    committed_money: Mutex<HashMap<u32, (i64, i64)>>,
+    /// `(money, money2, aa_point, bank_aa_point)` last committed to (or loaded from) the
+    /// database per online character. A character without an entry counts as financially dirty.
+    /// Never held with a data lock.
+    committed_wallet: Mutex<HashMap<u32, (i64, i64, i64, i64)>>,
 }
 
 impl SaveManager {
     /// Seeds the committed wallet of a character that just entered the world from the database.
-    pub(crate) fn seed_committed_money(&self, player: &PlayerRef) {
-        let money = {
+    pub(crate) fn seed_committed_wallet(&self, player: &PlayerRef) {
+        let wallet = {
             let c = player.data();
-            (c.money, c.money2)
+            (c.money, c.money2, c.aa_point, c.bank_aa_point)
         };
-        self.set_committed_money(player.character_id, money);
+        self.set_committed_wallet(player.character_id, wallet);
     }
 
-    fn set_committed_money(&self, character_id: u32, money: (i64, i64)) {
-        self.committed_money
+    fn set_committed_wallet(&self, character_id: u32, wallet: (i64, i64, i64, i64)) {
+        self.committed_wallet
             .lock()
-            .expect("committed money poisoned")
-            .insert(character_id, money);
+            .expect("committed wallet poisoned")
+            .insert(character_id, wallet);
     }
 
-    fn forget_committed_money(&self, character_id: u32) {
-        self.committed_money
+    fn forget_committed_wallet(&self, character_id: u32) {
+        self.committed_wallet
             .lock()
-            .expect("committed money poisoned")
+            .expect("committed wallet poisoned")
             .remove(&character_id);
     }
 
-    /// True when the wallet differs from the committed one (or none is known), or labor is
-    /// pending. Money is the only character-row field other characters' operations change.
+    /// True when the wallet differs from the committed one (or none is known), labor is
+    /// pending, or a learned craft is not yet committed. The wallet is the only character-row
+    /// state other characters' operations change; the learned crafts commit in the same
+    /// snapshot as the recipe-item deletion.
     fn is_financially_dirty(&self, player: &PlayerRef) -> bool {
-        let (money, labor_pending) = {
+        let (wallet, labor_pending, craft_pending) = {
             let c = player.data();
-            ((c.money, c.money2), c.labor_power_unsaved != 0)
+            (
+                (c.money, c.money2, c.aa_point, c.bank_aa_point),
+                c.labor_power_unsaved != 0,
+                !c.learned_crafts_unsaved.is_empty(),
+            )
         };
         labor_pending
+            || craft_pending
             || self
-                .committed_money
+                .committed_wallet
                 .lock()
-                .expect("committed money poisoned")
+                .expect("committed wallet poisoned")
                 .get(&player.character_id)
-                != Some(&money)
+                != Some(&wallet)
     }
 
     pub(crate) fn pending_departure(&self, character_id: u32) -> Option<PlayerRef> {

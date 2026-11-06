@@ -3,6 +3,8 @@
 //! ([`SusManager::finalize_transform`], called by the unit movement handler).
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::server::GameServer;
@@ -79,6 +81,10 @@ pub struct SusManager {
     last_pet_positions: Baselines,
     /// `Transform._lastFinalizeTime` (unix ms) / `_skipCheckTime` (s) per object.
     finalize_checks: Mutex<HashMap<u32, (i64, f32)>>,
+    /// The entries `log_activity` reported, newest last and bounded. Compiled for tests only:
+    /// it lets a flow test observe a log call without a database.
+    #[cfg(test)]
+    recent: Mutex<VecDeque<(String, u32, String)>>,
 }
 
 impl SusManager {
@@ -224,6 +230,8 @@ impl SusManager {
         position: [f32; 3],
         description: &str,
     ) -> bool {
+        #[cfg(test)]
+        self.remember(category, player_id, description);
         let res = sqlx::query(
             "INSERT INTO audit_char_sus (sus_category, sus_account, sus_character, zone_group, x, y, z, description) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -275,6 +283,51 @@ impl SusManager {
         };
         self.log_activity(server, category, account, id, zone, pos, description)
             .await
+    }
+
+    /// `LogActivity(category, player, description)` from a synchronous packet handler (the C#
+    /// called it synchronously): the `audit_char_sus` insert runs on a task, the message and the
+    /// player lookup happen before the handler changes state.
+    pub fn log_activity_player_deferred(
+        &self,
+        server: &GameServer,
+        category: &str,
+        player: Option<&PlayerRef>,
+        description: &str,
+    ) {
+        let (Some(srv), Ok(rt)) = (server.self_arc(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        let player = player.cloned();
+        let (category, description) = (category.to_string(), description.to_string());
+        rt.spawn(async move {
+            srv.systems
+                .services
+                .sus
+                .log_activity_player(&srv, &category, player.as_ref(), &description)
+                .await;
+        });
+    }
+
+    /// Keeps the most recent reported activity for a test to inspect (bounded to 32 entries).
+    #[cfg(test)]
+    fn remember(&self, category: &str, player_id: u32, description: &str) {
+        let mut recent = self.recent.lock().expect("sus poisoned");
+        if recent.len() == 32 {
+            recent.pop_front();
+        }
+        recent.push_back((category.to_string(), player_id, description.to_string()));
+    }
+
+    /// The reported activities recorded by [`Self::log_activity`], newest last (tests only).
+    #[cfg(test)]
+    pub(crate) fn recent_activities(&self) -> Vec<(String, u32, String)> {
+        self.recent
+            .lock()
+            .expect("sus poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// `LogActivity(category, description)`.

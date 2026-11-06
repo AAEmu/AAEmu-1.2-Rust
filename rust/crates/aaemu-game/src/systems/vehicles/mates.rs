@@ -1618,17 +1618,13 @@ pub fn first_active_mate(server: &GameServer, p: &PlayerRef) -> Option<MateRef> 
 }
 
 /// The mate part of `Npc.DoDie` experience: every active mate of the player gets `exp`
-/// (`mate.AddExp`) and the player a "Pet gained" message.
+/// (`mate.AddExp`, which sends the mate's `SCExpChanged`). The 1.2 client formats its own
+/// localized pet-exp chat line from that EXP_CHANGED event (`chat_msg_event.alb` ->
+/// `GetAddPetExpString`), so the C# "Pet gained N XP" system chat is not sent.
 pub fn reward_kill_exp(server: &GameServer, p: &PlayerRef, exp: i32) {
     let id = p.data().id;
     for mate in manager_of(server, p).get_active_mates(id) {
         add_exp(server, &mate, exp);
-        // TODO (C#): Proper message?
-        crate::world::session::send_message(
-            p,
-            crate::managers::chat::chat_type::SYSTEM,
-            &format!("Pet gained {exp} XP"),
-        );
     }
 }
 

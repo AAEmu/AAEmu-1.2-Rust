@@ -15,13 +15,13 @@ use std::sync::{Arc, MutexGuard};
 
 use chrono::Utc;
 
-use crate::data::items::{TemplateKind, EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK};
+use crate::data::items::{ItemTemplate, TemplateKind, EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK};
 use crate::data::ItemData;
 use crate::models::container::{
     equip_slot, slot_type, ContainerRef, ItemContainer, ItemEnv, ItemRules,
 };
 use crate::models::item::{Item, ItemClass};
-use crate::models::item_task::{task_type, ItemFxList, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
 use crate::world::{PlayerRef, WorldObject};
@@ -103,7 +103,7 @@ impl<'a> ItemTxn<'a> {
 
     /// Queue for the character packets sent during this operation.
     pub fn out(&mut self) -> Out<'_> {
-        Out::Queue(&mut self.env.fx)
+        Out::Queue(self.server, &mut self.env.fx)
     }
 
     /// Ends the operation now (same as dropping it).
@@ -1107,6 +1107,33 @@ pub fn split_or_move_item_ex(
         (action, from_item, target_item, s.slot_type, dref.slot_type)
     };
 
+    // The 1.2 client refuses the equip below the item's actability requirement before the move
+    // is sent (`FUN_394e41f0` -> `FUN_394e1a90`, error 508); the same check guards every other
+    // caller that can put an item into the equipment container. The packet handlers answer 508
+    // themselves; this is the silent last line of defence.
+    let incoming = if src_type == slot_type::EQUIPMENT
+        && dst_type != slot_type::EQUIPMENT
+        && matches!(action, SwapAction::DoEquipInEmptySlot | SwapAction::DoSwap)
+    {
+        // Equipping into an empty slot (`DoEquipInEmptySlot`) or swapping an occupied bag
+        // slot: the target item moves into the equipment slot the source leaves.
+        target_item.as_ref()
+    } else if dst_type == slot_type::EQUIPMENT && src_type != slot_type::EQUIPMENT {
+        from_item.as_ref()
+    } else {
+        None
+    };
+    if let (Some(item), Some(player)) =
+        (incoming, txn.server.world.character_by_id(inv.character_id))
+    {
+        if data
+            .template(item.template_id)
+            .is_some_and(|t| !meets_item_actability(txn.server, &player, t))
+        {
+            return false;
+        }
+    }
+
     // ---- Two-handed weapon handling ----
     let mut un_equip_offhand = false;
     let mut un_equip_mainhand = false;
@@ -1465,12 +1492,18 @@ pub fn coffer_items(
 }
 
 /// `Inventory.ExpandSlot(slotType)`.
-pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8) {
+pub fn expand_slot(
+    txn: &mut ItemTxn<'_>,
+    player: &PlayerRef,
+    inv: &Inv,
+    st: u8,
+    auto_use_aa_point: bool,
+) {
     let server = txn.server;
     let is_bank = st == slot_type::BANK;
-    let (num_bank, num_inv, money) = {
+    let (num_bank, num_inv, money, aa_point) = {
         let c = player.data();
-        (c.num_bank_slots, c.num_inventory_slots, c.money)
+        (c.num_bank_slots, c.num_inventory_slots, c.money, c.aa_point)
     };
     let step = (if is_bank {
         i32::from(num_bank)
@@ -1486,9 +1519,30 @@ pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8)
     let Some(expand) = expands.iter().find(|e| e.is_bank == is_bank).copied() else {
         return;
     };
+    let mut aa_cost = 0i32;
     if expand.price != 0 && money < i64::from(expand.price) {
-        tracing::warn!("No Money for expand!");
-        return;
+        if !auto_use_aa_point {
+            tracing::warn!("No Money for expand!");
+            return;
+        }
+        // Cover the gold shortage with AA points 1:1 (INFERRED from the `ask_use_aa_point`
+        // client text; the rate is not evidenced). A short AA purse refuses the whole
+        // expansion before anything is consumed or expanded.
+        let shortage = i64::from(expand.price) - money;
+        let Ok(shortage) = i32::try_from(shortage) else {
+            tracing::warn!("No Money or AA points for expand!");
+            send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
+            return;
+        };
+        if aa_point < i64::from(shortage) {
+            tracing::warn!(
+                "No Money or AA points for expand! Money: {money}, AAPoint: {aa_point}, Price: {}",
+                expand.price
+            );
+            send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
+            return;
+        }
+        aa_cost = shortage;
     }
     if expand.item_id != 0
         && expand.item_count != 0
@@ -1513,16 +1567,31 @@ pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8)
     if expand.price != 0 {
         // `tasks.Add(new MoneyChange(-expand.Price))` was collected but never sent in C#; the
         // client needs the change to update its displayed money.
-        player.data().money -= i64::from(expand.price);
-        txn.env.fx.tasks(
-            player.character_id,
-            if is_bank {
-                task_type::EXPAND_BANK
-            } else {
-                task_type::EXPAND_BAG
-            },
-            vec![ItemTask::MoneyChange(-expand.price)],
-        );
+        let action = if is_bank {
+            task_type::EXPAND_BANK
+        } else {
+            task_type::EXPAND_BAG
+        };
+        if aa_cost > 0 {
+            let gold_cost = expand.price - aa_cost;
+            if !take_money_and_aa_point(
+                &mut txn.out(),
+                player,
+                slot_type::INVENTORY,
+                gold_cost,
+                aa_cost,
+                action,
+            ) {
+                return;
+            }
+        } else {
+            player.data().money -= i64::from(expand.price);
+            txn.env.fx.tasks(
+                player.character_id,
+                action,
+                vec![ItemTask::MoneyChange(-expand.price)],
+            );
+        }
     }
     if expand.item_id != 0 && expand.item_count != 0 {
         inv.bag().lock().expect("container poisoned").consume_item(
@@ -1600,10 +1669,12 @@ pub fn send_error_message_to(out: &mut Out<'_>, player: &PlayerRef, error: i16) 
 
 /// Where a character's own packets go: straight to its connection, or queued with the item
 /// effects of the running [`ItemTxn`] (the C# sends everything inline, so the order of item
-/// task packets and these packets must be kept).
+/// task packets and these packets must be kept). Both variants carry the server, because an
+/// upward money change reports the `MY_GOLD` achievement through it (queued in the item effects
+/// or in the achievement deferral, never under the character or operation lock).
 pub enum Out<'a> {
-    Direct,
-    Queue(&'a mut ItemFxList),
+    Direct(&'a GameServer),
+    Queue(&'a GameServer, &'a mut ItemFxList),
 }
 
 impl Out<'_> {
@@ -1613,8 +1684,8 @@ impl Out<'_> {
         packet: impl crate::net::packet::ServerPacket + 'static,
     ) {
         match self {
-            Out::Direct => player.send(packet),
-            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Packet {
+            Out::Direct(_) => player.send(packet),
+            Out::Queue(_, fx) => fx.push(ItemFx::Packet {
                 owner: player.character_id,
                 packet: Box::new(packet),
             }),
@@ -1633,8 +1704,10 @@ pub fn change_money(
     task: u8,
 ) -> bool {
     let mut tasks = Vec::new();
+    let mut gold_report = None;
     {
         let mut c = player.data();
+        let before = c.money;
         match from {
             slot_type::INVENTORY => {
                 if i64::from(amount) > c.money {
@@ -1666,6 +1739,24 @@ pub fn change_money(
                 tasks.push(ItemTask::MoneyChangeBank(amount));
             }
             _ => {}
+        }
+        // `MY_GOLD` is a high-water record: only an upward change of the carried purse is
+        // reported. The character lock is released here; the report itself runs from the item
+        // effects (`Out::Queue`) or the achievement deferral (`Out::Direct`), never inside this
+        // function's lock.
+        if c.money > before {
+            gold_report = Some(c.money);
+        }
+    }
+    if let Some(money) = gold_report {
+        match &mut *out {
+            Out::Direct(server) => {
+                crate::systems::social::achievement_hooks::report_gold(server, player, money);
+            }
+            Out::Queue(_, fx) => fx.push(ItemFx::Money {
+                owner: player.character_id,
+                money,
+            }),
         }
     }
     out.send(
@@ -1716,6 +1807,372 @@ pub fn subtract_money(
         return false;
     }
     change_money(out, player, slot_type::NONE, location, -amount, task)
+}
+
+/// The composition of one payment: the gold part and the 1:1 AA-point shortage cover.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaymentSplit {
+    pub gold: i32,
+    pub aa_point: i32,
+}
+
+impl PaymentSplit {
+    pub fn total(self) -> i64 {
+        i64::from(self.gold) + i64::from(self.aa_point)
+    }
+}
+
+/// Whether the carried gold purse can pay `amount`, covering a shortage from the AA wallet
+/// when `auto_use_aa_point` is set. A read-only pre-check for callers that must refuse before
+/// another mutation (e.g. housing extending the tax protection); the charge itself is
+/// [`try_take_gold_or_aa`].
+pub fn can_afford_gold_or_aa(player: &PlayerRef, amount: i32, auto_use_aa_point: bool) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    let c = player.data();
+    if c.money < 0 || c.aa_point < 0 {
+        return false;
+    }
+    let available = c.money + if auto_use_aa_point { c.aa_point } else { 0 };
+    available >= i64::from(amount)
+}
+
+/// Pays `amount` from the carried gold purse. With `auto_use_aa_point`, a gold shortage is
+/// covered 1:1 from the carried AA wallet (INFERRED from the `ask_use_aa_point` /
+/// `auto_use_aa_point` client texts; the flag is what the 1.2 packets carry). All gold is spent
+/// before AA points, the balance check and both debits happen under one character lock, and a
+/// single `SCItemTaskSuccessPacket` carries the money and AA deltas. `None` means neither purse
+/// changed and no packet was sent; the caller sends its own existing error.
+pub fn try_take_gold_or_aa(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    amount: i32,
+    auto_use_aa_point: bool,
+    task: u8,
+) -> Option<PaymentSplit> {
+    if amount < 0 {
+        return None;
+    }
+    let split = {
+        let mut c = player.data();
+        if c.money < 0 || c.aa_point < 0 {
+            return None;
+        }
+        let owed = i64::from(amount);
+        let gold = c.money.min(owed);
+        let aa_point = owed - gold;
+        if aa_point > 0 && (!auto_use_aa_point || aa_point > c.aa_point) {
+            return None;
+        }
+        c.money -= gold;
+        c.aa_point -= aa_point;
+        PaymentSplit {
+            gold: gold as i32,
+            aa_point: aa_point as i32,
+        }
+    };
+    let mut tasks = vec![ItemTask::MoneyChange(-split.gold)];
+    if split.aa_point > 0 {
+        tasks.push(ItemTask::AaPointUpdate(-split.aa_point));
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    Some(split)
+}
+
+/// Sends the wallet update of an AA-point change (`ItemTask` 16 / 17). The 1.2 client applies
+/// these with the same delta path as `MoneyChange` / `MoneyChangeBank` (`FUN_397d1030`); that
+/// the amount is a delta and not the new balance is INFERRED from that symmetry.
+fn send_aa_point_task(out: &mut Out<'_>, player: &PlayerRef, bank: bool, delta: i32, task: u8) {
+    let update = if bank {
+        ItemTask::ChangeBankAaPoint(delta)
+    } else {
+        ItemTask::AaPointUpdate(delta)
+    };
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks: vec![update],
+            force_remove: Vec::new(),
+        },
+    );
+}
+
+/// Adds AA points to the carried purse. `amount < 0` is refused like `add_money`; the caller
+/// takes points with [`try_take_aa_point`].
+pub fn add_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    player.data().aa_point += i64::from(amount);
+    send_aa_point_task(out, player, false, amount, task);
+    true
+}
+
+/// Takes AA points from the carried purse: the check and the debit happen under one
+/// character lock, so two concurrent takes cannot overdraw. A short balance sends
+/// `NOT_ENOUGH_AA_POINT` and changes nothing.
+pub fn try_take_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    {
+        let mut c = player.data();
+        if i64::from(amount) > c.aa_point {
+            drop(c);
+            send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
+            return false;
+        }
+        c.aa_point -= i64::from(amount);
+    }
+    send_aa_point_task(out, player, false, -amount, task);
+    true
+}
+
+/// Adds AA points to the bank purse (`/aapoint ... bank`, later bank transfers).
+pub fn add_bank_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    player.data().bank_aa_point += i64::from(amount);
+    send_aa_point_task(out, player, true, amount, task);
+    true
+}
+
+/// Takes AA points from the bank purse under one character lock (`NOT_ENOUGH_BANK_AA_POINT`
+/// when short).
+pub fn try_take_bank_aa_point(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    amount: i32,
+    task: u8,
+) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    {
+        let mut c = player.data();
+        if i64::from(amount) > c.bank_aa_point {
+            drop(c);
+            send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
+            return false;
+        }
+        c.bank_aa_point -= i64::from(amount);
+    }
+    send_aa_point_task(out, player, true, -amount, task);
+    true
+}
+
+/// Debits gold and AA points from the same purse (`SlotType.Inventory` or `SlotType.Bank`) in
+/// one operation: both balances are checked and changed under one character lock, so a refusal
+/// changes neither. The successful debit sends one `SCItemTaskSuccessPacket` with the money
+/// task followed by the AA task. A short gold purse sends `NOT_ENOUGH_MONEY`; a short AA purse
+/// sends `NOT_ENOUGH_AA_POINT` 707 (carried) / `NOT_ENOUGH_BANK_AA_POINT` 708 (bank).
+pub fn take_money_and_aa_point(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    location: u8,
+    money: i32,
+    aa_point: i32,
+    task: u8,
+) -> bool {
+    if money < 0 || aa_point < 0 {
+        return false;
+    }
+    let mut tasks = Vec::new();
+    {
+        let mut c = player.data();
+        match location {
+            slot_type::INVENTORY => {
+                if i64::from(money) > c.money {
+                    drop(c);
+                    send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
+                    return false;
+                }
+                if i64::from(aa_point) > c.aa_point {
+                    drop(c);
+                    send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
+                    return false;
+                }
+                c.money -= i64::from(money);
+                c.aa_point -= i64::from(aa_point);
+                if money != 0 {
+                    tasks.push(ItemTask::MoneyChange(-money));
+                }
+                if aa_point != 0 {
+                    tasks.push(ItemTask::AaPointUpdate(-aa_point));
+                }
+            }
+            slot_type::BANK => {
+                if i64::from(money) > c.money2 {
+                    drop(c);
+                    send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
+                    return false;
+                }
+                if i64::from(aa_point) > c.bank_aa_point {
+                    drop(c);
+                    send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
+                    return false;
+                }
+                c.money2 -= i64::from(money);
+                c.bank_aa_point -= i64::from(aa_point);
+                if money != 0 {
+                    tasks.push(ItemTask::MoneyChangeBank(-money));
+                }
+                if aa_point != 0 {
+                    tasks.push(ItemTask::ChangeBankAaPoint(-aa_point));
+                }
+            }
+            _ => {}
+        }
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    true
+}
+
+/// Moves gold and AA points between the carried and the bank purse in one operation
+/// (`deposit` = carried -> bank). Both purses are checked and changed under one character lock,
+/// so a short purse changes nothing; it sends `NOT_ENOUGH_MONEY` for gold,
+/// `NOT_ENOUGH_AA_POINT` 707 for a short carried AA purse (deposit) and
+/// `NOT_ENOUGH_BANK_AA_POINT` 708 for a short bank AA purse (withdraw).
+pub fn transfer_bank_money_and_aa_point(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    deposit: bool,
+    money: i32,
+    aa_point: i32,
+    task: u8,
+) -> bool {
+    if money < 0 || aa_point < 0 {
+        return false;
+    }
+    let mut tasks = Vec::new();
+    let mut gold_report = None;
+    {
+        let mut c = player.data();
+        if deposit {
+            if i64::from(money) > c.money {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
+                return false;
+            }
+            if i64::from(aa_point) > c.aa_point {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
+                return false;
+            }
+            c.money -= i64::from(money);
+            c.money2 += i64::from(money);
+            c.aa_point -= i64::from(aa_point);
+            c.bank_aa_point += i64::from(aa_point);
+            if money != 0 {
+                tasks.push(ItemTask::MoneyChange(-money));
+                tasks.push(ItemTask::MoneyChangeBank(money));
+            }
+            if aa_point != 0 {
+                tasks.push(ItemTask::AaPointUpdate(-aa_point));
+                tasks.push(ItemTask::ChangeBankAaPoint(aa_point));
+            }
+        } else {
+            if i64::from(money) > c.money2 {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
+                return false;
+            }
+            if i64::from(aa_point) > c.bank_aa_point {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
+                return false;
+            }
+            let before = c.money;
+            c.money2 -= i64::from(money);
+            c.money += i64::from(money);
+            c.bank_aa_point -= i64::from(aa_point);
+            c.aa_point += i64::from(aa_point);
+            if money != 0 {
+                tasks.push(ItemTask::MoneyChangeBank(-money));
+                tasks.push(ItemTask::MoneyChange(money));
+            }
+            if aa_point != 0 {
+                tasks.push(ItemTask::ChangeBankAaPoint(-aa_point));
+                tasks.push(ItemTask::AaPointUpdate(aa_point));
+            }
+            if c.money > before {
+                gold_report = Some(c.money);
+            }
+        }
+    }
+    if let Some(money) = gold_report {
+        match &mut *out {
+            Out::Direct(server) => {
+                crate::systems::social::achievement_hooks::report_gold(server, player, money);
+            }
+            Out::Queue(_, fx) => fx.push(ItemFx::Money {
+                owner: player.character_id,
+                money,
+            }),
+        }
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    true
+}
+
+/// Sets the carried AA balance (GM / debug source). The new balance and its `i32` delta are
+/// applied under one character lock; a negative target or a delta the item task cannot carry
+/// is refused without changing anything.
+pub fn set_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    let delta = {
+        let mut c = player.data();
+        let Ok(delta) = i32::try_from(i64::from(amount) - c.aa_point) else {
+            return false;
+        };
+        c.aa_point = i64::from(amount);
+        delta
+    };
+    send_aa_point_task(out, player, false, delta, task);
+    true
+}
+
+/// Sets the bank AA balance under one character lock (see [`set_aa_point`]).
+pub fn set_bank_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    let delta = {
+        let mut c = player.data();
+        let Ok(delta) = i32::try_from(i64::from(amount) - c.bank_aa_point) else {
+            return false;
+        };
+        c.bank_aa_point = i64::from(amount);
+        delta
+    };
+    send_aa_point_task(out, player, true, delta, task);
+    true
 }
 
 /// `Character.ChangeGamePoints(kind, change)`.
@@ -1813,12 +2270,12 @@ pub fn change_labor(
             // Inside an `ItemTxn` (the ops lock is held): `AddExp` ends in quest events, which
             // take the non-reentrant ops lock themselves. Queue it behind the item tasks;
             // `fx::flush` applies it after the lock is released, before the labor packet below.
-            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Exp {
+            Out::Queue(_, fx) => fx.push(ItemFx::Exp {
                 owner: player.character_id,
                 exp: xp_to_add,
                 add_ability_exp: true,
             }),
-            Out::Direct => {
+            Out::Direct(_) => {
                 if let Some(h) = server.systems.economy.hooks.progression.get() {
                     h.add_exp(server, player, xp_to_add, true);
                 }
@@ -1875,6 +2332,97 @@ pub(crate) fn item_use_zone_allowed(
         send_error_message(player, error_message::ITEM_CANNOT_USE_HERE, 0, true);
     }
     !banned
+}
+
+/// The 1.2 client's item actability check (`FUN_394e1a90`, called by the use/equip action
+/// `FUN_390447d0` and the equip-drag validation `FUN_394e41f0`): with
+/// `items.actability_requirement` > 0 the character's points in `items.actability_group_id`,
+/// plus the house act-ability bonus (`FUN_390b3a80`), must reach the requirement. The client
+/// shows `actability_not_enough_point` (508) through `FUN_39428370(0x1fc)`.
+pub fn meets_item_actability(
+    server: &GameServer,
+    player: &PlayerRef,
+    template: &ItemTemplate,
+) -> bool {
+    let requirement = i64::from(template.actability_requirement);
+    if requirement <= 0 {
+        return true;
+    }
+    let group_id = template.actability_group_id;
+    let points = {
+        let c = player.data();
+        c.actability
+            .actabilities
+            .iter()
+            .find(|a| a.id == group_id.max(0) as u32)
+            .map_or(0, |a| i64::from(a.point))
+    };
+    let me = WorldObject::from(player);
+    let bonus = server.world.world_of(&me).map_or(0, |world| {
+        let pos = world.world_pos_rot(&me);
+        crate::systems::housing::act_ability_bonus_at_in_world(
+            server, world.id, group_id, pos.x, pos.y,
+        )
+    });
+    points.saturating_add(i64::from(bonus)) >= requirement
+}
+
+/// Refuses the item use / equip with the client's `actability_not_enough_point` (508) and the
+/// actability group as the error `kind` (as `craft.rs` does for crafts). Returns whether the
+/// action was refused; the caller must then leave the item where it is.
+pub fn refuse_item_actability(server: &GameServer, player: &PlayerRef, template_id: u32) -> bool {
+    let Some(template) = server.game_data.items.template(template_id) else {
+        return false;
+    };
+    if meets_item_actability(server, player, template) {
+        return false;
+    }
+    send_error_message(
+        player,
+        error_message::ACTABILITY_NOT_ENOUGH_POINT,
+        template.actability_group_id.max(0) as u32,
+        true,
+    );
+    true
+}
+
+/// The 1.2 client's equip actability gate for a `SplitOrMoveItem` request: resolves the item
+/// that would enter the character's equipment container and refuses it when the actability
+/// requirement is unmet. Two request shapes put the *target* item into the equipment slot: the
+/// client sends an empty equipment slot as the source (`DoEquipInEmptySlot`), and a swap of an
+/// equipped item onto an occupied bag / bank slot moves that target item into the vacated
+/// equipment slot (`DoSwap`). The source item may live in a coffer (opened through a bank
+/// doodad), which `Inv` does not hold, so item ids also resolve through the server item manager.
+#[allow(clippy::too_many_arguments)]
+pub fn equip_actability_refused(
+    server: &GameServer,
+    player: &PlayerRef,
+    from_type: u8,
+    from_item_id: u64,
+    to_type: u8,
+    to_item_id: u64,
+    to_slot: u8,
+) -> bool {
+    let inv = Inv::of(player);
+    let resolve = |id: u64| {
+        inv.item_by_id(id)
+            .or_else(|| server.items.item_by_id(id))
+            .map(|i| i.template_id)
+    };
+    let template_id = if from_type == slot_type::EQUIPMENT && to_type != slot_type::EQUIPMENT {
+        inv.item_by_id(to_item_id)
+            .or_else(|| inv.item_at(to_type, to_slot))
+            .or_else(|| server.items.item_by_id(to_item_id))
+            .map(|i| i.template_id)
+    } else if from_type != slot_type::EQUIPMENT
+        && to_type == slot_type::EQUIPMENT
+        && from_item_id != 0
+    {
+        resolve(from_item_id)
+    } else {
+        None
+    };
+    template_id.is_some_and(|id| refuse_item_actability(server, player, id))
 }
 
 /// `Character.ItemUse(item)` (`Events.OnItemUse` -> quests).

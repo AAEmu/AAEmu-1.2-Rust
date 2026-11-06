@@ -15,17 +15,20 @@
 //!   logout and a server restart (`bounty_pledges`).
 //! * The arresting player receives the whole accumulated total when the arrest is decided, and
 //!   the target's total resets. NPC, guard and mob kills never pay.
-//! * `SCUnitBountyMoney` is not sent: its writer has not been located in the 1.2 client (only
-//!   the handler `391d6680`), so the layout is not confirmed (BOUNTY-3).
+//! * `SCUnitBountyMoney` (`bc objId ; i64 moneyAmount`, writer `FUN_397b3b50`) carries the whole
+//!   total, never a delta: to every viewer after a successful pledge, to a viewer whose client
+//!   just received the target's entry `SCUnitState`, and 0 after the payout (BOUNTY-3).
+//!   When the client draws it is INFERRED (`OnUnitBountyMoney`, handler `FUN_391d6680`).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use sqlx::mysql::MySqlPool;
-use sqlx::{MySql, Transaction};
+use sqlx::{MySql, Row, Transaction};
 
 use super::bounty_runtime::{BountyActor, BountyError, BountyLedger, BountyPledge, BountySnapshot};
-use super::packets::trial::SCBountyPaidPacket;
+use super::crime::BountyDescription;
+use super::packets::trial::{SCBountyPaidPacket, SCUnitBountyMoneyPacket, MAX_BOUNTY_LIST_ENTRIES};
 use super::util;
 use crate::db::int;
 use crate::error::Result;
@@ -46,6 +49,62 @@ pub const PERMIT_TTL_MS: i64 = 5 * 60_000;
 pub const CANNOT_SET_BOUNTY_FOR_SUCH_NAME: i16 = 585;
 /// `ErrorMessageType.CANNOT_SET_BOUNTY` (586): any other refusal.
 pub const CANNOT_SET_BOUNTY: i16 = 586;
+
+/// Sends `target`'s whole `total` as `SCUnitBountyMoney` to every viewer of it, and to the
+/// target itself (`include_self`, like `GameObject.BroadcastPacket`). No object or manager lock
+/// may be held: [`on_character_entered`] and [`BountyManager::place`] call this after dropping
+/// theirs.
+fn send_bounty_money(server: &GameServer, target: &PlayerRef, total: i64) {
+    let obj = WorldObject::from(target.clone());
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    crate::world::broadcast(
+        &world,
+        obj,
+        &SCUnitBountyMoneyPacket {
+            obj_id: target.obj_id,
+            money_amount: total,
+        },
+        true,
+    );
+}
+
+/// The `SCUnitBountyMoney` frames a character needs when it enters a world instance: its own
+/// total to the players around it, and the total of every wanted player already around it to
+/// the entering client. Called right after the entry `SCUnitState` exchange in
+/// `world::session::spawn` and `instances::worlds::instance_loaded`. A total of 0 sends nothing.
+pub fn on_character_entered(server: &GameServer, p: &PlayerRef) {
+    let obj = WorldObject::from(p.clone());
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    let own = server.systems.social.bounties.active_total(p.character_id);
+    if own > 0 {
+        crate::world::broadcast(
+            &world,
+            obj.clone(),
+            &SCUnitBountyMoneyPacket {
+                obj_id: p.obj_id,
+                money_amount: own,
+            },
+            true,
+        );
+    }
+    for other in world.players_around(&obj) {
+        let total = server
+            .systems
+            .social
+            .bounties
+            .active_total(other.character_id);
+        if total > 0 {
+            p.send(SCUnitBountyMoneyPacket {
+                obj_id: other.obj_id,
+                money_amount: total,
+            });
+        }
+    }
+}
 
 /// Why [`BountyManager::place`] refused a `SendBountyUpdate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +160,111 @@ struct BountyState {
 #[derive(Debug, Default)]
 pub struct BountySaveBatch {
     pledges: BountySnapshot,
+}
+
+/// A built `CSNaviOpenBounty` answer: `total` is every character with an unpaid pledge and
+/// `rows` the entries written (the caller serializes them, capped by the packet writer too).
+#[derive(Debug, Default)]
+pub struct BountyBoard {
+    pub total: i32,
+    pub rows: Vec<BountyDescription>,
+}
+
+/// One board row from a live character: `crime_point`, zone, position and `is_live = true` from
+/// the unit, the counters from the character.
+fn online_board_row(server: &GameServer, target_id: u32, amount: i64) -> Option<BountyDescription> {
+    let player = server.world.character_by_id(target_id)?;
+    let c = player.data();
+    Some(BountyDescription {
+        player_id: target_id,
+        player_name: c.unit.name.clone(),
+        player_level: c.unit.level,
+        zone_id: c.unit.transform.zone_id,
+        pos: (c.unit.transform.x, c.unit.transform.y, c.unit.transform.z),
+        bounty_amount: u64::try_from(amount).unwrap_or(0),
+        crime_points: c.crime_point,
+        is_live: true,
+        player_race: c.race,
+        // The client reads this field as "type" (`FUN_397bebf0`, +184); its meaning is unknown.
+        // 1 is the value of the C# dummy row (C#-only, BOUNTY-board).
+        type184: 1,
+        arrest_count: c.arrest_count,
+        accept_guilty_count: c.accept_guilty_count,
+        accept_trial_count: c.accept_trial_count,
+        guilty_count: c.guilty_count,
+        not_guilty_count: c.not_guilty_count,
+        // The column exists in the client row; no 1.2 meaning is known (no timer is invented).
+        seconds: 0,
+    })
+}
+
+/// One board row from the `characters` table (`is_live = false`). A deleted, missing or
+/// unreadable row is skipped with a warning.
+async fn offline_board_row(
+    pool: &MySqlPool,
+    target_id: u32,
+    amount: i64,
+) -> Option<BountyDescription> {
+    let row = match sqlx::query(
+        "SELECT `name`, CAST(`level` AS SIGNED) AS level, \
+         CAST(`zone_id` AS SIGNED) AS zone_id, `x`, `y`, `z`, \
+         CAST(`crime_point` AS SIGNED) AS crime_point, \
+         CAST(`race` AS SIGNED) AS race, \
+         CAST(`arrest_count` AS SIGNED) AS arrest_count, \
+         CAST(`accept_guilty_count` AS SIGNED) AS accept_guilty_count, \
+         CAST(`accept_trial_count` AS SIGNED) AS accept_trial_count, \
+         CAST(`not_guilty_count` AS SIGNED) AS not_guilty_count, \
+         CAST(`guilty_count` AS SIGNED) AS guilty_count \
+         FROM `characters` WHERE `id` = ? AND `deleted` = 0",
+    )
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                "Bounty board: characters row for target {target_id} unreadable: {error}"
+            );
+            return None;
+        }
+    };
+    let count = |name: &str| -> i32 {
+        row.try_get::<Option<i64>, _>(name)
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    Some(BountyDescription {
+        player_id: target_id,
+        player_name: row.try_get::<String, _>("name").ok()?,
+        player_level: row.try_get::<i64, _>("level").ok()?.clamp(0, 255) as u8,
+        zone_id: row
+            .try_get::<i64, _>("zone_id")
+            .ok()?
+            .clamp(0, i64::from(u32::MAX)) as u32,
+        pos: (
+            row.try_get::<f32, _>("x").ok()?,
+            row.try_get::<f32, _>("y").ok()?,
+            row.try_get::<f32, _>("z").ok()?,
+        ),
+        bounty_amount: u64::try_from(amount).unwrap_or(0),
+        crime_points: row
+            .try_get::<i64, _>("crime_point")
+            .ok()?
+            .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16,
+        is_live: false,
+        player_race: row.try_get::<i64, _>("race").ok()?.clamp(0, 255) as u8,
+        type184: 1,
+        arrest_count: count("arrest_count"),
+        accept_guilty_count: count("accept_guilty_count"),
+        accept_trial_count: count("accept_trial_count"),
+        guilty_count: count("guilty_count"),
+        not_guilty_count: count("not_guilty_count"),
+        seconds: 0,
+    })
 }
 
 /// The bounty manager (`server.systems.social.bounties`).
@@ -281,6 +445,60 @@ impl BountyManager {
             .active_total(target_character_id)
     }
 
+    /// Every character with an unpaid pledge: `(character id, total)`, highest total first and
+    /// ties by character id. The order is a server policy (the client stores the rows in a map
+    /// keyed by id, so it does not depend on it); it only decides which rows the 20-entry cap
+    /// keeps.
+    pub fn active_targets(&self) -> Vec<(u32, i64)> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut totals: HashMap<u32, i64> = HashMap::new();
+        for pledge in state.ledger.pledges().filter(|p| !p.paid) {
+            let target = pledge.target.character_id;
+            if target != 0 {
+                let total = totals.entry(target).or_default();
+                *total = total.saturating_add(pledge.amount);
+            }
+        }
+        let mut targets: Vec<(u32, i64)> =
+            totals.into_iter().filter(|(_, total)| *total > 0).collect();
+        targets.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        targets
+    }
+
+    /// The `SCBountyList` payload for `CSNaviOpenBounty`: every character with an unpaid pledge
+    /// as `total`, and up to [`MAX_BOUNTY_LIST_ENTRIES`] rows (the client's cap).
+    ///
+    /// The board is only filled with `Social.BountyBoard = true`; the default keeps the empty
+    /// list the C# server sent because a filled board broke the 1.2 client Lua (BOUNTY-board,
+    /// capture-pending). Online characters are read from the live unit; an offline target's
+    /// name, level, zone and position come from its `characters` row. A missing or unreadable
+    /// row is skipped instead of failing the whole board.
+    pub async fn board(&self, server: &GameServer) -> BountyBoard {
+        if !server.config.social.bounty_board {
+            return BountyBoard::default();
+        }
+        let targets = self.active_targets();
+        let mut total = i32::try_from(targets.len()).unwrap_or(i32::MAX);
+        let mut rows = Vec::with_capacity(targets.len().min(MAX_BOUNTY_LIST_ENTRIES));
+        for (index, (target_id, total_amount)) in targets.into_iter().enumerate() {
+            if index >= MAX_BOUNTY_LIST_ENTRIES {
+                break;
+            }
+            if let Some(row) = online_board_row(server, target_id, total_amount) {
+                rows.push(row);
+                continue;
+            }
+            if let Some(row) = offline_board_row(&server.db, target_id, total_amount).await {
+                rows.push(row);
+            } else {
+                // A deleted or unreadable character row is skipped; keep the total equal to
+                // what the server can actually resolve so the client can complete its map.
+                total -= 1;
+            }
+        }
+        BountyBoard { total, rows }
+    }
+
     /// Remembers that `payer_id` may place a bounty on `target_id` (replaces an older request
     /// and prunes expired ones).
     pub fn permit(&self, payer_id: u32, target_id: u32) {
@@ -364,7 +582,7 @@ impl BountyManager {
         // `subtract_money` reads from `None`, which never checks funds, so a concurrent wallet
         // change could overdraw the payer.
         if !inventory::change_money(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             payer,
             slot_type::INVENTORY,
             slot_type::NONE,
@@ -379,7 +597,7 @@ impl BountyManager {
                 // Cannot happen under the lock; refund rather than destroying the copper.
                 drop(state);
                 inventory::add_money(
-                    &mut Out::Direct,
+                    &mut Out::Direct(server),
                     payer,
                     slot_type::INVENTORY,
                     amount,
@@ -390,7 +608,12 @@ impl BountyManager {
         };
         state.permits.remove(&payer.character_id);
         state.dirty.insert(pledge.id);
-        Ok(state.ledger.active_total(target_id))
+        let total = state.ledger.active_total(target_id);
+        // Never send into the world while the ledger lock (or the economy ops lock) is held.
+        drop(state);
+        drop(_ops);
+        send_bounty_money(server, &target, total);
+        Ok(total)
     }
 
     /// The arrest of `target`: pays the whole unpaid total to `arrestor` and resets the target's
@@ -462,7 +685,7 @@ impl BountyManager {
         while remaining > 0 {
             let chunk = remaining.min(i64::from(i32::MAX)) as i32;
             if !inventory::add_money(
-                &mut Out::Direct,
+                &mut Out::Direct(server),
                 arrestor,
                 slot_type::INVENTORY,
                 chunk,
@@ -489,6 +712,10 @@ impl BountyManager {
             arrestor.character_id,
             target.character_id
         );
+        // The total reset to 0: every viewer clears the amount it draws (whole value, not a
+        // delta). Drop the economy ops lock before the world send.
+        drop(_ops);
+        send_bounty_money(server, target, 0);
         total
     }
 }

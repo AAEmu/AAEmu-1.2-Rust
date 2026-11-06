@@ -37,6 +37,14 @@
 //! told with `SCRankRewardMailPacket`. The period is recorded in `rank_period_payouts` before the
 //! first letter is built, inside the economy operation gate the save snapshot is also captured
 //! under.
+//!
+//! # Alarms
+//!
+//! The same once-a-minute task broadcasts `SCRankAlarmPacket` for the boards that author an alarm
+//! message: [`RankingManager::send_due_alarms`] compares the tick's interval with the alarm
+//! moments of the boards' contest windows and sends each crossing once per period. The client
+//! chooses the text from its own `ranks` row, so the packet carries only the board id and the
+//! alarm kind (0 start / 1 end, INFERRED).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -53,13 +61,14 @@ use super::ranking_packets::{
 };
 use super::ranking_persistence;
 use super::ranking_runtime::{
-    build_personal_rows, build_snapshot, ranked_scores, RankEvent, RankHolder, RankScore,
-    RankingState, RecordOutcome,
+    alarms_due, build_personal_rows, build_snapshot, ranked_scores, RankAlarmKind, RankEvent,
+    RankHolder, RankScore, RankingState, RecordOutcome,
 };
 use crate::error::Result;
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::{ClientPacket, PacketRegistry};
+use crate::packets::g2c_misc::SCRankAlarmPacket;
 use crate::server::GameServer;
 use crate::systems::economy::inventory::ItemTxn;
 use crate::systems::economy::mail::{self, mail_type};
@@ -86,6 +95,9 @@ struct Store {
     states: BTreeMap<u32, RankingState>,
     /// `(rank_id, period_start) -> paid_at` of every paid period.
     paid: BTreeMap<(u32, i64), i64>,
+    /// `(rank_id, alarm kind) -> the period its alarm was last broadcast in`. In-memory only: a
+    /// restart inside the alarm minute may send it once more.
+    alarms: BTreeMap<(u32, RankAlarmKind), i64>,
 }
 
 /// The global ranking score store (`server.systems.social.ranking`).
@@ -148,6 +160,17 @@ impl RankingManager {
             (scores, paid)
         };
         ranking_persistence::write(tx, &scores, &paid).await
+    }
+
+    /// Updates the cached character name (`account`) in every stored score of a renamed
+    /// character. The caller owns `SaveManager::transaction_lock`, so the periodic save cannot
+    /// write the old name back after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut store = self.store();
+        let Some(state) = store.states.get_mut(&character_id) else {
+            return 0;
+        };
+        state.rename_holder(new_name)
     }
 
     /// The stored score of a character on a board in a period.
@@ -328,26 +351,81 @@ impl RankingManager {
         letters.len()
     }
 
-    /// Spawns the once-a-minute payout check. The first tick fires at once, which pays the
-    /// periods that closed while the server was down.
+    /// Broadcasts the board alarms the tick from `prev_tick` to `now` crossed, once per
+    /// `(board, kind, period)`; returns how many were sent.
+    ///
+    /// The broadcast runs after the store lock is released. Only boards that author a message
+    /// for the kind produce an alarm; the shipped data authors one (board 2, the fishing
+    /// contest), and its authored lifetime ended in 2014, so it never fires on that data.
+    pub fn send_due_alarms(
+        &self,
+        server: &GameServer,
+        prev_tick: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> usize {
+        let boards = &server.game_data.systems.social.ranking;
+        let mut due: Vec<(u32, RankAlarmKind)> = Vec::new();
+        {
+            let mut store = self.store();
+            for board in boards.supported_ranks() {
+                let kinds = alarms_due(board, prev_tick, now);
+                if kinds.is_empty() {
+                    continue;
+                }
+                // `is_supported` already excluded the racing board; an alarm outside every
+                // authoring period has no period to key the once-per-period guard on.
+                let Some(period) = board.period_at(now) else {
+                    continue;
+                };
+                let period_start = period.start.timestamp();
+                for kind in kinds {
+                    let key = (board.id, kind);
+                    if store.alarms.get(&key) == Some(&period_start) {
+                        continue;
+                    }
+                    store.alarms.insert(key, period_start);
+                    due.push((board.id, kind));
+                }
+            }
+        }
+        for (rank_id, kind) in &due {
+            tracing::debug!(rank_id, kind = ?kind, "ranking alarm");
+            server.world.broadcast_to_server(&SCRankAlarmPacket {
+                kind: *rank_id,
+                rank_alarm_kind: kind.wire(),
+            });
+        }
+        due.len()
+    }
+
+    /// Spawns the once-a-minute payout check and alarm clock. The first tick fires at once, which
+    /// pays the periods that closed while the server was down; alarms only report a crossing
+    /// since the previous tick, so the first one starts at start-up.
     pub fn start_tick(server: &Arc<GameServer>) {
         let weak = Arc::downgrade(server);
         tokio::spawn(async move {
             let mut iv =
                 tokio::time::interval(std::time::Duration::from_secs(PAYOUT_INTERVAL_SECS));
+            let mut prev_tick = Utc::now();
             loop {
                 iv.tick().await;
                 let Some(server) = weak.upgrade() else {
                     break;
                 };
-                let paid = server
-                    .systems
-                    .social
-                    .ranking
-                    .pay_closed(&server, Utc::now());
+                let now = Utc::now();
+                let paid = server.systems.social.ranking.pay_closed(&server, now);
                 if paid > 0 {
                     tracing::info!("Ranking: mailed {paid} period rewards");
                 }
+                let alarms = server
+                    .systems
+                    .social
+                    .ranking
+                    .send_due_alarms(&server, prev_tick, now);
+                if alarms > 0 {
+                    tracing::info!("Ranking: sent {alarms} board alarms");
+                }
+                prev_tick = now;
             }
         });
     }

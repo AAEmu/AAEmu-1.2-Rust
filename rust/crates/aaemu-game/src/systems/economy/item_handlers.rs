@@ -148,6 +148,17 @@ impl CSSwapItemsPacket {
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
             return;
         }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::split_or_move_item(
@@ -199,6 +210,17 @@ impl CSSplitBagItemPacket {
         }
         let inv = Inv::of(&p);
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
             return;
         }
         let mut txn = ItemTxn::begin(server);
@@ -255,12 +277,19 @@ impl CSDestroyItemPacket {
             }
             let mut count = self.count;
             if count <= 0 {
-                // SusManager.LogActivity(CategoryCheating, ...)
-                tracing::warn!(
+                // Every non-positive amount is a cheating report and destroys the whole stack
+                // (C# `CSDestroyItemPacket.cs:32`, `SusManager.CategoryCheating`).
+                let text = format!(
                     "CSDestroyItemPacket, player {} attempted to destroy a negative amount of items {count} for item: template {}, id {}",
                     p.data().unit.name,
                     item.template_id,
                     item.id
+                );
+                server.systems.services.sus.log_activity_player_deferred(
+                    server,
+                    crate::systems::services::sus::CATEGORY_CHEATING,
+                    Some(&p),
+                    &text,
                 );
                 count = item.count;
             }
@@ -332,18 +361,30 @@ impl CSExpandSlotsPacket {
         let Some(p) = active(conn) else { return };
         let inv = Inv::of(&p);
         let mut txn = ItemTxn::begin(server);
-        inventory::expand_slot(&mut txn, &p, &inv, self.slot_type as u8);
+        inventory::expand_slot(
+            &mut txn,
+            &p,
+            &inv,
+            self.slot_type as u8,
+            self.auto_use_aa_point,
+        );
     }
 }
 sync_client_packet!(CSExpandSlotsPacket);
 
-/// Bank guard shared by deposit / withdraw: the amount must be positive (a negative amount
-/// would move money the wrong way) and the player must be interacting with a banker NPC in
-/// range (the C# checked neither).
-fn bank_request_allowed(server: &GameServer, p: &PlayerRef, what: &str, amount: i32) -> bool {
-    if amount <= 0 {
+/// Bank guard shared by deposit / withdraw: at least one of the gold / AA amounts must be
+/// positive (a negative amount would move the values the wrong way) and the player must be
+/// interacting with a banker NPC in range (the C# checked neither).
+fn bank_request_allowed(
+    server: &GameServer,
+    p: &PlayerRef,
+    what: &str,
+    amount: i32,
+    aa_point: i32,
+) -> bool {
+    if amount < 0 || aa_point < 0 || (amount == 0 && aa_point == 0) {
         tracing::warn!(
-            "{}: rejected {what} with non-positive amount {amount}",
+            "{}: rejected {what} with amount {amount} and AA points {aa_point}",
             p.data().unit.name
         );
         return false;
@@ -377,17 +418,29 @@ impl CSDepositMoneyPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
-        if !bank_request_allowed(server, &p, "DepositMoney", self.amount) {
+        if !bank_request_allowed(server, &p, "DepositMoney", self.amount, self.aa_point) {
             return;
         }
-        inventory::change_money(
-            &mut inventory::Out::Direct,
-            &p,
-            slot_type::INVENTORY,
-            slot_type::BANK,
-            self.amount,
-            task_type::DEPOSIT_MONEY,
-        );
+        let mut out = inventory::Out::Direct(server);
+        if self.aa_point == 0 {
+            inventory::change_money(
+                &mut out,
+                &p,
+                slot_type::INVENTORY,
+                slot_type::BANK,
+                self.amount,
+                task_type::DEPOSIT_MONEY,
+            );
+        } else {
+            inventory::transfer_bank_money_and_aa_point(
+                &mut out,
+                &p,
+                true,
+                self.amount,
+                self.aa_point,
+                task_type::DEPOSIT_MONEY,
+            );
+        }
     }
 }
 sync_client_packet!(CSDepositMoneyPacket);
@@ -409,17 +462,29 @@ impl CSWithdrawMoneyPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
-        if !bank_request_allowed(server, &p, "WithdrawMoney", self.amount) {
+        if !bank_request_allowed(server, &p, "WithdrawMoney", self.amount, self.aa_point) {
             return;
         }
-        inventory::change_money(
-            &mut inventory::Out::Direct,
-            &p,
-            slot_type::BANK,
-            slot_type::INVENTORY,
-            self.amount,
-            task_type::WITHDRAW_MONEY,
-        );
+        let mut out = inventory::Out::Direct(server);
+        if self.aa_point == 0 {
+            inventory::change_money(
+                &mut out,
+                &p,
+                slot_type::BANK,
+                slot_type::INVENTORY,
+                self.amount,
+                task_type::WITHDRAW_MONEY,
+            );
+        } else {
+            inventory::transfer_bank_money_and_aa_point(
+                &mut out,
+                &p,
+                false,
+                self.amount,
+                self.aa_point,
+                task_type::WITHDRAW_MONEY,
+            );
+        }
     }
 }
 sync_client_packet!(CSWithdrawMoneyPacket);
@@ -446,6 +511,17 @@ impl CSSplitCofferItemPacket {
         let a = self.args;
         let inv = Inv::of(&p);
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
             return;
         }
         let ok = {
@@ -497,6 +573,17 @@ impl CSSwapCofferItemsPacket {
         let a = self.args;
         let inv = Inv::of(&p);
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
             return;
         }
         let ok = {

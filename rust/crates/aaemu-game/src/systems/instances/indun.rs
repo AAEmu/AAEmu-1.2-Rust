@@ -11,7 +11,19 @@ use crate::world::{PlayerRef, WorldInstance};
 
 use super::data::IndunZone;
 use super::dungeon::{self, Dungeon};
+use super::packets::SCSystemDungeonChannelPacket;
 use super::worlds::{self, error_message as err, send_error};
+
+/// The `SC 0x207` answer owed once the selected channel's load finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ChannelSelectPending {
+    /// The zone id the load sends (`SCLoadInstance.zoneId`).
+    pub zone_id: i32,
+    /// World instance id of the picked channel.
+    pub instance_id: u32,
+    /// 0-based index of the channel in the `SC 0x206` list.
+    pub index: i32,
+}
 
 /// `IndunManager` runtime state (`server.systems.instances.indun`).
 #[derive(Debug, Default)]
@@ -21,6 +33,8 @@ pub struct IndunManager {
     /// Serialize selecting/creating a party run and resetting its bindings.
     requests: Mutex<()>,
     charges: Mutex<()>,
+    /// Channel picks waiting for their load, by character id (see [`ChannelSelectPending`]).
+    channel_selects: Mutex<HashMap<u32, ChannelSelectPending>>,
 }
 
 fn now_ms() -> i64 {
@@ -103,6 +117,22 @@ impl IndunManager {
             .get(&character_id)
             .and_then(|z| z.get(&zone_group_id))
             .map_or(0, Vec::len)
+    }
+
+    /// Remember the `SC 0x207` answer for the channel just queued.
+    pub(super) fn set_channel_select(&self, character_id: u32, pending: ChannelSelectPending) {
+        self.channel_selects
+            .lock()
+            .expect("channel selects poisoned")
+            .insert(character_id, pending);
+    }
+
+    /// Take (and forget) the pending `SC 0x207` answer of a character.
+    pub(super) fn take_channel_select(&self, character_id: u32) -> Option<ChannelSelectPending> {
+        self.channel_selects
+            .lock()
+            .expect("channel selects poisoned")
+            .remove(&character_id)
     }
 
     /// `InfoAttempt()`.
@@ -199,6 +229,82 @@ pub fn existing_dungeons_by_zone_key(server: &GameServer, zone_key: u32) -> Vec<
         .filter(|(w, _)| w.template.zone_keys.contains(&zone_key))
         .map(|(_, d)| d)
         .collect()
+}
+
+/// The live instances of a dungeon zone, in world id order: one `SC 0x206` channel row each.
+pub fn live_zone_instances(
+    server: &GameServer,
+    zone_key: u32,
+) -> Vec<(Arc<WorldInstance>, Arc<Dungeon>)> {
+    existing_dungeons_by_zone_key(server, zone_key)
+        .into_iter()
+        .filter_map(|d| d.world(server).map(|w| (w, d)))
+        .collect()
+}
+
+/// Enters the dungeon instance the player picked in the channel dialog. `inst_id` is a world
+/// instance id from an `SC 0x206` row; a stale id (the instance went away after the list was
+/// sent) is ignored. Capacity and the normal full error stay `QueuePlayer`'s. The `SC 0x207`
+/// answer goes out once the selected channel's load finishes (sent here when that happened
+/// synchronously, else from `worlds::instance_loaded`).
+pub fn enter_selected_system_instance(
+    server: &GameServer,
+    p: &PlayerRef,
+    zone_key: u32,
+    zone_group_id: u32,
+    inst_id: u32,
+) -> bool {
+    let live = live_zone_instances(server, zone_key);
+    let Some(index) = live
+        .iter()
+        .position(|(w, d)| w.id == inst_id && d.zone_group_id() == zone_group_id)
+    else {
+        tracing::debug!(
+            "SelectSysInstance: stale instId {inst_id} for zone key {zone_key}, character {}",
+            p.character_id
+        );
+        return false;
+    };
+    let (world, d) = (live[index].0.clone(), live[index].1.clone());
+    // The channel pick has to leave the same main-world return point as the direct entrance
+    // (same condition), and it does so only after every check passed: a refused pick saves
+    // nothing.
+    worlds::ensure_main_world_position(server, p);
+    let pending = ChannelSelectPending {
+        zone_id: d.zone_instance_id.zone_id as i32,
+        instance_id: inst_id,
+        index: index as i32,
+    };
+    server
+        .systems
+        .instances
+        .indun
+        .set_channel_select(p.character_id, pending);
+    if !dungeon::queue_player(server, &d, p) {
+        server
+            .systems
+            .instances
+            .indun
+            .take_channel_select(p.character_id);
+        return false;
+    }
+    if p.data().unit.transform.instance_id == world.id
+        && server
+            .systems
+            .instances
+            .indun
+            .take_channel_select(p.character_id)
+            .is_some()
+    {
+        // The queue moved the player at once, so `SCLoadInstance` has already been sent;
+        // `CSInstanceLoaded` may follow later (or never), no need to wait for it.
+        p.send(SCSystemDungeonChannelPacket {
+            zone_id: pending.zone_id,
+            instance_id: world.id,
+            instance_index: pending.index,
+        });
+    }
+    true
 }
 
 /// `RequestSystemInstance(character, zoneId, channelId, out dungeon)`.

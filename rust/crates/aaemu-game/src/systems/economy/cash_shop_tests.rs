@@ -16,6 +16,7 @@ use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::cash_shop::*;
 use crate::systems::economy::error_message;
+use crate::systems::economy::inventory;
 use crate::systems::economy::tests::{run, task_body, world, World, SINGLE, STACK};
 
 fn body_of<P: Marshal>(p: &P) -> Vec<u8> {
@@ -70,12 +71,13 @@ impl CashShopDb for MemDb {
         if amount < 0 && *self.fail_debits.lock().unwrap() {
             return Box::pin(async { false });
         }
-        self.accounts
-            .lock()
-            .unwrap()
-            .entry(account_id)
-            .or_default()
-            .0 += amount;
+        let mut accounts = self.accounts.lock().unwrap();
+        let entry = accounts.entry(account_id).or_default();
+        // The production debit is `... WHERE credits >= ?`: a short balance matches no row.
+        if amount < 0 && entry.0 < -amount {
+            return Box::pin(async { false });
+        }
+        entry.0 += amount;
         Box::pin(async { true })
     }
 
@@ -88,12 +90,12 @@ impl CashShopDb for MemDb {
         if amount < 0 && *self.fail_debits.lock().unwrap() {
             return Box::pin(async { false });
         }
-        self.accounts
-            .lock()
-            .unwrap()
-            .entry(account_id)
-            .or_default()
-            .1 += amount;
+        let mut accounts = self.accounts.lock().unwrap();
+        let entry = accounts.entry(account_id).or_default();
+        if amount < 0 && entry.1 < -amount {
+            return Box::pin(async { false });
+        }
+        entry.1 += amount;
         Box::pin(async { true })
     }
 
@@ -142,10 +144,13 @@ impl CashShopDb for MemDb {
 }
 
 #[derive(Default)]
-struct MailLog(Mutex<Vec<CommercialMailRequest>>);
+struct MailLog(Mutex<Vec<CommercialMailRequest>>, Mutex<bool>);
 
 impl CashShopMailHooks for MailLog {
     fn send_commercial_mail(&self, _server: &GameServer, mail: CommercialMailRequest) -> bool {
+        if *self.1.lock().unwrap() {
+            return false;
+        }
         self.0.lock().unwrap().push(mail);
         true
     }
@@ -464,32 +469,6 @@ fn packets_layout() {
         sc::SCAccountWarnedPacket,
         &[2, 2, 0, b'H', b'i'],
     );
-    // Premium list with the fixed C# entry
-    let det = premium_detail();
-    let mut w = PacketStream::new();
-    w.write_bool(true)
-        .write_u8(1)
-        .write_i32(8000001)
-        .write_str("Премиум-подпиcка (30 дней)")
-        .write_u16(1)
-        .write_u8(0)
-        .write_u8(0)
-        .write_i32(720)
-        .write_u8(0)
-        .write_i32(300)
-        .write_u32(0)
-        .write_i32(0)
-        .write_i32(0);
-    check(
-        encode(&SCPremiumServiceListPacket {
-            is_end: true,
-            size: 1,
-            detail: det,
-            exchange_ratio: 0,
-        }),
-        sc::SCPremiumServiceListPacket,
-        w.as_bytes(),
-    );
 }
 
 #[test]
@@ -611,10 +590,8 @@ fn cart(st: &CashShopState, picks: &[(u32, usize)]) -> Vec<IcsSku> {
 }
 
 #[tokio::test]
-async fn checkout_rejects_unpaid_aa_points_and_invalid_cart_values_before_mutation() {
+async fn checkout_rejects_invalid_cart_values_before_mutation() {
     let base = cart(&shop_state(), &[(200, 0)])[0].clone();
-    let mut aa = base.clone();
-    aa.currency = currency::AA_POINTS;
     let mut price = base.clone();
     price.price = u32::MAX;
     price.discount_price = 0;
@@ -632,7 +609,6 @@ async fn checkout_rejects_unpaid_aa_points_and_invalid_cart_values_before_mutati
     let mut missing_bonus = base;
     missing_bonus.bonus_item_id = 999_999;
     for (cart, error) in [
-        (vec![aa], error_message::INGAME_SHOP_BUY_FAIL_AA_POINT),
         (vec![price], error_message::INGAME_SHOP_BUY_FAIL),
         (
             vec![total.clone(), total],
@@ -666,6 +642,263 @@ async fn checkout_rejects_unpaid_aa_points_and_invalid_cart_values_before_mutati
             ]
         );
     }
+}
+
+fn aa_sku(shop_id: u32, price: u32) -> IcsSku {
+    let mut sku = cart(&shop_state(), &[(shop_id, 0)])[0].clone();
+    sku.currency = currency::AA_POINTS;
+    sku.price = price;
+    sku.discount_price = 0;
+    sku.bonus_item_id = 0;
+    sku.bonus_item_count = 0;
+    sku
+}
+
+fn aa_task(delta: i32) -> Vec<u8> {
+    task_body(
+        task_type::BUY_AA_POINT,
+        vec![ItemTask::AaPointUpdate(delta)],
+    )
+}
+
+#[tokio::test]
+async fn aa_priced_sku_debits_the_wallet_exactly_once() {
+    let mut s = shop();
+    let buyer = s.w.pa.clone();
+    buyer.data().aa_point = 100;
+    let sku = aa_sku(200, 40);
+    execute_buy(&s.w.server, 1, &buyer, &buyer, &[sku]).await;
+    assert_eq!(buyer.data().aa_point, 60);
+    assert_eq!(s.mail.0.lock().unwrap().len(), 1);
+    assert_eq!(s.db.sales.lock().unwrap()[0].sale_cost, 40);
+    assert_eq!(
+        s.db.sales.lock().unwrap()[0].sale_currency,
+        currency::AA_POINTS
+    );
+    let frames = s.w.a.drain();
+    let wallet_updates: Vec<&Vec<u8>> = frames
+        .iter()
+        .filter(|f| f.0 == sc::SCItemTaskSuccessPacket)
+        .map(|f| &f.1)
+        .collect();
+    assert_eq!(
+        wallet_updates,
+        vec![&aa_task(-40)],
+        "one debit for the whole purchase"
+    );
+    assert_eq!(
+        frames.last().unwrap().1,
+        result_body(true, "Alice", 40),
+        "charge_aa_point carries the AA total"
+    );
+}
+
+#[tokio::test]
+async fn short_aa_points_refuse_with_592_and_change_nothing() {
+    let mut s = shop();
+    let buyer = s.w.pa.clone();
+    buyer.data().aa_point = 39;
+    let sku = aa_sku(200, 40);
+    execute_buy(&s.w.server, 1, &buyer, &buyer, &[sku]).await;
+    assert_eq!(buyer.data().aa_point, 39);
+    assert!(s.mail.0.lock().unwrap().is_empty());
+    assert!(s.db.sales.lock().unwrap().is_empty());
+    assert_eq!(
+        s.w.server.systems.economy.cash_shop.state().shop_items[&200].remaining,
+        3
+    );
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (
+                sc::SCErrorMsgPacket,
+                error_body(error_message::INGAME_SHOP_NOT_ENOUGH_AA_POINT)
+            ),
+            (sc::SCICSBuyResultPacket, result_body(false, "Alice", 0)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn aa_debit_is_returned_when_the_item_grant_fails() {
+    let mut s = shop();
+    let buyer = s.w.pa.clone();
+    buyer.data().aa_point = 100;
+    *s.mail.1.lock().unwrap() = true;
+    let sku = aa_sku(100, 40);
+    execute_buy(&s.w.server, 1, &buyer, &buyer, &[sku]).await;
+    assert_eq!(buyer.data().aa_point, 100, "the debit was rolled back");
+    assert!(s.db.sales.lock().unwrap().is_empty());
+    assert_eq!(
+        s.w.server.systems.economy.cash_shop.state().shop_items[&100].remaining,
+        -1
+    );
+    let frames = s.w.a.drain();
+    let wallet_updates: Vec<&Vec<u8>> = frames
+        .iter()
+        .filter(|f| f.0 == sc::SCItemTaskSuccessPacket)
+        .map(|f| &f.1)
+        .collect();
+    assert_eq!(
+        wallet_updates,
+        vec![&aa_task(-40), &aa_task(40)],
+        "debit then compensating refund"
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .map(|f| f.0)
+            .collect::<Vec<u16>>()
+            .into_iter()
+            .filter(|op| *op == sc::SCErrorMsgPacket)
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames.last().unwrap().1,
+        result_body(false, "Alice", 40),
+        "nothing was sold"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_wallet_takes_hold_one_lock() {
+    let mut w = world();
+    w.pa.data().aa_point = 40;
+    let take = |server: Arc<GameServer>, player: crate::world::PlayerRef| {
+        tokio::task::spawn_blocking(move || {
+            let mut out = inventory::Out::Direct(&server);
+            take_aa_points(
+                &mut out,
+                &player,
+                40,
+                task_type::BUY_AA_POINT,
+                error_message::INGAME_SHOP_NOT_ENOUGH_AA_POINT,
+            )
+        })
+    };
+    let (first, second) = tokio::join!(
+        take(w.server.clone(), w.pa.clone()),
+        take(w.server.clone(), w.pa.clone())
+    );
+    let results = [first.unwrap(), second.unwrap()];
+    assert_eq!(results.iter().filter(|took| **took).count(), 1);
+    assert_eq!(w.pa.data().aa_point, 0);
+    let mut ops = w.a.drain_ops();
+    ops.sort_unstable();
+    let mut expected = vec![sc::SCItemTaskSuccessPacket, sc::SCErrorMsgPacket];
+    expected.sort_unstable();
+    assert_eq!(ops, expected);
+}
+
+#[tokio::test]
+async fn concurrent_aa_purchases_cannot_overdraw() {
+    let s = shop();
+    let buyer = s.w.pa.clone();
+    buyer.data().aa_point = 40;
+    let sku = aa_sku(100, 40);
+    let (a, b) = tokio::join!(
+        execute_buy(&s.w.server, 1, &buyer, &buyer, std::slice::from_ref(&sku)),
+        execute_buy(&s.w.server, 1, &buyer, &buyer, std::slice::from_ref(&sku)),
+    );
+    let _ = (a, b);
+    assert_eq!(buyer.data().aa_point, 0, "at most one purchase was paid");
+    assert_eq!(s.mail.0.lock().unwrap().len(), 1);
+    assert_eq!(s.db.sales.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn buy_aa_point_uses_the_configured_ratio_and_refuses_bad_amounts() {
+    // Ratio 0 (the shipped default) is the existing failure: nothing is debited.
+    let mut s = shop();
+    s.db.accounts.lock().unwrap().insert(1001, (1000, 0));
+    let body = 100i32.to_le_bytes();
+    run::<CSICSBuyAAPointPacket>(&mut s.w, 0, &body);
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001].0, 1000);
+    assert_eq!(s.w.pa.data().aa_point, 0);
+    assert_eq!(
+        s.w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::INGAME_SHOP_BUY_FAIL_AA_POINT)
+        )]
+    );
+
+    // Ratio 3: 100 cash buys 300 AA, the new cash balance and the ratio are sent.
+    let mut s = shop();
+    s.w.server
+        .config
+        .update(|c| c.ics.aa_point_exchange_ratio = 3);
+    s.db.accounts.lock().unwrap().insert(1001, (1000, 0));
+    run::<CSICSBuyAAPointPacket>(&mut s.w, 0, &body);
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001].0, 900);
+    assert_eq!(s.w.pa.data().aa_point, 300);
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (sc::SCItemTaskSuccessPacket, aa_task(300)),
+            (sc::SCICSCashPointPacket, 900i32.to_le_bytes().to_vec()),
+            (sc::SCICSExchangeRatioPacket, 3i32.to_le_bytes().to_vec()),
+        ]
+    );
+
+    // A negative ratio, a non-positive cash amount and an i32 overflow are all refused.
+    for (ratio, cash) in [(-1, 100), (3, 0), (3, -100), (2, i32::MAX)] {
+        let mut s = shop();
+        s.w.server
+            .config
+            .update(|c| c.ics.aa_point_exchange_ratio = ratio);
+        s.db.accounts.lock().unwrap().insert(1001, (1000, 0));
+        run::<CSICSBuyAAPointPacket>(&mut s.w, 0, &cash.to_le_bytes());
+        assert_eq!(
+            s.db.accounts.lock().unwrap()[&1001].0,
+            1000,
+            "ratio {ratio}, cash {cash}"
+        );
+        assert_eq!(s.w.pa.data().aa_point, 0, "ratio {ratio}, cash {cash}");
+        assert_eq!(
+            s.w.a.drain(),
+            vec![(
+                sc::SCErrorMsgPacket,
+                error_body(error_message::INGAME_SHOP_BUY_FAIL_AA_POINT)
+            )],
+            "ratio {ratio}, cash {cash}"
+        );
+    }
+
+    // A short cash balance uses the shop's cash error and buys nothing.
+    let mut s = shop();
+    s.w.server
+        .config
+        .update(|c| c.ics.aa_point_exchange_ratio = 3);
+    s.db.accounts.lock().unwrap().insert(1001, (50, 0));
+    run::<CSICSBuyAAPointPacket>(&mut s.w, 0, &body);
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001].0, 50);
+    assert_eq!(s.w.pa.data().aa_point, 0);
+    assert_eq!(
+        s.w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::INGAME_SHOP_NOT_ENOUGH_AA_CASH)
+        )]
+    );
+}
+
+#[tokio::test]
+async fn shop_open_sends_the_exchange_ratio_with_the_cash_balance() {
+    let mut s = shop();
+    s.w.server
+        .config
+        .update(|c| c.ics.aa_point_exchange_ratio = 4);
+    s.db.accounts.lock().unwrap().insert(1001, (90, 0));
+    run::<CSICSMoneyRequestPacket>(&mut s.w, 0, &[]);
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (sc::SCICSCashPointPacket, 90i32.to_le_bytes().to_vec()),
+            (sc::SCICSExchangeRatioPacket, 4i32.to_le_bytes().to_vec()),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1202,39 +1435,98 @@ async fn buy_packet_handler() {
     assert_eq!(s.db.accounts.lock().unwrap()[&1001].0, 90);
     assert_eq!(s.mail.0.lock().unwrap()[0].receiver_id, 2);
 
-    // Money request
+    // Money request (the shop open also sends the configured AA exchange ratio)
     run::<CSICSMoneyRequestPacket>(&mut s.w, 0, &[]);
     assert_eq!(
         s.w.a.drain(),
-        vec![(sc::SCICSCashPointPacket, 90i32.to_le_bytes().to_vec())]
+        vec![
+            (sc::SCICSCashPointPacket, 90i32.to_le_bytes().to_vec()),
+            (sc::SCICSExchangeRatioPacket, 0i32.to_le_bytes().to_vec()),
+        ]
     );
-    // Premium service list / message
-    run::<CSPremiumServiceListPacket>(&mut s.w, 0, &[]);
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+async fn private_mysql_aa_purchase_wallet_survives_character_reload() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
     assert_eq!(
-        s.w.a.drain(),
-        vec![(
-            sc::SCPremiumServiceListPacket,
-            body_of(&SCPremiumServiceListPacket {
-                is_end: true,
-                size: 1,
-                detail: premium_detail(),
-                exchange_ratio: 0
-            })
-        )]
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
     );
-    run::<CSPremiumServiceMsgPacket>(&mut s.w, 0, &3i32.to_le_bytes());
-    assert_eq!(
-        s.w.a.drain(),
-        vec![(
-            sc::SCAccountWarnedPacket,
-            body_of(&SCAccountWarnedPacket {
-                source: 2,
-                msg: "Premium ...".into()
-            })
-        )]
-    );
-    run::<CSPremiumServiceBuyPacket>(&mut s.w, 0, &3i32.to_le_bytes());
-    assert!(s.w.a.drain().is_empty());
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    // Every table `save_character` writes or `load_character` reads (see db_character tests);
+    // connection-local shadows keep the shared lane database untouched.
+    for table in [
+        "characters",
+        "accounts",
+        "options",
+        "abilities",
+        "actabilities",
+        "appellations",
+        "character_active_buffs",
+        "character_cooldowns",
+        "portal_book_coords",
+        "portal_visited_district",
+        "friends",
+        "blocked",
+        "skills",
+        "quests",
+        "completed_quests",
+        "character_records",
+        "character_achievements",
+        "character_crafts",
+    ] {
+        let (_, definition): (String, String) =
+            sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let shadow = crate::systems::social::achievement_persistence::temporary_shadow_definition(
+            &definition,
+        );
+        sqlx::query(&shadow).execute(&pool).await.unwrap();
+    }
+
+    // Buy one AA-priced SKU through the real checkout (the wallet is a character field).
+    let s = shop();
+    let buyer = s.w.pa.clone();
+    buyer.data().aa_point = 100;
+    execute_buy(&s.w.server, 1, &buyer, &buyer, &[aa_sku(100, 40)]).await;
+    let bought = buyer.data().aa_point;
+    assert_eq!(bought, 60);
+
+    let mut data = crate::data::GameData::empty();
+    data.experience = crate::test_support::test_experience(55);
+    let mut server = crate::test_support::test_server_with(data);
+    server.db = pool.clone();
+    let mut character = crate::test_support::test_character(1, "AaPurchaseReload", 100.0, 100.0);
+    character.account_id = 1001;
+    character.created = chrono::Utc::now().timestamp();
+    character.aa_point = bought;
+    let mut tx = pool.begin().await.unwrap();
+    crate::db_character::save_character(&mut tx, &mut character, chrono::Utc::now().timestamp())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let (loaded, _) = crate::db_character::load_character(&server, 1, 1001)
+        .await
+        .unwrap()
+        .expect("saved character");
+    assert_eq!(loaded.aa_point, 60);
+    pool.close().await;
 }
 
 #[test]

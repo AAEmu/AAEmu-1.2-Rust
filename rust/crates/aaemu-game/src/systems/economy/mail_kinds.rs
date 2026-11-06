@@ -360,7 +360,12 @@ impl MailForAuction {
         true
     }
 
-    /// `FinalizeForBidFail(previousBuyerId, previousBid)` (C# uses `MailType.AucOffFail`).
+    /// `FinalizeForBidFail(previousBuyerId, previousBid)`.
+    ///
+    /// Deviation from C# (`MailType.AucOffFail`): the 1.2 client's own mail-type table has a
+    /// distinct `AUCITON_BID_FAIL = 17` next to `AUCTION_OFF_FAIL = 15`
+    /// (`mailbox/mail/common.alb`, referenced by `SetMailLabelColorByType`), so the outbid
+    /// refund is type 17.
     pub fn finalize_for_bid_fail(
         &mut self,
         server: &GameServer,
@@ -374,7 +379,7 @@ impl MailForAuction {
         self.mail.header.sender_name = ".auctionBidFail".to_string();
         self.mail.header.receiver_id = self.buyer_id;
         self.mail.receiver_name = name_buyer;
-        self.mail.mail_type = mail_type::AUC_OFF_FAIL;
+        self.mail.mail_type = mail_type::AUC_BID_FAIL;
         self.mail.title = TITLE_BID_LOST.to_string();
         self.mail.body.text = format!("body('{}')", quote_arg(&self.item_name));
         self.mail.attach_money(previous_bid, 0, 0);
@@ -514,12 +519,21 @@ impl MailForSpeciality {
         self.mail.header.sender_name = TRADE_DELIVERY_NAME.to_string();
         self.mail.header.receiver_id = self.sender_id;
         self.mail.receiver_name = self.sender_name.clone();
+        // The 1.2 client's `ui_texts` tables (synced to every language in `localized_texts`)
+        // carry these titles as `sell_backpack_title` / `mail_sell_backpack_title_seller`.
         self.mail.title = if self.crafter_id == 0 {
-            TRADE_DELIVERY_TITLE
+            super::mail_data::localized_ui_text(
+                txn.server,
+                "sell_backpack_title",
+                TRADE_DELIVERY_TITLE,
+            )
         } else {
-            TRADE_DELIVERY_TITLE_SELLER
-        }
-        .to_string();
+            super::mail_data::localized_ui_text(
+                txn.server,
+                "mail_sell_backpack_title_seller",
+                TRADE_DELIVERY_TITLE_SELLER,
+            )
+        };
         let (payout, payout_with_interest) = self.payouts();
         if self.item_to_send == ITEM_COINS {
             self.mail.attach_money(self.item_count_seller, 0, 0);
@@ -585,7 +599,11 @@ impl MailForSpeciality {
         self.mail.header.receiver_id = self.crafter_id;
         self.mail.receiver_name = crafter_name.unwrap_or_default();
         let (payout, _) = self.payouts();
-        self.mail.title = TRADE_DELIVERY_TITLE_CRAFTER.to_string();
+        self.mail.title = super::mail_data::localized_ui_text(
+            txn.server,
+            "mail_sell_backpack_title_crafter",
+            TRADE_DELIVERY_TITLE_CRAFTER,
+        );
         if self.item_to_send == ITEM_COINS {
             self.mail.attach_money(self.item_count_crafter, 0, 0);
             self.mail.body.text = format!(

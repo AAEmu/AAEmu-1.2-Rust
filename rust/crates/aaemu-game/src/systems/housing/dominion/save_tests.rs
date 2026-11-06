@@ -172,6 +172,128 @@ async fn dominion_peace_window_round_trips_through_its_row() {
 }
 
 #[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local authority tables only"]
+async fn dominion_declaration_round_trips_through_its_row() {
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).unwrap();
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in ["dominions", "dominion_siege_participants"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (column, ddl) in [
+        ("declaration_attacker", "int unsigned NOT NULL DEFAULT 0"),
+        ("declaration_at", "bigint NOT NULL DEFAULT 0"),
+        ("declaration_cycle", "bigint NOT NULL DEFAULT 0"),
+        ("declaration_hq_x", "float NOT NULL DEFAULT 0"),
+        ("declaration_hq_y", "float NOT NULL DEFAULT 0"),
+        ("declaration_hq_z", "float NOT NULL DEFAULT 0"),
+    ] {
+        if sqlx::query(&format!("SHOW COLUMNS FROM dominions LIKE '{column}'"))
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            sqlx::query(&format!(
+                "ALTER TABLE dominions ADD COLUMN `{column}` {ddl}"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+    let f = fixture();
+    let now = manager::now();
+    let declared = f
+        .server
+        .systems
+        .housing
+        .dominions
+        .declare(25, 20, now, now, 0, (10.5, 20.5, 30.5))
+        .unwrap();
+    assert_eq!(
+        declared.declaration.map(|d| d.attacker_expedition_id),
+        Some(20)
+    );
+    let batch = f.server.systems.housing.dominions.prepare_save();
+    let mut tx = pool.begin().await.unwrap();
+    super::db::write_batch(&mut tx, &batch).await.unwrap();
+    tx.commit().await.unwrap();
+    let loaded = super::db::load_rows(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|state| state.zone_group_id == 25)
+        .unwrap();
+    let declaration = loaded.declaration.expect("declaration survives");
+    assert_eq!(declaration.attacker_expedition_id, 20);
+    assert_eq!(declaration.declared_at, now);
+    assert_eq!(declaration.cycle_auction_start, now);
+    assert_eq!(
+        (declaration.hq_x, declaration.hq_y, declaration.hq_z),
+        (10.5, 20.5, 30.5)
+    );
+    assert_eq!(declaration.hq_obj_id, 0, "the doodad is runtime-only");
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart() {
+    let f = fixture();
+    let now = manager::now();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .declare(
+            25,
+            20,
+            now - 30 * 86_400,
+            now - 30 * 86_400,
+            1,
+            (0.0, 0.0, 0.0),
+        )
+        .unwrap();
+    let mut states = f.server.systems.housing.dominions.all();
+    super::db::clear_stale_declarations(&mut states, now);
+    assert!(states[0].declaration.is_none());
+
+    f.server
+        .systems
+        .housing
+        .dominions
+        .cancel_declaration(25, 20)
+        .unwrap();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .declare(25, 20, now, now, 1, (0.0, 0.0, 0.0))
+        .unwrap();
+    let mut states = f.server.systems.housing.dominions.all();
+    super::db::clear_stale_declarations(&mut states, now);
+    assert!(states[0].declaration.is_some());
+}
+
+#[tokio::test]
 #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local financial tables only"]
 async fn private_mysql_property_payment_and_collection_cannot_straddle_financial_snapshot() {
     let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
@@ -208,6 +330,7 @@ async fn private_mysql_property_payment_and_collection_cannot_straddle_financial
         "skills",
         "quests",
         "completed_quests",
+        "character_crafts",
     ];
     for table in tables {
         let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))

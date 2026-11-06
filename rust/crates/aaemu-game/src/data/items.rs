@@ -5,13 +5,13 @@
 //! `item_accessories`, `item_summon_mates`, `item_summon_slaves`, `item_body_parts`,
 //! `item_enchanting_gems`, `item_backpacks`), the hard-coded UCC / music / treasure templates, the
 //! base `items` table, `equip_slot_enchanting_costs`, `item_grade_enchanting_supports`,
-//! `item_socket_chances`, `item_cap_scales`, `item_grade_distributions`,
+//! `item_socket_chances`, `item_cap_scales`, `item_cap_scale_forbids`, `item_grade_distributions`,
 //! `loot_pack_dropping_npcs`, `doodad_func_convert_fish_items`, `item_spawn_doodads`,
 //! `unit_modifiers` (items), `armor_grade_buffs`, `item_sets` / `item_set_items`, and the
 //! "invalid_item_" names. The localized search strings live in `systems::economy::items_data`
 //! (they need the localization tables).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
@@ -785,6 +785,11 @@ pub struct ItemTemplate {
     pub loot_quest_id: u32,
     pub honor_price: i32,
     pub level_requirement: i32,
+    /// `items.actability_group_id`: the actability group of `actability_requirement`.
+    pub actability_group_id: i32,
+    /// `items.actability_requirement`: actability points needed to use / equip the item
+    /// (1.2 client `FUN_394e1a90`, `actability_not_enough_point` 508; 0 = no requirement).
+    pub actability_requirement: i32,
     pub auction_category_a: i32,
     pub auction_category_b: i32,
     pub auction_category_c: i32,
@@ -828,6 +833,8 @@ impl ItemTemplate {
             loot_quest_id: 0,
             honor_price: 0,
             level_requirement: 0,
+            actability_group_id: 0,
+            actability_requirement: 0,
             auction_category_a: 0,
             auction_category_b: 0,
             auction_category_c: 0,
@@ -980,6 +987,9 @@ pub struct ItemData {
     pub equip_slot_group_maps: HashMap<u32, Vec<EquipSlotGroupMap>>,
     /// `_itemCapScales` (by skill id).
     pub item_cap_scales: HashMap<u32, ItemCapScale>,
+    /// `item_cap_scale_forbids.item_id` (the 1.2 client `FUN_395a72d0` set): item templates
+    /// that cannot be the target of `ItemCapScale` / its reset.
+    pub item_cap_scale_forbids: HashSet<u32>,
     /// `_itemGradeDistributions`.
     pub grade_distributions: HashMap<i32, GradeDistributions>,
     /// `_lootPackDroppingNpc` (by npc template id, rows in table order).
@@ -1003,6 +1013,11 @@ fn load_err(msg: String) -> rusqlite::Error {
 impl ItemData {
     pub fn template(&self, id: u32) -> Option<&ItemTemplate> {
         self.templates.get(&id)
+    }
+
+    /// `item_body_parts` row of an item (the `BodyPartTemplate` specifics).
+    pub fn body_part(&self, id: u32) -> Option<&BodyPartTemplate> {
+        self.body_parts.get(&id)
     }
 
     /// `GetGradeTemplate`.
@@ -1146,6 +1161,11 @@ impl ItemData {
     /// `GetItemCapScale(skillId)`.
     pub fn item_cap_scale(&self, skill_id: u32) -> Option<&ItemCapScale> {
         self.item_cap_scales.get(&skill_id)
+    }
+
+    /// 1.2 client `FUN_395a72d0`: whether `item_cap_scale_forbids` lists this template.
+    pub fn cap_scale_forbidden(&self, item_id: u32) -> bool {
+        self.item_cap_scale_forbids.contains(&item_id)
     }
 
     /// `GetAttributeModifiers(id)` (`None` where the C# indexer throws).
@@ -1770,6 +1790,8 @@ impl ItemData {
                 r.u32("specialty_zone_id")?
             };
             t.level_requirement = r.i32("level_requirement")?;
+            t.actability_group_id = r.i32_or("actability_group_id", 0)?;
+            t.actability_requirement = r.i32_or("actability_requirement", 0)?;
             t.auction_category_a = r.i32_or("auction_a_category_id", 0)?;
             t.auction_category_b = r.i32_or("auction_b_category_id", 0)?;
             t.auction_category_c = r.i32_or("auction_c_category_id", 0)?;
@@ -1928,6 +1950,16 @@ impl ItemData {
             data.item_cap_scales.entry(c.skill_id).or_insert(c);
             Ok(())
         })?;
+
+        for_each_row(
+            conn,
+            "SELECT item_id FROM item_cap_scale_forbids",
+            [],
+            |r| {
+                data.item_cap_scale_forbids.insert(r.u32("item_id")?);
+                Ok(())
+            },
+        )?;
 
         for_each_row(conn, "SELECT * FROM item_grade_distributions", [], |r| {
             let mut weights = [0i32; 12];

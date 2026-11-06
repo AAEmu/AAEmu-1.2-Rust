@@ -1,12 +1,14 @@
 //! Bounty placement / arrest flow tests: several connections, C->S packets through
 //! `handle_frame`, the real wallet and the real `combat::do_die` arrest path.
 
+use aaemu_commons::helpers::convert_long_to_coord;
 use aaemu_commons::PacketStream;
 
 use crate::data::skills::{BuffKind, BuffTemplate};
 use crate::data::world_data::SystemFaction;
 use crate::data::GameData;
 use crate::models::npc::Npc;
+use crate::models::transform::convert_long;
 use crate::net::packet::{encode_raw, LEVEL_PLAIN};
 use crate::opcodes::{cs, sc};
 use crate::server::GameServer;
@@ -15,6 +17,7 @@ use crate::systems::skills::types::KillReason;
 use crate::systems::social::bounty::BountyManager;
 use crate::systems::social::config::{CourtRoomConfig, JailConfig, JusticeConfig, SpawnPosition};
 use crate::systems::social::crime::buff as crime_buff;
+use crate::systems::social::crime::BountyDescription;
 use crate::systems::social::util;
 use crate::test_support::*;
 use crate::world::{Entity, PlayerRef, WorldObject};
@@ -110,6 +113,40 @@ fn player(server: &GameServer, id: u32, name: &str, wanted: bool, money: i64) ->
     Pc { client, p }
 }
 
+/// A player entering the world through the real entry path (`world::session::spawn`), whose
+/// spawn frames are kept for inspection.
+fn enter(server: &GameServer, id: u32, name: &str, x: f32) -> Pc {
+    let mut client = TestClient::new(server, id, 1000 + id);
+    let mut c = test_character(id, name, x, 100.0);
+    c.obj_id = 0x100 + id;
+    c.is_online = true;
+    let p = crate::world::Player::new(c, client.conn.handle());
+    client.conn.active_char = Some(p.clone());
+    server.names.add_character(id, name, 1000 + id);
+    crate::world::session::spawn(server, &p);
+    Pc { client, p }
+}
+
+/// Drops the frames produced by spawning (players seeing each other).
+fn settle(pcs: &mut [&mut Pc]) {
+    for p in pcs.iter_mut() {
+        p.client.drain();
+    }
+}
+
+/// A player whose zone load (`CSInstanceLoaded`) files it into the world; its frames are kept.
+fn zone_load(server: &GameServer, id: u32, name: &str, x: f32) -> Pc {
+    let mut client = TestClient::new(server, id, 1000 + id);
+    let mut c = test_character(id, name, x, 100.0);
+    c.obj_id = 0x100 + id;
+    c.is_online = true;
+    let p = crate::world::Player::new(c, client.conn.handle());
+    client.conn.active_char = Some(p.clone());
+    server.names.add_character(id, name, 1000 + id);
+    crate::systems::instances::worlds::instance_loaded(server, &p);
+    Pc { client, p }
+}
+
 async fn send(server: &GameServer, pc: &mut Pc, opcode: u16, f: impl FnOnce(&mut PacketStream)) {
     let mut s = PacketStream::new();
     f(&mut s);
@@ -150,6 +187,11 @@ fn done(body: &[u8]) -> (u32, String, i64, i16) {
     )
 }
 
+fn bounty_money(body: &[u8]) -> (u32, i64) {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    (s.read_bc().unwrap(), s.read_i64().unwrap())
+}
+
 fn paid(body: &[u8]) -> (String, String, i64) {
     let mut s = PacketStream::from_bytes(body.to_vec());
     (
@@ -157,6 +199,78 @@ fn paid(body: &[u8]) -> (String, String, i64) {
         s.read_string().unwrap(),
         s.read_i64().unwrap(),
     )
+}
+
+/// One `SCBountyList` row as the 1.2 client reads it (`FUN_397bebf0`: id, name, level, zone,
+/// fixed-point x / y, float z, bounty, crime points, live flag, race, type, arrest / trial
+/// counters, seconds; notGuilty before guilty).
+fn read_board_row(s: &mut PacketStream) -> BountyDescription {
+    BountyDescription {
+        player_id: s.read_u32().unwrap(),
+        player_name: s.read_string().unwrap(),
+        player_level: s.read_u8().unwrap(),
+        zone_id: s.read_u32().unwrap(),
+        pos: (
+            convert_long_to_coord(s.read_i64().unwrap()),
+            convert_long_to_coord(s.read_i64().unwrap()),
+            s.read_f32().unwrap(),
+        ),
+        bounty_amount: s.read_u64().unwrap(),
+        crime_points: s.read_i16().unwrap(),
+        is_live: s.read_bool().unwrap(),
+        player_race: s.read_u8().unwrap(),
+        type184: s.read_i32().unwrap(),
+        arrest_count: s.read_i32().unwrap(),
+        accept_guilty_count: s.read_i32().unwrap(),
+        accept_trial_count: s.read_i32().unwrap(),
+        not_guilty_count: s.read_i32().unwrap(),
+        guilty_count: s.read_i32().unwrap(),
+        seconds: s.read_i32().unwrap(),
+    }
+}
+
+/// The bytes of one row for the synthetic test characters (`test_character`: level 10, race 1,
+/// zone [`TEST_ZONE`], no crime points or trial counters).
+fn board_row_bytes(id: u32, name: &str, x: f32, y: f32, z: f32, bounty: u64) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u32(id)
+        .write_str(name)
+        .write_u8(10)
+        .write_u32(TEST_ZONE)
+        .write_i64(convert_long(x))
+        .write_i64(convert_long(y))
+        .write_f32(z)
+        .write_u64(bounty)
+        .write_i16(0)
+        .write_bool(true)
+        .write_u8(1)
+        .write_i32(1)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0);
+    s.into_bytes()
+}
+
+fn board_entries(body: &[u8]) -> (i32, u8, Vec<BountyDescription>) {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    let total = s.read_i32().unwrap();
+    let count = s.read_u8().unwrap();
+    let rows = (0..count).map(|_| read_board_row(&mut s)).collect();
+    (total, count, rows)
+}
+
+async fn open_board(server: &GameServer, pc: &mut Pc) -> Vec<u8> {
+    send(server, pc, cs::CSNaviOpenBountyPacket, |s| {
+        s.write_bc(0x123);
+    })
+    .await;
+    let frames = pc.client.drain();
+    let lists = find(&frames, sc::SCBountyListPacket);
+    assert_eq!(lists.len(), 1, "one SCBountyList answer");
+    lists.into_iter().next().unwrap()
 }
 
 /// `(task type, money change)` of the single money task in an `SCItemTaskSuccess` body.
@@ -257,8 +371,12 @@ async fn a_placement_debits_the_purse_and_answers_the_new_total() {
             .active_total(b.p.character_id),
         250
     );
-    // The `SCUnitBountyMoney` writer has not been located in the 1.2 client (BOUNTY-3).
-    assert!(find(&frames, sc::SCUnitBountyMoneyPacket).is_empty());
+    // The payer is a viewer of the target: the whole new total goes out (BOUNTY-3).
+    let moneys: Vec<(u32, i64)> = find(&frames, sc::SCUnitBountyMoneyPacket)
+        .iter()
+        .map(|b| bounty_money(b))
+        .collect();
+    assert_eq!(moneys, vec![(b.p.obj_id, 250)]);
 
     // A second update without a new request is refused and moves nothing.
     update(&server, &mut a, b.p.character_id, "Wanted", 50).await;
@@ -333,6 +451,149 @@ async fn several_payers_stack_into_one_total() {
     );
     assert_eq!(a.p.data().money, 900);
     assert_eq!(c.p.data().money, 750);
+}
+
+#[tokio::test]
+async fn a_pledge_broadcasts_the_whole_new_total_to_every_viewer() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "PayerA", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    let mut c = player(&server, 3, "PayerC", false, 1000);
+    settle(&mut [&mut a, &mut b, &mut c]);
+
+    place(&server, &mut a, b.p.character_id, "Wanted", 100).await;
+    let frames = a.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 100)]
+    );
+    a.client.drain();
+    b.client.drain();
+    c.client.drain();
+
+    // A second pledge sends the whole stacked total (150), never the 50 delta.
+    place(&server, &mut c, b.p.character_id, "Wanted", 50).await;
+    let frames = a.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 150)]
+    );
+    let frames = c.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 150)]
+    );
+    // The target itself is a viewer too.
+    let frames = b.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 150)]
+    );
+}
+
+#[tokio::test]
+async fn an_entering_viewer_receives_a_wanted_targets_total_once() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    settle(&mut [&mut a, &mut b]);
+    place(&server, &mut a, b.p.character_id, "Wanted", 175).await;
+    a.client.drain();
+
+    // A viewer entering the world later (after the pledge) gets the target's total once.
+    let mut c = enter(&server, 3, "Viewer", 103.0);
+    let frames = c.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 175)]
+    );
+    let _ = b.client.drain();
+}
+
+#[tokio::test]
+async fn a_zone_load_viewer_receives_a_wanted_targets_total_once() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    settle(&mut [&mut a, &mut b]);
+    place(&server, &mut a, b.p.character_id, "Wanted", 175).await;
+    a.client.drain();
+
+    // The second entry path (`CSInstanceLoaded`) sends the same frames after the exchange.
+    let mut c = zone_load(&server, 3, "Viewer", 103.0);
+    let frames = c.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 175)]
+    );
+    let _ = b.client.drain();
+}
+
+#[tokio::test]
+async fn an_entering_viewer_gets_no_bounty_frame_when_no_total_is_set() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "PlainA", false, 0);
+    settle(&mut [&mut a]);
+
+    let mut b = enter(&server, 2, "PlainB", 103.0);
+    let frames = b.client.drain();
+    assert!(find(&frames, sc::SCUnitBountyMoneyPacket).is_empty());
+}
+
+#[tokio::test]
+async fn a_payout_broadcasts_zero_to_the_viewers() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    let mut d = player(&server, 4, "Arrestor", false, 0);
+    settle(&mut [&mut a, &mut b, &mut d]);
+
+    place(&server, &mut a, b.p.character_id, "Wanted", 100).await;
+    a.client.drain();
+    b.client.drain();
+    d.client.drain();
+
+    do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&d.p)),
+        KillReason::Damage,
+    );
+
+    for viewer in [&mut a, &mut d] {
+        let frames = viewer.client.drain();
+        assert_eq!(
+            find(&frames, sc::SCUnitBountyMoneyPacket)
+                .iter()
+                .map(|body| bounty_money(body))
+                .collect::<Vec<_>>(),
+            vec![(b.p.obj_id, 0)]
+        );
+    }
+    assert!(find(&b.client.drain(), sc::SCUnitBountyMoneyPacket)
+        .iter()
+        .map(|body| bounty_money(body))
+        .collect::<Vec<_>>()
+        .iter()
+        .all(|&(id, total)| id == b.p.obj_id && total == 0));
 }
 
 #[tokio::test]
@@ -499,7 +760,7 @@ async fn npc_kills_and_non_wanted_victims_never_pay() {
 }
 
 #[tokio::test]
-async fn the_board_still_answers_an_empty_list() {
+async fn bounty_board_flag_off_answers_todays_empty_list() {
     let server = bounty_server();
     let mut a = player(&server, 1, "Payer", false, 1000);
     let b = player(&server, 2, "Wanted", true, 0);
@@ -514,6 +775,62 @@ async fn the_board_still_answers_an_empty_list() {
     let lists = find(&frames, sc::SCBountyListPacket);
     assert_eq!(lists.len(), 1);
     assert_eq!(lists[0], vec![0, 0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn bounty_board_flag_on_with_no_pledges_is_the_empty_list() {
+    let server = bounty_server();
+    server.config.update(|c| c.social.bounty_board = true);
+    let mut a = player(&server, 1, "Viewer", false, 1000);
+    a.client.drain();
+
+    assert_eq!(open_board(&server, &mut a).await, vec![0, 0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn bounty_board_writes_two_rows_highest_total_first() {
+    let server = bounty_server();
+    server.config.update(|c| c.social.bounty_board = true);
+    let mut a = player(&server, 1, "Payer", false, 1_000_000);
+    player(&server, 2, "Bravo", true, 0);
+    player(&server, 3, "Alpha", true, 0);
+    place(&server, &mut a, 2, "Bravo", 500).await;
+    place(&server, &mut a, 3, "Alpha", 900).await;
+    a.client.drain();
+
+    let body = open_board(&server, &mut a).await;
+    let mut expected = 2i32.to_le_bytes().to_vec();
+    expected.push(2);
+    expected.extend(board_row_bytes(3, "Alpha", 103.0, 100.0, 100.0, 900));
+    expected.extend(board_row_bytes(2, "Bravo", 102.0, 100.0, 100.0, 500));
+    assert_eq!(body, expected);
+}
+
+#[tokio::test]
+async fn bounty_board_caps_rows_at_twenty_and_reports_the_full_total() {
+    let server = bounty_server();
+    server.config.update(|c| c.social.bounty_board = true);
+    let mut payer = player(&server, 1, "Payer", false, 1_000_000);
+    let mut targets = Vec::new();
+    for id in 2..=22u32 {
+        let name = format!("Wanted{id}");
+        player(&server, id, &name, true, 0);
+        targets.push((id, name));
+    }
+    for (id, name) in &targets {
+        place(&server, &mut payer, *id, name, 100 + *id as i32).await;
+    }
+    payer.client.drain();
+
+    let body = open_board(&server, &mut payer).await;
+    let (total, count, rows) = board_entries(&body);
+    assert_eq!(total, 21, "total is every character with a pledge");
+    assert_eq!(count, 20, "the client cap");
+    assert_eq!(rows.len(), 20);
+    let ids: Vec<u32> = rows.iter().map(|row| row.player_id).collect();
+    assert_eq!(ids, (3..=22u32).rev().collect::<Vec<_>>());
+    assert_eq!(rows[0].bounty_amount, 122);
+    assert_eq!(rows[19].bounty_amount, 103);
 }
 
 /// The pledges a live server wrote survive a restart: `save` + `load` on a temporary table.

@@ -54,6 +54,8 @@ pub struct GameServer {
     /// A weak self reference for the timers that outlive a packet handler.
     self_ref: std::sync::OnceLock<std::sync::Weak<GameServer>>,
     next_connection_id: AtomicU32,
+    /// Monotonic order of the slot-occupancy reports sent to the login server's world queue.
+    occupancy_sequence: std::sync::Mutex<u32>,
     /// Set while the graceful shutdown returns the players to the world list: entering the world
     /// is refused (`systems::services::shutdown`).
     shutting_down: AtomicBool,
@@ -61,6 +63,18 @@ pub struct GameServer {
 
 impl GameServer {
     pub fn new(config: AppConfig, db: MySqlPool, game_data: GameData) -> Self {
+        tracing::info!(
+            "Character slots: base {} per account (purchased extra_character_slots are added); the login server's Login:MaxCharactersPerAccount must match",
+            config.characters.max_per_account
+        );
+        tracing::info!(
+            "Character pre-select period {}; the login server's Login:PreSelectCharacterPeriod must match",
+            if config.characters.pre_select_period {
+                "on"
+            } else {
+                "off"
+            }
+        );
         let ids = Arc::new(IdManagers::default());
         let world = Arc::new(WorldManager::default());
         let reply_delay = ReplyDelay::resolve(&config.debug.reply_delay);
@@ -110,6 +124,7 @@ impl GameServer {
             login: LoginLink::default(),
             self_ref: std::sync::OnceLock::new(),
             next_connection_id: AtomicU32::new(1),
+            occupancy_sequence: std::sync::Mutex::new(0),
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -171,6 +186,31 @@ impl GameServer {
         }
     }
 
+    /// Slot occupancy reported to the login server's world queue: accounts in the lobby or world
+    /// plus world cookies the client has not consumed yet (they expire, see
+    /// `EnterWorldManager::PENDING_TOKEN_LIFETIME`).
+    pub fn world_occupancy(&self) -> u32 {
+        let accounts = u32::try_from(self.accounts.count()).unwrap_or(u32::MAX);
+        let pending = u32::try_from(self.enter_world.pending_count()).unwrap_or(u32::MAX);
+        accounts.saturating_add(pending)
+    }
+
+    /// The next occupancy report as `(sequence, occupancy)`. The sequence lock serialises the
+    /// snapshot with its order, so the login server can discard a report that was taken before a
+    /// newer one even when the two are sent from different tasks.
+    pub fn next_occupancy(&self) -> (u32, u32) {
+        let mut sequence = self
+            .occupancy_sequence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *sequence = sequence.wrapping_add(1);
+        if *sequence == 0 {
+            *sequence = 1;
+        }
+        let sequence = *sequence;
+        (sequence, self.world_occupancy())
+    }
+
     /// Decodes and dispatches one frame payload for `conn`.
     ///
     /// The C# handler only creates packet tables for levels 1 and 2 ("For 1.2 client we only have
@@ -201,7 +241,7 @@ impl GameServer {
                 raw.opcode,
                 name,
                 raw.body.unread().len(),
-                crate::net::body_hex(raw.body.unread())
+                crate::net::trace_body(raw.level, raw.opcode, raw.body.unread())
             );
         }
         match self.registry.get(raw.level, raw.opcode) {

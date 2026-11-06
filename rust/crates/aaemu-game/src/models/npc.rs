@@ -61,6 +61,12 @@ pub struct Npc {
     pub ai_hold_or_idle: bool,
     /// `Spawner?.Position.Z` (`None` without a spawner), kept for `GetReferenceHeight`.
     pub spawner_z: Option<f32>,
+    // ---- phase 5 / ai interaction ----
+    /// Whether the client offers this NPC's interaction (cursor / talk marker). `false` while
+    /// the NPC runs an `ai_command_sets` row whose `can_interact` is `'f'`; the AI publishes the
+    /// change with `SCNpcInteractionStatusChanged` and the visibility code repeats it to players
+    /// that enter sight later (INFERRED, see `PORTING.md` WP-5b).
+    pub interactable: bool,
 }
 
 impl Npc {
@@ -88,6 +94,7 @@ impl Npc {
             current_alertness: MoveTypeAlertness::IDLE,
             ai_hold_or_idle: false,
             spawner_z: None,
+            interactable: true,
         }
     }
 

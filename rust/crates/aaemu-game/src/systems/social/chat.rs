@@ -8,11 +8,15 @@ use std::time::{Duration, Instant};
 
 use crate::data::world_data::factions;
 use crate::managers::id::IdManager;
+use crate::models::character::Character;
+use crate::models::item::UnixTime;
 use crate::net::packet::ServerPacket;
 use crate::packets::world::{
-    ChatSender, SCChatMessagePacket, SCJoinedChatChannelPacket, SCLeavedChatChannelPacket,
+    ChatSender, SCChatMessagePacket, SCErrorMsgPacket, SCJoinedChatChannelPacket,
+    SCLeavedChatChannelPacket,
 };
 use crate::systems::social::config::ChatConfig;
+use crate::systems::social::util::ChatFailure;
 use crate::world::PlayerRef;
 
 /// `ChatType`.
@@ -71,6 +75,83 @@ pub fn chat_spam_allows(
     }
     last_send[group] = Some(now + Duration::from_millis(u64::from(delay_ms)));
     true
+}
+
+/// Access level from which a character is treated as a GM: the same threshold as the
+/// closed-zone bypass (`world::zone_access`), so a character with it is exempt from
+/// `Chat.MinLevelByChatType`. Account-level elevation alone is not consulted here (the chat
+/// path is synchronous and does not read the account row).
+pub const GM_ACCESS_LEVEL: i32 = 100;
+
+/// Why an outgoing chat message was refused before routing (SL4b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRefusal {
+    /// Below `Chat.MinLevelByChatType` for this chat type.
+    LevelTooLow,
+    /// `characters.chat_restricted_until` is still in the future (`/restrict_chat`).
+    /// `remaining_seconds` is `until - now` at the refusal (the client shows
+    /// `duration / 60 + 1` minutes), `until` the persisted end.
+    Muted {
+        remaining_seconds: u32,
+        until: UnixTime,
+    },
+}
+
+/// The SL4b gate: the configured per-type minimum level (GMs exempt) and the persisted mute.
+///
+/// Both checks read (and the mute expiry clears) the same [`Character`], so the caller must
+/// hold its `data()` lock once and pass the guard's character here. The mute check runs after
+/// the level check; both rules are independent, and the order is not evidenced.
+pub fn chat_refusal(
+    config: &ChatConfig,
+    c: &mut Character,
+    chat_type: i16,
+    now: UnixTime,
+) -> Option<ChatRefusal> {
+    if c.access_level < GM_ACCESS_LEVEL && c.unit.level < config.min_level(chat_type) {
+        return Some(ChatRefusal::LevelTooLow);
+    }
+    if c.chat_restricted(now) {
+        let remaining_seconds =
+            u32::try_from(c.chat_restricted_until.saturating_sub(now)).unwrap_or(u32::MAX);
+        return Some(ChatRefusal::Muted {
+            remaining_seconds,
+            until: c.chat_restricted_until,
+        });
+    }
+    None
+}
+
+/// Tells the sender why the message was dropped. The level refusal is
+/// `CHAT_CANNOT_SEND_SINCE_LEVEL_LOW` 786 (the localized text asks for `$1`, the level; the
+/// `SCErrorMsgPacket` argument mechanism is UNKNOWN, so no argument is sent). The mute refusal
+/// is `SCRestrictInfoPacket`, which the client's `FUN_393c4170` turns into the
+/// `restrict_remain_time` system line ("chat banned, released in `$1` minutes") using the
+/// remaining seconds. Retail's trigger for that notice is UNKNOWN; the refused chat attempt is
+/// INFERRED (`CHAT-RESTRICT-1`).
+pub fn send_chat_refusal(p: &PlayerRef, refusal: ChatRefusal) {
+    match refusal {
+        ChatRefusal::LevelTooLow => p.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::CHAT_CANNOT_SEND_SINCE_LEVEL_LOW,
+            0,
+            true,
+        )),
+        ChatRefusal::Muted {
+            remaining_seconds,
+            until,
+        } => {
+            let chname = p.data().unit.name.clone();
+            p.send(super::packets::chat::SCRestrictInfoPacket {
+                chname,
+                index: 0,
+                code: 0,
+                duration: remaining_seconds,
+                // The mute start is not persisted; the client ignores both dates (INFERRED).
+                start: until.saturating_sub(i64::from(remaining_seconds)),
+                end: until,
+            })
+        }
+    }
 }
 
 /// `CourtRoomRegion`.
@@ -540,7 +621,7 @@ impl ChatManager {
         password: &str,
         create: bool,
         chat_ids: &IdManager,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ChatFailure> {
         use super::util::error;
         if name.is_empty()
             || name.len() > USER_CHANNEL_NAME_BYTES
@@ -548,7 +629,7 @@ impl ChatManager {
             || password.len() > USER_CHANNEL_PASSWORD_BYTES
             || password.chars().any(char::is_control)
         {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
         }
         let mut channels = self.user_channels.lock().expect("chat poisoned");
         let joined_count = || channels.values().filter(|c| c.channel.contains(p)).count();
@@ -557,19 +638,19 @@ impl ChatManager {
             .find(|c| c.channel.internal_name() == name);
         if let Some(existing) = existing {
             if create {
-                return Err(error::CHAT_CHANNEL_ALREADY_EXISTS);
+                return Err(ChatFailure::new(error::CHAT_CHANNEL_ALREADY_EXISTS, name));
             }
             if existing.channel.contains(p) {
-                return Err(error::CHAT_ALREADY_JOINED_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_ALREADY_JOINED_CHANNEL, name));
             }
             if !existing.password.is_empty() && password.is_empty() {
-                return Err(error::CHAT_PRIVATE_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_PRIVATE_CHANNEL, name));
             }
             if existing.password != password {
-                return Err(error::CHAT_WRONG_PASSWORD);
+                return Err(ChatFailure::new(error::CHAT_WRONG_PASSWORD, name));
             }
             if joined_count() >= USER_CHANNELS_PER_SESSION {
-                return Err(error::CHAT_NO_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
             }
             existing.channel.join(p);
             return Ok(());
@@ -578,9 +659,11 @@ impl ChatManager {
             || joined_count() >= USER_CHANNELS_PER_SESSION
             || channels.len() >= USER_CHANNELS_TOTAL
         {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
         }
-        let id = chat_ids.get_next_id().map_err(|_| error::CHAT_NO_CHANNEL)?;
+        let id = chat_ids
+            .get_next_id()
+            .map_err(|_| ChatFailure::new(error::CHAT_NO_CHANNEL, name))?;
         let channel = Arc::new(ChatChannel::new(
             chat_type::USER,
             0,
@@ -606,16 +689,19 @@ impl ChatManager {
         p: &PlayerRef,
         identity: i64,
         chat_ids: &IdManager,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ChatFailure> {
         use super::util::error;
         let mut channels = self.user_channels.lock().expect("chat poisoned");
         let id = (identity as u64 >> 32) as u32;
         let entry = channels
             .get(&id)
             .filter(|c| user_channel_identity(&c.channel) == identity)
-            .ok_or(error::CHAT_NO_CHANNEL)?;
+            .ok_or_else(|| ChatFailure::new(error::CHAT_NO_CHANNEL, ""))?;
         if !entry.channel.leave(p) {
-            return Err(error::CHAT_NOT_JOINED_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NOT_JOINED_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         if entry.channel.is_empty() {
             channels.remove(&id);
@@ -631,23 +717,32 @@ impl ChatManager {
         sub_type: i16,
         channel_id: u32,
         message: &SCChatMessagePacket,
-    ) -> Result<usize, i16> {
+    ) -> Result<usize, ChatFailure> {
         use super::util::error;
         let channels = self.user_channels.lock().expect("chat poisoned");
         let entry = channels
             .get(&channel_id)
             .filter(|c| c.channel.sub_type == sub_type)
-            .ok_or(error::CHAT_NO_CHANNEL)?;
+            .ok_or_else(|| ChatFailure::new(error::CHAT_NO_CHANNEL, ""))?;
         if !entry.channel.contains(p) {
-            return Err(error::CHAT_NOT_JOINED_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NOT_JOINED_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         if message.message.len() > i16::MAX as usize {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NO_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         let packet = super::packets::chat::user_message(&entry.channel, message);
         // The six-byte plain packet header is part of the transport's u16 frame length.
         if packet.body.len() + 6 > u16::MAX as usize {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NO_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         Ok(entry.channel.send_packet(&packet))
     }

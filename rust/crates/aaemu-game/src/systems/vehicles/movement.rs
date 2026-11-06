@@ -113,7 +113,8 @@ pub fn vehicle_move(
 pub fn on_mate_unit_move(server: &GameServer, character: &PlayerRef, mate: &MateRef, u: &UnitMove) {
     let obj = WorldObject::from(mate);
     remove_effects(server, &obj, u);
-    // TODO (C#): Check if we're the owner, or allowed to otherwise control this pet
+    // Authority (the character itself or its owned mate) is checked by
+    // `world::session::move_unit` before this call.
     if u.vel_x != 0 || u.vel_y != 0 {
         mates::start_update_xp(server, character, mate);
     } else {

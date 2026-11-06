@@ -25,6 +25,7 @@ use crate::world::PlayerRef;
 
 const SWORD: u32 = 5001; // "Iron Sword", level 20, categories 1/2/3
 const POTION: u32 = 5002; // "Healing Potion", level 5, categories 4/0/0
+const SIEGE_CAMP: u32 = 5003; // "Siege Camp", category 11 (declare_siege)
 
 #[derive(Default)]
 struct MailLog(Mutex<Vec<AuctionMail>>);
@@ -91,6 +92,14 @@ fn auction_world() -> (World, Arc<MailLog>) {
             level: 5,
             auction_category_a: 4,
             ..ItemTemplate::plain(POTION, 20)
+        },
+    );
+    d.items.templates.insert(
+        SIEGE_CAMP,
+        ItemTemplate {
+            level: 1,
+            auction_category_a: 11,
+            ..ItemTemplate::plain(SIEGE_CAMP, 1)
         },
     );
     let mut en = HashMap::new();
@@ -209,6 +218,13 @@ fn bid_packet_body(
     s.into_bytes()
 }
 
+/// `SCAuctionMessagePacket` body: msgType, itemType, moneyAmount.
+fn message_body(msg_type: u8, item_type: u32, money: i32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u8(msg_type).write_u32(item_type).write_i32(money);
+    s.into_bytes()
+}
+
 fn cancel_body(lot_id: u64) -> Vec<u8> {
     let mut s = PacketStream::new();
     s.write_bc(0x200).write_bc(0x200);
@@ -324,6 +340,32 @@ fn sc_auction_posted_and_canceled_are_byte_exact() {
     assert_eq!(SCAuctionSearchedPacket::OPCODE, 0x12f);
     assert_eq!(SCAuctionLowestPricePacket::OPCODE, 0x130);
     assert_eq!(SCAuctionBidPacket::OPCODE, 0x131);
+    assert_eq!(SCAuctionMessagePacket::OPCODE, 0x133);
+}
+
+/// Body layout from the 1.2 client reader `FUN_397b56f0`: u8 msgType, u32 itemType,
+/// i32 moneyAmount (literals, not the writer).
+#[test]
+fn sc_auction_message_is_byte_exact() {
+    let p = SCAuctionMessagePacket {
+        msg_type: 0,
+        item_type: 5001,     // 0x0000_1389
+        money_amount: 12345, // 0x0000_3039
+    };
+    assert_eq!(
+        body(&p),
+        vec![0x00, 0x89, 0x13, 0x00, 0x00, 0x39, 0x30, 0x00, 0x00]
+    );
+
+    let p = SCAuctionMessagePacket {
+        msg_type: 1,
+        item_type: 0x0403_0201,
+        money_amount: 0x0807_0605,
+    };
+    assert_eq!(
+        body(&p),
+        vec![0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+    );
 }
 
 #[test]
@@ -647,6 +689,58 @@ async fn search_filters_sorts_and_pages() {
 }
 
 #[tokio::test]
+async fn declare_siege_filter_lists_only_the_siege_camps() {
+    let (mut w, _log) = auction_world();
+    let (_, camp_one) = post(&mut w, SIEGE_CAMP, 0, 100, 0);
+    let (_, sword) = post(&mut w, SWORD, 1, 100, 0);
+    let (_, camp_two) = post(&mut w, SIEGE_CAMP, 2, 100, 0);
+    w.a.drain();
+
+    let search = |w: &mut World, s: AuctionSearch| -> Vec<u8> {
+        run::<CSAuctionSearchPacket>(w, 1, &search_body(&s));
+        let frames = w.b.drain();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, sc::SCAuctionSearchedPacket);
+        let b = frames[0].1.clone();
+        b[..b.len() - 8].to_vec() // without the server time
+    };
+    let page = |p: i32, lots: &[&AuctionLot]| -> Vec<u8> {
+        let mut s = PacketStream::new();
+        s.write_i32(p).write_i32(lots.len() as i32);
+        for l in lots {
+            s.write_raw(&lot_bytes(l));
+        }
+        s.write_i16(0);
+        s.into_bytes()
+    };
+
+    // The declare tab (`filter = 1`) keeps only the category-11 lots.
+    let declare = AuctionSearch {
+        filter: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        search(&mut w, declare),
+        page(0, &[&camp_one, &camp_two]),
+        "filter 1 must list the two camps and hide the sword"
+    );
+    // The normal tab is unchanged and still lists every lot.
+    assert_eq!(
+        search(&mut w, AuctionSearch::default()),
+        page(0, &[&camp_one, &sword, &camp_two])
+    );
+    // An unknown filter behaves like the normal tab.
+    let unknown = AuctionSearch {
+        filter: 7,
+        ..Default::default()
+    };
+    assert_eq!(
+        search(&mut w, unknown),
+        page(0, &[&camp_one, &sword, &camp_two])
+    );
+}
+
+#[tokio::test]
 async fn search_pages_hold_nine_lots() {
     let (mut w, _log) = auction_world();
     w.pa.data().money = 1_000_000;
@@ -737,6 +831,14 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
         (2, "Bob", 500, 0)
     );
     assert!(log.take().is_empty());
+    // The online seller is told about the accepted bid (type 0).
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BIDDEN, SWORD, 500)
+        )]
+    );
 
     // A lower bid is ignored.
     run::<CSBidAuctionPacket>(&mut w, 0, &bid_body(lot.id, 400));
@@ -834,6 +936,53 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
     run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 5000));
     assert!(w.b.drain().is_empty());
     assert!(log.take().is_empty());
+}
+
+/// An online seller gets `SCAuctionMessage` type 0 when a bid is accepted and type 1 when the
+/// lot is bought out (the sale path shared with a timed winner); the mail still carries the
+/// result.
+#[tokio::test]
+async fn online_seller_gets_bid_and_sale_messages() {
+    let (mut w, _log) = auction_world();
+    let (_, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    w.a.drain();
+
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 500));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BIDDEN, SWORD, 500)
+        )]
+    );
+
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BOUGHT_BY_SOMEONE, SWORD, 1000)
+        )]
+    );
+    assert!(w.server.systems.economy.auction.lot(lot.id).is_none());
+}
+
+/// An offline seller gets no live message; the sale mail is delivered as before.
+#[tokio::test]
+async fn offline_seller_gets_no_auction_message_but_the_mails() {
+    let (mut w, log) = auction_world();
+    let (_, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    assert!(w.server.world.try_remove_character(w.pa.obj_id));
+    w.a.drain();
+
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 500));
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    assert!(
+        w.a.drain().is_empty(),
+        "no live notice for an offline seller"
+    );
+    let mails = log.take();
+    assert_eq!(mails.len(), 3, "outbid refund, sale seller, sale buyer");
 }
 
 #[tokio::test]
@@ -982,8 +1131,94 @@ async fn expiry_returns_unsold_and_delivers_won_lots() {
     let mut deleted = ah.deleted_ids();
     deleted.sort_unstable();
     assert_eq!(deleted, vec![unsold.id, won.id]);
-    // Auction ids are released for reuse.
-    assert!(w.a.drain().is_empty());
+    // Auction ids are released for reuse. The seller only hears about the won lot (type 1),
+    // not about the unsold return.
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BOUGHT_BY_SOMEONE, POTION, 700)
+        )]
+    );
+}
+
+/// Posts a system lot (`client_id = 0`) the way the GM command does, outside the fixtures'
+/// player-posted path.
+fn post_system(w: &mut World, template: u32, start: i32) -> AuctionLot {
+    let auction = &w.server.systems.economy.auction;
+    let _items = w.server.systems.economy.operation_scope();
+    let _op = auction.operation_lock();
+    let lot = AuctionManager::create_system_lot(
+        &w.server,
+        template,
+        start,
+        0,
+        auction_duration::HOURS_6,
+        Utc::now(),
+    )
+    .expect("system lot");
+    auction.add_auction_lot(lot.clone());
+    lot
+}
+
+/// A system lot (`client_id = 0`) sold at expiry: the buyer gets the item by the normal auction
+/// mail, the money is destroyed (there is no seller to pay or mail).
+#[tokio::test]
+async fn system_lot_expiry_mails_the_item_to_the_buyer_only() {
+    let (mut w, _log) = auction_world();
+    crate::systems::economy::wiring::install(&w.server);
+    let lot = post_system(&mut w, SIEGE_CAMP, 100);
+    let item_id = lot.item_id();
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 100));
+    assert_eq!(money(&w.pb), 100_000 - 100);
+    let ah = &w.server.systems.economy.auction;
+    let later = lot.end_time + Duration::seconds(1);
+    ah.update_auction_house(&w.server, later);
+
+    assert!(ah.lot(lot.id).is_none());
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    let buyer = mails_to(&w.server, 2);
+    assert_eq!(buyer.len(), 1, "the buyer's win mail");
+    assert_eq!(
+        buyer[0].mail_type,
+        crate::systems::economy::mail::mail_type::AUC_BID_WIN
+    );
+    assert_eq!(buyer[0].body.attachments, vec![item_id]);
+    assert_eq!(buyer[0].body.copper_coins, 0);
+    assert_eq!(
+        mails_to(&w.server, 1),
+        vec![],
+        "no seller 0 / Alice mail for a system lot"
+    );
+    assert_eq!(mails_to(&w.server, 0), Vec::new());
+    let item = w.server.items.item_by_id(item_id).expect("the camp item");
+    assert_eq!(
+        (item.owner_id, item.slot_type),
+        (2, slot_type::MAIL),
+        "the item is attached to the buyer's mail"
+    );
+}
+
+/// An unsold system lot is not returned to a seller (there is none): the item is deleted and
+/// both the lot row and the item row are queued for deletion, leaving no orphan.
+#[tokio::test]
+async fn system_lot_unbid_expiry_deletes_the_item_and_leaves_no_orphan() {
+    let (mut w, log) = auction_world();
+    let lot = post_system(&mut w, SIEGE_CAMP, 100);
+    let item_id = lot.item_id();
+    let ah = &w.server.systems.economy.auction;
+    let later = lot.end_time + Duration::seconds(1);
+    ah.update_auction_house(&w.server, later);
+
+    assert!(ah.lot(lot.id).is_none());
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    assert!(w.server.items.item_by_id(item_id).is_none());
+    assert!(
+        w.server.items.removed_items().contains(&item_id),
+        "the item row is queued for deletion"
+    );
+    assert!(log.take().is_empty(), "no return mail for a system lot");
+    assert!(mails_to(&w.server, 0).is_empty());
 }
 
 /// A failed sale mail must not drop the lot (the seller's money / buyer's item would be lost):
@@ -1332,7 +1567,7 @@ async fn sale_and_win_mails_can_be_taken_all_and_deleted() {
     assert_eq!(ran, 100_000 - 20 + 900);
 }
 
-/// The outbid refund (`AucOffFail` money mail) taken with take-all-and-delete: the exact
+/// The outbid refund (`AucBidFail` money mail) taken with take-all-and-delete: the exact
 /// sequence the Bevy client's live auction test hung on (bid, buyout by someone else, claim the
 /// refund).
 #[tokio::test]

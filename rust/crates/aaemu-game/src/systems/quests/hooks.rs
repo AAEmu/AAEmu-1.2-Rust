@@ -55,6 +55,17 @@ pub trait QuestHooks: Send + Sync {
     ) {
     }
 
+    /// `QuestActSupplyHonorPoint`: `World.HonorRate` then the Quest honor attribute pair
+    /// (`HonorPointGainQuest` / `...Mul`), credited as `GAME_POINT_HONOR`.
+    fn grant_quest_honor(
+        &self,
+        _server: &GameServer,
+        _player: Option<&PlayerRef>,
+        _c: &mut Character,
+        _amount: i32,
+    ) {
+    }
+
     /// `Character.ChangeLabor(amount, actabilityId)`.
     fn change_labor(
         &self,

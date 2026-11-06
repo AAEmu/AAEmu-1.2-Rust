@@ -234,9 +234,13 @@ mod tests {
         assert_eq!(gm.chat(), ["[Scripts] Using: /scripts <action>"]);
         let (_, out) = harness::run(&server, &gm.p, "scripts reload").await;
         assert_eq!(out, ["[scripts] [Scripts] Reload - Success"]);
+        // Rust-only additions: `/premium`, `/secondpassword`, `/mail`, the seven retail
+        // tax / crime / social commands of WP-SL6b, `/restrict_chat` of WP-SL4b, the two
+        // auction GM keys and the seven siege / dominion commands of WP-SL6a, plus `/aapoint`
+        // and the two guild rename controls.
         assert_eq!(
             server.systems.services.commands.get_command_keys().len(),
-            100
+            122
         );
         let (_, out) = harness::run(&server, &gm.p, "scripts what").await;
         assert_eq!(out, [harness::error("scripts", "Undefined action...")]);
