@@ -139,10 +139,6 @@ pub struct Character {
     pub leave_time: UnixTime,
     pub money: i64,
     pub money2: i64,
-    /// Carried AA points (the third `moneyAmount` of `SCCharacterState`).
-    pub aa_point: i64,
-    /// Banked AA points (the fourth `moneyAmount` of `SCCharacterState`).
-    pub bank_aa_point: i64,
     pub honor_point: i32,
     pub vocation_point: i32,
     /// Current crime points (clamped to >= 0 by the C# setter).
@@ -321,8 +317,6 @@ impl Character {
             leave_time: 0,
             money: 0,
             money2: 0,
-            aa_point: 0,
-            bank_aa_point: 0,
             honor_point: 0,
             vocation_point: 0,
             crime_point: 0,

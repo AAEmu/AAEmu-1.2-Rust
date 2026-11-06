@@ -70,11 +70,8 @@ pub fn character_state(c: &Character, bounty_money: i64) -> SCCharacterStatePack
         .write_i16(c.num_bank_slots)
         .write_i64(c.money)
         .write_i64(c.money2)
-        // The client's character-state reader takes four `i64` moneyAmount fields in order:
-        // money, bank money, AA point, bank AA point (`FUN_394c9580` / `FUN_394c9640` read
-        // `+0xc330` / `+0xc338` of the inventory object that starts at the first one).
-        .write_i64(c.aa_point)
-        .write_i64(c.bank_aa_point)
+        .write_i64(0)
+        .write_i64(0)
         .write_bool(c.auto_use_aa_point)
         .write_i32(c.jury_point)
         .write_i32(0) // jailSeconds
@@ -811,27 +808,18 @@ mod tests {
     }
 
     #[test]
-    fn character_state_wallet_has_aa_points_after_the_two_purses() {
+    fn character_state_writes_zero_third_and_fourth_money_amounts() {
         let mut c = Character::new(5, 1, UnitCustomModelParams::default());
         c.money = 0x0102_0304_0506_0708;
         c.money2 = 0x1112_1314_1516_1718;
-        c.aa_point = 0x2122_2324_2526_2728;
-        c.bank_aa_point = 0x3132_3334_3536_3738;
         let body = character_state(&c, 0).body;
-        // The four moneyAmount i64 end 46 bytes before the packet end: autoUseAAPoint (1),
+        // The four moneyAmount i64 end 78 bytes before the packet end: autoUseAAPoint (1),
         // jury (4), jail (4), bounty (8), bounty time (8), reported (4), suspected (4),
-        // play time (4), created (8), expandedExpert (1).
+        // play time (4), created (8), expandedExpert (1). AA points are not supported, so
+        // the third / fourth slots keep the zeroes the pre-AA packet wrote.
         let base = body.len() - 78;
         assert_eq!(body[base..base + 8], c.money.to_le_bytes());
         assert_eq!(body[base + 8..base + 16], c.money2.to_le_bytes());
-        assert_eq!(body[base + 16..base + 24], c.aa_point.to_le_bytes());
-        assert_eq!(body[base + 24..base + 32], c.bank_aa_point.to_le_bytes());
-
-        // 0 AA points (the pre-wallet default) writes the zero bytes the packet had.
-        c.aa_point = 0;
-        c.bank_aa_point = 0;
-        let body = character_state(&c, 0).body;
-        let base = body.len() - 78;
         assert_eq!(body[base + 16..base + 32], [0u8; 16]);
     }
 }

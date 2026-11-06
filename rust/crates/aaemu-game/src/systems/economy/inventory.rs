@@ -1492,18 +1492,12 @@ pub fn coffer_items(
 }
 
 /// `Inventory.ExpandSlot(slotType)`.
-pub fn expand_slot(
-    txn: &mut ItemTxn<'_>,
-    player: &PlayerRef,
-    inv: &Inv,
-    st: u8,
-    auto_use_aa_point: bool,
-) {
+pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8) {
     let server = txn.server;
     let is_bank = st == slot_type::BANK;
-    let (num_bank, num_inv, money, aa_point) = {
+    let (num_bank, num_inv, money) = {
         let c = player.data();
-        (c.num_bank_slots, c.num_inventory_slots, c.money, c.aa_point)
+        (c.num_bank_slots, c.num_inventory_slots, c.money)
     };
     let step = (if is_bank {
         i32::from(num_bank)
@@ -1519,30 +1513,9 @@ pub fn expand_slot(
     let Some(expand) = expands.iter().find(|e| e.is_bank == is_bank).copied() else {
         return;
     };
-    let mut aa_cost = 0i32;
     if expand.price != 0 && money < i64::from(expand.price) {
-        if !auto_use_aa_point {
-            tracing::warn!("No Money for expand!");
-            return;
-        }
-        // Cover the gold shortage with AA points 1:1 (INFERRED from the `ask_use_aa_point`
-        // client text; the rate is not evidenced). A short AA purse refuses the whole
-        // expansion before anything is consumed or expanded.
-        let shortage = i64::from(expand.price) - money;
-        let Ok(shortage) = i32::try_from(shortage) else {
-            tracing::warn!("No Money or AA points for expand!");
-            send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
-            return;
-        };
-        if aa_point < i64::from(shortage) {
-            tracing::warn!(
-                "No Money or AA points for expand! Money: {money}, AAPoint: {aa_point}, Price: {}",
-                expand.price
-            );
-            send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
-            return;
-        }
-        aa_cost = shortage;
+        tracing::warn!("No Money for expand!");
+        return;
     }
     if expand.item_id != 0
         && expand.item_count != 0
@@ -1567,31 +1540,16 @@ pub fn expand_slot(
     if expand.price != 0 {
         // `tasks.Add(new MoneyChange(-expand.Price))` was collected but never sent in C#; the
         // client needs the change to update its displayed money.
-        let action = if is_bank {
-            task_type::EXPAND_BANK
-        } else {
-            task_type::EXPAND_BAG
-        };
-        if aa_cost > 0 {
-            let gold_cost = expand.price - aa_cost;
-            if !take_money_and_aa_point(
-                &mut txn.out(),
-                player,
-                slot_type::INVENTORY,
-                gold_cost,
-                aa_cost,
-                action,
-            ) {
-                return;
-            }
-        } else {
-            player.data().money -= i64::from(expand.price);
-            txn.env.fx.tasks(
-                player.character_id,
-                action,
-                vec![ItemTask::MoneyChange(-expand.price)],
-            );
-        }
+        player.data().money -= i64::from(expand.price);
+        txn.env.fx.tasks(
+            player.character_id,
+            if is_bank {
+                task_type::EXPAND_BANK
+            } else {
+                task_type::EXPAND_BAG
+            },
+            vec![ItemTask::MoneyChange(-expand.price)],
+        );
     }
     if expand.item_id != 0 && expand.item_count != 0 {
         inv.bag().lock().expect("container poisoned").consume_item(
@@ -1807,372 +1765,6 @@ pub fn subtract_money(
         return false;
     }
     change_money(out, player, slot_type::NONE, location, -amount, task)
-}
-
-/// The composition of one payment: the gold part and the 1:1 AA-point shortage cover.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PaymentSplit {
-    pub gold: i32,
-    pub aa_point: i32,
-}
-
-impl PaymentSplit {
-    pub fn total(self) -> i64 {
-        i64::from(self.gold) + i64::from(self.aa_point)
-    }
-}
-
-/// Whether the carried gold purse can pay `amount`, covering a shortage from the AA wallet
-/// when `auto_use_aa_point` is set. A read-only pre-check for callers that must refuse before
-/// another mutation (e.g. housing extending the tax protection); the charge itself is
-/// [`try_take_gold_or_aa`].
-pub fn can_afford_gold_or_aa(player: &PlayerRef, amount: i32, auto_use_aa_point: bool) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    let c = player.data();
-    if c.money < 0 || c.aa_point < 0 {
-        return false;
-    }
-    let available = c.money + if auto_use_aa_point { c.aa_point } else { 0 };
-    available >= i64::from(amount)
-}
-
-/// Pays `amount` from the carried gold purse. With `auto_use_aa_point`, a gold shortage is
-/// covered 1:1 from the carried AA wallet (INFERRED from the `ask_use_aa_point` /
-/// `auto_use_aa_point` client texts; the flag is what the 1.2 packets carry). All gold is spent
-/// before AA points, the balance check and both debits happen under one character lock, and a
-/// single `SCItemTaskSuccessPacket` carries the money and AA deltas. `None` means neither purse
-/// changed and no packet was sent; the caller sends its own existing error.
-pub fn try_take_gold_or_aa(
-    out: &mut Out<'_>,
-    player: &PlayerRef,
-    amount: i32,
-    auto_use_aa_point: bool,
-    task: u8,
-) -> Option<PaymentSplit> {
-    if amount < 0 {
-        return None;
-    }
-    let split = {
-        let mut c = player.data();
-        if c.money < 0 || c.aa_point < 0 {
-            return None;
-        }
-        let owed = i64::from(amount);
-        let gold = c.money.min(owed);
-        let aa_point = owed - gold;
-        if aa_point > 0 && (!auto_use_aa_point || aa_point > c.aa_point) {
-            return None;
-        }
-        c.money -= gold;
-        c.aa_point -= aa_point;
-        PaymentSplit {
-            gold: gold as i32,
-            aa_point: aa_point as i32,
-        }
-    };
-    let mut tasks = vec![ItemTask::MoneyChange(-split.gold)];
-    if split.aa_point > 0 {
-        tasks.push(ItemTask::AaPointUpdate(-split.aa_point));
-    }
-    out.send(
-        player,
-        super::item_packets::SCItemTaskSuccessPacket {
-            action: task,
-            tasks,
-            force_remove: Vec::new(),
-        },
-    );
-    Some(split)
-}
-
-/// Sends the wallet update of an AA-point change (`ItemTask` 16 / 17). The 1.2 client applies
-/// these with the same delta path as `MoneyChange` / `MoneyChangeBank` (`FUN_397d1030`); that
-/// the amount is a delta and not the new balance is INFERRED from that symmetry.
-fn send_aa_point_task(out: &mut Out<'_>, player: &PlayerRef, bank: bool, delta: i32, task: u8) {
-    let update = if bank {
-        ItemTask::ChangeBankAaPoint(delta)
-    } else {
-        ItemTask::AaPointUpdate(delta)
-    };
-    out.send(
-        player,
-        super::item_packets::SCItemTaskSuccessPacket {
-            action: task,
-            tasks: vec![update],
-            force_remove: Vec::new(),
-        },
-    );
-}
-
-/// Adds AA points to the carried purse. `amount < 0` is refused like `add_money`; the caller
-/// takes points with [`try_take_aa_point`].
-pub fn add_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    player.data().aa_point += i64::from(amount);
-    send_aa_point_task(out, player, false, amount, task);
-    true
-}
-
-/// Takes AA points from the carried purse: the check and the debit happen under one
-/// character lock, so two concurrent takes cannot overdraw. A short balance sends
-/// `NOT_ENOUGH_AA_POINT` and changes nothing.
-pub fn try_take_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    {
-        let mut c = player.data();
-        if i64::from(amount) > c.aa_point {
-            drop(c);
-            send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
-            return false;
-        }
-        c.aa_point -= i64::from(amount);
-    }
-    send_aa_point_task(out, player, false, -amount, task);
-    true
-}
-
-/// Adds AA points to the bank purse (`/aapoint ... bank`, later bank transfers).
-pub fn add_bank_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    player.data().bank_aa_point += i64::from(amount);
-    send_aa_point_task(out, player, true, amount, task);
-    true
-}
-
-/// Takes AA points from the bank purse under one character lock (`NOT_ENOUGH_BANK_AA_POINT`
-/// when short).
-pub fn try_take_bank_aa_point(
-    out: &mut Out<'_>,
-    player: &PlayerRef,
-    amount: i32,
-    task: u8,
-) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    {
-        let mut c = player.data();
-        if i64::from(amount) > c.bank_aa_point {
-            drop(c);
-            send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
-            return false;
-        }
-        c.bank_aa_point -= i64::from(amount);
-    }
-    send_aa_point_task(out, player, true, -amount, task);
-    true
-}
-
-/// Debits gold and AA points from the same purse (`SlotType.Inventory` or `SlotType.Bank`) in
-/// one operation: both balances are checked and changed under one character lock, so a refusal
-/// changes neither. The successful debit sends one `SCItemTaskSuccessPacket` with the money
-/// task followed by the AA task. A short gold purse sends `NOT_ENOUGH_MONEY`; a short AA purse
-/// sends `NOT_ENOUGH_AA_POINT` 707 (carried) / `NOT_ENOUGH_BANK_AA_POINT` 708 (bank).
-pub fn take_money_and_aa_point(
-    out: &mut Out<'_>,
-    player: &PlayerRef,
-    location: u8,
-    money: i32,
-    aa_point: i32,
-    task: u8,
-) -> bool {
-    if money < 0 || aa_point < 0 {
-        return false;
-    }
-    let mut tasks = Vec::new();
-    {
-        let mut c = player.data();
-        match location {
-            slot_type::INVENTORY => {
-                if i64::from(money) > c.money {
-                    drop(c);
-                    send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
-                    return false;
-                }
-                if i64::from(aa_point) > c.aa_point {
-                    drop(c);
-                    send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
-                    return false;
-                }
-                c.money -= i64::from(money);
-                c.aa_point -= i64::from(aa_point);
-                if money != 0 {
-                    tasks.push(ItemTask::MoneyChange(-money));
-                }
-                if aa_point != 0 {
-                    tasks.push(ItemTask::AaPointUpdate(-aa_point));
-                }
-            }
-            slot_type::BANK => {
-                if i64::from(money) > c.money2 {
-                    drop(c);
-                    send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
-                    return false;
-                }
-                if i64::from(aa_point) > c.bank_aa_point {
-                    drop(c);
-                    send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
-                    return false;
-                }
-                c.money2 -= i64::from(money);
-                c.bank_aa_point -= i64::from(aa_point);
-                if money != 0 {
-                    tasks.push(ItemTask::MoneyChangeBank(-money));
-                }
-                if aa_point != 0 {
-                    tasks.push(ItemTask::ChangeBankAaPoint(-aa_point));
-                }
-            }
-            _ => {}
-        }
-    }
-    out.send(
-        player,
-        super::item_packets::SCItemTaskSuccessPacket {
-            action: task,
-            tasks,
-            force_remove: Vec::new(),
-        },
-    );
-    true
-}
-
-/// Moves gold and AA points between the carried and the bank purse in one operation
-/// (`deposit` = carried -> bank). Both purses are checked and changed under one character lock,
-/// so a short purse changes nothing; it sends `NOT_ENOUGH_MONEY` for gold,
-/// `NOT_ENOUGH_AA_POINT` 707 for a short carried AA purse (deposit) and
-/// `NOT_ENOUGH_BANK_AA_POINT` 708 for a short bank AA purse (withdraw).
-pub fn transfer_bank_money_and_aa_point(
-    out: &mut Out<'_>,
-    player: &PlayerRef,
-    deposit: bool,
-    money: i32,
-    aa_point: i32,
-    task: u8,
-) -> bool {
-    if money < 0 || aa_point < 0 {
-        return false;
-    }
-    let mut tasks = Vec::new();
-    let mut gold_report = None;
-    {
-        let mut c = player.data();
-        if deposit {
-            if i64::from(money) > c.money {
-                drop(c);
-                send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
-                return false;
-            }
-            if i64::from(aa_point) > c.aa_point {
-                drop(c);
-                send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
-                return false;
-            }
-            c.money -= i64::from(money);
-            c.money2 += i64::from(money);
-            c.aa_point -= i64::from(aa_point);
-            c.bank_aa_point += i64::from(aa_point);
-            if money != 0 {
-                tasks.push(ItemTask::MoneyChange(-money));
-                tasks.push(ItemTask::MoneyChangeBank(money));
-            }
-            if aa_point != 0 {
-                tasks.push(ItemTask::AaPointUpdate(-aa_point));
-                tasks.push(ItemTask::ChangeBankAaPoint(aa_point));
-            }
-        } else {
-            if i64::from(money) > c.money2 {
-                drop(c);
-                send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
-                return false;
-            }
-            if i64::from(aa_point) > c.bank_aa_point {
-                drop(c);
-                send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
-                return false;
-            }
-            let before = c.money;
-            c.money2 -= i64::from(money);
-            c.money += i64::from(money);
-            c.bank_aa_point -= i64::from(aa_point);
-            c.aa_point += i64::from(aa_point);
-            if money != 0 {
-                tasks.push(ItemTask::MoneyChangeBank(-money));
-                tasks.push(ItemTask::MoneyChange(money));
-            }
-            if aa_point != 0 {
-                tasks.push(ItemTask::ChangeBankAaPoint(-aa_point));
-                tasks.push(ItemTask::AaPointUpdate(aa_point));
-            }
-            if c.money > before {
-                gold_report = Some(c.money);
-            }
-        }
-    }
-    if let Some(money) = gold_report {
-        match &mut *out {
-            Out::Direct(server) => {
-                crate::systems::social::achievement_hooks::report_gold(server, player, money);
-            }
-            Out::Queue(_, fx) => fx.push(ItemFx::Money {
-                owner: player.character_id,
-                money,
-            }),
-        }
-    }
-    out.send(
-        player,
-        super::item_packets::SCItemTaskSuccessPacket {
-            action: task,
-            tasks,
-            force_remove: Vec::new(),
-        },
-    );
-    true
-}
-
-/// Sets the carried AA balance (GM / debug source). The new balance and its `i32` delta are
-/// applied under one character lock; a negative target or a delta the item task cannot carry
-/// is refused without changing anything.
-pub fn set_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    let delta = {
-        let mut c = player.data();
-        let Ok(delta) = i32::try_from(i64::from(amount) - c.aa_point) else {
-            return false;
-        };
-        c.aa_point = i64::from(amount);
-        delta
-    };
-    send_aa_point_task(out, player, false, delta, task);
-    true
-}
-
-/// Sets the bank AA balance under one character lock (see [`set_aa_point`]).
-pub fn set_bank_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
-    if amount < 0 {
-        return false;
-    }
-    let delta = {
-        let mut c = player.data();
-        let Ok(delta) = i32::try_from(i64::from(amount) - c.bank_aa_point) else {
-            return false;
-        };
-        c.bank_aa_point = i64::from(amount);
-        delta
-    };
-    send_aa_point_task(out, player, true, delta, task);
-    true
 }
 
 /// `Character.ChangeGamePoints(kind, change)`.

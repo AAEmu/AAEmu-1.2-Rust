@@ -840,7 +840,7 @@ async fn new_house_prepaid_period_is_paid_before_first_bill_and_renewal_covers_o
     let before = house.data().protection_end_date;
     {
         let mut txn = ItemTxn::begin(&f.server);
-        assert!(mail::pay_charge_money(&mut txn, &f.player, mails[0], false).is_some());
+        assert!(mail::pay_charge_money(&mut txn, &f.player, mails[0], false));
     }
     assert_eq!(house.data().protection_end_date, before + 7 * 86400);
     assert_eq!(f.player.data().money, 99_996);
@@ -1004,7 +1004,7 @@ async fn atomic_payment_rechecks_the_selected_design_before_touching_money() {
         .unwrap();
     source.item_id += 100;
     assert_eq!(
-        hooks.pay_house_construction(&f.server, &f.player, source, 300_003, false, false),
+        hooks.pay_house_construction(&f.server, &f.player, source, 300_003, false),
         Err(HouseConstructionError::InvalidDesign)
     );
     assert_eq!(f.player.data().money, 400_000);

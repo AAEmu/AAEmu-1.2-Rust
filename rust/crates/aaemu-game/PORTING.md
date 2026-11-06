@@ -563,135 +563,20 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
-#### AA-point wallet (WP-AA1, 2026-11-06)
+#### AA points: not supported (owner decision 2026-11-06)
 
-The 1.2 client reads the two AA balances from the in-world character state:
-`X2Util.GetMyAAPointString` / `GetMyBankAAPointString` (`FUN_394c9580` / `FUN_394c9640`) print
-`+0xc330` / `+0xc338` of the inventory object, and the character-state reader fills four `i64`
-moneyAmount fields in the order money, bank money, AA point, bank AA point (the inventory object
-starts at the first one, so `0x1860 + 0xc330 = 0xdb90`). `SCCharacterStatePacket` writes
-`Character::aa_point` / `bank_aa_point` there; the two zeroes it wrote before this change are
-exactly the 0-balance bytes. The balances are per character (the shop dialog debits the same
-field) and persist as `characters.aa_point` / `bank_aa_point` (`bigint`, default 0), saved with
-money in the same financial snapshot (the departure dirty rule covers all four wallet fields).
-`systems::economy::inventory` owns the wallet: `add_aa_point` / `try_take_aa_point` (and the bank
-pair, plus absolute `set_*` for the GM command) check and change the balance under one character
-lock, make a negative balance impossible, and send `SCItemTaskSuccessPacket` with `ItemTask` 16
-(`ChangeAaPoint`) / 17 (`ChangeBankAaPoint`); a short purse sends `NOT_ENOUGH_AA_POINT` 707 /
-`NOT_ENOUGH_BANK_AA_POINT` 708. That the task amount is a **delta** is INFERRED from the client's
-task switch (`FUN_397d1030`), which applies 16 / 17 through the money path; a real-client display
-check is still pending (AA1-DELTA-1). The cash shop and the premium service shop spend AA
-points since WP-AA2 (below). `/aapoint <add|set|show> [bank] <amount>` is a debug
-source: the 1.2 data has no player-reachable AA grant (`quest_act_supply_aa_points` has 0 rows).
-The kind-35 `AAPointMaxLimitByLevel` cap is not enforced (balance cap or per-period cap is
-UNKNOWN).
-
-WP-AA3c (2026-11-06) spends the wallet where the 1.2 packets carry `autoUseAAPoint`:
-`inventory::try_take_gold_or_aa` pays a cost from carried gold first and covers the rest 1:1
-from carried AA points, checking and debiting both under one character lock and sending both
-deltas in one `SCItemTaskSuccess`. INFERRED from the client texts `ask_use_aa_point` /
-`auto_use_aa_point` ("not enough gold; use AA points for the missing amount?"): the flag opts in,
-a short AA purse keeps the caller's existing error and charges nothing. Consumers: the house-tax
-billing mail (`PayChargeMoney`), `CSCreateShipyard` (taxation) and `CSCreateHouse` (construction
-quote). Tax certificates still pay no gold and therefore never use AA. Cash-shop AA prices,
-`CSICSBuyAAPoint` and the bank/store/trade consumers stay under WP-AA2 / AA3a/b/d. Tests:
-`gold_or_aa_shortage_cover_debits_both_purses_in_one_task`,
-`house_tax_aa_shortage_cover_pays_the_shortage_and_books_the_aa_revenue_share`,
-`house_tax_refusals_leave_gold_aa_house_and_treasury_untouched_when_aa_is_short_or_the_flag_is_off`,
-`house_construction_aa_shortage_cover_builds_and_a_refusal_keeps_gold_aa_and_design`,
-`aa_shortage_cover_builds_the_shipyard_and_refusals_keep_money_aa_and_item`.
-
-#### AA points as a gold-shortage purse (WP-AA3a, 2026-11-06)
-
-`CSRepairSingleEquipmentPacket`, `CSRepairAllEquipmentsPacket` and `CSExpandSlotsPacket` carry
-`autoUseAAPoint`; the C# parsed it and ignored it. With the flag set and the carried gold short,
-the repair / expansion pays the shortage from the carried AA purse 1:1 and sends the money and
-AA tasks together (`ItemTask::MoneyChange` + `ItemTask::AaPointUpdate`). The rule is INFERRED
-from the client text `ask_use_aa_point` ("not enough gold; use AA points for the missing
-amount?") and the `lost_aa_point` task path; neither the rate nor the "shortage only" part is
-capture-proven (AA3-PURSE-1). The gold and AA checks and both debits run under one character
-lock (`inventory::take_money_and_aa_point`), so a refusal cannot make a partial charge; when the
-AA purse is short too the operation is refused with `NOT_ENOUGH_MONEY` 26 and nothing is
-repaired, consumed or expanded. A repair-all whose combined purses cannot pay every eligible
-item is refused whole (a deviation from the C# gold-only loop, which repairs only the items the
-gold covers). With the flag false both packets behave exactly as before. The AA task amount is
-a delta (see the wallet section above).
-
-`CSDepositMoneyPacket` / `CSWithdrawMoneyPacket` carry an `aa_point` amount next to the gold
-amount (WP-AA3b). An AA deposit moves the carried AA purse to the bank purse and an AA
-withdrawal moves it back, in the same direction as the gold amount; the direction is INFERRED
-from the packet's own gold semantics (AA3-PURSE-1). Both the gold and the AA checks and moves
-run under one character lock (`inventory::transfer_bank_money_and_aa_point`), so a short gold
-or AA purse changes neither; the AA errors are `NOT_ENOUGH_AA_POINT` 707 (carried) and
-`NOT_ENOUGH_BANK_AA_POINT` 708 (bank), while a short gold purse keeps `NOT_ENOUGH_MONEY` 26.
-With `aa_point = 0` the handler takes the unchanged `ChangeMoney` path. Mail AA attachments
-(`SCAttachmentTaken.aa_point`, `CSSendMail money0..2`) stay out: the 1.2 client has no
-evidenced meaning for them (mail AA is UNKNOWN).
-
-#### Store purchases and player trades in AA points (WP-AA3d, 2026-11-06)
-
-`CSBuyItemsPacket.useAAPoint` was parsed and ignored by the C#. With the flag set and the gold
-total short, the checkout pays the shortage from the carried AA purse 1:1 (all gold first) and
-the `STORE_BUY` task packet carries the `AaPointUpdate` delta next to the item tasks; the gold
-part keeps its `DEPOSIT_MONEY` packet. The rule is INFERRED from the same `ask_use_aa_point`
-text as WP-AA3a. A short AA purse is refused with `NOT_ENOUGH_AA_POINT` 707 and changes nothing;
-with the flag false the checkout is exactly the old gold one. The debit runs under the
-character lock that was taken before the item preflight, so the wallet and the bag commit in the
-same operation (the shared `inventory::try_take_gold_or_aa` takes that lock itself and therefore
-cannot be called there). No shipped 1.2 data marks an item as refusing AA:
-`STORE_CANT_BUY_WITH_AA_POINT` 709 and `STORE_CANT_BUY_WITH_MONEY_WITH_AA_POINT` 710 have no
-consumer in the `items` or merchant tables, so only the shortage rule is implemented
-(AA3-AA-REFUSAL-1). Tests: `store_aa_point_pays_the_gold_shortage_one_to_one`,
-`store_aa_point_short_refuses_and_leaves_everything_unchanged`,
-`store_without_the_aa_flag_keeps_todays_gold_refusal`,
-`store_aa_flag_does_not_spend_aa_when_gold_covers_the_total`.
-
-Player trade carries one i32 `moneyAmount` and no AA field (WP-RE1 section 3). The 1.2 client
-picks the currency of that amount from `content_configs` id 3 (`FUN_394b4380` /
-`FUN_394b4810` / `FUN_394b4990` read `FUN_39744420(3)`); the shipped value is 100, so today's
-trade is gold. When the value is 3 the server treats the same i32 as AA points: put-up and
-completion are guarded with `NOT_ENOUGH_AA_POINT` 707 (a refused put-up keeps the trade; a
-refused completion cancels it), and each side's `SCTradeMade` carries `ItemTask::AaPointUpdate`
-deltas instead of `MoneyChange`. The two purses are changed one character lock at a time, with
-the first side refunded if the second fails, so a completed trade moves both wallets or
-neither. That the tasks use action 16 inside `SCTradeMade` is INFERRED from the shared task
-container (AA3-TRADE-1). The client also needs its own 0x1000 feature flag, which the server
-cannot observe; the content config alone selects the mode. Tests:
-`trade_money_stays_gold_with_the_shipped_content_config`,
-`aa_trade_moves_both_wallets_atomically`, `aa_trade_refuses_insufficient_aa_at_put_up`,
-`aa_trade_refuses_insufficient_aa_at_completion_without_moving_either_wallet`.
-
-#### Cash-shop AA prices and the cash -> AA purchase (WP-AA2, 2026-11-06)
-
-An AA-priced SKU (`ics_skus.currency = 1`) is now purchasable. The cart total is checked against
-the wallet before anything is created, and a short purse is refused with
-`INGAME_SHOP_NOT_ENOUGH_AA_POINT` 592 while nothing changes. The authoritative check-and-take runs
-in the transaction loop under one character lock (`CashShopBuyTask` pattern), inside the same
-`ItemTxn` as the coin path; if a concurrent spend makes it fail, the entry is refused with 592 and
-the allocated item ids are released. `SCICSBuyResultPacket.chargeAA` carries the cart's AA total
-(0 only when a pre-transaction check fails). The AA debit and the item grant roll back together:
-the commercial-mail grant failure path (the only failure after the debit) returns the currency and
-the reserved stock, as the stock-update failure path already did.
-
-`CSICSBuyAAPointPacket` 0x137 (`i32 cashMoney`; client writer `FUN_397b17f0`, sender
-`FUN_39187800`) is registered; the C# never registered it. The exchange is gated by the new
-configuration key `Ics:AaPointExchangeRatio` (`Configurations/Ics.json`, default **0** = off).
-With a ratio of 0, a negative ratio, a non-positive cash amount, an `i64` product outside `i32`
-or a short credit balance the request is refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 778 (short
-credits: `INGAME_SHOP_NOT_ENOUGH_AA_CASH` 591) and nothing is debited. With a positive ratio the
-credits are debited with the guarded SQL statement, `cashMoney * ratio` AA is credited, and the
-reply is `SCItemTaskSuccessPacket` task type `BUY_AA_POINT` 116 with `AaPointUpdate`,
-`SCICSCashPointPacket` with the new credits, then `SCICSExchangeRatioPacket`. The reply form is
-**INFERRED** (the client's buy dialog and `GetExchangeRatio` are read, but no 1.2 server reply was
-captured); the ratio value is **UNKNOWN** (server policy). `SCICSExchangeRatioPacket` 0x1d7 is
-sent right after `SCICSCashPointPacket` whenever the cash balance is sent on shop open
-(`CSICSMoneyRequestPacket`), and the premium service list carries the same configured ratio
-(INFERRED).
-
-The premium service shop now accepts an AA price: the wallet is charged before the MySQL grant
-(one character lock, `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when short) and refunded if the
-grant fails. The debit and the grant are not crash-atomic (the wallet is in memory, the grant in
-MySQL); a crash between them keeps the AA debit without the premium window.
+AA points are not supported: the per-character wallet, `/aapoint`, the cash -> AA exchange, the
+AA prices in the cash / premium shops and the AA shortage cover are gone, and every former AA
+path behaves as it did before AA existed (AA-priced cash-shop SKUs are refused with
+`INGAME_SHOP_BUY_FAIL_AA_POINT` 592, AA-priced premium services with
+`PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775, and `CSICSBuyAAPointPacket` has no handler). The
+client still carries AA: `SCCharacterState` reads its third / fourth `i64` moneyAmount as AA and
+bank AA (`FUN_394c9580` / `FUN_394c9640` read `+0xc330` / `+0xc338`; the server writes `0, 0`),
+`ItemTask` 16 / 17 (`ChangeAaPoint` / `ChangeBankAaPoint`) apply signed deltas through the
+client's money task switch (`FUN_397d1030`), and the AA amount is displayed only in the
+inventory window (`X2Util.GetMyAAPointString` / `GetMyBankAAPointString`). Confirmed with the
+real client 2026-11-06. The `FeatureSet.aaPoint` key (bit 44) stays available but must remain
+`false`.
 
 #### Item and craft notification packet definitions (2026-11-05)
 
@@ -1447,7 +1332,7 @@ Rules (all **INFERRED** from the client decompile; no 1.2-server capture):
 | `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check - a non-driver point must be declared by the slave's model in `model_bindings` - client reach and reservation run under the slave's one lock; a missing or taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). `ApplySlaveBonuses` stores the flat `unit_modifiers.value`; all 452 Slave rows of the 1.2 data have `linear_level_bonus = 0`, so the unused C# `LinearLevelBonus` term cannot change a bonus (gated test `real_slave_unit_modifiers_have_no_linear_level_bonus` pins that data assumption). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
 | `CSBoardingTransferPacket` 0x067 (board / unboard) | `systems/vehicles/{packets,transfers}.rs`, `models/transfer.rs`, `world/visibility.rs` | done / capture-pending server side | The 1.2 client sends `tl` = the transfer's `TlId` (u16, shared by the motor and its boarding part) and `ap`: the first free seat 2..7 of the targeted transfer (`FUN_393565c0` + `FUN_393546b0`) when boarding, or 0 from `UnBoardingTransfer` (`FUN_39440d30`). The server resolves the part whose model declares `ap` in `model_bindings` (motor 654 has only point 30; the carriage part 653 has 2/3; the floating ship 314 has 2..8), checks liveness, that the player is not on a slave/mate/another transfer or bonded to a doodad seat, a free seat and the client's 3 m range to the requested seat itself (`DAT_39ac79fc` = 9.0 is the squared range `FUN_39093860` compares with `SQRT(param)`; `FUN_3989bf90` measures to the target's bounds). The seat position is the bench doodad parented to the part, else the C# Passenger0/1 local offsets; an unresolved seat falls back to 3 m + the `ship_models` half extent, else 9 m. It then reserves the seat under the transfer's one lock. The attachment state is adopted only while the seat is still reserved after the broadcast; if it was released in between, a compensating `SCUnitDetached` is broadcast. The confirmation is `SCUnitAttachedPacket(child, ap, BOARD_TRANSFER 7, transfer)`; unboarding removes the seat, detaches the transform and broadcasts `SCUnitDetachedPacket`. A late viewer gets the seat from the transfer's visibility add. Cleanup: `force_dismount` (instance-change / GM `/move` / `/teleport`) plus `session::teleport_ended`, which every same-world `SCTeleportUnit` sender reaches (same-instance portals, the NPC teleporter, dominion / instant-game / move-all / nudge / sphere teleports), death, logout, disconnect and transfer despawn detach the passengers; a boarded passenger cannot mount a mate, bind a slave or take a doodad bench seat (refused with `slave_unbind_first` 102), and `detach_passenger` clears `attached_point` only when it still holds the removed seat and clears a sticky parent that still points at the transfer. **Deviation:** C# `Transfer.AttachedCharacters` was a `List<Character>` with no seat and the packet was log-only; the Rust keeps `(point, obj_id)` because the client needs the point (the C# never sent `SCUnitAttached` for a transfer). **Capture-pending (transfer-boarding-1):** the original 1.2 server's answers for a taken / undeclared seat and an out-of-range board are unknown; the Rust uses the client's clearing codes `slave_already_has_master` 97, `slave_cannot_bind` 96, `slave_unbind_first` 102 and `too_far_away` 154 (all in `FUN_393457e0`'s pending-bind clear set) and the client's `TRANSFER_BOARDING` / `TRANSFER_UNBOARDING` events confirm the attach / detach UI. Tests: `boarding_a_transfer_seats_the_player_on_the_boarding_part`, `boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_request`, `unboarding_a_transfer_detaches_the_passenger_and_is_idempotent`, `a_late_viewer_receives_the_transfer_passenger_seat`, `a_server_teleport_frees_the_transfer_seat`, `logout_and_disconnect_free_the_transfer_seat`, `death_frees_the_transfer_seat`, `a_transfer_despawn_frees_the_passenger`, `a_boarded_passenger_cannot_mount_a_mate_or_bind_a_slave`, `a_bonded_bench_seat_refuses_transfer_boarding`, `unboarding_keeps_a_different_attachment_point`, `boarding_measures_to_the_seat_not_the_transfer_origin`, `a_same_world_teleport_ended_frees_the_seat`, `a_boarded_passenger_cannot_take_a_doodad_bench`, `unboarding_clears_a_stale_sticky_parent_without_detaching_another_parent`, `a_gm_move_frees_the_transfer_seat`. |
-| `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). **Design item:** `CSCreateShipyard.designItem` is the bag item object id the client placed (u64, a bag item id, not a template id); `create` validates ownership + `SlotType.Inventory` and maps its template through `item_shipyards` (fallback `origin_item_id` only when the shipyard has no row and it is nonzero), then consumes exactly that item under one bag lock (`ItemSkillHooks::consume_bag_item_by_id`) before reagents / money. A mismatch or a missing / foreign item is refused with `NotEnoughItem` and nothing is consumed; this is what makes shipyards 2-4 and 10 / 11 (`origin_item_id` 0; 16163 -> 2, 15687 -> 3, 15564 -> 4, 18124 -> 10, 18149 -> 11) buildable. Shipyard 14's design item (28013) maps to its duplicate 15, so 14 itself stays unbuildable (the 1.2 data has no row for it); shipyard 1 has neither. **Rewards:** `shipyard_rewards` (9 rows, all doodad 1330) spawns `count` debris doodads inside `radius` of the shipyard on `on_death` (`spawn_rewards`); the trigger is INFERRED from the schema (wreckage), not capture-proven, so normal completion spawns nothing until a capture shows otherwise. Debris is temporary (not persisted). Doodad 1330 keeps its authored phase chain (2146 Timer 1159: 300 s -> 2147 LootItem 740 -> 2147 Final 451: 120 s, which deletes it); the spawn only adds a delete task for a template with no Timer/Final phase func (`doodad_almighties.min_time`-`max_time` or a 600 s fallback, not the authored lifetime). `on_water` rows return the water surface when the computed ground is in water / below it, otherwise the collision / heightmap ground. `ShipyardData.Type` still carries `origin_item_id` (capture-pending: the C# value; the 1.2 client meaning is unproven). The AABB remains ignored (AABB use UNKNOWN) and is logged. `autoUseAAPoint` covers a gold shortage on the taxation 1:1 from the carried AA wallet (`inventory::try_take_gold_or_aa`, WP-AA3c); a short AA purse keeps `NotEnoughMoney`, and the balance is checked before any reagent / design item is consumed. Tests: `shipyards_10_and_11_build_from_their_item_and_consume_it_exactly_once`, `wrong_missing_or_foreign_design_item_is_refused_and_kept`, `origin_item_id_is_the_fallback_without_an_item_shipyards_row`, `real_use_skill_14879_requires_and_consumes_its_reagents`, `destroyed_shipyard_spawns_the_reward_doodads`, `on_water_reward_uses_the_water_surface_over_a_seabed`, `reward_points_are_inside_the_radius`, and the gated `real_data_reward_doodad_keeps_its_authored_phase_chain`. |
+| `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). **Design item:** `CSCreateShipyard.designItem` is the bag item object id the client placed (u64, a bag item id, not a template id); `create` validates ownership + `SlotType.Inventory` and maps its template through `item_shipyards` (fallback `origin_item_id` only when the shipyard has no row and it is nonzero), then consumes exactly that item under one bag lock (`ItemSkillHooks::consume_bag_item_by_id`) before reagents / money. A mismatch or a missing / foreign item is refused with `NotEnoughItem` and nothing is consumed; this is what makes shipyards 2-4 and 10 / 11 (`origin_item_id` 0; 16163 -> 2, 15687 -> 3, 15564 -> 4, 18124 -> 10, 18149 -> 11) buildable. Shipyard 14's design item (28013) maps to its duplicate 15, so 14 itself stays unbuildable (the 1.2 data has no row for it); shipyard 1 has neither. **Rewards:** `shipyard_rewards` (9 rows, all doodad 1330) spawns `count` debris doodads inside `radius` of the shipyard on `on_death` (`spawn_rewards`); the trigger is INFERRED from the schema (wreckage), not capture-proven, so normal completion spawns nothing until a capture shows otherwise. Debris is temporary (not persisted). Doodad 1330 keeps its authored phase chain (2146 Timer 1159: 300 s -> 2147 LootItem 740 -> 2147 Final 451: 120 s, which deletes it); the spawn only adds a delete task for a template with no Timer/Final phase func (`doodad_almighties.min_time`-`max_time` or a 600 s fallback, not the authored lifetime). `on_water` rows return the water surface when the computed ground is in water / below it, otherwise the collision / heightmap ground. `ShipyardData.Type` still carries `origin_item_id` (capture-pending: the C# value; the 1.2 client meaning is unproven). The AABB remains ignored (AABB use UNKNOWN) and is logged. `CSCreateShipyard.autoUseAAPoint` is parsed and ignored (AA points are not supported). Tests: `shipyards_10_and_11_build_from_their_item_and_consume_it_exactly_once`, `wrong_missing_or_foreign_design_item_is_refused_and_kept`, `origin_item_id_is_the_fallback_without_an_item_shipyards_row`, `real_use_skill_14879_requires_and_consumes_its_reagents`, `destroyed_shipyard_spawns_the_reward_doodads`, `on_water_reward_uses_the_water_surface_over_a_seabed`, `reward_points_are_inside_the_radius`, and the gated `real_data_reward_doodad_keeps_its_authored_phase_chain`. |
 | `ShipHarpoonRopeController`, `CSUnhangPacket` | `systems/vehicles/harpoon.rs` | done | Tow forces are physics (`ShipHarpoonTowPhysics`): the per-tick entry points are exposed for the physics port. |
 | `CSMoveUnitPacket` vehicle branches (ship request, vehicle, mate xp, riding, standing on objects) | `systems/vehicles/movement.rs`, `world/session.rs` | done | Ship-deck support accepts the actor standing flag independently of the movement header, preserving valid GC-relative positions and the current-parent sentinel during controller updates. This corrects the mirrored C# header-only attachment test; clearing both support flags still disembarks. A unit no longer hanging (`HangingFromObject` unset) loses its sticky parent unless it is boarded on a transfer. Mate-movement authority is enforced in `world::session::move_unit` (only the character itself or its owned mate may submit unit motion), before `on_mate_unit_move`. |
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
@@ -2202,8 +2087,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   cancels a siege keeps the owner and sends nothing. A successful property-tax collection
   (`/collectdominion <zoneGroupId>` -> `tax::collect_locked`, the only existing settlement
   path) sends `SCDominionTaxBalanced` (0x023; Deserialize `0x397B7B60`: zone group, peace-fund
-  money, peace-fund AA points) with the current peace-fund values and no accrual. Peace Fund
-  rates, sources, the AA-point split and the historical automatic payout remain UNKNOWN (see
+  money, peace-fund AA points) with the current peace-fund values and no accrual (the AA field is
+  written from the treasury column, which stays 0 because AA points are not supported). Peace
+  Fund rates, sources and the historical automatic payout remain UNKNOWN (see
   the property-tax bullet above). Known, not fixed: 0x023 has no sender after a weekly
   settlement because no settlement hook exists yet (the calendar changes periods only);
   `tax::collect_locked` reads `authority_for_zone` before the collection call, so the
@@ -4325,9 +4211,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   payment). An explicit payment row becomes `Premium`. `premium_point` is
   `max(details.premium_point, premium_configs.connect_point).clamp(0, max_point)` - a stored
   higher point is never lowered. Credits and loyalty are debited in the transaction; an AA
-  price is taken from the per-character wallet before the grant (WP-AA2) and returned if the
-  grant fails, with `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when the wallet is short. Other
-  currencies are refused with 773. A loyalty debit also sets the buyer's `bm_point` and sends
+  price is refused with `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 (AA points are not supported).
+  Other currencies are refused with 773. A loyalty debit also sets the buyer's `bm_point` and sends
   `SCBmPointPacket`. The buy result has no dedicated 1.2 SC: the client's error handler
   (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
   0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
@@ -4468,7 +4353,7 @@ the GM `/feature set` command still changes the runtime copy; the config is the 
 | `mailCoolTime` | 75 | on | Mail send cooldown display (INFERRED). |
 | `hudAuctionButton` | 81 | on | Auction-house button in the HUD. |
 | `auctionPostBuff` | 83 | on | Auction posting buff / UI (INFERRED). |
-| `aaPoint` | 44 | off | AA-point amounts in price and currency displays (`x2game.dll.c:66363` sets `grade_enchant_cost` / `grade_enchant_currency`, also `633707`, `659611`, `733342`). The server has no AA-point wallet; keep it off. |
+| `aaPoint` | 44 | off | AA-point amounts in price and currency displays (`x2game.dll.c:66363` sets `grade_enchant_cost` / `grade_enchant_currency`, also `633707`, `659611`, `733342`). AA points are not supported; keep it off. |
 | `ExtraBits` | any | `{}` | Override map for the unnamed `flag_x_y` bits, `0..=87`. The C++ reads unnamed bits 32, 34, 41, 42, 47, 60 and 73 (purpose unresolved); 78 is the mate equipment whitelist (`PORTING.md`, mate equipment). Defaults: 32 on (plus inherited 16-19, 24-27, 35, 37, 49); 34, 41, 42, 47, 60, 73 and 78 off. |
 
 The C#-named bits that have no `GetFeatureSet()` Lua key (`allowFamilyChanges` 1, `houseSale` 3,
@@ -5157,12 +5042,11 @@ and in NPC wandering / buff remaining times.
     `/collectdominion <zoneGroupId>` (ordinary-player access, current guild leader only),
     receiving the original eleven-argument balance-receipt
     mail. Repeated empty collection creates no mail, failed staged delivery retains revenue,
-    and Peace Fund remains untouched. Hunting tax was removed by Trion's 1.2 notes. Since
-    WP-AA3c a tax bill paid with the `autoUseAAPoint` flag books its AA share of the collected
-    property surcharge in `cur_house_tax_aa_point` and the rest in `cur_house_tax_money`, in the
-    proportions of the payment (INFERRED server policy: the ledgers only say which purse the
-    revenue arrived in). `peace_tax_aa_point` stays untouched like `peace_tax_money`, because no
-    gold Peace Fund accrual is defined; Peace Fund percentages, nation splits and historical
+    and Peace Fund remains untouched. Hunting tax was removed by Trion's 1.2 notes. A tax
+    bill's `autoUseAAPoint` flag is parsed and ignored (AA points are not supported); the
+    collected property surcharge is booked in `cur_house_tax_money` only, and the
+    `cur_house_tax_aa_point` / `peace_tax_aa_point` ledger columns stay 0 like `peace_tax_money`,
+    because no Peace Fund accrual is defined; Peace Fund percentages, nation splits and historical
     automatic payout scheduling are not invented. Original one-hour territory tax change
     cooldown uses wire error488/UI3544.
   Floors/walls/roofs use every normal-state prefab element and are synchronized when
@@ -5277,11 +5161,10 @@ Additional world-side fixes from the same audit:
 
 * Cash-shop checkout charges the effective discounted price, validates templates and checked
   cart totals before fulfillment, serializes stock updates, and uses guarded SQL credit and
-  loyalty debits. Gold still uses the inventory transaction path. AA-priced SKUs now debit the
-  per-character wallet (`characters.aa_point` / `bank_aa_point`, WP-AA1) under the same
-  one-character-lock rule and report `INGAME_SHOP_NOT_ENOUGH_AA_POINT` 592 when short (WP-AA2,
-  see the economy section). A failed grant refunds the AA debit. `money2` is bank gold, not an
-  AA Points balance. Unit flows and private-MySQL tests cover failed debits, limits and
+  loyalty debits. Gold still uses the inventory transaction path. AA-priced SKUs
+  are refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 592 (AA points are not supported). A failed
+  grant refunds the currency and the reserved stock. `money2` is bank gold, not an AA Points
+  balance. Unit flows and private-MySQL tests cover failed debits, limits and
   concurrent overdraft attempts. Debit, audit and commercial-mail delivery do not yet form one
   crash-atomic transaction/outbox.
 * Temporary USER chat channels implement the existing join/leave packets and packed eight-byte

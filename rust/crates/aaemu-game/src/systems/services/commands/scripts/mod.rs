@@ -21,7 +21,6 @@ pub mod sub;
 mod tests;
 pub mod util;
 
-pub mod aa_point;
 pub mod add_badges;
 pub mod add_buff;
 pub mod add_gold;
@@ -529,11 +528,6 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["secondpassword", "secondpass", "clearsecondpassword"],
             Arc::new(second_password_cmd::SecondPassword::new(env)),
-        ),
-        // AAPoint (Rust only, WP-AA1: grant / set the per-character AA-point wallet)
-        (
-            &["aapoint", "aa_point"],
-            Arc::new(aa_point::AaPoint::new(env)),
         ),
         // Mail (Rust only: `/mail admin` system letter to an online or offline character)
         (&["mail"], Arc::new(mail::MailCommand::new(env))),

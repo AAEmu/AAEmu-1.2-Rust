@@ -361,30 +361,18 @@ impl CSExpandSlotsPacket {
         let Some(p) = active(conn) else { return };
         let inv = Inv::of(&p);
         let mut txn = ItemTxn::begin(server);
-        inventory::expand_slot(
-            &mut txn,
-            &p,
-            &inv,
-            self.slot_type as u8,
-            self.auto_use_aa_point,
-        );
+        inventory::expand_slot(&mut txn, &p, &inv, self.slot_type as u8);
     }
 }
 sync_client_packet!(CSExpandSlotsPacket);
 
-/// Bank guard shared by deposit / withdraw: at least one of the gold / AA amounts must be
-/// positive (a negative amount would move the values the wrong way) and the player must be
-/// interacting with a banker NPC in range (the C# checked neither).
-fn bank_request_allowed(
-    server: &GameServer,
-    p: &PlayerRef,
-    what: &str,
-    amount: i32,
-    aa_point: i32,
-) -> bool {
-    if amount < 0 || aa_point < 0 || (amount == 0 && aa_point == 0) {
+/// Bank guard shared by deposit / withdraw: the amount must be positive (a negative amount
+/// would move money the wrong way) and the player must be interacting with a banker NPC in
+/// range (the C# checked neither).
+fn bank_request_allowed(server: &GameServer, p: &PlayerRef, what: &str, amount: i32) -> bool {
+    if amount <= 0 {
         tracing::warn!(
-            "{}: rejected {what} with amount {amount} and AA points {aa_point}",
+            "{}: rejected {what} with non-positive amount {amount}",
             p.data().unit.name
         );
         return false;
@@ -418,29 +406,17 @@ impl CSDepositMoneyPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
-        if !bank_request_allowed(server, &p, "DepositMoney", self.amount, self.aa_point) {
+        if !bank_request_allowed(server, &p, "DepositMoney", self.amount) {
             return;
         }
-        let mut out = inventory::Out::Direct(server);
-        if self.aa_point == 0 {
-            inventory::change_money(
-                &mut out,
-                &p,
-                slot_type::INVENTORY,
-                slot_type::BANK,
-                self.amount,
-                task_type::DEPOSIT_MONEY,
-            );
-        } else {
-            inventory::transfer_bank_money_and_aa_point(
-                &mut out,
-                &p,
-                true,
-                self.amount,
-                self.aa_point,
-                task_type::DEPOSIT_MONEY,
-            );
-        }
+        inventory::change_money(
+            &mut inventory::Out::Direct(server),
+            &p,
+            slot_type::INVENTORY,
+            slot_type::BANK,
+            self.amount,
+            task_type::DEPOSIT_MONEY,
+        );
     }
 }
 sync_client_packet!(CSDepositMoneyPacket);
@@ -462,29 +438,17 @@ impl CSWithdrawMoneyPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
-        if !bank_request_allowed(server, &p, "WithdrawMoney", self.amount, self.aa_point) {
+        if !bank_request_allowed(server, &p, "WithdrawMoney", self.amount) {
             return;
         }
-        let mut out = inventory::Out::Direct(server);
-        if self.aa_point == 0 {
-            inventory::change_money(
-                &mut out,
-                &p,
-                slot_type::BANK,
-                slot_type::INVENTORY,
-                self.amount,
-                task_type::WITHDRAW_MONEY,
-            );
-        } else {
-            inventory::transfer_bank_money_and_aa_point(
-                &mut out,
-                &p,
-                false,
-                self.amount,
-                self.aa_point,
-                task_type::WITHDRAW_MONEY,
-            );
-        }
+        inventory::change_money(
+            &mut inventory::Out::Direct(server),
+            &p,
+            slot_type::BANK,
+            slot_type::INVENTORY,
+            self.amount,
+            task_type::WITHDRAW_MONEY,
+        );
     }
 }
 sync_client_packet!(CSWithdrawMoneyPacket);

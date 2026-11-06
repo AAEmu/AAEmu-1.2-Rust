@@ -76,8 +76,6 @@ struct MemStore {
     accounts: Mutex<HashMap<u32, MemAccount>>,
     sales: Mutex<Vec<MemSale>>,
     calls: Mutex<u32>,
-    /// Simulates a failed MySQL grant (the AA wallet must be returned).
-    fail: Mutex<bool>,
 }
 
 impl PremiumServiceStore for MemStore {
@@ -98,24 +96,18 @@ impl PremiumServiceStore for MemStore {
             if current.premium_state(request.now) && current.end_time == 0 {
                 return PurchaseOutcome::PermanentPremium;
             }
-            if *self.fail.lock().unwrap() {
-                return PurchaseOutcome::Failed;
-            }
             let currency = request.service.price_type;
             let balance = match currency {
-                currency::CREDITS => Some(account.credits),
-                currency::LOYALTY => Some(account.loyalty),
-                // Taken from the character wallet by the caller, not from the account.
-                currency::AA_POINTS => None,
+                currency::CREDITS => account.credits,
+                currency::LOYALTY => account.loyalty,
                 _ => return PurchaseOutcome::Failed,
             };
-            if balance.is_some_and(|balance| balance < request.service.price) {
+            if balance < request.service.price {
                 return PurchaseOutcome::InsufficientFunds;
             }
             match currency {
                 currency::CREDITS => account.credits -= request.service.price,
                 currency::LOYALTY => account.loyalty -= request.service.price,
-                currency::AA_POINTS => {}
                 _ => return PurchaseOutcome::Failed,
             }
             let payment = extend_payment(&current, request.service.hours, request.now);
@@ -447,8 +439,7 @@ async fn insufficient_funds_and_unknown_or_unsellable_services_change_nothing() 
         )]
     );
 
-    // Unknown id, not for sale, an AA price with an empty wallet and an unsupported currency:
-    // refused before the store.
+    // Unknown id, not for sale, AA points and an unsupported currency: refused before the store.
     let (mut w, store) = shop_with(vec![
         service(1, 24, currency::CREDITS, 300, false),
         service(2, 24, currency::AA_POINTS, 300, true),
@@ -457,42 +448,17 @@ async fn insufficient_funds_and_unknown_or_unsellable_services_change_nothing() 
         service(5, 24, currency::CREDITS, -1, true),
     ]);
     let buyer = w.pa.clone();
-    for (c_id, outcome, error) in [
-        (
-            999,
-            BuyOutcome::Refused,
-            error_message::PREMIUM_SERVICE_BUY_FAIL,
-        ),
-        (
-            1,
-            BuyOutcome::Refused,
-            error_message::PREMIUM_SERVICE_BUY_FAIL,
-        ),
-        (
-            2,
-            BuyOutcome::InsufficientFunds,
-            error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT,
-        ),
-        (
-            3,
-            BuyOutcome::Refused,
-            error_message::PREMIUM_SERVICE_BUY_FAIL,
-        ),
-        (
-            4,
-            BuyOutcome::Refused,
-            error_message::PREMIUM_SERVICE_BUY_FAIL,
-        ),
-        (
-            5,
-            BuyOutcome::Refused,
-            error_message::PREMIUM_SERVICE_BUY_FAIL,
-        ),
+    for (c_id, error) in [
+        (999, error_message::PREMIUM_SERVICE_BUY_FAIL),
+        (1, error_message::PREMIUM_SERVICE_BUY_FAIL),
+        (2, error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT),
+        (3, error_message::PREMIUM_SERVICE_BUY_FAIL),
+        (4, error_message::PREMIUM_SERVICE_BUY_FAIL),
+        (5, error_message::PREMIUM_SERVICE_BUY_FAIL),
     ] {
         assert_eq!(
             execute_buy(&w.server, &buyer, c_id).await,
-            outcome,
-            "cId {c_id}"
+            BuyOutcome::Refused
         );
         assert_eq!(
             w.a.drain(),
@@ -501,115 +467,6 @@ async fn insufficient_funds_and_unknown_or_unsellable_services_change_nothing() 
         );
     }
     assert_eq!(*store.calls.lock().unwrap(), 0, "no store call on refusals");
-    assert_eq!(buyer.data().aa_point, 0, "a short wallet is untouched");
-}
-
-#[tokio::test]
-async fn aa_price_is_paid_from_the_wallet_and_grants_the_premium() {
-    let (mut w, store) = shop_with(vec![service(9, 24, currency::AA_POINTS, 300, true)]);
-    store.accounts.lock().unwrap().insert(
-        1001,
-        MemAccount {
-            payment: Some(non_premium()),
-            ..MemAccount::default()
-        },
-    );
-    w.pa.data().aa_point = 350;
-    let buyer = w.pa.clone();
-    assert_eq!(
-        execute_buy(&w.server, &buyer, 9).await,
-        BuyOutcome::Purchased
-    );
-    assert_eq!(buyer.data().aa_point, 50, "debit exactly once");
-    let account = store.accounts.lock().unwrap()[&1001].clone();
-    assert!(account.payment.is_some(), "premium granted");
-    assert_eq!(store.sales.lock().unwrap()[0].currency, currency::AA_POINTS);
-    let frames = w.a.drain();
-    let tasks = frames
-        .iter()
-        .find(|f| f.0 == sc::SCItemTaskSuccessPacket)
-        .expect("wallet update");
-    assert_eq!(
-        tasks.1,
-        crate::systems::economy::tests::task_body(
-            crate::models::item_task::task_type::BUY_PREMIUM_SERVICE,
-            vec![crate::models::item_task::ItemTask::AaPointUpdate(-300)],
-        )
-    );
-    assert_eq!(
-        frames.last().unwrap().1,
-        error_body(error_message::PREMIUM_SERVICE_BUY_SUCCESS)
-    );
-}
-
-#[tokio::test]
-async fn aa_price_is_refused_with_775_when_the_wallet_is_short() {
-    let (mut w, store) = shop_with(vec![service(9, 24, currency::AA_POINTS, 300, true)]);
-    store.accounts.lock().unwrap().insert(
-        1001,
-        MemAccount {
-            payment: Some(non_premium()),
-            ..MemAccount::default()
-        },
-    );
-    w.pa.data().aa_point = 299;
-    let buyer = w.pa.clone();
-    assert_eq!(
-        execute_buy(&w.server, &buyer, 9).await,
-        BuyOutcome::InsufficientFunds
-    );
-    assert_eq!(buyer.data().aa_point, 299);
-    assert_eq!(*store.calls.lock().unwrap(), 0);
-    assert!(store.sales.lock().unwrap().is_empty());
-    assert_eq!(
-        w.a.drain(),
-        vec![(
-            sc::SCErrorMsgPacket,
-            error_body(error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT)
-        )]
-    );
-}
-
-#[tokio::test]
-async fn a_failed_grant_returns_the_aa_price() {
-    let (mut w, store) = shop_with(vec![service(9, 24, currency::AA_POINTS, 300, true)]);
-    store.accounts.lock().unwrap().insert(
-        1001,
-        MemAccount {
-            payment: Some(non_premium()),
-            ..MemAccount::default()
-        },
-    );
-    *store.fail.lock().unwrap() = true;
-    w.pa.data().aa_point = 350;
-    let buyer = w.pa.clone();
-    assert_eq!(execute_buy(&w.server, &buyer, 9).await, BuyOutcome::Refused);
-    assert_eq!(buyer.data().aa_point, 350, "the debit was returned");
-    let frames = w.a.drain();
-    let updates: Vec<Vec<u8>> = frames
-        .iter()
-        .filter(|f| f.0 == sc::SCItemTaskSuccessPacket)
-        .map(|f| f.1.clone())
-        .collect();
-    assert_eq!(updates.len(), 2, "debit then refund");
-    assert_eq!(
-        updates[0],
-        crate::systems::economy::tests::task_body(
-            crate::models::item_task::task_type::BUY_PREMIUM_SERVICE,
-            vec![crate::models::item_task::ItemTask::AaPointUpdate(-300)],
-        )
-    );
-    assert_eq!(
-        updates[1],
-        crate::systems::economy::tests::task_body(
-            crate::models::item_task::task_type::BUY_PREMIUM_SERVICE,
-            vec![crate::models::item_task::ItemTask::AaPointUpdate(300)],
-        )
-    );
-    assert_eq!(
-        frames.last().unwrap().1,
-        error_body(error_message::PREMIUM_SERVICE_BUY_FAIL)
-    );
 }
 
 #[tokio::test]
