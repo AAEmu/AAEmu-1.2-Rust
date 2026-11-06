@@ -137,7 +137,7 @@ fn revenue_preflight_rejects_stale_and_overflow_before_charge_and_collection_pre
     let state = authority(25);
     manager.restore(vec![state.clone()]).unwrap();
     assert_eq!(
-        manager.credit_property_tax_with(&state, 25000, || false),
+        manager.credit_property_tax_with(&state, 25000, || None),
         Err(DominionError::Resources)
     );
     assert_eq!(manager.get(25), Some(state.clone()));
@@ -189,6 +189,7 @@ fn revenue_preflight_rejects_stale_and_overflow_before_charge_and_collection_pre
 pub(crate) struct Fixture {
     pub(crate) server: GameServer,
     pub(crate) payer: PlayerRef,
+    pub(crate) payer_client: TestClient,
     pub(crate) leader: PlayerRef,
     pub(crate) leader_client: TestClient,
     successor: PlayerRef,
@@ -196,8 +197,12 @@ pub(crate) struct Fixture {
 }
 
 pub(crate) fn fixture() -> Fixture {
+    fixture_with_tax_item(true)
+}
+
+pub(crate) fn fixture_with_tax_item(tax_item: bool) -> Fixture {
     let mut data = GameData::empty();
-    data.features.set(Feature::TaxItem, true);
+    data.features.set(Feature::TaxItem, tax_item);
     data.zones.zones.insert(
         TEST_ZONE,
         Zone {
@@ -315,12 +320,18 @@ pub(crate) fn fixture() -> Fixture {
         .dominions
         .set_tax_rate(25, state.owner_expedition_id, 25, manager::now())
         .unwrap();
+    let leader = players.remove(0);
+    let payer = players.remove(0);
+    let successor = players.remove(0);
+    let leader_client = clients.remove(0);
+    let payer_client = clients.remove(0);
     Fixture {
         server,
-        leader: players.remove(0),
-        payer: players.remove(0),
-        successor: players.remove(0),
-        leader_client: clients.remove(0),
+        payer,
+        payer_client,
+        leader,
+        leader_client,
+        successor,
         tower,
     }
 }
@@ -347,6 +358,17 @@ pub(crate) fn give(f: &Fixture, template: u32, count: i32, slot: i32) -> u64 {
 }
 
 pub(crate) fn place(f: &Fixture, design: u32, item: u32, x: f32, slot: i32) -> HouseRef {
+    place_with_aa(f, design, item, x, slot, false).unwrap()
+}
+
+pub(crate) fn place_with_aa(
+    f: &Fixture,
+    design: u32,
+    item: u32,
+    x: f32,
+    slot: i32,
+    auto_use_aa_point: bool,
+) -> Option<HouseRef> {
     let item_id = give(f, item, 1, slot);
     f.payer.data().unit.transform.set_xyz(x, 100.0, 100.0);
     ops::build(
@@ -362,7 +384,7 @@ pub(crate) fn place(f: &Fixture, design: u32, item: u32, x: f32, slot: i32) -> H
             item_id,
             money_amount: 0,
             ht: 0,
-            auto_use_aa_point: false,
+            auto_use_aa_point,
         },
     );
     f.server
@@ -372,7 +394,6 @@ pub(crate) fn place(f: &Fixture, design: u32, item: u32, x: f32, slot: i32) -> H
         .all()
         .into_iter()
         .find(|h| h.data().unit.template_id == design)
-        .unwrap()
 }
 
 pub(crate) fn certificates(f: &Fixture) -> i32 {
@@ -466,6 +487,174 @@ async fn province_construction_and_weekly_mail_pay_actual_surcharge_once_and_exe
             .treasury
             .cur_house_tax_money,
         50000
+    );
+}
+
+#[tokio::test]
+async fn house_tax_aa_shortage_cover_pays_the_shortage_and_books_the_aa_revenue_share() {
+    use crate::models::item_task::{task_type, ItemTask};
+
+    let mut f = fixture_with_tax_item(false);
+    // Gold construction: 100,000 weekly tax + 25% surcharge + 200,000 deposit = 325,000.
+    f.payer.data().money = 500_000;
+    let house = place(&f, 300, 9000, 600.0, 0);
+    assert_eq!(f.payer.data().money, 175_000);
+    assert_eq!(
+        f.server
+            .systems
+            .housing
+            .dominions
+            .get(25)
+            .unwrap()
+            .treasury
+            .cur_house_tax_money,
+        25_000
+    );
+
+    house.data().protection_end_date = manager::now() + 6 * 86400;
+    manager::update_tax_info(&f.server, &house);
+    let mail_id = f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_my_house_mails(house.data().id)[0];
+    let bill = f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(mail_id)
+        .unwrap();
+    assert_eq!(bill.body.billing_amount, 125_000);
+    let protection = house.data().protection_end_date;
+
+    // 25,000 gold + 100,000 AA cover the weekly bill: both tasks in one wallet packet.
+    f.payer.data().money = 25_000;
+    f.payer.data().aa_point = 150_000;
+    f.payer_client.drain();
+    assert!(mail::pay_housing_tax(&f.server, &f.payer, mail_id, true));
+    assert_eq!(f.payer.data().money, 0);
+    assert_eq!(f.payer.data().aa_point, 50_000);
+    assert_eq!(house.data().protection_end_date, protection + 7 * 86400);
+    let tasks: Vec<_> = f
+        .payer_client
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket)
+        .collect();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].1,
+        crate::systems::economy::tests::task_body(
+            task_type::DEPOSIT_MONEY,
+            vec![
+                ItemTask::MoneyChange(-25_000),
+                ItemTask::AaPointUpdate(-100_000)
+            ],
+        )
+    );
+    // The 25,000 surcharge is booked by the composition of the payment: 100,000/125,000 from
+    // AA -> 20,000 AA, the remaining 5,000 gold, on top of the construction revenue.
+    let treasury = f.server.systems.housing.dominions.get(25).unwrap().treasury;
+    assert_eq!(treasury.cur_house_tax_money, 30_000);
+    assert_eq!(treasury.cur_house_tax_aa_point, 20_000);
+    assert_eq!(treasury.peace_tax_aa_point, 0);
+}
+
+#[tokio::test]
+async fn house_tax_refusals_leave_gold_aa_house_and_treasury_untouched_when_aa_is_short_or_the_flag_is_off(
+) {
+    let f = fixture_with_tax_item(false);
+    f.payer.data().money = 500_000;
+    let house = place(&f, 300, 9000, 600.0, 0);
+    house.data().protection_end_date = manager::now() + 6 * 86400;
+    manager::update_tax_info(&f.server, &house);
+    let mail_id = f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_my_house_mails(house.data().id)[0];
+    let protection = house.data().protection_end_date;
+    let treasury = f.server.systems.housing.dominions.get(25).unwrap().treasury;
+
+    // Flag off: a huge AA wallet never pays for gold.
+    f.payer.data().money = 25_000;
+    f.payer.data().aa_point = 1_000_000;
+    assert!(!mail::pay_housing_tax(&f.server, &f.payer, mail_id, false));
+    assert_eq!(f.payer.data().money, 25_000);
+    assert_eq!(f.payer.data().aa_point, 1_000_000);
+
+    // Flag on but both purses short: the existing refusal, still nothing charged.
+    f.payer.data().money = 1_000;
+    f.payer.data().aa_point = 1_000;
+    assert!(!mail::pay_housing_tax(&f.server, &f.payer, mail_id, true));
+    assert_eq!(f.payer.data().money, 1_000);
+    assert_eq!(f.payer.data().aa_point, 1_000);
+    assert_eq!(house.data().protection_end_date, protection);
+    assert_eq!(
+        f.server.systems.housing.dominions.get(25).unwrap().treasury,
+        treasury
+    );
+    assert_eq!(
+        f.server
+            .systems
+            .economy
+            .mail
+            .get_mail_by_id(mail_id)
+            .unwrap()
+            .header
+            .status,
+        mail::mail_status::UNPAID
+    );
+}
+
+#[tokio::test]
+async fn house_construction_aa_shortage_cover_builds_and_a_refusal_keeps_gold_aa_and_design() {
+    use crate::models::item_task::{task_type, ItemTask};
+
+    let mut f = fixture_with_tax_item(false);
+    // 195,000 gold + 130,000 AA = the 325,000 gold construction quote.
+    f.payer.data().money = 195_000;
+    f.payer.data().aa_point = 130_000;
+    f.payer_client.drain();
+    let house = place_with_aa(&f, 300, 9000, 600.0, 0, true).expect("the AA purse covers the rest");
+    assert_eq!(house.data().unit.template_id, 300);
+    assert_eq!(f.payer.data().money, 0);
+    assert_eq!(f.payer.data().aa_point, 0);
+    assert_eq!(
+        Inv::of(&f.payer).items_count_in(slot_type::INVENTORY, 9000, -1),
+        0
+    );
+    let expected = crate::systems::economy::tests::task_body(
+        task_type::HOUSE_CREATION,
+        vec![
+            ItemTask::MoneyChange(-195_000),
+            ItemTask::AaPointUpdate(-130_000),
+        ],
+    );
+    assert!(f
+        .payer_client
+        .drain()
+        .iter()
+        .any(|(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket && *body == expected));
+    // 130,000/325,000 of the 25,000 surcharge came from AA.
+    let treasury = f.server.systems.housing.dominions.get(25).unwrap().treasury;
+    assert_eq!(treasury.cur_house_tax_money, 15_000);
+    assert_eq!(treasury.cur_house_tax_aa_point, 10_000);
+
+    // A second design the two purses cannot cover: refused, nothing charged or consumed.
+    let houses = f.server.systems.housing.manager.all().len();
+    f.payer.data().money = 100_000;
+    f.payer.data().aa_point = 25_000;
+    place_with_aa(&f, 300, 9000, 700.0, 1, true);
+    assert_eq!(f.server.systems.housing.manager.all().len(), houses);
+    assert_eq!(f.payer.data().money, 100_000);
+    assert_eq!(f.payer.data().aa_point, 25_000);
+    assert_eq!(
+        Inv::of(&f.payer).items_count_in(slot_type::INVENTORY, 9000, -1),
+        1
     );
 }
 

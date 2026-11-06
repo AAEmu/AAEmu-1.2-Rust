@@ -152,12 +152,14 @@ pub trait HousingEconomyHooks: Send + Sync {
         _design: HouseItem,
         _total: i32,
         _tax_item: bool,
+        _auto_use_aa_point: bool,
     ) -> Result<(), HouseConstructionError> {
         Err(HouseConstructionError::InvalidDesign)
     }
 
-    /// The production economy bridge returns queued effects so a territory charge can defer
-    /// callbacks until authority/housing locks are released. Existing hook providers remain
+    /// The production economy bridge returns queued effects and the wallet composition of the
+    /// payment so a territory charge can defer callbacks until authority/housing locks are
+    /// released and can book the AA share of the revenue. Existing hook providers remain
     /// compatible through their atomic construction payment implementation.
     fn pay_house_construction_deferred(
         &self,
@@ -166,8 +168,15 @@ pub trait HousingEconomyHooks: Send + Sync {
         design: HouseItem,
         total: i32,
         tax_item: bool,
-    ) -> Result<Option<crate::models::item_task::ItemFxList>, HouseConstructionError> {
-        self.pay_house_construction(server, player, design, total, tax_item)?;
+        auto_use_aa_point: bool,
+    ) -> Result<
+        Option<(
+            crate::models::item_task::ItemFxList,
+            crate::systems::economy::inventory::PaymentSplit,
+        )>,
+        HouseConstructionError,
+    > {
+        self.pay_house_construction(server, player, design, total, tax_item, auto_use_aa_point)?;
         Ok(None)
     }
 

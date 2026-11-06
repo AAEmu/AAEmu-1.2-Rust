@@ -60,6 +60,7 @@ impl HousingEconomyHooks for TestHooks {
         _design: HouseItem,
         _total: i32,
         _tax_item: bool,
+        _auto_use_aa_point: bool,
     ) -> Result<(), HouseConstructionError> {
         Ok(())
     }
