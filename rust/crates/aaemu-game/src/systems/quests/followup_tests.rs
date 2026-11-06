@@ -230,6 +230,7 @@ async fn relogin_inside_a_sphere_fires_the_enter_event_again() {
             local: [100.0, 100.0, 100.0],
             radius: 50.0,
         }],
+        &[],
         "main_world",
         |_| (0, 0),
     );
@@ -284,6 +285,7 @@ async fn leaving_the_world_drops_the_sphere_triggers_of_the_character() {
             local: [100.0, 100.0, 100.0],
             radius: 50.0,
         }],
+        &[],
         "main_world",
         |_| (0, 0),
     );

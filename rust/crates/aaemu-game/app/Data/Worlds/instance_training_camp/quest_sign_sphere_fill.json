@@ -1,0 +1,26 @@
+[
+  {
+    "quest_id": 5979,
+    "component_id": 25757,
+    "sphere_id": 2252,
+    "zone": 198,
+    "x": 1100.59,
+    "y": 400.994,
+    "z": 198.622,
+    "radius": 12.82,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  },
+  {
+    "quest_id": 5979,
+    "component_id": 25757,
+    "sphere_id": 2252,
+    "zone": 198,
+    "x": 1228.98,
+    "y": 530.024,
+    "z": 198.622,
+    "radius": 12.82,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  }
+]
