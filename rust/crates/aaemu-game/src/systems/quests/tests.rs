@@ -6256,3 +6256,116 @@ async fn partial_consumption_updates_a_collect_objective() {
         "the partial consume reports one consumed unit"
     );
 }
+
+/// A pirate whose infamy reaches 0 through the quest act `QuestActSupplyCrimePoint` returns to
+/// the faction of the race/gender template (the home faction). The 1.2 client prints ui_text
+/// 2297 `pardon_pirate` from the `SCUnitFactionChangedPacket` (old 161 -> non-pirate), so the
+/// faction change is the notice; the same event credits achievement kind 49 ("Repentant",
+/// `char_records` 2401). This drives the real quest operation, act and shared helper.
+#[tokio::test]
+async fn pirate_reaching_zero_infamy_through_the_quest_act_returns_home() {
+    use crate::data::character_templates::CharacterTemplate;
+    use crate::systems::social::achievement::char_record_kind;
+    use crate::systems::social::achievement_flow_tests::one_achievement;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    const QUEST: u32 = 9_001;
+    const HOME: u32 = 101;
+    const PIRATE: u32 = 161;
+
+    let mut quests = QuestData::default();
+    quests.add_template(quest(QUEST));
+    let c = QUEST * 10;
+    quests.add_component(component(c + 1, QUEST, kind::START));
+    quests.add_act(c + 1, c + 1, c + 1, 0, ActKind::ConAutoComplete);
+    quests.add_component(component(c + 2, QUEST, kind::PROGRESS));
+    quests.add_act(
+        c + 2,
+        c + 2,
+        c + 2,
+        1,
+        ActKind::ObjCraft {
+            craft_id: QUEST,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    quests.add_component(component(c + 3, QUEST, kind::REWARD));
+    quests.add_act(
+        c + 3,
+        c + 3,
+        c + 3,
+        0,
+        ActKind::SupplyCrimePoint { point: -500 },
+    );
+    quests.finish();
+
+    let mut data = GameData::empty();
+    data.systems.quests = quests;
+    data.characters.templates.insert(
+        0x11,
+        CharacterTemplate {
+            race: 1,
+            gender: 1,
+            creatable: true,
+            faction_id: HOME,
+            ..Default::default()
+        },
+    );
+    data.systems.social.achievements = one_achievement(
+        1380,
+        1,
+        0,
+        2401,
+        char_record_kind::MY_DISHONORABLE_POINT,
+        0,
+        0,
+    );
+    let server = std::sync::Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::social::install_hooks(&server);
+    super::install_hooks(&server);
+
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut character = test_character(1, "Pirate", 100.0, 100.0);
+    character.unit.faction_id = PIRATE;
+    character.crime_point = 500;
+    character.infamy_point = 500;
+    character.is_online = true;
+    let player = spawn_player(&server, &client, character, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+
+    assert!(events::add_quest(&server, &player, QUEST, false).is_some());
+    server.systems.quests.run_queued_evaluations(&server);
+    events::on_craft(&server, &player, QUEST);
+    server.systems.quests.run_queued_evaluations(&server);
+
+    {
+        let c = player.data();
+        assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+        assert_eq!(c.unit.faction_id, HOME, "the pirate returned home");
+        assert_eq!(crate::db_character::persisted_faction(&c), HOME);
+        assert_eq!(
+            c.achievement_state.record_value(2401),
+            1,
+            "repentant (kind 49) credited"
+        );
+    }
+    let frames = client.drain();
+    let expected = crate::systems::social::packets::body(&SCUnitFactionChangedPacket {
+        obj_id: 0x100,
+        unit_name: "Pirate".into(),
+        id: PIRATE,
+        id2: HOME,
+        temp: false,
+    });
+    assert!(
+        frames
+            .iter()
+            .any(|(op, body)| *op == sc::SCUnitFactionChangedPacket && *body == expected),
+        "the faction change the client turns into ui_text 2297: {frames:x?}"
+    );
+}

@@ -498,7 +498,7 @@ impl QuestHooks for GameQuestHooks {
         c: &mut Character,
         points: i16,
     ) {
-        let (packet, became_pirate) = crate::systems::social::crime::add_crime(
+        let (packet, change) = crate::systems::social::crime::add_crime(
             server,
             c,
             points,
@@ -506,17 +506,12 @@ impl QuestHooks for GameQuestHooks {
         );
         if let Some(p) = player {
             p.send(packet);
-            // Wanted / crime buffs added by the crime point setter, then the `SetFaction(Pirate)`
-            // the threshold asks for (it needs the world, so it runs after the lock is released).
+            // Wanted / crime buffs added by the crime point setter, then the faction change the
+            // threshold asks for (`SetFaction(Pirate)` or the infamy-0 pardon; it needs the
+            // world, so it runs after the lock is released).
             let p = p.clone();
             super::events::after_unlock(server, c.id, move |s| {
-                if became_pirate {
-                    crate::systems::social::faction::set_faction_persistent(
-                        s,
-                        &p,
-                        crate::data::world_data::factions::PIRATE,
-                    );
-                }
+                crate::systems::social::faction::apply_crime_faction_change(s, &p, change);
                 crate::systems::dispatch_buff_events(s, &WorldObject::from(&p))
             });
         }

@@ -128,9 +128,30 @@ pub fn give_honor_point(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4])
     progress::change_game_points(server, p, progress::GAME_POINT_HONOR, points);
 }
 
-/// `GiveCrimePoint` (only logs in the C#).
-pub fn give_crime_point(_server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+/// `GiveCrimePoint` (the C# only logged it): `value1` is added to the caster's crime and infamy
+/// points through `Character.AddCrime`, so a negative value can pardon a pirate (infamy 0).
+/// 1.2 data: item 32212 "Draught of Forgiveness" (use skill 25281, special effect 15906, -100;
+/// its comment calls it a test item) and skills 25280 (+100) / 23417 (-10) carry the same
+/// special effect (type 102).
+pub fn give_crime_point(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "GiveCrimePoint", v);
+    let Some(p) = args.caster.as_ref().and_then(WorldObject::as_player) else {
+        return;
+    };
+    let Ok(amount) = i16::try_from(v[0]) else {
+        tracing::warn!("GiveCrimePoint: {} is outside the crime point range", v[0]);
+        return;
+    };
+    if amount == 0 {
+        return;
+    }
+    let (packet, change) = {
+        let mut c = p.data();
+        crate::systems::social::crime::add_crime(server, &mut c, amount, crate::world::now_ms())
+    };
+    p.send(packet);
+    crate::systems::social::faction::apply_crime_faction_change(server, p, change);
+    crate::systems::dispatch_buff_events(server, &WorldObject::from(p));
 }
 
 /// `EnterBeautyshop`: `SCToggleBeautyshopResponsePacket(1)`.
@@ -1039,5 +1060,54 @@ mod tests {
         let text = String::from_utf8_lossy(&frames[0].1);
         assert!(text.contains("X: 123"), "{text}");
         assert!(text.contains("Y: 456"), "{text}");
+    }
+
+    /// Special effect 102 (`GiveCrimePoint`): item 32212's skill 25281 carries -100, so a pirate
+    /// at exactly 100 infamy is pardoned by the item (the shared helper).
+    #[tokio::test]
+    async fn give_crime_point_pardons_a_pirate_at_zero_infamy() {
+        let mut data = GameData::empty();
+        data.characters.templates.insert(
+            key(1, 1),
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                creatable: true,
+                faction_id: 101,
+                ..CharacterTemplate::default()
+            },
+        );
+        let server = std::sync::Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::social::install_hooks(&server);
+
+        let mut client = TestClient::new(&server, 1, 1001);
+        let mut character = test_character(1, "Pirate", 100.0, 100.0);
+        character.unit.faction_id = 161;
+        character.crime_point = 100;
+        character.infamy_point = 100;
+        let p = spawn_player(&server, &client, character, 0x100);
+        client.conn.active_char = Some(p.clone());
+        client.drain();
+
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&p)),
+            caster_caster: SkillCaster::Unit(p.obj_id),
+            target: Target::Obj(WorldObject::from(&p)),
+            target_caster: SkillCastTarget::Unit(p.obj_id),
+            cast: CastAction::Skill {
+                skill_id: 25_281,
+                tl_id: 1,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+        super::super::execute(&server, 102, &args, [-100, 0, 0, 0]);
+
+        {
+            let c = p.data();
+            assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+            assert_eq!(c.unit.faction_id, 101, "the potion pardoned the pirate");
+        }
     }
 }

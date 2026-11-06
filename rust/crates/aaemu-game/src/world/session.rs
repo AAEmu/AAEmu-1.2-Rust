@@ -859,27 +859,25 @@ pub fn select_loaded(
             }
         }
     }
-    let became_pirate = {
+    let crime_faction = {
         let mut live = player.data();
         apply_active_buffs(server, &mut live, &db.saved_buffs, now_ms());
         // WP-B: the premium grade buffs (`pcbang_buffs` rows with `active = 't'` for the
         // account's grade) are part of the login state, like the saved buffs above.
         crate::systems::services::premium::apply_login_buffs(server, &mut live);
-        let became_pirate = live.check_wanted_threshold(server, now_ms());
+        let change = live.check_wanted_threshold(server, now_ms());
         // UpdateGearBonuses(null, null): gear bonuses are a later phase.
         live.restore_saved_hp_mp();
         live.breath = 60_000; // LungCapacity
-        became_pirate
+        change
     };
-    if became_pirate {
-        // `Character.CheckWantedThreshold` -> `Character.SetFaction(Pirate)`: the DB load only
-        // restored the wanted buffs; the faction change itself needs the live player and runs
-        // here, after the data lock is released (broadcast, houses, guild / party).
-        crate::systems::social::faction::set_faction_persistent(
-            server,
-            &player,
-            crate::data::world_data::factions::PIRATE,
-        );
+    if !crime_faction.is_empty() {
+        // `Character.CheckWantedThreshold` -> `Character.SetFaction(Pirate)` / pardon: the DB
+        // load only restored the wanted buffs; the faction change itself needs the live player
+        // and runs here, after the data lock is released (broadcast, houses, guild / party).
+        // A pirate whose infamy reached 0 while offline is pardoned here, mirroring the pirate
+        // conversion `bridges.rs` leaves to this select path.
+        crate::systems::social::faction::apply_crime_faction_change(server, &player, crime_faction);
     }
     crate::systems::skills::on_character_loaded(server, &player); // buffs, gear bonuses, exact MaxHp/MaxMp
     let zone = player.data().unit.transform.zone_id;

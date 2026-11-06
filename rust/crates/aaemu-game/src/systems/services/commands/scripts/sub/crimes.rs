@@ -250,12 +250,12 @@ impl SubCommand for CrimeAddPointSubCommand {
         if crime_points != 0 || infamy_points != 0 || jury_points != 0 {
             // If something changed, go to change mode
             let now = crate::world::now_ms();
-            let (packet, jury_packet, became_pirate) = {
+            let (packet, jury_packet, change) = {
                 let mut c = target.data();
                 let cp = c.crime_point.wrapping_add(crime_points);
-                let mut became_pirate = crime::set_crime_point(server, &mut c, cp, now);
+                let mut change = crime::set_crime_point(server, &mut c, cp, now);
                 let ip = c.infamy_point.wrapping_add(infamy_points);
-                became_pirate |= crime::set_infamy_point(server, &mut c, ip, now);
+                change = change.merge(crime::set_infamy_point(server, &mut c, ip, now));
                 let packet = SCCrimeChangedPacket {
                     points: i32::from(crime_points),
                     crime_points: c.crime_point,
@@ -263,14 +263,12 @@ impl SubCommand for CrimeAddPointSubCommand {
                     crime_state: crime::crime_state(&c),
                 };
                 let jp = c.jury_point.wrapping_add(jury_points);
-                (packet, crime::set_jury_point(&mut c, jp), became_pirate)
+                (packet, crime::set_jury_point(&mut c, jp), change)
             };
-            // The threshold's `SetFaction(Pirate)` needs the world: run it after the data lock.
-            if became_pirate {
-                crate::systems::social::faction::set_faction_persistent(
-                    server,
-                    &target,
-                    crate::data::world_data::factions::PIRATE,
+            // The threshold's faction change needs the world: run it after the data lock.
+            if !change.is_empty() {
+                crate::systems::social::faction::apply_crime_faction_change(
+                    server, &target, change,
                 );
             }
             target.send(packet);

@@ -71,10 +71,10 @@ impl Command for SetCrimeValue {
         };
         let target_name = name_of(&target);
         let now = crate::world::now_ms();
-        let (packet, became_pirate, before) = {
+        let (packet, change, before) = {
             let mut c = target.data();
             let before = c.crime_point;
-            let became_pirate = crime::set_crime_point(server, &mut c, value, now);
+            let change = crime::set_crime_point(server, &mut c, value, now);
             let after = c.crime_point;
             let packet = SCCrimeChangedPacket {
                 points: i32::from(after) - i32::from(before),
@@ -82,14 +82,10 @@ impl Command for SetCrimeValue {
                 infamy_points: c.infamy_point,
                 crime_state: crime::crime_state(&c),
             };
-            (packet, became_pirate, before)
+            (packet, change, before)
         };
-        if became_pirate {
-            crate::systems::social::faction::set_faction_persistent(
-                server,
-                &target,
-                crate::data::world_data::factions::PIRATE,
-            );
+        if !change.is_empty() {
+            crate::systems::social::faction::apply_crime_faction_change(server, &target, change);
         }
         let after = packet.crime_points;
         if packet.points != 0 {
