@@ -628,6 +628,39 @@ With `aa_point = 0` the handler takes the unchanged `ChangeMoney` path. Mail AA 
 (`SCAttachmentTaken.aa_point`, `CSSendMail money0..2`) stay out: the 1.2 client has no
 evidenced meaning for them (mail AA is UNKNOWN).
 
+#### Store purchases and player trades in AA points (WP-AA3d, 2026-11-06)
+
+`CSBuyItemsPacket.useAAPoint` was parsed and ignored by the C#. With the flag set and the gold
+total short, the checkout pays the shortage from the carried AA purse 1:1 (all gold first) and
+the `STORE_BUY` task packet carries the `AaPointUpdate` delta next to the item tasks; the gold
+part keeps its `DEPOSIT_MONEY` packet. The rule is INFERRED from the same `ask_use_aa_point`
+text as WP-AA3a. A short AA purse is refused with `NOT_ENOUGH_AA_POINT` 707 and changes nothing;
+with the flag false the checkout is exactly the old gold one. The debit runs under the
+character lock that was taken before the item preflight, so the wallet and the bag commit in the
+same operation (the shared `inventory::try_take_gold_or_aa` takes that lock itself and therefore
+cannot be called there). No shipped 1.2 data marks an item as refusing AA:
+`STORE_CANT_BUY_WITH_AA_POINT` 709 and `STORE_CANT_BUY_WITH_MONEY_WITH_AA_POINT` 710 have no
+consumer in the `items` or merchant tables, so only the shortage rule is implemented
+(AA3-AA-REFUSAL-1). Tests: `store_aa_point_pays_the_gold_shortage_one_to_one`,
+`store_aa_point_short_refuses_and_leaves_everything_unchanged`,
+`store_without_the_aa_flag_keeps_todays_gold_refusal`,
+`store_aa_flag_does_not_spend_aa_when_gold_covers_the_total`.
+
+Player trade carries one i32 `moneyAmount` and no AA field (WP-RE1 section 3). The 1.2 client
+picks the currency of that amount from `content_configs` id 3 (`FUN_394b4380` /
+`FUN_394b4810` / `FUN_394b4990` read `FUN_39744420(3)`); the shipped value is 100, so today's
+trade is gold. When the value is 3 the server treats the same i32 as AA points: put-up and
+completion are guarded with `NOT_ENOUGH_AA_POINT` 707 (a refused put-up keeps the trade; a
+refused completion cancels it), and each side's `SCTradeMade` carries `ItemTask::AaPointUpdate`
+deltas instead of `MoneyChange`. The two purses are changed one character lock at a time, with
+the first side refunded if the second fails, so a completed trade moves both wallets or
+neither. That the tasks use action 16 inside `SCTradeMade` is INFERRED from the shared task
+container (AA3-TRADE-1). The client also needs its own 0x1000 feature flag, which the server
+cannot observe; the content config alone selects the mode. Tests:
+`trade_money_stays_gold_with_the_shipped_content_config`,
+`aa_trade_moves_both_wallets_atomically`, `aa_trade_refuses_insufficient_aa_at_put_up`,
+`aa_trade_refuses_insufficient_aa_at_completion_without_moving_either_wallet`.
+
 #### Cash-shop AA prices and the cash -> AA purchase (WP-AA2, 2026-11-06)
 
 An AA-priced SKU (`ics_skus.currency = 1`) is now purchasable. The cart total is checked against

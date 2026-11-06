@@ -31,7 +31,8 @@ use crate::packets::packet_def;
 use crate::server::GameServer;
 use crate::world::PlayerRef;
 
-use super::inventory::{lock_pair, Inv, ItemTxn};
+use super::error_message;
+use super::inventory::{self, lock_pair, Inv, ItemTxn};
 use super::item_handlers::{active, sync_client_packet};
 
 // ---------------------------------------------------------------------------------------------
@@ -500,13 +501,34 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
     unlock_trade(t, &owner, &target);
 }
 
+/// The 1.2 client takes the currency of the trade-money amount from `content_configs` id 3:
+/// the shipped data has `100` (gold); `3` makes the same i32 `moneyAmount` an AA-point amount,
+/// checked against the AA wallet. The client additionally needs its own feature flag, which the
+/// server cannot observe; the server follows the content config only (see PORTING.md).
+fn money_is_aa(server: &GameServer) -> bool {
+    server.game_data.content_configs.content_config(3) == Some(3)
+}
+
 /// `TradeManager.AddMoney(character, moneyAmount)`.
 pub fn add_money(server: &GameServer, character: &PlayerRef, money_amount: i32) {
+    let aa_mode = money_is_aa(server);
     let mut trades = manager(server).lock();
     let trade_id = get_trade_id(&trades, character.obj_id);
-    let money = character.data().money;
+    let balance = {
+        let c = character.data();
+        if aa_mode {
+            c.aa_point
+        } else {
+            c.money
+        }
+    };
     // A negative amount would be stored and then skipped when the trade is made; reject it.
-    if trade_id == 0 || money_amount < 0 || money < i64::from(money_amount) {
+    if trade_id == 0 || money_amount < 0 || balance < i64::from(money_amount) {
+        if aa_mode && trade_id != 0 && money_amount >= 0 {
+            // AA short: refused like the client's own wallet check, nothing is put up.
+            inventory::send_error_message(character, error_message::NOT_ENOUGH_AA_POINT, 0, true);
+            return;
+        }
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
         return;
     }
@@ -755,51 +777,89 @@ pub fn finish_trade(
         );
         return;
     }
-    // Validate Money (custom client protection) and apply the transfers with overflow checks.
-    let owner_money = owner.data().money;
-    if owner_put > owner_money {
-        send_canceled(server, &trade, owner.obj_id, 0); // Reason?
-        let c = owner.data();
-        tracing::error!(
-            "{} ({}) is putting up more money for trade than have {} > {}, possible exploit or modified client!",
-            c.unit.name,
-            c.id,
-            trade.owner_money_putup,
-            c.money
-        );
-        return;
-    }
-    let target_money = target.data().money;
-    if target_put > target_money {
-        send_canceled(server, &trade, target.obj_id, 0); // Reason?
-        let c = target.data();
-        tracing::error!(
-            "{} ({}) is putting up more money for trade than have {} > {}, possible exploit or modified client!",
-            c.unit.name,
-            c.id,
-            trade.target_money_putup,
-            c.money
-        );
-        return;
-    }
-    // Money after the transfer, checked before anything is changed.
-    if owner_money
-        .checked_sub(owner_put)
-        .and_then(|money| money.checked_add(target_put))
-        .is_none()
-    {
-        send_canceled(server, &trade, owner.obj_id, 0);
-        tracing::error!("Trade Id:{trade_id} money overflow, possible exploit or modified client!");
-        return;
-    }
-    if target_money
-        .checked_sub(target_put)
-        .and_then(|money| money.checked_add(owner_put))
-        .is_none()
-    {
-        send_canceled(server, &trade, target.obj_id, 0);
-        tracing::error!("Trade Id:{trade_id} money overflow, possible exploit or modified client!");
-        return;
+    let aa_mode = money_is_aa(server);
+    if aa_mode {
+        // In AA-trade mode the i32 put-up is AA points: both purses must still cover their
+        // put-up; a short one is refused with error 707 and the trade cancels with no change.
+        let owner_aa = owner.data().aa_point;
+        if owner_put > owner_aa {
+            inventory::send_error_message(owner, error_message::NOT_ENOUGH_AA_POINT, 0, true);
+            send_canceled(server, &trade, owner.obj_id, 0);
+            let c = owner.data();
+            tracing::error!(
+                "{} ({}) is putting up more AA points for trade than have {} > {}, possible exploit or modified client!",
+                c.unit.name,
+                c.id,
+                trade.owner_money_putup,
+                c.aa_point
+            );
+            return;
+        }
+        let target_aa = target.data().aa_point;
+        if target_put > target_aa {
+            inventory::send_error_message(target, error_message::NOT_ENOUGH_AA_POINT, 0, true);
+            send_canceled(server, &trade, target.obj_id, 0);
+            let c = target.data();
+            tracing::error!(
+                "{} ({}) is putting up more AA points for trade than have {} > {}, possible exploit or modified client!",
+                c.unit.name,
+                c.id,
+                trade.target_money_putup,
+                c.aa_point
+            );
+            return;
+        }
+    } else {
+        // Validate Money (custom client protection) and apply the transfers with overflow checks.
+        let owner_money = owner.data().money;
+        if owner_put > owner_money {
+            send_canceled(server, &trade, owner.obj_id, 0); // Reason?
+            let c = owner.data();
+            tracing::error!(
+                "{} ({}) is putting up more money for trade than have {} > {}, possible exploit or modified client!",
+                c.unit.name,
+                c.id,
+                trade.owner_money_putup,
+                c.money
+            );
+            return;
+        }
+        let target_money = target.data().money;
+        if target_put > target_money {
+            send_canceled(server, &trade, target.obj_id, 0); // Reason?
+            let c = target.data();
+            tracing::error!(
+                "{} ({}) is putting up more money for trade than have {} > {}, possible exploit or modified client!",
+                c.unit.name,
+                c.id,
+                trade.target_money_putup,
+                c.money
+            );
+            return;
+        }
+        // Money after the transfer, checked before anything is changed.
+        if owner_money
+            .checked_sub(owner_put)
+            .and_then(|money| money.checked_add(target_put))
+            .is_none()
+        {
+            send_canceled(server, &trade, owner.obj_id, 0);
+            tracing::error!(
+                "Trade Id:{trade_id} money overflow, possible exploit or modified client!"
+            );
+            return;
+        }
+        if target_money
+            .checked_sub(target_put)
+            .and_then(|money| money.checked_add(owner_put))
+            .is_none()
+        {
+            send_canceled(server, &trade, target.obj_id, 0);
+            tracing::error!(
+                "Trade Id:{trade_id} money overflow, possible exploit or modified client!"
+            );
+            return;
+        }
     }
 
     // The item operation lock keeps the item containers still from the preflight until the
@@ -828,28 +888,55 @@ pub fn finish_trade(
     let mut tasks_owner = Vec::new();
     let mut tasks_target = Vec::new();
 
-    // Money moves as deltas, each under a single character guard (no absolute write from an
-    // earlier read).
-    if !apply_money_delta(owner, target_put - owner_put) {
-        send_canceled(server, &trade, owner.obj_id, 0);
-        tracing::error!("Trade Id:{trade_id} money changed during the trade, aborted!");
-        return;
-    }
-    if !apply_money_delta(target, owner_put - target_put) {
-        apply_money_delta(owner, owner_put - target_put);
-        send_canceled(server, &trade, target.obj_id, 0);
-        tracing::error!("Trade Id:{trade_id} money changed during the trade, aborted!");
-        return;
-    }
-    // Handle Money from Owner
-    if trade.owner_money_putup > 0 {
-        tasks_owner.push(ItemTask::MoneyChange(-trade.owner_money_putup));
-        tasks_target.push(ItemTask::MoneyChange(trade.owner_money_putup));
-    }
-    // Handle Money from Target
-    if trade.target_money_putup > 0 {
-        tasks_owner.push(ItemTask::MoneyChange(trade.target_money_putup));
-        tasks_target.push(ItemTask::MoneyChange(-trade.target_money_putup));
+    // AA points / money move as deltas, each under a single character guard (no absolute write
+    // from an earlier read). A failed second side restores the first, so the trade moves both
+    // purses or neither.
+    if aa_mode {
+        if !apply_aa_point_delta(owner, target_put - owner_put) {
+            inventory::send_error_message(owner, error_message::NOT_ENOUGH_AA_POINT, 0, true);
+            send_canceled(server, &trade, owner.obj_id, 0);
+            tracing::error!("Trade Id:{trade_id} AA points changed during the trade, aborted!");
+            return;
+        }
+        if !apply_aa_point_delta(target, owner_put - target_put) {
+            apply_aa_point_delta(owner, owner_put - target_put);
+            inventory::send_error_message(target, error_message::NOT_ENOUGH_AA_POINT, 0, true);
+            send_canceled(server, &trade, target.obj_id, 0);
+            tracing::error!("Trade Id:{trade_id} AA points changed during the trade, aborted!");
+            return;
+        }
+        // Handle AA points from Owner
+        if trade.owner_money_putup > 0 {
+            tasks_owner.push(ItemTask::AaPointUpdate(-trade.owner_money_putup));
+            tasks_target.push(ItemTask::AaPointUpdate(trade.owner_money_putup));
+        }
+        // Handle AA points from Target
+        if trade.target_money_putup > 0 {
+            tasks_owner.push(ItemTask::AaPointUpdate(trade.target_money_putup));
+            tasks_target.push(ItemTask::AaPointUpdate(-trade.target_money_putup));
+        }
+    } else {
+        if !apply_money_delta(owner, target_put - owner_put) {
+            send_canceled(server, &trade, owner.obj_id, 0);
+            tracing::error!("Trade Id:{trade_id} money changed during the trade, aborted!");
+            return;
+        }
+        if !apply_money_delta(target, owner_put - target_put) {
+            apply_money_delta(owner, owner_put - target_put);
+            send_canceled(server, &trade, target.obj_id, 0);
+            tracing::error!("Trade Id:{trade_id} money changed during the trade, aborted!");
+            return;
+        }
+        // Handle Money from Owner
+        if trade.owner_money_putup > 0 {
+            tasks_owner.push(ItemTask::MoneyChange(-trade.owner_money_putup));
+            tasks_target.push(ItemTask::MoneyChange(trade.owner_money_putup));
+        }
+        // Handle Money from Target
+        if trade.target_money_putup > 0 {
+            tasks_owner.push(ItemTask::MoneyChange(trade.target_money_putup));
+            tasks_target.push(ItemTask::MoneyChange(-trade.target_money_putup));
+        }
     }
 
     // Handle Items from Owner
@@ -910,6 +997,19 @@ pub fn finish_trade(
         tracing::error!(
             "{has_errors}item(s) could not be trade for tradeId: {trade_id} between {on} ({oi}) and {tn} ({ti}), possible exploit or modified client!"
         );
+    }
+}
+
+/// Adds `delta` to the character's AA purse under one guard; `false` (nothing changed) when
+/// the result would be negative or overflow.
+fn apply_aa_point_delta(player: &PlayerRef, delta: i64) -> bool {
+    let mut c = player.data();
+    match c.aa_point.checked_add(delta) {
+        Some(aa_point) if aa_point >= 0 => {
+            c.aa_point = aa_point;
+            true
+        }
+        _ => false,
     }
 }
 
