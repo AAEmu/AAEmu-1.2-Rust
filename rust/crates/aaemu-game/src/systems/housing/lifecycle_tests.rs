@@ -788,7 +788,7 @@ async fn new_house_prepaid_period_is_paid_before_first_bill_and_renewal_covers_o
         let h = house.data();
         (
             h.place_date,
-            manager::tax_due_date(&h),
+            manager::tax_due_date(&f.server, &h),
             h.protection_end_date,
             h.unit.tl_id,
         )
@@ -840,7 +840,7 @@ async fn new_house_prepaid_period_is_paid_before_first_bill_and_renewal_covers_o
     let before = house.data().protection_end_date;
     {
         let mut txn = ItemTxn::begin(&f.server);
-        assert!(mail::pay_charge_money(&mut txn, &f.player, mails[0], false).is_some());
+        assert!(mail::pay_charge_money(&mut txn, &f.player, mails[0], false));
     }
     assert_eq!(house.data().protection_end_date, before + 7 * 86400);
     assert_eq!(f.player.data().money, 99_996);
@@ -887,6 +887,54 @@ async fn nonrenewable_beginner_construction_keeps_authored_seven_day_lifetime() 
         .mail
         .get_my_house_mails(house.data().id)
         .is_empty());
+}
+
+/// WP-H1: the grace between the bill's due date and removal is the house group's
+/// `allowed_tax_delay_week` (x7 days), and the fixed one-week interval when it is NULL.
+#[tokio::test]
+async fn tax_grace_reads_the_housing_groups_allowed_tax_delay_week() {
+    for (delay, expected_days) in [(Some(2), 14), (Some(0), 0), (None, 7)] {
+        let mut data = GameData::empty();
+        data.systems
+            .npcs
+            .subzone
+            .housing_zones
+            .entry(0)
+            .or_default()
+            .insert(
+                1,
+                vec![crate::systems::npcs::subzone::Area {
+                    id: 5,
+                    name: "Housing".into(),
+                    points: vec![
+                        [90.0, 90.0, 0.0],
+                        [150.0, 90.0, 0.0],
+                        [150.0, 150.0, 0.0],
+                        [90.0, 150.0, 0.0],
+                    ],
+                }],
+            );
+        data.systems.housing.areas.insert(5, 13);
+        data.systems.housing.groups.insert(
+            13,
+            super::data::HousingGroup {
+                id: 13,
+                allowed_tax_delay_week: delay,
+                ..Default::default()
+            },
+        );
+        data.systems.housing.group_categories.insert(13, vec![0]);
+        let f = fixture_with_data(false, 500_000, None, data);
+        let selected = give(&f, slot_type::INVENTORY, DESIGN_ITEM, 1, 0);
+        ops::build(&f.server, &f.player, 1001, &packet(selected));
+        let house = f.server.systems.housing.manager.all()[0].clone();
+        let h = house.data();
+        assert_eq!(
+            manager::tax_due_date(&f.server, &h),
+            h.protection_end_date - expected_days * 86400,
+            "allowed_tax_delay_week {delay:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -956,7 +1004,7 @@ async fn atomic_payment_rechecks_the_selected_design_before_touching_money() {
         .unwrap();
     source.item_id += 100;
     assert_eq!(
-        hooks.pay_house_construction(&f.server, &f.player, source, 300_003, false, false),
+        hooks.pay_house_construction(&f.server, &f.player, source, 300_003, false),
         Err(HouseConstructionError::InvalidDesign)
     );
     assert_eq!(f.player.data().money, 400_000);

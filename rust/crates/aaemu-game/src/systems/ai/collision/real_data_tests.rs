@@ -61,6 +61,7 @@ fn env_with(geo_data_mode: bool) -> Option<Env> {
             heightmaps_enable: true,
             geo_data_mode,
             pre_load_terrain: false,
+            placement_strict_surface: false,
         },
     ));
     Some(Env {

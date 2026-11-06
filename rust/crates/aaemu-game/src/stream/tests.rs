@@ -1211,24 +1211,25 @@ async fn ucc_custom_upload() {
     assert_eq!(stored.ty, UccType::Complex);
     assert_eq!(stored.uploader_id, 555);
     assert_eq!(stored.data, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-    // The money task and the reagent removal, both before the failing save.
+    // A custom image costs the reagent only: the row's 50000 is not charged on this path
+    // (client `X2Ucc.GetMakeUccConsumeInfo` shows the item, not the money).
     let frames = game_frames(&mut g);
+    assert_eq!(frames[0].0, crate::opcodes::sc::SCItemTaskSuccessPacket);
     assert_eq!(
-        frames[0],
-        (
-            crate::opcodes::sc::SCItemTaskSuccessPacket,
-            hex("53  01  01 B0 3C FF FF  00  00 00 00 00")
-        )
-    );
-    assert!(
-        frames.iter().skip(1).any(
-            |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
-                && body.first() == Some(&task_type::IMPRINT_UCC)
-        ),
+        frames[0].1.first(),
+        Some(&task_type::IMPRINT_UCC),
         "the reagent removal is an IMPRINT_UCC item task"
     );
-    // The save failed before the Crest Ink went to the bag, and the reagent is gone.
-    assert_eq!(p.data().money, 0);
+    assert!(
+        !frames.iter().any(
+            |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
+                && body.first() == Some(&task_type::DEPOSIT_MONEY)
+        ),
+        "no money task on a custom upload"
+    );
+    // The save failed before the Crest Ink went to the bag, the reagent is gone and the money
+    // is untouched.
+    assert_eq!(p.data().money, 50_000);
     assert_eq!(
         crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
             crate::models::container::slot_type::INVENTORY,
@@ -1387,6 +1388,7 @@ async fn crest_upload_3038_charges_the_row_money() {
     let (server, mut c, mut g) = joined_printer(printer_3038()).await;
     let p = server.world.character_by_connection(77).unwrap();
     p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
     let start = start_upload_body(PRINTER_OBJ, 0);
     c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
         .await
@@ -1404,6 +1406,15 @@ async fn crest_upload_3038_charges_the_row_money() {
             crate::opcodes::sc::SCItemTaskSuccessPacket,
             hex("53  01  01 B0 3C FF FF  00  00 00 00 00")
         )]
+    );
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        1,
+        "a default pattern charges no reagent"
     );
     assert_eq!(server.streams.ucc.get_ucc(1).unwrap().ty, UccType::Simple);
 }
@@ -1425,13 +1436,14 @@ async fn crest_custom_upload_requires_the_reagent() {
 }
 
 /// (d) With the reagent: it is consumed exactly once, the ink carries the new UCC id and the
-/// money debit shares the same transaction. A second call without the reagent changes nothing.
+/// custom path charges **no money** (it succeeds with an empty purse). A second call without
+/// the reagent changes nothing.
 #[tokio::test]
 async fn crest_custom_reagent_is_consumed_once_with_the_ink() {
     use super::ucc::{add_crest_ink, charge_and_create_crest_ink};
     let (server, _c, _g) = joined_printer(printer_3038()).await;
     let p = server.world.character_by_connection(77).unwrap();
-    p.data().money = 50_000;
+    p.data().money = 0;
     give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
     let cost = CrestPrinterCost {
         consume_money: 50_000,
@@ -1439,7 +1451,7 @@ async fn crest_custom_reagent_is_consumed_once_with_the_ink() {
         consume_count: 1,
     };
     let item = charge_and_create_crest_ink(&server, &p, 7, &cost, true).expect("crest ink");
-    assert_eq!(p.data().money, 0);
+    assert_eq!(p.data().money, 0, "a custom image never takes money");
     assert_eq!(
         crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
             crate::models::container::slot_type::INVENTORY,

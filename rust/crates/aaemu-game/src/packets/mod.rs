@@ -69,10 +69,19 @@ mod tests {
         let registry = super::build_registry();
         let supported: Vec<_> = crate::opcodes::cs::NAMES
             .iter()
-            .filter(|(opcode, _)| *opcode != 0xfff)
+            // `CSICSBuyAAPointPacket` (0x137) is a known 1.2 client opcode, but AA points
+            // are not supported (owner decision 2026-11-06), so no handler is registered.
+            // `CSCreate/Change/Clear/CheckSecondPasswordPacket` (0x126..=0x129) are known
+            // 1.2 client opcodes, but the second password is not supported (owner decision
+            // 2026-11-06), so no handler is registered.
+            .filter(|(opcode, _)| {
+                *opcode != 0xfff
+                    && *opcode != crate::opcodes::cs::CSICSBuyAAPointPacket
+                    && !matches!(*opcode, 0x126..=0x129)
+            })
             .collect();
-        // 257 with the owner-approved native 1.2 CS 0x13d (system-dungeon channel pick).
-        assert_eq!(supported.len(), 257);
+        // 252 with the owner-approved native 1.2 CS 0x13d (system-dungeon channel pick).
+        assert_eq!(supported.len(), 252);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -153,22 +162,13 @@ mod tests {
             // `CSSetCraftingPayPacket` is the owner-approved native 1.2 0x08d
             // (`FUN_394d7230`; handled by `systems::economy::craft` as a validated no-op); the
             // C# left it at 0xfff.
-            // `CSCreate/Change/Clear/CheckSecondPasswordPacket` (0x126..=0x129) are the 1.2
-            // client's second password packets (serializers FUN_397b14d0 / FUN_397b1560 /
-            // FUN_397b1650 / FUN_397b16e0); the C# never registered them.
             // `CSSelectSysInstanceChannelPacket` (0x13d) is the 1.2 client's system-dungeon
             // channel pick (writer FUN_397bca60); the C# never registered it.
-            // `CSICSBuyAAPointPacket` (0x137) is the 1.2 client's cash -> AA exchange (writer
-            // FUN_397b17f0, sender FUN_39187800); the C# never registered it.
             let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
                 || opcode == crate::opcodes::cs::CSUpdateNationalTaxRatePacket
                 || opcode == crate::opcodes::cs::CSSetCraftingPayPacket
                 || opcode == crate::opcodes::cs::CSSelectSysInstanceChannelPacket
-                || opcode == crate::opcodes::cs::CSICSBuyAAPointPacket
-                || matches!(
-                    opcode,
-                    0x11f | 0x120 | 0x126 | 0x127 | 0x128 | 0x129 | 0x130 | 0x133
-                );
+                || matches!(opcode, 0x11f | 0x120 | 0x130 | 0x133);
             if !expected.contains_key(&(level, opcode)) && opcode != 0xfff && !rust_only {
                 missing.push(format!(
                     "0x{opcode:03x}({level}) {} not registered in C#",

@@ -7,9 +7,11 @@ use std::collections::HashMap;
 
 use super::data::{DbSphere, DbSphereQuest, QuestData, RawSignSphere};
 use super::events;
-use super::spheres::load_sign_sphere_fill;
+use super::spheres::{load_sign_sphere_fill, load_sphere_areas};
 use super::templates::ActKind;
+use crate::data::client_files::ClientFileManager;
 use crate::data::world_data::{Zone, ZoneData};
+use crate::data::world_templates::WorldTemplates;
 use crate::data::GameData;
 use crate::models::character::Character;
 use crate::systems::quests::model::kind;
@@ -213,8 +215,8 @@ async fn entering_an_imported_sphere_advances_the_objective() {
                 zone_id: 100,
                 quest_id: 20,
                 component_id: 202,
-                // Zone 100's origin in the test world is (1, 1): world (1124, 1124).
-                local: [100.0, 100.0, 100.0],
+                // Imported fill rows already hold world coordinates.
+                local: [1124.0, 1124.0, 100.0],
                 radius: 5.0,
             },
         )],
@@ -290,5 +292,62 @@ fn real_data_imported_quest_sign_spheres_load() {
             .expect("world templates");
         let fill = load_sign_sphere_fill(&app, &data, &zones, &worlds);
         assert_eq!(fill.len(), 8, "{fill:?}");
+    }
+}
+
+/// The zone's world rectangle from its 1.2 `world.xml` cells: every loaded sphere must lie
+/// inside it. A converted zone-local position is `origin * 1024 + local`; without the
+/// conversion a `sphere_area_fill.json` row sits in the top-left corner of the world and fails.
+fn assert_in_zone(worlds: &WorldTemplates, world: &str, zone: u32, x: f32, y: f32) {
+    let template = worlds
+        .get_world_template_by_name(world)
+        .unwrap_or_else(|| panic!("world {world} is not loaded"));
+    let xml_zone = template
+        .xml_world_zones()
+        .get(&zone)
+        .unwrap_or_else(|| panic!("zone {zone} is not in {world}"));
+    if xml_zone.cells.is_empty() {
+        return;
+    }
+    let min_x = xml_zone.cells.keys().map(|c| c.0).min().unwrap();
+    let max_x = xml_zone.cells.keys().map(|c| c.0).max().unwrap();
+    let min_y = xml_zone.cells.keys().map(|c| c.1).min().unwrap();
+    let max_y = xml_zone.cells.keys().map(|c| c.1).max().unwrap();
+    let inside = min_x as f32 * 1024.0 <= x
+        && x <= (max_x + 1) as f32 * 1024.0
+        && min_y as f32 * 1024.0 <= y
+        && y <= (max_y + 1) as f32 * 1024.0;
+    assert!(
+        inside,
+        "{world} zone {zone}: ({x}, {y}) is outside cells ({min_x}, {min_y})..({max_x}, {max_y})"
+    );
+}
+
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB and AAEMU_GAME_PAK"]
+fn real_data_fill_spheres_lie_inside_their_zone_rectangle() {
+    let Some(conn) = super::tests::real_db() else {
+        return;
+    };
+    let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+        return;
+    };
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let mut files = ClientFileManager::new();
+    assert!(files.add_source(&pak, std::path::Path::new(".")));
+    let data = QuestData::load_from(&conn, &files).expect("quest data");
+    let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+
+    let areas = load_sphere_areas(&app, |id| data.spheres.contains_key(&id));
+    assert_eq!(areas.len(), 2112, "committed area spheres");
+    for area in &areas {
+        assert_in_zone(&worlds, &area.world, area.zone, area.xyz.0, area.xyz.1);
+    }
+
+    let zones = ZoneData::load(&conn, 0).expect("zones");
+    let fill = load_sign_sphere_fill(&app, &data, &zones, &worlds);
+    assert_eq!(fill.len(), 8, "committed imported sign spheres");
+    for (world, row) in &fill {
+        assert_in_zone(&worlds, world, row.zone_id, row.local[0], row.local[1]);
     }
 }

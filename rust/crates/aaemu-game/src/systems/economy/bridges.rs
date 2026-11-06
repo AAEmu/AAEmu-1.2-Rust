@@ -3752,16 +3752,10 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         design: crate::systems::housing::hooks::HouseItem,
         total: i32,
         tax_item: bool,
-        auto_use_aa_point: bool,
     ) -> Result<(), crate::systems::housing::hooks::HouseConstructionError> {
-        if let Some((effects, _payment)) = self.pay_house_construction_deferred(
-            server,
-            player,
-            design,
-            total,
-            tax_item,
-            auto_use_aa_point,
-        )? {
+        if let Some(effects) =
+            self.pay_house_construction_deferred(server, player, design, total, tax_item)?
+        {
             super::fx::flush(server, effects);
         }
         Ok(())
@@ -3774,12 +3768,8 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         design: crate::systems::housing::hooks::HouseItem,
         total: i32,
         tax_item: bool,
-        auto_use_aa_point: bool,
     ) -> Result<
-        Option<(
-            crate::models::item_task::ItemFxList,
-            inventory::PaymentSplit,
-        )>,
+        Option<crate::models::item_task::ItemFxList>,
         crate::systems::housing::hooks::HouseConstructionError,
     > {
         use crate::systems::housing::hooks::{
@@ -3815,26 +3805,23 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
             return Err(HouseConstructionError::InsufficientPayment);
         }
         let certificates = construction_certificates(total);
-        // Tax certificates pay no gold, so no AA shortage cover applies to them either.
-        let mut payment = inventory::PaymentSplit::default();
         if tax_item {
             if i64::from(bound) + i64::from(unbound) < i64::from(certificates) {
                 return Err(HouseConstructionError::InsufficientPayment);
             }
         } else {
-            if !inventory::can_afford_gold_or_aa(player, total, auto_use_aa_point) {
+            if player.data().money < i64::from(total) {
                 return Err(HouseConstructionError::InsufficientPayment);
             }
-            let Some(taken) = inventory::try_take_gold_or_aa(
+            if !inventory::subtract_money(
                 &mut txn.out(),
                 player,
+                slot_type::INVENTORY,
                 total,
-                auto_use_aa_point,
                 item_task::HOUSE_CREATION,
-            ) else {
+            ) {
                 return Err(HouseConstructionError::InsufficientPayment);
-            };
-            payment = taken;
+            }
         }
         let mut bag = lock(&bag);
         if tax_item {
@@ -3867,7 +3854,7 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
             &mut txn.env,
         );
         drop(bag);
-        Ok(Some((txn.into_fx(), payment)))
+        Ok(Some(txn.into_fx()))
     }
 
     fn inventory_item(

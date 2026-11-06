@@ -710,7 +710,7 @@ async fn beginner_plot_refuses_renewal_bills_and_does_not_charge_a_forged_paymen
     bill.body.recv_date = mail::now();
     let mut txn = ItemTxn::begin(&server);
     let id = mail::send_mail(&mut txn, bill).unwrap();
-    assert!(mail::pay_charge_money(&mut txn, &player, id, false).is_none());
+    assert!(!mail::pay_charge_money(&mut txn, &player, id, false));
     assert_eq!(player.data().money, 1000);
     assert_eq!(house.data().protection_end_date, before);
     drop(txn);

@@ -21,7 +21,6 @@ pub mod sub;
 mod tests;
 pub mod util;
 
-pub mod aa_point;
 pub mod add_badges;
 pub mod add_buff;
 pub mod add_gold;
@@ -88,7 +87,6 @@ pub mod revive;
 pub mod rotate;
 pub mod run;
 pub mod scripts_cmd;
-pub mod second_password_cmd;
 pub mod send_packet;
 pub mod set_bounty_money;
 pub mod set_crime_value;
@@ -533,16 +531,6 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["premium", "setpremium"],
             Arc::new(premium_cmd::Premium::new(env)),
-        ),
-        // SecondPassword (Rust only: admin recovery for the 1.2 second password)
-        (
-            &["secondpassword", "secondpass", "clearsecondpassword"],
-            Arc::new(second_password_cmd::SecondPassword::new(env)),
-        ),
-        // AAPoint (Rust only, WP-AA1: grant / set the per-character AA-point wallet)
-        (
-            &["aapoint", "aa_point"],
-            Arc::new(aa_point::AaPoint::new(env)),
         ),
         // Mail (Rust only: `/mail admin` system letter to an online or offline character)
         (&["mail"], Arc::new(mail::MailCommand::new(env))),

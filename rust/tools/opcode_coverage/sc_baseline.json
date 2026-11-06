@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 60,
-    "never_sent": 52
+    "typeless": 68,
+    "never_sent": 53
   },
   "typeless": [
     "SCAiDebugPacket",
@@ -38,6 +38,14 @@
     "SCPlaySequencePacket",
     "SCPlotProcessingTimePacket",
     "SCQuestListPacket",
+    "SCSecondPassAccountLockedPacket",
+    "SCSecondPassChangedPacket",
+    "SCSecondPassCheckOverFailedPacket",
+    "SCSecondPassCheckedPacket",
+    "SCSecondPassClearedPacket",
+    "SCSecondPassCreatedPacket",
+    "SCSecondPassKeyTablesPacket",
+    "SCSecondPassSettedPacket",
     "SCShowDemoModeUiPacket",
     "SCSoundAreaEventPacket",
     "SCSpecialtyRecordsPacket",
@@ -87,6 +95,7 @@
     "SCHouseBuildPayChangedPacket",
     "SCHouseFarmPacket",
     "SCHouseOwnerNameChangedPacket",
+    "SCICSExchangeRatioPacket",
     "SCIdleKickPacket",
     "SCInstantGameRemainTimePacket",
     "SCItemDetailUpdatedPacket",

@@ -309,10 +309,6 @@ pub struct GameConnection {
     /// Cached copy of `AccountManager::state` (`systems::services::accounts`); the registry / MySQL
     /// is the source of truth, refreshed at login and on every `CSListCharacter`.
     pub payment: AccountPayment,
-    /// The 1.2 second password of this connection (`systems::services::second_password`):
-    /// the one-shot virtual-keyboard tables, the per-connection `passed` flag and the cached
-    /// account state pushed by `SCSecondPassSetted`.
-    pub second_password: crate::systems::services::second_password::ConnectionState,
     /// `Characters.Values` in insertion (load) order.
     pub characters: Vec<Character>,
     /// `ActiveChar`.
@@ -373,7 +369,6 @@ impl GameConnection {
             reconnect_token,
             state: GameState::Lobby,
             payment: AccountPayment::default(),
-            second_password: Default::default(),
             characters: Vec::new(),
             active_char: None,
             leave_task: None,

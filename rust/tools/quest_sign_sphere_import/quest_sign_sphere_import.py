@@ -21,8 +21,10 @@ per zone:
 
 Both file kinds are zone-local (CryEngine level coordinates); the 10.x `quest_sign_sphere.g`
 positions were checked against the 1.2 `mission_mission0.xml` `AreaSphere` entities and agree
-where both exist. The runtime converts them with the 1.2 zone origin cell, exactly like the
-1.2 client file (see `systems/npcs/sphere_quest.rs` / `systems/quests/spheres.rs`).
+where both exist. The committed output holds WORLD coordinates, `origin * 1024 + local` (z as
+is), exactly the formula the 1.2 sign-sphere loader applies (`systems/quests/spheres.rs`). The
+origin comes from the 10.x `world.xml` of the source file; for the zones kept below it equals
+the 1.2 origin.
 
 Data-version guard (the 10.x world is newer than 1.2). A block is kept only when
 
@@ -46,10 +48,10 @@ Data-version guard (the 10.x world is newer than 1.2). A block is kept only when
     933 exists in zones 159 and 186 and quest 5716 is authored in zone 186).
 
 The output is one `<out>/<world>/quest_sign_sphere_fill.json` per 1.2 world with the kept
-blocks in zone-local coordinates:
+blocks in world coordinates (`x = origin_x * 1024 + local_x`, `y` likewise, z unchanged):
 
     [{"quest_id": 1650, "component_id": 7764, "sphere_id": 650, "zone": 142,
-      "x": 1965.21, "y": 1687.57, "z": 121.855, "radius": 6.0,
+      "x": 14253.21, "y": 14999.57, "z": 121.855, "radius": 6.0,
       "source": "quest_area_sphere.g", "radius_source": "10x_area"}]
 
 The 10.x pak and server database are read-only inputs and are never a runtime input: only the
@@ -101,6 +103,8 @@ POS_RE = re.compile(
 )
 MISSION_RADIUS_TOLERANCE = 0.11
 MISSION_POSITION_TOLERANCE = 1.5
+#: `WorldManager.CELL_SIZE`: the zone origin cell is this many metres wide/tall.
+CELL_SIZE = 1024
 
 DROP_REASONS = (
     "invalid_block",
@@ -252,6 +256,28 @@ def load_worlds_12(client12: Path) -> dict[str, dict[int, tuple[int, int]]]:
     worlds: dict[str, dict[int, tuple[int, int]]] = {}
     for path in sorted(client12.glob("game/worlds/*/world.xml")):
         worlds[path.parent.name.lower()] = parse_zone_keys(path.read_bytes())
+    return worlds
+
+
+def load_worlds_10(
+    pak10: Pak | None,
+    index10: dict[str, tuple[int, int]] | None,
+    extracted10: Path | None,
+) -> dict[str, dict[int, tuple[int, int]]]:
+    """`lower-cased world directory name -> (origin x, origin y)` from the 10.x world.xml."""
+    worlds: dict[str, dict[int, tuple[int, int]]] = {}
+    if extracted10 is not None:
+        base = extracted10 / "game" / "worlds"
+        if not base.is_dir():
+            base = extracted10 / "worlds"
+        for path in sorted(base.glob("*/world.xml")):
+            worlds[path.parent.name.lower()] = parse_zone_keys(path.read_bytes())
+        return worlds
+    assert pak10 is not None and index10 is not None
+    for name in index10:
+        parts = name.split("/")
+        if len(parts) == 4 and parts[0] == "game" and parts[1] == "worlds" and parts[3] == "world.xml":
+            worlds[parts[2]] = parse_zone_keys(pak_read(pak10, index10, name))
     return worlds
 
 
@@ -629,13 +655,42 @@ def collect_blocks(
     return blocks, files, missing
 
 
-def write_files(result: Result, worlds: dict[str, dict[int, tuple[int, int]]], out: Path) -> None:
+def to_world_entry(
+    entry: dict,
+    world: str,
+    worlds10: dict[str, dict[int, tuple[int, int]]],
+    worlds12: dict[str, dict[int, tuple[int, int]]],
+) -> dict | None:
+    """Convert one zone-local entry to world coordinates; `None` without a zone origin."""
+    origin = worlds10.get(world, {}).get(entry["zone"])
+    if origin is None:
+        # Fall back to the 1.2 origin only when the 10.x world.xml has no such zone; the kept
+        # zones have identical origins in both versions.
+        origin = worlds12.get(world, {}).get(entry["zone"])
+    if origin is None:
+        return None
+    converted = dict(entry)
+    converted["x"] = round(origin[0] * CELL_SIZE + entry["x"], 5)
+    converted["y"] = round(origin[1] * CELL_SIZE + entry["y"], 5)
+    return converted
+
+
+def write_files(
+    result: Result,
+    worlds: dict[str, dict[int, tuple[int, int]]],
+    worlds10: dict[str, dict[int, tuple[int, int]]],
+    out: Path,
+) -> None:
     by_world: dict[str, list[dict]] = {}
     for entry in result.kept:
         world = next((w for w, zones in worlds.items() if entry["zone"] in zones), None)
         if world is None:
             continue
-        by_world.setdefault(world, []).append(entry)
+        converted = to_world_entry(entry, world, worlds10, worlds)
+        if converted is None:
+            print(f"WARNING: no zone origin for quest {entry['quest_id']} zone {entry['zone']}")
+            continue
+        by_world.setdefault(world, []).append(converted)
     for world, entries in sorted(by_world.items()):
         dest = out / world / "quest_sign_sphere_fill.json"
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -662,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     blocks, files, missing = collect_blocks(pak10, index10, args.extracted10)
 
     worlds = load_worlds_12(args.client12)
+    worlds10 = load_worlds_10(pak10, index10, args.extracted10)
     d12 = load_12(args.compact, args.client12)
     d10 = load_10(args.db10)
     missions = load_mission_entities(args.client12)
@@ -679,7 +735,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"  quest {q}: {detail}")
     if not args.dry_run:
-        write_files(result, worlds, args.out)
+        write_files(result, worlds, worlds10, args.out)
     return 0
 
 

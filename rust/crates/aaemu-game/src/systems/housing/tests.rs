@@ -73,7 +73,6 @@ impl HousingEconomyHooks for Eco {
         design: HouseItem,
         total: i32,
         tax_item: bool,
-        _auto_use_aa_point: bool,
     ) -> Result<(), super::hooks::HouseConstructionError> {
         use super::hooks::{construction_certificates, item_task, HouseConstructionError};
         let certificates = construction_certificates(total);

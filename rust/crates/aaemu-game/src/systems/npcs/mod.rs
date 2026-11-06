@@ -17,6 +17,7 @@
 //! | [`doodad`] | `DoodadManager`, `Doodad` funcs / phases, `DoodadSpawner`, persistence, `SCDoodad*` |
 //! | [`spawn_manager`] | `SpawnManager` (one per world instance) |
 //! | [`heightmap`] | `WorldCell` heightmaps, `WorldManager.GetHeight` |
+//! | [`terrain_surface`] | `surface.xml` detail materials -> doodad place kinds |
 //! | [`gimmick`] | `GimmickManager`, `GimmickGameData`, `GimmickSpawner` |
 //! | [`area_trigger`], [`subzone`], [`sphere_quest`] | `AreaTriggerManager`, `SubZoneManager`, `SphereQuestManager` |
 //! | [`portal`], [`specialty`], [`public_farm`], [`fish_school`] | `PortalManager`, `SpecialtyManager`, `PublicFarmManager`, `FishSchoolManager` |
@@ -44,6 +45,7 @@ pub mod spawn_manager;
 pub mod specialty;
 pub mod sphere_quest;
 pub mod subzone;
+pub mod terrain_surface;
 
 use std::sync::Arc;
 

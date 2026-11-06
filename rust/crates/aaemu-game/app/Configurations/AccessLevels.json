@@ -33,7 +33,6 @@
         "coffer": 50,
         
         // Admin
-        "aapoint": 100,
         "addbuff": 100,
         "addgold": 100,
         "additem": 100,
@@ -77,10 +76,7 @@
         "scripts": 100,
         "allowguildrename": 100,
         "renameguild": 100,
-        "secondpassword": 100,
-        "secondpass": 100,
         "setpremium": 100,
-        "clearsecondpassword": 100,
         "set_bounty_money": 100,
         "set_crime_value": 100,
         "set_jury": 100,

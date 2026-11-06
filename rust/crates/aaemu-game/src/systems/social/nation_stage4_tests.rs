@@ -119,6 +119,8 @@ impl Fixture {
             test_character(2, "Subject", 101.0, 100.0),
             0x101,
         );
+        server.names.add_character(1, "King", 1001);
+        server.names.add_character(2, "Subject", 1002);
         server.systems.social.nations.add(Nation {
             id: NATION,
             expedition_id: EXPEDITION,
@@ -543,6 +545,34 @@ async fn national_tax_mirrors_the_client_validator_and_broadcasts() {
         let (zone, rate, prev, time) = parse_tax_rate(&rates[0]);
         assert_eq!((zone, rate, prev), (ZONE as u16, 500, 0));
         assert_eq!(time, saved.last_national_tax_rate_changed_at);
+    }
+    for receiver in [1u32, 2] {
+        let notice = f
+            .server
+            .systems
+            .economy
+            .mail
+            .state()
+            .all
+            .iter()
+            .find(|(_, m)| {
+                m.header.receiver_id == receiver
+                    && m.mail_type == crate::systems::economy::mail::mail_type::NATION_TAX_RATE
+            })
+            .map(|(_, m)| m.clone())
+            .expect("each online citizen gets the national tax notice");
+        assert_eq!(notice.title, "title(25)");
+        assert_eq!(
+            notice.body.text,
+            format!(
+                "body('{NATION}','{ZONE}','500','0','{}')",
+                saved.last_national_tax_rate_changed_at
+            )
+        );
+        assert_eq!(
+            notice.header.sender_name,
+            crate::systems::economy::mail_system::NATION_TAX_RATE_SENDER
+        );
     }
 
     // The same rate is ignored (the client shows `equal_tax_rate_warning`).

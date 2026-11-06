@@ -147,7 +147,7 @@ pub fn house_tax_info(server: &GameServer, player: &PlayerRef, tl: u16) {
     let now = now();
     let weeks_without_pay = if h.protection_end_date <= now {
         1
-    } else if tax_due_date(&h) <= now {
+    } else if tax_due_date(server, &h) <= now {
         0
     } else {
         -1
@@ -289,23 +289,14 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
     let mut payment_error = None;
     let mut payment_effects = None;
     let revenue = super::dominion::tax::charge_with(server, &quote, || {
-        match hooks.pay_house_construction_deferred(
-            server,
-            player,
-            source,
-            total,
-            tax_item,
-            p.auto_use_aa_point,
-        ) {
-            Ok(Some((effects, payment))) => {
-                payment_effects = Some(effects);
-                Some(payment)
+        match hooks.pay_house_construction_deferred(server, player, source, total, tax_item) {
+            Ok(effects) => {
+                payment_effects = effects;
+                true
             }
-            // A hook without queued effects cannot report a split; its payment is gold-only.
-            Ok(None) => Some(crate::systems::economy::inventory::PaymentSplit::default()),
             Err(error) => {
                 payment_error = Some(error);
-                None
+                false
             }
         }
     });
@@ -1092,7 +1083,11 @@ pub fn set_for_sale(
     if let Some(player) = seller {
         let (owner, step, tax_due) = {
             let h = house.data();
-            (h.unit.owner_id, h.current_step, tax_due_date(&h) <= now())
+            (
+                h.unit.owner_id,
+                h.current_step,
+                tax_due_date(server, &h) <= now(),
+            )
         };
         if owner != player.character_id {
             send_error(player, err::HOUSE_CANNOT_SELL_AS_NOT_OWNER);

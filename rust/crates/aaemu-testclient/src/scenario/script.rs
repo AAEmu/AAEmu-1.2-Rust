@@ -93,11 +93,6 @@
 //! nattack <skill> [name]             target the peer and cast at it; fail unless SCSkillStarted
 //!                                    arrives without SCErrorMsg
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
-//! spcreate <password>               create the account's 1.2 second password (key tables decoded)
-//! spcheck <password>                check it; fails unless the server passes the connection
-//! spcheckfail <password>            check it and only print the failure / lock replies
-//! spchange <old> <new>              change it; fails unless result 1 (SUCCESSED)
-//! spclear <password>                clear it; fails unless the server accepts
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
 //! expectbuff <buff> [self|peer|player:NAME] [secs]
@@ -816,78 +811,6 @@ async fn teleport_to(
     );
     show(&got);
     Ok(())
-}
-
-/// The 1.2 second-password alphabet (`FUN_3907a370`).
-const SECOND_PASSWORD_ALPHABET: &str =
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-struct SecondPassTables {
-    key_id: u32,
-    tables: [String; 4],
-}
-
-/// `CSRequestSecondPasswordKeyTables` and the decoded `SCSecondPassKeyTables` reply.
-async fn second_pass_tables(
-    game: &mut GameClient,
-    wire_type: u8,
-) -> anyhow::Result<SecondPassTables> {
-    game.send_cs(cs::CSRequestSecondPasswordKeyTablesPacket, &[wire_type])
-        .await?;
-    let packet = game
-        .wait_for("SCSecondPassKeyTablesPacket", |p| {
-            p.is_sc(sc::SCSecondPassKeyTablesPacket)
-        })
-        .await?;
-    let mut stream = packet.stream();
-    let got = stream.read_u8()?;
-    ensure!(
-        got == wire_type,
-        "SCSecondPassKeyTables answered type {got}, requested {wire_type}"
-    );
-    let key_id = stream.read_u32()?;
-    let tables = [
-        stream.read_string()?,
-        stream.read_string()?,
-        stream.read_string()?,
-        stream.read_string()?,
-    ];
-    Ok(SecondPassTables { key_id, tables })
-}
-
-/// `sent = table[alphabet.index(plain)]` (`FUN_3907a370`).
-fn second_pass_substitute(table: &str, plain: &str) -> anyhow::Result<String> {
-    let mut out = String::with_capacity(plain.len());
-    for c in plain.chars() {
-        let index = SECOND_PASSWORD_ALPHABET
-            .find(c)
-            .with_context(|| format!("character {c:?} is not in the second password alphabet"))?;
-        out.push(
-            table
-                .chars()
-                .nth(index)
-                .context("the server sent a short key table")?,
-        );
-    }
-    Ok(out)
-}
-
-/// Sends a one-password second-password packet (create / clear / check) and drains the reply.
-async fn second_pass_send(
-    game: &mut GameClient,
-    opcode: u16,
-    tables: &SecondPassTables,
-    table_index: u8,
-    plain: &str,
-) -> anyhow::Result<Vec<Packet>> {
-    let sent = second_pass_substitute(&tables.tables[usize::from(table_index)], plain)?;
-    let mut body = aaemu_commons::PacketStream::new();
-    body.write_u32(tables.key_id)
-        .write_u8(table_index)
-        .write_str(&sent);
-    game.send_cs(opcode, body.as_bytes()).await?;
-    game.drain(Duration::from_millis(700), Duration::from_secs(5))
-        .await
 }
 
 /// `expectpkt <PacketName> [secs]`.
@@ -2017,99 +1940,6 @@ async fn run_lines(
                     }
                     game.recv_within(Duration::from_millis(200)).await?;
                 }
-            }
-            "spcreate" => {
-                let plain = parts.first().context("spcreate <password>")?;
-                let tables = second_pass_tables(game, 1).await?;
-                let got =
-                    second_pass_send(game, cs::CSCreateSecondPasswordPacket, &tables, 0, plain)
-                        .await?;
-                show(&got);
-                let created = got
-                    .iter()
-                    .find(|p| p.is_sc(sc::SCSecondPassCreatedPacket))
-                    .is_some_and(|p| p.body.first() == Some(&1));
-                ensure!(
-                    created,
-                    "FAIL spcreate: no successful SCSecondPassCreatedPacket"
-                );
-                println!("    second password created");
-            }
-            "spcheck" | "spcheckfail" => {
-                let want_ok = cmd == "spcheck";
-                let plain = parts.first().with_context(|| format!("{cmd} <password>"))?;
-                let tables = second_pass_tables(game, 4).await?;
-                let got =
-                    second_pass_send(game, cs::CSCheckSecondPasswordPacket, &tables, 0, plain)
-                        .await?;
-                show(&got);
-                let checked = got.iter().find(|p| p.is_sc(sc::SCSecondPassCheckedPacket));
-                let locked = got
-                    .iter()
-                    .any(|p| p.is_sc(sc::SCSecondPassAccountLockedPacket));
-                let over = got
-                    .iter()
-                    .any(|p| p.is_sc(sc::SCSecondPassCheckOverFailedPacket));
-                if want_ok {
-                    ensure!(
-                        checked.is_some_and(|p| p.body.first() == Some(&1)),
-                        "FAIL spcheck: the check was refused"
-                    );
-                    println!("    second password passed");
-                } else {
-                    ensure!(
-                        checked.is_some() || locked || over,
-                        "FAIL spcheckfail: no Checked / AccountLocked / CheckOverFailed reply"
-                    );
-                    println!(
-                        "    second password check failed as expected (locked: {locked}, over: {over})"
-                    );
-                }
-            }
-            "spchange" => {
-                let old = parts.first().context("spchange <old> <new>")?;
-                let new = parts.get(1).context("spchange <old> <new>")?;
-                let tables = second_pass_tables(game, 2).await?;
-                let old_sent = second_pass_substitute(&tables.tables[0], old)?;
-                let new_sent = second_pass_substitute(&tables.tables[3], new)?;
-                let mut body = aaemu_commons::PacketStream::new();
-                body.write_u32(tables.key_id)
-                    .write_u8(0)
-                    .write_u8(3)
-                    .write_str(&old_sent)
-                    .write_str(&new_sent);
-                game.send_cs(cs::CSChangeSecondPasswordPacket, body.as_bytes())
-                    .await?;
-                let got = game
-                    .drain(Duration::from_millis(700), Duration::from_secs(5))
-                    .await?;
-                show(&got);
-                let result = got
-                    .iter()
-                    .find(|p| p.is_sc(sc::SCSecondPassChangedPacket))
-                    .and_then(|p| p.body.first().copied());
-                ensure!(
-                    result == Some(1),
-                    "FAIL spchange: result {result:?}, expected 1 (SUCCESSED)"
-                );
-                println!("    second password changed");
-            }
-            "spclear" => {
-                let plain = parts.first().context("spclear <password>")?;
-                let tables = second_pass_tables(game, 3).await?;
-                let got =
-                    second_pass_send(game, cs::CSClearSecondPasswordPacket, &tables, 0, plain)
-                        .await?;
-                show(&got);
-                let cleared = got
-                    .iter()
-                    .find(|p| p.is_sc(sc::SCSecondPassClearedPacket))
-                    .is_some_and(|p| p.body.first() == Some(&1));
-                ensure!(
-                    cleared,
-                    "FAIL spclear: no successful SCSecondPassClearedPacket"
-                );
-                println!("    second password cleared");
             }
             "expectpkt" => {
                 let name = parts.first().context("expectpkt <PacketName> [secs]")?;

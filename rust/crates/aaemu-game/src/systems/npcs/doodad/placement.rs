@@ -31,6 +31,7 @@ use crate::server::GameServer;
 use crate::systems::housing::dominion::fort;
 use crate::systems::npcs::doodad::packets::error_message;
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
+use crate::systems::npcs::terrain_surface::SurfaceMaterial;
 use crate::world::{PlayerRef, WorldInstance, WorldObject};
 
 /// `FUN_393a8fa0` step 3: at most 30 m in 3D (`900.0 < d²` refuses, so exactly 30 m is
@@ -50,6 +51,10 @@ pub const ROUND_GROUPS: [u32; 6] = [2, 3, 5, 12, 40, 80];
 pub const SPHERE_TEMPLATE: u32 = 1219;
 /// `FUN_3983b360`: this group overlaps as a sphere whatever the template.
 pub const SPHERE_GROUP: u32 = 38;
+/// `FUN_393a7170` step 0 skips the place-skin rule for these templates (Pathfinder Map / Door).
+pub const PLACE_SKIN_SKIP_TEMPLATES: [u32; 2] = [1218, 1219];
+/// `FUN_393a7170` step 0 skips the place-skin rule for this group.
+pub const PLACE_SKIN_SKIP_GROUP: u32 = 37;
 
 /// Why a spot cannot hold the doodad, with the `ErrorMessageType` the 1.2 client shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,10 +168,66 @@ fn in_own_dominion(
     expedition != 0 && state.owner_expedition_id == expedition
 }
 
+/// `FUN_393a7170` step 0: the place-skin terrain rule is skipped for templates 1218/1219, group
+/// 37 and a spot inside a house box the player may build on. The server's house query is the
+/// garden square (`house_at_location_in_world`), not the client's shrunken box, and the
+/// permission check is `allowed_to_interact`: permissive, never stricter.
+fn place_skin_skipped(
+    server: &GameServer,
+    world: &WorldInstance,
+    player: &PlayerRef,
+    template: &DoodadTemplate,
+    x: f32,
+    y: f32,
+) -> bool {
+    if PLACE_SKIN_SKIP_TEMPLATES.contains(&template.id)
+        || template.group_id == PLACE_SKIN_SKIP_GROUP
+    {
+        return true;
+    }
+    crate::systems::housing::house_at_location_in_world(server, world.id, x, y)
+        .is_some_and(|house| crate::systems::housing::allowed_to_interact(server, &house, player))
+}
+
+/// `FUN_393a8fa0` step "place skin" (`Housing.PlacementStrictSurface` only): the terrain material
+/// under the spot must map to one of the template's `doodad_place_skins` kinds. A material whose
+/// engine surface type is not one of the client's four names is refused, like a known kind the
+/// template does not allow; no usable surface data (world/cell/hole/unknown id) allows.
+fn surface_material_refusal(
+    server: &GameServer,
+    world: &WorldInstance,
+    template: &DoodadTemplate,
+    x: f32,
+    y: f32,
+) -> Option<Refusal> {
+    let heightmaps = server.systems.npcs.heightmaps.get()?;
+    let map = heightmaps.template(world.template.id)?;
+    let material = map.material_at(heightmaps.files(), x, y);
+    let allowed = server
+        .game_data
+        .systems
+        .npcs
+        .doodad
+        .place_skins
+        .get(&template.id);
+    match material {
+        SurfaceMaterial::Unknown => None,
+        SurfaceMaterial::Unmapped => Some(Refusal::Area),
+        SurfaceMaterial::Kind(kind) => {
+            if allowed.is_some_and(|kinds| kinds.contains(&kind.kind_id())) {
+                None
+            } else {
+                Some(Refusal::Area)
+            }
+        }
+    }
+}
+
 /// The placement refusal of `pos` for `template`, or `None` when the spot is free.
 ///
 /// Order follows `FUN_393a8fa0`: area (restrict zone) -> water -> range -> doodads -> units ->
-/// dominion (only for the Territory Statue blueprint, by `item_template_id`).
+/// dominion (only for the Territory Statue blueprint, by `item_template_id`). The place-skin
+/// terrain material rule of step 0 runs last, only with `Housing.PlacementStrictSurface` on.
 pub fn refusal(
     server: &GameServer,
     world: &WorldInstance,
@@ -236,6 +297,13 @@ pub fn refusal(
         && !in_own_dominion(server, world, player, (x, y))
     {
         return Some(Refusal::Dominion);
+    }
+    if server.config.housing.placement_strict_surface
+        && !place_skin_skipped(server, world, player, template, x, y)
+    {
+        if let Some(refusal) = surface_material_refusal(server, world, template, x, y) {
+            return Some(refusal);
+        }
     }
     None
 }

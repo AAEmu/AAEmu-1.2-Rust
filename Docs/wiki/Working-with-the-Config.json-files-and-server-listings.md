@@ -130,8 +130,8 @@ The login server tells the client how many characters an account has:
   before playing; world entry (`CSSelectCharacter`) is refused until the period
   ends. The login reports this value to the game server when it registers, and
   the game applies it, so the two servers cannot disagree. Only the account's
-  own, not-deleted character that never entered the world can be edited; the
-  second-password gate applies. Leave it off for normal play.
+  own, not-deleted character that never entered the world can be edited. Leave it off for
+  normal play.
 
 Purchased character slots (`accounts.extra_character_slots`, from the slot
 increase item) are sent by the game server's `SCGetSlotCount` as the purchased
@@ -266,33 +266,9 @@ evidenced; the tabs, SKUs, prices, stock limits and currencies are server-owner
 policy. `SQL/examples/example-ics-default-en.sql` is an optional example catalogue
 (English labels and example prices) that can be imported and edited; it is not part
 of the base schema or the required updates. Check each SKU's `currency` (credits,
-AA points, loyalty or coins) and price before importing. AA-priced SKUs debit the
-per-character AA-point wallet; a short wallet is refused with
-`INGAME_SHOP_NOT_ENOUGH_AA_POINT` (592).
-
-### AA point exchange (`Configurations/Ics.json`)
-
-`CSICSBuyAAPoint` (cash -> AA points) is disabled by default. The ratio is AA
-points per credit spent:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `AaPointExchangeRatio` | `0` | `0` (or negative) keeps the exchange off: the request is answered with the shop's AA failure and nothing is debited. A positive value debits the requested credits (guarded against overdraft), credits `cash × ratio` AA points and sends the new AA balance, the new credit balance and the ratio to the client. The product must fit a 32-bit signed value. The retail ratio is UNKNOWN; this is operator policy. |
-
-```json
-{
-  "Ics": {
-    "AaPointExchangeRatio": 3
-  }
-}
-```
-
-Override it in `Config.Local.json` or with `Ics__AaPointExchangeRatio`. The same
-ratio is sent to the client when the cash shop opens and in the premium service
-list, so AA prices display consistently. An AA-priced premium service is charged
-from the wallet (`PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when short). The
-reply form of the exchange is INFERRED from the 1.2 client; see
-`rust/crates/aaemu-game/PORTING.md` (WP-AA2).
+AA points, loyalty or coins) and price before importing. AA points are not
+supported: AA-priced SKUs (`currency = 1`) are refused with error 592 and nothing is
+debited.
 
 ## Account restrictions and idle kick (`Account:Restrictions`, `Account:IdleKickTime`)
 
@@ -647,6 +623,63 @@ original-client run opens the board without a Lua error. Row details and the
 open question are recorded in `rust/crates/aaemu-game/PORTING.md`
 (BOUNTY-board).
 
+## Client feature switches (`Configurations/FeatureSet.json`)
+
+The client FeatureSet is the 11-byte blob the game server sends in
+`SCInitialConfig.fsets`; the 1.2 client turns it into the Lua table behind
+`X2Player:GetFeatureSet()` (`FUN_39496b20`, `x2game.dll.c:956456`), where each
+named key is one bit. The game server reads `Configurations/FeatureSet.json`
+(section `FeatureSet`) at startup and applies it after loading the level caps.
+The shipped defaults are exactly the previous bytes, so the file changes
+nothing until an operator edits it. Override a key in `Config.Local.json` or
+with the environment form `FeatureSet__Siege=false`.
+
+```json
+{
+  "FeatureSet": {
+    "siege": true,
+    "aaPoint": false,
+    "ExtraBits": { "78": true }
+  }
+}
+```
+
+| Key | Bit | Default | What the client uses it for |
+| --- | --- | --- | --- |
+| `siege` | 0 | `true` | Siege / dominion UI. The exact window is INFERRED from the Lua key. |
+| `premium` | 4 | `true` | Premium / Patron HUD and labor UI. |
+| `itemSecure` | 45 | `true` | Item-secure / lock handling and UI. |
+| `secondpass` | 46 | `false` | Second-password entry and its opcode path. The second password is not supported, so keep it off. |
+| `ranking` | 36 | `true` | Ranking window. |
+| `slave_customize` | 48 | `true` | Vehicle / ship customization UI (INFERRED). |
+| `bm_mileage` | 43 | `true` | Cash-shop mileage display (INFERRED; Korean business model). |
+| `ingamecashshop` | 38 | `true` | In-game cash-shop entry and open guards. |
+| `customsaveload` | 40 | `true` | Custom UI save/load (INFERRED). |
+| `beautyshopBypass` | 52 | `true` | Beauty-salon bypass entry (INFERRED). |
+| `ingameshopSecondpass` | 55 | `false` | Second-password gate on cash-shop purchases (INFERRED). Not supported, so keep it off. |
+| `backpackProfitShare` | 56 | `true` | Trade-pack sale profit share and sale mails. |
+| `sensitiveOpeartion` | 58 | `false` | Sensitive-operation confirmation prompts (INFERRED; the key's spelling is the client's). |
+| `taxItem` | 59 | `true` | Tax-item payment UI; the server also uses this bit for its tax-item behavior. |
+| `achievement` | 63 | `true` | Achievement window. |
+| `dwarfWarborn` | 74 | `false` | Dwarf / Warborn race selection. The shipped `characters` data has both races `creatable = 'f'`, so turning the bit on does not make them creatable by itself. |
+| `mailCoolTime` | 75 | `true` | Mail send cooldown display (INFERRED). |
+| `hudAuctionButton` | 81 | `true` | Auction-house button in the HUD. |
+| `auctionPostBuff` | 83 | `true` | Auction posting buff / UI (INFERRED). |
+| `aaPoint` | 44 | `false` | AA-point amounts in price and currency displays. AA points are not supported, so keep it off. |
+| `ExtraBits` | any | `{}` | `bit -> bool` overrides for the unnamed `flag_x_y` bits (`0..=87`); a `false` value turns a default-on bit off. Bit 78 is the mate equipment whitelist. The C++ reads 32, 34, 41, 42, 47, 60 and 73 too, but their purpose is unresolved. |
+
+The C#-named bits that the client does not expose through `GetFeatureSet()`
+(`allowFamilyChanges` 1, `houseSale` 3, `nations` 6, `customUiButton` 39,
+`freeLpRaise` 53, `houseTaxPrepay` 84) have no named key; they keep their
+current defaults, and `ExtraBits` can override them like any other bit.
+
+The player level limit (byte 1) and mate level limit (byte 8) are not part of
+this section: they keep coming from the `levels` table. The runtime GM command
+`/feature set` still changes bits after startup; `FeatureSet.json` is only the
+startup baseline. Every key's bit number and the client line that reads it are
+recorded in `rust/crates/aaemu-game/PORTING.md` (Client FeatureSet
+configuration).
+
 ## Chat feature switches (`Configurations/Chat.json`)
 
 Rust-only switches for chat whose retail 1.2 behaviour is not fully evidenced.
@@ -769,7 +802,7 @@ actually charged. Refunded deposits do not generate territory revenue.
 The owning guild's current leader can collect actual property revenue through the player
 command `/collectdominion <zoneGroupId>`. Collection sends a system tax receipt with gold;
 If staging the receipt fails, the balance stays available. Repeated empty collection sends nothing.
-It leaves Peace Fund untouched. Hunting tax, AA Points, nation splits, and automatic historical
+It leaves Peace Fund untouched. Hunting tax, nation splits, and automatic historical
 payout schedules are not added. Territory tax changes have the original one-hour cooldown.
 
 ## Siege-time shop gate
@@ -796,6 +829,32 @@ line is still charged in honor through the item's honor price.
 only, not from a capture of the retail server. Keep the switch off until an original-client
 capture shows how the retail shop behaved. The implementation and the open question are
 recorded in `rust/crates/aaemu-game/PORTING.md` (WP-SD4a).
+
+## Strict doodad placement surface check
+
+The 1.2 client checks the terrain material under a player doodad placement (its
+"place skin" step): the terrain detail material must be one of the four place
+kinds the doodad template lists in `doodad_place_skins`. The server can make the
+same check from the client files. It is off by default and keeps the previous
+placement behaviour:
+
+```json
+{
+  "Housing": {
+    "PlacementStrictSurface": true
+  }
+}
+```
+
+With the switch on, a placement whose terrain material is not allowed by the
+template is refused with `DOODAD_SIM_AREA` (276, "Can't be installed here.") and
+the seed item is kept. The existing skips stay: templates 1218/1219, group 37,
+and a spot inside a house box the player may build on. Worlds without surface
+data, cells without a heightmap, terrain holes and unknown surface ids are
+allowed (permissive). The check reads `game/worlds/<world>/surface.xml` and the
+detail material `.mtl` files lazily; see `rust/crates/aaemu-game/PORTING.md`
+(D1d place-skin section) for the evidence, the documented permissive deviation
+(`mat_sand_dry` / `mat_mud` count as kind 4) and the memory cost.
 
 ## Migration note from old setup docs
 
