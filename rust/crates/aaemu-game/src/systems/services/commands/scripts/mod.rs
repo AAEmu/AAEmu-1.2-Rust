@@ -94,6 +94,7 @@ pub mod set_jury;
 pub mod set_trade_pack_mail_delay;
 pub mod ship_barrier_cmd;
 pub mod show_inventory;
+pub mod siege_alias;
 pub mod snow;
 pub mod solo_party;
 pub mod spawn;
@@ -563,6 +564,35 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["auction_cancel"],
             Arc::new(auction_siege::AuctionCancel::new(env)),
+        ),
+        // Retail GM siege / dominion aliases (WP-SL6a: names the 1.2 client knows; Rust only)
+        (
+            &["schedule_siege"],
+            Arc::new(siege_alias::ScheduleSiege::new(env)),
+        ),
+        (
+            &["stop_siege", "off_siege"],
+            Arc::new(siege_alias::StopSiege::new(env)),
+        ),
+        (
+            &["delete_dominion"],
+            Arc::new(siege_alias::DeleteDominion::new(env)),
+        ),
+        (
+            &["change_dominion_owner"],
+            Arc::new(siege_alias::ChangeDominionOwner::new(env)),
+        ),
+        (
+            &["bestow_dominion"],
+            Arc::new(siege_alias::BestowDominion::new(env)),
+        ),
+        (
+            &["set_dominion_non_pvp"],
+            Arc::new(siege_alias::SetDominionNonPvp::new(env)),
+        ),
+        (
+            &["set_dominion_limit"],
+            Arc::new(siege_alias::SetDominionLimit::new(env)),
         ),
         // WorldCmd.cs
         (&["world"], Arc::new(roots::world_cmd())),

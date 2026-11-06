@@ -204,6 +204,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | Other `Models/Game/*` (AI, Auction, Crafts, Crime, DoodadObj, Mails, Mate, NPChar, Quests logic, Slaves, Team, ...) | – | see the subsystems | Ported with their managers (phase 3 / 4 subsystems). `Achievement` has no 1.2 logic. |
 | `Scripts/Commands/**`, `Scripts/SubCommands/**`, `Utils/Scripts`, `Utils/{Quest,Sphere}CommandUtil` | `systems/services/commands/` (+ `scripts/`) | done | Infrastructure (`CommandManager` with async command execution, `AccessLevelManager`, `ICommand`, `IMessageOutput`, `SubCommandBase` + parameters) and every GM command: one module per `Scripts/Commands/*.cs` file in `scripts/`, the `SubCommandBase` roots in `scripts/roots.rs` / `scripts/sub/*` (Crimes, Doodads, Gimmick, Gold, Items, Npcs, Slaves sub commands). `scripts::load` registers them in the C# type order (`ScriptReflector`), so `GoldCmd` owns `gold` (and `AddGold`'s aliases) and `CrimeCmd` registers `crime` with `/doodad` as call prefix. Tests: a harness test per command (`scripts/harness.rs`), the registered set vs the C# sources (`scripts/tests.rs`). |
 | Retail GM command names, tax / crime / social (WP-SL6b) | `systems/services/commands/scripts/{delay_tax_due_date,resend_house_tax_mail,set_bounty_money,clear_crime_status,set_crime_value,set_jury,imprison}.rs` | added | The C# server had no equivalents; the names are the 1.2 client's command table (`siege-social-2.md` 1.5). `delay_tax_due_date <character> [days]`, `resend_house_tax_mail <character>` (console shapes `DelayTaxDueDate(%s)` / `ResendHouseTaxMail(%s)`; the day count is an assumed default of 7), `set_crime_value <character> <value>` (console shape `SetCrimeValue(%s, %d)`), and the assumed positional forms `set_bounty_money <character> <amount>`, `clear_crime_status <character>`, `set_jury <character> <trialId>`, `imprison <character>`. Effects reuse the gameplay paths: `HousingManager` tax dates / `new_tax_mail` (online or offline owners, dominion infrastructure skipped), `CrimePoint` / `InfamyPoint` setters (online only), `BountyManager.place` with the GM as payer (online wanted target), `TrialManager.force_summon_jury` -> `SummonJuryMember` (invitation/queue checks skipped, step/main-world/one-trial checks kept), and the `crime court jail` holding-cell effect (force dismount, `FORCIBLY_AWAITING_TRIAL`, teleport). No new opcodes; admin access 100 in `AccessLevels.json`. |
+| Retail GM command names, siege / dominion (WP-SL6a) | `systems/services/commands/scripts/siege_alias.rs` | added | The names are the 1.2 client's command table (`siege-social-2.md` 1.5); the C# server had no equivalents. `schedule_siege <zoneGroupId> <year> <month> <day> <hour> <minute>` uses the EVIDENCED console shape `ScheduleSiege(%d,%d,%d,%d,%d,%d)` but reads the six integers as zone + local wall-clock date/time (INFERRED: the console labels beside the shape are `declare_min`/`warmup_min`/`siege_min`/`peace_min`/`pay_min`, so the retail minute-vs-date reading is UNKNOWN). The attacker is the territory's accepted declaration (the six arguments carry no expedition, and the declaration chain is the only other authority that names one); the record uses the zone's authored `siege_zones` duration. `stop_siege` / `off_siege <zoneGroupId>` call the existing `cancel_siege` path. `delete_dominion <character> <zoneGroupId>` uses the EVIDENCED `DeleteDominion(%s, %d)` shape and only deletes a record owned by that character's expedition (assumed meaning of the name). `change_dominion_owner` and `bestow_dominion <zoneGroupId> <expeditionId>` use the new single-lock `DominionManager::transfer_owner`: the target's owned-territory limit is checked under the claim lock, an unfinished siege is refused, and a transfer is not a fresh claim (`claimed_at = 0`); the bestow form sets the client's `bestowed` announcement bit. `set_dominion_non_pvp <zoneGroupId> [minutes]` reuses `start_non_pvp` (default 120, the authored row). `set_dominion_limit <limit>` updates `Housing.DominionClaimLimit` at runtime. `declare_dominion_always` is **not registered**: skipping the claim gates is INFERRED and no existing switch already carries that meaning (the claim window, pirate refusal and claim limit are separate checks). No new opcodes; admin access 100 in `AccessLevels.json`. Tests: effect, argument-error and access-guard cases per command in `siege_alias.rs`. |
 | `Services` (WebApi, DiscordBot) | `systems/services/webapi/`, `systems/services/discord.rs` | done | axum transport with the C# regex routing; mail / auction controllers call the economy through `WebApiEconomyHooks`. |
 | `GameService` startup / `ManagerOrchestrator`, `Program` | `main.rs`, `systems/services/game_service.rs` | done | `Program.Main` (initialization log, `compiler-check`, config command line, MySQL / SQLite checks) and `GameService.StartAsync` stages in order (DB updater, client files, holdables check, game data, user items, DB loads, time / task managers, subsystems, save manager, deleted characters, online tracking, networks, "Server started! Took ..."), then WebApi / Discord; shutdown in reverse (Discord, WebApi, final save, task / tick / time managers). `GameService.StartTime` / `TimeSinceStart`, `Program.UpTime`, `ManagerOrchestrator.BuildBatches` ported with their tests. |
 
@@ -4524,12 +4525,11 @@ and in NPC wandering / buff remaining times.
   siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
   (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
   The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
-  open: the declaration chain WP-SD2a-c (persistent declaration, Siege Camp use / validation /
-  cancel and the headquarters lifecycle; in progress, not landed), the `siege_items` use gate
-  WP-SD3 (in progress, not landed), the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
-  `doodad_func_purchase_siege_tickets` has no rows), siege hostility WP-SD7 (decision-blocked:
-  no evidence shows how retail made the two sides attackable) and the siege-shop period / side
-  gate WP-SD4a (INFERRED from the pack names, not implemented).
+  open: the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
+  `doodad_func_purchase_siege_tickets` has no rows) and siege hostility WP-SD7 (decision-blocked:
+  no evidence shows how retail made the two sides attackable). The siege-shop period / side
+  gate WP-SD4a is implemented behind `Housing.SiegeShopGate` (default off; the rule is
+  INFERRED from the pack names, capture-pending).
   Known, not fixed:
   the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
   time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
@@ -4638,6 +4638,26 @@ and in NPC wandering / buff remaining times.
   period 2 and 4, inside/outside the circle, item kept on refusal), the loader assertion in
   `castle_references_preserve_stage_order_dates_and_zero_open_duration`, and the gated
   `housing_real_compact_db` row-count check (13 rows).
+* systems::housing / systems::npcs (siege-time shop gate, WP-SD4a, 2026-11-06): with
+  `Housing.SiegeShopGate` on (default off, so both packs keep selling as before), merchant
+  packs 224 / 225 are sold only during the warmup or siege period (3 / 4) of the NPC's
+  territory and only to a character on the matching side of that siege's roster: pack 224 to
+  defenders, 225 to attackers. The period is the one `social::dominion::snapshot` shows for
+  the territory (calendar or explicit siege), and the roster is the persisted participant
+  list. Refusals are silent like the other `CSBuyItems` catalog checks; an allowed line is
+  still charged in honor through the item's `honor_price`. A pack that matches but is not
+  one of the two named packs is never gated, so an item also offered by an ordinary pack
+  stays on sale. The rule is **INFERRED** from the two `merchant_packs` names ("defense-side
+  goods sold during a siege" / "siege-side goods sold during a siege") only: the retail
+  period/side restriction is capture-pending, as is which pack belongs to which side (224 =
+  defense, 225 = attack is the name reading). The gate lives in the real NPC catalog bridge
+  (`npcs/bridges.rs::merchant_sells`, called from `economy/store.rs`), the switch in
+  `systems/housing/config.rs`. Tests:
+  `siege_shop_gate_sells_224_to_defenders_and_225_to_attackers_in_warmup_and_siege`,
+  `siege_shop_gate_refuses_registered_sides_outside_warmup_and_siege`,
+  `siege_shop_gate_refuses_non_participants_during_the_siege`,
+  `siege_shop_gate_off_keeps_both_packs_selling_at_any_time_to_anyone` and the config binder.
+  Live capture of the restriction and side rule is still pending.
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

@@ -355,6 +355,13 @@ fn registered_commands_match_the_csharp_scripts() {
                     | ["imprison"]
                     | ["auction_post_siege_items", "auction_post_siege"]
                     | ["auction_cancel"]
+                    | ["schedule_siege"]
+                    | ["stop_siege", "off_siege"]
+                    | ["delete_dominion"]
+                    | ["change_dominion_owner"]
+                    | ["bestow_dominion"]
+                    | ["set_dominion_non_pvp"]
+                    | ["set_dominion_limit"]
             )
         })
         .collect();
@@ -405,8 +412,9 @@ fn load_resolves_collisions_like_csharp() {
     let keys = m.get_command_keys();
     // Original commands plus Dominion administration, collection and player registration,
     // the Rust-only `/premium` / `/secondpassword` / `/mail` admin commands, the seven
-    // retail tax / crime / social commands of WP-SL6b and the retail auction GM keys.
-    assert_eq!(keys.len(), 111);
+    // retail tax / crime / social commands of WP-SL6b, the retail auction GM keys and the
+    // seven siege / dominion commands of WP-SL6a (`off_siege` is an alias key).
+    assert_eq!(keys.len(), 118);
     // `GoldCmd` (registered after `AddGold`) owns `gold`, and `AddGold`'s aliases lead to it.
     for alias in ["gold", "addgold", "add_gold"] {
         let c = m.get_command_interface_by_name(alias).expect(alias);

@@ -103,10 +103,14 @@ pub trait NpcEconomyHooks: Send + Sync {
         None
     }
 
-    /// Whether any of the NPC's catalogs offers this item at the grade sent by the 1.2 client.
+    /// Whether any of the NPC's catalogs offers this item at the grade sent by the 1.2
+    /// client. `buyer` and `npc` are the interacting player and, for an NPC shop, that NPC;
+    /// a pack can additionally depend on the buyer's siege participation (packs 224/225).
     fn merchant_sells(
         &self,
         _server: &GameServer,
+        _buyer: &PlayerRef,
+        _npc: Option<&NpcRef>,
         _pack_ids: &[u32],
         _item_id: u32,
         _grade: u8,
