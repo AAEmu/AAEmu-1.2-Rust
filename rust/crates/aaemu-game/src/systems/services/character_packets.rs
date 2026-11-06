@@ -281,6 +281,16 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
+// The second password is not supported (owner decision 2026-11-06); both requests are
+// log-only like they were before the feature existed.
+log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
+    let _ = s;
+    String::new()
+});
+log_only_packet!(CSSetupSecondPassword, debug, |s| {
+    let _ = s;
+    String::new()
+});
 // The client's anti-cheat return-address report. The server does not use it (the C# handler
 // was log-only); debug keeps it out of the warning log (`MISC-CS-1`).
 log_only_packet!(CSResturnAddrsPacket, debug, |s| {
@@ -863,6 +873,11 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSEditorGameModePacket>(LEVEL_PLAIN, cs::CSEditorGameModePacket);
     reg.register::<CSRankCharacterPacket>(LEVEL_PLAIN, cs::CSRankCharacterPacket);
     reg.register::<CSRequestCharBriefPacket>(LEVEL_PLAIN, cs::CSRequestCharBriefPacket);
+    reg.register::<CSRequestSecondPasswordKeyTablesPacket>(
+        LEVEL_PLAIN,
+        cs::CSRequestSecondPasswordKeyTablesPacket,
+    );
+    reg.register::<CSSetupSecondPassword>(LEVEL_PLAIN, cs::CSSetupSecondPassword);
     reg.register::<CSResturnAddrsPacket>(LEVEL_PLAIN, cs::CSResturnAddrsPacket);
 }
 

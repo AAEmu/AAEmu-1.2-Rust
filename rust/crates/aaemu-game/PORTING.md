@@ -114,8 +114,6 @@ Rules (from the 1.2 UI and the create path; the 1.2 server behaviour itself is n
   the character untouched. Mail/auction/trade/system containers and mate/slave equipment keep
   their rows and items: a never-played character can already own mail attachments delivered
   while it was offline (`systems/economy/mail.rs` creates the MAIL container by character id).
-* Gated by `systems::services::second_password::allow_lobby_action`, like the other lobby
-  actions (`CSEditCharacter` was the packet that call was reserved for).
 * **Failure reply: UNKNOWN / capture-pending** (`EDITCHAR-FAIL-1`). The 1.2 handler
   `FUN_391eb910` only has a success path (a zero character id is its only no-op), so a refused
   edit sends nothing and logs the reason; the client leaves its create window open.
@@ -1405,7 +1403,6 @@ live acceptance remain pending.
 | `TickManager` (+ `TickEventHandler`) | `systems/services/tick.rs` | done | Thread loop (20 ms), sync / async subscribers, busy skip. Port of `TickManagerTests`. |
 | `TaskManager2`, `Models/Tasks/Task` | `systems/services/tasks.rs` | done | Delayed / repeating / cron tasks (NCrontab subset of `systems::npcs::schedule`), ids, cancel, `RemoveTasks`, `GetQueueCount`. Port of `TaskManagerTests`. |
 | `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | Since WP-B the per-account runtime state also holds the payment and premium point (`AccountManager::state`), loaded from `aaemu_game.accounts` under `lock_of` and refreshed at `Add` / `CSListCharacter`; the disconnect drops the point to `premium_configs.disconnect_point`. |
-| Second password (`Create/Change/Clear/CheckSecondPasswordPacket`, `SCSecondPass*`) | `systems/services/second_password.rs` | done | 1.2 virtual-keyboard tables, one-shot key id, shared `PasswordService` hashing, MySQL failure counter + timed lock. See the deviation below. |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | The tick reads the account payment / premium grade from `AccountManager` (WP-B) instead of the C# connection default; `max_labor` is `premium_benefits.max_labor`. |
 | Account payment / premium (`premium_grades`, `premium_benefits`, `premium_configs`, `pcbang_buffs`, `SCAccountInfo`, `SCUpdatePremiumPoint`) | `systems/services/premium.rs`, `systems/services/accounts.rs`, `packets/{c2g,proxy,g2c}.rs` | done | Rust only: the C# never loaded these tables and sent the permanent `AccountPayment` default (`SCUpdatePremiumPoint(1,1,1)` hard-coded at `FinishState(7)`). See the deviations below. |
 | `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `CHARACTER_ITEM_OPS` (economy). **Deviation (hair validation):** `ApplyBeautySalon` only accepts an `item_body_parts` row in the hair slot (`slot_type_id = 24`), not `npc_only`, whose `model_id` is the `characters` template model for the character's race/gender (`beautyshop_only` is allowed; a missing character model does not restrict). A refused request, including the previously silent missing-certificate path, sends `SCErrorMsg` `FAILED_TO_CHANGE_ITEM_LOOK` (the salon-specific id is UNKNOWN) and changes no appearance, item, certificate or money. The C# put any client-supplied template into the hair slot. **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
@@ -4253,39 +4250,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   client briefly shows the purchase state until the next `SCAccountInfo`; the database row is
   whichever transaction wrote last. There is no rate limit on `CSPremiumServiceBuy`: every
   packet is one charge.
-* systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
-  `systems::services::second_password`. The client sends four shuffled permutations of
-  `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes
-  through the inverse table; tables are one-shot per connection and any create/change/clear/check
-  consumes them. Create/change/clear/check hash or verify through the shared
-  `aaemu_commons::password::PasswordService` on `spawn_blocking`; the plaintext and the hash are
-  never logged. The consecutive failure counter and the lock live in
-  `accounts.second_password_hash/failed/locked_until` and every read-modify-write runs under
-  `AccountManager::lock_of`, so reconnects and parallel sessions cannot reset or race them; a
-  locked account answers `SCSecondPassAccountLocked` without hashing. `SecondPassword:Enabled`
-  also flips `Feature::Secondpass` / `IngameshopSecondpass` and supplies
-  `SCInitialConfig.secondPasswordMaxFailCount`; `MaxFailCount = 0` is refused at config load
-  (owner decision 2026-11-03: defaults 5 failures / 10 minutes, both configurable). Deviation
-  from the C# (which has no second-password implementation): the decoded password is re-validated
-  server side (alphabet, 4..=31 characters) before hashing. `SCSecondPassChanged.result` = 1..=5
-  (`R_SUCCESSED` .. `R_PASSWORD_SAME_FAILED`) is read from the compiled `chat_msg_event.alb`
-  constant table (the research note listed it as INFERRED 0..4). Two items stay **capture-pending**:
-  the unlock time is unix seconds like `SCAccountInfo.pay_end`, inferred from the client's
-  server-time comparison (`SECONDPASS-UNLOCK-1`, confirm `GetSecondPasswordUnlockRemainTime`),
-  and the lobby gating (refuse `CSSelectCharacter` / `CSDeleteCharacter` /
-  `CSCancelCharacterDelete` / `CSCreateCharacter` until passed and push
-  `SCSecondPassKeyTables(type = 4)`) is inferred from the client's locked branch
-  (`SECONDPASS-GATE-1`). The real-client virtual-keyboard UI path cannot be driven headlessly.
-  **Known, not fixed:** there is no per-connection rate limit on the 0x126..=0x129 handlers, and
-  the PBKDF2 verification runs while the shared per-account lock is held, so a burst of checks
-  can occupy the blocking pool and stall the batch tick (score 3); `CSSetLpManageCharacterPacket`
-  is not gated (`CSEditCharacter` now calls `allow_lobby_action`); the lock time is
-  wall-clock unix seconds; and the attempt that observes an expired lock is swallowed (the
-  server resets the counter and answers `SCSecondPassAccountLocked(0)` instead of checking it).
-  Store errors fail closed: a load that cannot be decoded, or a failure counter that cannot be
-  written, refuses the action and (for the counter) every further attempt on that connection.
-  The GM command `/secondpassword <account id|character name|self>` clears the hash, counter and
-  lock under the account lock (`AccessLevels.json`, level 100) for admin recovery.
+* systems::services (second password): not supported (owner decision 2026-11-06); the 1.2 client
+  showed no second-password option even with `FeatureSet.secondpass` on (real-client run
+  2026-11-06). `CSRequestSecondPasswordKeyTables` and `CSSetupSecondPassword` are log-only as
+  they were before the feature existed; the four 0x126..=0x129 packets have no handler,
+  `SCInitialConfig.secondPasswordMaxFailCount` stays 0 and the lobby is not gated.
 
 * systems::services (`SCInitialConfig` account parameters, WP-J, 2026-11-04): the 1.2 client
   reader `FUN_397b2a00` reads `host`, the 11-byte fset, `count` + entries, `initLp`, the seven
@@ -4349,22 +4318,22 @@ it on or off sets exactly its bit; `ExtraBits` is a `bit -> bool` map that overr
 bits (and can turn a default-on bit off). The shipped defaults reproduce the current bytes
 exactly, so an absent section or the shipped file changes no behaviour. `levelLimit` (byte 1)
 and `mateLevelLimit` (byte 8) still come from the `levels` table through `GameData::load` and
-are not configurable here. `SecondPassword:Enabled` still turns bits 46/55 on at startup and
-the GM `/feature set` command still changes the runtime copy; the config is the baseline.
+are not configurable here. The GM `/feature set` command still changes the runtime copy; the
+config is the baseline.
 
 | Key | Bit | Default | What the client uses it for |
 | --- | --- | --- | --- |
 | `siege` | 0 | on | Siege / dominion UI (`FUN_39496b20:956485`). The Lua key is read by the siege UI; the exact window is INFERRED. |
 | `premium` | 4 | on | Premium / Patron HUD and labor UI (C++ reads at `x2game.dll.c:703203`, `708636`). |
 | `itemSecure` | 45 | on | Item-secure / lock handling (`FUN_397cc350`, item byte flag `0x4`). |
-| `secondpass` | 46 | off | Second-password entry and its opcode path (`x2game.dll.c:45293`, `617228`, `108647`). |
+| `secondpass` | 46 | off | Second-password entry and its opcode path (`x2game.dll.c:45293`, `617228`, `108647`). The second password is not supported; keep it off. |
 | `ranking` | 36 | on | Ranking window (the `ranking` UI calls `GetFeatureSet`). |
 | `slave_customize` | 48 | on | Vehicle / ship customization UI (INFERRED from the key and the customizing UI callers). |
 | `bm_mileage` | 43 | on | Cash-shop mileage display (INFERRED; Korean business model). |
 | `ingamecashshop` | 38 | on | In-game cash-shop open guards (`x2game.dll.c:62540`, `62632`). |
 | `customsaveload` | 40 | on | Custom UI save/load (INFERRED). |
 | `beautyshopBypass` | 52 | on | Beauty-salon bypass entry (customizing UI; INFERRED). |
-| `ingameshopSecondpass` | 55 | off | Second-password gate on cash-shop purchases (INFERRED). |
+| `ingameshopSecondpass` | 55 | off | Second-password gate on cash-shop purchases (INFERRED). Not supported; keep it off. |
 | `backpackProfitShare` | 56 | on | Trade-pack sale profit share and sale mails (`systems/economy/specialty.rs`; the later note in this file). |
 | `sensitiveOpeartion` | 58 | off | Sensitive-operation confirmation prompts (INFERRED; the key's spelling is the client's). |
 | `taxItem` | 59 | on | Tax-item payment UI (the server also gates `TaxItem` behavior on this bit). |
