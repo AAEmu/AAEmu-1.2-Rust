@@ -600,6 +600,33 @@ quote). Tax certificates still pay no gold and therefore never use AA. Cash-shop
 `house_construction_aa_shortage_cover_builds_and_a_refusal_keeps_gold_aa_and_design`,
 `aa_shortage_cover_builds_the_shipyard_and_refusals_keep_money_aa_and_item`.
 
+#### AA points as a gold-shortage purse (WP-AA3a, 2026-11-06)
+
+`CSRepairSingleEquipmentPacket`, `CSRepairAllEquipmentsPacket` and `CSExpandSlotsPacket` carry
+`autoUseAAPoint`; the C# parsed it and ignored it. With the flag set and the carried gold short,
+the repair / expansion pays the shortage from the carried AA purse 1:1 and sends the money and
+AA tasks together (`ItemTask::MoneyChange` + `ItemTask::AaPointUpdate`). The rule is INFERRED
+from the client text `ask_use_aa_point` ("not enough gold; use AA points for the missing
+amount?") and the `lost_aa_point` task path; neither the rate nor the "shortage only" part is
+capture-proven (AA3-PURSE-1). The gold and AA checks and both debits run under one character
+lock (`inventory::take_money_and_aa_point`), so a refusal cannot make a partial charge; when the
+AA purse is short too the operation is refused with `NOT_ENOUGH_MONEY` 26 and nothing is
+repaired, consumed or expanded. A repair-all whose combined purses cannot pay every eligible
+item is refused whole (a deviation from the C# gold-only loop, which repairs only the items the
+gold covers). With the flag false both packets behave exactly as before. The AA task amount is
+a delta (see the wallet section above).
+
+`CSDepositMoneyPacket` / `CSWithdrawMoneyPacket` carry an `aa_point` amount next to the gold
+amount (WP-AA3b). An AA deposit moves the carried AA purse to the bank purse and an AA
+withdrawal moves it back, in the same direction as the gold amount; the direction is INFERRED
+from the packet's own gold semantics (AA3-PURSE-1). Both the gold and the AA checks and moves
+run under one character lock (`inventory::transfer_bank_money_and_aa_point`), so a short gold
+or AA purse changes neither; the AA errors are `NOT_ENOUGH_AA_POINT` 707 (carried) and
+`NOT_ENOUGH_BANK_AA_POINT` 708 (bank), while a short gold purse keeps `NOT_ENOUGH_MONEY` 26.
+With `aa_point = 0` the handler takes the unchanged `ChangeMoney` path. Mail AA attachments
+(`SCAttachmentTaken.aa_point`, `CSSendMail money0..2`) stay out: the 1.2 client has no
+evidenced meaning for them (mail AA is UNKNOWN).
+
 #### Item and craft notification packet definitions (2026-11-05)
 
 `systems/economy/item_notify_packets.rs` defines the four S->C packets the former C# port never
