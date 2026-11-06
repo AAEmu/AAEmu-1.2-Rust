@@ -68,7 +68,8 @@ pub fn appraisal_certificate(server: &GameServer) -> u32 {
 }
 
 const DAY: i64 = 24 * 3600;
-/// Existing interval between the tax due date and removal deadline.
+/// The C# `TaxDueDate` interval (`ProtectionEndDate.AddDays(-7)`), kept for a house whose
+/// housing group, area or `allowed_tax_delay_week` column is missing / NULL.
 pub const TAX_PAYMENT_GRACE_DAYS: i64 = 7;
 
 /// `DateTime.UtcNow` in unix seconds (housing dates are stored with second precision, like the
@@ -77,9 +78,22 @@ pub fn now() -> UnixTime {
     chrono::Utc::now().timestamp()
 }
 
-/// `TaxDueDate` (`ProtectionEndDate.AddDays(-7)`).
-pub fn tax_due_date(h: &House) -> UnixTime {
-    h.protection_end_date - TAX_PAYMENT_GRACE_DAYS * DAY
+/// Days between the tax bill's due date and removal: `housing_groups.allowed_tax_delay_week`
+/// of the house's group times 7 (WP-H1). The shipped 1.2 data authors 1 for every extendable
+/// group; group 13 authors 0 and cannot be extended (it never gets a bill and is removed at
+/// `protection_end_date`). A missing group / area / world / column (or a negative value) keeps
+/// [`TAX_PAYMENT_GRACE_DAYS`].
+pub fn tax_grace_days(server: &GameServer, h: &House) -> i64 {
+    super::placement::house_group(server, &h.unit.transform)
+        .and_then(|group| group.allowed_tax_delay_week)
+        .filter(|weeks| *weeks >= 0)
+        .map_or(TAX_PAYMENT_GRACE_DAYS, |weeks| weeks.saturating_mul(7))
+}
+
+/// `TaxDueDate` (`ProtectionEndDate - allowed_tax_delay_week * 7 days`; the C# fixed 7 when the
+/// group has no value).
+pub fn tax_due_date(server: &GameServer, h: &House) -> UnixTime {
+    h.protection_end_date - tax_grace_days(server, h) * DAY
 }
 
 /// The `HousingManager` maps.
@@ -971,8 +985,8 @@ pub fn tax_mail_update(server: &GameServer, house: &HouseRef) -> TaxMailUpdate {
     let info = quote.info;
     let now = now();
     let mut late_fees = 0;
-    let mut deadline = tax_due_date(&h);
-    if tax_due_date(&h) <= now {
+    let mut deadline = tax_due_date(server, &h);
+    if tax_due_date(server, &h) <= now {
         late_fees = 1;
         deadline = h.protection_end_date;
     }
@@ -1065,7 +1079,7 @@ pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
         let h = house.data();
         (
             h.protection_end_date <= now,
-            tax_due_date(&h) <= now,
+            tax_due_date(server, &h) <= now,
             h.unit.owner_id,
             h.id,
         )

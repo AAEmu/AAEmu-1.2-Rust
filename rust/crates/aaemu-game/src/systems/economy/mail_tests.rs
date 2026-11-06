@@ -1646,6 +1646,7 @@ async fn tax_mail_and_pay_charge_money() {
         protection_end_date: mail::now() + 3 * 24 * 3600,
         base_tax: 250_000,
         heavy_tax: false,
+        allowed_tax_delay_week: None,
     };
     let tax = BuildingTaxInfo {
         total_tax_amount_due: 500,

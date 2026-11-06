@@ -147,7 +147,7 @@ pub fn house_tax_info(server: &GameServer, player: &PlayerRef, tl: u16) {
     let now = now();
     let weeks_without_pay = if h.protection_end_date <= now {
         1
-    } else if tax_due_date(&h) <= now {
+    } else if tax_due_date(server, &h) <= now {
         0
     } else {
         -1
@@ -1092,7 +1092,11 @@ pub fn set_for_sale(
     if let Some(player) = seller {
         let (owner, step, tax_due) = {
             let h = house.data();
-            (h.unit.owner_id, h.current_step, tax_due_date(&h) <= now())
+            (
+                h.unit.owner_id,
+                h.current_step,
+                tax_due_date(server, &h) <= now(),
+            )
         };
         if owner != player.character_id {
             send_error(player, err::HOUSE_CANNOT_SELL_AS_NOT_OWNER);
