@@ -35,6 +35,10 @@ pub struct HousingGroup {
     pub id: u32,
     pub houseless: bool,
     pub existing_category_id: u32,
+    /// `allowed_tax_delay_week`: weeks between the tax bill's due date and removal
+    /// (`tax_due = protection_end - weeks * 7 d`). `None` when the column is NULL or missing
+    /// from an older compact; the fixed one-week interval then applies (WP-H1).
+    pub allowed_tax_delay_week: Option<i64>,
     pub can_extend: bool,
 }
 
@@ -44,6 +48,7 @@ impl Default for HousingGroup {
             id: 0,
             houseless: false,
             existing_category_id: 0,
+            allowed_tax_delay_week: None,
             can_extend: true,
         }
     }
@@ -615,6 +620,13 @@ impl HousingData {
                 id: r.u32("id")?,
                 houseless: r.bool_str("houseless")?,
                 existing_category_id: r.u32_or("existing_category_id", 0)?,
+                allowed_tax_delay_week: if r.has("allowed_tax_delay_week")
+                    && !r.is_null("allowed_tax_delay_week")?
+                {
+                    Some(r.i64("allowed_tax_delay_week")?)
+                } else {
+                    None
+                },
                 can_extend: r.bool_str("can_extend")?,
             };
             if d.groups.insert(group.id, group).is_some() {
@@ -1183,7 +1195,7 @@ pub(crate) mod tests {
         CREATE TABLE world_var_defaults (id INT, kind_id INT, variable_name TEXT,
             default_value INT);
         CREATE TABLE housing_areas (id INT, housing_group_id INT);
-        CREATE TABLE housing_groups (id INT, houseless NUM, existing_category_id INT, can_extend NUM);
+        CREATE TABLE housing_groups (id INT, houseless NUM, existing_category_id INT, allowed_tax_delay_week INT, can_extend NUM);
         CREATE TABLE housing_group_categories (id INT, housing_group_id INT, category_id INT,
             max_construct_count INT);
         CREATE TABLE housing_deco_limit_elems (id INT, housing_deco_limit_id INT, deco_actability_group_id INT, count INT);
@@ -1578,6 +1590,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn housing_groups_read_the_tax_delay_and_tolerate_null() {
+        let c = sample();
+        c.execute_batch(
+            "INSERT INTO housing_groups VALUES (1, 'f', 0, 1, 't');
+             INSERT INTO housing_groups VALUES (13, 't', 16, 0, 'f');
+             INSERT INTO housing_groups VALUES (14, 'f', 0, NULL, 't');",
+        )
+        .unwrap();
+        let d = HousingData::load_from(&c, "en_us", Vec::new()).unwrap();
+        assert_eq!(d.groups[&1].allowed_tax_delay_week, Some(1));
+        assert_eq!(d.groups[&13].allowed_tax_delay_week, Some(0));
+        assert!(!d.groups[&13].can_extend);
+        assert_eq!(d.groups[&14].allowed_tax_delay_week, None);
+    }
+
+    #[test]
     fn real_bindings_file_parses() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("app/Data/housing_bindings.json");
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -1619,6 +1647,20 @@ pub(crate) mod tests {
         assert_eq!(d.taxations.len(), rows("taxations"));
         assert_eq!(d.areas.len(), rows("housing_areas"));
         assert_eq!(d.groups.len(), rows("housing_groups"));
+        // WP-H1: the shipped data authors 1 week for every extendable group; only group 13
+        // authors 0, and it cannot be extended (no bills; the authored lifetime still applies).
+        let zero: Vec<_> = d
+            .groups
+            .values()
+            .filter(|g| g.allowed_tax_delay_week == Some(0))
+            .map(|g| (g.id, g.can_extend))
+            .collect();
+        assert_eq!(zero, vec![(13, false)]);
+        assert!(d
+            .groups
+            .values()
+            .filter(|g| g.id != 13)
+            .all(|g| g.allowed_tax_delay_week == Some(1) && g.can_extend));
         assert_eq!(
             d.group_categories.values().map(Vec::len).sum::<usize>(),
             rows("housing_group_categories")
