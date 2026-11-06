@@ -72,6 +72,7 @@
         "reloadauction": 100,
         "reloadconfig": 100,
         "resend_house_tax_mail": 100,
+        "restrict_chat": 100,
         "rotate": 100,
         "scripts": 100,
         "secondpassword": 100,

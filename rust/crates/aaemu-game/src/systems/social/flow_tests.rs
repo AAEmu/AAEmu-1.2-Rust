@@ -3888,6 +3888,160 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
 }
 
 #[tokio::test]
+async fn chat_level_gate_refuses_below_the_configured_level_and_exempts_gms() {
+    use crate::packets::world::SCErrorMsgPacket;
+    use crate::systems::economy::error_message;
+
+    let server = test_server();
+    let mut a = pc(&server, 1, "Low", 100.0, 100.0);
+    let mut b = pc(&server, 2, "High", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+
+    // The default `Chat.MinLevelByChatType` is empty: no gate, exactly the previous behaviour.
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "open"),
+    )
+    .await;
+    assert_eq!(find(&a.frames(), sc::SCChatMessagePacket).len(), 1);
+    assert_eq!(find(&b.frames(), sc::SCChatMessagePacket).len(), 1);
+
+    // Both test characters are level 10; Say now needs 20.
+    server.config.update(|c| {
+        c.chat.min_level_by_chat_type.insert(chat_type::WHITE, 20);
+    });
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "blocked"),
+    )
+    .await;
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            body(&SCErrorMsgPacket::new(
+                error_message::CHAT_CANNOT_SEND_SINCE_LEVEL_LOW,
+                0,
+                true,
+            ))
+        )]
+    );
+    assert!(b.frames().is_empty(), "a below-level message was routed");
+
+    // Reaching the level lets the same message through.
+    a.p.data().unit.level = 20;
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "allowed"),
+    )
+    .await;
+    assert_eq!(find(&a.frames(), sc::SCChatMessagePacket).len(), 1);
+    assert_eq!(find(&b.frames(), sc::SCChatMessagePacket).len(), 1);
+
+    // GM exemption: `access_level >= 100` bypasses the gate even below the level.
+    a.p.data().unit.level = 10;
+    a.p.data().access_level = crate::systems::social::chat::GM_ACCESS_LEVEL;
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "gm"),
+    )
+    .await;
+    assert_eq!(find(&a.frames(), sc::SCChatMessagePacket).len(), 1);
+    assert_eq!(find(&b.frames(), sc::SCChatMessagePacket).len(), 1);
+}
+
+#[tokio::test]
+async fn chat_mute_refuses_the_message_and_expires_automatically() {
+    use crate::systems::services::commands::scripts::harness::chat_text;
+
+    let server = test_server();
+    let mut a = pc(&server, 1, "Muted", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Friend", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+
+    a.p.data().chat_restricted_until = chrono::Utc::now().timestamp() + 600;
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "blocked"),
+    )
+    .await;
+    let frames = a.frames();
+    assert_eq!(frames.len(), 1, "one refusal, nothing else");
+    assert_eq!(frames[0].0, sc::SCChatMessagePacket);
+    assert_eq!(
+        i16::from_le_bytes(frames[0].1[..2].try_into().expect("chat type")),
+        chat_type::SYSTEM
+    );
+    assert_eq!(chat_text(&frames[0].1), "You are muted and cannot chat.");
+    assert!(b.frames().is_empty(), "a muted message was routed");
+    assert!(a.p.data().chat_restricted_until > 0, "mute kept");
+
+    a.p.data().chat_restricted_until = chrono::Utc::now().timestamp() - 1;
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "after"),
+    )
+    .await;
+    assert_eq!(a.p.data().chat_restricted_until, 0, "expired mute cleared");
+    assert_eq!(find(&a.frames(), sc::SCChatMessagePacket).len(), 1);
+    assert_eq!(find(&b.frames(), sc::SCChatMessagePacket).len(), 1);
+}
+
+#[tokio::test]
+async fn a_muted_sender_cannot_bypass_the_mute_in_a_user_channel() {
+    use crate::systems::services::commands::scripts::harness::chat_text;
+    use crate::systems::social::chat::user_channel_identity;
+
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    a.send(
+        &server,
+        cs::CSJoinUserChatChannelPacket,
+        user_join("Friends", "", true),
+    )
+    .await;
+    let channel = server
+        .chat
+        .list_all_channels()
+        .into_iter()
+        .find(|c| c.chat_type == chat_type::USER)
+        .unwrap();
+    let identity = user_channel_identity(&channel);
+    b.send(
+        &server,
+        cs::CSJoinUserChatChannelPacket,
+        user_join("Friends", "", false),
+    )
+    .await;
+    a.frames();
+    b.frames();
+
+    a.p.data().chat_restricted_until = chrono::Utc::now().timestamp() + 600;
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        user_chat(identity, "hidden"),
+    )
+    .await;
+    let frames = a.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        i16::from_le_bytes(frames[0].1[..2].try_into().expect("chat type")),
+        chat_type::SYSTEM
+    );
+    assert_eq!(chat_text(&frames[0].1), "You are muted and cannot chat.");
+    assert!(b.frames().is_empty(), "the user-channel copy was routed");
+}
+
+#[tokio::test]
 async fn chat_spam_delay_refuses_messages_inside_the_channel_window() {
     use crate::packets::world::SCErrorMsgPacket;
     use crate::systems::social::chat::CHAT_SPAM_DELAY_ERROR;

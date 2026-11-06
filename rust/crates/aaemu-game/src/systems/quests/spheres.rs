@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+use crate::data::world_data::ZoneData;
+use crate::data::world_templates::WorldTemplates;
+
 use super::data::{QuestData, RawSignSphere};
 use super::model::sphere_trigger;
 use super::packets::SCAreaTeamMessagePacket;
@@ -128,6 +131,173 @@ pub fn load_sphere_areas(app_path: &Path, known_sphere: impl Fn(u32) -> bool) ->
     out
 }
 
+/// Reads every `<app_path>/Data/Worlds/*/quest_sign_sphere_fill.json` (the 10.x-derived
+/// geometry of `Docs/wiki/Quest-Audit.md` quests that the 1.2 client pack has no sign sphere
+/// for). The file is written by `rust/tools/quest_sign_sphere_import`; its rows are zone-local
+/// coordinates, like the client `quest_sign_sphere.g` areas.
+///
+/// Runtime data-version guards, repeated here so a stale or hand-edited data file cannot
+/// inject a sphere the loaded 1.2 data does not know:
+/// * the quest template and component exist and the component has an objective sphere act
+///   (`QuestActObjSphere` / `QuestActCheckSphere`) for the same `sphere_id`;
+/// * the `spheres` row is a `SphereQuest` whose `sphere_quests.quest_id` is the row's quest;
+/// * no 1.2 client sign sphere exists for the same `(quest_id, component_id)` (the client pack
+///   always wins);
+/// * the zone belongs to the named 1.2 world and its `zones.closed` is false;
+/// * the radius is finite and positive, and the row is not an exact duplicate.
+///
+/// A missing file, a malformed row or an unknown field is skipped: a bad data file must not
+/// fail the catalog.
+pub fn load_sign_sphere_fill(
+    app_path: &Path,
+    data: &QuestData,
+    zones: &ZoneData,
+    worlds: &WorldTemplates,
+) -> Vec<(String, RawSignSphere)> {
+    let dir = app_path.join("Data").join("Worlds");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
+    dirs.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    let mut files = 0usize;
+    let mut skipped = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for entry in dirs {
+        let world = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().join("quest_sign_sphere_fill.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rows: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("{}: {e} (ignored)", path.display());
+                continue;
+            }
+        };
+        files += 1;
+        for row in rows {
+            let number = |key: &str| row.get(key).and_then(serde_json::Value::as_f64);
+            let (Some(quest_id), Some(component_id), Some(sphere_id)) = (
+                number("quest_id"),
+                number("component_id"),
+                number("sphere_id"),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let (Some(zone), Some(x), Some(y), Some(z), Some(radius)) = (
+                number("zone"),
+                number("x"),
+                number("y"),
+                number("z"),
+                number("radius"),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let (quest_id, component_id, sphere_id, zone) = (
+                quest_id as u32,
+                component_id as u32,
+                sphere_id as u32,
+                zone as u32,
+            );
+            if !radius.is_finite() || radius <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let Some(component) = data.component(component_id) else {
+                skipped += 1;
+                continue;
+            };
+            if component.quest_id != quest_id {
+                skipped += 1;
+                continue;
+            }
+            let objective = component.acts.iter().any(|&a| {
+                matches!(
+                    data.acts[a].kind,
+                    ActKind::ObjSphere { sphere_id: id, .. } | ActKind::CheckSphere { sphere_id: id }
+                        if id == sphere_id
+                )
+            });
+            if !objective {
+                skipped += 1;
+                continue;
+            }
+            let Some(sphere) = data.spheres.get(&sphere_id) else {
+                skipped += 1;
+                continue;
+            };
+            if sphere.sphere_detail_type != "SphereQuest" {
+                skipped += 1;
+                continue;
+            }
+            let Some(row_quest) = data.sphere_quests.get(&sphere.sphere_detail_id) else {
+                skipped += 1;
+                continue;
+            };
+            if row_quest.quest_id != quest_id {
+                skipped += 1;
+                continue;
+            }
+
+            if data
+                .sign_spheres
+                .iter()
+                .any(|s| s.quest_id == quest_id && s.component_id == component_id)
+            {
+                skipped += 1;
+                continue;
+            }
+            if !zones.zone_by_key(zone).is_some_and(|z| !z.closed) {
+                skipped += 1;
+                continue;
+            }
+            if worlds
+                .get_world_template_by_zone_key(zone)
+                .is_none_or(|w| w.name != world)
+            {
+                skipped += 1;
+                continue;
+            }
+            let key = (
+                quest_id,
+                component_id,
+                sphere_id,
+                zone,
+                (x as f32).to_bits(),
+                (y as f32).to_bits(),
+                (z as f32).to_bits(),
+                (radius as f32).to_bits(),
+            );
+            if !seen.insert(key) {
+                skipped += 1;
+                continue;
+            }
+            out.push((
+                world.clone(),
+                RawSignSphere {
+                    zone_id: zone,
+                    quest_id,
+                    component_id,
+                    local: [x as f32, y as f32, z as f32],
+                    radius: radius as f32,
+                },
+            ));
+        }
+    }
+    if files > 0 {
+        tracing::info!(
+            "Loaded {} imported quest sign spheres from {files} world files ({skipped} skipped)",
+            out.len()
+        );
+    }
+    out
+}
+
 /// `SphereQuestTrigger`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SphereQuestTrigger {
@@ -194,15 +364,18 @@ impl SphereQuestManager {
         &self,
         data: &QuestData,
         raw: &[RawSignSphere],
+        fill: &[(String, RawSignSphere)],
         world_name: &str,
         origin: impl Fn(u32) -> (i32, i32),
     ) {
         let mut s = Spheres::default();
-        for r in raw {
+        let client = raw.iter().map(|r| (world_name, r));
+        let imported = fill.iter().map(|(w, r)| (w.as_str(), r));
+        for (sphere_world, r) in client.chain(imported) {
             let (ox, oy) = origin(r.zone_id);
             let sphere = SphereQuest {
                 zone_id: r.zone_id,
-                world_id: world_name.to_string(),
+                world_id: sphere_world.to_string(),
                 quest_id: r.quest_id,
                 component_id: r.component_id,
                 radius: r.radius,
@@ -540,6 +713,9 @@ impl SphereQuestManager {
         };
         let mut current_positions = HashMap::new();
         for starter in self.starters() {
+            if starter.sphere.world_id != world.template.name {
+                continue;
+            }
             let (sx, sy, _) = starter.sphere.xyz;
             let Some(region) = world.region_by_pos(sx, sy) else {
                 continue;
@@ -614,6 +790,14 @@ fn tick_trigger(
     trigger: &SphereQuestTrigger,
     now: i64,
 ) -> Result<Option<(f32, f32, f32)>, String> {
+    // Imported spheres carry the world they were authored in; a main_world area must not fire
+    // inside an instance (and vice versa).
+    let Some(world) = server.world.world_of(&WorldObject::from(player.clone())) else {
+        return Ok(None);
+    };
+    if trigger.sphere.world_id != world.template.name {
+        return Ok(None);
+    }
     let elapsed = if trigger.last_tick_ms == i64::MIN {
         f64::INFINITY
     } else {

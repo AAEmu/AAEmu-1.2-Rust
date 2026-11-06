@@ -8,9 +8,12 @@ use std::time::{Duration, Instant};
 
 use crate::data::world_data::factions;
 use crate::managers::id::IdManager;
+use crate::models::character::Character;
+use crate::models::item::UnixTime;
 use crate::net::packet::ServerPacket;
 use crate::packets::world::{
-    ChatSender, SCChatMessagePacket, SCJoinedChatChannelPacket, SCLeavedChatChannelPacket,
+    ChatSender, SCChatMessagePacket, SCErrorMsgPacket, SCJoinedChatChannelPacket,
+    SCLeavedChatChannelPacket,
 };
 use crate::systems::social::config::ChatConfig;
 use crate::systems::social::util::ChatFailure;
@@ -72,6 +75,59 @@ pub fn chat_spam_allows(
     }
     last_send[group] = Some(now + Duration::from_millis(u64::from(delay_ms)));
     true
+}
+
+/// Access level from which a character is treated as a GM: the same threshold as the
+/// closed-zone bypass (`world::zone_access`), so a character with it is exempt from
+/// `Chat.MinLevelByChatType`. Account-level elevation alone is not consulted here (the chat
+/// path is synchronous and does not read the account row).
+pub const GM_ACCESS_LEVEL: i32 = 100;
+
+/// Why an outgoing chat message was refused before routing (SL4b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRefusal {
+    /// Below `Chat.MinLevelByChatType` for this chat type.
+    LevelTooLow,
+    /// `characters.chat_restricted_until` is still in the future (`/restrict_chat`).
+    Muted,
+}
+
+/// The SL4b gate: the configured per-type minimum level (GMs exempt) and the persisted mute.
+///
+/// Both checks read (and the mute expiry clears) the same [`Character`], so the caller must
+/// hold its `data()` lock once and pass the guard's character here. The mute check runs after
+/// the level check; both rules are independent, and the order is not evidenced.
+pub fn chat_refusal(
+    config: &ChatConfig,
+    c: &mut Character,
+    chat_type: i16,
+    now: UnixTime,
+) -> Option<ChatRefusal> {
+    if c.access_level < GM_ACCESS_LEVEL && c.unit.level < config.min_level(chat_type) {
+        return Some(ChatRefusal::LevelTooLow);
+    }
+    if c.chat_restricted(now) {
+        return Some(ChatRefusal::Muted);
+    }
+    None
+}
+
+/// Tells the sender why the message was dropped. The level refusal is
+/// `CHAT_CANNOT_SEND_SINCE_LEVEL_LOW` 786 (the localized text asks for `$1`, the level; the
+/// `SCErrorMsgPacket` argument mechanism is UNKNOWN, so no argument is sent). The mute refusal
+/// is a plain system message: retail's rule and error for `/restrict_chat` are UNKNOWN
+/// (INFERRED, `CHAT-RESTRICT-1`).
+pub fn send_chat_refusal(p: &PlayerRef, refusal: ChatRefusal) {
+    match refusal {
+        ChatRefusal::LevelTooLow => p.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::CHAT_CANNOT_SEND_SINCE_LEVEL_LOW,
+            0,
+            true,
+        )),
+        ChatRefusal::Muted => {
+            super::util::send_message(p, chat_type::SYSTEM, "You are muted and cannot chat.")
+        }
+    }
 }
 
 /// `CourtRoomRegion`.

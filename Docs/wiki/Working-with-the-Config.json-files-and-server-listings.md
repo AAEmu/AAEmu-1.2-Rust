@@ -422,6 +422,61 @@ To disable the API even when the shipped config contains the section, set
 section also disables it. Existing clients must add the Bearer header to every
 `/api` request; local `/status` checks continue to work without credentials.
 
+### Read-only monitoring endpoints
+
+Two tooling routes, added in Rust only (the 1.2 client has no web API), also require
+the same Bearer credential as the `/api` routes:
+
+* `GET /online` — the characters currently in the world:
+
+  ```json
+  {
+    "Count": 2,
+    "Characters": [
+      {
+        "Id": 1,
+        "Name": "Example",
+        "Level": 55,
+        "Race": 1,
+        "FactionId": 101,
+        "FactionName": "",
+        "ExpeditionId": 7,
+        "ExpeditionName": "Example Guild",
+        "ZoneId": 15
+      }
+    ]
+  }
+  ```
+
+  Characters ordered by id. `ExpeditionName` is `null` without a guild. Only the
+  zone id is exposed — no account data, addresses or positions.
+
+* `GET /dominions` — one object per persisted dominion zone group, ordered by zone
+  group id:
+
+  ```json
+  [
+    {
+      "ZoneGroupId": 25,
+      "ZoneGroupName": "Solzreed",
+      "OwnerExpeditionId": 7,
+      "OwnerExpeditionName": "Example Guild",
+      "SiegePeriod": 3,
+      "NextSiegeStart": "2026-11-08T20:30:00Z",
+      "NextSiegeEnd": "2026-11-08T22:30:00Z",
+      "DeclarationAttacker": { "ExpeditionId": 9, "Name": "Challengers" }
+    }
+  ]
+  ```
+
+  `OwnerExpeditionId` / `OwnerExpeditionName` are `null` for an unowned territory
+  (`SiegePeriod` 0). `SiegePeriod` is the 1.2 period id: 0 no dominion, 1 auction,
+  2 declare, 3 warmup, 4 siege, 5 peace. `NextSiegeStart` / `NextSiegeEnd` describe
+  an explicit scheduled siege, or the declared calendar cycle's authored siege
+  window, and are `null` when neither applies. `DeclarationAttacker` is `null` when
+  no expedition has an accepted declaration. These endpoints are read-only and do
+  not change any manager state.
+
 ## Tower defense event schedules
 
 Tower defense controllers are reserved for events instead of spawning permanently.
@@ -590,11 +645,23 @@ They ship in `Configurations/Chat.json` and can be overridden in
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `ChatFailedPacket` | `false` | Answer channel-bound chat failures with `SCChatFailedPacket(error, channel name)` instead of the `SCErrorMsgPacket` toast: the user-channel join / leave / message errors, and the "not in party / raid / expedition / family" errors. Every other chat failure keeps `SCErrorMsgPacket`. `false` keeps the previous frames. |
+| `MinLevelByChatType` | `{}` | Minimum character level per chat type (`"0"` Say, `"1"` Shout, `"-3"` Whisper; a missing entry or `0` means no gate). A sender below the level is refused with error 786 and the message is not routed; characters with `access_level >= 100` are exempt. |
 
 **Capture-pending:** which failures retail 1.2 sent as `SCChatFailed` is
 unknown. Keep `ChatFailedPacket` off until a capture of the original server
 shows the form it used. The packet layout and the open question are recorded
-in `rust/crates/aaemu-game/PORTING.md` (CHAT-FAILED-1).
+in `rust/crates/aaemu-game/PORTING.md` (CHAT-FAILED-1). The retail per-chat-type
+levels are unknown too, so `MinLevelByChatType` ships empty (CHAT-LEVEL-1).
+
+### Chat mute (`/restrict_chat`)
+
+The retail GM command `/restrict_chat <character> [minutes]` mutes an online
+or offline character for the given number of minutes (default 60; `0` lifts
+the mute). The retail argument shape is unknown, so the duration and the
+default are assumed. The mute is stored in `characters.chat_restricted_until`
+(UTC), survives restarts, and expires automatically. A muted sender's message
+is not routed and a plain system message tells them they are muted; the retail
+mute error is unknown (CHAT-RESTRICT-1).
 
 ## Loot announcements (`Configurations/Loot.json`)
 

@@ -4332,7 +4332,7 @@ async fn leaving_before_in_game_drops_deferred_evaluations() {
 
 // ----- real compact.sqlite3 -----
 
-fn real_db() -> Option<rusqlite::Connection> {
+pub(super) fn real_db() -> Option<rusqlite::Connection> {
     let path = std::env::var("AAEMU_COMPACT_DB").ok()?;
     Some(
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -5963,6 +5963,7 @@ async fn sphere_trigger_uses_the_world_position_of_an_attached_player() {
             local: [125.0, 120.0, 100.0],
             radius: 3.0,
         }],
+        &[],
         "main_world",
         |_| (0, 0),
     );
