@@ -3333,6 +3333,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   debited scroll; before, the scroll was lost. The cast-path tests
   (`grade_enchant_cast_refunds_the_scroll_*`) drive `CSStartSkillPacket` and assert the
   scroll count.
+* systems::economy / skills (renew and physical enchant, 2026-11, stage 1): the C#
+  `RenewEquipment` (57), `PhysicalEnchantWeapon` (20) and `PhysicalEnchantArmor` (21) actions only
+  logged. Rust ports the 1.2 client's pair predicate `FUN_397cca90` (`X2RenewItem.Renew` ->
+  `FUN_394e92d0`): armor needs a `base_equipment` source and a non-`base_equipment` target with
+  the same armor-type record; a weapon needs the same holdable slot type and renew category, with
+  the renew category in 1..3. The client's toast ids are sent for the same refusals (20 slot out
+  of range, 27 item missing, 206 not a bag item, 1 not a renewable pair). For 20/21 the
+  enchanter's `physical_enchant_abilities` row (npc template id, armor flag, next enchant step)
+  is checked: `min_friendship > 0` is always unmet because 1.2 grants no NPC friendship
+  (`track_friendship` is false for every NPC), and the row's `success_ratio` is rolled. The next
+  enchant step is INFERRED as `temper_physical - 100 + 1` (`IT2-ENCHANT-LEVEL`). Stage 1 never
+  changes an item: what a success consumes / transforms is capture-blocked (`IT2-STAGE2`); the
+  outcome is logged. The enchanter NPC is the cast's NPC operand when it has one, else the
+  character's current interaction object (`CSInteractNPC`), because the 1.2 cast carries no NPC.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -6821,16 +6835,23 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
 
 ## Static-table and feature verdicts (2026-11-06, recorded so they are not reopened)
 
-* **`equip_slot_groups` (24 rows) is not read; `equip_slot_group_maps` (48 rows) is.**
-  Equipping keeps the hard-coded `allowed_gear_slots` (`models/container.rs:93`, the C#
-  `EquipmentContainer.GetAllowedGearSlots`); the maps are read only by the lunagem check
-  (`item_sockets.equip_slot_group_id` -> `equip_slot_group_maps` -> target slot type,
-  `data/items.rs:1154-1159`, `systems/economy/item_effects.rs:755`). The optional data guard
-  (every map row matches the hard-coded table) is not needed until the group table gains a
-  consumer.
+* **`equip_slot_groups` (24 rows) is loaded; `equip_slot_group_maps` has 48 rows, 47 loaded.**
+  The group table is the parent of the maps, and the lunagem check now requires it
+  (`item_sockets.equip_slot_group_id` -> `equip_slot_groups` + `equip_slot_group_maps` ->
+  target slot type, `data/items.rs`, `systems/economy/item_effects.rs`). Map 10 names the
+  missing group 9 and is skipped at load, like the orphan `item_sockets` rows. Equipping keeps
+  the hard-coded `allowed_gear_slots` (`models/container.rs`, the C#
+  `EquipmentContainer.GetAllowedGearSlots`): the data has no target equip-slot column, so it
+  cannot express that rule. The real-data guard
+  `real_compact_equip_slot_groups_guard_the_hard_coded_slots` checks that every mapped slot
+  type is one the hard-coded table accepts and that the nine base groups still name the same
+  equip slots.
 * **`item_bags` has 5 rows whose ids do not resolve** (no item template references them). The
   1.2 client loads the table itself (`strings.txt:13953`); there is no reachable template and
   no known server rule, so there is nothing to load. Do not reopen.
+* **`item_tools` (130 rows) is client-side**: the 1.2 client loads `item_id, asset_id` for the
+  tool visual (`strings.txt` 13836), and `crafts.tool_id` is 0 in all 7 010 rows, so no server
+  check uses it.
 * **`expert_limits` prices are empty:** every `up_price` / `down_price` is 0 and `advantage` is
   a client display value (31 rows checked). The server uses the limit columns for
   labor/expand steps and charges the configured items, so there is no price to enforce.

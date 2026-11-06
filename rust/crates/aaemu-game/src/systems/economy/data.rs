@@ -44,6 +44,8 @@ pub struct Data {
     pub item_effects: super::item_effects::ItemEffectsData,
     /// Mate equipment rules (`mate_equip_slot_packs`, `mate_equip_pack_*`).
     pub mate_equipment: super::mate_equipment_data::MateEquipmentData,
+    /// `physical_enchant_abilities` (renew / physical-enchant stage 1).
+    pub renew: super::renew::RenewData,
     /// UCC applicability and crest patterns (`ucc_applicables`, `emblem_patterns`).
     pub ucc: super::ucc_data::UccData,
 }
@@ -77,6 +79,7 @@ impl Data {
         data.loot = super::loot_data::LootData::load(ctx.conn)?;
         data.item_effects = super::item_effects::ItemEffectsData::load(ctx.conn)?;
         data.mate_equipment = super::mate_equipment_data::MateEquipmentData::load(ctx.conn)?;
+        data.renew = super::renew::RenewData::load(ctx.conn)?;
         data.ucc = super::ucc_data::UccData::load(ctx.conn)?;
         Ok(data)
     }
