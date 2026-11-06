@@ -669,12 +669,16 @@ pub struct TaxMailHouse {
     pub base_tax: i32,
     /// `house.Template.HeavyTax`.
     pub heavy_tax: bool,
+    /// `housing_groups.allowed_tax_delay_week` of the house's group (WP-H1); `None` keeps the
+    /// fixed one-week interval of the C# `TaxDueDate`.
+    pub allowed_tax_delay_week: Option<i64>,
 }
 
 impl TaxMailHouse {
-    /// `House.TaxDueDate` (`ProtectionEndDate - 7 days`).
+    /// `House.TaxDueDate` (`ProtectionEndDate - allowed_tax_delay_week * 7 days`).
     pub fn tax_due_date(&self) -> UnixTime {
-        self.protection_end_date - 7 * 24 * 3600
+        let weeks = self.allowed_tax_delay_week.filter(|weeks| *weeks >= 0);
+        self.protection_end_date - weeks.map_or(7, |weeks| weeks.saturating_mul(7)) * 24 * 3600
     }
 }
 

@@ -44,6 +44,8 @@ pub struct Data {
     pub item_effects: super::item_effects::ItemEffectsData,
     /// Mate equipment rules (`mate_equip_slot_packs`, `mate_equip_pack_*`).
     pub mate_equipment: super::mate_equipment_data::MateEquipmentData,
+    /// UCC applicability and crest patterns (`ucc_applicables`, `emblem_patterns`).
+    pub ucc: super::ucc_data::UccData,
 }
 
 impl Data {
@@ -75,6 +77,7 @@ impl Data {
         data.loot = super::loot_data::LootData::load(ctx.conn)?;
         data.item_effects = super::item_effects::ItemEffectsData::load(ctx.conn)?;
         data.mate_equipment = super::mate_equipment_data::MateEquipmentData::load(ctx.conn)?;
+        data.ucc = super::ucc_data::UccData::load(ctx.conn)?;
         Ok(data)
     }
 

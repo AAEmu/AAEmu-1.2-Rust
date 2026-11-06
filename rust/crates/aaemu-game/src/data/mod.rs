@@ -35,7 +35,7 @@ use rusqlite::{Connection, OpenFlags};
 pub use character_templates::CharacterData;
 pub use content_configs::ContentConfigs;
 pub use experience::{ExperienceError, ExperienceTable, LevelTemplate};
-pub use features::{Feature, FeatureSet};
+pub use features::{Feature, FeatureSet, FeatureSetConfig};
 pub use formulas::FormulaManager;
 pub use items::{ItemData, ItemTemplate};
 pub use skills::SkillData;
