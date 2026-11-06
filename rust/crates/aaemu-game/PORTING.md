@@ -6563,6 +6563,25 @@ is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invent
 expiry, a placement fee and a same-account refusal; all three are gone in favour of the
 client-evidenced rules above.
 
+## Server features the 1.2 client cannot reach (catalogue, 2026-11-06)
+
+Server functionality that is implemented and tested but that the stock 1.2 client UI cannot
+show or start, because of bugs or missing wiring in the client's own UI scripts. The original 1.2
+client is left as it is (no client patches are shipped); the Bevy client is where the UI is
+fixed. Each entry stays here until a client can use it. Evidence:
+`D:/aaemu-audits/gap-audit-2026-11-02/research/bounty-board-workaround.md` (local research
+notes, not in git).
+
+| Feature | Server state | Why the 1.2 client cannot use it | How it is reached today |
+|---|---|---|---|
+| Bounty board list (`CSNaviOpenBounty` -> `SCBountyList`) | rows implemented, behind `Social.BountyBoard` (default `false`, keep it off for the 1.2 client) | `usertrial/bounty_bullet.alb` `FillData` indexes globals that no 1.2 script sets (`listCtrl`, `bountyRecords`, `index`), so any row aborts the window before it is shown; the client also keeps every received row until restart | headless `aaemu-testclient`; Bevy client (fix pending) |
+| "Offer a Reward" on the board | placement implemented (`CSRequestSetBountyMoney` / `CSSendBountyUpdate`) | the button handler compares the unset global `curSelected`, so every click fails | as above |
+| Placing a bounty (right-click / setup window) | implemented (see "Wanted-player bounty") | the popup-menu entry is never added, `SET_BOUNTY` has no UI handler and `setup_bounty.alb` registers the board toggle to the wrong function | GM `set_bounty_money <character> <amount>`; headless client |
+| Wanted-list chat command (`/wanted`) | not built (owner decision 2026-11-06: catalogue only, do not add for now) | - | - |
+
+Arrest payout (`SCBountyPaid`, `PAY_BOUNTY_MONEY`), `SCUnitBountyMoney` and the wanted buff work
+with the stock client.
+
 ## Water-only skill targets (2026-11-03)
 
 `target_only_water` casts (fishing rods) are admitted against the water surface the 1.2 client
