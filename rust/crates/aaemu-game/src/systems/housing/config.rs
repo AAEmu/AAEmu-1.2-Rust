@@ -51,6 +51,21 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub dominion_claim_limit: u32,
+    /// World-space offset from the lodestone where the server spawns the defender's HQ
+    /// doodad (3410) at the warmup of a declared siege. The retail rule is UNKNOWN; the
+    /// default `[0, 0, 0]` disables the automatic spawn and keeps the GM-bound HQ behaviour.
+    /// `Housing.DefenseHqOffset`.
+    #[serde(rename = "defensehqoffset")]
+    pub defense_hq_offset: [f32; 3],
+    /// Gate merchant packs 224/225 ("siege-time goods", defense / attack side) to the
+    /// warmup and siege periods of the NPC's territory and to registered participants of
+    /// the pack's side. The rule is INFERRED from the 1.2 pack names only (`merchant_packs`:
+    /// "defense-side goods sold during a siege" / "siege-side goods sold during a siege");
+    /// there is no capture of the retail restriction or its side rule. `false` (default)
+    /// keeps the previous behaviour: both packs sell at any time to anyone.
+    /// `Housing.SiegeShopGate`.
+    #[serde(rename = "siegeshopgate", deserialize_with = "crate::config::lenient")]
+    pub siege_shop_gate: bool,
 }
 
 fn default_dominion_claim_limit() -> u32 {
@@ -64,6 +79,8 @@ impl Default for HousingConfig {
             siege_calendar: false,
             siege_calendar_timezone: String::new(),
             dominion_claim_limit: default_dominion_claim_limit(),
+            defense_hq_offset: [0.0; 3],
+            siege_shop_gate: false,
         }
     }
 }
@@ -105,6 +122,30 @@ mod tests {
             }))
             .unwrap();
             assert_eq!(config.housing.dominion_claim_limit, 1);
+        }
+    }
+
+    #[test]
+    fn defense_hq_offset_defaults_to_disabled_and_binds_three_numbers() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.defense_hq_offset, [0.0, 0.0, 0.0]);
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": { "DefenseHqOffset": [10.5, -4.0, 2.0] }
+        }))
+        .unwrap();
+        assert_eq!(config.housing.defense_hq_offset, [10.5, -4.0, 2.0]);
+    }
+
+    #[test]
+    fn siege_shop_gate_defaults_off_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.siege_shop_gate);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeShopGate": value }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_shop_gate);
         }
     }
 

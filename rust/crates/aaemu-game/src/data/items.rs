@@ -1015,6 +1015,11 @@ impl ItemData {
         self.templates.get(&id)
     }
 
+    /// `item_body_parts` row of an item (the `BodyPartTemplate` specifics).
+    pub fn body_part(&self, id: u32) -> Option<&BodyPartTemplate> {
+        self.body_parts.get(&id)
+    }
+
     /// `GetGradeTemplate`.
     pub fn grade(&self, grade: i32) -> Option<&GradeTemplate> {
         self.grades.get(&grade)

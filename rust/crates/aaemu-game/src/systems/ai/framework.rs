@@ -93,6 +93,12 @@ pub enum AiKind {
 
 impl AiKind {
     /// `AiUtils.GetAiByType(type, owner)` (`None` = `null`, no AI).
+    ///
+    /// AI 11 `siegeweapon_place` and AI 12 `bomb` are no AI by design: the C#
+    /// `GetAiByType` / `AiParams.CreateByType` return `null` for both and the 1.2 data has no
+    /// `npc_ai_params` row, so the 61 placeholder / test / cutscene NPCs (e.g. NPC 52, the
+    /// `mother ...` templates, `QA_TEST_*`) and the 3 bomb / flying-machine pilot NPCs have no
+    /// behaviour to port.
     pub fn by_type(t: Option<AiParamType>) -> Option<Self> {
         use AiParamType as T;
         Some(match t? {

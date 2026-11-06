@@ -1,12 +1,13 @@
-//! Item and craft notification packets whose server-side triggers are not known yet:
-//! `SCCraftItemUnlockPacket` 0x0f5, `SCItemAcquisitionPacket` 0x097,
-//! `SCItemDetailUpdatedPacket` 0x093 and `SCItemTaskNotifyPacket` 0x091.
+//! Item and craft notification packets: `SCCraftItemUnlockPacket` 0x0f5,
+//! `SCItemAcquisitionPacket` 0x097, `SCItemDetailUpdatedPacket` 0x093 and
+//! `SCItemTaskNotifyPacket` 0x091.
 //!
-//! The layouts come from the 1.2 client readers only (cited per packet). Neither the 1.2 zone
-//! binaries nor a capture shows when the original server built them, so the server deliberately
-//! never sends them; they stay in the S->C coverage baseline as typed-but-never-sent and are
-//! recorded as capture-pending in `PORTING.md` (`ITEM-NOTIFY-1`..`4`). A future capture that
-//! shows a trigger only has to construct the packet; the wire format is test-locked here.
+//! The layouts come from the 1.2 client readers only (cited per packet). `SCItemAcquisitionPacket`
+//! is sent for loot pickups behind `Loot:AnnounceToParty` (default off, WP-IT1); the zone
+//! binaries still show no trigger for the other three, so the server deliberately never sends
+//! them: they stay in the S->C coverage baseline as typed-but-never-sent and are recorded as
+//! capture-pending in `PORTING.md` (`ITEM-NOTIFY-1`, `-3`, `-4`). A future capture that shows a
+//! trigger only has to construct the packet; the wire formats are test-locked here.
 
 use aaemu_commons::{Marshal, PacketStream};
 
@@ -64,7 +65,9 @@ impl Marshal for SCCraftItemUnlockPacket {
 /// standard item reader `FUN_3961f500` (`x2game.dll.c:1301392`, the same record `Item::write`
 /// emits for `SCItemTaskSuccessPacket`). The handler acts only for type `1` and builds an item
 /// link line naming `charName` (INFERRED: a party/raid member obtained an item). Trigger
-/// UNKNOWN-4: which grades / sources announce is unknown.
+/// (INFERRED, WP-IT1): `systems::economy::looting` sends one packet per loot pickup to the other
+/// team members in loot range when `Loot:AnnounceToParty` is enabled; which grades / sources the
+/// client announces is still decided client-side (`FUN_39695dc0`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SCItemAcquisitionPacket {
     pub kind: u8,

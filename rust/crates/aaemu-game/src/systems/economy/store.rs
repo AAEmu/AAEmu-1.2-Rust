@@ -464,9 +464,9 @@ impl CSBuyItemsPacket {
             {
                 return;
             }
-            let sells = npc_hooks
-                .as_ref()
-                .is_some_and(|h| h.merchant_sells(server, &pack_ids, e.item_id, e.grade));
+            let sells = npc_hooks.as_ref().is_some_and(|h| {
+                h.merchant_sells(server, &p, npc.as_ref(), &pack_ids, e.item_id, e.grade)
+            });
             // The purchase func sells its own item at the template price; a coin-item priced
             // func only checks out through `CSBuyCoinItemPacket` (and is refused here).
             let purchase_line = purchase.filter(|(f, _)| {

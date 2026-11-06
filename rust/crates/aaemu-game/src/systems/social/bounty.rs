@@ -24,10 +24,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use sqlx::mysql::MySqlPool;
-use sqlx::{MySql, Transaction};
+use sqlx::{MySql, Row, Transaction};
 
 use super::bounty_runtime::{BountyActor, BountyError, BountyLedger, BountyPledge, BountySnapshot};
-use super::packets::trial::{SCBountyPaidPacket, SCUnitBountyMoneyPacket};
+use super::crime::BountyDescription;
+use super::packets::trial::{SCBountyPaidPacket, SCUnitBountyMoneyPacket, MAX_BOUNTY_LIST_ENTRIES};
 use super::util;
 use crate::db::int;
 use crate::error::Result;
@@ -159,6 +160,111 @@ struct BountyState {
 #[derive(Debug, Default)]
 pub struct BountySaveBatch {
     pledges: BountySnapshot,
+}
+
+/// A built `CSNaviOpenBounty` answer: `total` is every character with an unpaid pledge and
+/// `rows` the entries written (the caller serializes them, capped by the packet writer too).
+#[derive(Debug, Default)]
+pub struct BountyBoard {
+    pub total: i32,
+    pub rows: Vec<BountyDescription>,
+}
+
+/// One board row from a live character: `crime_point`, zone, position and `is_live = true` from
+/// the unit, the counters from the character.
+fn online_board_row(server: &GameServer, target_id: u32, amount: i64) -> Option<BountyDescription> {
+    let player = server.world.character_by_id(target_id)?;
+    let c = player.data();
+    Some(BountyDescription {
+        player_id: target_id,
+        player_name: c.unit.name.clone(),
+        player_level: c.unit.level,
+        zone_id: c.unit.transform.zone_id,
+        pos: (c.unit.transform.x, c.unit.transform.y, c.unit.transform.z),
+        bounty_amount: u64::try_from(amount).unwrap_or(0),
+        crime_points: c.crime_point,
+        is_live: true,
+        player_race: c.race,
+        // The client reads this field as "type" (`FUN_397bebf0`, +184); its meaning is unknown.
+        // 1 is the value of the C# dummy row (C#-only, BOUNTY-board).
+        type184: 1,
+        arrest_count: c.arrest_count,
+        accept_guilty_count: c.accept_guilty_count,
+        accept_trial_count: c.accept_trial_count,
+        guilty_count: c.guilty_count,
+        not_guilty_count: c.not_guilty_count,
+        // The column exists in the client row; no 1.2 meaning is known (no timer is invented).
+        seconds: 0,
+    })
+}
+
+/// One board row from the `characters` table (`is_live = false`). A deleted, missing or
+/// unreadable row is skipped with a warning.
+async fn offline_board_row(
+    pool: &MySqlPool,
+    target_id: u32,
+    amount: i64,
+) -> Option<BountyDescription> {
+    let row = match sqlx::query(
+        "SELECT `name`, CAST(`level` AS SIGNED) AS level, \
+         CAST(`zone_id` AS SIGNED) AS zone_id, `x`, `y`, `z`, \
+         CAST(`crime_point` AS SIGNED) AS crime_point, \
+         CAST(`race` AS SIGNED) AS race, \
+         CAST(`arrest_count` AS SIGNED) AS arrest_count, \
+         CAST(`accept_guilty_count` AS SIGNED) AS accept_guilty_count, \
+         CAST(`accept_trial_count` AS SIGNED) AS accept_trial_count, \
+         CAST(`not_guilty_count` AS SIGNED) AS not_guilty_count, \
+         CAST(`guilty_count` AS SIGNED) AS guilty_count \
+         FROM `characters` WHERE `id` = ? AND `deleted` = 0",
+    )
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                "Bounty board: characters row for target {target_id} unreadable: {error}"
+            );
+            return None;
+        }
+    };
+    let count = |name: &str| -> i32 {
+        row.try_get::<Option<i64>, _>(name)
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    Some(BountyDescription {
+        player_id: target_id,
+        player_name: row.try_get::<String, _>("name").ok()?,
+        player_level: row.try_get::<i64, _>("level").ok()?.clamp(0, 255) as u8,
+        zone_id: row
+            .try_get::<i64, _>("zone_id")
+            .ok()?
+            .clamp(0, i64::from(u32::MAX)) as u32,
+        pos: (
+            row.try_get::<f32, _>("x").ok()?,
+            row.try_get::<f32, _>("y").ok()?,
+            row.try_get::<f32, _>("z").ok()?,
+        ),
+        bounty_amount: u64::try_from(amount).unwrap_or(0),
+        crime_points: row
+            .try_get::<i64, _>("crime_point")
+            .ok()?
+            .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16,
+        is_live: false,
+        player_race: row.try_get::<i64, _>("race").ok()?.clamp(0, 255) as u8,
+        type184: 1,
+        arrest_count: count("arrest_count"),
+        accept_guilty_count: count("accept_guilty_count"),
+        accept_trial_count: count("accept_trial_count"),
+        guilty_count: count("guilty_count"),
+        not_guilty_count: count("not_guilty_count"),
+        seconds: 0,
+    })
 }
 
 /// The bounty manager (`server.systems.social.bounties`).
@@ -337,6 +443,60 @@ impl BountyManager {
             .unwrap_or_else(|e| e.into_inner())
             .ledger
             .active_total(target_character_id)
+    }
+
+    /// Every character with an unpaid pledge: `(character id, total)`, highest total first and
+    /// ties by character id. The order is a server policy (the client stores the rows in a map
+    /// keyed by id, so it does not depend on it); it only decides which rows the 20-entry cap
+    /// keeps.
+    pub fn active_targets(&self) -> Vec<(u32, i64)> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut totals: HashMap<u32, i64> = HashMap::new();
+        for pledge in state.ledger.pledges().filter(|p| !p.paid) {
+            let target = pledge.target.character_id;
+            if target != 0 {
+                let total = totals.entry(target).or_default();
+                *total = total.saturating_add(pledge.amount);
+            }
+        }
+        let mut targets: Vec<(u32, i64)> =
+            totals.into_iter().filter(|(_, total)| *total > 0).collect();
+        targets.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        targets
+    }
+
+    /// The `SCBountyList` payload for `CSNaviOpenBounty`: every character with an unpaid pledge
+    /// as `total`, and up to [`MAX_BOUNTY_LIST_ENTRIES`] rows (the client's cap).
+    ///
+    /// The board is only filled with `Social.BountyBoard = true`; the default keeps the empty
+    /// list the C# server sent because a filled board broke the 1.2 client Lua (BOUNTY-board,
+    /// capture-pending). Online characters are read from the live unit; an offline target's
+    /// name, level, zone and position come from its `characters` row. A missing or unreadable
+    /// row is skipped instead of failing the whole board.
+    pub async fn board(&self, server: &GameServer) -> BountyBoard {
+        if !server.config.social.bounty_board {
+            return BountyBoard::default();
+        }
+        let targets = self.active_targets();
+        let mut total = i32::try_from(targets.len()).unwrap_or(i32::MAX);
+        let mut rows = Vec::with_capacity(targets.len().min(MAX_BOUNTY_LIST_ENTRIES));
+        for (index, (target_id, total_amount)) in targets.into_iter().enumerate() {
+            if index >= MAX_BOUNTY_LIST_ENTRIES {
+                break;
+            }
+            if let Some(row) = online_board_row(server, target_id, total_amount) {
+                rows.push(row);
+                continue;
+            }
+            if let Some(row) = offline_board_row(&server.db, target_id, total_amount).await {
+                rows.push(row);
+            } else {
+                // A deleted or unreadable character row is skipped; keep the total equal to
+                // what the server can actually resolve so the client can complete its map.
+                total -= 1;
+            }
+        }
+        BountyBoard { total, rows }
     }
 
     /// Remembers that `payer_id` may place a bounty on `target_id` (replaces an older request

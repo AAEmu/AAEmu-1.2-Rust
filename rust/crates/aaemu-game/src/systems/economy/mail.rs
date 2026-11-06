@@ -631,6 +631,25 @@ impl MailManager {
         self.state().all.get_mut(id).map(f)
     }
 
+    /// Updates the cached sender / receiver names of a renamed character. Returns the number of
+    /// changed name fields. The caller owns `SaveManager::transaction_lock`, so no save can
+    /// snapshot the old names after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut st = self.state();
+        let mut changed = 0;
+        for (_, mail) in st.all.iter_mut() {
+            if mail.header.sender_id == character_id && mail.header.sender_name != new_name {
+                mail.header.sender_name = new_name.to_string();
+                changed += 1;
+            }
+            if mail.header.receiver_id == character_id && mail.receiver_name != new_name {
+                mail.receiver_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// `AllPlayerMails.Count`.
     pub fn count(&self) -> usize {
         self.state().all.len()

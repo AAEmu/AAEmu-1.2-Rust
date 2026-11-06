@@ -1,6 +1,8 @@
-//! Explicit real-object headquarters for the GM-scheduled first siege implementation.
-//! Bindings are intentionally runtime-only: a restarted server requires the GM to rebind
-//! retained original HQ doodads. No synthetic coordinates, scroll fees or auction period.
+//! Real-object headquarters. A GM-scheduled siege binds a retained HQ doodad explicitly; a
+//! declared siege binds its camp (WP-SD2c) at acceptance and re-binds the retained doodad on
+//! boot by its persisted position. The defender's HQ is spawned at the warmup only when
+//! `Housing.DefenseHqOffset` is configured (the retail rule is UNKNOWN; default = the GM bind
+//! behaviour, no spawn). No synthetic coordinates, scroll fees or auction period.
 //! Call bind/prune/clear while holding housing.operation_lock; effect completion takes it.
 
 use std::collections::HashMap;
@@ -46,6 +48,8 @@ struct Binding {
     siege_id: u64,
     ownership_generation: u64,
     tower: TowerIdentity,
+    /// Attacker of the declaration this binding was created for (WP-SD2c); 0 for a GM bind.
+    declared_attacker: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -164,9 +168,187 @@ impl Headquarters {
                 siege_id: siege.siege_id,
                 ownership_generation: state.ownership_generation,
                 tower: state.tower,
+                declared_attacker: 0,
             },
         );
         Ok(())
+    }
+
+    /// Binds the camp doodad of an accepted declaration as the offense HQ (WP-SD2c). There is
+    /// no siege record yet: the binding is validated against the declaration until the
+    /// calendar materialises the siege, which [`Self::bind_materialised`] stamps.
+    pub fn bind_declaration(
+        &self,
+        server: &GameServer,
+        zone: u32,
+        doodad: &DoodadRef,
+    ) -> Result<(), HqError> {
+        let state = server
+            .systems
+            .housing
+            .dominions
+            .get(zone)
+            .ok_or(HqError::MissingSiege)?;
+        let declaration = state.declaration.ok_or(HqError::MissingSiege)?;
+        let (template, transform) = {
+            let d = doodad.data();
+            (d.template_id, d.transform)
+        };
+        if template != OFFENSE_HQ_TEMPLATE
+            || transform.parent_obj_id != 0
+            || transform.instance_id != state.tower.instance_id
+            || ![
+                transform.x,
+                transform.y,
+                transform.z,
+                transform.rot_x,
+                transform.rot_y,
+                transform.rot_z,
+            ]
+            .into_iter()
+            .all(f32::is_finite)
+            || server
+                .game_data
+                .zones
+                .zone_by_key(transform.zone_id)
+                .map(|zone| zone.group_id)
+                != Some(state.zone_group_id)
+        {
+            return Err(HqError::InvalidHeadquarters);
+        }
+        self.bindings.lock().expect("headquarters poisoned").insert(
+            key(zone, SiegeSide::Attacker),
+            Binding {
+                doodad: doodad.clone(),
+                position: transform.local(),
+                siege_id: 0,
+                ownership_generation: state.ownership_generation,
+                tower: state.tower,
+                declared_attacker: declaration.attacker_expedition_id,
+            },
+        );
+        Ok(())
+    }
+
+    /// Stamps the pending declaration binding with the materialised siege, so the snapshot
+    /// and teleport validation accept it.
+    pub fn bind_materialised(&self, server: &GameServer, state: &DominionState) {
+        let Some(current) = server.systems.housing.dominions.get(state.zone_group_id) else {
+            return;
+        };
+        if current.tower != state.tower {
+            return;
+        }
+        let Some(siege) = current
+            .siege
+            .as_ref()
+            .filter(|siege| siege.status != SiegeStatus::Finished)
+        else {
+            return;
+        };
+        let mut bindings = self.bindings.lock().expect("headquarters poisoned");
+        let Some(binding) = bindings.get_mut(&key(current.zone_group_id, SiegeSide::Attacker))
+        else {
+            return;
+        };
+        if binding.declared_attacker == siege.attacker_expedition_id
+            && binding.tower == current.tower
+        {
+            binding.siege_id = siege.siege_id;
+            binding.ownership_generation = current.ownership_generation;
+        }
+    }
+
+    /// Re-binds retained camp doodads to reloaded declarations (WP-SD2c): the doodad obj id is
+    /// runtime-only, so on boot the live 4307 nearest the persisted camp position is picked.
+    pub fn restore_declarations(&self, server: &GameServer) {
+        for state in server.systems.housing.dominions.all() {
+            let Some(declaration) = state.declaration else {
+                continue;
+            };
+            let Some(world) = server.world.world(state.tower.instance_id) else {
+                continue;
+            };
+            let found = world.all_doodads().into_iter().find(|doodad| {
+                let d = doodad.data();
+                let zone_ok = server
+                    .game_data
+                    .zones
+                    .zone_by_key(d.transform.zone_id)
+                    .is_some_and(|zone| zone.group_id == state.zone_group_id);
+                let dx = f64::from(d.transform.x) - f64::from(declaration.hq_x);
+                let dy = f64::from(d.transform.y) - f64::from(declaration.hq_y);
+                let dz = f64::from(d.transform.z) - f64::from(declaration.hq_z);
+                d.template_id == OFFENSE_HQ_TEMPLATE
+                    && zone_ok
+                    && dx * dx + dy * dy + dz * dz <= 25.0
+            });
+            let Some(doodad) = found else {
+                continue;
+            };
+            if self
+                .bind_declaration(server, state.zone_group_id, &doodad)
+                .is_ok()
+            {
+                let position = doodad.data().transform;
+                let _ = server.systems.housing.dominions.bind_declaration_hq(
+                    state.zone_group_id,
+                    doodad.obj_id,
+                    (position.x, position.y, position.z),
+                );
+            }
+        }
+    }
+
+    /// Spawns the defender HQ (3410) at the configured lodestone offset when a declared siege
+    /// materialises. The retail rule is UNKNOWN; `Housing.DefenseHqOffset` defaults to zero,
+    /// which keeps the existing GM-bound behaviour (no automatic spawn).
+    pub fn spawn_defense_hq(
+        &self,
+        server: &GameServer,
+        state: &DominionState,
+    ) -> Option<DoodadRef> {
+        let offset = server.config.housing.defense_hq_offset;
+        if offset == [0.0; 3] || state.siege.is_none() {
+            return None;
+        }
+        let tower = server.systems.housing.manager.by_id(state.tower.house_id)?;
+        let tower_object = WorldObject::from(&tower);
+        let world = server.world.world(state.tower.instance_id)?;
+        let base = world.world_pos_rot(&tower_object);
+        let mut transform = tower.data().unit.transform;
+        transform.set_position(
+            base.x + offset[0],
+            base.y + offset[1],
+            base.z + offset[2],
+            0.0,
+            0.0,
+            base.rot_z,
+        );
+        let Some(doodad) = crate::systems::npcs::doodad::manager::create(
+            server,
+            &world,
+            0,
+            DEFENSE_HQ_TEMPLATE,
+            None,
+            false,
+        ) else {
+            tracing::warn!(
+                "Dominion {}: defense HQ template {DEFENSE_HQ_TEMPLATE} is missing",
+                state.zone_group_id
+            );
+            return None;
+        };
+        doodad.data().transform = transform;
+        crate::systems::npcs::doodad::manager::init_doodad(server, &world, &doodad);
+        crate::systems::npcs::doodad::manager::spawn(server, &world, &doodad);
+        if let Err(error) = self.bind(server, state.zone_group_id, SiegeSide::Defender, &doodad) {
+            tracing::warn!(
+                "Dominion {}: spawned defense HQ cannot be bound: {error}",
+                state.zone_group_id
+            );
+        }
+        Some(doodad)
     }
 
     pub fn clear_zone(&self, zone: u32) {
@@ -205,6 +387,27 @@ impl Headquarters {
         binding: &Binding,
     ) -> Option<HqSnapshot> {
         let current = server.systems.housing.dominions.get(state.zone_group_id)?;
+        if binding.declared_attacker != 0 {
+            if let Some(declaration) = current.declaration {
+                if declaration.attacker_expedition_id != binding.declared_attacker
+                    || declaration.hq_obj_id != binding.doodad.obj_id
+                    || binding.tower != current.tower
+                    || current.owner_expedition_id == 0
+                    || binding.doodad.data().transform.local() != binding.position
+                {
+                    return None;
+                }
+                return Some(HqSnapshot {
+                    obj_id: binding.doodad.obj_id,
+                    position: binding.position,
+                });
+            }
+            // The declaration was materialised (or dropped): only a stamped siege binding is
+            // usable from here on.
+            if binding.siege_id == 0 {
+                return None;
+            }
+        }
         let siege = current.siege.as_ref()?;
         if siege.status == SiegeStatus::Finished
             || chrono::Utc::now().timestamp() >= siege.ends_at

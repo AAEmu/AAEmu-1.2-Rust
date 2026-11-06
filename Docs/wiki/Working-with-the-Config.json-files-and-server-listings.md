@@ -1,7 +1,7 @@
 # Working with Config Files and Server Listings
 
 - Audience: Contributors, players, and testers
-- Last verified against: `rust-rewrite` on October 12, 2026
+- Last verified against: `main` on November 6, 2026
 - Prerequisites: Basic JSON editing and AAEmu project structure familiarity
 
 ## Overview
@@ -143,6 +143,25 @@ the effective values in the `Character slots: base ...` startup log line of each
 server. If the game server cannot read `extra_character_slots` from MySQL, it
 logs the error and falls back to the base alone.
 
+### Two-factor authentication (`TwoFactor`)
+
+The login server reads `user_2fa` rows for OTP, PC-certificate PIN and ARS (phone
+callback). OTP works in-tree with a TOTP app:
+
+```json
+{
+  "TwoFactor": {
+    "MaxOtpFailures": 5,
+    "OtpLockoutMinutes": 15
+  }
+}
+```
+
+ARS needs an **operator provider**. The repository has the `ArsPhoneProvider` seam
+and a `DisabledArsPhoneProvider` default that refuses ARS logins with a warning;
+placing the call needs telephone integration, so an operator must supply that
+implementation. It is not a configuration toggle.
+
 ### Environment variable mapping (login)
 
 You can define server entries via environment variables:
@@ -239,6 +258,17 @@ The grant has its own end date; the configured default does not. The grant
 writes the account row and pushes `SCAccountInfo` and `SCUpdatePremiumPoint`
 to the account.
 
+## Cash shop (ICS) content is operator policy
+
+The cash shop reads `aaemu_game.ics_menu`, `ics_shop_items` and `ics_skus`. The base
+schema creates the tables but ships no catalogue, because no 1.2 retail content is
+evidenced; the tabs, SKUs, prices, stock limits and currencies are server-owner
+policy. `SQL/examples/example-ics-default-en.sql` is an optional example catalogue
+(English labels and example prices) that can be imported and edited; it is not part
+of the base schema or the required updates. Check each SKU's `currency` (credits,
+AA points, loyalty or coins) and price before importing. AA-priced SKUs need the
+AA-point wallet.
+
 ## Account restrictions and idle kick (`Account:Restrictions`, `Account:IdleKickTime`)
 
 `SCInitialConfig` carries seven `canXxx` booleans and an `idleKickTime` value. The 1.2 client
@@ -272,6 +302,11 @@ A flag that is not listed keeps its default (`true`). The per-method source is i
 client performs the idle kick itself and the `CGame::Update` consumer was not located, so it is
 not documented as minutes or seconds. The server never kicks an idle player and sends no
 `SCIdleKick`. The default `0` keeps the previous bytes.
+
+The unit needs one real-client run, because the kick is decided by the real client and
+the headless `aaemu-testclient` does not emulate it: set `Account:IdleKickTime` to `1`,
+log in with the 1.2 client and watch how long it stays; about 1 second means seconds,
+about 1 minute means minutes. Until then the value stays raw.
 
 Both settings can be overridden in `Config.Local.json` or with the environment variables
 `Account__IdleKickTime` and e.g. `Account__Restrictions__Demo__CanTrade`.
@@ -505,6 +540,58 @@ checks use, so a large NPC is not refused at its edge. Override it in
 }
 ```
 
+## Social feature switches (`Configurations/Social.json`)
+
+Rust-only switches for social content whose 1.2 behaviour is not fully
+evidenced. Defaults are shipped in `Configurations/Social.json` and can be
+overridden in `Config.Local.json` or with `Social__BountyBoard`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `BountyBoard` | `false` | Fill the `CSNaviOpenBounty` answer with the wanted-player board (characters that have an unpaid bounty) instead of the empty list. Rows are capped at the client's 20 entries and online / offline characters are both listed. `false` keeps the C# server's empty list. |
+
+**Capture-pending:** the C# server noted that a filled board broke the 1.2
+client Lua and the cause was never confirmed. Keep `BountyBoard` off until an
+original-client run opens the board without a Lua error. Row details and the
+open question are recorded in `rust/crates/aaemu-game/PORTING.md`
+(BOUNTY-board).
+
+## Chat feature switches (`Configurations/Chat.json`)
+
+Rust-only switches for chat whose retail 1.2 behaviour is not fully evidenced.
+They ship in `Configurations/Chat.json` and can be overridden in
+`Config.Local.json` or with `Chat__ChatFailedPacket`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ChatFailedPacket` | `false` | Answer channel-bound chat failures with `SCChatFailedPacket(error, channel name)` instead of the `SCErrorMsgPacket` toast: the user-channel join / leave / message errors, and the "not in party / raid / expedition / family" errors. Every other chat failure keeps `SCErrorMsgPacket`. `false` keeps the previous frames. |
+
+**Capture-pending:** which failures retail 1.2 sent as `SCChatFailed` is
+unknown. Keep `ChatFailedPacket` off until a capture of the original server
+shows the form it used. The packet layout and the open question are recorded
+in `rust/crates/aaemu-game/PORTING.md` (CHAT-FAILED-1).
+
+## Loot announcements (`Configurations/Loot.json`)
+
+Rust-only switch for the party/raid loot chat line. The shipped default keeps
+the previous behaviour (no announcement):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `AnnounceToParty` | `false` | When a character picks up loot (corpse / loot bag, loot-all, or party-distributed loot such as a dice win), send `SCItemAcquisition` (kind 1) with the looted item stacks to the other party/raid members within the loot range (200 m), never to the looter. The 1.2 client decides which items appear in the chat line. |
+
+```json
+{
+  "Loot": {
+    "AnnounceToParty": true
+  }
+}
+```
+
+Override it in `Config.Local.json` or with `Loot__AnnounceToParty`. The kind-1
+semantics and the loot sources are INFERRED from the 1.2 client (WP-IT1), not
+evidenced; see `rust/crates/aaemu-game/PORTING.md`.
+
 ## Territory property tax
 
 Claimed Dominion provinces apply their current territory tax rate to ordinary taxable housing
@@ -532,6 +619,31 @@ command `/collectdominion <zoneGroupId>`. Collection sends a system tax receipt 
 If staging the receipt fails, the balance stays available. Repeated empty collection sends nothing.
 It leaves Peace Fund untouched. Hunting tax, AA Points, nation splits, and automatic historical
 payout schedules are not added. Territory tax changes have the original one-hour cooldown.
+
+## Siege-time shop gate
+
+The two 1.2 merchant packs named "defense-side goods sold during a siege" (224) and
+"siege-side goods sold during a siege" (225) can be restricted to the siege itself. The
+switch is off by default and keeps the previous behaviour (both packs sell at any time to
+anyone):
+
+```json
+{
+  "Housing": {
+    "SiegeShopGate": true
+  }
+}
+```
+
+With the switch on, pack 224 sells only to registered defenders and pack 225 only to
+registered attackers, and only during the warmup or siege period (3 / 4) of the NPC's
+territory. A refused line is silent like the other `CSBuyItems` catalog refusals; an allowed
+line is still charged in honor through the item's honor price.
+
+**Capture-pending (INFERRED):** the restriction and its side rule come from the pack names
+only, not from a capture of the retail server. Keep the switch off until an original-client
+capture shows how the retail shop behaved. The implementation and the open question are
+recorded in `rust/crates/aaemu-game/PORTING.md` (WP-SD4a).
 
 ## Migration note from old setup docs
 

@@ -520,6 +520,31 @@ impl SiegeCalendar {
         None
     }
 
+    /// The calendar view for a territory that may carry a declaration (WP-SD2a).
+    ///
+    /// A declaration belongs to exactly one cycle. When it matches the running cycle the
+    /// declared walk (2 -> 3 -> 4 -> 5) applies; a stale declaration from an earlier cycle
+    /// changes nothing and the undeclared walk is used.
+    pub fn view_for_declaration(
+        &self,
+        zone_group_id: u32,
+        now: i64,
+        timezone: &CalendarTimeZone,
+        declared_cycle: Option<i64>,
+        siege_not_before: i64,
+    ) -> Option<PeriodView> {
+        if let Some(cycle) = declared_cycle {
+            if let Some(view) =
+                self.view_at_protected(zone_group_id, now, timezone, true, siege_not_before)
+            {
+                if view.cycle.is_some_and(|view| view.auction_start == cycle) {
+                    return Some(view);
+                }
+            }
+        }
+        self.view_at_protected(zone_group_id, now, timezone, false, siege_not_before)
+    }
+
     /// Peace until the first rotation cycle at or after `siege_not_before`.
     fn protected_view(
         &self,
@@ -546,7 +571,6 @@ impl SiegeCalendar {
         None
     }
 }
-
 #[cfg(test)]
 #[path = "calendar_tests.rs"]
 mod tests;

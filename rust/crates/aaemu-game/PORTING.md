@@ -185,14 +185,14 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `IO` (ClientFileManager, AAPak) | `data/client_files.rs`, `data/pak.rs` | done | Read-only pak (types A/B/F) and directory sources, file listing semantics of both. |
 | `Core/Managers/World/ZoneManager`, `ZoneConflict`, `ZoneStateChangeTask` | `data/world_data.rs`, `systems/social/zone_conflict.rs` | done | zones, zone_groups, conflict_zones (+ return points / tower ids); the conflict runtime (`AddZoneKill`, `SetState`, `ForceNextState`, timers, `SCConflictZoneStatePacket` broadcasts) is `server.systems.social.conflicts`. |
 | `Core/Managers/World/FactionManager`, `LocalizationManager` | `data/world_data.rs`, `systems/services/localization.rs` | partial / done | system factions (+ localized names), relations, SendFactions / SendRelations (relation checks: `systems::social`). The complete `LocalizationManager` (all translations, item-name cache, `MatchItemName`) is `systems::services::localization`. |
-| `Core/Managers/ExpeditionManager`, `Models/Game/Expeditions` | `managers/expedition.rs` | partial | Load, GetExpedition, SendExpeditions, SendExpeditionInfo, member refresh / login / logout status packets. Guild management todo. |
-| `Core/Managers/FriendMananger` | `managers/friend.rs`, `db_character.rs` | partial | Load, SendStatusChange, GetFriendInfo, FormatFriend. Add/remove todo. |
-| `Core/Managers/PortalManager` | `data/world_data.rs` | partial | recalls.json + district_return_points (GetRecallBySubZoneId, GetDistrictReturnPoint). Teleports, world gates, respawns todo. |
-| `Core/Managers/ChatManager`, `Models/Game/Chat` | `managers/chat.rs`, `world/session.rs` | partial | Faction / nation / zone / guild / family channels, join/leave/send; CSSendChatMessage for every chat type (party/raid -> "not in party/raid" errors as there are no teams). Trial channels, commands todo. |
+| `Core/Managers/ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs` (`managers::expedition` re-exports) | done | Load, GetExpedition, SendExpeditions, SendExpeditionInfo, member refresh / login / logout status packets, and guild management: create, invite / reply, leave, kick, member role, owner, role policy, disband, rename, per-change save and offline leave. See the `systems::social` table. |
+| `Core/Managers/FriendMananger` | `systems/social/friend.rs` (`managers::friend` re-exports), `db_character.rs` | done | Load, SendStatusChange, GetFriendInfo, FormatFriend, add / remove friends and block / unblock (online or by name), the client's failure feedback for every refusal (WP-SL2) and block-list enforcement on direct deliveries. See the `systems::social` table. |
+| `Core/Managers/PortalManager` | `systems/npcs/portal/`, `data/world_data.rs` | done | recalls.json + district_return_points, recalls / world gates by sub-zone and id, respawn points and `closest_return_portal`, the private portal book (add / delete / rename), `CSUsePortal` with the range and court checks, the NPC teleporter and the navi teleport / open-portal packets. See `systems::npcs` and the portal notes below. |
+| `Core/Managers/ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs` (`managers::chat` re-exports), `world/session.rs`, `systems/social/session.rs` | done | Faction / nation / zone / guild / family / party / raid / court channels, join / leave / send, party / raid / raid-leader / judge routing (court / trial channels exist), per-channel spam delays with server enforcement, `LeaveAllChannels` and slash commands through `CommandManager` in `send_chat_message`. User channels are log-only as in C#. See the `systems::social` table. |
 | `Core/Managers/TimeManager` (+ `TimeOfDayObserver`) | `managers/time.rs` | done | `Get` / `Set` / `Stop` added (phase 4). Storm-ship time override (`ResolveClientTimeOfDayHours`) per observer (`subscribe_with`). |
 | `Core/Managers/SaveManager` | `managers/save.rs` | partial | Periodic + final save of items and online characters; the subsystems' rows through `systems::save_stage` (`BeforeItems`: houses, mails; `AfterItems`: auction, crimes; `AfterCharacters`: slaves). |
 | `Core/Managers/World/StreamManager` | `managers/stream.rs`, `stream/cells.rs` | done | AddToken/RemoveToken/Login (wrong account removes the token, as C#), RequestCell/ContinueCell incl. the C# `next - 1` copy off-by-one. |
-| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | partial | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation. `CreateStamp`/`ApplyStamp` (item-side, used by skill effects) todo. **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's `consume_money` (and, for a custom image, the row's `consume_item_id` x `consume_count`, 1x 11127) — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The charge is the row's `consume_money` (50000 for 3038, 10000 for 1470; the old `UCC_PRICE` constant is gone); `confirm_default_ucc` re-checks money / reagent (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked money debit, the reagent consume (`ItemTaskType.IMPRINT_UCC`) and the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 (capture-pending):** whether a custom upload also costs money (the Lua info helper shows only the item) — the money charge is kept on that path as before. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. |
+| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | done | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation, `CreateStamp` / `ApplyStamp` (`economy/item_effects.rs`, the `GainItemWithEmblemImprint` effect and `economy/bridges.rs`). **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's `consume_money` (and, for a custom image, the row's `consume_item_id` x `consume_count`, 1x 11127) — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The charge is the row's `consume_money` (50000 for 3038, 10000 for 1470; the old `UCC_PRICE` constant is gone); `confirm_default_ucc` re-checks money / reagent (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked money debit, the reagent consume (`ItemTaskType.IMPRINT_UCC`) and the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 (capture-pending):** whether a custom upload also costs money (the Lua info helper shows only the item) — the money charge is kept on that path as before. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. |
 | `Core/Managers/TimedRewardsManager` | `systems/services/timed_rewards.rs` | done | `TimedRewardsTask` every minute, daily login reward, offline labor. |
 | `Core/Managers/HousingManager`, `Models/Game/Housing` | `systems/housing/` | done | See "Phase 3 subsystems". |
 | `Core/Managers/CrimeManager` | `db_character.rs` | partial | CheckWantedThreshold thresholds only. |
@@ -203,6 +203,8 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Models/AppConfiguration`, `Models/Game/Configurations` + `Program` config loading | `config.rs` | done | Every member (incl. WebApiNetwork, DiscordToken, Dungeons, AccessLevel, LaborOffline, Specialty, Scripts, full World), Config.json + Configurations/** + Config.Local.json + user secrets + environment (`Section__Key`) + command line, enums by name / value, `ConfigCell` (= `AppConfiguration.Instance`, replaceable at runtime). |
 | Other `Models/Game/*` (AI, Auction, Crafts, Crime, DoodadObj, Mails, Mate, NPChar, Quests logic, Slaves, Team, ...) | – | see the subsystems | Ported with their managers (phase 3 / 4 subsystems). `Achievement` has no 1.2 logic. |
 | `Scripts/Commands/**`, `Scripts/SubCommands/**`, `Utils/Scripts`, `Utils/{Quest,Sphere}CommandUtil` | `systems/services/commands/` (+ `scripts/`) | done | Infrastructure (`CommandManager` with async command execution, `AccessLevelManager`, `ICommand`, `IMessageOutput`, `SubCommandBase` + parameters) and every GM command: one module per `Scripts/Commands/*.cs` file in `scripts/`, the `SubCommandBase` roots in `scripts/roots.rs` / `scripts/sub/*` (Crimes, Doodads, Gimmick, Gold, Items, Npcs, Slaves sub commands). `scripts::load` registers them in the C# type order (`ScriptReflector`), so `GoldCmd` owns `gold` (and `AddGold`'s aliases) and `CrimeCmd` registers `crime` with `/doodad` as call prefix. Tests: a harness test per command (`scripts/harness.rs`), the registered set vs the C# sources (`scripts/tests.rs`). |
+| Retail GM command names, tax / crime / social (WP-SL6b) | `systems/services/commands/scripts/{delay_tax_due_date,resend_house_tax_mail,set_bounty_money,clear_crime_status,set_crime_value,set_jury,imprison}.rs` | added | The C# server had no equivalents; the names are the 1.2 client's command table (`siege-social-2.md` 1.5). `delay_tax_due_date <character> [days]`, `resend_house_tax_mail <character>` (console shapes `DelayTaxDueDate(%s)` / `ResendHouseTaxMail(%s)`; the day count is an assumed default of 7), `set_crime_value <character> <value>` (console shape `SetCrimeValue(%s, %d)`), and the assumed positional forms `set_bounty_money <character> <amount>`, `clear_crime_status <character>`, `set_jury <character> <trialId>`, `imprison <character>`. Effects reuse the gameplay paths: `HousingManager` tax dates / `new_tax_mail` (online or offline owners, dominion infrastructure skipped), `CrimePoint` / `InfamyPoint` setters (online only), `BountyManager.place` with the GM as payer (online wanted target), `TrialManager.force_summon_jury` -> `SummonJuryMember` (invitation/queue checks skipped, step/main-world/one-trial checks kept), and the `crime court jail` holding-cell effect (force dismount, `FORCIBLY_AWAITING_TRIAL`, teleport). No new opcodes; admin access 100 in `AccessLevels.json`. |
+| Retail GM command names, siege / dominion (WP-SL6a) | `systems/services/commands/scripts/siege_alias.rs` | added | The names are the 1.2 client's command table (`siege-social-2.md` 1.5); the C# server had no equivalents. `schedule_siege <zoneGroupId> <year> <month> <day> <hour> <minute>` uses the EVIDENCED console shape `ScheduleSiege(%d,%d,%d,%d,%d,%d)` but reads the six integers as zone + local wall-clock date/time (INFERRED: the console labels beside the shape are `declare_min`/`warmup_min`/`siege_min`/`peace_min`/`pay_min`, so the retail minute-vs-date reading is UNKNOWN). The attacker is the territory's accepted declaration (the six arguments carry no expedition, and the declaration chain is the only other authority that names one); the record uses the zone's authored `siege_zones` duration. `stop_siege` / `off_siege <zoneGroupId>` call the existing `cancel_siege` path. `delete_dominion <character> <zoneGroupId>` uses the EVIDENCED `DeleteDominion(%s, %d)` shape and only deletes a record owned by that character's expedition (assumed meaning of the name). `change_dominion_owner` and `bestow_dominion <zoneGroupId> <expeditionId>` use the new single-lock `DominionManager::transfer_owner`: the target's owned-territory limit is checked under the claim lock, an unfinished siege is refused, and a transfer is not a fresh claim (`claimed_at = 0`); the bestow form sets the client's `bestowed` announcement bit. `set_dominion_non_pvp <zoneGroupId> [minutes]` reuses `start_non_pvp` (default 120, the authored row). `set_dominion_limit <limit>` updates `Housing.DominionClaimLimit` at runtime. `declare_dominion_always` is **not registered**: skipping the claim gates is INFERRED and no existing switch already carries that meaning (the claim window, pirate refusal and claim limit are separate checks). No new opcodes; admin access 100 in `AccessLevels.json`. Tests: effect, argument-error and access-guard cases per command in `siege_alias.rs`. |
 | `Services` (WebApi, DiscordBot) | `systems/services/webapi/`, `systems/services/discord.rs` | done | axum transport with the C# regex routing; mail / auction controllers call the economy through `WebApiEconomyHooks`. |
 | `GameService` startup / `ManagerOrchestrator`, `Program` | `main.rs`, `systems/services/game_service.rs` | done | `Program.Main` (initialization log, `compiler-check`, config command line, MySQL / SQLite checks) and `GameService.StartAsync` stages in order (DB updater, client files, holdables check, game data, user items, DB loads, time / task managers, subsystems, save manager, deleted characters, online tracking, networks, "Server started! Took ..."), then WebApi / Discord; shutdown in reverse (Discord, WebApi, final save, task / tick / time managers). `GameService.StartTime` / `TimeSinceStart`, `Program.UpTime`, `ManagerOrchestrator.BuildBatches` ported with their tests. |
 
@@ -505,7 +507,7 @@ buff unchanged, absolute-value inference, real-compact loader for the three colu
 | `DoodadManager.Load` (templates, func groups, funcs, phase funcs, all 121 func template tables) | `doodad/data.rs`, `doodad/templates.rs` | done | 7 124 templates, 13 974 funcs, 24 465 phase funcs (counts match the DB). |
 | `Doodad` phase machine (`Use`, `DoFunc`, `DoPhaseFuncs`, `DoChangePhase`, `InitDoodad`, `OnSkillHit`, `FuncGroupId` setter, ToD triggers), 42 phase funcs, func tasks, `DoodadManager` runtime (Create, CreatePlayerDoodad, ChangeDoodadData, coffers), persistence (`doodads` table) | `doodad/{phase,phase_funcs,tasks,manager,db,logic}.rs` | partial | Serialized interactions, per-object counters, generation and handle guards for timers, ToD transitions, ordered MySQL persistence. Authored immediate logic/family pulses, spawn management groups and moving gimmicks are implemented. FlowGraph runs in the client. Logic delay descriptors 2/3 lack timing semantics; spawn groups 73–76 lack authored membership in shipped data. |
 | `blocked_child_doodads` (buff id -> child doodad template id) | `systems/skills/data/mod.rs` (loader), `doodad/{phase,interactions,packets}.rs`, `npcs/{bridges,portal/mod}.rs`, `economy/store.rs` (use entry guards) | added | The C# did not load this table; the 1.2 client does (`dll.c` `39a0c158` / `39a0c460`: `SELECT owner_type, owner_id, doodad_id FROM blocked_child_doodads`). The two rows are buff 6064 -> doodad 6560 (fishing boat crane) and buff 6245 -> doodad 3446 (backpack storage box). While such a buff is active on the child doodad's parent unit, a player's use is refused with the existing `NO_INTERACTION_AVAILABLE` error (no new packet) and `Character.SkillCancelled`, so a running cast refunds its item / labor cost. Only `owner_type = 'Buff'` is handled (the only evidenced value; other / NULL values are skipped at debug, NULL ids too). Covered player entries: `Doodad.Use` (skills `InteractionEffect` / `ScopedFEffect`, `CSHang`, harpoon, loot bag; `funcs::use_func` is reached through it), world interactions (`execute_interaction_with`, incl. the `CSLootOpenBag` recover path and `CheckGrowth`), `CSChangeDoodadPhase`, the `CSBuyCoinItem` and `CSBuyItems` purchase paths, and navi open / teleport. Doodads without a parent are unchanged and internal phase changes (timers, ToD, func chaining, instance events, GM phase commands, crime-evidence loot) are not gated. Who casts 6064 / 6245 in the live flow is UNKNOWN. Tests: `blocked_child_tests` (refused with the buff, allowed without / unrelated buff, parentless doodad) and gated `blocked_child_doodads_real_compact_db`. |
-| 79 non-phase funcs, 41 world interactions (`execute_interaction` for the skills InteractionEffect), coffers, bond / seats | `doodad/funcs/`, `doodad/interactions.rs`, `doodad/coffer.rs` | done | Items, loot, coffers through the economy `EconomyBridge`; skills, quests, housing through the bridges; instance funcs (`systems::instances`), `BindSlave` (`systems::vehicles`). Sticky parents are not modelled. |
+| 79 non-phase funcs, 41 world interactions (`execute_interaction` for the skills InteractionEffect), coffers, bond / seats | `doodad/funcs/`, `doodad/interactions.rs`, `doodad/coffer.rs` | done | Items, loot, coffers through the economy `EconomyBridge`; skills, quests, housing through the bridges; instance funcs (`systems::instances`), `BindSlave` (`systems::vehicles`). Sticky parents are not modelled. The funcs that stay trace-only (`DoodadFuncBankUi` / `_AuctionUi` / `_StoreUi` / `_CofferPerm` / `_RenewItem`, `Climb`, `CraftStart/Act/GetItem/Cancel/Info/Pack`, `InsertCounter`, `StampMaker`, `UccImprint`) are **client-driven**: the 1.2 client loads `doodad_func_bank_uis`, `_auction_uis`, `_store_uis`, `_coffer_perms` and `_renew_items` itself (`strings.txt:13498-13557`), so there is no server answer to add (do not reopen). |
 | SCDoodad* packets, doodad C->S packets (CSChangeDoodadData/Phase, CSCreateDoodad, CSSetLogicDoodad, CSSaveDoodadUccString, CSUnbondDoodad, CSCofferInteraction) | `doodad/packets.rs`, `doodad/coffer.rs` | done | Byte-exact tests. `SCWorldInteractionCanceledPacket` 0x07f (`bc unitObjId, u32 doodadObjId`, reader `FUN_397c6540`) is defined and byte-tested but never sent: its trigger is capture-pending (CAP-INT-1). `SCDoodadPhaseMsgPacket` 0x157 (`bc doodadObjId, u32 funcGroupId`, reader `FUN_397b6460`) is sent on an authored `phase_msg` change (WP-UI1, see the deviations). |
 | `CSCreateDoodadPacket` placement checks / 1.2 seed-builder rules | `doodad/manager.rs` (`handle_create_doodad`, `create_player_doodad`, `create_player_doodad_server_spawned`), `doodad/placement.rs` | deviation | **Deviation:** the C# checked only the source item, public farm (`CanPlace`), house permission and labor, and several refusals were silent. The Rust applies the 1.2 client's seed-builder validation (`FUN_393a8fa0`; research `s3-farm-plant-harvest.md`, capture `2026-10-30-capture-farm-cinema.md`) to the one planting entry path, `CSCreateDoodadPacket` (`handle_create_doodad` -> checked `create_player_doodad`), through `placement::refusal`. The fake-trial GM command and crime evidence (bloodstains / footprints) spawn server-side doodads and use `create_player_doodad_server_spawned` through `SocialHooks::create_player_doodad`, so they are not planting paths and are not validated; item-use backpacks (`spawn_backpack_doodad`) and skill `SpawnDoodad` effects are also not plantings. Rules, in `FUN_393a8fa0` order: (1) `restrict_zone_id` mismatch -> `DOODAD_SIM_AREA` 276 (F11: the client shows "Can't be installed here."); (2) water: group 40 (marine crops) must stand in water and every other group refuses it, `DOODAD_SIM_AREA` 276 — the server's `WorldInstance.IsWater` with the client PR's `surface > z + 0.3 m` margin (the decompiled `worldvtbl+0xf4` test and F5 were not decoded: capture-pending); (3) range: at most 30 m in 3D, `TOO_FAR_AWAY` 154 — `FUN_393a8fa0` (~761319) refuses only `900.0 < d²`, so exactly 30 m is allowed (F1's screen-projected sweep cannot pin the boundary). The server measures from its own player position, which lags a moving client; the code base has no placement-range allowance (the 15 m `DOODAD_RANGE_ALLOWANCE` in `systems::skills` covers cast targets, not placement), so none is added; (4) doodads: sphere test `dist3D < r_new + r_other` only when both are round (`FUN_3983b360`: groups 2, 3, 5, 12, 40, 80, template 1219, group 38), radius `max(sim_radius / 1000, 0.1)` m, `DOODAD_SIM_TOO_CLOSE_TO_OTHER_DOODAD` 277. Every mixed/non-round pair uses oriented boxes (`FUN_390318f0` / `FUN_39030ae0`) that are not decoded, and non-round units use a physics collider (`FUN_39180d50`), so those pairs are skipped: the server is permissive, never stricter than the client (real group 72 plantables 5287–5290 / 6591 with 3 m and group 69 3596 with 2 m stay placeable); (5) round doodads against units inside their radius -> `DOODAD_SIM_TOO_CLOSE_TO_OTHER_UNIT` 278; (6) dominion: only item template 29800 ("Blueprint: Territory Statue", `DAT_39ac774c`) is gated (step 7, `dll.c:761340-761378`). The spot must be in a non-zero zone group whose dominion record is owned by the caster's own expedition (not the nation king) and lies within the live tower's 2D `radius_dominion` (`guard_tower_settings.radius_dominion`, the `+0xa0` short; the field order is INFERRED from `DominionTerritoryData`'s wire order), else `LOCATE_INVALID_DOMINION_AREA` 749; every other item skips the gate and the refusal answers before the seed is consumed. Silent drops answer `FAILED_TO_USE_ITEM` 207 for a missing / foreign item or an unknown template — **inference**, not a capture: the 1.2 client uses the same code when a seed use is cancelled, but no server->client answer was captured (a zone-banned item keeps its 440 `ITEM_CANNOT_USE_HERE`). Malformed positions (non-finite / scale outside 0..10) stay silent: they are anti-cheat guards, not a 1.2 client path. Open client steps not implemented: the ±6 m footprint height spread (step 2, `FUN_393a7720`; skipped for groups 2, 3, 5, 12, 37, 40, 80 — footprint sampling undecoded and F7 not driven); the house/farm area rule of step 0 (the server keeps its own house/public-farm checks); the area-box test `FUN_393287c0` (0x114); the overlap skip list `FUN_397a7cc0` / `FUN_397a7ce0` (it compares four template pointers whose ids are not initialized in the decompile); and the farm-plot radius call `FUN_3983b280(..,1)` (the decompiled body ignores the second argument). Research `re-placement-fakeuse.md` sections D1b-D1d records the rest as below the bug bar or blocked: D1b (a doodad cube straddling a shrunken house box, 276) needs the render-model z box and is largely covered by `house_at_location_in_world` + `allowed_to_interact` answering `NO_PERM` for a spot inside a house (score 2, worker-ready NO); D1c (±6 m footprint spread, 279, plus the z snap to the minimum) needs the model local bbox (score 3, worker-ready NO); D1d's terrain / surface sampling needs engine data the server does not have (worker-ready NO). The hard-coded farm zones vs `common_farms` (S5) belong to slice 11 and are unchanged. Concurrency (Greptile P1 on #25): the final check and the doodad's insertion into the grid are one critical section under `WorldInstance::placement_guard`, so two plantings at the same empty spot cannot both pass the overlap check; the seed is consumed only after the insert succeeds and a failed consumption deletes the doodad again. **Deviation:** C# consumed the seed before `Spawn()`, which left the check-then-spawn window open; the refusal error and the economy callbacks run after the guard is dropped. |
 | Heightmaps (`WorldCell` heightmap.dat, `GetHeight`, `GetReferenceHeight`), NPC reference height in `SCUnitStatePacket` | `heightmap.rs`, `world/unit_state.rs` | done | Lazy per cell (`PreLoadTerrain`); with `GeoDataMode` the navmesh height of `systems::ai::geodata` comes first. Median error 0.098 m vs 4 002 real spawn Z values. Used by the skill controllers / displacements, plots and NPC spawns. |
@@ -596,7 +598,7 @@ wrote, from the 1.2 client readers only:
   reader `FUN_397c1f80` (`x2game.dll.c:1717976`); the item records use the standard reader
   `FUN_3961f500` (`x2game.dll.c:1301392`), the same record `SCItemTaskSuccessPacket` writes.
   The handler acts only for type 1 (an item link line naming `charName`), which is INFERRED to
-  be a party/raid member announcement.
+  be a party/raid member announcement. WP-IT1 now sends it (see below).
 * `SCItemDetailUpdatedPacket` 0x093: `u64 itemId, u8 x, u8 index, ItemDetail`, reader
   `FUN_397b3840` (`x2game.dll.c:1707583`); `ItemDetail` is the `FUN_3961edf0`
   (`x2game.dll.c:1301101`) `u8 detailType` plus its fixed body. The two zeroed bytes between the
@@ -606,13 +608,31 @@ wrote, from the 1.2 client readers only:
   (`x2game.dll.c:1707572`) followed by the `SCItemTaskSuccessPacket` reader `FUN_397d1d00`
   (`x2game.dll.c:1729938`).
 
-All four are **capture-pending** and deliberately never sent, because no 1.2 zone code or capture
-shows their triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft
-materials), **ITEM-NOTIFY-2** (acquisition: which grades/sources announce is unknown),
+`SCCraftItemUnlockPacket`, `SCItemDetailUpdatedPacket` and `SCItemTaskNotifyPacket` are
+**capture-pending** and deliberately never sent, because no 1.2 zone code or capture shows their
+triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft materials),
 **ITEM-NOTIFY-3** (detail update) and **ITEM-NOTIFY-4** (task notify: probably item tasks for an
-owner other than the viewer). Their byte layouts are test-locked in the module; the types are
-listed in `rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent, and a future
-trigger must remove them from that list.
+owner other than the viewer). Their byte layouts are test-locked in the module and they stay in
+`rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent; a future trigger must
+remove them from that list.
+
+#### Party loot announcement `SCItemAcquisitionPacket` (WP-IT1, 2026-11-06)
+
+`systems/economy/looting.rs` now sends one `SCItemAcquisitionPacket` per loot pickup to the
+other team members: corpse / loot-bag picks (`CSLootItemPacket`, `CSLootOpenBagPacket` loot-all)
+and party-distributed loot (rotate winner / dice / loot master, through `try_distribute`). The
+packet carries kind `1`, the receiving character's name and the looted stacks as they were in the
+container (the client filters which templates announce with `FUN_39695dc0`), capped at the wire's
+`u8` item count. Recipients come from the container's `KillerTeam` (`active_team`, the same team
+`TryLoot` distributes to): every member except the receiver, in the same world instance, within
+`MAX_LOOTING_RANGE` (200 m, `looting.rs:48`, the loot distribution range used by
+`generate_loot_with`). The recipients are collected while the looting container is locked; the
+packets are sent after the container, item-transaction and character locks are released. The
+whole feature is behind `Loot:AnnounceToParty` (`Configurations/Loot.json`, default **false**).
+
+INFERRED, not evidenced: kind `1` as the party-loot line (client handler `FUN_391d5760` acts only
+for 1 and the `ITEM_ACQUISITION_BY_LOOT` event text), the loot sources and the range. The C#
+never sent this packet (it only declared the opcode), so there is no C# behaviour to mirror.
 
 #### Item use gates from data (2026-11-04)
 
@@ -824,7 +844,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy, rename, national tax, monument) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-4 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. Stage 4 adds the nation rename (`SCNationShowRenameUI` 0x010 + the `CSRenameExpedition` nation half), the national tax (`CSUpdateNationalTaxRate` 0x013 -> `SCNationalTaxRate` 0x021) and the territory-statue monument (`SCNationalMonumentChanged` 0x022). See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). The temporary Red / Blue team faction also goes to each participant's active mates and owned slaves (they copy the owner's faction at spawn and `Character.SetFaction` never updates them) through `combat::set_faction_with_temp`, and is restored with the owner's at the end / disconnect; a mate or slave summoned during the duel is restored as well. Test: `mate_and_slave_follow_the_duel_faction_and_get_it_back`. |
-| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
+| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board answers the empty list by default and the pledge rows behind `Social.BountyBoard` (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
 | `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. The dominion `SCDominionDeleted` / `TaxBalanced` / `NonPvPStarted` / `NonPvPStopped` notifications now have senders (see the `systems::housing / systems::social` notification bullet under Phase 3). |
 | `RankingGameData` (later C# history), 1.2 ranking packets | `systems/social/ranking_{data,packets,runtime,manager,persistence}.rs` | done (arena + fishing boards) | Not in the 1.2 C#; Rust only. Request path, MySQL persistence (`character_rank_scores`, `rank_period_payouts`), score hooks and period-close reward letters: see "Ranking boards" under Known deviations. |
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
@@ -1295,6 +1315,7 @@ Rules (all **INFERRED** from the client decompile; no 1.2-server capture):
 | `CSSpawnSlavePacket` 0x02e | `systems/vehicles/{packets,slaves}.rs` | done / entry point UNKNOWN | The C# only logged the packet. The 1.2 client sends it from its placement-preview click handler (`FUN_393459b0` <- `FUN_394d31a0` <- `FUN_394d8c70` <- `FUN_39366480`, when the previewed kind `+0x48` is 8); which item/UI enters that mode is UNKNOWN (capture-pending). The Rust synthesizes the item-use cast the client sends for a summon item: `itemId` must be the sender's inventory `SummonSlave` item whose template's `slave_id` is the packet's `slaveId` (missing / foreign / wrong-template / zero items start no cast and only warn), and the cast is the item's `use_skill_id` with a `SummonPos` position target at the client position / `zRot` plus an internal `SkillObject::Unk5(hideSpawnEffect)` marker. It runs through `handlers::start_skill` -> `skill::use_skill`, so every item-cast gate applies (ownership, item-only skill, `item_use_zone_allowed` 440 / zone tag 58, actability, dead / stunned / swimming, cast time and interrupt, cooldown / GCD, reagents, item consumption). The `SpawnSlave` effect sees the marker and validates the placement with `validated_client_spawn` (the client yaw and the 1.2 10 m land rule); the spawn itself still runs `create_for_owner`, so the active-vehicle replacement, repair, item-update (once) and one-active checks are exactly the item path's. Placement refusals answer `SlaveSpawnErrorInvalidArea` 583; the 1.2 full placement check answers `SLAVE_SPAWN_SHIP_NEED_MORE_SPACE` 100. Tests: `csspawnslave_spawns_at_the_client_position_and_commits_once`, `csspawnslave_refuses_dead_stunned_and_cooldown_senders`, `csspawnslave_refuses_a_zone_banned_item`, `csspawnslave_refuses_a_far_high_or_wrong_surface_spot`, `csspawnslave_boat_on_water_spawns_on_the_surface`, `csspawnslave_refuses_a_hull_box_blocked_spot_with_100`, `csspawnslave_without_an_owned_matching_item_spawns_nothing`, `csspawnslave_keeps_the_item_path_one_active_vehicle_refusal`, `a_refused_land_summon_keeps_the_old_vehicle_and_binding`, `an_ownerless_spawn_at_a_cliff_skips_the_item_height_rule`, `a_client_placement_over_the_sea_floor_is_refused`. |
 | `SpawnEffect` slave dir ids (`PosDirId` / `OriDirId`) | `systems/vehicles/effects.rs` | done / partial | Dir 1 = relative to the effect target (a position target falls back to the caster as the NPC branch does), dir 2 = relative to the caster; the position is `relative unit position + AddDistanceToFront(pos_distance)` along `relative unit yaw + pos_angle` (the C# slave branch moved along the caster's rotation; unlike the NPC branch's absolute `PosAngle`), and the orientation is the orientation-relative unit's yaw + `ori_angle`. Every 1.2 slave `spawn_effects` row uses pos dir 1/2 and ori dir 1/2/3; ori dir 3 and `mate_state_id` have no evidenced slave meaning (UNKNOWN), so they keep the caster-relative orientation / are ignored and are logged once. The C# `PosDistance = 2` default and the doubled roll / pitch are unchanged. Gated real-data test: `real_spawn_effect_slave_dirs_and_templates`. |
 | `CSTurretStatePacket` 0x036 (turret / cannon aim) | `packets/c2g_misc.rs`, `systems/vehicles/slaves.rs` (`set_turret_state`), `world/unit_state.rs`, `systems/npcs/npc/packets.rs` | deviation / capture-pending | **Deviation:** the C# `CSTurretStatePacket.Read` only logged the three fields and `Unit.ModelPosture` always wrote pitch/yaw 0, so no client ever saw a crewed cannon turn. The Rust decodes `bc unitId, f32 pitch, f32 yaw` (1.2 client writer `397c7640`), accepts it only from a character attached to any seat of the slave named by `unitId`, stores it on that slave and relays the same values to the other players in range as `SCUnitModelPostureChanged` 0x103 posture type 8 (`u8 type, bool isLooted, f32 pitch, f32 yaw`; client reader `397bda20` -> `397b1df0` applies it through `390bdec0`). A viewer that arrives later gets the stored aim in the slave's `SCUnitState` posture block. The server clamps the model-frame radians to the slave's `vehicle_models` turret limits before storing / relaying (degrees -> radians, and a full-circle yaw wraps into +/-pi like the client's key aim); a non-numeric limit (the text `'f'` the real rows store in `turret_yaw_angle_max`) is no limit, and a reversed window is sorted instead of panicking; it ignores a slave whose model is not a `VehicleModel` (the client only sends turret aim for a `VehicleUnitModel`, `FUN_390b3750`). The 1.2 client itself sends `CSTurretState` at most once per 200 ms and only when the aim changes (`39356990`: `DAT_3a169940 + 200 <= now`), and the server additionally never relays an unchanged aim and delays a changed aim that arrives less than 150 ms after the last relayed one for that slave; the newest aim is always stored on the slave at once (a late viewer's `SCUnitState` reads it) and the slave tick relays a pending aim once the window ends, so a final update inside the window is not lost. The stored aim is not cleared when the gunner leaves the seat, so late viewers keep seeing the last posture (as the two-client live run showed). **Capture-pending (S12):** the 1.2 *server* side is not proven. Capture with two clients: A mans a ship cannon (GM `/slave spawn 22` spawns a hull with eight cannons; `/slave spawn 25` a ground cannon) and pans / fires while B records 0x103; confirm whether the original server relays the aim, the packet's unit id (cannon child vs hull vs gunner), whether the gunner also receives the echo, that the angles are model-local radians and whether the original server clamps them, and whether a passenger seat (tank gunner, point 2) is a valid aim path. Record the result here and in the S12 research. |
+| `SpawnEffect` Mate branch | `systems/vehicles/effects.rs:44-49` | no reachable content | The `BaseUnitType::Mate` arm only breaks. Four `spawn_effects` rows reach it: 1986 and 1998 (NPC skill 23588, monster summon), 2014 (skill 24045 "walking pet summon", cow 9323, no item uses it) and 2245 (horse 3599, no skill uses it). None is player-reachable in the shipped data, so the arm stays empty (score 2; do not reopen). |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
 #### Summon replacement and retained cargo (2026-10-25)
 
@@ -1348,7 +1369,7 @@ live acceptance remain pending.
 | Second password (`Create/Change/Clear/CheckSecondPasswordPacket`, `SCSecondPass*`) | `systems/services/second_password.rs` | done | 1.2 virtual-keyboard tables, one-shot key id, shared `PasswordService` hashing, MySQL failure counter + timed lock. See the deviation below. |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | The tick reads the account payment / premium grade from `AccountManager` (WP-B) instead of the C# connection default; `max_labor` is `premium_benefits.max_labor`. |
 | Account payment / premium (`premium_grades`, `premium_benefits`, `premium_configs`, `pcbang_buffs`, `SCAccountInfo`, `SCUpdatePremiumPoint`) | `systems/services/premium.rs`, `systems/services/accounts.rs`, `packets/{c2g,proxy,g2c}.rs` | done | Rust only: the C# never loaded these tables and sent the permanent `AccountPayment` default (`SCUpdatePremiumPoint(1,1,1)` hard-coded at `FinishState(7)`). See the deviations below. |
-| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
+| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `CHARACTER_ITEM_OPS` (economy). **Deviation (hair validation):** `ApplyBeautySalon` only accepts an `item_body_parts` row in the hair slot (`slot_type_id = 24`), not `npc_only`, whose `model_id` is the `characters` template model for the character's race/gender (`beautyshop_only` is allowed; a missing character model does not restrict). A refused request, including the previously silent missing-certificate path, sends `SCErrorMsg` `FAILED_TO_CHANGE_ITEM_LOOK` (the salon-specific id is UNKNOWN) and changes no appearance, item, certificate or money. The C# put any client-supplied template into the hair slot. **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
 | Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
 | `CharacterManager` `bag_expands` / `expand_expert_limits`, `Inventory.ExpandSlot`, `CharacterActability.Regrade` / `ExpandExpert`, `CSExpandSlotsPacket`, `CSExpandExpertPacket`, `CSUpgrade/DowngradeExpertLimitPacket` (+ `SCInvenExpandedPacket`, `SCExpertLimitModifiedPacket`, `SCExpertExpandedPacket`) | `systems/services/expands.rs` | done | Item checks / consumption through `CHARACTER_ITEM_OPS` (economy). |
 | `CommandManager`, `AccessLevelManager`, `Models/Game/ICommand`, `Utils/Scripts/**` | `systems/services/commands/` | done (infra) | Ports of `SubCommandBaseTests`, `NumericSubCommandParameterTests`, `AccessLevelManagerTests`, `DoodadChainSubCommandTests`. AStar sub commands need `ASTAR_HOOKS` (AI path finding). `Scripts/SubCommands/Doodads/DoodadSetAgeCommand` is ported (`commands/doodads.rs`, port of `DoodadSetAgeCommandTests` through a test root with the `DoodadCmd` aliases); the `DoodadCmd` root itself is the scripts phase. |
@@ -1363,12 +1384,53 @@ live acceptance remain pending.
 | `Models/Tasks/SaveTask/SaveTickStartTask` | `managers/save.rs` | done (by design) | The periodic save is a Tokio interval instead of a `TaskManager` task (not counted in `GetQueueCount`). |
 | `Utils/{MathUtil, NumericExtensions, Converters/*, DB/HoldablesSchemaCheck}` | `utils/` | done | `Utils/DB/SQLite*` = `data::sqlite`, `Utils/IdManager` = `managers::id`. `SphereCommandUtil` / `QuestCommandUtil`: `services::commands::scripts::{sphere, quest_cmd}`. |
 
+#### Character rename (`SCCharacterRenamed` 0x05a, WP-AC2)
+
+Rust only: the 1.2 client has no packet or UI that starts a character rename (the only client
+rename packet is `CSRenameExpedition`, guild / nation), so the trigger is the GM command
+`/rename <old> <new>` (`commands/scripts/rename.rs`) through
+`systems/services/character_rename.rs`. It works online and offline.
+
+* **Wire format (EVIDENCED).** `SCCharacterRenamedPacket` is `{ u32 charId, string oldName,
+  string newName }` (client serializer `FUN_397b7820`). The client handler `FUN_391df6e0`
+  updates the unit-name cache (`FUN_393c8520`), the chat / friend caches (`FUN_393de080`) and
+  the expedition / family member names (`FUN_392fb550`). It was defined but never sent.
+* **Recipients (INFERRED).** Viewers of the character (its world instance's
+  `players_around`), its online friends (owners that keep it in `friends`), its guild and
+  family members, and the character itself, one packet per recipient. The C# never sent the
+  packet, so there is no sender to copy; the set follows what the client handler updates.
+* **Rules.** The name goes through `NameManager::validate_character_name_with_blocks` (regex,
+  blocked texts, `allowed_name_chars` when loaded); the same name, a name held by another
+  character and a deleted / pending-deletion row are refused. `NameManager::rename_character`
+  swaps the id and name maps under one write lock (no reader sees neither or both) and refuses
+  to clobber another character's name. The check, the `characters.name` UPDATE and the cache
+  swap share `SaveManager::transaction_lock` with character create / the lobby edit, so a
+  concurrent create of the new name has exactly one winner.
+* **Persisted copies and their memory caches.** The **authoritative** `characters.name` and the
+  copies the server reads back are updated in the same database transaction:
+  `mails.sender_name` / `receiver_name`, `expedition_members.name`, `expeditions.owner_name`,
+  `family_members.name`, `nations.owner_name`, `shipyards.owner_name` (the completion / decay
+  path resolves the owner with `character_by_name`, so the live shipyard's `owner_name` and
+  unit name are updated too), `auction_house.client_name` / `bidder_name` and
+  `character_rank_scores.account` (the character name the client shows where the login account
+  is unknown). The managers that loaded these rows and save from memory are updated after the
+  commit while the save transaction lock is still held, so a later save cannot put the old
+  names back: `MailManager`, `NationManager`, `AuctionManager`, `RankingManager`, the guild /
+  family / shipyard caches, and the runtime-only `TrialManager` defendant name and
+  `CrimeManager` offline-victim cache (neither is persisted). `housings` stores only the owner
+  id and resolves the owner name from the name cache, so no house row changes. `friends` /
+  `blocked` store ids only; `mates.name` and `slaves.name` are pet / vehicle names, not
+  character names.
+* **Deviation from the C#.** The C# had the packet definition and the lobby edit's name change
+  but no world-rename path; the Rust adds the GM command, the broadcast and the copy updates.
+  There is no 1.2 client trigger to capture, so the recipients stay INFERRED.
+
 ### systems::ai
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `NpcManager.LoadAiParams` (NLua), `Models/Game/AI/v2/Params/**`, `AiGameData` (commands, command sets, chat bubbles, events), `ModelManager` (actor models + game stances, ship models) | `systems/ai/{lua,params,data}.rs` | done | A Lua 5.4 subset evaluator with `System.Convert` semantics; all 2 489 `npc_ai_params` rows produce the same values as NLua (differential harness, gated test `real_compact_db_params_match_nlua`; rows 443 / 835 / 1975 fail to parse in both). |
-| `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). **Deviation:** `UpdateAggroHelp` skips a linked NPC without an AI (one warning per NPC) and keeps helping the remaining NPCs; the C# `NullReferenceException` ended the whole loop. **Added (data-inferred, capture-pending AGGROLINK-1):** a member of an `aggro_links` group helps another member of the same group even when its template (`accept_aggro_link` / `aggression` / `aggro_link_special_rule_id`) would decline; the link path keeps the helper's `aggro_link_help_dist` and applies `aggro_link_sight_check` only when enabled, while non-members keep the template rules exactly (including the C# sight gate in the special-rule branch). |
+| `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). **Deviation:** `UpdateAggroHelp` skips a linked NPC without an AI (one warning per NPC) and keeps helping the remaining NPCs; the C# `NullReferenceException` ended the whole loop. **Added (data-inferred, capture-pending AGGROLINK-1):** a member of an `aggro_links` group helps another member of the same group even when its template (`accept_aggro_link` / `aggression` / `aggro_link_special_rule_id`) would decline; the link path keeps the helper's `aggro_link_help_dist` and applies `aggro_link_sight_check` only when enabled, while non-members keep the template rules exactly (including the C# sight gate in the special-rule branch). AI 11 `siegeweapon_place` (61 placeholder / test / cutscene NPCs) and AI 12 `bomb` (NPC 376 and two flying-machine pilots) are no AI by design: the C# `AiUtils.GetAiByType` / `AiParams.CreateByType` return null and the 1.2 data has no `npc_ai_params` row for either type; `flow_tests::hooks_create_ai_by_file_type_and_detach_on_delete` pins it. |
 | `AIManager` (100 ms tick, `AddAi`, region activity) | `systems/ai/manager.rs` | done | Per-AI mutex + queued calls; activity-based candidate selection and bounded `World.AiWorkerThreads` chunk batches (see deviations). |
 | AI members of `Npc` / `Unit` (`MoveTowards`, `LookTowards`, `StopMovement`, `SetTarget`, `CurrentAggroTarget`, `CurrentGameStance`, `BaseMoveSpeed`, `OnDamageReceived`, `CheckIfEmptyAggroToReturn`, `ClearAllAggro`, `FindPath`), `NpcEvents` | `systems/ai/{npc,combat,skills,npc_events}.rs` | done | `SCOneUnitMovementPacket` movement, aggro tables through the skills API. |
 | `AiPathsManager` (`Data/Path`), `AiPathHandler`, `Units/Route/Simulation` | `systems/ai/{path_handler,simulation}.rs` | done | Every `Data/Path/*.path` file loads (test). Routes are generated from the 10.x client, see the 2026-10-16 note. |
@@ -1905,6 +1967,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the item; receipts still report actual equipment. Hair-creation failure still logs and
   continues with the model update, receipt and certificate consumption, as in C#; failed
   certificate consumption still logs without undoing the already broadcast appearance.
+  The requested template must be a hair body part of the character's own model
+  (`data/items.rs` `body_part`, `characters` template model); an arbitrary template,
+  an `npc_only` hair or another race/gender's hair is refused with `SCErrorMsg`
+  `FAILED_TO_CHANGE_ITEM_LOOK` (generic; the salon-specific id is UNKNOWN) before any
+  change or charge, and the missing-certificate path uses the same error instead of
+  returning silently. The C# accepted any template.
 
 * systems::services (music): 1.2 CS123 has independent `isTooltip` / `showBuffOnly`
   bool bytes (native constructor `397acd70`, serializer `397b1480`). The C# packed
@@ -2229,7 +2297,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   ignored like a non-matching `targetUnit` cast (superseded: vehicles, sticky parents, fall
   damage and the Sus analysis are ported); `LastPacketActivityTime` is `systems::services`.
 * `LeaveAllChannels` iterates channels in key order (C# `ConcurrentDictionary` order is
-  unspecified). Trial channels do not exist.
+  unspecified). Court (trial) channels exist and are included in the leave set.
 * The C# keeps `Connection.Characters[id]` and `ActiveChar` as the same object; Rust copies the
   active character back into the lobby list when `LeaveWorldTask` runs.
 * Combat / slave logout delays (x30, +10 min) are not applied (no combat state / slaves).
@@ -2339,6 +2407,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`declare_siege`, the six Siege Camps). `filter = 0` is unchanged and still lists every lot
   (whether retail also hid the camps from the normal tab is UNKNOWN); any other value is
   treated as 0 and logged once. The C# ignored `filter`.
+* systems::economy (system auction lots, WP-SD1b, 2026-11-05): the retail GM command
+  `auction_post_siege_items` (name in the 1.2 client; arguments UNKNOWN, assumed
+  `[duration] [startPrice] [buyoutPrice]`) posts one lot per distinct
+  `siege_zones.declare_item_id` (the six Siege Camps) with `client_id = 0` and an empty seller
+  name. Defaults: 48 h duration class, the item's own `price` as the start price, no buyout.
+  Each item is created once through `ItemManager::Create` and kept in the auction escrow
+  (loose, `SlotType.Auction`, owner 0) so the normal settlement path can mail it; a failed run
+  discards every item it created. Every settlement path skips the seller leg for
+  `client_id == 0`: the sale mails only the buyer (`AucBidWin`), the money is destroyed (no
+  seller mail or live notice, no `AUCTION_SOLD` record), and an expiry without a bid deletes
+  the item instead of returning it. The optional `auction_cancel <lotId>` command removes an
+  unbid system lot and deletes its item (the lot-id argument and the refusal of player lots /
+  lots with a bid are assumed). `client_id = 0` rows load normally on restart. The C# had
+  neither command and no system-lot path.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -2469,6 +2551,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   delay at 0 (the previous C# behaviour, **capture-pending CHAT-SPAM-1**). To enable the limit,
   set `Chat.ChatGroupDelays[i]` (milliseconds) and optionally `Chat.ChatTypeGroups` in
   `Configurations/Chat.json`; the same values are sent to the client and enforced by the server.
+* systems::social: **`SCChatFailedPacket`.** The 1.2 reader `FUN_397c2950` is
+  `i16 ErrorMessage ; string chname (max 10)`; its handler `FUN_391d8de0` raises the client's
+  `CHAT_FAILED(error, chname)` event (the `chat_msg_event.alb` handler displays the error text).
+  With `Chat.ChatFailedPacket` on (`Configurations/Chat.json`, default `false`) the server
+  answers the channel-bound failures it already detects with this packet: the user-channel
+  join / leave / message errors `CHAT_NO_CHANNEL` 270, `CHAT_CHANNEL_ALREADY_EXISTS` 269,
+  `CHAT_ALREADY_JOINED_CHANNEL` 271, `CHAT_PRIVATE_CHANNEL` 272, `CHAT_WRONG_PASSWORD` 273 and
+  `CHAT_NOT_JOINED_CHANNEL` 467 carry the requested or stored channel name (capped at the
+  packet's 10 bytes), while the "not in" errors of party 267, raid 268, expedition 311 and
+  family 412 carry the labels "Party", "Raid", "Expedition" and "Family" (the 1.2
+  `chat_msg_event.alb` handler displays only the error, so these strings are informational and
+  retail's exact values are not captured). Every other chat
+  failure (whisper 265 / 437, the raid-owner check 496, the spam delay `0x108`) keeps
+  `SCErrorMsgPacket`. **Capture-pending (CHAT-FAILED-1):** which failures retail 1.2 sent as
+  `SCChatFailed` is unknown, so the flag defaults to off and the frames stay exactly as before.
+  Tests: `chat_failed_writes_i16_error_then_the_channel_name`,
+  `chat_failed_channel_name_is_capped_at_ten_bytes_on_a_char_boundary`,
+  `channel_bound_chat_failures_use_scc_chat_failed_only_when_enabled`.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /
@@ -3599,10 +3699,18 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and show it to arrival observers without a movement packet; `CSTeleportEnded` repaints from
   the arrival region without repeating observer deltas or zone changes. Outside an instance a
   gate whose zone exists only in instance worlds is treated as missing (never instance
-  coordinates in the main world). The `MainWorldPosition` fallback remains only for the Memory
-  Tome (`value1 == 0`) outside instances. Retail resolves a Return gate in the caster's own
-  world (instance worlds ship their own `return_point.g`) and never falls back to the main world.
-  The C# closed-zone check of world gates (`Skill.cs` `portal_zone_check`) is not ported.
+   coordinates in the main world). Outside an instance a destination that cannot be resolved
+   (the Memory Tome's recall, or a world gate whose zone is unusable) still falls back to
+   `MainWorldPosition`: this is the C# `Return.cs` TODO behaviour and the single recorded
+   deviation (retail's fallback rule is UNKNOWN). Retail resolves a Return gate in the caster's
+   own world (instance worlds ship their own `return_point.g`) and never falls back to the main
+   world.
+   The C# closed-zone check of `Return` / `OpenPortal` (`Skill.cs`, inline) is ported as
+   `portal_zone_check` (`systems/skills/skill.rs:928-1029`): for access level < 100 it resolves
+   the same destination the effect would use (world gate, district return point or private
+   portal, including the `MainWorldPosition` fallback) and refuses an inaccessible zone with
+   `NO_PERM` (an `OpenPortal` outside the main world with `INVALID_LOCATION`) from `use_skill_impl`
+   and again from `cast`, before the cast is committed.
 
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
@@ -4077,8 +4185,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `SCInitialConfig.idleKickTime`; the 1.2 `SCIdleKick` reader (`FUN_39184540`) is empty and
   `SCPlaytime` is a no-op, so the server sends neither and implements no idle kick. The unit of
   `idleKickTime` is **UNKNOWN** (the `CGame::Update` consumer was not located): the config is
-  the raw wire value, not minutes or seconds. `CSIdleStatus` was already handled (it broadcasts
-  `SCUnitIdleStatus` to observers) and is unchanged.
+  the raw wire value, not minutes or seconds. **Needs one real-client run** (not a capture and
+  not driveable headlessly: the kick is decided by the real client, which `aaemu-testclient`
+  does not emulate; do NOT start the real client from a worker): set `Account:IdleKickTime=1`
+  and log in; if the client leaves after about 1 s the unit is seconds, if after about 1 min it
+  is minutes. Write the result here and in the config comment; until then the raw value stays.
+  `CSIdleStatus` was already handled (it broadcasts `SCUnitIdleStatus` to observers) and is
+  unchanged.
 * systems::services (`SCRestrictInfo` 0x1c8, WP-J, 2026-11-04): this is a per-character penalty
   record (`chname`, `index`, `restrictCode`, `duration`, start/end times;
   `FUN_397c4570`/`FUN_397beb40`), not the seven `canXxx` flags. The server has no restriction
@@ -4425,12 +4538,142 @@ and in NPC wandering / buff remaining times.
   calendar view. Explicit siege deadlines/tick transitions and the persisted state always use
   the real clock, and the command is refused while `Housing.SiegeCalendar` is disabled.
   GM scheduling with player registration is the chosen server policy for actually running a
-  siege; the automatic auction *lots* and bidding remain unimplemented. Known, not fixed:
+  siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
+  (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
+  The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
+  open: the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
+  `doodad_func_purchase_siege_tickets` has no rows) and siege hostility WP-SD7 (decision-blocked:
+  no evidence shows how retail made the two sides attackable). The siege-shop period / side
+  gate WP-SD4a is implemented behind `Housing.SiegeShopGate` (default off; the rule is
+  INFERRED from the pack names, capture-pending).
+  Known, not fixed:
   the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
   time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-SD2a, 2026-11-06): the siege declaration is now
+  persistent state, and the weekly calendar hands it over to the explicit siege record at the
+  cycle's warmup start. `DominionState.declaration` holds the attacker expedition, the
+  accepted time, the cycle's `auction_start` and the camp position; at most one declaration
+  exists per zone and cycle (a second one is `DominionError::AlreadyDeclared` /
+  `DeclaredByOther`, mapped by the caller to client 442/443). It is persisted in the new
+  `dominions.declaration_attacker/at/cycle/hq_x/hq_y/hq_z` columns (the doodad obj id is
+  runtime-only and re-bound after a restart). The declaration is cleared by cancel, by a
+  capture or forced release, and when its cycle's warmup materialises it. The calendar reads
+  `Calendar::view_for_declaration`: a declaration of the running cycle keeps the authored
+  2 -> 3 -> 4 -> 5 walk (`FUN_392f7db0`); a declaration from another cycle changes nothing.
+  At warmup the record is created with the cycle's real `warmup/siege` start and siege end
+  (not `now + delay`), with the defender's authored `siege_settings` limits frozen in; the
+  announcement is `SCSiegeDeclared` (offense team) followed by the phase `SCSiegeState`. A
+  calendar-materialised record stays described by the calendar (the GM test clock walks its
+  periods; the authority tick uses the calendar clock for it, which equals the real clock in
+  production), while a GM `/dominion schedule` keeps its own timers and overrides. A
+  declaration whose expedition disbands, or that is still pending when warmup/siege/peace
+  passes, is dropped and announced with a zero offense team (`SCSiegeDeclared`), the
+  client's "nobody declared" state (INFERRED: the client's cancel path is the zero team,
+  `FUN_392f7cc0`; the disband/owner-change drop is INFERRED, low risk). On restart a
+  declaration older than one cycle (7 days) is discarded. **Assumption (capture-pending):**
+  the attacker `ni/nr/limit` in the declaration snapshot use the only evidenced cap, the
+  defender `siege_settings` row's `num_defenders + num_reinforcements` (siege.md 1.3 says
+  the attacker's values are UNKNOWN). The declaration route (camp use) is WP-SD2b; the
+  cancel trigger's UI and the defense HQ offset are WP-SD2b/SD2c. Tests:
+  `second_declaration_is_refused_for_self_and_other_expeditions`,
+  `cancel_clears_only_the_declaring_expedition`,
+  `materialisation_creates_exactly_one_siege_with_the_cycle_times`,
+  `a_declaration_requires_an_owned_territory_and_never_coexists_with_a_live_siege`,
+  `release_expedition_drops_a_declaration_it_attacked_or_accepted`,
+  `a_declaration_of_the_running_cycle_keeps_the_warmup_and_siege_walk`,
+  `calendar_snapshot_carries_a_matching_declaration_and_zero_team_after_cancel`,
+  `declaration_materialises_at_warmup_and_the_calendar_walks_periods_three_to_five`,
+  `dominion_declaration_round_trips_through_its_row` (MySQL),
+  `a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart`.
+* systems::housing / systems::skills (WP-SD2b, 2026-11-06): the Siege Camp item use now runs
+  the declaration. The `SpawnDoodad(4307)` effect of skill 16918 (the six
+  `siege_zones.declare_item_id` items) asks `dominion::declare::handle_camp_use` before it
+  spawns; the check runs under the housing operation lock and only while
+  `Housing.SiegeCalendar` is enabled (with the calendar off, the camp use keeps its old plain
+  spawn, so GM-scheduled sieges are untouched). Rules, in this server's order, with the
+  client's ids: zone has no owned dominion 342; the caster's expedition is the owner 343; the
+  camp item is not this zone's `declare_item_id` 344; not the declare period (2) 386;
+  horizontal distance to the live lodestone below `guard_tower_settings.radius_declare`
+  (250/450 m, the authored value, not the old `OFFENSE_HQ_MIN_DISTANCE` constant) 345; the
+  caster's expedition rank lacks the `SiegeMaster` policy 459; pirate expedition 444; the
+  expedition already has an unfinished siege 639; a declaration already exists 442/443
+  (`DominionError::AlreadyDeclared`/`DeclaredByOther`). On success the declaration is
+  recorded, the camp is spawned and its real obj id/position are bound into the declaration
+  (a second `SCSiegeDeclared`, then the phase `SCSiegeState`, carries the offense team); the
+  source item is consumed by the normal cast debit. Every refusal cancels the effect
+  (`effect_cancelled`), which makes the cast path refund the item — a refused declaration
+  keeps the camp. A spawn failure after acceptance also rolls the declaration back and
+  cancels the effect. Cancelling is `dominion undeclare [zone]` (the GM command), which clears
+  the declaration and broadcasts the zero offense team; the in-game trigger is UNKNOWN
+  (destroying/removing the camp is the candidate), so it is capture-pending.
+  **Capture-pending assumptions:** 459 is used for the missing policy although 581 is the
+  other candidate text; the placement thresholds behind 625 (resurrection point), 633
+  (house), 661 (another zone) and 741 (obstacle), and the "siege too imminent" window behind
+  760, are UNKNOWN and are NOT enforced (no refusal today); the cancellation trigger's UI is
+  UNKNOWN. The check order is this server's policy. Tests:
+  `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
+  `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
+  `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
+  442/443, item kept each time).
+* systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
+  doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
+  stores it against the declaration (no siege record yet) and `bind_materialised` stamps it
+  with the siege when the calendar materialises the record, so the offense teleport (17046)
+  and the `SCSiegeState` team position use the real camp. A restart re-binds the retained
+  4307 nearest the persisted camp position (`restore_declarations`, five metres); the GM
+  bind of a retained doodad still exists for explicit schedules. The defender HQ (3410) is
+  spawned at the warmup at the lodestone plus `Housing.DefenseHqOffset` (three floats); the
+  retail spawn rule is UNKNOWN, so the default `[0, 0, 0]` disables the spawn and keeps the
+  existing GM-bound behaviour. The authored 10-minute camp lifetime stays owned by the WP-S3
+  phase chain, as before. Tests: `declaration_camp_becomes_the_offense_hq_and_survives_a_rebind`,
+  `a_materialised_declaration_keeps_the_offense_hq_and_the_teleport_works` (offense teleport
+  packet at the camp position after materialisation),
+  `defense_hq_spawns_only_with_a_configured_lodestone_offset`.
+* systems::housing / systems::skills (WP-SD3, 2026-11-06): the 13 `siege_items` rows gate item
+  casts in the one client item-cast branch (`skills/handlers.rs`, after the item template is
+  resolved from the owned stack and before `skill::use_skill`, so a refusal keeps the item and
+  answers only `SCErrorMsg` 431). The client loads the table and shows the row's `USAGE` text
+  for 431, so this is defence in depth for forged casts. The mapping is INFERRED from the row
+  shapes: a `true` flag means the situation allows the use; situations are the current period
+  (`period::current_period`: no dominion/declare/peace), `radius_siege` around the lodestone
+  (inside/outside the siege area) and `radius_offense_hq` around the registered side's bound
+  HQ (the defense radius is UNKNOWN and uses the offense value). Rows: 26397/26424/26428 are
+  allowed only inside the siege circle during the siege, 27300/27302 only inside the offense
+  HQ circle during the siege, and the escape/Eanad scrolls 34018/34021/34060-34065 everywhere
+  except the siege/HQ circles during warmup and siege. The gate is active only when
+  `Housing.SiegeCalendar` is on or the zone has an explicit siege; outside every dominion
+  zone the `outside_siege_zone` flag decides (a tank mine is unusable there, an escape scroll
+  is usable). Period 1 (auction) has no authored flag and is not gated. Unlisted items are
+  never refused. The table is loaded beside `SiegeZone` in `housing/data.rs` (a missing table
+  disables the gate); the decisions live in `dominion/siege_items.rs`. Tests:
+  `the_three_authored_classes_allow_exactly_their_situations`,
+  `siege_items_are_refused_outside_their_authored_situations_and_kept` (real item casts in
+  period 2 and 4, inside/outside the circle, item kept on refusal), the loader assertion in
+  `castle_references_preserve_stage_order_dates_and_zero_open_duration`, and the gated
+  `housing_real_compact_db` row-count check (13 rows).
+* systems::housing / systems::npcs (siege-time shop gate, WP-SD4a, 2026-11-06): with
+  `Housing.SiegeShopGate` on (default off, so both packs keep selling as before), merchant
+  packs 224 / 225 are sold only during the warmup or siege period (3 / 4) of the NPC's
+  territory and only to a character on the matching side of that siege's roster: pack 224 to
+  defenders, 225 to attackers. The period is the one `social::dominion::snapshot` shows for
+  the territory (calendar or explicit siege), and the roster is the persisted participant
+  list. Refusals are silent like the other `CSBuyItems` catalog checks; an allowed line is
+  still charged in honor through the item's `honor_price`. A pack that matches but is not
+  one of the two named packs is never gated, so an item also offered by an ordinary pack
+  stays on sale. The rule is **INFERRED** from the two `merchant_packs` names ("defense-side
+  goods sold during a siege" / "siege-side goods sold during a siege") only: the retail
+  period/side restriction is capture-pending, as is which pack belongs to which side (224 =
+  defense, 225 = attack is the name reading). The gate lives in the real NPC catalog bridge
+  (`npcs/bridges.rs::merchant_sells`, called from `economy/store.rs`), the switch in
+  `systems/housing/config.rs`. Tests:
+  `siege_shop_gate_sells_224_to_defenders_and_225_to_attackers_in_warmup_and_siege`,
+  `siege_shop_gate_refuses_registered_sides_outside_warmup_and_siege`,
+  `siege_shop_gate_refuses_non_participants_during_the_siege`,
+  `siege_shop_gate_off_keeps_both_packs_selling_at_any_time_to_anyone` and the config binder.
+  Live capture of the restriction and side rule is still pending.
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean
@@ -5114,9 +5357,17 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
   performs the last build action. **Auction** and **jury** credits go to online characters only.
 * **GET_FACTION** is state-derived (entry back-credit plus the crossing of the infamy threshold in
   `CrimeManager::add_crime_points`); other faction changes do not credit (Q8).
-* **GET_ITEM_TYPE (k29), KILL_SLAVE (k26), MY_DISHONORABLE_POINT (k49), siege results (k57-60)** stay
-  unwired (see the audit for why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is
-  deliberately never sent.
+* **GET_ITEM_TYPE (k29)** counts only genuine acquisitions. `ItemFx::Acquired` now carries the
+  `added` unit count and an `AcquiredSource`: a newly created item (loot, craft product, quest
+  reward, shop purchase), new units merged into an owned stack, a mail take, or an item received
+  from another character (trade). Moves between the character's own containers (bag <-> bank, a
+  house coffer, re-slotting) and merges of already owned stacks are tagged `Transfer` and never
+  credit, so warehouse shuffling cannot complete a collection achievement. The report runs from
+  `economy::fx::flush` with the same lock rules as the other producers (queued while the economy
+  lock is held). All 216 authored records use the `-1` any-grade wildcard, so the event carries no
+  grade (a `value2 >= 0` row would need one). `KILL_SLAVE (k26)`,
+  `MY_DISHONORABLE_POINT (k49)` and the siege results (k57-60) stay unwired (see the audit for
+  why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is deliberately never sent.
 
 ## PvP duel fixes (duel disconnect, GM faction, quit relog)
 
@@ -6114,10 +6365,23 @@ Policy decisions / capture-pending (each also a case id in the code):
   A deleted character's pledges are never refunded and stay in the table for its id. Arena and
   instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
   these have 1.2 evidence; they are safe defaults.
-* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The row layout is verified (M10), but the
-  C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
-  The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the
-  original client first.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The empty `(0, 0)` list stays the
+  default: the C# comment records that a filled list broke the 1.2 client Lua, the cause was
+  never found and the row layout was only verified later (M10, reader `FUN_397bebf0`), so the
+  real-client check is **capture-pending**. `Social.BountyBoard` (default `false`, shipped in
+  `Configurations/Social.json`) enables the filled answer:
+  `SCBountyList{total, count, rows}` where `total` is every character with an unpaid pledge and
+  the rows are capped at the client's 20 entries (`0x14`, `MAX_BOUNTY_LIST_ENTRIES`), highest
+  total first (ties by character id; the order is a server policy, not client evidence, and only
+  decides which rows the cap keeps). Online rows read name, level, race, crime point, zone and
+  position from the live character with `is_live = true`; offline rows read the same fields plus
+  the arrest / trial counters from its `characters` row (`deleted = 0`) with `is_live = false`.
+  A missing or unreadable character row is skipped and no longer counted in `total`, so the
+  client can still complete its id-keyed row map. The row's `type` field (`+184` in the reader,
+  meaning UNKNOWN) is `1`, the value of the C# dummy row (C#-only); `seconds` is `0` (no 1.2
+  meaning known, no timer is invented). `total > count` only while more than 20 characters have
+  pledges. The switch must stay `false` until an original-client run (hidden client, bounty
+  board doodad) opens the board without a Lua error.
 
 * **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
   `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is
@@ -6214,6 +6478,24 @@ are now honoured at craft execution (WP-I2 A/B; `systems::economy::{craft,craft_
   `0xfff`) and the packet is registered; the handler reads `(bc objId, i32 money)`, rejects a
   negative amount and otherwise logs only. Pay rules are UNKNOWN, so it changes no state
   (capture-pending).
+- **Shipyard wage reading (2026-11-06, INFERRED strong).** `FUN_394d63e0` resolves the target
+  only when its kind (`+0x410`) is 6 (`BaseUnitType.Shipyard`); the `SCShipyardState` body
+  `FUN_3961ef40` puts the i32 `moneyAmount` at unit `+0x9c` (record `+0x2c`), the same field as
+  our `ShipyardData.money_amount` (`models/shipyard.rs:20,43`). The setter `FUN_394d7230` (the
+  only caller of the Lua `SetCraftingPay`, through `FUN_39460cc0`) refuses pay < 1, a
+  non-shipyard target and overflow, caps `total = pay x record.actions` at 2,000,000,000
+  copper (`FUN_394d7360`) and requires the local player's inventory money >= total; it then
+  sends CS `0x8d` with the **per-action** pay, not the total. The client has no ownership check.
+  The only reader is `FUN_394d7310` -> Lua `GetCraftingPayStr` (label `crafting_pay` = "Wage:"),
+  so any player targeting the shipyard can read it. The client never changes the field itself,
+  so the UI only updates when the server re-sends `SCShipyardState` with the new `moneyAmount`
+  (INFERRED; no dedicated ack). UNKNOWN: who pays the helper, when (per build action or at
+  completion), and whether the owner's `pay x actions` is escrowed. **Capture plan before
+  storing or paying it:** owner A on a shipyard with several actions + helper B; (1) A sets
+  100/action and capture the reply (expect `SCShipyardState`, maybe `SCItemTaskSuccess`); (2) B
+  does N build actions and capture the money tasks for A and B; (3) A with less than
+  `pay x actions` tries and is refused by the client (nothing sent); (4) set 0 and see whether
+  the wage clears.
 
 Tests: `craft_material_requires_its_grade` (low and high grades refused, exact grade pays and
 only that stack is consumed; refusals keep the stacks), `craft_main_grade_sets_the_product_grade`
@@ -6353,3 +6635,55 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
 * **Chat / name test shortcuts (score 1).** The chat-spam flow test edits the live `ConfigCell`
   with `update` instead of going through a reload, and the name opt-in test builds two servers
   instead of reloading one; both prove the gates, not the reload path. Known, not fixed.
+
+## Static-table and feature verdicts (2026-11-06, recorded so they are not reopened)
+
+* **`equip_slot_groups` (24 rows) is not read; `equip_slot_group_maps` (48 rows) is.**
+  Equipping keeps the hard-coded `allowed_gear_slots` (`models/container.rs:93`, the C#
+  `EquipmentContainer.GetAllowedGearSlots`); the maps are read only by the lunagem check
+  (`item_sockets.equip_slot_group_id` -> `equip_slot_group_maps` -> target slot type,
+  `data/items.rs:1154-1159`, `systems/economy/item_effects.rs:755`). The optional data guard
+  (every map row matches the hard-coded table) is not needed until the group table gains a
+  consumer.
+* **`item_bags` has 5 rows whose ids do not resolve** (no item template references them). The
+  1.2 client loads the table itself (`strings.txt:13953`); there is no reachable template and
+  no known server rule, so there is nothing to load. Do not reopen.
+* **`expert_limits` prices are empty:** every `up_price` / `down_price` is 0 and `advantage` is
+  a client display value (31 rows checked). The server uses the limit columns for
+  labor/expand steps and charges the configured items, so there is no price to enforce.
+* **`unit_formulas` kind 35 `AAPointMaxLimitByLevel` is the constant 1500** for owner types
+  0-6. Whether it caps the balance or a per-period purchase is UNKNOWN, so it is not enforced;
+  an optional guard on the constant is all that is warranted.
+* **Doodad UI funcs are client-driven** (see the doodad table above): the 1.2 client loads the
+  bank / auction / store / coffer-permission / renew-item UI tables itself, so the server has
+  nothing to answer.
+* **`SCRestrictInfo` 0x1c8** is a per-character penalty list with an unknown `restrictCode`
+  table. A restriction store would be a moderation feature; RE of the client's code values is
+  needed first. Recorded, not a package.
+* **ARS phone verification needs an operator provider.** The login's `ArsPhoneProvider` seam
+  and the session/lockout logic exist; the default `DisabledArsPhoneProvider` refuses such a
+  login. Supplying an implementation that places the call is operator integration, not a repo
+  task (documented in the wiki).
+* **No 1.2 data / client-side, so no package:** the X-day salon certificate (only salon item
+  30811; no item with `exp_abs_lifetime` is a certificate), mould tables (0 rows), demo mode
+  (no 1.2 trigger), evolving / refurbish / revert look (no `special_effects` rows), doodad
+  exchange (0 rows) and buy-fish model rows (prefab strings), `gem_visual_effect_id` (the
+  client loads the effect), mate `SpawnEffect` rows (the 4 unreachable rows above), slave
+  customizing styles (`slave_customizings` is client-loaded; one customizable slave), radar
+  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`,
+  gimmick collision: capture-pending / design-blocked).
+* **`conflict_zones.peace_protected_faction_id` / `peace_tower_def_id` are placeholders.**
+  All 16 rows carry faction id 5 and a NULL `peace_tower_def_id`; faction 5 does not exist in
+  `system_factions` (ids 1, 2, 3 and 101-179) and neither column is ever read
+  (`data/world_data.rs:214,293` keeps the faction id in the loaded row only). The used columns
+  are `num_kills_*` / `no_kill_min_*` / `conflict_min` / `war_min` / `peace_min`
+  (`systems/social/zone_conflict.rs`), `war_tower_def_id` (`systems/instances/tower_def.rs:934`)
+  and the two return-point ids (`systems/skills/resurrect.rs:112-113`). Nothing to implement.
+* **`world_groups` is client map data.** Its 6 rows (`id`, `name`, `target_id`, `image_map`,
+  `x` / `y` / `w` / `h`, `image_x` / `image_y` / `image_w` / `image_h`) describe the world-map
+  rectangles the client draws; the server never reads the table. Not a gap.
+* **`world_spec_configs` is not read; its one row matches the hard-coded specialty divisor.**
+  The only row (`world_01`) has `specialty_mod` 1000 and `specialty_adjust_ratio` 500.
+  `economy/specialty.rs:388` hard-codes the `ratio / 1000` divisor that `specialty_mod` mirrors;
+  no code reads the table, and `specialty_adjust_ratio` has no known consumer (retail use
+  UNKNOWN). No package.

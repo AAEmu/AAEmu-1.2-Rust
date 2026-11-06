@@ -1068,8 +1068,9 @@ async fn doodad_summons_use_the_selected_frame_and_keep_radian_rotations() {
             _zone_id: u32,
             pos: PositionAndRotation,
             _delay: i32,
-        ) {
+        ) -> Option<crate::world::DoodadRef> {
             self.0.lock().unwrap().push(pos);
+            None
         }
     }
     let (server, _client, player, npc) = fixture(GameData::empty());
