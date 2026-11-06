@@ -2720,12 +2720,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   of 60 minutes and `0` = lift are INFERRED) writes `characters.chat_restricted_until` (UTC):
   an online character through its live state (saved by the save manager), an offline one with
   a direct row UPDATE. Both outgoing chat paths (`send_chat_message` and the user-channel
-  `send_user_chat`) refuse a muted sender with a plain system message (retail's mute error is
-  UNKNOWN; INFERRED, `CHAT-RESTRICT-1`), and the mute lifts itself when the timestamp passes.
-  `chat_restricted_until` is loaded and saved with the character. Retail's per-type levels are
-  not evidenced (**capture-pending CHAT-LEVEL-1**). Tests: level gate / default off / GM
-  exemption, mute + expiry, user-channel bypass, `restrict_chat` online / offline / non-GM,
-  and the MySQL character round trip.
+  `send_user_chat`) refuse a muted sender with `SCRestrictInfoPacket` 0x1c8: the 1.2 reader
+  `FUN_397c4570` -> `FUN_397beb40` is `chname (max 11) ; i32 index ; u8 restrictCode ; u32
+  duration ; i64 startDate ; i64 endDate`, and the handler `FUN_391e0be0` passes only `duration`
+  to `FUN_393c4170`, which shows `restrict_remain_time` with `duration / 60 + 1` minutes
+  (so `duration` is remaining seconds). The client reads neither `index`, `restrictCode` nor
+  the dates; the server sends `index 0`, `code 0` (chat), `duration` = `chat_restricted_until
+  - now`, `start` = that now and `end` = `chat_restricted_until` (the mute start is not
+  persisted; INFERRED, ignored by the client). Retail's trigger for the notice is UNKNOWN and
+  the refused chat attempt is INFERRED (**`CHAT-RESTRICT-1`**). Starting or lifting a mute of an
+  online target sends `SCResultRestrictCheckPacket(code 0, result 1 / 0)`; `FUN_391e0ea0` turns
+  result 1 into the client's chat-restriction flag plus `restrict_start`, and 0 into the flag
+  restore plus `restrict_end`. The push is not sent when the mute expires on its own (no timer;
+  the client's flag/label is only restored by a lift packet or a relog) and is not persisted
+  across a relog. `CSRestrictCheck(code 0)` answers from the same persisted mute; `code 1` (the
+  lobby connection check, the only code the stock client sends) always answers 0 because there
+  is no login-restriction store yet. `chat_restricted_until` is loaded and saved with the
+  character. Retail's per-type levels are not evidenced (**capture-pending CHAT-LEVEL-1**).
+  Tests: level gate / default off / GM exemption, mute + expiry (the notice carries the
+  remaining seconds), user-channel bypass, `restrict_chat` online / offline / non-GM (online
+  start/lift send result 1/0), `CSRestrictCheck` code 0 muted/unmuted/expired and code 1, the
+  packet byte layout, and the MySQL character round trip.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /

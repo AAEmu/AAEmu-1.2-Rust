@@ -185,6 +185,26 @@ fn expect_chat_failed(p: &mut Pc, error: i16, channel: &str) {
     );
 }
 
+/// The `SCRestrictInfoPacket` a muted sender gets: `chname`, `index` 0, `code` 0 (chat),
+/// `duration` = remaining seconds of the persisted mute, `end` = the persisted end and
+/// `start` = `end - duration` (the notice time; the client ignores both dates).
+fn expect_restrict_info(p: &mut Pc, chname: &str, until: i64) {
+    let frames = p.frames();
+    assert_eq!(frames.len(), 1, "one refusal, nothing else");
+    assert_eq!(frames[0].0, sc::SCRestrictInfoPacket);
+    let mut s = PacketStream::from_bytes(frames[0].1.clone());
+    assert_eq!(s.read_string().unwrap(), chname);
+    assert_eq!(s.read_i32().unwrap(), 0, "index");
+    assert_eq!(s.read_u8().unwrap(), 0, "restrictCode (chat)");
+    let duration = s.read_u32().unwrap();
+    let start = s.read_i64().unwrap();
+    let end = s.read_i64().unwrap();
+    assert_eq!(end, until);
+    assert_eq!(start, until - i64::from(duration));
+    assert!((595..=600).contains(&duration), "{duration}");
+    assert_eq!(s.remaining(), 0);
+}
+
 /// The full expected `SCChatMessagePacket` body: literal identity bytes, then the sender block
 /// `(obj id, character id, language, race, faction, name)`, message and ability. Built from
 /// `PacketStream` primitives, never from the chat encoder.
@@ -3956,28 +3976,20 @@ async fn chat_level_gate_refuses_below_the_configured_level_and_exempts_gms() {
 
 #[tokio::test]
 async fn chat_mute_refuses_the_message_and_expires_automatically() {
-    use crate::systems::services::commands::scripts::harness::chat_text;
-
     let server = test_server();
     let mut a = pc(&server, 1, "Muted", 100.0, 100.0);
     let mut b = pc(&server, 2, "Friend", 110.0, 100.0);
     settle(&mut [&mut a, &mut b]);
 
-    a.p.data().chat_restricted_until = chrono::Utc::now().timestamp() + 600;
+    let until = chrono::Utc::now().timestamp() + 600;
+    a.p.data().chat_restricted_until = until;
     a.send(
         &server,
         cs::CSSendChatMessagePacket,
         chat(chat_type::WHITE, "blocked"),
     )
     .await;
-    let frames = a.frames();
-    assert_eq!(frames.len(), 1, "one refusal, nothing else");
-    assert_eq!(frames[0].0, sc::SCChatMessagePacket);
-    assert_eq!(
-        i16::from_le_bytes(frames[0].1[..2].try_into().expect("chat type")),
-        chat_type::SYSTEM
-    );
-    assert_eq!(chat_text(&frames[0].1), "You are muted and cannot chat.");
+    expect_restrict_info(&mut a, "Muted", until);
     assert!(b.frames().is_empty(), "a muted message was routed");
     assert!(a.p.data().chat_restricted_until > 0, "mute kept");
 
@@ -3995,7 +4007,6 @@ async fn chat_mute_refuses_the_message_and_expires_automatically() {
 
 #[tokio::test]
 async fn a_muted_sender_cannot_bypass_the_mute_in_a_user_channel() {
-    use crate::systems::services::commands::scripts::harness::chat_text;
     use crate::systems::social::chat::user_channel_identity;
 
     let server = test_server();
@@ -4024,20 +4035,15 @@ async fn a_muted_sender_cannot_bypass_the_mute_in_a_user_channel() {
     a.frames();
     b.frames();
 
-    a.p.data().chat_restricted_until = chrono::Utc::now().timestamp() + 600;
+    let until = chrono::Utc::now().timestamp() + 600;
+    a.p.data().chat_restricted_until = until;
     a.send(
         &server,
         cs::CSSendChatMessagePacket,
         user_chat(identity, "hidden"),
     )
     .await;
-    let frames = a.frames();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(
-        i16::from_le_bytes(frames[0].1[..2].try_into().expect("chat type")),
-        chat_type::SYSTEM
-    );
-    assert_eq!(chat_text(&frames[0].1), "You are muted and cannot chat.");
+    expect_restrict_info(&mut a, "Al", until);
     assert!(b.frames().is_empty(), "the user-channel copy was routed");
 }
 

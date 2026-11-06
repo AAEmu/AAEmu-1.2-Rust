@@ -43,6 +43,34 @@ impl SCChatFailedPacket {
     }
 }
 
+sc_packet!(
+    /// `SCRestrictInfoPacket` (S 0x1c8), the chat-ban notice: `string chname (max 11) ;
+    /// i32 index ; u8 restrictCode ; u32 duration ; i64 startDate ; i64 endDate`.
+    ///
+    /// Reader `FUN_397c4570` reads `chname` (max 11 bytes), then `FUN_397beb40` reads the
+    /// record in that order. Handler `FUN_391e0be0` passes only `duration` to `FUN_393c4170`,
+    /// which raises the system line `restrict_remain_time` with `duration / 60 + 1` minutes;
+    /// the 1.2 client reads neither `index`, `restrictCode`, `startDate` nor `endDate`. The
+    /// server sends `index = 0`, `restrictCode = 0` (chat), `duration` = remaining seconds of
+    /// the persisted mute, and `start`/`end` = the notice time / `chat_restricted_until`
+    /// (the mute start is not persisted; both fields are ignored by the client, INFERRED).
+    SCRestrictInfoPacket {
+        chname: String,
+        index: i32,
+        code: u8,
+        duration: u32,
+        start: i64,
+        end: i64
+    } |self, s| {
+        s.write_str(&self.chname)
+            .write_i32(self.index)
+            .write_u8(self.code)
+            .write_u32(self.duration)
+            .write_i64(self.start)
+            .write_i64(self.end);
+    }
+);
+
 cs_packet!(
     /// `CSJoinUserChatChannelPacket`: temporary user channel create/join.
     CSJoinUserChatChannelPacket { name: String, pwd: String, create: bool }
@@ -290,6 +318,33 @@ mod tests {
         assert_eq!(
             body.as_bytes(),
             expected([0xFE, 0xFF, 0, 0, 0, 0, 0, 0], None, "hi", 3)
+        );
+    }
+
+    #[test]
+    fn restrict_info_writes_the_reader_layout() {
+        // Reader `FUN_397c4570` (chname) -> `FUN_397beb40` (index, restrictCode, duration,
+        // startDate, endDate); independent little-endian literals.
+        let packet = SCRestrictInfoPacket {
+            chname: "Crook".into(),
+            index: 0,
+            code: 0,
+            duration: 601,
+            start: 1_700_000_000,
+            end: 1_700_000_601,
+        };
+        let mut body = PacketStream::new();
+        packet.write(&mut body);
+        assert_eq!(
+            body.as_bytes(),
+            vec![
+                5, 0, b'C', b'r', b'o', b'o', b'k', // string chname
+                0, 0, 0, 0, // i32 index
+                0, // u8 restrictCode
+                0x59, 0x02, 0, 0, // u32 duration (601 s)
+                0, 0xF1, 0x53, 0x65, 0, 0, 0, 0, // i64 startDate (1_700_000_000)
+                0x59, 0xF3, 0x53, 0x65, 0, 0, 0, 0, // i64 endDate (1_700_000_601)
+            ]
         );
     }
 
