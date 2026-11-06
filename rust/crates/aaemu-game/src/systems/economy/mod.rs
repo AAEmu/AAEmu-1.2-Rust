@@ -77,6 +77,9 @@ mod premium_service_tests;
 pub mod procs;
 #[cfg(test)]
 mod procs_tests;
+pub mod renew;
+#[cfg(test)]
+mod renew_tests;
 pub mod repair;
 pub mod shop_limits;
 #[cfg(test)]
