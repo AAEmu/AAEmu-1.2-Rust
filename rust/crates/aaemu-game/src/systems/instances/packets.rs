@@ -648,6 +648,10 @@ impl Marshal for SCInstantGameInviteTimeoutPacket {
 }
 
 /// `SCInviteToInstantGamePacket(zoneInstanceId, rulesetId, corps, qualifiedId)`.
+///
+/// The qualified id is the game's zone instance plus a per-game invitation counter; the client
+/// echoes it in `CSJoinInstantGame` / `CSEnteredInstantGameWorld` and a value that no longer
+/// matches the live invitation is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCInviteToInstantGamePacket {
     pub zone_instance_id: ZoneInstanceId,
