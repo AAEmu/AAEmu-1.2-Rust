@@ -43,6 +43,7 @@ pub mod rename;
 pub mod session;
 pub mod team;
 pub mod trial;
+pub mod ui_packets;
 pub mod util;
 pub mod zone_conflict;
 
