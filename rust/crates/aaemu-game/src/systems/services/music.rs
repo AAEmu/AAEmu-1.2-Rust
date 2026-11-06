@@ -7,11 +7,12 @@
 //! the economy subsystem implements (it also implements the skills `ItemSkillHooks`
 //! `midi_cache` / `create_sheet_music` by calling this manager).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use aaemu_commons::{Marshal, PacketStream};
 use futures::future::BoxFuture;
+use serde::Deserialize;
 use sqlx::Row;
 
 use crate::error::Result;
@@ -30,6 +31,69 @@ pub const BUFF_SCORE_MEMORIZED: u32 = 6010;
 pub const TAG_PLAY_SONG: u32 = 1155;
 /// `ErrorMessageType.BagFull`.
 const ERROR_BAG_FULL: i16 = 25;
+
+/// `Music` (Rust only): the upload sanity the server applies before storing a user song.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MusicConfig {
+    /// Longest `song` accepted by `CSSaveUserMusicNotes`, in UTF-16 code units. The 1.2 client
+    /// enforces its own `music_note_limits`; the server cap is a sanity bound and defaults to a
+    /// value the client's normal compositions stay below. `Music.MaxSongChars`.
+    #[serde(rename = "maxsongchars", deserialize_with = "crate::config::lenient")]
+    pub max_song_chars: usize,
+}
+
+impl Default for MusicConfig {
+    fn default() -> Self {
+        Self {
+            max_song_chars: 3000,
+        }
+    }
+}
+
+/// `instrument_sounds` item ids (the 1.2 client loads `item_id, midi` for its composition UI,
+/// `dll.c:1559064`). The server only needs the set of playable instrument templates: an upload
+/// from anything else is refused.
+#[derive(Debug, Default)]
+pub struct InstrumentSounds {
+    ids: HashSet<u32>,
+}
+
+impl InstrumentSounds {
+    /// `SELECT item_id FROM instrument_sounds` (199 rows in the shipped data).
+    pub fn load(conn: &rusqlite::Connection) -> Result<Self, crate::data::GameDataError> {
+        let mut ids = HashSet::new();
+        crate::data::sqlite::for_each_row(
+            conn,
+            "SELECT item_id FROM instrument_sounds",
+            [],
+            |r| {
+                ids.insert(r.u32("item_id")?);
+                Ok(())
+            },
+        )?;
+        Ok(Self { ids })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_ids(ids: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            ids: ids.into_iter().collect(),
+        }
+    }
+
+    pub fn contains(&self, item_id: u32) -> bool {
+        self.ids.contains(&item_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
 
 /// `SongData`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -269,6 +333,49 @@ impl ClientPacket for CSSaveUserMusicNotesPacket {
             let Some(p) = conn.active_char.clone() else {
                 return Ok(());
             };
+            // The C# stored anything the client sent. Refuse what the 1.2 client cannot produce:
+            // a size that is not the string's UTF-16 length, a song above `Music.MaxSongChars`,
+            // or a source item that is not an owned instrument from `instrument_sounds`.
+            // The song grammar stays unparsed (no evidenced server-side format).
+            let song_len = self.song.encode_utf16().count();
+            let size_mismatch = u32::try_from(song_len) != Ok(self.song_size);
+            let refusal = if size_mismatch {
+                Some(format!(
+                    "song_size {} does not match the {song_len} UTF-16 characters",
+                    self.song_size
+                ))
+            } else if song_len > server.config.music.max_song_chars {
+                Some(format!(
+                    "song has {song_len} UTF-16 characters (max {})",
+                    server.config.music.max_song_chars
+                ))
+            } else {
+                let inv = crate::systems::economy::inventory::Inv::of(&p);
+                match inv.item_by_id(self.item_id) {
+                    None => Some(format!("item {} is not owned", self.item_id)),
+                    Some(item)
+                        if !server
+                            .game_data
+                            .systems
+                            .services
+                            .instrument_sounds
+                            .contains(item.template_id) =>
+                    {
+                        Some(format!(
+                            "item {} (template {}) is not in instrument_sounds",
+                            self.item_id, item.template_id
+                        ))
+                    }
+                    Some(_) => None,
+                }
+            };
+            if let Some(reason) = refusal {
+                tracing::warn!(
+                    "CSSaveUserMusicNotesPacket from {} refused: {reason}",
+                    p.data().unit.name
+                );
+                return Ok(());
+            }
             server.systems.services.music.upload_song(
                 p.character_id,
                 &self.title,

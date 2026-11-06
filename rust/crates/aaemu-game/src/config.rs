@@ -103,6 +103,9 @@ pub struct AppConfig {
     /// `Loot` (`Configurations/Loot.json`: party loot announcements).
     #[serde(rename = "loot")]
     pub loot: crate::systems::economy::config::LootAnnounceConfig,
+    /// `Music` (`systems::services::music`: user song upload sanity).
+    #[serde(rename = "music")]
+    pub music: crate::systems::services::music::MusicConfig,
     #[serde(rename = "clientdata")]
     pub client_data: ClientDataConfig,
     /// `Specialty`.
@@ -185,6 +188,7 @@ impl Default for AppConfig {
             crafting: Default::default(),
             ics: Default::default(),
             loot: Default::default(),
+            music: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
             scripts: ScriptsConfig::default(),
