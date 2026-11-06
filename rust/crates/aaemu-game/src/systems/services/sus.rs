@@ -2,7 +2,9 @@
 //! speed analysis of players and mounts, run every 5 s of `Transform.FinalizeTransform`
 //! ([`SusManager::finalize_transform`], called by the unit movement handler).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::server::GameServer;
