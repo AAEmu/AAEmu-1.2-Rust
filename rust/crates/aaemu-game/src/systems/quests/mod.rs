@@ -25,6 +25,7 @@ pub mod packets;
 pub mod spheres;
 pub mod state;
 pub mod templates;
+pub mod ui_packets;
 pub mod unit_reqs;
 
 #[cfg(test)]
