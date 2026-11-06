@@ -78,6 +78,8 @@ pub struct Data {
     pub expands: expands::ExpandData,
     /// `premium_grades` / `premium_benefits` / `premium_configs` / `pcbang_buffs` (WP-B).
     pub premium: premium::PremiumData,
+    /// `instrument_sounds` item ids (user music uploads, WP-M1).
+    pub instrument_sounds: music::InstrumentSounds,
 }
 
 impl Data {
@@ -89,6 +91,7 @@ impl Data {
             models: models::ModelManager::load(ctx.conn)?,
             expands: expands::ExpandData::load(ctx.conn)?,
             premium: premium::PremiumData::load(ctx.conn)?,
+            instrument_sounds: music::InstrumentSounds::load(ctx.conn)?,
         })
     }
 }

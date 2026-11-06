@@ -97,6 +97,9 @@ pub struct CharacterData {
     /// keyed by `16 * gender + race`.
     pub templates: HashMap<u8, CharacterTemplate>,
     pub ability_items: HashMap<u8, AbilityItems>,
+    /// `default_action_bar_actions` in id order: (item id, action slot). The 1.2 client loads
+    /// the table itself; the server uses it to place the starter supplies at the authored slots.
+    pub default_action_bar_actions: Vec<(u32, u8)>,
     /// `_appellations` (id -> buff id).
     pub appellations: HashMap<u32, u32>,
     /// `_actabilities` in insertion order.
@@ -269,6 +272,16 @@ impl CharacterData {
                 });
             Ok(())
         })?;
+        for_each_row(
+            conn,
+            "SELECT * FROM default_action_bar_actions ORDER BY id",
+            [],
+            |r| {
+                d.default_action_bar_actions
+                    .push((r.u32("item_id")?, r.u8("slot_index")?));
+                Ok(())
+            },
+        )?;
         let mut packs = Vec::new();
         for_each_row(conn, "SELECT * FROM character_equip_packs", [], |r| {
             packs.push((

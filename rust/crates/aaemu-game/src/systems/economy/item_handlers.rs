@@ -277,12 +277,19 @@ impl CSDestroyItemPacket {
             }
             let mut count = self.count;
             if count <= 0 {
-                // SusManager.LogActivity(CategoryCheating, ...)
-                tracing::warn!(
+                // Every non-positive amount is a cheating report and destroys the whole stack
+                // (C# `CSDestroyItemPacket.cs:32`, `SusManager.CategoryCheating`).
+                let text = format!(
                     "CSDestroyItemPacket, player {} attempted to destroy a negative amount of items {count} for item: template {}, id {}",
                     p.data().unit.name,
                     item.template_id,
                     item.id
+                );
+                server.systems.services.sus.log_activity_player_deferred(
+                    server,
+                    crate::systems::services::sus::CATEGORY_CHEATING,
+                    Some(&p),
+                    &text,
                 );
                 count = item.count;
             }
