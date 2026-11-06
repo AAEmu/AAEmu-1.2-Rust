@@ -97,6 +97,9 @@ pub struct AppConfig {
     /// `Crafting` (recipe learning gate).
     #[serde(rename = "crafting")]
     pub crafting: crate::systems::economy::config::CraftingConfig,
+    /// `Ics` (`Configurations/Ics.json`: cash -> AA point exchange ratio).
+    #[serde(rename = "ics")]
+    pub ics: crate::systems::economy::config::IcsConfig,
     /// `Loot` (`Configurations/Loot.json`: party loot announcements).
     #[serde(rename = "loot")]
     pub loot: crate::systems::economy::config::LootAnnounceConfig,
@@ -180,6 +183,7 @@ impl Default for AppConfig {
             world: WorldConfig::default(),
             housing: Default::default(),
             crafting: Default::default(),
+            ics: Default::default(),
             loot: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
@@ -1647,6 +1651,8 @@ mod tests {
         assert_eq!(cfg.account.name_regex, "^[a-zA-Z0-9]{1,18}$");
         assert_eq!(cfg.scripts.load_strategy, LoadStrategyType::Reflection);
         assert_eq!(cfg.client_data.sources.len(), 4);
+        // Ics.json: the AA point exchange is off unless the operator sets a ratio.
+        assert_eq!(cfg.ics.aa_point_exchange_ratio, 0);
         // Events.json / Config.json: the Halloween window defaults to the yearly roll.
         assert!(cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "");
@@ -1782,6 +1788,17 @@ mod tests {
         }))
         .unwrap();
         assert!(cfg.loot.announce_to_party);
+    }
+
+    #[test]
+    fn ics_aa_point_exchange_ratio_defaults_off_and_binds_leniently() {
+        let cfg = AppConfig::from_value(json!({})).unwrap();
+        assert_eq!(cfg.ics.aa_point_exchange_ratio, 0);
+        let cfg = AppConfig::from_value(json!({
+            "Ics": { "AaPointExchangeRatio": "3" }
+        }))
+        .unwrap();
+        assert_eq!(cfg.ics.aa_point_exchange_ratio, 3);
     }
 
     #[test]

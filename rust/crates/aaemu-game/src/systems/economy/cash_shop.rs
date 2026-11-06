@@ -29,7 +29,7 @@ use crate::db::{self, AccountDetails};
 use crate::error::Result;
 use crate::models::container::slot_type;
 use crate::models::item::Item;
-use crate::models::item_task::task_type;
+use crate::models::item_task::{task_type, ItemTask};
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::{ClientPacket, PacketRegistry};
@@ -872,6 +872,40 @@ fn fail(buyer: &PlayerRef, error: i16, buy_mode: u8, target_name: &str) {
     });
 }
 
+/// Check-and-take AA points under one character lock. The wallet lives in memory, so there is
+/// no SQL guard to lean on: the check and the debit are one critical section, which is what
+/// keeps two concurrent takes from overdrawing. A short purse sends `short_error` (the caller's
+/// shop error, not the wallet API's 707) and changes nothing.
+pub(crate) fn take_aa_points(
+    out: &mut inventory::Out<'_>,
+    player: &PlayerRef,
+    amount: i32,
+    task: u8,
+    short_error: i16,
+) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    {
+        let mut c = player.data();
+        if i64::from(amount) > c.aa_point {
+            drop(c);
+            inventory::send_error_message_to(out, player, short_error);
+            return false;
+        }
+        c.aa_point -= i64::from(amount);
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks: vec![ItemTask::AaPointUpdate(-amount)],
+            force_remove: Vec::new(),
+        },
+    );
+    true
+}
+
 /// `DateTime.UtcNow`.
 fn utc_now() -> NaiveDateTime {
     Utc::now().naive_utc()
@@ -888,7 +922,7 @@ pub async fn execute_buy(
     let mgr = manager(server);
     let _purchase = mgr.purchases.lock().await;
     let store = mgr.store();
-    let (buyer_name, buyer_id, buyer_account, buyer_level, buyer_money) = {
+    let (buyer_name, buyer_id, buyer_account, buyer_level, buyer_money, buyer_aa_point) = {
         let c = buyer.data();
         (
             c.unit.name.clone(),
@@ -896,6 +930,7 @@ pub async fn execute_buy(
             c.account_id,
             c.unit.level,
             c.money,
+            c.aa_point,
         )
     };
     let (target_name, target_id, target_account) = {
@@ -917,16 +952,6 @@ pub async fn execute_buy(
     let mut costs = [0u32; currency::MAX as usize];
     let mut quantities = HashMap::<u32, u32>::new();
     for sku in cart {
-        // The 1.2 AA-point wallet is not implemented. It is distinct from bank money2.
-        if sku.currency == currency::AA_POINTS {
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL_AA_POINT,
-                buy_mode,
-                &target_name,
-            );
-            return;
-        }
         if sku.item_count == 0
             || sku.item_count > i32::MAX as u32
             || sku.bonus_item_count > i32::MAX as u32
@@ -1007,6 +1032,17 @@ pub async fn execute_buy(
         fail(
             buyer,
             error_message::NOT_ENOUGH_COIN,
+            buy_mode,
+            &target_name,
+        );
+        return;
+    }
+    // Check AA Points. This snapshot keeps the shop's error (592) and refuses before anything
+    // is created; the guarded take in the transaction loop re-checks under the wallet lock.
+    if i64::from(costs[currency::AA_POINTS as usize]) > buyer_aa_point {
+        fail(
+            buyer,
+            error_message::INGAME_SHOP_NOT_ENOUGH_AA_POINT,
             buy_mode,
             &target_name,
         );
@@ -1208,6 +1244,16 @@ pub async fn execute_buy(
                         task_type::STORE_BUY,
                     )
                 }
+                currency::AA_POINTS => {
+                    let mut txn = ItemTxn::begin(server);
+                    take_aa_points(
+                        &mut txn.out(),
+                        buyer,
+                        price,
+                        task_type::BUY_AA_POINT,
+                        error_message::INGAME_SHOP_NOT_ENOUGH_AA_POINT,
+                    )
+                }
                 _ => false,
             }
         };
@@ -1215,7 +1261,11 @@ pub async fn execute_buy(
             for item in &items {
                 server.ids.item.release_id(item.id as u32);
             }
-            send_error(buyer, error_message::INGAME_SHOP_BUY_FAIL);
+            // The AA take already reported its own (shop) error; the legacy paths report the
+            // generic buy failure.
+            if sku.currency != currency::AA_POINTS {
+                send_error(buyer, error_message::INGAME_SHOP_BUY_FAIL);
+            }
             continue;
         }
 
@@ -1313,8 +1363,44 @@ pub async fn execute_buy(
             }
         };
         if !sent {
-            // Sending this mail should actually never be able to fail.
+            // The grant failed: no goods left the shop, so return the currency and the stock
+            // reserved above. The debit and the grant must roll back together (the AA wallet
+            // included), as the stock-update failure path already does.
+            refund_checkout_price(
+                server,
+                store.as_ref(),
+                buyer,
+                buyer_account,
+                sku.currency,
+                price,
+            )
+            .await;
+            if shop_item.remaining >= 0 {
+                let restored = {
+                    let mut st = mgr.state();
+                    st.shop_items.get_mut(&shop_item.shop_id).map(|si| {
+                        si.remaining += sku.item_count as i32;
+                        si.remaining
+                    })
+                };
+                if let Some(remaining) = restored {
+                    if !store
+                        .update_remaining_stock(server, shop_item.shop_id, remaining)
+                        .await
+                    {
+                        tracing::error!(
+                            "Cash shop could not restore stock for {} after a failed grant",
+                            shop_item.shop_id
+                        );
+                    }
+                    buyer.send(SCICSSyncGoodPacket {
+                        cash_shop_id: shop_item.shop_id as i32,
+                        remain_count: remaining,
+                    });
+                }
+            }
             send_error(target, error_message::INGAME_SHOP_BUY_FAIL);
+            continue;
         }
 
         entries_sold += 1;
@@ -1402,6 +1488,10 @@ async fn refund_checkout_price(
                 price,
                 task_type::STORE_BUY,
             )
+        }
+        currency::AA_POINTS => {
+            let mut txn = ItemTxn::begin(server);
+            inventory::add_aa_point(&mut txn.out(), buyer, price, task_type::BUY_AA_POINT)
         }
         _ => false,
     };
@@ -1714,6 +1804,7 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSICSGoodsListPacket>(LEVEL_PLAIN, cs::CSICSGoodsListPacket);
     reg.register::<CSICSBuyGoodPacket>(LEVEL_PLAIN, cs::CSICSBuyGoodPacket);
     reg.register::<CSICSMoneyRequestPacket>(LEVEL_PLAIN, cs::CSICSMoneyRequestPacket);
+    reg.register::<CSICSBuyAAPointPacket>(LEVEL_PLAIN, cs::CSICSBuyAAPointPacket);
     super::premium_service::register(reg);
 }
 
@@ -1889,6 +1980,82 @@ impl ClientPacket for CSICSMoneyRequestPacket {
                 .await;
             conn.send(&SCICSCashPointPacket {
                 point: points.credits,
+            });
+            // The shop open sends the cash balance; the AA exchange dialog needs the ratio.
+            conn.send(&SCICSExchangeRatioPacket {
+                exchange_ratio: server.config.ics.aa_point_exchange_ratio,
+            });
+            Ok(())
+        })
+    }
+}
+
+/// `CSICSBuyAAPointPacket` (`i32 cashMoney`; client writer `FUN_397b17f0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CSICSBuyAAPointPacket {
+    pub cash_money: i32,
+}
+
+/// AA points for a cash purchase: both values must be positive and the `i64` product must fit
+/// the `i32` of the item task. `None` means "refuse, nothing debited".
+pub(crate) fn aa_points_for_cash(cash_money: i32, ratio: i32) -> Option<i32> {
+    if cash_money <= 0 || ratio <= 0 {
+        return None;
+    }
+    let aa_points = i64::from(cash_money).checked_mul(i64::from(ratio))?;
+    i32::try_from(aa_points).ok()
+}
+
+impl ClientPacket for CSICSBuyAAPointPacket {
+    const NAME: &'static str = "CSICSBuyAAPointPacket";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
+        Ok(Self {
+            cash_money: s.read_i32()?,
+        })
+    }
+
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let Some(buyer) = active(conn) else {
+                return Ok(());
+            };
+            let ratio = server.config.ics.aa_point_exchange_ratio;
+            // The reply form is INFERRED (no 1.2 capture): a refused exchange uses the shop's
+            // AA failure and leaves both balances untouched.
+            let Some(aa_points) = aa_points_for_cash(self.cash_money, ratio) else {
+                send_error(&buyer, error_message::INGAME_SHOP_BUY_FAIL_AA_POINT);
+                return Ok(());
+            };
+            let account_id = conn.account_id();
+            let store = manager(server).store();
+            // Guarded SQL debit (`credits >= ?` in the UPDATE), the same check-and-take the
+            // credit checkout uses.
+            if !store
+                .add_credits(server, account_id, -self.cash_money)
+                .await
+            {
+                send_error(&buyer, error_message::INGAME_SHOP_NOT_ENOUGH_AA_CASH);
+                return Ok(());
+            }
+            let mut wallet_out = inventory::Out::Direct(server);
+            if !inventory::add_aa_point(&mut wallet_out, &buyer, aa_points, task_type::BUY_AA_POINT)
+            {
+                // `aa_points` is positive, so this cannot fail; return the cash if it does.
+                store.add_credits(server, account_id, self.cash_money).await;
+                send_error(&buyer, error_message::INGAME_SHOP_BUY_FAIL_AA_POINT);
+                return Ok(());
+            }
+            let after = store.account_details(server, account_id).await;
+            buyer.send(SCICSCashPointPacket {
+                point: after.credits,
+            });
+            buyer.send(SCICSExchangeRatioPacket {
+                exchange_ratio: ratio,
             });
             Ok(())
         })

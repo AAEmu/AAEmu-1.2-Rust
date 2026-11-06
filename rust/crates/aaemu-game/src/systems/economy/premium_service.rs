@@ -38,9 +38,12 @@
 //! the payment fields are extended on the same row and the sale is audited in
 //! `audit_ics_sales`, then the transaction commits. The whole path runs under
 //! `AccountManager::lock_of` so the cached state and the packets of one account cannot interleave.
-//! Only the account columns `credits` and `loyalty` can be debited atomically with the grant;
-//! AA points have no balance carrier yet (WP-D) and are refused with error 775. A loyalty debit
-//! also updates the buyer's `bm_point` and sends `SCBmPointPacket` (the ICS loyalty path). A
+//! Only the account columns `credits` and `loyalty` are debited in the transaction. AA points
+//! are a per-character wallet (`characters.aa_point`), so an AA-priced service is taken through
+//! [`cash_shop::take_aa_points`] before the grant (check and debit under one character lock,
+//! error 775 when short) and returned if the grant fails; that pair is not crash-atomic. A
+//! loyalty debit also updates the buyer's `bm_point` and sends `SCBmPointPacket` (the ICS
+//! loyalty path). A
 //! permanent premium (`pay_end = 0`, including the configured default) is refused with 773
 //! before the debit: there is no end to extend. A row that still uses `Account:DefaultPayment`
 //! keeps `pay_method = 0`; only its purchased window (`pay_start` / `pay_end`) is stored, which
@@ -56,6 +59,9 @@
 //! * The state is published after the account lock is released. A concurrent GM `set_payment`
 //!   can publish in between, so the client may briefly show the purchase state after the GM
 //!   write until the next `SCAccountInfo`. The database row is the one that was written last.
+//! * An AA-priced purchase debits the in-memory wallet before the MySQL grant and refunds it
+//!   when the store refuses or fails. A process crash between the two steps keeps the AA debit
+//!   without the premium window (the wallet has no transaction spanning both stores).
 //! * There is no rate limit on `CSPremiumServiceBuy`; every packet is one charge.
 //! * A GM premium window that starts in the future is not premium yet and is replaced by
 //!   `now..now + hours` by a purchase (not extended).
@@ -72,6 +78,7 @@ use crate::config::DefaultPayment;
 use crate::db::{self, AccountDetails};
 use crate::error::Result;
 use crate::managers::account::AccountState;
+use crate::models::item_task::task_type;
 use crate::net::connection::{AccountPayment, GameConnection, PaymentMethodType};
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
@@ -215,12 +222,15 @@ impl CSPremiumServiceListPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let services = manager(server).services();
+        // The same configured cash -> AA ratio the cash shop sends, used by the client to
+        // render an AA-priced service (INFERRED: the 1.2 server value is UNKNOWN).
+        let exchange_ratio = server.config.ics.aa_point_exchange_ratio;
         if services.is_empty() {
             conn.send(&SCPremiumServiceListPacket {
                 is_end: true,
                 size: 0,
                 detail: PremiumDetail::default(),
-                exchange_ratio: 0,
+                exchange_ratio,
             });
             return;
         }
@@ -232,7 +242,7 @@ impl CSPremiumServiceListPacket {
                 is_end: index == last,
                 size,
                 detail: service.detail(),
-                exchange_ratio: 0,
+                exchange_ratio,
             });
         }
     }
@@ -479,6 +489,15 @@ fn send_error(buyer: &PlayerRef, error: i16) {
     inventory::send_error_message(buyer, error, 0, true);
 }
 
+/// Returns an AA-priced purchase's wallet debit when the MySQL grant did not happen.
+fn refund_aa(server: &GameServer, buyer: &PlayerRef, amount: i32) {
+    if amount <= 0 {
+        return;
+    }
+    let mut out = inventory::Out::Direct(server);
+    inventory::add_aa_point(&mut out, buyer, amount, task_type::BUY_PREMIUM_SERVICE);
+}
+
 /// Validates the service, runs the atomic debit + grant under the account lock, publishes the new
 /// state and answers with the evidenced `SCErrorMsg` result (see the module docs).
 pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> BuyOutcome {
@@ -510,17 +529,31 @@ pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> B
         return BuyOutcome::Refused;
     }
     let currency = service.price_type;
-    if currency == cash_shop::currency::AA_POINTS {
-        send_error(buyer, error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT);
-        return BuyOutcome::Refused;
-    }
-    if currency != cash_shop::currency::CREDITS && currency != cash_shop::currency::LOYALTY {
+    if currency != cash_shop::currency::CREDITS
+        && currency != cash_shop::currency::LOYALTY
+        && currency != cash_shop::currency::AA_POINTS
+    {
         tracing::warn!(
             "PremiumServiceBuy: service {} uses unsupported price type {currency}",
             service.c_id
         );
         send_error(buyer, error_message::PREMIUM_SERVICE_BUY_FAIL);
         return BuyOutcome::Refused;
+    }
+    let pays_aa = currency == cash_shop::currency::AA_POINTS && service.price > 0;
+    if pays_aa {
+        // The AA wallet is per character and lives in memory: take it under the one character
+        // lock before the grant, and return it below if the grant does not happen.
+        let mut wallet_out = inventory::Out::Direct(server);
+        if !cash_shop::take_aa_points(
+            &mut wallet_out,
+            buyer,
+            service.price,
+            task_type::BUY_PREMIUM_SERVICE,
+            error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT,
+        ) {
+            return BuyOutcome::InsufficientFunds;
+        }
     }
 
     let now = Utc::now().timestamp();
@@ -575,16 +608,24 @@ pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> B
         }
         PurchaseOutcome::InsufficientFunds => {
             drop(guard);
-            let error = if currency == cash_shop::currency::CREDITS {
-                error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_CASH
-            } else {
-                error_message::PREMIUM_SERVICE_BUY_FAIL
+            if pays_aa {
+                refund_aa(server, buyer, service.price);
+            }
+            let error = match currency {
+                cash_shop::currency::CREDITS => error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_CASH,
+                cash_shop::currency::AA_POINTS => {
+                    error_message::PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT
+                }
+                _ => error_message::PREMIUM_SERVICE_BUY_FAIL,
             };
             send_error(buyer, error);
             BuyOutcome::InsufficientFunds
         }
         PurchaseOutcome::PermanentPremium => {
             drop(guard);
+            if pays_aa {
+                refund_aa(server, buyer, service.price);
+            }
             tracing::info!(
                 "Account {account_id}: premium service {} refused, the account is permanently                  premium",
                 service.c_id
@@ -594,6 +635,9 @@ pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> B
         }
         PurchaseOutcome::Failed => {
             drop(guard);
+            if pays_aa {
+                refund_aa(server, buyer, service.price);
+            }
             send_error(buyer, error_message::PREMIUM_SERVICE_BUY_FAIL);
             BuyOutcome::Refused
         }
@@ -662,9 +706,12 @@ pub(crate) async fn purchase_sql_with_tables(
         premium_point: db::int(&row, "premium_point")? as i32,
         ..AccountDetails::default()
     };
+    // AA points are a character wallet taken by the caller before this transaction; the
+    // account row only records the grant and the sale for that currency.
     let (column, credits_balance, loyalty_balance) = match request.service.price_type {
-        cash_shop::currency::CREDITS => ("credits", true, false),
-        cash_shop::currency::LOYALTY => ("loyalty", false, true),
+        cash_shop::currency::CREDITS => (Some("credits"), true, false),
+        cash_shop::currency::LOYALTY => (Some("loyalty"), false, true),
+        cash_shop::currency::AA_POINTS => (None, false, false),
         _ => {
             tx.rollback().await?;
             return Ok(PurchaseOutcome::Failed);
@@ -692,19 +739,21 @@ pub(crate) async fn purchase_sql_with_tables(
         1
     };
     let price = request.service.price;
-    // Check and take in the same statement: a concurrent second buy matches zero rows.
-    let debit = sqlx::query(&format!(
-        "UPDATE {accounts_table} SET {column} = {column} - ? \
-         WHERE account_id = ? AND {column} >= ?"
-    ))
-    .bind(price)
-    .bind(account_id)
-    .bind(price)
-    .execute(&mut *tx)
-    .await?;
-    if debit.rows_affected() == 0 {
-        tx.rollback().await?;
-        return Ok(PurchaseOutcome::InsufficientFunds);
+    if let Some(column) = column {
+        // Check and take in the same statement: a concurrent second buy matches zero rows.
+        let debit = sqlx::query(&format!(
+            "UPDATE {accounts_table} SET {column} = {column} - ? \
+             WHERE account_id = ? AND {column} >= ?"
+        ))
+        .bind(price)
+        .bind(account_id)
+        .bind(price)
+        .execute(&mut *tx)
+        .await?;
+        if debit.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(PurchaseOutcome::InsufficientFunds);
+        }
     }
     let mut payment = extend_payment(&current, request.service.hours, request.now);
     payment.location = pay_location;

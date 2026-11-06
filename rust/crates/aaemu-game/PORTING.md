@@ -580,11 +580,44 @@ lock, make a negative balance impossible, and send `SCItemTaskSuccessPacket` wit
 (`ChangeAaPoint`) / 17 (`ChangeBankAaPoint`); a short purse sends `NOT_ENOUGH_AA_POINT` 707 /
 `NOT_ENOUGH_BANK_AA_POINT` 708. That the task amount is a **delta** is INFERRED from the client's
 task switch (`FUN_397d1030`), which applies 16 / 17 through the money path; a real-client display
-check is still pending (AA1-DELTA-1). Nothing spends AA points yet: cash-shop AA prices and the
-cash -> AA purchase stay refused (WP-AA2 / WP-AA3). `/aapoint <add|set|show> [bank] <amount>` is
+check is still pending (AA1-DELTA-1). The cash shop and the premium service shop spend AA points
+since WP-AA2 (below); the other AA consumers (repair, bank, taxes, stores, trades) stay open
+(WP-AA3). `/aapoint <add|set|show> [bank] <amount>` is
 the only source, a debug command: the 1.2 data has no player-reachable AA grant
 (`quest_act_supply_aa_points` has 0 rows). The kind-35 `AAPointMaxLimitByLevel` cap is not
 enforced (balance cap or per-period cap is UNKNOWN).
+
+#### Cash-shop AA prices and the cash -> AA purchase (WP-AA2, 2026-11-06)
+
+An AA-priced SKU (`ics_skus.currency = 1`) is now purchasable. The cart total is checked against
+the wallet before anything is created, and a short purse is refused with
+`INGAME_SHOP_NOT_ENOUGH_AA_POINT` 592 while nothing changes. The authoritative check-and-take runs
+in the transaction loop under one character lock (`CashShopBuyTask` pattern), inside the same
+`ItemTxn` as the coin path; if a concurrent spend makes it fail, the entry is refused with 592 and
+the allocated item ids are released. `SCICSBuyResultPacket.chargeAA` carries the cart's AA total
+(0 only when a pre-transaction check fails). The AA debit and the item grant roll back together:
+the commercial-mail grant failure path (the only failure after the debit) returns the currency and
+the reserved stock, as the stock-update failure path already did.
+
+`CSICSBuyAAPointPacket` 0x137 (`i32 cashMoney`; client writer `FUN_397b17f0`, sender
+`FUN_39187800`) is registered; the C# never registered it. The exchange is gated by the new
+configuration key `Ics:AaPointExchangeRatio` (`Configurations/Ics.json`, default **0** = off).
+With a ratio of 0, a negative ratio, a non-positive cash amount, an `i64` product outside `i32`
+or a short credit balance the request is refused with `INGAME_SHOP_BUY_FAIL_AA_POINT` 778 (short
+credits: `INGAME_SHOP_NOT_ENOUGH_AA_CASH` 591) and nothing is debited. With a positive ratio the
+credits are debited with the guarded SQL statement, `cashMoney * ratio` AA is credited, and the
+reply is `SCItemTaskSuccessPacket` task type `BUY_AA_POINT` 116 with `AaPointUpdate`,
+`SCICSCashPointPacket` with the new credits, then `SCICSExchangeRatioPacket`. The reply form is
+**INFERRED** (the client's buy dialog and `GetExchangeRatio` are read, but no 1.2 server reply was
+captured); the ratio value is **UNKNOWN** (server policy). `SCICSExchangeRatioPacket` 0x1d7 is
+sent right after `SCICSCashPointPacket` whenever the cash balance is sent on shop open
+(`CSICSMoneyRequestPacket`), and the premium service list carries the same configured ratio
+(INFERRED).
+
+The premium service shop now accepts an AA price: the wallet is charged before the MySQL grant
+(one character lock, `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when short) and refunded if the
+grant fails. The debit and the grant are not crash-atomic (the wallet is in memory, the grant in
+MySQL); a crash between them keeps the AA debit without the premium window.
 
 #### Item and craft notification packet definitions (2026-11-05)
 
@@ -4112,9 +4145,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   explicit premium (a `pay_method = 0` row with a stored window is premium, not the default
   payment). An explicit payment row becomes `Premium`. `premium_point` is
   `max(details.premium_point, premium_configs.connect_point).clamp(0, max_point)` - a stored
-  higher point is never lowered. Only credits and loyalty are debitable atomically with the
-  grant; AA points are still refused with error 775 (the per-character wallet exists since
-  WP-AA1, but this purchase path is not wired until WP-AA2), other currencies with 773. A loyalty debit also sets the buyer's `bm_point` and sends
+  higher point is never lowered. Credits and loyalty are debited in the transaction; an AA
+  price is taken from the per-character wallet before the grant (WP-AA2) and returned if the
+  grant fails, with `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775 when the wallet is short. Other
+  currencies are refused with 773. A loyalty debit also sets the buyer's `bm_point` and sends
   `SCBmPointPacket`. The buy result has no dedicated 1.2 SC: the client's error handler
   (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
   0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
@@ -5010,12 +5044,13 @@ Additional world-side fixes from the same audit:
 
 * Cash-shop checkout charges the effective discounted price, validates templates and checked
   cart totals before fulfillment, serializes stock updates, and uses guarded SQL credit and
-  loyalty debits. Gold still uses the inventory transaction path. The formerly free AA Points
-  branch still returns the existing failure (778) until WP-AA2 wires it to the wallet; the
-  per-character AA wallet now exists (`characters.aa_point` / `bank_aa_point`, WP-AA1, see the
-  economy section). `money2` is bank gold, not an AA Points balance. Unit flows and
-  private-MySQL tests cover failed debits, limits and concurrent overdraft attempts. Debit,
-  audit and commercial-mail delivery do not yet form one crash-atomic transaction/outbox.
+  loyalty debits. Gold still uses the inventory transaction path. AA-priced SKUs now debit the
+  per-character wallet (`characters.aa_point` / `bank_aa_point`, WP-AA1) under the same
+  one-character-lock rule and report `INGAME_SHOP_NOT_ENOUGH_AA_POINT` 592 when short (WP-AA2,
+  see the economy section). A failed grant refunds the AA debit. `money2` is bank gold, not an
+  AA Points balance. Unit flows and private-MySQL tests cover failed debits, limits and
+  concurrent overdraft attempts. Debit, audit and commercial-mail delivery do not yet form one
+  crash-atomic transaction/outbox.
 * Temporary USER chat channels implement the existing join/leave packets and packed eight-byte
   channel identity. Membership belongs to the current player session, chat requires that
   membership, and disconnect releases empty channels and ids. Emulator policy is server-global
