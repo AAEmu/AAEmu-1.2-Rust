@@ -192,7 +192,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Core/Managers/TimeManager` (+ `TimeOfDayObserver`) | `managers/time.rs` | done | `Get` / `Set` / `Stop` added (phase 4). Storm-ship time override (`ResolveClientTimeOfDayHours`) per observer (`subscribe_with`). |
 | `Core/Managers/SaveManager` | `managers/save.rs` | partial | Periodic + final save of items and online characters; the subsystems' rows through `systems::save_stage` (`BeforeItems`: houses, mails; `AfterItems`: auction, crimes; `AfterCharacters`: slaves). |
 | `Core/Managers/World/StreamManager` | `managers/stream.rs`, `stream/cells.rs` | done | AddToken/RemoveToken/Login (wrong account removes the token, as C#), RequestCell/ContinueCell incl. the C# `next - 1` copy off-by-one. |
-| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | done | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation, `CreateStamp` / `ApplyStamp` (`economy/item_effects.rs`, the `GainItemWithEmblemImprint` effect and `economy/bridges.rs`). **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's `consume_money` (and, for a custom image, the row's `consume_item_id` x `consume_count`, 1x 11127) — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The charge is the row's `consume_money` (50000 for 3038, 10000 for 1470; the old `UCC_PRICE` constant is gone); `confirm_default_ucc` re-checks money / reagent (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked money debit, the reagent consume (`ItemTaskType.IMPRINT_UCC`) and the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 (capture-pending):** whether a custom upload also costs money (the Lua info helper shows only the item) — the money charge is kept on that path as before. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. **Imprint validation (WP-U2, housing-farm-ucc#3 / tables-unused-2#10):** `ImprintUccEffect` refuses (`Outcome::Cancelled`, the existing missing-operand path, so the stamp and the target keep their UCCs and the skill keeps its reagent) when the target template is not a `ucc_applicables` kind-2 `actual_id` (80 shipped item rows) or when the stamp's UCC (`UccManager.get_ucc`) carries a non-zero `pattern1` / `pattern2` that is not an `emblem_patterns.id` (57 shipped rows). Kinds 1 (18 slave template ids) and 3 (30 flag doodad ids) are INFERRED and not enforced; the pattern id space is INFERRED (CAP-UCC-1). A table with no matching rows stays permissive (the pre-WP-U2 behaviour), so an older compact still loads. The other `tables-unused-2#10` tables (`world_groups`, `world_spec_configs`) stay documented-only in the no-package list. |
+| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | done | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation, `CreateStamp` / `ApplyStamp` (`economy/item_effects.rs`, the `GainItemWithEmblemImprint` effect and `economy/bridges.rs`). **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's cost for the upload kind the client selected — a default pattern's `consume_money` (50000 for 3038, 10000 for 1470) or a custom image's `consume_item_id` x `consume_count` (1x 11127 Crest Brainstorm) and **no money** — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The split is the client's own: `X2Ucc.GetMakeUccConsumeInfo` (`FUN_394b5e80`, x2game.dll.c:981806) returns item + count for a user image and otherwise formats the row's money, matching `ui_texts` 4206 "You need 1 Crest Brainstorm to create a custom crest." and 4207 "Crest Ink costs the following amount to craft". `confirm_default_ucc` re-checks the same cost (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked default-pattern money debit, or the custom-image reagent consume (`ItemTaskType.IMPRINT_UCC`) with no money, plus the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 resolved (2026-11-06 Part B reassessment, B9):** the client decompile shows a custom upload costs the item only; the C# money charge on that path is dropped. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. **Imprint validation (WP-U2, housing-farm-ucc#3 / tables-unused-2#10):** `ImprintUccEffect` refuses (`Outcome::Cancelled`, the existing missing-operand path, so the stamp and the target keep their UCCs and the skill keeps its reagent) when the target template is not a `ucc_applicables` kind-2 `actual_id` (80 shipped item rows) or when the stamp's UCC (`UccManager.get_ucc`) carries a non-zero `pattern1` / `pattern2` that is not an `emblem_patterns.id` (57 shipped rows). Kinds 1 (18 slave template ids) and 3 (30 flag doodad ids) are INFERRED and not enforced; the pattern id space is INFERRED (CAP-UCC-1). A table with no matching rows stays permissive (the pre-WP-U2 behaviour), so an older compact still loads. The other `tables-unused-2#10` tables (`world_groups`, `world_spec_configs`) stay documented-only in the no-package list. |
 | `Core/Managers/TimedRewardsManager` | `systems/services/timed_rewards.rs` | done | `TimedRewardsTask` every minute, daily login reward, offline labor. |
 | `Core/Managers/HousingManager`, `Models/Game/Housing` | `systems/housing/` | done | See "Phase 3 subsystems". |
 | `Core/Managers/CrimeManager` | `db_character.rs` | partial | CheckWantedThreshold thresholds only. |
@@ -6516,23 +6516,47 @@ Policy decisions / capture-pending (each also a case id in the code):
   A deleted character's pledges are never refunded and stay in the table for its id. Arena and
   instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
   these have 1.2 evidence; they are safe defaults.
-* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The empty `(0, 0)` list stays the
-  default: the C# comment records that a filled list broke the 1.2 client Lua, the cause was
-  never found and the row layout was only verified later (M10, reader `FUN_397bebf0`), so the
-  real-client check is **capture-pending**. `Social.BountyBoard` (default `false`, shipped in
-  `Configurations/Social.json`) enables the filled answer:
-  `SCBountyList{total, count, rows}` where `total` is every character with an unpaid pledge and
-  the rows are capped at the client's 20 entries (`0x14`, `MAX_BOUNTY_LIST_ENTRIES`), highest
-  total first (ties by character id; the order is a server policy, not client evidence, and only
-  decides which rows the cap keeps). Online rows read name, level, race, crime point, zone and
-  position from the live character with `is_live = true`; offline rows read the same fields plus
-  the arrest / trial counters from its `characters` row (`deleted = 0`) with `is_live = false`.
-  A missing or unreadable character row is skipped and no longer counted in `total`, so the
-  client can still complete its id-keyed row map. The row's `type` field (`+184` in the reader,
-  meaning UNKNOWN) is `1`, the value of the C# dummy row (C#-only); `seconds` is `0` (no 1.2
-  meaning known, no timer is invented). `total > count` only while more than 20 characters have
-  pledges. The switch must stay `false` until an original-client run (hidden client, bounty
-  board doodad) opens the board without a Lua error.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. A filled list still breaks the 1.2
+  client UI, and the 2026-11-06 real-client run (one wanted row, client log
+  `ArcheAge-bounty.log` lines 1077-1099) shows the cause is in the client's own
+  `usertrial/bounty_bullet.alb`, not in the row values:
+  * On every open it logs `?:6422 LocalizeUiText() expect parameter 4 of type String (Provided
+    type Number)`. `FillLeftFrame` (lines 42-43) calls
+    `locale.trial.trialChoice(tostring(record[12]), record[11])` and
+    `rulingChoice(tostring(record[14]), record[13])`; record 11/13 are the numeric
+    `acceptGuilty` / `notGuilty` counters built by the client's `GetBountyData`
+    (`FUN_39080c00` indexes 11 and 13, type tag 4 = number), and the wrappers
+    `baselib/locale_helper.alb:6418/6422` pass them as parameters 3/4 of
+    `X2Locale.LocalizeUiText`, which requires strings. The sibling trial scripts
+    `crime_records.alb` (0.17) and `bot_records.alb` (0.10) call `tostring()` on both counters;
+    `bounty_bullet.alb` omits the second one. No server field can turn a numeric row column into
+    a Lua string.
+  * Then it logs `?:115 attempt to index global 'listCtrl' (a nil value)`:
+    `bounty_bullet.alb` FillData line 115 calls `listCtrl.InsertData`, but no `.alb` in the
+    client ever assigns a global `listCtrl` (the page list owns `listCtrl` as
+    `wnd.listCtrl` / `pageListCtrl.listCtrl`, and the sibling scripts call
+    `pageListCtrl:InsertData`). The row insert therefore aborts for every row.
+  * Clicking a board button logs `?:53 attempt to compare number with nil`: the handler compares
+    the global `curSelected`, which is never assigned either; the selection handler updates the
+    `CUR_SELECTED` upvalue instead.
+  The board stays behind `Social.BountyBoard` (default `false`, shipped in
+  `Configurations/Social.json`) until the client script is fixed, because the real 1.2 client
+  cannot render the rows. When enabled, `SCBountyList{total, count, rows}` reports `total` as
+  every character with an unpaid pledge and caps the rows at the client's 20 entries (`0x14`,
+  `MAX_BOUNTY_LIST_ENTRIES`), highest total first (ties by character id; the order is a server
+  policy, not client evidence, and only decides which rows the cap keeps). Online rows read
+  name, level, race, faction, crime point, zone and position from the live character with
+  `is_live = true`; offline rows read the same fields plus the arrest / trial counters from its
+  `characters` row (`deleted = 0`) with `is_live = false`. A missing or unreadable character row
+  is skipped and no longer counted in `total`, so the client can still complete its id-keyed row
+  map. The row's `+0xb8` field (called `Type184` in the C#, whose dummy row sent `1`) is the
+  **faction id**: the client's `GetBountyData` record 9 feeds it to `FUN_392f8120(id, 1)` and
+  uses the result as the left frame's faction name (`FUN_39080c00`; the same call fills the
+  field literally named `"faction"` in `FUN_3907e830`). Online rows now send
+  `unit.faction_id`, offline rows `characters.faction_id`, instead of the C# dummy. `seconds`
+  is `0` (no 1.2 meaning known, no timer is invented). `total > count` only while more than 20
+  characters have pledges. The real-client check stays open until a client `bounty_bullet.alb`
+  that uses `pageListCtrl.listCtrl` and `tostring()` on both counters is available.
 
 * **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
   `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is
