@@ -66,6 +66,16 @@ pub struct HousingConfig {
     /// `Housing.SiegeShopGate`.
     #[serde(rename = "siegeshopgate", deserialize_with = "crate::config::lenient")]
     pub siege_shop_gate: bool,
+    /// Apply the 1.2 client's place-skin terrain material rule to player doodad placements:
+    /// the terrain material under the spot must be one of the template's
+    /// `doodad_place_skins` kinds, else `DOODAD_SIM_AREA` (276). `false` (default) keeps the
+    /// previous behaviour (no terrain material check). See `PORTING.md`.
+    /// `Housing.PlacementStrictSurface`.
+    #[serde(
+        rename = "placementstrictsurface",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub placement_strict_surface: bool,
 }
 
 fn default_dominion_claim_limit() -> u32 {
@@ -81,6 +91,7 @@ impl Default for HousingConfig {
             dominion_claim_limit: default_dominion_claim_limit(),
             defense_hq_offset: [0.0; 3],
             siege_shop_gate: false,
+            placement_strict_surface: false,
         }
     }
 }
@@ -146,6 +157,19 @@ mod tests {
             }))
             .unwrap();
             assert!(config.housing.siege_shop_gate);
+        }
+    }
+
+    #[test]
+    fn placement_strict_surface_defaults_off_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.placement_strict_surface);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "PlacementStrictSurface": value }
+            }))
+            .unwrap();
+            assert!(config.housing.placement_strict_surface);
         }
     }
 

@@ -179,7 +179,7 @@ impl Marshal for SCLpManagedPacket {
 /// Declares a C->S packet with a `Read` that only reads and logs.
 macro_rules! log_only_packet {
     ($name:ident, $level:ident, |$s:ident| $read:block) => {
-        #[doc = concat!("`", stringify!($name), "` (read and logged only, as in C#).")]
+        #[doc = concat!("`", stringify!($name), "` (read and logged only; client-local or diagnostic, see the comment at the use).")]
         #[derive(Debug, Clone, PartialEq)]
         pub struct $name(pub String);
 
@@ -239,12 +239,18 @@ impl ClientPacket for CSCleanupLogicLinkPacket {
         })
     }
 }
+// The client's console-command usage report. The server has no console and the 1.2 C#
+// handler only logged it; keep it at debug (`MISC-CS-1`, capture-pending if it ever needs an
+// answer).
 log_only_packet!(CSConsoleCmdUsedPacket, debug, |s| {
     format!(", Cmd: {}", s.read_string()?)
 });
-log_only_packet!(CSCriminalLockedPacket, warn, |s| {
+// The client's criminal-lock notice. It carries no server-side state the 1.2 server used
+// (the C# handler was log-only), so debug avoids warning on every notice.
+log_only_packet!(CSCriminalLockedPacket, debug, |s| {
     format!(", Id: {}", s.read_u32()?)
 });
+// The client's editor-mode toggle. Editor mode is client-local; the C# only logged it.
 log_only_packet!(CSEditorGameModePacket, debug, |s| {
     let on = s.read_bool()?;
     let _x = s.read_i64()?;
@@ -275,7 +281,19 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
-log_only_packet!(CSResturnAddrsPacket, warn, |s| {
+// The second password is not supported (owner decision 2026-11-06); both requests are
+// log-only like they were before the feature existed.
+log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
+    let _ = s;
+    String::new()
+});
+log_only_packet!(CSSetupSecondPassword, debug, |s| {
+    let _ = s;
+    String::new()
+});
+// The client's anti-cheat return-address report. The server does not use it (the C# handler
+// was log-only); debug keeps it out of the warning log (`MISC-CS-1`).
+log_only_packet!(CSResturnAddrsPacket, debug, |s| {
     let code_base = s.read_u32()?;
     let code_size = s.read_u32()?;
     let f = s.read_u32()?;
@@ -855,6 +873,11 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSEditorGameModePacket>(LEVEL_PLAIN, cs::CSEditorGameModePacket);
     reg.register::<CSRankCharacterPacket>(LEVEL_PLAIN, cs::CSRankCharacterPacket);
     reg.register::<CSRequestCharBriefPacket>(LEVEL_PLAIN, cs::CSRequestCharBriefPacket);
+    reg.register::<CSRequestSecondPasswordKeyTablesPacket>(
+        LEVEL_PLAIN,
+        cs::CSRequestSecondPasswordKeyTablesPacket,
+    );
+    reg.register::<CSSetupSecondPassword>(LEVEL_PLAIN, cs::CSSetupSecondPassword);
     reg.register::<CSResturnAddrsPacket>(LEVEL_PLAIN, cs::CSResturnAddrsPacket);
 }
 

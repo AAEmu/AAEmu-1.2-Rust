@@ -133,7 +133,12 @@ pub struct BountyDescription {
     pub crime_points: i16,
     pub is_live: bool,
     pub player_race: u8,
-    pub type184: i32,
+    /// The character's faction id. The client's `GetBountyData` builds Lua record field 9 (the
+    /// left frame's faction name) with `FUN_392f8120(id, 1)` (`FUN_39080c00` @ 0x39080c00); the
+    /// same call fills the field literally named `"faction"` in `FUN_3907e830`. The row offset
+    /// (+0xb8, reader `FUN_397bebf0`) was called `Type184` in the C# server, whose dummy row sent
+    /// 1.
+    pub faction_id: u32,
     pub arrest_count: i32,
     pub accept_guilty_count: i32,
     pub accept_trial_count: i32,
@@ -145,7 +150,7 @@ pub struct BountyDescription {
 impl BountyDescription {
     /// One entry of `SCBountyListPacket.Write` (`ConvertLongX` for both x and y; guilty is
     /// written after notGuilty: the 1.2 client row reader 397bebf0 reads notGuilty first; the C# order
-    /// was swapped).
+    /// was swapped). The `faction_id` is the u32 the client's faction-name lookup consumes.
     pub fn write(&self, s: &mut PacketStream) {
         s.write_u32(self.player_id)
             .write_str(&self.player_name)
@@ -158,7 +163,7 @@ impl BountyDescription {
             .write_i16(self.crime_points)
             .write_bool(self.is_live)
             .write_u8(self.player_race)
-            .write_i32(self.type184)
+            .write_u32(self.faction_id)
             .write_i32(self.arrest_count)
             .write_i32(self.accept_guilty_count)
             .write_i32(self.accept_trial_count)

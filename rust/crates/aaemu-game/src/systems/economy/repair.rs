@@ -33,20 +33,9 @@ pub struct RepairTarget {
 }
 
 /// `Character.DoRepair(items)` (`None` entries are the C# null items).
-pub fn do_repair(
-    server: &GameServer,
-    player: &PlayerRef,
-    items: &[Option<RepairTarget>],
-    auto_use_aa_point: bool,
-) {
+pub fn do_repair(server: &GameServer, player: &PlayerRef, items: &[Option<RepairTarget>]) {
     let inv = Inv::of(player);
-    let repaired = repair_in_containers(
-        server,
-        player,
-        items,
-        &[inv.bag(), inv.equipment()],
-        auto_use_aa_point,
-    );
+    let repaired = repair_in_containers(server, player, items, &[inv.bag(), inv.equipment()]);
     report_repaired(server, player, repaired.len());
     if let Some(hooks) = server.systems.economy.hooks.gear.get() {
         for (item, was_destroyed) in repaired {
@@ -75,16 +64,14 @@ fn repair_in_containers(
     player: &PlayerRef,
     items: &[Option<RepairTarget>],
     containers: &[ContainerRef],
-    auto_use_aa_point: bool,
 ) -> Vec<(Item, bool)> {
     let data = &server.game_data.items;
     let mut txn = ItemTxn::begin(server);
     let mut tasks = Vec::new();
     let mut repair_cost = 0i32;
-    let mut aa_cost = 0i32;
     let mut repaired = Vec::new();
-    // Items are only recorded here; they are changed after the gold / AA debit succeeded, so
-    // a refused payment never leaves a repaired item behind.
+    // Items are only recorded here; they are changed after the gold debit succeeded, so a
+    // refused payment never leaves a repaired item behind.
     let mut plan: Vec<(ContainerRef, u64, u8)> = Vec::new();
     for target in items.iter().flatten() {
         let id = target.item_id;
@@ -160,67 +147,15 @@ fn repair_in_containers(
             continue;
         };
         if money < i64::from(total_cost) {
-            if !auto_use_aa_point {
-                tracing::warn!(
-                    "Not enough money to repair, Item: {id}, Money: {money}, RepairCost: {cost}"
-                );
-                continue;
-            }
-            // The client asked to cover the gold shortage with AA points 1:1. The rule is
-            // INFERRED from the `ask_use_aa_point` text; nothing proves the rate or that only
-            // the shortage is charged. The whole repair is refused when the combined purses
-            // are short, so no item is repaired on a failed payment.
-            let shortage = i64::from(total_cost) - money;
-            let Ok(shortage) = i32::try_from(shortage) else {
-                tracing::warn!(
-                    "Not enough money or AA points to repair, Item: {id}, Money: {money}, RepairCost: {total_cost}"
-                );
-                inventory::send_error_message_to(
-                    &mut txn.out(),
-                    player,
-                    error_message::NOT_ENOUGH_MONEY,
-                );
-                plan.clear();
-                repair_cost = 0;
-                aa_cost = 0;
-                break;
-            };
-            let aa_point = player.data().aa_point;
-            if aa_point < i64::from(shortage) {
-                tracing::warn!(
-                    "Not enough money or AA points to repair, Item: {id}, Money: {money}, AAPoint: {aa_point}, RepairCost: {total_cost}"
-                );
-                inventory::send_error_message_to(
-                    &mut txn.out(),
-                    player,
-                    error_message::NOT_ENOUGH_MONEY,
-                );
-                plan.clear();
-                repair_cost = 0;
-                aa_cost = 0;
-                break;
-            }
-            aa_cost = shortage;
+            tracing::warn!(
+                "Not enough money to repair, Item: {id}, Money: {money}, RepairCost: {cost}"
+            );
+            continue;
         }
         plan.push((container.clone(), id, max));
         repair_cost = total_cost;
     }
-    if aa_cost > 0 {
-        // One guarded debit: the gold part and the AA part are checked and taken under one
-        // character lock, so a refusal cannot leave a partial charge. The gold part is what
-        // the planned items still owe after the AA part covers the shortage.
-        let gold_cost = repair_cost - aa_cost;
-        if !inventory::take_money_and_aa_point(
-            &mut txn.out(),
-            player,
-            slot_type::INVENTORY,
-            gold_cost,
-            aa_cost,
-            task_type::DEPOSIT_MONEY,
-        ) {
-            plan.clear();
-        }
-    } else if repair_cost > 0 {
+    let paid = if repair_cost > 0 {
         // ChangeMoney(SlotType.Inventory, -repairCost) (default task DepositMoney)
         inventory::change_money_at(
             &mut txn.out(),
@@ -228,16 +163,20 @@ fn repair_in_containers(
             slot_type::INVENTORY,
             -repair_cost,
             task_type::DEPOSIT_MONEY,
-        );
-    }
-    for (container, id, max) in plan {
-        let mut c = container.lock().expect("container poisoned");
-        if let Some(i) = c.get_item_by_id_mut(id) {
-            let was_destroyed = i.details.durability == 0;
-            i.details.durability = max;
-            i.dirty = true;
-            tasks.push(ItemTask::update(i));
-            repaired.push((i.clone(), was_destroyed));
+        )
+    } else {
+        true
+    };
+    if paid {
+        for (container, id, max) in plan {
+            let mut c = container.lock().expect("container poisoned");
+            if let Some(i) = c.get_item_by_id_mut(id) {
+                let was_destroyed = i.details.durability == 0;
+                i.details.durability = max;
+                i.dirty = true;
+                tasks.push(ItemTask::update(i));
+                repaired.push((i.clone(), was_destroyed));
+            }
         }
     }
     txn.out().send(
@@ -474,7 +413,6 @@ impl CSRepairSingleEquipmentPacket {
             server,
             &player,
             &[item.map(|i| RepairTarget { item_id: i.id })],
-            self.auto_use_aa_point,
         );
     }
 }
@@ -507,15 +445,15 @@ impl CSRepairAllEquipmentsPacket {
             .iter()
             .map(|i| Some(RepairTarget { item_id: i.id }))
             .collect();
-        do_repair(server, &player, &items, self.auto_use_aa_point);
+        do_repair(server, &player, &items);
     }
 }
 sync_client_packet!(CSRepairAllEquipmentsPacket);
 
 /// `CSChangeAutoUseAAPointPacket` (0x133): the client's "use AA points automatically" toggle
 /// (one bool, per Bevy RE notes). It sets the persisted `auto_use_aapoint` character flag, which
-/// `SCCharacterState` reports and is confirmed to the client with an item task; the repair and
-/// expansion packets carry their own copy of the flag.
+/// `SCCharacterState` reports and is confirmed to the client with an item task; the flag is not
+/// consulted by repairs or expansions yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSChangeAutoUseAAPointPacket {
     pub auto_use_aa_point: bool,

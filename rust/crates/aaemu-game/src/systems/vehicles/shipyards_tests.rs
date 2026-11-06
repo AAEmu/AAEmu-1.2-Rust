@@ -415,8 +415,7 @@ async fn shipyards_10_and_11_build_from_their_item_and_consume_it_exactly_once()
         100.0,
         0.5,
         DESIGN_10,
-        0,
-        false
+        0
     )
     .is_none());
     assert_eq!(server.systems.vehicles.shipyards.all().len(), 1);
@@ -432,7 +431,6 @@ async fn shipyards_10_and_11_build_from_their_item_and_consume_it_exactly_once()
         0.0,
         DESIGN_11,
         0,
-        false,
     )
     .expect("shipyard 11");
     assert_eq!(server.systems.vehicles.shipyards.all().len(), 2);
@@ -464,8 +462,7 @@ async fn wrong_missing_or_foreign_design_item_is_refused_and_kept() {
         100.0,
         0.0,
         DESIGN_11,
-        0,
-        false
+        0
     )
     .is_none());
     assert!(design_item_still_owned(&server, &player, DESIGN_11));
@@ -482,8 +479,7 @@ async fn wrong_missing_or_foreign_design_item_is_refused_and_kept() {
             100.0,
             0.0,
             design_item,
-            0,
-            false
+            0
         )
         .is_none());
         assert!(design_item_still_owned(&server, &player, DESIGN_11));
@@ -498,70 +494,6 @@ async fn wrong_missing_or_foreign_design_item_is_refused_and_kept() {
         .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
         .collect();
     assert_eq!(codes, vec![27, 27, 27]);
-}
-
-#[tokio::test]
-async fn aa_shortage_cover_builds_the_shipyard_and_refusals_keep_money_aa_and_item() {
-    use crate::models::item_task::{task_type, ItemTask};
-    use crate::net::registry::ClientPacket;
-
-    let mut d = shipyard_test_data();
-    d.systems.vehicles.taxations.insert(1, 5_000);
-    let server = shipyard_server_from(d);
-    let mut client = TestClient::new(&server, 1, 1);
-    let player = spawn_player(
-        &server,
-        &client,
-        test_character(1, "Owner", 100.0, 100.0),
-        0x00F0_1001,
-    );
-    client.conn.active_char = Some(player.clone());
-    give_design_item(&server, &player, DESIGN_10, 18124);
-    player.data().money = 1_000;
-    player.data().aa_point = 13_000;
-    client.drain();
-
-    // 1,000 gold + 4,000 AA cover the 5,000 taxation; the design is consumed exactly once.
-    let mut packet = shipyard_packet(SHIPYARD_10, DESIGN_10);
-    packet.auto_use_aa_point = true;
-    packet.handle(&server, &mut client.conn).await.unwrap();
-    assert_eq!(server.systems.vehicles.shipyards.all().len(), 1);
-    assert!(!design_item_still_owned(&server, &player, DESIGN_10));
-    assert_eq!(player.data().money, 0);
-    assert_eq!(player.data().aa_point, 9_000);
-    let expected = crate::systems::economy::tests::task_body(
-        task_type::SHIPYARD,
-        vec![
-            ItemTask::MoneyChange(-1_000),
-            ItemTask::AaPointUpdate(-4_000),
-        ],
-    );
-    assert!(client
-        .drain()
-        .iter()
-        .any(|(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket && *body == expected));
-
-    // Both purses short: refused before any item is consumed.
-    give_design_item(&server, &player, DESIGN_11, 18149);
-    player.data().money = 100;
-    player.data().aa_point = 100;
-    let mut packet = shipyard_packet(SHIPYARD_11, DESIGN_11);
-    packet.auto_use_aa_point = true;
-    packet.handle(&server, &mut client.conn).await.unwrap();
-    assert_eq!(server.systems.vehicles.shipyards.all().len(), 1);
-    assert!(design_item_still_owned(&server, &player, DESIGN_11));
-    assert_eq!(player.data().money, 100);
-    assert_eq!(player.data().aa_point, 100);
-
-    // Flag off: the AA wallet never pays for the shipyard wage.
-    player.data().aa_point = 100_000;
-    let mut packet = shipyard_packet(SHIPYARD_11, DESIGN_11);
-    packet.auto_use_aa_point = false;
-    packet.handle(&server, &mut client.conn).await.unwrap();
-    assert_eq!(server.systems.vehicles.shipyards.all().len(), 1);
-    assert!(design_item_still_owned(&server, &player, DESIGN_11));
-    assert_eq!(player.data().money, 100);
-    assert_eq!(player.data().aa_point, 100_000);
 }
 
 #[tokio::test]
@@ -587,7 +519,6 @@ async fn destroyed_shipyard_spawns_the_reward_doodads() {
         0.0,
         DESIGN_10,
         0,
-        false,
     )
     .expect("shipyard");
     let world = server.world.world(0).unwrap();
@@ -755,7 +686,6 @@ async fn origin_item_id_is_the_fallback_without_an_item_shipyards_row() {
         0.0,
         0x0000_0000_0000_9201,
         0,
-        false,
     )
     .expect("origin-item shipyard");
     assert!(!design_item_still_owned(
@@ -791,8 +721,7 @@ async fn real_use_skill_14879_requires_and_consumes_its_reagents() {
         100.0,
         0.0,
         DESIGN_10,
-        0,
-        false
+        0
     )
     .is_none());
     for item in [DESIGN_10, 0x0000_0000_0000_9301, 0x0000_0000_0000_9302] {
@@ -819,7 +748,6 @@ async fn real_use_skill_14879_requires_and_consumes_its_reagents() {
         0.0,
         DESIGN_10,
         0,
-        false,
     )
     .expect("shipyard with reagents");
     for item in [

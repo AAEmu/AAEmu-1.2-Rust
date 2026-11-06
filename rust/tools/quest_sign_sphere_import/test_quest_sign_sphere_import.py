@@ -20,6 +20,7 @@ from quest_sign_sphere_import import (  # noqa: E402
     parse_area_spheres,
     parse_quest_sign_spheres,
     plan,
+    to_world_entry,
 )
 
 QUEST = 1650
@@ -274,6 +275,30 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(len(result.kept), 1)
         self.assertEqual(result.kept[0]["source"], "quest_sign_sphere.g")
         self.assertEqual(result.kept[0]["radius_source"], "10x_client")
+
+
+class WorldConversionTest(unittest.TestCase):
+    def test_local_plus_source_origin_is_world(self) -> None:
+        entry = {
+            "quest_id": QUEST,
+            "component_id": COMPONENT,
+            "sphere_id": SPHERE,
+            "zone": ZONE,
+            "x": 10.0,
+            "y": 20.0,
+            "z": 30.0,
+            "radius": 5.0,
+        }
+        worlds12 = {"main_world": {ZONE: (12, 13)}}
+        worlds10 = {"main_world": {ZONE: (12, 12)}}
+        out = to_world_entry(entry, "main_world", worlds10, worlds12)
+        assert out is not None
+        self.assertEqual((out["x"], out["y"], out["z"]), (12 * 1024 + 10, 12 * 1024 + 20, 30))
+        # Without a 10.x frame the 1.2 origin is the fallback.
+        out = to_world_entry(entry, "main_world", {}, worlds12)
+        assert out is not None
+        self.assertEqual((out["x"], out["y"]), (12 * 1024 + 10, 13 * 1024 + 20))
+        self.assertIsNone(to_world_entry(entry, "main_world", {}, {}))
 
 
 class CollectTest(unittest.TestCase):

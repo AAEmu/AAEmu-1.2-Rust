@@ -78,9 +78,6 @@ pub struct AppConfig {
     /// `Characters` (Rust only: the lobby character-slot limit).
     #[serde(rename = "characters")]
     pub characters: CharactersConfig,
-    /// `SecondPassword` (1.2 second password and its account lock).
-    #[serde(rename = "secondpassword")]
-    pub second_password: SecondPasswordConfig,
     #[serde(rename = "labor")]
     pub labor: CurrencyValuesConfig,
     /// `LaborOffline` (labor granted per offline tick on login).
@@ -97,9 +94,6 @@ pub struct AppConfig {
     /// `Crafting` (recipe learning gate).
     #[serde(rename = "crafting")]
     pub crafting: crate::systems::economy::config::CraftingConfig,
-    /// `Ics` (`Configurations/Ics.json`: cash -> AA point exchange ratio).
-    #[serde(rename = "ics")]
-    pub ics: crate::systems::economy::config::IcsConfig,
     /// `Loot` (`Configurations/Loot.json`: party loot announcements).
     #[serde(rename = "loot")]
     pub loot: crate::systems::economy::config::LootAnnounceConfig,
@@ -184,7 +178,6 @@ impl Default for AppConfig {
             access_level: Vec::new(),
             account: AccountConfig::default(),
             characters: CharactersConfig::default(),
-            second_password: SecondPasswordConfig::default(),
             labor: CurrencyValuesConfig::default(),
             labor_offline: CurrencyValuesConfig::default(),
             credits: CurrencyValuesConfig::default(),
@@ -192,7 +185,6 @@ impl Default for AppConfig {
             world: WorldConfig::default(),
             housing: Default::default(),
             crafting: Default::default(),
-            ics: Default::default(),
             loot: Default::default(),
             quest: Default::default(),
             music: Default::default(),
@@ -492,32 +484,6 @@ impl Default for CharactersConfig {
         Self {
             max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
             pre_select_period: false,
-        }
-    }
-}
-
-/// `SecondPassword` (Rust only: the 1.2 virtual-keyboard second password, WP-A).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct SecondPasswordConfig {
-    /// Enables the feature and its `Feature::Secondpass` / `IngameshopSecondpass` bits.
-    #[serde(rename = "enabled", deserialize_with = "lenient")]
-    pub enabled: bool,
-    /// Consecutive failed checks before the account is locked. `0` is refused at load: the
-    /// feature cannot run without a lock (owner decision, 2026-11-03).
-    #[serde(rename = "maxfailcount", deserialize_with = "lenient")]
-    pub max_fail_count: u8,
-    /// How long a locked account refuses checks (minutes, at least 1: `0` is refused at load).
-    #[serde(rename = "lockminutes", deserialize_with = "lenient")]
-    pub lock_minutes: u32,
-}
-
-impl Default for SecondPasswordConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_fail_count: 5,
-            lock_minutes: 10,
         }
     }
 }
@@ -897,7 +863,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 35] = [
+const TOP_LEVEL_KEYS: [&str; 34] = [
     "physics",
     "featureset",
     "id",
@@ -918,7 +884,6 @@ const TOP_LEVEL_KEYS: [&str; 35] = [
     "accesslevel",
     "account",
     "characters",
-    "secondpassword",
     "labor",
     "laboroffline",
     "credits",
@@ -985,17 +950,6 @@ impl AppConfig {
         let access_level = access_levels(&value)?;
         let mut cfg: Self =
             serde_json::from_value(lowercase_keys(value)).map_err(ConfigError::Bind)?;
-        if cfg.second_password.max_fail_count == 0 {
-            return Err(ConfigError::Bind(de::Error::custom(
-                "SecondPassword:MaxFailCount must be at least 1: a second password without a \
-                 lock cannot protect the account",
-            )));
-        }
-        if cfg.second_password.lock_minutes == 0 {
-            return Err(ConfigError::Bind(de::Error::custom(
-                "SecondPassword:LockMinutes must be at least 1: a second password without a lock cannot protect the account",
-            )));
-        }
         cfg.access_level = access_level;
         Ok(cfg)
     }
@@ -1693,8 +1647,6 @@ mod tests {
         assert_eq!(cfg.account.name_regex, "^[a-zA-Z0-9]{1,18}$");
         assert_eq!(cfg.scripts.load_strategy, LoadStrategyType::Reflection);
         assert_eq!(cfg.client_data.sources.len(), 4);
-        // Ics.json: the AA point exchange is off unless the operator sets a ratio.
-        assert_eq!(cfg.ics.aa_point_exchange_ratio, 0);
         // Events.json / Config.json: the Halloween window defaults to the yearly roll.
         assert!(cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "");
@@ -1870,17 +1822,6 @@ mod tests {
         }))
         .unwrap();
         assert!(cfg.loot.announce_to_party);
-    }
-
-    #[test]
-    fn ics_aa_point_exchange_ratio_defaults_off_and_binds_leniently() {
-        let cfg = AppConfig::from_value(json!({})).unwrap();
-        assert_eq!(cfg.ics.aa_point_exchange_ratio, 0);
-        let cfg = AppConfig::from_value(json!({
-            "Ics": { "AaPointExchangeRatio": "3" }
-        }))
-        .unwrap();
-        assert_eq!(cfg.ics.aa_point_exchange_ratio, 3);
     }
 
     #[test]

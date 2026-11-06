@@ -2091,10 +2091,10 @@ fn real_data_sphere_areas_load_the_guarded_1_2_table() {
     }
     let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
     let areas = load_sphere_areas(&app, |id| known.contains(&id));
-    assert_eq!(areas.len(), 2113);
+    assert_eq!(areas.len(), 2112);
     assert_eq!(
         areas.iter().filter(|a| a.world == "main_world").count(),
-        1914
+        1913
     );
     assert_eq!(
         areas

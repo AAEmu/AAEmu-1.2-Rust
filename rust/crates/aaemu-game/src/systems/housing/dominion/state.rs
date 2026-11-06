@@ -69,25 +69,6 @@ impl Treasury {
     }
 }
 
-/// Books property revenue into the purse it was paid from. See
-/// [`DominionManager::credit_property_tax_with`] for the INFERRED rule.
-fn property_credit(
-    amount: i32,
-    payment: crate::systems::economy::inventory::PaymentSplit,
-) -> Treasury {
-    let total = payment.total();
-    let aa_point = if total <= 0 {
-        0
-    } else {
-        (i64::from(amount) * i64::from(payment.aa_point) / total) as i32
-    };
-    Treasury {
-        cur_house_tax_money: amount - aa_point,
-        cur_house_tax_aa_point: aa_point,
-        ..Treasury::default()
-    }
-}
-
 /// Database state, not the native client's phase enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -2135,20 +2116,12 @@ impl DominionManager {
     }
 
     /// Preflight the exact current ownership/rate and ledger capacity before charging. The
-    /// callback follows authority -> economy lock order, must not call this manager and returns
-    /// the wallet composition of the payment (`None` refuses the whole charge). Ledger capacity
-    /// is checked for the full revenue in either of the two house-tax columns before the
-    /// charge; the actual split can only use less.
-    ///
-    /// INFERRED: a payment made partly or wholly in AA points books its AA share of the
-    /// property revenue in `cur_house_tax_aa_point` and the rest in `cur_house_tax_money`
-    /// (the proportions of the payment). `peace_tax_aa_point` stays untouched like
-    /// `peace_tax_money`, because no gold Peace Fund accrual is defined.
+    /// callback follows authority -> economy lock order and must not call this manager.
     pub fn credit_property_tax_with(
         &self,
         expected: &DominionState,
         amount: i32,
-        charge: impl FnOnce() -> Option<crate::systems::economy::inventory::PaymentSplit>,
+        charge: impl FnOnce() -> bool,
     ) -> Result<DominionState, DominionError> {
         if amount < 0 {
             return Err(DominionError::InvalidTreasury);
@@ -2168,21 +2141,17 @@ impl DominionManager {
         {
             return Err(DominionError::StaleTaxQuote);
         }
-        state
+        let treasury = state
             .treasury
             .checked_add(Treasury {
                 cur_house_tax_money: amount,
-                cur_house_tax_aa_point: amount,
                 ..Treasury::default()
             })
             .ok_or(DominionError::InvalidTreasury)?;
         let revision = (amount != 0).then(|| next_revision(&inner)).transpose()?;
-        let payment = charge().ok_or(DominionError::Resources)?;
-        let credit = property_credit(amount, payment);
-        let treasury = state
-            .treasury
-            .checked_add(credit)
-            .ok_or(DominionError::InvalidTreasury)?;
+        if !charge() {
+            return Err(DominionError::Resources);
+        }
         if let Some(revision) = revision {
             state.treasury = treasury;
             replace(&mut inner, state.clone(), revision);

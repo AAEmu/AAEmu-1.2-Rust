@@ -133,8 +133,9 @@ pub fn load_sphere_areas(app_path: &Path, known_sphere: impl Fn(u32) -> bool) ->
 
 /// Reads every `<app_path>/Data/Worlds/*/quest_sign_sphere_fill.json` (the 10.x-derived
 /// geometry of `Docs/wiki/Quest-Audit.md` quests that the 1.2 client pack has no sign sphere
-/// for). The file is written by `rust/tools/quest_sign_sphere_import`; its rows are zone-local
-/// coordinates, like the client `quest_sign_sphere.g` areas.
+/// for). The file is written by `rust/tools/quest_sign_sphere_import`; unlike the client
+/// `quest_sign_sphere.g` areas its rows already hold world coordinates (`origin * 1024 + local`
+/// was applied offline by the converter).
 ///
 /// Runtime data-version guards, repeated here so a stale or hand-edited data file cannot
 /// inject a sphere the loaded 1.2 data does not know:
@@ -283,6 +284,8 @@ pub fn load_sign_sphere_fill(
                     zone_id: zone,
                     quest_id,
                     component_id,
+                    // The fill file is world coordinates; `Spheres::load` must not add a zone
+                    // origin again.
                     local: [x as f32, y as f32, z as f32],
                     radius: radius as f32,
                 },
@@ -333,6 +336,25 @@ struct Spheres {
     basic: Vec<SphereQuestStarter>,
 }
 
+fn push_sphere(s: &mut Spheres, sphere_world: &str, r: &RawSignSphere, xyz: (f32, f32, f32)) {
+    let sphere = SphereQuest {
+        zone_id: r.zone_id,
+        world_id: sphere_world.to_string(),
+        quest_id: r.quest_id,
+        component_id: r.component_id,
+        radius: r.radius,
+        xyz,
+    };
+    match s
+        .by_component
+        .iter_mut()
+        .find(|(c, _)| *c == r.component_id)
+    {
+        Some((_, v)) => v.push(sphere),
+        None => s.by_component.push((r.component_id, vec![sphere])),
+    }
+}
+
 #[derive(Debug, Default)]
 struct Triggers {
     list: Vec<SphereQuestTrigger>,
@@ -360,6 +382,9 @@ pub struct SphereQuestManager {
 impl SphereQuestManager {
     /// `LoadQuestSpheres` (zone-local -> world coordinates with the zone origin cells) +
     /// `Load` (quest starters). `origin(zone)` is `ZoneManager.GetZoneOriginCell`.
+    ///
+    /// `raw` are the 1.2 client `quest_sign_sphere.g` rows (zone-local). `fill` rows are already
+    /// world coordinates (the converter applied the origin cell), so no origin is added to them.
     pub fn load(
         &self,
         data: &QuestData,
@@ -369,30 +394,26 @@ impl SphereQuestManager {
         origin: impl Fn(u32) -> (i32, i32),
     ) {
         let mut s = Spheres::default();
-        let client = raw.iter().map(|r| (world_name, r));
-        let imported = fill.iter().map(|(w, r)| (w.as_str(), r));
-        for (sphere_world, r) in client.chain(imported) {
+        for r in raw {
             let (ox, oy) = origin(r.zone_id);
-            let sphere = SphereQuest {
-                zone_id: r.zone_id,
-                world_id: sphere_world.to_string(),
-                quest_id: r.quest_id,
-                component_id: r.component_id,
-                radius: r.radius,
-                xyz: (
+            push_sphere(
+                &mut s,
+                world_name,
+                r,
+                (
                     ox as f32 * 1024.0 + r.local[0],
                     oy as f32 * 1024.0 + r.local[1],
                     r.local[2],
                 ),
-            };
-            match s
-                .by_component
-                .iter_mut()
-                .find(|(c, _)| *c == r.component_id)
-            {
-                Some((_, v)) => v.push(sphere),
-                None => s.by_component.push((r.component_id, vec![sphere])),
-            }
+            );
+        }
+        for (sphere_world, r) in fill {
+            push_sphere(
+                &mut s,
+                sphere_world,
+                r,
+                (r.local[0], r.local[1], r.local[2]),
+            );
         }
         // Link quest starters to spheres
         for (component_id, list) in &s.by_component {
