@@ -110,12 +110,14 @@ pub struct DbSphereQuest {
 }
 
 /// One `area` block of a `quest_sign_sphere.g` file, in zone-local coordinates (converted to
-/// world coordinates by the sphere manager, which has the world templates).
+/// world coordinates by the sphere manager, which has the world templates). A row read from an
+/// imported `quest_sign_sphere_fill.json` instead already holds world coordinates in `local`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawSignSphere {
     pub zone_id: u32,
     pub quest_id: u32,
     pub component_id: u32,
+    /// Zone-local for a client row; world for an imported fill row.
     pub local: [f32; 3],
     pub radius: f32,
 }
