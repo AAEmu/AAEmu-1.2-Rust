@@ -81,6 +81,7 @@ pub mod reload_configs;
 pub mod rename;
 pub mod resend_house_tax_mail;
 pub mod reset_skill_cooldowns;
+pub mod restrict_chat;
 pub mod retail;
 pub mod revive;
 pub mod rotate;
@@ -562,6 +563,11 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         (&["set_jury"], Arc::new(set_jury::SetJury::new(env))),
         (&["imprison"], Arc::new(imprison::Imprison::new(env))),
+        // Retail chat mute (WP-SL4b: the 1.2 client knows the name; Rust only)
+        (
+            &["restrict_chat"],
+            Arc::new(restrict_chat::RestrictChat::new(env)),
+        ),
         // Retail GM auction commands (names from the 1.2 client; Rust only)
         (
             &["auction_post_siege_items", "auction_post_siege"],

@@ -8,7 +8,7 @@ use crate::opcodes::{cs, sc};
 use crate::packets::raw_body_packet;
 use crate::packets::world::SCChatMessagePacket;
 use crate::systems::social::{
-    chat::{chat_type, ChatChannel},
+    chat::{chat_refusal, chat_type, send_chat_refusal, ChatChannel},
     util::send_chat_failure,
 };
 use aaemu_commons::{Marshal, PacketStream};
@@ -130,7 +130,23 @@ pub async fn send_user_chat(
             return;
         }
     }
-    let sender = crate::world::session::chat_sender(&p.data(), p.obj_id);
+    // SL4b: the user-channel input is the other outgoing chat path (`chat_type::USER` 15), so
+    // the same level gate / mute check applies. The sender identity and the refusal share one
+    // character lock.
+    let (sender, refusal) = {
+        let mut c = p.data();
+        let refusal = chat_refusal(
+            &server.config.chat,
+            &mut c,
+            chat_type::USER,
+            chrono::Utc::now().timestamp(),
+        );
+        (crate::world::session::chat_sender(&c, p.obj_id), refusal)
+    };
+    if let Some(refusal) = refusal {
+        send_chat_refusal(&p, refusal);
+        return;
+    }
     let message = SCChatMessagePacket {
         chat_type: chat_type::USER,
         sender: Some(sender),

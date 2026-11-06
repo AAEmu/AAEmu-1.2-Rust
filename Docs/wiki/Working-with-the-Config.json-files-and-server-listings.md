@@ -645,11 +645,23 @@ They ship in `Configurations/Chat.json` and can be overridden in
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `ChatFailedPacket` | `false` | Answer channel-bound chat failures with `SCChatFailedPacket(error, channel name)` instead of the `SCErrorMsgPacket` toast: the user-channel join / leave / message errors, and the "not in party / raid / expedition / family" errors. Every other chat failure keeps `SCErrorMsgPacket`. `false` keeps the previous frames. |
+| `MinLevelByChatType` | `{}` | Minimum character level per chat type (`"0"` Say, `"1"` Shout, `"-3"` Whisper; a missing entry or `0` means no gate). A sender below the level is refused with error 786 and the message is not routed; characters with `access_level >= 100` are exempt. |
 
 **Capture-pending:** which failures retail 1.2 sent as `SCChatFailed` is
 unknown. Keep `ChatFailedPacket` off until a capture of the original server
 shows the form it used. The packet layout and the open question are recorded
-in `rust/crates/aaemu-game/PORTING.md` (CHAT-FAILED-1).
+in `rust/crates/aaemu-game/PORTING.md` (CHAT-FAILED-1). The retail per-chat-type
+levels are unknown too, so `MinLevelByChatType` ships empty (CHAT-LEVEL-1).
+
+### Chat mute (`/restrict_chat`)
+
+The retail GM command `/restrict_chat <character> [minutes]` mutes an online
+or offline character for the given number of minutes (default 60; `0` lifts
+the mute). The retail argument shape is unknown, so the duration and the
+default are assumed. The mute is stored in `characters.chat_restricted_until`
+(UTC), survives restarts, and expires automatically. A muted sender's message
+is not routed and a plain system message tells them they are muted; the retail
+mute error is unknown (CHAT-RESTRICT-1).
 
 ## Loot announcements (`Configurations/Loot.json`)
 

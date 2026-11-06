@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS `characters` (
   `rez_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `rez_penalty_duration` int NOT NULL,
   `leave_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
+  `chat_restricted_until` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `money` bigint NOT NULL DEFAULT '0',
   `money2` bigint NOT NULL DEFAULT '0',
   `aa_point` bigint NOT NULL DEFAULT '0',

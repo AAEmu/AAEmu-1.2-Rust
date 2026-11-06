@@ -41,6 +41,7 @@ const CHARACTER_COLUMNS: &str = "CAST(id AS SIGNED) AS id, CAST(account_id AS SI
      faction_name, CAST(expedition_id AS SIGNED) AS expedition_id, CAST(family AS SIGNED) AS family, \
      CAST(dead_count AS SIGNED) AS dead_count, dead_time, CAST(rez_wait_duration AS SIGNED) AS rez_wait_duration, \
      rez_time, CAST(rez_penalty_duration AS SIGNED) AS rez_penalty_duration, leave_time, \
+     chat_restricted_until, \
      CAST(money AS SIGNED) AS money, CAST(money2 AS SIGNED) AS money2, \
      CAST(aa_point AS SIGNED) AS aa_point, CAST(bank_aa_point AS SIGNED) AS bank_aa_point, \
      CAST(honor_point AS SIGNED) AS honor_point, \
@@ -190,6 +191,7 @@ pub async fn load_character(
     c.rez_time = unix(dt(&row, "rez_time"));
     c.rez_penalty_duration = int(&row, "rez_penalty_duration")? as i32;
     c.leave_time = unix(dt(&row, "leave_time"));
+    c.chat_restricted_until = unix(dt(&row, "chat_restricted_until"));
     c.money = int(&row, "money")?;
     c.money2 = int(&row, "money2")?;
     c.aa_point = int(&row, "aa_point")?;
@@ -998,14 +1000,14 @@ pub async fn save_character(
         (`id`,`account_id`,`name`,`access_level`,`race`,`gender`,`unit_model_params`,`level`,`experience`,`recoverable_exp`,\
         `hp`,`mp`,`consumed_lp`,`ability1`,`ability2`,`ability3`,\
         `world_id`,`zone_id`,`x`,`y`,`z`,`roll`,`pitch`,`yaw`,\
-        `faction_id`,`faction_name`,`expedition_id`,`family`,`dead_count`,`dead_time`,`rez_wait_duration`,`rez_time`,`rez_penalty_duration`,`leave_time`,\
+        `faction_id`,`faction_name`,`expedition_id`,`family`,`dead_count`,`dead_time`,`rez_wait_duration`,`rez_time`,`rez_penalty_duration`,`leave_time`,`chat_restricted_until`,\
         `money`,`money2`,`aa_point`,`bank_aa_point`,`honor_point`,`vocation_point`,`crime_point`,`crime_record`,`jury_point`,\
         `hostile_faction_kills`,`pvp_honor`,`died_in_pvp`,`died_in_pvp_war_zone`,\
         `delete_request_time`,`transfer_request_time`,`delete_time`,`auto_use_aapoint`,`prev_point`,`point`,`gift`,\
         `num_inv_slot`,`num_bank_slot`,`expanded_expert`,`slots`,`created_at`,`updated_at`,`return_district`,`online_time`,\
         `arrest_count`, `accept_guilty_count`, `accept_trial_count`, `not_guilty_count`, `guilty_count`, `evidence_reported_count`, `bot_reported_count`, `reported_as_bot_count`,\
         `offline_guilty_time`,`offline_guilty_region`) VALUES \
-        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
+        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
     )
     .bind(c.id)
     .bind(c.account_id)
@@ -1041,6 +1043,7 @@ pub async fn save_character(
     .bind(from_unix(c.rez_time))
     .bind(c.rez_penalty_duration)
     .bind(from_unix(c.leave_time))
+    .bind(from_unix(c.chat_restricted_until))
     .bind(c.money)
     .bind(c.money2)
     .bind(c.aa_point)
@@ -1783,6 +1786,68 @@ mod tests {
             .unwrap()
             .expect("saved character");
         assert_eq!((loaded.aa_point, loaded.bank_aa_point), (4_321, 24));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_chat_restriction_survives_character_reload() {
+        use crate::test_support::{test_character, test_server_with};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let mut server = test_server_with(crate::data::GameData::empty());
+        server.db = pool.clone();
+
+        let until = Utc::now().timestamp() + 3_600;
+        let mut character = test_character(1, "ChatRestrict", 100.0, 100.0);
+        character.account_id = 1;
+        character.created = Utc::now().timestamp();
+        character.chat_restricted_until = until;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let saved: chrono::NaiveDateTime =
+            sqlx::query_scalar("SELECT `chat_restricted_until` FROM `characters` WHERE `id` = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unix(Some(saved)), until);
+
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!(loaded.chat_restricted_until, until);
+
+        character.chat_restricted_until = 0;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!(loaded.chat_restricted_until, 0);
         pool.close().await;
     }
 

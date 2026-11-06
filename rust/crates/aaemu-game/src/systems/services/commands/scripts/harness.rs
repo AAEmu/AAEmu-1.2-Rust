@@ -19,7 +19,17 @@ use super::ScriptEnv;
 /// A server with `data`, every subsystem's hooks (as `systems::start_all` installs them) and
 /// the command scripts loaded (`ScriptReflector.Reflect`).
 pub fn server_with(data: GameData) -> Arc<GameServer> {
-    let server = Arc::new(test_server_with(data));
+    wire(Arc::new(test_server_with(data)))
+}
+
+/// [`server_with`] with a caller database pool, for the MySQL-gated command tests.
+pub fn server_with_db(data: GameData, db: sqlx::MySqlPool) -> Arc<GameServer> {
+    let mut server = test_server_with(data);
+    server.db = db;
+    wire(Arc::new(server))
+}
+
+fn wire(server: Arc<GameServer>) -> Arc<GameServer> {
     server.set_self();
     crate::systems::skills::bind(&server);
     crate::systems::npcs::install_hooks(&server);
