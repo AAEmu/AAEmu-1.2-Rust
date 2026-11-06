@@ -1592,6 +1592,12 @@ fn owned_ucc_items(
 
 /// `ImprintUccEffect.Apply` (stamp a UCC onto an item). The caller supplies the caster and
 /// cancels rejected effects before the skill's subsequent reagent consumption.
+///
+/// WP-U2: the target template must be a `ucc_applicables` kind-2 item and the stamp UCC's
+/// non-zero patterns must be `emblem_patterns` ids. Both checks are permissive when the table
+/// has no rows (the pre-WP-U2 behaviour); a UCC id with no loaded `uccs` row carries no known
+/// patterns and is accepted. A refusal is the existing `Outcome::Cancelled` path, so the stamp
+/// and the target keep their UCCs and the skill keeps its reagent.
 pub fn imprint_ucc(
     server: &GameServer,
     target: Option<&PlayerRef>,
@@ -1607,11 +1613,30 @@ pub fn imprint_ucc(
     let Some((stamp_item, holder)) = ucc_operands(player, stamp, stamp_item, target_id) else {
         return Outcome::Cancelled;
     };
+    let ucc_data = &server.game_data.systems.economy.ucc;
+    if let Some(ucc) = server.streams.ucc.get_ucc(stamp_item.ucc_id) {
+        for (field, pattern) in [("pattern1", ucc.pattern1), ("pattern2", ucc.pattern2)] {
+            if !ucc_data.pattern_exists(pattern) {
+                tracing::warn!(
+                    "ImprintUccEffect refused: UCC {} {field} {pattern} is not an emblem_patterns id",
+                    ucc.id
+                );
+                return Outcome::Cancelled;
+            }
+        }
+    }
     let target_item = {
         let mut container = lock(&holder);
         let Some(target_item) = container.get_item_by_id_mut(target_id) else {
             return Outcome::Cancelled;
         };
+        if !ucc_data.accepts_imprint(target_item.template_id) {
+            tracing::warn!(
+                "ImprintUccEffect refused: item template {} does not accept a UCC imprint",
+                target_item.template_id
+            );
+            return Outcome::Cancelled;
+        }
         apply_stamp(&stamp_item, target_item);
         target_item.clone()
     };
