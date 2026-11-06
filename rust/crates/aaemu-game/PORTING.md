@@ -602,6 +602,17 @@ item is refused whole (a deviation from the C# gold-only loop, which repairs onl
 gold covers). With the flag false both packets behave exactly as before. The AA task amount is
 a delta (see the wallet section above).
 
+`CSDepositMoneyPacket` / `CSWithdrawMoneyPacket` carry an `aa_point` amount next to the gold
+amount (WP-AA3b). An AA deposit moves the carried AA purse to the bank purse and an AA
+withdrawal moves it back, in the same direction as the gold amount; the direction is INFERRED
+from the packet's own gold semantics (AA3-PURSE-1). Both the gold and the AA checks and moves
+run under one character lock (`inventory::transfer_bank_money_and_aa_point`), so a short gold
+or AA purse changes neither; the AA errors are `NOT_ENOUGH_AA_POINT` 707 (carried) and
+`NOT_ENOUGH_BANK_AA_POINT` 708 (bank), while a short gold purse keeps `NOT_ENOUGH_MONEY` 26.
+With `aa_point = 0` the handler takes the unchanged `ChangeMoney` path. Mail AA attachments
+(`SCAttachmentTaken.aa_point`, `CSSendMail money0..2`) stay out: the 1.2 client has no
+evidenced meaning for them (mail AA is UNKNOWN).
+
 #### Item and craft notification packet definitions (2026-11-05)
 
 `systems/economy/item_notify_packets.rs` defines the four S->C packets the former C# port never

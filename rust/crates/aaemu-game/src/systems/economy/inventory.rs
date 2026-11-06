@@ -1967,6 +1967,100 @@ pub fn take_money_and_aa_point(
     true
 }
 
+/// Moves gold and AA points between the carried and the bank purse in one operation
+/// (`deposit` = carried -> bank). Both purses are checked and changed under one character lock,
+/// so a short purse changes nothing; it sends `NOT_ENOUGH_MONEY` for gold,
+/// `NOT_ENOUGH_AA_POINT` 707 for a short carried AA purse (deposit) and
+/// `NOT_ENOUGH_BANK_AA_POINT` 708 for a short bank AA purse (withdraw).
+pub fn transfer_bank_money_and_aa_point(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    deposit: bool,
+    money: i32,
+    aa_point: i32,
+    task: u8,
+) -> bool {
+    if money < 0 || aa_point < 0 {
+        return false;
+    }
+    let mut tasks = Vec::new();
+    let mut gold_report = None;
+    {
+        let mut c = player.data();
+        if deposit {
+            if i64::from(money) > c.money {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
+                return false;
+            }
+            if i64::from(aa_point) > c.aa_point {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
+                return false;
+            }
+            c.money -= i64::from(money);
+            c.money2 += i64::from(money);
+            c.aa_point -= i64::from(aa_point);
+            c.bank_aa_point += i64::from(aa_point);
+            if money != 0 {
+                tasks.push(ItemTask::MoneyChange(-money));
+                tasks.push(ItemTask::MoneyChangeBank(money));
+            }
+            if aa_point != 0 {
+                tasks.push(ItemTask::AaPointUpdate(-aa_point));
+                tasks.push(ItemTask::ChangeBankAaPoint(aa_point));
+            }
+        } else {
+            if i64::from(money) > c.money2 {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_MONEY);
+                return false;
+            }
+            if i64::from(aa_point) > c.bank_aa_point {
+                drop(c);
+                send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
+                return false;
+            }
+            let before = c.money;
+            c.money2 -= i64::from(money);
+            c.money += i64::from(money);
+            c.bank_aa_point -= i64::from(aa_point);
+            c.aa_point += i64::from(aa_point);
+            if money != 0 {
+                tasks.push(ItemTask::MoneyChangeBank(-money));
+                tasks.push(ItemTask::MoneyChange(money));
+            }
+            if aa_point != 0 {
+                tasks.push(ItemTask::ChangeBankAaPoint(-aa_point));
+                tasks.push(ItemTask::AaPointUpdate(aa_point));
+            }
+            if c.money > before {
+                gold_report = Some(c.money);
+            }
+        }
+    }
+    if let Some(money) = gold_report {
+        match &mut *out {
+            Out::Direct(server) => {
+                crate::systems::social::achievement_hooks::report_gold(server, player, money);
+            }
+            Out::Queue(_, fx) => fx.push(ItemFx::Money {
+                owner: player.character_id,
+                money,
+            }),
+        }
+    }
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    true
+}
+
 /// Sets the carried AA balance (GM / debug source). The new balance and its `i32` delta are
 /// applied under one character lock; a negative target or a delta the item task cannot carry
 /// is refused without changing anything.

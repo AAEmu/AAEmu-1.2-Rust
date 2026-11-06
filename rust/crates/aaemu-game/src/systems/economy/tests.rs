@@ -1613,6 +1613,188 @@ async fn bank_refuses_non_positive_amounts_and_missing_banker() {
 }
 
 #[tokio::test]
+async fn deposit_and_withdraw_aa_points() {
+    let mut w = world();
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
+    w.pa.data().money = 500;
+    w.pa.data().aa_point = 100;
+    w.pa.data().bank_aa_point = 30;
+    w.a.drain();
+
+    // Deposit AA only: the carried purse -> the bank purse.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(40);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (500, 0, 60, 70)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::DEPOSIT_MONEY,
+                vec![
+                    ItemTask::AaPointUpdate(-40),
+                    ItemTask::ChangeBankAaPoint(40)
+                ]
+            )
+        )]
+    );
+
+    // Withdraw AA only: the bank purse -> the carried purse.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(25);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (500, 0, 85, 45)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::WITHDRAW_MONEY,
+                vec![
+                    ItemTask::ChangeBankAaPoint(-25),
+                    ItemTask::AaPointUpdate(25)
+                ]
+            )
+        )]
+    );
+
+    // Gold and AA move in the same guarded operation in both directions.
+    let mut s = PacketStream::new();
+    s.write_i32(200).write_i32(10);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (300, 200, 75, 55)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::DEPOSIT_MONEY,
+                vec![
+                    ItemTask::MoneyChange(-200),
+                    ItemTask::MoneyChangeBank(200),
+                    ItemTask::AaPointUpdate(-10),
+                    ItemTask::ChangeBankAaPoint(10)
+                ]
+            )
+        )]
+    );
+    let mut s = PacketStream::new();
+    s.write_i32(50).write_i32(5);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    {
+        let c = w.pa.data();
+        assert_eq!(
+            (c.money, c.money2, c.aa_point, c.bank_aa_point),
+            (350, 150, 80, 50)
+        );
+    }
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::WITHDRAW_MONEY,
+                vec![
+                    ItemTask::MoneyChangeBank(-50),
+                    ItemTask::MoneyChange(50),
+                    ItemTask::ChangeBankAaPoint(-5),
+                    ItemTask::AaPointUpdate(5)
+                ]
+            )
+        )]
+    );
+}
+
+#[tokio::test]
+async fn bank_aa_refusals_change_neither_purse() {
+    let mut w = world();
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
+    w.pa.data().money = 500;
+    w.pa.data().money2 = 0;
+    w.pa.data().aa_point = 100;
+    w.pa.data().bank_aa_point = 30;
+    w.a.drain();
+    let unchanged = |w: &World, expected: (i64, i64, i64, i64), what: &str| {
+        let c = w.pa.data();
+        let got = (c.money, c.money2, c.aa_point, c.bank_aa_point);
+        assert_eq!(got, expected, "{what}");
+    };
+
+    // A short carried AA purse on a deposit: 707, and gold does not move either.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(101);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "deposit AA");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_AA_POINT, 0)
+        )]
+    );
+
+    // A short bank AA purse on a withdrawal: 708.
+    let mut s = PacketStream::new();
+    s.write_i32(0).write_i32(31);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "withdraw AA");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_BANK_AA_POINT, 0)
+        )]
+    );
+
+    // A short gold purse refuses before the AA part moves (no partial deposit).
+    let mut s = PacketStream::new();
+    s.write_i32(600).write_i32(10);
+    run::<CSDepositMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "deposit gold");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_MONEY, 0)
+        )]
+    );
+
+    // Same on a withdrawal whose bank gold is empty.
+    let mut s = PacketStream::new();
+    s.write_i32(100).write_i32(10);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, s.as_bytes());
+    unchanged(&w, (500, 0, 100, 30), "withdraw gold");
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_MONEY, 0)
+        )]
+    );
+}
+
+#[tokio::test]
 async fn acquire_stacks_then_creates_and_sends_timers() {
     let mut w = world();
     let pa = w.pa.clone();
