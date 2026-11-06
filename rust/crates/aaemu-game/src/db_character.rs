@@ -41,7 +41,9 @@ const CHARACTER_COLUMNS: &str = "CAST(id AS SIGNED) AS id, CAST(account_id AS SI
      faction_name, CAST(expedition_id AS SIGNED) AS expedition_id, CAST(family AS SIGNED) AS family, \
      CAST(dead_count AS SIGNED) AS dead_count, dead_time, CAST(rez_wait_duration AS SIGNED) AS rez_wait_duration, \
      rez_time, CAST(rez_penalty_duration AS SIGNED) AS rez_penalty_duration, leave_time, \
-     CAST(money AS SIGNED) AS money, CAST(money2 AS SIGNED) AS money2, CAST(honor_point AS SIGNED) AS honor_point, \
+     CAST(money AS SIGNED) AS money, CAST(money2 AS SIGNED) AS money2, \
+     CAST(aa_point AS SIGNED) AS aa_point, CAST(bank_aa_point AS SIGNED) AS bank_aa_point, \
+     CAST(honor_point AS SIGNED) AS honor_point, \
      CAST(vocation_point AS SIGNED) AS vocation_point, \
      CAST(crime_point AS SIGNED) AS crime_point, CAST(crime_record AS SIGNED) AS crime_record, \
      CAST(jury_point AS SIGNED) AS jury_point, CAST(hostile_faction_kills AS SIGNED) AS hostile_faction_kills, \
@@ -190,6 +192,8 @@ pub async fn load_character(
     c.leave_time = unix(dt(&row, "leave_time"));
     c.money = int(&row, "money")?;
     c.money2 = int(&row, "money2")?;
+    c.aa_point = int(&row, "aa_point")?;
+    c.bank_aa_point = int(&row, "bank_aa_point")?;
     c.honor_point = int(&row, "honor_point")? as i32;
     c.vocation_point = int(&row, "vocation_point")? as i32;
     let now_ms = Utc::now().timestamp_millis();
@@ -995,13 +999,13 @@ pub async fn save_character(
         `hp`,`mp`,`consumed_lp`,`ability1`,`ability2`,`ability3`,\
         `world_id`,`zone_id`,`x`,`y`,`z`,`roll`,`pitch`,`yaw`,\
         `faction_id`,`faction_name`,`expedition_id`,`family`,`dead_count`,`dead_time`,`rez_wait_duration`,`rez_time`,`rez_penalty_duration`,`leave_time`,\
-        `money`,`money2`,`honor_point`,`vocation_point`,`crime_point`,`crime_record`,`jury_point`,\
+        `money`,`money2`,`aa_point`,`bank_aa_point`,`honor_point`,`vocation_point`,`crime_point`,`crime_record`,`jury_point`,\
         `hostile_faction_kills`,`pvp_honor`,`died_in_pvp`,`died_in_pvp_war_zone`,\
         `delete_request_time`,`transfer_request_time`,`delete_time`,`auto_use_aapoint`,`prev_point`,`point`,`gift`,\
         `num_inv_slot`,`num_bank_slot`,`expanded_expert`,`slots`,`created_at`,`updated_at`,`return_district`,`online_time`,\
         `arrest_count`, `accept_guilty_count`, `accept_trial_count`, `not_guilty_count`, `guilty_count`, `evidence_reported_count`, `bot_reported_count`, `reported_as_bot_count`,\
         `offline_guilty_time`,`offline_guilty_region`) VALUES \
-        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
+        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
     )
     .bind(c.id)
     .bind(c.account_id)
@@ -1039,6 +1043,8 @@ pub async fn save_character(
     .bind(from_unix(c.leave_time))
     .bind(c.money)
     .bind(c.money2)
+    .bind(c.aa_point)
+    .bind(c.bank_aa_point)
     .bind(c.honor_point)
     .bind(c.vocation_point)
     .bind(c.crime_point)
@@ -1715,6 +1721,68 @@ mod tests {
             .unwrap();
             assert_eq!(saved, (i64::from(expected.0), i64::from(expected.1), 6));
         }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_aa_point_wallet_survives_character_reload() {
+        use crate::test_support::{test_character, test_experience, test_server_with};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let mut data = crate::data::GameData::empty();
+        data.experience = test_experience(55);
+        let mut server = test_server_with(data);
+        server.db = pool.clone();
+
+        let mut character = test_character(1, "AaPointReload", 100.0, 100.0);
+        character.account_id = 1;
+        character.created = Utc::now().timestamp();
+        character.aa_point = 1_234;
+        character.bank_aa_point = 42;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let saved: (i64, i64) = sqlx::query_as(
+            "SELECT CAST(aa_point AS SIGNED), CAST(bank_aa_point AS SIGNED) \
+             FROM `characters` WHERE `id` = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(saved, (1_234, 42));
+
+        character.aa_point = 4_321;
+        character.bank_aa_point = 24;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!((loaded.aa_point, loaded.bank_aa_point), (4_321, 24));
         pool.close().await;
     }
 

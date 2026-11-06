@@ -1767,6 +1767,126 @@ pub fn subtract_money(
     change_money(out, player, slot_type::NONE, location, -amount, task)
 }
 
+/// Sends the wallet update of an AA-point change (`ItemTask` 16 / 17). The 1.2 client applies
+/// these with the same delta path as `MoneyChange` / `MoneyChangeBank` (`FUN_397d1030`); that
+/// the amount is a delta and not the new balance is INFERRED from that symmetry.
+fn send_aa_point_task(out: &mut Out<'_>, player: &PlayerRef, bank: bool, delta: i32, task: u8) {
+    let update = if bank {
+        ItemTask::ChangeBankAaPoint(delta)
+    } else {
+        ItemTask::AaPointUpdate(delta)
+    };
+    out.send(
+        player,
+        super::item_packets::SCItemTaskSuccessPacket {
+            action: task,
+            tasks: vec![update],
+            force_remove: Vec::new(),
+        },
+    );
+}
+
+/// Adds AA points to the carried purse. `amount < 0` is refused like `add_money`; the caller
+/// takes points with [`try_take_aa_point`].
+pub fn add_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    player.data().aa_point += i64::from(amount);
+    send_aa_point_task(out, player, false, amount, task);
+    true
+}
+
+/// Takes AA points from the carried purse: the check and the debit happen under one
+/// character lock, so two concurrent takes cannot overdraw. A short balance sends
+/// `NOT_ENOUGH_AA_POINT` and changes nothing.
+pub fn try_take_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    {
+        let mut c = player.data();
+        if i64::from(amount) > c.aa_point {
+            drop(c);
+            send_error_message_to(out, player, error_message::NOT_ENOUGH_AA_POINT);
+            return false;
+        }
+        c.aa_point -= i64::from(amount);
+    }
+    send_aa_point_task(out, player, false, -amount, task);
+    true
+}
+
+/// Adds AA points to the bank purse (`/aapoint ... bank`, later bank transfers).
+pub fn add_bank_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    player.data().bank_aa_point += i64::from(amount);
+    send_aa_point_task(out, player, true, amount, task);
+    true
+}
+
+/// Takes AA points from the bank purse under one character lock (`NOT_ENOUGH_BANK_AA_POINT`
+/// when short).
+pub fn try_take_bank_aa_point(
+    out: &mut Out<'_>,
+    player: &PlayerRef,
+    amount: i32,
+    task: u8,
+) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    {
+        let mut c = player.data();
+        if i64::from(amount) > c.bank_aa_point {
+            drop(c);
+            send_error_message_to(out, player, error_message::NOT_ENOUGH_BANK_AA_POINT);
+            return false;
+        }
+        c.bank_aa_point -= i64::from(amount);
+    }
+    send_aa_point_task(out, player, true, -amount, task);
+    true
+}
+
+/// Sets the carried AA balance (GM / debug source). The new balance and its `i32` delta are
+/// applied under one character lock; a negative target or a delta the item task cannot carry
+/// is refused without changing anything.
+pub fn set_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    let delta = {
+        let mut c = player.data();
+        let Ok(delta) = i32::try_from(i64::from(amount) - c.aa_point) else {
+            return false;
+        };
+        c.aa_point = i64::from(amount);
+        delta
+    };
+    send_aa_point_task(out, player, false, delta, task);
+    true
+}
+
+/// Sets the bank AA balance under one character lock (see [`set_aa_point`]).
+pub fn set_bank_aa_point(out: &mut Out<'_>, player: &PlayerRef, amount: i32, task: u8) -> bool {
+    if amount < 0 {
+        return false;
+    }
+    let delta = {
+        let mut c = player.data();
+        let Ok(delta) = i32::try_from(i64::from(amount) - c.bank_aa_point) else {
+            return false;
+        };
+        c.bank_aa_point = i64::from(amount);
+        delta
+    };
+    send_aa_point_task(out, player, true, delta, task);
+    true
+}
+
 /// `Character.ChangeGamePoints(kind, change)`.
 pub fn change_game_points(out: &mut Out<'_>, player: &PlayerRef, kind: u8, mut change: i32) {
     {

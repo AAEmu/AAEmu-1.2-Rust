@@ -563,6 +563,29 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### AA-point wallet (WP-AA1, 2026-11-06)
+
+The 1.2 client reads the two AA balances from the in-world character state:
+`X2Util.GetMyAAPointString` / `GetMyBankAAPointString` (`FUN_394c9580` / `FUN_394c9640`) print
+`+0xc330` / `+0xc338` of the inventory object, and the character-state reader fills four `i64`
+moneyAmount fields in the order money, bank money, AA point, bank AA point (the inventory object
+starts at the first one, so `0x1860 + 0xc330 = 0xdb90`). `SCCharacterStatePacket` writes
+`Character::aa_point` / `bank_aa_point` there; the two zeroes it wrote before this change are
+exactly the 0-balance bytes. The balances are per character (the shop dialog debits the same
+field) and persist as `characters.aa_point` / `bank_aa_point` (`bigint`, default 0), saved with
+money in the same financial snapshot (the departure dirty rule covers all four wallet fields).
+`systems::economy::inventory` owns the wallet: `add_aa_point` / `try_take_aa_point` (and the bank
+pair, plus absolute `set_*` for the GM command) check and change the balance under one character
+lock, make a negative balance impossible, and send `SCItemTaskSuccessPacket` with `ItemTask` 16
+(`ChangeAaPoint`) / 17 (`ChangeBankAaPoint`); a short purse sends `NOT_ENOUGH_AA_POINT` 707 /
+`NOT_ENOUGH_BANK_AA_POINT` 708. That the task amount is a **delta** is INFERRED from the client's
+task switch (`FUN_397d1030`), which applies 16 / 17 through the money path; a real-client display
+check is still pending (AA1-DELTA-1). Nothing spends AA points yet: cash-shop AA prices and the
+cash -> AA purchase stay refused (WP-AA2 / WP-AA3). `/aapoint <add|set|show> [bank] <amount>` is
+the only source, a debug command: the 1.2 data has no player-reachable AA grant
+(`quest_act_supply_aa_points` has 0 rows). The kind-35 `AAPointMaxLimitByLevel` cap is not
+enforced (balance cap or per-period cap is UNKNOWN).
+
 #### Item and craft notification packet definitions (2026-11-05)
 
 `systems/economy/item_notify_packets.rs` defines the four S->C packets the former C# port never
@@ -4090,15 +4113,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   payment). An explicit payment row becomes `Premium`. `premium_point` is
   `max(details.premium_point, premium_configs.connect_point).clamp(0, max_point)` - a stored
   higher point is never lowered. Only credits and loyalty are debitable atomically with the
-  grant; AA points are refused with error 775 (other currencies with 773) because this build
-  stores no AA balance yet. The 1.2 wire carrier is settled without a capture: the four trailing
-  i64 of `SCCharacterStatePacket` are money, bank money, AA point and bank AA point
-  (`GetMyAAPointString` reads inventory `+0xc330`, `GetMyBankAAPointString` `+0xc338`; the
-  in-world state reader fills `0x1860/0x1868/0xdb90/0xdb98`), and `ItemTask` actions 16
-  `CHANGE_AA_POINT` / 17 `CHANGE_BANK_AA_POINT` move them (delta, INFERRED by symmetry with
-  `MoneyChange`). Our packet still writes `0, 0` in the last two slots
-  (`src/world/unit_state.rs:70-75`); `money2` is bank gold, not AA. A loyalty
-  debit also sets the buyer's `bm_point` and sends
+  grant; AA points are still refused with error 775 (the per-character wallet exists since
+  WP-AA1, but this purchase path is not wired until WP-AA2), other currencies with 773. A loyalty debit also sets the buyer's `bm_point` and sends
   `SCBmPointPacket`. The buy result has no dedicated 1.2 SC: the client's error handler
   (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
   0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
@@ -4995,10 +5011,9 @@ Additional world-side fixes from the same audit:
 * Cash-shop checkout charges the effective discounted price, validates templates and checked
   cart totals before fulfillment, serializes stock updates, and uses guarded SQL credit and
   loyalty debits. Gold still uses the inventory transaction path. The formerly free AA Points
-  branch returns the existing failure (778) because this build stores no AA balance. The 1.2
-  carrier is no longer unknown (the four `SCCharacterStatePacket` i64 and `ItemTask` 16/17;
-  see the premium shop note above), so what remains is a stored balance, not a capture.
-  `money2` is bank gold, not an AA Points balance. Unit flows and
+  branch still returns the existing failure (778) until WP-AA2 wires it to the wallet; the
+  per-character AA wallet now exists (`characters.aa_point` / `bank_aa_point`, WP-AA1, see the
+  economy section). `money2` is bank gold, not an AA Points balance. Unit flows and
   private-MySQL tests cover failed debits, limits and concurrent overdraft attempts. Debit,
   audit and commercial-mail delivery do not yet form one crash-atomic transaction/outbox.
 * Temporary USER chat channels implement the existing join/leave packets and packed eight-byte
