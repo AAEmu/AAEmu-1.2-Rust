@@ -636,6 +636,63 @@ original-client run opens the board without a Lua error. Row details and the
 open question are recorded in `rust/crates/aaemu-game/PORTING.md`
 (BOUNTY-board).
 
+## Client feature switches (`Configurations/FeatureSet.json`)
+
+The client FeatureSet is the 11-byte blob the game server sends in
+`SCInitialConfig.fsets`; the 1.2 client turns it into the Lua table behind
+`X2Player:GetFeatureSet()` (`FUN_39496b20`, `x2game.dll.c:956456`), where each
+named key is one bit. The game server reads `Configurations/FeatureSet.json`
+(section `FeatureSet`) at startup and applies it after loading the level caps.
+The shipped defaults are exactly the previous bytes, so the file changes
+nothing until an operator edits it. Override a key in `Config.Local.json` or
+with the environment form `FeatureSet__Siege=false`.
+
+```json
+{
+  "FeatureSet": {
+    "siege": true,
+    "aaPoint": false,
+    "ExtraBits": { "78": true }
+  }
+}
+```
+
+| Key | Bit | Default | What the client uses it for |
+| --- | --- | --- | --- |
+| `siege` | 0 | `true` | Siege / dominion UI. The exact window is INFERRED from the Lua key. |
+| `premium` | 4 | `true` | Premium / Patron HUD and labor UI. |
+| `itemSecure` | 45 | `true` | Item-secure / lock handling and UI. |
+| `secondpass` | 46 | `false` | Second-password entry and its opcode path. `SecondPassword:Enabled` still turns this bit on at startup. |
+| `ranking` | 36 | `true` | Ranking window. |
+| `slave_customize` | 48 | `true` | Vehicle / ship customization UI (INFERRED). |
+| `bm_mileage` | 43 | `true` | Cash-shop mileage display (INFERRED; Korean business model). |
+| `ingamecashshop` | 38 | `true` | In-game cash-shop entry and open guards. |
+| `customsaveload` | 40 | `true` | Custom UI save/load (INFERRED). |
+| `beautyshopBypass` | 52 | `true` | Beauty-salon bypass entry (INFERRED). |
+| `ingameshopSecondpass` | 55 | `false` | Second-password gate on cash-shop purchases (INFERRED). |
+| `backpackProfitShare` | 56 | `true` | Trade-pack sale profit share and sale mails. |
+| `sensitiveOpeartion` | 58 | `false` | Sensitive-operation confirmation prompts (INFERRED; the key's spelling is the client's). |
+| `taxItem` | 59 | `true` | Tax-item payment UI; the server also uses this bit for its tax-item behavior. |
+| `achievement` | 63 | `true` | Achievement window. |
+| `dwarfWarborn` | 74 | `false` | Dwarf / Warborn race selection. The shipped `characters` data has both races `creatable = 'f'`, so turning the bit on does not make them creatable by itself. |
+| `mailCoolTime` | 75 | `true` | Mail send cooldown display (INFERRED). |
+| `hudAuctionButton` | 81 | `true` | Auction-house button in the HUD. |
+| `auctionPostBuff` | 83 | `true` | Auction posting buff / UI (INFERRED). |
+| `aaPoint` | 44 | `false` | AA-point amounts in price and currency displays. The server has no AA-point wallet, so keep it off. |
+| `ExtraBits` | any | `{}` | `bit -> bool` overrides for the unnamed `flag_x_y` bits (`0..=87`); a `false` value turns a default-on bit off. Bit 78 is the mate equipment whitelist. The C++ reads 32, 34, 41, 42, 47, 60 and 73 too, but their purpose is unresolved. |
+
+The C#-named bits that the client does not expose through `GetFeatureSet()`
+(`allowFamilyChanges` 1, `houseSale` 3, `nations` 6, `customUiButton` 39,
+`freeLpRaise` 53, `houseTaxPrepay` 84) have no named key; they keep their
+current defaults, and `ExtraBits` can override them like any other bit.
+
+The player level limit (byte 1) and mate level limit (byte 8) are not part of
+this section: they keep coming from the `levels` table. The runtime GM command
+`/feature set` still changes bits after startup; `FeatureSet.json` is only the
+startup baseline. Every key's bit number and the client line that reads it are
+recorded in `rust/crates/aaemu-game/PORTING.md` (Client FeatureSet
+configuration).
+
 ## Chat feature switches (`Configurations/Chat.json`)
 
 Rust-only switches for chat whose retail 1.2 behaviour is not fully evidenced.
