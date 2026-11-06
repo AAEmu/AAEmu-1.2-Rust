@@ -824,7 +824,10 @@ async fn buy_aa_point_uses_the_configured_ratio_and_refuses_bad_amounts() {
         )]
     );
 
-    // Ratio 3: 100 cash buys 300 AA, the new cash balance and the ratio are sent.
+    // Ratio 3: 100 cash buys 300 AA, the new cash balance and the ratio are sent, then
+    // SCICSBuyResult(buy_mode = 2, chargeAAPoint = 300) raises the client's
+    // BUY_RESULT_AA_POINT message (the body is an independent literal, from the reader
+    // `FUN_397b83c0`: bool success, u8 buyMode, u16-length string, i32 chargeAAPoint).
     let mut s = shop();
     s.w.server
         .config
@@ -839,6 +842,7 @@ async fn buy_aa_point_uses_the_configured_ratio_and_refuses_bad_amounts() {
             (sc::SCItemTaskSuccessPacket, aa_task(300)),
             (sc::SCICSCashPointPacket, 900i32.to_le_bytes().to_vec()),
             (sc::SCICSExchangeRatioPacket, 3i32.to_le_bytes().to_vec()),
+            (sc::SCICSBuyResultPacket, vec![1, 2, 0, 0, 0x2c, 0x01, 0, 0]),
         ]
     );
 
@@ -866,7 +870,8 @@ async fn buy_aa_point_uses_the_configured_ratio_and_refuses_bad_amounts() {
         );
     }
 
-    // A short cash balance uses the shop's cash error and buys nothing.
+    // A short cash balance is refused with the exchange's own failure (778), not the generic
+    // shop error 591: only 778 raises BUY_RESULT_AA_POINT with success = false.
     let mut s = shop();
     s.w.server
         .config
@@ -879,7 +884,7 @@ async fn buy_aa_point_uses_the_configured_ratio_and_refuses_bad_amounts() {
         s.w.a.drain(),
         vec![(
             sc::SCErrorMsgPacket,
-            error_body(error_message::INGAME_SHOP_NOT_ENOUGH_AA_CASH)
+            error_body(error_message::INGAME_SHOP_BUY_FAIL_AA_POINT)
         )]
     );
 }
