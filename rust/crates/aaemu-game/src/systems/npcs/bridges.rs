@@ -1170,6 +1170,68 @@ pub fn install_economy(server: &GameServer) {
     server.items.treasure_maps.install(me);
 }
 
+/// 1.2 `merchant_packs` 224 / 225: "defense-side goods sold during a siege" and
+/// "siege-side goods sold during a siege" (the attack side). The name-derived rule
+/// (`Housing.SiegeShopGate`) is INFERRED; see PORTING.md and the config page.
+const SIEGE_DEFENSE_MERCHANT_PACK: u32 = 224;
+const SIEGE_ATTACK_MERCHANT_PACK: u32 = 225;
+
+/// The siege-time goods gate for one catalog. Only the two named packs are gated; every
+/// other pack keeps selling at any time. The period is the one the client is shown for the
+/// NPC's territory (`social::dominion::snapshot`), so warmup and siege agree with the siege
+/// window; the roster is the persisted participant list of that siege.
+fn siege_goods_sell_now(
+    server: &GameServer,
+    buyer: &PlayerRef,
+    npc: Option<&NpcRef>,
+    pack_id: u32,
+) -> bool {
+    use crate::systems::housing::dominion::state::{SiegeSide, SiegeStatus};
+    let side = match pack_id {
+        SIEGE_DEFENSE_MERCHANT_PACK => SiegeSide::Defender,
+        SIEGE_ATTACK_MERCHANT_PACK => SiegeSide::Attacker,
+        _ => return true,
+    };
+    if !server.config.housing.siege_shop_gate {
+        return true;
+    }
+    let Some(npc) = npc else {
+        return false;
+    };
+    let zone_key = npc.data().unit.transform.zone_id;
+    let Some(zone_group_id) = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map(|zone| zone.group_id)
+    else {
+        return false;
+    };
+    let Some(state) = server.systems.housing.dominions.get(zone_group_id) else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let Some(period) = crate::systems::social::dominion::snapshot(server, &state, now)
+        .map(|dominion| dominion.siege_timers.siege_period)
+    else {
+        return false;
+    };
+    if !matches!(
+        period,
+        crate::systems::housing::dominion::calendar::PERIOD_WARMUP
+            | crate::systems::housing::dominion::calendar::PERIOD_SIEGE
+    ) {
+        return false;
+    }
+    state.siege.as_ref().is_some_and(|siege| {
+        siege.status != SiegeStatus::Finished
+            && siege
+                .participants
+                .get(&buyer.character_id)
+                .is_some_and(|participant| participant.side == side)
+    })
+}
+
 impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
     fn shop_info(
         &self,
@@ -1194,6 +1256,8 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
     fn merchant_sells(
         &self,
         server: &GameServer,
+        buyer: &PlayerRef,
+        npc: Option<&NpcRef>,
         pack_ids: &[u32],
         item_id: u32,
         grade: u8,
@@ -1210,6 +1274,7 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
                 .goods
                 .get(pack_id)
                 .is_some_and(|g| g.sells_item_at_grade(template, grade))
+                && siege_goods_sell_now(server, buyer, npc, *pack_id)
         })
     }
 

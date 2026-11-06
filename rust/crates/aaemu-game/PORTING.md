@@ -4524,12 +4524,11 @@ and in NPC wandering / buff remaining times.
   siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
   (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
   The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
-  open: the declaration chain WP-SD2a-c (persistent declaration, Siege Camp use / validation /
-  cancel and the headquarters lifecycle; in progress, not landed), the `siege_items` use gate
-  WP-SD3 (in progress, not landed), the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
-  `doodad_func_purchase_siege_tickets` has no rows), siege hostility WP-SD7 (decision-blocked:
-  no evidence shows how retail made the two sides attackable) and the siege-shop period / side
-  gate WP-SD4a (INFERRED from the pack names, not implemented).
+  open: the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
+  `doodad_func_purchase_siege_tickets` has no rows) and siege hostility WP-SD7 (decision-blocked:
+  no evidence shows how retail made the two sides attackable). The siege-shop period / side
+  gate WP-SD4a is implemented behind `Housing.SiegeShopGate` (default off; the rule is
+  INFERRED from the pack names, capture-pending).
   Known, not fixed:
   the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
   time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
@@ -4638,6 +4637,26 @@ and in NPC wandering / buff remaining times.
   period 2 and 4, inside/outside the circle, item kept on refusal), the loader assertion in
   `castle_references_preserve_stage_order_dates_and_zero_open_duration`, and the gated
   `housing_real_compact_db` row-count check (13 rows).
+* systems::housing / systems::npcs (siege-time shop gate, WP-SD4a, 2026-11-06): with
+  `Housing.SiegeShopGate` on (default off, so both packs keep selling as before), merchant
+  packs 224 / 225 are sold only during the warmup or siege period (3 / 4) of the NPC's
+  territory and only to a character on the matching side of that siege's roster: pack 224 to
+  defenders, 225 to attackers. The period is the one `social::dominion::snapshot` shows for
+  the territory (calendar or explicit siege), and the roster is the persisted participant
+  list. Refusals are silent like the other `CSBuyItems` catalog checks; an allowed line is
+  still charged in honor through the item's `honor_price`. A pack that matches but is not
+  one of the two named packs is never gated, so an item also offered by an ordinary pack
+  stays on sale. The rule is **INFERRED** from the two `merchant_packs` names ("defense-side
+  goods sold during a siege" / "siege-side goods sold during a siege") only: the retail
+  period/side restriction is capture-pending, as is which pack belongs to which side (224 =
+  defense, 225 = attack is the name reading). The gate lives in the real NPC catalog bridge
+  (`npcs/bridges.rs::merchant_sells`, called from `economy/store.rs`), the switch in
+  `systems/housing/config.rs`. Tests:
+  `siege_shop_gate_sells_224_to_defenders_and_225_to_attackers_in_warmup_and_siege`,
+  `siege_shop_gate_refuses_registered_sides_outside_warmup_and_siege`,
+  `siege_shop_gate_refuses_non_participants_during_the_siege`,
+  `siege_shop_gate_off_keeps_both_packs_selling_at_any_time_to_anyone` and the config binder.
+  Live capture of the restriction and side rule is still pending.
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

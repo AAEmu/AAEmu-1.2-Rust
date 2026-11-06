@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{backpack_type, EquipTemplate, ItemTemplate, TemplateKind};
+use crate::data::world_data::Zone;
 use crate::data::GameData;
 use crate::models::container::{equip_slot, slot_type};
 use crate::models::doodad::Doodad;
+use crate::models::house::House;
 use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemTask};
 use crate::models::npc::Npc;
@@ -33,6 +35,9 @@ use crate::systems::economy::store_data::{
     ExpandExpertLimit, ItemLookConvert, SpecialtyBundleItem, SpecialtyNpc,
 };
 use crate::systems::economy::tests::{give, item_at, run, task_body, test_data, World, STACK};
+use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
+use crate::systems::housing::dominion::runtime as dominion_runtime;
+use crate::systems::housing::dominion::state::SiegeSide;
 use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncStoreUi, FuncTemplate};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{DoodadRef, Entity, NpcRef, PlayerRef};
@@ -1363,6 +1368,8 @@ impl NpcEconomyHooks for Shops {
     fn merchant_sells(
         &self,
         _server: &GameServer,
+        _buyer: &PlayerRef,
+        _npc: Option<&NpcRef>,
         pack_ids: &[u32],
         item_id: u32,
         grade: u8,
@@ -1417,7 +1424,23 @@ fn catalog_world(mut d: GameData, stock: &[(u32, u8)]) -> World {
 }
 
 async fn buy_grade(w: &mut World, item_id: u32, grade: u8, count: i32, currency: u8) {
+    buy_grade_as(w, false, item_id, grade, count, currency).await;
+}
+
+async fn buy_grade_as(
+    w: &mut World,
+    second_player: bool,
+    item_id: u32,
+    grade: u8,
+    count: i32,
+    currency: u8,
+) {
     use crate::net::registry::ClientPacket;
+    let conn = if second_player {
+        &mut w.b.conn
+    } else {
+        &mut w.a.conn
+    };
     CSBuyItemsPacket {
         npc_obj_id: MERCHANT_NPC,
         doodad_obj_id: 0,
@@ -1431,7 +1454,7 @@ async fn buy_grade(w: &mut World, item_id: u32, grade: u8, count: i32, currency:
         buy_back: Vec::new(),
         use_aa_point: false,
     }
-    .handle(&w.server, &mut w.a.conn)
+    .handle(&w.server, conn)
     .await
     .unwrap();
 }
@@ -1500,6 +1523,226 @@ async fn shop_npc_sells_items_from_every_merchant_pack() {
     buy_grade(&mut w, POWDER, 0, 1, shop_currency_type::MONEY).await;
     assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 1);
     assert_eq!(w.pa.data().money, 1000 - 10 - 100);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Siege-time goods gate (Housing.SiegeShopGate, WP-SD4a)
+// ---------------------------------------------------------------------------------------------
+
+const SIEGE_ZONE_GROUP: u32 = 33;
+const SIEGE_DEFENSE_EXPEDITION: u32 = 10;
+const SIEGE_ATTACK_EXPEDITION: u32 = 20;
+const SIEGE_HOUSE_TEMPLATE: u32 = 139;
+const SIEGE_GUARD_TOWER_SETTING: u32 = 6;
+const SIEGE_DEFENSE_PACK: u32 = 224;
+const SIEGE_ATTACK_PACK: u32 = 225;
+
+fn spawn_zone_npc(w: &mut World, obj_id: u32, template: u32, x: f32) -> NpcRef {
+    let mut n = Npc::new(template);
+    n.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    n.unit.transform.set_xyz(x, 100.0, 100.0);
+    let n = Entity::new(obj_id, n);
+    let world = w.server.world.world(0).unwrap();
+    world.spawn(&n, &w.server.view_ctx());
+    w.a.drain();
+    w.b.drain();
+    n
+}
+
+/// A merchant selling the two inferred siege packs and an owned territory in the NPC's zone.
+fn siege_shop_world(gate: bool) -> World {
+    let mut d = data();
+    d.items.templates.get_mut(&POWDER).unwrap().honor_price = 4;
+    d.zones.zones.insert(
+        crate::test_support::TEST_ZONE,
+        Zone {
+            zone_key: crate::test_support::TEST_ZONE,
+            group_id: SIEGE_ZONE_GROUP,
+            ..Default::default()
+        },
+    );
+    d.systems.housing.add_template(HousingTemplate {
+        id: SIEGE_HOUSE_TEMPLATE,
+        guard_tower_setting_id: SIEGE_GUARD_TOWER_SETTING,
+        ..Default::default()
+    });
+    d.systems.housing.castles.guard_tower_settings.insert(
+        SIEGE_GUARD_TOWER_SETTING,
+        GuardTowerSetting {
+            id: SIEGE_GUARD_TOWER_SETTING,
+            radius_dominion: 200,
+            ..Default::default()
+        },
+    );
+    for (pack, item) in [(SIEGE_DEFENSE_PACK, STACK), (SIEGE_ATTACK_PACK, POWDER)] {
+        let mut goods = crate::systems::npcs::npc::data::MerchantGoods {
+            id: pack,
+            items: Vec::new(),
+        };
+        goods.add_item_to_stock(item, 0);
+        d.systems.npcs.npc.goods.insert(pack, goods);
+    }
+    d.systems.npcs.npc.templates.insert(
+        1234,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1234,
+            merchant: true,
+            merchant_pack_ids: vec![SIEGE_DEFENSE_PACK, SIEGE_ATTACK_PACK],
+            ..Default::default()
+        },
+    );
+    let mut w = world_with_data(d);
+    w.server
+        .config
+        .update(|config| config.housing.siege_shop_gate = gate);
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    spawn_zone_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    let mut house = House::new(61, SIEGE_HOUSE_TEMPLATE);
+    house.current_step = -1;
+    house.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    house.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let tower = Entity::new(0x200, house);
+    w.server.systems.housing.manager.insert(&tower);
+    w.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&tower, &w.server.view_ctx());
+    let (_, identity) = dominion_runtime::tower_identity(&w.server, &tower).unwrap();
+    w.server
+        .systems
+        .housing
+        .dominions
+        .declare_unowned_with(
+            SIEGE_ZONE_GROUP,
+            identity,
+            SIEGE_DEFENSE_EXPEDITION,
+            chrono::Utc::now().timestamp() - 1_000,
+            || true,
+        )
+        .unwrap();
+    w
+}
+
+fn schedule_siege_at(w: &World, starts_in: i64) {
+    let now = chrono::Utc::now().timestamp();
+    w.server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege(
+            SIEGE_ZONE_GROUP,
+            SIEGE_ATTACK_EXPEDITION,
+            now + starts_in,
+            now + 3_600,
+            now - 20,
+        )
+        .unwrap();
+}
+
+fn register_siege_side(w: &World, character_id: u32, expedition: u32, side: SiegeSide) {
+    w.server
+        .systems
+        .housing
+        .dominions
+        .register_participant(
+            SIEGE_ZONE_GROUP,
+            character_id,
+            expedition,
+            side,
+            chrono::Utc::now().timestamp(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn siege_shop_gate_sells_224_to_defenders_and_225_to_attackers_in_warmup_and_siege() {
+    for starts_in in [-10, 100] {
+        let mut w = siege_shop_world(true);
+        schedule_siege_at(&w, starts_in);
+        register_siege_side(&w, 1, SIEGE_ATTACK_EXPEDITION, SiegeSide::Attacker);
+        register_siege_side(&w, 2, SIEGE_DEFENSE_EXPEDITION, SiegeSide::Defender);
+        w.pa.data().honor_point = 100;
+        w.pb.data().honor_point = 100;
+
+        // The attacker (Alice, character 1) buys the attack pack (225, POWDER).
+        buy_grade(&mut w, POWDER, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 1);
+        assert_eq!(w.pa.data().honor_point, 96);
+        // The defense pack (224, STACK) is refused for the attacker without a charge.
+        buy_grade(&mut w, STACK, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+        assert_eq!(w.pa.data().honor_point, 96);
+
+        // The defender (Bob, character 2) buys the defense pack; the attack pack is refused.
+        buy_grade_as(&mut w, true, STACK, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 1);
+        assert_eq!(w.pb.data().honor_point, 97);
+        buy_grade_as(&mut w, true, POWDER, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 0);
+        assert_eq!(w.pb.data().honor_point, 97);
+    }
+}
+
+#[tokio::test]
+async fn siege_shop_gate_refuses_registered_sides_outside_warmup_and_siege() {
+    let mut w = siege_shop_world(true);
+    schedule_siege_at(&w, -10);
+    register_siege_side(&w, 1, SIEGE_ATTACK_EXPEDITION, SiegeSide::Attacker);
+    register_siege_side(&w, 2, SIEGE_DEFENSE_EXPEDITION, SiegeSide::Defender);
+    // Cancelling keeps the roster but leaves the territory in peace (period 5).
+    w.server
+        .systems
+        .housing
+        .dominions
+        .cancel_siege(SIEGE_ZONE_GROUP, chrono::Utc::now().timestamp())
+        .unwrap();
+    w.pa.data().honor_point = 100;
+    w.pb.data().honor_point = 100;
+    for second_player in [false, true] {
+        for item in [STACK, POWDER] {
+            buy_grade_as(&mut w, second_player, item, 0, 1, shop_currency_type::HONOR).await;
+        }
+    }
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 0);
+    assert_eq!(w.pa.data().honor_point, 100);
+    assert_eq!(w.pb.data().honor_point, 100);
+}
+
+#[tokio::test]
+async fn siege_shop_gate_off_keeps_both_packs_selling_at_any_time_to_anyone() {
+    let mut w = siege_shop_world(false);
+    w.pa.data().honor_point = 100;
+    w.pb.data().honor_point = 100;
+    // No siege is scheduled and neither player is a participant.
+    buy_grade(&mut w, STACK, 0, 1, shop_currency_type::HONOR).await;
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(w.pa.data().honor_point, 97);
+    buy_grade_as(&mut w, true, POWDER, 0, 1, shop_currency_type::HONOR).await;
+    assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 1);
+    assert_eq!(w.pb.data().honor_point, 96);
+}
+
+#[tokio::test]
+async fn siege_shop_gate_refuses_non_participants_during_the_siege() {
+    let mut w = siege_shop_world(true);
+    schedule_siege_at(&w, -10);
+    w.pa.data().honor_point = 100;
+    w.pb.data().honor_point = 100;
+    for second_player in [false, true] {
+        for item in [STACK, POWDER] {
+            buy_grade_as(&mut w, second_player, item, 0, 1, shop_currency_type::HONOR).await;
+        }
+    }
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 0);
+    assert_eq!(w.pa.data().honor_point, 100);
+    assert_eq!(w.pb.data().honor_point, 100);
 }
 
 #[tokio::test]

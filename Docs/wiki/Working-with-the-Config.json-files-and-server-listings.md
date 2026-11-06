@@ -620,6 +620,31 @@ If staging the receipt fails, the balance stays available. Repeated empty collec
 It leaves Peace Fund untouched. Hunting tax, AA Points, nation splits, and automatic historical
 payout schedules are not added. Territory tax changes have the original one-hour cooldown.
 
+## Siege-time shop gate
+
+The two 1.2 merchant packs named "defense-side goods sold during a siege" (224) and
+"siege-side goods sold during a siege" (225) can be restricted to the siege itself. The
+switch is off by default and keeps the previous behaviour (both packs sell at any time to
+anyone):
+
+```json
+{
+  "Housing": {
+    "SiegeShopGate": true
+  }
+}
+```
+
+With the switch on, pack 224 sells only to registered defenders and pack 225 only to
+registered attackers, and only during the warmup or siege period (3 / 4) of the NPC's
+territory. A refused line is silent like the other `CSBuyItems` catalog refusals; an allowed
+line is still charged in honor through the item's honor price.
+
+**Capture-pending (INFERRED):** the restriction and its side rule come from the pack names
+only, not from a capture of the retail server. Keep the switch off until an original-client
+capture shows how the retail shop behaved. The implementation and the open question are
+recorded in `rust/crates/aaemu-game/PORTING.md` (WP-SD4a).
+
 ## Migration note from old setup docs
 
 Older instructions referenced `aaemu_login.game_servers` and SQL inserts.
