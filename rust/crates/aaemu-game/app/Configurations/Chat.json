@@ -4,6 +4,7 @@
         "ChatGroupDelays": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         "ApplyConfig": "",
         "DetectConfig": "",
-        "ChatFailedPacket": false
+        "ChatFailedPacket": false,
+        "MinLevelByChatType": {}
     }
 }

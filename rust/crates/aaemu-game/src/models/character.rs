@@ -239,6 +239,10 @@ pub struct Character {
     // ---- phase 3 / social: add this subsystem's Character fields below ----
     /// `InParty` (set through `systems::social::team::set_in_party`, which notifies friends).
     pub in_party: bool,
+    /// Chat mute expiry (`characters.chat_restricted_until`, Unix seconds UTC; `0` = not
+    /// muted). Written by the retail `/restrict_chat` GM command and checked on every outgoing
+    /// chat message; a past value lifts the mute automatically (see [`Self::chat_restricted`]).
+    pub chat_restricted_until: UnixTime,
     /// `LocalPingPosition` (`WorldSpawnPosition` x / y / z).
     pub local_ping_position: (f32, f32, f32),
     /// `OriginFactionName` (`Unit.SetFaction`).
@@ -391,6 +395,7 @@ impl Character {
 
             // ---- phase 3 / social ----
             in_party: false,
+            chat_restricted_until: 0,
             local_ping_position: (0.0, 0.0, 0.0),
             origin_faction_name: String::new(),
             main_world_position: None,
@@ -418,6 +423,18 @@ impl Character {
         self.labor_power = self.labor_power.wrapping_add(change);
         self.labor_power_unsaved += i32::from(change);
         self.labor_power_modified = chrono::Utc::now().timestamp();
+    }
+
+    /// `chat_restricted_until` check with automatic expiry: `true` while the mute is in the
+    /// future, otherwise clears the timestamp and returns `false`. Check and clear happen
+    /// under the same character lock, so a sender never sees a stale mute.
+    pub fn chat_restricted(&mut self, now: UnixTime) -> bool {
+        if self.chat_restricted_until > now {
+            true
+        } else {
+            self.chat_restricted_until = 0;
+            false
+        }
     }
 
     /// Records a learned craft and marks it for the next character save. `false` when the

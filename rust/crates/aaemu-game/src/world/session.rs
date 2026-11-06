@@ -1251,6 +1251,23 @@ pub async fn send_chat_message(
             return;
         }
     }
+    // SL4b: the configured per-type minimum level and the persisted GM mute (`restrict_chat`)
+    // are checked before routing. The refusal and the sender identity come from one character
+    // lock; the level gate exempts GMs (`access_level >= 100`) and the mute expires itself.
+    let (sender, refusal) = {
+        let mut c = me.data();
+        let refusal = crate::systems::social::chat::chat_refusal(
+            &server.config.chat,
+            &mut c,
+            chat,
+            Utc::now().timestamp(),
+        );
+        (chat_sender(&c, me.obj_id), refusal)
+    };
+    if let Some(refusal) = refusal {
+        crate::systems::social::chat::send_chat_refusal(&me, refusal);
+        return;
+    }
     // The 1.2 client throttles itself from `SCChatSpamDelayPacket` (`FUN_393C2540`) and shows
     // localized message 0x108 when a message is too fast. Enforce the same limits here so a
     // modified client cannot bypass them.
@@ -1267,10 +1284,6 @@ pub async fn send_chat_message(
         ));
         return;
     }
-    let sender = {
-        let c = me.data();
-        chat_sender(&c, me.obj_id)
-    };
     let msg = |t: i16, s: &ChatSender| SCChatMessagePacket {
         chat_type: t,
         sender: Some(s.clone()),

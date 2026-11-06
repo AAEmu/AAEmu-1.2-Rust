@@ -2643,6 +2643,23 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Tests: `chat_failed_writes_i16_error_then_the_channel_name`,
   `chat_failed_channel_name_is_capped_at_ten_bytes_on_a_char_boundary`,
   `channel_bound_chat_failures_use_scc_chat_failed_only_when_enabled`.
+* systems::social: **Chat level gate and GM mute (WP-SL4b).** `Chat.MinLevelByChatType`
+  (`Configurations/Chat.json`, empty by default) maps a chat type to a minimum character level;
+  a sender below it gets `SCErrorMsgPacket(CHAT_CANNOT_SEND_SINCE_LEVEL_LOW 786, 0, true)` and
+  the message is not routed. The 786 text is "You must be at least Lv$1 to chat.", but the
+  `SCErrorMsgPacket` argument / `$1` substitution mechanism is UNKNOWN, so no level argument is
+  sent. Characters with `access_level >= 100` are exempt (the closed-zone GM threshold; the
+  account-level elevation is not read on this synchronous path). The retail GM command
+  `/restrict_chat <character> [minutes]` (name EVIDENCED, argument shape UNKNOWN; the default
+  of 60 minutes and `0` = lift are INFERRED) writes `characters.chat_restricted_until` (UTC):
+  an online character through its live state (saved by the save manager), an offline one with
+  a direct row UPDATE. Both outgoing chat paths (`send_chat_message` and the user-channel
+  `send_user_chat`) refuse a muted sender with a plain system message (retail's mute error is
+  UNKNOWN; INFERRED, `CHAT-RESTRICT-1`), and the mute lifts itself when the timestamp passes.
+  `chat_restricted_until` is loaded and saved with the character. Retail's per-type levels are
+  not evidenced (**capture-pending CHAT-LEVEL-1**). Tests: level gate / default off / GM
+  exemption, mute + expiry, user-channel bypass, `restrict_chat` online / offline / non-GM,
+  and the MySQL character round trip.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /

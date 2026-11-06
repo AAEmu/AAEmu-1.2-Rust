@@ -1407,6 +1407,35 @@ where
     }
 }
 
+/// A JSON object whose keys and values may be numbers or numeric strings (the Microsoft
+/// binder flattens `Section:Map:Key` entries to strings).
+pub(crate) fn lenient_map<'de, D, K, V>(d: D) -> Result<std::collections::BTreeMap<K, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: FromStr + Ord,
+    K::Err: Display,
+    V: FromStr,
+    V::Err: Display,
+{
+    match Value::deserialize(d)? {
+        Value::Object(map) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (key, value) in map {
+                let key = key
+                    .trim()
+                    .parse::<K>()
+                    .map_err(|e| de::Error::custom(format!("invalid map key {key:?}: {e}")))?;
+                out.insert(key, parse_scalar(&value)?);
+            }
+            Ok(out)
+        }
+        Value::Null => Ok(std::collections::BTreeMap::new()),
+        other => Err(de::Error::custom(format!(
+            "expected an object, got {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
