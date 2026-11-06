@@ -1746,6 +1746,77 @@ async fn expand_bag_and_bank() {
 }
 
 #[tokio::test]
+async fn expand_slot_pays_a_gold_shortage_with_aa_points() {
+    let mut w = world();
+    // The bag step costs 100; the carried gold pays 40 and AA points pay the 60 shortage.
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 60;
+    let mut s = PacketStream::new();
+    s.write_i32(2).write_bool(true);
+    run::<CSExpandSlotsPacket>(&mut w, 0, s.as_bytes());
+    let (money, aa_point) = {
+        let c = w.pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((money, aa_point), (0, 0));
+    assert_eq!(w.pa.data().num_inventory_slots, 60);
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 60);
+    let f = w.a.drain();
+    assert_eq!(f.len(), 2);
+    assert_eq!(
+        f[0].1,
+        task_body(
+            task_type::EXPAND_BAG,
+            vec![ItemTask::MoneyChange(-40), ItemTask::AaPointUpdate(-60)]
+        )
+    );
+    assert_eq!(f[1].0, sc::SCInvenExpandedPacket);
+    assert_eq!(f[1].1, vec![2, 60]);
+}
+
+#[tokio::test]
+async fn expand_slot_refuses_when_aa_points_are_short_too() {
+    let mut w = world();
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 59;
+    let mut s = PacketStream::new();
+    s.write_i32(2).write_bool(true);
+    run::<CSExpandSlotsPacket>(&mut w, 0, s.as_bytes());
+    let (money, aa_point) = {
+        let c = w.pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((money, aa_point), (40, 59));
+    assert_eq!(w.pa.data().num_inventory_slots, 50);
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 50);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_MONEY, 0)
+        )]
+    );
+}
+
+#[tokio::test]
+async fn expand_slot_ignores_aa_points_when_the_flag_is_false() {
+    let mut w = world();
+    w.pa.data().money = 40;
+    w.pa.data().aa_point = 1000;
+    let mut s = PacketStream::new();
+    s.write_i32(2).write_bool(false);
+    run::<CSExpandSlotsPacket>(&mut w, 0, s.as_bytes());
+    let (money, aa_point) = {
+        let c = w.pa.data();
+        (c.money, c.aa_point)
+    };
+    assert_eq!((money, aa_point), (40, 1000));
+    assert_eq!(w.pa.data().num_inventory_slots, 50);
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 50);
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test]
 async fn swap_between_bag_and_bank() {
     let mut w = world();
     let pa = w.pa.clone();

@@ -586,6 +586,22 @@ the only source, a debug command: the 1.2 data has no player-reachable AA grant
 (`quest_act_supply_aa_points` has 0 rows). The kind-35 `AAPointMaxLimitByLevel` cap is not
 enforced (balance cap or per-period cap is UNKNOWN).
 
+#### AA points as a gold-shortage purse (WP-AA3a, 2026-11-06)
+
+`CSRepairSingleEquipmentPacket`, `CSRepairAllEquipmentsPacket` and `CSExpandSlotsPacket` carry
+`autoUseAAPoint`; the C# parsed it and ignored it. With the flag set and the carried gold short,
+the repair / expansion pays the shortage from the carried AA purse 1:1 and sends the money and
+AA tasks together (`ItemTask::MoneyChange` + `ItemTask::AaPointUpdate`). The rule is INFERRED
+from the client text `ask_use_aa_point` ("not enough gold; use AA points for the missing
+amount?") and the `lost_aa_point` task path; neither the rate nor the "shortage only" part is
+capture-proven (AA3-PURSE-1). The gold and AA checks and both debits run under one character
+lock (`inventory::take_money_and_aa_point`), so a refusal cannot make a partial charge; when the
+AA purse is short too the operation is refused with `NOT_ENOUGH_MONEY` 26 and nothing is
+repaired, consumed or expanded. A repair-all whose combined purses cannot pay every eligible
+item is refused whole (a deviation from the C# gold-only loop, which repairs only the items the
+gold covers). With the flag false both packets behave exactly as before. The AA task amount is
+a delta (see the wallet section above).
+
 #### Item and craft notification packet definitions (2026-11-05)
 
 `systems/economy/item_notify_packets.rs` defines the four S->C packets the former C# port never

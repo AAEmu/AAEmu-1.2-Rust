@@ -354,7 +354,13 @@ impl CSExpandSlotsPacket {
         let Some(p) = active(conn) else { return };
         let inv = Inv::of(&p);
         let mut txn = ItemTxn::begin(server);
-        inventory::expand_slot(&mut txn, &p, &inv, self.slot_type as u8);
+        inventory::expand_slot(
+            &mut txn,
+            &p,
+            &inv,
+            self.slot_type as u8,
+            self.auto_use_aa_point,
+        );
     }
 }
 sync_client_packet!(CSExpandSlotsPacket);
