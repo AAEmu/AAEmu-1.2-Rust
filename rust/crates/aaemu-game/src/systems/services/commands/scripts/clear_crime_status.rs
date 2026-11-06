@@ -50,25 +50,21 @@ impl Command for ClearCrimeStatus {
         };
         let target_name = name_of(&target);
         let now = crate::world::now_ms();
-        let (packet, became_pirate, old) = {
+        let (packet, change, old) = {
             let mut c = target.data();
             let old = (c.crime_point, c.infamy_point);
-            let mut became_pirate = crime::set_crime_point(server, &mut c, 0, now);
-            became_pirate |= crime::set_infamy_point(server, &mut c, 0, now);
+            let mut change = crime::set_crime_point(server, &mut c, 0, now);
+            change = change.merge(crime::set_infamy_point(server, &mut c, 0, now));
             let packet = SCCrimeChangedPacket {
                 points: -i32::from(old.0),
                 crime_points: c.crime_point,
                 infamy_points: c.infamy_point,
                 crime_state: crime::crime_state(&c),
             };
-            (packet, became_pirate, old)
+            (packet, change, old)
         };
-        if became_pirate {
-            crate::systems::social::faction::set_faction_persistent(
-                server,
-                &target,
-                crate::data::world_data::factions::PIRATE,
-            );
+        if !change.is_empty() {
+            crate::systems::social::faction::apply_crime_faction_change(server, &target, change);
         }
         if old != (0, 0) {
             target.send(packet);

@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::data::skills::BuffKind;
 use crate::data::world_data::factions;
+use crate::db_character::CrimeFactionChange;
 use crate::managers::chat::ChannelRef;
 use crate::net::packet::ServerPacket;
 use crate::packets::world::{SCChatMessagePacket, SCUnitPointsPacket};
@@ -271,8 +272,9 @@ pub enum Effect {
     ForceDismount(PlayerRef),
     /// `Buffs.RemoveBuffs(kind, count, tag)`.
     RemoveBuffsByTag(PlayerRef, BuffKind, i32, u32),
-    /// `Character.SetFaction(factionId)`.
-    SetFaction(PlayerRef, u32),
+    /// The faction consequences of a crime-point change (`SetFaction(Pirate)` / the infamy-0
+    /// pardon); run with [`crate::systems::social::faction::apply_crime_faction_change`].
+    CrimeFaction(PlayerRef, CrimeFactionChange),
     /// Update world membership and visibility after a justice teleport, outside the trial lock.
     Teleport(PlayerRef, crate::models::transform::Transform),
     /// An achievement event for a trial participant (JUDGEMENT, GET_JURY_POINT).
@@ -281,38 +283,10 @@ pub enum Effect {
 
 type Effects = Vec<Effect>;
 
-/// Runs deferred effects; `SetFaction` (async) is spawned on the runtime.
+/// Runs deferred effects (the trial mutex is already released).
 fn run_effects(server: &GameServer, fx: Effects) {
-    let mut factions = Vec::new();
     for e in fx {
-        match e {
-            Effect::SetFaction(p, f) => factions.push((p, f)),
-            other => run_effect(server, other),
-        }
-    }
-    if factions.is_empty() {
-        return;
-    }
-    match server.self_arc() {
-        Some(s) => {
-            tokio::spawn(async move {
-                for (p, f) in factions {
-                    crate::systems::social::faction::set_faction(&s, &p, f).await;
-                }
-            });
-        }
-        None => tracing::error!("SetFaction after a trial: server handle not available"),
-    }
-}
-
-async fn run_effects_async(server: &GameServer, fx: Effects) {
-    for e in fx {
-        match e {
-            Effect::SetFaction(p, f) => {
-                crate::systems::social::faction::set_faction(server, &p, f).await;
-            }
-            other => run_effect(server, other),
-        }
+        run_effect(server, e);
     }
 }
 
@@ -329,7 +303,9 @@ fn run_effect(server: &GameServer, e: Effect) {
             crate::systems::dispatch_buff_events(server, &WorldObject::from(&p));
         }
         Effect::Achievement(p, input) => crate::systems::report_achievement(server, &p, input),
-        Effect::SetFaction(..) => unreachable!("handled by the callers"),
+        Effect::CrimeFaction(p, change) => {
+            crate::systems::social::faction::apply_crime_faction_change(server, &p, change);
+        }
         Effect::Teleport(p, destination) => {
             let old_instance = p.data().unit.transform.instance_id;
             let Some(world) = server.world.world(destination.instance_id) else {
@@ -960,7 +936,7 @@ fn result_is_guilty(
     t.send_state(now_ms);
     room.leave_chat(defendant);
     archive_trial_evidence(server, t, now_ms);
-    let (pkt, became_pirate) = {
+    let (pkt, change) = {
         let mut c = defendant.data();
         let crime_count = c.crime_point;
         c.unit.buffs.remove_buff(buff::FORCIBLY_AWAITING_TRIAL);
@@ -968,7 +944,7 @@ fn result_is_guilty(
         c.offline_guilty_time = 0;
         c.offline_guilty_region = i32::from(court_room_region::INVALID);
         let v = c.crime_point.wrapping_sub(crime_count);
-        let became_pirate = set_crime_point(server, &mut c, v, now_ms);
+        let change = set_crime_point(server, &mut c, v, now_ms);
         if plead_guilty {
             c.accept_guilty_count += 1;
         } else {
@@ -981,14 +957,14 @@ fn result_is_guilty(
                 infamy_points: c.infamy_point,
                 crime_state: crime_state(&c),
             },
-            became_pirate,
+            change,
         )
     };
     defendant.send(pkt);
-    if became_pirate {
-        // Deferred like every other `SetFaction` here: the trial mutex is still held (module
-        // rule, lines 5-13), and `set_faction` re-enters the world / guild / team subsystems.
-        fx.push(Effect::SetFaction(defendant.clone(), factions::PIRATE));
+    if !change.is_empty() {
+        // Deferred: the trial mutex is still held (module rule, lines 5-13), and the faction
+        // change re-enters the world / guild / team subsystems.
+        fx.push(Effect::CrimeFaction(defendant.clone(), change));
     }
     // Prisoner buff (minimum 10 s: 0 would use the default 30 minutes).
     let jail_time_ms = t.jail_time.saturating_mul(60_000).max(10_000);
@@ -1035,7 +1011,7 @@ fn result_is_not_guilty(
     t.current_step_end_ms = now_ms + END_TRIAL_SECONDS * SECOND_MS;
     t.send_state(now_ms);
     archive_trial_evidence(server, t, now_ms);
-    let (pkt, infamy, faction, race, gender, became_pirate) = {
+    let (pkt, change) = {
         let mut c = defendant.data();
         let crime_count = c.crime_point;
         c.unit.buffs.remove_buff(buff::FORCIBLY_AWAITING_TRIAL);
@@ -1044,9 +1020,9 @@ fn result_is_not_guilty(
         c.offline_guilty_region = i32::from(court_room_region::INVALID);
         c.not_guilty_count += 1;
         let v = c.crime_point.wrapping_sub(crime_count);
-        let mut became_pirate = set_crime_point(server, &mut c, v, now_ms);
+        let mut change = set_crime_point(server, &mut c, v, now_ms);
         let v = c.infamy_point.wrapping_sub(i32::from(crime_count));
-        became_pirate |= set_infamy_point(server, &mut c, v, now_ms);
+        change = change.merge(set_infamy_point(server, &mut c, v, now_ms));
         (
             SCCrimeChangedPacket {
                 points: i32::from(crime_count),
@@ -1054,17 +1030,13 @@ fn result_is_not_guilty(
                 infamy_points: c.infamy_point,
                 crime_state: crime_state(&c),
             },
-            c.infamy_point,
-            c.unit.faction_id,
-            c.race,
-            c.gender,
-            became_pirate,
+            change,
         )
     };
     defendant.send(pkt);
-    if became_pirate {
+    if !change.is_empty() {
         // Deferred: the trial mutex is still held (module rule, lines 5-13).
-        fx.push(Effect::SetFaction(defendant.clone(), factions::PIRATE));
+        fx.push(Effect::CrimeFaction(defendant.clone(), change));
     }
     fx.push(Effect::RemoveBuffsByTag(
         defendant.clone(),
@@ -1078,13 +1050,6 @@ fn result_is_not_guilty(
         .buffs
         .remove_buff(buff::TRIAL_DEFENDANT);
     fx.push(Effect::DispatchBuffs(defendant.clone()));
-    if infamy <= 0 && faction == factions::PIRATE {
-        // Return to the original faction.
-        match server.game_data.characters.template(race, gender) {
-            Some(tpl) => fx.push(Effect::SetFaction(defendant.clone(), tpl.faction_id)),
-            None => tracing::error!("ResultIsNotGuilty: no character template {race}/{gender}"),
-        }
-    }
 }
 
 /// `TrialData.FinalizeVerdict()`.
@@ -1529,7 +1494,7 @@ impl TrialManager {
             self.update_jury_queue(server, &mut st);
             self.update_trial_states(server, &mut st, now_ms, &mut fx);
         }
-        run_effects_async(server, fx).await;
+        run_effects(server, fx);
     }
 
     /// `UpdateJuryQueue()` on its own.
