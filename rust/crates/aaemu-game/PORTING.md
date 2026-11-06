@@ -1271,10 +1271,24 @@ treasury changes with houses / mail / wallets) and broadcasts `SCNationalTaxRate
 `{zone, taxRate, prevTaxRate, changedTime}` to every client, because the client handler
 `FUN_392f39b0` updates a server-wide dominion record and shows ui_texts 5675.
 
-* The rate is a king/lord split of collected tax excluding the peace fund (ui_texts 5536),
-  but the split arithmetic, the weekly receipt mail 24 and mail 23 (`NATIONAL_TAX_RATE`) are
-  not implemented: no 1.2 server code or capture defines them (capture-pending). A new
-  dominion starts at 0; the C# set 500 on claim, which is not 1.2 evidence.
+* The rate is a king/lord split of collected tax excluding the peace fund (ui_texts 5536).
+  A successful change also stores mail 23 (`NATIONAL_TAX_RATE`) for the nation's citizens
+  (online at once; offline through the saved `characters.faction_id` query after the housing
+  lock is released): sender `.nationalTaxRate`, title `title(<zone group>)`, body
+  `body('<nation>','<zone>','<new>','<old>','<changedAt>')`. The parameter order is the
+  client's `locale.mail.nationalTaxRate.body` (proto 110 of `x2ui/baselib/locale_helper.alb`);
+  `read_mail.alb` reads `oldTaxRate` / `newTaxRate` back from the table. The audience and the
+  exact 1.2 body are INFERRED from the client body fields and the nation member broadcast
+  paths, and are capture-pending (`NATION-TAX-MAIL-1`). The weekly receipt mail 24 and the
+  split arithmetic remain unimplemented: no 1.2 server code or capture defines them
+  (capture-pending `NATION-TAX-MAIL-2`). A new dominion starts at 0; the C# set 500 on claim,
+  which is not 1.2 evidence.
+* `CSUpdateDominionTaxRatePacket` 0x012 success also stores mail 8 (`TAXRATE_CHANGED`) for
+  the owners of houses in the territory (deduplicated): sender `.taxRateChange`, title
+  `title(<zone group>)`, body `body('<old>','<new>')` (the client's
+  `locale.mail.taxRateChange.body`, proto 79). The recipient set is INFERRED from the client's
+  `X2House.GetTaxations` property-tax breakdown and the existing house-tax mail audience;
+  capture-pending (`TAX-RATE-MAIL-1`).
 * 684/685/725 are the client's own error ids (`error_message.rs`), so a forged packet gets
   the same answer the client would have produced locally.
 * Test hook: GM `nation dominion <zone>` seeds an **in-memory-only** `DominionState` for the
@@ -2575,7 +2589,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   meaning of the id are capture-pending (**CAPTURE-PENDING QUEST-MAIL-1**). Mia mail (types 11
   `MIA_SEND` / 12 `MIA_RECV`) is the client's separate commercial mailbox (`comercialmail/*`,
   `X2MiaMail`, `unreadMiaMail`) fed by the cash-shop path; the C# notifier branch was empty and
-  the existing counter routing is unchanged (**CAPTURE-PENDING MIA-MAIL-1**).
+  the existing counter routing is unchanged (**CAPTURE-PENDING MIA-MAIL-1**). The tax-rate
+  notices now use the same `send_system_mail` path: `TAXRATE_CHANGED` (8) on a dominion tax
+  rate change and `NATIONAL_TAX_RATE` (23) on a national tax rate change (see "National tax
+  (RENAME-8)"). `BILLING` (6) already carries the house-tax bill / overdue notice
+  (`MailForTax`); `NATION_TAX_RECEIPT` (24), `USER_BILL` (22), `PROMOTION` (10), `SPAM` (4)
+  and the MIA / hero / mobilization types still have no evidenced 1.2 trigger and stay
+  capture-pending.
 * systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
   non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
   interaction object; `CSBuyItems` accepts goods only from a pack of the interacting NPC (every

@@ -26,6 +26,7 @@ use crate::systems::economy::mail_kinds::{
     MailForSpeciality, MailForTax, TaxMailHouse,
 };
 use crate::systems::economy::mail_packets::*;
+use crate::systems::economy::mail_system;
 use crate::systems::economy::tests::{give, item_at, run, task_body, World, SINGLE, STACK};
 use crate::world::object::Entity;
 use crate::world::WorldObject;
@@ -1624,6 +1625,78 @@ fn spawn_tax_property(w: &mut World) {
         .spawn(&house, &w.server.view_ctx());
     w.a.drain();
     w.b.drain();
+}
+
+#[tokio::test]
+async fn tax_rate_changed_mail_uses_the_client_body_and_sender() {
+    let mut w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(mail_system::send_tax_rate_changed_mail(
+        &mut txn, 2, 25, 10, 20
+    ));
+    drop(txn);
+
+    let ids = bob_mail_ids(&w.server);
+    assert_eq!(ids.len(), 1);
+    let m = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(ids[0])
+        .expect("stored mail");
+    assert_eq!(m.mail_type, mail_type::TAXRATE_CHANGED);
+    assert_eq!(m.header.sender_id, 0);
+    assert_eq!(m.header.sender_name, mail_system::TAX_RATE_CHANGED_SENDER);
+    assert_eq!(m.header.receiver_id, 2);
+    assert_eq!(m.header.status, mail_status::UNREAD);
+    assert_eq!(m.title, "title(25)");
+    assert_eq!(m.body.text, "body('10','20')");
+    assert_eq!(m.body.billing_amount, 0);
+    assert_eq!(m.body.attachments, Vec::<u64>::new());
+
+    let fb = w.b.drain();
+    assert_eq!(ops(&fb), vec![sc::SCGotMailPacket]);
+    assert_eq!(w.pb.data().unread_mail.received, 1);
+}
+
+#[tokio::test]
+async fn nation_tax_rate_mail_uses_the_client_body_and_sender() {
+    let mut w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(mail_system::send_nation_tax_rate_mail(
+        &mut txn,
+        2,
+        9_000,
+        25,
+        500,
+        400,
+        1_700_000_000,
+    ));
+    drop(txn);
+
+    let ids = bob_mail_ids(&w.server);
+    assert_eq!(ids.len(), 1);
+    let m = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(ids[0])
+        .expect("stored mail");
+    assert_eq!(m.mail_type, mail_type::NATION_TAX_RATE);
+    assert_eq!(m.header.sender_id, 0);
+    assert_eq!(m.header.sender_name, mail_system::NATION_TAX_RATE_SENDER);
+    assert_eq!(m.header.receiver_id, 2);
+    assert_eq!(m.header.status, mail_status::UNREAD);
+    assert_eq!(m.title, "title(25)");
+    // The client body parser maps parameters 3/4 to newTaxRate/oldTaxRate, so the wire order
+    // is new before old.
+    assert_eq!(m.body.text, "body('9000','25','500','400','1700000000')");
+
+    let fb = w.b.drain();
+    assert_eq!(ops(&fb), vec![sc::SCGotMailPacket]);
+    assert_eq!(w.pb.data().unread_mail.received, 1);
 }
 
 #[tokio::test]
