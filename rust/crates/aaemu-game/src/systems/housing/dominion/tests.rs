@@ -40,6 +40,32 @@ fn destroyed_siege() -> DominionManager {
     manager
 }
 
+/// A destroyed siege with non-native frozen limits and the reinforcement wave announced, so a
+/// MySQL round trip proves the persisted `siege_reinforced` bool and `ni`/`nr` columns.
+fn destroyed_reinforced_siege() -> DominionManager {
+    let manager = owned();
+    manager
+        .schedule_siege_with_limits(
+            ZONE,
+            ATTACKER,
+            2000,
+            3000,
+            1500,
+            SiegeLimits { ni: 50, nr: 70 },
+        )
+        .unwrap();
+    manager
+        .register_participant(ZONE, 11, ATTACKER, SiegeSide::Attacker, 1500)
+        .unwrap();
+    manager
+        .register_participant(ZONE, 12, DEFENDER, SiegeSide::Defender, 1500)
+        .unwrap();
+    manager.mark_tower_destroyed(ZONE, tower(), 2000).unwrap();
+    let siege_id = manager.state(ZONE).unwrap().siege.unwrap().siege_id;
+    manager.mark_reinforced(ZONE, siege_id, 2000, 2000).unwrap();
+    manager
+}
+
 #[test]
 fn claim_consumption_is_atomic_and_never_fabricates_treasury_or_schedule() {
     let manager = DominionManager::default();
@@ -53,7 +79,7 @@ fn claim_consumption_is_atomic_and_never_fabricates_treasury_or_schedule() {
         .unwrap();
     assert_eq!(claimed.owner_expedition_id, DEFENDER);
     assert_eq!(claimed.ownership_generation, 1);
-    assert_eq!(claimed.reign_start_at, 1000);
+    assert_eq!((claimed.reign_start_at, claimed.claimed_at), (1000, 1000));
     assert_eq!(claimed.treasury, Treasury::default());
     assert_eq!(
         (
@@ -72,6 +98,16 @@ fn claim_consumption_is_atomic_and_never_fabricates_treasury_or_schedule() {
     );
     assert!(manager.tick(1_791_900_000).unwrap().is_empty());
     assert_eq!(manager.state(ZONE).unwrap(), claimed);
+}
+
+#[test]
+fn a_claim_records_claimed_at_and_restart_keeps_it() {
+    let manager = owned();
+    let claimed = manager.state(ZONE).unwrap();
+    assert_eq!((claimed.reign_start_at, claimed.claimed_at), (1000, 1000));
+    let restarted = DominionManager::default();
+    restarted.restore(manager.snapshots()).unwrap();
+    assert_eq!(restarted.state(ZONE).unwrap().claimed_at, 1000);
 }
 
 #[test]
@@ -98,6 +134,38 @@ fn concurrent_claims_consume_only_the_winning_expediton_pack() {
     let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
     assert_eq!(consumes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn non_pvp_expiry_clears_the_window_once_at_its_authored_end() {
+    let manager = owned();
+    manager.start_non_pvp(ZONE, DEFENDER, 120, 1000).unwrap();
+    let end = 1000 + 120 * 60;
+    assert_eq!(manager.expire_non_pvp(end - 1), Ok(Vec::new()));
+    assert_eq!(manager.expire_non_pvp(end), Ok(vec![ZONE]));
+    let state = manager.state(ZONE).unwrap();
+    assert_eq!((state.non_pvp_start_at, state.non_pvp_duration_min), (0, 0));
+    assert_eq!(manager.expire_non_pvp(end), Ok(Vec::new()));
+    // A cleared window can be started again; a stale duration would make the client's
+    // cached end nonzero and its peace-skill precheck would keep refusing.
+    manager.start_non_pvp(ZONE, DEFENDER, 120, end).unwrap();
+    assert_eq!(manager.state(ZONE).unwrap().non_pvp_start_at, end);
+}
+
+#[test]
+fn reclaim_does_not_inherit_a_restored_non_pvp_window() {
+    let manager = DominionManager::default();
+    let mut state = DominionState::unowned(ZONE, tower());
+    state.non_pvp_start_at = 1000;
+    state.non_pvp_duration_min = 120;
+    manager.restore(vec![state]).unwrap();
+    let claimed = manager
+        .declare_unowned_with(ZONE, tower(), DEFENDER, 2000, || true)
+        .unwrap();
+    assert_eq!(
+        (claimed.non_pvp_start_at, claimed.non_pvp_duration_min),
+        (0, 0)
+    );
 }
 
 #[test]
@@ -244,10 +312,11 @@ fn capture_requires_full_five_minutes_and_invalidates_competing_and_replayed_han
     assert_eq!(
         (
             captured.reign_start_at,
+            captured.claimed_at,
             captured.last_siege_end_at,
             captured.ownership_generation
         ),
-        (2300, 2300, 2)
+        (2300, 0, 2300, 2)
     );
     assert!(!captured.tower_destroyed);
     assert_eq!(captured.tower_hp, None);
@@ -654,7 +723,7 @@ async fn private_mysql_dominion_rollback_failure_retry_and_restart_preserve_auth
             .await
             .unwrap();
     }
-    let manager = destroyed_siege();
+    let manager = destroyed_reinforced_siege();
     let old_channel = manager
         .begin_engraving(ZONE, tower(), 11, ATTACKER, 2_000_000)
         .unwrap();
@@ -671,7 +740,10 @@ async fn private_mysql_dominion_rollback_failure_retry_and_restart_preserve_auth
     assert_eq!(manager.prepare_save().changed_count(), 1);
     let rows = super::db::load_rows(&pool).await.unwrap();
     assert_eq!(rows[0].tax_rate, 0);
-    assert_eq!(rows[0].siege.as_ref().unwrap().participants.len(), 2);
+    let siege = rows[0].siege.as_ref().unwrap();
+    assert_eq!(siege.participants.len(), 2);
+    assert!(siege.reinforced);
+    assert_eq!((siege.defender_ni, siege.defender_nr), (50, 70));
     assert_eq!(rows[0].tower_hp, Some(0));
     let restarted = DominionManager::default();
     restarted.restore(rows).unwrap();
@@ -717,4 +789,63 @@ async fn private_mysql_dominion_rollback_failure_retry_and_restart_preserve_auth
             .unwrap();
     }
     pool.close().await;
+}
+
+#[test]
+fn ephemeral_test_territory_is_never_prepared_for_the_financial_save() {
+    let manager = owned();
+    manager.mark_ephemeral(ZONE);
+    assert_eq!(
+        manager.prepare_save().changed_count(),
+        0,
+        "a test-only territory with a placeholder tower must not reach the dominions table"
+    );
+    let persisted = owned();
+    assert_eq!(persisted.prepare_save().changed_count(), 1);
+}
+
+#[test]
+fn owner_change_and_release_clear_the_national_monument_reference() {
+    let manager = owned();
+    manager
+        .place_national_monument(ZONE, DEFENDER, 77, 1.0, 2.0, 3.0)
+        .unwrap();
+    let released = manager.release_expedition(DEFENDER, 2000);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].1.national_monument_db_id, 0);
+    assert_eq!(released[0].1.national_monument_x, 0.0);
+
+    // A stale monument on an unowned row is dropped by the next claim.
+    let manager = DominionManager::default();
+    let mut stale = DominionState::unowned(ZONE, tower());
+    stale.national_monument_db_id = 77;
+    stale.national_monument_x = 1.0;
+    stale.national_monument_y = 2.0;
+    stale.national_monument_z = 3.0;
+    manager.restore(vec![stale]).unwrap();
+    let claimed = manager
+        .declare_unowned_with(ZONE, tower(), DEFENDER, 1000, || true)
+        .unwrap();
+    assert_eq!(claimed.national_monument_db_id, 0);
+
+    // A siege capture drops the previous owner's monument.
+    let manager = owned();
+    manager
+        .place_national_monument(ZONE, DEFENDER, 77, 1.0, 2.0, 3.0)
+        .unwrap();
+    manager
+        .schedule_siege(ZONE, ATTACKER, 2000, 3000, 1500)
+        .unwrap();
+    manager
+        .register_participant(ZONE, 11, ATTACKER, SiegeSide::Attacker, 1500)
+        .unwrap();
+    manager.mark_tower_destroyed(ZONE, tower(), 2000).unwrap();
+    let handle = manager
+        .begin_engraving(ZONE, tower(), 11, ATTACKER, 2_000_123)
+        .unwrap();
+    let captured = manager
+        .complete_engraving(&handle, ATTACKER, 2_300_123)
+        .unwrap();
+    assert_eq!(captured.owner_expedition_id, ATTACKER);
+    assert_eq!(captured.national_monument_db_id, 0);
 }

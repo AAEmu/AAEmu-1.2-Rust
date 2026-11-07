@@ -25,6 +25,10 @@ raw_body_packet!(
     SCCreateCharacterResponsePacket,
     sc::SCCreateCharacterResponsePacket
 );
+raw_body_packet!(
+    SCEditCharacterResponsePacket,
+    sc::SCEditCharacterResponsePacket
+);
 
 /// `SCCharacterGamePointsPacket(character)`.
 #[derive(Debug, Clone)]

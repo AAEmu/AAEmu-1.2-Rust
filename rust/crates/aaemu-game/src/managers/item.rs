@@ -206,14 +206,106 @@ impl ItemManager {
             c.items.clear();
             container_ids.release_id(c.container_id as u32);
         }
+        self.discard_created_items(created_items, item_ids);
+    }
+
+    /// Releases the item ids a rejected lobby edit allocated. The items live in standalone
+    /// containers that were never registered, so only the ids are freed; a deletion the
+    /// allocation cancelled is restored first (another owner can queue/release an id during
+    /// setup).
+    pub(crate) fn discard_created_items(
+        &self,
+        created_items: &[(u64, bool)],
+        item_ids: &IdManager,
+    ) {
         for &(id, canceled_deletion) in created_items {
-            // Captured at allocation: another owner can queue/release an ID during setup.
-            // Restore its canceled deletion before freeing the ID for another operation.
             if canceled_deletion {
                 self.mark_for_db_deletion(id);
             }
             item_ids.release_id(id as u32);
         }
+    }
+
+    /// The save batch of a lobby edit: the items the rebuild created, written into the
+    /// character's persistent container ids. The edit's transaction deletes the old rows first
+    /// (`save_edited_character_locked`), and the caller installs the same items in memory with
+    /// [`Self::commit_rebuilt_containers`] after the commit. Only the creation containers
+    /// (equipment, bag and bank) are rebuilt; mail/auction/trade/system containers and mate /
+    /// slave equipment keep their rows and items.
+    pub(crate) fn prepare_rebuilt_batch(
+        &self,
+        built: &crate::models::character::Inventory,
+        persistent: &crate::models::character::Inventory,
+    ) -> ItemSaveBatch {
+        use crate::models::container::is_creation_container;
+        let mut batch = ItemSaveBatch::default();
+        for (_, container) in &persistent.containers {
+            let snapshot = container.lock().expect("container poisoned").clone();
+            if is_creation_container(snapshot.slot_type, snapshot.mate_id)
+                && snapshot.container_id > 0
+            {
+                batch
+                    .containers
+                    .push((container.clone(), ContainerSaveRow::of(&snapshot)));
+            }
+        }
+        for (slot, source) in &built.containers {
+            if !is_creation_container(*slot, 0) {
+                continue;
+            }
+            let Some((_, target)) = persistent.containers.iter().find(|(s, _)| s == slot) else {
+                continue;
+            };
+            let container_id = target.lock().expect("container poisoned").container_id;
+            if container_id == 0 {
+                continue;
+            }
+            let items = source.lock().expect("container poisoned").items.clone();
+            for item in items {
+                batch.items.push((None, container_id, item));
+            }
+        }
+        batch
+    }
+
+    /// Replaces the in-memory contents of the character's creation containers (equipment, bag
+    /// and bank) with the rebuilt ones (the edit's transaction wrote exactly these rows and
+    /// deleted the old items). Returns the ids of the replaced items so the caller can free
+    /// them; every other container keeps its contents.
+    pub(crate) fn commit_rebuilt_containers(
+        &self,
+        built: &crate::models::character::Inventory,
+        persistent: &crate::models::character::Inventory,
+    ) -> Vec<u64> {
+        use crate::models::container::is_creation_container;
+        let mut removed = Vec::new();
+        for (slot, target) in &persistent.containers {
+            {
+                let g = target.lock().expect("container poisoned");
+                if !is_creation_container(g.slot_type, g.mate_id) {
+                    continue;
+                }
+            }
+            let items = built
+                .containers
+                .iter()
+                .find(|(s, _)| s == slot)
+                .map(|(_, c)| {
+                    let mut c = c.lock().expect("container poisoned");
+                    std::mem::take(&mut c.items)
+                })
+                .unwrap_or_default();
+            let mut target = target.lock().expect("container poisoned");
+            removed.extend(target.items.drain(..).map(|i| i.id).filter(|id| *id != 0));
+            for mut item in items {
+                item.dirty = false;
+                target.items.push(item);
+            }
+            // The container row itself did not change; only its items were replaced.
+            target.dirty = false;
+            target.update_free_slot_count();
+        }
+        removed
     }
 
     /// `NewCofferContainer(characterId)`.
@@ -750,8 +842,8 @@ impl ItemManager {
 async fn save_item(tx: &mut Transaction<'_, MySql>, item: &Item, container_id: u64) -> Result<()> {
     let res = sqlx::query(
         "REPLACE INTO items (`id`,`type`,`template_id`,`container_id`,`slot_type`,`slot`,`count`,`details`,`lifespan_mins`,`made_unit_id`,\
-         `unsecure_time`,`unpack_time`,`owner`,`created_at`,`grade`,`flags`,`ucc`,`expire_time`,`expire_online_minutes`,`charge_time`,`charge_count`) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         `crafter_id`,`unsecure_time`,`unpack_time`,`owner`,`created_at`,`grade`,`flags`,`ucc`,`expire_time`,`expire_online_minutes`,`charge_time`,`charge_count`) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(item.id)
     .bind(item.class.type_name())
@@ -763,6 +855,7 @@ async fn save_item(tx: &mut Transaction<'_, MySql>, item: &Item, container_id: u
     .bind(item.details_blob())
     .bind(item.lifespan_mins)
     .bind(item.made_unit_id)
+    .bind(item.crafter_id)
     .bind(from_unix(item.unsecure_time))
     .bind(from_unix(item.unpack_time))
     .bind(item.owner_id)
@@ -788,7 +881,7 @@ async fn save_item(tx: &mut Transaction<'_, MySql>, item: &Item, container_id: u
 const ITEM_SELECT: &str = "SELECT `type`, CAST(id AS UNSIGNED) AS id, CAST(template_id AS SIGNED) AS template_id, \
      CAST(container_id AS UNSIGNED) AS container_id, CAST(slot_type AS SIGNED) AS slot_type, \
      CAST(slot AS SIGNED) AS slot, CAST(`count` AS SIGNED) AS item_count, CAST(lifespan_mins AS SIGNED) AS lifespan_mins, \
-     CAST(made_unit_id AS SIGNED) AS made_unit_id, unsecure_time, unpack_time, created_at, CAST(`owner` AS UNSIGNED) AS owner, \
+     CAST(made_unit_id AS SIGNED) AS made_unit_id, CAST(crafter_id AS SIGNED) AS crafter_id, unsecure_time, unpack_time, created_at, CAST(`owner` AS UNSIGNED) AS owner, \
      CAST(flags AS SIGNED) AS flags, CAST(ucc AS SIGNED) AS ucc, details, CAST(grade AS SIGNED) AS grade, charge_time, \
      expire_time, (expire_online_minutes + 0E0) AS expire_online_minutes, CAST(charge_count AS SIGNED) AS charge_count \
      FROM items";
@@ -804,6 +897,7 @@ fn item_row(r: &MySqlRow) -> Result<ItemRow> {
         count: int(r, "item_count")? as i32,
         lifespan_mins: int(r, "lifespan_mins")? as i32,
         made_unit_id: int(r, "made_unit_id")? as u32,
+        crafter_id: int(r, "crafter_id")? as u32,
         unsecure_time: unix(dt(r, "unsecure_time")),
         unpack_time: unix(dt(r, "unpack_time")),
         created_at: unix(dt(r, "created_at")),

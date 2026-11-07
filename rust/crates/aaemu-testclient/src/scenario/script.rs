@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! gm <command line>                  GM chat command (without the leading slash)
+//! gmraw <command line>               same, without draining (the caller asserts the reply)
 //! tp <x> <y> <z>                     /move there, acknowledge the teleport, wait for the area
 //! moverel <dx> <dy> <dz>             /move to self + delta (e.g. leave an aura radius)
 //! gopeer [name]                      /move to the peer's position (no drain)
@@ -30,24 +31,67 @@
 //! expectattach <point>              fail unless SCUnitAttached for us at that point
 //! expecterror <code>                fail unless SCErrorMsg with that code
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
+//! buycoin <doodad template> <func>   CSBuyCoinItemPacket (DoodadFuncPurchase) and print the reply
+//! buycoinraw <doodad template> <func>  same without draining (the caller asserts the reply)
+//! goods <npc template>              walk to the NPC, CSListSpecialtyGoods and print SCSpecialtyGoods
+//! sellpack <npc template>           walk to the NPC, CSSellBackpackGoods; fail unless the labor
+//!                                   and item-task answers arrive (the payment mail is delayed)
+//! trader <npc template>             replay the captured trader talk (0x068, 0x065, 0x052 25205,
+//!                                   0x043, 0x065 false, 0x042) and fail if 0x9b comes back
+//! priceboard <from> <to>            CSRequestSpecialtyCurrent (0x131) and print the parsed table
+//! cexec <craft> <doodad obj> <n>    CSExecuteCraft (client writer `FUN_397bbfc0`), print the
+//!                                   decoded craft replies (`SCCraftItemUnlock`, `SCCraftFailed`)
+//! maillist                          CSListMail (empty) and decode `SCMailList` / `SCMailListEnd`
+//! mailread <isSent 0|1> <mailId>    CSReadMail (client writer `FUN_397ba350`) and decode
+//!                                   `SCMailBody` (`FUN_397af2d0` / `FUN_398a5e60`)
+//! aucpost <npc tpl> <item tpl> <start> <buyout> <duration>
+//!                                   walk to the auctioneer NPC, CSAuctionPost (client writer
+//!                                   `FUN_397bae70`) and decode `SCAuctionPosted`
+//! aucbid <npc tpl> <lotId> <money>  CSAuctionBid (client writer `FUN_397bb050` + `FUN_398a6880`)
+//!                                   and decode `SCAuctionBid` / `SCAuctionMessage`
 //! item <template> <count>            `/item add self` and remember the stack id / slot
 //! equip <template> <slot>            move the remembered stack to equipment slot `slot` (26 = back)
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
+//! icastitem <skill> <scroll template> <target item template> error <code>|ok
+//!                                    item-on-item cast (`GradeEnchant` scroll on the target
+//!                                    item); fails unless the expected error (and no result) or
+//!                                    an `SCGradeEnchantResult` arrives.
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex are
-//!                                    the object ids, `GUILD` the bot's guild id as a u32)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
+//!                                    in the body hex)
+//! rawcsend <opcode hex> <body hex>   send it without draining (the caller asserts the reply)
+//! rawcswait <opcode hex> <body hex> <PacketName> [secs]
+//!                                    send it and fail unless that packet answers (default 5 s)
 //! targetpeer [name]                 select the peer (GM commands that act on the target)
 //! pkill [name]                       `/kill` with the peer targeted (GM)
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
 //! partyaccept                        wait for SCAskToJoinTeam and accept it
+//! areainvite [team] [party|raid]     CSInviteAreaToTeam (team 0 = the current team); the
+//!                                    answer is left for expectpkt (SCTeamAreaInvitedPacket)
+//! expectareacool [secs]              fail unless SCTeamAreaInvited arrives with s=false and a
+//!                                    positive remaining cooldown in r
+//! partyacceptarea                    wait for SCAskToJoinTeamArea and accept it (isArea=1);
+//!                                    the join packets are left for expectpkt
 //! gcreate <name>                     CSCreateExpedition
 //! ginvite [name]                     CSInviteToExpedition to the peer
-//! grename <name>                     CSRenameExpedition for the bot's own guild
 //! gaccept                            wait for the guild invitation and join
 //! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
+//! grename <name>                     CSRenameExpedition for the bot's own guild (the `GUILD` id)
+//! gexpectrenamed <name>              fail unless SCFactionRenamed carries that name
+//! gexpectretry <error>               fail unless SCFactionRetryRename re-opens the expedition dialog
+//!                                    with that error code
+//! ninvite [name]                     CSFactionImmigrationInvite to the peer (nation king)
+//! nlevel [name] <level>              `/level <peer> <level>` (GM)
+//! naccept [0|1]                      wait for SCFactionImmigrateInvite and answer it
+//! nreply <nation> <nonce> <0|1>      CSFactionImmigrationInviteReply without an invitation
+//! norigin                            CSFactionImmigrateToOrigin
+//! nkick <name>                       CSFactionKickToOrigin
+//! nhostile <faction>                 CSFactionDeclareHostile (nation king)
+//! nattack <skill> [name]             target the peer and cast at it; fail unless SCSkillStarted
+//!                                    arrives without SCErrorMsg
 //! hangup                            hard disconnect (socket closed, no CSLeaveWorld); ends the script
 //! expectseen <code> [secs]          fail unless an SCErrorMsg with that code arrived since the last
 //!                                   `expectseen` (also one an earlier command already drained)
@@ -78,7 +122,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use aaemu_game::opcodes::{cs, sc};
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 
 use super::questitem::{chat_text, gm_command, quest_state, stack_id, stack_location};
 use super::{pump, skill_response_result, Runner};
@@ -136,6 +180,27 @@ fn show(packets: &[Packet]) {
                 println!("    SCDoodadCompleteQuest doodad {doodad} quest {quest}");
             } else {
                 println!("    SCDoodadCompleteQuest (unreadable)");
+            }
+        } else if p.is_sc(sc::SCRaceCondPacket) {
+            let mut s = p.stream();
+            match (s.read_u8(), s.read_u32(), s.read_u32()) {
+                (Ok(rc), Ok(track), Ok(after)) => {
+                    println!("    SCRaceCond rc {rc} track {track} after {after} ms");
+                }
+                _ => println!("    SCRaceCond (unreadable)"),
+            }
+        } else if p.is_sc(sc::SCRacingPacket) {
+            let mut s = p.stream();
+            match (s.read_u8(), s.read_u32(), s.read_i32()) {
+                (Ok(rc), Ok(record), Ok(v1)) => {
+                    println!("    SCRacing rc {rc} record {record} ms v1 {v1}");
+                }
+                _ => println!("    SCRacing (unreadable)"),
+            }
+        } else if p.is_sc(sc::SCRacingResultPacket) {
+            match decode_racing_result(&mut p.stream()) {
+                Ok(rows) => println!("    SCRacingResult rows {rows:?}"),
+                Err(_) => println!("    SCRacingResult (unreadable)"),
             }
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {
             let t = parse_item_task(&p.body);
@@ -233,6 +298,313 @@ fn complete_quest_body(quest: u32, npc_obj: u32, doodad_obj: u32, selected: i32)
         .write_bc(doodad_obj)
         .write_i32(selected);
     b.into_bytes()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Craft / mail / auction: C->S bodies built exactly like the 1.2 client writer functions.
+// ---------------------------------------------------------------------------------------------
+
+/// `CSExecuteCraft` body as `X2Craft.ExecuteCraft` builds it (`FUN_394d1340` -> writer
+/// `FUN_397bbfc0`): `u32 craftId, bc doodadObjId, i32 count`.
+fn execute_craft_body(craft_id: u32, doodad_obj: u32, count: i32) -> Vec<u8> {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_u32(craft_id).write_bc(doodad_obj).write_i32(count);
+    b.into_bytes()
+}
+
+/// `CSReadMail` body as the client's `ReadMailById` builds it (`FUN_393cc2e0` -> writer
+/// `FUN_397ba350`): `bool isSent, i64 mailId`.
+fn read_mail_body(is_sent: bool, mail_id: i64) -> Vec<u8> {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_bool(is_sent).write_i64(mail_id);
+    b.into_bytes()
+}
+
+/// `CSAuctionPost` body as the client's post-article call builds it (`FUN_394cea60` -> writer
+/// `FUN_397bae70`): `bc auctioneerId, bc auctioneerId2, u64 itemId, i32 startPrice,
+/// i32 buyoutPrice, u8 duration`.
+fn auction_post_body(
+    auctioneer_id: u32,
+    auctioneer_id2: u32,
+    item_id: u64,
+    start_price: i32,
+    buyout_price: i32,
+    duration: u8,
+) -> Vec<u8> {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_bc(auctioneer_id)
+        .write_bc(auctioneer_id2)
+        .write_u64(item_id)
+        .write_i32(start_price)
+        .write_i32(buyout_price)
+        .write_u8(duration);
+    b.into_bytes()
+}
+
+/// `CSBidAuction` body as the client's bid call builds it (`FUN_394cfff0` -> writer
+/// `FUN_397bb050`): `bc auctioneerId, bc auctioneerId2, AuctionDisplay, AuctionBid`.
+///
+/// `AuctionDisplay` is the client's copy of the listed lot (`FUN_398a6de0`). The server only
+/// reads its `id`; the other fields are sent zeroed, with an empty item (`templateId 0`), which
+/// is the same wire layout the client writes for a real lot.
+fn auction_bid_body(
+    auctioneer_id: u32,
+    auctioneer_id2: u32,
+    lot_id: u64,
+    bidder_id: u32,
+    bidder_name: &str,
+    money: i32,
+) -> Vec<u8> {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_bc(auctioneer_id).write_bc(auctioneer_id2);
+    // AuctionDisplay (client writer `FUN_398a6de0`).
+    b.write_u64(lot_id)
+        .write_u8(0) // duration
+        .write_u32(0) // item template 0: the client writes no item body
+        .write_u8(0) // worldId
+        .write_u32(0) // clientId
+        .write_str("") // clientName
+        .write_i32(0) // startMoney
+        .write_i32(0) // directMoney
+        .write_i64(0) // postDate
+        .write_u8(0) // bidWorldId
+        .write_u32(0) // bidderId
+        .write_str("") // bidderName
+        .write_i32(0) // bidMoney
+        .write_i32(0); // extra
+
+    // AuctionBid (client writer `FUN_398a6880`).
+    b.write_u64(lot_id)
+        .write_u8(0) // worldId
+        .write_u32(bidder_id)
+        .write_str(bidder_name)
+        .write_i32(money);
+    b.into_bytes()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Craft / mail / auction: S->C decoders from the 1.2 client reader functions (not the server's
+// writers, so a server-side wire change cannot hide behind a mirrored decoder).
+// ---------------------------------------------------------------------------------------------
+
+/// `MailHeader` as the client reads it (`FUN_398a5a00`): i64 mailId, u8 type, u8 status,
+/// string title, string senderName, u8 attachments, string receiverName, i64 openDate,
+/// bool returned, i64 extra.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MailHeaderView {
+    mail_id: i64,
+    mail_type: u8,
+    status: u8,
+    title: String,
+    sender_name: String,
+    attachments: u8,
+    receiver_name: String,
+    open_date: i64,
+    returned: bool,
+    extra: i64,
+}
+
+fn decode_mail_header(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<MailHeaderView> {
+    Ok(MailHeaderView {
+        mail_id: s.read_i64()?,
+        mail_type: s.read_u8()?,
+        status: s.read_u8()?,
+        title: s.read_string()?,
+        sender_name: s.read_string()?,
+        attachments: s.read_u8()?,
+        receiver_name: s.read_string()?,
+        open_date: s.read_i64()?,
+        returned: s.read_bool()?,
+        extra: s.read_i64()?,
+    })
+}
+
+/// `MailBody` as the client reads it (`FUN_398a5e60`): i64 mailId, u8 type, string receiverName,
+/// string title, string text, i32 moneyAmount x3, i64 sendDate/recvDate/openDate, ten items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MailBodyView {
+    mail_id: i64,
+    mail_type: u8,
+    receiver_name: String,
+    title: String,
+    text: String,
+    copper_coins: i32,
+    billing_amount: i32,
+    money_amount2: i32,
+    send_date: i64,
+    recv_date: i64,
+    open_date: i64,
+    items: Vec<(u32, u64, u8, i32)>,
+}
+
+fn decode_mail_body(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<MailBodyView> {
+    let mail_id = s.read_i64()?;
+    let mail_type = s.read_u8()?;
+    let receiver_name = s.read_string()?;
+    let title = s.read_string()?;
+    let text = s.read_string()?;
+    let copper_coins = s.read_i32()?;
+    let billing_amount = s.read_i32()?;
+    let money_amount2 = s.read_i32()?;
+    let send_date = s.read_i64()?;
+    let recv_date = s.read_i64()?;
+    let open_date = s.read_i64()?;
+    let mut items = Vec::with_capacity(10);
+    for _ in 0..10 {
+        items.push(decode_item_summary(s)?);
+    }
+    Ok(MailBodyView {
+        mail_id,
+        mail_type,
+        receiver_name,
+        title,
+        text,
+        copper_coins,
+        billing_amount,
+        money_amount2,
+        send_date,
+        recv_date,
+        open_date,
+        items,
+    })
+}
+
+/// `UnreadMailCount` as the client reads it (`FUN_398a5700`): four i32 counters.
+fn decode_count_unread(
+    s: &mut aaemu_commons::PacketStream,
+) -> anyhow::Result<(i32, i32, i32, i32)> {
+    Ok((s.read_i32()?, s.read_i32()?, s.read_i32()?, s.read_i32()?))
+}
+
+/// One `Item` record as the client reads it (`FUN_3961f500`): `u32 templateId`; when nonzero
+/// `u64 id, u8 grade, u8 flags, i32 stackSize, ItemDetail, i64 creationTime, u32 lifespanMins,
+/// u32 madeUnitId, u8 worldId, i64 unsecureDateTime, i64 unpackDateTime`. Only the summary is
+/// kept; the detail body is skipped with the client's own length table.
+fn decode_item_summary(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<(u32, u64, u8, i32)> {
+    let template = s.read_u32()?;
+    if template == 0 {
+        return Ok((0, 0, 0, 0));
+    }
+    let id = s.read_u64()?;
+    let grade = s.read_u8()?;
+    let _flags = s.read_u8()?;
+    let count = s.read_i32()?;
+    let detail = s.read_u8()?;
+    s.read_bytes(aaemu_game::models::item::detail_body_len(detail))?;
+    s.read_i64()?; // creationTime
+    s.read_i32()?; // lifespanMins
+    s.read_u32()?; // madeUnitId
+    s.read_u8()?; // worldId
+    s.read_i64()?; // unsecureDateTime
+    s.read_i64()?; // unpackDateTime
+    Ok((template, id, grade, count))
+}
+
+/// `AuctionLot` as the client reads it (`FUN_398a6de0`): u64 id, u8 duration, Item, u8 worldId,
+/// u32 clientId, string clientName, i32 startMoney, i32 directMoney, i64 postDate,
+/// u8 bidWorldId, u32 bidderId, string bidderName, i32 bidMoney, i32 extra.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuctionLotView {
+    id: u64,
+    duration: u8,
+    item_template: u32,
+    item_id: u64,
+    world_id: u8,
+    client_id: u32,
+    client_name: String,
+    start_money: i32,
+    direct_money: i32,
+    post_date: i64,
+    bid_world_id: u8,
+    bidder_id: u32,
+    bidder_name: String,
+    bid_money: i32,
+    extra: i32,
+}
+
+fn decode_auction_lot(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<AuctionLotView> {
+    let id = s.read_u64()?;
+    let duration = s.read_u8()?;
+    let (item_template, item_id, _, _) = decode_item_summary(s)?;
+    Ok(AuctionLotView {
+        id,
+        duration,
+        item_template,
+        item_id,
+        world_id: s.read_u8()?,
+        client_id: s.read_u32()?,
+        client_name: s.read_string()?,
+        start_money: s.read_i32()?,
+        direct_money: s.read_i32()?,
+        post_date: s.read_i64()?,
+        bid_world_id: s.read_u8()?,
+        bidder_id: s.read_u32()?,
+        bidder_name: s.read_string()?,
+        bid_money: s.read_i32()?,
+        extra: s.read_i32()?,
+    })
+}
+
+/// `AuctionBid` as the client reads it (`FUN_398a6880`): u64 lotId, u8 worldId, u32 bidderId,
+/// string bidderName, i32 money.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuctionBidView {
+    lot_id: u64,
+    world_id: u8,
+    bidder_id: u32,
+    bidder_name: String,
+    money: i32,
+}
+
+fn decode_auction_bid(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<AuctionBidView> {
+    Ok(AuctionBidView {
+        lot_id: s.read_u64()?,
+        world_id: s.read_u8()?,
+        bidder_id: s.read_u32()?,
+        bidder_name: s.read_string()?,
+        money: s.read_i32()?,
+    })
+}
+
+/// `SCAuctionMessage` as the client reads it (`FUN_397b56f0`): u8 msgType, u32 itemType,
+/// i32 moneyAmount.
+fn decode_auction_message(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<(u8, u32, i32)> {
+    Ok((s.read_u8()?, s.read_u32()?, s.read_i32()?))
+}
+
+/// `SCCraftItemUnlock` as the client reads it (`FUN_397b4c60`): two u8s (slot type, index).
+fn decode_craft_unlock(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<(u8, u8)> {
+    Ok((s.read_u8()?, s.read_u8()?))
+}
+
+/// `SCRacingResult` as the client reads it (`FUN_397b0340`): i32 count, then `min(count, 10)`
+/// rows of `{u32 type, u32 record}` (`FUN_397a8870`).
+fn decode_racing_result(s: &mut aaemu_commons::PacketStream) -> anyhow::Result<Vec<(u32, u32)>> {
+    let count = s.read_i32()?;
+    let mut rows = Vec::new();
+    for _ in 0..count.clamp(0, 10) {
+        rows.push((s.read_u32()?, s.read_u32()?));
+    }
+    Ok(rows)
+}
+
+/// `SCCraftFailed` as the client reads it (`FUN_397b8110`): u32 id, i32 count (clamped to 20),
+/// `count` u32 item template ids.
+fn decode_craft_failed(
+    s: &mut aaemu_commons::PacketStream,
+) -> anyhow::Result<(u32, i32, Vec<u32>)> {
+    let id = s.read_u32()?;
+    let count = s.read_i32()?;
+    let mut items = Vec::new();
+    for _ in 0..count.clamp(0, 20) {
+        items.push(s.read_u32()?);
+    }
+    Ok((id, count, items))
+}
+
+/// `cexec <craftId> <doodadObjId> <count>` arguments.
+fn parse_craft_args(parts: &[&str]) -> anyhow::Result<(u32, u32, i32)> {
+    Ok((num(parts, 0)?, num(parts, 1)?, num(parts, 2)?))
 }
 
 /// The other player to target: `name`, else the first other player in sight.
@@ -589,6 +961,9 @@ async fn run_lines(
                 let reply = gm_command(game, rest).await?;
                 show(&reply);
             }
+            "gmraw" => {
+                game.chat(0, &format!("/{rest}")).await?;
+            }
             "tp" => {
                 let (x, y, z): (f32, f32, f32) =
                     (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
@@ -943,6 +1318,374 @@ async fn run_lines(
                 let args = split_quoted(rest)?;
                 super::music::command(game, &mut music, c, &args).await?;
             }
+            "buycoin" | "buycoinraw" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let func: u32 = num(&parts, 1)?;
+                let me = game.state.self_pos;
+                let d = game
+                    .state
+                    .doodads
+                    .values()
+                    .filter(|d| d.template_id == tpl)
+                    .min_by(|a, b| dist(a.pos, me).total_cmp(&dist(b.pos, me)))
+                    .cloned()
+                    .with_context(|| format!("doodad {tpl} not in sight"))?;
+                if d.parent_obj_id == 0 {
+                    clock += 1500;
+                    game.move_to((d.pos.0 + 1.0, d.pos.1, d.pos.2), clock)
+                        .await?;
+                }
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_bc(d.obj_id).write_u32(func);
+                game.send_cs(aaemu_game::opcodes::cs::CSBuyCoinItemPacket, b.as_bytes())
+                    .await?;
+                if cmd == "buycoinraw" {
+                    continue;
+                }
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
+            }
+            "goods" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_bc(npc.obj_id);
+                game.send_cs(cs::CSListSpecialtyGoodsPacket, body.as_bytes())
+                    .await?;
+                let packet = game.wait_sc(sc::SCSpecialtyGoodsPacket).await?;
+                let mut s = packet.stream();
+                let count = s.read_i32()?;
+                println!("    SCSpecialtyGoods count {count}");
+                for i in 0..count.max(0) {
+                    let item = s.read_u32()?;
+                    let refund = s.read_i32()?;
+                    let currency = s.read_u8()?;
+                    let unknown = s.read_u8()?;
+                    println!(
+                        "      good {i}: item {item} refund {refund} currency {currency} unknown {unknown}"
+                    );
+                }
+            }
+            "sellpack" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_bc(npc.obj_id);
+                game.send_cs(cs::CSSellBackpackGoodsPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let labor = got
+                    .iter()
+                    .find(|p| p.is_sc(sc::SCCharacterLaborPowerChangedPacket))
+                    .context("sellpack: no SCCharacterLaborPowerChanged")?;
+                let mut s = labor.stream();
+                let amount = s.read_i32()?;
+                let action = s.read_i32()?;
+                let point = s.read_i32()?;
+                let step = s.read_u8()?;
+                println!("    labor change {amount} action {action} point {point} step {step}");
+                ensure!(
+                    got.iter().any(|p| p.is_sc(sc::SCItemTaskSuccessPacket)),
+                    "sellpack: no SCItemTaskSuccess"
+                );
+            }
+            "trader" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                game.start_interaction(npc.obj_id).await?;
+                // The captured first talk has the target-changed flag set; the tail repeat is 00.
+                game.interact_npc(npc.obj_id, true).await?;
+                game.start_skill(25205, npc.obj_id).await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u32(34159); // the pack template the client checks
+                game.send_cs(cs::CSSpecialtyRatioPacket, body.as_bytes())
+                    .await?;
+                game.interact_npc(npc.obj_id, false).await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_bc(npc.obj_id);
+                game.send_cs(cs::CSSellBackpackGoodsPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
+                ensure!(
+                    got.iter().any(|p| p.is_sc(sc::SCSpecialtyRatioPacket)),
+                    "trader: no SCSpecialtyRatio answer"
+                );
+                ensure!(
+                    !got.iter().any(|p| p.is_sc(sc::SCSpecialtyRecordsPacket)),
+                    "trader: the discarded SCSpecialtyRecords must not be sent"
+                );
+            }
+            "priceboard" => {
+                let from: u16 = num(&parts, 0)?;
+                let to: u16 = num(&parts, 1)?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u16(from).write_u16(to);
+                game.send_cs(cs::CSRequestSpecialtyCurrentPacket, body.as_bytes())
+                    .await?;
+                let packet = game.wait_sc(sc::SCSpecialtyCurrentPacket).await?;
+                let mut s = packet.stream();
+                let count = s.read_i32()?;
+                let got_from = s.read_u16()?;
+                let got_to = s.read_u16()?;
+                ensure!(
+                    (0..=0x80).contains(&count),
+                    "priceboard: invalid count {count}"
+                );
+                println!("    SCSpecialtyCurrent from {got_from} to {got_to} count {count}");
+                for i in 0..count.min(3) {
+                    let item = s.read_u32()?;
+                    let ratio = s.read_i32()?;
+                    println!("      {i}: item {item} ratio {ratio}");
+                }
+            }
+            "cexec" => {
+                let (craft, doodad, count) = parse_craft_args(&parts)?;
+                game.send_cs(
+                    cs::CSExecuteCraft,
+                    &execute_craft_body(craft, doodad, count),
+                )
+                .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(10))
+                    .await?;
+                for p in &got {
+                    if p.is_sc(sc::SCCraftItemUnlockPacket) {
+                        let mut s = p.stream();
+                        let (slot_type, index) = decode_craft_unlock(&mut s)?;
+                        ensure!(
+                            s.remaining() == 0,
+                            "SCCraftItemUnlockPacket has trailing bytes"
+                        );
+                        println!("    SCCraftItemUnlock slot type {slot_type} index {index}");
+                    } else if p.is_sc(sc::SCCraftFailedPacket) {
+                        let mut s = p.stream();
+                        let (id, count, items) = decode_craft_failed(&mut s)?;
+                        ensure!(s.remaining() == 0, "SCCraftFailedPacket has trailing bytes");
+                        println!("    SCCraftFailed id {id} count {count} items {items:?}");
+                    }
+                }
+                show(&got);
+            }
+            "maillist" => {
+                game.send_cs(cs::CSListMailPacket, &[]).await?;
+                let got = game
+                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                    .await?;
+                let mut headers = 0usize;
+                let mut list_end = false;
+                for p in &got {
+                    if p.is_sc(sc::SCMailListPacket) {
+                        let mut s = p.stream();
+                        let is_sent = s.read_bool()?;
+                        let total = s.read_i32()?;
+                        let h = decode_mail_header(&mut s)?;
+                        ensure!(s.remaining() == 0, "SCMailListPacket has trailing bytes");
+                        println!(
+                            "    SCMailList isSent {is_sent} total {total} mail {} type {} \
+                             status {} title {:?} sender {:?} receiver {:?} attachments {} \
+                             open {} returned {} extra {}",
+                            h.mail_id,
+                            h.mail_type,
+                            h.status,
+                            h.title,
+                            h.sender_name,
+                            h.receiver_name,
+                            h.attachments,
+                            h.open_date,
+                            h.returned,
+                            h.extra
+                        );
+                        headers += 1;
+                    } else if p.is_sc(sc::SCMailListEndPacket) {
+                        let mut s = p.stream();
+                        let total_headers = s.read_i32()?;
+                        let total_bodies = s.read_i32()?;
+                        println!("    SCMailListEnd headers {total_headers} bodies {total_bodies}");
+                        list_end = true;
+                    }
+                }
+                show(&got);
+                ensure!(list_end, "maillist: no SCMailListEndPacket");
+                println!("    {headers} mail header(s)");
+            }
+            "mailread" => {
+                let is_sent = num::<u8>(&parts, 0)? != 0;
+                let mail_id: i64 = num(&parts, 1)?;
+                game.send_cs(cs::CSReadMailPacket, &read_mail_body(is_sent, mail_id))
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                    .await?;
+                let mut body_seen = false;
+                for p in &got {
+                    if p.is_sc(sc::SCMailBodyPacket) {
+                        let mut s = p.stream();
+                        let is_prepare = s.read_bool()?;
+                        let body_is_sent = s.read_bool()?;
+                        let b = decode_mail_body(&mut s)?;
+                        let open_modified = s.read_bool()?;
+                        let (sent, received, mia, commercial) = decode_count_unread(&mut s)?;
+                        ensure!(s.remaining() == 0, "SCMailBodyPacket has trailing bytes");
+                        println!(
+                            "    SCMailBody prepare {is_prepare} sent {body_is_sent} mail {} \
+                             type {} title {:?} text {:?} money [{}, {}, {}] dates [{}, {}, {}] \
+                             openDateModified {open_modified} unread [{sent}, {received}, {mia}, \
+                             {commercial}]",
+                            b.mail_id,
+                            b.mail_type,
+                            b.title,
+                            b.text,
+                            b.copper_coins,
+                            b.billing_amount,
+                            b.money_amount2,
+                            b.send_date,
+                            b.recv_date,
+                            b.open_date
+                        );
+                        for (i, (tpl, id, grade, count)) in b.items.iter().enumerate() {
+                            if *tpl != 0 {
+                                println!(
+                                    "      attachment {i}: tpl {tpl} id {id} grade {grade} \
+                                     count {count}"
+                                );
+                            }
+                        }
+                        body_seen = true;
+                    } else if p.is_sc(sc::SCMailStatusUpdatedPacket) {
+                        let mut s = p.stream();
+                        let sent = s.read_bool()?;
+                        let id = s.read_i64()?;
+                        let status = s.read_u8()?;
+                        println!("    SCMailStatusUpdated isSent {sent} mail {id} status {status}");
+                    }
+                }
+                show(&got);
+                ensure!(
+                    body_seen,
+                    "mailread: no SCMailBodyPacket for mail {mail_id}"
+                );
+            }
+            "aucpost" => {
+                let npc_tpl: u32 = num(&parts, 0)?;
+                let item_tpl: u32 = num(&parts, 1)?;
+                let start: i32 = num(&parts, 2)?;
+                let buyout: i32 = num(&parts, 3)?;
+                let duration: u8 = num(&parts, 4)?;
+                let item_id = *items
+                    .get(&item_tpl)
+                    .with_context(|| format!("item {item_tpl} not added with `item`"))?;
+                let npc = nearest(game, npc_tpl)
+                    .with_context(|| format!("NPC {npc_tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                game.start_interaction(npc.obj_id).await?;
+                game.drain(Duration::from_millis(300), Duration::from_secs(1))
+                    .await?;
+                game.send_cs(
+                    cs::CSAuctionPostPacket,
+                    &auction_post_body(npc.obj_id, 0, item_id, start, buyout, duration),
+                )
+                .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                let mut posted = false;
+                for p in &got {
+                    if p.is_sc(sc::SCAuctionPostedPacket) {
+                        let mut s = p.stream();
+                        let lot = decode_auction_lot(&mut s)?;
+                        ensure!(
+                            s.remaining() == 0,
+                            "SCAuctionPostedPacket has trailing bytes"
+                        );
+                        println!(
+                            "    SCAuctionPosted lot {} duration {} item tpl {} id {} \
+                             client {} '{}' start {} buyout {}",
+                            lot.id,
+                            lot.duration,
+                            lot.item_template,
+                            lot.item_id,
+                            lot.client_id,
+                            lot.client_name,
+                            lot.start_money,
+                            lot.direct_money
+                        );
+                        posted = true;
+                    }
+                }
+                show(&got);
+                ensure!(
+                    posted,
+                    "aucpost: no SCAuctionPostedPacket (auctioneer NPC in range?)"
+                );
+            }
+            "aucbid" => {
+                let npc_tpl: u32 = num(&parts, 0)?;
+                let lot_id: u64 = num(&parts, 1)?;
+                let money: i32 = num(&parts, 2)?;
+                let npc = nearest(game, npc_tpl)
+                    .with_context(|| format!("NPC {npc_tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                game.start_interaction(npc.obj_id).await?;
+                game.drain(Duration::from_millis(300), Duration::from_secs(1))
+                    .await?;
+                let body = auction_bid_body(
+                    npc.obj_id,
+                    0,
+                    lot_id,
+                    game.state.selected_char,
+                    &cfg.character,
+                    money,
+                );
+                game.send_cs(cs::CSBidAuctionPacket, &body).await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                let mut bid_seen = false;
+                for p in &got {
+                    if p.is_sc(sc::SCAuctionBidPacket) {
+                        let mut s = p.stream();
+                        let bid = decode_auction_bid(&mut s)?;
+                        let is_buyout = s.read_bool()?;
+                        let item_id = s.read_u32()?;
+                        ensure!(s.remaining() == 0, "SCAuctionBidPacket has trailing bytes");
+                        println!(
+                            "    SCAuctionBid lot {} bidder {} '{}' money {} buyout {is_buyout} \
+                             item {item_id}",
+                            bid.lot_id, bid.bidder_id, bid.bidder_name, bid.money
+                        );
+                        bid_seen = true;
+                    } else if p.is_sc(sc::SCAuctionMessagePacket) {
+                        let (msg, item, amount) = decode_auction_message(&mut p.stream())?;
+                        println!("    SCAuctionMessage type {msg} item {item} money {amount}");
+                    }
+                }
+                show(&got);
+                ensure!(
+                    bid_seen,
+                    "aucbid: no SCAuctionBidPacket (auctioneer NPC in range, lot valid?)"
+                );
+            }
             "item" => {
                 let tpl: u32 = num(&parts, 0)?;
                 let count: u32 = num(&parts, 1)?;
@@ -1048,6 +1791,50 @@ async fn run_lines(
                     }
                 }
                 show(&got);
+            }
+            "icastitem" => {
+                let skill: u32 = num(&parts, 0)?;
+                let scroll_tpl: u32 = num(&parts, 1)?;
+                let target_tpl: u32 = num(&parts, 2)?;
+                let expect = parts.get(3).copied().unwrap_or("ok");
+                let scroll = *items
+                    .get(&scroll_tpl)
+                    .with_context(|| format!("item {scroll_tpl} not added with `item`"))?;
+                let target = *items
+                    .get(&target_tpl)
+                    .with_context(|| format!("item {target_tpl} not added with `item`"))?;
+                game.start_item_skill_on_item(skill, scroll, scroll_tpl, target)
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(2000), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let errors: Vec<i16> = got
+                    .iter()
+                    .filter(|p| p.is_sc(sc::SCErrorMsgPacket))
+                    .filter_map(|p| p.stream().read_i16().ok())
+                    .collect();
+                let regraded = got.iter().any(|p| p.is_sc(sc::SCGradeEnchantResultPacket));
+                println!(
+                    "    item cast {skill} from {scroll_tpl} on {target_tpl}: errors {errors:?}, \
+                     regrade result {regraded}"
+                );
+                match expect {
+                    "ok" => ensure!(
+                        regraded && errors.is_empty(),
+                        "item cast {skill} on {target_tpl}: expected SCGradeEnchantResult and no \
+                         error, got errors {errors:?}"
+                    ),
+                    "error" => {
+                        let code: i16 = num(&parts, 4)?;
+                        ensure!(
+                            errors.contains(&code) && !regraded,
+                            "item cast {skill} on {target_tpl}: expected error {code} and no \
+                             regrade result, got errors {errors:?}"
+                        );
+                    }
+                    other => bail!("unknown icastitem expectation '{other}' (error <code>|ok)"),
+                }
             }
             "walk" => {
                 // Steps of 4 m every 800 ms (5 m/s).
@@ -1366,7 +2153,7 @@ async fn run_lines(
                 let got = gm_command(game, "kill").await?;
                 show(&got);
             }
-            "rawcs" => {
+            "rawcs" | "rawcswait" | "rawcsend" => {
                 let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
                 // `SELF` / `PEER` stand for our own / the first other player's object id in
                 // the packet's `bc` encoding.
@@ -1387,7 +2174,7 @@ async fn run_lines(
                     String::new()
                 };
                 // `GUILD` is the bot's guild id as a little-endian u32.
-                let hex = raw
+                let mut hex = raw
                     .replace(
                         "GUILD",
                         &game
@@ -1399,6 +2186,23 @@ async fn run_lines(
                     )
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
+                // `ITEM(<template>)` expands to the stack id remembered by
+                // `item <template>`, little-endian, so a packet can carry the real item
+                // instance id.
+                while let Some(start) = hex.find("ITEM(") {
+                    let rest = &hex[start + 5..];
+                    let end = rest.find(')').context("ITEM( needs a closing )")?;
+                    let template: u32 = rest[..end].parse()?;
+                    let id = *items
+                        .get(&template)
+                        .with_context(|| format!("item {template} not added with `item`"))?;
+                    let bytes: String = id
+                        .to_le_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    hex.replace_range(start..start + 5 + end + 1, &bytes);
+                }
                 anyhow::ensure!(
                     hex.len() % 2 == 0 && hex.is_ascii(),
                     "rawcs body hex must be an even number of hex digits"
@@ -1407,10 +2211,21 @@ async fn run_lines(
                     .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
                     .collect::<Result<_, _>>()?;
                 game.send_cs(opcode, &body).await?;
-                let got = game
-                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
-                    .await?;
-                show(&got);
+                if cmd == "rawcswait" {
+                    // The answer is asserted, not drained away (`rawcs` prints it instead).
+                    let want = parts
+                        .get(2)
+                        .context("rawcswait needs <PacketName> after the body")?;
+                    let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(5);
+                    expect_packet(game, want, secs).await?;
+                } else if cmd == "rawcsend" {
+                    // Leave the reply for a following `expecterror` / `expectpkt`.
+                } else {
+                    let got = game
+                        .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                        .await?;
+                    show(&got);
+                }
             }
             "expectseen" => {
                 let code: i16 = num(&parts, 0)?;
@@ -1469,20 +2284,54 @@ async fn run_lines(
                     .await?;
                 show(&got);
             }
+            "areainvite" => {
+                let team_id: u32 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let is_party = !parts.get(1).is_some_and(|x| x.eq_ignore_ascii_case("raid"));
+                let (op, body) = social::invite_area_to_team(team_id, is_party);
+                game.send_cs(op, &body).await?;
+            }
+            "expectareacool" => {
+                let secs: u64 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(5);
+                loop {
+                    match await_event(game, &mut consumed, "AreaInvited", secs).await? {
+                        SocialEvent::AreaInvited { r, s: false } => {
+                            anyhow::ensure!(
+                                r > 0 && r <= 30_000,
+                                "area cooldown reply has r={r} (want 1..=30000 ms)"
+                            );
+                            println!("    area invite on cooldown: {r} ms left");
+                            break;
+                        }
+                        SocialEvent::AreaInvited { r, s: true } => {
+                            println!("    skipped success area invite (r={r})");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            "partyacceptarea" => {
+                let SocialEvent::TeamAskArea {
+                    team_id,
+                    sender_id,
+                    is_party,
+                    ..
+                } = await_event(game, &mut consumed, "TeamAskArea", 60).await?
+                else {
+                    bail!("not an area team invitation");
+                };
+                let (op, body) = social::reply_area_to_join_team(
+                    team_id,
+                    is_party,
+                    sender_id,
+                    false,
+                    &cfg.character,
+                );
+                game.send_cs(op, &body).await?;
+            }
             "gcreate" => {
                 let (op, body) = social::create_expedition(rest.trim());
                 game.send_cs(op, &body).await?;
                 game.drain(Duration::from_millis(800), Duration::from_secs(4))
-                    .await?;
-            }
-            "grename" => {
-                let id = game.state.guild_id;
-                if id == 0 {
-                    bail!("grename: the bot has not seen its guild yet");
-                }
-                let (op, body) = social::rename_expedition(id, rest.trim(), true);
-                game.send_cs(op, &body).await?;
-                game.drain(Duration::from_millis(800), Duration::from_secs(3))
                     .await?;
             }
             "ginvite" => {
@@ -1513,6 +2362,160 @@ async fn run_lines(
                     .drain(Duration::from_millis(800), Duration::from_secs(3))
                     .await?;
                 show(&got);
+            }
+
+            "grename" => {
+                let id = game.state.guild_id;
+                if id == 0 {
+                    bail!("grename: the bot has not seen its guild yet");
+                }
+                let (op, body) = social::rename_expedition(id, rest.trim(), true);
+                game.send_cs(op, &body).await?;
+                game.drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+            }
+            "gexpectrenamed" => {
+                let name = rest.trim();
+                ensure!(!name.is_empty(), "gexpectrenamed <name>");
+                let SocialEvent::GuildRenamed {
+                    id,
+                    name: got,
+                    by_gm,
+                } = await_event(game, &mut consumed, "GuildRenamed", 60).await?
+                else {
+                    bail!("not a faction rename");
+                };
+                ensure!(
+                    got == *name,
+                    "expected the guild to be renamed to {name:?}, got {got:?} (id {id}, byGm {by_gm})"
+                );
+                println!("    guild {id} renamed to {got}");
+            }
+            "gexpectretry" => {
+                let code: i16 = num(&parts, 0)?;
+                let SocialEvent::GuildRenameRetry {
+                    is_expedition,
+                    error: error_message,
+                    name,
+                } = await_event(game, &mut consumed, "GuildRenameRetry", 60).await?
+                else {
+                    bail!("not a faction rename retry");
+                };
+                ensure!(
+                    is_expedition,
+                    "retry packet for a nation (xpdt false), expected the expedition dialog"
+                );
+                ensure!(
+                    error_message == code,
+                    "expected rename retry error {code}, got {error_message} (name {name:?})"
+                );
+                println!("    rename retry {error_message} with name {name:?}");
+            }
+
+            "ninvite" => {
+                // The character name differs in case from the account name: use the peer's.
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionImmigrationInvitePacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "naccept" => {
+                // The reply echoes the invitation's (nation id, nonce) (PORTING.md, NATION-11).
+                let join = parts.first().map(|v| *v != "0").unwrap_or(true);
+                let invitation = game.wait_sc(sc::SCFactionImmigrateInvitePacket).await?;
+                let mut s = invitation.stream();
+                let nation = s.read_u32()?;
+                let nonce = s.read_u32()?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nreply" => {
+                // Answer an invitation that was never received (forged / replayed reply).
+                let nation: u32 = num(&parts, 0)?;
+                let nonce: u32 = num(&parts, 1)?;
+                let join = num::<u8>(&parts, 2)? != 0;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nlevel" => {
+                // `/level <name> <level>`: the GM command's name match is exact.
+                let target = peer(game, parts.first().copied())?;
+                let level: u8 = num(&parts, 1)?;
+                let got = gm_command(game, &format!("level {} {level}", target.name)).await?;
+                show(&got);
+            }
+            "norigin" => {
+                game.send_cs(cs::CSFactionImmigrateToOriginPacket, &[])
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nkick" => {
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionKickToOriginPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nhostile" => {
+                // No drain: the caller asserts the result / relation packets.
+                let faction: u32 = num(&parts, 0)?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(faction);
+                game.send_cs(cs::CSFactionDeclareHostilePacket, &b.into_bytes())
+                    .await?;
+                println!("    hostile declaration sent");
+            }
+            "nattack" => {
+                let skill: u32 = num(&parts, 0)?;
+                let target = peer(game, parts.get(1).copied())?;
+                clock += 1500;
+                game.move_to((target.pos.0 + 1.0, target.pos.1, target.pos.2), clock)
+                    .await?;
+                game.change_target(target.obj_id).await?;
+                game.start_skill(skill, target.obj_id).await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                let refused = got.iter().find(|p| p.is_sc(sc::SCErrorMsgPacket)).map(|p| {
+                    let mut s = p.stream();
+                    s.read_i16().unwrap_or_default()
+                });
+                show(&got);
+                if let Some(code) = refused {
+                    bail!("attack at the peer was refused (error {code})");
+                }
+                ensure!(
+                    got.iter().any(|p| p.is_sc(sc::SCSkillStartedPacket)
+                        || p.is_sc(sc::SCSkillFiredPacket)
+                        || p.is_sc(sc::SCSkillEndedPacket)
+                        || p.is_sc(sc::SCUnitDamagedPacket)),
+                    "the attack did not start"
+                );
+                println!("    attack started");
             }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }
@@ -1580,5 +2583,295 @@ mod tests {
         );
         let p = CSCompleteQuestContextPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
         assert_eq!((p.npc_obj_id, p.doodad_obj_id, p.selected), (0x200, 0, -1));
+    }
+
+    #[test]
+    fn cexec_arguments_parse() {
+        assert_eq!(
+            super::parse_craft_args(&["1", "2", "3"]).unwrap(),
+            (1, 2, 3)
+        );
+        assert!(super::parse_craft_args(&["1", "2"]).is_err());
+        assert!(super::parse_craft_args(&["x", "2", "3"]).is_err());
+    }
+
+    #[test]
+    fn execute_craft_body_matches_the_client_writer() {
+        // `FUN_397bbfc0`: u32 craftId, bc doodadObjId, i32 count.
+        assert_eq!(
+            super::execute_craft_body(987, 0x300, 1),
+            vec![0xdb, 0x03, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn read_mail_body_matches_the_client_writer() {
+        // `FUN_397ba350`: bool isSent, i64 mailId.
+        assert_eq!(
+            super::read_mail_body(false, 0x0102_0304_0506_0708),
+            vec![0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+        assert_eq!(
+            super::read_mail_body(true, -2),
+            vec![0x01, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn auction_post_body_matches_the_client_writer() {
+        // `FUN_397bae70`: bc, bc, u64 itemId, i32 startPrice, i32 buyoutPrice, u8 duration.
+        assert_eq!(
+            super::auction_post_body(0x300, 0, 0x0102_0304_0506_0708, 10, 20, 2),
+            vec![
+                0x00, 0x03, 0x00, // auctioneerId
+                0x00, 0x00, 0x00, // auctioneerId2
+                0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // itemId
+                0x0a, 0x00, 0x00, 0x00, // startPrice
+                0x14, 0x00, 0x00, 0x00, // buyoutPrice
+                0x02, // duration
+            ]
+        );
+    }
+
+    #[test]
+    fn auction_bid_body_matches_the_client_writer() {
+        // `FUN_397bb050` + `FUN_398a6de0` (AuctionDisplay) + `FUN_398a6880` (AuctionBid).
+        assert_eq!(
+            super::auction_bid_body(0x300, 0, 0x1122_3344_5566_7788, 0x0a, "Bob", 42),
+            vec![
+                0x00, 0x03, 0x00, // auctioneerId
+                0x00, 0x00, 0x00, // auctioneerId2
+                0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // display.id
+                0x00, // display.duration
+                0x00, 0x00, 0x00, 0x00, // display.item templateId 0
+                0x00, // display.worldId
+                0x00, 0x00, 0x00, 0x00, // display.clientId
+                0x00, 0x00, // display.clientName ""
+                0x00, 0x00, 0x00, 0x00, // display.startMoney
+                0x00, 0x00, 0x00, 0x00, // display.directMoney
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // display.postDate
+                0x00, // display.bidWorldId
+                0x00, 0x00, 0x00, 0x00, // display.bidderId
+                0x00, 0x00, // display.bidderName ""
+                0x00, 0x00, 0x00, 0x00, // display.bidMoney
+                0x00, 0x00, 0x00, 0x00, // display.extra
+                0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // bid.lotId
+                0x00, // bid.worldId
+                0x0a, 0x00, 0x00, 0x00, // bid.bidderId
+                0x03, 0x00, b'B', b'o', b'b', // bid.bidderName
+                0x2a, 0x00, 0x00, 0x00, // bid.money
+            ]
+        );
+    }
+
+    #[test]
+    fn mail_header_decodes_the_client_reader_layout() {
+        // `FUN_398a5a00`: i64, u8, u8, string, string, u8, string, i64, bool, i64.
+        let bytes = vec![
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // mailId
+            0x03, // type
+            0x01, // status
+            0x02, 0x00, b'h', b'i', // title
+            0x02, 0x00, b'A', b'l', // senderName
+            0x02, // attachments
+            0x02, 0x00, b'B', b'o', // receiverName
+            0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // openDate
+            0x01, // returned
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // extra -1
+        ];
+        let mut s = aaemu_commons::PacketStream::from_bytes(bytes);
+        let h = super::decode_mail_header(&mut s).unwrap();
+        assert_eq!(s.remaining(), 0);
+        assert_eq!(
+            h,
+            super::MailHeaderView {
+                mail_id: 0x0102_0304_0506_0708,
+                mail_type: 3,
+                status: 1,
+                title: "hi".into(),
+                sender_name: "Al".into(),
+                attachments: 2,
+                receiver_name: "Bo".into(),
+                open_date: 0x11,
+                returned: true,
+                extra: -1,
+            }
+        );
+    }
+
+    #[test]
+    fn mail_body_decodes_the_client_reader_layout() {
+        // `FUN_398a5e60`: i64, u8, string, string, string, i32 x3, i64 x3, ten Items.
+        let mut bytes = vec![
+            0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mailId
+            0x01, // type
+            0x02, 0x00, b'B', b'o', // receiverName
+            0x01, 0x00, b'T', // title
+            0x01, 0x00, b'x', // text
+            0x01, 0x00, 0x00, 0x00, // copperCoins
+            0x02, 0x00, 0x00, 0x00, // billingAmount
+            0x03, 0x00, 0x00, 0x00, // moneyAmount2
+            0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // sendDate
+            0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // recvDate
+            0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // openDate
+            // attachment 0: `Item` (`FUN_3961f500`) with detail type 0.
+            0xd2, 0x04, 0x00, 0x00, // templateId 1234
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // id
+            0x05, // grade
+            0x00, // flags
+            0x07, 0x00, 0x00, 0x00, // stackSize
+            0x00, // detailType
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // creationTime
+            0x00, 0x00, 0x00, 0x00, // lifespanMins
+            0x00, 0x00, 0x00, 0x00, // madeUnitId
+            0x00, // worldId
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // unsecureDateTime
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // unpackDateTime
+        ];
+        // Attachments 1..9 are empty items (`templateId 0`, no body).
+        bytes.extend(std::iter::repeat_n(0, 9 * 4));
+        let mut s = aaemu_commons::PacketStream::from_bytes(bytes);
+        let b = super::decode_mail_body(&mut s).unwrap();
+        assert_eq!(s.remaining(), 0);
+        assert_eq!(
+            b,
+            super::MailBodyView {
+                mail_id: 5,
+                mail_type: 1,
+                receiver_name: "Bo".into(),
+                title: "T".into(),
+                text: "x".into(),
+                copper_coins: 1,
+                billing_amount: 2,
+                money_amount2: 3,
+                send_date: 10,
+                recv_date: 11,
+                open_date: 12,
+                items: {
+                    let mut items = vec![(1234, 0x0102_0304_0506_0708, 5, 7)];
+                    items.extend(std::iter::repeat_n((0, 0, 0, 0), 9));
+                    items
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn auction_lot_decodes_the_client_reader_layout() {
+        // `FUN_398a6de0`: u64, u8, Item, u8, u32, string, i32 x2, i64, u8, u32, string,
+        // i32 x2.
+        let bytes = vec![
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // id
+            0x02, // duration
+            0x00, 0x00, 0x00, 0x00, // item templateId 0
+            0x03, // worldId
+            0x0d, 0x0c, 0x0b, 0x0a, // clientId
+            0x01, 0x00, b'S', // clientName
+            0x64, 0x00, 0x00, 0x00, // startMoney
+            0xc8, 0x00, 0x00, 0x00, // directMoney
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // postDate
+            0x04, // bidWorldId
+            0x11, 0x00, 0x00, 0x00, // bidderId
+            0x01, 0x00, b'B', // bidderName
+            0x32, 0x00, 0x00, 0x00, // bidMoney
+            0xfe, 0xff, 0xff, 0xff, // extra -2
+        ];
+        let mut s = aaemu_commons::PacketStream::from_bytes(bytes);
+        let lot = super::decode_auction_lot(&mut s).unwrap();
+        assert_eq!(s.remaining(), 0);
+        assert_eq!(
+            lot,
+            super::AuctionLotView {
+                id: 0x1122_3344_5566_7788,
+                duration: 2,
+                item_template: 0,
+                item_id: 0,
+                world_id: 3,
+                client_id: 0x0a0b_0c0d,
+                client_name: "S".into(),
+                start_money: 100,
+                direct_money: 200,
+                post_date: 0x0102_0304_0506_0708,
+                bid_world_id: 4,
+                bidder_id: 0x11,
+                bidder_name: "B".into(),
+                bid_money: 50,
+                extra: -2,
+            }
+        );
+    }
+
+    #[test]
+    fn auction_bid_decodes_the_client_reader_layout() {
+        // `FUN_398a6880`: u64 lotId, u8 worldId, u32 bidderId, string bidderName, i32 money.
+        let bytes = vec![
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // lotId
+            0x04, // worldId
+            0x09, 0x00, 0x00, 0x00, // bidderId
+            0x03, 0x00, b'B', b'i', b'd', // bidderName
+            0x2a, 0x00, 0x00, 0x00, // money
+        ];
+        let mut s = aaemu_commons::PacketStream::from_bytes(bytes);
+        let bid = super::decode_auction_bid(&mut s).unwrap();
+        assert_eq!(s.remaining(), 0);
+        assert_eq!(
+            bid,
+            super::AuctionBidView {
+                lot_id: 0x1122_3344_5566_7788,
+                world_id: 4,
+                bidder_id: 9,
+                bidder_name: "Bid".into(),
+                money: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn auction_message_decodes_the_client_reader_layout() {
+        // `FUN_397b56f0`: u8 msgType, u32 itemType, i32 moneyAmount.
+        let mut s = aaemu_commons::PacketStream::from_bytes(vec![
+            0x01, 0xd2, 0x04, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00,
+        ]);
+        assert_eq!(
+            super::decode_auction_message(&mut s).unwrap(),
+            (1, 1234, 42)
+        );
+        assert_eq!(s.remaining(), 0);
+    }
+
+    #[test]
+    fn craft_unlock_and_failure_decode_the_client_reader_layouts() {
+        // `FUN_397b4c60`: two u8s.
+        let mut s = aaemu_commons::PacketStream::from_bytes(vec![0x01, 0x02]);
+        assert_eq!(super::decode_craft_unlock(&mut s).unwrap(), (1, 2));
+        assert_eq!(s.remaining(), 0);
+
+        // `FUN_397b8110`: u32 id, i32 count, count u32 item template ids.
+        let mut s = aaemu_commons::PacketStream::from_bytes(vec![
+            0x07, 0x00, 0x00, 0x00, // id
+            0x02, 0x00, 0x00, 0x00, // count
+            0x64, 0x00, 0x00, 0x00, // item 100
+            0xc8, 0x00, 0x00, 0x00, // item 200
+        ]);
+        assert_eq!(
+            super::decode_craft_failed(&mut s).unwrap(),
+            (7, 2, vec![100, 200])
+        );
+        assert_eq!(s.remaining(), 0);
+    }
+
+    #[test]
+    fn racing_result_decodes_the_client_reader_layout() {
+        // `FUN_397b0340`: i32 count, then min(count, 10) rows of {u32 type, u32 record}.
+        let mut s = aaemu_commons::PacketStream::from_bytes(vec![
+            0x02, 0x00, 0x00, 0x00, // count
+            0x02, 0x00, 0x00, 0x00, 0x88, 0x13, 0x00, 0x00, // type 2, record 5000
+            0x07, 0x00, 0x00, 0x00, 0x60, 0xEA, 0x00, 0x00, // type 7, record 60000
+        ]);
+        assert_eq!(
+            super::decode_racing_result(&mut s).unwrap(),
+            vec![(2, 5000), (7, 60000)]
+        );
+        assert_eq!(s.remaining(), 0);
     }
 }

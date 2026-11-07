@@ -17,6 +17,7 @@
 pub mod attribute_limits;
 pub mod character_templates;
 pub mod client_files;
+pub mod content_configs;
 pub mod experience;
 pub mod features;
 pub mod formulas;
@@ -32,8 +33,9 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 pub use character_templates::CharacterData;
+pub use content_configs::ContentConfigs;
 pub use experience::{ExperienceError, ExperienceTable, LevelTemplate};
-pub use features::{Feature, FeatureSet};
+pub use features::{Feature, FeatureSet, FeatureSetConfig};
 pub use formulas::FormulaManager;
 pub use items::{ItemData, ItemTemplate};
 pub use skills::SkillData;
@@ -57,6 +59,8 @@ pub enum GameDataError {
 
 #[derive(Debug, Default)]
 pub struct GameData {
+    /// `content_configs` by id (the client's key), shared by every subsystem.
+    pub content_configs: ContentConfigs,
     /// `ExperienceManager`.
     pub experience: ExperienceTable,
     /// `ItemManager` templates.
@@ -85,6 +89,7 @@ impl GameData {
         let path = app_path.join("Data").join("compact.sqlite3");
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
+        let content_configs = ContentConfigs::load(&conn)?;
         let experience = ExperienceTable::from_templates(load_levels(&conn)?)?;
         let items = ItemData::load(&conn)?;
         let localization = Localization::load(&conn, language)?;
@@ -111,6 +116,7 @@ impl GameData {
         })?;
 
         let data = GameData {
+            content_configs,
             features: FeatureSet::initialized(
                 experience.max_player_level(),
                 experience.max_mate_level(),

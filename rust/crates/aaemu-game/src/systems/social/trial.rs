@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::data::skills::BuffKind;
 use crate::data::world_data::factions;
+use crate::db_character::CrimeFactionChange;
 use crate::managers::chat::ChannelRef;
 use crate::net::packet::ServerPacket;
 use crate::packets::world::{SCChatMessagePacket, SCUnitPointsPacket};
@@ -234,6 +235,30 @@ impl TrialData {
     fn send_state(&self, now_ms: i64) {
         self.send_packets(&self.state_packet(self.active_jury_count(), now_ms));
     }
+
+    /// `SCChangeJuryVerdictCountPacket` to every seated juror who has not voted yet.
+    /// Returns `(votes cast, seated jurors)`. The audience is INFERRED: `verdict.alb`
+    /// registers `VERDICT_COUNT` and prints the remaining count, and the C# sent no such packet.
+    fn send_verdict_count(&self) -> (i32, i32) {
+        let total = self
+            .jury
+            .values()
+            .filter(|j| j.jury_member.is_some())
+            .count() as i32;
+        let count = self
+            .jury
+            .values()
+            .filter(|j| j.jury_member.is_some() && j.selected_sentence >= 0)
+            .count() as i32;
+        for j in self.jury.values() {
+            if j.selected_sentence < 0 {
+                if let Some(m) = &j.jury_member {
+                    m.send(SCChangeJuryVerdictCountPacket { count, total });
+                }
+            }
+        }
+        (count, total)
+    }
 }
 
 /// Work deferred until the trial mutex is released (see the module docs).
@@ -247,8 +272,9 @@ pub enum Effect {
     ForceDismount(PlayerRef),
     /// `Buffs.RemoveBuffs(kind, count, tag)`.
     RemoveBuffsByTag(PlayerRef, BuffKind, i32, u32),
-    /// `Character.SetFaction(factionId)`.
-    SetFaction(PlayerRef, u32),
+    /// The faction consequences of a crime-point change (`SetFaction(Pirate)` / the infamy-0
+    /// pardon); run with [`crate::systems::social::faction::apply_crime_faction_change`].
+    CrimeFaction(PlayerRef, CrimeFactionChange),
     /// Update world membership and visibility after a justice teleport, outside the trial lock.
     Teleport(PlayerRef, crate::models::transform::Transform),
     /// An achievement event for a trial participant (JUDGEMENT, GET_JURY_POINT).
@@ -257,38 +283,10 @@ pub enum Effect {
 
 type Effects = Vec<Effect>;
 
-/// Runs deferred effects; `SetFaction` (async) is spawned on the runtime.
+/// Runs deferred effects (the trial mutex is already released).
 fn run_effects(server: &GameServer, fx: Effects) {
-    let mut factions = Vec::new();
     for e in fx {
-        match e {
-            Effect::SetFaction(p, f) => factions.push((p, f)),
-            other => run_effect(server, other),
-        }
-    }
-    if factions.is_empty() {
-        return;
-    }
-    match server.self_arc() {
-        Some(s) => {
-            tokio::spawn(async move {
-                for (p, f) in factions {
-                    crate::systems::social::faction::set_faction(&s, &p, f).await;
-                }
-            });
-        }
-        None => tracing::error!("SetFaction after a trial: server handle not available"),
-    }
-}
-
-async fn run_effects_async(server: &GameServer, fx: Effects) {
-    for e in fx {
-        match e {
-            Effect::SetFaction(p, f) => {
-                crate::systems::social::faction::set_faction(server, &p, f).await;
-            }
-            other => run_effect(server, other),
-        }
+        run_effect(server, e);
     }
 }
 
@@ -305,7 +303,9 @@ fn run_effect(server: &GameServer, e: Effect) {
             crate::systems::dispatch_buff_events(server, &WorldObject::from(&p));
         }
         Effect::Achievement(p, input) => crate::systems::report_achievement(server, &p, input),
-        Effect::SetFaction(..) => unreachable!("handled by the callers"),
+        Effect::CrimeFaction(p, change) => {
+            crate::systems::social::faction::apply_crime_faction_change(server, &p, change);
+        }
         Effect::Teleport(p, destination) => {
             let old_instance = p.data().unit.transform.instance_id;
             let Some(world) = server.world.world(destination.instance_id) else {
@@ -936,7 +936,7 @@ fn result_is_guilty(
     t.send_state(now_ms);
     room.leave_chat(defendant);
     archive_trial_evidence(server, t, now_ms);
-    let pkt = {
+    let (pkt, change) = {
         let mut c = defendant.data();
         let crime_count = c.crime_point;
         c.unit.buffs.remove_buff(buff::FORCIBLY_AWAITING_TRIAL);
@@ -944,20 +944,28 @@ fn result_is_guilty(
         c.offline_guilty_time = 0;
         c.offline_guilty_region = i32::from(court_room_region::INVALID);
         let v = c.crime_point.wrapping_sub(crime_count);
-        set_crime_point(server, &mut c, v, now_ms);
+        let change = set_crime_point(server, &mut c, v, now_ms);
         if plead_guilty {
             c.accept_guilty_count += 1;
         } else {
             c.guilty_count += 1;
         }
-        SCCrimeChangedPacket {
-            points: i32::from(crime_count),
-            crime_points: c.crime_point,
-            infamy_points: c.infamy_point,
-            crime_state: crime_state(&c),
-        }
+        (
+            SCCrimeChangedPacket {
+                points: i32::from(crime_count),
+                crime_points: c.crime_point,
+                infamy_points: c.infamy_point,
+                crime_state: crime_state(&c),
+            },
+            change,
+        )
     };
     defendant.send(pkt);
+    if !change.is_empty() {
+        // Deferred: the trial mutex is still held (module rule, lines 5-13), and the faction
+        // change re-enters the world / guild / team subsystems.
+        fx.push(Effect::CrimeFaction(defendant.clone(), change));
+    }
     // Prisoner buff (minimum 10 s: 0 would use the default 30 minutes).
     let jail_time_ms = t.jail_time.saturating_mul(60_000).max(10_000);
     {
@@ -1003,7 +1011,7 @@ fn result_is_not_guilty(
     t.current_step_end_ms = now_ms + END_TRIAL_SECONDS * SECOND_MS;
     t.send_state(now_ms);
     archive_trial_evidence(server, t, now_ms);
-    let (pkt, infamy, faction, race, gender) = {
+    let (pkt, change) = {
         let mut c = defendant.data();
         let crime_count = c.crime_point;
         c.unit.buffs.remove_buff(buff::FORCIBLY_AWAITING_TRIAL);
@@ -1012,9 +1020,9 @@ fn result_is_not_guilty(
         c.offline_guilty_region = i32::from(court_room_region::INVALID);
         c.not_guilty_count += 1;
         let v = c.crime_point.wrapping_sub(crime_count);
-        set_crime_point(server, &mut c, v, now_ms);
+        let mut change = set_crime_point(server, &mut c, v, now_ms);
         let v = c.infamy_point.wrapping_sub(i32::from(crime_count));
-        set_infamy_point(server, &mut c, v, now_ms);
+        change = change.merge(set_infamy_point(server, &mut c, v, now_ms));
         (
             SCCrimeChangedPacket {
                 points: i32::from(crime_count),
@@ -1022,13 +1030,14 @@ fn result_is_not_guilty(
                 infamy_points: c.infamy_point,
                 crime_state: crime_state(&c),
             },
-            c.infamy_point,
-            c.unit.faction_id,
-            c.race,
-            c.gender,
+            change,
         )
     };
     defendant.send(pkt);
+    if !change.is_empty() {
+        // Deferred: the trial mutex is still held (module rule, lines 5-13).
+        fx.push(Effect::CrimeFaction(defendant.clone(), change));
+    }
     fx.push(Effect::RemoveBuffsByTag(
         defendant.clone(),
         BuffKind::Good,
@@ -1041,13 +1050,6 @@ fn result_is_not_guilty(
         .buffs
         .remove_buff(buff::TRIAL_DEFENDANT);
     fx.push(Effect::DispatchBuffs(defendant.clone()));
-    if infamy <= 0 && faction == factions::PIRATE {
-        // Return to the original faction.
-        match server.game_data.characters.template(race, gender) {
-            Some(tpl) => fx.push(Effect::SetFaction(defendant.clone(), tpl.faction_id)),
-            None => tracing::error!("ResultIsNotGuilty: no character template {race}/{gender}"),
-        }
-    }
 }
 
 /// `TrialData.FinalizeVerdict()`.
@@ -1161,6 +1163,17 @@ fn create_trial_case(
     Some(id)
 }
 
+/// Why [`TrialManager::force_summon_jury`] refused to seat a player. The GM command maps
+/// these to chat messages; no packet is sent for a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceJuryError {
+    NoTrial,
+    NotSummoning,
+    NotInMainWorld,
+    AlreadyInTrial,
+    NoSeat,
+}
+
 impl TrialManager {
     fn st(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("trial manager poisoned")
@@ -1224,6 +1237,20 @@ impl TrialManager {
                     .await;
             }
         });
+    }
+
+    /// Updates the cached defendant name of an in-progress trial (character rename). Returns the
+    /// number of changed trials. Trials are runtime only; the name is not persisted.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut st = self.st();
+        let mut changed = 0;
+        for trial in st.trials.values_mut() {
+            if trial.defendant_id == character_id && trial.defendant_name != new_name {
+                trial.defendant_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
     }
 
     /// The configured court rooms (snapshot).
@@ -1414,6 +1441,8 @@ impl TrialManager {
                         sentence_type: 0,
                         sentence_time: 0,
                     });
+                    // Every seated juror is still expected to vote: count 0 of `total`.
+                    t.send_verdict_count();
                 }
                 if t.step == step::JURY_VERDICT && t.current_step_end_ms <= now {
                     tracing::debug!("TrialStep.CalculateSentence - {}", t.id);
@@ -1432,6 +1461,10 @@ impl TrialManager {
                     t.current_step_end_ms = TIME_MAX;
                 }
                 if t.step == step::TRIAL_CANCELLED {
+                    // The defendant and the seated jury hear the cancellation before the
+                    // ruling closes. `TRIAL_CANCELED` is registered by `usertrial/trial_status.alb`;
+                    // the C# sent no such packet and the audience is INFERRED from `SendPackets`.
+                    t.send_packets(&SCTrialCanceledPacket { trial_id: t.id });
                     let d = t.defendant.clone();
                     result_is_guilty(server, rooms, &d, t, false, now, fx);
                     t.send_packets(&SCRulingClosedPacket {});
@@ -1461,7 +1494,7 @@ impl TrialManager {
             self.update_jury_queue(server, &mut st);
             self.update_trial_states(server, &mut st, now_ms, &mut fx);
         }
-        run_effects_async(server, fx).await;
+        run_effects(server, fx);
     }
 
     /// `UpdateJuryQueue()` on its own.
@@ -1504,6 +1537,57 @@ impl TrialManager {
     }
 
     /// `ProcessTrialInviteReply(player, accept, trialId)`.
+    /// GM `/set_jury` (retail command, WP-SL6b): seats `player` in the first free jury seat
+    /// of `trial_id` without an invitation or queue entry. The structural checks of
+    /// `ProcessTrialInviteReply` still apply (step, main world, no other trial); the
+    /// invitation / queue / eligibility checks are deliberately skipped for the GM command.
+    pub fn force_summon_jury(
+        &self,
+        server: &GameServer,
+        trial_id: u32,
+        player: &PlayerRef,
+        now_ms: i64,
+    ) -> Result<(), ForceJuryError> {
+        let mut fx = Vec::new();
+        let res = {
+            let mut st = self.st();
+            let State {
+                rooms,
+                trials,
+                queues,
+                ..
+            } = &mut *st;
+            let Some(t) = trials.get(&trial_id) else {
+                return Err(ForceJuryError::NoTrial);
+            };
+            if t.step != trial_step::AWAITING_JURY_SUMMONS {
+                return Err(ForceJuryError::NotSummoning);
+            }
+            if player.data().unit.transform.instance_id != 0 {
+                return Err(ForceJuryError::NotInMainWorld);
+            }
+            if trials.values().any(|t| {
+                t.jury.values().any(|j| {
+                    j.jury_member
+                        .as_ref()
+                        .is_some_and(|m| Arc::ptr_eq(m, player))
+                })
+            }) {
+                return Err(ForceJuryError::AlreadyInTrial);
+            }
+            let Some(t) = trials.get_mut(&trial_id) else {
+                return Err(ForceJuryError::NoTrial);
+            };
+            if summon_jury_member(server, rooms, queues, t, player, now_ms, &mut fx) {
+                Ok(())
+            } else {
+                Err(ForceJuryError::NoSeat)
+            }
+        };
+        run_effects(server, fx);
+        res
+    }
+
     pub fn process_trial_invite_reply(
         &self,
         server: &GameServer,
@@ -1928,6 +2012,9 @@ impl TrialManager {
             };
             if Arc::ptr_eq(&t.defendant, p) {
                 if t.step < step::TRIAL_CANCELLED {
+                    // INFERRED audience (see the auto-cancel path): the defendant and the
+                    // seated jury, before the later `SCRulingClosedPacket`.
+                    t.send_packets(&SCTrialCanceledPacket { trial_id: t.id });
                     result_is_guilty(server, rooms, p, t, true, now_ms, &mut fx);
                 }
             } else {
@@ -2083,9 +2170,26 @@ impl TrialManager {
                 }
             }
         }
+        // Tell the jurors who still owe a vote the new `votes cast / seated` count.
+        t.send_verdict_count();
         if t.all_jury_selected_sentence() {
             t.current_step_end_ms = now_ms;
         }
+    }
+
+    /// `CSJurySummonedPacket` acknowledgement: true only for the player holding jury seat
+    /// `jury_id` of the trial. The packet changes no state.
+    pub fn jury_summoned(&self, player: &PlayerRef, trial_id: u32, jury_id: i32) -> bool {
+        let st = self.st();
+        let Some(t) = st.trials.get(&trial_id) else {
+            return false;
+        };
+        t.jury.get(&jury_id).is_some_and(|j| {
+            j.seat_id == jury_id
+                && j.jury_member
+                    .as_ref()
+                    .is_some_and(|m| Arc::ptr_eq(m, player))
+        })
     }
 
     /// `SkipFinalStatementReply(defendant, trial)`.

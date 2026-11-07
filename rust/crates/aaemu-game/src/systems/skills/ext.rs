@@ -227,8 +227,9 @@ pub trait NpcSkillHooks: Send + Sync {
         _zone_id: u32,
         _pos: PositionAndRotation,
         _delay_ms: i32,
-    ) {
+    ) -> Option<crate::world::DoodadRef> {
         not_ported("SpawnDoodad");
+        None
     }
 
     /// `npc.Template.PetItemId` (0 = none).
@@ -288,7 +289,9 @@ pub trait NpcSkillHooks: Send + Sync {
 
     /// `SlaveManager.Create(owner, skillItem, positionOverride)` (`SpawnSlave`). `placement` is
     /// the `SummonPos` spot the client chose (`None` for a self-targeted summon item cast);
-    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded).
+    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded). `client_spawn` is
+    /// `Some(hide_spawn_effect)` when the cast was synthesized from `CSSpawnSlave` (0x02e): the
+    /// placement then keeps the client yaw and the packet's hide flag.
     fn spawn_slave(
         &self,
         _server: &GameServer,
@@ -296,6 +299,7 @@ pub trait NpcSkillHooks: Send + Sync {
         _skill_item: &SkillCaster,
         _placement: Option<SummonPlacement>,
         _max_range: f32,
+        _client_spawn: Option<bool>,
     ) {
         not_ported("SlaveManager.Create");
     }
@@ -671,6 +675,23 @@ pub trait ItemSkillHooks: Send + Sync {
         0
     }
 
+    /// `Inventory.Bag.ConsumeItem(taskType, templateId, amount, item)`: verify and consume
+    /// `amount` from the one bag item `item_id`, under one container lock. `Some(true)` when
+    /// exactly `amount` was consumed; `Some(false)` when the item is not the player's bag item
+    /// with `expected_template_id` or is secure; `None` when the implementation does not track
+    /// items (tests / hooks).
+    fn consume_bag_item_by_id(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _task_type: u8,
+        _item_id: u64,
+        _expected_template_id: u32,
+        _amount: i32,
+    ) -> Option<bool> {
+        None
+    }
+
     /// `ItemManager.GetItemByItemId(sourceItemId)` and, when it exists,
     /// `UccManager.CreateStamp(player, sourceItem)` (`GainItemWithEmblemImprint`).
     /// `source_item` is the cast's pre-debit snapshot (the live item is already gone).
@@ -704,6 +725,27 @@ pub trait ItemSkillHooks: Send + Sync {
         _source_item: Option<&Item>,
     ) {
         not_ported("Dyeing");
+    }
+
+    /// `RenewEquipment` (57) and `PhysicalEnchantWeapon` / `PhysicalEnchantArmor` (20 / 21).
+    /// `armor`: `None` for RenewEquipment, `Some(false)` for the weapon enchant and
+    /// `Some(true)` for the armor enchant. Stage 1 validates the 1.2 client's pair predicate,
+    /// checks the enchanter's `physical_enchant_abilities` row and rolls it; no item changes.
+    /// `true` = the cast may continue.
+    #[allow(clippy::too_many_arguments)]
+    fn renew_equipment(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _source_item_id: u64,
+        _source_template_id: u32,
+        _source_slot: u32,
+        _target_item_id: u64,
+        _target_slot: u32,
+        _armor: Option<bool>,
+        _npc_template_id: Option<u32>,
+    ) -> bool {
+        false
     }
 
     /// `FishingLoot`: `LootGameData.GetPack(zoneGroup.FishingLandLootPackId` (`land`) or

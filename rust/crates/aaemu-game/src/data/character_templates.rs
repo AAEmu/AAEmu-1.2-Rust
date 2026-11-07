@@ -97,6 +97,9 @@ pub struct CharacterData {
     /// keyed by `16 * gender + race`.
     pub templates: HashMap<u8, CharacterTemplate>,
     pub ability_items: HashMap<u8, AbilityItems>,
+    /// `default_action_bar_actions` in id order: (item id, action slot). The 1.2 client loads
+    /// the table itself; the server uses it to place the starter supplies at the authored slots.
+    pub default_action_bar_actions: Vec<(u32, u8)>,
     /// `_appellations` (id -> buff id).
     pub appellations: HashMap<u32, u32>,
     /// `_actabilities` in insertion order.
@@ -107,6 +110,10 @@ pub struct CharacterData {
     pub expert_limits: Vec<ExpertLimit>,
     /// `blocked_texts` rows with `check_name`; independent of the configured name regex.
     pub blocked_names: Vec<BlockedName>,
+    /// `allowed_name_chars`: the one-character rows the 1.2 client accepts in a character name
+    /// (ASCII letters are always accepted). Empty when the table is missing, which disables the
+    /// whitelist.
+    pub allowed_name_chars: Vec<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +193,7 @@ impl CharacterData {
             )?),
             p_stat_limits: super::attribute_limits::CharacterPStatLimits::load(conn)?,
             blocked_names: load_blocked_names(conn)?,
+            allowed_name_chars: load_allowed_name_chars(conn)?,
             ..CharacterData::default()
         };
         let mut temp: HashMap<u32, u8> = HashMap::new();
@@ -264,6 +272,16 @@ impl CharacterData {
                 });
             Ok(())
         })?;
+        for_each_row(
+            conn,
+            "SELECT * FROM default_action_bar_actions ORDER BY id",
+            [],
+            |r| {
+                d.default_action_bar_actions
+                    .push((r.u32("item_id")?, r.u8("slot_index")?));
+                Ok(())
+            },
+        )?;
         let mut packs = Vec::new();
         for_each_row(conn, "SELECT * FROM character_equip_packs", [], |r| {
             packs.push((
@@ -408,6 +426,30 @@ impl CharacterData {
     }
 }
 
+/// `allowed_name_chars` (native 1.2 `FUN_39572620`): one character per row. A missing table or a
+/// malformed / NULL row is skipped instead of failing the catalog; the whitelist then stays off.
+fn load_allowed_name_chars(conn: &Connection) -> Result<Vec<char>, GameDataError> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allowed_name_chars'",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(Vec::new());
+    }
+    let mut chars = Vec::new();
+    for_each_row(conn, "SELECT * FROM allowed_name_chars", [], |r| {
+        let text = r.string_or("char", "")?;
+        let mut it = text.chars();
+        match (it.next(), it.next()) {
+            (Some(ch), None) => chars.push(ch),
+            _ => tracing::warn!("allowed_name_chars: skipping {text:?} (not one character)"),
+        }
+        Ok(())
+    })?;
+    Ok(chars)
+}
+
 fn load_blocked_names(conn: &Connection) -> Result<Vec<BlockedName>, GameDataError> {
     let mut names = Vec::new();
     for_each_row(conn, "SELECT * FROM blocked_texts", [], |r| {
@@ -452,6 +494,28 @@ mod tests {
     }
 
     #[test]
+    fn allowed_name_chars_load_one_character_rows_and_skip_malformed_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE allowed_name_chars (id INT, char TEXT, bytes INT);
+             INSERT INTO allowed_name_chars VALUES
+                (1, 'a', 1), (2, '가', 3), (3, 'ab', 2), (4, '', 0), (5, 'Z', 1),
+                (6, NULL, 0);",
+        )
+        .unwrap();
+        assert_eq!(
+            load_allowed_name_chars(&conn).unwrap(),
+            vec!['a', '가', 'Z']
+        );
+    }
+
+    #[test]
+    fn allowed_name_chars_missing_table_is_not_fatal() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(load_allowed_name_chars(&conn).unwrap().is_empty());
+    }
+
+    #[test]
     #[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
     fn lobby_rules_real_compact_db() {
         let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
@@ -475,5 +539,15 @@ mod tests {
             .blocked_names
             .iter()
             .any(|n| n.text == "GM" && !n.partial_match));
+        // Shipped 1.2 data: the authored starter action bar (services-misc#7).
+        assert_eq!(
+            data.default_action_bar_actions,
+            vec![(18791, 10), (18792, 11), (4045, 12)]
+        );
+        // Shipped 1.2 data: lowercase Latin and Hangul syllables, no digits.
+        assert!(data.allowed_name_chars.contains(&'a'));
+        assert!(data.allowed_name_chars.contains(&'가'));
+        assert!(!data.allowed_name_chars.contains(&'1'));
+        assert!(!data.allowed_name_chars.contains(&'А'));
     }
 }

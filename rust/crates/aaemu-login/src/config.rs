@@ -70,6 +70,10 @@ pub struct AppConfig {
     /// `KoreaAuth` section.
     #[serde(rename = "koreaauth", default)]
     pub korea_auth: KoreaAuthOptions,
+    /// `Login` section (Rust only: the character slots and pre-select period advertised to the
+    /// client).
+    #[serde(rename = "login", default)]
+    pub login: LoginConfig,
     /// `TwoFactor` section: factor attempt limits.
     #[serde(rename = "twofactor", default)]
     pub two_factor: TwoFactorOptions,
@@ -86,6 +90,41 @@ pub struct AppConfig {
 
 fn default_enter_world_timeout() -> Duration {
     Duration::from_secs(10)
+}
+
+/// `Login`: the account character slots and pre-select period advertised in `ACJoinResponse` and
+/// `ACAuthResponse` (base slots) and `SCGetSlotCount` (the game server sends the purchased slots).
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct LoginConfig {
+    /// Base character slots of every account. Must equal the game server's
+    /// `Characters:MaxPerAccount`, which enforces it.
+    #[serde(rename = "maxcharactersperaccount", deserialize_with = "lenient_u8")]
+    pub max_characters_per_account: u8,
+    /// `ACJoinResponse.afs` byte 1: "additional characters per server when using the slot
+    /// increase item" (the client's expandable limit).
+    #[serde(
+        rename = "additionalcharactersperserver",
+        deserialize_with = "lenient_u8"
+    )]
+    pub additional_characters_per_server: u8,
+    /// Whether the client is told it is in the character pre-select period (character edit at
+    /// character select). The client's Start button then sends `CSEditCharacter` instead of
+    /// entering the world, and the game server applies the edit while its
+    /// `Characters:PreSelectPeriod` is on.
+    #[serde(rename = "preselectcharacterperiod", deserialize_with = "lenient_bool")]
+    pub pre_select_character_period: bool,
+}
+
+impl Default for LoginConfig {
+    fn default() -> Self {
+        Self {
+            max_characters_per_account:
+                aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+            additional_characters_per_server: 0,
+            pre_select_character_period: false,
+        }
+    }
 }
 
 /// Configuration of a single game server.
@@ -106,6 +145,28 @@ pub struct GameServerConfig {
     /// Whether to hide the server from the client's server selection screen.
     #[serde(rename = "hidden", default, deserialize_with = "lenient_bool")]
     pub hidden: bool,
+    /// World login queue: the maximum slot occupancy (accounts in the lobby/world plus pending
+    /// world cookies, as reported by `GL_GAME_SERVER_LOAD`) before `CAEnterWorld` is queued.
+    /// `0` (default) disables the queue: every request goes straight to the game server, which
+    /// is the behaviour before this feature.
+    #[serde(rename = "maxconcurrent", default, deserialize_with = "lenient_u32")]
+    pub max_concurrent: u32,
+    /// Maximum number of clients waiting in this world's queue. When it is reached a new
+    /// `CAEnterWorld` is refused with `ACEnterWorldDenied` instead of being queued. `0` means
+    /// the packet field limit (`u16::MAX`). Ignored while `MaxConcurrent` is 0.
+    #[serde(
+        rename = "queuelimit",
+        default = "default_queue_limit",
+        deserialize_with = "lenient_u16"
+    )]
+    pub queue_limit: u16,
+}
+
+/// Default `GameServers[].QueueLimit`.
+pub const DEFAULT_QUEUE_LIMIT: u16 = 100;
+
+fn default_queue_limit() -> u16 {
+    DEFAULT_QUEUE_LIMIT
 }
 
 /// `NetworkConfig` (`PublicNetworkConfig` / `InternalNetworkConfig`).
@@ -460,7 +521,7 @@ pub fn set_path(root: &mut Value, path: &str, value: &str) {
     *node = Value::String(value.to_string());
 }
 
-const TOP_LEVEL_KEYS: [&str; 13] = [
+const TOP_LEVEL_KEYS: [&str; 14] = [
     "secretkey",
     "autoaccount",
     "skiphostresolve",
@@ -470,6 +531,7 @@ const TOP_LEVEL_KEYS: [&str; 13] = [
     "internalnetwork",
     "connections",
     "koreaauth",
+    "login",
     "twofactor",
     "reconnect",
     "connectionstrings",
@@ -595,6 +657,7 @@ macro_rules! lenient_int {
 
 lenient_int!(lenient_u8, u8);
 lenient_int!(lenient_u16, u16);
+lenient_int!(lenient_u32, u32);
 lenient_int!(lenient_i32, i32);
 
 fn timespan<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
@@ -640,6 +703,88 @@ mod tests {
         assert_eq!(cfg.network.port, 1237);
         assert_eq!(cfg.enter_world_timeout, Duration::from_secs(10));
         assert_eq!(cfg.korea_auth.rounds, 100_000);
+    }
+
+    #[test]
+    fn game_server_queue_config_binds_and_defaults() {
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "GameServers": [ {
+                    "Host": "127.0.0.1", "Id": 1, "Name": "AAEmu", "Port": 1239,
+                    "MaxConcurrent": "2", "QueueLimit": "7"
+                } ]
+            })),
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.game_servers[0].max_concurrent, 2);
+        assert_eq!(cfg.game_servers[0].queue_limit, 7);
+
+        // Absent settings keep the pre-queue behaviour: no capacity gate, default cap.
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "GameServers": [ {
+                    "Host": "127.0.0.1", "Id": 1, "Name": "AAEmu", "Port": 1239
+                } ]
+            })),
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.game_servers[0].max_concurrent, 0);
+        assert_eq!(
+            cfg.game_servers[0].queue_limit,
+            crate::config::DEFAULT_QUEUE_LIMIT
+        );
+
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "GameServers": [ {
+                    "Host": "127.0.0.1", "Id": 1, "Name": "AAEmu", "Port": 1239,
+                    "MaxConcurrent": "not-a-number"
+                } ]
+            })),
+        );
+        assert!(AppConfig::from_value(root).is_err());
+    }
+
+    #[test]
+    fn login_slot_config_binds_the_pre_select_flag() {
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "Login": {
+                    "MaxCharactersPerAccount": "8",
+                    "AdditionalCharactersPerServer": "2",
+                    "PreSelectCharacterPeriod": "false"
+                }
+            })),
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.login.max_characters_per_account, 8);
+        assert_eq!(cfg.login.additional_characters_per_server, 2);
+        assert!(!cfg.login.pre_select_character_period);
+
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "Login": { "PreSelectCharacterPeriod": true }
+            })),
+        );
+        let cfg = AppConfig::from_value(root)
+            .expect("the pre-select period is allowed now that the lobby edit packet exists");
+        assert!(cfg.login.pre_select_character_period);
+        assert!(!LoginConfig::default().pre_select_character_period);
     }
 
     #[test]

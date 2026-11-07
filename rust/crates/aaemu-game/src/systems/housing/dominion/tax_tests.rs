@@ -190,6 +190,7 @@ pub(crate) struct Fixture {
     pub(crate) server: GameServer,
     pub(crate) payer: PlayerRef,
     pub(crate) leader: PlayerRef,
+    pub(crate) leader_client: TestClient,
     successor: PlayerRef,
     tower: HouseRef,
 }
@@ -261,6 +262,7 @@ pub(crate) fn fixture() -> Fixture {
         .housing
         .install(Arc::new(EconomyComposite));
     let mut players = Vec::new();
+    let mut clients = Vec::new();
     for (id, name, expedition) in [(1, "Lord", 10), (2, "Taxpayer", 0), (3, "Newlord", 20)] {
         server.names.add_character(id, name, 1000 + id);
         let client = TestClient::new(&server, id, 1000 + id);
@@ -272,6 +274,7 @@ pub(crate) fn fixture() -> Fixture {
             character,
             server.ids.object.get_next_id().unwrap(),
         ));
+        clients.push(client);
     }
     for (expedition, leader) in [(10, &players[0]), (20, &players[2])] {
         server.expeditions.add(Expedition {
@@ -317,6 +320,7 @@ pub(crate) fn fixture() -> Fixture {
         leader: players.remove(0),
         payer: players.remove(0),
         successor: players.remove(0),
+        leader_client: clients.remove(0),
         tower,
     }
 }
@@ -344,6 +348,7 @@ pub(crate) fn give(f: &Fixture, template: u32, count: i32, slot: i32) -> u64 {
 
 pub(crate) fn place(f: &Fixture, design: u32, item: u32, x: f32, slot: i32) -> HouseRef {
     let item_id = give(f, item, 1, slot);
+    f.payer.data().unit.transform.set_xyz(x, 100.0, 100.0);
     ops::build(
         &f.server,
         &f.payer,
@@ -467,7 +472,7 @@ async fn province_construction_and_weekly_mail_pay_actual_surcharge_once_and_exe
 #[tokio::test]
 async fn collection_receipt_requires_current_leader_and_failed_mail_preserves_balance_and_peace_fund(
 ) {
-    let f = fixture();
+    let mut f = fixture();
     give(&f, TAX_CERTIFICATE, 100, 5);
     place(&f, 300, 9000, 600.0, 0);
     f.server
@@ -518,6 +523,7 @@ async fn collection_receipt_requires_current_leader_and_failed_mail_preserves_ba
         .housing
         .hooks
         .install(Arc::new(EconomyForHousing));
+    f.leader_client.drain();
     let state = collect_locked(&f.server, &f.leader, 25).unwrap();
     assert_eq!(
         (
@@ -526,6 +532,15 @@ async fn collection_receipt_requires_current_leader_and_failed_mail_preserves_ba
         ),
         (0, 123)
     );
+    // Native Deserialize 0x397B7B60: u16 zone group, i32 peace money, i32 peace AA points.
+    let balanced: Vec<_> = f
+        .leader_client
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == crate::opcodes::sc::SCDominionTaxBalancedPacket)
+        .collect();
+    assert_eq!(balanced.len(), 1);
+    assert_eq!(balanced[0].1, vec![25, 0, 123, 0, 0, 0, 0, 0, 0, 0]);
     let receipt = mail::get_current_mail_list_for(&f.server, 1);
     let receipts: Vec<_> = receipt
         .iter()
@@ -540,6 +555,10 @@ async fn collection_receipt_requires_current_leader_and_failed_mail_preserves_ba
         mail::get_current_mail_list_for(&f.server, 1).len(),
         receipt.len()
     );
+    assert!(!f
+        .leader_client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCDominionTaxBalancedPacket));
 }
 
 #[tokio::test]

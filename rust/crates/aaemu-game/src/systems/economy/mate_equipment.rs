@@ -1,11 +1,16 @@
 //! Pet / vehicle gear: `CSChangeMateEquipmentPacket` (moves between the bag and a mate's
 //! `MateEquipmentContainer`), the `MateEquipmentContainer.OnEnter/LeaveContainer` packets
 //! (`SCMateEquipmentChangedPacket`), the base `EquipmentContainer` events of a mate (the default
-//! [`SummonItemHooks::on_mate_equipment_changed`]), the slave repair packet that only logs in
-//! the 1.2 C# (`CSRepairSlaveItemsPacket`), and the stablehand mate revive packet
-//! (`CSRepairPetItemsPacket`, handled in `vehicles::mates`). The slave equipment move packet
-//! lives in `vehicles::packets` with the other slave packets.
+//! [`SummonItemHooks::on_mate_equipment_changed`]), the repairman's slave summon item repair
+//! (`CSRepairSlaveItemsPacket`, handled in `vehicles::slaves`), and the stablehand mate revive
+//! packet (`CSRepairPetItemsPacket`, handled in `vehicles::mates`). The slave equipment move
+//! packet lives in `vehicles::packets` with the other slave packets.
+//!
+//! `change_mate_equipment` enforces the 1.2 client's slot permission (`mate_equip_slot_packs`
+//! through `npcs.mate_equip_slot_pack_id`, see [`super::mate_equipment_data`]) and, while
+//! FeatureSet bit 78 is set, the per-mate item list from `mate_equip_pack_groups`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use aaemu_commons::PacketStream;
@@ -26,6 +31,7 @@ use super::inventory::{self, Inv, ItemTxn};
 use super::item_effect_packets::{ItemAndLocation, SCMateEquipmentChangedPacket};
 use super::item_handlers::{active, sync_client_packet};
 use super::item_packets::SCUnitEquipmentsChangedPacket;
+use super::mate_equipment_data::MateSlotPack;
 
 /// A raw wire item (`Item.Read` / `Item.Write`): the fields the container code needs. The detail
 /// body is consumed according to its `ItemDetailType` (gear 55 bytes; the 1.2 reader has no
@@ -169,10 +175,23 @@ pub fn on_mate_equipment_changed(
     let Some(mate) = hooks.mate_by_id(server, owner, mate_id) else {
         return; // ParentUnit == null
     };
+    // The container already holds the post-move state. Reading it on leave keeps the mirror
+    // and the broadcast correct for a swap: the C# sends `OnEnterContainer` for the moved item
+    // before `OnLeaveContainer` of the item it displaced, both for the same slot.
+    let current = if entered {
+        Some(item.clone())
+    } else {
+        hooks.mate_equipment(server, &mate).and_then(|c| {
+            c.lock()
+                .expect("container poisoned")
+                .get_item_by_slot(i32::from(slot))
+                .cloned()
+        })
+    };
     {
         let mut m = mate.data();
         if let Some(e) = m.equipment.get_mut(usize::from(slot)) {
-            *e = entered.then(|| item.clone());
+            *e = current.clone();
         }
     }
     let obj = WorldObject::from(&mate);
@@ -182,7 +201,7 @@ pub fn on_mate_equipment_changed(
             obj.clone(),
             &SCUnitEquipmentsChangedPacket {
                 obj_id: mate.obj_id,
-                items: vec![(slot, entered.then(|| item.clone()))],
+                items: vec![(slot, current)],
             },
             false,
         );
@@ -267,6 +286,45 @@ impl CSChangeMateEquipmentPacket {
 }
 sync_client_packet!(CSChangeMateEquipmentPacket);
 
+/// The two rules the 1.2 client applies to an item placed onto a mate, in its order:
+/// `FUN_395ac760` (the `mate_equip_pack_groups` list, only while FeatureSet bit 78 is set) and
+/// `FUN_3933a9c0` (the `mate_equip_slot_packs` row). `None` = the item may be placed; `Some` is
+/// the reason for the debug log. A mate template the server data does not know skips both
+/// checks (the client always knows its templates; this keeps test fixtures working); a known
+/// template with no pack row refuses every slot like the client.
+fn mate_gear_refusal(
+    server: &GameServer,
+    template_known: bool,
+    slot_pack: Option<MateSlotPack>,
+    pack_items: Option<&HashSet<u32>>,
+    whitelist_enabled: bool,
+    template_id: u32,
+) -> Option<&'static str> {
+    if !template_known {
+        return None;
+    }
+    if whitelist_enabled && !pack_items.is_some_and(|items| items.contains(&template_id)) {
+        return Some("is not in the mate's `mate_equip_pack_groups` list");
+    }
+    let Some(pack) = slot_pack else {
+        return Some("has no `mate_equip_slot_packs` row for the mate's template");
+    };
+    let equip_slot = server
+        .game_data
+        .items
+        .template(template_id)
+        .and_then(|t| t.gear_slot_type())
+        .and_then(|st| {
+            crate::models::container::allowed_gear_slots(st)
+                .first()
+                .copied()
+        });
+    if !equip_slot.is_some_and(|slot| pack.allows(slot)) {
+        return Some("is not allowed in the mate's equipment slots");
+    }
+    None
+}
+
 /// `CSChangeMateEquipmentPacket.Read` (the logic part).
 pub fn change_mate_equipment(
     server: &GameServer,
@@ -290,10 +348,13 @@ pub fn change_mate_equipment(
         return;
     };
     // A tl id identifies a visible mate; it does not grant access to its equipment.
-    if p.owning_player_id != character.character_id || mate.data().owner_obj_id != character.obj_id
-    {
-        return;
-    }
+    let (mate_id, mate_template_id) = {
+        let m = mate.data();
+        if p.owning_player_id != character.character_id || m.owner_obj_id != character.obj_id {
+            return;
+        }
+        (m.id, m.unit.template_id)
+    };
     if p.item_count == 0 {
         return;
     }
@@ -301,10 +362,51 @@ pub fn change_mate_equipment(
         tracing::error!("ChangeMateEquipment, mate {} has no equipment", p.mate_tl);
         return;
     };
-    let mate_id = mate.data().id;
+    // `IsMateEquipableSlot` (`FUN_3933a9c0`): the mate's NPC template names a
+    // `mate_equip_slot_packs` row through `mate_equip_slot_pack_id`; when the template exists
+    // but its pack is missing (0 / NULL), the client refuses every slot. Only a template the
+    // server data does not know (test fixtures) stays unrestricted.
+    let mate_rules = &server.game_data.systems.economy.mate_equipment;
+    let mate_template = server.game_data.systems.npcs.npc.template(mate_template_id);
+    let mate_template_known = mate_template.is_some();
+    let mate_slot_pack = mate_template.and_then(|t| {
+        mate_rules
+            .slot_packs
+            .get(&t.mate_equip_slot_pack_id)
+            .copied()
+    });
+    // `mate_equip_pack_groups` x `mate_equip_pack_items`: the client checks the list through
+    // `FUN_395ac760` only while FeatureSet bit 78 (`flag_9_6`, server-controlled;
+    // `fset[9] & 0x40`, dword `DAT_39b02294 + 0x1c` bit 0x4000) is set.
+    let mate_pack_items = mate_rules.pack_items.get(&mate_template_id);
+    let whitelist_enabled = server.systems.services.features(server).check_bit(78);
+
     let mut s = PacketStream::from_bytes(p.rest);
     let inv = Inv::of(character);
     let bag = inv.bag();
+    // The refusal the client shows for both rules: `SCMateEquipmentChanged{success:false}`
+    // plus the error (the client's whitelist failure falls to error `0xcc` = `ITEM_NOT_FOR_PET`
+    // 204, `FUN_394e41f0` `dll.c:1021556`; the slot failure id `0x22f` is capture-pending).
+    let refuse =
+        |txn: &mut ItemTxn<'_>, player_loc: &ItemAndLocation, mate_loc: &ItemAndLocation| {
+            txn.out().send(
+                character,
+                SCMateEquipmentChangedPacket {
+                    item_on_pet: player_loc.clone(),
+                    item_in_bag: mate_loc.clone(),
+                    mate_tl_id: p.mate_tl,
+                    character_id: p.owning_player_id,
+                    passenger_id: p.passenger_player_id,
+                    bts: p.bts,
+                    success: false,
+                },
+            );
+            inventory::send_error_message_to(
+                &mut txn.out(),
+                character,
+                super::error_message::ITEM_NOT_FOR_PET,
+            );
+        };
     for _ in 0..p.item_count {
         let Ok(player_template) = read_wire_equip_item(&mut s) else {
             return;
@@ -356,6 +458,29 @@ pub fn change_mate_equipment(
         let Some(src_item) = &src_loc.item else {
             continue;
         };
+        // The item that lands on the mate: the moved bag item when equipping, or the bag
+        // item swapped onto the mate when unequipping into an occupied bag slot. Both follow
+        // the client's whitelist and slot-pack checks.
+        if let Some(worn) = player_loc.item.as_ref() {
+            if let Some(reason) = mate_gear_refusal(
+                server,
+                mate_template_known,
+                mate_slot_pack,
+                mate_pack_items,
+                whitelist_enabled,
+                worn.template_id,
+            ) {
+                tracing::debug!(
+                    "ChangeMateEquipment: mate {} (template {}) refuses item template {}: {}",
+                    p.mate_tl,
+                    mate_template_id,
+                    worn.template_id,
+                    reason
+                );
+                refuse(&mut txn, &player_loc, &mate_loc);
+                continue;
+            }
+        }
         let start = txn.env.fx.len();
         let res = inventory::split_or_move_item_ex(
             &mut txn,
@@ -423,7 +548,9 @@ impl CSRepairPetItemsPacket {
 }
 sync_client_packet!(CSRepairPetItemsPacket);
 
-/// `CSRepairSlaveItemsPacket` (only logs in 1.2).
+/// `CSRepairSlaveItemsPacket`: the repairman restores destroyed slave summon items. The 1.2
+/// C# only logged it; the client's cost preview (`GetTotalRepairsForSlaveItems`) and locale
+/// strings define the service, and `vehicles::slaves::repair_slave_items` implements it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRepairSlaveItemsPacket {
     pub npc_id: u32,
@@ -436,8 +563,12 @@ impl CSRepairSlaveItemsPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(character) = active(conn) else {
+            return;
+        };
         tracing::debug!("RepairSlaveItems, NpcId: {}", self.npc_id);
+        crate::systems::vehicles::slaves::repair_slave_items(server, &character, self.npc_id);
     }
 }
 sync_client_packet!(CSRepairSlaveItemsPacket);

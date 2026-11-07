@@ -7,12 +7,18 @@
 //! world); only `main_world` exists here, so there is one manager for the server.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+
+use crate::data::world_data::ZoneData;
+use crate::data::world_templates::WorldTemplates;
 
 use super::data::{QuestData, RawSignSphere};
 use super::model::sphere_trigger;
+use super::packets::SCAreaTeamMessagePacket;
 use super::templates::ActKind;
 use crate::server::GameServer;
+use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
 use crate::world::{PlayerRef, WorldObject};
 
 /// `SphereQuest` (one `quest_sign_sphere.g` area, world coordinates).
@@ -39,6 +45,260 @@ pub fn distance3(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     let dy = f64::from(a.1) - f64::from(b.1);
     let dz = f64::from(a.2) - f64::from(b.2);
     (dx * dx + dy * dy + dz * dz).sqrt() as f32
+}
+
+/// One area of `Data/Worlds/<world>/sphere_area_fill.json` (world coordinates).
+///
+/// The file is produced offline from the 10.x `world_server/quest_area_sphere.g` by
+/// `rust/tools/sphere_area_import/sphere_area_import.py`; the converter already dropped blocks
+/// whose world/zone/sphere the 1.2 data does not contain. `stype` is the 1.2 `spheres.id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SphereArea {
+    pub world: String,
+    pub zone: u32,
+    pub sphere_id: u32,
+    pub xyz: (f32, f32, f32),
+    pub radius: f32,
+}
+
+impl SphereArea {
+    /// 3D distance (computed in double) <= radius, like [`SphereQuest::contains`].
+    pub fn contains(&self, pos: (f32, f32, f32)) -> bool {
+        distance3(self.xyz, pos) <= self.radius
+    }
+}
+
+/// Reads every `<app_path>/Data/Worlds/*/sphere_area_fill.json`; a missing file is empty and a
+/// malformed row is skipped (a bad data file must not fail the catalog). `known_sphere` is the
+/// runtime data-version guard (the 1.2 `spheres` table of this build).
+pub fn load_sphere_areas(app_path: &Path, known_sphere: impl Fn(u32) -> bool) -> Vec<SphereArea> {
+    let dir = app_path.join("Data").join("Worlds");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
+    dirs.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    let mut files = 0usize;
+    let mut skipped = 0usize;
+    for entry in dirs {
+        let path = entry.path().join("sphere_area_fill.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let world = entry.file_name().to_string_lossy().to_string();
+        let rows: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("{}: {e} (ignored)", path.display());
+                continue;
+            }
+        };
+        files += 1;
+        for row in rows {
+            let number = |key: &str| row.get(key).and_then(serde_json::Value::as_f64);
+            let (Some(sphere_id), Some(zone), Some(x), Some(y), Some(z), Some(radius)) = (
+                number("sphere_id"),
+                number("zone"),
+                number("x"),
+                number("y"),
+                number("z"),
+                number("radius"),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let (sphere_id, zone) = (sphere_id as u32, zone as u32);
+            if radius <= 0.0 || !known_sphere(sphere_id) {
+                skipped += 1;
+                continue;
+            }
+            out.push(SphereArea {
+                world: world.clone(),
+                zone,
+                sphere_id,
+                xyz: (x as f32, y as f32, z as f32),
+                radius: radius as f32,
+            });
+        }
+    }
+    if files > 0 {
+        tracing::info!(
+            "Loaded {} sphere area triggers from {files} world files ({skipped} skipped)",
+            out.len()
+        );
+    }
+    out
+}
+
+/// Reads every `<app_path>/Data/Worlds/*/quest_sign_sphere_fill.json` (the 10.x-derived
+/// geometry of `Docs/wiki/Quest-Audit.md` quests that the 1.2 client pack has no sign sphere
+/// for). The file is written by `rust/tools/quest_sign_sphere_import`; unlike the client
+/// `quest_sign_sphere.g` areas its rows already hold world coordinates (`origin * 1024 + local`
+/// was applied offline by the converter).
+///
+/// Runtime data-version guards, repeated here so a stale or hand-edited data file cannot
+/// inject a sphere the loaded 1.2 data does not know:
+/// * the quest template and component exist and the component has an objective sphere act
+///   (`QuestActObjSphere` / `QuestActCheckSphere`) for the same `sphere_id`;
+/// * the `spheres` row is a `SphereQuest` whose `sphere_quests.quest_id` is the row's quest;
+/// * no 1.2 client sign sphere exists for the same `(quest_id, component_id)` (the client pack
+///   always wins);
+/// * the zone belongs to the named 1.2 world and its `zones.closed` is false;
+/// * the radius is finite and positive, and the row is not an exact duplicate.
+///
+/// A missing file, a malformed row or an unknown field is skipped: a bad data file must not
+/// fail the catalog.
+pub fn load_sign_sphere_fill(
+    app_path: &Path,
+    data: &QuestData,
+    zones: &ZoneData,
+    worlds: &WorldTemplates,
+) -> Vec<(String, RawSignSphere)> {
+    let dir = app_path.join("Data").join("Worlds");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
+    dirs.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    let mut files = 0usize;
+    let mut skipped = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for entry in dirs {
+        let world = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().join("quest_sign_sphere_fill.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rows: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("{}: {e} (ignored)", path.display());
+                continue;
+            }
+        };
+        files += 1;
+        for row in rows {
+            let number = |key: &str| row.get(key).and_then(serde_json::Value::as_f64);
+            let (Some(quest_id), Some(component_id), Some(sphere_id)) = (
+                number("quest_id"),
+                number("component_id"),
+                number("sphere_id"),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let (Some(zone), Some(x), Some(y), Some(z), Some(radius)) = (
+                number("zone"),
+                number("x"),
+                number("y"),
+                number("z"),
+                number("radius"),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let (quest_id, component_id, sphere_id, zone) = (
+                quest_id as u32,
+                component_id as u32,
+                sphere_id as u32,
+                zone as u32,
+            );
+            if !radius.is_finite() || radius <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let Some(component) = data.component(component_id) else {
+                skipped += 1;
+                continue;
+            };
+            if component.quest_id != quest_id {
+                skipped += 1;
+                continue;
+            }
+            let objective = component.acts.iter().any(|&a| {
+                matches!(
+                    data.acts[a].kind,
+                    ActKind::ObjSphere { sphere_id: id, .. } | ActKind::CheckSphere { sphere_id: id }
+                        if id == sphere_id
+                )
+            });
+            if !objective {
+                skipped += 1;
+                continue;
+            }
+            let Some(sphere) = data.spheres.get(&sphere_id) else {
+                skipped += 1;
+                continue;
+            };
+            if sphere.sphere_detail_type != "SphereQuest" {
+                skipped += 1;
+                continue;
+            }
+            let Some(row_quest) = data.sphere_quests.get(&sphere.sphere_detail_id) else {
+                skipped += 1;
+                continue;
+            };
+            if row_quest.quest_id != quest_id {
+                skipped += 1;
+                continue;
+            }
+
+            if data
+                .sign_spheres
+                .iter()
+                .any(|s| s.quest_id == quest_id && s.component_id == component_id)
+            {
+                skipped += 1;
+                continue;
+            }
+            if !zones.zone_by_key(zone).is_some_and(|z| !z.closed) {
+                skipped += 1;
+                continue;
+            }
+            if worlds
+                .get_world_template_by_zone_key(zone)
+                .is_none_or(|w| w.name != world)
+            {
+                skipped += 1;
+                continue;
+            }
+            let key = (
+                quest_id,
+                component_id,
+                sphere_id,
+                zone,
+                (x as f32).to_bits(),
+                (y as f32).to_bits(),
+                (z as f32).to_bits(),
+                (radius as f32).to_bits(),
+            );
+            if !seen.insert(key) {
+                skipped += 1;
+                continue;
+            }
+            out.push((
+                world.clone(),
+                RawSignSphere {
+                    zone_id: zone,
+                    quest_id,
+                    component_id,
+                    // The fill file is world coordinates; `Spheres::load` must not add a zone
+                    // origin again.
+                    local: [x as f32, y as f32, z as f32],
+                    radius: radius as f32,
+                },
+            ));
+        }
+    }
+    if files > 0 {
+        tracing::info!(
+            "Loaded {} imported quest sign spheres from {files} world files ({skipped} skipped)",
+            out.len()
+        );
+    }
+    out
 }
 
 /// `SphereQuestTrigger`.
@@ -76,6 +336,25 @@ struct Spheres {
     basic: Vec<SphereQuestStarter>,
 }
 
+fn push_sphere(s: &mut Spheres, sphere_world: &str, r: &RawSignSphere, xyz: (f32, f32, f32)) {
+    let sphere = SphereQuest {
+        zone_id: r.zone_id,
+        world_id: sphere_world.to_string(),
+        quest_id: r.quest_id,
+        component_id: r.component_id,
+        radius: r.radius,
+        xyz,
+    };
+    match s
+        .by_component
+        .iter_mut()
+        .find(|(c, _)| *c == r.component_id)
+    {
+        Some((_, v)) => v.push(sphere),
+        None => s.by_component.push((r.component_id, vec![sphere])),
+    }
+}
+
 #[derive(Debug, Default)]
 struct Triggers {
     list: Vec<SphereQuestTrigger>,
@@ -91,6 +370,11 @@ pub struct SphereQuestManager {
     triggers: Mutex<Triggers>,
     /// `_questStartingLastPositionChecks` (character id -> position).
     last_positions: Mutex<HashMap<u32, (f32, f32, f32)>>,
+    /// `Data/Worlds/<world>/sphere_area_fill.json` (world coordinates, read-only).
+    areas: OnceLock<Vec<SphereArea>>,
+    /// Area indexes the character was inside at the last tick (character id -> indexes,
+    /// ascending).
+    area_inside: Mutex<HashMap<u32, Vec<usize>>>,
     /// Serializes ticks.
     tick_lock: Mutex<()>,
 }
@@ -98,36 +382,38 @@ pub struct SphereQuestManager {
 impl SphereQuestManager {
     /// `LoadQuestSpheres` (zone-local -> world coordinates with the zone origin cells) +
     /// `Load` (quest starters). `origin(zone)` is `ZoneManager.GetZoneOriginCell`.
+    ///
+    /// `raw` are the 1.2 client `quest_sign_sphere.g` rows (zone-local). `fill` rows are already
+    /// world coordinates (the converter applied the origin cell), so no origin is added to them.
     pub fn load(
         &self,
         data: &QuestData,
         raw: &[RawSignSphere],
+        fill: &[(String, RawSignSphere)],
         world_name: &str,
         origin: impl Fn(u32) -> (i32, i32),
     ) {
         let mut s = Spheres::default();
         for r in raw {
             let (ox, oy) = origin(r.zone_id);
-            let sphere = SphereQuest {
-                zone_id: r.zone_id,
-                world_id: world_name.to_string(),
-                quest_id: r.quest_id,
-                component_id: r.component_id,
-                radius: r.radius,
-                xyz: (
+            push_sphere(
+                &mut s,
+                world_name,
+                r,
+                (
                     ox as f32 * 1024.0 + r.local[0],
                     oy as f32 * 1024.0 + r.local[1],
                     r.local[2],
                 ),
-            };
-            match s
-                .by_component
-                .iter_mut()
-                .find(|(c, _)| *c == r.component_id)
-            {
-                Some((_, v)) => v.push(sphere),
-                None => s.by_component.push((r.component_id, vec![sphere])),
-            }
+            );
+        }
+        for (sphere_world, r) in fill {
+            push_sphere(
+                &mut s,
+                sphere_world,
+                r,
+                (r.local[0], r.local[1], r.local[2]),
+            );
         }
         // Link quest starters to spheres
         for (component_id, list) in &s.by_component {
@@ -162,6 +448,16 @@ impl SphereQuestManager {
 
     fn spheres(&self) -> Option<&Spheres> {
         self.spheres.get()
+    }
+
+    /// Installs the loaded `sphere_area_fill.json` table (once).
+    pub fn set_areas(&self, areas: Vec<SphereArea>) {
+        let _ = self.areas.set(areas);
+    }
+
+    /// Loaded sphere area blocks (tests / diagnostics).
+    pub fn area_count(&self) -> usize {
+        self.areas.get().map_or(0, Vec::len)
     }
 
     /// `GetQuestSpheres(componentId)`.
@@ -291,6 +587,10 @@ impl SphereQuestManager {
             .lock()
             .expect("positions poisoned")
             .remove(&character_id);
+        self.area_inside
+            .lock()
+            .expect("area inside poisoned")
+            .remove(&character_id);
     }
 
     /// `GetSphereQuestTriggers()` (live list).
@@ -302,11 +602,90 @@ impl SphereQuestManager {
             .clone()
     }
 
+    /// Enter / leave of the imported area spheres (`sphere_area_fill.json`).
+    ///
+    /// INFERRED trigger (CAP-UI-7): the 1.2 client only receives `SCAreaChatBubble` for a bubble
+    /// sphere on entering / leaving its area; no 1.2 sender was captured. A `SphereBubble` row
+    /// sends `SCAreaChatBubble(enter, the player's unit, sphere_detail_id)` and any row with a
+    /// non-empty `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player only
+    /// (CAP-UI-6: `is_personal_msg` is true for every shipped `team_msg` row; the non-personal
+    /// audience is UNKNOWN). On leave only a row with `enter_or_leave` set fires. The other
+    /// sphere types (SphereSkill / SphereSound / SphereDoodadInteract / SphereBuff) are loaded
+    /// but have no effect here (a separate content decision).
+    fn tick_area_spheres(&self, server: &GameServer) {
+        let Some(areas) = self.areas.get() else {
+            return;
+        };
+        if areas.is_empty() {
+            return;
+        }
+        let data = &server.game_data.systems.quests;
+        let mut next: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut events: Vec<(PlayerRef, usize, bool)> = Vec::new();
+        for player in server.world.all_characters() {
+            if player.region().is_none() {
+                continue;
+            }
+            let obj = WorldObject::from(player.clone());
+            let Some(world) = server.world.world_of(&obj) else {
+                continue;
+            };
+            let pos = super::events::world_position(server, &obj);
+            let inside: Vec<usize> = areas
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.world == world.template.name && a.contains(pos))
+                .map(|(i, _)| i)
+                .collect();
+            let previous = self
+                .area_inside
+                .lock()
+                .expect("area inside poisoned")
+                .get(&player.character_id)
+                .cloned()
+                .unwrap_or_default();
+            for &i in &inside {
+                if !previous.contains(&i) {
+                    events.push((player.clone(), i, true));
+                }
+            }
+            for &i in &previous {
+                if inside.binary_search(&i).is_err() {
+                    events.push((player.clone(), i, false));
+                }
+            }
+            next.insert(player.character_id, inside);
+        }
+        *self.area_inside.lock().expect("area inside poisoned") = next;
+        for (player, area, enter) in events {
+            let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
+                continue;
+            };
+            if !enter && !sphere.enter_or_leave {
+                continue;
+            }
+            if sphere.sphere_detail_type == "SphereBubble" {
+                player.send(SCAreaChatBubblePacket {
+                    enter,
+                    unit_obj_id: player.obj_id,
+                    bubble_type: sphere.sphere_detail_id,
+                });
+            }
+            if !sphere.team_msg.trim().is_empty() {
+                player.send(SCAreaTeamMessagePacket {
+                    enter,
+                    sphere_id: sphere.id,
+                });
+            }
+        }
+    }
+
     /// One `Tick` (every 500 ms). A throwing quest event handler aborts the rest of the tick,
     /// like the C# exception caught around the whole tick.
     pub fn tick(&self, server: &GameServer) {
         let _serial = self.tick_lock.lock().expect("tick poisoned");
         let now = chrono::Utc::now().timestamp_millis();
+        self.tick_area_spheres(server);
         // Add new player specific triggers
         let list = {
             let mut t = self.triggers.lock().expect("triggers poisoned");
@@ -355,6 +734,9 @@ impl SphereQuestManager {
         };
         let mut current_positions = HashMap::new();
         for starter in self.starters() {
+            if starter.sphere.world_id != world.template.name {
+                continue;
+            }
             let (sx, sy, _) = starter.sphere.xyz;
             let Some(region) = world.region_by_pos(sx, sy) else {
                 continue;
@@ -429,6 +811,14 @@ fn tick_trigger(
     trigger: &SphereQuestTrigger,
     now: i64,
 ) -> Result<Option<(f32, f32, f32)>, String> {
+    // Imported spheres carry the world they were authored in; a main_world area must not fire
+    // inside an instance (and vice versa).
+    let Some(world) = server.world.world_of(&WorldObject::from(player.clone())) else {
+        return Ok(None);
+    };
+    if trigger.sphere.world_id != world.template.name {
+        return Ok(None);
+    }
     let elapsed = if trigger.last_tick_ms == i64::MIN {
         f64::INFINITY
     } else {

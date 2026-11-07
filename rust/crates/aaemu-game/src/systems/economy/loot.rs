@@ -526,6 +526,7 @@ pub(crate) fn loot_convert_fish_from_pack(
                 count: rng.next_i32(l.min_amount, l.max_amount),
                 lifespan_mins: 0,
                 made_unit_id: template_id,
+                crafter_id: 0,
                 world_id: server.config.id,
                 create_time: chrono::Utc::now().timestamp(),
                 unsecure_time: 0,

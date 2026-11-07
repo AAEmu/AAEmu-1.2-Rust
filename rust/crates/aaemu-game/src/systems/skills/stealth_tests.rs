@@ -187,4 +187,30 @@ fn real_compact_db_stealth_column_and_keep_stealth_skills() {
         )
         .unwrap();
     assert_eq!(cancelling, 30);
+
+    // Detection inputs: the two formula rows, the columns the client reads and the attribute
+    // the predicate scales the range with (`unit attribute 94`, `DetectStealthRangeMul`).
+    let detect: Vec<u32> = ids("SELECT id FROM buffs WHERE detect_stealth='t' ORDER BY id");
+    assert_eq!(detect, vec![1496, 1503, 1574, 2232, 2233, 2284]);
+    let anti: Vec<u32> = ids("SELECT id FROM buffs WHERE anti_stealth='t' ORDER BY id");
+    assert_eq!(anti, vec![5212]);
+    let front: String = conn
+        .query_row("SELECT formula FROM formulas WHERE id=4", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        front,
+        "min(40, 12 * (1 + (source_level - target_level) / 50) / (1 + stealth_level / 50))"
+    );
+    let back: String = conn
+        .query_row("SELECT formula FROM formulas WHERE id=10", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, "0.5");
+    let attr94: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM unit_modifiers WHERE unit_attribute_id=94",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(attr94, 21);
 }

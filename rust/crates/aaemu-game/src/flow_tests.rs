@@ -126,12 +126,73 @@ fn enter_world_body(account_id: u32, cookie: u32) -> Vec<u8> {
     })
 }
 
-/// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, 2030-01-01).
+/// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, no end date;
+/// owner decision 2026-11-03: the configured default premium is permanent).
 fn account_info_frame() -> Vec<u8> {
     l1(
         0x1C2,
-        &hex("01 00 00 00  01 00 00 00  00 00 00 00 00 00 00 00  80 D8 DB 70 00 00 00 00  00 00 00 00 00 00 00 00"),
+        &hex("01 00 00 00  01 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00"),
     )
+}
+
+/// WP-J: the configured restriction flags (selected by the effective payment method) and the
+/// idle kick time reach `SCInitialConfig` through the real `FinishState(0)` handler. The reader
+/// (`FUN_397b2a00`) takes the seven booleans, then `secondPriceType`, `secondPasswordMaxFailCount`
+/// and `idleKickTime` (`u16`, `FUN_39017bf0` masks with `0xffff`).
+#[tokio::test]
+async fn initial_config_uses_configured_restrictions_and_idle_kick_time() {
+    use crate::config::{DefaultPayment, RestrictionFlags};
+
+    let mut config = AppConfig {
+        id: 1,
+        ..AppConfig::default()
+    };
+    config.stream_network.port = 1250;
+    config.network.num_connections = 10;
+    config.connections.mysql_provider.host = "127.0.0.1".into();
+    config.connections.mysql_provider.port = 1; // nothing listens here
+    config.account.default_payment = DefaultPayment::Demo;
+    config.account.restrictions.demo = RestrictionFlags {
+        can_place_house: false,
+        can_use_auction: false,
+        can_trade: false,
+        can_use_copper: false,
+        ..RestrictionFlags::default()
+    };
+    config.account.idle_kick_time = 0x1234;
+    let db = MySqlPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(300))
+        .connect_lazy_with(config.connections.mysql_provider.connect_options());
+    let server = Arc::new(GameServer::new(config, db, GameData::empty()));
+
+    assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
+    let mut c = client(&server, 77);
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 4242)),
+        )
+        .await
+        .unwrap();
+    c.drain();
+
+    // ---- FinishState(0): the lobby configuration burst
+    server
+        .handle_frame(
+            &mut c.conn,
+            &[0xDD, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        )
+        .await
+        .unwrap();
+    let frames = c.drain();
+    let init = frames
+        .iter()
+        .find(|f| f.len() > 6 && f[..6] == [0xDD, 0x01, 0x00, 0x00, 0x06, 0x00])
+        .expect("SCInitialConfig");
+    assert_eq!(
+        &init[init.len() - 11..],
+        &[0, 1, 0, 0, 1, 1, 0, 2, 0, 0x34, 0x12]
+    );
 }
 
 #[tokio::test]
@@ -140,24 +201,26 @@ async fn lobby_flow_end_to_end() {
     let (login_tx, mut login_rx) = mpsc::unbounded_channel();
     server.login.set(Some(login_tx));
 
-    // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0)
+    // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0,
+    // online 1: the pending cookie occupies one slot; the two trailing u32 are the Rust queue
+    // occupancy and report sequence).
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  01 00 00 00")
     );
     // A second LGPlayerEnter for the same connection id throws in C# (no reply). Here the stale
     // entry (a cookie that was never used) is replaced and answered.
     assert!(crate::login::handle(&server, &hex("01 00  E9 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  02 00 00 00")
     );
     // ... and back to account 1000 for the rest of the flow.
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  03 00 00 00")
     );
     assert!(login_rx.try_recv().is_err());
 
@@ -321,9 +384,16 @@ async fn lobby_flow_end_to_end() {
         hex("03 00  05 00 00 00  06 00 00 00  00 00 00 00")
     );
 
-    // ---- LGRegisterGameServer: 0 keeps the link, anything else closes it
+    // ---- LGRegisterGameServer: 0 keeps the link, anything else closes it. The Rust-only tail
+    // carries the login's pre-select period, which the game applies.
     assert!(crate::login::handle(&server, &[0x00, 0x00, 0x00]).await);
     assert!(!crate::login::handle(&server, &[0x00, 0x00, 0x01]).await);
+    assert!(!server.config.characters.pre_select_period);
+    assert!(crate::login::handle(&server, &[0x00, 0x00, 0x00, 0x01]).await);
+    assert!(
+        server.config.characters.pre_select_period,
+        "the login's pre-select period is authoritative"
+    );
 }
 
 /// A character with one equipped armor piece in slot 3 (chest).
@@ -409,7 +479,7 @@ fn expected_character_bytes(c: &Character) -> Vec<u8> {
                     s.write_u16(0).write_u16(0);
                     s.write_i64(item.create_time)
                         .write_i32(item.lifespan_mins)
-                        .write_u32(item.made_unit_id)
+                        .write_u32(item.crafter())
                         .write_u8(item.world_id)
                         .write_i64(item.unsecure_time)
                         .write_i64(item.unpack_time);
@@ -493,12 +563,20 @@ async fn dispatch_edge_cases() {
         .unwrap();
     assert_eq!(c.drain(), vec![l2(pp::FastPongPacket, &[9, 0, 0, 0])]);
 
-    // A packet whose C# `Read` only logs an error: the connection stays up.
+    // A registered packet whose handler only logs: the connection stays up.
     server
-        .handle_frame(&mut c.conn, &c2s_l1(cs::CSEditCharacterPacket, &[1, 2, 3]))
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::CSCriminalLockedPacket, &[1, 0, 0, 0]),
+        )
         .await
         .unwrap();
     assert!(!c.conn.is_closing());
+    // `CSEditCharacterPacket` is a real reader now; its body must decode.
+    assert!(server
+        .handle_frame(&mut c.conn, &c2s_l1(cs::CSEditCharacterPacket, &[1, 2, 3]))
+        .await
+        .is_err());
     // Levels other than 1 and 2 have no table (C# KeyNotFoundException -> Shutdown).
     for level in [0u8, 3, 4, 5] {
         assert!(server

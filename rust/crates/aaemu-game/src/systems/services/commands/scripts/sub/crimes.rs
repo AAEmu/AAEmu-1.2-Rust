@@ -112,6 +112,45 @@ fn resolve_character(
     found
 }
 
+/// The `crime court jail` effect: put `target` in the court's holding cell with the
+/// `FORCIBLY_AWAITING_TRIAL` buff. Shared with the retail `/imprison` command so both use the
+/// same jail path (WP-SL6b).
+pub(crate) fn jail_court_room(
+    server: &GameServer,
+    target: &PlayerRef,
+    court_room: &crate::systems::social::trial::CourtRoom,
+) {
+    server
+        .systems
+        .social
+        .hooks
+        .get()
+        .force_dismount(server, target);
+    {
+        let mut c = target.data();
+        c.set_disabled_set_position(true);
+        if !c.unit.buffs.check_buff(buff::FORCIBLY_AWAITING_TRIAL) {
+            crime::add_own_buff(
+                server,
+                &mut c,
+                buff::FORCIBLY_AWAITING_TRIAL,
+                0,
+                crate::world::now_ms(),
+            );
+        }
+    }
+    crate::systems::dispatch_buff_events(server, &WorldObject::from(target));
+    let jail = &court_room.jail;
+    target.send(SCTeleportUnitPacket {
+        reason: 0,
+        error_message: 0,
+        x: jail.x,
+        y: jail.y,
+        z: jail.z,
+        z2: jail.yaw.to_radians(),
+    });
+}
+
 /// `WorldSpawnPosition.ToString()`.
 fn world_spawn_position_string(x: f32, y: f32, z: f32, roll: f32, pitch: f32, yaw: f32) -> String {
     let g = |v: f32| group_1(f64::from(v));
@@ -211,12 +250,12 @@ impl SubCommand for CrimeAddPointSubCommand {
         if crime_points != 0 || infamy_points != 0 || jury_points != 0 {
             // If something changed, go to change mode
             let now = crate::world::now_ms();
-            let (packet, jury_packet) = {
+            let (packet, jury_packet, change) = {
                 let mut c = target.data();
                 let cp = c.crime_point.wrapping_add(crime_points);
-                crime::set_crime_point(server, &mut c, cp, now);
+                let mut change = crime::set_crime_point(server, &mut c, cp, now);
                 let ip = c.infamy_point.wrapping_add(infamy_points);
-                crime::set_infamy_point(server, &mut c, ip, now);
+                change = change.merge(crime::set_infamy_point(server, &mut c, ip, now));
                 let packet = SCCrimeChangedPacket {
                     points: i32::from(crime_points),
                     crime_points: c.crime_point,
@@ -224,8 +263,14 @@ impl SubCommand for CrimeAddPointSubCommand {
                     crime_state: crime::crime_state(&c),
                 };
                 let jp = c.jury_point.wrapping_add(jury_points);
-                (packet, crime::set_jury_point(&mut c, jp))
+                (packet, crime::set_jury_point(&mut c, jp), change)
             };
+            // The threshold's faction change needs the world: run it after the data lock.
+            if !change.is_empty() {
+                crate::systems::social::faction::apply_crime_faction_change(
+                    server, &target, change,
+                );
+            }
             target.send(packet);
             if let Some(p) = jury_packet {
                 target.send(p);
@@ -255,15 +300,37 @@ impl SubCommand for CrimeAddPointSubCommand {
             }
         } else {
             // If nothing changed, show target player's stats instead.
-            let (faction_id, crime_point, infamy_point, jury_point) = {
+            let (
+                faction_id,
+                crime_point,
+                infamy_point,
+                jury_point,
+                arrest_count,
+                accept_guilty_count,
+                accept_trial_count,
+                not_guilty_count,
+                guilty_count,
+            ) = {
                 let c = target.data();
                 (
                     c.unit.faction_id,
                     c.crime_point,
                     c.infamy_point,
                     c.jury_point,
+                    c.arrest_count,
+                    c.accept_guilty_count,
+                    c.accept_trial_count,
+                    c.not_guilty_count,
+                    c.guilty_count,
                 )
             };
+            // The trial counters live in the `characters` table; the archive count is the
+            // player's judged (`judgement_time` set) rows of the `crime` table.
+            let archived = server
+                .systems
+                .social
+                .crimes
+                .archived_evidence_count(target.character_id);
             self.base.send_color_message(
                 out,
                 Color::WHITE,
@@ -282,7 +349,16 @@ impl SubCommand for CrimeAddPointSubCommand {
             self.base
                 .send_message(out, &format!("[Infamy] {infamy_point}"));
             self.base.send_message(out, &format!("[Jury] {jury_point}"));
-            // TODO: Add trial/guilty counts
+            self.base.send_message(
+                out,
+                &format!(
+                    "[Trial] arrests {arrest_count}, accepted {accept_trial_count}, guilty pleas {accept_guilty_count}, guilty {guilty_count}, not guilty {not_guilty_count}"
+                ),
+            );
+            self.base.send_message(
+                out,
+                &format!("[Trial Archive] {archived} judged crime records (crime table)"),
+            );
         }
         Ok(())
     }
@@ -522,35 +598,7 @@ impl SubCommand for CrimeCourtSubCommand {
                         court_room.name
                     ),
                 );
-                server
-                    .systems
-                    .social
-                    .hooks
-                    .get()
-                    .force_dismount(server, &target);
-                {
-                    let mut c = target.data();
-                    c.set_disabled_set_position(true);
-                    if !c.unit.buffs.check_buff(buff::FORCIBLY_AWAITING_TRIAL) {
-                        crime::add_own_buff(
-                            server,
-                            &mut c,
-                            buff::FORCIBLY_AWAITING_TRIAL,
-                            0,
-                            crate::world::now_ms(),
-                        );
-                    }
-                }
-                crate::systems::dispatch_buff_events(server, &WorldObject::from(&target));
-                let jail = &court_room.jail;
-                target.send(SCTeleportUnitPacket {
-                    reason: 0,
-                    error_message: 0,
-                    x: jail.x,
-                    y: jail.y,
-                    z: jail.z,
-                    z2: jail.yaw.to_radians(),
-                });
+                jail_court_room(server, &target, &court_room);
             }
             _ => {}
         }
@@ -1081,7 +1129,7 @@ mod tests {
     use crate::systems::social::config::{
         CourtRoomConfig, JailConfig, JusticeConfig, SpawnPosition,
     };
-    use crate::systems::social::crime::buff;
+    use crate::systems::social::crime::{buff, CrimeEvent};
 
     const NUIA: u32 = 148;
 
@@ -1270,6 +1318,30 @@ mod tests {
             "[Crime Points] [GM] Gm has changed your justice points; crime +10, infamy -3, jury points +2"
         );
 
+        // Trial history counters (characters table) and two archived records (crime table).
+        {
+            let mut c = bob.p.data();
+            c.arrest_count = 3;
+            c.accept_trial_count = 2;
+            c.accept_guilty_count = 1;
+            c.not_guilty_count = 4;
+            c.guilty_count = 5;
+        }
+        for id in [900, 901] {
+            assert!(server.systems.social.crimes.insert(CrimeEvent {
+                id,
+                criminal: bob.p.character_id,
+                judgement_time: 1_700_000_000,
+                ..CrimeEvent::default()
+            }));
+        }
+        // An active (unjudged) record must not be counted as archived.
+        assert!(server.systems.social.crimes.insert(CrimeEvent {
+            id: 902,
+            criminal: bob.p.character_id,
+            ..CrimeEvent::default()
+        }));
+
         // Stats mode.
         let (_, out) = harness::run(&server, &gm.p, "crime points Bob").await;
         assert_eq!(
@@ -1280,6 +1352,8 @@ mod tests {
                 "[Crime Points] [Crime] 10",
                 "[Crime Points] [Infamy] 0",
                 "[Crime Points] [Jury] 2",
+                "[Crime Points] [Trial] arrests 3, accepted 2, guilty pleas 1, guilty 5, not guilty 4",
+                "[Crime Points] [Trial Archive] 2 judged crime records (crime table)",
             ]
         );
         // Target lookups.

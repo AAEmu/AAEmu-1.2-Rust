@@ -17,12 +17,14 @@
 //! | [`doodad`] | `DoodadManager`, `Doodad` funcs / phases, `DoodadSpawner`, persistence, `SCDoodad*` |
 //! | [`spawn_manager`] | `SpawnManager` (one per world instance) |
 //! | [`heightmap`] | `WorldCell` heightmaps, `WorldManager.GetHeight` |
+//! | [`terrain_surface`] | `surface.xml` detail materials -> doodad place kinds |
 //! | [`gimmick`] | `GimmickManager`, `GimmickGameData`, `GimmickSpawner` |
 //! | [`area_trigger`], [`subzone`], [`sphere_quest`] | `AreaTriggerManager`, `SubZoneManager`, `SphereQuestManager` |
 //! | [`portal`], [`specialty`], [`public_farm`], [`fish_school`] | `PortalManager`, `SpecialtyManager`, `PublicFarmManager`, `FishSchoolManager` |
 
 pub mod area_trigger;
 pub mod bridges;
+pub mod config;
 pub mod doodad;
 pub mod fish_school;
 pub mod gimmick;
@@ -33,6 +35,7 @@ pub mod npc;
 pub mod portal;
 pub mod public_farm;
 pub mod schedule;
+pub mod schedule_events;
 pub mod schedule_item_manager;
 pub mod schedule_item_packets;
 pub mod schedule_item_persistence;
@@ -43,6 +46,7 @@ pub mod spawn_manager;
 pub mod specialty;
 pub mod sphere_quest;
 pub mod subzone;
+pub mod terrain_surface;
 
 use std::sync::Arc;
 
@@ -135,6 +139,8 @@ pub struct System {
     pub fish_schools: fish_school::FishSchoolManager,
     /// `ScheduleItemManager` (account-wide schedule-item progress and its prepared save).
     pub schedule_items: schedule_item_manager::ScheduleItemManager,
+    /// Scheduled-event announcement state (`Events:ScheduledEvents`, Rust only).
+    pub schedule_events: schedule_events::ScheduleEventState,
     /// Behaviour of other subsystems this one calls (installed by them at start).
     pub hooks: hooks::NpcsHooks,
 }
@@ -166,6 +172,8 @@ impl System {
             .await?;
         tracing::info!("Loaded schedule item progress of {accounts} accounts");
         schedule_item_session::start_tick_task(server);
+        // `Events:ScheduledEvents`: validate the allow-list and start the 30 s edge tick.
+        schedule_events::start(server);
         Ok(())
     }
 

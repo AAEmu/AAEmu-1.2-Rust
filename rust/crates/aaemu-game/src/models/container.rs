@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use crate::data::items::{backpack_type, bind_type, ItemData, ItemTemplate, TemplateKind};
 use crate::managers::id::IdManager;
 use crate::managers::item::ItemManager;
-use crate::models::item::{Item, UnixTime, ITEM_FLAG_SOUL_BOUND};
-use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
+use crate::models::item::{Item, UnixTime, ITEM_FLAG_SECURE, ITEM_FLAG_SOUL_BOUND};
+use crate::models::item_task::{task_type, AcquiredSource, ItemFx, ItemFxList, ItemTask};
 
 /// `SlotType`.
 pub mod slot_type {
@@ -40,6 +40,18 @@ pub mod slot_type {
         EQUIPMENT_MATE,
         SYSTEM,
     ];
+}
+
+/// The character's own containers that character creation fills and the lobby character edit
+/// rebuilds: equipment, bag and bank. Mail, auction, trade and system containers and mate /
+/// slave equipment keep their rows and items untouched - a never-played character can already
+/// own mail attachments, and mate/slave equipment is not part of creation.
+pub fn is_creation_container(slot: u8, mate_id: u32) -> bool {
+    mate_id == 0
+        && matches!(
+            slot,
+            slot_type::EQUIPMENT | slot_type::INVENTORY | slot_type::BANK
+        )
 }
 
 /// `EquipmentItemSlot` indices used by this phase.
@@ -233,6 +245,11 @@ impl ItemContainer {
         self.free_slot_count
     }
 
+    /// `ContainerSize`.
+    pub fn size(&self) -> i32 {
+        self.size
+    }
+
     /// `PartOfPlayerInventory`.
     fn part_of_player_inventory(&self) -> bool {
         matches!(
@@ -279,10 +296,28 @@ impl ItemContainer {
 
     /// `GetAllItemsByTemplate` -> (items, units).
     pub fn items_by_template(&self, template_id: u32, grade: i32) -> (Vec<u64>, i32) {
+        self.items_by_template_filtered(template_id, grade, false)
+    }
+
+    /// [`items_by_template`](Self::items_by_template) without the secured stacks: locked items
+    /// cannot pay a consumption, hand-in or reagent (`ItemFlag.Secure`).
+    pub fn items_by_template_unlocked(&self, template_id: u32, grade: i32) -> (Vec<u64>, i32) {
+        self.items_by_template_filtered(template_id, grade, true)
+    }
+
+    fn items_by_template_filtered(
+        &self,
+        template_id: u32,
+        grade: i32,
+        unlocked_only: bool,
+    ) -> (Vec<u64>, i32) {
         let mut ids = Vec::new();
         let mut units = 0;
         for i in &self.items {
-            if i.template_id == template_id && (grade < 0 || grade == i32::from(i.grade)) {
+            if i.template_id == template_id
+                && (grade < 0 || grade == i32::from(i.grade))
+                && !(unlocked_only && i.has_flag(ITEM_FLAG_SECURE))
+            {
                 ids.push(i.id);
                 units += i.count;
             }
@@ -531,6 +566,22 @@ impl ItemContainer {
         let source_slot = item.slot as u8;
         let source_slot_type = item.slot_type;
         let from_other = src.is_some();
+        // Where the units came from, for the acquisition achievements (`GET_ITEM_TYPE`): a
+        // freshly created item, new units for a stack, a mail take, another character's
+        // container (trade) or a move between the character's own containers. A coffer is a
+        // `Coffer` container owned by the house: its slot type is `TRADE`, but it is the
+        // character's own storage, so it must not look like a trade.
+        let source_container = src.as_deref().map(|s| (s.owner_id, s.kind));
+        let acquired_source = match (source_container, src_slot_type) {
+            (None, None) => AcquiredSource::NewItem,
+            (Some(_), Some(slot_type::MAIL)) => AcquiredSource::MailTake,
+            (Some((owner_id, kind)), Some(_))
+                if kind != ContainerKind::Coffer && owner_id != self.owner_id =>
+            {
+                AcquiredSource::Trade
+            }
+            _ => AcquiredSource::Transfer,
+        };
         let mut item_tasks = Vec::new();
         let mut source_tasks = Vec::new();
         let template_id = item.template_id;
@@ -621,6 +672,8 @@ impl ItemContainer {
                 owner: self.owner_id,
                 template_id,
                 count: final_count,
+                added: final_count,
+                source: acquired_source,
             });
         } else if source_slot_type == slot_type::MAIL && self.slot_type != slot_type::MAIL {
             // Got attachment from Mail
@@ -628,6 +681,8 @@ impl ItemContainer {
                 owner: self.owner_id,
                 template_id,
                 count: final_count,
+                added: final_count,
+                source: acquired_source,
             });
         } else if src_slot_type.is_some()
             && source_slot_type != slot_type::MAIL
@@ -807,20 +862,49 @@ impl ItemContainer {
         &mut self,
         task: u8,
         template_id: u32,
+        amount: i32,
+        preferred_item: Option<u64>,
+        env: &mut ItemEnv<'_>,
+    ) -> i32 {
+        self.consume_item_filtered(task, template_id, -1, amount, preferred_item, env)
+    }
+
+    /// [`consume_item`](Self::consume_item) restricted to items of `grade` (`-1` = any grade),
+    /// for craft materials that name a `require_grade` or inherit a main material's grade.
+    pub fn consume_item_by_grade(
+        &mut self,
+        task: u8,
+        template_id: u32,
+        grade: i32,
+        amount: i32,
+        preferred_item: Option<u64>,
+        env: &mut ItemEnv<'_>,
+    ) -> i32 {
+        self.consume_item_filtered(task, template_id, grade, amount, preferred_item, env)
+    }
+
+    fn consume_item_filtered(
+        &mut self,
+        task: u8,
+        template_id: u32,
+        grade: i32,
         mut amount: i32,
         preferred_item: Option<u64>,
         env: &mut ItemEnv<'_>,
     ) -> i32 {
-        let (mut found, _) = self.items_by_template(template_id, -1);
+        let (mut found, _) = self.items_by_template_unlocked(template_id, grade);
         if found.is_empty() {
             return 0; // Nothing found
         }
         let mut total = 0;
         let mut tasks = Vec::new();
         if let Some(pid) = preferred_item {
-            // Preferred item template did not match / is not in this container
+            // Preferred item template did not match / is not in this container, or it is locked.
             match self.get_item_by_id(pid) {
-                Some(p) if p.template_id == template_id => {}
+                Some(p)
+                    if p.template_id == template_id
+                        && (grade < 0 || grade == i32::from(p.grade))
+                        && !p.has_flag(ITEM_FLAG_SECURE) => {}
                 _ => return 0,
             }
             if amount > 0 {
@@ -955,11 +1039,14 @@ impl ItemContainer {
                     amount -= add;
                     tasks.push(ItemTask::count_update(item, add));
                     res.updated.push(id);
-                    // OnAcquiredItem(i, addAmount, true) -> DoItemsAcquiredEvents(item.Count)
+                    // OnAcquiredItem(i, addAmount, true) -> DoItemsAcquiredEvents(item.Count).
+                    // The achievement credit needs the delta, not the new total.
                     env.fx.push(ItemFx::Acquired {
                         owner: self.owner_id,
                         template_id,
                         count: item.count,
+                        added: add,
+                        source: AcquiredSource::NewUnits,
                     });
                 }
                 if amount < 0 {
@@ -977,10 +1064,17 @@ impl ItemContainer {
                 );
                 return None;
             };
-            // Add name if marked as crafter (single stack items only)
-            if crafter_id > 0 && template.max_count == 1 {
-                item.made_unit_id = crafter_id;
-                item.world_id = env.default_world_template_id;
+            // The 1.2 client shows the crafter of any item whose `madeUnitId` resolves to a
+            // character name (tooltip `FUN_39423560`), so record the crafter on every crafted
+            // product. `made_unit_id`/`world_id` keep the C# behaviour for single-stack items
+            // (the older carrier and the world the pack was made on); `crafter_id` is the
+            // dedicated column and reaches the same wire field through `Item::crafter`.
+            if crafter_id > 0 {
+                item.crafter_id = crafter_id;
+                if template.max_count == 1 {
+                    item.made_unit_id = crafter_id;
+                    item.world_id = env.default_world_template_id;
+                }
             }
             amount -= add;
             let pref = if matches!(template.kind, TemplateKind::Backpack { .. })

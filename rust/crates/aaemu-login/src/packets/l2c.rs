@@ -37,13 +37,21 @@ pub enum JoinResponseReason {
 }
 
 /// An AFS (Account Feature Settings?) value.
+///
+/// Layout, from the 1.2 client (Ghidra `x2game.dll.c`): the reader `FUN_393d27d0` reads a `u64`
+/// at `ACJoinResponse` body + 0x10 and the handler `FUN_393cf110` copies it to account data
+/// +0x80..+0x87. `GetTotalCharactersDefaultLimit` (`FUN_394ccf90`) reads byte 0x80,
+/// `GetTotalCharactersExpandableLimit` (`FUN_394cd020`) reads byte 0x81 and
+/// `IsPreSelectCharacterPeriod` (`FUN_394cc9c0`) reads bit 0 of byte 0x82; bytes 0x83-0x87 are
+/// never read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AfsValue {
-    /// The maximum number of characters per account.
+    /// The maximum number of characters per account (byte 0).
     pub max_characters_per_account: u8,
-    /// The additional number of characters per server when using the slot increase item.
-    pub additional_characters_per_server: u32,
-    /// Whether the server is in character pre-creation mode.
+    /// The additional number of characters per server when using the slot increase item
+    /// (byte 1; the client's expandable limit).
+    pub additional_characters_per_server: u8,
+    /// Whether the server is in character pre-creation mode (byte 2, bit 0).
     pub is_pre_select_character_period: bool,
 }
 
@@ -51,19 +59,15 @@ impl AfsValue {
     pub fn from_u64(afs: u64) -> Self {
         Self {
             max_characters_per_account: (afs & 0xFF) as u8,
-            is_pre_select_character_period: afs & 0x100 != 0,
-            additional_characters_per_server: (afs >> 32) as u32,
+            additional_characters_per_server: ((afs >> 8) & 0xFF) as u8,
+            is_pre_select_character_period: afs & 0x1_0000 != 0,
         }
     }
 
     pub fn to_u64(self) -> u64 {
-        (u64::from(self.additional_characters_per_server) << 32)
-            | if self.is_pre_select_character_period {
-                1 << 8
-            } else {
-                0
-            }
-            | u64::from(self.max_characters_per_account)
+        u64::from(self.max_characters_per_account)
+            | (u64::from(self.additional_characters_per_server) << 8)
+            | (u64::from(self.is_pre_select_character_period) << 16)
     }
 }
 
@@ -87,9 +91,10 @@ impl OutgoingPacket for AcJoinResponse {
     const OPCODE: u16 = opcodes::AC_JOIN_RESPONSE;
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
         s.write_u16(self.reason);
-        // afs[0] -> max number of characters per account
-        // afs[1] -> additional number of characters per server when using the slot increase item
-        // afs[2] -> 1 - character pre-creation mode
+        // afs byte 0 -> max number of characters per account
+        // afs byte 1 -> additional number of characters per server when using the slot increase
+        //               item (the client's expandable limit)
+        // afs byte 2 bit 0 -> character pre-creation (pre-select) mode
         s.write_u64(self.afs);
         Ok(())
     }
@@ -414,18 +419,31 @@ impl OutgoingPacket for AcWorldList {
     }
 }
 
-/// `ACWorldQueuePacket`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AcWorldQueue;
+/// `ACWorldQueuePacket`: `u8 worldId, bool isPremium, u16 myTurn, u16 normalLength,
+/// u16 premiumLength`.
+///
+/// The client reader is `FUN_393d0da0` (vtable entry for AC opcode 0x009): it reads `worldId` at
+/// packet offset 0x8, `isPremium` at 0x9, then the three `u16` at 0xa, 0xc and 0xe. `myTurn == 0`
+/// ends the wait (client handler `FUN_39406b80`, event 0x4b); any other value is the 1-based
+/// queue position. The game server's `SCWorldQueuePacket` (SC 0x005, client reader
+/// `FUN_397ae880`) has the same body.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AcWorldQueue {
+    pub world_id: u8,
+    pub is_premium: bool,
+    pub my_turn: u16,
+    pub normal_length: u16,
+    pub premium_length: u16,
+}
 
 impl OutgoingPacket for AcWorldQueue {
     const OPCODE: u16 = opcodes::AC_WORLD_QUEUE;
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
-        s.write_u8(0); // diw -> world id
-        s.write_bool(false); // isPremium
-        s.write_u16(0); // myTurn
-        s.write_u16(0); // normalLength
-        s.write_u16(0); // premiumLength
+        s.write_u8(self.world_id);
+        s.write_bool(self.is_premium);
+        s.write_u16(self.my_turn);
+        s.write_u16(self.normal_length);
+        s.write_u16(self.premium_length);
         Ok(())
     }
 }
@@ -511,9 +529,10 @@ mod tests {
             additional_characters_per_server: 2,
             is_pre_select_character_period: true,
         };
+        // reason 0000, then afs = 06 | 02 << 8 | 01 << 16 (client byte layout).
         assert_eq!(
             frame(&AcJoinResponse::new(JoinResponseReason::Success, afs)),
-            "0c00000000000601000002000000"
+            "0c00000000000602010000000000"
         );
         // What LoginClient.SendAuthSuccessAsync sends.
         let default_afs = AfsValue {
@@ -529,6 +548,28 @@ mod tests {
             "0c00000000000600000000000000"
         );
         assert_eq!(AfsValue::from_u64(afs.to_u64()), afs);
+    }
+
+    /// The client reads byte 0x80 as the default limit, byte 0x81 as the expandable limit and bit
+    /// 0 of byte 0x82 as the pre-select flag (Ghidra `FUN_394ccf90` / `FUN_394cd020` /
+    /// `FUN_394cc9c0`), so the 8 AFS bytes must be laid out exactly like this.
+    #[test]
+    fn afs_uses_the_client_byte_layout() {
+        let afs = AfsValue {
+            max_characters_per_account: 6,
+            additional_characters_per_server: 2,
+            is_pre_select_character_period: true,
+        };
+        assert_eq!(afs.to_u64().to_le_bytes(), [6, 2, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(AfsValue::from_u64(0x0000_0000_0001_0206), afs);
+
+        let none = AfsValue {
+            max_characters_per_account: 8,
+            additional_characters_per_server: 3,
+            is_pre_select_character_period: false,
+        };
+        assert_eq!(none.to_u64().to_le_bytes(), [8, 3, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(AfsValue::from_u64(0x0000_0000_0000_0308), none);
     }
 
     #[test]
@@ -551,7 +592,19 @@ mod tests {
             timeout: Duration::from_secs(180),
         };
         assert_eq!(frame(&p), "0c00060004003132333420bf0200");
-        assert_eq!(frame(&AcWorldQueue), "0a0009000000000000000000");
+        // Client reader FUN_393d0da0: u8 worldId, bool isPremium, u16 myTurn, u16 normalLength,
+        // u16 premiumLength.
+        assert_eq!(frame(&AcWorldQueue::default()), "0a0009000000000000000000");
+        assert_eq!(
+            frame(&AcWorldQueue {
+                world_id: 3,
+                is_premium: true,
+                my_turn: 5,
+                normal_length: 9,
+                premium_length: 2,
+            }),
+            "0a0009000301050009000200"
+        );
         assert_eq!(frame(&AcAccountWarned), "05000d00000000");
     }
 

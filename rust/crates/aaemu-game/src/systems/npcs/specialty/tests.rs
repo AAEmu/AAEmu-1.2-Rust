@@ -193,8 +193,6 @@ fn packets_are_byte_exact() {
         CSSpecialtyRatioPacket::read(&mut s).unwrap(),
         CSSpecialtyRatioPacket { id: 7 }
     );
-    let mut s = PacketStream::from_bytes(vec![9u8, 0, 0]);
-    assert_eq!(CSListSpecialtyGoodsPacket::read(&mut s).unwrap().obj_id, 9);
     let mut s = PacketStream::from_bytes(vec![22u8, 0, 5, 0]);
     assert_eq!(
         CSRequestSpecialtyCurrentPacket::read(&mut s).unwrap(),
@@ -213,11 +211,6 @@ fn packets_are_byte_exact() {
             kind: 4,
             obj_id: 0x070605
         }
-    );
-    let mut s = PacketStream::from_bytes(vec![0xffu8, 0xff, 0xff, 0xff, 2, 0, 0, 0]);
-    assert_eq!(
-        CSSpecialtyRecordLoadPacket::read(&mut s).unwrap(),
-        CSSpecialtyRecordLoadPacket { zone_id: -1, id: 2 }
     );
 }
 

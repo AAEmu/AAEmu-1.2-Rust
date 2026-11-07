@@ -27,6 +27,7 @@ use super::error_message;
 use super::inventory::{self, game_point_kind, lock_pair, Inv, ItemTxn};
 use super::item_handlers::{active, sync_client_packet};
 use super::item_packets::{SCGamePointChangedPacket, SCItemTaskSuccessPacket};
+use super::shop_limits::ShopClaim;
 
 /// Discard a failed staged checkout while releasing only newly allocated IDs.
 fn discard_shop_stage(
@@ -339,21 +340,74 @@ impl CSBuyItemsPacket {
             self.buy_back.len()
         );
 
-        // If a NPC was provided, check if it's valid. Its catalog wins over a doodad's (C#).
-        let mut pack_id = None;
+        // If a NPC was provided, check if it's valid. Its catalogs win over a doodad's (C#);
+        // the 1.2 client unions every `merchants` pack of the NPC, so all of them sell.
+        let mut pack_ids = Vec::new();
         if self.npc_obj_id != 0 {
             let Some(n) = &npc else { return };
             let info = shop_info(server, n);
-            if !info.merchant || info.merchant_pack_id == 0 {
+            if !info.merchant || info.merchant_pack_ids.is_empty() {
                 return;
             }
-            pack_id = Some(info.merchant_pack_id);
+            pack_ids = info.merchant_pack_ids;
         }
         if let Some(n) = &npc {
             let dist = world_distance(&world, &WorldObject::from(&p), &WorldObject::from(n));
             if dist > SHOP_RANGE {
                 // 3m should be enough for NPC shops
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
+                return;
+            }
+        }
+
+        // A doodad checkout holds the doodad's phase-operation reservation from the
+        // current-phase validation until the phase advance after the commit, so the func group
+        // cannot move between them (the coin path does the same).
+        let _phase_operation = if self.doodad_obj_id != 0 {
+            match &doodad {
+                Some(d) => {
+                    let Some(operation) = crate::systems::npcs::doodad::phase::Operation::enter(d)
+                    else {
+                        return;
+                    };
+                    Some(operation)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        // A `DoodadFuncPurchase` dialog writes the func's `doodad_funcs` row id into the
+        // packet's `unkId` (`FUN_393b8040` / `FUN_397ac3f0` at `x2game.dll.c`), and its money
+        // price is the item template's, paid through this packet like a shop line. The coin
+        // form of the same func arrives as `CSBuyCoinItemPacket`.
+        let purchase = if self.doodad_obj_id != 0 && self.unk_id != 0 {
+            doodad.as_ref().and_then(|d| {
+                let data = &server.game_data.systems.npcs.doodad;
+                let group = d.data().func_group_id;
+                data.func(self.unk_id)
+                    .filter(|f| f.group_id == group && f.func_type == "DoodadFuncPurchase")
+                    .and_then(|f| match data.func_template(f.func_id, &f.func_type) {
+                        Some(crate::systems::npcs::doodad::templates::FuncTemplate::Purchase(
+                            p,
+                        )) => Some((p, f.next_phase)),
+                        _ => None,
+                    })
+            })
+        } else {
+            None
+        };
+
+        // `blocked_child_doodads`: no checkout (and no purchase-func phase advance) from a
+        // child doodad whose parent unit carries the blocking buff.
+        if let Some(d) = &doodad {
+            if crate::systems::npcs::doodad::phase::refuse_blocked_child_doodad(
+                server,
+                &world,
+                d,
+                Some(&WorldObject::from(&p)),
+            ) {
                 return;
             }
         }
@@ -368,15 +422,18 @@ impl CSBuyItemsPacket {
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
                 return;
             }
-            if pack_id.is_none() {
-                pack_id = doodad_shop_pack(server, d);
+            if pack_ids.is_empty() {
+                if let Some(pack_id) = doodad_shop_pack(server, d) {
+                    pack_ids.push(pack_id);
+                }
             }
         }
 
-        // Only goods of the interacting shop's catalog can be bought. Without one (no NPC, no
-        // `DoodadFuncStoreUi` doodad) every template would be buyable, so refuse the purchase
-        // (buy-back needs no catalog and stays allowed).
-        if !self.buy.is_empty() && pack_id.is_none() {
+        // Only goods of the interacting shop's catalog or of the named money-priced
+        // `DoodadFuncPurchase` can be bought. Without one (no NPC, no `DoodadFuncStoreUi`, no
+        // purchase func) every template would be buyable, so refuse the purchase (buy-back
+        // needs no catalog and stays allowed).
+        if !self.buy.is_empty() && pack_ids.is_empty() && purchase.is_none() {
             tracing::warn!(
                 "{}: rejected BuyItems of {} item(s) without a merchant catalog (npc {}, doodad {})",
                 p.data().unit.name,
@@ -392,6 +449,10 @@ impl CSBuyItemsPacket {
         let mut honor_points = 0i32;
         let mut vocation_badges = 0i32;
         let mut items_buy = Vec::new();
+        let mut purchase_used = false;
+        // The per-character purchase allowance is per item template: lines of the same item
+        // (whatever grade or currency) add up to one claim.
+        let mut claims: HashMap<u32, ShopClaim> = HashMap::new();
         for e in &self.buy {
             if e.count <= 0
                 || !matches!(
@@ -403,11 +464,17 @@ impl CSBuyItemsPacket {
             {
                 return;
             }
-            let sells = match (pack_id, &npc_hooks) {
-                (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id, e.grade),
-                _ => false,
-            };
-            if !sells {
+            let sells = npc_hooks.as_ref().is_some_and(|h| {
+                h.merchant_sells(server, &p, npc.as_ref(), &pack_ids, e.item_id, e.grade)
+            });
+            // The purchase func sells its own item at the template price; a coin-item priced
+            // func only checks out through `CSBuyCoinItemPacket` (and is refused here).
+            let purchase_line = purchase.filter(|(f, _)| {
+                f.coin_item_id == 0
+                    && f.item_id == e.item_id
+                    && f.currency_id == u32::from(e.currency)
+            });
+            if !sells && purchase_line.is_none() {
                 continue;
             }
             let Some(template) = server.game_data.items.template(e.item_id) else {
@@ -416,6 +483,24 @@ impl CSBuyItemsPacket {
             if template.max_count <= 0 {
                 return;
             }
+            // The func offers one grade only (`fixed_grade` if the template has one, else basic)
+            // and sells whole func bundles. Without the grade rule a forged high-grade line was
+            // bought at the template price and sold back at the grade's refund multiplier
+            // (item 8661: 64 500 price, 32 250 * 6 refund at grade 11).
+            let purchase_sells = purchase_line.is_some_and(|(f, _)| {
+                f.count > 0
+                    && e.count % f.count == 0
+                    && e.grade
+                        == if template.fixed_grade >= 0 {
+                            template.fixed_grade as u8
+                        } else {
+                            0
+                        }
+            });
+            if !sells && !purchase_sells {
+                continue;
+            }
+            purchase_used |= purchase_sells;
             let (price, total) = match e.currency {
                 shop_currency_type::MONEY => (template.price, &mut money),
                 shop_currency_type::HONOR => (template.honor_price, &mut honor_points),
@@ -435,6 +520,14 @@ impl CSBuyItemsPacket {
                 return;
             };
             *total = sum;
+            if let Some(limit) = template.purchase_limit() {
+                let claim = claims.entry(e.item_id).or_insert(ShopClaim {
+                    item_id: e.item_id,
+                    count: 0,
+                    limit,
+                });
+                claim.count = claim.count.saturating_add(e.count);
+            }
             items_buy.push((e.item_id, e.count, e.grade));
         }
 
@@ -539,6 +632,25 @@ impl CSBuyItemsPacket {
             discard_shop_stage(&mut txn, &staged_bag, &bag, &buyback);
             return;
         }
+        // Everything is staged; only now take the per-character purchase allowance, so a
+        // refused or failed checkout never has to give a claim back. The economy operation
+        // lock held by the transaction keeps the check and the commit one operation.
+        let mut claims: Vec<ShopClaim> = claims.into_values().collect();
+        claims.sort_unstable_by_key(|c| c.item_id);
+        if !server
+            .systems
+            .economy
+            .shop_limits
+            .try_claim(p.character_id, &claims)
+        {
+            discard_shop_stage(&mut txn, &staged_bag, &bag, &buyback);
+            inventory::send_error_message_to(
+                &mut txn.out(),
+                &p,
+                error_message::STORE_ONE_TIME_SALE,
+            );
+            return;
+        }
         *bag = staged_bag;
         *buyback = staged_buyback;
         character.money = next_money;
@@ -547,43 +659,63 @@ impl CSBuyItemsPacket {
         drop(buyback);
         drop(bag);
         drop(character);
-        let mut out = txn.out();
-        if honor_points > 0 {
-            out.send(
-                &p,
-                SCGamePointChangedPacket {
-                    kind: game_point_kind::HONOR,
-                    amount: -honor_points,
-                },
-            );
-        }
-        if vocation_badges > 0 {
-            out.send(
-                &p,
-                SCGamePointChangedPacket {
-                    kind: game_point_kind::VOCATION,
-                    amount: vocation_change,
-                },
-            );
-        }
-        if money > 0 {
+        {
+            let mut out = txn.out();
+            if honor_points > 0 {
+                out.send(
+                    &p,
+                    SCGamePointChangedPacket {
+                        kind: game_point_kind::HONOR,
+                        amount: -honor_points,
+                    },
+                );
+            }
+            if vocation_badges > 0 {
+                out.send(
+                    &p,
+                    SCGamePointChangedPacket {
+                        kind: game_point_kind::VOCATION,
+                        amount: vocation_change,
+                    },
+                );
+            }
+            if money > 0 {
+                out.send(
+                    &p,
+                    SCItemTaskSuccessPacket {
+                        action: task_type::DEPOSIT_MONEY,
+                        tasks: vec![ItemTask::MoneyChange(-money)],
+                        force_remove: Vec::new(),
+                    },
+                );
+            }
             out.send(
                 &p,
                 SCItemTaskSuccessPacket {
-                    action: task_type::DEPOSIT_MONEY,
-                    tasks: vec![ItemTask::MoneyChange(-money)],
+                    action: task_type::STORE_BUY,
+                    tasks,
                     force_remove: Vec::new(),
                 },
             );
         }
-        out.send(
-            &p,
-            SCItemTaskSuccessPacket {
-                action: task_type::STORE_BUY,
-                tasks,
-                force_remove: Vec::new(),
-            },
-        );
+        // The economy operation ends before the phase funcs (they may start item operations of
+        // their own); the doodad's phase reservation stays held until this function returns.
+        drop(txn);
+        if purchase_used {
+            if let Some((_, next_phase)) = purchase {
+                if next_phase > 0 {
+                    if let Some(d) = &doodad {
+                        crate::systems::npcs::doodad::manager::do_change_phase(
+                            server,
+                            &world,
+                            d,
+                            Some(&WorldObject::from(&p)),
+                            next_phase,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 sync_client_packet!(CSBuyItemsPacket);
@@ -664,6 +796,13 @@ impl CSSellItemsPacket {
                 }
                 items.push(item);
             }
+        }
+
+        if items
+            .iter()
+            .any(|item| super::item_security::refuse_if_locked(&p, item))
+        {
+            return;
         }
 
         let buyback = server.systems.economy.store.buyback(p.character_id);
@@ -859,7 +998,9 @@ impl CSBuyPriestBuffPacket {
 }
 sync_client_packet!(CSBuyPriestBuffPacket);
 
-/// `CSBuyCoinItemPacket`.
+/// `CSBuyCoinItemPacket`: `bc objId`, `u32 funcId` (`doodad_funcs.id`). The 1.2 client sends
+/// it from a `DoodadFuncPurchase` dialog priced in a coin item (`FUN_393b80d0`, coin dialog
+/// `FUN_393bac20`); the npcs hook validates the func, phase and range before the purchase runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSBuyCoinItemPacket {
     pub obj_id: u32,
@@ -951,7 +1092,11 @@ pub fn expand_expert(server: &GameServer, p: &PlayerRef) {
         .expand_expert_limit(expanded)
         .copied()
     else {
-        return; // TODO ... send msg error?
+        // C#: `return; // TODO ... send msg error?` The 1.2 client has `store_unknown_error`
+        // (228) for a store action it cannot complete, and an expansion step with no
+        // `expand_expert_limits` row cannot be completed.
+        inventory::send_error_message(p, error_message::STORE_UNKNOWN_ERROR, 0, true);
+        return;
     };
     if expand.life_point > vocation {
         inventory::send_error_message(p, error_message::NOT_ENOUGH_EXPAND_ITEM_AND_MONEY, 0, true);
@@ -1080,6 +1225,11 @@ pub fn convert_item_look(server: &GameServer, p: &PlayerRef, base_id: u64, look_
         inventory::send_error_message(p, error_message::FAILED_TO_USE_ITEM, 0, true);
         return;
     };
+    if super::item_security::refuse_if_locked(p, &to_image)
+        || super::item_security::refuse_if_locked(p, &image_item)
+    {
+        return;
+    }
     if !to_image.class.is_equip() {
         inventory::send_error_message(
             p,

@@ -172,10 +172,15 @@ async fn mate_skill_packet_requires_real_passenger_attachment_and_keeps_unlisted
             id: 900,
             name: "Horse".into(),
             level: 1,
+            model_id: 77,
             scale: 1.0,
             ..Default::default()
         },
     );
+    data.systems
+        .vehicles
+        .model_bindings
+        .insert(77, vec![attach_point::DRIVER, attach_point::PASSENGER0]);
     data.systems
         .vehicles
         .npc_mount_skills

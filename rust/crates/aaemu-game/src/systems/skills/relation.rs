@@ -3,15 +3,14 @@
 //! `SkillTargetingUtil.FilterWithRelation` / `IsRelationValid`.
 
 use crate::server::GameServer;
+use crate::systems::social::nation;
 use crate::world::{now_ms, PlayerRef, WorldObject};
 
 use super::geometry::Target;
 use super::types::{buff_constants, RelationState, SkillTargetRelation};
 
 /// `FactionsEnum` root factions.
-const FACTION_FRIENDLY: u32 = 1;
 const FACTION_NEUTRAL: u32 = 2;
-const FACTION_HOSTILE: u32 = 3;
 
 /// `WorldManager.DefaultCombatTimeout` (seconds).
 pub const DEFAULT_COMBAT_TIMEOUT_MS: i64 = 15_000;
@@ -20,55 +19,12 @@ fn relation_from_raw(v: u8) -> RelationState {
     RelationState::from_raw(i64::from(v)).unwrap_or(RelationState::Neutral)
 }
 
-/// The stored relation between two factions (`faction.Relations[other]`).
-fn stored_relation(server: &GameServer, a: u32, b: u32) -> Option<RelationState> {
-    server
-        .game_data
-        .factions
-        .relations
-        .iter()
-        .find(|r| (r.id == a && r.id2 == b) || (r.id == b && r.id2 == a))
-        .map(|r| relation_from_raw(r.state))
-}
-
 /// `SystemFaction.GetRelationState(other)` for faction ids (0 / unknown ids = null factions).
+/// Runtime nations are resolved by the social subsystem's shared implementation.
 pub fn faction_relation(server: &GameServer, own: u32, other: u32) -> RelationState {
-    let factions = &server.game_data.factions;
-    let Some(me) = factions.get(own) else {
-        return RelationState::Neutral; // this.Faction == null -> GetRelationStateTo: Neutral
-    };
-    let Some(them) = factions.get(other) else {
-        return RelationState::Neutral;
-    };
-    let faction_id = if me.mother_id != 0 {
-        me.mother_id
-    } else {
-        me.id
-    };
-    let other_id = if them.mother_id != 0 {
-        them.mother_id
-    } else {
-        them.id
-    };
-    match faction_id {
-        FACTION_NEUTRAL => return RelationState::Neutral,
-        FACTION_FRIENDLY => return RelationState::Friendly,
-        FACTION_HOSTILE => return RelationState::Hostile,
-        _ => {}
-    }
-    match other_id {
-        FACTION_NEUTRAL => return RelationState::Neutral,
-        FACTION_FRIENDLY => return RelationState::Friendly,
-        FACTION_HOSTILE => return RelationState::Hostile,
-        _ => {}
-    }
-    if faction_id == other_id {
-        return RelationState::Friendly;
-    }
-    if me.mother_id != 0 && factions.get(me.mother_id).is_some() {
-        return stored_relation(server, me.mother_id, other_id).unwrap_or(RelationState::Friendly);
-    }
-    stored_relation(server, me.id, other_id).unwrap_or(RelationState::Neutral)
+    relation_from_raw(crate::systems::social::faction::relation_state_live(
+        server, own, other,
+    ))
 }
 
 /// The faction id of a target (0 for position units / no faction).
@@ -121,6 +77,26 @@ pub fn is_actively_hostile(me: &PlayerRef, target_obj_id: u32) -> bool {
         .is_some_and(|(_, t)| t + DEFAULT_COMBAT_TIMEOUT_MS > now)
 }
 
+/// The target's zone group is an instance whose `indun_zones` row has `pvp = false`.
+fn is_no_pvp_zone(server: &GameServer, target: &Target) -> bool {
+    let (_, zone_key) = super::geometry::instance_and_zone(target);
+    let Some(group_id) = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map(|z| z.group_id)
+    else {
+        return false;
+    };
+    server
+        .game_data
+        .systems
+        .instances
+        .indun
+        .dungeon_zone(group_id)
+        .is_some_and(|zone| !zone.pvp)
+}
+
 /// `BaseUnit.CanAttack(target)`.
 pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     if let Some(allowed) =
@@ -131,11 +107,25 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     let my_faction = faction_of(me);
     let target_faction = faction_of(target);
     let factions = &server.game_data.factions;
-    if factions.get(my_faction).is_none() || factions.get(target_faction).is_none() {
+    if !nation::faction_exists(server, my_faction)
+        || !nation::faction_exists(server, target_faction)
+    {
         return true; // this.Faction == null || target.Faction == null
     }
     if me.obj_id() == target.obj_id() {
         return false;
+    }
+    // `indun_zones.pvp = false`: the 1.2 client resolves a character-owned pair as
+    // non-hostile before faction logic (`FUN_390281c0` stores `pvp == 0` in the relation
+    // context; `FUN_39837a40` returns that flag and `FUN_39838880` then yields relation
+    // kind 2 and returns early). The server rule is inferred from that; `EnforceNoPvp`
+    // restores the faction-only decision.
+    if server.config.dungeons.enforce_no_pvp {
+        let me_owner = me.as_obj().and_then(|o| owner_character(server, o));
+        let target_owner = target.as_obj().and_then(|o| owner_character(server, o));
+        if me_owner.is_some() && target_owner.is_some() && is_no_pvp_zone(server, target) {
+            return false;
+        }
     }
     let relation = relation_to(server, me, target);
     let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
@@ -154,7 +144,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     let zone_faction = factions
         .get(zone_faction_id)
         .or_else(|| factions.get(FACTION_NEUTRAL));
-    let target_mother = factions.get(target_faction).map_or(0, |f| f.mother_id);
+    let target_mother = nation::faction_of_id(server, target_faction).map_or(0, |f| f.1);
     if me_char.is_some() && target_mother != 0 {
         if let Some(z) = zone_faction {
             if target_mother == z.mother_id || target_mother == z.id {
@@ -172,7 +162,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
             .unit
             .buffs
             .check_buff(buff_constants::RETRIBUTION);
-        let owner_mother = factions.get(owner_faction).map_or(0, |f| f.mother_id);
+        let owner_mother = nation::faction_of_id(server, owner_faction).map_or(0, |f| f.1);
         if owner_mother != 0
             && owner_mother == zone_faction_id
             && !is_actively_hostile(me_c, owner_obj)
@@ -390,5 +380,278 @@ mod tests {
         assert_eq!(faction_relation(&server, 109, 1), RelationState::Friendly);
         assert_eq!(faction_relation(&server, 109, 115), RelationState::Hostile);
         assert_eq!(faction_relation(&server, 109, 101), RelationState::Hostile);
+    }
+
+    const MIRAGE_ZONE: u32 = 260;
+    const MIRAGE_GROUP: u32 = 49;
+    const NACHASHGAR_ZONE: u32 = 261;
+    const NACHASHGAR_GROUP: u32 = 55;
+
+    fn pvp_data() -> GameData {
+        use crate::data::world_data::Zone;
+        use crate::systems::instances::data::IndunZone;
+        let mut data = GameData::empty();
+        for f in [
+            faction(1, 0),
+            faction(2, 0),
+            faction(101, 148),
+            faction(109, 149),
+            faction(148, 0),
+            faction(149, 0),
+        ] {
+            data.factions.add(f);
+        }
+        for (id, id2, state) in [
+            (148, 149, RelationState::Hostile),
+            (101, 109, RelationState::Hostile),
+        ] {
+            data.factions.relations.push(FactionRelation {
+                id,
+                id2,
+                state: state as u8,
+                exp_time: 0,
+            });
+        }
+        for (zone_key, group_id) in [
+            (crate::test_support::TEST_ZONE, 1),
+            (MIRAGE_ZONE, MIRAGE_GROUP),
+            (NACHASHGAR_ZONE, NACHASHGAR_GROUP),
+        ] {
+            data.zones.zones.insert(
+                zone_key,
+                Zone {
+                    id: zone_key,
+                    name: format!("zone_{zone_key}"),
+                    zone_key,
+                    group_id,
+                    ..Zone::default()
+                },
+            );
+        }
+        data.systems.instances.indun.zones.insert(
+            MIRAGE_GROUP,
+            IndunZone {
+                zone_group_id: MIRAGE_GROUP,
+                name: "mirage".into(),
+                pvp: false,
+                ..IndunZone::default()
+            },
+        );
+        data.systems.instances.indun.zones.insert(
+            NACHASHGAR_GROUP,
+            IndunZone {
+                zone_group_id: NACHASHGAR_GROUP,
+                name: "nachashgar".into(),
+                pvp: true,
+                ..IndunZone::default()
+            },
+        );
+        data
+    }
+
+    /// A player of `faction_id` standing in `zone_key` / instance `instance_id`.
+    fn player_in(
+        server: &GameServer,
+        client: &crate::test_support::TestClient,
+        obj_id: u32,
+        faction_id: u32,
+        zone_key: u32,
+        instance_id: u32,
+    ) -> PlayerRef {
+        let mut c = crate::test_support::test_character(obj_id & 0xff, "P", 100.0, 100.0);
+        c.unit.faction_id = faction_id;
+        c.unit.hp = 5_000;
+        c.unit.max_hp = 5_000;
+        c.unit.mp = 1_000;
+        c.unit.max_mp = 1_000;
+        let p = crate::test_support::spawn_player(server, client, c, obj_id);
+        {
+            let mut d = p.data();
+            d.unit.transform.zone_id = zone_key;
+            d.unit.transform.instance_id = instance_id;
+        }
+        p
+    }
+
+    #[tokio::test]
+    async fn no_pvp_instance_blocks_character_and_owned_unit_attacks() {
+        use crate::models::mate::Mate;
+        use crate::models::slave::Slave;
+        use crate::world::{Entity, WorldObject};
+        let server = crate::test_support::test_server_with(pvp_data());
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let a = player_in(&server, &ca, 0x101, 101, MIRAGE_ZONE, 100);
+        let b = player_in(&server, &cb, 0x109, 109, MIRAGE_ZONE, 100);
+        let ta = Target::Obj(WorldObject::from(&a));
+        let tb = Target::Obj(WorldObject::from(&b));
+        // The faction relation itself is unchanged; only `can_attack` is gated.
+        assert_eq!(relation_to(&server, &ta, &tb), RelationState::Hostile);
+        assert!(!can_attack(&server, &ta, &tb));
+        assert!(!can_attack(&server, &tb, &ta));
+
+        // A pet / slave owned by a player is character-owned too.
+        let mut mate = Mate::new(0x201, 1);
+        mate.owner_obj_id = a.obj_id;
+        mate.unit.faction_id = 101;
+        mate.unit.transform.set_xyz(105.0, 100.0, 100.0);
+        mate.unit.transform.zone_id = MIRAGE_ZONE;
+        mate.unit.transform.instance_id = 100;
+        let mate = Entity::new(0x201, mate);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&mate, &server.view_ctx());
+        {
+            let mut d = mate.data();
+            d.unit.transform.zone_id = MIRAGE_ZONE;
+            d.unit.transform.instance_id = 100;
+        }
+        let t_mate = Target::Obj(WorldObject::from(&mate));
+        assert!(!can_attack(&server, &t_mate, &tb));
+        assert!(!can_attack(&server, &ta, &t_mate));
+
+        let mut slave = Slave::new(0x301, 1);
+        slave.summoner_obj_id = b.obj_id;
+        slave.unit.faction_id = 109;
+        slave.unit.transform.set_xyz(106.0, 100.0, 100.0);
+        slave.unit.transform.zone_id = MIRAGE_ZONE;
+        slave.unit.transform.instance_id = 100;
+        let slave = Entity::new(0x301, slave);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&slave, &server.view_ctx());
+        {
+            let mut d = slave.data();
+            d.unit.transform.zone_id = MIRAGE_ZONE;
+            d.unit.transform.instance_id = 100;
+        }
+        let t_slave = Target::Obj(WorldObject::from(&slave));
+        assert!(!can_attack(&server, &ta, &t_slave));
+        assert!(!can_attack(&server, &t_slave, &ta));
+
+        // NPC targets and `relation_to` are untouched.
+        let npc = Entity::new(0x401, crate::models::npc::Npc::new(900));
+        {
+            let mut n = npc.data();
+            n.unit.faction_id = 109;
+            n.unit.transform.set_xyz(105.0, 100.0, 100.0);
+            n.unit.transform.zone_id = MIRAGE_ZONE;
+        }
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        let t_npc = Target::Obj(WorldObject::from(&npc));
+        assert!(can_attack(&server, &ta, &t_npc));
+    }
+
+    #[tokio::test]
+    async fn pvp_instances_and_the_open_world_keep_faction_attacks() {
+        use crate::world::WorldObject;
+        let server = crate::test_support::test_server_with(pvp_data());
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        // Nachashgar (55) has `pvp = true`.
+        let a = player_in(&server, &ca, 0x101, 101, NACHASHGAR_ZONE, 100);
+        let b = player_in(&server, &cb, 0x109, 109, NACHASHGAR_ZONE, 100);
+        let ta = Target::Obj(WorldObject::from(&a));
+        let tb = Target::Obj(WorldObject::from(&b));
+        assert!(can_attack(&server, &ta, &tb));
+        assert!(can_attack(&server, &tb, &ta));
+
+        // A zone with no `indun_zones` record (the open world) is unchanged.
+        {
+            let mut d = b.data();
+            d.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+            d.unit.transform.instance_id = 0;
+        }
+        assert!(can_attack(&server, &ta, &tb));
+    }
+
+    #[tokio::test]
+    async fn skill_casts_are_refused_in_a_no_pvp_instance() {
+        use super::super::data::effects::EffectTemplate;
+        use super::super::data::EffectKind;
+        use super::super::skill::use_skill;
+        use super::super::state::SkillRun;
+        use super::super::tests::{damage_effect, skill_effect, skill_template};
+        use super::super::types::{SkillCastTarget, SkillCaster, SkillObject};
+        let mut data = pvp_data();
+        let skills = &mut data.systems.skills;
+        skills.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(damage_effect(1, 600))),
+            900_001,
+        );
+        let mut dmg = skill_template(10_001);
+        dmg.effects
+            .push(skill_effect(900_001, EffectKind::DamageEffect, 1));
+        let template = std::sync::Arc::new(dmg);
+        skills.add_skill((*template).clone());
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let a = player_in(&server, &ca, 0x101, 101, MIRAGE_ZONE, 100);
+        let b = player_in(&server, &cb, 0x109, 109, MIRAGE_ZONE, 100);
+        let b_hp = b.data().unit.hp;
+        // Mirage Isle (`pvp = false`): the skill effect path deals no damage, the same check
+        // the auto-attack tick uses (`skill.rs` `can_attack`).
+        let skill = SkillRun::new(template.clone(), 1);
+        use_skill(
+            &server,
+            &skill,
+            &WorldObject::from(&a),
+            SkillCaster::Unit(a.obj_id),
+            &mut SkillCastTarget::Unit(b.obj_id),
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(b.data().unit.hp, b_hp);
+
+        // Nachashgar (`pvp = true`): the same cast damages the enemy player.
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let c = player_in(&server, &cc, 0x201, 101, NACHASHGAR_ZONE, 100);
+        let d = player_in(&server, &cd, 0x209, 109, NACHASHGAR_ZONE, 100);
+        let d_hp = d.data().unit.hp;
+        let skill = SkillRun::new(template, 1);
+        use_skill(
+            &server,
+            &skill,
+            &WorldObject::from(&c),
+            SkillCaster::Unit(c.obj_id),
+            &mut SkillCastTarget::Unit(d.obj_id),
+            Some(SkillObject::None),
+            true,
+        );
+        assert!(
+            d.data().unit.hp < d_hp,
+            "the pvp zone cast must damage ({} -> {})",
+            d_hp,
+            d.data().unit.hp
+        );
+    }
+
+    #[tokio::test]
+    async fn config_off_restores_the_faction_only_decision() {
+        use crate::world::WorldObject;
+        let server = crate::test_support::test_server_with(pvp_data());
+        server.config.update(|c| c.dungeons.enforce_no_pvp = false);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let a = player_in(&server, &ca, 0x101, 101, MIRAGE_ZONE, 100);
+        let b = player_in(&server, &cb, 0x109, 109, MIRAGE_ZONE, 100);
+        assert!(can_attack(
+            &server,
+            &Target::Obj(WorldObject::from(&a)),
+            &Target::Obj(WorldObject::from(&b))
+        ));
     }
 }

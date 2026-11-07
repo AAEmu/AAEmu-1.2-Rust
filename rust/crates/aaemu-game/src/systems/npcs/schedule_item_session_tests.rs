@@ -53,6 +53,18 @@ fn fixture(rows: Vec<ScheduleItemDef>, bag_slots: u8) -> Fixture {
         .templates
         .insert(REWARD_ITEM, ItemTemplate::plain(REWARD_ITEM, 1));
     data.systems.npcs.schedule_items = ScheduleItemData::from_rows(rows);
+    data.systems.services.premium.grades = vec![
+        crate::systems::services::premium::PremiumGrade {
+            id: 1,
+            grade_id: 1,
+            point: 0,
+        },
+        crate::systems::services::premium::PremiumGrade {
+            id: 2,
+            grade_id: 2,
+            point: 1,
+        },
+    ];
     let server = Arc::new(test_server_with(data));
     server.set_self();
     server.names.add_character(1, "Tester", 1);
@@ -254,7 +266,7 @@ async fn the_receipt_persists_through_the_save_snapshot() {
         .lock()
         .get(&ACCOUNT)
         .expect("account")
-        .build_update_rows(data, now, &eligibility(now));
+        .build_update_rows(data, now, &eligibility(&f.server, ACCOUNT, now));
     assert_eq!((rows[0].gave, rows[0].acumulated), (1, 0));
 }
 
@@ -332,4 +344,47 @@ async fn an_entry_with_no_event_on_air_sends_nothing_and_the_tick_stays_quiet() 
     assert!(update_lists(&f.client.drain()).is_empty());
     assert_eq!(tick(&f.server), 0);
     assert!(update_lists(&f.client.drain()).is_empty());
+}
+
+/// WP-B: the schedule eligibility of an account follows its real payment / premium state.
+#[tokio::test]
+async fn eligibility_reads_the_account_payment_and_grade() {
+    use crate::managers::account::AccountState;
+    use crate::net::connection::{AccountPayment, PaymentMethodType};
+
+    let f = fixture(vec![], 0);
+    let now = Utc::now().timestamp();
+    f.server.accounts.set_state(
+        ACCOUNT,
+        AccountState {
+            payment: AccountPayment {
+                method: PaymentMethodType::None,
+                location: 1,
+                start_time: 0,
+                end_time: 0,
+            },
+            premium_point: 0,
+        },
+    );
+    let evidence = eligibility(&f.server, ACCOUNT, now);
+    assert!(!evidence.paid_patron);
+    assert_eq!(evidence.premium_grade_id, 1);
+    assert!(!evidence.pc_bang);
+
+    f.server.accounts.set_state(
+        ACCOUNT,
+        AccountState {
+            payment: AccountPayment {
+                method: PaymentMethodType::Premium,
+                location: 1,
+                start_time: 0,
+                end_time: 1_893_456_000,
+            },
+            premium_point: 1,
+        },
+    );
+    let evidence = eligibility(&f.server, ACCOUNT, now);
+    assert!(evidence.paid_patron);
+    assert_eq!(evidence.premium_grade_id, 2);
+    assert!(!evidence.pc_bang);
 }

@@ -26,6 +26,7 @@ use crate::systems::economy::mail_kinds::{
     MailForSpeciality, MailForTax, TaxMailHouse,
 };
 use crate::systems::economy::mail_packets::*;
+use crate::systems::economy::mail_system;
 use crate::systems::economy::tests::{give, item_at, run, task_body, World, SINGLE, STACK};
 use crate::world::object::Entity;
 use crate::world::WorldObject;
@@ -330,14 +331,13 @@ fn server_packets_are_byte_exact() {
         }),
         want.into_bytes()
     );
-    // SCQuestRewardedByMailPacket
-    let mut want = PacketStream::new();
-    want.write_u8(2).write_u32(10).write_u32(20);
+    // SCQuestRewardedByMailPacket: reader FUN_397b5ec0, bool success then the u32 quest id.
     assert_eq!(
         body(&SCQuestRewardedByMailPacket {
-            quests: vec![10, 20]
+            success: true,
+            quest_id: 10
         }),
-        want.into_bytes()
+        vec![1, 10, 0, 0, 0]
     );
     // SCCountUnreadMailPacket (phase 2)
     let mut want = PacketStream::new();
@@ -1299,7 +1299,7 @@ async fn system_mails_auction_commercial_speciality() {
     assert!(fail.finalize_for_bid_fail(&w.server, 2, 250));
     assert_eq!(fail.mail.body.copper_coins, 250);
     assert_eq!(fail.mail.header.attachments, 1);
-    assert_eq!(fail.mail.mail_type, mail_type::AUC_OFF_FAIL);
+    assert_eq!(fail.mail.mail_type, mail_type::AUC_BID_FAIL);
     // ...the other finalizers need the item (C# NRE).
     let mut cancel = MailForAuction::new_from_template(&w.server, SINGLE, 1, 400, 0);
     assert!(!cancel.finalize_for_cancel(&w.server));
@@ -1463,6 +1463,86 @@ async fn speciality_coin_text_and_crafter() {
 }
 
 #[tokio::test]
+async fn speciality_mail_titles_use_the_localized_ui_texts() {
+    let server = Arc::new(crate::test_support::test_server_with({
+        let mut d = crate::systems::economy::tests::test_data();
+        d.items.templates.insert(
+            mail::ITEM_COINS,
+            crate::data::items::ItemTemplate::plain(mail::ITEM_COINS, 1_000_000),
+        );
+        d.systems
+            .economy
+            .mail
+            .ui_texts
+            .insert("sell_backpack_title".into(), "Lokale Zahlung".into());
+        d.systems.economy.mail.ui_texts.insert(
+            "mail_sell_backpack_title_seller".into(),
+            "Lokale Lieferung".into(),
+        );
+        d.systems.economy.mail.ui_texts.insert(
+            "mail_sell_backpack_title_crafter".into(),
+            "Lokaler Hersteller".into(),
+        );
+        d
+    }));
+    server.names.add_character(1, "Alice", 1001);
+    server.names.add_character(3, "Carl", 1003);
+    let client = crate::test_support::TestClient::new(&server, 1, 1001);
+    let alice = crate::test_support::spawn_player(
+        &server,
+        &client,
+        crate::test_support::test_character(1, "Alice", 100.0, 100.0),
+        0x100,
+    );
+    let mut txn = ItemTxn::begin(&server);
+    let mut plain = MailForSpeciality::new(
+        &server,
+        &alice,
+        0,
+        9000,
+        130,
+        mail::ITEM_COINS,
+        1000,
+        0,
+        1300,
+        0,
+        5,
+    );
+    assert!(plain.finalize_for_seller(&mut txn));
+    assert_eq!(plain.mail.title, "Lokale Zahlung");
+    let mut seller = MailForSpeciality::new(
+        &server,
+        &alice,
+        3,
+        9000,
+        130,
+        mail::ITEM_COINS,
+        1000,
+        0,
+        900,
+        400,
+        5,
+    );
+    assert!(seller.finalize_for_seller(&mut txn));
+    assert_eq!(seller.mail.title, "Lokale Lieferung");
+    let mut crafter = MailForSpeciality::new(
+        &server,
+        &alice,
+        3,
+        9000,
+        130,
+        mail::ITEM_COINS,
+        1000,
+        0,
+        900,
+        400,
+        5,
+    );
+    assert!(crafter.finalize_for_crafter(&mut txn));
+    assert_eq!(crafter.mail.title, "Lokaler Hersteller");
+}
+
+#[tokio::test]
 async fn quest_reward_mails_split_by_ten() {
     let w = mail_world();
     let defs = [
@@ -1548,6 +1628,78 @@ fn spawn_tax_property(w: &mut World) {
 }
 
 #[tokio::test]
+async fn tax_rate_changed_mail_uses_the_client_body_and_sender() {
+    let mut w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(mail_system::send_tax_rate_changed_mail(
+        &mut txn, 2, 25, 10, 20
+    ));
+    drop(txn);
+
+    let ids = bob_mail_ids(&w.server);
+    assert_eq!(ids.len(), 1);
+    let m = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(ids[0])
+        .expect("stored mail");
+    assert_eq!(m.mail_type, mail_type::TAXRATE_CHANGED);
+    assert_eq!(m.header.sender_id, 0);
+    assert_eq!(m.header.sender_name, mail_system::TAX_RATE_CHANGED_SENDER);
+    assert_eq!(m.header.receiver_id, 2);
+    assert_eq!(m.header.status, mail_status::UNREAD);
+    assert_eq!(m.title, "title(25)");
+    assert_eq!(m.body.text, "body('10','20')");
+    assert_eq!(m.body.billing_amount, 0);
+    assert_eq!(m.body.attachments, Vec::<u64>::new());
+
+    let fb = w.b.drain();
+    assert_eq!(ops(&fb), vec![sc::SCGotMailPacket]);
+    assert_eq!(w.pb.data().unread_mail.received, 1);
+}
+
+#[tokio::test]
+async fn nation_tax_rate_mail_uses_the_client_body_and_sender() {
+    let mut w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(mail_system::send_nation_tax_rate_mail(
+        &mut txn,
+        2,
+        9_000,
+        25,
+        500,
+        400,
+        1_700_000_000,
+    ));
+    drop(txn);
+
+    let ids = bob_mail_ids(&w.server);
+    assert_eq!(ids.len(), 1);
+    let m = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(ids[0])
+        .expect("stored mail");
+    assert_eq!(m.mail_type, mail_type::NATION_TAX_RATE);
+    assert_eq!(m.header.sender_id, 0);
+    assert_eq!(m.header.sender_name, mail_system::NATION_TAX_RATE_SENDER);
+    assert_eq!(m.header.receiver_id, 2);
+    assert_eq!(m.header.status, mail_status::UNREAD);
+    assert_eq!(m.title, "title(25)");
+    // The client body parser maps parameters 3/4 to newTaxRate/oldTaxRate, so the wire order
+    // is new before old.
+    assert_eq!(m.body.text, "body('9000','25','500','400','1700000000')");
+
+    let fb = w.b.drain();
+    assert_eq!(ops(&fb), vec![sc::SCGotMailPacket]);
+    assert_eq!(w.pb.data().unread_mail.received, 1);
+}
+
+#[tokio::test]
 async fn tax_mail_and_pay_charge_money() {
     let mut w = mail_world_with(|d| {
         tax_property_data(d, 20_000);
@@ -1567,6 +1719,7 @@ async fn tax_mail_and_pay_charge_money() {
         protection_end_date: mail::now() + 3 * 24 * 3600,
         base_tax: 250_000,
         heavy_tax: false,
+        allowed_tax_delay_week: None,
     };
     let tax = BuildingTaxInfo {
         total_tax_amount_due: 500,
@@ -2303,6 +2456,7 @@ async fn private_mysql_quest_mail_auction_rollback_retry_and_reconnect() {
         "skills",
         "quests",
         "completed_quests",
+        "character_crafts",
     ] {
         let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
             .fetch_one(&pool)

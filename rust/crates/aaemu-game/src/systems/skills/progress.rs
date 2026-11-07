@@ -23,7 +23,7 @@ use crate::world::{now_ms, PlayerRef, WorldObject};
 use super::broadcast;
 use super::packets::{
     SCAbilitySwappedPacket, SCBuffLearnedPacket, SCExpChangedPacket, SCSkillLearnedPacket,
-    SCSkillsResetPacket,
+    SCSkillUpgradedPacket, SCSkillsResetPacket,
 };
 use super::types::SkillCaster;
 use crate::systems::economy::item_packets::SCItemTaskSuccessPacket;
@@ -121,15 +121,25 @@ fn actability_exp_multiplier(_step: u8) -> f32 {
     1.0
 }
 
+/// A learned skill whose level rose with its ability level (`SCSkillUpgraded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillUpgrade {
+    pub skill_id: u32,
+    pub level: u8,
+}
+
 /// The outcome of [`add_exp_locked`]: what `Character.AddExp` still has to send / raise once the
 /// character's lock is released.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpGain {
     /// The applied delta (after `ExpRate` and the caster's XP bonuses).
     pub exp: i32,
     pub should_add_ability_exp: bool,
     /// The new level when the character leveled up.
     pub new_level: Option<u8>,
+    /// Learned skills whose level rose with an ability level (sent after the lock is released;
+    /// the trigger is INFERRED, CAP-UI-2).
+    pub upgraded_skills: Vec<SkillUpgrade>,
 }
 
 /// The data part of `Character.AddExp(expDelta, shouldAddAbilityExp)` on a locked character
@@ -176,6 +186,7 @@ pub fn add_exp_locked(
     }
     c.experience = new_exp;
     c.unit.level = new_level;
+    let mut upgraded_skills = Vec::new();
     if add_ability_exp {
         // Abilities.AddActiveExp
         let max_exp = exp_table.exp_for_level(exp_table.max_player_level(), false);
@@ -184,12 +195,47 @@ pub fn add_exp_locked(
             if a == ability::NONE {
                 continue;
             }
-            if let Some(ab) = c.abilities.get_mut(a) {
-                ab.exp = if exp_delta > 0 {
+            let (old_level, new_level) = {
+                let Some(ab) = c.abilities.get_mut(a) else {
+                    continue;
+                };
+                let old_exp = ab.exp;
+                let new_exp = if exp_delta > 0 {
                     ab.exp.saturating_add(exp_delta).min(max_exp)
                 } else {
                     (ab.exp + exp_delta).min(max_exp)
                 };
+                if new_exp == old_exp {
+                    continue;
+                }
+                ab.exp = new_exp;
+                let level_of = |exp| {
+                    exp_table
+                        .level_from_exp_any(exp, false)
+                        .map_or(0, |(level, _)| level)
+                };
+                (level_of(old_exp), level_of(new_exp))
+            };
+            if new_level <= old_level {
+                continue;
+            }
+            // The learned level is derived from the ability level, so the client has to be
+            // told which skills crossed a level_step (INFERRED trigger, CAP-UI-2).
+            for s in c.skills.skills.iter_mut() {
+                let Some(t) = server.game_data.skills.skill(s.id) else {
+                    continue;
+                };
+                if t.ability_id != a {
+                    continue;
+                }
+                let level = t.level_for(i32::from(new_level));
+                if level > t.level_for(i32::from(old_level)) {
+                    s.level = level;
+                    upgraded_skills.push(SkillUpgrade {
+                        skill_id: s.id,
+                        level,
+                    });
+                }
             }
         }
     }
@@ -197,6 +243,7 @@ pub fn add_exp_locked(
         exp: exp_delta,
         should_add_ability_exp: add_ability_exp,
         new_level: leveled.then_some(new_level),
+        upgraded_skills,
     })
 }
 
@@ -212,8 +259,15 @@ pub fn send_exp_changed(p: &PlayerRef, gain: &ExpGain) {
 /// The world part of `Character.AddExp` after [`send_exp_changed`] (no lock held): on a level
 /// up `Expedition?.OnCharacterRefresh` + the `SCLevelChangedPacket` broadcast (and the cached
 /// stats of the new level), then `QuestManager.DoOnLevelUpEvents` (raised on every exp change,
-/// as in C#).
+/// as in C#). Learned skills whose ability level rose send `SCSkillUpgradedPacket` here, after
+/// the lock (INFERRED trigger, CAP-UI-2).
 pub fn add_exp_world_tail(server: &GameServer, p: &PlayerRef, gain: &ExpGain) {
+    for upgrade in &gain.upgraded_skills {
+        p.send(SCSkillUpgradedPacket {
+            skill_id: upgrade.skill_id,
+            level: upgrade.level,
+        });
+    }
     if let Some(level) = gain.new_level {
         let expedition_id = p.data().unit.expedition_id;
         if expedition_id != 0 {
@@ -429,6 +483,103 @@ pub fn change_game_points(server: &GameServer, p: &PlayerRef, kind: u8, change: 
         p.send(packet);
         report_life_points_gained(server, p, kind, amount);
     }
+}
+
+/// The honor gain that a `UnitAttribute` add / multiplier pair belongs to (`HonorPointGain*`
+/// 126-135). War is the conflict / siege / war PvP kill source, NpcKill the monster hunt
+/// (buff 6442's text: "+1 honor per monster hunted; ... +1 during conflict/siege; +4 during
+/// war"; the numeric mapping comes from the names and that text, INFERRED).
+///
+/// Trial has no grant site in the 1.2 flow; the source exists so the mapping is complete
+/// (UNKNOWN which flow should call it, see PORTING.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HonorSource {
+    NpcKill,
+    Trial,
+    War,
+    Quest,
+    BattleField,
+}
+
+impl HonorSource {
+    fn attributes(self) -> (UnitAttribute, UnitAttribute) {
+        use UnitAttribute::*;
+        match self {
+            HonorSource::NpcKill => (HonorPointGainNpcKill, HonorPointGainNpcKillMul),
+            HonorSource::Trial => (HonorPointGainTrial, HonorPointGainTrialMul),
+            HonorSource::War => (HonorPointGainWar, HonorPointGainWarMul),
+            HonorSource::Quest => (HonorPointGainQuest, HonorPointGainQuestMul),
+            HonorSource::BattleField => (HonorPointGainBattleField, HonorPointGainBattleFieldMul),
+        }
+    }
+}
+
+/// The attribute-modified amount of a positive honor gain: `round(base + add)`, then
+/// `round(change * (mul + 100) / 100)`, clamped at 0 (the `LivingPointGain` pattern above;
+/// buffs 6266/6267 add / multiply by 100). Non-positive changes pass through unchanged: the
+/// spend and death-loss paths do not apply gain attributes.
+pub fn honor_gain(c: &Character, source: HonorSource, base: i32, now: i64) -> i32 {
+    if base <= 0 {
+        return base;
+    }
+    let (add_attr, mul_attr) = source.attributes();
+    let add = c.unit.calculate_with_bonuses(0.0, add_attr, now) as f32;
+    let mul = c.unit.calculate_with_bonuses(0.0, mul_attr, now) as f32;
+    let change = (base as f32 + add).round_ties_even() as i32;
+    let change = (change as f32 * ((mul + 100.0) / 100.0)).round_ties_even() as i32;
+    change.max(0)
+}
+
+/// [`honor_gain`] on a character the caller already holds the lock for (a quest reward act):
+/// the `SCGamePointChanged` packet is for the caller to send.
+pub fn grant_honor_locked(
+    c: &mut Character,
+    source: HonorSource,
+    base: i32,
+) -> Option<SCGamePointChangedPacket> {
+    let change = honor_gain(c, source, base, now_ms());
+    change_game_points_locked(c, GAME_POINT_HONOR, change)
+}
+
+/// `Character.ChangeGamePoints(GAME_POINT_HONOR, ..)` for a positive honor gain: applies the
+/// source attribute pair, then credits and sends `SCGamePointChanged`.
+pub fn grant_honor(server: &GameServer, p: &PlayerRef, source: HonorSource, base: i32) {
+    let packet = {
+        let mut c = p.data();
+        grant_honor_locked(&mut c, source, base)
+    };
+    if let Some(packet) = packet {
+        let amount = packet.amount;
+        p.send(packet);
+        report_life_points_gained(server, p, GAME_POINT_HONOR, amount);
+    }
+}
+
+/// The honor a War-zone death costs: `base` scaled by `HonorPointLoseMul`
+/// (`(mul + 100) / 100`; buff 6303 `-100` means no loss), clamped at 0 and to the character's
+/// current honor. The current honor is read and debited under one character lock; returns the
+/// applied loss.
+pub fn lose_honor_on_death(p: &PlayerRef, base: i32) -> i32 {
+    let (packet, loss) = {
+        let mut c = p.data();
+        let now = now_ms();
+        let mul = c
+            .unit
+            .calculate_with_bonuses(0.0, UnitAttribute::HonorPointLoseMul, now)
+            as f32;
+        let scaled = (base as f32 * ((mul + 100.0) / 100.0)).round_ties_even() as i32;
+        let loss = scaled.max(0).min(c.honor_point);
+        let packet = if loss > 0 {
+            change_game_points_locked(&mut c, GAME_POINT_HONOR, -loss)
+        } else {
+            None
+        };
+        (packet, loss)
+    };
+    if let Some(packet) = packet {
+        p.send(packet);
+    }
+    loss
 }
 
 /// GET_LIFE_POINT achievement credit: vocation (living) points gained. Honor, and every spend,
@@ -1086,5 +1237,79 @@ mod tests {
         assert!(frames
             .iter()
             .any(|(op, _)| *op == sc::SCAbilitySwappedPacket));
+    }
+
+    #[tokio::test]
+    async fn an_ability_level_rise_upgrades_only_the_learned_skills_that_cross_a_step() {
+        use crate::data::skills::SkillTemplate;
+
+        let mut data = GameData::empty();
+        data.experience = crate::test_support::test_experience(55);
+        let template = |id, ability_id, level_step| SkillTemplate {
+            id,
+            ability_id,
+            ability_level: 1,
+            level_step,
+            ..Default::default()
+        };
+        // Ability 1: 101 crosses (step 3) and 103 crosses (step 1); 102 does not (step 10).
+        data.skills.add_skill(template(101, 1, 3));
+        data.skills.add_skill(template(102, 1, 10));
+        data.skills.add_skill(template(103, 1, 1));
+        // Ability 2 is inactive, so its exp does not move: 201 must stay untouched.
+        data.skills.add_skill(template(201, 2, 3));
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Upgrader", 100.0, 100.0);
+        character.ability1 = 1;
+        character.ability2 = ability::NONE;
+        character.ability3 = ability::NONE;
+        // level_from_exp(9_000) = 9, level_from_exp(10_000) = 10.
+        character.abilities.get_mut(1).unwrap().exp = 9_000;
+        character.abilities.get_mut(2).unwrap().exp = 9_000;
+        character.skills.skills = vec![
+            Skill { id: 101, level: 3 },
+            Skill { id: 102, level: 1 },
+            Skill { id: 103, level: 9 },
+            Skill { id: 201, level: 3 },
+        ];
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.drain();
+
+        add_exp(&server, &player, 1_000, true);
+
+        let frames = client.drain();
+        let mut upgraded: Vec<(u32, u8)> = frames
+            .iter()
+            .filter(|(op, _)| *op == sc::SCSkillUpgradedPacket)
+            .map(|(_, body)| {
+                (
+                    u32::from_le_bytes(body[0..4].try_into().expect("skill id")),
+                    body[4],
+                )
+            })
+            .collect();
+        upgraded.sort();
+        assert_eq!(upgraded, [(101, 4), (103, 10)]);
+        assert_eq!(
+            player.data().skills.skills,
+            [
+                Skill { id: 101, level: 4 },
+                Skill { id: 102, level: 1 },
+                Skill { id: 103, level: 10 },
+                Skill { id: 201, level: 3 },
+            ]
+        );
+
+        // A gain that crosses no step sends nothing.
+        {
+            let mut c = player.data();
+            c.abilities.get_mut(1).unwrap().exp = 9_000;
+            c.skills.skills[0].level = 3;
+            c.skills.skills[2].level = 9;
+        }
+        client.drain();
+        add_exp(&server, &player, 1, true);
+        assert!(!client.drain_ops().contains(&sc::SCSkillUpgradedPacket));
     }
 }

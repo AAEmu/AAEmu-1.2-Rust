@@ -394,6 +394,134 @@ fn tower_def_list_count_and_payload_are_bounded_for_the_1_2_client() {
 }
 
 #[test]
+fn system_dungeon_channel_packets_are_byte_exact() {
+    // SC 0x206 reader FUN_397b8c30: u32 zoneKey ; i32 count ; count x
+    // { i32 index ; u32 instId ; i32 restrict ; i32 current }.
+    let state = SCSystemDungeonStatePacket {
+        zone_key: 209,
+        channels: vec![
+            SystemDungeonChannel {
+                index: 0,
+                instance_id: 0x0001_00C8,
+                restrict: 190,
+                current: 3,
+            },
+            SystemDungeonChannel {
+                index: 1,
+                instance_id: 0x0001_00C9,
+                restrict: 190,
+                current: 0,
+            },
+        ],
+    };
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&209u32.to_le_bytes());
+    expected.extend_from_slice(&2i32.to_le_bytes());
+    expected.extend_from_slice(&0i32.to_le_bytes());
+    expected.extend_from_slice(&0x0001_00C8u32.to_le_bytes());
+    expected.extend_from_slice(&190i32.to_le_bytes());
+    expected.extend_from_slice(&3i32.to_le_bytes());
+    expected.extend_from_slice(&1i32.to_le_bytes());
+    expected.extend_from_slice(&0x0001_00C9u32.to_le_bytes());
+    expected.extend_from_slice(&190i32.to_le_bytes());
+    expected.extend_from_slice(&0i32.to_le_bytes());
+    assert_eq!(body(&state), expected);
+    assert_eq!(state.opcode(), sc::SCUnkPacket15);
+
+    // SC 0x207 reader FUN_397b03b0: i32 zoneId ; u32 instanceId ; i32 instanceIndex.
+    let picked = SCSystemDungeonChannelPacket {
+        zone_id: 296,
+        instance_id: 0x0001_00C8,
+        instance_index: 1,
+    };
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&296i32.to_le_bytes());
+    expected.extend_from_slice(&0x0001_00C8u32.to_le_bytes());
+    expected.extend_from_slice(&1i32.to_le_bytes());
+    assert_eq!(body(&picked), expected);
+    assert_eq!(picked.opcode(), sc::SCUnkPacket16);
+
+    // The reader clamps the count to 0x20, so the writer never sends more rows.
+    let many = SCSystemDungeonStatePacket {
+        zone_key: 1,
+        channels: (0..33)
+            .map(|i| SystemDungeonChannel {
+                index: i,
+                instance_id: i as u32,
+                restrict: 1,
+                current: 0,
+            })
+            .collect(),
+    };
+    let bytes = body(&many);
+    assert_eq!(bytes.len(), 4 + 4 + 32 * 16);
+    assert_eq!(
+        i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        32
+    );
+}
+
+#[test]
+fn racing_packets_are_byte_exact() {
+    let cond = SCRaceCondPacket {
+        rc: 3,
+        track_id: 2,
+        after_ms: 5000,
+    };
+    assert_eq!(
+        body(&cond),
+        vec![0x03, 0x02, 0x00, 0x00, 0x00, 0x88, 0x13, 0x00, 0x00]
+    );
+    assert_eq!(cond.opcode(), sc::SCRaceCondPacket);
+
+    let racing = SCRacingPacket {
+        rc: 3,
+        record_ms: 12345,
+        v1: 4,
+    };
+    assert_eq!(
+        body(&racing),
+        vec![0x03, 0x39, 0x30, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00]
+    );
+    assert_eq!(racing.opcode(), sc::SCRacingPacket);
+
+    let result = SCRacingResultPacket {
+        rows: vec![(2, 5000), (7, 60000)],
+    };
+    assert_eq!(
+        body(&result),
+        vec![
+            0x02, 0x00, 0x00, 0x00, // count
+            0x02, 0x00, 0x00, 0x00, 0x88, 0x13, 0x00, 0x00, // type 2, record 5000
+            0x07, 0x00, 0x00, 0x00, 0x60, 0xEA, 0x00, 0x00, // type 7, record 60000
+        ]
+    );
+    assert_eq!(result.opcode(), sc::SCRacingResultPacket);
+}
+
+#[test]
+fn racing_result_truncates_to_the_ten_rows_the_client_reads() {
+    let rows = (1..=12u32).map(|i| (i, i * 1000)).collect();
+    assert_eq!(
+        body(&SCRacingResultPacket { rows }),
+        vec![
+            0x0A, 0x00, 0x00, 0x00, // count: capped at 10, not the supplied 12
+            0x01, 0x00, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00, // 1, 1000
+            0x02, 0x00, 0x00, 0x00, 0xD0, 0x07, 0x00, 0x00, // 2, 2000
+            0x03, 0x00, 0x00, 0x00, 0xB8, 0x0B, 0x00, 0x00, // 3, 3000
+            0x04, 0x00, 0x00, 0x00, 0xA0, 0x0F, 0x00, 0x00, // 4, 4000
+            0x05, 0x00, 0x00, 0x00, 0x88, 0x13, 0x00, 0x00, // 5, 5000
+            0x06, 0x00, 0x00, 0x00, 0x70, 0x17, 0x00, 0x00, // 6, 6000
+            0x07, 0x00, 0x00, 0x00, 0x58, 0x1B, 0x00, 0x00, // 7, 7000
+            0x08, 0x00, 0x00, 0x00, 0x40, 0x1F, 0x00, 0x00, // 8, 8000
+            0x09, 0x00, 0x00, 0x00, 0x28, 0x23, 0x00, 0x00, // 9, 9000
+            0x0A, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, // 10, 10000
+        ]
+    );
+    assert_eq!(RACING_RESULT_MAX_ROWS, 10);
+}
+
+#[test]
 fn client_packets_decode() {
     let mut s = PacketStream::from_bytes(vec![7, 0, 0, 0, 2]);
     assert_eq!(
@@ -437,6 +565,18 @@ fn client_packets_decode() {
     assert!(CSInstanceLoadedPacket::read(&mut s).is_ok());
     assert!(CSCancelInstantGamePacket::read(&mut s).is_ok());
     assert!(CSLeaveInstantGamePacket::read(&mut s).is_ok());
+    // CS 0x13d writer FUN_397bca60: u32 instId ; bc doodadObjId.
+    let mut b = Vec::new();
+    b.extend_from_slice(&0x1234u32.to_le_bytes());
+    b.extend_from_slice(&[0xC8, 0x00, 0x01]);
+    let mut s = PacketStream::from_bytes(b);
+    assert_eq!(
+        CSSelectSysInstanceChannelPacket::read(&mut s).unwrap(),
+        CSSelectSysInstanceChannelPacket {
+            inst_id: 0x1234,
+            doodad_obj_id: 0x0001_00C8
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -570,6 +710,8 @@ fn battlefield_data_loads_with_json_quirks() {
     assert_eq!(s.corps1_spawn.unwrap().y, 606.0);
     assert_eq!(s.corps2_spawn.unwrap().rotation_z, -5);
     assert_eq!(arena.rule_set.unwrap().id, 28);
+    // The hand-built schema has no time_resurrection_delay column: 0, not an error.
+    assert_eq!(arena.rule_set.unwrap().time_resurrection_delay, 0);
     // The scoring / rule-event / buff tables are attached to their rule set / battlefield.
     assert_eq!(
         GameScoreRule::resolve(
@@ -615,12 +757,14 @@ fn battlefield_rule_set_loads_kill_conditions() {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch(
         "CREATE TABLE battle_fields (id INT, name TEXT, zone_key INT);
-         CREATE TABLE game_rule_sets (id INT, corps_size INT, corps1_id INT, corps2_id INT, time_opening INT, time_ending INT, time_playing INT, victory_score INT, battle_field_id INT, victory_kill_count INT, killstreak0_id INT, killstreak9_id INT, killstreak23_id INT, level_min INT, victory_kill_corps1_head INT, victory_kill_corps2_head INT, bonus_winner INT, bonus_loser INT, bonus_no_death INT, bonus_top_enemy_pc_kill INT, bonus_top_enemy_non_pc_kill INT, rank_invalid_point INT, rank_win_point INT, rank_lose_point INT, rank_draw_point INT, time_unearned_win INT);
+         CREATE TABLE game_rule_sets (id INT, corps_size INT, corps1_id INT, corps2_id INT, time_opening INT, time_ending INT, time_playing INT, victory_score INT, battle_field_id INT, victory_kill_count INT, killstreak0_id INT, killstreak9_id INT, killstreak23_id INT, level_min INT, victory_kill_corps1_head INT, victory_kill_corps2_head INT, bonus_winner INT, bonus_loser INT, bonus_no_death INT, bonus_top_enemy_pc_kill INT, bonus_top_enemy_non_pc_kill INT, rank_invalid_point INT, rank_win_point INT, rank_lose_point INT, rank_draw_point INT, time_unearned_win INT, time_resurrection_delay INT);
          CREATE TABLE game_score_rules (id INT, rule_set_id INT, rule_set_corps INT, event_id INT, event_value INT, event_score INT);
          CREATE TABLE game_rule_events (id INT, rule_set_id INT, condition_id INT, kind_id INT, param1 INT, param2 INT);
          CREATE TABLE battle_field_buffs (id INT, battle_field_id INT, buff_id INT, value INT);
          INSERT INTO battle_fields VALUES (6, 'camp1v1', 198);
-         INSERT INTO game_rule_sets VALUES (8, 1, 159, 160, 1, 1, 15, 5000, 6, 50, 22331, 22527, 0, 45, 13353, 13352, 50, 10, 7, 10, 3, 0, 4, 1, 2, 60);",
+         INSERT INTO battle_fields VALUES (12, 'null_delay', 198);
+         INSERT INTO game_rule_sets VALUES (8, 1, 159, 160, 1, 1, 15, 5000, 6, 50, 22331, 22527, 0, 45, 13353, 13352, 50, 10, 7, 10, 3, 0, 4, 1, 2, 60, 15);
+         INSERT INTO game_rule_sets VALUES (99, 1, 159, 160, 1, 1, 15, 5000, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL);",
     )
     .unwrap();
     let d = BattlefieldData::load(&c, Some("[]")).unwrap();
@@ -646,6 +790,10 @@ fn battlefield_rule_set_loads_kill_conditions() {
     assert_eq!(rs.rank_lose_point, 1);
     assert_eq!(rs.rank_draw_point, 2);
     assert_eq!(rs.time_unearned_win, 60);
+    assert_eq!(rs.time_resurrection_delay, 15);
+    // A NULL delay loads as 0 (no authored wait); the caller keeps its fallback.
+    let null_delay = d.battlefield(12).unwrap().rule_set.unwrap();
+    assert_eq!(null_delay.time_resurrection_delay, 0);
 }
 
 #[test]
@@ -716,6 +864,46 @@ fn entry_attempts_are_limited_within_four_hours() {
     assert!(m.check_entry_attempt_count(1, 56, &zone, true));
 }
 
+/// The real entrance rows (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game
+/// real_library_entrances -- --ignored`): rows 2-9 are the selective library entrances
+/// (zones 209/210/211), row 1 (zone 183, the mall) is not; groups 70/71/72 select a channel.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_library_entrances_are_selective() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    use crate::systems::npcs::doodad::templates::FuncTemplate;
+    let dd = crate::systems::npcs::doodad::data::DoodadData::load_from(&conn).unwrap();
+    let entrance = |id: u32| match dd.func_template(id, "DoodadFuncEnterSysInstance") {
+        Some(FuncTemplate::EnterSysInstance(f)) => f.clone(),
+        other => panic!("doodad_func_enter_sys_instances row {id}: {other:?}"),
+    };
+    let plain = entrance(1);
+    assert!(!plain.selective);
+    assert_eq!(plain.zone_id, 183);
+    let indun = IndunData::load(&conn, "en_us").unwrap();
+    for (id, zone_id, group) in [
+        (2, 209, 70),
+        (3, 209, 70),
+        (4, 209, 70),
+        (5, 209, 70),
+        (6, 210, 71),
+        (7, 210, 71),
+        (8, 211, 72),
+        (9, 211, 72),
+    ] {
+        let f = entrance(id);
+        assert!(f.selective, "row {id}");
+        assert_eq!(f.zone_id, zone_id, "row {id}");
+        let zone = indun.dungeon_zone(group).unwrap();
+        assert!(zone.select_channel, "zone group {group}");
+        assert_eq!(zone.max_players, 190, "zone group {group}");
+    }
+}
+
 /// The real 1.2 tables (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_instances_data --
 /// --ignored`); `battlefields.json` is read from `<db dir>/../battlefields.json`.
 #[test]
@@ -763,6 +951,17 @@ fn real_instances_data() {
     let mirage = indun.dungeon_zone(49).unwrap();
     assert_eq!(mirage.max_players, 190);
     assert_eq!(mirage.enter_count, 1000);
+    // `pvp = 'f'` rows: Mirage Isle (49), Immortal Isle (62 / 64) and the Library (70-76).
+    for group in [49, 62, 64, 70, 71, 72, 73, 74, 75, 76] {
+        let zone = indun
+            .dungeon_zone(group)
+            .unwrap_or_else(|| panic!("zone group {group}"));
+        assert!(!zone.pvp, "zone group {group} must load pvp = false");
+    }
+    // `has_graveyard = 'f'` only for Mirage Isle (49) and the prologue (68).
+    assert!(!indun.dungeon_zone(49).unwrap().has_graveyard);
+    assert!(!indun.dungeon_zone(68).unwrap().has_graveyard);
+    assert!(indun.dungeon_zone(55).unwrap().has_graveyard);
     let nach = indun.dungeon_zone(55).unwrap();
     assert!(nach.party_only);
     assert_eq!(nach.item_id, 27965);

@@ -1,0 +1,8 @@
+{
+	"Crafting": {
+		// Refuse CSExecuteCraft for a craft with a learn source (`item_recipes` /
+		// `train_craft_effects`) until its recipe item / training skill has been used.
+		// Default false: whether retail 1.2 enforced the gate is UNKNOWN (WP-I1 UNKNOWN-1).
+		"RequireLearnedRecipes": false
+	}
+}

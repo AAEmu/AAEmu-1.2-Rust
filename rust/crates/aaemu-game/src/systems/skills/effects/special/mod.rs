@@ -309,6 +309,8 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         15 => misc::spawn_doodad(s, a, v),
         16 => unit_actions::buff_steal(s, a, v),
         18 => unit_actions::fake_death(s, a, v),
+        20 => items::physical_enchant(s, a, v, false),
+        21 => items::physical_enchant(s, a, v, true),
         22 => combat::resurrection(s, a, v),
         23 => items::capture_pet(s, a, v),
         24 => misc::spawn_pet(s, a, v),
@@ -333,6 +335,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         53 => misc::attach_to(s, a, v),
         54 => combat::add_breath(s, a, v),
         56 => unit_actions::heal_pet(s, a, v),
+        57 => items::renew_equipment(s, a, v),
         58 => misc::remove_doodad(s, a, v),
         59 => combat::cancel_stealth(s, a, v),
         60 => misc::spawn_slave(s, a, v),
@@ -377,8 +380,10 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         // `CombatDice` (67) is a marker for the plot combat-dice condition (`plots.rs`,
         // condition 9) and `Combo` (48) is the client-driven combo chain (`value1` next skill,
         // `value2` window in ms): neither needs a server action, so both only log.
-        // NotifyQuest (70) already fires in plots::finish_item_plot; DeclareIndependence (71) has no faction ownership runtime, so both stay log-only.
-        // Every other class only logs (`if (caster is Character) Logger.Debug(...)`).
+        // NotifyQuest (70) already fires in plots::finish_item_plot. DeclareIndependence (71)
+        // is routed to the social subsystem (`SocialForSkills::apply_special_effect`).
+        // Every other class only logs (`if (caster is Character) Logger.Debug(...)`); the
+        // 2026-11-07 verdicts for the remaining types are in `PORTING.md`.
         _ => match special_type_name(kind) {
             Some("Unk9") | None => {
                 // `Type.GetType` finds no class: logged unless it is a projectile.

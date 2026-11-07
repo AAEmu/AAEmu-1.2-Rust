@@ -11,6 +11,7 @@ use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::systems::skills::packets::CompressedGamePackets;
 use crate::systems::skills::packets_special::{SCCharacterResurrectedPacket, SCTeleportUnitPacket};
 use crate::systems::skills::types::SkillCaster;
+use crate::systems::social::crime::buff as crime_buff;
 use crate::world::{Player, PlayerRef, WorldObject};
 
 use super::data::{
@@ -80,6 +81,11 @@ pub const INVITE_TIMEOUT_SECS: u64 = 60;
 /// battlefield Lua names: `BFER_TIMEOVER_COMPARE_KILL_COUNT`).
 pub const ENDING_TIMEOVER_COMPARE_KILL_COUNT: u8 = 1;
 
+/// The C# hard-coded 6 s wait before `OnKill` resurrects the victim. Kept as the fallback for
+/// a rule set that authors no `time_resurrection_delay` (the 1.2 rows author 15 s, or 5 s for
+/// the Gladiator).
+const LEGACY_RESURRECTION_DELAY_SECS: u64 = 6;
+
 /// `Character.ResetAllSkillCooldowns`: `playerSkillsTag`.
 const PLAYER_SKILLS_TAG: u32 = 378;
 
@@ -141,9 +147,29 @@ pub struct GameState {
     /// The result (bonuses, honor, rank points) has been awarded; a second `send_result`
     /// re-sends the packet but never pays twice.
     pub results_awarded: bool,
+    /// The `qualified_id` of each player's live invitation (a re-invite replaces the value, a
+    /// removal drops it). The client echoes it in `CSJoinInstantGame` /
+    /// `CSEnteredInstantGameWorld`.
+    pub qualified: Vec<(PlayerRef, u64)>,
+    /// Per-game invitation counter (see [`InstantGame::next_qualified_id`]).
+    pub qualified_counter: u64,
 }
 
 impl GameState {
+    /// The live invitation's `qualified_id` of a player, if one was sent.
+    fn qualified_of(&self, p: &PlayerRef) -> Option<u64> {
+        self.qualified
+            .iter()
+            .find(|(x, _)| Arc::ptr_eq(x, p))
+            .map(|(_, id)| *id)
+    }
+
+    /// Stores the `qualified_id` of a player's new invitation, replacing an older one.
+    fn set_qualified(&mut self, p: &PlayerRef, id: u64) {
+        self.qualified.retain(|(x, _)| !Arc::ptr_eq(x, p));
+        self.qualified.push((p.clone(), id));
+    }
+
     fn corps_of(&self, p: &PlayerRef) -> Option<u8> {
         self.character_corps
             .iter()
@@ -299,6 +325,16 @@ impl InstantGame {
             out.send(&p.conn);
         }
     }
+
+    /// The `qualified_id` of one invitation: the game's zone instance plus a per-game counter,
+    /// so a re-invite never reuses the previous value. What the 1.2 client echoes is the value
+    /// from the invite; no other meaning is evidenced.
+    fn next_qualified_id(&self, st: &mut GameState) -> u64 {
+        st.qualified_counter = st.qualified_counter.wrapping_add(1);
+        let base = (u64::from(self.zone_instance_id.zone_id) << 32)
+            | u64::from(self.zone_instance_id.instance_id);
+        base.wrapping_add(st.qualified_counter)
+    }
 }
 
 /// `new InstantGame(battlefield)`: creates the battlefield's world instance (its spawn files
@@ -383,6 +419,7 @@ pub fn add_player(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef, c
         // Player already exists in game, remove for correction
         remove_player(server, game, p);
     }
+    let qualified_id;
     {
         let mut st = game.st();
         st.players.push(p.clone());
@@ -395,12 +432,14 @@ pub fn add_player(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef, c
             list.push(p.clone());
         }
         st.character_corps.push((p.clone(), corps));
+        qualified_id = game.next_qualified_id(&mut st);
+        st.set_qualified(p, qualified_id);
     }
     p.send(SCInviteToInstantGamePacket {
         zone_instance_id: game.zone_instance_id,
         ruleset_id: game.rule_set.id,
         corps,
-        qualified_id: 1,
+        qualified_id,
     });
     server
         .systems
@@ -414,18 +453,23 @@ pub fn add_player(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef, c
         let pl = p.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(INVITE_TIMEOUT_SECS)).await;
-            expire_invite(&s, &g, &pl);
+            expire_invite(&s, &g, &pl, qualified_id);
         });
     }
 }
 
 /// Drops a still-unanswered invitation: the timeout packet first, then the normal
 /// withdrawal (which clears the queue UI and requeues the game).
-fn expire_invite(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef) {
+fn expire_invite(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef, qualified_id: u64) {
     let mgr = &server.systems.instances.instant_games;
     match mgr.current(p) {
         Some(cur) if Arc::ptr_eq(&cur, game) => {}
         _ => return,
+    }
+    // An older invitation's timer must not withdraw a newer invitation of the same game.
+    let invited = game.st().qualified_of(p);
+    if invited != Some(qualified_id) {
+        return;
     }
     if !game.has_player(p) || game.st().member_index(p).is_some() {
         return;
@@ -461,16 +505,36 @@ pub fn remove_player(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef
             }
         }
         st.character_corps.retain(|(x, _)| !Arc::ptr_eq(x, p));
+        st.qualified.retain(|(x, _)| !Arc::ptr_eq(x, p));
     }
     server.systems.instances.instant_games.set_current(p, None);
+    // `character.Events.OnKill -= handler`: every removal path unbinds here (leave, decline
+    // and the re-invite inside `add_player`), so a game never leaves a subscription behind.
+    server
+        .systems
+        .instances
+        .events
+        .characters
+        .unsubscribe(p, CharEvent::Kill, game.uid);
     true
 }
 
 /// `PlayerInviteResponse(character, joins, qualifierId)`.
-pub fn player_invite_response(server: &GameServer, p: &PlayerRef, join: bool, _qualified_id: u64) {
+pub fn player_invite_response(server: &GameServer, p: &PlayerRef, join: bool, qualified_id: u64) {
     let Some(game) = server.systems.instances.instant_games.current(p) else {
         return;
     };
+    // The client echoes the invitation's id: a different value is a stale response (the
+    // invitation was replaced by a re-invite or expired) and must not move the player.
+    let invited = game.st().qualified_of(p);
+    if invited != Some(qualified_id) {
+        tracing::debug!(
+            "InstantGame: ignoring a stale qualified id {qualified_id} from {} (game {})",
+            p.data().unit.name,
+            game.uid
+        );
+        return;
+    }
     if !join {
         // Next room, remove from current game then readd to requeue
         withdraw_inner(server, p, false);
@@ -536,10 +600,19 @@ fn move_character_to_world(
 }
 
 /// `OnEnterWorld(character, qualifierId)` (`CSEnteredInstantGameWorldPacket`).
-pub fn on_enter_world(server: &GameServer, p: &PlayerRef, _qualified_id: u64) {
+pub fn on_enter_world(server: &GameServer, p: &PlayerRef, qualified_id: u64) {
     let Some(game) = server.systems.instances.instant_games.current(p) else {
         return;
     };
+    let invited = game.st().qualified_of(p);
+    if invited != Some(qualified_id) {
+        tracing::debug!(
+            "InstantGame: ignoring a stale qualified id {qualified_id} from {} (game {})",
+            p.data().unit.name,
+            game.uid
+        );
+        return;
+    }
     if p.data().unit.transform.instance_id != game.world_id {
         return;
     }
@@ -589,7 +662,9 @@ pub fn on_enter_world(server: &GameServer, p: &PlayerRef, _qualified_id: u64) {
         } else {
             st.corps2.members.push(idx);
         }
-        // TODO (C#): This can be done better; game expire after 60 seconds if not enough players
+        // The C# TODO asked for a game expiry when too few players are present. No shipped
+        // rule set carries a start timeout (`game_rule_sets` has no such column), so none is
+        // invented: only the per-invite `INVITE_TIMEOUT_SECS` expires anything (PORTING.md).
         st.members.len() as u64 == u64::from(game.rule_set.corps_size) * 2
     };
     server.systems.instances.events.characters.subscribe(
@@ -870,7 +945,7 @@ pub fn send_result(server: &GameServer, game: &Arc<InstantGame>, reason: u8) {
 /// state as sent by `SendResult`, so a game that runs out of time is ranked by its kill-count
 /// verdict (see [`finish_timeover`]), and a game is paid once ([`award_results`]).
 fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
-    use crate::systems::skills::progress::{change_game_points, GAME_POINT_HONOR};
+    use crate::systems::skills::progress::{grant_honor, HonorSource};
     use crate::systems::social::ranking_runtime::RankEvent;
 
     let zone_group_id =
@@ -878,7 +953,7 @@ fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
     let now = chrono::Utc::now();
     for award in awards {
         if award.honor != 0 {
-            change_game_points(server, &award.player, GAME_POINT_HONOR, award.honor);
+            grant_honor(server, &award.player, HonorSource::BattleField, award.honor);
         }
         if award.rank_points != 0 || award.rank_wins != 0 {
             server.systems.social.ranking.record(
@@ -902,9 +977,10 @@ fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
 pub fn destroy_game(server: &GameServer, game: &Arc<InstantGame>) {
     let players = game.st().players.clone();
     for p in &players {
+        // `leave_instant_game` removes the player, which also unbinds its `OnKill` handler
+        // (`remove_player`), even when the leave stops early (no origin faction).
         leave_instant_game(server, game, p);
     }
-    // TODO (C#): Unbind all events from characters
     worlds::cleanup_instance(server, game.world_id);
     worlds::remove_world(server, game.world_id);
     worlds::release_world_id(server, game.world_id);
@@ -933,12 +1009,6 @@ pub fn leave_instant_game(server: &GameServer, game: &Arc<InstantGame>, p: &Play
         return;
     }
     crate::systems::social::faction::restore_temporary_faction(server, p);
-    server
-        .systems
-        .instances
-        .events
-        .characters
-        .unsubscribe(p, CharEvent::Kill, game.uid);
     p.data().set_disabled_set_position(true);
     if p.data().main_world_position.is_none() {
         tracing::warn!(
@@ -1131,9 +1201,17 @@ pub fn on_kill(
     let Some(s) = server.self_arc() else {
         return;
     };
+    // The rule set of the running instance decides the wait (1.2: 15 s, Gladiator 5 s); a
+    // rule set without one keeps the C# 6 s.
+    let delay_secs = if game.rule_set.time_resurrection_delay > 0 {
+        u64::try_from(game.rule_set.time_resurrection_delay)
+            .unwrap_or(LEGACY_RESURRECTION_DELAY_SECS)
+    } else {
+        LEGACY_RESURRECTION_DELAY_SECS
+    };
     let (g, killer) = (game.clone(), killer.clone());
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         respawn_after_kill(&s, &g, &killer, &victim, victim_spawn, killer_spawn);
     });
 }
@@ -1148,10 +1226,17 @@ fn respawn_after_kill(
     victim_spawn: Option<Point>,
     killer_spawn: Option<Point>,
 ) {
-    // TODO (C#): Prevent fall damage for both killer and victim on teleport
     let Some(spawn) = victim_spawn else {
         return;
     };
+    // The kill teleport must not be read as a fall (C# TODO: "Prevent fall damage for both
+    // killer and victim on teleport"): restart the ZWUnitFell tracker at the spawn.
+    server
+        .systems
+        .ai
+        .collision
+        .fall
+        .reset_at(victim.obj_id, spawn.z, crate::world::now_ms());
     let vobj = WorldObject::from(victim);
     crate::systems::skills::broadcast(
         server,
@@ -1176,6 +1261,13 @@ fn respawn_after_kill(
     let Some(spawn) = killer_spawn else {
         return;
     };
+    // Same for the Gladiator's killer teleport / resurrection.
+    server
+        .systems
+        .ai
+        .collision
+        .fall
+        .reset_at(killer.obj_id, spawn.z, crate::world::now_ms());
     let kobj = WorldObject::from(killer);
     let dead = killer.data().unit.hp == 0;
     if dead {
@@ -1395,6 +1487,16 @@ impl InstantGameManager {
 
 /// `ApplyToBattlefield(battlefieldId, corps, character)`.
 pub fn apply_to_battlefield(server: &GameServer, battlefield_id: u32, corps: u8, p: &PlayerRef) {
+    // `PlayerCanEnter` (the C# never called it): refuse a character who is fighting, in an
+    // instance, dead, carrying a tradepack, under rebirth trauma, on a vehicle, duelling, on a
+    // jury or in jail. No packet is sent for this refusal (no 1.2 error id is evidenced).
+    if !player_can_enter(server, p) {
+        tracing::debug!(
+            "[Matchmaking] {} cannot apply to battlefield {battlefield_id} in its current state",
+            p.data().unit.name
+        );
+        return;
+    }
     // `level_min` gate (never enforced by any C# version, so a level-1 character could queue
     // for the level-50 Gladiator Arena): refuse with the client's own message and no queue
     // entry.
@@ -1698,31 +1800,47 @@ pub fn battlefield_tick(server: &GameServer) {
     }
 }
 
-/// `PlayerCanEnter(character)` (not called by the C# server code).
+/// `PlayerCanEnter(character)` (not called by the C# server code; it now gates
+/// [`apply_to_battlefield`]).
 pub fn player_can_enter(server: &GameServer, p: &PlayerRef) -> bool {
-    // TODO (C#): Not in jury, not in duel, not in jail conditions
-    let c = p.data();
-    if c.unit.is_in_battle {
-        return false; // In Combat
+    let instance = {
+        let c = p.data();
+        if c.unit.is_in_battle {
+            return false; // In Combat
+        }
+        if c.unit.transform.instance_id != crate::models::character::DEFAULT_INSTANCE_ID {
+            return false; // In an instanced world (Dungeon or Mirage)
+        }
+        if c.unit.hp == 0 {
+            return false; // Is dead
+        }
+        if c.inventory
+            .equipment_slots()
+            .get(26)
+            .is_some_and(Option::is_some)
+        {
+            return false; // Tradepack equipped
+        }
+        if c.unit.buffs.check_buff(2385) {
+            return false; // Rebirth trauma is active
+        }
+        // The C# TODO's "not in jury, not in jail": a seated juror carries the JURY buff, a
+        // jailed character holds the court-jail buff or a sentenced prisoner buff. A duel is
+        // not a unit state, so it is checked through the duel manager below.
+        if c.unit.buffs.check_buffs(&[
+            crime_buff::JURY,
+            crime_buff::FORCIBLY_AWAITING_TRIAL,
+            crime_buff::PRISONER_NUIAN,
+            crime_buff::PRISONER_HARANYAN,
+        ]) {
+            return false;
+        }
+        c.unit.transform.instance_id
+    };
+    // Not in a duel (the C# TODO).
+    if server.systems.social.duels.get(p.character_id).is_some() {
+        return false;
     }
-    if c.unit.transform.instance_id != crate::models::character::DEFAULT_INSTANCE_ID {
-        return false; // In an instanced world (Dungeon or Mirage)
-    }
-    if c.unit.hp == 0 {
-        return false; // Is dead
-    }
-    if c.inventory
-        .equipment_slots()
-        .get(26)
-        .is_some_and(Option::is_some)
-    {
-        return false; // Tradepack equipped
-    }
-    if c.unit.buffs.check_buff(2385) {
-        return false; // Rebirth trauma is active
-    }
-    let instance = c.unit.transform.instance_id;
-    drop(c);
     // Vehicle or boat is summoned
     let summoned = server.world.world(instance).is_some_and(|w| {
         crate::systems::vehicles::slaves::get_active_slave_by_owner_obj_id(&w, p.obj_id).is_some()

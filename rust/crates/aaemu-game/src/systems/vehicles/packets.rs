@@ -12,7 +12,7 @@ use crate::packets::packet_def;
 use crate::systems::economy::mate_equipment::read_wire_item;
 pub use crate::systems::economy::mate_equipment::WireItem;
 
-use super::{mates, shipyards, slaves};
+use super::{mates, shipyards, slaves, transfers};
 
 macro_rules! cs_packet {
     ($(#[$m:meta])* $name:ident { $($(#[$fm:meta])* $f:ident : $t:ty),* $(,)? }
@@ -386,7 +386,11 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSSpawnSlavePacket` (log only in C#).
+    /// `CSSpawnSlavePacket` (0x02e). The 1.2 client sends it from its placement-preview click
+    /// handler (`FUN_393459b0` <- `FUN_394d31a0` <- `FUN_394d8c70` <- `FUN_39366480`, when the
+    /// previewed kind `+0x48` is 8); which item/UI enters that mode is UNKNOWN. The handler
+    /// maps the packet onto the item summon path and requires the named summon item, so the
+    /// unidentified entry point cannot spawn a slave the item path would refuse.
     CSSpawnSlavePacket {
         slave_id: u32,
         x: f32,
@@ -417,16 +421,34 @@ cs_packet!(
     }
     handle |self, server, conn| {
         tracing::debug!("SpawnSlave, SlaveId: {}", self.slave_id);
+        let p = active_char!(conn);
+        if let Some(cast) = slaves::client_spawn_cast(
+            server,
+            &p,
+            self.slave_id,
+            self.x,
+            self.y,
+            self.z,
+            self.z_rot,
+            self.item_id,
+            self.hide_spawn_effect,
+        ) {
+            // Same entry as a client item use: every cast gate, the cast time and the cooldown.
+            crate::systems::skills::handlers::start_skill(server, conn, cast);
+        }
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSBoardingTransferPacket` (log only in C#).
+    /// `CSBoardingTransferPacket`: paperdoll board (`ap` = seat 2..7) and unboard
+    /// (`ap = 0`, `UnBoardingTransfer`).
     CSBoardingTransferPacket { tl: u16, ap: u8 }
     read |s| { Ok(Self { tl: s.read_u16()?, ap: s.read_u8()? }) }
     handle |self, server, conn| {
-        tracing::warn!("BoardingTransfer, Tl: {}, Ap: {}", self.tl, self.ap);
+        tracing::debug!("BoardingTransfer, Tl: {}, Ap: {}", self.tl, self.ap);
+        let p = active_char!(conn);
+        transfers::board(server, &p, self.tl, self.ap);
         Ok(())
     }
 );
@@ -458,9 +480,15 @@ cs_packet!(
         Ok(Self { id, x, y, z, z_rot, design_item, aabb, auto_use_aa_point })
     }
     handle |self, server, conn| {
-        tracing::warn!(
-            "CreateShipyard, Id: {}, X: {}, Y: {}, Z: {}, DesignItem: {}",
-            self.id, self.x, self.y, self.z, self.design_item
+        tracing::debug!(
+            "CreateShipyard, Id: {}, X: {}, Y: {}, Z: {}, DesignItem: {}, AABB: {:?}, AutoUseAAPoint: {}",
+            self.id,
+            self.x,
+            self.y,
+            self.z,
+            self.design_item,
+            self.aabb,
+            self.auto_use_aa_point
         );
         // `Connection.ActiveChar` null throws in `Create` (only this packet ends).
         let p = active_char!(conn);

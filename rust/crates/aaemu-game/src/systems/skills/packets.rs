@@ -196,6 +196,30 @@ impl Marshal for SCCastingStoppedPacket {
     }
 }
 
+/// `SCCastingDelayedPacket(skillId, plotId, delay)`.
+///
+/// 1.2 reader `FUN_397ca570`: `u16 skillId (0x40) ; u16 plotId (0x40) ; u32 delay (0x3c)`.
+/// The client adds `delay` ms to the end of the running cast of that skill id
+/// (`FUN_39395760`) or of that plot id (`FUN_3938c520`); a direct cast sends plot id 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCCastingDelayedPacket {
+    pub skill_id: u16,
+    pub plot_id: u16,
+    pub delay: u32,
+}
+packet_def!(
+    SCCastingDelayedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCCastingDelayedPacket
+);
+impl Marshal for SCCastingDelayedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u16(self.skill_id)
+            .write_u16(self.plot_id)
+            .write_u32(self.delay);
+    }
+}
+
 /// `SCBuffCreatedPacket(buff)`: the fields the C# reads from the live `Buff`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SCBuffCreatedPacket {
@@ -1098,6 +1122,30 @@ mod tests {
             .write_u32(7);
         assert_eq!(body(&p), e.into_bytes());
         assert_eq!(&encode(&p)[..6], &[0xDD, 0x01, 0, 0, 0xA1, 0x00]);
+    }
+
+    #[test]
+    fn casting_delayed_layout() {
+        // 1.2 reader FUN_397ca570: u16 skillId (0x40), u16 plotId (0x40), u32 delay (0x3c).
+        let direct = SCCastingDelayedPacket {
+            skill_id: 12_390,
+            plot_id: 0,
+            delay: 1_000,
+        };
+        assert_eq!(
+            body(&direct),
+            vec![0x66, 0x30, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00]
+        );
+        let plot = SCCastingDelayedPacket {
+            skill_id: 0,
+            plot_id: 77,
+            delay: 70_000,
+        };
+        assert_eq!(
+            body(&plot),
+            vec![0x00, 0x00, 0x4D, 0x00, 0x70, 0x11, 0x01, 0x00]
+        );
+        assert_eq!(&encode(&direct)[4..6], &[0xA6, 0x00]);
     }
 
     #[test]

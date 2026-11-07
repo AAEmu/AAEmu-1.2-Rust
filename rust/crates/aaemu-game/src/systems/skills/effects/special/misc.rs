@@ -128,9 +128,30 @@ pub fn give_honor_point(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4])
     progress::change_game_points(server, p, progress::GAME_POINT_HONOR, points);
 }
 
-/// `GiveCrimePoint` (only logs in the C#).
-pub fn give_crime_point(_server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+/// `GiveCrimePoint` (the C# only logged it): `value1` is added to the caster's crime and infamy
+/// points through `Character.AddCrime`, so a negative value can pardon a pirate (infamy 0).
+/// 1.2 data: item 32212 "Draught of Forgiveness" (use skill 25281, special effect 15906, -100;
+/// its comment calls it a test item) and skills 25280 (+100) / 23417 (-10) carry the same
+/// special effect (type 102).
+pub fn give_crime_point(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "GiveCrimePoint", v);
+    let Some(p) = args.caster.as_ref().and_then(WorldObject::as_player) else {
+        return;
+    };
+    let Ok(amount) = i16::try_from(v[0]) else {
+        tracing::warn!("GiveCrimePoint: {} is outside the crime point range", v[0]);
+        return;
+    };
+    if amount == 0 {
+        return;
+    }
+    let (packet, change) = {
+        let mut c = p.data();
+        crate::systems::social::crime::add_crime(server, &mut c, amount, crate::world::now_ms())
+    };
+    p.send(packet);
+    crate::systems::social::faction::apply_crime_faction_change(server, p, change);
+    crate::systems::dispatch_buff_events(server, &WorldObject::from(p));
 }
 
 /// `EnterBeautyshop`: `SCToggleBeautyshopResponsePacket(1)`.
@@ -240,7 +261,7 @@ pub(crate) fn transfer_gender(server: &GameServer, player: &crate::world::Player
                 .is_some_and(|t| t.char_gender != 0 && t.char_gender != new_gender)
         });
         if blocked {
-            let mut out = Out::Direct;
+            let mut out = Out::Direct(server);
             send_error_message_to(
                 &mut out,
                 player,
@@ -531,6 +552,64 @@ pub fn spawn_doodad(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     };
     let (xx, yy) = add_distance_to_front_deg(1.0, base.x, base.y, rad_to_deg(base.rot_z) + 90.0);
     let pos = PositionAndRotation::new(xx, yy, base.z, base.rot_x, base.rot_y, base.rot_z);
+    // The Siege Camp use (skill 16918) is the declaration route (WP-SD2b). It runs only with
+    // the weekly calendar enabled, so an explicit GM-scheduled siege behaves as before. A
+    // refusal cancels the effect, which makes the cast path refund the camp item.
+    if doodad_id as u32 == crate::systems::housing::dominion::declare::CAMP_DOODAD_TEMPLATE
+        && args.source.skill().is_some_and(|skill| {
+            skill.id == crate::systems::housing::dominion::declare::DECLARE_SKILL
+        })
+        && server
+            .systems
+            .housing
+            .calendar
+            .settings(&server.config.housing)
+            .enabled
+    {
+        let declare =
+            crate::systems::housing::dominion::declare::handle_camp_use(server, args, pos);
+        if declare.is_err() {
+            if let Some(skill) = args.source.skill() {
+                skill.state().cancelled = true;
+                skill.state().effect_cancelled = true;
+            }
+            return;
+        }
+        let group = server
+            .game_data
+            .zones
+            .zone_by_key(zone_id)
+            .map(|zone| zone.group_id);
+        let spawned = server.systems.skills.ext.npcs().spawn_doodad(
+            server,
+            caster,
+            doodad_id as u32,
+            zone_id,
+            pos,
+            delay,
+        );
+        match (spawned, group) {
+            (Some(doodad), Some(group)) => {
+                crate::systems::housing::dominion::declare::attach_spawned_camp(
+                    server, group, &doodad,
+                );
+            }
+            _ => {
+                if let Some(group) = group {
+                    let _ = server.systems.housing.dominions.drop_declaration(group);
+                }
+                // The declaration was rolled back: refund the camp like any refused use.
+                if let Some(skill) = args.source.skill() {
+                    skill.state().cancelled = true;
+                    skill.state().effect_cancelled = true;
+                }
+                tracing::error!(
+                    "Siege Camp declaration could not spawn doodad {doodad_id} in zone {zone_id}"
+                );
+            }
+        }
+        return;
+    }
     server.systems.skills.ext.npcs().spawn_doodad(
         server,
         caster,
@@ -623,12 +702,19 @@ pub fn spawn_slave(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         .source
         .skill()
         .map_or(0.0, |s| s.template.max_range as f32);
+    // `CSSpawnSlave` builds the cast with an internal `SkillObject::Unk5(hideSpawnEffect)`
+    // marker; a real client summon-item cast carries no skill object.
+    let client_spawn = match args.skill_object {
+        SkillObject::Unk5(hide) => Some(*hide != 0),
+        _ => None,
+    };
     server.systems.skills.ext.npcs().spawn_slave(
         server,
         p,
         &args.caster_caster,
         placement,
         max_range,
+        client_spawn,
     );
 }
 
@@ -974,5 +1060,54 @@ mod tests {
         let text = String::from_utf8_lossy(&frames[0].1);
         assert!(text.contains("X: 123"), "{text}");
         assert!(text.contains("Y: 456"), "{text}");
+    }
+
+    /// Special effect 102 (`GiveCrimePoint`): item 32212's skill 25281 carries -100, so a pirate
+    /// at exactly 100 infamy is pardoned by the item (the shared helper).
+    #[tokio::test]
+    async fn give_crime_point_pardons_a_pirate_at_zero_infamy() {
+        let mut data = GameData::empty();
+        data.characters.templates.insert(
+            key(1, 1),
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                creatable: true,
+                faction_id: 101,
+                ..CharacterTemplate::default()
+            },
+        );
+        let server = std::sync::Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::social::install_hooks(&server);
+
+        let mut client = TestClient::new(&server, 1, 1001);
+        let mut character = test_character(1, "Pirate", 100.0, 100.0);
+        character.unit.faction_id = 161;
+        character.crime_point = 100;
+        character.infamy_point = 100;
+        let p = spawn_player(&server, &client, character, 0x100);
+        client.conn.active_char = Some(p.clone());
+        client.drain();
+
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&p)),
+            caster_caster: SkillCaster::Unit(p.obj_id),
+            target: Target::Obj(WorldObject::from(&p)),
+            target_caster: SkillCastTarget::Unit(p.obj_id),
+            cast: CastAction::Skill {
+                skill_id: 25_281,
+                tl_id: 1,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+        super::super::execute(&server, 102, &args, [-100, 0, 0, 0]);
+
+        {
+            let c = p.data();
+            assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+            assert_eq!(c.unit.faction_id, 101, "the potion pardoned the pirate");
+        }
     }
 }

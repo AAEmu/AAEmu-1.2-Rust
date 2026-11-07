@@ -16,7 +16,7 @@ use crate::data::items::ItemTemplate;
 use crate::data::GameData;
 use crate::models::container::slot_type;
 use crate::models::doodad::Doodad;
-use crate::models::item::Item;
+use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::bridges::EconomyForHousing;
@@ -686,6 +686,39 @@ async fn construction_zero_step_design_is_finished_at_placement_without_a_build_
     );
 }
 
+#[tokio::test]
+async fn locked_design_is_refused() {
+    let mut f = fixture(false, 400_000);
+    let design = give(&f, slot_type::INVENTORY, DESIGN_ITEM, 1, 0);
+    Inv::of(&f.player)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(design)
+        .unwrap()
+        .flags |= ITEM_FLAG_SECURE;
+    f.client.drain();
+    ops::build(&f.server, &f.player, 1001, &packet(design));
+    let frames = f.client.drain();
+    assert!(frames.iter().any(|(op, body)| {
+        *op == sc::SCErrorMsgPacket
+            && *body == {
+                let mut s = aaemu_commons::PacketStream::new();
+                aaemu_commons::Marshal::write(
+                    &crate::packets::world::SCErrorMsgPacket::new(
+                        crate::systems::economy::error_message::ITEM_SECURE_CONDITION,
+                        0,
+                        true,
+                    ),
+                    &mut s,
+                );
+                s.into_bytes()
+            }
+    }));
+    assert!(f.server.systems.housing.manager.all().is_empty());
+    assert!(Inv::of(&f.player).item_by_id(design).is_some());
+}
+
 fn packet(item_id: u64) -> CSCreateHousePacket {
     CSCreateHousePacket {
         design_id: DESIGN,
@@ -755,7 +788,7 @@ async fn new_house_prepaid_period_is_paid_before_first_bill_and_renewal_covers_o
         let h = house.data();
         (
             h.place_date,
-            manager::tax_due_date(&h),
+            manager::tax_due_date(&f.server, &h),
             h.protection_end_date,
             h.unit.tl_id,
         )
@@ -854,6 +887,54 @@ async fn nonrenewable_beginner_construction_keeps_authored_seven_day_lifetime() 
         .mail
         .get_my_house_mails(house.data().id)
         .is_empty());
+}
+
+/// WP-H1: the grace between the bill's due date and removal is the house group's
+/// `allowed_tax_delay_week` (x7 days), and the fixed one-week interval when it is NULL.
+#[tokio::test]
+async fn tax_grace_reads_the_housing_groups_allowed_tax_delay_week() {
+    for (delay, expected_days) in [(Some(2), 14), (Some(0), 0), (None, 7)] {
+        let mut data = GameData::empty();
+        data.systems
+            .npcs
+            .subzone
+            .housing_zones
+            .entry(0)
+            .or_default()
+            .insert(
+                1,
+                vec![crate::systems::npcs::subzone::Area {
+                    id: 5,
+                    name: "Housing".into(),
+                    points: vec![
+                        [90.0, 90.0, 0.0],
+                        [150.0, 90.0, 0.0],
+                        [150.0, 150.0, 0.0],
+                        [90.0, 150.0, 0.0],
+                    ],
+                }],
+            );
+        data.systems.housing.areas.insert(5, 13);
+        data.systems.housing.groups.insert(
+            13,
+            super::data::HousingGroup {
+                id: 13,
+                allowed_tax_delay_week: delay,
+                ..Default::default()
+            },
+        );
+        data.systems.housing.group_categories.insert(13, vec![0]);
+        let f = fixture_with_data(false, 500_000, None, data);
+        let selected = give(&f, slot_type::INVENTORY, DESIGN_ITEM, 1, 0);
+        ops::build(&f.server, &f.player, 1001, &packet(selected));
+        let house = f.server.systems.housing.manager.all()[0].clone();
+        let h = house.data();
+        assert_eq!(
+            manager::tax_due_date(&f.server, &h),
+            h.protection_end_date - expected_days * 86400,
+            "allowed_tax_delay_week {delay:?}"
+        );
+    }
 }
 
 #[tokio::test]

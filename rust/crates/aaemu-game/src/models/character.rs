@@ -225,10 +225,20 @@ pub struct Character {
     /// `Bonding` (`BondDoodad`: the doodad seat / bed the character is attached to).
     pub bonding: Option<crate::models::doodad::BondDoodad>,
     // ---- phase 3 / economy: add this subsystem's Character fields below ----
+    /// Crafts learned from recipe items / `TrainCraftEffect` (`character_crafts`), gating
+    /// `Crafting.RequireLearnedRecipes` when enabled.
+    pub learned_crafts: std::collections::HashSet<u32>,
+    /// Learned crafts not yet committed by a successful character save; cleared from the live
+    /// character by the save ack.
+    pub learned_crafts_unsaved: std::collections::HashSet<u32>,
 
     // ---- phase 3 / social: add this subsystem's Character fields below ----
     /// `InParty` (set through `systems::social::team::set_in_party`, which notifies friends).
     pub in_party: bool,
+    /// Chat mute expiry (`characters.chat_restricted_until`, Unix seconds UTC; `0` = not
+    /// muted). Written by the retail `/restrict_chat` GM command and checked on every outgoing
+    /// chat message; a past value lifts the mute automatically (see [`Self::chat_restricted`]).
+    pub chat_restricted_until: UnixTime,
     /// `LocalPingPosition` (`WorldSpawnPosition` x / y / z).
     pub local_ping_position: (f32, f32, f32),
     /// `OriginFactionName` (`Unit.SetFaction`).
@@ -252,6 +262,10 @@ pub struct Character {
     pub is_riding: bool,
     /// `AttachedPoint` (`AttachPointKind` of the mate / slave seat, 0 = None).
     pub attached_point: u8,
+    // ---- phase 3 / services: add this subsystem's Character fields below ----
+    /// `Connection.Payment.PremiumState` cached for the `SCUnitStatePacket` premium field
+    /// (set on select / grade change, WP-B).
+    pub premium: bool,
 }
 
 /// `Guid.NewGuid().ToByteArray()` (random, version 4 / variant 1).
@@ -370,9 +384,12 @@ impl Character {
             zone_access: Default::default(),
             bonding: None,
             // ---- phase 3 / economy ----
+            learned_crafts: std::collections::HashSet::new(),
+            learned_crafts_unsaved: std::collections::HashSet::new(),
 
             // ---- phase 3 / social ----
             in_party: false,
+            chat_restricted_until: 0,
             local_ping_position: (0.0, 0.0, 0.0),
             origin_faction_name: String::new(),
             main_world_position: None,
@@ -383,6 +400,8 @@ impl Character {
             // ---- phase 3 / vehicles ----
             is_riding: false,
             attached_point: 0,
+            // ---- phase 3 / services ----
+            premium: false,
         }
     }
 
@@ -398,6 +417,28 @@ impl Character {
         self.labor_power = self.labor_power.wrapping_add(change);
         self.labor_power_unsaved += i32::from(change);
         self.labor_power_modified = chrono::Utc::now().timestamp();
+    }
+
+    /// `chat_restricted_until` check with automatic expiry: `true` while the mute is in the
+    /// future, otherwise clears the timestamp and returns `false`. Check and clear happen
+    /// under the same character lock, so a sender never sees a stale mute.
+    pub fn chat_restricted(&mut self, now: UnixTime) -> bool {
+        if self.chat_restricted_until > now {
+            true
+        } else {
+            self.chat_restricted_until = 0;
+            false
+        }
+    }
+
+    /// Records a learned craft and marks it for the next character save. `false` when the
+    /// craft was already learned (the caller refuses the source use).
+    pub fn learn_craft(&mut self, craft_id: u32) -> bool {
+        if !self.learned_crafts.insert(craft_id) {
+            return false;
+        }
+        self.learned_crafts_unsaved.insert(craft_id);
+        true
     }
 
     /// `SetAction(slot, type, id)` (C# indexes the array: out of range throws).

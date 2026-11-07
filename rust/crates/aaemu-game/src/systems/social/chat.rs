@@ -4,13 +4,19 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::data::world_data::factions;
 use crate::managers::id::IdManager;
+use crate::models::character::Character;
+use crate::models::item::UnixTime;
 use crate::net::packet::ServerPacket;
 use crate::packets::world::{
-    ChatSender, SCChatMessagePacket, SCJoinedChatChannelPacket, SCLeavedChatChannelPacket,
+    ChatSender, SCChatMessagePacket, SCErrorMsgPacket, SCJoinedChatChannelPacket,
+    SCLeavedChatChannelPacket,
 };
+use crate::systems::social::config::ChatConfig;
+use crate::systems::social::util::ChatFailure;
 use crate::world::PlayerRef;
 
 /// `ChatType`.
@@ -33,6 +39,119 @@ pub mod chat_type {
     pub const JUDGE: i16 = 11;
     pub const ALLY: i16 = 14;
     pub const USER: i16 = 15;
+}
+
+/// `SCChatSpamDelayPacket`'s error: the 1.2 client passes localized message `0x108` when its own
+/// `FUN_393C2540` throttle refuses a message.
+pub const CHAT_SPAM_DELAY_ERROR: i16 = 0x108;
+
+/// The client's `FUN_393C2540` rate limit: chats `0..=14` map to a group, and a message is
+/// refused while the previous one's delay has not elapsed. Negative chat types (whispers) and
+/// user channels (`>= 15`) are not limited. The server keeps the same per-session `last_send`
+/// array so a modified client cannot bypass the limit.
+///
+/// The client stamps `last_send` when it sends; the server stamps it when the message arrives, so
+/// network jitter can make a stock client's message at the delay arrive early. A small grace
+/// (`min(250 ms, delay / 4)`) absorbs that without moving the boundary for a real flood.
+pub fn chat_spam_allows(
+    config: &ChatConfig,
+    last_send: &mut [Option<Instant>; 15],
+    chat_type: i16,
+    now: Instant,
+) -> bool {
+    let Ok(chat_type) = usize::try_from(chat_type) else {
+        return true;
+    };
+    if chat_type > 14 {
+        return true;
+    }
+    let group = config.type_group(chat_type);
+    let delay_ms = config.delay_ms(group);
+    let grace = Duration::from_millis(u64::from((delay_ms / 4).min(250)));
+    if let Some(last) = last_send[group] {
+        if now + grace < last {
+            return false;
+        }
+    }
+    last_send[group] = Some(now + Duration::from_millis(u64::from(delay_ms)));
+    true
+}
+
+/// Access level from which a character is treated as a GM: the same threshold as the
+/// closed-zone bypass (`world::zone_access`), so a character with it is exempt from
+/// `Chat.MinLevelByChatType`. Account-level elevation alone is not consulted here (the chat
+/// path is synchronous and does not read the account row).
+pub const GM_ACCESS_LEVEL: i32 = 100;
+
+/// Why an outgoing chat message was refused before routing (SL4b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRefusal {
+    /// Below `Chat.MinLevelByChatType` for this chat type.
+    LevelTooLow,
+    /// `characters.chat_restricted_until` is still in the future (`/restrict_chat`).
+    /// `remaining_seconds` is `until - now` at the refusal (the client shows
+    /// `duration / 60 + 1` minutes), `until` the persisted end.
+    Muted {
+        remaining_seconds: u32,
+        until: UnixTime,
+    },
+}
+
+/// The SL4b gate: the configured per-type minimum level (GMs exempt) and the persisted mute.
+///
+/// Both checks read (and the mute expiry clears) the same [`Character`], so the caller must
+/// hold its `data()` lock once and pass the guard's character here. The mute check runs after
+/// the level check; both rules are independent, and the order is not evidenced.
+pub fn chat_refusal(
+    config: &ChatConfig,
+    c: &mut Character,
+    chat_type: i16,
+    now: UnixTime,
+) -> Option<ChatRefusal> {
+    if c.access_level < GM_ACCESS_LEVEL && c.unit.level < config.min_level(chat_type) {
+        return Some(ChatRefusal::LevelTooLow);
+    }
+    if c.chat_restricted(now) {
+        let remaining_seconds =
+            u32::try_from(c.chat_restricted_until.saturating_sub(now)).unwrap_or(u32::MAX);
+        return Some(ChatRefusal::Muted {
+            remaining_seconds,
+            until: c.chat_restricted_until,
+        });
+    }
+    None
+}
+
+/// Tells the sender why the message was dropped. The level refusal is
+/// `CHAT_CANNOT_SEND_SINCE_LEVEL_LOW` 786 (the localized text asks for `$1`, the level; the
+/// `SCErrorMsgPacket` argument mechanism is UNKNOWN, so no argument is sent). The mute refusal
+/// is `SCRestrictInfoPacket`, which the client's `FUN_393c4170` turns into the
+/// `restrict_remain_time` system line ("chat banned, released in `$1` minutes") using the
+/// remaining seconds. Retail's trigger for that notice is UNKNOWN; the refused chat attempt is
+/// INFERRED (`CHAT-RESTRICT-1`).
+pub fn send_chat_refusal(p: &PlayerRef, refusal: ChatRefusal) {
+    match refusal {
+        ChatRefusal::LevelTooLow => p.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::CHAT_CANNOT_SEND_SINCE_LEVEL_LOW,
+            0,
+            true,
+        )),
+        ChatRefusal::Muted {
+            remaining_seconds,
+            until,
+        } => {
+            let chname = p.data().unit.name.clone();
+            p.send(super::packets::chat::SCRestrictInfoPacket {
+                chname,
+                index: 0,
+                code: 0,
+                duration: remaining_seconds,
+                // The mute start is not persisted; the client ignores both dates (INFERRED).
+                start: until.saturating_sub(i64::from(remaining_seconds)),
+                end: until,
+            })
+        }
+    }
 }
 
 /// `CourtRoomRegion`.
@@ -502,7 +621,7 @@ impl ChatManager {
         password: &str,
         create: bool,
         chat_ids: &IdManager,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ChatFailure> {
         use super::util::error;
         if name.is_empty()
             || name.len() > USER_CHANNEL_NAME_BYTES
@@ -510,7 +629,7 @@ impl ChatManager {
             || password.len() > USER_CHANNEL_PASSWORD_BYTES
             || password.chars().any(char::is_control)
         {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
         }
         let mut channels = self.user_channels.lock().expect("chat poisoned");
         let joined_count = || channels.values().filter(|c| c.channel.contains(p)).count();
@@ -519,19 +638,19 @@ impl ChatManager {
             .find(|c| c.channel.internal_name() == name);
         if let Some(existing) = existing {
             if create {
-                return Err(error::CHAT_CHANNEL_ALREADY_EXISTS);
+                return Err(ChatFailure::new(error::CHAT_CHANNEL_ALREADY_EXISTS, name));
             }
             if existing.channel.contains(p) {
-                return Err(error::CHAT_ALREADY_JOINED_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_ALREADY_JOINED_CHANNEL, name));
             }
             if !existing.password.is_empty() && password.is_empty() {
-                return Err(error::CHAT_PRIVATE_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_PRIVATE_CHANNEL, name));
             }
             if existing.password != password {
-                return Err(error::CHAT_WRONG_PASSWORD);
+                return Err(ChatFailure::new(error::CHAT_WRONG_PASSWORD, name));
             }
             if joined_count() >= USER_CHANNELS_PER_SESSION {
-                return Err(error::CHAT_NO_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
             }
             existing.channel.join(p);
             return Ok(());
@@ -540,9 +659,11 @@ impl ChatManager {
             || joined_count() >= USER_CHANNELS_PER_SESSION
             || channels.len() >= USER_CHANNELS_TOTAL
         {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
         }
-        let id = chat_ids.get_next_id().map_err(|_| error::CHAT_NO_CHANNEL)?;
+        let id = chat_ids
+            .get_next_id()
+            .map_err(|_| ChatFailure::new(error::CHAT_NO_CHANNEL, name))?;
         let channel = Arc::new(ChatChannel::new(
             chat_type::USER,
             0,
@@ -568,16 +689,19 @@ impl ChatManager {
         p: &PlayerRef,
         identity: i64,
         chat_ids: &IdManager,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ChatFailure> {
         use super::util::error;
         let mut channels = self.user_channels.lock().expect("chat poisoned");
         let id = (identity as u64 >> 32) as u32;
         let entry = channels
             .get(&id)
             .filter(|c| user_channel_identity(&c.channel) == identity)
-            .ok_or(error::CHAT_NO_CHANNEL)?;
+            .ok_or_else(|| ChatFailure::new(error::CHAT_NO_CHANNEL, ""))?;
         if !entry.channel.leave(p) {
-            return Err(error::CHAT_NOT_JOINED_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NOT_JOINED_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         if entry.channel.is_empty() {
             channels.remove(&id);
@@ -593,23 +717,32 @@ impl ChatManager {
         sub_type: i16,
         channel_id: u32,
         message: &SCChatMessagePacket,
-    ) -> Result<usize, i16> {
+    ) -> Result<usize, ChatFailure> {
         use super::util::error;
         let channels = self.user_channels.lock().expect("chat poisoned");
         let entry = channels
             .get(&channel_id)
             .filter(|c| c.channel.sub_type == sub_type)
-            .ok_or(error::CHAT_NO_CHANNEL)?;
+            .ok_or_else(|| ChatFailure::new(error::CHAT_NO_CHANNEL, ""))?;
         if !entry.channel.contains(p) {
-            return Err(error::CHAT_NOT_JOINED_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NOT_JOINED_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         if message.message.len() > i16::MAX as usize {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NO_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         let packet = super::packets::chat::user_message(&entry.channel, message);
         // The six-byte plain packet header is part of the transport's u16 frame length.
         if packet.body.len() + 6 > u16::MAX as usize {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NO_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         Ok(entry.channel.send_packet(&packet))
     }
@@ -856,5 +989,107 @@ mod tests {
         assert_eq!(server.chat.user_channels.lock().unwrap().len(), 1);
         server.chat.leave_user_channels(&player, &server.ids.chat);
         assert!(server.chat.user_channels.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod spam_tests {
+    use super::*;
+
+    fn config() -> ChatConfig {
+        ChatConfig {
+            chat_type_groups: vec![0, 0, 1, 1, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2],
+            chat_group_delays_ms: vec![1000, 3000, 0],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_spam_limits_follow_the_group_delay() {
+        let cfg = config();
+        let t0 = Instant::now();
+        let mut last = [None; 15];
+        // Say (group 0): allowed, then refused inside the delay and allowed at its boundary.
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t0));
+        assert!(!chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t0 + Duration::from_millis(1000)
+        ));
+    }
+
+    #[test]
+    fn chat_spam_grace_absorbs_network_jitter_but_not_a_flood() {
+        let cfg = config();
+        let t0 = Instant::now();
+        let mut last = [None; 15];
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t0));
+        // 80 ms before the 1 s delay: inside `min(250 ms, delay / 4)`.
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t0 + Duration::from_millis(920)
+        ));
+        // Clearly early: half the delay.
+        let t1 = Instant::now() + Duration::from_secs(10);
+        let mut last = [None; 15];
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t1));
+        assert!(!chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t1 + Duration::from_millis(500)
+        ));
+    }
+
+    #[test]
+    fn chat_spam_keeps_groups_and_unlimited_types() {
+        let cfg = config();
+        let t0 = Instant::now();
+        let mut last = [None; 15];
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t0));
+        // Shout shares group 0 with say; trade (group 1) has its own window.
+        assert!(!chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::SHOUT,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::TRADE,
+            t0 + Duration::from_millis(500)
+        ));
+        // Party (group 2) has no delay at all.
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::PARTY,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::PARTY,
+            t0 + Duration::from_millis(900)
+        ));
+        // Whisper and user channels are outside the client's limited range.
+        let slow = ChatConfig {
+            chat_group_delays_ms: vec![60_000; 15],
+            ..Default::default()
+        };
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::WHISPER, t0));
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::WHISPER, t0));
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::USER, t0));
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::USER, t0));
     }
 }

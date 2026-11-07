@@ -18,11 +18,13 @@ use std::sync::Arc;
 use rusqlite::Connection;
 
 use crate::data::formulas::FormulaKind;
-use crate::data::items::{FullGradeTemplate, ItemGradeEnchantingSupport, TemplateKind};
+use crate::data::items::{
+    FullGradeTemplate, ItemData, ItemGradeEnchantingSupport, ItemTemplate, TemplateKind,
+};
 use crate::data::sqlite::for_each_row;
 use crate::managers::chat::chat_type;
 use crate::models::container::{equip_slot, slot_type, ContainerRef};
-use crate::models::item::{Item, ItemClass};
+use crate::models::item::{Item, ItemClass, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemFx, ItemTask};
 use crate::net::packet::ServerPacket;
 use crate::packets::world::SCChatMessagePacket;
@@ -329,6 +331,26 @@ fn task_packet(action: u8, tasks: Vec<ItemTask>) -> SCItemTaskSuccessPacket {
 // GradeEnchant
 // ---------------------------------------------------------------------------------------------
 
+/// The 1.2 client's highest regrade target grade (`FUN_393a0130`: `item.grade == 0xb`).
+const GRADE_ENCHANT_MAX_GRADE: u8 = 11;
+
+/// The item class `FUN_393a0130` compares with the scroll's `special_effects.value3`
+/// (`X2ItemDesc` `+0x48`): 1 weapon, 2 armor, 24 accessory, anything else 0.
+fn grade_enchant_kind(kind: &TemplateKind) -> i32 {
+    match kind {
+        TemplateKind::Weapon(_) => 1,
+        TemplateKind::Armor(_) => 2,
+        TemplateKind::Accessory(_) => 24,
+        _ => 0,
+    }
+}
+
+/// Refuses the effect but keeps the cast's source item: `skill_cancelled` makes
+/// `apply_effects` drop the `CastSourceDebit` and refund the scroll.
+fn cancel_grade_enchant(player: &PlayerRef) {
+    player.data().skill_char.skill_cancelled = true;
+}
+
 /// `GradeEnchant.Execute` (special effect `GradeEnchant`; regrade scrolls). `value1 != 0` =
 /// lucky scroll (great success possible), `value3` = item kind (1 weapon, 2 armor, 24
 /// accessory). `support_item_id` = `SkillObjectItemGradeEnchantingSupport.SupportItemId`.
@@ -351,6 +373,8 @@ pub fn grade_enchant(
     );
     let Some(scroll) = scroll else { return };
     let Some(target_id) = target_item_id else {
+        // A malformed cast still took the scroll; refund it.
+        cancel_grade_enchant(player);
         return;
     };
     let use_charm = support_item_id.is_some_and(|id| id != 0);
@@ -360,25 +384,76 @@ pub fn grade_enchant(
     let mut txn = ItemTxn::begin(server);
     let inv = Inv::of(player);
     let Some(holder) = inv.holder_of(target_id) else {
-        return; // Invalid item
-    };
-    let Some(item) = lock(&holder).get_item_by_id(target_id).cloned() else {
+        cancel_grade_enchant(player); // Invalid item
         return;
     };
+    let Some(item) = lock(&holder).get_item_by_id(target_id).cloned() else {
+        cancel_grade_enchant(player);
+        return;
+    };
+    // 1.2 client `FUN_393a0130` (the `GradeEnchant` special effect's target check, switch case
+    // 0x5c): an item whose `items.grade_enchantable` is false is refused with SkillResult
+    // INVALID_TARGET (0x22) before any roll. The C# never read the column, so it regraded
+    // anything. Cancel the cast like `item_socketing` does, so the scroll (the cast's source
+    // item, `use_skill_as_reagent`) is refunded and no gold or charm is taken.
+    let Some(template) = data.template(item.template_id) else {
+        tracing::error!("GradeEnchant: unknown item template {}", item.template_id);
+        cancel_grade_enchant(player);
+        return;
+    };
+    if !template.grade_enchantable {
+        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
+        drop(txn);
+        cancel_grade_enchant(player);
+        return;
+    }
+    // `FUN_393a0130`: the target's `level_requirement` (`+0x54`) must reach the scroll's
+    // `special_effects.value2`; the client answers SkillResult INVALID_TARGET (0x22) with
+    // error 0x206 (`level_low_to_use`).
+    if template.level_requirement < value2 {
+        send_error_message_to(&mut txn.out(), player, error_message::LEVEL_LOW_TO_USE);
+        drop(txn);
+        cancel_grade_enchant(player);
+        return;
+    }
+    // `FUN_393a0130`: the target's item class (`+0x48`) must equal the scroll's
+    // `special_effects.value3` (1 weapon, 2 armor, 24 accessory; -1 = any), else
+    // INVALID_TARGET (0x22).
+    if value3 != -1 && grade_enchant_kind(&template.kind) != value3 {
+        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
+        drop(txn);
+        cancel_grade_enchant(player);
+        return;
+    }
+    if super::item_security::refuse_if_locked(player, &item) {
+        cancel_grade_enchant(player);
+        return;
+    }
     let initial_grade = item.grade;
+    // `FUN_393a0130`: a grade-11 target is refused with `grade_enchant_max` (0x299).
+    if initial_grade == GRADE_ENCHANT_MAX_GRADE {
+        send_error_message_to(&mut txn.out(), player, error_message::GRADE_ENCHANT_MAX);
+        drop(txn);
+        cancel_grade_enchant(player);
+        return;
+    }
     let Some(grade_template) = data.full_grade(i32::from(item.grade)).cloned() else {
         // C#: NullReferenceException in GoldCost.
         tracing::error!("GradeEnchant: no grade template for grade {}", item.grade);
+        cancel_grade_enchant(player);
         return;
     };
     let Some(cost) = gold_cost(server, &grade_template, &item, value3) else {
+        cancel_grade_enchant(player);
         return;
     };
     if cost == -1 {
-        return; // No gold on template, invalid ?
+        cancel_grade_enchant(player); // No gold on template, invalid ?
+        return;
     }
     if player.data().money < i64::from(cost) {
         send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
+        cancel_grade_enchant(player);
         return;
     }
     let has_scroll = match scroll_item {
@@ -392,11 +467,13 @@ pub fn grade_enchant(
             player,
             error_message::NOT_ENOUGH_REQUIRED_ITEM,
         );
+        cancel_grade_enchant(player);
         return;
     }
     let mut charm: Option<(Item, ItemGradeEnchantingSupport)> = None;
     if use_charm {
         let Some(charm_item) = inv.item_by_id(support_item_id.unwrap_or(0)) else {
+            cancel_grade_enchant(player);
             return;
         };
         let Some(info) = data.enchanting_support(charm_item.template_id).copied() else {
@@ -405,6 +482,7 @@ pub fn grade_enchant(
                 "GradeEnchant: item {} is not a grade enchanting support",
                 charm_item.template_id
             );
+            cancel_grade_enchant(player);
             return;
         };
         if info.require_grade_min != -1 && i32::from(item.grade) < info.require_grade_min {
@@ -413,10 +491,12 @@ pub fn grade_enchant(
                 player,
                 error_message::NOT_ENOUGH_REQUIRED_ITEM,
             );
+            cancel_grade_enchant(player);
             return;
         }
         if info.require_grade_max != -1 && i32::from(item.grade) > info.require_grade_max {
             send_error_message_to(&mut txn.out(), player, error_message::GRADE_ENCHANT_MAX);
+            cancel_grade_enchant(player);
             return;
         }
         charm = Some((charm_item, info));
@@ -430,6 +510,7 @@ pub fn grade_enchant(
         charm.as_ref().map(|c| &c.1),
         rng,
     ) else {
+        cancel_grade_enchant(player);
         return;
     };
     let after = if result == grade_enchant_result::BREAK {
@@ -665,8 +746,48 @@ pub fn gold_cost(
 // Socketing / tempering / looks
 // ---------------------------------------------------------------------------------------------
 
+/// The 1.2 client refuses to socket into items below this item level (`content_configs` id 62,
+/// kind 24, value 20; checked before the install/remove branch of `FUN_397ceb80`).
+const ITEM_SOCKET_MIN_ITEM_LEVEL: i32 = 20;
+
+/// Gate for installing one lunagem, mirroring the client's `FUN_397ceb80`:
+/// `item_socket_level_limits` is checked first (`socket_target_level`), then the gem's equip
+/// slot group (`item_sockets`) against the target slot type through `equip_slot_group_maps`,
+/// and `item_socket_num_limits` for the target's slot type and grade. A missing/zero socket
+/// limit is `invalid_target` (`FUN_395aca00` returns 0, the client maps it to 0x12); only an
+/// existing limit reached by the current gem count is `item_sockets_full`.
+/// Returns the `SCErrorMsg` code the 1.2 client uses for the rejected rule.
+fn socket_install_rejection(
+    data: &ItemData,
+    target: &Item,
+    template: &ItemTemplate,
+    gem_template_id: u32,
+    gem_count: usize,
+) -> Result<(), i16> {
+    if let Some(required_level) = data.item_socket_level_limit(gem_template_id) {
+        if template.level_requirement < required_level {
+            return Err(error_message::SOCKET_TARGET_LEVEL);
+        }
+    }
+    let Some(group_id) = data.item_socket_group(gem_template_id) else {
+        return Err(error_message::INVALID_TARGET);
+    };
+    let Some(slot_type_id) = template.gear_slot_type() else {
+        return Err(error_message::INVALID_TARGET);
+    };
+    let limit = data.item_socket_num_limit(slot_type_id, target.grade);
+    if limit == 0 || !data.socket_group_allows(group_id, slot_type_id) {
+        return Err(error_message::INVALID_TARGET);
+    }
+    if gem_count >= usize::from(limit) {
+        return Err(error_message::ITEM_SOCKETS_FULL);
+    }
+    Ok(())
+}
+
 /// `ItemSocketing.Execute` (lunagems; `Item.DawnStone` removes every gem). Sends
-/// `SCSkillEndedPacket(skill_tl_id)` itself.
+/// `SCSkillEndedPacket(skill_tl_id)` itself. A rejected attempt sends the client's error and
+/// sets `skill_cancelled`, so the cast refunds the source gem and no socket roll happens.
 #[allow(clippy::too_many_arguments)]
 pub fn item_socketing(
     server: &GameServer,
@@ -699,44 +820,74 @@ pub fn item_socketing(
             "Special effects: ItemSocketing targetItem {target_id} or gemItem {} not found",
             gem.item_id
         );
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
         return;
     };
     let mut g = lock(&holder);
     let Some(equip) = g.get_item_by_id_mut(target_id) else {
+        drop(g);
+        player.data().skill_char.skill_cancelled = true;
         return;
     };
-    if !equip.is_equip() {
-        tracing::warn!("Special effects: ItemSocketing targetItem {target_id} was not a EquipItem");
+    if equip.has_flag(ITEM_FLAG_SECURE) {
+        drop(g);
+        send_error_message_to(&mut txn.out(), player, error_message::ITEM_SECURE_CONDITION);
+        player.data().skill_char.skill_cancelled = true;
         return;
     }
+    if !equip.is_equip() {
+        tracing::warn!("Special effects: ItemSocketing targetItem {target_id} was not a EquipItem");
+        drop(g);
+        player.data().skill_char.skill_cancelled = true;
+        return;
+    }
+    let data = &server.game_data.items;
+    let mut rejection = None;
     let mut result = 0u8;
     let mut installed = false;
-    let gems = &mut equip.details.gem_ids;
-    if gem_item.template_id != crate::data::items::ITEM_DAWN_STONE {
-        // Add LunaGem
-        let gem_count = gems.iter().filter(|&&id| id != 0).count();
-        // Reject if the item has no free gem sockets
-        if gem_count >= gems.len() {
-            tracing::warn!(
-                "Special effects: ItemSocketing target {target_id} has no free gem sockets"
-            );
-            return;
+    match data.template(equip.template_id) {
+        None => rejection = Some(error_message::INVALID_TARGET),
+        Some(template) if template.level < ITEM_SOCKET_MIN_ITEM_LEVEL => {
+            rejection = Some(error_message::SOCKET_TARGET_LEVEL);
         }
-        // Roll for Success
-        let gem_roll = rng.next_i32(0, 10000);
-        let gem_chance = server.game_data.items.socket_chance(gem_count as u32);
-        if i64::from(gem_roll) < i64::from(gem_chance) {
-            gems[gem_count] = gem_item.template_id;
-            result = 1;
-        } else {
-            // Failed: a failed socket attempt removes ALL currently socketed gems.
-            gems.fill(0);
+        Some(template) => {
+            let gem_count = equip.details.gem_ids.iter().filter(|&&id| id != 0).count();
+            if gem_item.template_id == crate::data::items::ITEM_DAWN_STONE {
+                // DawnStone: the 1.2 client rejects a removal with no gems (`item_sockets_empty`).
+                if gem_count == 0 {
+                    rejection = Some(error_message::ITEM_SOCKETS_EMPTY);
+                } else {
+                    equip.details.gem_ids.fill(0);
+                    result = 1;
+                }
+            } else if let Err(error) =
+                socket_install_rejection(data, equip, template, gem_item.template_id, gem_count)
+            {
+                rejection = Some(error);
+            } else {
+                // All rules pass: roll for success. A rejected attempt never reaches this roll.
+                let gem_roll = rng.next_i32(0, 10000);
+                let gem_chance = data.socket_chance(gem_count as u32);
+                if i64::from(gem_roll) < i64::from(gem_chance) {
+                    equip.details.gem_ids[gem_count] = gem_item.template_id;
+                    result = 1;
+                } else {
+                    // Failed: a failed socket attempt removes ALL currently socketed gems.
+                    equip.details.gem_ids.fill(0);
+                }
+                installed = true;
+            }
         }
-        installed = true;
-    } else {
-        // DawnStone
-        gems.fill(0);
-        result = 1;
+    }
+    if let Some(error) = rejection {
+        drop(g);
+        send_error_message_to(&mut txn.out(), player, error);
+        drop(txn);
+        // The cast already took the gem as its source item; cancelling refunds it and keeps
+        // a rejected attempt free of a socket roll.
+        player.data().skill_char.skill_cancelled = true;
+        return;
     }
     // GemIds is a plain array, so no C# property setter marked the item dirty; without this the
     // next `ItemManager.Save` skips the socketing.
@@ -852,6 +1003,20 @@ pub fn item_cap_scale(
         tracing::error!("ItemCapScale: item {target_id} is not an EquipItem"); // InvalidCast
         return;
     }
+    // `item_cap_scale_forbids` (1.2 client `FUN_395a72d0`, the item's "scalable" property;
+    // `FUN_3939dc20` answers the cast with SkillResult INVALID_TARGET 0x22, refused by the cast
+    // validation before the source item is taken). This is the last line of defence for direct
+    // effect calls: cancel so the source item (the temper) is refunded.
+    if server
+        .game_data
+        .items
+        .cap_scale_forbidden(equip.template_id)
+    {
+        drop(g);
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
+        return;
+    }
     let Some(scale) = server.game_data.items.item_cap_scale(skill_id).copied() else {
         tracing::error!("ItemCapScale: no item cap scale for skill {skill_id}"); // NRE
         return;
@@ -903,6 +1068,19 @@ pub fn item_cap_scale_reset(
     };
     if !equip.is_equip() {
         tracing::error!("ItemCapScaleReset: item {target_id} is not an EquipItem");
+        return;
+    }
+    // The reset tool is refused by the same `item_cap_scale_forbids` set as `ItemCapScale`
+    // (`FUN_395a72d0`; reset-tool path unverified, see PORTING.md); cancel so its source item is
+    // refunded.
+    if server
+        .game_data
+        .items
+        .cap_scale_forbidden(equip.template_id)
+    {
+        drop(g);
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
         return;
     }
     equip.details.temper_physical = 0;
@@ -1099,6 +1277,9 @@ pub fn item_conversion(
     let Some(template) = data.template(target.template_id) else {
         return Outcome::Cancelled;
     };
+    if super::item_security::refuse_if_locked(player, &target) {
+        return Outcome::Cancelled;
+    }
     if !template.disenchantable {
         return Outcome::Cancelled;
     }
@@ -1411,6 +1592,12 @@ fn owned_ucc_items(
 
 /// `ImprintUccEffect.Apply` (stamp a UCC onto an item). The caller supplies the caster and
 /// cancels rejected effects before the skill's subsequent reagent consumption.
+///
+/// WP-U2: the target template must be a `ucc_applicables` kind-2 item and the stamp UCC's
+/// non-zero patterns must be `emblem_patterns` ids. Both checks are permissive when the table
+/// has no rows (the pre-WP-U2 behaviour); a UCC id with no loaded `uccs` row carries no known
+/// patterns and is accepted. A refusal is the existing `Outcome::Cancelled` path, so the stamp
+/// and the target keep their UCCs and the skill keeps its reagent.
 pub fn imprint_ucc(
     server: &GameServer,
     target: Option<&PlayerRef>,
@@ -1426,11 +1613,30 @@ pub fn imprint_ucc(
     let Some((stamp_item, holder)) = ucc_operands(player, stamp, stamp_item, target_id) else {
         return Outcome::Cancelled;
     };
+    let ucc_data = &server.game_data.systems.economy.ucc;
+    if let Some(ucc) = server.streams.ucc.get_ucc(stamp_item.ucc_id) {
+        for (field, pattern) in [("pattern1", ucc.pattern1), ("pattern2", ucc.pattern2)] {
+            if !ucc_data.pattern_exists(pattern) {
+                tracing::warn!(
+                    "ImprintUccEffect refused: UCC {} {field} {pattern} is not an emblem_patterns id",
+                    ucc.id
+                );
+                return Outcome::Cancelled;
+            }
+        }
+    }
     let target_item = {
         let mut container = lock(&holder);
         let Some(target_item) = container.get_item_by_id_mut(target_id) else {
             return Outcome::Cancelled;
         };
+        if !ucc_data.accepts_imprint(target_item.template_id) {
+            tracing::warn!(
+                "ImprintUccEffect refused: item template {} does not accept a UCC imprint",
+                target_item.template_id
+            );
+            return Outcome::Cancelled;
+        }
         apply_stamp(&stamp_item, target_item);
         target_item.clone()
     };
@@ -1584,7 +1790,10 @@ pub fn gain_loot_pack_item(
         return;
     }
     tracing::debug!("GainLootPackItemEffect {}", effect.loot_pack_id);
-    // TODO (C#): Find the related ActAbility
+    // TODO (C#): Find the related ActAbility (items-crafting#9). The 1.2 client only parses
+    // the `GainLootPackItemEffect` descriptor (`FUN_396e91c0`), so which ActAbility supplies
+    // the inherited grade is not derivable from it: capture-pending **ITEM-LOOT-GRADE**. The
+    // cast's source item grade stays the only input.
     let mut inherited_grade = None;
     let mut txn = ItemTxn::begin(server);
     let bag = Inv::of(player).bag();
@@ -1664,6 +1873,9 @@ pub fn put_down_backpack(
     let Some(item) = lock(&equipment).get_item_by_id(pack_item.item_id).cloned() else {
         return;
     };
+    if super::item_security::refuse_if_locked(player, &item) {
+        return;
+    }
     if hooks.in_public_farm(server, player) {
         let mut txn = ItemTxn::begin(server);
         send_error_message_to(
@@ -1746,6 +1958,9 @@ pub fn drop_trade_pack_to_floor(server: &GameServer, player: &PlayerRef) {
     let Some(item) = inv.equipped(equip_slot::BACKPACK) else {
         return;
     };
+    if super::item_security::is_locked(&item) {
+        return;
+    }
     let use_skill_id = match server.game_data.items.template(item.template_id) {
         Some(t) => match t.kind {
             TemplateKind::Backpack { backpack_type }

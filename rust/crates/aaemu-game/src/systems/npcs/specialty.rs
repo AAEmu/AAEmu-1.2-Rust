@@ -493,12 +493,12 @@ fn zone_group_of(server: &GameServer, zone_key: u32) -> u32 {
         .map_or(0, |z| z.group_id)
 }
 
-/// The equipped trade pack: (template id, item id, `MadeUnitId`).
+/// The equipped trade pack: (template id, item id, crafter character id).
 fn backpack(player: &PlayerRef) -> Option<(u32, u64, u32)> {
     let equipment = player.data().inventory.equipment().clone();
     let c = equipment.lock().expect("container poisoned");
     c.get_item_by_slot(equip_slot::BACKPACK)
-        .map(|i| (i.template_id, i.id, i.made_unit_id))
+        .map(|i| (i.template_id, i.id, i.crafter()))
 }
 
 fn send_error(player: &PlayerRef, error: i16) {
@@ -673,10 +673,17 @@ pub fn sell_specialty(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) 
         return base_price;
     }
     let price_ratio = ratio_for_specialty(server, player);
-    let Some((template_id, item_id, made_unit_id)) = backpack(player) else {
+    let Some((template_id, item_id, pack_crafter_id)) = backpack(player) else {
         send_error(player, error_message::STORE_BACKPACK_NOGOODS);
         return base_price;
     };
+    if let Some(pack) =
+        crate::systems::economy::inventory::Inv::of(player).equipped(equip_slot::BACKPACK)
+    {
+        if crate::systems::economy::item_security::refuse_if_locked(player, &pack) {
+            return base_price;
+        }
+    }
     let instance = player.data().unit.transform.instance_id;
     let Some(npc) = server.world.world(instance).and_then(|w| w.npc(npc_obj_id)) else {
         return base_price;
@@ -694,9 +701,10 @@ pub fn sell_specialty(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) 
         tracing::error!("SellSpecialty: npc template {npc_template_id} not found");
         return base_price;
     };
-    // TODO in C# too: the crafter of the pack.
-    let crafter_id = if made_unit_id != character_id {
-        made_unit_id
+    // The pack's crafter (the C# used the overloaded `MadeUnitId`; the dedicated column falls
+    // back to it for packs crafted before the column existed).
+    let crafter_id = if pack_crafter_id != character_id {
+        pack_crafter_id
     } else {
         0
     };
@@ -809,33 +817,6 @@ impl ClientPacket for CSSpecialtyRatioPacket {
     }
 }
 
-/// `CSListSpecialtyGoodsPacket` (logged only, as in C#).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CSListSpecialtyGoodsPacket {
-    pub obj_id: u32,
-}
-
-impl ClientPacket for CSListSpecialtyGoodsPacket {
-    const NAME: &'static str = "CSListSpecialtyGoodsPacket";
-
-    fn read(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            obj_id: s.read_bc()?,
-        })
-    }
-
-    fn handle<'a>(
-        self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            tracing::debug!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
-            Ok(())
-        })
-    }
-}
-
 /// `CSRequestSpecialtyCurrentPacket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRequestSpecialtyCurrentPacket {
@@ -895,22 +876,6 @@ impl CSBuySpecialtyItemPacket {
             currency: s.read_u8()?,
             kind: s.read_u8()?,
             obj_id: s.read_bc()?,
-        })
-    }
-}
-
-/// `CSSpecialtyRecordLoadPacket` (no 1.2 opcode: not registered, as in C#).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CSSpecialtyRecordLoadPacket {
-    pub zone_id: i32,
-    pub id: u32,
-}
-
-impl CSSpecialtyRecordLoadPacket {
-    pub fn read(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            zone_id: s.read_i32()?,
-            id: s.read_u32()?,
         })
     }
 }

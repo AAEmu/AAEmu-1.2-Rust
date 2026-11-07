@@ -1,0 +1,69 @@
+# Guild (expedition) rename (systems/social/expedition.rs, packets/expedition.rs):
+# the 1.2 client opens the rename dialog only for SCExpeditionShowRenameUI (the GM
+# `/testguild rename` hook), the owner's confirm sends CSRenameExpeditionPacket, and every
+# online client receives SCFactionRenamedPacket. A taken name answers SCFactionRetryRename
+# with error 299 and changes nothing; a member cannot be offered the dialog; a rename without
+# the GM-granted right or without the dialog offer is refused. The name is persisted in
+# expeditions.name.
+#
+# Scripts/verify.sh lowers Expedition.Create Cost/Level/PartyMemberCount in the lane runtime
+# config so two bots can create a guild without gold or leveling.
+
+suite guild-rename
+bot leader gm
+bot partner gm
+bot rival
+bot mate
+
+[leader]
+waitpeer 120 ${partner}
+partyinvite ${partner}
+await TeamJoined 30
+gcreate Rename Guild
+expectdb "SELECT COUNT(*) FROM expeditions WHERE name='Rename Guild'" 1 20
+sync created 4
+gmraw testguild rename
+expectpkt SCExpeditionShowRenameUIPacket 5
+grename Renamed Guild
+gexpectrenamed Renamed Guild
+expectdb "SELECT name FROM expeditions WHERE id=(SELECT expedition_id FROM expedition_members WHERE name='${leader}')" "Renamed Guild" 20
+sync renamed 4
+# The right was spent by the rename above: another one is refused and nothing changes
+# (`grename` drains the reply, so `expectseen` looks at what it already read).
+grename No Offer
+expectseen 32
+expectdb "SELECT name FROM expeditions WHERE id=(SELECT expedition_id FROM expedition_members WHERE name='${leader}')" "Renamed Guild" 10
+# Taken name -> the dialog re-opens with error 299; the guild keeps its name.
+gmraw testguild rename
+expectpkt SCExpeditionShowRenameUIPacket 5
+grename Taken Guild
+gexpectretry 299
+expectdb "SELECT name FROM expeditions WHERE id=(SELECT expedition_id FROM expedition_members WHERE name='${leader}')" "Renamed Guild" 10
+
+[partner]
+waitpeer 120 ${leader}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name='${partner}'" 1 20
+sync created 4
+# The member sees the owner's rename.
+gexpectrenamed Renamed Guild
+sync renamed 4
+# A member is never offered the rename dialog.
+gmraw testguild rename
+expecterror 807
+
+[rival]
+waitpeer 120 ${mate}
+partyinvite ${mate}
+await TeamJoined 30
+gcreate Taken Guild
+expectdb "SELECT COUNT(*) FROM expeditions WHERE name='Taken Guild'" 1 20
+sync created 4
+sync renamed 4
+
+[mate]
+waitpeer 120 ${rival}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name='${mate}'" 1 20
+sync created 4
+sync renamed 4

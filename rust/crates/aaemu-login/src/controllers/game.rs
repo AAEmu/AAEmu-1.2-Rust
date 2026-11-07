@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Context;
 use dashmap::DashMap;
 
+use super::queue::{Admission, WorldQueue};
 use super::request::RequestController;
 use crate::config::AppConfig;
 use crate::models::{
@@ -16,9 +17,10 @@ use crate::models::{
 };
 use crate::network::internal::InternalConnection;
 use crate::network::login::{LoginConnection, LoginConnectionTable};
-use crate::packets::l2c::WorldInfo;
+use crate::packets::l2c::{AcWorldQueue, WorldInfo};
 use crate::packets::l2g::{LgPlayerEnter, LgRegisterGameServer, LgRequestInfo};
 use crate::packets::OutgoingPacket;
+use crate::server::LoginServer;
 
 /// `TODO Request 20s` in the C# code.
 const WORLD_LIST_REQUEST_TIMEOUT: Duration = Duration::from_millis(20_000);
@@ -83,6 +85,11 @@ pub struct GameController {
     /// mirror id -> parent id
     mirrors_id: Mutex<HashMap<GameServerId, GameServerId>>,
     character_requests: DashMap<u32, Arc<CharacterRequest>>,
+    /// `Login:PreSelectCharacterPeriod`, reported to a registering game server so it applies
+    /// the same period the clients are told about.
+    pre_select_character_period: std::sync::atomic::AtomicBool,
+    /// One login queue per configured world (`GameServers[].MaxConcurrent`/`QueueLimit`).
+    queues: Mutex<HashMap<GameServerId, WorldQueue>>,
 }
 
 /// The recipient of an LGRequestInfo round-trip. The response has no world id on the wire.
@@ -119,7 +126,21 @@ impl GameController {
             game_servers: DashMap::new(),
             mirrors_id: Mutex::new(HashMap::new()),
             character_requests: DashMap::new(),
+            pre_select_character_period: std::sync::atomic::AtomicBool::new(false),
+            queues: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn queues_guard(&self) -> std::sync::MutexGuard<'_, HashMap<GameServerId, WorldQueue>> {
+        self.queues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `Login:PreSelectCharacterPeriod` (set by [`Self::load`]).
+    pub fn pre_select_character_period(&self) -> bool {
+        self.pre_select_character_period
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn try_get_parent_id(&self, gs_id: GameServerId) -> Option<GameServerId> {
@@ -128,6 +149,10 @@ impl GameController {
 
     /// Loads the non-hidden game servers from the configuration.
     pub async fn load(&self, config: &AppConfig) {
+        self.pre_select_character_period.store(
+            config.login.pre_select_character_period,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         for gs in config.game_servers.iter().filter(|gs| !gs.hidden) {
             let id = GameServerId(gs.id);
             let host = if config.skip_host_resolve {
@@ -144,6 +169,20 @@ impl GameController {
                 );
             } else {
                 self.game_servers.insert(id, server);
+                self.queues_guard()
+                    .insert(id, WorldQueue::new(gs.max_concurrent, gs.queue_limit));
+            }
+            if gs.max_concurrent > 0 {
+                tracing::info!(
+                    "Game Server {}: login queue at {} concurrent slots, queue limit {}",
+                    id,
+                    gs.max_concurrent,
+                    if gs.queue_limit == 0 {
+                        u16::MAX
+                    } else {
+                        gs.queue_limit
+                    }
+                );
             }
             let extra = if host != gs.host {
                 format!("from {}", gs.host)
@@ -187,6 +226,7 @@ impl GameController {
                     Duration::from_secs(5),
                     LgRegisterGameServer {
                         result: GsRegisterResult::Error,
+                        pre_select_character_period: self.pre_select_character_period(),
                     },
                 );
                 return;
@@ -196,6 +236,7 @@ impl GameController {
             connection.set_game_server(gs_id);
             gs.send_packet(&LgRegisterGameServer {
                 result: GsRegisterResult::Success,
+                pre_select_character_period: self.pre_select_character_period(),
             });
         }
 
@@ -262,6 +303,7 @@ impl GameController {
             gs.connection = None;
             std::mem::take(&mut gs.mirrors)
         };
+        let mut cleared_ids = vec![gs_id];
         for mirror_id in mirrors {
             if let Some(mut server) = self.game_servers.get_mut(&mirror_id) {
                 if !server
@@ -273,7 +315,25 @@ impl GameController {
                 }
                 server.connection = None;
             }
+            cleared_ids.push(mirror_id);
             self.mirrors_id.lock().unwrap().remove(&mirror_id);
+        }
+        // The waiting clients cannot be admitted by a world that is gone. Keep the queue object
+        // (capacity and limit) so a restarted/reconnected game server does not silently disable
+        // the queue until the login server itself restarts.
+        let mut waiting = Vec::new();
+        {
+            let mut queues = self.queues_guard();
+            for id in cleared_ids {
+                if let Some(queue) = queues.get_mut(&id) {
+                    waiting.extend(queue.clear_for_unregister());
+                }
+            }
+        }
+        for connection_id in waiting {
+            if let Some(conn) = self.connections.get(connection_id) {
+                conn.world_unavailable();
+            }
         }
     }
 
@@ -378,6 +438,178 @@ impl GameController {
         })?;
         gs.load = load;
         Ok(())
+    }
+
+    // ---- world login queue ----------------------------------------------------------------
+
+    /// The queue that owns `gs_id`: a mirror shares its parent's queue, because the game link
+    /// carries no world id and the reports/answers carry the parent id only.
+    fn queue_key(&self, gs_id: GameServerId) -> GameServerId {
+        self.try_get_parent_id(gs_id).unwrap_or(gs_id)
+    }
+
+    /// Decides whether a `CAEnterWorld` may go to the game server now, must wait in the queue, or
+    /// must be refused because the queue is full.
+    pub fn try_enter_world(&self, gs_id: GameServerId, connection_id: ConnectionId) -> Admission {
+        match self.queues_guard().get_mut(&self.queue_key(gs_id)) {
+            Some(queue) => queue.try_enter(gs_id, connection_id),
+            // A world without a configured queue entry (should not happen for a loaded,
+            // active server) behaves exactly as before the queue existed.
+            None => Admission::Direct { reservation: None },
+        }
+    }
+
+    /// Records the authoritative occupancy reported by the game. `sequence` is the game's
+    /// monotonic report order; `0` means the game server predates the extension.
+    pub fn note_online(&self, gs_id: GameServerId, online: u32, sequence: u32) {
+        if let Some(queue) = self.queues_guard().get_mut(&self.queue_key(gs_id)) {
+            queue.set_online(online, sequence);
+        }
+    }
+
+    /// Handles a `GL_PLAYER_ENTER` result: the game's occupancy now includes (or refused) the
+    /// pending cookie for `connection_id`, so its reservation is no longer needed. The link
+    /// answers requests in order, so the oldest outstanding reservation belongs to this response
+    /// (connection ids are reused).
+    pub fn note_enter_world_result(
+        &self,
+        gs_id: GameServerId,
+        connection_id: ConnectionId,
+        online: u32,
+        sequence: u32,
+    ) {
+        if let Some(queue) = self.queues_guard().get_mut(&self.queue_key(gs_id)) {
+            queue.set_online(online, sequence);
+            queue.release_oldest_reservation(connection_id);
+        }
+    }
+
+    /// Releases a reservation whose game response never arrived (timeout). Only the matching
+    /// generation is dropped: the connection id may have been reused for a newer admission.
+    pub fn release_reservation(
+        &self,
+        gs_id: GameServerId,
+        connection_id: ConnectionId,
+        generation: u64,
+    ) {
+        if let Some(queue) = self.queues_guard().get_mut(&self.queue_key(gs_id)) {
+            queue.release_reservation(connection_id, generation);
+        }
+    }
+
+    /// Removes a client that cancelled its queued enter-world request. The reservation of the
+    /// admission being cancelled (the newest, if the request was already popped) is released too.
+    pub fn cancel_queued(&self, connection_id: ConnectionId) {
+        let affected = {
+            let mut queues = self.queues_guard();
+            let mut affected = Vec::new();
+            for (gs_id, queue) in queues.iter_mut() {
+                if queue.remove_queued(connection_id)
+                    | queue.release_newest_reservation(connection_id)
+                {
+                    affected.push(*gs_id);
+                }
+            }
+            affected
+        };
+        for gs_id in affected {
+            self.notify_queue(gs_id);
+        }
+    }
+
+    /// Removes a disconnected client from every queue. Reservations of admitted clients are left
+    /// alone: the client may have received its world cookie already and be connecting to the
+    /// game; the reservation is released by the game's response or its timeout.
+    pub fn connection_closed(&self, connection_id: ConnectionId) {
+        let affected = {
+            let mut queues = self.queues_guard();
+            let mut affected = Vec::new();
+            for (gs_id, queue) in queues.iter_mut() {
+                if queue.remove_queued(connection_id) {
+                    affected.push(*gs_id);
+                }
+            }
+            affected
+        };
+        for gs_id in affected {
+            self.notify_queue(gs_id);
+        }
+    }
+
+    /// Sends every waiting client its current position.
+    pub fn notify_queue(&self, gs_id: GameServerId) {
+        let notices = match self.queues_guard().get(&self.queue_key(gs_id)) {
+            Some(queue) => queue.notices(),
+            None => return,
+        };
+        for notice in notices {
+            let Some(conn) = self.connections.get(notice.connection_id) else {
+                continue;
+            };
+            let _ = conn.send_packet(&AcWorldQueue {
+                world_id: notice.world_id.0,
+                is_premium: false,
+                my_turn: notice.my_turn,
+                normal_length: notice.normal_length,
+                premium_length: 0,
+            });
+        }
+    }
+
+    /// Warns once for a queue-enabled world whose game server does not send the occupancy
+    /// extension (an old binary): its reports read as 0, so the queue gate never engages.
+    pub fn warn_missing_occupancy(&self, gs_id: GameServerId) {
+        let missing = match self.queues_guard().get_mut(&self.queue_key(gs_id)) {
+            Some(queue) => queue.needs_missing_occupancy_warning(),
+            None => false,
+        };
+        if missing {
+            tracing::warn!(
+                "Game Server {} has a login queue configured but reports no slot occupancy (old game server?): the queue will not engage",
+                gs_id
+            );
+        }
+    }
+
+    /// Admits queued clients while the world has free slots. Called after every occupancy report,
+    /// every enter-world result and every reservation release.
+    pub async fn drain_queues(&self, server: &Arc<LoginServer>) {
+        let worlds: Vec<GameServerId> = self.queues_guard().keys().copied().collect();
+        for gs_id in worlds {
+            let mut moved = false;
+            loop {
+                let next = match self.queues_guard().get_mut(&gs_id) {
+                    Some(queue) => queue.pop_for_admission(),
+                    None => None,
+                };
+                let Some((connection_id, world_id, generation, normal_length)) = next else {
+                    break;
+                };
+                moved = true;
+                let admitted = match self.connections.get(connection_id) {
+                    Some(conn) => {
+                        // The final position 0 tells the client the wait is over; the world
+                        // cookie follows from the normal enter-world flow.
+                        let _ = conn.send_packet(&AcWorldQueue {
+                            world_id: world_id.0,
+                            is_premium: false,
+                            my_turn: 0,
+                            normal_length,
+                            premium_length: 0,
+                        });
+                        conn.admit_from_queue(server, world_id, generation).await
+                    }
+                    None => false,
+                };
+                if !admitted {
+                    self.release_reservation(world_id, connection_id, generation);
+                }
+            }
+            // Only a pop moves the remaining positions; a plain occupancy change does not.
+            if moved {
+                self.notify_queue(gs_id);
+            }
+        }
     }
 
     /// A game server by id (a snapshot).

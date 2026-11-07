@@ -27,9 +27,11 @@ What it does, in order:
 1. `Scripts/live-stack.sh build` and builds `aaemu-testclient` for the lane target directory.
 1. `Scripts/live-stack.sh sync` and patches the **runtime** `Configurations/Expedition.json`
    with `Cost 0 / Level 1 / PartyMemberCount 2` (never the repository's `app/` copy).
-1. Restarts this lane's stack with `aaemu_game::systems::services::express_text=debug` and
-   `aaemu_game::systems::ai::behaviors=debug` added to `RUST_LOG` (the emote guard and the aggro
-   link join log at debug), then waits for the game registration.
+1. Restarts this lane's stack with `aaemu_game::systems::services::express_text=debug`,
+   `aaemu_game::systems::ai::behaviors=debug`, `aaemu_game::systems::services::music=debug` and
+   `aaemu_game::systems::skills::effects::special=debug` added to `RUST_LOG` (the emote guard, the
+   aggro link join and the music upload / save-notes lines log at debug), then waits for the game
+   registration.
 1. Provisions every declared bot account: a login-only `aaemu-testclient` run creates it
    (`AutoAccount`), then `access_level` is set in this lane's game database
    (`UPDATE <game db>.accounts SET access_level=100` for `gm` bots, `0` otherwise).

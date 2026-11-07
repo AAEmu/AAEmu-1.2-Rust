@@ -5,13 +5,13 @@
 //! `item_accessories`, `item_summon_mates`, `item_summon_slaves`, `item_body_parts`,
 //! `item_enchanting_gems`, `item_backpacks`), the hard-coded UCC / music / treasure templates, the
 //! base `items` table, `equip_slot_enchanting_costs`, `item_grade_enchanting_supports`,
-//! `item_socket_chances`, `item_cap_scales`, `item_grade_distributions`,
+//! `item_socket_chances`, `item_cap_scales`, `item_cap_scale_forbids`, `item_grade_distributions`,
 //! `loot_pack_dropping_npcs`, `doodad_func_convert_fish_items`, `item_spawn_doodads`,
 //! `unit_modifiers` (items), `armor_grade_buffs`, `item_sets` / `item_set_items`, and the
 //! "invalid_item_" names. The localized search strings live in `systems::economy::items_data`
 //! (they need the localization tables).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
@@ -50,6 +50,9 @@ pub const ITEM_SALON_CERTIFICATE: u32 = 30811;
 
 /// `BackpackType` values `ItemContainer.CanAccept` allows in player containers.
 pub mod backpack_type {
+    /// The castle-claim packs skill 18540 (declare independence) requires
+    /// (`skills.link_backpack_type_id = 1`; `item_backpacks.backpack_type_id` 1).
+    pub const CASTLE_CLAIM: u32 = 1;
     pub const GLIDER: u32 = 2;
     pub const TOY_FLAG: u32 = 7;
 }
@@ -586,6 +589,46 @@ pub struct ItemCapScale {
     pub scale_max: i32,
 }
 
+/// `item_socket_num_limits`: max sockets of an item by equip slot type and grade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemSocketNumLimit {
+    pub id: u32,
+    pub slot_id: u32,
+    pub grade_id: i32,
+    pub num_socket: u8,
+}
+
+/// `item_socket_level_limits`: the target item's level requirement for a lunagem.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemSocketLevelLimit {
+    pub id: u32,
+    pub item_id: u32,
+    pub level: i32,
+}
+
+/// `item_sockets`: the equip slot group a lunagem fits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemSocket {
+    pub id: u32,
+    pub item_id: u32,
+    pub equip_slot_group_id: u32,
+}
+
+/// `equip_slot_group_maps`: the equip slot types a slot group covers (one row per pair).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EquipSlotGroupMap {
+    pub id: u32,
+    pub equip_slot_group_id: u32,
+    pub equip_slot_type_id: u32,
+}
+
+/// `equip_slot_groups`: the named groups `equip_slot_group_maps` joins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EquipSlotGroup {
+    pub id: u32,
+    pub name: String,
+}
+
 /// `GradeDistributions` (`item_grade_distributions`; `weights[i]` = `Weight{i}`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GradeDistributions {
@@ -727,6 +770,8 @@ pub struct ItemTemplate {
     pub bind_type: u32,
     pub max_count: i32,
     pub gradable: bool,
+    /// `items.grade_enchantable`: the item may be the target of a regrade (`GradeEnchant`).
+    pub grade_enchantable: bool,
     pub fixed_grade: i32,
     pub exp_abs_lifetime: i32,
     pub exp_online_lifetime: i32,
@@ -747,6 +792,11 @@ pub struct ItemTemplate {
     pub loot_quest_id: u32,
     pub honor_price: i32,
     pub level_requirement: i32,
+    /// `items.actability_group_id`: the actability group of `actability_requirement`.
+    pub actability_group_id: i32,
+    /// `items.actability_requirement`: actability points needed to use / equip the item
+    /// (1.2 client `FUN_394e1a90`, `actability_not_enough_point` 508; 0 = no requirement).
+    pub actability_requirement: i32,
     pub auction_category_a: i32,
     pub auction_category_b: i32,
     pub auction_category_c: i32,
@@ -755,6 +805,11 @@ pub struct ItemTemplate {
     pub living_point_price: i32,
     pub char_gender: u8,
     pub specialty_zone_id: u32,
+    /// `items.limited_sale_count`: how many of this template one character may buy
+    /// (0 = unlimited).
+    pub limited_sale_count: i32,
+    /// `items.one_time_sale`: one character may buy this template once.
+    pub one_time_sale: bool,
 }
 
 impl ItemTemplate {
@@ -766,6 +821,7 @@ impl ItemTemplate {
             bind_type: 0,
             max_count: 0,
             gradable: false,
+            grade_enchantable: false,
             fixed_grade: 0,
             exp_abs_lifetime: 0,
             exp_online_lifetime: 0,
@@ -784,6 +840,8 @@ impl ItemTemplate {
             loot_quest_id: 0,
             honor_price: 0,
             level_requirement: 0,
+            actability_group_id: 0,
+            actability_requirement: 0,
             auction_category_a: 0,
             auction_category_b: 0,
             auction_category_c: 0,
@@ -792,6 +850,22 @@ impl ItemTemplate {
             living_point_price: 0,
             char_gender: 0,
             specialty_zone_id: 0,
+            limited_sale_count: 0,
+            one_time_sale: false,
+        }
+    }
+
+    /// The per-character purchase limit of `items.one_time_sale` / `items.limited_sale_count`
+    /// (`None` = unlimited). A one-time sale is a limit of one; when both columns are set the
+    /// smaller limit wins.
+    pub fn purchase_limit(&self) -> Option<i32> {
+        let limited = (self.limited_sale_count > 0).then_some(self.limited_sale_count);
+        let one_time = self.one_time_sale.then_some(1);
+        match (limited, one_time) {
+            (Some(limited), Some(one_time)) => Some(limited.min(one_time)),
+            (Some(limited), None) => Some(limited),
+            (None, Some(one_time)) => Some(one_time),
+            (None, None) => None,
         }
     }
 
@@ -910,8 +984,21 @@ pub struct ItemData {
     pub enchanting_supports: HashMap<u32, ItemGradeEnchantingSupport>,
     /// `_socketChance`.
     pub socket_chance: HashMap<u32, u32>,
+    /// `item_socket_num_limits` (by equip slot type and grade).
+    pub item_socket_num_limits: HashMap<(u32, i32), ItemSocketNumLimit>,
+    /// `item_socket_level_limits` (by lunagem item id).
+    pub item_socket_level_limits: HashMap<u32, ItemSocketLevelLimit>,
+    /// `item_sockets` (by lunagem item id).
+    pub item_sockets: HashMap<u32, ItemSocket>,
+    /// `equip_slot_groups` (by id).
+    pub equip_slot_groups: HashMap<u32, EquipSlotGroup>,
+    /// `equip_slot_group_maps` (by equip slot group id, in table order).
+    pub equip_slot_group_maps: HashMap<u32, Vec<EquipSlotGroupMap>>,
     /// `_itemCapScales` (by skill id).
     pub item_cap_scales: HashMap<u32, ItemCapScale>,
+    /// `item_cap_scale_forbids.item_id` (the 1.2 client `FUN_395a72d0` set): item templates
+    /// that cannot be the target of `ItemCapScale` / its reset.
+    pub item_cap_scale_forbids: HashSet<u32>,
     /// `_itemGradeDistributions`.
     pub grade_distributions: HashMap<i32, GradeDistributions>,
     /// `_lootPackDroppingNpc` (by npc template id, rows in table order).
@@ -935,6 +1022,11 @@ fn load_err(msg: String) -> rusqlite::Error {
 impl ItemData {
     pub fn template(&self, id: u32) -> Option<&ItemTemplate> {
         self.templates.get(&id)
+    }
+
+    /// `item_body_parts` row of an item (the `BodyPartTemplate` specifics).
+    pub fn body_part(&self, id: u32) -> Option<&BodyPartTemplate> {
+        self.body_parts.get(&id)
     }
 
     /// `GetGradeTemplate`.
@@ -1047,9 +1139,50 @@ impl ItemData {
             .unwrap_or(0)
     }
 
+    /// Max gem sockets for an equip slot type and grade. A missing row means no socket
+    /// (`FUN_395aca00` returns 0), so installing is impossible there.
+    pub fn item_socket_num_limit(&self, slot_type_id: u32, grade: u8) -> u8 {
+        self.item_socket_num_limits
+            .get(&(slot_type_id, i32::from(grade)))
+            .map_or(0, |l| l.num_socket)
+    }
+
+    /// The lunagem's minimum target level requirement (`None` = no limit, as the client's
+    /// `FUN_395aca70` returns `INT_MAX` for a missing row).
+    pub fn item_socket_level_limit(&self, item_id: u32) -> Option<i32> {
+        self.item_socket_level_limits.get(&item_id).map(|l| l.level)
+    }
+
+    /// The equip slot group a lunagem fits (`None` = the gem declares no socket group).
+    pub fn item_socket_group(&self, item_id: u32) -> Option<u32> {
+        self.item_sockets
+            .get(&item_id)
+            .map(|s| s.equip_slot_group_id)
+    }
+
+    /// The `equip_slot_groups` row (`None` = a map / socket row names an unknown group).
+    pub fn equip_slot_group(&self, id: u32) -> Option<&EquipSlotGroup> {
+        self.equip_slot_groups.get(&id)
+    }
+
+    /// Whether the gem's `equip_slot_group_id` covers `slot_type_id` (`equip_slot_groups` +
+    /// `equip_slot_group_maps`). A group that is not in the parent table covers nothing.
+    pub fn socket_group_allows(&self, group_id: u32, slot_type_id: u32) -> bool {
+        self.equip_slot_groups.contains_key(&group_id)
+            && self
+                .equip_slot_group_maps
+                .get(&group_id)
+                .is_some_and(|maps| maps.iter().any(|m| m.equip_slot_type_id == slot_type_id))
+    }
+
     /// `GetItemCapScale(skillId)`.
     pub fn item_cap_scale(&self, skill_id: u32) -> Option<&ItemCapScale> {
         self.item_cap_scales.get(&skill_id)
+    }
+
+    /// 1.2 client `FUN_395a72d0`: whether `item_cap_scale_forbids` lists this template.
+    pub fn cap_scale_forbidden(&self, item_id: u32) -> bool {
+        self.item_cap_scale_forbids.contains(&item_id)
     }
 
     /// `GetAttributeModifiers(id)` (`None` where the C# indexer throws).
@@ -1657,6 +1790,7 @@ impl ItemData {
             t.impl_id = r.i32("impl_id")?;
             t.buff_id = r.u32("buff_id")?;
             t.gradable = r.bool_str("gradable")?;
+            t.grade_enchantable = r.bool_str("grade_enchantable")?;
             t.loot_multi = r.bool_str("loot_multi")?;
             t.loot_quest_id = r.u32("loot_quest_id")?;
             t.honor_price = r.i32("honor_price")?;
@@ -1673,6 +1807,8 @@ impl ItemData {
                 r.u32("specialty_zone_id")?
             };
             t.level_requirement = r.i32("level_requirement")?;
+            t.actability_group_id = r.i32_or("actability_group_id", 0)?;
+            t.actability_requirement = r.i32_or("actability_requirement", 0)?;
             t.auction_category_a = r.i32_or("auction_a_category_id", 0)?;
             t.auction_category_b = r.i32_or("auction_b_category_id", 0)?;
             t.auction_category_c = r.i32_or("auction_c_category_id", 0)?;
@@ -1681,6 +1817,8 @@ impl ItemData {
             t.disenchantable = r.bool_str("disenchantable")?;
             t.living_point_price = r.i32("living_point_price")?;
             t.char_gender = r.u8("char_gender_id")?;
+            t.limited_sale_count = r.i32_or("limited_sale_count", 0)?;
+            t.one_time_sale = r.bool_str("one_time_sale")?;
             Ok(())
         })?;
 
@@ -1726,6 +1864,119 @@ impl ItemData {
             Ok(())
         })?;
 
+        // `slot_id` is an `EquipmentItemSlotType` id (the client feeds the target template's
+        // slot type straight into this table's lookup, `FUN_397cc290` -> `FUN_395aca00`).
+        for_each_row(conn, "SELECT * FROM item_socket_num_limits", [], |r| {
+            let limit = ItemSocketNumLimit {
+                id: r.u32("id")?,
+                slot_id: r.u32("slot_id")?,
+                grade_id: r.i32("grade_id")?,
+                num_socket: r.u8("num_socket")?,
+            };
+            // Skip rows that cannot describe a real item (bad slot / grade / > 7 gem array).
+            if !(1..=equipment_item_slot_type::COSPLAY).contains(&limit.slot_id)
+                || !(0..=i32::from(item_grade::MYTHIC)).contains(&limit.grade_id)
+                || limit.num_socket > 7
+            {
+                tracing::warn!(
+                    "item_socket_num_limits {}: bad slot {} / grade {} / sockets {}",
+                    limit.id,
+                    limit.slot_id,
+                    limit.grade_id,
+                    limit.num_socket
+                );
+                return Ok(());
+            }
+            data.item_socket_num_limits
+                .entry((limit.slot_id, limit.grade_id))
+                .or_insert(limit);
+            Ok(())
+        })?;
+
+        for_each_row(conn, "SELECT * FROM item_socket_level_limits", [], |r| {
+            let limit = ItemSocketLevelLimit {
+                id: r.u32("id")?,
+                item_id: r.u32("item_id")?,
+                level: r.i32("level")?,
+            };
+            if !data.templates.contains_key(&limit.item_id) {
+                tracing::warn!(
+                    "item_socket_level_limits {}: item {} is not in the items table",
+                    limit.id,
+                    limit.item_id
+                );
+                return Ok(());
+            }
+            data.item_socket_level_limits
+                .entry(limit.item_id)
+                .or_insert(limit);
+            Ok(())
+        })?;
+
+        // The 1.2 table has 15 rows for test/removed items (no `items` row); they cannot be
+        // used by any real item, so skip them instead of failing the catalog.
+        for_each_row(conn, "SELECT * FROM item_sockets", [], |r| {
+            let socket = ItemSocket {
+                id: r.u32("id")?,
+                item_id: r.u32("item_id")?,
+                equip_slot_group_id: r.u32_or("equip_slot_group_id", 0)?,
+            };
+            // Rows left over from removed/test items have no items row (and often no group);
+            // they are expected in the shipped 1.2 data and cannot be used by any real item.
+            if socket.equip_slot_group_id == 0 || !data.templates.contains_key(&socket.item_id) {
+                tracing::debug!(
+                    "item_sockets {}: item {} / equip slot group {} is not loadable",
+                    socket.id,
+                    socket.item_id,
+                    socket.equip_slot_group_id
+                );
+                return Ok(());
+            }
+            data.item_sockets.entry(socket.item_id).or_insert(socket);
+            Ok(())
+        })?;
+
+        for_each_row(conn, "SELECT * FROM equip_slot_groups", [], |r| {
+            let group = EquipSlotGroup {
+                id: r.u32("id")?,
+                name: r.string("name")?,
+            };
+            data.equip_slot_groups.insert(group.id, group);
+            Ok(())
+        })?;
+
+        for_each_row(conn, "SELECT * FROM equip_slot_group_maps", [], |r| {
+            let map = EquipSlotGroupMap {
+                id: r.u32("id")?,
+                equip_slot_group_id: r.u32("equip_slot_group_id")?,
+                equip_slot_type_id: r.u32("equip_slot_type_id")?,
+            };
+            if !(1..=equipment_item_slot_type::COSPLAY).contains(&map.equip_slot_type_id) {
+                tracing::warn!(
+                    "equip_slot_group_maps {}: bad slot type {}",
+                    map.id,
+                    map.equip_slot_type_id
+                );
+                return Ok(());
+            }
+            if !data
+                .equip_slot_groups
+                .contains_key(&map.equip_slot_group_id)
+            {
+                tracing::warn!(
+                    "equip_slot_group_maps {}: unknown equip slot group {}",
+                    map.id,
+                    map.equip_slot_group_id
+                );
+                return Ok(());
+            }
+            data.equip_slot_group_maps
+                .entry(map.equip_slot_group_id)
+                .or_default()
+                .push(map);
+            Ok(())
+        })?;
+
         for_each_row(conn, "SELECT * FROM item_cap_scales", [], |r| {
             let c = ItemCapScale {
                 id: r.u32("id")?,
@@ -1736,6 +1987,16 @@ impl ItemData {
             data.item_cap_scales.entry(c.skill_id).or_insert(c);
             Ok(())
         })?;
+
+        for_each_row(
+            conn,
+            "SELECT item_id FROM item_cap_scale_forbids",
+            [],
+            |r| {
+                data.item_cap_scale_forbids.insert(r.u32("item_id")?);
+                Ok(())
+            },
+        )?;
 
         for_each_row(conn, "SELECT * FROM item_grade_distributions", [], |r| {
             let mut weights = [0i32; 12];
@@ -1937,5 +2198,41 @@ mod tests {
         // (int)(1000 * 1000 * 1 * 1000 * 1e-8) = 10; *1 -> 10; round(10 * 100 * 0.01) = 10
         assert_eq!(d.max_durability(&t, 0), Some(10));
         assert_eq!(d.max_durability(&t, 1), None);
+    }
+
+    /// `items.grade_enchantable` is loaded into every template. The real 1.2 data has 4 564
+    /// `'t'` rows (all equipment) and 16 918 `'f'` rows.
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+    fn real_compact_db_loads_grade_enchantable() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let data = ItemData::load(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, grade_enchantable FROM items")
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let (mut on, mut off) = (0, 0);
+        while let Some(row) = rows.next().unwrap() {
+            let id: u32 = row.get(0).unwrap();
+            let flag: String = row.get(1).unwrap();
+            let expected = flag == "t";
+            let t = data
+                .template(id)
+                .unwrap_or_else(|| panic!("item {id} has no template"));
+            assert_eq!(t.grade_enchantable, expected, "item {id}");
+            if expected {
+                on += 1;
+            } else {
+                off += 1;
+            }
+        }
+        assert_eq!((on, off), (4564, 16918));
+        // A first-step leather cap is enchantable; NPC-only gear is not.
+        assert!(data.template(6735).unwrap().grade_enchantable);
+        assert!(!data.template(8559).unwrap().grade_enchantable);
     }
 }

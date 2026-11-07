@@ -447,6 +447,23 @@ impl QuestHooks for GameQuestHooks {
         }
     }
 
+    fn grant_quest_honor(
+        &self,
+        server: &GameServer,
+        player: Option<&PlayerRef>,
+        c: &mut Character,
+        amount: i32,
+    ) {
+        use crate::systems::skills::progress::{self, HonorSource};
+        // `World.HonorRate`, the same rate `GiveHonorPoint` applies, then the Quest pair.
+        let rate = server.config.get().world.honor_rate;
+        let base = (rate * f64::from(amount)).round_ties_even() as i32;
+        let packet = progress::grant_honor_locked(c, HonorSource::Quest, base);
+        if let (Some(p), Some(packet)) = (player, packet) {
+            p.send(packet);
+        }
+    }
+
     fn change_labor(
         &self,
         server: &GameServer,
@@ -481,7 +498,7 @@ impl QuestHooks for GameQuestHooks {
         c: &mut Character,
         points: i16,
     ) {
-        let packet = crate::systems::social::crime::add_crime(
+        let (packet, change) = crate::systems::social::crime::add_crime(
             server,
             c,
             points,
@@ -489,12 +506,19 @@ impl QuestHooks for GameQuestHooks {
         );
         if let Some(p) = player {
             p.send(packet);
-            // Wanted / crime buffs added by the crime point setter.
+            // Wanted / crime buffs added by the crime point setter, then the faction change the
+            // threshold asks for (`SetFaction(Pirate)` or the infamy-0 pardon; it needs the
+            // world, so it runs after the lock is released).
             let p = p.clone();
             super::events::after_unlock(server, c.id, move |s| {
+                crate::systems::social::faction::apply_crime_faction_change(s, &p, change);
                 crate::systems::dispatch_buff_events(s, &WorldObject::from(&p))
             });
         }
+        // Offline (a quest reward stored while the character is away): the crime points are
+        // saved; the faction is left for `CSSelectCharacter` like the offline crime path
+        // (`add_offline_crime_points`), so the conversion gets the live player, the broadcast
+        // and the guild / party side effects.
     }
 
     fn acquire_default_item(

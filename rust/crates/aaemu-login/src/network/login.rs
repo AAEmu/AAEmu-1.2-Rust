@@ -15,7 +15,9 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{AuthFlow, AuthFlowResult, KoreaStep, LoginClient};
+use crate::config::LoginConfig;
 use crate::controllers::game::{GameController, GameServer};
+use crate::controllers::queue::Admission;
 use crate::handlers;
 use crate::id_manager::{ConnectionIdLease, IdError, SimpleIdManager};
 use crate::models::{AccountId, ConnectionId, GameServerId, LoginCharacterInfo, LoginDeniedReason};
@@ -34,9 +36,16 @@ pub enum LoginState {
     Connected,
     Authenticating,
     Authenticated,
+    /// Waiting in the world login queue (`ACWorldQueuePacket`), not yet asked to enter.
+    Queued,
     EnteringWorld,
     Disconnected,
 }
+
+/// How long an admitted request keeps its world-queue slot reservation when the game server never
+/// answers (`EnterWorldTimeout` normally ends the wait much earlier; the timer is for a lost
+/// response). Normal responses release the reservation immediately.
+const RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `EnterWorldResult`.
 #[derive(Clone, Debug)]
@@ -79,6 +88,8 @@ pub struct LoginConnection {
     closed: CancellationToken,
     data: Mutex<AccountData>,
     session: Mutex<SessionState>,
+    /// The character-slot and pre-select values `send_auth_success` advertises.
+    limits: LoginConfig,
 }
 
 impl std::fmt::Debug for LoginConnection {
@@ -96,6 +107,7 @@ impl LoginConnection {
         ip: IpAddr,
         is_locally_connected: bool,
         tx: mpsc::UnboundedSender<Vec<u8>>,
+        limits: LoginConfig,
     ) -> Self {
         Self {
             lease,
@@ -110,6 +122,7 @@ impl LoginConnection {
                 enter_world: None,
                 background: None,
             }),
+            limits,
         }
     }
 
@@ -121,10 +134,11 @@ impl LoginConnection {
         local_ip: Option<IpAddr>,
         remote_ip: IpAddr,
         tx: mpsc::UnboundedSender<Vec<u8>>,
+        limits: LoginConfig,
     ) -> Result<Self, IdError> {
         let lease = ConnectionIdLease::rent(ids)?;
         let is_local = local_ip == Some(remote_ip);
-        Ok(Self::new(lease, remote_ip, is_local, tx))
+        Ok(Self::new(lease, remote_ip, is_local, tx, limits))
     }
 
     pub fn id(&self) -> ConnectionId {
@@ -358,14 +372,20 @@ impl LoginConnection {
         }
     }
 
-    /// Initiates entering the world on `gs_id`: requests the player slot from the game server and
-    /// waits for its answer in the background, which then sends the world cookie or a denial.
+    /// Initiates entering the world on `gs_id`: either queues the client (`ACWorldQueuePacket`)
+    /// when the world is at its configured capacity, refuses it when the queue is full, or
+    /// requests the player slot from the game server and waits for its answer in the background,
+    /// which then sends the world cookie or a denial.
+    ///
+    /// The queue decision and the session transition happen under the session lock; the queue
+    /// controller's lock is only ever taken inside it here, and the controller never calls back
+    /// into the session while holding its own lock (see `GameController::drain_queues`).
     pub async fn initiate_enter_world(
         self: &Arc<Self>,
         server: &Arc<LoginServer>,
         gs_id: GameServerId,
     ) -> anyhow::Result<()> {
-        let (rx, cancel) = {
+        let (decision, pending) = {
             let mut s = self.session.lock().unwrap();
             if s.state != LoginState::Authenticated {
                 tracing::warn!(
@@ -387,6 +407,65 @@ impl LoginConnection {
                 );
                 return Ok(());
             }
+            let decision = server.games.try_enter_world(gs_id, self.id());
+            let pending = match decision {
+                Admission::Direct { .. } => {
+                    s.state = LoginState::EnteringWorld;
+                    let cancel = self.closed.child_token();
+                    let (tx, rx) = oneshot::channel();
+                    s.enter_world = Some(PendingEnterWorld {
+                        gs_id,
+                        cancel: cancel.clone(),
+                        result_tx: Some(tx),
+                    });
+                    Some((rx, cancel))
+                }
+                Admission::Queued => {
+                    s.state = LoginState::Queued;
+                    None
+                }
+                Admission::Full => None,
+            };
+            (decision, pending)
+        };
+
+        match (decision, pending) {
+            (Admission::Direct { reservation }, Some((rx, cancel))) => {
+                self.start_enter_world_request(server, gs_id, rx, cancel, reservation);
+            }
+            (Admission::Queued, _) => {
+                tracing::debug!("World {} is full: connection {} queued", gs_id, self.id());
+                server.games.notify_queue(gs_id);
+            }
+            (Admission::Full, _) => {
+                // The 1.2 client's ACEnterWorldDenied handler (FUN_393d51d0) ignores the reason
+                // byte and shows "error_failed_to_connect_to_server"; the packet is the evidenced
+                // refusal.
+                tracing::info!(
+                    "World {} queue is full: connection {} refused",
+                    gs_id,
+                    self.id()
+                );
+                self.send_enter_world_denied(0)?;
+            }
+            (Admission::Direct { .. }, None) => unreachable!("direct admission has a pending flow"),
+        }
+        Ok(())
+    }
+
+    /// Continues a queued client into the normal enter-world flow after a slot freed.
+    /// Returns false when the client left the queue (cancel, disconnect, or it was never queued).
+    pub async fn admit_from_queue(
+        self: &Arc<Self>,
+        server: &Arc<LoginServer>,
+        gs_id: GameServerId,
+        generation: u64,
+    ) -> bool {
+        let (rx, cancel) = {
+            let mut s = self.session.lock().unwrap();
+            if s.state != LoginState::Queued {
+                return false;
+            }
             s.state = LoginState::EnteringWorld;
             let cancel = self.closed.child_token();
             let (tx, rx) = oneshot::channel();
@@ -397,13 +476,27 @@ impl LoginConnection {
             });
             (rx, cancel)
         };
+        tracing::debug!(
+            "World {} admitted connection {} from the queue",
+            gs_id,
+            self.id()
+        );
+        self.start_enter_world_request(server, gs_id, rx, cancel, Some(generation));
+        true
+    }
 
-        // Send request to game server (outside the lock)
+    fn start_enter_world_request(
+        self: &Arc<Self>,
+        server: &Arc<LoginServer>,
+        gs_id: GameServerId,
+        rx: oneshot::Receiver<EnterWorldResult>,
+        cancel: CancellationToken,
+        reservation: Option<u64>,
+    ) {
         server
             .games
             .request_enter_world(self.account_id(), self.id(), gs_id);
 
-        // Spawn background task to await response and send result
         let handle = tokio::spawn(run_enter_world_background(
             self.clone(),
             server.config.enter_world_timeout,
@@ -411,22 +504,64 @@ impl LoginConnection {
             cancel,
         ));
         self.session.lock().unwrap().background = Some(handle);
-        Ok(())
+
+        if let Some(generation) = reservation {
+            // A game response normally releases this reservation (with the occupancy that
+            // includes the pending cookie); this is the fallback for a lost response. Only this
+            // generation is released: the connection id may be reused for a newer admission.
+            let server = server.clone();
+            let connection_id = self.id();
+            let timeout = server.config.enter_world_timeout.max(RESERVATION_TIMEOUT);
+            tokio::spawn(async move {
+                tokio::time::sleep(timeout).await;
+                server
+                    .games
+                    .release_reservation(gs_id, connection_id, generation);
+                server.games.drain_queues(&server).await;
+            });
+        }
     }
 
-    /// Cancels an in-progress enter world request.
-    pub fn cancel_enter_world(&self) {
-        let s = self.session.lock().unwrap();
-        if s.state != LoginState::EnteringWorld {
-            tracing::debug!(
-                "CancelEnterWorld ignored: not in EnteringWorld state for connection {}",
-                self.id()
-            );
-            return;
+    /// Cancels an in-progress enter world request or leaves the world queue.
+    pub async fn cancel_enter_world(self: &Arc<Self>, server: &Arc<LoginServer>) {
+        let was_queued = {
+            let mut s = self.session.lock().unwrap();
+            match s.state {
+                LoginState::Queued => {
+                    s.state = LoginState::Authenticated;
+                    true
+                }
+                LoginState::EnteringWorld => {
+                    tracing::debug!("Cancelling EnterWorld for connection {}", self.id());
+                    if let Some(p) = &s.enter_world {
+                        p.cancel.cancel();
+                    }
+                    false
+                }
+                _ => {
+                    tracing::debug!(
+                        "CancelEnterWorld ignored: {:?} state for connection {}",
+                        s.state,
+                        self.id()
+                    );
+                    return;
+                }
+            }
+        };
+        if was_queued {
+            tracing::debug!("Connection {} left the world queue", self.id());
+            server.games.cancel_queued(self.id());
+            server.games.drain_queues(server).await;
         }
-        tracing::debug!("Cancelling EnterWorld for connection {}", self.id());
-        if let Some(p) = &s.enter_world {
-            p.cancel.cancel();
+    }
+
+    /// The queued client's world went away (game server unregistered): answer the pending
+    /// enter-world request with the refusal packet and return the session to character select.
+    pub fn world_unavailable(&self) {
+        let mut s = self.session.lock().unwrap();
+        if s.state == LoginState::Queued {
+            s.state = LoginState::Authenticated;
+            let _ = self.send_enter_world_denied(0);
         }
     }
 
@@ -446,7 +581,12 @@ impl LoginConnection {
             return;
         }
         let pending_gs = s.enter_world.as_ref().map(|p| p.gs_id);
-        if pending_gs != Some(gs_id) {
+        // The game link answers with the game server's own id. A client that selected a mirror
+        // gets the mirror's id back from here, so accept the parent id for a mirror request.
+        let is_mirror_response = pending_gs.is_some_and(|pending| {
+            pending != gs_id && games.try_get_parent_id(pending) == Some(gs_id)
+        });
+        if pending_gs != Some(gs_id) && !is_mirror_response {
             tracing::warn!(
                 "CompleteEnterWorldRequest ignored: gsId mismatch (expected {:?}, got {}) for connection {}",
                 pending_gs,
@@ -456,8 +596,12 @@ impl LoginConnection {
             return;
         }
         let success = result == 0;
+        // The world cookie must point at the world the client selected (the mirror's configured
+        // address), not at the id the game happens to answer with.
         let server = if success {
-            games.get_game_server(gs_id)
+            pending_gs
+                .and_then(|pending| games.get_game_server(pending))
+                .or_else(|| games.get_game_server(gs_id))
         } else {
             None
         };
@@ -539,21 +683,17 @@ async fn run_enter_world_background(
 
 impl LoginClient for LoginConnection {
     fn send_auth_success(&self, account_id: AccountId) -> Result<(), PacketError> {
-        const MAX_CHARACTERS_PER_ACCOUNT: u8 = 6; // TODO: Make configurable
-        const ADDITIONAL_CHARACTERS_PER_SERVER: u32 = 0; // TODO: Make configurable
-        const IS_PRE_SELECT_CHARACTER_PERIOD: bool = false; // TODO: Make configurable
-
         self.send_packet(&AcJoinResponse::new(
             JoinResponseReason::Success,
             AfsValue {
-                max_characters_per_account: MAX_CHARACTERS_PER_ACCOUNT,
-                additional_characters_per_server: ADDITIONAL_CHARACTERS_PER_SERVER,
-                is_pre_select_character_period: IS_PRE_SELECT_CHARACTER_PERIOD,
+                max_characters_per_account: self.limits.max_characters_per_account,
+                additional_characters_per_server: self.limits.additional_characters_per_server,
+                is_pre_select_character_period: self.limits.pre_select_character_period,
             },
         ))?;
         self.send_packet(&AcAuthResponse {
             account_id,
-            slot_count: 6,
+            slot_count: self.limits.max_characters_per_account,
         })
     }
 
@@ -694,7 +834,13 @@ async fn handle_connection(
     // checks if a connection is from the same machine
     let local_ip = stream.local_addr().ok().map(|l| l.ip());
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let conn = match LoginConnection::create(&server.connection_ids, local_ip, addr.ip(), tx) {
+    let conn = match LoginConnection::create(
+        &server.connection_ids,
+        local_ip,
+        addr.ip(),
+        tx,
+        server.config.login,
+    ) {
         Ok(c) => Arc::new(c),
         Err(e) => {
             tracing::error!("Error on connection from {}: {}", addr, e);
@@ -754,6 +900,8 @@ async fn handle_connection(
         conn.ip()
     );
     server.connections.remove(conn.id());
+    // Entries die with their connection (the queue position updates reach the others).
+    server.games.connection_closed(conn.id());
     let _ = writer_task.await;
     // DisposeAsync: notify the session; the id lease is returned when the last Arc drops.
     conn.disconnect().await;

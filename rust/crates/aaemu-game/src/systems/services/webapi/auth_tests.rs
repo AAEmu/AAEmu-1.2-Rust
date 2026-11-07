@@ -184,6 +184,8 @@ async fn all_api_routes_require_auth_even_with_legacy_regex_urls() {
         ("GET", "/api/character/list"),
         ("GET", "/api/world/logged-characters"),
         ("GET", "/api/expedition/list"),
+        ("GET", "/online"),
+        ("GET", "/dominions"),
         ("GET", "/api/auction/list"),
         ("GET", "/api/auction/search"),
         ("POST", "/status?next=/api/mail/send"),

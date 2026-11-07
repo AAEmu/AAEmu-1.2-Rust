@@ -148,10 +148,70 @@ impl Marshal for SCQuestContextFailedPacket {
     }
 }
 
-/// `SCQuestRewardedByMailPacket(questList)`.
+/// `SCQuestUnitReqFailedPacket(quest, unitObjId, kind, messageId, value)` (`0x148`): the start
+/// of the quest was refused by a `unit_reqs` row. The 1.2 client reader `FUN_397b5d00` reads a
+/// `u32` quest, a 3-byte `bc` unit object id and a flag bag (`FUN_397b1ef0`): one flag byte,
+/// then only the set parts in that order -- bit 0x01 `u8` kind, bit 0x02 `u16` message id, bit
+/// 0x04 `u32` value. A zero part is not written, so an all-zero bag is the single byte `00`.
+/// Handler `FUN_391dbdd0` -> `FUN_39376590(quest, unitObjId, kind | messageId << 16, value)`
+/// acts only when `unitObjId` is the local player, builds the "unit requirement failed" text
+/// (`FUN_39390900`: the system message id when the message id is set, otherwise text by kind
+/// and value -- kind 0x16 `NO_BUFF` prints the buff name of value, kind 0x24
+/// `EXCEPT_COMPLETE_QUEST_CONTEXT` the quest name) and raises `QUEST_QUICK_CLOSE_EVENT` (0xf4,
+/// closes the quest directing dialog). INFERRED: `kind` = `unit_reqs.kind_id`, `message_id` = 0
+/// (`unit_reqs` has no message column) and `value` = its `value1` (`ui-quests.md` 1.1,
+/// CAP-QU-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCQuestUnitReqFailedPacket {
+    pub quest_id: u32,
+    pub unit_obj_id: u32,
+    pub kind: u8,
+    pub message_id: u16,
+    pub value: u32,
+}
+packet_def!(
+    SCQuestUnitReqFailedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCQuestUnitReqFailedPacket
+);
+impl Marshal for SCQuestUnitReqFailedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        let mut flags = 0u8;
+        if self.kind != 0 {
+            flags |= 0x01;
+        }
+        if self.message_id != 0 {
+            flags |= 0x02;
+        }
+        if self.value != 0 {
+            flags |= 0x04;
+        }
+        s.write_u32(self.quest_id)
+            .write_bc(self.unit_obj_id)
+            .write_u8(flags);
+        if self.kind != 0 {
+            s.write_u8(self.kind);
+        }
+        if self.message_id != 0 {
+            s.write_u16(self.message_id);
+        }
+        if self.value != 0 {
+            s.write_u32(self.value);
+        }
+    }
+}
+
+/// `SCQuestRewardedByMailPacket(success, questId)` (`0x14e`): the reward was sent by mail
+/// because it did not fit in the bag. The client reader `FUN_397b5ec0` (class registered with
+/// opcode 0x14e, vtable `399b3aa4`) reads `success` as a bool at body `+0xc` (vtable slot
+/// `0x78`, the named bool reader) and then the quest id as a `u32` at `+0x10` (slot `0x3c`).
+/// `OnQuestRewardMailSent` (`FUN_391dc150`) calls `FUN_3937a520`: on success it looks the
+/// quest up (`FUN_39856420`) and raises `QUEST_REWARDED_BY_MAIL`; when the flag is false it
+/// raises quest error 0xb (`cant_supply_rewards`) instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCQuestRewardedByMailPacket {
-    pub quests: Vec<u32>,
+    pub success: bool,
+    pub quest_id: u32,
 }
 packet_def!(
     SCQuestRewardedByMailPacket,
@@ -160,10 +220,48 @@ packet_def!(
 );
 impl Marshal for SCQuestRewardedByMailPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u8(self.quests.len() as u8);
-        for q in &self.quests {
-            s.write_u32(*q);
-        }
+        s.write_bool(self.success).write_u32(self.quest_id);
+    }
+}
+
+/// `SCQuestMailSentPacket(id)` (`0x150`): a quest mail was sent to the player. The 1.2 client
+/// reader `FUN_397b5f00` (wrapper `FUN_391b19b0`, which assigns `[1] = 0x150`) reads exactly one
+/// `u32` through vtable slot `0x3c` at body `+0xc`; there is no sentinel field. The meaning of
+/// the value as a `quest_mails.id` is inferred from the table, and no server trigger sends this
+/// packet yet: which quest step mails what is capture-pending (case `QUEST-MAIL-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCQuestMailSentPacket {
+    pub quest_mail_id: u32,
+}
+packet_def!(
+    SCQuestMailSentPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCQuestMailSentPacket
+);
+impl Marshal for SCQuestMailSentPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u32(self.quest_mail_id);
+    }
+}
+
+/// `SCAreaTeamMessagePacket(enter, sphereId)` (`0x155`): a player entered / left an area
+/// sphere; the client shows the sphere's `team_msg`. The 1.2 client reader `FUN_397b63b0`
+/// reads a bool at body `+0xc` and a `u32` at `+0x10`; the handler `FUN_391dc460` looks the
+/// sphere up in its own `spheres` table and raises event `0xfd` with `team_msg`. The trigger
+/// and the audience are inferred (CAP-UI-6 / CAP-UI-7, see `spheres.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCAreaTeamMessagePacket {
+    pub enter: bool,
+    pub sphere_id: u32,
+}
+packet_def!(
+    SCAreaTeamMessagePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCAreaTeamMessagePacket
+);
+impl Marshal for SCAreaTeamMessagePacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bool(self.enter).write_u32(self.sphere_id);
     }
 }
 
@@ -274,20 +372,14 @@ impl ClientPacket for CSStartQuestContextPacket {
             let Some(p) = active(conn) else {
                 return Ok(());
             };
-            if self.npc_obj_id > 0 {
-                events::add_quest_from_npc(server, &p, self.quest_context_id, self.npc_obj_id);
-            } else if self.doodad_obj_id > 0 {
-                events::add_quest_from_doodad(
-                    server,
-                    &p,
-                    self.quest_context_id,
-                    self.doodad_obj_id,
-                );
-            } else if self.sphere_id > 0 {
-                events::add_quest_from_sphere(server, &p, self.quest_context_id, self.sphere_id);
-            } else {
-                events::add_quest(server, &p, self.quest_context_id, false);
-            }
+            events::start_quest_context(
+                server,
+                &p,
+                self.quest_context_id,
+                self.npc_obj_id,
+                self.doodad_obj_id,
+                self.sphere_id,
+            );
             Ok(())
         })
     }
@@ -423,22 +515,63 @@ impl ClientPacket for CSQuestTalkMadePacket {
     }
 }
 
-/// `CSQuestStartWithPacket` (logged only).
+/// The typed tail of [`CSQuestStartWithPacket`] (`FUN_397c5450` + `FUN_397be540`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestStartWithTail {
+    /// Type 1: six `u32` (meaning unknown).
+    SixU32([u32; 6]),
+    /// Type 2: the player level that was reached (`QuestActConAcceptLevelUp`).
+    Level(u8),
+    /// Type 3: two `u32` (meaning unknown).
+    TwoU32([u32; 2]),
+    /// Type 4: one `u32` (meaning unknown).
+    OneU32(u32),
+    /// An unknown type: the 1.2 client sends only types 1-4, so no tail is read.
+    Unknown,
+}
+
+/// `CSQuestStartWithPacket` (logged only at debug): `u32 quest, u32 component, u32 act,
+/// u8 type` and a typed tail. The 1.2 client writer `FUN_397c5450` / `FUN_397be540` has only
+/// two send sites: type 2 = a player level reached (`FUN_39378660`, a
+/// `QuestActConAcceptLevelUp` start) and type 3 = an NPC emotion
+/// (`FUN_39378930`); types 1 / 4 are never sent. The server starts those quests itself, so the
+/// packet needs no action; see `PORTING.md` ("Gap audit verdicts (2026-11-07)").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSQuestStartWithPacket {
-    pub unk_id: u32,
-    pub unk_id2: u32,
-    pub unk_id3: u32,
+    pub quest: u32,
+    pub component: u32,
+    pub act: u32,
+    pub kind: u8,
+    pub tail: QuestStartWithTail,
 }
 
 impl ClientPacket for CSQuestStartWithPacket {
     const NAME: &'static str = "CSQuestStartWithPacket";
 
     fn read(s: &mut PacketStream) -> Result<Self> {
+        let quest = s.read_u32()?;
+        let component = s.read_u32()?;
+        let act = s.read_u32()?;
+        let kind = s.read_u8()?;
+        let tail = match kind {
+            1 => {
+                let mut v = [0u32; 6];
+                for x in &mut v {
+                    *x = s.read_u32()?;
+                }
+                QuestStartWithTail::SixU32(v)
+            }
+            2 => QuestStartWithTail::Level(s.read_u8()?),
+            3 => QuestStartWithTail::TwoU32([s.read_u32()?, s.read_u32()?]),
+            4 => QuestStartWithTail::OneU32(s.read_u32()?),
+            _ => QuestStartWithTail::Unknown,
+        };
         Ok(Self {
-            unk_id: s.read_u32()?,
-            unk_id2: s.read_u32()?,
-            unk_id3: s.read_u32()?,
+            quest,
+            component,
+            act,
+            kind,
+            tail,
         })
     }
 
@@ -448,11 +581,13 @@ impl ClientPacket for CSQuestStartWithPacket {
         _conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
-                "QuestStartWith, UnkId: {}, UnkId2: {}, UnkId3: {}",
-                self.unk_id,
-                self.unk_id2,
-                self.unk_id3
+            tracing::debug!(
+                "QuestStartWith, Quest: {}, Component: {}, Act: {}, Type: {}, Tail: {:?}",
+                self.quest,
+                self.component,
+                self.act,
+                self.kind,
+                self.tail
             );
             Ok(())
         })

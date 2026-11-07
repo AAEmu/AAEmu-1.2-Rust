@@ -47,9 +47,9 @@ await GuildShowRename 10
 grename x1
 await GuildRenameRetry 10
 expectdb "SELECT COUNT(*) FROM expeditions WHERE name = 'Funcs Guild' AND allow_change_name = 1" 1
-grename Renamed Guild
+grename Funcs Renamed
 await GuildRenamed 10
-expectdb "SELECT COUNT(*) FROM expeditions WHERE name = 'Renamed Guild' AND allow_change_name = 0" 1 10
+expectdb "SELECT COUNT(*) FROM expeditions WHERE name = 'Funcs Renamed' AND allow_change_name = 0" 1 10
 sync renamed 2
 # The right is spent: a second rename is refused (32).
 grename Third Guild

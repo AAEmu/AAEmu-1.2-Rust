@@ -341,8 +341,17 @@ pub fn set_unit_position(
 
 /// `Character.ForceDismount(reason)`: off any mate seat, off any slave, out of a doodad seat,
 /// `Transform.DetachAll()`. `true` when a mate / slave dismount happened.
+/// `Character.ForceDismount`: releases a mate mount, a slave seat, a doodad bond and a transfer
+/// passenger seat before a server-side move. Returns `true` when a mate / slave / transfer
+/// attachment was released (a plain doodad bond is unbound but does not set the flag).
+///
+/// Not every same-world `SCTeleportUnit` sender calls this; `world::session::teleport_ended`
+/// releases a remaining transfer seat once for those paths as well.
 pub fn force_dismount(server: &GameServer, player: &PlayerRef, reason: u8) -> bool {
     let mut res = false;
+    // A transfer seat has no mate / slave record, so release it here too: the instance-change
+    // and command teleports call this before moving the character.
+    res |= transfers::unboard_all(server, player, reason);
     let instance = player.data().unit.transform.instance_id;
     if let Some((mate, point)) = server
         .systems
@@ -406,7 +415,11 @@ pub fn on_death_event(server: &GameServer, victim: &WorldObject) {
     match victim {
         WorldObject::Shipyard(s) => shipyards::on_death(server, s),
         WorldObject::Mate(m) => mates::on_death(server, m),
-        WorldObject::Player(p) => slaves::on_character_death(server, p),
+        WorldObject::Player(p) => {
+            slaves::on_character_death(server, p);
+            // A dead passenger leaves the carriage too; the C# had no transfer boarding at all.
+            transfers::unboard_all(server, p, slaves::attach_reason::NONE);
+        }
         _ => {}
     }
 }
@@ -502,6 +515,7 @@ pub fn leave_extra_logout_ms(server: &GameServer, player: &PlayerRef) -> i32 {
 /// closes coffers and calls [`force_dismount`], as the C# order).
 pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
     let _items = server.systems.economy.operation_scope();
+    transfers::unboard_all(server, player, slaves::attach_reason::NONE);
     let Some(_departure) = server
         .systems
         .vehicles
@@ -525,6 +539,7 @@ pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
 /// now, the active vehicle 10 minutes later unless the character logs in again).
 pub fn on_disconnect(server: &GameServer, player: &PlayerRef) {
     let _items = server.systems.economy.operation_scope();
+    transfers::unboard_all(server, player, slaves::attach_reason::NONE);
     let Some(_departure) = server
         .systems
         .vehicles

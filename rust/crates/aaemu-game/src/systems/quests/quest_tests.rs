@@ -188,3 +188,25 @@ async fn objectives_array_bounds_does_not_throw() {
         assert!(quest_mut(ctx, h).objectives.get_mut(10).is_none());
     });
 }
+
+/// An offline quest `AddCrime` saves the points only: the faction is left for the select
+/// (`Character.CheckWantedThreshold` -> `SetFaction(Pirate)` with the live player), like
+/// `add_offline_crime_points`. Writing `faction_id` here skipped the broadcasts, the house
+/// faction sync and the guild / party removal.
+#[tokio::test]
+async fn an_offline_quest_crime_leaves_the_pirate_faction_to_the_select() {
+    use super::bridges::GameQuestHooks;
+    use super::hooks::QuestHooks;
+    use super::tests::{character, server_with};
+
+    let (server, _) = server_with(|_| {});
+    let mut c = character();
+    c.unit.faction_id = 101;
+    c.infamy_point = crate::systems::social::crime::PIRATE_CRIME_POINT_THRESHOLD - 10;
+    GameQuestHooks.add_crime(&server, None, &mut c, 25);
+    assert!(c.infamy_point >= crate::systems::social::crime::PIRATE_CRIME_POINT_THRESHOLD);
+    assert_eq!(
+        c.unit.faction_id, 101,
+        "the select applies SetFaction(Pirate), not the offline quest hook"
+    );
+}

@@ -28,7 +28,7 @@ pub const FOR_SALE_MARKER_DOODAD_ID: u32 = 6760;
 pub const MAX_HEAVY_TAX_COUNTED: i32 = 10;
 /// `HoursForFailedTaxToReturnHouse`.
 pub const HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE: i64 = 22;
-/// `CopperPerCertificate`.
+/// `CopperPerCertificate` (fallback when `content_configs` 37 is missing).
 pub const COPPER_PER_CERTIFICATE: f64 = 1_000_000.0;
 /// `BuffConstants.Untouchable`.
 pub const BUFF_UNTOUCHABLE: u32 = 545;
@@ -36,13 +36,40 @@ pub const BUFF_UNTOUCHABLE: u32 = 545;
 pub const BUFF_REMOVAL_DEBUFF: u32 = 2250;
 /// `FactionsEnum.Monstrosity`.
 pub const FACTION_MONSTROSITY: u32 = 115;
-/// `Item.TaxCertificate` / `BoundTaxCertificate` / `AppraisalCertificate`.
+/// `Item.TaxCertificate` / `BoundTaxCertificate` / `AppraisalCertificate` (the appraisal item id
+/// is the fallback for `content_configs` 57).
 pub const TAX_CERTIFICATE: u32 = 31891;
 pub const BOUND_TAX_CERTIFICATE: u32 = 31892;
 pub const APPRAISAL_CERTIFICATE: u32 = 28085;
 
+/// `content_configs` 37: the copper per tax certificate divisor, read by the client in
+/// `FUN_39897100` (`max(1, money / value)`). The shipped 1.2 row is 1,000,000; a missing or
+/// non-positive row keeps [`COPPER_PER_CERTIFICATE`].
+pub fn copper_per_certificate(server: &GameServer) -> f64 {
+    server
+        .game_data
+        .content_configs
+        .content_config(37)
+        .filter(|value| *value > 0)
+        .map_or(COPPER_PER_CERTIFICATE, |value| value as f64)
+}
+
+/// `content_configs` 57: the appraisal certificate item id the client's sale window reads
+/// (`dll.c:657520`, `934215`). The shipped 1.2 row is 28085; a missing / non-item row keeps
+/// [`APPRAISAL_CERTIFICATE`].
+pub fn appraisal_certificate(server: &GameServer) -> u32 {
+    server
+        .game_data
+        .content_configs
+        .content_config(57)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .unwrap_or(APPRAISAL_CERTIFICATE)
+}
+
 const DAY: i64 = 24 * 3600;
-/// Existing interval between the tax due date and removal deadline.
+/// The C# `TaxDueDate` interval (`ProtectionEndDate.AddDays(-7)`), kept for a house whose
+/// housing group, area or `allowed_tax_delay_week` column is missing / NULL.
 pub const TAX_PAYMENT_GRACE_DAYS: i64 = 7;
 
 /// `DateTime.UtcNow` in unix seconds (housing dates are stored with second precision, like the
@@ -51,9 +78,22 @@ pub fn now() -> UnixTime {
     chrono::Utc::now().timestamp()
 }
 
-/// `TaxDueDate` (`ProtectionEndDate.AddDays(-7)`).
-pub fn tax_due_date(h: &House) -> UnixTime {
-    h.protection_end_date - TAX_PAYMENT_GRACE_DAYS * DAY
+/// Days between the tax bill's due date and removal: `housing_groups.allowed_tax_delay_week`
+/// of the house's group times 7 (WP-H1). The shipped 1.2 data authors 1 for every extendable
+/// group; group 13 authors 0 and cannot be extended (it never gets a bill and is removed at
+/// `protection_end_date`). A missing group / area / world / column (or a negative value) keeps
+/// [`TAX_PAYMENT_GRACE_DAYS`].
+pub fn tax_grace_days(server: &GameServer, h: &House) -> i64 {
+    super::placement::house_group(server, &h.unit.transform)
+        .and_then(|group| group.allowed_tax_delay_week)
+        .filter(|weeks| *weeks >= 0)
+        .map_or(TAX_PAYMENT_GRACE_DAYS, |weeks| weeks.saturating_mul(7))
+}
+
+/// `TaxDueDate` (`ProtectionEndDate - allowed_tax_delay_week * 7 days`; the C# fixed 7 when the
+/// group has no value).
+pub fn tax_due_date(server: &GameServer, h: &House) -> UnixTime {
+    h.protection_end_date - tax_grace_days(server, h) * DAY
 }
 
 /// The `HousingManager` maps.
@@ -272,16 +312,28 @@ pub fn send_error(player: &PlayerRef, error: i16) {
 /// `ErrorMessageType` values housing sends.
 pub mod error_message {
     pub const HOUSE_CANNOT_DECORATE: i16 = 122;
+    pub const HOUSE_NOT_DECORATABLE_STATE: i16 = 123;
+    pub const HOUSE_TOO_MANY_DECORATIONS: i16 = 124;
+    pub const TOO_FAR_AWAY: i16 = 154;
     pub const BAG_INVALID_ITEM: i16 = 181;
+    pub const TOO_FAR_TO_DECORATE_HOUSE: i16 = 199;
+    pub const HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN: i16 = 289;
     pub const MAIL_NOT_ENOUGH_MONEY_TO_PAY_TAXES: i16 = 481;
     pub const INVALID_HOUSE_INFO: i16 = 614;
+    pub const ACATBILITY_DECO_ARRANG_FAIL: i16 = 629;
+    pub const HOUSE_CANNOT_SELL_AS_NOT_OWNER: i16 = 642;
+    pub const HOUSE_CANNOT_SELL_AS_TYPE: i16 = 644;
+    pub const HOUSE_CANNOT_SELL_AS_DELAYED_TAX: i16 = 645;
+    pub const HOUSE_CANNOT_SELL_AS_ALREADY_FOR_SALE: i16 = 646;
     pub const HOUSE_CANNOT_SELL_AS_NOT_ENOUGH_SEAL: i16 = 647;
     pub const HOUSE_CANNOT_SELL_AS_DESIGNATED_BUYER_NOT_FOUND: i16 = 648;
+    pub const HOUSE_CANNOT_SELL_AS_TOO_LOW_PRICE: i16 = 650;
     pub const HOUSE_CANNOT_BUY_AS_NOT_FOR_SALE: i16 = 654;
     pub const HOUSE_CANNOT_BUY_AS_OWNER: i16 = 655;
     pub const HOUSE_CANNOT_BUY_AS_NOT_DESIGNATED_BUYER: i16 = 656;
     pub const HOUSE_CANNOT_BUY_AS_NOT_ENOUGH_MONEY: i16 = 657;
     pub const HOUSE_CANNOT_BUY_AS_SALE_INFO_CHANGED: i16 = 658;
+    pub const HOUSE_CANNOT_SELL_AS_UNDER_CONSTRUCTION: i16 = 668;
 }
 
 /// The `Permission` setter (always-public templates force `Public`).
@@ -313,9 +365,9 @@ pub fn refresh_expedition(server: &GameServer, house: &HouseRef) {
     house.data().unit.expedition_id = guild;
 }
 
-/// `FactionManager.GetFaction(id)?.Id` (0 = null).
+/// `FactionManager.GetFaction(id)?.Id` (0 = null), including the runtime player nations.
 fn faction_or_null(server: &GameServer, faction_id: u32) -> u32 {
-    if server.game_data.factions.get(faction_id).is_some() {
+    if crate::systems::social::nation::faction_exists(server, faction_id) {
         faction_id
     } else {
         0
@@ -933,8 +985,8 @@ pub fn tax_mail_update(server: &GameServer, house: &HouseRef) -> TaxMailUpdate {
     let info = quote.info;
     let now = now();
     let mut late_fees = 0;
-    let mut deadline = tax_due_date(&h);
-    if tax_due_date(&h) <= now {
+    let mut deadline = tax_due_date(server, &h);
+    if tax_due_date(server, &h) <= now {
         late_fees = 1;
         deadline = h.protection_end_date;
     }
@@ -1027,7 +1079,7 @@ pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
         let h = house.data();
         (
             h.protection_end_date <= now,
-            tax_due_date(&h) <= now,
+            tax_due_date(server, &h) <= now,
             h.unit.owner_id,
             h.id,
         )
@@ -1656,4 +1708,44 @@ pub fn house_doodads(server: &GameServer, house: &HouseRef) -> Vec<DoodadRef> {
     };
     let id = house.data().id;
     world.doodads_by_house_db_id(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::test_support::test_server_with;
+
+    fn server_with(rows: &[(u32, i64)]) -> GameServer {
+        let mut data = GameData::empty();
+        for (id, value) in rows {
+            data.content_configs.insert(*id, *value);
+        }
+        test_server_with(data)
+    }
+
+    /// Shipped-data no-op: a missing row keeps the old constants (ids 37 and 57 equal them).
+    #[tokio::test]
+    async fn certificate_config_values_fall_back_to_the_constants() {
+        let server = test_server_with(GameData::empty());
+        assert_eq!(copper_per_certificate(&server), COPPER_PER_CERTIFICATE);
+        assert_eq!(appraisal_certificate(&server), APPRAISAL_CERTIFICATE);
+    }
+
+    /// `content_configs` 37 / 57 drive the sale certificate count and the mailed item.
+    #[tokio::test]
+    async fn certificate_config_values_follow_content_configs() {
+        let server = server_with(&[(37, 500), (57, 9_999)]);
+        assert_eq!(copper_per_certificate(&server), 500.0);
+        assert_eq!(appraisal_certificate(&server), 9_999);
+        // 1001 copper at 500 per certificate -> ceil(2.002) = 3.
+        assert_eq!(
+            crate::systems::housing::ops::calculate_sale_certificates(&server, 1_001),
+            3
+        );
+        // Invalid rows (0 / negative) keep the fallbacks.
+        let server = server_with(&[(37, 0), (57, -4)]);
+        assert_eq!(copper_per_certificate(&server), COPPER_PER_CERTIFICATE);
+        assert_eq!(appraisal_certificate(&server), APPRAISAL_CERTIFICATE);
+    }
 }

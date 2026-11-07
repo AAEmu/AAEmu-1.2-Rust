@@ -198,8 +198,8 @@ pub struct ItemDetails {
     pub slave_type: u8,
     pub slave_db_id: u32,
     pub slave_is_destroyed: u8,
-    /// `SummonSlave.RepairStartTime` (unix seconds, 0 = `DateTime.MinValue`). Never restored
-    /// from the DB (the C# `ReadDetails` always falls back to `MinValue`).
+    /// `SummonSlave.RepairStartTime` (unix seconds, 0 = `DateTime.MinValue`). Restored from the
+    /// `items.details` blob by `read_details`; negative stored values clamp to 0.
     pub slave_repair_start_time: UnixTime,
     // TreasureMap
     pub map_position_x: i64,
@@ -221,6 +221,11 @@ pub struct Item {
     pub count: i32,
     pub lifespan_mins: i32,
     pub made_unit_id: u32,
+    /// Character id of the crafter of a crafted item (`0` = not crafted). Written to the
+    /// client's `madeUnitId` field, which the 1.2 tooltip resolves to the crafter's name
+    /// (`FUN_39423560` reads item `+0x14` and looks the id up with `FUN_39018560`).
+    /// `made_unit_id` keeps the older/other uses (fish template id, music sheet author).
+    pub crafter_id: u32,
     /// `Item()` sets this to `AppConfiguration.Id`; it is not stored in the DB.
     pub world_id: u8,
     pub create_time: UnixTime,
@@ -254,6 +259,7 @@ pub struct ItemRow {
     pub count: i32,
     pub lifespan_mins: i32,
     pub made_unit_id: u32,
+    pub crafter_id: u32,
     pub unsecure_time: UnixTime,
     pub unpack_time: UnixTime,
     pub created_at: UnixTime,
@@ -309,6 +315,7 @@ impl Item {
             count: row.count,
             lifespan_mins: row.lifespan_mins,
             made_unit_id: row.made_unit_id,
+            crafter_id: row.crafter_id,
             world_id,
             create_time: row.created_at,
             unsecure_time: row.unsecure_time,
@@ -395,6 +402,7 @@ impl Item {
             count,
             lifespan_mins: 0,
             made_unit_id: 0,
+            crafter_id: 0,
             world_id,
             create_time: now,
             unsecure_time: 0,
@@ -439,6 +447,7 @@ impl Item {
             count: 0,
             lifespan_mins: 0,
             made_unit_id: 0,
+            crafter_id: 0,
             world_id,
             create_time: 0,
             unsecure_time: 0,
@@ -493,6 +502,19 @@ impl Item {
         self.dirty = true;
     }
 
+    /// The character id written into the client's `madeUnitId` item field, which the 1.2 tooltip
+    /// resolves to the crafter's name (`FUN_39423560` -> `FUN_39018560`). Crafted items carry
+    /// it in `crafter_id`; rows written before that column existed (and the non-craft uses:
+    /// fish template id, music sheet author) still carry it in `made_unit_id`, which stays the
+    /// fallback so no existing item loses the field it sends today.
+    pub fn crafter(&self) -> u32 {
+        if self.crafter_id != 0 {
+            self.crafter_id
+        } else {
+            self.made_unit_id
+        }
+    }
+
     /// The `DetailType` byte `Item.Write` / the item task write. Every write path goes through
     /// this guard: a type the 1.2 client cannot read (10, 11, ...) would desync the item.
     pub fn wire_detail_type(&self) -> u8 {
@@ -531,7 +553,11 @@ impl Item {
     /// The subclass `ReadDetails` overrides, applied to the `details` blob.
     fn read_details(&mut self, blob: &[u8]) {
         let need = self.class.detail_bytes_length();
-        if need == 0 || blob.len() < need {
+        // A `SummonSlave` blob that stops after the destroyed flag (an old/hand-written row
+        // without the repair field) still restores its 5-byte header; every other class keeps
+        // the C# `ReadDetails` rule of skipping a blob shorter than `DetailBytesLength`.
+        let short_summon_slave = self.class == ItemClass::SummonSlave && blob.len() >= 5;
+        if need == 0 || (blob.len() < need && !short_summon_slave) {
             // Base Item.ReadDetails with DetailType Invalid reads nothing; subclasses bail out
             // when `LeftBytes < DetailBytesLength`.
             return;
@@ -577,8 +603,22 @@ impl Item {
                     d.slave_type = s.read_u8()?;
                     d.slave_db_id = s.read_bc()?;
                     d.slave_is_destroyed = s.read_u8()?;
-                    // C#: `Convert.ToInt32(byte[])` always throws InvalidCastException, so
-                    // RepairStartTime ends up DateTime.MinValue and the rest is skipped.
+                    // The C# `ReadDetails` threw on the time (`Convert.ToInt32(byte[])`) and
+                    // never stored `RepairStartTime`, so the 10 minute repair-kit timer was
+                    // lost on every load. `write_details` emits it right after the destroyed
+                    // flag as an i64 (0 when unset); restore it, clamping garbage to unset.
+                    // Legacy C# blobs decode too: unset was i32 0 followed by five i32 zeros,
+                    // set was an i64 followed by five i32 zeros.
+                    if s.remaining() >= 8 {
+                        d.slave_repair_start_time = s.read_i64()?.max(0);
+                    }
+                    // Four unused i32 filler fields follow the time (always written as 0).
+                    for _ in 0..4 {
+                        if s.remaining() < 4 {
+                            break;
+                        }
+                        s.read_i32()?;
+                    }
                 }
                 ItemClass::TreasureMap => {
                     let _ = s.read_i64()?;
@@ -1072,7 +1112,7 @@ impl Marshal for Item {
         self.write_details(s);
         s.write_i64(self.create_time)
             .write_i32(self.lifespan_mins)
-            .write_u32(self.made_unit_id)
+            .write_u32(self.crafter())
             .write_u8(self.world_id)
             .write_i64(self.unsecure_time)
             .write_i64(self.unpack_time);
@@ -1150,6 +1190,71 @@ mod tests {
             .write_u8(1)
             .write_i64(0)
             .write_i64(600);
+        assert_eq!(s.as_bytes(), want.as_bytes());
+    }
+
+    /// The client reader `FUN_3961f500` (`x2game.dll.c:1301392`) reads one u32 between
+    /// `lifespanMins` and `worldId`; the tooltip (`FUN_39423560`) resolves it to the crafter's
+    /// name. Crafted items carry it in `crafter_id`, which wins over the legacy `made_unit_id`.
+    #[test]
+    fn crafted_item_write_puts_the_crafter_id_in_the_made_unit_field() {
+        let row = ItemRow {
+            type_name: "AAEmu.Game.Models.Game.Items.Item".into(),
+            id: 0x0102030405060708,
+            template_id: 0x1000,
+            count: 1,
+            made_unit_id: 0x5566_7788,
+            crafter_id: 0x1122_3344,
+            ..ItemRow::default()
+        };
+        let item = Item::from_row(row, Some(&ItemTemplate::plain(0x1000, 1)), 1);
+        let mut s = PacketStream::new();
+        item.write(&mut s);
+        let mut want = PacketStream::new();
+        want.write_u32(0x1000)
+            .write_u64(0x0102030405060708)
+            .write_u8(0)
+            .write_u8(0)
+            .write_i32(1)
+            .write_u8(detail_type::INVALID)
+            .write_i64(0)
+            .write_i32(0)
+            .write_u32(0x1122_3344) // crafter id, not made_unit_id
+            .write_u8(1)
+            .write_i64(0)
+            .write_i64(0);
+        assert_eq!(s.as_bytes(), want.as_bytes());
+    }
+
+    /// Rows written before the `crafter_id` column (and the non-craft uses of `made_unit_id`:
+    /// fish template id, music sheet author) keep sending their `made_unit_id` unchanged.
+    #[test]
+    fn item_without_a_crafter_column_keeps_the_legacy_made_unit_id_on_the_wire() {
+        let row = ItemRow {
+            type_name: "AAEmu.Game.Models.Game.Items.Item".into(),
+            id: 0x0102030405060708,
+            template_id: 0x1000,
+            count: 1,
+            made_unit_id: 0x5566_7788,
+            crafter_id: 0,
+            ..ItemRow::default()
+        };
+        let item = Item::from_row(row, Some(&ItemTemplate::plain(0x1000, 1)), 1);
+        let mut s = PacketStream::new();
+        item.write(&mut s);
+        let mut want = PacketStream::new();
+        want.write_u32(0x1000)
+            .write_u64(0x0102030405060708)
+            .write_u8(0)
+            .write_u8(0)
+            .write_i32(1)
+            .write_u8(detail_type::INVALID)
+            .write_i64(0)
+            .write_i32(0)
+            .write_u32(0x5566_7788) // legacy made_unit_id
+            .write_u8(1)
+            .write_i64(0)
+            .write_i64(0);
         assert_eq!(s.as_bytes(), want.as_bytes());
     }
 

@@ -761,7 +761,7 @@ impl EconomyForSkills {
             )
         };
         tracing::debug!("Player {name}");
-        let mut out = Out::Direct;
+        let mut out = Out::Direct(server);
         if recoverable <= 0 {
             // Is this one correct?
             send_error_message_to(
@@ -986,7 +986,7 @@ impl ItemSkillHooks for EconomyForSkills {
     }
 
     fn item_count(&self, _server: &GameServer, player: &PlayerRef, template_id: u32) -> i32 {
-        Inv::of(player).items_count(template_id, -1)
+        Inv::of(player).items_count_unlocked(template_id, -1)
     }
 
     fn owned_item(
@@ -1217,6 +1217,7 @@ impl ItemSkillHooks for EconomyForSkills {
             restored.details = taken.item.details.clone();
             restored.lifespan_mins = taken.item.lifespan_mins;
             restored.made_unit_id = taken.item.made_unit_id;
+            restored.crafter_id = taken.item.crafter_id;
             restored.create_time = taken.item.create_time;
             restored.unsecure_time = taken.item.unsecure_time;
             restored.unpack_time = taken.item.unpack_time;
@@ -1251,7 +1252,7 @@ impl ItemSkillHooks for EconomyForSkills {
         let inv = Inv::of(player);
         // The economy operation lock serialises item moves, so this count cannot change before
         // the debit below: a missing reagent consumes nothing.
-        if inv.items_count(template_id, -1) < amount {
+        if inv.items_count_unlocked(template_id, -1) < amount {
             return Some(false);
         }
         let consumed = inventory::consume_item(
@@ -1333,7 +1334,7 @@ impl ItemSkillHooks for EconomyForSkills {
         let mut txn = ItemTxn::begin(server);
         let inv = Inv::of(player);
         // Match both the availability check and Inventory.ConsumeItem's container set.
-        if inv.items_count(template_id, -1) < amount {
+        if inv.items_count_unlocked(template_id, -1) < amount {
             return None;
         }
         let snapshots: Vec<_> = [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK]
@@ -1533,9 +1534,59 @@ impl ItemSkillHooks for EconomyForSkills {
                     world_interaction, ..
                 },
             ) => Self::craft_effect(server, *world_interaction, args),
-            // Trace-only effects in C#.
-            (EffectKind::TrainCraftEffect, _) => {
-                tracing::trace!("TrainCraftEffect");
+            (EffectKind::TrainCraftEffect, EffectTemplate::TrainCraft { craft_id, .. }) => {
+                let Some(player) = player_caster(args) else {
+                    return true;
+                };
+                // An item cast names its template on the caster; the source item may already
+                // have been debited out of its container. Only a non-item cast uses the
+                // effect's own craft.
+                let item_template_id = match args.caster_caster {
+                    SkillCaster::Item {
+                        item_template_id, ..
+                    } => Some(item_template_id),
+                    _ => None,
+                };
+                match super::craft_learning::train_craft(
+                    server,
+                    player,
+                    *craft_id,
+                    item_template_id,
+                ) {
+                    super::craft_learning::TrainOutcome::Learned(crafts) => {
+                        tracing::debug!(
+                            character = player.character_id,
+                            ?crafts,
+                            "TrainCraftEffect: learned craft"
+                        );
+                    }
+                    super::craft_learning::TrainOutcome::AlreadyLearned => {
+                        tracing::debug!(
+                            character = player.character_id,
+                            craft_id,
+                            "TrainCraftEffect: craft already learned, item kept"
+                        );
+                        // `craft_already_learned` (client error id 0x81 = 129, X2G:1136026).
+                        inventory::send_error_message(
+                            player,
+                            error_message::CRAFT_ALREADY_LEARNED,
+                            0,
+                            true,
+                        );
+                        // `Skill.Apply` refunds its pre-debited source item unless the cast is
+                        // cancelled, as the dye path does.
+                        cancel_skill(args);
+                    }
+                    super::craft_learning::TrainOutcome::NoRecipe { item_template_id } => {
+                        tracing::warn!(
+                            character = player.character_id,
+                            ?item_template_id,
+                            effect_craft_id = craft_id,
+                            "TrainCraftEffect: no learnable craft in the data, item kept"
+                        );
+                        cancel_skill(args);
+                    }
+                }
                 true
             }
             (EffectKind::AccountAttributeEffect, EffectTemplate::AccountAttribute(e)) => {
@@ -1625,6 +1676,35 @@ impl ItemSkillHooks for EconomyForSkills {
             &mut txn.env,
         );
         result
+    }
+
+    fn consume_bag_item_by_id(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        task_type: u8,
+        item_id: u64,
+        expected_template_id: u32,
+        amount: i32,
+    ) -> Option<bool> {
+        let container = Inv::of(player).bag();
+        let mut txn = ItemTxn::begin(server);
+        let mut guard = lock(&container);
+        let matches = guard.get_item_by_id(item_id).is_some_and(|item| {
+            item.template_id == expected_template_id
+                && item.owner_id == u64::from(player.character_id)
+        });
+        if !matches || amount <= 0 {
+            return Some(false);
+        }
+        let consumed = guard.consume_item(
+            task_type,
+            expected_template_id,
+            amount,
+            Some(item_id),
+            &mut txn.env,
+        );
+        Some(consumed == amount)
     }
 
     fn ucc_create_stamp(
@@ -1719,6 +1799,37 @@ impl ItemSkillHooks for EconomyForSkills {
             player,
             task_packet(task_type::DYEING, vec![ItemTask::update(&after)]),
         );
+    }
+
+    fn renew_equipment(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        source_item_id: u64,
+        source_template_id: u32,
+        source_slot: u32,
+        target_item_id: u64,
+        target_slot: u32,
+        armor: Option<bool>,
+        npc_template_id: Option<u32>,
+    ) -> bool {
+        let kind = match armor {
+            None => super::renew::EnchantKind::Renew,
+            Some(false) => super::renew::EnchantKind::Weapon,
+            Some(true) => super::renew::EnchantKind::Armor,
+        };
+        super::renew::renew_equipment(
+            server,
+            player,
+            source_item_id,
+            source_template_id,
+            source_slot,
+            target_item_id,
+            target_slot,
+            kind,
+            npc_template_id,
+            &mut SharedRandom,
+        )
     }
 
     fn give_fishing_loot(
@@ -1974,6 +2085,7 @@ impl crate::systems::services::music::SheetMusicInventory for EconomySheetMusic<
         };
         sheet.owner_id = u64::from(player.character_id);
         sheet.made_unit_id = player.character_id;
+        sheet.crafter_id = player.character_id;
         sheet.details.song_id = song_id;
         let data = txn.data();
         let bag = Inv::of(player).bag();
@@ -2011,7 +2123,7 @@ pub struct EconomyForServices;
 
 impl crate::systems::services::item_ops::CharacterItemOps for EconomyForServices {
     fn items_count(&self, _server: &GameServer, player: &PlayerRef, template_id: u32) -> i32 {
-        Inv::of(player).items_count_in(slot_type::INVENTORY, template_id, -1)
+        Inv::of(player).items_count_in_unlocked(slot_type::INVENTORY, template_id, -1)
     }
 
     fn consume_item(
@@ -2351,7 +2463,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
     }
 
     fn item_count(&self, _server: &GameServer, player: &PlayerRef, template_id: u32) -> i32 {
-        Inv::of(player).items_count(template_id, -1)
+        Inv::of(player).items_count_unlocked(template_id, -1)
     }
 
     fn give_loot_pack(&self, server: &GameServer, player: &PlayerRef, loot_pack_id: u32) -> bool {
@@ -2387,6 +2499,50 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         } else {
             inventory::add_money(&mut txn.out(), player, slot_type::INVENTORY, amount, task)
         }
+    }
+
+    fn try_claim_shop_purchase(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        template_id: u32,
+        count: i32,
+    ) -> bool {
+        let Some(limit) = super::shop_limits::purchase_limit(server, template_id) else {
+            return true;
+        };
+        let claim = super::shop_limits::ShopClaim {
+            item_id: template_id,
+            count,
+            limit,
+        };
+        server
+            .systems
+            .economy
+            .shop_limits
+            .try_claim(player.character_id, &[claim])
+    }
+
+    fn release_shop_purchase(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        template_id: u32,
+        count: i32,
+    ) {
+        let Some(limit) = super::shop_limits::purchase_limit(server, template_id) else {
+            return;
+        };
+        let claim = super::shop_limits::ShopClaim {
+            item_id: template_id,
+            count,
+            limit,
+        };
+        server
+            .systems
+            .economy
+            .shop_limits
+            .release(player.character_id, &[claim]);
     }
 
     fn npc_has_loot_items(&self, server: &GameServer, npc: &NpcRef) -> bool {
@@ -3403,6 +3559,7 @@ impl crate::systems::quests::hooks::QuestHooks for EconomyForQuests {
     ) {
         // ChangeMoney(SlotType.None, SlotType.Inventory, amount) (DepositMoney)
         c.money += i64::from(amount);
+        let money = c.money;
         let mut fx = ItemFxList::default();
         fx.send(
             c.id,
@@ -3411,6 +3568,11 @@ impl crate::systems::quests::hooks::QuestHooks for EconomyForQuests {
                 vec![ItemTask::MoneyChange(amount)],
             ),
         );
+        // A quest reward deposit is an upward money change like any other: `fx::flush` reports
+        // the absolute `MY_GOLD` value after the character lock is released.
+        if amount > 0 {
+            fx.push(ItemFx::Money { owner: c.id, money });
+        }
         Self::defer(server, c.id, fx);
     }
 
@@ -3569,6 +3731,7 @@ fn house_item(server: &GameServer, item: &Item) -> crate::systems::housing::hook
             .template(item.template_id)
             .map_or(1, |t| t.max_count),
         soul_bound: item.has_flag(crate::models::item::ITEM_FLAG_SOUL_BOUND),
+        secure: item.has_flag(crate::models::item::ITEM_FLAG_SECURE),
         slot_type: item.slot_type,
         ucc_id: item.ucc_id,
         big_fish: (item.class == ItemClass::BigFish)
@@ -3605,20 +3768,14 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         count: i32,
     ) -> bool {
         use crate::systems::housing::hooks::item_task;
-        use crate::systems::housing::manager::APPRAISAL_CERTIFICATE;
+        let certificate = crate::systems::housing::manager::appraisal_certificate(server);
         let mut txn = ItemTxn::begin(server);
         let bag = Inv::of(player).bag();
         let mut bag = lock(&bag);
-        if count <= 0 || bag.items_by_template(APPRAISAL_CERTIFICATE, -1).1 < count {
+        if count <= 0 || bag.items_by_template_unlocked(certificate, -1).1 < count {
             return false;
         }
-        bag.consume_item(
-            item_task::BUY_HOUSE,
-            APPRAISAL_CERTIFICATE,
-            count,
-            None,
-            &mut txn.env,
-        ) == count
+        bag.consume_item(item_task::BUY_HOUSE, certificate, count, None, &mut txn.env) == count
     }
 
     fn pay_house_construction(
@@ -3670,8 +3827,14 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
             {
                 return Err(HouseConstructionError::InvalidDesign);
             }
-            let bound = bag.items_by_template(BOUND_TAX_CERTIFICATE, -1).1.max(0);
-            let unbound = bag.items_by_template(TAX_CERTIFICATE, -1).1.max(0);
+            if item.has_flag(crate::models::item::ITEM_FLAG_SECURE) {
+                return Err(HouseConstructionError::ItemLocked);
+            }
+            let bound = bag
+                .items_by_template_unlocked(BOUND_TAX_CERTIFICATE, -1)
+                .1
+                .max(0);
+            let unbound = bag.items_by_template_unlocked(TAX_CERTIFICATE, -1).1.max(0);
             (bound, unbound)
         };
         if total < 0 {
@@ -3758,7 +3921,7 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         player: &PlayerRef,
         template_id: u32,
     ) -> i32 {
-        Inv::of(player).items_count_in(slot_type::INVENTORY, template_id, -1)
+        Inv::of(player).items_count_in_unlocked(slot_type::INVENTORY, template_id, -1)
     }
 
     fn bag_consume_item(

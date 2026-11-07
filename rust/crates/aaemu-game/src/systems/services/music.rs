@@ -7,11 +7,12 @@
 //! the economy subsystem implements (it also implements the skills `ItemSkillHooks`
 //! `midi_cache` / `create_sheet_music` by calling this manager).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use aaemu_commons::{Marshal, PacketStream};
 use futures::future::BoxFuture;
+use serde::Deserialize;
 use sqlx::Row;
 
 use crate::error::Result;
@@ -22,6 +23,7 @@ use crate::opcodes::sc;
 use crate::packets::packet_def;
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
+use crate::systems::economy::error_message::USER_NOTE_CANNOT_SAVE;
 use crate::world::{PlayerRef, WorldObject};
 
 /// `BuffConstants.ScoreMemorized`.
@@ -30,6 +32,129 @@ pub const BUFF_SCORE_MEMORIZED: u32 = 6010;
 pub const TAG_PLAY_SONG: u32 = 1155;
 /// `ErrorMessageType.BagFull`.
 const ERROR_BAG_FULL: i16 = 25;
+
+/// `Music` (Rust only): the upload sanity the server applies before storing a user song.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MusicConfig {
+    /// Outer sanity bound for a `CSSaveUserMusicNotes` song, in UTF-16 code units. The real
+    /// limit is the client's `music_note_limits` row for the player's Artistry grade (at most
+    /// 1000, also the UI's hard input cap); this cap defaults above it so it never binds.
+    /// `Music.MaxSongChars`.
+    #[serde(rename = "maxsongchars", deserialize_with = "crate::config::lenient")]
+    pub max_song_chars: usize,
+}
+
+impl Default for MusicConfig {
+    fn default() -> Self {
+        Self {
+            max_song_chars: 3000,
+        }
+    }
+}
+
+/// `actability_groups` id 33 (`예술`, Artistry). The composition UI asks
+/// `X2Ability.GetMyActabilityInfo(33)` and matches that grade against
+/// `X2UserMusic.GetCompositionLimitInfos()` (`user_music.alb`).
+pub const ARTISTRY_ACTABILITY_ID: u32 = 33;
+
+/// `music_note_limits`: the maximum song length per Artistry grade. The 1.2 client loads it
+/// (`dll.c:1207337`) and `X2UserMusic.GetCompositionLimitInfos` returns one
+/// `{ grade, compositionLimit }` per row; `SaveNotes` refuses a song longer than the player's
+/// limit (`FUN_39079640`, `FUN_39082130`).
+#[derive(Debug, Default)]
+pub struct MusicNoteLimits {
+    /// `(step, note_length)` in step order.
+    limits: Vec<(u8, u32)>,
+}
+
+impl MusicNoteLimits {
+    /// `SELECT step, note_length FROM music_note_limits ORDER BY step ASC` (11 rows in the
+    /// shipped data: 0 -> 200, 1 -> 400, 2 -> 600, 3 -> 800, 4..10 -> 1000).
+    pub fn load(conn: &rusqlite::Connection) -> Result<Self, crate::data::GameDataError> {
+        let mut limits = Vec::new();
+        crate::data::sqlite::for_each_row(
+            conn,
+            "SELECT step, note_length FROM music_note_limits ORDER BY step ASC",
+            [],
+            |r| {
+                limits.push((r.u8("step")?, r.u32("note_length")?));
+                Ok(())
+            },
+        )?;
+        Ok(Self { limits })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_limits(limits: impl IntoIterator<Item = (u8, u32)>) -> Self {
+        Self {
+            limits: limits.into_iter().collect(),
+        }
+    }
+
+    /// The composition limit for an Artistry grade. The table ends at step 10 while an
+    /// actability can regrade past it, so a higher grade uses the highest authored limit (the
+    /// table saturates at 1000, which is also the UI's hard input cap, `SetMaxTextLength(scoreEdit, 1000)`).
+    pub fn limit(&self, step: u8) -> Option<u32> {
+        self.limits
+            .iter()
+            .take_while(|(s, _)| *s <= step)
+            .last()
+            .map(|(_, limit)| *limit)
+    }
+
+    pub fn len(&self) -> usize {
+        self.limits.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.limits.is_empty()
+    }
+}
+
+/// `instrument_sounds` item ids (the 1.2 client loads `item_id, midi` for its composition UI,
+/// `dll.c:1559064`). The server only needs the set of playable instrument templates: an upload
+/// from anything else is refused.
+#[derive(Debug, Default)]
+pub struct InstrumentSounds {
+    ids: HashSet<u32>,
+}
+
+impl InstrumentSounds {
+    /// `SELECT item_id FROM instrument_sounds` (199 rows in the shipped data).
+    pub fn load(conn: &rusqlite::Connection) -> Result<Self, crate::data::GameDataError> {
+        let mut ids = HashSet::new();
+        crate::data::sqlite::for_each_row(
+            conn,
+            "SELECT item_id FROM instrument_sounds",
+            [],
+            |r| {
+                ids.insert(r.u32("item_id")?);
+                Ok(())
+            },
+        )?;
+        Ok(Self { ids })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_ids(ids: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            ids: ids.into_iter().collect(),
+        }
+    }
+
+    pub fn contains(&self, item_id: u32) -> bool {
+        self.ids.contains(&item_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
 
 /// `SongData`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -269,6 +394,69 @@ impl ClientPacket for CSSaveUserMusicNotesPacket {
             let Some(p) = conn.active_char.clone() else {
                 return Ok(());
             };
+            // The C# stored anything the client sent. Refuse what the 1.2 client cannot produce:
+            // a song longer than the player's `music_note_limits` row for the Artistry grade (the
+            // limit the client's SaveNotes enforces before sending, `FUN_39079640` /
+            // `FUN_39082130`), a song above the outer `Music.MaxSongChars` sanity bound, or a
+            // source item the player does not own. The song grammar stays unparsed (no evidenced
+            // server-side format), so a grammar failure can only be refused by the client itself.
+            let song_len = self.song.encode_utf16().count();
+            let size_mismatch = u32::try_from(song_len) != Ok(self.song_size);
+            if size_mismatch {
+                // The client writer's size unit is not evidenced (no decompile hit), so a
+                // mismatch is logged and accepted instead of dropping the upload.
+                tracing::warn!(
+                    "CSSaveUserMusicNotesPacket: song_size {} does not match the {song_len} UTF-16 characters (accepted)",
+                    self.song_size
+                );
+            }
+            let (artistry_step, composition_limit) = {
+                let c = p.data();
+                let step = c
+                    .actability
+                    .actabilities
+                    .iter()
+                    .find(|a| a.id == ARTISTRY_ACTABILITY_ID)
+                    .map_or(0, |a| a.step);
+                let limit = server
+                    .game_data
+                    .systems
+                    .services
+                    .music_note_limits
+                    .limit(step);
+                (step, limit)
+            };
+            let refusal = if let Some(limit) =
+                composition_limit.filter(|&limit| song_len as u32 > limit)
+            {
+                Some(format!(
+                    "song has {song_len} UTF-16 characters (Artistry grade {artistry_step} limit {limit})"
+                ))
+            } else if song_len > server.config.music.max_song_chars {
+                Some(format!(
+                    "song has {song_len} UTF-16 characters (max {})",
+                    server.config.music.max_song_chars
+                ))
+            } else {
+                let inv = crate::systems::economy::inventory::Inv::of(&p);
+                // The client sends the id of a bag item it found by its 64-bit id
+                // (`sub_3961E9A0` in `sub_39079640` / `sub_390799E0`), which is the music paper
+                // the later item cast consumes, not an instrument: only ownership is checked.
+                match inv.item_by_id(self.item_id) {
+                    None => Some(format!("item {} is not owned", self.item_id)),
+                    Some(_) => None,
+                }
+            };
+            if let Some(reason) = refusal {
+                tracing::warn!(
+                    "CSSaveUserMusicNotesPacket from {} refused: {reason}",
+                    p.data().unit.name
+                );
+                // The 1.2 client's own save refusal is `ErrorMessageType.UserNoteCannotSave`
+                // (0x2aa, `user_note_cannot_save`, the only error `SaveNotes` shows).
+                p.send(SCErrorMsgPacket::new(USER_NOTE_CANNOT_SAVE, 0, true));
+                return Ok(());
+            }
             server.systems.services.music.upload_song(
                 p.character_id,
                 &self.title,

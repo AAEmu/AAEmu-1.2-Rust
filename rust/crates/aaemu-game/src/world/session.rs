@@ -31,6 +31,7 @@ use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
 use crate::server::GameServer;
 use crate::systems::skills::packets::SCCooldownsPacket;
+use crate::systems::social::util::{send_chat_failure, ChatFailure};
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
 #[path = "zone_access.rs"]
@@ -330,6 +331,14 @@ pub fn resurrect_at(server: &GameServer, p: &PlayerRef, destination: Transform) 
 /// (a ship deck, a moving gimmick) is detached first; otherwise the new world position would be
 /// composed with the old parent and land in the parent's region / zone.
 pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
+    // Every `SCTeleportUnit` path ends here. Some same-world senders (the same-instance portal
+    // branch, the NPC teleporter, dominion headquarters, instant games, GM `/move all` / nudge /
+    // test height / spheres) do not call `force_dismount`, so release a transfer seat here too.
+    crate::systems::vehicles::transfers::unboard_all(
+        server,
+        p,
+        crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+    );
     let Some((filed_instance, _, _)) = p.region() else {
         // An instance load is pending: `instance_loaded` files the arrival.
         return;
@@ -462,6 +471,15 @@ pub async fn select_character(
 ) -> Result<()> {
     if server.is_shutting_down() {
         refuse_during_shutdown(conn);
+        return Ok(());
+    }
+    // During the pre-select period the client's Start button edits the character instead of
+    // entering the world (character_select.alb); a forged client must not enter either. The
+    // period is temporary and ends when the login stops advertising it.
+    if server.config.characters.pre_select_period {
+        tracing::warn!(
+            "Character select for {character_id} refused: the character pre-select period is on (Characters:PreSelectPeriod)"
+        );
         return Ok(());
     }
     let Some(idx) = conn.characters.iter().position(|c| c.id == character_id) else {
@@ -621,7 +639,8 @@ pub fn select_loaded(
 
     let data = &server.game_data;
     let snapshot = player.data().clone();
-    conn.send(&unit_state::character_state(&snapshot));
+    let bounty_money = server.systems.social.bounties.active_total(snapshot.id);
+    conn.send(&unit_state::character_state(&snapshot, bounty_money));
     conn.send(&SCCharacterGamePointsPacket {
         honor_point: snapshot.honor_point,
         vocation_point: snapshot.vocation_point,
@@ -791,6 +810,8 @@ pub fn select_loaded(
     for chunk in server.expeditions.faction_chunks() {
         conn.send(&SCFactionListPacket { factions: chunk });
     }
+    // Player nations: their faction records and relation rows (NationManager).
+    crate::systems::social::nation::send_login_lists(server, conn);
     conn.send(&SCExpeditionRolePolicyListPacket {
         policies: Vec::new(),
     });
@@ -838,13 +859,25 @@ pub fn select_loaded(
             }
         }
     }
-    {
+    let crime_faction = {
         let mut live = player.data();
         apply_active_buffs(server, &mut live, &db.saved_buffs, now_ms());
-        live.check_wanted_threshold(server, now_ms());
+        // WP-B: the premium grade buffs (`pcbang_buffs` rows with `active = 't'` for the
+        // account's grade) are part of the login state, like the saved buffs above.
+        crate::systems::services::premium::apply_login_buffs(server, &mut live);
+        let change = live.check_wanted_threshold(server, now_ms());
         // UpdateGearBonuses(null, null): gear bonuses are a later phase.
         live.restore_saved_hp_mp();
         live.breath = 60_000; // LungCapacity
+        change
+    };
+    if !crime_faction.is_empty() {
+        // `Character.CheckWantedThreshold` -> `Character.SetFaction(Pirate)` / pardon: the DB
+        // load only restored the wanted buffs; the faction change itself needs the live player
+        // and runs here, after the data lock is released (broadcast, houses, guild / party).
+        // A pirate whose infamy reached 0 while offline is pardoned here, mirroring the pirate
+        // conversion `bridges.rs` leaves to this select path.
+        crate::systems::social::faction::apply_crime_faction_change(server, &player, crime_faction);
     }
     crate::systems::skills::on_character_loaded(server, &player); // buffs, gear bonuses, exact MaxHp/MaxMp
     let zone = player.data().unit.transform.zone_id;
@@ -916,6 +949,9 @@ pub fn spawn(server: &GameServer, p: &PlayerRef) {
     server.world.try_add_character(p);
     let changes = world.show(p, &server.view_ctx());
     handle_zone_changes(server, changes);
+    // The entry `SCUnitState` exchange is done: tell the viewers this character's bounty total
+    // and this client the totals of the wanted characters it now sees (WP-SL3a).
+    crate::systems::social::bounty::on_character_entered(server, p);
 }
 
 /// `CSNotifyInGamePacket.Execute`.
@@ -962,6 +998,7 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
     crate::systems::social::session::on_notify_in_game_trial(server, &p);
     crate::systems::social::session::on_notify_in_game_achievements(server, &p);
     crate::systems::npcs::schedule_item_session::on_enter(server, &p);
+    crate::systems::npcs::schedule_events::on_enter(server, &p);
     tracing::info!("NotifyInGame: {name} ({id})");
 }
 
@@ -1215,10 +1252,39 @@ pub async fn send_chat_message(
             return;
         }
     }
-    let sender = {
-        let c = me.data();
-        chat_sender(&c, me.obj_id)
+    // SL4b: the configured per-type minimum level and the persisted GM mute (`restrict_chat`)
+    // are checked before routing. The refusal and the sender identity come from one character
+    // lock; the level gate exempts GMs (`access_level >= 100`) and the mute expires itself.
+    let (sender, refusal) = {
+        let mut c = me.data();
+        let refusal = crate::systems::social::chat::chat_refusal(
+            &server.config.chat,
+            &mut c,
+            chat,
+            Utc::now().timestamp(),
+        );
+        (chat_sender(&c, me.obj_id), refusal)
     };
+    if let Some(refusal) = refusal {
+        crate::systems::social::chat::send_chat_refusal(&me, refusal);
+        return;
+    }
+    // The 1.2 client throttles itself from `SCChatSpamDelayPacket` (`FUN_393C2540`) and shows
+    // localized message 0x108 when a message is too fast. Enforce the same limits here so a
+    // modified client cannot bypass them.
+    if !crate::systems::social::chat::chat_spam_allows(
+        &server.config.chat,
+        &mut conn.chat_spam_last,
+        chat,
+        std::time::Instant::now(),
+    ) {
+        conn.send(&SCErrorMsgPacket::new(
+            crate::systems::social::chat::CHAT_SPAM_DELAY_ERROR,
+            0,
+            true,
+        ));
+        return;
+    }
     let msg = |t: i16, s: &ChatSender| SCChatMessagePacket {
         chat_type: t,
         sender: Some(s.clone()),
@@ -1227,11 +1293,23 @@ pub async fn send_chat_message(
         language_type,
     };
     let error = |e: i16| me.send(SCErrorMsgPacket::new(e, 0, true));
+    // Channel-bound failures can use `SCChatFailedPacket(error, channel name)`; the flag is off
+    // by default because retail's choice is not captured (`CHAT-FAILED-1`).
+    let chat_failure = |e: i16, channel: &str| {
+        send_chat_failure(&me, &server.config.chat, ChatFailure::new(e, channel))
+    };
     match chat {
         chat_type::WHISPER => {
             let target = server.world.character_by_name(target_name);
             match target {
                 Some(t) if t.data().is_online => {
+                    // A blocked sender's whisper is dropped silently: the 1.2 client has no
+                    // "target has blocked you" error and its own whisper display does not
+                    // filter, so only the server can enforce the list (capture-pending, case
+                    // `BLOCK-LIST-1`).
+                    if crate::systems::social::friend::is_blocked_by(&t, me.character_id) {
+                        return;
+                    }
                     let (tf, mf) = (
                         mother_id(server, t.data().unit.faction_id),
                         mother_id(server, sender.faction_id),
@@ -1282,7 +1360,7 @@ pub async fn send_chat_message(
                             language_type,
                         );
                 }
-                None => error(error_message::CHAT_NOT_IN_EXPEDITION),
+                None => chat_failure(error_message::CHAT_NOT_IN_EXPEDITION, "Expedition"),
             }
         }
         chat_type::FAMILY => {
@@ -1299,7 +1377,7 @@ pub async fn send_chat_message(
                         language_type,
                     );
             } else {
-                error(error_message::CHAT_NOT_IN_FAMILY);
+                chat_failure(error_message::CHAT_NOT_IN_FAMILY, "Family");
             }
         }
         chat_type::REGION => {
@@ -1410,9 +1488,10 @@ pub async fn leave_world_task(
             p,
             crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
         );
-        // Chat channels, family and guild logout, pending guild invitation (shared with a hard
-        // disconnect, `on_disconnect`).
+        // Chat channels, family and guild logout, pending guild invitation and rename
+        // offers (shared with a hard disconnect, `on_disconnect`).
         crate::systems::social::session::on_leave_world(server, p);
+        crate::systems::services::premium::remove_grade_buffs(server, p);
         delete(server, p);
         // BuyBackItems.Wipe (+ the economy's per-character state)
         crate::systems::economy::on_leave_world(server, p);
@@ -1447,7 +1526,8 @@ pub async fn leave_world_task(
             // frames are flushed first). Deviation from the C#, which kept the connection and
             // the account registered until the client closed the socket or the dead-connection
             // sweep (30-60 s) did, so a prompt relog was refused ("enter world denied, reason 1").
-            server.accounts.remove_if_owned(conn.account_id(), conn.id);
+            crate::systems::services::accounts::end_session(server, conn.account_id(), conn.id)
+                .await;
             conn.shutdown();
         }
     }
@@ -1565,23 +1645,25 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     zone_access::cancel(&p);
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
     crate::systems::housing::dominion::participants::clear_player(server, &p);
+    // WP-B: the premium grade buffs are session state, not saved buffs.
+    crate::systems::services::premium::remove_grade_buffs(server, &p);
     crate::systems::economy::on_disconnect(server, &p);
     server.chat.leave_user_channels(&p, &server.ids.chat);
     // A character that still is the live world entry has not been through `leave_world_task`
     // (a connection keeps its `active_char` after a leave): its social logout is still to do.
-    let live = server
+    let live_now = server
         .world
         .character_by_obj_id(p.obj_id)
         .is_some_and(|live| Arc::ptr_eq(&live, &p));
-    if p.data().is_online {
-        set_online(server, &p, false);
-    }
-    if live {
+    if live_now {
         // The same social logout as `leave_world_task` (the C# disconnect had none: guild and
         // family members kept seeing the character online and its channels kept the dead
-        // session): chat channels, family, guild status + `last_leave_time`, guild invitation.
+        // session): chat channels, family, guild status + `last_leave_time`, invitations.
         p.data().leave_time = Utc::now().timestamp();
         crate::systems::social::session::on_leave_world(server, &p);
+    }
+    if p.data().is_online {
+        set_online(server, &p, false);
     }
     for sub in p.subscribers().drain(..) {
         server.time.unsubscribe(sub);
@@ -1597,6 +1679,10 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     // departure again would write a stale copy over a character that logged in again on a newer
     // connection. Only the departure save is skipped; the cleanups above are not part of the
     // leave path and stay as before.
+    let live = server
+        .world
+        .character_by_obj_id(p.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, &p));
     if !live {
         tracing::debug!(
             "Disconnect of session {}: character {} already left the world, no second save",

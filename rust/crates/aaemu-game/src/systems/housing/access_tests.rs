@@ -9,8 +9,10 @@ use super::{manager, ops};
 use crate::data::GameData;
 use crate::models::doodad::doodad_owner_type;
 use crate::models::house::housing_permission;
+use crate::models::item::ITEM_FLAG_SECURE;
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
+use crate::systems::economy::inventory::Inv;
 use crate::systems::npcs::doodad::funcs;
 use crate::systems::npcs::doodad::interactions::{self, world_interaction_type as wi};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
@@ -391,7 +393,7 @@ fn fixture_with_limits(always_public: bool, overall_limit: u32, group_limit: Opt
         h.account_id = 1001;
         h.unit.transform.set_xyz(105.0, 100.0, 100.0);
         h.unit.transform.zone_id = TEST_ZONE;
-        h.protection_end_date = manager::now() + 7 * 86400;
+        h.protection_end_date = manager::now() + 14 * 86400;
     }
     manager::set_current_step(&server, &house, -1, false);
     assert!(server.systems.housing.manager.insert(&house));
@@ -697,6 +699,32 @@ async fn production_listing_preserves_insufficient_certificates_and_consumes_com
     assert_eq!(
         inv.items_count_in(slot_type::INVENTORY, manager::APPRAISAL_CERTIFICATE, -1),
         0
+    );
+}
+
+#[tokio::test]
+async fn locked_decoration_is_refused() {
+    let mut fx = fixture(false);
+    production_economy(&fx);
+    let id = give(&fx, CHAIR_ITEM, 1);
+    Inv::of(&fx.owner)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .flags |= ITEM_FLAG_SECURE;
+    let mut p = decoration(&fx);
+    p.item_id = id;
+    fx.owner_client.drain();
+    assert_eq!(ops::decorate_house(&fx.server, &fx.owner, &p), Ok(false));
+    let frames = fx.owner_client.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| { *op == crate::opcodes::sc::SCErrorMsgPacket }));
+    assert_eq!(
+        fx.server.items.item_by_id(id).unwrap().slot_type,
+        slot_type::INVENTORY
     );
 }
 
@@ -1084,4 +1112,229 @@ async fn house_bench_permissions_are_rechecked_before_products_are_created() {
         .economy
         .craft
         .is_crafting(fx.guest.character_id));
+}
+
+fn error_codes(client: &mut TestClient) -> Vec<i16> {
+    client
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+        .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+        .collect()
+}
+
+#[tokio::test]
+async fn decoration_from_far_away_is_refused_with_too_far_to_decorate_house() {
+    let mut fx = fixture(false);
+    fx.owner.data().unit.transform.set_xyz(300.0, 300.0, 100.0);
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::TOO_FAR_TO_DECORATE_HOUSE]
+    );
+    assert!(furniture(&fx).is_empty());
+    assert_eq!(fx.eco.debit_calls.load(Ordering::SeqCst), 0);
+}
+
+/// Mounts `player` on a spawned mate at `(x, y, z)` and gives it the seat-local transform
+/// `mates::mount_mate` writes for a rider (the parent-relative origin).
+fn mount_at(fx: &Fx, player: &PlayerRef, x: f32, y: f32, z: f32) {
+    let mut mate = crate::models::mate::Mate::new(1, 1);
+    mate.unit.owner_id = player.character_id;
+    mate.owner_obj_id = player.obj_id;
+    mate.unit.transform.set_xyz(x, y, z);
+    let mate = crate::world::Entity::new(fx.server.ids.object.get_next_id().unwrap(), mate);
+    let world = fx.server.world.world(0).unwrap();
+    world.spawn(&mate, &fx.server.view_ctx());
+    world.attach_child(&WorldObject::from(&mate), &WorldObject::from(player));
+    player
+        .data()
+        .unit
+        .transform
+        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+/// Seats `player` on a spawned chair doodad at `(x, y, z)` (a parent-relative seat transform).
+fn seat_at(fx: &Fx, player: &PlayerRef, x: f32, y: f32, z: f32) {
+    let world = fx.server.world.world(0).unwrap();
+    let seat =
+        crate::systems::npcs::doodad::manager::create(&fx.server, &world, 0, CHAIR, None, true)
+            .expect("chair doodad");
+    seat.data().transform.set_xyz(x, y, z);
+    world.spawn(&seat, &fx.server.view_ctx());
+    world.attach_child(&WorldObject::from(&seat), &WorldObject::from(player));
+    player
+        .data()
+        .unit
+        .transform
+        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+#[tokio::test]
+async fn a_mounted_buyer_at_the_house_is_in_range() {
+    let fx = fixture(false);
+    assert!(ops::set_for_sale(&fx.server, &fx.house, 100, 0, None));
+    mount_at(&fx, &fx.guest, 105.0, 100.0, 100.0);
+    let tl = fx.house.data().unit.tl_id;
+    assert!(ops::buy_house(&fx.server, tl, 100, &fx.guest));
+    assert_eq!(fx.house.data().unit.owner_id, 2);
+    assert_eq!(fx.guest.data().money, 9900);
+}
+
+#[tokio::test]
+async fn a_mounted_buyer_far_away_is_still_refused() {
+    let mut fx = fixture(false);
+    assert!(ops::set_for_sale(&fx.server, &fx.house, 100, 0, None));
+    mount_at(&fx, &fx.guest, 400.0, 400.0, 100.0);
+    let tl = fx.house.data().unit.tl_id;
+    assert!(!ops::buy_house(&fx.server, tl, 100, &fx.guest));
+    assert_eq!(
+        error_codes(&mut fx.guest_client),
+        vec![manager::error_message::TOO_FAR_AWAY]
+    );
+    assert_eq!(fx.house.data().unit.owner_id, 1);
+}
+
+#[tokio::test]
+async fn a_seated_decorator_at_the_house_is_in_range() {
+    let fx = fixture(false);
+    seat_at(&fx, &fx.owner, 105.0, 100.0, 100.0);
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(true)
+    );
+    assert_eq!(furniture(&fx).len(), 1);
+}
+
+#[tokio::test]
+async fn decoration_refusals_answer_house_cannot_decorate() {
+    let mut fx = fixture(false);
+    // The item is not in the owner's bag (or not owned).
+    let mut p = decoration(&fx);
+    p.item_id = 999;
+    assert_eq!(ops::decorate_house(&fx.server, &fx.owner, &p), Ok(false));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE]
+    );
+    // The house has no loaded template.
+    fx.house.data().unit.template_id = 999_999;
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE]
+    );
+    fx.house.data().unit.template_id = HOUSE;
+    // The item payment fails after the doodad was created.
+    fx.eco.debit_ok.store(false, Ordering::SeqCst);
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE]
+    );
+    assert!(furniture(&fx).is_empty());
+}
+
+#[tokio::test]
+async fn decoration_outside_the_garden_is_refused() {
+    let mut fx = fixture(false);
+    let mut p = decoration(&fx);
+    p.x = 9.0; // the fixture garden radius is 8 m
+    assert_eq!(ops::decorate_house(&fx.server, &fx.owner, &p), Ok(false));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN]
+    );
+    assert!(furniture(&fx).is_empty());
+    assert_eq!(fx.eco.debit_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn decoration_over_the_house_limit_reports_too_many_decorations() {
+    let mut fx = fixture_with_limits(false, 1, None);
+    {
+        let mut item = fx.eco.item.lock().unwrap();
+        item.max_count = 10;
+        item.count = 10;
+    }
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(true)
+    );
+    fx.owner_client.drain();
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_TOO_MANY_DECORATIONS]
+    );
+    assert_eq!(furniture(&fx).len(), 1);
+}
+
+#[tokio::test]
+async fn delayed_tax_blocks_sale_listing() {
+    let mut fx = fixture(false);
+    fx.house.data().protection_end_date = manager::now() + 3 * 86400;
+    assert!(!ops::set_for_sale(
+        &fx.server,
+        &fx.house,
+        100,
+        0,
+        Some(&fx.owner)
+    ));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_SELL_AS_DELAYED_TAX]
+    );
+    assert_eq!(fx.house.data().sell_price, 0);
+    assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_under_construction_house_cannot_be_listed() {
+    let mut fx = fixture(false);
+    fx.house.data().current_step = 0;
+    assert!(!ops::set_for_sale(
+        &fx.server,
+        &fx.house,
+        100,
+        0,
+        Some(&fx.owner)
+    ));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_SELL_AS_UNDER_CONSTRUCTION]
+    );
+    assert_eq!(fx.house.data().sell_price, 0);
+    assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_listed_house_cannot_be_relisted_at_another_price() {
+    let mut fx = fixture(false);
+    assert!(ops::set_for_sale(&fx.server, &fx.house, 100, 0, None));
+    assert!(!ops::set_for_sale(
+        &fx.server,
+        &fx.house,
+        200,
+        0,
+        Some(&fx.owner)
+    ));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_SELL_AS_ALREADY_FOR_SALE]
+    );
+    assert_eq!(fx.house.data().sell_price, 100);
+    assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
 }

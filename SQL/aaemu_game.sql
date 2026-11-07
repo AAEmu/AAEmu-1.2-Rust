@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `divine_clock_time` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Time that has been passed already',
   `divine_clock_taken` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of clicks taken today',
   `extra_character_slots` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Purchased character slots beyond the base account slots',
+  `pay_method` TINYINT NOT NULL DEFAULT 0 COMMENT '1 Premium, 3 Demo, 5 None; 0 = Account:DefaultPayment',
+  `pay_location` INT NOT NULL DEFAULT 1,
+  `pay_start` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds',
+  `pay_end` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds',
+  `premium_point` INT NOT NULL DEFAULT 0 COMMENT 'Premium point; grade = premium_grades lookup',
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Account specific values not related to login';
 
@@ -121,6 +126,14 @@ CREATE TABLE IF NOT EXISTS `character_active_buffs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Stores active buffs across player sessions';
 
 
+CREATE TABLE IF NOT EXISTS `character_crafts` (
+  `character_id` INT UNSIGNED NOT NULL COMMENT 'Character who learned the craft',
+  `craft_id`     INT UNSIGNED NOT NULL COMMENT 'crafts.id from compact.sqlite3',
+  `learned_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'UTC timestamp of the first learn',
+  PRIMARY KEY (`character_id`, `craft_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Crafts learned from recipe items / TrainCraftEffect';
+
+
 CREATE TABLE IF NOT EXISTS `character_cooldowns` (
   `character_id`  INT UNSIGNED NOT NULL COMMENT 'Character who owns this cooldown',
   `cooldown_type` TINYINT UNSIGNED NOT NULL COMMENT '0 = skill id, 1 = shared cooldown tag',
@@ -165,6 +178,7 @@ CREATE TABLE IF NOT EXISTS `characters` (
   `rez_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `rez_penalty_duration` int NOT NULL,
   `leave_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
+  `chat_restricted_until` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `money` bigint NOT NULL DEFAULT '0',
   `money2` bigint NOT NULL DEFAULT '0',
   `honor_point` int NOT NULL DEFAULT '0',
@@ -312,6 +326,38 @@ CREATE TABLE IF NOT EXISTS `expeditions` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Guilds';
 
 
+CREATE TABLE IF NOT EXISTS `nations` (
+  `id` int unsigned NOT NULL COMMENT 'Faction id; same id space as expeditions.id',
+  `expedition_id` int unsigned NOT NULL COMMENT 'Founding expedition (its mother becomes this nation)',
+  `owner_character_id` int unsigned NOT NULL COMMENT 'King: the founding expedition owner',
+  `owner_name` varchar(128) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `created_at` bigint NOT NULL DEFAULT 0 COMMENT 'Unix seconds (SystemFaction.Created)',
+  `allow_change_name` tinyint unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `nations_name` (`name`),
+  KEY `nations_expedition` (`expedition_id`),
+  KEY `nations_owner` (`owner_character_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Player nations (top-level user factions)';
+
+
+CREATE TABLE IF NOT EXISTS `nation_relations` (
+  `nation_id` int unsigned NOT NULL,
+  `other_faction_id` int unsigned NOT NULL,
+  `state` tinyint unsigned NOT NULL COMMENT '1 hostile, 2 neutral, 3 friendly',
+  `expire_at` bigint NOT NULL DEFAULT 0 COMMENT 'Unix seconds; 0 = no expiry',
+  `next_state` tinyint unsigned NOT NULL DEFAULT 0 COMMENT 'State to switch to at expire_at',
+  PRIMARY KEY (`nation_id`,`other_faction_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Nation relation overlay';
+
+CREATE TABLE IF NOT EXISTS `nation_relation_offers` (
+  `nation_id` int unsigned NOT NULL,
+  `other_faction_id` int unsigned NOT NULL,
+  `last_offer_at` bigint NOT NULL DEFAULT 0 COMMENT 'Unix seconds of the last type-25 mail',
+  PRIMARY KEY (`nation_id`,`other_faction_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Nation treaty request cooldowns';
+
+
 CREATE TABLE IF NOT EXISTS `family_members` (
   `character_id` int NOT NULL,
   `family_id` int NOT NULL,
@@ -383,6 +429,7 @@ CREATE TABLE IF NOT EXISTS `items` (
   `details` blob,
   `lifespan_mins` int NOT NULL,
   `made_unit_id` int unsigned NOT NULL DEFAULT '0',
+  `crafter_id` int unsigned NOT NULL DEFAULT '0' COMMENT 'Character id of the crafter (crafted items only, 0 = not crafted)',
   `unsecure_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `unpack_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `owner` int unsigned NOT NULL,
@@ -646,6 +693,25 @@ ENGINE=InnoDB
 ;
 
 
+CREATE TABLE IF NOT EXISTS `premium_services` (
+    `c_id` INT NOT NULL COMMENT 'CSPremiumServiceBuy.cId and SCPremiumServiceList.cId',
+    `name` VARCHAR(400) NOT NULL DEFAULT '' COMMENT 'SCPremiumServiceList.cname (client max 400 bytes)',
+    `premium_id` SMALLINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'SCPremiumServiceList.pId',
+    `hours` INT NOT NULL DEFAULT '0' COMMENT 'Premium hours granted by a purchase (SCPremiumServiceList.ptime)',
+    `price_type` TINYINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Credits(0), AAPoints(1), Loyalty(2), Coins(3)',
+    `price` INT NOT NULL DEFAULT '0' COMMENT 'Price in price_type units',
+    `grade` TINYINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Copied to SCPremiumServiceList.id; meaning UNKNOWN, display only',
+    `is_sell` TINYINT(1) NOT NULL DEFAULT '0' COMMENT 'Buy allowed (1 = for sale)',
+    `is_hidden` TINYINT(1) NOT NULL DEFAULT '0' COMMENT 'SCPremiumServiceList.isHidden',
+    `buy_max` INT NOT NULL DEFAULT '0' COMMENT 'Copied to SCPremiumServiceList.bcount; not enforced (meaning UNKNOWN)',
+    PRIMARY KEY (`c_id`) USING BTREE
+)
+COMMENT='Premium service shop catalogue (WP-C)'
+COLLATE='utf8mb4_general_ci'
+ENGINE=InnoDB
+;
+
+
 CREATE TABLE IF NOT EXISTS `audit_char_sus` (
 	`id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
 	`sus_date` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Time of incident',
@@ -700,12 +766,17 @@ CREATE TABLE IF NOT EXISTS `dominions` (
   `owner_expedition_id` int unsigned NOT NULL DEFAULT 0,
   `ownership_generation` bigint unsigned NOT NULL DEFAULT 0,
   `reign_start_at` bigint NOT NULL DEFAULT 0,
+  `claimed_at` bigint NOT NULL DEFAULT 0,
   `last_siege_end_at` bigint NOT NULL DEFAULT 0,
   `tax_rate` int NOT NULL DEFAULT 0,
   `national_tax_rate` smallint unsigned NOT NULL DEFAULT 0,
   `last_paid_at` bigint NOT NULL DEFAULT 0,
   `last_tax_rate_changed_at` bigint NOT NULL DEFAULT 0,
   `last_national_tax_rate_changed_at` bigint NOT NULL DEFAULT 0,
+  `national_monument_db_id` bigint NOT NULL DEFAULT 0,
+  `national_monument_x` float NOT NULL DEFAULT 0,
+  `national_monument_y` float NOT NULL DEFAULT 0,
+  `national_monument_z` float NOT NULL DEFAULT 0,
   `cur_house_tax_money` int NOT NULL DEFAULT 0,
   `cur_hunt_tax_money` int NOT NULL DEFAULT 0,
   `peace_tax_money` int NOT NULL DEFAULT 0,
@@ -724,8 +795,18 @@ CREATE TABLE IF NOT EXISTS `dominions` (
   `siege_starts_at` bigint NOT NULL DEFAULT 0,
   `siege_ends_at` bigint NOT NULL DEFAULT 0,
   `siege_ended_at` bigint NOT NULL DEFAULT 0,
+  `siege_reinforced` tinyint(1) NOT NULL DEFAULT 0,
+  `siege_defender_ni` tinyint unsigned NOT NULL DEFAULT 100,
+  `siege_defender_nr` tinyint unsigned NOT NULL DEFAULT 100,
+  `siege_outcome_credited` tinyint(1) NOT NULL DEFAULT 0,
   `non_pvp_start_at` bigint NOT NULL DEFAULT 0,
   `non_pvp_duration_min` smallint unsigned NOT NULL DEFAULT 0,
+  `declaration_attacker` int unsigned NOT NULL DEFAULT 0,
+  `declaration_at` bigint NOT NULL DEFAULT 0,
+  `declaration_cycle` bigint NOT NULL DEFAULT 0,
+  `declaration_hq_x` float NOT NULL DEFAULT 0,
+  `declaration_hq_y` float NOT NULL DEFAULT 0,
+  `declaration_hq_z` float NOT NULL DEFAULT 0,
   PRIMARY KEY (`zone_group_id`),
   UNIQUE KEY `dominions_tower` (`tower_house_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -827,3 +908,29 @@ CREATE TABLE IF NOT EXISTS `shipyards` (
   `spawned`      bigint NOT NULL COMMENT 'Unix seconds UTC',
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Shipyards (drydocks), restored at server start';
+
+-- Per-character purchases of item templates limited by `items.limited_sale_count` /
+-- `items.one_time_sale` (`systems::economy::shop_limits`). The counters are rewritten with the
+-- wallet / items in the save transaction and loaded at server start; they are per character and
+-- never expire (the 1.2 data has no reset period).
+CREATE TABLE IF NOT EXISTS `character_shop_purchases` (
+  `character_id`   int unsigned NOT NULL COMMENT 'characters.id',
+  `item_id`        int unsigned NOT NULL COMMENT 'items.id (the template, not an item instance)',
+  `purchase_count` int NOT NULL DEFAULT 0 COMMENT 'Copies bought so far',
+  PRIMARY KEY (`character_id`, `item_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Per-character purchases of limited-sale item templates';
+
+-- Wanted-player bounty pledges (`systems::social::bounty`): one row per placement, kept after
+-- payout as the record of who paid. `amount` is copper already debited from the payer's purse;
+-- `paid` means the whole accumulated total was credited to the arresting player. Timestamps are
+-- UTC Unix seconds. No foreign key to `characters`.
+CREATE TABLE IF NOT EXISTS `bounty_pledges` (
+  `id`        bigint unsigned NOT NULL COMMENT 'BountyLedger pledge id',
+  `payer_id`  int unsigned NOT NULL COMMENT 'characters.id of the payer',
+  `target_id` int unsigned NOT NULL COMMENT 'characters.id of the wanted target',
+  `amount`    bigint NOT NULL COMMENT 'Escrowed copper',
+  `created`   bigint NOT NULL COMMENT 'Unix seconds UTC',
+  `paid`      tinyint unsigned NOT NULL DEFAULT 0 COMMENT 'Paid to the arresting player',
+  PRIMARY KEY (`id`),
+  KEY `target_id` (`target_id`, `paid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Wanted-player bounty pledges (escrowed copper)';

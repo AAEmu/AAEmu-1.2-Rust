@@ -35,6 +35,7 @@ pub mod framework;
 pub mod geodata;
 pub mod gimmick;
 pub mod hooks;
+pub mod interaction;
 pub mod lua;
 pub mod manager;
 pub mod npc;

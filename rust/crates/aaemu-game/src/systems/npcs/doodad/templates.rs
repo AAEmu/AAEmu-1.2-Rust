@@ -171,6 +171,12 @@ pub struct DoodadFuncGroups {
     /// `GroupKindId` ([`doodad_func_group_kind`]).
     pub group_kind_id: u32,
     pub sound_id: u32,
+    /// `PhaseMsg`: the message the 1.2 client shows (`DOODAD_PHASE_MSG`, event 0xfd) when told
+    /// this group was entered (`SCDoodadPhaseMsg`). 160 shipped groups author one.
+    pub phase_msg: String,
+    /// `IsMsgToZone`: the message needs no local doodad, so the client accepts it without one
+    /// and the server sends it to the whole zone (`SCDoodadPhaseMsg` handler `FUN_3902e0f0`).
+    pub is_msg_to_zone: bool,
     /// `Model`: always `None` (C# null). Only the first, discarded `doodad_func_groups` pass of
     /// `DoodadManager.Load` reads the `model` column; the pass that keeps the groups does not.
     pub model: Option<String>,
@@ -620,6 +626,8 @@ pub struct DoodadFuncEnterSysInstance {
     pub zone_id: u32,
     /// `FactionsEnum`.
     pub faction_id: u32,
+    /// `selective`: the entrance opens the channel-select dialog (CS 0x13d picks a channel).
+    pub selective: bool,
 }
 
 /// `DoodadFuncEvidenceItemLoot` (`DoodadFuncTemplate`).

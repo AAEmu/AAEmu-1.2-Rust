@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{backpack_type, EquipTemplate, ItemTemplate, TemplateKind};
+use crate::data::world_data::Zone;
 use crate::data::GameData;
 use crate::models::container::{equip_slot, slot_type};
 use crate::models::doodad::Doodad;
-use crate::models::item::Item;
+use crate::models::house::House;
+use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemTask};
 use crate::models::npc::Npc;
 use crate::opcodes::sc;
@@ -25,14 +27,17 @@ use crate::systems::economy::item_packets::{
     SCCharacterLaborPowerChangedPacket, SCGamePointChangedPacket,
 };
 use crate::systems::economy::specialty::{
-    self, CSRequestSpecialtyCurrentPacket, CSSpecialtyRatioPacket, SCSpecialtyCurrentPacket,
-    SCSpecialtyRatioPacket,
+    self, CSListSpecialtyGoodsPacket, CSRequestSpecialtyCurrentPacket, CSSpecialtyRatioPacket,
+    SCSpecialtyCurrentPacket, SCSpecialtyGoodsPacket, SCSpecialtyRatioPacket, SpecialtyGood,
 };
 use crate::systems::economy::store::{self, *};
 use crate::systems::economy::store_data::{
     ExpandExpertLimit, ItemLookConvert, SpecialtyBundleItem, SpecialtyNpc,
 };
 use crate::systems::economy::tests::{give, item_at, run, task_body, test_data, World, STACK};
+use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
+use crate::systems::housing::dominion::runtime as dominion_runtime;
+use crate::systems::housing::dominion::state::SiegeSide;
 use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncStoreUi, FuncTemplate};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{DoodadRef, Entity, NpcRef, PlayerRef};
@@ -119,6 +124,7 @@ fn data() -> GameData {
                 item_id: STACK,
                 amount: 3,
                 main_grade: false,
+                require_grade: -1,
             }],
             ..Craft::default()
         },
@@ -387,14 +393,34 @@ fn sc_expert_expanded_and_specialty_bytes() {
         results: vec![(PACK, 130), (GLIDER, 70)],
     };
     let mut want = PacketStream::new();
+    // 1.2 reader FUN_397b87c0: i32 count, u16 from, u16 to, then (u32 item, i32 ratio) pairs.
     want.write_i32(2)
         .write_u16(5)
         .write_u16(9)
         .write_u32(PACK)
-        .write_u32(130)
+        .write_i32(130)
         .write_u32(GLIDER)
-        .write_u32(70);
+        .write_i32(70);
     assert_eq!(bytes(&p), want.into_bytes());
+}
+
+#[test]
+fn sc_specialty_goods_bytes() {
+    // 1.2 reader FUN_397aec90 + FUN_398a9e30: i32 count, then 10-byte records
+    // (u32 itemId, i32 refund, u8 Currency, u8 unknown).
+    let goods = vec![SpecialtyGood {
+        item_id: 26488,
+        refund: 4321,
+        currency: 1,
+        unknown: 7,
+    }];
+    let mut want = PacketStream::new();
+    want.write_i32(1)
+        .write_u32(26488)
+        .write_i32(4321)
+        .write_u8(1)
+        .write_u8(7);
+    assert_eq!(bytes(&SCSpecialtyGoodsPacket { goods }), want.into_bytes());
 }
 
 #[test]
@@ -581,7 +607,7 @@ fn load_craft_sql(rows: &str) -> CraftData {
         INSERT INTO crafts VALUES (1, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         CREATE TABLE craft_products (id, craft_id, item_id, amount, rate,
             show_lower_crafts, use_grade, item_grade_id);
-        CREATE TABLE craft_materials (id, craft_id, item_id, amount, main_grade);
+        CREATE TABLE craft_materials (id, craft_id, item_id, amount, main_grade, require_grade);
         CREATE TABLE craft_pack_crafts (craft_id);
         CREATE TABLE skills (id, consume_lp, actability_group_id, cooldown_time);
         INSERT INTO skills VALUES (10, 5, 0, 0);",
@@ -611,8 +637,8 @@ fn craft_grade_flags_load_sqlite_text() {
             (4, 1, 5000, 1, 100, 'f', 0, 0),
             (5, 1, 5000, 1, 100, 'f', NULL, 0);
         INSERT INTO craft_materials VALUES
-            (1, 1, 1000, 1, 'f'), (2, 1, 7000, 1, 't'),
-            (3, 1, 1000, 1, 0), (4, 1, 7000, 1, 1), (5, 1, 1000, 1, NULL);",
+            (1, 1, 1000, 1, 'f', -1), (2, 1, 7000, 1, 't', 4),
+            (3, 1, 1000, 1, 0, NULL), (4, 1, 7000, 1, 1, 6), (5, 1, 1000, 1, NULL, -1);",
     );
     let c = d.craft(CRAFT).unwrap();
     assert_eq!(
@@ -625,9 +651,9 @@ fn craft_grade_flags_load_sqlite_text() {
     assert_eq!(
         c.craft_materials
             .iter()
-            .map(|m| m.main_grade)
+            .map(|m| (m.main_grade, m.require_grade))
             .collect::<Vec<_>>(),
-        vec![false, true, false, true, false]
+        vec![(false, -1), (true, 4), (false, -1), (true, 6), (false, -1)]
     );
 }
 
@@ -636,6 +662,7 @@ async fn craft_loaded_grade_recipes_create_expected_inventory() {
     for (use_grade, main_grade, material, product_grade, fixed_grade, gradable, expected) in [
         ("t", "f", STACK, 3, -1, true, 3),
         ("f", "t", SWORD, 0, -1, true, 4),
+        ("f", "t", STACK, 0, -1, true, 4),
         // Keep the 1.2 equipment-material heuristic when the main_grade flag is unset.
         ("f", "f", SWORD, 0, -1, true, 4),
         ("t", "f", STACK, 3, 2, false, 2),
@@ -644,7 +671,7 @@ async fn craft_loaded_grade_recipes_create_expected_inventory() {
         let mut d = data();
         d.systems.economy.craft = load_craft_sql(&format!(
             "INSERT INTO craft_products VALUES (1, 1, {PRODUCT}, 1, 100, 'f', '{use_grade}', {product_grade});
-            INSERT INTO craft_materials VALUES (1, 1, {material}, 1, '{main_grade}');"
+            INSERT INTO craft_materials VALUES (1, 1, {material}, 1, '{main_grade}', -1);"
         ));
         let recipe = d.systems.economy.craft.craft(CRAFT).unwrap();
         assert_eq!(recipe.craft_products[0].use_grade, use_grade == "t");
@@ -690,6 +717,347 @@ async fn craft_loaded_grade_recipes_create_expected_inventory() {
 }
 
 #[tokio::test]
+async fn craft_material_requires_its_grade() {
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 1000, 1, 'f', 2);",
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+
+    // A lower grade does not count and the refusal keeps the stack.
+    let low = give(&w, &pa, slot_type::INVENTORY, STACK, 1, 0);
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(low)
+        .unwrap()
+        .grade = 1;
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+    assert_eq!(
+        Inv::of(&pa).items_count(STACK, 1),
+        1,
+        "refusal keeps the material"
+    );
+
+    // A higher grade does not count either: the client counts exactly `require_grade`
+    // (GetCraftMaterialInfo 0x39462600 / GetExecutableCraftCount 0x394d3cc0 -> FUN_3961fbc0).
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(low)
+        .unwrap()
+        .grade = 3;
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+
+    // Exactly the required grade pays, and only that stack is consumed.
+    let right = give(&w, &pa, slot_type::INVENTORY, STACK, 1, 1);
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(right)
+        .unwrap()
+        .grade = 2;
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let inv = Inv::of(&pa);
+    assert_eq!(
+        inv.items_count(STACK, 3),
+        1,
+        "the other grade stack is untouched"
+    );
+    assert_eq!(
+        inv.items_count(STACK, 2),
+        0,
+        "the required grade stack paid"
+    );
+    assert_eq!(inv.items_count(PRODUCT, -1), 1);
+}
+
+#[tokio::test]
+async fn craft_main_grade_sets_the_product_grade() {
+    // Every main_grade row in compact.sqlite3 is on a product with use_grade = 'f', so the
+    // material itself must drive the inherited grade.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 7000, 1, 't', -1);",
+    );
+    d.items.grades.insert(
+        3,
+        crate::data::items::GradeTemplate {
+            grade: 3,
+            grade_order: 3,
+            durability: 1.0,
+        },
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    let id = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .grade = 3;
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let inv = Inv::of(&pa);
+    assert_eq!(inv.items_count(SWORD, -1), 0);
+    let bag = inv.bag();
+    let bag = bag.lock().unwrap();
+    assert_eq!((bag.items[0].template_id, bag.items[0].grade), (PRODUCT, 3));
+}
+
+#[tokio::test]
+async fn craft_equipment_material_grade_inherits_for_any_product() {
+    // The 1.2 equipment-material heuristic runs whenever no `main_grade` row exists, whatever
+    // `use_grade` says: ~484 gear-upgrade crafts without grade rows (4993, 5285, 5086, ...)
+    // keep their inherited grade and the free-regrade roll.
+    for use_grade in ["t", "f"] {
+        let mut d = data();
+        d.systems.economy.craft = load_craft_sql(&format!(
+            "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', '{use_grade}', 0);
+            INSERT INTO craft_materials VALUES (1, 1, 7000, 1, 'f', -1);"
+        ));
+        d.items.grades.insert(
+            2,
+            crate::data::items::GradeTemplate {
+                grade: 2,
+                grade_order: 2,
+                durability: 1.0,
+            },
+        );
+        let mut w = world_with_data(d);
+        let rec = install_craft_hooks(&w);
+        let pa = w.pa.clone();
+        pa.data().labor_power = 100;
+        let id = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+        Inv::of(&pa)
+            .bag()
+            .lock()
+            .unwrap()
+            .get_item_by_id_mut(id)
+            .unwrap()
+            .grade = 2;
+        execute_craft(&mut w, CRAFT, 1);
+        assert_eq!(rec.casts.lock().unwrap().len(), 1);
+        craft::end_craft(&w.server, &pa);
+        let bag = Inv::of(&pa).bag();
+        let bag = bag.lock().unwrap();
+        assert_eq!(
+            (bag.items[0].template_id, bag.items[0].grade),
+            (PRODUCT, 2),
+            "use_grade = {use_grade}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn craft_unflagged_upgrade_inherits_the_equipment_grade() {
+    // An upgrade recipe with no `main_grade` row and `use_grade = 'f'` (the bulk of the gear
+    // upgrade crafts) still takes the equipment material's grade.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 7000, 1, 'f', -1);",
+    );
+    d.items.grades.insert(
+        4,
+        crate::data::items::GradeTemplate {
+            grade: 4,
+            grade_order: 4,
+            durability: 1.0,
+        },
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    let id = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .grade = 4;
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let bag = Inv::of(&pa).bag();
+    let bag = bag.lock().unwrap();
+    assert_eq!((bag.items[0].template_id, bag.items[0].grade), (PRODUCT, 4));
+}
+
+#[tokio::test]
+async fn craft_material_rows_of_one_item_are_summed() {
+    // Craft 370's shape: the same item twice (8318 x3 + x1). Three units must not satisfy 4.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES
+            (1, 1, 1000, 3, 'f', -1), (2, 1, 1000, 1, 'f', -1);",
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+    assert_eq!(Inv::of(&pa).items_count(STACK, -1), 3);
+
+    give(&w, &pa, slot_type::INVENTORY, STACK, 1, 1);
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let inv = Inv::of(&pa);
+    assert_eq!(inv.items_count(STACK, -1), 0);
+    assert_eq!(inv.items_count(PRODUCT, -1), 1);
+}
+
+#[tokio::test]
+async fn craft_main_material_lowest_slot_decides_and_is_consumed() {
+    // Two units of the main material at different grades in different slots: the lowest slot
+    // is the grade source (consume_item's order) and only it is consumed.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 7000, 1, 't', -1);",
+    );
+    for grade in [2i32, 3] {
+        d.items.grades.insert(
+            grade,
+            crate::data::items::GradeTemplate {
+                grade,
+                grade_order: grade,
+                durability: 1.0,
+            },
+        );
+    }
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    // Insertion order puts grade 2 first; slot 0 holds grade 3.
+    let high = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 5);
+    let low = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    {
+        let bag = Inv::of(&pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(high).unwrap().grade = 2;
+        bag.get_item_by_id_mut(low).unwrap().grade = 3;
+    }
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    craft::end_craft(&w.server, &pa);
+    let inv = Inv::of(&pa);
+    assert_eq!(inv.items_count(SWORD, 2), 1, "the higher-slot stack stays");
+    assert_eq!(inv.items_count(SWORD, 3), 0, "the lowest slot paid");
+    let bag = inv.bag();
+    let bag = bag.lock().unwrap();
+    let product = bag.items.iter().find(|i| i.template_id == PRODUCT).unwrap();
+    assert_eq!(product.grade, 3);
+}
+
+#[tokio::test]
+async fn craft_secured_right_grade_material_is_locked_only() {
+    // A secured stack of the right grade cannot pay; the refusal says ITEM_SECURE_CONDITION.
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 1000, 1, 'f', 2);",
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 1, 0);
+    {
+        let bag = Inv::of(&pa).bag();
+        let mut bag = bag.lock().unwrap();
+        let item = bag.get_item_by_id_mut(id).unwrap();
+        item.grade = 2;
+        item.flags |= ITEM_FLAG_SECURE;
+    }
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 664, 0, false))]
+    );
+    assert_eq!(Inv::of(&pa).items_count(STACK, 2), 1);
+}
+
+#[tokio::test]
+async fn craft_grade_lost_before_the_hand_out_keeps_the_materials() {
+    let mut d = data();
+    d.systems.economy.craft = load_craft_sql(
+        "INSERT INTO craft_products VALUES (1, 1, 5000, 1, 100, 'f', 'f', 0);
+        INSERT INTO craft_materials VALUES (1, 1, 1000, 1, 'f', 2);",
+    );
+    let mut w = world_with_data(d);
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 1, 0);
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .grade = 2;
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    w.a.drain();
+
+    // The required grade is gone before the cast's CraftEffect applies (a regrade, a move).
+    Inv::of(&pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .grade = 1;
+    craft::end_craft(&w.server, &pa);
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+    let inv = Inv::of(&pa);
+    assert_eq!(inv.items_count(PRODUCT, -1), 0);
+    assert_eq!(inv.items_count(STACK, 1), 1, "refusal keeps the material");
+    assert!(rec.crafted.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn craft_batch_consumes_materials_adds_products_and_reschedules() {
     let mut w = world();
     let rec = install_craft_hooks(&w);
@@ -711,7 +1079,11 @@ async fn craft_batch_consumes_materials_adds_products_and_reschedules() {
     craft::end_craft(&w.server, &pa);
     let product = item_at(&pa, 2, 1).expect("product");
     assert_eq!((product.template_id, product.count), (PRODUCT, 2));
-    assert_eq!(product.made_unit_id, 0); // stackable: no crafter name
+    // Every crafted product records its crafter; only single-stack items also fill the older
+    // `made_unit_id` carrier.
+    assert_eq!(product.crafter_id, 1);
+    assert_eq!(product.crafter(), 1);
+    assert_eq!(product.made_unit_id, 0);
     let mat = item_at(&pa, 2, 0).unwrap();
     assert_eq!(mat.count, 3);
     let f = w.a.drain();
@@ -958,7 +1330,8 @@ async fn craft_trade_pack_equips_into_backpack_slot() {
     craft::end_craft(&w.server, &pa);
     let pack = Inv::of(&pa).equipped(equip_slot::BACKPACK).expect("pack");
     assert_eq!(pack.template_id, PACK);
-    assert_eq!(pack.made_unit_id, 1); // single-stack product carries the crafter
+    assert_eq!(pack.crafter_id, 1); // the pack records its crafter in the dedicated column
+    assert_eq!(pack.made_unit_id, 1); // and keeps the older single-stack carrier
     assert_eq!(item_at(&pa, 2, 0).unwrap().template_id, GLIDER);
     let ops = w.a.drain_ops();
     assert_eq!(
@@ -992,13 +1365,21 @@ impl NpcEconomyHooks for Shops {
     fn shop_info(&self, _server: &GameServer, npc: &NpcRef) -> Option<NpcShopInfo> {
         Some(NpcShopInfo {
             merchant: npc.data().unit.template_id == 1234,
-            merchant_pack_id: 7,
+            merchant_pack_ids: vec![7],
             ..NpcShopInfo::default()
         })
     }
 
-    fn merchant_sells(&self, _server: &GameServer, pack_id: u32, item_id: u32, grade: u8) -> bool {
-        pack_id == 7 && item_id == STACK && grade == 0
+    fn merchant_sells(
+        &self,
+        _server: &GameServer,
+        _buyer: &PlayerRef,
+        _npc: Option<&NpcRef>,
+        pack_ids: &[u32],
+        item_id: u32,
+        grade: u8,
+    ) -> bool {
+        pack_ids.contains(&7) && item_id == STACK && grade == 0
     }
 }
 
@@ -1036,7 +1417,7 @@ fn catalog_world(mut d: GameData, stock: &[(u32, u8)]) -> World {
         crate::systems::npcs::npc::data::NpcTemplate {
             id: 1234,
             merchant: true,
-            merchant_pack_id: 7,
+            merchant_pack_ids: vec![7],
             ..Default::default()
         },
     );
@@ -1048,7 +1429,23 @@ fn catalog_world(mut d: GameData, stock: &[(u32, u8)]) -> World {
 }
 
 async fn buy_grade(w: &mut World, item_id: u32, grade: u8, count: i32, currency: u8) {
+    buy_grade_as(w, false, item_id, grade, count, currency).await;
+}
+
+async fn buy_grade_as(
+    w: &mut World,
+    second_player: bool,
+    item_id: u32,
+    grade: u8,
+    count: i32,
+    currency: u8,
+) {
     use crate::net::registry::ClientPacket;
+    let conn = if second_player {
+        &mut w.b.conn
+    } else {
+        &mut w.a.conn
+    };
     CSBuyItemsPacket {
         npc_obj_id: MERCHANT_NPC,
         doodad_obj_id: 0,
@@ -1062,7 +1459,7 @@ async fn buy_grade(w: &mut World, item_id: u32, grade: u8, count: i32, currency:
         buy_back: Vec::new(),
         use_aa_point: false,
     }
-    .handle(&w.server, &mut w.a.conn)
+    .handle(&w.server, conn)
     .await
     .unwrap();
 }
@@ -1090,6 +1487,267 @@ async fn shop_catalog_grades_create_distinct_paid_inventory() {
     assert_eq!(inv.items_count(SWORD, 4), 1);
     let c = w.pa.data();
     assert_eq!((c.money, c.honor_point, c.vocation_point), (960, 91, 0));
+}
+
+/// `merchants` rows are additive: the 1.2 client joins `merchants` x `merchant_goods` per
+/// NPC (`strings.txt:13227`), so an NPC with two packs sells the union. Pack 7 comes first
+/// (`STACK`), pack 8 last (`POWDER`): a last-wins loader would refuse the first purchase.
+#[tokio::test]
+async fn shop_npc_sells_items_from_every_merchant_pack() {
+    let mut d = data();
+    d.items.templates.get_mut(&POWDER).unwrap().price = 100;
+    let mut first = crate::systems::npcs::npc::data::MerchantGoods {
+        id: 7,
+        items: Vec::new(),
+    };
+    first.add_item_to_stock(STACK, 0);
+    let mut second = crate::systems::npcs::npc::data::MerchantGoods {
+        id: 8,
+        items: Vec::new(),
+    };
+    second.add_item_to_stock(POWDER, 0);
+    d.systems.npcs.npc.goods.insert(7, first);
+    d.systems.npcs.npc.goods.insert(8, second);
+    d.systems.npcs.npc.templates.insert(
+        1234,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1234,
+            merchant: true,
+            merchant_pack_ids: vec![7, 8],
+            ..Default::default()
+        },
+    );
+    let mut w = world_with_data(d);
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    w.pa.data().money = 1000;
+
+    // The item of the first pack is sold; so is the item of the last pack.
+    buy_grade(&mut w, STACK, 0, 1, shop_currency_type::MONEY).await;
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    buy_grade(&mut w, POWDER, 0, 1, shop_currency_type::MONEY).await;
+    assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 1);
+    assert_eq!(w.pa.data().money, 1000 - 10 - 100);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Siege-time goods gate (Housing.SiegeShopGate, WP-SD4a)
+// ---------------------------------------------------------------------------------------------
+
+const SIEGE_ZONE_GROUP: u32 = 33;
+const SIEGE_DEFENSE_EXPEDITION: u32 = 10;
+const SIEGE_ATTACK_EXPEDITION: u32 = 20;
+const SIEGE_HOUSE_TEMPLATE: u32 = 139;
+const SIEGE_GUARD_TOWER_SETTING: u32 = 6;
+const SIEGE_DEFENSE_PACK: u32 = 224;
+const SIEGE_ATTACK_PACK: u32 = 225;
+
+fn spawn_zone_npc(w: &mut World, obj_id: u32, template: u32, x: f32) -> NpcRef {
+    let mut n = Npc::new(template);
+    n.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    n.unit.transform.set_xyz(x, 100.0, 100.0);
+    let n = Entity::new(obj_id, n);
+    let world = w.server.world.world(0).unwrap();
+    world.spawn(&n, &w.server.view_ctx());
+    w.a.drain();
+    w.b.drain();
+    n
+}
+
+/// A merchant selling the two inferred siege packs and an owned territory in the NPC's zone.
+fn siege_shop_world(gate: bool) -> World {
+    let mut d = data();
+    d.items.templates.get_mut(&POWDER).unwrap().honor_price = 4;
+    d.zones.zones.insert(
+        crate::test_support::TEST_ZONE,
+        Zone {
+            zone_key: crate::test_support::TEST_ZONE,
+            group_id: SIEGE_ZONE_GROUP,
+            ..Default::default()
+        },
+    );
+    d.systems.housing.add_template(HousingTemplate {
+        id: SIEGE_HOUSE_TEMPLATE,
+        guard_tower_setting_id: SIEGE_GUARD_TOWER_SETTING,
+        ..Default::default()
+    });
+    d.systems.housing.castles.guard_tower_settings.insert(
+        SIEGE_GUARD_TOWER_SETTING,
+        GuardTowerSetting {
+            id: SIEGE_GUARD_TOWER_SETTING,
+            radius_dominion: 200,
+            ..Default::default()
+        },
+    );
+    for (pack, item) in [(SIEGE_DEFENSE_PACK, STACK), (SIEGE_ATTACK_PACK, POWDER)] {
+        let mut goods = crate::systems::npcs::npc::data::MerchantGoods {
+            id: pack,
+            items: Vec::new(),
+        };
+        goods.add_item_to_stock(item, 0);
+        d.systems.npcs.npc.goods.insert(pack, goods);
+    }
+    d.systems.npcs.npc.templates.insert(
+        1234,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1234,
+            merchant: true,
+            merchant_pack_ids: vec![SIEGE_DEFENSE_PACK, SIEGE_ATTACK_PACK],
+            ..Default::default()
+        },
+    );
+    let mut w = world_with_data(d);
+    w.server
+        .config
+        .update(|config| config.housing.siege_shop_gate = gate);
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    spawn_zone_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    let mut house = House::new(61, SIEGE_HOUSE_TEMPLATE);
+    house.current_step = -1;
+    house.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    house.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let tower = Entity::new(0x200, house);
+    w.server.systems.housing.manager.insert(&tower);
+    w.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&tower, &w.server.view_ctx());
+    let (_, identity) = dominion_runtime::tower_identity(&w.server, &tower).unwrap();
+    w.server
+        .systems
+        .housing
+        .dominions
+        .declare_unowned_with(
+            SIEGE_ZONE_GROUP,
+            identity,
+            SIEGE_DEFENSE_EXPEDITION,
+            chrono::Utc::now().timestamp() - 1_000,
+            || true,
+        )
+        .unwrap();
+    w
+}
+
+fn schedule_siege_at(w: &World, starts_in: i64) {
+    let now = chrono::Utc::now().timestamp();
+    w.server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege(
+            SIEGE_ZONE_GROUP,
+            SIEGE_ATTACK_EXPEDITION,
+            now + starts_in,
+            now + 3_600,
+            now - 20,
+        )
+        .unwrap();
+}
+
+fn register_siege_side(w: &World, character_id: u32, expedition: u32, side: SiegeSide) {
+    w.server
+        .systems
+        .housing
+        .dominions
+        .register_participant(
+            SIEGE_ZONE_GROUP,
+            character_id,
+            expedition,
+            side,
+            chrono::Utc::now().timestamp(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn siege_shop_gate_sells_224_to_defenders_and_225_to_attackers_in_warmup_and_siege() {
+    for starts_in in [-10, 100] {
+        let mut w = siege_shop_world(true);
+        schedule_siege_at(&w, starts_in);
+        register_siege_side(&w, 1, SIEGE_ATTACK_EXPEDITION, SiegeSide::Attacker);
+        register_siege_side(&w, 2, SIEGE_DEFENSE_EXPEDITION, SiegeSide::Defender);
+        w.pa.data().honor_point = 100;
+        w.pb.data().honor_point = 100;
+
+        // The attacker (Alice, character 1) buys the attack pack (225, POWDER).
+        buy_grade(&mut w, POWDER, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 1);
+        assert_eq!(w.pa.data().honor_point, 96);
+        // The defense pack (224, STACK) is refused for the attacker without a charge.
+        buy_grade(&mut w, STACK, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+        assert_eq!(w.pa.data().honor_point, 96);
+
+        // The defender (Bob, character 2) buys the defense pack; the attack pack is refused.
+        buy_grade_as(&mut w, true, STACK, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 1);
+        assert_eq!(w.pb.data().honor_point, 97);
+        buy_grade_as(&mut w, true, POWDER, 0, 1, shop_currency_type::HONOR).await;
+        assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 0);
+        assert_eq!(w.pb.data().honor_point, 97);
+    }
+}
+
+#[tokio::test]
+async fn siege_shop_gate_refuses_registered_sides_outside_warmup_and_siege() {
+    let mut w = siege_shop_world(true);
+    schedule_siege_at(&w, -10);
+    register_siege_side(&w, 1, SIEGE_ATTACK_EXPEDITION, SiegeSide::Attacker);
+    register_siege_side(&w, 2, SIEGE_DEFENSE_EXPEDITION, SiegeSide::Defender);
+    // Cancelling keeps the roster but leaves the territory in peace (period 5).
+    w.server
+        .systems
+        .housing
+        .dominions
+        .cancel_siege(SIEGE_ZONE_GROUP, chrono::Utc::now().timestamp())
+        .unwrap();
+    w.pa.data().honor_point = 100;
+    w.pb.data().honor_point = 100;
+    for second_player in [false, true] {
+        for item in [STACK, POWDER] {
+            buy_grade_as(&mut w, second_player, item, 0, 1, shop_currency_type::HONOR).await;
+        }
+    }
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 0);
+    assert_eq!(w.pa.data().honor_point, 100);
+    assert_eq!(w.pb.data().honor_point, 100);
+}
+
+#[tokio::test]
+async fn siege_shop_gate_off_keeps_both_packs_selling_at_any_time_to_anyone() {
+    let mut w = siege_shop_world(false);
+    w.pa.data().honor_point = 100;
+    w.pb.data().honor_point = 100;
+    // No siege is scheduled and neither player is a participant.
+    buy_grade(&mut w, STACK, 0, 1, shop_currency_type::HONOR).await;
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(w.pa.data().honor_point, 97);
+    buy_grade_as(&mut w, true, POWDER, 0, 1, shop_currency_type::HONOR).await;
+    assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 1);
+    assert_eq!(w.pb.data().honor_point, 96);
+}
+
+#[tokio::test]
+async fn siege_shop_gate_refuses_non_participants_during_the_siege() {
+    let mut w = siege_shop_world(true);
+    schedule_siege_at(&w, -10);
+    w.pa.data().honor_point = 100;
+    w.pb.data().honor_point = 100;
+    for second_player in [false, true] {
+        for item in [STACK, POWDER] {
+            buy_grade_as(&mut w, second_player, item, 0, 1, shop_currency_type::HONOR).await;
+        }
+    }
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(POWDER, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(POWDER, -1), 0);
+    assert_eq!(w.pa.data().honor_point, 100);
+    assert_eq!(w.pb.data().honor_point, 100);
 }
 
 #[tokio::test]
@@ -1626,9 +2284,12 @@ async fn expand_expert_flow() {
             (sc::SCExpertExpandedPacket, vec![1]),
         ]
     );
-    // No further step: silently ignored.
+    // No further step: the C# TODO's silent return now answers `store_unknown_error` (228).
     run::<CSExpandExpertPacket>(&mut w, 0, &[]);
-    assert!(w.a.drain().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(228, 228, 0, true))]
+    );
 }
 
 #[tokio::test]
@@ -1890,6 +2551,290 @@ async fn sell_trade_pack_refused_without_mail() {
     assert!(Inv::of(&pa).equipped(equip_slot::BACKPACK).is_some());
 }
 
+#[tokio::test]
+async fn list_specialty_goods_answers_empty_until_the_content_is_evidenced() {
+    let mut w = world();
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    for obj_id in [TRADER_NPC, 0x777777] {
+        let mut s = PacketStream::new();
+        s.write_bc(obj_id);
+        run::<CSListSpecialtyGoodsPacket>(&mut w, 0, s.as_bytes());
+        let f = w.a.drain();
+        assert_eq!(
+            f,
+            vec![(sc::SCSpecialtyGoodsPacket, 0i32.to_le_bytes().to_vec())]
+        );
+    }
+}
+
+#[tokio::test]
+async fn specialty_ratio_reply_does_not_send_the_discarded_records_packet() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(w.a.drain().len(), 3);
+
+    // The trader-talk 0x43 answer is only SCSpecialtyRatio: the 1.2 client discards 0x9b.
+    let mut s = PacketStream::new();
+    s.write_u32(PACK);
+    run::<CSSpecialtyRatioPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCSpecialtyRatioPacket, 130i32.to_le_bytes().to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn sell_trade_pack_labor_uses_the_commerce_step_multiplier() {
+    let mut w = world();
+    w.server
+        .config
+        .update(|c| c.specialty.scale_sale_labor_by_commerce = true);
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 4, // Actability.GetLaborCostMultiplier(4) = 0.85 -> 60 * 0.85 = 51
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(pa.data().labor_power, 49);
+    let f = w.a.drain();
+    let labor = f
+        .iter()
+        .find(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket)
+        .expect("labor packet");
+    assert_eq!(
+        labor.1,
+        bytes(&SCCharacterLaborPowerChangedPacket {
+            amount: -51,
+            action: 31,
+            point: 51,
+            step: 4,
+        })
+    );
+}
+
+#[tokio::test]
+async fn sell_trade_pack_labor_defaults_to_the_flat_60() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 4,
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(pa.data().labor_power, 40);
+    let f = w.a.drain();
+    let labor = f
+        .iter()
+        .find(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket)
+        .expect("labor packet");
+    assert_eq!(
+        labor.1,
+        bytes(&SCCharacterLaborPowerChangedPacket {
+            amount: -60,
+            action: 31,
+            point: 60,
+            step: 4,
+        })
+    );
+}
+
+#[tokio::test]
+async fn sell_trade_pack_profit_share_follows_the_global_feature_set() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer.clone());
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    // The runtime `FeaturesManager.Fsets` is the global set (a GM command can change it).
+    assert!(w.server.systems.services.set_feature(
+        &w.server,
+        crate::data::Feature::BackpackProfitShare as u8,
+        false
+    ));
+
+    let pack = give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(mailer.0.lock().unwrap().len(), 1);
+    w.a.drain();
+
+    assert!(w.server.systems.services.set_feature(
+        &w.server,
+        crate::data::Feature::BackpackProfitShare as u8,
+        true
+    ));
+    pa.data().labor_power = 200;
+    let pack = give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(mailer.0.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn specialty_sale_sends_the_configured_negotiation_bonus() {
+    let mut w = world();
+    w.server
+        .config
+        .update(|c| c.specialty.negotiation_bonus_percent = 10.0);
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer.clone());
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    // pre-interest 7000 * 130% = 9100; +10% bargaining = 910; +5% interest 455 -> 10465.
+    let mails = mailer.0.lock().unwrap().clone();
+    assert_eq!(mails.len(), 1);
+    assert_eq!(mails[0].item_count_bonus, 910);
+    assert_eq!(mails[0].item_count_for_seller, 10465);
+    // `SPECIALTY_MARGIN` (626, the notice for a money bonus).
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .any(|(op, body)| *op == sc::SCErrorMsgPacket && *body == err_bytes(626, 626, 0, true)));
+
+    // An out-of-range setting is clamped to 0..100: 100% -> 9100 bonus, total 18655.
+    w.server
+        .config
+        .update(|c| c.specialty.negotiation_bonus_percent = 250.0);
+    pa.data().labor_power = 200;
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    let mails = mailer.0.lock().unwrap().clone();
+    assert_eq!(mails.len(), 2);
+    assert_eq!(mails[1].item_count_bonus, 9100);
+    assert_eq!(mails[1].item_count_for_seller, 18655);
+}
+
+#[tokio::test]
+async fn sold_pack_with_a_crafter_delivers_the_crafter_mail() {
+    let mut d = data();
+    d.items.templates.insert(
+        crate::data::items::ITEM_COINS,
+        ItemTemplate::plain(crate::data::items::ITEM_COINS, 1_000_000),
+    );
+    let mut w = world_with_data(d);
+    crate::systems::economy::wiring::install(&w.server);
+    w.server.names.add_character(1, "Alice", 1001);
+    w.server.names.add_character(2, "Bob", 1002);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    let pack = give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    let mails: Vec<(u32, String, i32)> = w
+        .server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .map(|(_, m)| (m.header.receiver_id, m.title.clone(), m.body.copper_coins))
+        .collect();
+    assert_eq!(mails.len(), 2, "seller and crafter mails: {mails:?}");
+    assert!(mails
+        .iter()
+        .any(|m| m.0 == 1 && m.1 == "Speciality Payment [Delivery]" && m.2 == 7644));
+    assert!(mails
+        .iter()
+        .any(|m| m.0 == 2 && m.1 == "Speciality Payment [Crafter]" && m.2 == 1911));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Real compact.sqlite3
 // ---------------------------------------------------------------------------------------------
@@ -1936,6 +2881,25 @@ fn real_compact_db_craft_and_store_tables() {
             .count(),
         101
     );
+    // `require_grade` is set on the 14 grade-restricted rows (crafts 6184-6191 and 6889-6894).
+    let restricted: Vec<(u32, u32, i32)> = craft
+        .crafts
+        .values()
+        .flat_map(|c| &c.craft_materials)
+        .filter(|m| m.require_grade > 0)
+        .map(|m| (m.craft_id, m.item_id, m.require_grade))
+        .collect();
+    assert_eq!(restricted.len(), 14);
+    assert_eq!(
+        restricted
+            .iter()
+            .filter(|(craft_id, item_id, _)| *craft_id == 6184 && *item_id == 30803)
+            .count(),
+        1
+    );
+    assert!(restricted
+        .iter()
+        .all(|(_, _, grade)| (4..=11).contains(grade)));
     // The 't'/'f' columns read through GetBoolean(column) are all false.
     assert!(craft
         .crafts

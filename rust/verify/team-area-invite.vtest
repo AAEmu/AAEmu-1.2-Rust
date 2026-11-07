@@ -1,0 +1,45 @@
+# Area team invitation (systems/social/team.rs InviteAreaToTeam):
+# `CSInviteAreaToTeam` must reach every eligible player nearby with
+# `SCAskToJoinTeamArea` (not the named `SCAskToJoinTeam`), answer the inviter with
+# `SCTeamAreaInvited`, and an `isArea` accept must join through the normal path.
+#
+# The 1.2 "refuse area invitation" option is client-local (`X2Team.SetRefuseAreaInvitation`
+# stores a flag and sends no packet; `OnAskToJoinTeamArea` drops the popup while it is set),
+# so the refuser models a refusing client by never answering: the area invite still arrives
+# at the socket, and the server must not add it to the team.
+#
+# Bots spawn at the same starter point (within the 100 m area radius).
+suite team-area-invite
+bot inviter gm
+bot joiner
+bot refuser
+
+[inviter]
+# A real inviter is in a team (the client's range button lives in the raid/party window);
+# a solo party also lets the accept take the existing-team join path.
+gm soloparty
+pump 1
+waitpeer 120 ${joiner}
+waitpeer 120 ${refuser}
+areainvite 0 party
+expectpkt SCTeamAreaInvitedPacket 10
+expectpkt SCTeamMemberJoinedPacket 20
+# (before the barrier: `sync` reads and drops packets while it waits)
+sync invites 3
+# A second request inside the 30 s server cooldown: s = false, r = remaining milliseconds.
+areainvite 0 party
+expectareacool 5
+
+[joiner]
+waitpeer 120 ${inviter}
+expectpkt SCAskToJoinTeamAreaPacket 20
+partyacceptarea
+expectpkt SCJoinedTeamPacket 10
+sync invites 3
+
+[refuser]
+waitpeer 120 ${inviter}
+expectpkt SCAskToJoinTeamAreaPacket 20
+sync invites 3
+# A refusing client never answers; the server must not add it to the team.
+expectnopkt SCJoinedTeamPacket 10

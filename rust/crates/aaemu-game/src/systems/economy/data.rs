@@ -28,16 +28,26 @@ pub struct Data {
     pub cash_shop: super::cash_shop::CashShopData,
     /// Crafting tables.
     pub craft: super::craft_data::CraftData,
+    /// Recipe learning data (`item_recipes`, `train_craft_effects`).
+    pub craft_learning: super::craft_learning::CraftRecipes,
     /// Store / specialty / taxation / expert / item-look tables.
     pub store: super::store_data::StoreData,
     /// Mail localization lookups.
     pub mail: super::mail_data::MailData,
+    /// `quest_mails` / `quest_mail_attachments` (loaded, not sent: trigger capture-pending).
+    pub quest_mails: super::mail_system::QuestMailData,
     /// `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, localized item names.
     pub items: super::items_data::ItemsData,
     /// `LootGameData`.
     pub loot: super::loot_data::LootData,
     /// Item effect tables (fishing loot packs by zone group, repairable slaves).
     pub item_effects: super::item_effects::ItemEffectsData,
+    /// Mate equipment rules (`mate_equip_slot_packs`, `mate_equip_pack_*`).
+    pub mate_equipment: super::mate_equipment_data::MateEquipmentData,
+    /// `physical_enchant_abilities` (renew / physical-enchant stage 1).
+    pub renew: super::renew::RenewData,
+    /// UCC applicability and crest patterns (`ucc_applicables`, `emblem_patterns`).
+    pub ucc: super::ucc_data::UccData,
 }
 
 impl Data {
@@ -61,11 +71,16 @@ impl Data {
             Ok(())
         })?;
         data.craft = super::craft_data::CraftData::load(ctx)?;
+        data.craft_learning = super::craft_learning::CraftRecipes::load(ctx)?;
         data.store = super::store_data::StoreData::load(ctx)?;
         data.mail = super::mail_data::MailData::load(ctx)?;
+        data.quest_mails = super::mail_system::QuestMailData::load(ctx)?;
         data.items = super::items_data::ItemsData::load(ctx.conn, ctx.language)?;
         data.loot = super::loot_data::LootData::load(ctx.conn)?;
         data.item_effects = super::item_effects::ItemEffectsData::load(ctx.conn)?;
+        data.mate_equipment = super::mate_equipment_data::MateEquipmentData::load(ctx.conn)?;
+        data.renew = super::renew::RenewData::load(ctx.conn)?;
+        data.ucc = super::ucc_data::UccData::load(ctx.conn)?;
         Ok(data)
     }
 

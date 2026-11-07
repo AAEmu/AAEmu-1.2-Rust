@@ -4,10 +4,17 @@
 
 use std::sync::{Arc, Barrier};
 
+use crate::data::skills::{BuffKind, BuffTemplate};
+use crate::data::GameData;
+use crate::managers::account::AccountState;
 use crate::managers::save::capture_financial_snapshot;
 use crate::net::connection::GameState;
+use crate::net::connection::{AccountPayment, PaymentMethodType};
+use crate::systems::services::premium::{PcBangBuff, PremiumGrade};
 use crate::systems::vehicles::mates::MateDb;
-use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+use crate::test_support::{
+    spawn_player, test_character, test_server, test_server_with, TestClient,
+};
 use crate::world::session::{self, SelectDbData};
 
 async fn assert_select_preserves_live_session(selected_id: u32) {
@@ -532,6 +539,7 @@ async fn private_mysql_reentry_loads_the_state_the_departure_save_committed() {
         "accounts",
         "character_records",
         "character_achievements",
+        "character_crafts",
     ] {
         let (_, definition): (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
@@ -593,4 +601,298 @@ async fn private_mysql_reentry_loads_the_state_the_departure_save_committed() {
     assert_eq!(reentered.data().money, 1234);
     assert_eq!(server.enter_world.character_owner(1), Some(2));
     pool.close().await;
+}
+
+/// The offline infamy crossed the threshold while the character was away: the select path
+/// applies `Character.SetFaction(Pirate)` once (the faction in the later spawn state is then
+/// already Pirate; the player is not in the world regions during the select, so nobody else is
+/// notified yet).
+#[tokio::test]
+async fn select_applies_the_pirate_faction_at_the_threshold_once() {
+    use crate::data::skills::{BuffKind, BuffTemplate};
+    use crate::data::world_data::SystemFaction;
+    use crate::data::GameData;
+    use crate::opcodes::sc;
+    use crate::systems::social::packets::body;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let mut data = GameData::empty();
+    for id in [3710u32, 4832] {
+        data.skills
+            .buffs
+            .insert(id, BuffTemplate::simple(id, BuffKind::Good));
+    }
+    for (id, mother) in [(101u32, 0u32), (161, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    let server = crate::test_support::test_server_with(data);
+    let mut observer_client = TestClient::new(&server, 2, 1008);
+    let observer = spawn_player(
+        &server,
+        &observer_client,
+        test_character(8, "Observer", 105.0, 100.0),
+        0x108,
+    );
+    observer_client.drain();
+
+    let mut client = TestClient::new(&server, 1, 1007);
+    let mut character = test_character(7, "Crook", 100.0, 100.0);
+    character.infamy_point = 3_000;
+    session::select_loaded(
+        &server,
+        &mut client.conn,
+        character,
+        SelectDbData::default(),
+    )
+    .expect("select");
+    let player = client.conn.active_char.clone().expect("selected");
+    assert_eq!(player.data().unit.faction_id, 161);
+
+    let expected = SCUnitFactionChangedPacket {
+        obj_id: player.obj_id,
+        unit_name: "Crook".into(),
+        id: 101,
+        id2: 161,
+        temp: false,
+    };
+    let find = |frames: &[(u16, Vec<u8>)]| -> Vec<Vec<u8>> {
+        frames
+            .iter()
+            .filter(|f| f.0 == sc::SCUnitFactionChangedPacket)
+            .map(|f| f.1.clone())
+            .collect()
+    };
+    assert_eq!(
+        find(&client.drain()),
+        vec![body(&expected)],
+        "the pirate is told exactly once (the 1.2 client shows \"$1 became pirate.\")"
+    );
+    // The select path adds the character to the world table but does not spawn it in a region
+    // yet, so there is no around-player broadcast here (the spawn's SCUnitState carries 161).
+    assert!(find(&observer_client.drain()).is_empty());
+    assert_eq!(observer.data().unit.faction_id, 101);
+}
+
+/// A character whose offline infamy crossed the threshold is converted at select, before
+/// `CSNotifyInGamePacket` runs `TeamManager.UpdateAtLogin`; the party removal must therefore
+/// find the team by membership instead of relying on `InParty` (still false at that point),
+/// otherwise `UpdateAtLogin` re-joins the new pirate to the team.
+#[tokio::test]
+async fn select_releases_a_converted_pirate_from_its_team() {
+    use crate::data::skills::{BuffKind, BuffTemplate};
+    use crate::data::world_data::SystemFaction;
+    use crate::data::GameData;
+    use crate::test_support::test_server_with;
+
+    let mut data = GameData::empty();
+    for id in [3710u32, 4832] {
+        data.skills
+            .buffs
+            .insert(id, BuffTemplate::simple(id, BuffKind::Good));
+    }
+    for (id, mother) in [(101u32, 0u32), (161, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    let server = test_server_with(data);
+    let mut owner_client = TestClient::new(&server, 8, 1008);
+    let owner = spawn_player(
+        &server,
+        &owner_client,
+        test_character(8, "Owner", 105.0, 100.0),
+        0x108,
+    );
+    let mut other_client = TestClient::new(&server, 9, 1009);
+    let other = spawn_player(
+        &server,
+        &other_client,
+        test_character(9, "Other", 106.0, 100.0),
+        0x109,
+    );
+    let mut member_client = TestClient::new(&server, 7, 1007);
+    let member = spawn_player(
+        &server,
+        &member_client,
+        test_character(7, "Crook", 100.0, 100.0),
+        0x107,
+    );
+    for p in [&owner, &other, &member] {
+        p.data().is_online = true;
+    }
+    let teams = &server.systems.social.teams;
+    teams.ask_to_join(&server, &owner, "", 0, true, Some(&member));
+    teams.reply_to_join_team(
+        &server,
+        &member,
+        0,
+        true,
+        owner.character_id,
+        false,
+        "",
+        false,
+    );
+    teams.ask_to_join(&server, &owner, "", 0, true, Some(&other));
+    teams.reply_to_join_team(
+        &server,
+        &other,
+        0,
+        true,
+        owner.character_id,
+        false,
+        "",
+        false,
+    );
+    assert!(member.data().in_party && owner.data().in_party && other.data().in_party);
+    assert!(teams.active_team_by_unit(member.character_id).is_some());
+
+    // End the old session without the team / world cleanup, then select the character again
+    // with the infamy that crossed the threshold while it was away.
+    server.world.try_remove_character(member.obj_id);
+    let mut character = test_character(7, "Crook", 100.0, 100.0);
+    character.infamy_point = 3_000;
+    session::select_loaded(
+        &server,
+        &mut member_client.conn,
+        character,
+        SelectDbData::default(),
+    )
+    .expect("select");
+    let player = member_client.conn.active_char.clone().expect("selected");
+    assert_eq!(player.data().unit.faction_id, 161);
+    assert!(
+        teams.active_team_by_unit(player.character_id).is_none(),
+        "the new pirate is not in the team after select"
+    );
+    assert!(!player.data().in_party);
+
+    // `UpdateAtLogin` must not bring the pirate back into the other faction's team.
+    crate::systems::social::session::on_notify_in_game_team(&server, &player);
+    assert!(teams.active_team_by_unit(player.character_id).is_none());
+    assert!(!player.data().in_party);
+    let team = teams
+        .active_team_by_unit(owner.character_id)
+        .expect("the remaining party survives");
+    assert_eq!(team.members_count(), 2);
+    assert!(team.is_member(owner.character_id) && team.is_member(other.character_id));
+    owner_client.drain();
+    other_client.drain();
+}
+
+/// WP-B: character selection applies the `pcbang_buffs` rows of the account's premium grade;
+/// the VIP buff 8000011 is no longer force-added to every character.
+#[tokio::test]
+async fn select_applies_the_premium_grade_buff_only_for_premium_accounts() {
+    let mut data = GameData::empty();
+    data.systems.services.premium.grades = vec![
+        PremiumGrade {
+            id: 1,
+            grade_id: 1,
+            point: 0,
+        },
+        PremiumGrade {
+            id: 2,
+            grade_id: 2,
+            point: 1,
+        },
+    ];
+    data.systems.services.premium.pcbang_buffs = vec![PcBangBuff {
+        id: 8_000_001,
+        buff_id: 8_000_011,
+        active: true,
+        kind_id: 3,
+        premium_grade_id: 2,
+    }];
+    data.skills
+        .buffs
+        .insert(8_000_011, BuffTemplate::simple(8_000_011, BuffKind::Good));
+    let server = test_server_with(data);
+    let now = chrono::Utc::now().timestamp();
+
+    for (account, premium) in [(1007u32, true), (1008u32, false)] {
+        let mut client = TestClient::new(&server, account - 1000, account);
+        server.accounts.set_state(
+            account,
+            AccountState {
+                payment: AccountPayment {
+                    method: if premium {
+                        PaymentMethodType::Premium
+                    } else {
+                        PaymentMethodType::None
+                    },
+                    location: 1,
+                    start_time: 0,
+                    end_time: if premium { now + 3_600 } else { 0 },
+                },
+                premium_point: i32::from(premium),
+            },
+        );
+        let character = test_character(account - 1000, "Tester", 100.0, 100.0);
+        session::select_loaded(
+            &server,
+            &mut client.conn,
+            character,
+            SelectDbData::default(),
+        )
+        .expect("select");
+        let player = client.conn.active_char.clone().expect("active char");
+        assert_eq!(
+            player.data().unit.buffs.check_buff(8_000_011),
+            premium,
+            "account {account}"
+        );
+
+        if premium {
+            // Relog: the leave removes the session buff, the next select applies it again.
+            session::leave_world_task(
+                &server,
+                None,
+                session::leave_target::CHARACTER_SELECT,
+                Some(player.clone()),
+            )
+            .await;
+            assert!(
+                !player.data().unit.buffs.check_buff(8_000_011),
+                "leave must remove the premium grade buff"
+            );
+            let again = test_character(account - 1000, "Tester2", 120.0, 120.0);
+            session::select_loaded(&server, &mut client.conn, again, SelectDbData::default())
+                .expect("select after leave");
+            let relogged = client.conn.active_char.clone().expect("active char");
+            assert!(
+                relogged.data().unit.buffs.check_buff(8_000_011),
+                "select must re-apply the premium grade buff"
+            );
+        }
+    }
+}
+
+/// During the pre-select period the client's Start button edits the character instead of
+/// entering the world; a forged `CSSelectCharacter` must not enter either.
+#[tokio::test]
+async fn select_is_refused_during_the_pre_select_period() {
+    let mut config = crate::config::AppConfig {
+        id: 1,
+        ..Default::default()
+    };
+    config.characters.pre_select_period = true;
+    let server = crate::test_support::test_server_with_config(GameData::empty(), config);
+    server.db.close().await;
+    let mut client = TestClient::new(&server, 1, 1007);
+    let mut character = test_character(9, "Pre", 1.0, 2.0);
+    character.account_id = 1007;
+    client.conn.characters.push(character);
+    session::select_character(&server, &mut client.conn, 9)
+        .await
+        .expect("refused without entering");
+    assert!(client.conn.active_char.is_none());
+    assert_eq!(client.conn.state, GameState::Lobby);
+    assert_eq!(server.enter_world.character_owner(9), None);
+    assert!(client.drain().is_empty());
 }

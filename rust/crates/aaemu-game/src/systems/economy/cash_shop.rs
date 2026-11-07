@@ -1,13 +1,12 @@
 //! Port of `Core/Managers/CashShopManager.cs`, `Models/Game/CashShop/*` (`IcsItem`, `IcsSku`,
-//! `IcsMenu`, `PremiumDetail`, `AuditIcsSale`), `Models/Tasks/CashShop/CashShopBuyTask.cs`, the
-//! account credit / loyalty members of `AccountManager` the shop uses, and the packets
-//! `CSICSMenuListPacket`, `CSICSGoodsListPacket`, `CSICSBuyGoodPacket`,
-//! `CSICSMoneyRequestPacket`, `CSPremiumServiceBuyPacket`, `CSPremiumServiceListPacket`,
-//! `CSPremiumServiceMsgPacket`, `SCICSMenuListPacket`, `SCICSGoodListPacket`,
-//! `SCICSGoodDetailPacket`, `SCICSCheckTimePacket`, `SCICSBuyResultPacket`,
+//! `IcsMenu`, `AuditIcsSale`), `Models/Tasks/CashShop/CashShopBuyTask.cs`, the account credit /
+//! loyalty members of `AccountManager` the shop uses, and the packets `CSICSMenuListPacket`,
+//! `CSICSGoodsListPacket`, `CSICSBuyGoodPacket`, `CSICSMoneyRequestPacket`, `SCICSMenuListPacket`,
+//! `SCICSGoodListPacket`, `SCICSGoodDetailPacket`, `SCICSCheckTimePacket`, `SCICSBuyResultPacket`,
 //! `SCICSSyncGoodPacket`, `SCICSCashPointPacket`, `SCICSExchangeRatioPacket`,
-//! `SCPremiumServiceListPacket`, `SCPremiumPointChangedPacket`, `SCBmPointPacket`,
-//! `SCAccountWarnedPacket` (`SCUpdatePremiumPointPacket` lives in `packets::g2c`).
+//! `SCPremiumPointChangedPacket`, `SCBmPointPacket`, `SCAccountWarnedPacket`
+//! (`SCUpdatePremiumPointPacket` lives in `packets::g2c`). The premium service shop (WP-C) lives
+//! in [`super::premium_service`]; its types are re-exported below.
 //!
 //! The shop tables come from MySQL (`ics_skus`, `ics_shop_items`, `ics_menu`), loaded in
 //! `System::start`. Account values and the sales audit go through [`CashShopDb`] (MySQL by
@@ -168,35 +167,12 @@ pub struct AuditIcsSale {
     pub description: String,
 }
 
-/// `PremiumDetail`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PremiumDetail {
-    pub c_id: i32,
-    pub c_name: String,
-    pub p_id: u16,
-    pub is_sell: u8,
-    pub is_hidden: u8,
-    pub p_time: i32,
-    pub p_type: u8,
-    pub price: i32,
-    pub id: u32,
-    pub b_count: i32,
-}
-
-impl Marshal for PremiumDetail {
-    fn write(&self, s: &mut PacketStream) {
-        s.write_i32(self.c_id)
-            .write_str(&self.c_name)
-            .write_u16(self.p_id)
-            .write_u8(self.is_sell)
-            .write_u8(self.is_hidden)
-            .write_i32(self.p_time)
-            .write_u8(self.p_type)
-            .write_i32(self.price)
-            .write_u32(self.id)
-            .write_i32(self.b_count);
-    }
-}
+// The premium shop moved to `systems::economy::premium_service` (WP-C). The old paths stay
+// available for callers of the cash shop module.
+pub use super::premium_service::{
+    CSPremiumServiceBuyPacket, CSPremiumServiceListPacket, CSPremiumServiceMsgPacket,
+    PremiumDetail, SCPremiumServiceListPacket,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Game data: item names (`LocalizationManager.Get("items", "name", id)`)
@@ -941,7 +917,9 @@ pub async fn execute_buy(
     let mut costs = [0u32; currency::MAX as usize];
     let mut quantities = HashMap::<u32, u32>::new();
     for sku in cart {
-        // The 1.2 AA-point wallet is not implemented. It is distinct from bank money2.
+        // AA points are not supported (owner decision 2026-11-06); an AA-priced SKU is
+        // refused with the same error as before the wallet existed. This is distinct from
+        // bank money2.
         if sku.currency == currency::AA_POINTS {
             fail(
                 buyer,
@@ -1337,8 +1315,44 @@ pub async fn execute_buy(
             }
         };
         if !sent {
-            // Sending this mail should actually never be able to fail.
+            // The grant failed: no goods left the shop, so return the currency and the stock
+            // reserved above. The debit and the grant must roll back together, as the
+            // stock-update failure path already does.
+            refund_checkout_price(
+                server,
+                store.as_ref(),
+                buyer,
+                buyer_account,
+                sku.currency,
+                price,
+            )
+            .await;
+            if shop_item.remaining >= 0 {
+                let restored = {
+                    let mut st = mgr.state();
+                    st.shop_items.get_mut(&shop_item.shop_id).map(|si| {
+                        si.remaining += sku.item_count as i32;
+                        si.remaining
+                    })
+                };
+                if let Some(remaining) = restored {
+                    if !store
+                        .update_remaining_stock(server, shop_item.shop_id, remaining)
+                        .await
+                    {
+                        tracing::error!(
+                            "Cash shop could not restore stock for {} after a failed grant",
+                            shop_item.shop_id
+                        );
+                    }
+                    buyer.send(SCICSSyncGoodPacket {
+                        cash_shop_id: shop_item.shop_id as i32,
+                        remain_count: remaining,
+                    });
+                }
+            }
             send_error(target, error_message::INGAME_SHOP_BUY_FAIL);
+            continue;
         }
 
         entries_sold += 1;
@@ -1679,27 +1693,6 @@ impl Marshal for SCICSExchangeRatioPacket {
     }
 }
 
-/// `SCPremiumServiceListPacket(isEnd, size, detail, exchangeRatio)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SCPremiumServiceListPacket {
-    pub is_end: bool,
-    pub size: u8,
-    pub detail: PremiumDetail,
-    pub exchange_ratio: i32,
-}
-packet_def!(
-    SCPremiumServiceListPacket,
-    level = LEVEL_PLAIN,
-    opcode = sc::SCPremiumServiceListPacket
-);
-impl Marshal for SCPremiumServiceListPacket {
-    fn write(&self, s: &mut PacketStream) {
-        s.write_bool(self.is_end).write_u8(self.size);
-        self.detail.write(s);
-        s.write_i32(self.exchange_ratio);
-    }
-}
-
 /// `SCPremiumPointChangedPacket(objId, point)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCPremiumPointChangedPacket {
@@ -1759,9 +1752,7 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSICSGoodsListPacket>(LEVEL_PLAIN, cs::CSICSGoodsListPacket);
     reg.register::<CSICSBuyGoodPacket>(LEVEL_PLAIN, cs::CSICSBuyGoodPacket);
     reg.register::<CSICSMoneyRequestPacket>(LEVEL_PLAIN, cs::CSICSMoneyRequestPacket);
-    reg.register::<CSPremiumServiceBuyPacket>(LEVEL_PLAIN, cs::CSPremiumServiceBuyPacket);
-    reg.register::<CSPremiumServiceListPacket>(LEVEL_PLAIN, cs::CSPremiumServiceListPacket);
-    reg.register::<CSPremiumServiceMsgPacket>(LEVEL_PLAIN, cs::CSPremiumServiceMsgPacket);
+    super::premium_service::register(reg);
 }
 
 /// `CSICSMenuListPacket` (empty body).
@@ -1941,78 +1932,3 @@ impl ClientPacket for CSICSMoneyRequestPacket {
         })
     }
 }
-
-/// `CSPremiumServiceBuyPacket` (logged only).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSPremiumServiceBuyPacket {
-    pub c_id: i32,
-}
-
-impl CSPremiumServiceBuyPacket {
-    fn read_body(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            c_id: s.read_i32()?,
-        })
-    }
-
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::debug!("PremiumServiceBuy, CId: {}", self.c_id);
-    }
-}
-sync_client_packet!(CSPremiumServiceBuyPacket);
-
-/// The fixed entry `CSPremiumServiceListPacket` answers with.
-pub fn premium_detail() -> PremiumDetail {
-    PremiumDetail {
-        c_id: 8000001,
-        c_name: "Премиум-подпиcка (30 дней)".into(),
-        p_id: 1,
-        p_time: 720, // hours
-        price: 300,
-        ..PremiumDetail::default()
-    }
-}
-
-/// `CSPremiumServiceListPacket` (empty body).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSPremiumServiceListPacket;
-
-impl CSPremiumServiceListPacket {
-    fn read_body(_s: &mut PacketStream) -> Result<Self> {
-        Ok(Self)
-    }
-
-    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!("PremiumServiceList");
-        conn.send(&SCPremiumServiceListPacket {
-            is_end: true,
-            size: 1,
-            detail: premium_detail(),
-            exchange_ratio: 0,
-        });
-    }
-}
-sync_client_packet!(CSPremiumServiceListPacket);
-
-/// `CSPremiumServiceMsgPacket`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CSPremiumServiceMsgPacket {
-    pub stage: i32,
-}
-
-impl CSPremiumServiceMsgPacket {
-    fn read_body(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            stage: s.read_i32()?,
-        })
-    }
-
-    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
-        tracing::info!("PremiumServieceMsg, stage {}", self.stage);
-        conn.send(&SCAccountWarnedPacket {
-            source: 2,
-            msg: "Premium ...".into(),
-        });
-    }
-}
-sync_client_packet!(CSPremiumServiceMsgPacket);

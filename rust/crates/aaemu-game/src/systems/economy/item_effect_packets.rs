@@ -1,8 +1,9 @@
 //! S->C packets of the item skill effects and of the mate / slave gear moves:
 //! `SCGradeEnchantResultPacket`, `SCGradeEnchantBroadcastPacket`,
 //! `SCItemSocketingLunagemResultPacket`, `SCItemSocketingLunastoneResultPacket`,
-//! `SCItemUccDataChangedPacket`, `SCMateEquipmentChangedPacket`, `SCSlaveEquipmentChangedPacket`
-//! and a local `SCSkillEndedPacket` (the effect bodies send it; dedup with `systems::skills`).
+//! `SCItemUccDataChangedPacket`, `SCMateEquipmentChangedPacket`, `SCMateEquipmentExpiredPacket`,
+//! `SCSlaveEquipmentChangedPacket` and a local `SCSkillEndedPacket` (the effect bodies send it;
+//! dedup with `systems::skills`).
 
 use aaemu_commons::{Marshal, PacketStream};
 
@@ -184,6 +185,30 @@ impl Marshal for SCMateEquipmentChangedPacket {
     }
 }
 
+/// `SCMateEquipmentExpiredPacket(mateTlId, slotType, slotIndex)`: the client removes the item
+/// from the gear of the mate whose tl id matches its current pet, when `slotType` is
+/// `slot_type::EQUIPMENT_MATE` and `slotIndex < 28` (`OnMateEquipmentExpired` `FUN_391db280` ->
+/// `FUN_394e5a90`, `dll.c:368834`, `dll.c:1022714`; the reader `FUN_397b5530` reads `u16`, `u8`,
+/// `u8`, `dll.c:1708939`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCMateEquipmentExpiredPacket {
+    pub mate_tl_id: u16,
+    pub slot_type: u8,
+    pub slot_index: u8,
+}
+packet_def!(
+    SCMateEquipmentExpiredPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCMateEquipmentExpiredPacket
+);
+impl Marshal for SCMateEquipmentExpiredPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u16(self.mate_tl_id)
+            .write_u8(self.slot_type)
+            .write_u8(self.slot_index);
+    }
+}
+
 /// `SCSlaveEquipmentChangedPacket(itemOnSlave, itemInBag, slaveTlId, characterId, dbSlaveId,
 /// bts, success, expireTime)` (`expireTime` is not written). Nothing sends it in the 1.2 C#.
 #[derive(Debug, Clone, PartialEq)]
@@ -266,7 +291,7 @@ mod tests {
             .write_u16(i.details.temper_magical)
             .write_i64(i.create_time)
             .write_i32(i.lifespan_mins)
-            .write_u32(i.made_unit_id)
+            .write_u32(i.crafter())
             .write_u8(i.world_id)
             .write_i64(i.unsecure_time)
             .write_i64(i.unpack_time);
@@ -328,6 +353,19 @@ mod tests {
             [0x10, 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0, 0, 0x30, 0, 0, 0, 0, 0, 0, 0]
         );
         assert_eq!(body(&SCSkillEndedPacket { tl: 0x1234 }), [0x34, 0x12]);
+    }
+
+    /// The reader `FUN_397b5530` (`dll.c:1708939`) transfers `u16` (stream slot 0x40) then `u8`
+    /// (0x44) then `u8` (0x44); `FUN_394e5a90` (`dll.c:1022714`) reads the slot type at `+1` and
+    /// the index at `+3` of the struct at `+0x10`, so the wire has no padding bytes.
+    #[test]
+    fn mate_equipment_expired_layout() {
+        let p = SCMateEquipmentExpiredPacket {
+            mate_tl_id: 0x1234,
+            slot_type: 0xfc,
+            slot_index: 0x1b,
+        };
+        assert_eq!(body(&p), [0x34, 0x12, 0xfc, 0x1b]);
     }
 
     #[test]

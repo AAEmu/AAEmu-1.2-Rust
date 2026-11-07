@@ -16,15 +16,18 @@
 pub mod acts;
 pub mod bridges;
 pub mod cinema;
+pub mod config;
 pub mod data;
 pub mod engine;
 pub mod events;
 pub mod hooks;
 pub mod model;
 pub mod packets;
+pub mod reward_scale;
 pub mod spheres;
 pub mod state;
 pub mod templates;
+pub mod ui_packets;
 pub mod unit_reqs;
 
 #[cfg(test)]
@@ -39,6 +42,8 @@ mod manager_tests;
 mod quest_tests;
 #[cfg(test)]
 mod schedule_tests;
+#[cfg(test)]
+mod sphere_fill_tests;
 #[cfg(test)]
 mod tests;
 
@@ -125,13 +130,28 @@ impl System {
         let _ = s.server.set(Arc::downgrade(server));
         let data = &server.game_data.systems.quests;
         let worlds = &server.game_data.worlds;
+        // 10.x-derived geometry for the quests the 1.2 client pack has no sign sphere for
+        // (`Docs/wiki/Quest-Audit.md`). Loaded after the client spheres; a fill row never
+        // overrides a 1.2 client sphere. A missing file leaves the table empty.
+        let fill = spheres::load_sign_sphere_fill(
+            &server.config.app_path,
+            data,
+            &server.game_data.zones,
+            worlds,
+        );
         s.spheres
-            .load(data, &data.sign_spheres, "main_world", |zone| {
+            .load(data, &data.sign_spheres, &fill, "main_world", |zone| {
                 worlds
                     .get_world_template_by_zone_key(zone)
                     .and_then(|w| w.xml_world_zones().get(&zone))
                     .map_or((0, 0), |z| (z.origin_x, z.origin_y))
             });
+        // 10.x-derived area sphere geometry (offline-converted, guarded against this build's
+        // `spheres` table). A missing file leaves the table empty.
+        s.spheres
+            .set_areas(spheres::load_sphere_areas(&server.config.app_path, |id| {
+                data.spheres.contains_key(&id)
+            }));
         // SphereQuestManager.Initialize: TickManager subscription (500 ms)
         let weak = Arc::downgrade(server);
         tokio::spawn(async move {

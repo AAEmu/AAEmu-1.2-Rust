@@ -1095,6 +1095,9 @@ fn run_navi_func(
         return;
     };
     let caster = WorldObject::from(player);
+    if phase::refuse_blocked_child_doodad(server, &ctx.world, doodad, Some(&caster)) {
+        return;
+    }
     let current = doodad.data().func_group_id;
     phase::do_func(&ctx, Some(&caster), 0, Some(func));
     let next = doodad.data().func_group_id;

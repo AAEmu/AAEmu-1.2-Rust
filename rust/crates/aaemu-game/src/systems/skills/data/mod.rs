@@ -137,6 +137,48 @@ pub struct Data {
     pub ability_change_cost: i32,
     /// `resurrection_waiting_times` by death step (see [`ResurrectionWaitingTime`]).
     pub resurrection_waiting_times: BTreeMap<u32, ResurrectionWaitingTime>,
+    /// `blocked_child_doodads` (see [`BlockedChildDoodads`]).
+    pub blocked_child_doodads: BlockedChildDoodads,
+}
+
+/// `blocked_child_doodads`: while a buff (`owner_type = 'Buff'`, `owner_id` = buff id) is active
+/// on a child doodad's parent unit, a player cannot use the child doodad template
+/// (`doodad_id`). The 1.2 client loads the same table (`dll.c` strings `39a0c158` / `39a0c460`:
+/// `SELECT owner_type, owner_id, doodad_id FROM blocked_child_doodads`); the two rows are buff
+/// 6064 -> doodad 6560 and buff 6245 -> doodad 3446.
+#[derive(Debug, Default)]
+pub struct BlockedChildDoodads {
+    /// Buff id -> child doodad template ids (each doodad id once, sorted).
+    by_buff: HashMap<u32, Vec<u32>>,
+}
+
+impl BlockedChildDoodads {
+    /// The child doodad template ids blocked while `buff_id` is active (empty when none).
+    pub fn doodads(&self, buff_id: u32) -> &[u32] {
+        self.by_buff.get(&buff_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `buff_id` blocks the child doodad template `doodad_id`.
+    pub fn blocks(&self, buff_id: u32, doodad_id: u32) -> bool {
+        self.doodads(buff_id).contains(&doodad_id)
+    }
+
+    /// Adds one row (duplicate buff/doodad pairs are kept once).
+    pub fn add(&mut self, buff_id: u32, doodad_id: u32) {
+        let doodads = self.by_buff.entry(buff_id).or_default();
+        if !doodads.contains(&doodad_id) {
+            doodads.push(doodad_id);
+        }
+    }
+
+    /// Number of buffs that block at least one child doodad.
+    pub fn len(&self) -> usize {
+        self.by_buff.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_buff.is_empty()
+    }
 }
 
 fn dup(what: &str, id: u32) -> rusqlite::Error {
@@ -490,6 +532,7 @@ impl Data {
         d.priest_buffs = super::priest::load(conn)?;
         d.ability_change_cost = misc::load_content_config(conn, 39)?;
         d.resurrection_waiting_times = load_resurrection_waiting_times(conn)?;
+        d.blocked_child_doodads = load_blocked_child_doodads(conn)?;
         Ok(d)
     }
 
@@ -744,6 +787,39 @@ pub(super) fn load_resurrection_waiting_times(
     Ok(rows)
 }
 
+/// `SELECT owner_type, owner_id, doodad_id FROM blocked_child_doodads` (the 1.2 client loads
+/// the same table, `dll.c` strings `39a0c158` / `39a0c460`). Only the evidenced owner type
+/// `Buff` is handled; other / unknown owner types are skipped at debug. NULL columns and zero
+/// ids are skipped so one bad row cannot abort the catalog.
+pub(super) fn load_blocked_child_doodads(
+    conn: &Connection,
+) -> rusqlite::Result<BlockedChildDoodads> {
+    let mut blocked = BlockedChildDoodads::default();
+    for_each_row(conn, "SELECT * FROM blocked_child_doodads", [], |r| {
+        let owner_type = r.string_or("owner_type", "")?;
+        let owner_id = r.u32_or("owner_id", 0)?;
+        let doodad_id = r.u32_or("doodad_id", 0)?;
+        if owner_id == 0 || doodad_id == 0 {
+            tracing::debug!(
+                "blocked_child_doodads row with NULL/zero owner_id or doodad_id is skipped"
+            );
+            return Ok(());
+        }
+        if !owner_type.eq_ignore_ascii_case("Buff") {
+            tracing::debug!(
+                "blocked_child_doodads owner_type {owner_type:?} (owner {owner_id}) is not handled; skipped"
+            );
+            return Ok(());
+        }
+        blocked.add(owner_id, doodad_id);
+        Ok(())
+    })?;
+    for doodads in blocked.by_buff.values_mut() {
+        doodads.sort_unstable();
+    }
+    Ok(blocked)
+}
+
 /// The 1.2 loader (`395D17B0`) attaches each breaker tag to its `buff_id`, rather than
 /// treating `buff_id` as the buff to apply. The 10.x loader (`39B41DE0`) uses a set.
 pub(super) fn load_buff_breakers(conn: &Connection) -> rusqlite::Result<HashMap<u32, Vec<u32>>> {
@@ -770,6 +846,46 @@ pub(super) fn load_buff_breakers(conn: &Connection) -> rusqlite::Result<HashMap<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The loader handles NULL columns and only the evidenced `Buff` owner type.
+    #[test]
+    fn blocked_child_doodads_are_null_tolerant_and_buff_only() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE blocked_child_doodads (id INT, owner_id INT, owner_type TEXT, doodad_id INT); \
+             INSERT INTO blocked_child_doodads VALUES \
+               (1, 6064, 'Buff', 6560), \
+               (2, 6245, 'Buff', 3446), \
+               (3, NULL, 'Buff', 6560), \
+               (4, 6064, NULL, 6560), \
+               (5, 6064, 'Buff', NULL), \
+               (6, 7000, 'Slave', 6560);",
+        )
+        .unwrap();
+        let blocked = load_blocked_child_doodads(&c).unwrap();
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked.blocks(6064, 6560));
+        assert!(blocked.blocks(6245, 3446));
+        assert_eq!(blocked.doodads(6064), &[6560]);
+        assert!(!blocked.blocks(7000, 6560), "only Buff rows are handled");
+        assert!(!blocked.blocks(6064, 3446));
+    }
+
+    /// The two real rows: buff 6064 -> doodad 6560 (fishing boat crane), buff 6245 -> doodad
+    /// 3446 (backpack storage box).
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn blocked_child_doodads_real_compact_db() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let blocked = load_blocked_child_doodads(&conn).unwrap();
+        assert_eq!(blocked.len(), 2);
+        assert_eq!(blocked.doodads(6064), &[6560]);
+        assert_eq!(blocked.doodads(6245), &[3446]);
+    }
 
     /// Loads every table of the real 1.2 compact.sqlite3 and reports row counts
     /// (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game skills_real_compact_db -- --ignored`).

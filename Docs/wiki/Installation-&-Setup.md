@@ -1,7 +1,7 @@
 # Installation & Setup
 
 - Audience: Contributors, players, and testers
-- Last verified against: `develop` on October 10, 2026
+- Last verified against: `main` on November 6, 2026
 - Prerequisites: stable Rust (rustup), required AAEmu dependencies/downloads,
   and Docker (Track A) or MySQL 8 (Track B)
 
@@ -83,6 +83,11 @@ Do not insert rows into `aaemu_login.game_servers`.
 Game server listing is configured via login server configuration
 (`GameServers`).
 
+Cash shop (ICS) content is operator policy. The base schema creates `ics_menu`,
+`ics_shop_items` and `ics_skus` without a catalogue;
+`SQL/examples/example-ics-default-en.sql` is an optional example data set. See
+[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings#cash-shop-ics-content-is-operator-policy).
+
 ### Login server configuration (manual)
 
 Create or edit `rust/crates/aaemu-login/app/Config.Local.json` and set DB
@@ -112,6 +117,10 @@ Example:
   ]
 }
 ```
+
+Two-factor OTP works in-tree for accounts with a `user_2fa` row. ARS (phone
+callback) needs an operator provider; the default provider is disabled. See
+[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings#two-factor-authentication-twofactor).
 
 ### Game server configuration (manual)
 

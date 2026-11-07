@@ -1,4 +1,4 @@
-//! Phase-3 subsystem: items / craft / loot / mail / auction / trade / cash shop.
+//! Phase-3 subsystem: items / craft / loot / mail / auction / trade / cash shop / premium shop.
 //!
 //! C# scope: item actions / tasks (`Models/Game/Items/Actions`, `SCItemTaskSuccessPacket`),
 //! moving / consuming items between containers (`Inventory`, `ItemContainer`), money / points /
@@ -25,8 +25,10 @@ pub mod cash_shop;
 #[cfg(test)]
 mod cash_shop_tests;
 pub mod character_slots;
+pub mod config;
 pub mod craft;
 pub mod craft_data;
+pub mod craft_learning;
 #[cfg(test)]
 mod craft_store_tests;
 pub mod data;
@@ -42,7 +44,11 @@ pub mod item_effects;
 #[cfg(test)]
 mod item_effects_tests;
 pub mod item_handlers;
+pub mod item_notify_packets;
 pub mod item_packets;
+pub mod item_security;
+#[cfg(test)]
+mod item_security_tests;
 pub mod item_timers;
 pub mod items_data;
 pub mod loot;
@@ -54,19 +60,30 @@ pub mod mail_character;
 pub mod mail_data;
 pub mod mail_kinds;
 pub mod mail_packets;
+pub mod mail_system;
 pub mod mail_template;
 #[cfg(test)]
 mod mail_tests;
 pub mod mate_equipment;
+pub mod mate_equipment_data;
 mod operation_scope;
 #[cfg(test)]
 mod operation_scope_tests;
 #[cfg(test)]
 mod ported_unit_tests;
+pub mod premium_service;
+#[cfg(test)]
+mod premium_service_tests;
 pub mod procs;
 #[cfg(test)]
 mod procs_tests;
+pub mod renew;
+#[cfg(test)]
+mod renew_tests;
 pub mod repair;
+pub mod shop_limits;
+#[cfg(test)]
+mod shop_limits_tests;
 pub mod specialty;
 pub mod store;
 pub mod store_data;
@@ -75,6 +92,7 @@ pub(crate) mod tests;
 pub mod trade;
 #[cfg(test)]
 mod trade_tests;
+pub mod ucc_data;
 pub mod wiring;
 
 use std::collections::HashMap;
@@ -109,10 +127,14 @@ pub struct System {
     pub trade: trade::TradeManager,
     /// `CashShopManager`.
     pub cash_shop: cash_shop::CashShopManager,
+    /// Premium service shop catalogue and its atomic purchase store (WP-C).
+    pub premium_service: premium_service::PremiumServiceManager,
     /// `CharacterCraft` of every character.
     pub craft: craft::CraftManager,
     /// Store state (`Character.BuyBackItems`) and its hooks.
     pub store: store::StoreManager,
+    /// Per-character purchases of `items.limited_sale_count` / `items.one_time_sale` templates.
+    pub shop_limits: shop_limits::ShopLimits,
     /// `SpecialtyManager` (trade pack ratios).
     pub specialty: specialty::SpecialtyManager,
     /// `MailManager`.
@@ -214,6 +236,10 @@ impl System {
         }
         tracing::debug!("economy: loading cash shop");
         cash_shop::load(server).await?;
+        tracing::debug!("economy: loading premium services");
+        premium_service::load(server).await?;
+        tracing::debug!("economy: loading shop purchase limits");
+        shop_limits::load(server).await?;
         tracing::debug!("economy: initializing specialty");
         specialty::initialize(server);
         tracing::debug!("economy: loading mails");

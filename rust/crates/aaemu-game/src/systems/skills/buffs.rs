@@ -214,7 +214,20 @@ pub fn check_buff_immune(server: &GameServer, owner: &WorldObject, buff_id: u32)
         .any(|t| data.buffs_by_tag(t).is_some_and(|l| l.contains(&buff_id)))
 }
 
-/// `Buffs.CheckDamageImmune(damageType)`.
+/// Whether a buff template marks the given damage type as immune.
+fn has_immune_flag(t: &BuffTemplate, dt: Option<DamageType>) -> bool {
+    match dt {
+        Some(DamageType::Melee) => t.melee_immune,
+        Some(DamageType::Magic) => t.spell_immune,
+        Some(DamageType::Ranged) => t.ranged_immune,
+        Some(DamageType::Siege) => t.siege_immune,
+        _ => false,
+    }
+}
+
+/// `Buffs.CheckDamageImmune(damageType)`: full immunity from a flagged buff that has no
+/// `immune_damage` threshold (229 real rows). A flagged buff with a positive `immune_damage`
+/// only ignores hits up to that amount; see [`damage_immune_threshold`].
 pub fn check_damage_immune(
     server: &GameServer,
     owner: &WorldObject,
@@ -225,14 +238,28 @@ pub fn check_damage_immune(
         owner.with_base_unit(|b| b.buffs().effects.iter().map(|e| e.template.id).collect());
     ids.into_iter().any(|id| {
         let Some(t) = data.buff(id) else { return false };
-        match dt {
-            Some(DamageType::Melee) => t.melee_immune,
-            Some(DamageType::Magic) => t.spell_immune,
-            Some(DamageType::Ranged) => t.ranged_immune,
-            Some(DamageType::Siege) => t.siege_immune,
-            _ => false,
-        }
+        t.immune_damage <= 0 && has_immune_flag(t, dt)
     })
+}
+
+/// The largest `buffs.immune_damage` threshold among the owner's live buffs that flag `dt`.
+/// The six threshold buffs (275, 276, 176, 2071, 3615, 4609) ignore only a hit whose final
+/// amount is at or below their value, unlike the `immune_damage == 0` full immunity above.
+/// The 1.2 client loads the column (`LoadBuffDescs`, dll.c:1579862) and reads it at column
+/// `0x42` (dll.c:1580052); their descriptions say "ignore hits of N or less".
+pub fn damage_immune_threshold(
+    server: &GameServer,
+    owner: &WorldObject,
+    dt: Option<DamageType>,
+) -> Option<i64> {
+    let data = &server.game_data.systems.skills;
+    let ids: Vec<u32> =
+        owner.with_base_unit(|b| b.buffs().effects.iter().map(|e| e.template.id).collect());
+    ids.into_iter()
+        .filter_map(|id| data.buff(id))
+        .filter(|t| t.immune_damage > 0 && has_immune_flag(t, dt))
+        .map(|t| i64::from(t.immune_damage))
+        .max()
 }
 
 // ------------------------------------------------------------------ AddBuff
@@ -1289,11 +1316,23 @@ fn start_skill_controller(
         ) {
             Some(sc) => sc,
             None => {
-                tracing::warn!(
-                    "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
-                    template.id,
-                    sct.kind_id
-                );
+                // WP-9 (combat-ai analysis, 2026-11-05): Rope (5), Anchor (6) and Flowgraph (8)
+                // have no generic controller by design (Rope is handled by the harpoon family,
+                // Flowgraph is test skill 23969 only, Anchor two monster skills), so this is an
+                // expected debug message. Other unimplemented kinds stay warnings.
+                if matches!(sct.kind_id, 5 | 6 | 8) {
+                    tracing::debug!(
+                        "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
+                        template.id,
+                        sct.kind_id
+                    );
+                } else {
+                    tracing::warn!(
+                        "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
+                        template.id,
+                        sct.kind_id
+                    );
+                }
                 return;
             }
         }
@@ -1652,6 +1691,49 @@ pub fn remove_all_effects(server: &GameServer, owner: &WorldObject) {
     }
 }
 
+/// Takes the unit's resurrection buff (`buffs.resurrection_health` / `resurrection_mana`; the
+/// only 1.2 row with either column set is 239 "Nui's Favor"). Returns the restore values and
+/// removes the effect ("once").
+///
+/// The select and the claim are one critical section under the owner's data lock: the effect
+/// is moved to `FINISHING` there, so a timer or another removal cannot take it in between.
+/// The buff lifecycle (dispel triggers, `StopEffectTask`, the queued `BuffEvent`s) then ends
+/// through [`exit`] once the lock is released.
+pub fn take_resurrection_buff(
+    server: &GameServer,
+    owner: &WorldObject,
+) -> Option<(i32, i32, bool)> {
+    let data = &server.game_data.systems.skills;
+    let (index, values) = owner.with_base_unit(|b| {
+        let (index, template_id) = b
+            .buffs()
+            .effects
+            .iter()
+            .find(|e| {
+                !e.is_ended()
+                    && data
+                        .buff(e.template.id)
+                        .is_some_and(|t| t.resurrection_health != 0 || t.resurrection_mana != 0)
+            })
+            .map(|e| (e.index, e.template.id))?;
+        let t = data.buff(template_id)?;
+        let values = (
+            t.resurrection_health,
+            t.resurrection_mana,
+            t.resurrection_percent,
+        );
+        for e in b.buffs_mut().effects.iter_mut() {
+            if e.index == index {
+                e.state = effect_state::FINISHING;
+                break;
+            }
+        }
+        Some((index, values))
+    })?;
+    exit(server, owner, index, false);
+    Some(values)
+}
+
 /// `Buffs.RemoveEffectsOnDeath()`.
 pub fn remove_effects_on_death(server: &GameServer, owner: &WorldObject) {
     let data = &server.game_data.systems.skills;
@@ -1762,17 +1844,62 @@ enum Claim {
     Taken,
 }
 
+/// The stealth state the 1.2 client caches per unit (`ClientBuffMan` +4 / +8, recomputed by
+/// `ClientBuffMan::UpdateCache` and its per-buff callback, x2game `FUN_39387e00` /
+/// `FUN_3989f230`): `stealthed` and `level` from the active `buffs.stealth` effects, and
+/// `anti_stealth` from the active `buffs.anti_stealth` effects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StealthState {
+    /// Any active effect whose template has `buffs.stealth`.
+    pub stealthed: bool,
+    /// Highest `ab_level` among those effects (the client's `stealth_level` = the instance
+    /// word at +0x2E, the `sourceAbLevel` of `SCBuffCreated`).
+    pub level: u32,
+    /// Any active effect whose template has `buffs.anti_stealth` (the client's "cannot hide"
+    /// byte at +8 that `CanDetect` reads).
+    pub anti_stealth: bool,
+}
+
+/// The cached stealth state of `owner` (see [`StealthState`]).
+pub fn stealth_state(server: &GameServer, owner: &WorldObject) -> StealthState {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|b| {
+        let mut state = StealthState::default();
+        for e in &b.buffs().effects {
+            let Some(t) = data.buff(e.template.id) else {
+                continue;
+            };
+            if t.stealth {
+                state.stealthed = true;
+                // The client stores `sourceAbLevel` as a 16-bit word (+0x2E).
+                state.level = state.level.max(u32::from(e.ab_level as u16));
+            }
+            if t.anti_stealth {
+                state.anti_stealth = true;
+            }
+        }
+        state
+    })
+}
+
 /// Whether `owner` carries an active buff whose 1.2 template is a stealth effect
 /// (`buffs.stealth`). The 1.2 client hides a unit by this column (`ClientUnit::ApplyStealth` /
 /// `CanDetect`, x2game `FUN_3935c270` / `FUN_3935a2b0`), not by buff tag 100 (`TagsEnum.Stealth`);
 /// 30 of the 71 stealth buffs lack tag 100 and 10 tag-100 buffs are not stealth.
 pub fn has_stealth(server: &GameServer, owner: &WorldObject) -> bool {
+    stealth_state(server, owner).stealthed
+}
+
+/// Whether `owner` carries an active `buffs.detect_stealth` effect. The column's rows say the
+/// holder detects stealth ("stealth detection", 2232 / 2233), but the 1.2 client's `CanDetect`
+/// does not read it; the server applies it as a reveal (see PORTING.md).
+pub fn has_detect_stealth(server: &GameServer, owner: &WorldObject) -> bool {
     let data = &server.game_data.systems.skills;
     owner.with_base_unit(|b| {
         b.buffs()
             .effects
             .iter()
-            .any(|e| data.buff(e.template.id).is_some_and(|t| t.stealth))
+            .any(|e| data.buff(e.template.id).is_some_and(|t| t.detect_stealth))
     })
 }
 

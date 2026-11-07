@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use aaemu_commons::PacketStream;
 
-use super::data::QuestData;
+use super::data::{DbSphere, QuestData};
 use super::engine::{Ctx, QuestEnv, UnitSnapshot};
 use super::events::{self, QuestEvent};
 use super::hooks::QuestHooks;
@@ -14,7 +14,7 @@ use super::model::{
     acceptor, detail, kind, status, ItemCreationDefinition, ObjectiveStatus, QuestSupplies,
 };
 use super::packets::*;
-use super::spheres::SphereQuest;
+use super::spheres::{load_sphere_areas, SphereArea, SphereQuest};
 use super::state::QuestHandle;
 use super::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
 use crate::data::items::{ItemData, ItemTemplate};
@@ -26,6 +26,7 @@ use crate::net::packet::{encode, ServerPacket};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
+use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, PlayerRef, WorldObject};
 
@@ -353,6 +354,7 @@ pub(super) fn with_ctx<R>(
             report_reply: None,
             report_refused: Vec::new(),
             answer_reports: true,
+            answer_start_refusals: false,
         };
         let r = f(&mut ctx);
         ctx.sync_rows();
@@ -497,11 +499,33 @@ fn sc_quest_context_packets_bytes() {
 
 #[test]
 fn sc_small_quest_packets_bytes() {
+    // Reader FUN_397b5ec0: bool "success" (one byte), then the u32 quest id.
     let p = SCQuestRewardedByMailPacket {
-        quests: vec![100, 0x01020304],
+        success: true,
+        quest_id: 100,
     };
-    assert_eq!(body(&p), vec![2, 100, 0, 0, 0, 4, 3, 2, 1]);
+    assert_eq!(body(&p), vec![1, 100, 0, 0, 0]);
     assert_eq!(p.opcode(), sc::SCQuestRewardedByMailPacket);
+    let p = SCQuestRewardedByMailPacket {
+        success: false,
+        quest_id: 0x01020304,
+    };
+    assert_eq!(body(&p), vec![0, 4, 3, 2, 1]);
+    assert_eq!(p.opcode(), 0x14e);
+    // SCQuestMailSentPacket: reader FUN_397b5f00 (wrapper FUN_391b19b0, opcode 0x150) reads one
+    // u32 through vtable slot 0x3c; the body is exactly four bytes.
+    let p = SCQuestMailSentPacket { quest_mail_id: 1 };
+    assert_eq!(body(&p), vec![1, 0, 0, 0]);
+    assert_eq!(p.opcode(), sc::SCQuestMailSentPacket);
+    assert_eq!(p.opcode(), 0x150);
+    let p = SCQuestMailSentPacket {
+        quest_mail_id: 0x01020304,
+    };
+    assert_eq!(body(&p), vec![4, 3, 2, 1]);
+    let p = SCQuestMailSentPacket {
+        quest_mail_id: u32::MAX,
+    };
+    assert_eq!(body(&p), vec![0xff, 0xff, 0xff, 0xff]);
     let p = SCDoodadQuestAcceptPacket {
         doodad_obj_id: 0x030201,
         quest_id: 7,
@@ -525,6 +549,95 @@ fn sc_small_quest_packets_bytes() {
     let p = SCAppellationGainedPacket { appellation_id: 9 };
     assert_eq!(body(&p), vec![9, 0, 0, 0]);
     assert_eq!(p.opcode(), sc::SCAppellationGainedPacket);
+}
+
+#[test]
+fn sc_quest_unit_req_failed_writes_the_flag_bag() {
+    // Reader FUN_397b5d00: u32 quest, 3-byte bc unit object id, then the FUN_397b1ef0 bag:
+    // one flag byte and only the set parts, in order kind (u8), message id (u16), value (u32).
+    // Every combination is spelled out as independent literals.
+    let quest = [4, 3, 2, 1]; // 0x01020304
+    let unit = [0x0c, 0x0b, 0x0a]; // bc 0x0a0b0c
+    let head = |flags: &[u8]| -> Vec<u8> {
+        let mut v = quest.to_vec();
+        v.extend_from_slice(&unit);
+        v.extend_from_slice(flags);
+        v
+    };
+
+    let p = SCQuestUnitReqFailedPacket {
+        quest_id: 0x01020304,
+        unit_obj_id: 0x0a0b0c,
+        kind: 0,
+        message_id: 0,
+        value: 0,
+    };
+    assert_eq!(body(&p), head(&[0x00]));
+    assert_eq!(p.opcode(), sc::SCQuestUnitReqFailedPacket);
+    assert_eq!(p.opcode(), 0x148);
+
+    let p = SCQuestUnitReqFailedPacket { kind: 0x16, ..p };
+    let mut expected = head(&[0x01]);
+    expected.push(0x16);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0,
+        message_id: 0x2233,
+        ..p
+    };
+    let mut expected = head(&[0x02]);
+    expected.extend_from_slice(&[0x33, 0x22]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        message_id: 0,
+        value: 0xaabbccdd,
+        ..p
+    };
+    let mut expected = head(&[0x04]);
+    expected.extend_from_slice(&[0xdd, 0xcc, 0xbb, 0xaa]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0x24,
+        message_id: 0x1234,
+        value: 0,
+        ..p
+    };
+    let mut expected = head(&[0x03]);
+    expected.extend_from_slice(&[0x24, 0x34, 0x12]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0x01,
+        message_id: 0,
+        value: 0x01020304,
+        ..p
+    };
+    let mut expected = head(&[0x05]);
+    expected.extend_from_slice(&[0x01, 4, 3, 2, 1]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0,
+        message_id: 0x0001,
+        value: 0x11223344,
+        ..p
+    };
+    let mut expected = head(&[0x06]);
+    expected.extend_from_slice(&[1, 0, 0x44, 0x33, 0x22, 0x11]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0x31,
+        message_id: 0xabcd,
+        value: 0xdeadbeef,
+        ..p
+    };
+    let mut expected = head(&[0x07]);
+    expected.extend_from_slice(&[0x31, 0xcd, 0xab, 0xef, 0xbe, 0xad, 0xde]);
+    assert_eq!(body(&p), expected);
 }
 
 #[test]
@@ -593,11 +706,46 @@ fn cs_quest_packets_decode() {
     let p = CSSaveTutorialPacket::read(&mut PacketStream::from_bytes(vec![2, 0, 0, 0])).unwrap();
     assert_eq!(p.id, 2);
     let p = CSQuestStartWithPacket::read(&mut PacketStream::from_bytes(vec![
-        1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0,
+        1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 2, 10,
     ]))
     .unwrap();
-    assert_eq!((p.unk_id, p.unk_id2, p.unk_id3), (1, 2, 3));
+    assert_eq!((p.quest, p.component, p.act), (1, 2, 3));
+    assert_eq!((p.kind, p.tail), (2, QuestStartWithTail::Level(10)));
     assert!(CSStartedCinemaPacket::read(&mut PacketStream::new()).is_ok());
+}
+
+#[test]
+fn cs_quest_start_with_reads_each_tail_type() {
+    use crate::net::registry::ClientPacket;
+    let read = |tail: &[u8]| {
+        let mut body = vec![0x2c, 0x01, 0, 0, 0x2d, 0x01, 0, 0, 0x2e, 0x01, 0, 0];
+        body.extend_from_slice(tail);
+        CSQuestStartWithPacket::read(&mut PacketStream::from_bytes(body)).unwrap()
+    };
+
+    // Type 1: six u32.
+    let p = read(&[
+        1, 10, 0, 0, 0, 11, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 14, 0, 0, 0, 15, 0, 0, 0,
+    ]);
+    assert_eq!((p.quest, p.component, p.act, p.kind), (300, 301, 302, 1));
+    assert_eq!(p.tail, QuestStartWithTail::SixU32([10, 11, 12, 13, 14, 15]));
+
+    // Type 2: the level the player reached.
+    let p = read(&[2, 10]);
+    assert_eq!((p.quest, p.component, p.act, p.kind), (300, 301, 302, 2));
+    assert_eq!(p.tail, QuestStartWithTail::Level(10));
+
+    // Type 3: two u32.
+    let p = read(&[3, 21, 0, 0, 0, 22, 0, 0, 0]);
+    assert_eq!(p.tail, QuestStartWithTail::TwoU32([21, 22]));
+
+    // Type 4: one u32.
+    let p = read(&[4, 31, 0, 0, 0]);
+    assert_eq!(p.tail, QuestStartWithTail::OneU32(31));
+
+    // An unknown type has no tail (the 1.2 client sends 1-4 only).
+    let p = read(&[9]);
+    assert_eq!((p.kind, p.tail), (9, QuestStartWithTail::Unknown));
 }
 
 // ----- state machine -----
@@ -829,6 +977,145 @@ async fn reward_supply_acts_replace_level_supplies() {
             "money 50",
         ]
     );
+}
+
+/// Start (auto-complete) -> Reward with no supply acts: the reward is the level-based
+/// `quest_supplies` exp / copper.
+fn fallback_reward_quest(d: &mut QuestData, id: u32, level: u8, degree: i32) {
+    d.add_template(QuestTemplate {
+        level,
+        degree,
+        ..quest(id)
+    });
+    d.add_component(component(id * 10 + 1, id, kind::START));
+    d.add_act(
+        id * 10 + 1,
+        id * 10 + 1,
+        id * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    d.add_component(component(id * 10 + 2, id, kind::REWARD));
+}
+
+#[tokio::test]
+async fn reward_scaling_off_pays_the_unscaled_supply() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        // Degree 2, player level 10: the flag off keeps today's unscaled payout.
+        fallback_reward_quest(d, 120, 10, 2);
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 980 true", "money 152"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_degree_two_supply_pays_seventy_five_percent() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        fallback_reward_quest(d, 120, 10, 2);
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    // (int)(980 * 0.75) and (int)(152 * 0.75); player level 10 / quest level 10 has no gap.
+    assert_eq!(rec.take(), vec!["exp 735 true", "money 114"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_level_gap_reduces_supply_exp_but_not_copper() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            2,
+            QuestSupplies {
+                id: 2,
+                level: 2,
+                exp: 1000,
+                copper: 100,
+            },
+        );
+        // Player level 10, quest level 2: d = -3 -> 70 % exp; degree 3 leaves the supply as is.
+        fallback_reward_quest(d, 120, 2, 3);
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 700 true", "money 100"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_gap_applies_to_the_exp_act_and_leaves_copper_act_alone() {
+    let (server, rec) = server_with(|d| {
+        fallback_reward_quest(d, 120, 2, 3);
+        // The Reward component's own acts replace the level supply: exp 1000 is gap-reduced,
+        // copper 50 has no gap factor.
+        d.add_act(1202, 1202, 1202, 0, ActKind::SupplyExp { exp: 1000 });
+        d.add_act(1202, 1203, 1203, 0, ActKind::SupplyCopper { amount: 50 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 700 true", "money 50"]);
+}
+
+#[tokio::test]
+async fn reward_scaling_on_applies_the_degree_factor_to_the_copper_fallback_only() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        // An exp act replaces the exp fallback; the copper stays the level supply, scaled by
+        // the degree-4 factor (x1.25) and not by the level gap (player level 10, quest 10).
+        fallback_reward_quest(d, 120, 10, 4);
+        d.add_act(1202, 1202, 1202, 0, ActKind::SupplyExp { exp: 1000 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(120, false, 0, 0));
+        drain(ctx);
+        assert!(!ctx.has_quest(120));
+    });
+    assert_eq!(rec.take(), vec!["exp 1000 true", "money 190"]);
 }
 
 #[tokio::test]
@@ -1572,6 +1859,252 @@ async fn check_sphere_tracks_presence_without_using_a_wire_objective_slot() {
     });
 }
 
+// ----- imported area spheres (`sphere_area_fill.json`) -----
+
+fn area_sphere(sphere_id: u32, x: f32, y: f32, z: f32, radius: f32) -> SphereArea {
+    SphereArea {
+        world: "main_world".into(),
+        zone: crate::test_support::TEST_ZONE,
+        sphere_id,
+        xyz: (x, y, z),
+        radius,
+    }
+}
+
+fn db_sphere(
+    id: u32,
+    detail_type: &str,
+    detail_id: u32,
+    enter_or_leave: bool,
+    team_msg: &str,
+) -> DbSphere {
+    DbSphere {
+        id,
+        name: format!("sphere {id}"),
+        enter_or_leave,
+        sphere_detail_id: detail_id,
+        sphere_detail_type: detail_type.into(),
+        team_msg: team_msg.into(),
+        is_personal_msg: true,
+        ..DbSphere::default()
+    }
+}
+
+fn area_server(
+    spheres: Vec<DbSphere>,
+    areas: Vec<SphereArea>,
+) -> (GameServer, TestClient, PlayerRef) {
+    let mut d = QuestData::default();
+    for s in spheres {
+        d.spheres.insert(s.id, s);
+    }
+    d.finish();
+    let mut data = GameData::empty();
+    data.systems.quests = d;
+    let server = test_server_with(data);
+    server.systems.quests.spheres.set_areas(areas);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 1001);
+    let _ = client.drain(); // the spawn packets
+    (server, client, player)
+}
+
+fn set_position(player: &PlayerRef, x: f32, y: f32, z: f32) {
+    let mut c = player.data();
+    c.unit.transform.set_xyz(x, y, z);
+}
+
+#[test]
+fn sphere_area_packets_are_byte_exact() {
+    // `FUN_397b63b0`: bool enter, u32 sphereId.
+    assert_eq!(
+        body(&SCAreaTeamMessagePacket {
+            enter: true,
+            sphere_id: 0x0102_0304
+        }),
+        vec![1, 4, 3, 2, 1]
+    );
+    assert_eq!(
+        body(&SCAreaTeamMessagePacket {
+            enter: false,
+            sphere_id: 933
+        }),
+        vec![0, 0xA5, 0x03, 0, 0]
+    );
+    // `FUN_397b6330`: bool enter, bc unitObjId, u32 sphereBubbleId.
+    assert_eq!(
+        body(&SCAreaChatBubblePacket {
+            enter: true,
+            unit_obj_id: 0x11,
+            bubble_type: 543
+        }),
+        vec![1, 0x11, 0, 0, 0x1F, 0x02, 0, 0]
+    );
+    assert_eq!(
+        body(&SCAreaChatBubblePacket {
+            enter: false,
+            unit_obj_id: 0xAB_CDEF,
+            bubble_type: 323
+        }),
+        vec![0, 0xEF, 0xCD, 0xAB, 0x43, 0x01, 0, 0]
+    );
+}
+
+#[tokio::test]
+async fn sphere_area_enter_and_leave_send_once() {
+    let (server, mut client, player) = area_server(
+        vec![db_sphere(1001, "SphereBubble", 323, true, "")],
+        vec![area_sphere(1001, 0.0, 0.0, 0.0, 10.0)],
+    );
+    // spawn position (100, 100, 100): outside.
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty());
+
+    set_position(&player, 0.0, 0.0, 0.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCAreaChatBubblePacket,
+            vec![1, 0xE9, 0x03, 0, 0x43, 0x01, 0, 0]
+        )]
+    );
+
+    // Staying inside sends nothing more.
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty());
+
+    set_position(&player, 100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCAreaChatBubblePacket,
+            vec![0, 0xE9, 0x03, 0, 0x43, 0x01, 0, 0]
+        )]
+    );
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty());
+}
+
+#[tokio::test]
+async fn sphere_area_enter_or_leave_controls_the_leave_packet() {
+    let (server, mut client, player) = area_server(
+        vec![db_sphere(1004, "SphereBubble", 325, false, "")],
+        vec![area_sphere(1004, 0.0, 0.0, 0.0, 10.0)],
+    );
+    set_position(&player, 0.0, 0.0, 0.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(client.drain().len(), 1);
+
+    set_position(&player, 100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty(), "enter_or_leave = false");
+}
+
+#[tokio::test]
+async fn sphere_area_team_message_is_for_non_blank_team_msg_only() {
+    let (server, mut client, player) = area_server(
+        vec![
+            // A non-bubble type with a team message: message only, no bubble.
+            db_sphere(1002, "SphereSkill", 0, true, "The aura can be felt."),
+            // Blank (whitespace) team message: bubble only.
+            db_sphere(1003, "SphereBubble", 324, true, "   "),
+        ],
+        vec![
+            area_sphere(1002, 0.0, 0.0, 0.0, 10.0),
+            area_sphere(1003, 0.0, 0.0, 0.0, 10.0),
+        ],
+    );
+    set_position(&player, 0.0, 0.0, 0.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![
+            (sc::SCAreaTeamMessagePacket, vec![1, 0xEA, 0x03, 0, 0]),
+            (
+                sc::SCAreaChatBubblePacket,
+                vec![1, 0xE9, 0x03, 0, 0x44, 0x01, 0, 0]
+            ),
+        ]
+    );
+
+    set_position(&player, 100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![
+            (sc::SCAreaTeamMessagePacket, vec![0, 0xEA, 0x03, 0, 0]),
+            (
+                sc::SCAreaChatBubblePacket,
+                vec![0, 0xE9, 0x03, 0, 0x44, 0x01, 0, 0]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn sphere_area_loader_missing_file_is_empty_and_skips_bad_rows() {
+    let dir = crate::data::pak::test_util::temp_path("sphere_area_load");
+    assert!(load_sphere_areas(&dir, |_| true).is_empty());
+    let world = dir.join("Data").join("Worlds").join("main_world");
+    std::fs::create_dir_all(&world).unwrap();
+    assert!(load_sphere_areas(&dir, |_| true).is_empty());
+
+    std::fs::write(
+        world.join("sphere_area_fill.json"),
+        r#"[
+            {"sphere_id": 7, "zone": 100, "x": 1.0, "y": 2.0, "z": 3.0, "radius": 4.0},
+            {"sphere_id": 8, "zone": 100, "x": 1.0, "y": 2.0, "z": 3.0, "radius": 4.0},
+            {"sphere_id": 9, "zone": 100}
+        ]"#,
+    )
+    .unwrap();
+    let areas = load_sphere_areas(&dir, |id| id == 7);
+    assert_eq!(areas, vec![area_sphere(7, 1.0, 2.0, 3.0, 4.0)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_data_sphere_areas_load_the_guarded_1_2_table() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let known: std::collections::HashSet<u32> = {
+        let mut stmt = conn.prepare("SELECT id FROM spheres").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        rows.map(|r| r.unwrap() as u32).collect()
+    };
+    let mut types = std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, sphere_detail_type FROM spheres")
+            .unwrap();
+        for row in stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+        {
+            let (id, detail_type) = row.unwrap();
+            types.insert(id as u32, detail_type);
+        }
+    }
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let areas = load_sphere_areas(&app, |id| known.contains(&id));
+    assert_eq!(areas.len(), 2112);
+    assert_eq!(
+        areas.iter().filter(|a| a.world == "main_world").count(),
+        1913
+    );
+    assert_eq!(
+        areas
+            .iter()
+            .filter(|a| types.get(&a.sphere_id).map(String::as_str) == Some("SphereBubble"))
+            .count(),
+        430
+    );
+}
+
 #[tokio::test]
 async fn check_timer_registers_and_fails() {
     let (server, _rec) = server_with(|d| {
@@ -2248,8 +2781,10 @@ async fn selective_rewards_and_mail_when_bag_full() {
         ctx.st.quest_mut(h).unwrap().selected_reward_index = 1;
         ops(ctx);
         drain(ctx);
-        let o = ops(ctx);
-        assert!(o.contains(&sc::SCQuestRewardedByMailPacket));
+        let sent = std::mem::take(&mut ctx.sent);
+        assert!(sent.iter().any(|(op, body)| {
+            *op == sc::SCQuestRewardedByMailPacket && body.as_slice() == [1, 40, 0, 0, 0]
+        }));
     });
     assert_eq!(rec.take(), vec!["mail 40 1 0"]);
 }
@@ -2468,6 +3003,95 @@ async fn component_and_sphere_or_requirements_need_a_matching_alternative() {
             assert!(!ctx.can_trigger_sphere(1001, false));
         }
         assert!(ctx.can_trigger_sphere(9999, true), "no requirements");
+    });
+}
+
+#[tokio::test]
+async fn first_failure_keeps_the_and_or_order_of_check_all() {
+    use super::unit_reqs::{req_kind, UnitReq};
+    let or_rows = || {
+        vec![
+            UnitReq {
+                id: 11,
+                owner_id: 1001,
+                owner_type: "QuestComponent".into(),
+                kind: req_kind::LEVEL,
+                value1: 20,
+                value2: 0,
+            },
+            UnitReq {
+                id: 12,
+                owner_id: 1001,
+                owner_type: "QuestComponent".into(),
+                kind: req_kind::MAX_LEVEL,
+                value1: 5,
+                value2: 0,
+            },
+        ]
+    };
+    let (server, _) = server_with(|d| {
+        main_quest(d);
+        d.components.get_mut(&1001).unwrap().or_unit_reqs = true;
+        d.unit_reqs
+            .by_owner
+            .entry("QuestComponent".into())
+            .or_default()
+            .insert(1001, or_rows());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        ctx.c.unit.level = 10;
+        assert!(!ctx.can_component_run(1001));
+        assert_eq!(
+            ctx.first_failed_component_req(1001).map(|r| r.id),
+            Some(11),
+            "an OR list reports its first row"
+        );
+        ctx.c.unit.level = 1;
+        assert!(ctx.can_component_run(1001));
+        assert_eq!(ctx.first_failed_component_req(1001), None);
+        ctx.c.unit.level = 30;
+        assert!(ctx.can_component_run(1001));
+        assert_eq!(ctx.first_failed_component_req(1001), None);
+    });
+
+    // AND: the first row that fails in table order.
+    let (server, _) = server_with(|d| {
+        main_quest(d);
+        d.unit_reqs
+            .by_owner
+            .entry("QuestComponent".into())
+            .or_default()
+            .insert(
+                1001,
+                vec![
+                    UnitReq {
+                        id: 21,
+                        owner_id: 1001,
+                        owner_type: "QuestComponent".into(),
+                        kind: req_kind::LEVEL,
+                        value1: 10,
+                        value2: 0,
+                    },
+                    UnitReq {
+                        id: 22,
+                        owner_id: 1001,
+                        owner_type: "QuestComponent".into(),
+                        kind: req_kind::LEVEL,
+                        value1: 20,
+                        value2: 0,
+                    },
+                ],
+            );
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        ctx.c.unit.level = 5;
+        assert_eq!(ctx.first_failed_component_req(1001).map(|r| r.id), Some(21));
+        ctx.c.unit.level = 15;
+        assert_eq!(ctx.first_failed_component_req(1001).map(|r| r.id), Some(22));
+        ctx.c.unit.level = 20;
+        assert_eq!(ctx.first_failed_component_req(1001), None);
     });
 }
 
@@ -2967,8 +3591,121 @@ async fn npc_quest_flow_through_packets_and_events() {
     assert_eq!(server.systems.quests.queued_count(), 0);
 }
 
-/// Adds a quest `id` that runs Start -> Progress (hunt NPC 600 x2) -> Ready, with a report
-/// act of `report` (None = no report act) and a small Reward step.
+/// Quest `id` whose Start component accepts anything and needs the owner to be of `level`
+/// (`QuestComponent` `unit_reqs`).
+fn level_gated_start(d: &mut QuestData, id: u32, component_id: u32, level: u32) {
+    use super::unit_reqs::{req_kind, UnitReq};
+    d.add_template(quest(id));
+    d.add_component(component(component_id, id, kind::START));
+    d.add_act(component_id, id, 1, 0, ActKind::ConAutoComplete);
+    d.unit_reqs
+        .by_owner
+        .entry("QuestComponent".into())
+        .or_default()
+        .insert(
+            component_id,
+            vec![UnitReq {
+                id: component_id,
+                owner_id: component_id,
+                owner_type: "QuestComponent".into(),
+                kind: req_kind::LEVEL,
+                value1: level,
+                value2: 0,
+            }],
+        );
+}
+
+#[tokio::test]
+async fn start_quest_context_reports_the_failed_level_requirement() {
+    let (server, _) = server_with(|d| level_gated_start(d, 300, 3001, 10));
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    player.data().unit.level = 5;
+    let start = CSStartQuestContextPacket {
+        quest_context_id: 300,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: 0,
+    };
+
+    start
+        .clone()
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert_eq!(
+        decode(frames.clone()),
+        vec![sc::SCQuestUnitReqFailedPacket],
+        "a player-initiated refusal is answered: {frames:?}"
+    );
+    // Reader FUN_397b5d00 / bag FUN_397b1ef0: quest, bc unit object id, flags 0x05 (kind and
+    // value set), then kind LEVEL (1) and the row's value1 (10).
+    let mut expected = PacketStream::new();
+    expected
+        .write_u32(300)
+        .write_bc(0x100)
+        .write_u8(0x05)
+        .write_u8(1)
+        .write_u32(10);
+    assert_eq!(frames[0].1, expected.into_bytes());
+    assert!(!events::has_quest(&player, 300));
+
+    // The same request at the required level starts the quest and sends no failure.
+    player.data().unit.level = 10;
+    client.drain();
+    start.handle(&server, &mut client.conn).await.unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert!(
+        !frames.iter().any(|f| f.0 == sc::SCQuestUnitReqFailedPacket),
+        "an accepted start must not report a requirement failure: {frames:?}"
+    );
+    assert!(frames
+        .iter()
+        .any(|f| f.0 == sc::SCQuestContextStartedPacket));
+}
+
+#[tokio::test]
+async fn automatic_level_up_start_does_not_report_a_requirement_failure() {
+    use super::unit_reqs::{req_kind, UnitReq};
+    let (server, _) = server_with(|d| {
+        d.add_template(quest(301));
+        d.add_component(component(3011, 301, kind::START));
+        // The level-up act that makes `on_level_up` try the quest at level 10.
+        d.add_act(3011, 301, 1, 0, ActKind::ConAcceptLevelUp { level: 10 });
+        d.unit_reqs
+            .by_owner
+            .entry("QuestComponent".into())
+            .or_default()
+            .insert(
+                3011,
+                vec![UnitReq {
+                    id: 3011,
+                    owner_id: 3011,
+                    owner_type: "QuestComponent".into(),
+                    kind: req_kind::LEVEL,
+                    value1: 20,
+                    value2: 0,
+                }],
+            );
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    player.data().unit.level = 10;
+    client.conn.active_char = Some(player.clone());
+
+    events::on_level_up(&server, &player);
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert!(
+        !frames.iter().any(|f| f.0 == sc::SCQuestUnitReqFailedPacket),
+        "an automatic starter must stay silent: {frames:?}"
+    );
+    assert!(!events::has_quest(&player, 301));
+}
 fn report_quest(d: &mut QuestData, id: u32, report: Option<ActKind>) {
     d.add_template(quest(id));
     d.add_component(component(id * 10 + 1, id, kind::START));
@@ -3734,7 +4471,7 @@ async fn leaving_before_in_game_drops_deferred_evaluations() {
 
 // ----- real compact.sqlite3 -----
 
-fn real_db() -> Option<rusqlite::Connection> {
+pub(super) fn real_db() -> Option<rusqlite::Connection> {
     let path = std::env::var("AAEMU_COMPACT_DB").ok()?;
     Some(
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -3910,6 +4647,45 @@ async fn real_compact_db_quest_tables() {
 
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_restart_on_fail_and_successive_flags() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let d = real_data(&conn);
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM quest_contexts WHERE restart_on_fail='t'"),
+        222
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM quest_contexts WHERE successive='t'"),
+        37
+    );
+    assert_eq!(
+        d.templates.values().filter(|t| t.restart_on_fail).count(),
+        222
+    );
+    assert_eq!(d.templates.values().filter(|t| t.successive).count(), 37);
+    assert!(d.template(213).unwrap().restart_on_fail);
+    assert!(d.template(80).unwrap().successive);
+    // Quest 64 is the level-3 timed quest used by the failure live check.
+    assert!(!d.template(64).unwrap().restart_on_fail);
+    // QUEST-1: no real restart_on_fail quest can fail server-side.
+    assert_eq!(
+        count(
+            "SELECT COUNT(DISTINCT q.id) FROM quest_contexts q              JOIN quest_components c ON c.quest_context_id=q.id              JOIN quest_acts a ON a.quest_component_id=c.id              WHERE q.restart_on_fail='t' AND (a.act_detail_type IN              ('QuestActCheckTimer','QuestActCheckGuard','QuestActConFail')              OR c.component_kind_id=5)"
+        ),
+        0
+    );
+    // 211 of the 222 flagged quests are detail_id 2, the client's restart gate.
+    assert_eq!(
+        count("SELECT COUNT(*) FROM quest_contexts WHERE restart_on_fail='t' AND detail_id=2"),
+        211
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_compact_db_report_doodads_are_ready_doodad_func_quests() {
     let Some(conn) = real_db() else {
         return;
@@ -3949,45 +4725,6 @@ async fn real_compact_db_report_doodads_are_ready_doodad_func_quests() {
         checked += 1;
     }
     assert_eq!(checked, 15, "live QuestActConReportDoodad acts");
-}
-
-#[tokio::test]
-#[ignore = "needs AAEMU_COMPACT_DB"]
-async fn real_compact_db_restart_on_fail_and_successive_flags() {
-    let Some(conn) = real_db() else {
-        return;
-    };
-    let d = real_data(&conn);
-    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(
-        count("SELECT COUNT(*) FROM quest_contexts WHERE restart_on_fail='t'"),
-        222
-    );
-    assert_eq!(
-        count("SELECT COUNT(*) FROM quest_contexts WHERE successive='t'"),
-        37
-    );
-    assert_eq!(
-        d.templates.values().filter(|t| t.restart_on_fail).count(),
-        222
-    );
-    assert_eq!(d.templates.values().filter(|t| t.successive).count(), 37);
-    assert!(d.template(213).unwrap().restart_on_fail);
-    assert!(d.template(80).unwrap().successive);
-    // Quest 64 is the level-3 timed quest used by the failure live check.
-    assert!(!d.template(64).unwrap().restart_on_fail);
-    // QUEST-1: no real restart_on_fail quest can fail server-side.
-    assert_eq!(
-        count(
-            "SELECT COUNT(DISTINCT q.id) FROM quest_contexts q              JOIN quest_components c ON c.quest_context_id=q.id              JOIN quest_acts a ON a.quest_component_id=c.id              WHERE q.restart_on_fail='t' AND (a.act_detail_type IN              ('QuestActCheckTimer','QuestActCheckGuard','QuestActConFail')              OR c.component_kind_id=5)"
-        ),
-        0
-    );
-    // 211 of the 222 flagged quests are detail_id 2, the client's restart gate.
-    assert_eq!(
-        count("SELECT COUNT(*) FROM quest_contexts WHERE restart_on_fail='t' AND detail_id=2"),
-        211
-    );
 }
 
 #[tokio::test]
@@ -5365,6 +6102,7 @@ async fn sphere_trigger_uses_the_world_position_of_an_attached_player() {
             local: [125.0, 120.0, 100.0],
             radius: 3.0,
         }],
+        &[],
         "main_world",
         |_| (0, 0),
     );
@@ -5655,5 +6393,118 @@ async fn partial_consumption_updates_a_collect_objective() {
         objective_count(&player, 201, 0),
         1,
         "the partial consume reports one consumed unit"
+    );
+}
+
+/// A pirate whose infamy reaches 0 through the quest act `QuestActSupplyCrimePoint` returns to
+/// the faction of the race/gender template (the home faction). The 1.2 client prints ui_text
+/// 2297 `pardon_pirate` from the `SCUnitFactionChangedPacket` (old 161 -> non-pirate), so the
+/// faction change is the notice; the same event credits achievement kind 49 ("Repentant",
+/// `char_records` 2401). This drives the real quest operation, act and shared helper.
+#[tokio::test]
+async fn pirate_reaching_zero_infamy_through_the_quest_act_returns_home() {
+    use crate::data::character_templates::CharacterTemplate;
+    use crate::systems::social::achievement::char_record_kind;
+    use crate::systems::social::achievement_flow_tests::one_achievement;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    const QUEST: u32 = 9_001;
+    const HOME: u32 = 101;
+    const PIRATE: u32 = 161;
+
+    let mut quests = QuestData::default();
+    quests.add_template(quest(QUEST));
+    let c = QUEST * 10;
+    quests.add_component(component(c + 1, QUEST, kind::START));
+    quests.add_act(c + 1, c + 1, c + 1, 0, ActKind::ConAutoComplete);
+    quests.add_component(component(c + 2, QUEST, kind::PROGRESS));
+    quests.add_act(
+        c + 2,
+        c + 2,
+        c + 2,
+        1,
+        ActKind::ObjCraft {
+            craft_id: QUEST,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    quests.add_component(component(c + 3, QUEST, kind::REWARD));
+    quests.add_act(
+        c + 3,
+        c + 3,
+        c + 3,
+        0,
+        ActKind::SupplyCrimePoint { point: -500 },
+    );
+    quests.finish();
+
+    let mut data = GameData::empty();
+    data.systems.quests = quests;
+    data.characters.templates.insert(
+        0x11,
+        CharacterTemplate {
+            race: 1,
+            gender: 1,
+            creatable: true,
+            faction_id: HOME,
+            ..Default::default()
+        },
+    );
+    data.systems.social.achievements = one_achievement(
+        1380,
+        1,
+        0,
+        2401,
+        char_record_kind::MY_DISHONORABLE_POINT,
+        0,
+        0,
+    );
+    let server = std::sync::Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::social::install_hooks(&server);
+    super::install_hooks(&server);
+
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut character = test_character(1, "Pirate", 100.0, 100.0);
+    character.unit.faction_id = PIRATE;
+    character.crime_point = 500;
+    character.infamy_point = 500;
+    character.is_online = true;
+    let player = spawn_player(&server, &client, character, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+
+    assert!(events::add_quest(&server, &player, QUEST, false).is_some());
+    server.systems.quests.run_queued_evaluations(&server);
+    events::on_craft(&server, &player, QUEST);
+    server.systems.quests.run_queued_evaluations(&server);
+
+    {
+        let c = player.data();
+        assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+        assert_eq!(c.unit.faction_id, HOME, "the pirate returned home");
+        assert_eq!(crate::db_character::persisted_faction(&c), HOME);
+        assert_eq!(
+            c.achievement_state.record_value(2401),
+            1,
+            "repentant (kind 49) credited"
+        );
+    }
+    let frames = client.drain();
+    let expected = crate::systems::social::packets::body(&SCUnitFactionChangedPacket {
+        obj_id: 0x100,
+        unit_name: "Pirate".into(),
+        id: PIRATE,
+        id2: HOME,
+        temp: false,
+    });
+    assert!(
+        frames
+            .iter()
+            .any(|(op, body)| *op == sc::SCUnitFactionChangedPacket && *body == expected),
+        "the faction change the client turns into ui_text 2297: {frames:x?}"
     );
 }

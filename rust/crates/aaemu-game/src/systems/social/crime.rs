@@ -15,6 +15,7 @@ use sqlx::Row;
 
 use crate::data::skills::BuffKind;
 use crate::db::{dt, from_unix, unix};
+use crate::db_character::CrimeFactionChange;
 use crate::models::buff::{Buff, SkillCaster};
 use crate::models::character::Character;
 use crate::models::doodad::doodad_owner_type;
@@ -132,7 +133,12 @@ pub struct BountyDescription {
     pub crime_points: i16,
     pub is_live: bool,
     pub player_race: u8,
-    pub type184: i32,
+    /// The character's faction id. The client's `GetBountyData` builds Lua record field 9 (the
+    /// left frame's faction name) with `FUN_392f8120(id, 1)` (`FUN_39080c00` @ 0x39080c00); the
+    /// same call fills the field literally named `"faction"` in `FUN_3907e830`. The row offset
+    /// (+0xb8, reader `FUN_397bebf0`) was called `Type184` in the C# server, whose dummy row sent
+    /// 1.
+    pub faction_id: u32,
     pub arrest_count: i32,
     pub accept_guilty_count: i32,
     pub accept_trial_count: i32,
@@ -144,7 +150,7 @@ pub struct BountyDescription {
 impl BountyDescription {
     /// One entry of `SCBountyListPacket.Write` (`ConvertLongX` for both x and y; guilty is
     /// written after notGuilty: the 1.2 client row reader 397bebf0 reads notGuilty first; the C# order
-    /// was swapped).
+    /// was swapped). The `faction_id` is the u32 the client's faction-name lookup consumes.
     pub fn write(&self, s: &mut PacketStream) {
         s.write_u32(self.player_id)
             .write_str(&self.player_name)
@@ -157,7 +163,7 @@ impl BountyDescription {
             .write_i16(self.crime_points)
             .write_bool(self.is_live)
             .write_u8(self.player_race)
-            .write_i32(self.type184)
+            .write_u32(self.faction_id)
             .write_i32(self.arrest_count)
             .write_i32(self.accept_guilty_count)
             .write_i32(self.accept_trial_count)
@@ -215,18 +221,36 @@ pub fn add_own_buff(
 }
 
 /// `Character.CrimePoint` setter (`value != field`: clamp to >= 0, `CheckWantedThreshold`).
-pub fn set_crime_point(server: &GameServer, c: &mut Character, value: i16, now_ms: i64) {
+/// Returns the [`Character::check_wanted_threshold`] signal: the caller must run
+/// [`crate::systems::social::faction::apply_crime_faction_change`] once the character's data
+/// lock is released.
+pub fn set_crime_point(
+    server: &GameServer,
+    c: &mut Character,
+    value: i16,
+    now_ms: i64,
+) -> CrimeFactionChange {
     if value != c.crime_point {
         c.crime_point = value.max(0);
-        c.check_wanted_threshold(server, now_ms);
+        c.check_wanted_threshold(server, now_ms)
+    } else {
+        CrimeFactionChange::default()
     }
 }
 
 /// `Character.InfamyPoint` setter (`value != field`: clamp to >= 0, `CheckWantedThreshold`).
-pub fn set_infamy_point(server: &GameServer, c: &mut Character, value: i32, now_ms: i64) {
+/// Returns the [`Character::check_wanted_threshold`] signal (see [`set_crime_point`]).
+pub fn set_infamy_point(
+    server: &GameServer,
+    c: &mut Character,
+    value: i32,
+    now_ms: i64,
+) -> CrimeFactionChange {
     if value != c.infamy_point {
         c.infamy_point = value.max(0);
-        c.check_wanted_threshold(server, now_ms);
+        c.check_wanted_threshold(server, now_ms)
+    } else {
+        CrimeFactionChange::default()
     }
 }
 
@@ -251,31 +275,36 @@ pub fn crime_state(c: &Character) -> i16 {
     0
 }
 
-/// Add crime and infamy points without wrapping away the wanted status.
+/// Add crime and infamy points without wrapping away the wanted status. The second value is the
+/// `CheckWantedThreshold` signal: the caller must run
+/// [`crate::systems::social::faction::apply_crime_faction_change`] after it releases the
+/// character's data lock. Negative amounts are the quest / trial / item reductions that can
+/// pardon a pirate (infamy 0).
 pub fn add_crime(
     server: &GameServer,
     c: &mut Character,
     amount: i16,
     now_ms: i64,
-) -> SCCrimeChangedPacket {
+) -> (SCCrimeChangedPacket, CrimeFactionChange) {
     let new_amount = i32::from(c.crime_point) + i32::from(amount);
-    set_crime_point(
+    let mut change = set_crime_point(
         server,
         c,
         new_amount.clamp(0, i32::from(i16::MAX)) as i16,
         now_ms,
     );
     let infamy = c.infamy_point.saturating_add(i32::from(amount));
-    set_infamy_point(server, c, infamy, now_ms);
+    change = change.merge(set_infamy_point(server, c, infamy, now_ms));
     if c.infamy_point < 0 {
-        set_infamy_point(server, c, 0, now_ms);
+        change = change.merge(set_infamy_point(server, c, 0, now_ms));
     }
-    SCCrimeChangedPacket {
+    let packet = SCCrimeChangedPacket {
         points: i32::from(amount),
         crime_points: c.crime_point,
         infamy_points: c.infamy_point,
         crime_state: crime_state(c),
-    }
+    };
+    (packet, change)
 }
 
 /// `CharacterManager.AddOfflineCrimePoints(playerId, crimePointsToAdd)`.
@@ -386,6 +415,17 @@ impl CrimeManager {
             .filter(|e| e.criminal == player_id && (include_old || e.judgement_time <= 0))
             .cloned()
             .collect()
+    }
+
+    /// Number of a player's judged (archived) crime records: the `crime` table rows whose
+    /// `judgement_time` was set by `TrialData.ArchiveEvidence` when a trial ends and
+    /// `Justice.KeepHistory` keeps them.
+    pub fn archived_evidence_count(&self, player_id: u32) -> usize {
+        self.st()
+            .events
+            .values()
+            .filter(|e| e.criminal == player_id && e.judgement_time > 0)
+            .count()
     }
 
     /// A crime event by id.
@@ -587,6 +627,19 @@ impl CrimeManager {
         self.st().victims.insert(id, info);
     }
 
+    /// Updates the prefetched offline-victim name cache (character rename). Crime rows store
+    /// ids only; the name is not persisted. Returns the number of changed caches.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut st = self.st();
+        match st.victims.get_mut(&character_id) {
+            Some(info) if info.name != new_name => {
+                info.name = new_name.to_string();
+                1
+            }
+            _ => 0,
+        }
+    }
+
     /// The values one `SCCrimeRecordsPacket` entry reads: the victim from the world
     /// (`GetCharacterById`) or the prefetched offline values, the reporter's name from the
     /// `NameManager`. Must be called without any player data lock held.
@@ -602,7 +655,7 @@ impl CrimeManager {
             },
         };
         // `victim?.Faction?.Id`, `victim?.Expedition?.Id`: unknown objects are null.
-        let victim_faction = if server.game_data.factions.get(faction).is_some() {
+        let victim_faction = if crate::systems::social::nation::faction_exists(server, faction) {
             faction
         } else {
             0
@@ -788,12 +841,19 @@ impl CrimeManager {
         let online = criminal.as_ref().is_some_and(|p| p.data().is_online);
         match criminal {
             Some(p) if online => {
-                let pkt = {
+                let (pkt, change) = {
                     let mut c = p.data();
-                    let pkt = add_crime(server, &mut c, points, util::now_ms());
+                    let (pkt, change) = add_crime(server, &mut c, points, util::now_ms());
                     c.evidence_reported_count += 1;
-                    pkt
+                    (pkt, change)
                 };
+                // `Character.AddCrime` -> `InfamyPoint` setter -> `CheckWantedThreshold` ->
+                // `SetFaction(Pirate)` / pardon: the broadcast and the house / guild / party
+                // effects need the world, so they run here, after the character's data lock is
+                // released.
+                if !change.is_empty() {
+                    crate::systems::social::faction::apply_crime_faction_change(server, &p, change);
+                }
                 p.send(pkt);
                 crate::systems::dispatch_buff_events(server, &WorldObject::from(&p));
                 // GET_FACTION: crossing the infamy threshold made the criminal a pirate.
@@ -1100,10 +1160,12 @@ mod tests {
     async fn add_crime_saturates_and_keeps_wanted_threshold() {
         let s = server();
         let mut c = crate::test_support::test_character(1, "Crook", 0.0, 0.0);
-        let p = add_crime(&s, &mut c, 30, 0);
+        let (p, change) = add_crime(&s, &mut c, 30, 0);
         assert_eq!((c.crime_point, c.infamy_point), (30, 30));
         assert_eq!(p.crime_state, 0);
-        let p = add_crime(&s, &mut c, 30, 0);
+        assert!(change.is_empty());
+        let (p, change) = add_crime(&s, &mut c, 30, 0);
+        assert!(change.is_empty());
         assert_eq!((c.crime_point, c.infamy_point), (60, 60));
         // Wanted buff from CheckWantedThreshold -> crime state 1.
         assert_eq!(p.crime_state, 1);
@@ -1118,15 +1180,58 @@ mod tests {
         );
         // Overflow keeps the criminal wanted.
         c.crime_point = i16::MAX - 1;
-        let p = add_crime(&s, &mut c, 10, 0);
+        let (p, _) = add_crime(&s, &mut c, 10, 0);
         assert_eq!(c.crime_point, i16::MAX);
         assert_eq!(p.crime_points, i16::MAX);
         assert_eq!(p.crime_state, 1);
         // Negative amounts clamp at 0.
         c.crime_point = 5;
         c.infamy_point = 5;
-        add_crime(&s, &mut c, -10, 0);
+        let (_, change) = add_crime(&s, &mut c, -10, 0);
+        assert!(change.is_empty());
         assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+    }
+
+    /// Infamy 1 keeps a pirate a pirate: the return needs exactly 0 (item 32212's text); and a
+    /// non-pirate whose infamy reaches 0 gets no faction change at all.
+    #[tokio::test]
+    async fn only_zero_infamy_pardons_a_pirate() {
+        use crate::test_support::{spawn_player, test_character, TestClient};
+
+        let s = server();
+        let mut client = TestClient::new(&s, 1, 1001);
+        let mut character = test_character(1, "Pirate", 100.0, 100.0);
+        character.unit.faction_id = crate::db_character::FACTION_PIRATE;
+        character.crime_point = 2;
+        character.infamy_point = 2;
+        character.is_online = true;
+        let p = spawn_player(&s, &client, character, 0x100);
+        client.drain();
+
+        let change = {
+            let mut c = p.data();
+            set_infamy_point(&s, &mut c, 1, 0)
+        };
+        assert!(change.is_empty(), "1 infamy is not 0");
+        crate::systems::social::faction::apply_crime_faction_change(&s, &p, change);
+        assert_eq!(
+            p.data().unit.faction_id,
+            crate::db_character::FACTION_PIRATE
+        );
+        assert!(client.drain().is_empty(), "no faction-change packet at 1");
+
+        {
+            let mut c = p.data();
+            c.unit.faction_id = 101;
+        }
+        let change = {
+            let mut c = p.data();
+            set_infamy_point(&s, &mut c, 0, 0)
+        };
+        assert!(change.is_empty(), "a non-pirate is not pardoned");
+        crate::systems::social::faction::apply_crime_faction_change(&s, &p, change);
+        assert_eq!(p.data().unit.faction_id, 101);
+        assert!(client.drain().is_empty());
     }
 
     #[tokio::test]

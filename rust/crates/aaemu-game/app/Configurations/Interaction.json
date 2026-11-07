@@ -1,0 +1,13 @@
+{
+	"Interaction": {
+		// Refuse CSStartInteraction for an NPC farther than the 1.2 client's 3.0 m
+		// interaction reach plus NpcReachToleranceMeters (movement/latency slack).
+		// The client does not gate the send itself, so only the server can refuse.
+		// false restores the old behaviour (no distance check).
+		"NpcReachCheck": true,
+		"NpcReachToleranceMeters": 2.0,
+		// Enforce ai_command_sets.can_interact = 'f' (NPC not talkable while such a set runs).
+		// INFERRED and 302 of 325 sets are 'f', so it is off by default.
+		"CommandSetLock": false
+	}
+}

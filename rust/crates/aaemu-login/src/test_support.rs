@@ -302,11 +302,40 @@ pub(crate) fn test_server(config: AppConfig, backend: Arc<MockBackend>) -> Arc<L
 
 /// A [`LoginConnection`] whose outgoing packets can be read from the returned receiver.
 pub(crate) fn test_connection(ip: IpAddr) -> (Arc<LoginConnection>, PacketLog) {
+    test_connection_with(ip, crate::config::LoginConfig::default())
+}
+
+/// [`test_connection`] with the slot/pre-select values the connection advertises.
+pub(crate) fn test_connection_with(
+    ip: IpAddr,
+    limits: crate::config::LoginConfig,
+) -> (Arc<LoginConnection>, PacketLog) {
     let ids = Arc::new(SimpleIdManager::new());
     let (tx, rx) = mpsc::unbounded_channel();
     let lease = ConnectionIdLease::rent(&ids).unwrap();
     (
-        Arc::new(LoginConnection::new(lease, ip, false, tx)),
+        Arc::new(LoginConnection::new(lease, ip, false, tx, limits)),
+        PacketLog { rx },
+    )
+}
+
+/// A [`LoginConnection`] on the server's own connection-id pool. Use this whenever a test has
+/// more than one connection: [`test_connection`] uses a fresh pool and therefore hands every
+/// connection id 1.
+pub(crate) fn test_connection_on(
+    server: &Arc<LoginServer>,
+    ip: IpAddr,
+) -> (Arc<LoginConnection>, PacketLog) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let lease = ConnectionIdLease::rent(&server.connection_ids).unwrap();
+    (
+        Arc::new(LoginConnection::new(
+            lease,
+            ip,
+            false,
+            tx,
+            server.config.login,
+        )),
         PacketLog { rx },
     )
 }

@@ -18,8 +18,10 @@ gcreate Disconnect Guild
 expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
 pump 2
 sync guild-ready 2
-expectpkt SCTeamMemberDisconnectedPacket 20
+# The server logs the member out of the guild (status change) before it marks the team member
+# offline, and `expectpkt` discards what it skips: wait in send order.
 expectpkt SCExpeditionMemberStatusChangedPacket 20
+expectpkt SCTeamMemberDisconnectedPacket 20
 
 [member]
 waitpeer 120 ${leader}

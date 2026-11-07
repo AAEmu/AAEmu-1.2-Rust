@@ -61,6 +61,61 @@ impl ClientPacket for CSCreateCharacterPacket {
     }
 }
 
+/// `CSEditCharacterPacket` (level 1, 0x023): the pre-select lobby edit. The body is
+/// `CSCreateCharacterPacket`'s with a leading character id and no `introZoneId` (1.2 client
+/// serializer `FUN_397c4da0`, writer `FUN_397ae360`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CSEditCharacterPacket {
+    pub character_id: u32,
+    pub request: CreateCharacterRequest,
+}
+
+impl ClientPacket for CSEditCharacterPacket {
+    const NAME: &'static str = "CSEditCharacterPacket";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
+        let character_id = s.read_u32()?;
+        let name = s.read_string()?;
+        let race = s.read_u8()?;
+        let gender = s.read_u8()?;
+        let mut body_items = [0u32; 7];
+        for i in body_items.iter_mut() {
+            *i = s.read_u32()?;
+        }
+        let model_params: UnitCustomModelParams = s.read()?;
+        Ok(Self {
+            character_id,
+            request: CreateCharacterRequest {
+                name,
+                race,
+                gender,
+                body_items,
+                model_params,
+                ability1: s.read_u8()?,
+                ability2: s.read_u8()?,
+                ability3: s.read_u8()?,
+                level: s.read_u8()?,
+            },
+        })
+    }
+
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            // A validated enter-world ticket installs the account id (new TCP connections start
+            // in Lobby too, so the state alone does not prove authentication).
+            if conn.account_id() == 0 {
+                conn.shutdown();
+                return Ok(());
+            }
+            character::edit(server, conn, self.character_id, self.request).await
+        })
+    }
+}
+
 /// `CSDeleteCharacterPacket` (level 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSDeleteCharacterPacket {
@@ -320,12 +375,14 @@ impl ClientPacket for CSCancelLeaveWorldPacket {
     }
 }
 
-/// Registers the C->S packets of this module (character create / delete / select, spawn, movement, chat).
+/// Registers the C->S packets of this module (character create / edit / delete / select, spawn,
+/// movement, chat).
 pub fn register(r: &mut crate::net::registry::PacketRegistry) {
     use crate::net::packet::LEVEL_PLAIN;
     use crate::opcodes::cs;
     r.register::<CSCancelLeaveWorldPacket>(LEVEL_PLAIN, cs::CSCancelLeaveWorldPacket)
         .register::<CSCreateCharacterPacket>(LEVEL_PLAIN, cs::CSCreateCharacterPacket)
+        .register::<CSEditCharacterPacket>(LEVEL_PLAIN, cs::CSEditCharacterPacket)
         .register::<CSDeleteCharacterPacket>(LEVEL_PLAIN, cs::CSDeleteCharacterPacket)
         .register::<CSCancelCharacterDeletePacket>(LEVEL_PLAIN, cs::CSCancelCharacterDeletePacket)
         .register::<CSSelectCharacterPacket>(LEVEL_PLAIN, cs::CSSelectCharacterPacket)
@@ -386,6 +443,87 @@ mod tests {
         );
         assert_eq!(p.body_items, [0, 1, 2, 3, 4, 5, 6]);
         assert_eq!(s.remaining(), 0);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_edit_character_does_not_touch_the_lobby() {
+        let server = crate::test_support::test_server();
+        let mut client = crate::test_support::TestClient::new(&server, 1, 0);
+        let packet = CSEditCharacterPacket {
+            character_id: 1,
+            request: CreateCharacterRequest {
+                name: "Noauth".into(),
+                race: 1,
+                gender: 1,
+                body_items: [0; 7],
+                model_params: UnitCustomModelParams::default(),
+                ability1: 1,
+                ability2: 11,
+                ability3: 11,
+                level: 1,
+            },
+        };
+        packet
+            .handle(&server, &mut client.conn)
+            .await
+            .expect("rejected before any lookup");
+        assert!(client.conn.is_closing());
+        assert!(client.drain().is_empty());
+        assert!(client.conn.characters.is_empty());
+    }
+
+    #[test]
+    fn reads_edit_character_as_the_create_body_with_a_leading_id() {
+        // 1.2 client serializer `FUN_397c4da0`: id, name, race, gender, 7 body items, the
+        // customizing blob, 3 abilities, level, and no `introZoneId`.
+        let mut s = PacketStream::new();
+        s.write_u32(0x0102_0304)
+            .write_str("Abc")
+            .write_u8(1)
+            .write_u8(2);
+        for i in 0..7u32 {
+            s.write_u32(i + 10);
+        }
+        UnitCustomModelParams::default().write(&mut s);
+        s.write_u8(1).write_u8(11).write_u8(11).write_u8(1);
+        let p = CSEditCharacterPacket::read(&mut s).unwrap();
+        assert_eq!(p.character_id, 0x0102_0304);
+        assert_eq!(p.request.name, "Abc");
+        assert_eq!(
+            (
+                p.request.race,
+                p.request.gender,
+                p.request.ability1,
+                p.request.ability3,
+                p.request.level
+            ),
+            (1, 2, 1, 11, 1)
+        );
+        assert_eq!(p.request.body_items, [10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(s.remaining(), 0);
+
+        // A truncated body is a read error (the previous log-only handler accepted anything).
+        let mut s = PacketStream::from_bytes(vec![1, 0, 0, 0]);
+        assert!(CSEditCharacterPacket::read(&mut s).is_err());
+    }
+
+    #[test]
+    fn create_body_ends_with_intro_zone_id_that_the_reader_ignores() {
+        // 1.2 create writer `FUN_397ae280` passes -1 as `introZoneId` (`FUN_397c4bf0`).
+        let mut s = PacketStream::new();
+        s.write_str("Abc").write_u8(1).write_u8(2);
+        for i in 0..7u32 {
+            s.write_u32(i);
+        }
+        UnitCustomModelParams::default().write(&mut s);
+        s.write_u8(1)
+            .write_u8(11)
+            .write_u8(11)
+            .write_u8(1)
+            .write_i32(-1);
+        let p = CSCreateCharacterPacket::read(&mut s).unwrap().0;
+        assert_eq!(p.name, "Abc");
+        assert_eq!(s.remaining(), 4);
     }
 
     #[test]

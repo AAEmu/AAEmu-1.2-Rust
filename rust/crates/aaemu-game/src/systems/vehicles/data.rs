@@ -21,6 +21,8 @@ pub mod attach_point {
     pub const DRIVER: u8 = 1;
     pub const PASSENGER0: u8 = 2;
     pub const PASSENGER1: u8 = 3;
+    pub const PASSENGER2: u8 = 4;
+    pub const PASSENGER3: u8 = 5;
     pub const TRAILED0: u8 = 30;
     pub const HEAL_POINT0: u8 = 36;
     pub const HEAL_POINT9: u8 = 45;
@@ -392,6 +394,18 @@ pub struct ShipyardTemplate {
     pub steps: Vec<(i32, ShipyardStep)>,
 }
 
+/// `ShipyardRewards`: the doodads scattered around a shipyard (see
+/// [`super::shipyards::spawn_rewards`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShipyardReward {
+    pub id: u32,
+    pub shipyard_id: u32,
+    pub doodad_id: u32,
+    pub on_water: bool,
+    pub radius: f32,
+    pub count: i32,
+}
+
 impl ShipyardTemplate {
     /// `ShipyardSteps[step]`.
     pub fn step(&self, step: i32) -> Option<&ShipyardStep> {
@@ -525,6 +539,13 @@ pub struct VehiclesData {
     pub repairable_slaves: HashMap<u32, u32>,
     pub transfer_templates: HashMap<u32, TransferTemplate>,
     pub shipyard_templates: HashMap<u32, ShipyardTemplate>,
+    /// `item_shipyards.item_id` -> `shipyard_id`: the shipyard a design item builds (client
+    /// loader `FUN_396cd6e0`). The 1.2 data differs from `shipyards.origin_item_id` for
+    /// shipyards 10 and 11 (origin 0) and has no row for shipyard 1; shipyard 14's design item
+    /// maps to its duplicate 15.
+    pub item_shipyards: HashMap<u32, u32>,
+    /// `shipyard_rewards` grouped by `shipyard_id`.
+    pub shipyard_rewards: HashMap<u32, Vec<ShipyardReward>>,
     /// `TaxationsManager.Taxations` (id -> tax).
     pub taxations: HashMap<u32, u32>,
     /// `ModelManager._modelTypes` (model id -> (sub id, sub type)).
@@ -1147,6 +1168,51 @@ impl VehiclesData {
         if let Some(e) = err {
             return Err(e);
         }
+        // `item_shipyards` is optional: a fixture that only covers the shipyard templates has
+        // no row and keeps the `origin_item_id` path (see `shipyards::create`).
+        if ctx
+            .conn
+            .prepare("SELECT * FROM item_shipyards LIMIT 0")
+            .is_ok()
+        {
+            for_each_row(ctx.conn, "SELECT * FROM item_shipyards", [], |r| {
+                let item_id = r.u32("item_id")?;
+                let shipyard_id = r.u32("shipyard_id")?;
+                if let Some(previous) = self.item_shipyards.insert(item_id, shipyard_id) {
+                    tracing::warn!(
+                        "item_shipyards: duplicate item {item_id} (shipyards {previous} and {shipyard_id}); the first row wins"
+                    );
+                    self.item_shipyards.insert(item_id, previous);
+                }
+                Ok(())
+            })?;
+        }
+        tracing::info!("Loaded {} item shipyards", self.item_shipyards.len());
+        if ctx
+            .conn
+            .prepare("SELECT * FROM shipyard_rewards LIMIT 0")
+            .is_ok()
+        {
+            for_each_row(ctx.conn, "SELECT * FROM shipyard_rewards", [], |r| {
+                let reward = ShipyardReward {
+                    id: r.u32("id")?,
+                    shipyard_id: r.u32("shipyard_id")?,
+                    doodad_id: r.u32("doodad_id")?,
+                    on_water: r.bool_str("on_water")?,
+                    radius: r.f32("radius")?,
+                    count: r.i32("count")?,
+                };
+                self.shipyard_rewards
+                    .entry(reward.shipyard_id)
+                    .or_default()
+                    .push(reward);
+                Ok(())
+            })?;
+        }
+        tracing::info!(
+            "Loaded {} shipyard reward rows",
+            self.shipyard_rewards.values().map(Vec::len).sum::<usize>()
+        );
         if ctx.conn.prepare("SELECT * FROM taxations LIMIT 0").is_ok() {
             for_each_row(ctx.conn, "SELECT * FROM taxations", [], |r| {
                 self.taxations.insert(r.u32("id")?, r.u32("tax")?);

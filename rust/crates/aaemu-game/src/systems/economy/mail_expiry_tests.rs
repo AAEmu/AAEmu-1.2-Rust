@@ -521,6 +521,7 @@ async fn expiry_preserves_system_tax_auction_quest_and_legacy_billing_metadata()
             mail_type::AUC_OFF_FAIL,
             mail_type::AUC_OFF_SUCCESS,
             mail_type::AUC_BID_WIN,
+            mail_type::AUC_BID_FAIL,
             mail_type::SYS_EXPRESS,
             mail_type::CHARGED,
             mail_type::SYS_SELL_BACKPACK,

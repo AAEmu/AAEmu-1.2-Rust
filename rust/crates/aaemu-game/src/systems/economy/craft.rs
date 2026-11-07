@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use aaemu_commons::{Marshal, PacketStream};
 
+use crate::data::items::ItemData;
 use crate::error::Result;
-use crate::models::container::slot_type;
+use crate::models::container::{slot_type, ItemContainer};
 use crate::models::item_task::task_type;
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
@@ -32,7 +33,7 @@ use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::systems::HookSlot;
 use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
-use super::craft_data::Craft;
+use super::craft_data::{Craft, CraftMaterial, CraftProduct};
 #[cfg(test)]
 #[path = "craft_publication_tests.rs"]
 mod publication_tests;
@@ -390,7 +391,7 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         // client is left waiting. Deviation: end the (client side) batch with an error.
         tracing::error!("Craft: unknown craft {craft_id}");
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
             error_message::CRAFT_INVALID_CRAFT_TYPE,
@@ -400,6 +401,27 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         cancel_craft(server, player);
         return;
     };
+    // Recipe learning gate (`Crafting.RequireLearnedRecipes`, default off because retail 1.2
+    // enforcement is UNKNOWN): a craft with a learn source must be learned first.
+    if !super::craft_learning::craft_allowed(server, player, craft.id) {
+        tracing::debug!(
+            character = player.character_id,
+            craft_id = craft.id,
+            "craft refused: craft not learned"
+        );
+        // `craft_not_learned` (client error id 0x82 = 130, X2G:1136028) under
+        // `CraftCantActAnyMore`; the client resets its batch only on that pair.
+        error2(
+            &mut Out::Direct(server),
+            player,
+            error_message::CRAFT_CANT_ACT_ANY_MORE,
+            error_message::CRAFT_NOT_LEARNED,
+            0,
+            false,
+        );
+        cancel_craft(server, player);
+        return;
+    }
     let mgr = &server.systems.economy.craft;
     let char_id = player.character_id;
     mgr.update(char_id, |s| {
@@ -408,7 +430,7 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         s.doodad_id = doodad_id;
     });
     let hooks = mgr.hooks();
-    let mut out = Out::Direct;
+    let mut out = Out::Direct(server);
 
     // check if you are equipped with a backpack or glider
     let inv = Inv::of(player);
@@ -426,19 +448,20 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         return;
     }
 
-    // Check if we have enough materials
-    let has_materials = craft.craft_materials.is_empty()
-        || craft
-            .craft_materials
-            .iter()
-            .all(|m| inv.items_count_in(slot_type::INVENTORY, m.item_id, -1) >= m.amount);
-    if !has_materials {
+    // Check if we have enough materials, each row in the grade it requires (the 1.2 client
+    // counts only items of exactly `require_grade`: GetCraftMaterialInfo 0x39462600).
+    let payout = material_payout(&inv, craft, &server.game_data.items);
+    if payout.availability != MaterialAvailability::Ok {
         // TODO not verified
         error2(
             &mut out,
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_REQUIRED_ITEM,
+            if payout.availability == MaterialAvailability::LockedOnly {
+                error_message::ITEM_SECURE_CONDITION
+            } else {
+                error_message::NOT_ENOUGH_REQUIRED_ITEM
+            },
             0,
             false,
         );
@@ -594,7 +617,7 @@ pub fn abort_craft(server: &GameServer, player: &PlayerRef, result: u8) {
 pub fn abort_craft_with(server: &GameServer, player: &PlayerRef, reason: i16) {
     debug_assert_ne!(reason, 0);
     error2(
-        &mut Out::Direct,
+        &mut Out::Direct(server),
         player,
         error_message::CRAFT_CANT_ACT_ANY_MORE,
         reason,
@@ -637,7 +660,7 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     };
     let labor = player.data().labor_power;
     if i32::from(labor) < state.consume_labor_power {
-        let mut out = Out::Direct;
+        let mut out = Out::Direct(server);
         send_debug_message(
             server,
             &mut out,
@@ -677,7 +700,7 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     if !bench_access(server, player, state.doodad_id, craft, mgr.hooks().as_ref()) {
         drop(operation);
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
             error_message::CRAFT_PERMISSION_DENY,
@@ -705,66 +728,178 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     }
 }
 
-/// The product / material part of `EndCraft` ("Improper" heuristic grade inheritance of the
-/// 1.2 C#). `false` = a trade pack could not be equipped (the craft is cancelled).
+/// What the bag can pay of a craft's material rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterialAvailability {
+    /// Every row has enough unlocked items of the grade it requires.
+    Ok,
+    /// The unlocked items are short but the same rows would be paid by secured stacks.
+    LockedOnly,
+    /// A row is short even counting its secured stacks.
+    Missing,
+}
+
+/// The grade that pays for `material`: its `require_grade`, or the grade inherited from the
+/// flagged main material; `-1` when any grade may pay.
+fn material_grade(material: &CraftMaterial, main_grade: Option<u8>) -> i32 {
+    if material.require_grade >= 0 {
+        material.require_grade
+    } else if material.main_grade {
+        main_grade.map_or(-1, i32::from)
+    } else {
+        -1
+    }
+}
+
+/// The grade of the first (lowest-slot, the order `consume_item` takes) unit that may pay for
+/// the craft's `main_grade` material.
+fn main_material_grade(bag: &ItemContainer, craft: &Craft) -> Option<u8> {
+    let material = craft.craft_materials.iter().find(|m| m.main_grade)?;
+    let (ids, _) = bag.items_by_template_unlocked(material.item_id, material.require_grade);
+    ids.iter()
+        .filter_map(|id| bag.get_item_by_id(*id))
+        .min_by_key(|item| item.slot)
+        .map(|item| item.grade)
+}
+
+/// The 1.2 C# "improper" grade source: the first equipment material's first unit. Kept for
+/// `use_grade` products that name no `main_grade` material (an interim rule; the client's
+/// `crafting_renewal.alb` also considers materials of the product's item implementation).
+fn first_equipment_material_grade(
+    bag: &ItemContainer,
+    craft: &Craft,
+    items: &ItemData,
+) -> Option<u8> {
+    craft.craft_materials.iter().find_map(|material| {
+        let template = items.template(material.item_id)?;
+        template.equip()?;
+        let (ids, _) = bag.items_by_template_unlocked(material.item_id, material.require_grade);
+        ids.iter()
+            .filter_map(|id| bag.get_item_by_id(*id))
+            .min_by_key(|item| item.slot)
+            .map(|item| item.grade)
+    })
+}
+
+/// One execution's material check plus the grade sources its products inherit from. Everything
+/// is read under one bag lock; the caller's `ItemTxn` operation lock keeps the state until the
+/// consumption, so a second caller cannot consume the checked items in between.
+struct MaterialPayout {
+    availability: MaterialAvailability,
+    /// Grade of the `main_grade` material's first consumable unit.
+    main_grade: Option<u8>,
+    /// Grade of the first equipment material's first consumable unit (the heuristic source).
+    equipment_grade: Option<u8>,
+}
+
+/// Checks every material row in the grade it requires and reads the grade sources under one bag
+/// lock. The 1.2 client counts only items of exactly `require_grade` (`GetCraftMaterialInfo`
+/// 0x39462600; `GetExecutableCraftCount` 0x394d3cc0 -> `FUN_3961fbc0` `param_3 == grade`), and a
+/// material with no requirement (`-1`) accepts any grade.
+fn material_payout(inv: &Inv, craft: &Craft, items: &ItemData) -> MaterialPayout {
+    let bag = inv.bag();
+    let bag = bag.lock().expect("container poisoned");
+    let main_grade = main_material_grade(&bag, craft);
+    // Rows that name the same item and effective grade share the stacks: 9 crafts list one
+    // item twice (e.g. craft 370: 8318 x3 + x1), so each row must not be checked against the
+    // whole stack separately.
+    let mut required: HashMap<(u32, i32), i32> = HashMap::new();
+    for m in &craft.craft_materials {
+        *required
+            .entry((m.item_id, material_grade(m, main_grade)))
+            .or_default() += m.amount;
+    }
+    let availability = if required.is_empty()
+        || required.iter().all(|(&(item_id, grade), &amount)| {
+            bag.items_by_template_unlocked(item_id, grade).1 >= amount
+        }) {
+        MaterialAvailability::Ok
+    } else if required.iter().any(|(&(item_id, grade), &amount)| {
+        bag.items_by_template_unlocked(item_id, grade).1 < amount
+            && bag.items_by_template(item_id, grade).1 >= amount
+    }) {
+        MaterialAvailability::LockedOnly
+    } else {
+        MaterialAvailability::Missing
+    };
+    let equipment_grade = match main_grade {
+        Some(_) => None,
+        None => first_equipment_material_grade(&bag, craft, items),
+    };
+    tracing::debug!(
+        craft_id = craft.id,
+        materials = ?craft
+            .craft_materials
+            .iter()
+            .map(|m| (m.item_id, m.amount, m.require_grade, m.main_grade))
+            .collect::<Vec<_>>(),
+        main_grade = ?main_grade,
+        availability = ?availability,
+        "craft material check"
+    );
+    MaterialPayout {
+        availability,
+        main_grade,
+        equipment_grade,
+    }
+}
+
+/// The grade a product is handed out with: the flagged main material's grade (`main_grade`), else
+/// the 1.2 equipment-material heuristic (any product, as before), else the fixed
+/// `item_grade_id`, else the default `-1`. Inherited grades keep the C# free-regrade roll.
+fn product_grade(
+    server: &GameServer,
+    product: &CraftProduct,
+    main_grade: Option<u8>,
+    equipment_grade: Option<u8>,
+) -> i32 {
+    if let Some(grade) = main_grade.or(equipment_grade) {
+        return free_regrade(server, i32::from(grade));
+    }
+    if product.item_grade_id > 0 {
+        product.item_grade_id as i32
+    } else {
+        -1
+    }
+}
+
+/// The product / material part of `EndCraft`. `false` = a trade pack could not be equipped (the
+/// craft is cancelled).
 fn hand_out_products(server: &GameServer, player: &PlayerRef, inv: &Inv, craft: &Craft) -> bool {
     let items = &server.game_data.items;
     let mut txn = ItemTxn::begin(server);
     let bag = inv.bag();
 
     // The materials are consumed from the bag only (the C# counted bank and equipment too and
-    // then crafted without consuming them): check again before anything is handed out.
-    let materials_ok = craft.craft_materials.iter().all(|m| {
-        let have = bag
-            .lock()
-            .expect("container poisoned")
-            .items_by_template(m.item_id, -1)
-            .1;
-        have >= m.amount
-    });
-    if !materials_ok {
+    // then crafted without consuming them). Check and read the grade sources under one bag lock;
+    // the transaction's operation lock keeps the state until the consumption below.
+    let payout = material_payout(inv, craft, items);
+    if payout.availability != MaterialAvailability::Ok {
         tracing::warn!(
             "{} crafted {} without the materials in the bag, craft refused.",
             player.data().unit.name,
             craft.id
         );
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_REQUIRED_ITEM,
+            if payout.availability == MaterialAvailability::LockedOnly {
+                error_message::ITEM_SECURE_CONDITION
+            } else {
+                error_message::NOT_ENOUGH_REQUIRED_ITEM
+            },
             0,
             false,
         );
         return false;
     }
 
-    // "Improper" Heuristic Grade inheritance to be used for 1.2 only, due to unset flags in
-    // compact. Search for the first equipment material in the craft
-    let mut inherited_grade: Option<u8> = None;
-    for material in &craft.craft_materials {
-        if items
-            .template(material.item_id)
-            .is_some_and(|t| t.equip().is_some())
-        {
-            let g = bag.lock().expect("container poisoned");
-            let (found, _) = g.items_by_template(material.item_id, -1);
-            if let Some(first) = found.first().and_then(|id| g.get_item_by_id(*id)) {
-                inherited_grade = Some(first.grade);
-                break;
-            }
-        }
-    }
-
     // The products handed out, for the MAKE_ITEM_* achievement credit once the craft went through.
     let mut produced: Vec<(u32, i32, i32)> = Vec::new();
     for product in &craft.craft_products {
-        let grade_to_use = match inherited_grade {
-            // If we found an equipment material, inherit grade and roll for free regrade
-            Some(g) => free_regrade(server, i32::from(g)),
-            None if product.item_grade_id > 0 => product.item_grade_id as i32,
-            None => -1,
-        };
+        let grade_to_use =
+            product_grade(server, product, payout.main_grade, payout.equipment_grade);
         // Check if template allows grade changes
         if let Some(t) = items.template(product.item_id) {
             let msg = format!(
@@ -815,13 +950,16 @@ fn hand_out_products(server: &GameServer, player: &PlayerRef, inv: &Inv, craft: 
     }
 
     for material in &craft.craft_materials {
-        bag.lock().expect("container poisoned").consume_item(
-            task_type::CRAFT_ACT_SAVED,
-            material.item_id,
-            material.amount,
-            None,
-            &mut txn.env,
-        );
+        bag.lock()
+            .expect("container poisoned")
+            .consume_item_by_grade(
+                task_type::CRAFT_ACT_SAVED,
+                material.item_id,
+                material_grade(material, payout.main_grade),
+                material.amount,
+                None,
+                &mut txn.env,
+            );
     }
     report_crafted(server, player, &produced);
     true
@@ -988,8 +1126,11 @@ pub fn free_regrade_with(server: &GameServer, base_grade: i32, lucky_roll: u32) 
 // -------------------------------------------------------------------------------------------
 
 pub fn register(reg: &mut PacketRegistry) {
-    // Not registered in the 1.2 `GameNetwork` (no opcode): `CSSetCraftingPayPacket`.
     reg.register::<CSExecuteCraft>(LEVEL_PLAIN, cs::CSExecuteCraft);
+    // 1.2 Lua `X2Craft.SetCraftingPay` -> `FUN_394d7230` (`local_14 = 0x8d`; the doodad obj
+    // id at `+0xc` and the money at `+0x10` via `FUN_397b0ca0`). Pay rules are UNKNOWN
+    // (capture-pending), so the handler only validates and logs.
+    reg.register::<CSSetCraftingPayPacket>(LEVEL_PLAIN, cs::CSSetCraftingPayPacket);
 }
 
 /// `CSExecuteCraft`.
@@ -1022,7 +1163,9 @@ impl CSExecuteCraft {
 }
 sync_client_packet!(CSExecuteCraft);
 
-/// `CSSetCraftingPayPacket` (only logged in C#).
+/// `CSSetCraftingPayPacket`. The 1.2 client writer `FUN_394d7230` sends opcode `0x8d` with the
+/// crafting doodad's obj id (`+0xc`) and the money (`+0x10`) through `FUN_397b0ca0`, in that
+/// order (bc, i32). The C# only logged it; here it is a validated no-op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSetCraftingPayPacket {
     pub obj_id: u32,
@@ -1037,11 +1180,24 @@ impl CSSetCraftingPayPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::debug!(
-            "SetCraftingPay, ObjId: {}, MoneyAmount: {}",
-            self.obj_id,
-            self.money_amount
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(player) = active(conn) else { return };
+        if self.money_amount < 0 {
+            tracing::warn!(
+                char_id = player.character_id,
+                obj_id = self.obj_id,
+                money = self.money_amount,
+                "SetCraftingPay: negative money, ignored (pay rules UNKNOWN, capture-pending)"
+            );
+            return;
+        }
+        let obj_exists = server.world.object(self.obj_id).is_some();
+        tracing::warn!(
+            char_id = player.character_id,
+            obj_id = self.obj_id,
+            money = self.money_amount,
+            obj_exists,
+            "SetCraftingPay logged, no state change (pay rules UNKNOWN, capture-pending)"
         );
     }
 }

@@ -46,7 +46,8 @@ simple_packet!(
 );
 
 simple_packet!(
-    /// `SCIdleKickPacket()` (empty body).
+    /// `SCIdleKickPacket()` (empty body). Never sent: the 1.2 client reader `FUN_39184540` is
+    /// empty and the client kicks itself from `SCInitialConfig.idleKickTime` (WP-J).
     SCIdleKickPacket {}
 );
 
@@ -548,6 +549,33 @@ mod tests {
                 premium_length: 5
             }),
             [1, 0, 3, 0, 4, 0, 5, 0]
+        );
+    }
+
+    /// The 1.2 client's SC reader FUN_397ae880 reads `worldId`, `isPremium`, `myTurn`,
+    /// `normalLength` and `premiumLength` in that order; `myTurn == 0` ends the queue wait
+    /// (handler FUN_39406b80). The login server's AC 0x009 packet has the same body.
+    #[test]
+    fn world_queue_bytes_match_the_client_reader() {
+        assert_eq!(
+            body(&SCWorldQueuePacket {
+                world_id: 7,
+                is_premium: false,
+                my_turn: 1,
+                normal_length: 2,
+                premium_length: 0
+            }),
+            [7, 0, 1, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            body(&SCWorldQueuePacket {
+                world_id: 3,
+                is_premium: true,
+                my_turn: 0,
+                normal_length: 0,
+                premium_length: 1
+            }),
+            [3, 1, 0, 0, 0, 0, 1, 0]
         );
     }
 

@@ -137,17 +137,25 @@ async fn delayed_skill_use_requires_the_original_caster_and_target_handles() {
 }
 
 #[tokio::test]
-async fn delayed_disturbance_does_not_interrupt_a_removed_or_recycled_target() {
+async fn delayed_disturbance_does_not_interrupt_a_removed_or_recycled_plot() {
+    // A direct cast is now extended by a delayed disturb (WP-1). The remaining delayed
+    // interrupt path is the plot fallback: its timer must still check that the target is the
+    // same live object before cancelling.
     for remove_target in [false, true] {
         let (server, _client, player, npc) = fixture(GameData::empty());
         let owner = WorldObject::from(&npc);
         let skill = SkillRun::new(Arc::new(super::tests::skill_template(1)), 1);
-        skill.state().tl_id = server.systems.skills.tl_ids.next_id(0, 0);
-        npc.data().unit.skill_state.skill_task = Some(super::state::SkillTaskSlot {
-            kind: super::state::SkillTaskKind::Cast,
-            skill: skill.clone(),
-            cancel: super::state::CancelToken::new(),
-        });
+        let plot = super::plots::PlotState::new(
+            skill.clone(),
+            super::skill::CastCtx {
+                caster: owner.clone(),
+                caster_caster: SkillCaster::Unit(npc.obj_id),
+                target: super::geometry::Target::Obj(WorldObject::from(&player)),
+                target_caster: SkillCastTarget::Unit(player.obj_id),
+                skill_object: SkillObject::None,
+            },
+        );
+        npc.data().unit.skill_state.active_plot = Some(super::state::PlotStateRef(plot.clone()));
         execute(
             &server,
             5,
@@ -162,11 +170,7 @@ async fn delayed_disturbance_does_not_interrupt_a_removed_or_recycled_target() {
             world.spawn(Entity::new(npc.obj_id, n), &server.view_ctx());
         }
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-        assert_eq!(skill.cancelled(), !remove_target);
-        assert_eq!(
-            npc.data().unit.skill_state.skill_task.is_some(),
-            remove_target
-        );
+        assert_eq!(plot.cancellation_requested(), !remove_target);
     }
 }
 #[tokio::test]
@@ -1064,8 +1068,9 @@ async fn doodad_summons_use_the_selected_frame_and_keep_radian_rotations() {
             _zone_id: u32,
             pos: PositionAndRotation,
             _delay: i32,
-        ) {
+        ) -> Option<crate::world::DoodadRef> {
             self.0.lock().unwrap().push(pos);
+            None
         }
     }
     let (server, _client, player, npc) = fixture(GameData::empty());
@@ -1122,6 +1127,7 @@ async fn disturb_casting_cancels_direct_casts_and_honors_zero_probability() {
         kind: super::state::SkillTaskKind::Cast,
         skill: skill.clone(),
         cancel: super::state::CancelToken::new(),
+        extend_ms: 0,
     });
     let args = args(&WorldObject::from(&player), &owner);
     execute(&server, 5, &args, [0, 0, 0, 0]);

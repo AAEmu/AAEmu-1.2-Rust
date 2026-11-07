@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::data::experience::{ExperienceTable, LevelTemplate};
 use crate::data::GameData;
 use crate::models::doodad::Doodad;
+use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType};
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
@@ -65,6 +66,9 @@ const EQUAL_CHANNEL_BUFF: u32 = 62_003;
 const VILLAGER: u32 = 200;
 /// A copy of `VILLAGER` whose template carries `no_penalty` (a guard / siege cannon).
 const NO_PENALTY_NPC: u32 = 201;
+/// A copy of `VILLAGER` with `honor_point = BOSS_HONOR` (a real L10 elite: 2 x level).
+const BOSS: u32 = 202;
+const BOSS_HONOR: i32 = 20;
 const VILLAGER_KILL_EXP: i32 = 140;
 const DOODAD_TEMPLATE: u32 = 1000;
 /// `CrimeManager` small bloodstain evidence doodad.
@@ -79,6 +83,9 @@ const GROUP_HUNT_QUEST: u32 = 400;
 const VILLAGER_GROUP: u32 = 7;
 /// `ObjZoneKill` of two player kills in the conflict zone group, `team_share` / `is_party`.
 const PVP_ZONE_KILL_QUEST: u32 = 500;
+/// A reward-only quest that pays `QuestActSupplyHonorPoint` [`HONOR_QUEST_POINT`].
+const HONOR_QUEST: u32 = 600;
+const HONOR_QUEST_POINT: i32 = 10;
 
 /// `WorldInteractionType.Use`.
 const WI_USE: i32 = 19;
@@ -286,6 +293,13 @@ fn game_data() -> GameData {
         no_penalty.name = "No-penalty guard".into();
         no_penalty.no_penalty = true;
         d.templates.insert(NO_PENALTY_NPC, no_penalty);
+        // A boss with `npcs.honor_point` (the real bosses have 2 x level; Kraken / Nisrock
+        // 100, the L10 elites 20).
+        let mut boss = d.template(VILLAGER).expect("villager").clone();
+        boss.id = BOSS;
+        boss.name = "Honor boss".into();
+        boss.honor_point = BOSS_HONOR;
+        d.templates.insert(BOSS, boss);
     }
 
     let d = &mut gd.systems.npcs.doodad;
@@ -381,6 +395,37 @@ fn game_data() -> GameData {
         2,
     );
     q.group_npcs.add(VILLAGER_GROUP, VILLAGER);
+    // A reward-only quest that pays `QuestActSupplyHonorPoint` 10 (Start auto-completes).
+    q.add_template(QuestTemplate {
+        id: HONOR_QUEST,
+        detail_id: crate::systems::quests::model::detail::NORMAL,
+        ..QuestTemplate::default()
+    });
+    let honor_component = |id: u32, kind_id: u8| QuestComponentTemplate {
+        id,
+        quest_id: HONOR_QUEST,
+        kind_id,
+        npc_ai_id: 1,
+        ..QuestComponentTemplate::default()
+    };
+    q.add_component(honor_component(HONOR_QUEST * 10 + 1, kind::START));
+    q.add_act(
+        HONOR_QUEST * 10 + 1,
+        HONOR_QUEST * 10 + 1,
+        HONOR_QUEST * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    q.add_component(honor_component(HONOR_QUEST * 10 + 2, kind::REWARD));
+    q.add_act(
+        HONOR_QUEST * 10 + 2,
+        HONOR_QUEST * 10 + 2,
+        HONOR_QUEST * 10 + 2,
+        0,
+        ActKind::SupplyHonorPoint {
+            point: HONOR_QUEST_POINT,
+        },
+    );
     q.finish();
     gd.items.templates.insert(
         QUEST_ITEM,
@@ -451,6 +496,21 @@ fn villager(server: &GameServer, obj_id: u32, hp: i32) -> NpcRef {
 fn no_penalty_npc(server: &GameServer, obj_id: u32) -> NpcRef {
     let npc =
         crate::systems::npcs::npc::manager::create(server, obj_id, NO_PENALTY_NPC).expect("npc");
+    {
+        let mut n = npc.data();
+        n.unit.faction_id = 0;
+        n.unit.hp = 1_000;
+        n.unit.max_hp = 1_000;
+        n.unit.transform.set_xyz(105.0, 100.0, 100.0);
+    }
+    let world = server.world.world(0).expect("world");
+    world.spawn(&npc, &server.view_ctx());
+    npc
+}
+
+/// A boss NPC of [`BOSS`] with 1 000 hp, faction 0.
+fn boss(server: &GameServer, obj_id: u32) -> NpcRef {
+    let npc = crate::systems::npcs::npc::manager::create(server, obj_id, BOSS).expect("npc");
     {
         let mut n = npc.data();
         n.unit.faction_id = 0;
@@ -1332,6 +1392,20 @@ fn enemy_pc(server: &GameServer, id: u32, name: &str, x: f32) -> Pc {
     pc
 }
 
+/// A `unit_modifiers` type 0 (`Value`) bonus, as buffs 6266 / 6267 apply to the honor
+/// attributes (+100 add / +100 mul, -100 on `HonorPointLoseMul`).
+fn value_bonus(attribute: UnitAttribute, value: i32) -> Bonus {
+    Bonus {
+        template: BonusTemplate {
+            attribute,
+            modifier_type: UnitModifierType::Value,
+            value,
+            linear_level_bonus: 0,
+        },
+        value,
+    }
+}
+
 #[tokio::test]
 async fn solo_pvp_kill_in_a_conflict_zone_awards_honor() {
     use crate::data::world_data::conflict_type;
@@ -1478,6 +1552,138 @@ async fn war_zone_kill_splits_honor_with_assists_and_costs_the_victim_honor() {
     assert_eq!(victim.p.data().honor_point, 15); // -10 in War
     let v = victim.p.data();
     assert!(v.died_in_pvp && v.died_in_pvp_war_zone);
+}
+
+#[tokio::test]
+async fn honor_point_lose_mul_minus_100_removes_the_war_death_loss() {
+    use crate::data::world_data::conflict_type;
+    use crate::systems::skills::types::KillReason;
+    let server = conflict_server(conflict_type::WAR, [0; 5]);
+    let mut victim = pc(&server, 1, "Protected", 100.0);
+    let killer = enemy_pc(&server, 2, "Killer", 102.0);
+    victim.p.data().honor_point = 25;
+    victim
+        .p
+        .data()
+        .unit
+        .bonuses
+        .add_bonus(6266, value_bonus(UnitAttribute::HonorPointLoseMul, -100));
+    victim.client.drain();
+
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&victim.p),
+        Some(&WorldObject::from(&killer.p)),
+        KillReason::Damage,
+    );
+
+    // Buff 6303's `HonorPointLoseMul = -100`: the flat War loss is scaled to 0.
+    assert_eq!(victim.p.data().honor_point, 25);
+    assert!(!victim
+        .client
+        .drain_ops()
+        .contains(&sc::SCGamePointChangedPacket));
+    assert_eq!(killer.p.data().honor_point, 20); // solo War kill, no assist split
+}
+
+#[tokio::test]
+async fn quest_honor_without_modifiers_is_unchanged() {
+    let server = server_with(false);
+    let mut p = pc(&server, 1, "Honored", 100.0);
+    p.client.drain();
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&server, &p.p, HONOR_QUEST, false),
+        Some(true)
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(p.p.data().honor_point, HONOR_QUEST_POINT);
+    assert!(p.client.drain_ops().contains(&sc::SCGamePointChangedPacket));
+}
+
+#[tokio::test]
+async fn quest_honor_applies_world_rate_and_the_quest_attributes() {
+    let server = server_with(false);
+    server.config.update(|c| c.world.honor_rate = 2.0);
+    let mut p = pc(&server, 1, "Honored", 100.0);
+    {
+        let mut c = p.p.data();
+        // Buffs 6266 / 6267 "Honor test buff" rows: +100 add, +100 mul.
+        c.unit
+            .bonuses
+            .add_bonus(6266, value_bonus(UnitAttribute::HonorPointGainQuest, 100));
+        c.unit.bonuses.add_bonus(
+            6267,
+            value_bonus(UnitAttribute::HonorPointGainQuestMul, 100),
+        );
+    }
+    p.client.drain();
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&server, &p.p, HONOR_QUEST, false),
+        Some(true)
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    // (10 * 2 + 100) * 2
+    assert_eq!(p.p.data().honor_point, 240);
+    assert!(p.client.drain_ops().contains(&sc::SCGamePointChangedPacket));
+}
+
+#[tokio::test]
+async fn boss_kill_grants_honor_point_times_honor_rate_to_every_eligible_killer() {
+    let server = server_with(false);
+    server.config.update(|c| c.world.honor_rate = 2.0);
+    let mut a = pc(&server, 1, "Lead", 100.0);
+    let mut b = pc(&server, 2, "Mate", 102.0);
+    let team_id = form_party(&server, &a.p, &b.p);
+    let npc = boss(&server, 0x200);
+    // A deals more than half of the max hp: the party tags it; B lands the killing blow.
+    cast(
+        &server,
+        &mut a,
+        HIT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+    a.client.drain();
+    b.client.drain();
+    cast(
+        &server,
+        &mut b,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.is_dead());
+
+    // No party split: every kill-exp-eligible player gets `honor_point * honor_rate`.
+    assert_eq!(a.p.data().honor_point, BOSS_HONOR * 2);
+    assert_eq!(b.p.data().honor_point, BOSS_HONOR * 2);
+    assert!(a.client.drain_ops().contains(&sc::SCGamePointChangedPacket));
+    assert!(b.client.drain_ops().contains(&sc::SCGamePointChangedPacket));
+}
+
+#[tokio::test]
+async fn npc_kill_honor_applies_the_npc_kill_attribute_pair() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Hunter", 100.0);
+    {
+        let mut c = a.p.data();
+        c.unit
+            .bonuses
+            .add_bonus(6266, value_bonus(UnitAttribute::HonorPointGainNpcKill, 100));
+        c.unit.bonuses.add_bonus(
+            6267,
+            value_bonus(UnitAttribute::HonorPointGainNpcKillMul, 100),
+        );
+    }
+    let npc = boss(&server, 0x200);
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.is_dead());
+    // (20 + 100) * 2
+    assert_eq!(a.p.data().honor_point, 240);
 }
 
 #[tokio::test]

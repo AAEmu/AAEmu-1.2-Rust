@@ -87,6 +87,8 @@ mod reflect_tests;
 #[cfg(test)]
 mod resurrect_tests;
 #[cfg(test)]
+mod resurrection_buff_tests;
+#[cfg(test)]
 mod sc_unit_impulse_packet_tests;
 #[cfg(test)]
 mod skill_tests;

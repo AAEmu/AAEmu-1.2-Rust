@@ -21,7 +21,7 @@ use crate::systems::skills::ext::NpcSkillHooks;
 use crate::systems::skills::geometry::{around_radius, Target};
 use crate::systems::skills::stats::StatKind;
 use crate::systems::skills::types::{BuffRemoveOn, SkillCastTarget, SkillCaster, SkillObject};
-use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
+use crate::world::{DoodadRef, NpcRef, PlayerRef, WorldInstance, WorldObject};
 
 use super::doodad::interactions::world_interaction_type as wi;
 use super::doodad::manager as doodads;
@@ -362,14 +362,12 @@ impl NpcSkillHooks for NpcSkills {
         zone_id: u32,
         pos: PositionAndRotation,
         delay_ms: i32,
-    ) {
-        let Some(world) = server.world.world_of(caster) else {
-            return;
-        };
+    ) -> Option<DoodadRef> {
+        let world = server.world.world_of(caster)?;
         let Some(doodad) = doodads::create(server, &world, 0, template_id, Some(caster), true)
         else {
             tracing::error!("SpawnDoodad: doodad template {template_id} does not exist");
-            return;
+            return None;
         };
         // `GeoData.GetHeight(doodad.Transform.World.Position)` (the caster-based position).
         let base = detached_transform(&world, caster);
@@ -406,6 +404,7 @@ impl NpcSkillHooks for NpcSkills {
             doodads::init_doodad(server, &world, &doodad);
             doodads::spawn(server, &world, &doodad);
         }
+        Some(doodad)
     }
 
     fn npc_pet_item_id(&self, server: &GameServer, npc: &NpcRef) -> u32 {
@@ -492,9 +491,15 @@ impl NpcSkillHooks for NpcSkills {
         skill_item: &crate::systems::skills::types::SkillCaster,
         placement: Option<crate::systems::skills::ext::SummonPlacement>,
         max_range: f32,
+        client_spawn: Option<bool>,
     ) {
         crate::systems::vehicles::slaves::create_from_skill(
-            server, player, skill_item, placement, max_range,
+            server,
+            player,
+            skill_item,
+            placement,
+            max_range,
+            client_spawn,
         );
     }
 
@@ -1206,6 +1211,68 @@ pub fn install_economy(server: &GameServer) {
     server.items.treasure_maps.install(me);
 }
 
+/// 1.2 `merchant_packs` 224 / 225: "defense-side goods sold during a siege" and
+/// "siege-side goods sold during a siege" (the attack side). The name-derived rule
+/// (`Housing.SiegeShopGate`) is INFERRED; see PORTING.md and the config page.
+const SIEGE_DEFENSE_MERCHANT_PACK: u32 = 224;
+const SIEGE_ATTACK_MERCHANT_PACK: u32 = 225;
+
+/// The siege-time goods gate for one catalog. Only the two named packs are gated; every
+/// other pack keeps selling at any time. The period is the one the client is shown for the
+/// NPC's territory (`social::dominion::snapshot`), so warmup and siege agree with the siege
+/// window; the roster is the persisted participant list of that siege.
+fn siege_goods_sell_now(
+    server: &GameServer,
+    buyer: &PlayerRef,
+    npc: Option<&NpcRef>,
+    pack_id: u32,
+) -> bool {
+    use crate::systems::housing::dominion::state::{SiegeSide, SiegeStatus};
+    let side = match pack_id {
+        SIEGE_DEFENSE_MERCHANT_PACK => SiegeSide::Defender,
+        SIEGE_ATTACK_MERCHANT_PACK => SiegeSide::Attacker,
+        _ => return true,
+    };
+    if !server.config.housing.siege_shop_gate {
+        return true;
+    }
+    let Some(npc) = npc else {
+        return false;
+    };
+    let zone_key = npc.data().unit.transform.zone_id;
+    let Some(zone_group_id) = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map(|zone| zone.group_id)
+    else {
+        return false;
+    };
+    let Some(state) = server.systems.housing.dominions.get(zone_group_id) else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let Some(period) = crate::systems::social::dominion::snapshot(server, &state, now)
+        .map(|dominion| dominion.siege_timers.siege_period)
+    else {
+        return false;
+    };
+    if !matches!(
+        period,
+        crate::systems::housing::dominion::calendar::PERIOD_WARMUP
+            | crate::systems::housing::dominion::calendar::PERIOD_SIEGE
+    ) {
+        return false;
+    }
+    state.siege.as_ref().is_some_and(|siege| {
+        siege.status != SiegeStatus::Finished
+            && siege
+                .participants
+                .get(&buyer.character_id)
+                .is_some_and(|participant| participant.side == side)
+    })
+}
+
 impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
     fn shop_info(
         &self,
@@ -1216,28 +1283,40 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         let t = server.game_data.systems.npcs.npc.template(template_id)?;
         Some(crate::systems::economy::hooks::NpcShopInfo {
             merchant: t.merchant,
-            merchant_pack_id: t.merchant_pack_id,
+            merchant_pack_ids: t.merchant_pack_ids.clone(),
             blacksmith: t.blacksmith,
             auctioneer: t.auctioneer,
             banker: t.banker,
             specialty: t.specialty,
             stabler: t.stabler,
             priest: t.priest,
+            repairman: t.repairman,
         })
     }
 
-    fn merchant_sells(&self, server: &GameServer, pack_id: u32, item_id: u32, grade: u8) -> bool {
+    fn merchant_sells(
+        &self,
+        server: &GameServer,
+        buyer: &PlayerRef,
+        npc: Option<&NpcRef>,
+        pack_ids: &[u32],
+        item_id: u32,
+        grade: u8,
+    ) -> bool {
         let Some(template) = server.game_data.items.template(item_id) else {
             return false;
         };
-        server
-            .game_data
-            .systems
-            .npcs
-            .npc
-            .goods
-            .get(&pack_id)
-            .is_some_and(|g| g.sells_item_at_grade(template, grade))
+        pack_ids.iter().any(|pack_id| {
+            server
+                .game_data
+                .systems
+                .npcs
+                .npc
+                .goods
+                .get(pack_id)
+                .is_some_and(|g| g.sells_item_at_grade(template, grade))
+                && siege_goods_sell_now(server, buyer, npc, *pack_id)
+        })
     }
 
     fn specialty_coin_id(&self, server: &GameServer, npc: &NpcRef) -> u32 {
@@ -1258,24 +1337,91 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         doodad: &crate::world::DoodadRef,
         id: u32,
     ) {
-        // DoodadManager.GetFunc(id) + GetFuncTemplate(func.FuncId, func.FuncType) +
-        // funcTemplate.Use(character, doodad, 0)
+        // `CSBuyCoinItemPacket` names a `doodad_funcs` row. Only a `DoodadFuncPurchase` of the
+        // doodad's *current* phase that is priced in a coin item may run: the same packet with
+        // any other func id (loot, use, a func of another phase) must not execute that func.
+        use super::doodad::templates::FuncTemplate;
+        // Serialize the current-phase check and the purchase with the phase machine, so the
+        // phase cannot move between them.
+        let Some(_operation) = super::doodad::phase::Operation::enter(doodad) else {
+            // Busy doodad: answer like the other reservation sites instead of staying silent.
+            player.send(super::doodad::packets::error_msg(
+                super::doodad::packets::error_message::NO_INTERACTION_AVAILABLE,
+            ));
+            return;
+        };
+        let caster = WorldObject::from(player);
+        // The doodad store checkout distance (`CSBuyItems`: 3 m); resolved here so the
+        // `blocked_child_doodads` refusal runs before any purchase side effect.
+        let Some(world) = crate::systems::economy::store::parent_world(server, player) else {
+            return;
+        };
+        if super::doodad::phase::refuse_blocked_child_doodad(server, &world, doodad, Some(&caster))
+        {
+            return;
+        }
         let data = &server.game_data.systems.npcs.doodad;
-        let template = data
-            .func(id)
-            .and_then(|f| data.func_template(f.func_id, &f.func_type));
-        let (Some(template), Some(ctx)) = (
-            template,
-            super::doodad::runtime::DoodadCtx::of(server, doodad),
-        ) else {
-            tracing::warn!(
+        let group = doodad.data().func_group_id;
+        let Some(func) = data.func(id) else {
+            tracing::debug!(
                 "BuyCoinItem, no doodadFunc for objId: {}, id: {id}",
                 doodad.obj_id
             );
             return;
         };
-        let caster = WorldObject::from(player);
-        super::doodad::funcs::use_func(template, &ctx, Some(&caster), 0, 0);
+        if func.group_id != group || func.func_type != "DoodadFuncPurchase" {
+            tracing::debug!(
+                "BuyCoinItem, func {id} is not a purchase of doodad {} phase {group}",
+                doodad.obj_id
+            );
+            return;
+        }
+        let Some(template) = data.func_template(func.func_id, &func.func_type) else {
+            tracing::warn!(
+                "BuyCoinItem, no purchase template for objId: {}, id: {id}",
+                doodad.obj_id
+            );
+            return;
+        };
+        let FuncTemplate::Purchase(purchase) = template else {
+            return;
+        };
+        if purchase.coin_item_id == 0 || purchase.coin_count < 1 {
+            tracing::debug!(
+                "BuyCoinItem, func {id} is not priced in a coin item (coin item {}, count {})",
+                purchase.coin_item_id,
+                purchase.coin_count
+            );
+            return;
+        }
+        if crate::systems::economy::store::world_distance(
+            &world,
+            &caster,
+            &WorldObject::from(doodad),
+        ) > crate::systems::economy::store::SHOP_RANGE
+        {
+            player.send(super::doodad::packets::error_msg(
+                super::doodad::packets::error_message::TOO_FAR_AWAY,
+            ));
+            return;
+        }
+        let Some(ctx) = super::doodad::runtime::DoodadCtx::of(server, doodad) else {
+            return;
+        };
+        // The C# only ran the template (its `CSBuyCoinItemPacket` never advanced the phase);
+        // 301 of the 468 purchase rows carry a `next_phase`, so a granted purchase moves the
+        // doodad through the normal phase machinery (phase funcs + `SCDoodadPhaseChangedPacket`).
+        if super::doodad::funcs::use_func(template, &ctx, Some(&caster), 0, 0)
+            && func.next_phase > 0
+        {
+            super::doodad::manager::do_change_phase(
+                server,
+                &ctx.world,
+                doodad,
+                Some(&caster),
+                func.next_phase,
+            );
+        }
     }
 }
 

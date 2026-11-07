@@ -13,7 +13,7 @@ use crate::data::items::{
     ITEM_CREST_INK, ITEM_CREST_STAMP, ITEM_DAWN_STONE, ITEM_SALON_CERTIFICATE, ITEM_SHEET_MUSIC,
     ITEM_TAX_CERTIFICATE, ITEM_TREASURE_MAP_WITH_COORDINATES,
 };
-use crate::models::item::{Item, ItemClass, ITEM_FLAG_HAS_UCC, ITEM_FLAG_SOUL_BOUND};
+use crate::models::item::{Item, ItemClass, ItemRow, ITEM_FLAG_HAS_UCC, ITEM_FLAG_SOUL_BOUND};
 
 /// `AppConfiguration.Instance.Id` stand-in for `new Item()`.
 const WORLD_ID: u8 = 1;
@@ -373,4 +373,94 @@ fn summon_slave_detail_is_always_29_bytes() {
     item.write_details_to(&mut running);
     assert_eq!(running.len(), 29);
     assert_eq!(running.as_bytes()[5..13], 0x1122_3344i64.to_le_bytes());
+}
+
+fn summon_slave_row(details: Vec<u8>) -> ItemRow {
+    ItemRow {
+        type_name: "AAEmu.Game.Models.Game.Items.SummonSlave".into(),
+        details,
+        ..ItemRow::default()
+    }
+}
+
+#[test]
+fn summon_slave_repair_start_time_survives_a_save_and_load() {
+    let mut item = Item::new(WORLD_ID);
+    item.class = ItemClass::SummonSlave;
+    item.details.slave_type = 2;
+    item.details.slave_db_id = 0x1_0203;
+    item.details.slave_is_destroyed = 1;
+    item.details.slave_repair_start_time = 1_700_000_000;
+
+    let loaded = Item::from_row(summon_slave_row(item.details_blob()), None, WORLD_ID);
+
+    assert_eq!(loaded.class, ItemClass::SummonSlave);
+    assert_eq!(loaded.details.slave_type, 2);
+    assert_eq!(loaded.details.slave_db_id, 0x1_0203);
+    assert_eq!(loaded.details.slave_is_destroyed, 1);
+    assert_eq!(loaded.details.slave_repair_start_time, 1_700_000_000);
+}
+
+#[test]
+fn legacy_summon_slave_details_still_load() {
+    // 1.2 C# writer, unset timer: i32 0 followed by five i32 zeros (29 bytes).
+    let mut unset = aaemu_commons::PacketStream::new();
+    unset.write_u8(2).write_bc(0x0102).write_u8(1).write_i32(0);
+    for _ in 0..5 {
+        unset.write_i32(0);
+    }
+    let unset = unset.into_bytes();
+    assert_eq!(unset.len(), 29);
+    let loaded = Item::from_row(summon_slave_row(unset), None, WORLD_ID);
+    assert_eq!(
+        (
+            loaded.details.slave_type,
+            loaded.details.slave_db_id,
+            loaded.details.slave_is_destroyed,
+            loaded.details.slave_repair_start_time
+        ),
+        (2, 0x0102, 1, 0)
+    );
+
+    // 1.2 C# writer, set timer: i64 time followed by five i32 zeros (33 bytes).
+    let mut set = aaemu_commons::PacketStream::new();
+    set.write_u8(2)
+        .write_bc(0x0102)
+        .write_u8(1)
+        .write_i64(1_700_000_001);
+    for _ in 0..5 {
+        set.write_i32(0);
+    }
+    let set = set.into_bytes();
+    assert_eq!(set.len(), 33);
+    let loaded = Item::from_row(summon_slave_row(set), None, WORLD_ID);
+    assert_eq!(loaded.details.slave_repair_start_time, 1_700_000_001);
+}
+
+#[test]
+fn a_summon_slave_detail_without_the_repair_field_still_loads() {
+    // A row that stops after the 5-byte header (no repair field at all) still restores the
+    // fields before it instead of dropping the whole detail.
+    let mut header = aaemu_commons::PacketStream::new();
+    header.write_u8(2).write_bc(0x0102).write_u8(1);
+    let header = header.into_bytes();
+    assert_eq!(header.len(), 5);
+
+    let loaded = Item::from_row(summon_slave_row(header), None, WORLD_ID);
+
+    assert_eq!(loaded.details.slave_type, 2);
+    assert_eq!(loaded.details.slave_db_id, 0x0102);
+    assert_eq!(loaded.details.slave_is_destroyed, 1);
+    assert_eq!(loaded.details.slave_repair_start_time, 0);
+}
+
+#[test]
+fn a_negative_summon_slave_repair_start_time_loads_as_unset() {
+    let mut item = Item::new(WORLD_ID);
+    item.class = ItemClass::SummonSlave;
+    item.details.slave_repair_start_time = -1;
+
+    let loaded = Item::from_row(summon_slave_row(item.details_blob()), None, WORLD_ID);
+
+    assert_eq!(loaded.details.slave_repair_start_time, 0);
 }

@@ -8,8 +8,12 @@ use crate::models::transform::convert_long;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::cs;
+use crate::systems::skills::buffs;
+use crate::systems::skills::types::tags;
+use crate::systems::social::bounty::{CANNOT_SET_BOUNTY, CANNOT_SET_BOUNTY_FOR_SUCH_NAME};
 use crate::systems::social::crime::BountyDescription;
 use crate::systems::social::util;
+use crate::world::WorldObject;
 
 /// `SCBotSuspectReportedPacket`, `SCCharacterResurrectedPacket`, `SCForceAttackSetPacket`,
 /// `SCTeleportUnitPacket`: the skills subsystem's definitions (one per opcode).
@@ -29,9 +33,21 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCBotSuspectArrestedPacket(reporter, suspect)`.
-    SCBotSuspectArrestedPacket { reporter: String, suspect: String }
-    |self, s| { s.write_str(&self.reporter).write_str(&self.suspect); }
+    /// `SCBotSuspectArrestedPacket(sheriffId, suspectId, sheriffName, suspectName)`: the 1.2
+    /// client reader (`FUN_397b6d10`, dll.c:1710108-1710128) takes two `u32` ids before the two
+    /// names, each read into a 0x80-byte buffer. Still unsent (the bot flow is capture-pending).
+    SCBotSuspectArrestedPacket {
+        sheriff_id: u32,
+        suspect_id: u32,
+        sheriff_name: String,
+        suspect_name: String
+    }
+    |self, s| {
+        s.write_u32(self.sheriff_id)
+            .write_u32(self.suspect_id)
+            .write_str(&self.sheriff_name)
+            .write_str(&self.suspect_name);
+    }
 );
 
 /// The most entries the client's bounty list holds (its record array cap).
@@ -51,6 +67,18 @@ fn write_bounty_name(s: &mut PacketStream, name: &str) {
         end -= 1;
     }
     s.write_str(&name[..end]);
+}
+
+/// Reads a bounty name the way the 1.2 client writes it: at most [`BOUNTY_NAME_MAX_BYTES`]
+/// UTF-8 bytes, cut on a character boundary. The client never sends a longer name; this keeps a
+/// malformed body from reaching the character lookup with garbage.
+fn read_bounty_name(s: &mut PacketStream) -> crate::error::Result<String> {
+    let name = s.read_string()?;
+    let mut end = name.len().min(BOUNTY_NAME_MAX_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(name[..end].to_string())
 }
 
 sc_packet!(
@@ -365,7 +393,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCUnitBountyMoneyPacket(objId, moneyAmount)`.
+    /// `SCUnitBountyMoneyPacket(objId, moneyAmount)`. Serializer `FUN_397b3b50` (constructor
+    /// `dll.c:375748`): `bc objId ; i64 moneyAmount`; the client handler is `FUN_391d6680`.
     SCUnitBountyMoneyPacket { obj_id: u32, money_amount: i64 }
     |self, s| { s.write_bc(self.obj_id).write_i64(self.money_amount); }
 );
@@ -379,9 +408,9 @@ sc_packet!(
     /// `SCSetBountyPermittedPacket(type, name, moneyAmount, allowed)`: whether the client may
     /// place the bounty (`allowed == false` makes it show error 584). Reader `0x397c6fc0`:
     /// `u32`, name (128-byte buffer), mandatory `i64`, `u8`.
-    SCSetBountyPermittedPacket { kind: u32, name: String, money_amount: i64, allowed: bool }
+    SCSetBountyPermittedPacket { target_id: u32, name: String, money_amount: i64, allowed: bool }
     |self, s| {
-        s.write_u32(self.kind);
+        s.write_u32(self.target_id);
         write_bounty_name(s, &self.name);
         s.write_i64(self.money_amount).write_bool(self.allowed);
     }
@@ -390,9 +419,9 @@ sc_packet!(
 sc_packet!(
     /// `SCSetBountyDonePacket(type, name, moneyAmount, errorMessage)`: the placement result
     /// (`0` = placed, `585` = name refused). Reader `0x397c7080`; the error is a plain `i16`.
-    SCSetBountyDonePacket { kind: u32, name: String, money_amount: i64, error_message: i16 }
+    SCSetBountyDonePacket { target_id: u32, name: String, money_amount: i64, error_message: i16 }
     |self, s| {
-        s.write_u32(self.kind);
+        s.write_u32(self.target_id);
         write_bounty_name(s, &self.name);
         s.write_i64(self.money_amount).write_i16(self.error_message);
     }
@@ -453,11 +482,19 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSJurySummonedPacket` (logged only).
+    /// `CSJurySummonedPacket`: the client's acknowledgement after `SCSummonJury`. It changes
+    /// no server state; the handler checks that the sender holds the seat and logs at debug.
     CSJurySummonedPacket { trial: u32, court: i32, jury: i32 }
     read |s| { Ok(Self { trial: s.read_u32()?, court: s.read_i32()?, jury: s.read_i32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("JurySummoned, Trial: {}, Court: {}, Jury: {}", self.trial, self.court, self.jury);
+        let p = active_char!(conn);
+        let seat_holder = server.systems.social.trials.jury_summoned(&p, self.trial, self.jury);
+        tracing::debug!(
+            "JurySummoned, Trial: {}, Court: {}, Jury: {}, seat holder: {seat_holder}",
+            self.trial,
+            self.court,
+            self.jury
+        );
         Ok(())
     }
 );
@@ -598,44 +635,140 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSNaviOpenBountyPacket`: answers with an empty `SCBountyListPacket` (filled lists break
-    /// the client's lua, see the C# comment).
+    /// `CSNaviOpenBountyPacket`: answers with `SCBountyListPacket` of the characters that have
+    /// an unpaid bounty. The list is empty unless `Social.BountyBoard` is on (the default keeps
+    /// the C# empty list because a filled board broke the 1.2 client Lua, BOUNTY-board).
     CSNaviOpenBountyPacket { obj_id: u32 }
     read |s| { Ok(Self { obj_id: s.read_bc()? }) }
     handle |self, server, conn| {
-        tracing::warn!("NaviOpenBounty, ObjId: {}", self.obj_id);
+        tracing::trace!("NaviOpenBounty, ObjId: {}", self.obj_id);
         let p = active_char!(conn);
-        p.send(SCBountyListPacket { total: 0, count: 0, bounties: Vec::new() });
+        let board = server.systems.social.bounties.board(server).await;
+        // The count is one byte: clamp the rows to it so count and written rows agree.
+        let mut rows = board.rows;
+        rows.truncate(MAX_BOUNTY_LIST_ENTRIES);
+        p.send(SCBountyListPacket {
+            total: board.total,
+            count: rows.len() as u8,
+            bounties: rows,
+        });
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSRequestSetBountyMoneyPacket` (0x11f; client serializer `397b13a0`, per Bevy RE notes):
-    /// the client asks whether it may put a bounty on `name`. Not answered yet: the bounty
-    /// ledger (`bounty_runtime.rs`) is not wired to the wallet or the board.
-    // TODO: answer with `SCSetBountyPermittedPacket` once placement is wired to the wallet.
+    /// `CSRequestSetBountyMoneyPacket` (0x11f; client serializer `397b13a0`): the client asks
+    /// whether it may put a bounty on `name`. Only an online, currently wanted target is
+    /// allowed; the answer is `SCSetBountyPermitted` (the client shows error 584 for
+    /// `allowed == false`) or, when the name is unknown, `SCSetBountyDone` with error 585.
     CSRequestSetBountyMoneyPacket { name: String }
-    read |s| { Ok(Self { name: s.read_string()? }) }
+    read |s| { Ok(Self { name: read_bounty_name(s)? }) }
     handle |self, server, conn| {
-        tracing::warn!("RequestSetBountyMoney (not implemented), Name: {}", self.name);
+        let p = active_char!(conn);
+        let Some(target) = server.world.character_by_name(&self.name) else {
+            tracing::debug!("RequestSetBountyMoney: no online target '{}'", self.name);
+            p.send(SCSetBountyDonePacket {
+                target_id: 0,
+                name: self.name.clone(),
+                money_amount: 0,
+                error_message: CANNOT_SET_BOUNTY_FOR_SUCH_NAME,
+            });
+            return Ok(());
+        };
+        let target_id = target.character_id;
+        let target_name = target.data().unit.name.clone();
+        let total = server.systems.social.bounties.active_total(target_id);
+        if target_id == p.character_id {
+            p.send(SCSetBountyDonePacket {
+                target_id,
+                name: target_name,
+                money_amount: total,
+                error_message: CANNOT_SET_BOUNTY,
+            });
+            return Ok(());
+        }
+        if !buffs::check_buff_tag(server, &WorldObject::from(target), tags::WANTED) {
+            p.send(SCSetBountyPermittedPacket {
+                target_id,
+                name: target_name,
+                money_amount: total,
+                allowed: false,
+            });
+            return Ok(());
+        }
+        server
+            .systems
+            .social
+            .bounties
+            .permit(p.character_id, target_id);
+        p.send(SCSetBountyPermittedPacket {
+            target_id,
+            name: target_name,
+            money_amount: total,
+            allowed: true,
+        });
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSSendBountyUpdatePacket` (0x120; client serializer `397bc6b0`, per Bevy RE notes): place
-    /// (`kind`) a bounty of `money` on `name`. The client's money field is a signed 32-bit value.
-    /// Not applied yet, see [`CSRequestSetBountyMoneyPacket`].
-    // TODO: debit the wallet, record the pledge in the bounty ledger and answer with
-    // `SCSetBountyDonePacket`.
-    CSSendBountyUpdatePacket { kind: u32, name: String, money: i32 }
-    read |s| { Ok(Self { kind: s.read_u32()?, name: s.read_string()?, money: s.read_i32()? }) }
+    /// `CSSendBountyUpdatePacket` (0x120; client serializer `397bc6b0`): place a bounty of
+    /// `money` copper on the character `target_id` named `name`. The client's money field is a
+    /// signed 32-bit value.
+    ///
+    /// Every condition is re-checked here: the target must still be online and wanted, the
+    /// id must match the name and the payer must hold a permit from
+    /// [`CSRequestSetBountyMoneyPacket`] (a second update without one is refused). The
+    /// refusal and the success both go through `SCSetBountyDone`.
+    CSSendBountyUpdatePacket { target_id: u32, name: String, money: i32 }
+    read |s| { Ok(Self { target_id: s.read_u32()?, name: read_bounty_name(s)?, money: s.read_i32()? }) }
     handle |self, server, conn| {
-        tracing::warn!(
-            "SendBountyUpdate (not implemented), Kind: {}, Name: {}, Money: {}",
-            self.kind, self.name, self.money
-        );
+        let p = active_char!(conn);
+        let bounties = &server.systems.social.bounties;
+        let target = server.world.character_by_id(self.target_id);
+        let target_name = target
+            .as_ref()
+            .map(|target| target.data().unit.name.clone());
+        let error = match &target_name {
+            None => Some(CANNOT_SET_BOUNTY_FOR_SUCH_NAME),
+            Some(name) if !name.eq_ignore_ascii_case(&self.name) => Some(CANNOT_SET_BOUNTY),
+            Some(_) if !bounties.has_permit(p.character_id, self.target_id) => {
+                Some(CANNOT_SET_BOUNTY)
+            }
+            Some(_) => None,
+        };
+        if let Some(error) = error {
+            p.send(SCSetBountyDonePacket {
+                target_id: self.target_id,
+                name: target_name.unwrap_or_else(|| self.name.clone()),
+                money_amount: bounties.active_total(self.target_id),
+                error_message: error,
+            });
+            return Ok(());
+        }
+        match bounties.place(server, &p, self.target_id, self.money) {
+            Ok(total) => {
+                p.send(SCSetBountyDonePacket {
+                    target_id: self.target_id,
+                    name: target_name.unwrap_or_default(),
+                    money_amount: total,
+                    error_message: 0,
+                });
+            }
+            Err(error) => {
+                tracing::debug!(
+                    "SendBountyUpdate refused for {} on {}: {error:?}",
+                    p.character_id,
+                    self.target_id
+                );
+                p.send(SCSetBountyDonePacket {
+                    target_id: self.target_id,
+                    name: target_name.unwrap_or_else(|| self.name.clone()),
+                    money_amount: bounties.active_total(self.target_id),
+                    error_message: error.message_id(),
+                });
+            }
+        }
         Ok(())
     }
 );
@@ -684,10 +817,17 @@ mod tests {
         );
         assert_eq!(
             body(&SCBotSuspectArrestedPacket {
-                reporter: "A".into(),
-                suspect: "Bc".into()
+                sheriff_id: 0x0102_0304,
+                suspect_id: 0x0A0B_0C0D,
+                sheriff_name: "Sheriff".into(),
+                suspect_name: "Suspect".into()
             }),
-            vec![1, 0, b'A', 2, 0, b'B', b'c']
+            vec![
+                0x04, 0x03, 0x02, 0x01, // sheriff id
+                0x0D, 0x0C, 0x0B, 0x0A, // suspect id
+                0x07, 0x00, b'S', b'h', b'e', b'r', b'i', b'f', b'f', // sheriff name
+                0x07, 0x00, b'S', b'u', b's', b'p', b'e', b'c', b't', // suspect name
+            ]
         );
         assert_eq!(
             body(&SCBotSuspectReportedPacket {
@@ -920,7 +1060,7 @@ mod tests {
             crime_points: 60,
             is_live: true,
             player_race: 3,
-            type184: 1,
+            faction_id: 0x1122_3344,
             arrest_count: 2,
             accept_guilty_count: 3,
             accept_trial_count: 4,
@@ -940,7 +1080,7 @@ mod tests {
                 .write_i16(60)
                 .write_bool(true)
                 .write_u8(3)
-                .write_i32(1)
+                .write_u32(0x1122_3344) // faction id (the client's "type" at +0xb8)
                 .write_i32(2)
                 .write_i32(3)
                 .write_i32(4)
@@ -965,6 +1105,37 @@ mod tests {
             }),
             vec![0, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn bounty_list_faction_id_is_at_the_client_faction_offset() {
+        // The client's `GetBountyData` record 9 (the left frame's faction name) is
+        // `FUN_392f8120(id, 1)` of the u32 read at `FUN_397bebf0` +0xb8. With an empty name the
+        // row is: 4 id + 2 name length + 0 name + 1 level + 4 zone + 8 x + 8 y + 4 z + 8 bounty
+        // + 2 crime + 1 live + 1 race = 43 bytes, so the faction field starts at body offset
+        // 5 + 43.
+        let b = BountyDescription {
+            player_id: 0x0102_0304,
+            player_name: String::new(),
+            player_level: 50,
+            zone_id: 129,
+            pos: (0.0, 0.0, 0.0),
+            bounty_amount: 1,
+            crime_points: 0,
+            is_live: false,
+            player_race: 1,
+            faction_id: 0x1122_3344,
+            ..BountyDescription::default()
+        };
+        let p = body(&SCBountyListPacket {
+            total: 1,
+            count: 1,
+            bounties: vec![b],
+        });
+        // 71-byte row: the 43 bytes above plus the faction u32 and six i32 counters, then the
+        // 5-byte packet header.
+        assert_eq!(p.len(), 5 + 71);
+        assert_eq!(&p[5 + 43..5 + 47], &[0x44, 0x33, 0x22, 0x11]);
     }
 
     #[test]
@@ -1030,7 +1201,7 @@ mod tests {
         // no group/optional-flag byte may appear anywhere.
         assert_eq!(
             body(&SCSetBountyPermittedPacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 allowed: true,
@@ -1045,7 +1216,7 @@ mod tests {
         // allowed=false is the client's error-584 branch.
         assert_eq!(
             body(&SCSetBountyPermittedPacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 allowed: false,
@@ -1060,7 +1231,7 @@ mod tests {
         // The money is mandatory even when zero.
         assert_eq!(
             body(&SCSetBountyPermittedPacket {
-                kind: 1,
+                target_id: 1,
                 name: "T".into(),
                 money_amount: 0,
                 allowed: true,
@@ -1071,7 +1242,7 @@ mod tests {
         // ErrorMessage 0 (placed) and the client's rejection ids 584 / 585.
         assert_eq!(
             body(&SCSetBountyDonePacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 error_message: 0,
@@ -1085,7 +1256,7 @@ mod tests {
         );
         assert_eq!(
             body(&SCSetBountyDonePacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 error_message: 585,
@@ -1099,7 +1270,7 @@ mod tests {
         );
         assert_eq!(
             body(&SCSetBountyDonePacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 error_message: 584,
@@ -1148,7 +1319,7 @@ mod tests {
         assert_eq!(long.len(), 2 + BOUNTY_NAME_MAX_BYTES + 2 + 8);
 
         let permitted = body(&SCSetBountyPermittedPacket {
-            kind: 1,
+            target_id: 1,
             name: "a".repeat(200),
             money_amount: 0,
             allowed: true,
@@ -1243,6 +1414,29 @@ mod tests {
             format!("{}\u{FFFD}", "a".repeat(199))
         );
         assert_eq!(record_msg(" hi "), " hi ");
+    }
+
+    #[test]
+    fn trial_canceled_and_verdict_count_match_the_1_2_readers() {
+        // SCTrialCanceled (0x183), reader FUN_397afa30: u32 trialId.
+        assert_eq!(
+            body(&SCTrialCanceledPacket {
+                trial_id: 0x0102_0304
+            }),
+            vec![0x04, 0x03, 0x02, 0x01]
+        );
+        // SCChangeJuryVerdictCount (0x17a), reader FUN_397af940: i32 count ; i32 total.
+        assert_eq!(
+            body(&SCChangeJuryVerdictCountPacket { count: 1, total: 2 }),
+            vec![1, 0, 0, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            body(&SCChangeJuryVerdictCountPacket {
+                count: -1,
+                total: 0x0102_0304
+            }),
+            vec![0xFF, 0xFF, 0xFF, 0xFF, 0x04, 0x03, 0x02, 0x01]
+        );
     }
 
     fn decode<P: ClientPacket>(f: impl FnOnce(&mut PacketStream)) -> P {
@@ -1350,6 +1544,39 @@ mod tests {
     }
 
     /// The bounty requests the 1.2 client sends (0x11f / 0x120; blob(name) = u16 length + bytes).
+    /// The exact bodies the 1.2 client writes (readers `397b13a0` / `397bc6b0`): a `u16`-length
+    /// name, and `u32 targetId, name, i32 amount`. The name is capped at the client's 128-byte
+    /// buffer.
+    #[test]
+    fn c2s_bounty_requests_read_the_client_bytes() {
+        let request = [6, 0, b'W', b'a', b'n', b't', b'e', b'd'];
+        assert_eq!(
+            CSRequestSetBountyMoneyPacket::read(&mut PacketStream::from_bytes(request.to_vec()))
+                .unwrap(),
+            CSRequestSetBountyMoneyPacket {
+                name: "Wanted".into()
+            }
+        );
+        let update = vec![
+            0x44, 0x33, 0x22, 0x11, //
+            6, 0, b'W', b'a', b'n', b't', b'e', b'd', //
+            0x78, 0xEC, 0xFF, 0xFF, // -5000
+        ];
+        assert_eq!(
+            CSSendBountyUpdatePacket::read(&mut PacketStream::from_bytes(update)).unwrap(),
+            CSSendBountyUpdatePacket {
+                target_id: 0x11223344,
+                name: "Wanted".into(),
+                money: -5000
+            }
+        );
+
+        let mut long = PacketStream::new();
+        long.write_str(&"a".repeat(200));
+        let capped = CSRequestSetBountyMoneyPacket::read(&mut long).unwrap();
+        assert_eq!(capped.name.len(), BOUNTY_NAME_MAX_BYTES);
+    }
+
     #[test]
     fn c2s_bounty_requests_decode() {
         assert_eq!(
@@ -1365,7 +1592,7 @@ mod tests {
                 s.write_u32(1).write_str("Wanted").write_i32(-5000);
             }),
             CSSendBountyUpdatePacket {
-                kind: 1,
+                target_id: 1,
                 name: "Wanted".into(),
                 money: -5000
             }

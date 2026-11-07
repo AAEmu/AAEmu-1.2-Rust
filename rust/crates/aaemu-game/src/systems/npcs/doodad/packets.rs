@@ -35,6 +35,9 @@ pub mod error_message {
     pub const DOODAD_SIM_AREA: i16 = 276;
     pub const DOODAD_SIM_TOO_CLOSE_TO_OTHER_DOODAD: i16 = 277;
     pub const DOODAD_SIM_TOO_CLOSE_TO_OTHER_UNIT: i16 = 278;
+    /// The 1.2 territory-statue placement refusal (`locate_invalid_dominion_area`), same value
+    /// as `systems::economy::error_message::LOCATE_INVALID_DOMINION_AREA`.
+    pub const LOCATE_INVALID_DOMINION_AREA: i16 = 749;
     pub const FAMILY_NOT_EXIST: i16 = 376;
     pub const ONLY_EXPEDITION_MEMBER: i16 = 808;
 }
@@ -79,6 +82,112 @@ impl Marshal for SCDoodadPhaseChangedPacket {
             .write_u32(self.time_left) // growing
             .write_i32(-1) // puzzleGroup
             .write_u32(self.item_template_id);
+    }
+}
+
+/// `SCDoodadPhaseMsgPacket(doodad, funcGroupId)`: the message of a func group that authors a
+/// `phase_msg`. The 1.2 reader `FUN_397b6460` is `bc doodadObjId ; u32 funcGroupId`; the handler
+/// `FUN_391dc720` -> `FUN_3902e0f0` looks the group up in the client's `doodad_func_groups`,
+/// requires the doodad to exist locally unless `is_msg_to_zone` is true, and raises
+/// `DOODAD_PHASE_MSG` (event 0xfd, a chat / center message) when `phase_msg` is not empty.
+/// The C# had only the opcode, no sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCDoodadPhaseMsgPacket {
+    pub doodad_obj_id: u32,
+    pub func_group_id: u32,
+}
+packet_def!(
+    SCDoodadPhaseMsgPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCDoodadPhaseMsgPacket
+);
+impl Marshal for SCDoodadPhaseMsgPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.doodad_obj_id).write_u32(self.func_group_id);
+    }
+}
+
+/// `SCWorldInteractionCanceledPacket(interactedUnitId, interactedDoodadId)`: the 1.2 client
+/// cancels an in-progress doodad world interaction. Reader `FUN_397c6540` (`bc unitObjId`, then
+/// `u32 doodadObjId`; EVIDENCED, content research 1.4). The trigger is capture-pending
+/// (CAP-INT-1): nothing sends it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCWorldInteractionCanceledPacket {
+    pub unit_obj_id: u32,
+    pub doodad_obj_id: u32,
+}
+packet_def!(
+    SCWorldInteractionCanceledPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCWorldInteractionCanceledPacket
+);
+impl Marshal for SCWorldInteractionCanceledPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.unit_obj_id).write_u32(self.doodad_obj_id);
+    }
+}
+
+/// One `InteractionInfo` block of [`SCWorldInteractionSkillListPacket`] (0x40 bytes in the 1.2
+/// client).
+///
+/// The client reader `FUN_397bef50` (`x2game.dll.c:1716218`) reads `bc`, `bc`, `u32`, `bc`, then
+/// `i32 interactCount`, `i32 extraInfo` and `interactCount` `u32` skill ids, reading at most 10
+/// of them. Roles of the first `bc`, the `u32` and the fourth `bc` are UNKNOWN; the handler
+/// `FUN_393b7440` (`x2game.dll.c:773717`) resolves the second `bc` through the world-object
+/// table (`FUN_39035110`) as the interacted doodad and starts `skill_list[0]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldInteractionInfo {
+    /// First `bc`; role UNKNOWN.
+    pub unk1: u32,
+    /// Second `bc`: the interacted doodad object id (the handler's world-object lookup).
+    pub doodad_obj_id: u32,
+    /// `u32`; role UNKNOWN.
+    pub unk2: u32,
+    /// Fourth `bc`; role UNKNOWN.
+    pub unk3: u32,
+    /// `extraInfo` (`i32` on the wire before the skill list).
+    pub extra_info: i32,
+    /// `u32` skill ids. The client reads at most 10; a sender must not write more.
+    pub skill_list: Vec<u32>,
+}
+
+/// `SCWorldInteractionSkillListPacket`: the server-initiated doodad world-interaction list
+/// (opcode 0x07e; the client's `x2ui/interaction.alb` window).
+///
+/// sent_by: none (CAP-INT-1, trigger unknown). The 1.2 client reader is `FUN_397c2d70`
+/// (`x2game.dll.c:1718589`, vtable `399b36e4`) + `FUN_397bef50`: `bc`, `bc`,
+/// [`WorldInteractionInfo`], `u8 mouseButton`, `i32 modifierKeys`. The handler `FUN_391d9080`
+/// (`x2game.dll.c:367106`) copies the 0x40-byte info and starts the first skill when the player
+/// is within the interaction range. Roles of the two leading `bc` values are UNKNOWN. See
+/// `PORTING.md` ("Gap audit verdicts (2026-11-07)").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SCWorldInteractionSkillListPacket {
+    /// First top-level `bc`; role UNKNOWN.
+    pub unk1: u32,
+    /// Second top-level `bc`; role UNKNOWN.
+    pub unk2: u32,
+    pub info: WorldInteractionInfo,
+    pub mouse_button: u8,
+    pub modifier_keys: i32,
+}
+packet_def!(
+    SCWorldInteractionSkillListPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCWorldInteractionSkillListPacket
+);
+impl Marshal for SCWorldInteractionSkillListPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.unk1).write_bc(self.unk2);
+        s.write_bc(self.info.unk1)
+            .write_bc(self.info.doodad_obj_id)
+            .write_u32(self.info.unk2)
+            .write_bc(self.info.unk3)
+            .write_i32(self.info.skill_list.len() as i32)
+            .write_i32(self.info.extra_info);
+        for &id in &self.info.skill_list {
+            s.write_u32(id);
+        }
+        s.write_u8(self.mouse_button).write_i32(self.modifier_keys);
     }
 }
 
@@ -224,7 +333,7 @@ impl ClientPacket for CSChangeDoodadDataPacket {
             };
             if let Some(doodad) = world.doodad(self.obj_id) {
                 let template_id = doodad.data().template_id;
-                tracing::warn!("Doodad: ({template_id})");
+                tracing::debug!("Doodad: ({template_id})");
                 if !super::manager::change_doodad_data(server, &world, &me, &doodad, self.data) {
                     me.send(error_msg(error_message::INTERACTION_PERMISSION_DENY));
                 }
@@ -234,40 +343,180 @@ impl ClientPacket for CSChangeDoodadDataPacket {
     }
 }
 
-/// `CSChangeDoodadPhasePacket` (logged only, as in C#).
+/// `CSChangeDoodadPhasePacket`: sent by the 1.2 client when it finishes a
+/// `DoodadFuncBubble` (0x3f) or `DoodadFuncOpenPaper` (0x46) whose func row has
+/// `next_phase > 0` (`FUN_393b8240` / `FUN_393b8450`; builder `FUN_397ac8d0`, writer
+/// `FUN_397bbbb0`). Body: `bc objId`, `u32 skill`, `u32 nextPhase`, `u32 funcId`
+/// (`doodad_funcs.id`).
+///
+/// The C# only logged it, so the phase never advanced. The handler accepts the client's
+/// phase change only when `funcId` is a Bubble / OpenPaper func of the doodad's current
+/// phase group whose `next_phase` is exactly `nextPhase`, from a live caster within the func's
+/// own reach (never the packet's `skill`) and a doodad not scheduled for despawn; the movement
+/// itself is the normal phase machinery (`DoChangePhase`: phase funcs, then
+/// `SCDoodadPhaseChangedPacket`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSChangeDoodadPhasePacket {
     pub obj_id: u32,
-    pub unk_id: u32,
-    pub unk2_id: u32,
-    pub unk3_id: u32,
+    /// The skill that ran the func (the client's first argument to the builder).
+    pub skill: u32,
+    pub next_phase: u32,
+    /// `doodad_funcs.id` (`FuncKey`) of the Bubble / OpenPaper func.
+    pub func_id: u32,
 }
 impl ClientPacket for CSChangeDoodadPhasePacket {
     const NAME: &'static str = "CSChangeDoodadPhasePacket";
     fn read(s: &mut PacketStream) -> Result<Self> {
         Ok(Self {
             obj_id: s.read_bc()?,
-            unk_id: s.read_u32()?,
-            unk2_id: s.read_u32()?,
-            unk3_id: s.read_u32()?,
+            skill: s.read_u32()?,
+            next_phase: s.read_u32()?,
+            func_id: s.read_u32()?,
         })
     }
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::debug!(
-                "ChangeDoodadPhase, ObjId: {}, Id: {}, {}, {}",
-                self.obj_id,
-                self.unk_id,
-                self.unk2_id,
-                self.unk3_id
+            let Some(me) = conn.active_char.clone() else {
+                return Ok(());
+            };
+            let Some(world) = server.world.world_of(&WorldObject::from(&me)) else {
+                return Ok(());
+            };
+            let Some(doodad) = world.doodad(self.obj_id) else {
+                tracing::debug!(
+                    "ChangeDoodadPhase, no doodad objId: {}, funcId: {}",
+                    self.obj_id,
+                    self.func_id
+                );
+                return Ok(());
+            };
+            // A dead character cannot run a doodad interaction (`Doodad.Use` has no dead check,
+            // but every skill / item path that reaches it does).
+            if me.data().unit.is_dead() {
+                tracing::debug!(
+                    "ChangeDoodadPhase, dead caster {} objId: {}, funcId: {}",
+                    me.data().unit.name,
+                    self.obj_id,
+                    self.func_id
+                );
+                return Ok(());
+            }
+            // `blocked_child_doodads`: a player cannot start the child doodad's phase funcs
+            // while its parent unit carries the blocking buff.
+            if super::phase::refuse_blocked_child_doodad(
+                server,
+                &world,
+                &doodad,
+                Some(&WorldObject::from(&me)),
+            ) {
+                return Ok(());
+            }
+            // Same refusal as `Doodad.Use` (phase.rs): a doodad scheduled for despawn must not
+            // change phase.
+            if server
+                .systems
+                .npcs
+                .spawns
+                .despawn_field(doodad.obj_id)
+                .is_some()
+            {
+                tracing::debug!(
+                    "ChangeDoodadPhase refused: doodad {} is scheduled for despawn",
+                    self.obj_id
+                );
+                me.send(error_msg(error_message::NO_INTERACTION_AVAILABLE));
+                return Ok(());
+            }
+            // Check the current phase and move it under the same operation reservation.
+            let Some(_operation) = super::phase::Operation::enter(&doodad) else {
+                return Ok(());
+            };
+            let data = &server.game_data.systems.npcs.doodad;
+            let Some(func) = data.func(self.func_id) else {
+                tracing::debug!(
+                    "ChangeDoodadPhase, no doodadFunc objId: {}, funcId: {}",
+                    self.obj_id,
+                    self.func_id
+                );
+                return Ok(());
+            };
+            let group = doodad.data().func_group_id;
+            let expected = i32::try_from(self.next_phase).unwrap_or(i32::MAX);
+            if func.group_id != group
+                || !matches!(
+                    func.func_type.as_str(),
+                    "DoodadFuncBubble" | "DoodadFuncOpenPaper"
+                )
+                || func.next_phase != expected
+                || func.next_phase <= 0
+            {
+                tracing::debug!(
+                    "ChangeDoodadPhase, func not usable: objId: {}, funcId: {}, group: {} (current {}), nextPhase: {}, requested {}",
+                    self.obj_id,
+                    self.func_id,
+                    func.group_id,
+                    group,
+                    func.next_phase,
+                    self.next_phase
+                );
+                return Ok(());
+            }
+            if !in_func_reach(server, &me, &doodad, func.skill_id) {
+                tracing::debug!(
+                    "ChangeDoodadPhase, out of range: objId: {}, funcId: {}, func skill: {} (client sent {})",
+                    self.obj_id,
+                    self.func_id,
+                    func.skill_id,
+                    self.skill
+                );
+                return Ok(());
+            }
+            super::manager::do_change_phase(
+                server,
+                &world,
+                &doodad,
+                Some(&WorldObject::from(&me)),
+                func.next_phase,
             );
             Ok(())
         })
     }
+}
+
+/// Reach of a Bubble / OpenPaper func, never using the packet's `skill` (it is client input and
+/// the skill-less funcs carry none). A known positive func skill range uses it plus the doodad
+/// allowance the cast target check adds; a skill-less / unknown / unbounded func gets the 5 m
+/// doodad interaction distance (`portal::NAVI_USE_RANGE`, also `looting::LOOT_TAKE_RANGE`) plus
+/// that allowance.
+pub(crate) fn in_func_reach(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    doodad: &crate::world::DoodadRef,
+    func_skill_id: u32,
+) -> bool {
+    use crate::systems::skills::geometry::{distance_to, Target};
+    let allowance = crate::systems::skills::validation::DOODAD_RANGE_ALLOWANCE;
+    let limit = server
+        .game_data
+        .systems
+        .skills
+        .skill(func_skill_id)
+        .filter(|skill| skill.max_range > 0)
+        .map_or_else(
+            || f64::from(crate::systems::npcs::portal::NAVI_USE_RANGE) + allowance,
+            |skill| f64::from(skill.max_range) + allowance,
+        );
+    let distance = distance_to(
+        server,
+        &Target::Obj(WorldObject::from(player)),
+        &Target::Obj(WorldObject::from(doodad)),
+        true,
+    );
+    f64::from(distance) <= limit
 }
 
 /// `CSSetLogicDoodadPacket`: provider and subscriber object IDs.
@@ -425,6 +674,65 @@ mod tests {
     }
 
     #[test]
+    fn sc_doodad_phase_msg() {
+        // Reader FUN_397b6460: `bc doodadObjId ; u32 funcGroupId`.
+        let p = SCDoodadPhaseMsgPacket {
+            doodad_obj_id: 0x01_0203,
+            func_group_id: 4699,
+        };
+        assert_eq!(p.opcode(), sc::SCDoodadPhaseMsgPacket);
+        assert_eq!(body(&p), vec![0x03, 0x02, 0x01, 0x5b, 0x12, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn sc_world_interaction_canceled_bytes() {
+        let p = SCWorldInteractionCanceledPacket {
+            unit_obj_id: 0x123,
+            doodad_obj_id: 77,
+        };
+        assert_eq!(p.opcode(), sc::SCWorldInteractionCanceledPacket);
+        assert_eq!(body(&p), vec![0x23, 0x01, 0x00, 0x4d, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn sc_world_interaction_skill_list_bytes() {
+        // Reader FUN_397c2d70 + FUN_397bef50 (x2game.dll.c:1718589 / :1716218):
+        // bc, bc, { bc, bc, u32, bc, i32 count, i32 extraInfo, u32[count] }, u8 mouse, i32 mods.
+        let p = SCWorldInteractionSkillListPacket {
+            unk1: 0x01_0203,
+            unk2: 0x04_0506,
+            info: WorldInteractionInfo {
+                unk1: 0x07_0809,
+                doodad_obj_id: 0x0a_0b0c,
+                unk2: 0x1122_3344,
+                unk3: 0x0d_0e0f,
+                extra_info: -3,
+                skill_list: vec![0x1516_1718, 0x191a_1b1c],
+            },
+            mouse_button: 0x21,
+            modifier_keys: -5,
+        };
+        assert_eq!(p.opcode(), sc::SCWorldInteractionSkillListPacket);
+        assert_eq!(p.opcode(), 0x07e);
+        #[rustfmt::skip]
+        let want: Vec<u8> = vec![
+            0x03, 0x02, 0x01, // unk1
+            0x06, 0x05, 0x04, // unk2
+            0x09, 0x08, 0x07, // info.unk1
+            0x0c, 0x0b, 0x0a, // info.doodad_obj_id
+            0x44, 0x33, 0x22, 0x11, // info.unk2
+            0x0f, 0x0e, 0x0d, // info.unk3
+            0x02, 0x00, 0x00, 0x00, // interactCount
+            0xfd, 0xff, 0xff, 0xff, // extraInfo = -3
+            0x18, 0x17, 0x16, 0x15, // skill_list[0]
+            0x1c, 0x1b, 0x1a, 0x19, // skill_list[1]
+            0x21, // mouseButton
+            0xfb, 0xff, 0xff, 0xff, // modifierKeys = -5
+        ];
+        assert_eq!(body(&p), want);
+    }
+
+    #[test]
     fn sc_doodad_sound_changed_originator_quest_accept() {
         let mut e = bc(7).to_vec();
         e.extend(55u32.to_le_bytes());
@@ -517,15 +825,15 @@ mod tests {
             }
         );
         let mut s = stream(|s| {
-            s.write_bc(5).write_u32(1).write_u32(2).write_u32(3);
+            s.write_bc(5).write_u32(13356).write_u32(2).write_u32(3);
         });
         assert_eq!(
             CSChangeDoodadPhasePacket::read(&mut s).unwrap(),
             CSChangeDoodadPhasePacket {
                 obj_id: 5,
-                unk_id: 1,
-                unk2_id: 2,
-                unk3_id: 3
+                skill: 13356,
+                next_phase: 2,
+                func_id: 3
             }
         );
         let mut s = stream(|s| {

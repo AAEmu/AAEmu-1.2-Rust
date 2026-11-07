@@ -13,14 +13,15 @@ use super::model::{
 use super::packets::{
     quest_error, SCQuestContextCompletedPacket, SCQuestContextFailedPacket,
     SCQuestContextResetPacket, SCQuestContextStartedPacket, SCQuestContextUpdatedPacket,
-    SCQuestRewardedByMailPacket,
+    SCQuestRewardedByMailPacket, SCQuestUnitReqFailedPacket,
 };
+use super::reward_scale::{gap_exp, scaled_supply_copper, scaled_supply_exp};
 use super::state::{
     ActPath, CinemaMark, Quest, QuestActState, QuestComponentState, QuestHandle, QuestState,
     QuestStepState,
 };
 use super::templates::ActKind;
-use super::unit_reqs::{ReqEnv, ReqSubject};
+use super::unit_reqs::{ReqEnv, ReqSubject, UnitReq};
 use crate::models::buff::{Buff, SkillCaster};
 use crate::models::char_data::CompletedQuest;
 use crate::models::character::Character;
@@ -150,6 +151,11 @@ pub struct Ctx<'a> {
     /// mode. A server-side report (`DoodadFuncQuest`, a doodad click on an owned quest) is
     /// only logged, so a click before the objectives are met shows no quest error.
     pub answer_reports: bool,
+    /// Whether a refused start (`AddQuest` blocked by a start-component unit requirement) is
+    /// answered with [`SCQuestUnitReqFailedPacket`]: only the requests the client made
+    /// (`CSStartQuestContext`, all four context kinds). Automatic starters (level up, item
+    /// gain, sphere entry, ...) stay silent, like [`Ctx::log_refusal`]'s repeat suppression.
+    pub answer_start_refusals: bool,
 }
 
 /// The result of one report event, collected across the quest's report acts: a component may
@@ -1048,7 +1054,8 @@ impl<'a> Ctx<'a> {
                     q.reward_coins = 0;
                 }
                 self.send(SCQuestRewardedByMailPacket {
-                    quests: vec![template_id],
+                    success: true,
+                    quest_id: template_id,
                 });
             } else {
                 for item in &pool {
@@ -1086,9 +1093,9 @@ impl<'a> Ctx<'a> {
 
         // Add quest level based rewards
         let data = self.data;
-        let (level, let_it_done) = data
+        let (level, let_it_done, degree) = data
             .template(template_id)
-            .map_or((0, false), |t| (t.level, t.let_it_done));
+            .map_or((0, false, 0), |t| (t.level, t.let_it_done, t.degree));
         let step = self.quest(h).map_or(0, |q| q.step);
         // Retail 1.2 replaces the level based supply with the Reward component's own
         // `QuestActSupplyExp` / `QuestActSupplyCopper` act instead of adding both (the client's
@@ -1126,13 +1133,28 @@ impl<'a> Ctx<'a> {
                 } else {
                     1f32
                 };
+                // `Quest:RewardScaling`: the client scales the supplies fallback by the quest
+                // degree and exp by the quest-vs-player level gap (see `reward_scale`). The
+                // act values replace the fallback per field, so each keeps its own path.
+                let scaling = self.server.config.get().quest.reward_scaling;
+                let player_level = self.c.unit.level;
                 if let Some(q) = self.quest_mut(h) {
                     q.reward_ratio = f64::from(ratio);
                     if !reward_exp_act {
-                        q.reward_exp = q.reward_exp.wrapping_add(lb.exp);
+                        let exp = if scaling {
+                            gap_exp(scaled_supply_exp(lb.exp, degree), level, player_level)
+                        } else {
+                            lb.exp
+                        };
+                        q.reward_exp = q.reward_exp.wrapping_add(exp);
                     }
                     if !reward_copper_act {
-                        q.reward_coins = q.reward_coins.wrapping_add(lb.copper);
+                        let copper = if scaling {
+                            scaled_supply_copper(lb.copper, degree)
+                        } else {
+                            lb.copper
+                        };
+                        q.reward_coins = q.reward_coins.wrapping_add(copper);
                     }
                 }
             }
@@ -1307,6 +1329,40 @@ impl<'a> Ctx<'a> {
                 &env,
             ),
         }
+    }
+
+    /// The requirement [`Ctx::can_component_run`] refuses on (same AND / OR order; an OR list
+    /// that fails reports its first row), for `SCQuestUnitReqFailedPacket`.
+    pub fn first_failed_component_req(&self, component_id: u32) -> Option<UnitReq> {
+        let ct = self.data.component(component_id)?;
+        let owner = OwnerView {
+            c: self.c,
+            st: self.st,
+            server: self.server,
+        };
+        let env = EnvView {
+            server: self.server,
+            env: &self.env,
+        };
+        let req = match &self.env.target {
+            Some(t) => self.data.unit_reqs.first_failure(
+                "QuestComponent",
+                component_id,
+                ct.or_unit_reqs,
+                &owner,
+                &TargetView(t, self.server),
+                &env,
+            ),
+            None => self.data.unit_reqs.first_failure(
+                "QuestComponent",
+                component_id,
+                ct.or_unit_reqs,
+                &owner,
+                &owner,
+                &env,
+            ),
+        };
+        req.cloned()
     }
 
     /// `QuestStep.RunComponents`.
@@ -1744,6 +1800,22 @@ impl<'a> Ctx<'a> {
                     quest_id,
                     &format!("unit requirements of the start component {} not met", c.id),
                 );
+                if self.answer_start_refusals {
+                    if let Some(req) = self.first_failed_component_req(c.id) {
+                        // INFERRED (WP-QU1): kind = unit_reqs.kind_id, value = value1, and the
+                        // message id stays 0 (`unit_reqs` has no message column). The client
+                        // reader FUN_397b5d00 / bag FUN_397b1ef0 resolves the text from kind
+                        // and value; case NO_BUFF prints the buff name of value, case
+                        // EXCEPT_COMPLETE_QUEST_CONTEXT the quest name (ui-quests.md 1.1).
+                        self.send(SCQuestUnitReqFailedPacket {
+                            quest_id,
+                            unit_obj_id: self.c.obj_id,
+                            kind: req.kind as u8,
+                            message_id: 0,
+                            value: req.value1,
+                        });
+                    }
+                }
                 return false;
             }
         }
@@ -2637,7 +2709,10 @@ impl ReqSubject for OwnerView<'_> {
     }
     fn labor_margin(&self) -> Option<i32> {
         // TimedRewardsManager.GetMaxLabor(Connection.Payment.PremiumState) - LaborPower
-        Some(crate::systems::skills::unit_reqs::max_labor() - i32::from(self.c.labor_power))
+        Some(
+            crate::systems::skills::unit_reqs::max_labor(self.server, self.c.account_id)
+                - i32::from(self.c.labor_power),
+        )
     }
     fn expedition(&self) -> Option<(u32, u32)> {
         (self.c.unit.expedition_id > 0).then_some((self.c.unit.expedition_id, 0))
@@ -2806,7 +2881,7 @@ pub fn items_by_template(c: &Character, containers: &[u8], template_id: u32) -> 
             let (ids, n) = cont
                 .lock()
                 .expect("container poisoned")
-                .items_by_template(template_id, -1);
+                .items_by_template_unlocked(template_id, -1);
             found |= !ids.is_empty();
             units = units.wrapping_add(n);
         }

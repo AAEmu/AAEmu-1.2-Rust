@@ -1,11 +1,22 @@
+use std::path::{Path, PathBuf};
 use std::sync::Condvar;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::data::client_files::ClientFileManager;
+use crate::data::pak::test_util::temp_path;
+use crate::data::world_data::{SystemFaction, Zone};
 use crate::data::{items::ItemTemplate, GameData};
+use crate::models::house::House;
 use crate::systems::economy::inventory::Inv;
+use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
+use crate::systems::npcs::heightmap::{
+    HeightmapConfig, HeightmapWorlds, WorldHeightmap, CELL_HMAP_RESOLUTION,
+};
+use crate::systems::social::expedition::{member_from_character, Expedition};
 use crate::test_support::*;
+use crate::world::Entity;
 
 /// Above the synthetic world's ocean level (100 m): a spot there is dry. The 1.2 client's water
 /// rule (`placement::refusal`) uses `WorldInstance.IsWater`, which counts the ocean below it.
@@ -1005,6 +1016,570 @@ async fn real_seed_and_sapling_placements_drive_the_handler() {
         (100.5, 100.0, 90.0),
     );
     assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// WP-D1a: the Territory Statue blueprint's dominion gate (`FUN_393a8fa0` step 7, error 749).
+// ---------------------------------------------------------------------------------------------
+
+struct StatueFixture {
+    server: GameServer,
+    player: PlayerRef,
+    client: TestClient,
+}
+
+/// Zone [`TEST_ZONE`] in `group` (no zone record at all when `None`), a live tower house at
+/// (100, 100) with `radius_dominion` 100, the caster in expedition 1000 and, when
+/// `owner_expedition != 0`, a dominion claim by that expedition.
+fn statue_fixture(group: Option<u32>, owner_expedition: u32) -> StatueFixture {
+    let mut data = GameData::empty();
+    if let Some(group) = group {
+        data.zones.zones.insert(
+            TEST_ZONE,
+            Zone {
+                zone_key: TEST_ZONE,
+                group_id: group,
+                ..Default::default()
+            },
+        );
+    }
+    // Item 29800 "Blueprint: Territory Statue" spawns doodad 7229 (group 80, sim_radius 5000).
+    data.items
+        .templates
+        .insert(29800, ItemTemplate::plain(29800, 1));
+    data.items
+        .templates
+        .insert(1000, ItemTemplate::plain(1000, 20));
+    data.items.item_doodads.insert(7229, vec![29800]);
+    data.items.item_doodads.insert(4000, vec![1000]);
+    data.systems.npcs.doodad.templates.insert(
+        7229,
+        DoodadTemplate {
+            id: 7229,
+            group_id: 80,
+            sim_radius: 5000,
+            ..Default::default()
+        },
+    );
+    data.systems.npcs.doodad.templates.insert(
+        4000,
+        DoodadTemplate {
+            id: 4000,
+            ..Default::default()
+        },
+    );
+    data.systems.housing.add_template(HousingTemplate {
+        id: 139,
+        guard_tower_setting_id: 6,
+        hp: 1000,
+        ..Default::default()
+    });
+    data.systems.housing.castles.guard_tower_settings.insert(
+        6,
+        GuardTowerSetting {
+            id: 6,
+            radius_dominion: 100,
+            ..Default::default()
+        },
+    );
+    let server = test_server_with(data);
+    crate::systems::economy::bridges::install(&server);
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Planter", 100.0, 100.0),
+        server.ids.object.get_next_id().unwrap(),
+    );
+    player.data().labor_power = 20;
+    let containers = player.data().inventory.containers.clone();
+    for (_, container) in containers {
+        server.items.add_container(container);
+    }
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 1000,
+            owner_id: 1,
+            ..Default::default()
+        },
+        members: vec![member_from_character(&server, 1000, &player, true)],
+        policies: Vec::new(),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    if let Some(group) = group {
+        let mut house = House::new(500, 139);
+        house.current_step = -1;
+        house.unit.hp = 1000;
+        house.unit.max_hp = 1000;
+        house.unit.transform.zone_id = TEST_ZONE;
+        house.unit.transform.set_xyz(100.0, 100.0, DRY_Z);
+        let tower = Entity::new(server.ids.object.get_next_id().unwrap(), house);
+        server.systems.housing.manager.insert(&tower);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&tower, &server.view_ctx());
+        if owner_expedition != 0 {
+            let (_, identity) =
+                crate::systems::housing::dominion::runtime::tower_identity(&server, &tower)
+                    .unwrap();
+            server
+                .systems
+                .housing
+                .dominions
+                .declare_unowned_with(group, identity, owner_expedition, 1_000_000, || true)
+                .unwrap();
+        }
+    }
+    StatueFixture {
+        server,
+        player,
+        client,
+    }
+}
+
+fn statue_count(server: &GameServer) -> usize {
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .all_doodads()
+        .into_iter()
+        .filter(|doodad| doodad.data().template_id == 7229)
+        .count()
+}
+
+#[tokio::test]
+async fn territory_statue_places_inside_the_casters_own_dominion() {
+    let mut f = statue_fixture(Some(25), 1000);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "own dominion inside radius: {codes:?}");
+    assert_eq!(statue_count(&f.server), 1);
+    assert!(
+        Inv::of(&f.player).item_by_id(item).is_none(),
+        "a successful placement consumes the blueprint"
+    );
+}
+
+#[tokio::test]
+async fn territory_statue_refuses_outside_the_dominion_radius_and_keeps_the_item() {
+    let mut f = statue_fixture(Some(25), 1000);
+    // Still within the 30 m placement range, but 100 m from the tower (radius² is exclusive).
+    f.player.data().unit.transform.set_xyz(200.0, 100.0, DRY_Z);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (200.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|i| i.count),
+        Some(1),
+        "a refused placement keeps the blueprint"
+    );
+}
+
+#[tokio::test]
+async fn territory_statue_refuses_another_guilds_dominion() {
+    let mut f = statue_fixture(Some(25), 2000);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|i| i.count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn territory_statue_refuses_a_spot_without_an_owned_zone_group() {
+    // No zone record: `FUN_397a6c60` answers no group.
+    let mut f = statue_fixture(None, 0);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+
+    // Zone group 25 with a tower but no dominion record (unowned): `FUN_3983a730` fails.
+    let mut f = statue_fixture(Some(25), 0);
+    let item = give(&f.server, &f.player, 29800, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        7229,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::LOCATE_INVALID_DOMINION_AREA]);
+    assert_eq!(statue_count(&f.server), 0);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|i| i.count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn other_items_place_inside_a_foreign_dominion_unchanged() {
+    let mut f = statue_fixture(Some(25), 2000);
+    let item = give(&f.server, &f.player, 1000, 1);
+    let codes = send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        4000,
+        item,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "the gate is item 29800 only: {codes:?}");
+    assert_eq!(
+        f.server
+            .world
+            .world(0)
+            .unwrap()
+            .all_doodads()
+            .into_iter()
+            .filter(|doodad| doodad.data().template_id == 4000)
+            .count(),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// D1d / W1: the place-skin terrain material rule (`Housing.PlacementStrictSurface`).
+// ---------------------------------------------------------------------------------------------
+
+/// Writes a `main_world` `surface.xml` with three materials and its detail `.mtl` files:
+/// id 10 `mat_grass` (kind 2), id 20 `mat_rock` (no kind), id 30 `mat_sand_dry` (permissive 4).
+fn surface_files() -> PathBuf {
+    let root = temp_path("place_surface");
+    let _ = std::fs::remove_dir_all(&root);
+    let world = root.join("game/worlds/main_world");
+    let materials = root.join("game/materials");
+    std::fs::create_dir_all(&world).unwrap();
+    std::fs::create_dir_all(&materials).unwrap();
+    std::fs::write(
+        world.join("surface.xml"),
+        r#"<Surface><SurfaceTypes>
+ <SurfaceType Name="grass" DetailMaterial="materials/grass" Id="10"/>
+ <SurfaceType Name="rock" DetailMaterial="materials/rock" Id="20"/>
+ <SurfaceType Name="sand" DetailMaterial="materials/sand" Id="30"/>
+</SurfaceTypes></Surface>"#,
+    )
+    .unwrap();
+    for (name, surface_type) in [
+        ("grass", "mat_grass"),
+        ("rock", "mat_rock"),
+        ("sand", "mat_sand_dry"),
+    ] {
+        std::fs::write(
+            materials.join(format!("{name}.mtl")),
+            format!("<Material Shader=\"Terrain.Layer\" SurfaceType=\"{surface_type}\"/>"),
+        )
+        .unwrap();
+    }
+    root
+}
+
+/// Installs a 2 x 2 cell surface map on the synthetic world. The lower-left 2 m sample's local id
+/// depends on the world Y band: 0..60 -> 0 (grass), 60..80 -> 1 (rock), 80..100 -> 2 (sand),
+/// 100..120 -> 31 (hole), 120..140 -> 3 (table id not in `surface.xml`), else 0.
+fn install_surface_heightmap(server: &GameServer, root: Option<&Path>) {
+    let files = root.map(|root| {
+        Arc::new(ClientFileManager::from_sources(
+            &[root.to_string_lossy().into_owned()],
+            root,
+        ))
+    });
+    let files = files.unwrap_or_else(|| Arc::new(ClientFileManager::new()));
+    let template = server.world.world(0).unwrap().template.clone();
+    let map = WorldHeightmap::with_size_surface(
+        template.id,
+        &template.name,
+        template.cell_x,
+        template.cell_y,
+        template.height_max_coefficient,
+        true,
+    );
+    let points = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usize;
+    let mut ids = vec![0u8; points];
+    for x in 0..CELL_HMAP_RESOLUTION {
+        for y in 0..CELL_HMAP_RESOLUTION {
+            let local = match y {
+                60..=79 => 1,
+                80..=99 => 2,
+                100..=119 => 31,
+                120..=139 => 3,
+                _ => 0,
+            };
+            ids[(x * CELL_HMAP_RESOLUTION + y) as usize] = local;
+        }
+    }
+    let mut table = [0u32; 32];
+    table[0] = 10;
+    table[1] = 20;
+    table[2] = 30;
+    table[3] = 999;
+    assert!(map.insert_cell_with_surface(0, 0, vec![0u16; points], table, ids));
+    let worlds = HeightmapWorlds::from_parts(
+        files,
+        vec![map],
+        std::collections::HashMap::new(),
+        HeightmapConfig {
+            heightmaps_enable: true,
+            placement_strict_surface: true,
+            ..Default::default()
+        },
+    );
+    server.systems.npcs.heightmaps.install(Arc::new(worlds));
+}
+
+struct SurfaceFixture {
+    server: GameServer,
+    player: PlayerRef,
+    client: TestClient,
+    root: PathBuf,
+}
+
+impl Drop for SurfaceFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Templates: 4010 grass-only (kind 2), 4011 sand/mud-only (kind 4), 4012 no place skins,
+/// 4013 group 37, 1218/1219 the client skip ids.
+fn surface_fixture(with_surface_xml: bool) -> SurfaceFixture {
+    let mut data = GameData::empty();
+    for id in [1010, 1011, 1012, 1013, 1018, 1019] {
+        data.items.templates.insert(id, ItemTemplate::plain(id, 20));
+    }
+    let templates = [
+        (4010, 1010, 24, vec![2]),
+        (4011, 1011, 24, vec![4]),
+        (4012, 1012, 24, Vec::new()),
+        (4013, 1013, 37, vec![2]),
+        (1218, 1018, 24, Vec::new()),
+        (1219, 1019, 24, Vec::new()),
+    ];
+    for (id, item, group_id, skins) in templates {
+        data.items.item_doodads.insert(id, vec![item]);
+        data.systems.npcs.doodad.templates.insert(
+            id,
+            DoodadTemplate {
+                id,
+                group_id,
+                ..Default::default()
+            },
+        );
+        if !skins.is_empty() {
+            data.systems.npcs.doodad.place_skins.insert(id, skins);
+        }
+    }
+    data.systems.housing.add_template(HousingTemplate {
+        id: 139,
+        garden_radius: 20.0,
+        hp: 1000,
+        ..Default::default()
+    });
+    let server = test_server_with(data);
+    crate::systems::economy::bridges::install(&server);
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Planter", 100.0, 100.0),
+        server.ids.object.get_next_id().unwrap(),
+    );
+    player.data().labor_power = 20;
+    let containers = player.data().inventory.containers.clone();
+    for (_, container) in containers {
+        server.items.add_container(container);
+    }
+    let root = if with_surface_xml {
+        surface_files()
+    } else {
+        let root = temp_path("place_no_surface");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    };
+    install_surface_heightmap(&server, Some(&root));
+    SurfaceFixture {
+        server,
+        player,
+        client,
+        root,
+    }
+}
+
+fn place_at(f: &mut SurfaceFixture, doodad: u32, item: u64, x: f32, y: f32) -> Vec<i16> {
+    f.player.data().unit.transform.set_xyz(x, y, DRY_Z);
+    send_placement(
+        &mut f.client,
+        &f.server,
+        &f.player,
+        doodad,
+        item,
+        (x, y, DRY_Z),
+    )
+}
+
+fn doodad_count(server: &GameServer, template_id: u32) -> usize {
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .all_doodads()
+        .into_iter()
+        .filter(|doodad| doodad.data().template_id == template_id)
+        .count()
+}
+
+#[tokio::test]
+async fn strict_surface_rule_refuses_the_wrong_material_and_keeps_the_item() {
+    let mut f = surface_fixture(true);
+    f.server
+        .config
+        .update(|config| config.housing.placement_strict_surface = true);
+
+    let item = give(&f.server, &f.player, 1010, 1);
+    let codes = place_at(&mut f, 4010, item, 100.0, 100.0);
+    assert!(codes.is_empty(), "grass doodad on grass: {codes:?}");
+    assert_eq!(doodad_count(&f.server, 4010), 1);
+
+    let item = give(&f.server, &f.player, 1010, 1);
+    let codes = place_at(&mut f, 4010, item, 100.0, 140.0);
+    assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
+    assert_eq!(doodad_count(&f.server, 4010), 1);
+    assert_eq!(
+        Inv::of(&f.player).item_by_id(item).map(|item| item.count),
+        Some(1),
+        "a refused placement keeps the seed"
+    );
+
+    let item = give(&f.server, &f.player, 1011, 1);
+    let codes = place_at(&mut f, 4011, item, 100.0, 180.0);
+    assert!(
+        codes.is_empty(),
+        "permissive: mat_sand_dry is kind 4: {codes:?}"
+    );
+    let item = give(&f.server, &f.player, 1011, 1);
+    let codes = place_at(&mut f, 4011, item, 100.0, 100.0);
+    assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
+
+    // A material whose surface type is not one of the four names is refused for every template.
+    let item = give(&f.server, &f.player, 1011, 1);
+    let codes = place_at(&mut f, 4011, item, 100.0, 140.0);
+    assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
+
+    // A template without place-skin rows is refused on open terrain.
+    let item = give(&f.server, &f.player, 1012, 1);
+    let codes = place_at(&mut f, 4012, item, 100.0, 100.0);
+    assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
+
+    // Unknown data (hole, surface id not in surface.xml) is permissive.
+    let item = give(&f.server, &f.player, 1012, 1);
+    let codes = place_at(&mut f, 4012, item, 100.0, 220.0);
+    assert!(codes.is_empty(), "a hole has no material: {codes:?}");
+    let item = give(&f.server, &f.player, 1012, 1);
+    let codes = place_at(&mut f, 4012, item, 100.0, 260.0);
+    assert!(
+        codes.is_empty(),
+        "an id not in surface.xml is unknown: {codes:?}"
+    );
+}
+
+#[tokio::test]
+async fn strict_surface_rule_is_off_by_default() {
+    let mut f = surface_fixture(true);
+    assert!(!f.server.config.housing.placement_strict_surface);
+    let item = give(&f.server, &f.player, 1010, 1);
+    let codes = place_at(&mut f, 4010, item, 100.0, 140.0);
+    assert!(
+        codes.is_empty(),
+        "without the flag a grass doodad may stand on rock: {codes:?}"
+    );
+    assert_eq!(doodad_count(&f.server, 4010), 1);
+}
+
+#[tokio::test]
+async fn strict_surface_rule_honours_the_house_and_group_skips() {
+    let mut f = surface_fixture(true);
+    f.server
+        .config
+        .update(|config| config.housing.placement_strict_surface = true);
+
+    for (doodad, item_template) in [(1218, 1018), (1219, 1019)] {
+        let item = give(&f.server, &f.player, item_template, 1);
+        let codes = place_at(&mut f, doodad, item, 100.0, 140.0);
+        assert!(codes.is_empty(), "template {doodad} is skipped: {codes:?}");
+    }
+    let item = give(&f.server, &f.player, 1013, 1);
+    let codes = place_at(&mut f, 4013, item, 100.0, 140.0);
+    assert!(codes.is_empty(), "group 37 is skipped: {codes:?}");
+
+    // A house box the player may build on skips the rule too (no place-skin rows on rock).
+    let mut house = House::new(500, 139);
+    house.current_step = 0;
+    house.unit.transform.zone_id = TEST_ZONE;
+    house.unit.transform.set_xyz(100.0, 140.0, DRY_Z);
+    let tower = Entity::new(f.server.ids.object.get_next_id().unwrap(), house);
+    f.server.systems.housing.manager.insert(&tower);
+    f.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&tower, &f.server.view_ctx());
+    let item = give(&f.server, &f.player, 1012, 1);
+    let codes = place_at(&mut f, 4012, item, 100.0, 140.0);
+    assert!(
+        codes.is_empty(),
+        "a permitted house box skips the rule: {codes:?}"
+    );
+    assert_eq!(doodad_count(&f.server, 4012), 1);
+}
+
+#[tokio::test]
+async fn strict_surface_rule_does_nothing_without_surface_data() {
+    let mut f = surface_fixture(false);
+    f.server
+        .config
+        .update(|config| config.housing.placement_strict_surface = true);
+    let item = give(&f.server, &f.player, 1010, 1);
+    let codes = place_at(&mut f, 4010, item, 100.0, 140.0);
+    assert!(codes.is_empty(), "no surface.xml -> no rule: {codes:?}");
+    assert_eq!(doodad_count(&f.server, 4010), 1);
 }
 
 /// Planting is routine (the bots plant hundreds of crops a day): its success path must not log

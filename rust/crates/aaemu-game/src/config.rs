@@ -75,6 +75,9 @@ pub struct AppConfig {
     pub access_level: Vec<(String, i32)>,
     #[serde(rename = "account")]
     pub account: AccountConfig,
+    /// `Characters` (Rust only: the lobby character-slot limit).
+    #[serde(rename = "characters")]
+    pub characters: CharactersConfig,
     #[serde(rename = "labor")]
     pub labor: CurrencyValuesConfig,
     /// `LaborOffline` (labor granted per offline tick on login).
@@ -88,6 +91,18 @@ pub struct AppConfig {
     pub world: WorldConfig,
     #[serde(rename = "housing")]
     pub housing: crate::systems::housing::config::HousingConfig,
+    /// `Crafting` (recipe learning gate).
+    #[serde(rename = "crafting")]
+    pub crafting: crate::systems::economy::config::CraftingConfig,
+    /// `Loot` (`Configurations/Loot.json`: party loot announcements).
+    #[serde(rename = "loot")]
+    pub loot: crate::systems::economy::config::LootAnnounceConfig,
+    /// `Quest` (Rust only: quest reward scaling, default off).
+    #[serde(rename = "quest")]
+    pub quest: crate::systems::quests::config::QuestConfig,
+    /// `Music` (`systems::services::music`: user song upload sanity).
+    #[serde(rename = "music")]
+    pub music: crate::systems::services::music::MusicConfig,
     #[serde(rename = "clientdata")]
     pub client_data: ClientDataConfig,
     /// `Specialty`.
@@ -102,6 +117,11 @@ pub struct AppConfig {
     /// `CharacterNameRegex` (`None` = NameManager's default pattern).
     #[serde(rename = "characternameregex")]
     pub character_name_regex: Option<String>,
+    /// Enables the 1.2 `allowed_name_chars` whitelist for character names. The stock client
+    /// enforces the table itself, and the whitelist overrides `CharacterNameRegex` where the two
+    /// disagree (digits/Cyrillic), so it is opt-in.
+    #[serde(rename = "characternameuseallowedchars", deserialize_with = "lenient")]
+    pub character_name_use_allowed_chars: bool,
     #[serde(rename = "defaultlanguage")]
     pub default_language: String,
     #[serde(rename = "debuginfo", deserialize_with = "lenient")]
@@ -111,20 +131,32 @@ pub struct AppConfig {
     /// `Debug` (Rust only: opt-in capture aids, off by default).
     #[serde(rename = "debug")]
     pub debug: DebugConfig,
-    /// `Expedition` / `Justice` (`systems::social::config`).
+    /// `Expedition` / `Justice` / `Chat` (`systems::social::config`).
     #[serde(rename = "expedition")]
     pub expedition: crate::systems::social::config::ExpeditionConfig,
     #[serde(rename = "justice")]
     pub justice: crate::systems::social::config::JusticeConfig,
+    /// Chat spam delays sent to the client and enforced by the server (`Configurations/Chat.json`).
+    #[serde(rename = "chat")]
+    pub chat: crate::systems::social::config::ChatConfig,
+    /// `Social` (`systems::social::config`: Rust-only social feature switches).
+    #[serde(rename = "social")]
+    pub social: crate::systems::social::config::SocialConfig,
     /// `Dungeons` (`systems::instances::config`).
     #[serde(rename = "dungeons")]
     pub dungeons: crate::systems::instances::config::DungeonsConfig,
+    /// `Interaction` (`systems::npcs::config`: NPC interaction reach).
+    #[serde(rename = "interaction")]
+    pub interaction: crate::systems::npcs::config::InteractionConfig,
     /// `HeightMapsEnable` (C# default false; the shipped Config.json sets it to true).
     #[serde(rename = "heightmapsenable", deserialize_with = "lenient")]
     pub heightmaps_enable: bool,
     /// `Physics` (`systems::ai::collision::config`, Rust only: the CryPhysics collision world).
     #[serde(rename = "physics")]
     pub physics: crate::systems::ai::collision::config::PhysicsConfig,
+    /// `FeatureSet` (`Configurations/FeatureSet.json`: the client feature switches).
+    #[serde(rename = "featureset")]
+    pub feature_set: crate::data::features::FeatureSetConfig,
     /// `FileManager.AppPath`: the directory holding `Config.json` and `Data/compact.sqlite3`.
     #[serde(skip)]
     pub app_path: PathBuf,
@@ -145,26 +177,36 @@ impl Default for AppConfig {
             discord_token: None,
             access_level: Vec::new(),
             account: AccountConfig::default(),
+            characters: CharactersConfig::default(),
             labor: CurrencyValuesConfig::default(),
             labor_offline: CurrencyValuesConfig::default(),
             credits: CurrencyValuesConfig::default(),
             loyalty: CurrencyValuesConfig::default(),
             world: WorldConfig::default(),
             housing: Default::default(),
+            crafting: Default::default(),
+            loot: Default::default(),
+            quest: Default::default(),
+            music: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
             scripts: ScriptsConfig::default(),
             events: EventsConfig::default(),
             character_name_regex: None,
+            character_name_use_allowed_chars: false,
             default_language: "en_us".into(),
             debug_info: true,
             debug_info_level: 100,
             debug: DebugConfig::default(),
             expedition: Default::default(),
             justice: Default::default(),
+            chat: Default::default(),
+            social: Default::default(),
             dungeons: Default::default(),
+            interaction: Default::default(),
             heightmaps_enable: false,
             physics: Default::default(),
+            feature_set: Default::default(),
             app_path: PathBuf::from("."),
         }
     }
@@ -270,6 +312,58 @@ pub struct AccountConfig {
     pub delete_release_name: bool,
     #[serde(rename = "deletetimings")]
     pub delete_timings: Vec<AccountDeleteDelayTiming>,
+    /// Payment state of accounts whose `accounts.pay_method` is 0 (never written by a GM or the
+    /// (not yet ported) premium shop). Default `premium`: the owner decision of 2026-11-03 keeps
+    /// the C# behaviour for existing databases.
+    #[serde(rename = "defaultpayment", deserialize_with = "lenient_enum")]
+    pub default_payment: DefaultPayment,
+    /// The seven `canXxx` flags of `SCInitialConfig`, per effective payment method (Rust only,
+    /// WP-J). The 1.2 client uses them to gate its own UI; the server has no restriction data,
+    /// so every default is `true` (today's bytes). The per-method source is INFERRED
+    /// (`ACCOUNT-RESTRICT-1`, capture-pending), not client-evidenced.
+    #[serde(rename = "restrictions")]
+    pub restrictions: AccountRestrictionsConfig,
+    /// `SCInitialConfig.idleKickTime` (raw `u16`, `0` = off; Rust only, WP-J). The unit is
+    /// **UNKNOWN** (the 1.2 `CGame::Update` consumer was not located): do not document it as
+    /// minutes or seconds. The client performs the idle kick itself; the server never kicks.
+    /// **Needs one real-client run** with `Account:IdleKickTime=1`: about 1 s means seconds,
+    /// about 1 min means minutes. `aaemu-testclient` does not emulate the kick.
+    #[serde(rename = "idlekicktime", deserialize_with = "lenient")]
+    pub idle_kick_time: u16,
+    /// The lobby `SCTrionConfig` values (Rust only, WP-UI4). The defaults are the formerly
+    /// hard-coded test URLs. What the client does with `activate: false` is UNKNOWN (CAP-UI-5;
+    /// the 1.2 consumer of the struct was not traced), so the default keeps today's `true`.
+    #[serde(rename = "trion")]
+    pub trion: TrionConfig,
+}
+
+/// `Account:Trion` (Rust only, WP-UI4): `SCTrionConfigPacket` sent in the lobby. The embedded
+/// browser panels (`webbrowser/web_help`, `web_market`, `web_play_diary`, promotion event,
+/// in-game notification) load these URLs; the defaults are the C# test values ("TODO - config
+/// files"). `activate: false` is the way to hide the panels once verified, but the client's
+/// reaction is UNKNOWN (CAP-UI-5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TrionConfig {
+    #[serde(rename = "activate", deserialize_with = "lenient")]
+    pub activate: bool,
+    #[serde(rename = "auth_url")]
+    pub auth_url: String,
+    #[serde(rename = "platform_url")]
+    pub platform_url: String,
+    #[serde(rename = "commerce_url")]
+    pub commerce_url: String,
+}
+
+impl Default for TrionConfig {
+    fn default() -> Self {
+        Self {
+            activate: true,
+            auth_url: "http://localhost/aaemu/login".into(),
+            platform_url: "http://localhost/aaemu/platform".into(),
+            commerce_url: "http://localhost/aaemu/shop".into(),
+        }
+    }
 }
 
 impl Default for AccountConfig {
@@ -281,6 +375,115 @@ impl Default for AccountConfig {
             access_level_first_character: 100,
             delete_release_name: false,
             delete_timings: Vec::new(),
+            default_payment: DefaultPayment::Premium,
+            restrictions: AccountRestrictionsConfig::default(),
+            idle_kick_time: 0,
+            trion: TrionConfig::default(),
+        }
+    }
+}
+
+/// `Account:Restrictions` (Rust only, WP-J): the seven `SCInitialConfig` `canXxx` booleans, keyed
+/// by the account's effective payment method. The 1.2 client only uses them to gate its UI; the
+/// server does not enforce them. INFERRED source (`ACCOUNT-RESTRICT-1`): the 1.2 client reader
+/// (`FUN_397b2a00` -> `FUN_397b1fb0`) names the flags but shows no server-side source.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AccountRestrictionsConfig {
+    #[serde(rename = "premium")]
+    pub premium: RestrictionFlags,
+    #[serde(rename = "demo")]
+    pub demo: RestrictionFlags,
+    #[serde(rename = "none")]
+    pub none: RestrictionFlags,
+}
+
+impl AccountRestrictionsConfig {
+    /// The flags sent for an effective payment method.
+    pub fn for_payment(
+        &self,
+        method: crate::net::connection::PaymentMethodType,
+    ) -> &RestrictionFlags {
+        use crate::net::connection::PaymentMethodType;
+        match method {
+            PaymentMethodType::Premium => &self.premium,
+            PaymentMethodType::Demo => &self.demo,
+            PaymentMethodType::None => &self.none,
+        }
+    }
+}
+
+/// The seven `SCInitialConfig` `canXxx` booleans in wire order. Every default is `true`, which
+/// keeps the bytes the server sent before WP-J.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RestrictionFlags {
+    #[serde(rename = "canplacehouse")]
+    pub can_place_house: bool,
+    #[serde(rename = "canpaytax")]
+    pub can_pay_tax: bool,
+    #[serde(rename = "canuseauction")]
+    pub can_use_auction: bool,
+    #[serde(rename = "cantrade")]
+    pub can_trade: bool,
+    #[serde(rename = "cansendmail")]
+    pub can_send_mail: bool,
+    #[serde(rename = "canusebank")]
+    pub can_use_bank: bool,
+    #[serde(rename = "canusecopper")]
+    pub can_use_copper: bool,
+}
+
+impl Default for RestrictionFlags {
+    fn default() -> Self {
+        Self {
+            can_place_house: true,
+            can_pay_tax: true,
+            can_use_auction: true,
+            can_trade: true,
+            can_send_mail: true,
+            can_use_bank: true,
+            can_use_copper: true,
+        }
+    }
+}
+
+/// `Account:DefaultPayment` (Rust only, WP-B): the effective payment of an account whose
+/// `accounts.pay_method` is still 0. The numeric values are the 1.2 `PaymentMethodType`
+/// (`Premium = 1`, `Demo = 3`, `None = 5`) the client receives in `SCAccountInfo.payMethod`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DefaultPayment {
+    #[default]
+    Premium,
+    Demo,
+    None,
+}
+
+impl_config_enum!(DefaultPayment { Premium = 1, Demo = 3, None = 5 });
+
+/// `Characters` (Rust only): the lobby character-slot limit and the pre-select period.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CharactersConfig {
+    /// Base character slots of every account, before the purchased
+    /// `accounts.extra_character_slots` are added. Must equal the login server's
+    /// `Login:MaxCharactersPerAccount`; the login server advertises it, this server enforces it.
+    /// There is no cross-process check of the two values.
+    #[serde(rename = "maxperaccount", deserialize_with = "lenient")]
+    pub max_per_account: u8,
+    /// Whether the lobby accepts `CSEditCharacter` (character edit at character select). Must
+    /// equal the login server's `Login:PreSelectCharacterPeriod`: the login server advertises
+    /// the period in `ACJoinResponse.afs` and the client only sends the edit packet while it is
+    /// set. There is no cross-process check of the two values.
+    #[serde(rename = "preselectperiod", deserialize_with = "lenient")]
+    pub pre_select_period: bool,
+}
+
+impl Default for CharactersConfig {
+    fn default() -> Self {
+        Self {
+            max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+            pre_select_period: false,
         }
     }
 }
@@ -348,6 +551,10 @@ pub struct WorldConfig {
     pub days_for_tax_payment: u32,
     #[serde(rename = "ignorefalldamageaccesslevel", deserialize_with = "lenient")]
     pub ignore_fall_damage_access_level: i32,
+    /// Minimum effective access level at which the radar / telescope shows every object in the
+    /// world regardless of the registered range (`RadarManager`, the C# had this hard-coded).
+    #[serde(rename = "radargmaccesslevel", deserialize_with = "lenient")]
+    pub radar_gm_access_level: i32,
     #[serde(rename = "godmode", deserialize_with = "lenient")]
     pub god_mode: bool,
     /// `GeoDataMode` (navmesh heights and A* paths, `systems::ai::geodata`).
@@ -425,6 +632,7 @@ impl Default for WorldConfig {
             growth_rate: 1.0,
             days_for_tax_payment: 7,
             ignore_fall_damage_access_level: 100,
+            radar_gm_access_level: 100,
             god_mode: false,
             geo_data_mode: false,
             pre_load_terrain: false,
@@ -470,6 +678,17 @@ pub struct SpecialtyConfig {
     pub ratio_regen_tick_minutes: f64,
     #[serde(rename = "tradepackmaildelayinminutes", deserialize_with = "lenient")]
     pub trade_pack_mail_delay_in_minutes: f64,
+    /// `SpecialtyManager` negotiation ("bargaining") bonus, percent of the pre-interest sale
+    /// price. The 1.2 client shows the bonus (`ui_texts` `sell_backpack_body2`,
+    /// `SPECIALTY_MARGIN` 626, `SPECIALTY_COIN_MARGIN` 677) but no formula or threshold is
+    /// evidenced; 0 keeps the C# 1.2 behaviour.
+    #[serde(rename = "negotiationbonuspercent", deserialize_with = "lenient")]
+    pub negotiation_bonus_percent: f64,
+    /// Apply the Commerce `GetLaborCostMultiplier` table to the pack-sale labor. The 1.2 C#
+    /// charged the flat 60 and skill 25205 has `consume_lp = 0`, so this stays off by default
+    /// (capture-pending LABOR-1).
+    #[serde(rename = "scalesalelaborbycommerce", deserialize_with = "lenient")]
+    pub scale_sale_labor_by_commerce: bool,
 }
 
 impl Default for SpecialtyConfig {
@@ -483,6 +702,8 @@ impl Default for SpecialtyConfig {
             ratio_decrease_tick_minutes: 1.0,
             ratio_regen_tick_minutes: 60.0,
             trade_pack_mail_delay_in_minutes: 480.0,
+            negotiation_bonus_percent: 0.0,
+            scale_sale_labor_by_commerce: false,
         }
     }
 }
@@ -512,6 +733,40 @@ pub struct EventsConfig {
     /// `Events:Halloween`.
     #[serde(rename = "halloween")]
     pub halloween: HalloweenConfig,
+    /// `Events:ScheduledEvents`.
+    #[serde(rename = "scheduledevents")]
+    pub scheduled_events: ScheduledEventsConfig,
+}
+
+/// `Events:ScheduledEvents` (Rust only, gap audit `sc-unused-3#3`): the allow-list of
+/// `game_schedules` rows whose window edges are announced with `SCScheduledEventStartedPacket`
+/// (0x1ec) / `SCScheduledEventEndedPacket` (0x1ed). Off by default: the wire format is
+/// client-evidenced, but the original trigger and message text are INFERRED (no original-server
+/// capture exists). An empty list announces nothing. The client keeps one active event id, so
+/// configuring overlapping events means a later Started replaces the earlier one.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScheduledEventsConfig {
+    #[serde(rename = "enabled", deserialize_with = "lenient")]
+    pub enabled: bool,
+    /// The allow-list in announcement order (`system::npcs::schedule_events`).
+    #[serde(rename = "events")]
+    pub events: Vec<ScheduledEventEntry>,
+}
+
+/// One allow-listed event: the `game_schedules` row and the texts the client shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ScheduledEventEntry {
+    /// `game_schedules.id` (must exist; invalid and duplicate ids are skipped at startup).
+    #[serde(rename = "scheduleid", deserialize_with = "lenient")]
+    pub schedule_id: i32,
+    /// The banner text of the opening edge (`SCScheduledEventStartedPacket.openMsg`).
+    #[serde(rename = "openmsg")]
+    pub open_msg: String,
+    /// The banner text of the closing edge (`SCScheduledEventEndedPacket.closeMsg`).
+    #[serde(rename = "closemsg")]
+    pub close_msg: String,
 }
 
 /// `Events:Halloween`: the window applied in memory to the retail Halloween rows of
@@ -642,8 +897,9 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 31] = [
+const TOP_LEVEL_KEYS: [&str; 34] = [
     "physics",
+    "featureset",
     "id",
     "additionalesid",
     "secretkey",
@@ -661,6 +917,7 @@ const TOP_LEVEL_KEYS: [&str; 31] = [
     "dungeons",
     "accesslevel",
     "account",
+    "characters",
     "labor",
     "laboroffline",
     "credits",
@@ -670,6 +927,7 @@ const TOP_LEVEL_KEYS: [&str; 31] = [
     "scripts",
     "events",
     "justice",
+    "social",
     "defaultlanguage",
     "debuginfo",
     "debuginfolevel",
@@ -1150,6 +1408,35 @@ where
     }
 }
 
+/// A JSON object whose keys and values may be numbers or numeric strings (the Microsoft
+/// binder flattens `Section:Map:Key` entries to strings).
+pub(crate) fn lenient_map<'de, D, K, V>(d: D) -> Result<std::collections::BTreeMap<K, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: FromStr + Ord,
+    K::Err: Display,
+    V: FromStr,
+    V::Err: Display,
+{
+    match Value::deserialize(d)? {
+        Value::Object(map) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (key, value) in map {
+                let key = key
+                    .trim()
+                    .parse::<K>()
+                    .map_err(|e| de::Error::custom(format!("invalid map key {key:?}: {e}")))?;
+                out.insert(key, parse_scalar(&value)?);
+            }
+            Ok(out)
+        }
+        Value::Null => Ok(std::collections::BTreeMap::new()),
+        other => Err(de::Error::custom(format!(
+            "expected an object, got {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1173,6 +1460,129 @@ mod tests {
         assert_eq!(cfg.login_network.port, 1234);
         assert!(cfg.account.delete_release_name);
         assert_eq!(cfg.account.access_level_first_account, 100);
+    }
+
+    #[test]
+    fn characters_config_binds_the_base_slot_count() {
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "MaxPerAccount": "8" }
+        }))
+        .unwrap();
+        assert_eq!(cfg.characters.max_per_account, 8);
+        assert_eq!(AppConfig::default().characters.max_per_account, 6);
+    }
+
+    #[test]
+    fn characters_config_binds_the_pre_select_period() {
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "PreSelectPeriod": "True" }
+        }))
+        .unwrap();
+        assert!(cfg.characters.pre_select_period);
+        assert!(!AppConfig::default().characters.pre_select_period);
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "PreSelectPeriod": false }
+        }))
+        .unwrap();
+        assert!(!cfg.characters.pre_select_period);
+    }
+
+    #[test]
+    fn account_restrictions_and_idle_kick_bind_from_config() {
+        use crate::net::connection::PaymentMethodType;
+
+        let default = AppConfig::default();
+        assert_eq!(default.account.idle_kick_time, 0);
+        for method in [
+            PaymentMethodType::Premium,
+            PaymentMethodType::Demo,
+            PaymentMethodType::None,
+        ] {
+            let flags = default.account.restrictions.for_payment(method);
+            assert!(flags.can_place_house);
+            assert!(flags.can_pay_tax);
+            assert!(flags.can_use_auction);
+            assert!(flags.can_trade);
+            assert!(flags.can_send_mail);
+            assert!(flags.can_use_bank);
+            assert!(flags.can_use_copper);
+        }
+
+        let cfg = AppConfig::from_value(json!({
+            "Account": {
+                "IdleKickTime": "1800",
+                "Restrictions": {
+                    "Demo": { "CanTrade": false, "CanSendMail": false }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(cfg.account.idle_kick_time, 1800);
+        let demo = cfg
+            .account
+            .restrictions
+            .for_payment(PaymentMethodType::Demo);
+        assert!(!demo.can_trade);
+        assert!(!demo.can_send_mail);
+        // Missing flags keep the default `true` (only the two listed are off).
+        assert!(demo.can_place_house);
+        assert!(demo.can_pay_tax);
+        assert!(demo.can_use_auction);
+        assert!(demo.can_use_bank);
+        assert!(demo.can_use_copper);
+        // The other methods are unaffected.
+        assert!(
+            cfg.account
+                .restrictions
+                .for_payment(PaymentMethodType::Premium)
+                .can_trade
+        );
+        assert!(
+            cfg.account
+                .restrictions
+                .for_payment(PaymentMethodType::None)
+                .can_trade
+        );
+    }
+
+    #[test]
+    fn account_trion_binds_from_config() {
+        let default = AppConfig::default();
+        assert!(default.account.trion.activate);
+        assert_eq!(
+            default.account.trion.auth_url,
+            "http://localhost/aaemu/login"
+        );
+        assert_eq!(
+            default.account.trion.platform_url,
+            "http://localhost/aaemu/platform"
+        );
+        assert_eq!(
+            default.account.trion.commerce_url,
+            "http://localhost/aaemu/shop"
+        );
+
+        let cfg = AppConfig::from_value(json!({
+            "Account": {
+                "Trion": {
+                    "Activate": "False",
+                    "Auth_Url": "https://auth.example.test/l",
+                    "Platform_Url": "https://platform.example.test",
+                    "Commerce_Url": "https://shop.example.test/c"
+                }
+            }
+        }))
+        .unwrap();
+        assert!(!cfg.account.trion.activate);
+        assert_eq!(cfg.account.trion.auth_url, "https://auth.example.test/l");
+        assert_eq!(
+            cfg.account.trion.platform_url,
+            "https://platform.example.test"
+        );
+        assert_eq!(
+            cfg.account.trion.commerce_url,
+            "https://shop.example.test/c"
+        );
     }
 
     #[test]
@@ -1275,6 +1685,46 @@ mod tests {
         assert!(cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "");
         assert_eq!(cfg.events.halloween.end, "");
+        // FeatureSet.json: the shipped switches are the current bytes (data::features), and the
+        // unnamed-bit override list starts empty.
+        assert!(cfg.feature_set.siege);
+        assert!(!cfg.feature_set.aa_point);
+        assert!(!cfg.feature_set.dwarf_warborn);
+        assert!(cfg.feature_set.extra_bits.is_empty());
+        // The shipped file applied to the stock level caps is exactly the current fset bytes.
+        let mut fset = crate::data::FeatureSet::initialized(55, 50);
+        fset.apply_config(&cfg.feature_set);
+        assert_eq!(
+            fset.bytes(),
+            &[0x5B, 55, 0x0F, 0x0F, 0xF9, 0x29, 0x33, 0x89, 50, 0x08, 0x1a]
+        );
+    }
+
+    #[test]
+    fn feature_set_section_binds_switches_and_extra_bits() {
+        let cfg = AppConfig::from_value(json!({
+            "FeatureSet": {
+                "Siege": false,
+                "DwarfWarborn": "true",
+                "aaPoint": true,
+                "ExtraBits": { "78": true, "32": "false" }
+            }
+        }))
+        .unwrap();
+        assert!(!cfg.feature_set.siege);
+        assert!(cfg.feature_set.dwarf_warborn);
+        assert!(cfg.feature_set.aa_point);
+        assert_eq!(cfg.feature_set.extra_bits.get(&78), Some(&true));
+        assert_eq!(cfg.feature_set.extra_bits.get(&32), Some(&false));
+
+        // The section is a top-level key, so the `FeatureSet__Key` environment form binds too.
+        let mut value = json!({});
+        apply_env(
+            &mut value,
+            [("FeatureSet__Siege".to_string(), "true".to_string())],
+        );
+        let cfg = AppConfig::from_value(value).unwrap();
+        assert!(cfg.feature_set.siege);
     }
 
     #[test]
@@ -1311,7 +1761,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("Configurations/World.json"),
-            r#"{ "World": { "ExpRate": 2.0, "WindModel": "realistic" } }"#,
+            r#"{ "World": { "ExpRate": 2.0, "WindModel": "realistic", "RadarGmAccessLevel": 90 } }"#,
         )
         .unwrap();
         let secrets = dir.join("secrets.json");
@@ -1320,6 +1770,7 @@ mod tests {
         let cfg = AppConfig::load_from(&dir, Some(&secrets), Vec::new(), &[]).unwrap();
         assert_eq!(cfg.world.exp_rate, 3.0);
         assert_eq!(cfg.world.wind_model, WindModelType::Realistic);
+        assert_eq!(cfg.world.radar_gm_access_level, 90);
         assert_eq!(cfg.discord_token.as_deref(), Some("tok"));
         // Environment beats secrets; unknown top-level variables are ignored.
         let env = vec![
@@ -1343,6 +1794,7 @@ mod tests {
         assert!(cfg.web_api_network.is_none());
         assert_eq!(cfg.labor_offline.tick_minutes, 5);
         assert_eq!(cfg.world.target_physics_tps, 25.0);
+        assert_eq!(cfg.world.radar_gm_access_level, 100);
         assert!(cfg.dungeons.auto_cleanup_after_kick);
         assert_eq!(cfg.specialty.ratio_decrease_per_pack, f64::from(0.5f32));
         assert_eq!(cfg.credits.get_tick_amount(true), 0);
@@ -1396,6 +1848,17 @@ mod tests {
     }
 
     #[test]
+    fn loot_announce_to_party_defaults_false_and_binds_leniently() {
+        let cfg = AppConfig::from_value(json!({})).unwrap();
+        assert!(!cfg.loot.announce_to_party);
+        let cfg = AppConfig::from_value(json!({
+            "Loot": { "AnnounceToParty": "True" }
+        }))
+        .unwrap();
+        assert!(cfg.loot.announce_to_party);
+    }
+
+    #[test]
     fn events_halloween_binds_leniently() {
         let cfg = AppConfig::from_value(json!({
             "Events": { "Halloween": {
@@ -1408,6 +1871,33 @@ mod tests {
         assert!(!cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "2026-10-14T00:00:00Z");
         assert_eq!(cfg.events.halloween.end, "2026-11-01T00:00:00Z");
+    }
+
+    #[test]
+    fn scheduled_events_default_off_and_bind_leniently() {
+        let cfg = AppConfig::from_value(json!({})).unwrap();
+        assert!(!cfg.events.scheduled_events.enabled);
+        assert!(cfg.events.scheduled_events.events.is_empty());
+
+        let cfg = AppConfig::from_value(json!({
+            "Events": { "ScheduledEvents": {
+                "Enabled": "True",
+                "Events": [
+                    { "ScheduleId": "14", "OpenMsg": "Weekend dungeon open",
+                      "CloseMsg": "Weekend dungeon closed" }
+                ]
+            } }
+        }))
+        .unwrap();
+        assert!(cfg.events.scheduled_events.enabled);
+        assert_eq!(
+            cfg.events.scheduled_events.events,
+            vec![ScheduledEventEntry {
+                schedule_id: 14,
+                open_msg: "Weekend dungeon open".into(),
+                close_msg: "Weekend dungeon closed".into(),
+            }]
+        );
     }
 
     #[test]

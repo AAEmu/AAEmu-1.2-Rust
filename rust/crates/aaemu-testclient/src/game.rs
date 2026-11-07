@@ -286,16 +286,27 @@ pub fn packet_name(dir: Dir, level: u8, opcode: u16) -> &'static str {
     name_of(table, opcode).unwrap_or("Unknown")
 }
 
-/// A character of `SCCharacterListPacket` / `SCCreateCharacterResponsePacket`.
+/// A character of `SCCharacterListPacket` / `SCCreateCharacterResponsePacket` /
+/// `SCEditCharacterResponsePacket`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CharInfo {
     pub id: u32,
     pub name: String,
+    pub appearance: Appearance,
+}
+
+/// The customizing ids of a character block (`UnitCustomModelParams`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Appearance {
+    pub kind: u8,
+    pub hair_color_id: u32,
+    pub skin_color_id: u32,
+    pub model_id: u32,
 }
 
 /// Consume one complete native `Character.Write` record. The list has no entry lengths;
 /// stopping after id/name would parse the next character from equipment or model bytes.
-fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
+pub(crate) fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
     use aaemu_game::models::container::{equip_slot, EQUIPMENT_CONTAINER_SIZE};
     use aaemu_game::models::item::detail_body_len;
     use aaemu_game::models::unit_model::UnitCustomModelParams;
@@ -337,7 +348,13 @@ fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
     s.read_i64()?; // x
     s.read_i64()?; // y
     s.read_f32()?; // z
-    let _: UnitCustomModelParams = s.read()?;
+    let appearance: UnitCustomModelParams = s.read()?;
+    let appearance = Appearance {
+        kind: appearance.kind.0,
+        hair_color_id: appearance.hair_color_id,
+        skin_color_id: appearance.skin_color_id,
+        model_id: appearance.model_id,
+    };
     s.read_i16()?; // labor
     s.read_i64()?; // labor modified
     s.read_i16()?; // dead count
@@ -364,7 +381,11 @@ fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
     s.read_i32()?; // gift
     s.read_i64()?; // updated
     s.read_u8()?; // force name change
-    Ok(CharInfo { id, name })
+    Ok(CharInfo {
+        id,
+        name,
+        appearance,
+    })
 }
 
 /// A unit seen in `SCUnitStatePacket`.
@@ -570,6 +591,11 @@ pub struct GameState {
     pub char_list_done: bool,
     pub selected_char: u32,
     pub self_obj: u32,
+    /// The guild (`expedition`) id from our last `SCUnitExpeditionChangedPacket` (0 = none).
+    pub self_expedition: u32,
+    /// Id of the guild the bot is in (from `SCFactionCreated` / `SCExpeditionMemberList`); 0 =
+    /// none seen.
+    pub guild_id: u32,
     pub self_pos: (f32, f32, f32),
     /// Last position actually received from the server, independent of local movement sends.
     pub observed_self_pos: Option<(f32, f32, f32)>,
@@ -580,6 +606,11 @@ pub struct GameState {
     pub doodads: HashMap<u32, DoodadInfo>,
     /// `SCDoodadCompleteQuestPacket` (`0x14d`) in arrival order: `(doodad object id, quest id)`.
     pub doodad_complete_quests: Vec<(u32, u32)>,
+    /// `SCQuestUnitReqFailedPacket` (`0x148`) in arrival order: `(quest id, unit object id,
+    /// kind, message id, value)`, with the omitted flag-bag parts decoded as 0.
+    pub quest_unit_req_failed: Vec<(u32, u32, u8, u16, u32)>,
+    /// `SCDoodadPhaseMsgPacket` (`0x157`) in arrival order: `(doodad object id, func group id)`.
+    pub doodad_phase_msgs: Vec<(u32, u32)>,
     /// First item of the bag (`SCCharacterInvenContentsPacket`, slot type 2): `(item id, slot)`.
     pub bag_items: Vec<(u64, u8, u32)>,
     pub bag_slots: u8,
@@ -603,9 +634,6 @@ pub struct GameState {
     /// Party / guild notifications in arrival order ([`crate::social`]), so `await` also sees
     /// packets an earlier `drain` already read.
     pub social: Vec<crate::social::SocialEvent>,
-    /// Id of the guild the bot is in (from `SCFactionCreated` / `SCExpeditionMemberList`); 0 =
-    /// none seen.
-    pub guild_id: u32,
     /// Position of the last `SCTeleportUnitPacket` (a GM `/move` only tells the client to go
     /// there; the server adopts the position from the client's next movement packet).
     pub last_teleport: Option<(f32, f32, f32)>,
@@ -654,10 +682,15 @@ impl GameState {
                 }
             }
             st.char_list_done |= last;
-        } else if p.is_sc(sc::SCCreateCharacterResponsePacket) {
-            let id = s.read_u32()?;
-            let name = s.read_string()?;
-            st.characters.push(CharInfo { id, name });
+        } else if p.is_sc(sc::SCCreateCharacterResponsePacket)
+            || p.is_sc(sc::SCEditCharacterResponsePacket)
+        {
+            let character = read_character(&mut s)?;
+            anyhow::ensure!(s.remaining() == 0, "trailing character-response bytes");
+            match st.characters.iter_mut().find(|c| c.id == character.id) {
+                Some(entry) => *entry = character,
+                None => st.characters.push(character),
+            }
         } else if p.is_sc(sc::SCBuffCreatedPacket) {
             use aaemu_game::systems::skills::types::SkillCaster;
             let kind = s.read_u8()?;
@@ -676,6 +709,17 @@ impl GameState {
                 }
                 !indices.is_empty()
             });
+        } else if p.is_sc(sc::SCUnitExpeditionChangedPacket) {
+            let _obj_id = s.read_bc()?;
+            let character_id = s.read_u32()?;
+            let _kicker = s.read_string()?;
+            let _unit_name = s.read_string()?;
+            let _id = s.read_u32()?;
+            let expedition_id = s.read_u32()?;
+            let _expel = s.read_bool()?;
+            if character_id == st.selected_char {
+                st.self_expedition = expedition_id;
+            }
         } else if p.is_sc(sc::SCUnitStatePacket) {
             let obj_id = s.read_bc()?;
             let name = s.read_string()?;
@@ -784,6 +828,21 @@ impl GameState {
             let doodad_obj_id = s.read_bc()?;
             let quest_id = s.read_u32()?;
             st.doodad_complete_quests.push((doodad_obj_id, quest_id));
+        } else if p.is_sc(sc::SCQuestUnitReqFailedPacket) {
+            // Reader FUN_397b5d00 / bag FUN_397b1ef0: u32 quest, bc unit, flag byte, then
+            // only the set parts (kind u8, message id u16, value u32).
+            let quest_id = s.read_u32()?;
+            let unit_obj_id = s.read_bc()?;
+            let flags = s.read_u8()?;
+            let kind = if flags & 0x01 != 0 { s.read_u8()? } else { 0 };
+            let message_id = if flags & 0x02 != 0 { s.read_u16()? } else { 0 };
+            let value = if flags & 0x04 != 0 { s.read_u32()? } else { 0 };
+            st.quest_unit_req_failed
+                .push((quest_id, unit_obj_id, kind, message_id, value));
+        } else if p.is_sc(sc::SCDoodadPhaseMsgPacket) {
+            let doodad_obj_id = s.read_bc()?;
+            let func_group_id = s.read_u32()?;
+            st.doodad_phase_msgs.push((doodad_obj_id, func_group_id));
         } else if p.is_sc(sc::SCUnitsRemovedPacket) {
             let n = s.read_u16()?;
             for _ in 0..n {
@@ -1217,6 +1276,36 @@ impl GameClient {
             .write_u8(1); // level
         self.send_cs(cs::CSCreateCharacterPacket, s.as_bytes())
             .await
+    }
+
+    /// `CSEditCharacterPacket` (0x023) for the pre-select lobby edit: the create body with a
+    /// leading character id and no `introZoneId`. Sends the same race/gender/ability/level the
+    /// character was created with and the given customizing colours.
+    pub async fn edit_character(
+        &mut self,
+        id: u32,
+        name: &str,
+        appearance: Appearance,
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(id)
+            .write_str(name)
+            .write_u8(1) // race
+            .write_u8(1); // gender
+        for _ in 0..7 {
+            s.write_u32(0); // body items: template defaults
+        }
+        write_custom_model_appearance(
+            &mut s,
+            appearance.hair_color_id,
+            appearance.skin_color_id,
+            appearance.model_id,
+        );
+        s.write_u8(1) // ability1: Fight
+            .write_u8(11) // ability2: None
+            .write_u8(11) // ability3: None
+            .write_u8(1); // level
+        self.send_cs(cs::CSEditCharacterPacket, s.as_bytes()).await
     }
 
     /// `CSSelectCharacterPacket`.
@@ -1718,6 +1807,97 @@ mod doodad_complete_quest_tests {
     }
 }
 
+#[cfg(test)]
+mod quest_unit_req_failed_tests {
+    use super::*;
+    use aaemu_commons::Marshal;
+    use aaemu_game::systems::quests::packets::SCQuestUnitReqFailedPacket;
+
+    fn observe(packet: SCQuestUnitReqFailedPacket, state: &mut GameState) {
+        let mut body = PacketStream::new();
+        packet.write(&mut body);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCQuestUnitReqFailedPacket,
+                body: body.into_bytes(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn observe_decodes_the_set_flag_bag_parts() {
+        let mut state = GameState::default();
+        observe(
+            SCQuestUnitReqFailedPacket {
+                quest_id: 2563,
+                unit_obj_id: 0x300,
+                kind: 1,
+                message_id: 0,
+                value: 10,
+            },
+            &mut state,
+        );
+        // The omitted message id decodes as 0, like the client bag does.
+        assert_eq!(state.quest_unit_req_failed, vec![(2563, 0x300, 1, 0, 10)]);
+    }
+
+    #[test]
+    fn observe_decodes_every_part_and_an_empty_bag() {
+        let mut state = GameState::default();
+        observe(
+            SCQuestUnitReqFailedPacket {
+                quest_id: 7,
+                unit_obj_id: 1,
+                kind: 0x16,
+                message_id: 0x1234,
+                value: 0xaabbccdd,
+            },
+            &mut state,
+        );
+        observe(
+            SCQuestUnitReqFailedPacket {
+                quest_id: 8,
+                unit_obj_id: 2,
+                kind: 0,
+                message_id: 0,
+                value: 0,
+            },
+            &mut state,
+        );
+        assert_eq!(
+            state.quest_unit_req_failed,
+            vec![(7, 1, 0x16, 0x1234, 0xaabbccdd), (8, 2, 0, 0, 0),]
+        );
+    }
+}
+
+#[cfg(test)]
+mod doodad_phase_msg_tests {
+    use super::*;
+    use aaemu_commons::Marshal;
+    use aaemu_game::systems::npcs::doodad::packets::SCDoodadPhaseMsgPacket;
+
+    #[test]
+    fn observe_records_the_doodad_object_id_and_func_group_id() {
+        let mut state = GameState::default();
+        let mut body = PacketStream::new();
+        SCDoodadPhaseMsgPacket {
+            doodad_obj_id: 0x300,
+            func_group_id: 3333,
+        }
+        .write(&mut body);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCDoodadPhaseMsgPacket,
+                body: body.into_bytes(),
+            })
+            .unwrap();
+        assert_eq!(state.doodad_phase_msgs, vec![(0x300, 3333)]);
+    }
+}
+
 fn dist2(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     let (dx, dy, dz) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
     dx * dx + dy * dy + dz * dz
@@ -1737,11 +1917,20 @@ fn facing_direction(pos: (f32, f32, f32), target: (f32, f32, f32)) -> i8 {
 
 /// `UnitCustomModelParams` with a full face block (type 3), all defaults.
 fn write_custom_model(s: &mut PacketStream) {
+    write_custom_model_appearance(s, 0, 0, 0);
+}
+
+fn write_custom_model_appearance(
+    s: &mut PacketStream,
+    hair_color_id: u32,
+    skin_color_id: u32,
+    model_id: u32,
+) {
     s.write_u8(3) // UnitCustomModelType.Face
-        .write_u32(0) // hair color
-        .write_u32(0) // skin color
-        .write_u32(0); // model id
-                       // UnitCustomFace
+        .write_u32(hair_color_id)
+        .write_u32(skin_color_id)
+        .write_u32(model_id);
+    // UnitCustomFace
     s.write_u32(0)
         .write_f32(0.0)
         .write_f32(0.0)

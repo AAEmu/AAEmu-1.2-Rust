@@ -4,10 +4,10 @@
 //! for the auction search (`ItemTemplate.searchString`, `ItemNameCache`,
 //! `GetItemIdsBySearchName`, `GetItemTemplatesForAuctionSearch`, `MatchItemName`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::data::items::{ItemData, ItemTemplate};
 use crate::data::sqlite::for_each_row;
@@ -119,6 +119,13 @@ pub struct ItemsData {
     /// `ItemTemplate.searchString` by template id (built on first use, the templates live in
     /// `GameData::items`).
     search_strings: OnceLock<Vec<(u32, String)>>,
+    /// `item_categories.secure` ids: the item categories whose items can be locked.
+    pub secure_categories: HashSet<i32>,
+    /// `item_secure_exceptions.item_id`: items that are never lockable even when their
+    /// category is secure (the 1.2 client's `FUN_394df4a0`).
+    pub secure_exceptions: HashSet<u32>,
+    /// `content_configs` id 43 (`X2Item.GetSecurityUnlockDelayTime`), in minutes.
+    pub security_unlock_delay_minutes: i64,
 }
 
 impl ItemsData {
@@ -255,7 +262,40 @@ impl ItemsData {
             d.fish_details.entry(t.item_id).or_insert(t);
             Ok(())
         })?;
+
+        // Item security (`LoadItemCategoryDescs` `secure`, `LoadItemSecureExceptionDescs`).
+        for_each_row(conn, "SELECT id, secure FROM item_categories", [], |r| {
+            if r.bool_str("secure")? {
+                d.secure_categories.insert(r.i32("id")?);
+            }
+            Ok(())
+        })?;
+        for_each_row(
+            conn,
+            "SELECT item_id FROM item_secure_exceptions",
+            [],
+            |r| {
+                d.secure_exceptions.insert(r.u32("item_id")?);
+                Ok(())
+            },
+        )?;
+        // The client reads the unlock delay as the raw `content_configs` value of id 43
+        // (`X2Item.GetSecurityUnlockDelayTime` -> `FUN_395720e0(0x2b)`); the dialogs divide it
+        // by 60 to print hours, so the value is minutes.
+        d.security_unlock_delay_minutes = conn
+            .query_row("SELECT value FROM content_configs WHERE id = 43", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .optional()?
+            .unwrap_or(0);
         Ok(d)
+    }
+
+    /// Whether `template` can be locked: its category is `secure` and the item is not in
+    /// `item_secure_exceptions` (the 1.2 client's `FUN_394df4a0`).
+    pub fn is_secure_lockable(&self, template: &ItemTemplate) -> bool {
+        self.secure_categories.contains(&template.category_id)
+            && !self.secure_exceptions.contains(&template.id)
     }
 
     /// `ItemGameData.GetItemBuff(itemId, gradeId)` (the buff id; the skills subsystem resolves
@@ -397,6 +437,7 @@ impl ItemsData {
             count: 1,
             lifespan_mins: 0,
             made_unit_id: 0,
+            crafter_id: 0,
             world_id,
             create_time: now,
             unsecure_time: 0,

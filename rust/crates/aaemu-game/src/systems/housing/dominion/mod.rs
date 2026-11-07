@@ -1,22 +1,31 @@
 //! Persisted territory authority. The 1.2 calendar tables are static reference data;
-//! scheduling a siege is an explicit administrative operation, never a calendar inference.
+//! [`calendar`] derives the weekly periods from them, while scheduling a siege explicitly
+//! (GM override) remains a separate administrative operation.
 
 pub mod brief;
+pub mod calendar;
+pub mod credit;
 pub mod db;
+pub mod declare;
 pub mod fort;
 pub mod headquarters;
 pub mod participants;
 pub mod peace;
+pub mod period;
+pub mod reinforce;
 pub mod rights;
 pub mod runtime;
+pub mod siege_items;
 pub mod state;
 pub mod tax;
 
 pub use state::{
-    DominionError, DominionManager, DominionState, EngravingHandle, SiegeOutcome, SiegeParticipant,
-    SiegeSide, SiegeState, SiegeStatus, TowerIdentity, Treasury,
+    DominionError, DominionManager, DominionState, EngravingHandle, ParticipantCap, SiegeLimits,
+    SiegeOutcome, SiegeParticipant, SiegeSide, SiegeState, SiegeStatus, TowerIdentity, Treasury,
 };
 
+#[cfg(test)]
+mod declare_tests;
 #[cfg(test)]
 mod fort_tests;
 #[cfg(test)]

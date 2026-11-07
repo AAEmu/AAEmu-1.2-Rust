@@ -174,6 +174,10 @@ async fn run() -> anyhow::Result<()> {
         &config.default_language,
     )
     .context("Failed to load compact.sqlite3 database check if it exists!")?;
+    // `FeatureSet` (`Configurations/FeatureSet.json`) overrides the `FeaturesManager.Initialize`
+    // bytes; the level limits stay the ones `GameData::load` took from the `levels` table.
+    game_data.features.apply_config(&config.feature_set);
+    tracing::info!("Client FeatureSet: {}", game_data.features);
     // The retail Halloween `game_schedules` rows are dated 2013/2014 and compact.sqlite3 is
     // read-only: `Events.Halloween` repeats the window in memory (`systems::npcs::schedule`).
     game_data

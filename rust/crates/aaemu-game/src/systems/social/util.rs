@@ -3,18 +3,26 @@
 
 use crate::packets::world::{SCChatMessagePacket, SCErrorMsgPacket};
 use crate::server::GameServer;
+use crate::systems::social::config::ChatConfig;
+use crate::systems::social::packets::chat::SCChatFailedPacket;
 use crate::world::{PlayerRef, WorldObject};
 
 /// `ErrorMessageType` values used by the social subsystem.
 pub mod error {
+    pub const TEAM_NO_RIGHTS: i16 = 72;
     pub const TEAM_FULL: i16 = 73;
+    pub const TEAM_INVITEE_IN_TEAM: i16 = 77;
+    pub const TEAM_INVITOR_OFFLINE: i16 = 78;
+    pub const TEAM_INVITOR_MOVED: i16 = 79;
     pub const TEAM_INVITE_REFUSED: i16 = 80;
+    pub const TEAM_JOIN_ALONE: i16 = 82;
     pub const EXPEDITION_CREATE_LEVEL: i16 = 293;
     pub const EXPEDITION_CREATE_MEMBER: i16 = 294;
     pub const EXPEDITION_CREATE_MONEY: i16 = 295;
     pub const EXPEDITION_NAME_CHARACTER: i16 = 296;
     pub const EXPEDITION_NAME_LENGTH: i16 = 297;
     pub const EXPEDITION_NAME_EXIST: i16 = 299;
+    pub const EXPEDITION_BAD_STATUS: i16 = 307;
     pub const CHAT_NOT_IN_EXPEDITION: i16 = 311;
     /// 321: "the sponsor faction was chosen wrongly" (the C# used it for a party member of
     /// another alliance, which is [`EXPEDITION_CREATE_MEMBER_FACTION`] = 320).
@@ -46,7 +54,7 @@ pub mod error {
     // The rest come straight from the generated `ErrorMessageType` table (the 1.2 client's
     // `ui_texts` carry the matching texts), so the values cannot drift.
     pub use crate::systems::economy::error_message::{
-        EXPEDITION_BAD_FACTION, EXPEDITION_BAD_STATUS, EXPEDITION_CHANGE_OWNER_MY_EXPEDITION,
+        EXPEDITION_BAD_FACTION, EXPEDITION_CHANGE_OWNER_MY_EXPEDITION,
         EXPEDITION_CHANGE_OWNER_SELF, EXPEDITION_CREATE_MEMBER_FACTION,
         EXPEDITION_DISMISS_IN_SIEGE, EXPEDITION_NAME_BADLIST, EXPEDITION_NO_TARGET,
         EXPEDITION_OTHER_EXPEDITION, EXPEDITION_OTHER_INVITATION,
@@ -54,15 +62,43 @@ pub mod error {
         EXPEDITION_OWNER_DISMISS, FACTION_CHANGE_MEMBER_ROLE_RIGHTS, FACTION_INVITE_BATTLEFIELD,
         FACTION_INVITE_OFFLINE, FACTION_INVITE_REJECTED, FACTION_INVITE_RIGHTS,
         FACTION_INVITE_SAME, FACTION_INVITE_SELF, FACTION_JOIN, FACTION_JOIN_NO_INVITOR,
-        FACTION_KICK_RIGHTS, FACTION_RIGHTS, INVITATION_CANCELED_TIMEOUT, TEAM_INVITEE_IN_TEAM,
-        TEAM_INVITEE_MEMBER, TEAM_INVITEE_OFFLINE, TEAM_INVITOR_OFFLINE, TEAM_JOIN,
-        TEAM_JOIN_ALONE, TEAM_NO_RIGHTS, TEAM_YOURSELF,
+        FACTION_KICK_RIGHTS, FACTION_RIGHTS, INVITATION_CANCELED_TIMEOUT, TEAM_INVITEE_MEMBER,
+        TEAM_INVITEE_OFFLINE, TEAM_JOIN, TEAM_YOURSELF,
     };
 }
 
 /// `Character.SendErrorMessage(type)` (`SCErrorMsgPacket(type, 0, true)`).
 pub fn send_error(p: &PlayerRef, error: i16) {
     p.send(SCErrorMsgPacket::new(error, 0, true));
+}
+
+/// A refused channel-bound chat action: the error id and the channel it belongs to (the
+/// `chname` of `SCChatFailedPacket`). The packet caps the name at 10 bytes when encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFailure {
+    pub error: i16,
+    pub channel: String,
+}
+
+impl ChatFailure {
+    pub fn new(error: i16, channel: impl Into<String>) -> Self {
+        Self {
+            error,
+            channel: channel.into(),
+        }
+    }
+}
+
+/// Answers a channel-bound chat failure with `SCChatFailedPacket(error, channel name)` when
+/// `Chat.ChatFailedPacket` is on, else with the `SCErrorMsgPacket` toast the server sent before
+/// the flag existed. Which failures retail answered with `SCChatFailed` is not captured
+/// (`CHAT-FAILED-1`, capture-pending), so the flag defaults to off.
+pub fn send_chat_failure(p: &PlayerRef, config: &ChatConfig, failure: ChatFailure) {
+    if config.chat_failed_packet {
+        p.send(SCChatFailedPacket::new(failure.error, &failure.channel));
+    } else {
+        send_error(p, failure.error);
+    }
 }
 
 /// `Character.SendMessage(type, message)` without a sender.

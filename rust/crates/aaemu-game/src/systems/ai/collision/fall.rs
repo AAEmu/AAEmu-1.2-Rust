@@ -133,6 +133,21 @@ impl FallTracker {
         self.states.remove(&obj_id);
     }
 
+    /// Restarts a unit's fall at `z` as grounded (a server teleport): the next sample cannot
+    /// measure a fall from where the unit was before the teleport.
+    pub fn reset_at(&self, obj_id: u32, z: f32, now_ms: i64) {
+        self.states.insert(
+            obj_id,
+            FallState {
+                start_z: z,
+                max_down_vel: 0.0,
+                airborne: false,
+                last_z: z,
+                last_ms: now_ms,
+            },
+        );
+    }
+
     /// The fall start of a unit that is landing now: the start z (or the last z when it was
     /// on the ground).
     pub fn start_z(&self, obj_id: u32) -> Option<f32> {
@@ -190,6 +205,21 @@ mod tests {
         // the zone gate (100 m drop: no height cap) agrees at the boundary
         assert_eq!(zone_fall_vel(last_safe, 200.0, 100.0), None);
         assert!(zone_fall_vel(last_safe + 1, 200.0, 100.0).is_some());
+    }
+
+    #[test]
+    fn reset_at_restarts_a_fall_at_the_teleport_z() {
+        let t = FallTracker::default();
+        assert_eq!(t.sample(1, 1000.0, Some(0.0), 0), None);
+        assert!(t.state(1).unwrap().airborne);
+        t.reset_at(1, 199.0, 1000);
+        let s = t.state(1).unwrap();
+        assert_eq!(
+            (s.start_z, s.last_z, s.airborne, s.max_down_vel),
+            (199.0, 199.0, false, 0.0)
+        );
+        // Landing at the teleport z is not a fall, whatever the client reports.
+        assert_eq!(t.sample(1, 199.0, Some(199.0), 2000), None);
     }
 
     #[test]

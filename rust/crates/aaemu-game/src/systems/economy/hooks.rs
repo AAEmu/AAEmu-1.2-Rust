@@ -80,16 +80,20 @@ pub trait ProgressionHooks: Send + Sync {
 
 /// The NPC template facts the shops / repair / auction / mail checks read
 /// (`npc.Template.Merchant`, `MerchantPackId`, `Blacksmith`, `Auctioneer`, ...).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NpcShopInfo {
     pub merchant: bool,
-    pub merchant_pack_id: u32,
+    /// Every `merchants` row of the NPC; the 1.2 client unions all of its packs.
+    pub merchant_pack_ids: Vec<u32>,
     pub blacksmith: bool,
     pub auctioneer: bool,
     pub banker: bool,
     pub specialty: bool,
     pub stabler: bool,
     pub priest: bool,
+    /// `npc_templates.repairman`: the NPC repairs destroyed slave summon items
+    /// (`CSRepairSlaveItemsPacket`; the client's `IsRepairmanNpc` reads this flag).
+    pub repairman: bool,
 }
 
 /// NPC data (`systems::npcs`: `NpcTemplate`, `NpcManager.GetGoods`).
@@ -99,11 +103,15 @@ pub trait NpcEconomyHooks: Send + Sync {
         None
     }
 
-    /// Whether the catalog offers this item at the grade sent by the 1.2 client.
+    /// Whether any of the NPC's catalogs offers this item at the grade sent by the 1.2
+    /// client. `buyer` and `npc` are the interacting player and, for an NPC shop, that NPC;
+    /// a pack can additionally depend on the buyer's siege participation (packs 224/225).
     fn merchant_sells(
         &self,
         _server: &GameServer,
-        _pack_id: u32,
+        _buyer: &PlayerRef,
+        _npc: Option<&NpcRef>,
+        _pack_ids: &[u32],
         _item_id: u32,
         _grade: u8,
     ) -> bool {

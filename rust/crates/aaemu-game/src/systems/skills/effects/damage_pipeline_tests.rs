@@ -44,6 +44,19 @@ fn fixture_data() -> GameData {
     data
 }
 
+fn threshold_data() -> GameData {
+    let mut data = fixture_data();
+    data.systems.skills.add_buff(skills::data::BuffTemplate {
+        id: 275,
+        kind: 1,
+        stack_rule: 1,
+        melee_immune: true,
+        immune_damage: 50,
+        ..Default::default()
+    });
+    data
+}
+
 fn args(caster: WorldObject, target: WorldObject, level: u8) -> EffectArgs<'static> {
     let skill = skills::state::SkillRun::new(Arc::new(skills::tests::skill_template(1)), level);
     EffectArgs {
@@ -383,6 +396,112 @@ async fn damage_pipeline_misses_and_immunity_stay_zero_with_or_without_aoe() {
             assert!(n.unit.skill_state.tagging.taggers.is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn damage_pipeline_immune_damage_threshold_ignores_only_hits_up_to_the_limit() {
+    // Physical Resist Potion (275, 50) data shape: melee flag plus a positive
+    // `buffs.immune_damage` threshold. Hits below and at the threshold are ignored;
+    // a larger melee hit and a non-melee hit still land.
+    for (amount, damage_type, immune) in
+        [(40, 1, true), (50, 1, true), (60, 1, false), (40, 2, false)]
+    {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(threshold_data());
+        let target = WorldObject::from(&npc);
+        let a = args((&player).into(), target.clone(), 1);
+        buffs::apply_template(
+            &server,
+            server.game_data.systems.skills.buff(275).unwrap(),
+            a.caster.as_ref(),
+            &a.caster_caster,
+            &target,
+            None,
+        );
+        let mut effect = skills::tests::damage_effect(1, amount);
+        effect.damage_type = damage_type;
+        client.drain();
+        damage_with_aoe(&server, &effect, &a, None, None);
+        let (dealt, dice, _) = packet(&mut client, player.obj_id, npc.obj_id);
+        if immune {
+            assert_eq!(dealt, 0, "hit {amount} type {damage_type} must be ignored");
+            assert_eq!(dice & 0x1f, SkillHitType::Immune as u16);
+        } else {
+            assert_eq!(dealt, amount, "hit {amount} type {damage_type} must land");
+        }
+        assert_eq!(npc.data().unit.hp, 1000 - dealt);
+    }
+}
+
+#[tokio::test]
+async fn damage_pipeline_immune_damage_zero_flag_still_ignores_every_hit() {
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    let target = WorldObject::from(&npc);
+    let a = args((&player).into(), target.clone(), 1);
+    buffs::apply_template(
+        &server,
+        server.game_data.systems.skills.buff(900).unwrap(),
+        a.caster.as_ref(),
+        &a.caster_caster,
+        &target,
+        None,
+    );
+    client.drain();
+    damage_with_aoe(
+        &server,
+        &skills::tests::damage_effect(1, 1_000_000),
+        &a,
+        None,
+        None,
+    );
+    let (dealt, dice, _) = packet(&mut client, player.obj_id, npc.obj_id);
+    assert_eq!(dealt, 0);
+    assert_eq!(dice & 0x1f, SkillHitType::Immune as u16);
+    assert_eq!(npc.data().unit.hp, 1000);
+}
+
+/// The real 1.2 rows behind the threshold rule: the six flagged buffs carry a positive
+/// `immune_damage`, and buff 131 (Invincible) is the zero-threshold full immunity.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+fn real_compact_db_separates_threshold_and_full_damage_immunity() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let buffs = skills::data::templates::load_buffs(&conn).unwrap();
+    let get = |id: u32| buffs.iter().find(|b| b.id == id).unwrap();
+    for (id, melee, spell, ranged, siege, threshold) in [
+        (176, false, true, false, false, 137),
+        (275, true, false, false, false, 50),
+        (276, false, true, false, false, 100),
+        (2071, true, true, true, true, 2000),
+        (3615, true, true, false, false, 1_000_000),
+        (4609, true, true, true, true, 9_999_999),
+    ] {
+        let b = get(id);
+        assert_eq!(
+            (
+                b.melee_immune,
+                b.spell_immune,
+                b.ranged_immune,
+                b.siege_immune,
+                b.immune_damage
+            ),
+            (melee, spell, ranged, siege, threshold),
+            "buff {id}"
+        );
+    }
+    let invincible = get(131);
+    assert_eq!(invincible.immune_damage, 0);
+    assert!(
+        invincible.melee_immune
+            && invincible.spell_immune
+            && invincible.ranged_immune
+            && invincible.siege_immune
+    );
 }
 
 #[tokio::test]

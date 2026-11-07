@@ -401,28 +401,66 @@ pub fn remove_item(f: &DoodadFuncRemoveItem, ctx: &DoodadCtx<'_>, caster: Option
     set_to_next_phase(ctx, balance > 0);
 }
 
-/// `DoodadFuncPurchase.Use`.
-pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) {
+/// `DoodadFuncPurchase.Use`; `true` when the item was granted.
+pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) -> bool {
     let Some(player) = DoodadCtx::as_player(caster) else {
-        return;
+        return false;
     };
     let server = ctx.server;
     let eco = economy(server);
     if eco.bag_space_left_for_item(server, player, f.item_id) < f.count {
         send_error(player, err::BAG_FULL);
-        return;
+        return false;
     }
-    if eco.bag_consume_item(
+    // Only the coin-item form buys here. The money form is the client's purchase dialog
+    // (`CSBuyItems`; `CSBuyCoinItemPacket` is the coin form) and must not grant the item for
+    // free when the doodad is used directly. The C# consumed template 0 and answered
+    // `NotEnoughItem`.
+    if f.coin_item_id == 0 || f.coin_count < 1 {
+        send_error(player, err::NOT_ENOUGH_ITEM);
+        return false;
+    }
+    // Per-character purchase allowance (`items.limited_sale_count` / `items.one_time_sale`).
+    // Reserved before the coin is spent; given back below when the purchase still fails.
+    if !eco.try_claim_shop_purchase(server, player, f.item_id, f.count) {
+        send_error(player, err::STORE_ONE_TIME_SALE);
+        return false;
+    }
+    // `ConsumeItem` is partial: it spends what it finds. Check the full price is held (locked
+    // stacks cannot pay) before spending, and refund only what was actually taken.
+    if eco.item_count(server, player, f.coin_item_id) < f.coin_count {
+        eco.release_shop_purchase(server, player, f.item_id, f.count);
+        send_error(player, err::NOT_ENOUGH_COIN);
+        return false;
+    }
+    let paid = eco.bag_consume_item(
         server,
         player,
         item_task::DOODAD_INTERACTION,
         f.coin_item_id,
         f.coin_count,
-    ) <= 0
-    {
-        send_error(player, err::NOT_ENOUGH_ITEM);
-        return;
+    );
+    let refund_paid = |paid: i32| {
+        if paid > 0 {
+            eco.acquire_item(
+                server,
+                player,
+                item_task::DOODAD_INTERACTION,
+                f.coin_item_id,
+                paid,
+                -1,
+            );
+        }
+    };
+    if paid != f.coin_count {
+        refund_paid(paid);
+        eco.release_shop_purchase(server, player, f.item_id, f.count);
+        send_error(player, err::NOT_ENOUGH_COIN);
+        return false;
     }
+    // The coin is already spent: a failed grant gives back exactly what was taken (the stack
+    // just left the bag, so the refund fits) and releases the claim.
+    let refund_coin = || refund_paid(paid);
     let name = player.data().unit.name.clone();
     if eco.is_auto_equip_trade_pack(server, f.item_id) {
         if !eco.try_equip_new_backpack(
@@ -432,13 +470,17 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             f.item_id,
             f.count,
         ) {
+            eco.release_shop_purchase(server, player, f.item_id, f.count);
+            refund_coin();
             tracing::error!(
                 "DoodadFuncPurchase: Failed to auto-equip backpack item {} for player {}",
                 f.item_id,
                 name
             );
             send_error(player, err::BACKPACK_OCCUPIED);
+            return false;
         }
+        true
     } else if !eco.acquire_item(
         server,
         player,
@@ -447,11 +489,16 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         f.count,
         -1,
     ) {
+        eco.release_shop_purchase(server, player, f.item_id, f.count);
+        refund_coin();
         tracing::error!(
             "DoodadFuncPurchase: Failed to create item {} for player {}",
             f.item_id,
             name
         );
+        false
+    } else {
+        true
     }
 }
 

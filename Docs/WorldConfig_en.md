@@ -70,6 +70,10 @@ Example:
 - **Type**: `number`
 - **Description**: Minimum access level that ignores fall damage (dev/testing).
 
+### `RadarGmAccessLevel`
+- **Type**: `number`
+- **Description**: Minimum effective access level at which the radar / telescope shows every object in the world regardless of the registered range (default: `100`; lower it to give the GM range to more accounts).
+
 ### `GodMode`
 - **Type**: `boolean`
 - **Description**: When `true`, players take no damage.

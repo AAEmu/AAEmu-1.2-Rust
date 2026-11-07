@@ -214,9 +214,116 @@ fn partners(server: &GameServer, t: &TradeTemplate) -> Option<(PlayerRef, Player
     ))
 }
 
+/// The 1.2 client's own trade-range constant: `x2game.dll` `0x39ac9b84` holds `25.0` and
+/// `FUN_39093860` (called from `X2Trade:RequestTrade` `FUN_394fddf0` and `X2Trade:StartTrade`
+/// `FUN_394fe180`) refuses while `FUN_3989bf90` distance is `>= sqrt(25) = 5` m. That distance
+/// is edge-to-edge (`FUN_398b1ab0`: centre distance minus both radii, 3D), the same measure
+/// `geometry::distance_to` returns.
+const TRADE_RANGE_M: f32 = 5.0;
+
+/// Why a trade request or acceptance is refused, and what the requester is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TradeRefusal {
+    /// The 1.2 client itself shows nothing for this condition, so the server sends nothing.
+    Silent,
+    /// `SCCannotStartTradePacket(reason = 0)`: the 1.2 client's `OnCannotStartTrade`
+    /// (`FUN_394ff1b0`) shows error 538 (`trade_target_is_not_possible_state`) for reason 0 or 5
+    /// and closes the trade UI. This is the client's generic "this player cannot trade" answer.
+    CannotTrade,
+    /// A specific `SCErrorMsgPacket` code that the 1.2 client displays for the same check.
+    Error(i16),
+}
+
+impl TradeRefusal {
+    fn send(self, requester: &PlayerRef, other: &PlayerRef) {
+        match self {
+            TradeRefusal::Silent => {}
+            TradeRefusal::CannotTrade => requester.send(SCCannotStartTradePacket {
+                obj_id: other.obj_id,
+                reason: 0,
+            }),
+            TradeRefusal::Error(code) => crate::systems::social::util::send_error(requester, code),
+        }
+    }
+}
+
+/// Trade state checks of the 1.2 client, applied by the server before a request is forwarded and
+/// again when the invitation is accepted.
+fn trade_state_refusal(
+    server: &GameServer,
+    owner: &PlayerRef,
+    target: &PlayerRef,
+) -> Option<TradeRefusal> {
+    // One character lock at a time (CONTRIBUTING-PORT locking rules).
+    let (owner_dead, owner_instance) = {
+        let c = owner.data();
+        (c.unit.is_dead(), c.unit.transform.instance_id)
+    };
+    let (target_dead, target_instance) = {
+        let c = target.data();
+        (c.unit.is_dead(), c.unit.transform.instance_id)
+    };
+    let same_instance = owner_instance == target_instance;
+    // `X2Unit:IsDead` reads `unit + 0x3c26` (client `FUN_394b9fa0`); `RequestTrade`/`StartTrade`
+    // return silently while either player is dead, with no error code (capture-pending for the
+    // 1.2 server answer, case `TRADE-1`).
+    if owner_dead || target_dead {
+        return Some(TradeRefusal::Silent);
+    }
+    // The 1.2 client never offers "Request Trade" on a hostile target:
+    // `popup_menu_proc.alb` proto 48 skips `requestTrade` when `GetTargetFactionRelationship()`
+    // is 1 (`FUN_394bb930`: 1 = hostile). A request that arrives anyway is refused; the client's
+    // generic refusal packet shows 538, but the 1.2 server's own answer is unknown
+    // (capture-pending, case `TRADE-2`).
+    if crate::systems::social::faction::player_relation(server, owner, target)
+        == crate::systems::social::faction::relation_state::HOSTILE
+    {
+        return Some(TradeRefusal::CannotTrade);
+    }
+    // Different instance: the client's own "other view" check (`FUN_390476a0() + 8`, error 539
+    // `cant_trade_with_other_view`) is the only cross-view error it has; the exact client state
+    // is not identified (capture-pending, case `TRADE-3`).
+    if !same_instance {
+        return Some(TradeRefusal::Error(
+            super::error_message::CANT_TRADE_WITH_OTHER_VIEW,
+        ));
+    }
+    // `FUN_39093860(owner, target, 25.0)`: the client refuses at `>= 5` m with error 154
+    // (`too_far_away`, `0x9a`). The server sends the same code (capture-pending for the 1.2
+    // server answer, case `TRADE-4`).
+    let distance = crate::systems::skills::geometry::distance_to(
+        server,
+        &crate::systems::skills::geometry::Target::Obj(crate::world::WorldObject::from(owner)),
+        &crate::systems::skills::geometry::Target::Obj(crate::world::WorldObject::from(target)),
+        true,
+    );
+    if distance >= TRADE_RANGE_M {
+        return Some(TradeRefusal::Error(super::error_message::TOO_FAR_AWAY));
+    }
+    None
+}
+
 /// `TradeManager.CanStartTrade(owner, target)`.
 pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRef) {
     if owner.obj_id == target.obj_id {
+        return;
+    }
+    // A blocked trade request never reaches the target; the 1.2 client has no sender-side
+    // error for it (capture-pending, case `BLOCK-LIST-1`).
+    if crate::systems::social::friend::is_blocked_by(target, owner.character_id) {
+        return;
+    }
+    // The state check takes player data locks and reads the world; keep it outside the trade
+    // table lock (which protects none of that state).
+    if let Some(refusal) = trade_state_refusal(server, owner, target) {
+        tracing::info!(
+            "{}({}) cannot trade with {}({}): {refusal:?}.",
+            name_of(owner),
+            owner.obj_id,
+            name_of(target),
+            target.obj_id
+        );
+        refusal.send(owner, target);
         return;
     }
     let mut trades = manager(server).lock();
@@ -225,7 +332,6 @@ pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRe
     {
         return;
     }
-    // TODO (C#) - Check faction and others
     tracing::info!(
         "{}({}) is trying to trade with {}({}).",
         name_of(owner),
@@ -239,8 +345,22 @@ pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRe
     });
 }
 
-/// `TradeManager.StartTrade(owner, target)`.
+/// `TradeManager.StartTrade(owner, target)`. The state is re-checked here because the
+/// invitation was issued when the request was made; either player may have died, left the
+/// instance, moved out of range or changed faction since.
 pub fn start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRef) {
+    // Player data / world first, trade table lock second (see `can_start_trade`).
+    if let Some(refusal) = trade_state_refusal(server, owner, target) {
+        tracing::info!(
+            "Trade acceptance of {}({}) by {}({}) refused: {refusal:?}.",
+            name_of(owner),
+            owner.obj_id,
+            name_of(target),
+            target.obj_id
+        );
+        refusal.send(owner, target);
+        return;
+    }
     let mut trades = manager(server).lock();
     if is_trading(server, &mut trades, owner.obj_id)
         || is_trading(server, &mut trades, target.obj_id)
@@ -316,6 +436,10 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
     let Some(item) = item else { return };
     if amount <= 0 || item.count < amount {
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        return;
+    }
+    if super::item_security::refuse_if_locked(character, &item) {
+        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id);
         return;
     }
     // Only unbound bag items may be put up (as for mail and auction).
@@ -832,8 +956,11 @@ fn preflight_items(
             .ok_or_else(|| format!("item {item_id} is no longer in the owner's containers"))?;
         if item.slot_type != slot_type::INVENTORY
             || item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0
+            || super::item_security::is_locked(&item)
         {
-            return Err(format!("item {item_id} left the bag or became bound"));
+            return Err(format!(
+                "item {item_id} left the bag, became bound or was locked"
+            ));
         }
         let total = totals.entry(item_id).or_insert(0);
         *total += i64::from(amount);

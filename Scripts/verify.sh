@@ -96,10 +96,11 @@ else
   exit 1
 fi
 
-# The spoof check reads a debug line from the express-text handler and the aggro-link suite one
-# from the AI behaviors; give the game log those filters, then restart this lane's stack so the
+# The spoof check reads a debug line from the express-text handler, the aggro-link suite one
+# from the AI behaviors and the music suites the upload / save-notes lines (services::music,
+# skills::effects::special); give the game log those filters, then restart this lane's stack so the
 # filters and the patched config apply.
-export RUST_LOG="${RUST_LOG:-info},aaemu_game::systems::services::express_text=debug,aaemu_game::systems::ai::behaviors=debug"
+export RUST_LOG="${RUST_LOG:-info},aaemu_game::systems::services::express_text=debug,aaemu_game::systems::ai::behaviors=debug,aaemu_game::systems::services::music=debug,aaemu_game::systems::skills::effects::special=debug"
 "$REPO/Scripts/live-stack.sh" stop
 
 export AAEMU_VERIFY_GAME_LOG="$GAME_LOG"
@@ -139,7 +140,37 @@ if "${MYSQL[@]}" -N -e "SHOW DATABASES LIKE '$DB_GAME'" | grep -q .; then
       (SELECT id FROM characters WHERE name IN ($names));
     DELETE FROM expedition_members WHERE character_id IN
       (SELECT id FROM characters WHERE name IN ($names));
-    UPDATE characters SET expedition_id=0 WHERE name IN ($names);"
+    UPDATE characters SET expedition_id=0 WHERE name IN ($names);
+    -- Nations the suites founded (nation-* suites declare one with the GM command) and the
+    -- factions the bots took (GM setfaction): back to the Nuian race faction, or a stale
+    -- nation name blocks the next run's guild create and a stale Haranya faction makes the
+    -- party invite hostile.
+    UPDATE characters SET faction_id=101 WHERE name IN ($names) AND race=1 AND faction_id<>101;
+    DELETE FROM nation_relation_offers WHERE nation_id IN
+      (SELECT id FROM nations WHERE owner_character_id IN
+         (SELECT id FROM characters WHERE name IN ($names)));
+    DELETE FROM nation_relations WHERE nation_id IN
+      (SELECT id FROM nations WHERE owner_character_id IN
+         (SELECT id FROM characters WHERE name IN ($names)));
+    DELETE FROM nations WHERE owner_character_id IN
+      (SELECT id FROM characters WHERE name IN ($names));
+    -- Persisted buffs / cooldowns of the bots (a rerun minutes later would meet them), and the
+    -- throwaway characters the "fresh" bots create (account slots run out after a few runs).
+    DELETE FROM character_active_buffs WHERE character_id IN
+      (SELECT id FROM characters WHERE name IN ($names));
+    DELETE FROM character_cooldowns WHERE character_id IN
+      (SELECT id FROM characters WHERE name IN ($names));
+    UPDATE characters SET deleted=1 WHERE name REGEXP '^Vn[0-9a-f]{16}\$';
+    -- A bot a suite let die (aggro-links) is revived: the next run casts as soon as it logs in.
+    UPDATE characters SET hp=100000, mp=100000 WHERE name IN ($names) AND hp<=0;
+    -- Labor the GM suites granted (each run adds 5000; past the i16 range a cast no longer finds
+    -- its labor cost).
+    UPDATE accounts SET labor=0 WHERE account_id IN
+      (SELECT account_id FROM characters WHERE name IN ($names));
+    -- Music the suites composed (music-run1 stores one song, music-run2 checks it).
+    DELETE FROM music WHERE author IN (SELECT id FROM characters WHERE name IN ($names));
+    DELETE FROM items WHERE template_id IN (27902, 28051, 6177) AND owner IN
+      (SELECT id FROM characters WHERE name IN ($names));"
 fi
 
 "$REPO/Scripts/live-stack.sh" start

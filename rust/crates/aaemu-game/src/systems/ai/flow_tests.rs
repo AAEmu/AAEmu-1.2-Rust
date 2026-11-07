@@ -6,9 +6,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::data::formulas::FormulaManager;
 use crate::data::GameData;
 use crate::models::movement::GameStanceType;
 use crate::models::npc::Npc;
+use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType};
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::npcs::npc::data::NpcTemplate;
@@ -25,7 +27,7 @@ use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 use super::data::{ActorModel, GameStance};
 use super::framework::{AiKind, BehaviorKind as B};
 use super::manager::{post, tick_all};
-use super::params::{AiCommandCategory, AiCommands};
+use super::params::{AiCommandCategory, AiCommandSets, AiCommands};
 use super::path_handler::{AiPathPoint, AiPathPointAction};
 
 const PLAYER_OBJ: u32 = 0x100;
@@ -149,8 +151,41 @@ fn stance(
 
 /// An aggressive hold-position NPC template whose base skill hits for 40 within 4 m, a passive
 /// helper template, the actor model with run / walk / sprint speeds, and the NpcReturn buff.
+fn stealth_formulas() -> FormulaManager {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
+         CREATE TABLE unit_formula_variables (id INTEGER, unit_formula_id INTEGER, variable_kind_id INTEGER, key INTEGER, value REAL);
+         CREATE TABLE wearable_formulas (id INTEGER, kind_id INTEGER, formula TEXT);
+         CREATE TABLE formulas (id INTEGER, formula TEXT);
+         INSERT INTO formulas VALUES
+           (4, 'min(40, 12 * (1 + (source_level - target_level) / 50) / (1 + stealth_level / 50))'),
+           (10, '0.5');",
+    )
+    .unwrap();
+    FormulaManager::load(&conn).unwrap()
+}
+
+/// [`stealth_formulas`] with formula 4 referring to a variable the predicate never sets: a
+/// prepared formula whose evaluation fails.
+fn broken_stealth_formulas() -> FormulaManager {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
+         CREATE TABLE unit_formula_variables (id INTEGER, unit_formula_id INTEGER, variable_kind_id INTEGER, key INTEGER, value REAL);
+         CREATE TABLE wearable_formulas (id INTEGER, kind_id INTEGER, formula TEXT);
+         CREATE TABLE formulas (id INTEGER, formula TEXT);
+         INSERT INTO formulas VALUES
+           (4, 'unknown_variable + 1'),
+           (10, '0.5');",
+    )
+    .unwrap();
+    FormulaManager::load(&conn).unwrap()
+}
+
 fn data() -> GameData {
     let mut data = GameData::empty();
+    data.formulas = stealth_formulas();
     let s = &mut data.systems.skills;
     s.add_effect(
         EffectKind::DamageEffect,
@@ -176,6 +211,22 @@ fn data() -> GameData {
         stack_rule: 1,
         ..BuffTemplate::default()
     });
+    for (id, stealth, detect_stealth, anti_stealth) in [
+        (STEALTH_COLUMN_BUFF, true, false, false),
+        (DETECT_STEALTH_BUFF, false, true, false),
+        (ANTI_STEALTH_BUFF, false, false, true),
+    ] {
+        s.add_buff(BuffTemplate {
+            id,
+            kind: 1,
+            duration: 60_000,
+            stack_rule: 1,
+            stealth,
+            detect_stealth,
+            anti_stealth,
+            ..BuffTemplate::default()
+        });
+    }
     let base = NpcTemplate {
         id: NPC_TEMPLATE,
         model_id: MODEL,
@@ -233,8 +284,32 @@ fn data() -> GameData {
             ],
         }),
     );
+    // The two `ai_command_sets` states of WP-5b (the real table: 302 'f', 23 't').
+    data.systems.ai.ai.command_sets.insert(
+        LOCKED_SET,
+        AiCommandSets {
+            id: LOCKED_SET,
+            name: "locked".into(),
+            can_interact: false,
+        },
+    );
+    data.systems.ai.ai.command_sets.insert(
+        OPEN_SET,
+        AiCommandSets {
+            id: OPEN_SET,
+            name: "open".into(),
+            can_interact: true,
+        },
+    );
     data
 }
+
+/// A command set whose `can_interact` is `'f'`.
+const LOCKED_SET: u32 = 9001;
+/// A command set whose `can_interact` is `'t'`.
+const OPEN_SET: u32 = 9002;
+/// A command set id absent from `ai_command_sets` (an NPC without a set).
+const PLAIN_SET: u32 = 9003;
 
 struct Fixture {
     server: Arc<GameServer>,
@@ -251,6 +326,10 @@ fn server() -> Arc<GameServer> {
 fn server_with_data(data: GameData) -> Arc<GameServer> {
     let server = Arc::new(test_server_with(data));
     server.set_self();
+    // The command-set interaction lock is opt-in; these flow tests exercise it.
+    server
+        .config
+        .update(|cfg| cfg.interaction.command_set_lock = true);
     crate::systems::skills::bind(&server);
     // The AI parts of the npcs NpcSkillHooks (`npcs::bridges::NpcSkills` at startup; its npc
     // stat overrides need npc data the bare test NPCs do not have).
@@ -303,6 +382,18 @@ fn spawn_npc(
     n.unit.scale = 1.0;
     n.unit.transform.set_xyz(x, y, 100.0);
     n.unit.transform.zone_id = TEST_ZONE;
+    // `NpcManager.Create` adds the template's `unit_modifiers` (`owner_type='Npc'`).
+    if let Some(t) = server.game_data.systems.npcs.npc.template(template) {
+        for bt in &t.bonuses {
+            n.unit.bonuses.add_bonus(
+                0,
+                Bonus {
+                    template: bt.clone(),
+                    value: bt.value,
+                },
+            );
+        }
+    }
     let npc = Entity::new(obj_id, n);
     server.systems.ai.ais.add_ai(&npc, kind);
     let world = server.world.world(0).expect("world");
@@ -2316,9 +2407,11 @@ async fn stealth_column_buff_without_tag_100_hides_the_player_from_aggro() {
     let f = fixture_with_data(data, 115.0);
     let server = f.server.clone();
     let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
     crate::systems::skills::buffs::add_buff_by_id(&server, &me, STEALTH_COLUMN_BUFF, &me, 0);
+    assert!(crate::systems::skills::buffs::has_stealth(&server, &me));
     assert!(
-        !super::npc::can_see_target(&server, &me),
+        !super::npc::can_see_target(&server, &npc, &me),
         "the stealth column must mark the player stealthed for the AI"
     );
 
@@ -2350,9 +2443,10 @@ async fn tag_100_buff_without_the_stealth_column_does_not_hide_the_player_from_a
     let f = fixture_with_data(data, 115.0);
     let server = f.server.clone();
     let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
     crate::systems::skills::buffs::add_buff_by_id(&server, &me, TAG_100_ONLY_BUFF, &me, 0);
     assert!(
-        super::npc::can_see_target(&server, &me),
+        super::npc::can_see_target(&server, &npc, &me),
         "tag 100 alone must not hide the player"
     );
 
@@ -2371,4 +2465,986 @@ async fn tag_100_buff_without_the_stealth_column_does_not_hide_the_player_from_a
         .skill_state
         .aggro_table
         .contains_key(&PLAYER_OBJ));
+}
+
+const DETECT_STEALTH_BUFF: u32 = 7_102;
+const ANTI_STEALTH_BUFF: u32 = 7_103;
+
+/// [`fixture_with_data`] with a free player position and NPC facing (`rot_z`, the `MathUtil.
+/// IsFront` yaw: -PI/2 faces +x). `distance_to` subtracts the model radii (the NPC's 0.5 m
+/// here), and the fixture stealth buff has `ab_level` 1, so formula 4 is 12 / 1.02 = 11.76 m.
+fn stealth_fixture(data: GameData, player_x: f32, player_y: f32, npc_rot_z: f32) -> Fixture {
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Runner", player_x, player_y);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    npc.data().unit.transform.rot_z = npc_rot_z;
+    Fixture {
+        server,
+        client,
+        player,
+        npc,
+    }
+}
+
+fn apply(server: &GameServer, owner: &WorldObject, buff_id: u32) {
+    crate::systems::skills::buffs::add_buff_by_id(server, owner, buff_id, owner, 0);
+}
+
+/// Walks straight at the player: true once the NPC's behavior is `Attack`.
+async fn aggros(server: &Arc<GameServer>, ticks: usize) -> bool {
+    tick_until(server, 100, 20, ticks, || {
+        behavior(server, NPC_OBJ) == Some(B::Attack)
+    })
+    .await
+}
+
+const FACE_PLUS_X: f32 = -std::f32::consts::FRAC_PI_2;
+
+/// Formula 4 (`DetectStealthRangeFront`, 12 m at equal levels) is evaluated: an 11 m stealthed
+/// player in front is detected (the old predicate hid every stealthed unit outside 1 m).
+#[tokio::test]
+async fn stealth_detection_front_formula_detects_inside_range() {
+    let f = stealth_fixture(data(), 111.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "11 m in front is inside formula 4"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 11 m");
+    assert!(f
+        .npc
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&PLAYER_OBJ));
+}
+
+/// Formula 4's range is real: 13 m in front is outside it.
+#[tokio::test]
+async fn stealth_detection_front_formula_misses_outside_range() {
+    let f = stealth_fixture(data(), 113.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "13 m in front is outside formula 4"
+    );
+    assert!(!aggros(&server, 40).await, "the NPC aggroed at 13 m");
+}
+
+/// Formula 10 (`DetectStealthRangeBack`, 0.5 m) applies when the target is behind the observer:
+/// 0.9 m centre to centre becomes 0.4 m after `distance_to` subtracts the NPC's 0.5 m model
+/// radius, so it is inside the 0.5 m back range.
+#[tokio::test]
+async fn stealth_detection_back_formula_detects_close_behind() {
+    let f = stealth_fixture(data(), 99.1, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "0.4 m behind after the model radii is inside formula 10"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 0.9 m");
+}
+
+/// The old C# `< 1.0` / `< 0.5` fallbacks no longer decide: 1.5 m behind is outside formula 10.
+#[tokio::test]
+async fn stealth_detection_back_formula_misses_far_behind() {
+    let f = stealth_fixture(data(), 98.5, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "1.5 m behind is outside formula 10"
+    );
+    assert!(
+        !aggros(&server, 40).await,
+        "the NPC aggroed at 1.5 m behind"
+    );
+}
+
+/// `UnitAttribute.DetectStealthRangeMul` (94) is applied: -100 turns the range to 0, so even a
+/// 0.3 m target is not detected (the C# `< 1.0` fallback used to make it visible).
+#[tokio::test]
+async fn stealth_detection_old_front_fallback_no_longer_decides() {
+    let mut data = data();
+    data.systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&NPC_TEMPLATE)
+        .expect("template")
+        .bonuses
+        .push(BonusTemplate {
+            attribute: UnitAttribute::DetectStealthRangeMul,
+            modifier_type: UnitModifierType::Value,
+            value: -100,
+            linear_level_bonus: 0,
+        });
+    let f = stealth_fixture(data, 100.3, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "attribute 94 -100 must zero the detection range"
+    );
+    assert!(
+        !aggros(&server, 40).await,
+        "the NPC aggroed a stealthed player at 0.3 m with range 0"
+    );
+}
+
+/// `buffs.detect_stealth` on the observer reveals stealthed units at any distance.
+#[tokio::test]
+async fn detect_stealth_buff_reveals_at_long_range() {
+    let f = stealth_fixture(data(), 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    apply(&server, &npc, DETECT_STEALTH_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "a detect_stealth observer must see the stealthed player"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// `buffs.anti_stealth` on the target (the client's "cannot hide" state) makes it visible.
+#[tokio::test]
+async fn anti_stealth_buff_reveals_at_long_range() {
+    let f = stealth_fixture(data(), 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    apply(&server, &me, ANTI_STEALTH_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "an anti_stealth target must be visible"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// `stealth_level` is the highest `ab_level` of the active stealth buffs (the client's
+/// `ClientBuffMan` +4): level 50 halves formula 4 (12 m -> 6 m), so 7 m is outside it.
+#[tokio::test]
+async fn stealth_level_from_the_buff_ab_level_shrinks_the_range() {
+    let f = stealth_fixture(data(), 107.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    me.with_base_unit(|b| {
+        b.buffs_mut()
+            .effects
+            .last_mut()
+            .expect("stealth buff")
+            .ab_level = 50;
+    });
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "stealth level 50 halves the 12 m front range"
+    );
+    assert!(!aggros(&server, 40).await, "the NPC aggroed at 7 m");
+}
+
+/// A positive `DetectStealthRangeMul` widens the range: +100 doubles 11.76 m to 23.5 m.
+#[tokio::test]
+async fn detect_stealth_range_mul_widens_the_range() {
+    let mut data = data();
+    data.systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&NPC_TEMPLATE)
+        .expect("template")
+        .bonuses
+        .push(BonusTemplate {
+            attribute: UnitAttribute::DetectStealthRangeMul,
+            modifier_type: UnitModifierType::Value,
+            value: 100,
+            linear_level_bonus: 0,
+        });
+    let f = stealth_fixture(data, 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "attribute 94 +100 widens formula 4 to 23.5 m"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// [`data`] with a helper template whose aggro-link sight check is enabled and whose special
+/// rule 1 (same faction) requires the helper itself to see the abuser.
+fn help_sight_data() -> GameData {
+    let mut data = data();
+    let helper = data
+        .systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&HELPER_TEMPLATE)
+        .expect("helper template");
+    helper.accept_aggro_link = true;
+    helper.aggro_link_sight_check = true;
+    helper.aggro_link_special_rule_id = 1;
+    helper.aggro_link_help_dist = 30.0;
+    data
+}
+
+/// A primary hold-position NPC at (125, 100) (15 m from the helper, outside its own 11.76 m
+/// front range) and a helper at (110, 100) facing +y; the player is at the caller's position.
+fn help_fixture(data: GameData, player_x: f32, player_y: f32) -> (Fixture, NpcRef) {
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Runner", player_x, player_y);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let primary = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        125.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    primary.data().unit.transform.rot_z = -std::f32::consts::FRAC_PI_2;
+    let helper = spawn_npc(
+        &server,
+        HELPER_OBJ,
+        HELPER_TEMPLATE,
+        110.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    helper.data().unit.transform.rot_z = 0.0; // faces +y
+    (
+        Fixture {
+            server,
+            client,
+            player,
+            npc: primary,
+        },
+        helper,
+    )
+}
+
+/// `UpdateAggroHelp` asks the *helper* `CanSeeTarget(abuser)`, not the primary NPC: the stealthed
+/// abuser 5 m in front of the helper is seen, while the primary 15.8 m away is outside its own
+/// 11.76 m front range. The fixture's stealth buff has `ab_level` 1, so formula 4 is
+/// 12 / 1.02 = 11.76 m.
+#[tokio::test]
+async fn aggro_help_uses_the_helper_npcs_stealth_detection_front() {
+    let (f, helper) = help_fixture(help_sight_data(), 110.0, 105.0);
+    let server = f.server.clone();
+    let abuser = WorldObject::from(&f.player);
+    apply(&server, &abuser, STEALTH_COLUMN_BUFF);
+    post(&server, NPC_OBJ, move |c| {
+        super::behaviors::update_aggro_help(c, &abuser, 200.0);
+    });
+    tick_all(&server, 100);
+    assert!(
+        helper
+            .data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&PLAYER_OBJ),
+        "the helper did not join although it can see the stealthed abuser"
+    );
+}
+
+/// The same call with the abuser 5 m behind the helper: formula 10 is 0.5 m, so the helper does
+/// not see it and does not join.
+#[tokio::test]
+async fn aggro_help_uses_the_helper_npcs_stealth_detection_behind() {
+    let (f, helper) = help_fixture(help_sight_data(), 110.0, 95.0);
+    let server = f.server.clone();
+    let abuser = WorldObject::from(&f.player);
+    apply(&server, &abuser, STEALTH_COLUMN_BUFF);
+    post(&server, NPC_OBJ, move |c| {
+        super::behaviors::update_aggro_help(c, &abuser, 200.0);
+    });
+    tick_all(&server, 100);
+    assert!(
+        helper.data().unit.skill_state.aggro_table.is_empty(),
+        "the helper joined although the stealthed abuser is behind it"
+    );
+}
+
+/// A missing formula row uses the same visible fallback as a broken one: a stealthed target
+/// must not become permanently invisible just because the data is absent.
+#[tokio::test]
+async fn stealth_detection_missing_formula_keeps_target_visible() {
+    let mut data = data();
+    data.formulas = FormulaManager::empty();
+    let f = stealth_fixture(data, 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "a missing formula must leave stealthed units visible"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// A formula that fails to evaluate (here: an undefined variable) also uses the visible
+/// fallback and must not be re-evaluated with an `error!` log on every scan.
+#[tokio::test]
+async fn stealth_detection_broken_formula_keeps_target_visible() {
+    let mut data = data();
+    data.formulas = broken_stealth_formulas();
+    let f = stealth_fixture(data, 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "a formula that fails to evaluate must leave stealthed units visible"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+// ===========================================================================================
+// WP-5a: FollowUnit / WP-5b: ai_command_sets.can_interact
+// ===========================================================================================
+
+fn set_command(cmd_set_id: u32, cmd_id: AiCommandCategory, param1: u32) -> AiCommands {
+    AiCommands {
+        id: 0,
+        cmd_set_id,
+        cmd_id,
+        param1,
+        param2: String::new(),
+    }
+}
+
+/// The bodies of the frames of one opcode (level-2 frames keep the `0x8000` tag).
+fn drain_op(client: &mut TestClient, op: u16) -> Vec<Vec<u8>> {
+    client
+        .drain()
+        .into_iter()
+        .filter(|(o, _)| *o == op)
+        .map(|(_, body)| body)
+        .collect()
+}
+
+/// A FollowUnit command follows the nearest player (20 m away) instead of only warning, and
+/// the NPC enters `FollowUnit` and closes the gap.
+#[tokio::test]
+async fn follow_unit_command_follows_the_nearest_player() {
+    let server = server();
+    let client = TestClient::new(&server, 1, 1);
+    let mut guide = test_character(1, "Guide", 120.0, 100.0);
+    guide.unit.hp = 1000;
+    guide.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, guide, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(
+        settled,
+        "the NPC did not settle: {:?}",
+        behavior(&server, NPC_OBJ)
+    );
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(PLAIN_SET, AiCommandCategory::FollowUnit, 1)],
+            false,
+        );
+    });
+    let following = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::FollowUnit)
+    })
+    .await;
+    assert!(
+        following,
+        "the FollowUnit command did not start the follow behavior: {:?}",
+        behavior(&server, NPC_OBJ)
+    );
+    assert_eq!(
+        server
+            .systems
+            .ai
+            .ais
+            .inspect(NPC_OBJ, |a| a.follow_unit.as_ref().map(WorldObject::obj_id)),
+        Some(Some(PLAYER_OBJ)),
+        "the fallback must pick the nearby player"
+    );
+    let start = npc_pos(&npc);
+    let moved = tick_until(&server, 100, 5, 60, || npc_pos(&npc).x > start.x + 2.0).await;
+    assert!(
+        moved,
+        "the NPC did not move towards the player: {:?}",
+        npc_pos(&npc)
+    );
+    assert!(player.data().unit.hp > 0);
+}
+
+/// Without a `follow_unit` and without any player in 100 m the command does not hang the set:
+/// the remaining commands run and the NPC settles back into its default behavior.
+#[tokio::test]
+async fn follow_unit_command_without_a_player_does_not_hang_the_set() {
+    let server = server();
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    // No player exists, so the spawn initialization settles into the unselected Idle state.
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::Idle)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[
+                set_command(PLAIN_SET, AiCommandCategory::FollowUnit, 1),
+                set_command(PLAIN_SET, AiCommandCategory::Timeout, 1),
+            ],
+            false,
+        );
+    });
+    let finished = tick_until(&server, 100, 5, 60, || {
+        server.systems.ai.ais.inspect(NPC_OBJ, |a| {
+            a.current_command.is_none()
+                && a.commands_queue.is_empty()
+                && a.follow_unit.is_none()
+                // No player is near, so the settled Idle AI is no longer selected and does
+                // not run its default transition.
+                && a.current_behavior() == Some(B::Idle)
+        }) == Some(true)
+    })
+    .await;
+    assert!(
+        finished,
+        "the set did not finish: behavior {:?}, state {:?}",
+        behavior(&server, NPC_OBJ),
+        server.systems.ai.ais.inspect(NPC_OBJ, |a| (
+            a.current_command.clone(),
+            a.commands_queue.len()
+        ))
+    );
+    assert_eq!(npc_pos(&npc), Vec3::new(100.0, 100.0, 100.0));
+}
+
+/// With `Interaction.CommandSetLock` off (the default) a `can_interact = 'f'` set locks nothing.
+#[tokio::test]
+async fn locked_command_set_is_ignored_without_the_config_flag() {
+    let server = server();
+    server
+        .config
+        .update(|cfg| cfg.interaction.command_set_lock = false);
+    let mut client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Talker", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 150)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(npc.data().interactable);
+    assert!(drain_op(&mut client, sc::SCNpcInteractionStatusChangedPacket).is_empty());
+}
+
+/// A set with `can_interact = 'f'` sends the status `false` to viewers when it starts, closes a
+/// window a player still has open on the NPC (`SCNpcInteractionEndedByZone`), and sends `true`
+/// when the set ends.
+#[tokio::test]
+async fn locked_command_set_publishes_the_interaction_status() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Talker", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    // The player has the NPC's interaction window open when the set starts.
+    player.data().unit.current_interaction_object = NPC_OBJ;
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 150)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable, "the locked set did not lock");
+    let frames = client.drain();
+    let status: Vec<Vec<u8>> = frames
+        .iter()
+        .filter(|(o, _)| *o == sc::SCNpcInteractionStatusChangedPacket)
+        .map(|(_, body)| body.clone())
+        .collect();
+    let ended_by_zone: Vec<Vec<u8>> = frames
+        .iter()
+        .filter(|(o, _)| *o == sc::SCNpcInteractionEndedByZonePacket)
+        .map(|(_, body)| body.clone())
+        .collect();
+    assert_eq!(
+        status,
+        vec![vec![0x00, 0x02, 0x00, 0x00]],
+        "viewers must get status false at set start"
+    );
+    assert_eq!(
+        ended_by_zone,
+        vec![vec![0x00, 0x02, 0x00]],
+        "an open interaction window must be closed"
+    );
+    assert_eq!(player.data().unit.current_interaction_object, 0);
+
+    let ended = tick_until(&server, 100, 5, 60, || {
+        server.systems.ai.ais.inspect(NPC_OBJ, |a| {
+            a.current_command.is_none()
+                && a.commands_queue.is_empty()
+                && a.locked_command_set.is_none()
+                && a.current_behavior() == Some(B::HoldPosition)
+        }) == Some(true)
+    })
+    .await;
+    assert!(ended, "{:?}", behavior(&server, NPC_OBJ));
+    assert!(npc.data().interactable);
+    let frames = client.drain();
+    let status: Vec<Vec<u8>> = frames
+        .iter()
+        .filter(|(o, _)| *o == sc::SCNpcInteractionStatusChangedPacket)
+        .map(|(_, body)| body.clone())
+        .collect();
+    assert_eq!(
+        status,
+        vec![vec![0x00, 0x02, 0x00, 0x01]],
+        "viewers must get status true when the set ends"
+    );
+    assert!(!frames
+        .iter()
+        .any(|(o, _)| *o == sc::SCNpcInteractionEndedByZonePacket));
+}
+
+/// A player that enters sight after the set started still learns the `false` state from the
+/// visibility path (the status packet follows `SCUnitStatePacket`).
+#[tokio::test]
+async fn late_viewer_gets_the_false_interaction_status() {
+    let server = server();
+    let mut far_client = TestClient::new(&server, 2, 2);
+    let far = spawn_player(
+        &server,
+        &far_client,
+        test_character(2, "Latecomer", 1500.0, 1500.0),
+        PLAYER_OBJ + 1,
+    );
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    // The only player is far away, so the spawn initialization settles into Idle.
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::Idle)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    far_client.drain();
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 100_000)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable);
+    assert!(
+        drain_op(&mut far_client, sc::SCNpcInteractionStatusChangedPacket).is_empty(),
+        "a player far away must not receive the status"
+    );
+
+    // Enter the NPC's neighbourhood.
+    far.data().unit.transform.set_xyz(101.0, 100.0, 100.0);
+    let world = server.world.world(0).expect("world");
+    world.add_visible_object(&far, &server.view_ctx());
+    let frames = far_client.drain();
+    let ops: Vec<u16> = frames.iter().map(|(o, _)| *o).collect();
+    assert!(
+        ops.contains(&sc::SCUnitStatePacket),
+        "the late viewer must see the NPC: {ops:?}"
+    );
+    let status: Vec<Vec<u8>> = frames
+        .into_iter()
+        .filter(|(o, _)| *o == sc::SCNpcInteractionStatusChangedPacket)
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(status, vec![vec![0x00, 0x02, 0x00, 0x00]]);
+}
+
+/// `CSStartInteraction` is refused while the locked set runs and accepted once it ended.
+#[tokio::test]
+async fn start_interaction_is_refused_while_the_set_is_locked() {
+    use crate::net::registry::ClientPacket;
+
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Clicker", 105.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    let request = crate::systems::npcs::npc::packets::CSStartInteractionPacket {
+        npc_obj_id: NPC_OBJ,
+        obj_id: PLAYER_OBJ,
+        extra_info: 0,
+        pick_id: 0,
+        mouse_button: 1,
+        modifier_keys: 0,
+    };
+
+    // `param1 = 0` ends the Timeout on the following tick (the command then clears).
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 0)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable, "the set must be running");
+    client.drain();
+    request.handle(&server, &mut client.conn).await.unwrap();
+    assert!(
+        drain_op(&mut client, sc::SCNpcInteractionSkillListPacket).is_empty(),
+        "a non-interactable NPC must not answer CSStartInteraction"
+    );
+
+    let ended = tick_until(&server, 100, 5, 60, || {
+        server.systems.ai.ais.inspect(NPC_OBJ, |a| {
+            a.current_command.is_none()
+                && a.commands_queue.is_empty()
+                && a.locked_command_set.is_none()
+        }) == Some(true)
+    })
+    .await;
+    assert!(ended, "{:?}", behavior(&server, NPC_OBJ));
+    assert!(npc.data().interactable);
+    client.drain();
+    request.handle(&server, &mut client.conn).await.unwrap();
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionSkillListPacket).len(),
+        1,
+        "the NPC must answer once the set ended"
+    );
+}
+
+/// Sets with `can_interact = 't'` (and commands that name no set) keep the old behaviour: no
+/// interaction status packet at start or end, and the NPC stays interactable.
+#[tokio::test]
+async fn interactable_command_sets_send_no_interaction_packets() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Talker", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    for set_id in [OPEN_SET, PLAIN_SET] {
+        post(&server, NPC_OBJ, move |c| {
+            c.enqueue_ai_commands(
+                &[set_command(set_id, AiCommandCategory::Timeout, 150)],
+                false,
+            );
+        });
+        let ended = tick_until(&server, 100, 5, 60, || {
+            server.systems.ai.ais.inspect(NPC_OBJ, |a| {
+                a.current_command.is_none()
+                    && a.commands_queue.is_empty()
+                    && a.current_behavior() == Some(B::HoldPosition)
+            }) == Some(true)
+        })
+        .await;
+        assert!(ended, "set {set_id}: {:?}", behavior(&server, NPC_OBJ));
+        assert!(
+            npc.data().interactable,
+            "set {set_id} must stay interactable"
+        );
+    }
+    let frames = client.drain();
+    let ops: Vec<u16> = frames.iter().map(|(o, _)| *o).collect();
+    assert!(
+        !ops.contains(&sc::SCNpcInteractionStatusChangedPacket)
+            && !ops.contains(&sc::SCNpcInteractionEndedByZonePacket),
+        "no interaction packets expected, got {ops:?}"
+    );
+}
+
+/// A run interrupted by combat abandons the command set (the state machine never returns to
+/// `RunCommandSet`), so the interaction lock must be released instead of leaving the NPC
+/// non-interactable forever.
+#[tokio::test]
+async fn interrupted_locked_set_releases_the_interaction_status() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Watcher", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 100_000)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable);
+    client.drain();
+
+    // Aggro pulls the NPC out of RunCommandSet; the set is abandoned, not resumed.
+    post(&server, NPC_OBJ, |c| c.go_to_combat());
+    tick_all(&server, 100);
+    assert!(
+        npc.data().interactable,
+        "an abandoned set must not leave the NPC locked: {:?}",
+        behavior(&server, NPC_OBJ)
+    );
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionStatusChangedPacket),
+        vec![vec![0x00, 0x02, 0x00, 0x01]]
+    );
+}
+
+/// A different command set that starts while the locked one is still queued replaces the
+/// interaction state: the `can_interact = 't'` set unlocks the NPC before its set ends.
+#[tokio::test]
+async fn replaced_locked_set_unlocks_the_npc() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Watcher", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 0)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable);
+    client.drain();
+
+    // The open set is queued behind the locked command.
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(OPEN_SET, AiCommandCategory::Timeout, 150)],
+            false,
+        );
+    });
+    // One tick clears the finished locked command, the next starts the open set.
+    tick_all(&server, 100);
+    assert!(
+        !npc.data().interactable,
+        "the locked command is still ending"
+    );
+    tick_all(&server, 100);
+    assert_eq!(
+        behavior(&server, NPC_OBJ),
+        Some(B::RunCommandSet),
+        "the open set must still be running"
+    );
+    assert!(
+        npc.data().interactable,
+        "the replacing 't' set must unlock the NPC"
+    );
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionStatusChangedPacket),
+        vec![vec![0x00, 0x02, 0x00, 0x01]]
+    );
+}
+
+/// A despawn (`NpcManager.Delete` -> the AI hook) closes the open interaction window, like the
+/// death behavior does (INFERRED, see PORTING.md WP-5b).
+#[tokio::test]
+async fn deleted_npc_closes_the_open_interaction_window() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Talker", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let _npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    client.drain();
+
+    player.data().unit.current_interaction_object = NPC_OBJ;
+    server
+        .systems
+        .hooks
+        .ai
+        .get()
+        .expect("ai hooks")
+        .npc_deleted(&server, NPC_OBJ);
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionEndedByZonePacket),
+        vec![vec![0x00, 0x02, 0x00]]
+    );
+    assert_eq!(player.data().unit.current_interaction_object, 0);
 }

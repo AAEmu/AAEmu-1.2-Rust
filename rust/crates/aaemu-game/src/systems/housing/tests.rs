@@ -630,6 +630,7 @@ async fn build_and_build_steps_flow() {
     assert!(!ops::craft_building(&fx.server, &fx.pa, &house, 11001));
 
     // Second house of the account: the heavy-tax formula applies (base + deposit).
+    fx.pa.data().unit.transform.set_xyz(300.0, 100.0, 100.0);
     fx.eco.items.lock().unwrap()[0].item_id = 78;
     fx.eco.item_counts.lock().unwrap().insert(DESIGN_ITEM, 1);
     let mut p2 = create_packet(0.0);
@@ -683,7 +684,7 @@ async fn tax_info_and_construct_tax_packets() {
     let mut fx = fixture(false);
     let house = place_house(&fx, DESIGN, &fx.pa, 300.0, 300.0, -1);
     fx.a.drain();
-    ops::construct_house_tax(&fx.server, &fx.pa, DESIGN, 0.0, 0.0, 0.0);
+    ops::construct_house_tax(&fx.server, &fx.pa, DESIGN, 100.0, 100.0, 100.0);
     let expected = SCConstructHouseTaxPacket {
         design_id: DESIGN,
         heavy_tax_house_count: 2,
@@ -1308,6 +1309,39 @@ async fn faction_sync_and_character_deletion() {
     // The next tax tick demolishes it.
     manager::check_housing_taxes(&fx.server);
     assert_eq!(house.data().unit.owner_id, 0);
+}
+
+#[tokio::test]
+async fn nation_faction_survives_house_updates_and_reload() {
+    use crate::systems::social::nation::Nation;
+
+    let fx = fixture(false);
+    let nation_id = 9_000;
+    fx.server.systems.social.nations.add(Nation {
+        id: nation_id,
+        expedition_id: 0,
+        owner_character_id: 1,
+        owner_name: "King".into(),
+        name: "Kingdom".into(),
+        created_at: 1,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+    let house = place_house(&fx, DESIGN, &fx.pa, 120.0, 100.0, -1);
+    super::on_character_loaded(&fx.server, 1, nation_id);
+    assert_eq!(house.data().unit.faction_id, nation_id);
+    let row = manager::save_row(&house).expect("dirty house row");
+    assert_eq!(row.faction_id, nation_id);
+
+    // A reload of the stored row resolves the nation again instead of storing 0.
+    let world = fx.server.world.world(0).unwrap();
+    let mut reload = row.clone();
+    reload.id = 56;
+    reload.x = 220.0;
+    reload.y = 200.0;
+    let loaded = manager::load_house_row(&fx.server, &world, &reload).unwrap();
+    assert_eq!(loaded.data().unit.faction_id, nation_id);
 }
 
 #[tokio::test]
