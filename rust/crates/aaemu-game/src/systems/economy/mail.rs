@@ -1717,9 +1717,10 @@ pub fn pay_charge_money(
     let required_certs = ((i64::from(mail.body.billing_amount) + 9999) / 10000) as i32;
     let user_bound_tax_count = if tax_items {
         let inv = Inv::of(character);
-        let user_tax_count = inv.items_count_in(slot_type::INVENTORY, ITEM_TAX_CERTIFICATE, -1);
+        let user_tax_count =
+            inv.items_count_in_unlocked(slot_type::INVENTORY, ITEM_TAX_CERTIFICATE, -1);
         let user_bound_tax_count =
-            inv.items_count_in(slot_type::INVENTORY, ITEM_BOUND_TAX_CERTIFICATE, -1);
+            inv.items_count_in_unlocked(slot_type::INVENTORY, ITEM_BOUND_TAX_CERTIFICATE, -1);
         let total = i64::from(user_tax_count) + i64::from(user_bound_tax_count);
         if total < i64::from(required_certs) {
             // Not enough certs
