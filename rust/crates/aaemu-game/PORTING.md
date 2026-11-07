@@ -1275,7 +1275,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `IndunGameData` (actions, events, zones, rooms), `Models/Game/Indun/{IndunZone, IndunRoom}` | `systems/instances/data.rs` | done | Same six event queries / four action queries in C# order; `EnterCount` hack (1000 for group 49 / channel dungeons, else 3); localized names. Real DB: 104 actions, 70 events, 20 zones, 13 rooms. |
+| `IndunGameData` (actions, events, zones, rooms), `Models/Game/Indun/{IndunZone, IndunRoom}` | `systems/instances/data.rs` | done | Same six event queries / four action queries in C# order; `EnterCount` hack (1000 for group 49 / channel dungeons, else 3); localized names. Real DB: 104 actions, 70 events, 20 zones, 13 rooms. `indun_zones.pvp` / `has_graveyard` are now enforced (`systems/skills/{relation,resurrect}.rs`; see the `systems::skills` dungeon-flags bullet). |
 | `BattlefieldGameData` + `Data/battlefields.json`, `TowerDefGameData`, `Models/Game/{InstantGame, TowerDefs}` data | `data.rs` | done | 7 battlefields (last `game_rule_sets` row wins), 24 tower defs / 89 valid progs. Tower defense skips orphan parents and orders waves by id. |
 | `WorldManager.CreateWorldInstance` / `RemoveWorld` / `CreateStaticInstances` (AutoCreate) / `WorldIdManager`, `WorldInstance.CleanupInstance` / `ChannelId` / `HasCharacter` / `GetCharacterCount` / `ListPlayerNames` | `worlds.rs`, `mod.rs` (start), `world/mod.rs` (`has_world`, `remove_world`, `leave_other_instance`, `WorldInstance::transfer_out`), `npcs::spawn_manager::SpawnManagers::remove` | done | Non-instanceable templates reuse their instance; fixed ids <= 100; per-instance `SpawnManager` created with the world and loaded by the dungeon loader / a background task. The cross-instance region switch happens when the client sends `CSInstanceLoaded` (the character is re-filed in the arrival instance; the next move finds it filed), as the C# `AddVisibleObject` region change. |
 | `Character.MainWorldPosition`, `Transform.CloneDetached` / `ApplyWorldSpawnPosition` / `MainWorldPosition.Clone()` | `worlds.rs`, `models/character.rs` (`main_world_position: Option<Transform>`), `db_character.rs` (save rule) | done | Saved inside an instance: the return point is written (C# `saveFromInstanceReturn`). |
@@ -3061,6 +3061,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   suppressed by `no_penalty` is unknown; only exp / durability are skipped, as the column name
   and the guard rows establish no more. **DEATH-3:** the first step's 0 s wait and the 600 s
   window replacing the C# 5-minute reset are data-driven, not captured.
+* systems::skills (dungeon `pvp` / `has_graveyard`, 2026-11-07): both `indun_zones` columns were
+  loaded but never read (the C# read neither). The server now mirrors the 1.2 client; the server
+  rules themselves are inferred.
+  * `pvp = 'f'`: `relation::can_attack` refuses a character-owned attacker (a player or a
+    mate/slave whose `GetOwnerCharacter` is a player) against another character-owned unit when
+    the target's zone group's `indun_zones` row has `pvp = false`. Evidence: the client builds
+    its relation context with `flag = (record+0x19 == 0)` (`FUN_390281c0`, x2game.dll.c:39376,
+    stored at relation+0x30), and the relation resolver `FUN_39838880` (~x2game.dll.c:1833560)
+    returns kind 2 (not hostile) early when `FUN_39837a40` reports that flag for two valid
+    combatants, before the faction / hostility branches. The client's kind-2 mapping is
+    **INFERRED** to mean non-hostile. `relation_to` is unchanged (the client's buff/heal mapping
+    is unproven) and NPC targets are not gated. `Dungeons.EnforceNoPvp` (default `true`)
+    restores the faction-only decision. Real data: groups 49 (Mirage Isle), 62 / 64 (Immortal
+    Isle) and 70-76 (Library) are `pvp = 'f'`. Tests:
+    `relation::tests::{no_pvp_instance_blocks_character_and_owned_unit_attacks,
+    pvp_instances_and_the_open_world_keep_faction_attacks,
+    skill_casts_are_refused_in_a_no_pvp_instance, config_off_restores_the_faction_only_decision}`;
+    gated `instances::tests::real_instances_data`.
+  * `has_graveyard = 'f'` (only groups 49 and 68): `respawn_portal` uses the closest open-world
+    return portal (`PortalManager.GetClosestReturnPortal`) and moves the character out of the
+    instance (`SCLoadInstancePacket`), then the Temple Priestess, then the saved
+    `MainWorldPosition` entry, then an in-place revive with a warning. Evidence for the split:
+    `X2Player.IsInIndunWithGraveyard` (`FUN_39495b20` = current zone's record exists and
+    `record+1 != 0`) selects `revive_indun` / "Revive at the entrance" (ui_texts 3843/3844) vs
+    the ordinary `revive` between `has_graveyard = t/f`; the exact `'f'` destination is
+    **INFERRED** (no capture). `Dungeons.NoGraveyardUseReturnPortal` (default `true`) restores
+    the C# priestess-only path; `has_graveyard = 't'` keeps the C# behaviour. Tests:
+    `resurrect::tests::{no_graveyard_instance_uses_the_return_portal,
+    graveyard_instance_keeps_the_priestess_only_behaviour,
+    no_graveyard_without_a_return_portal_uses_the_entry_position,
+    config_off_keeps_the_priestess_behaviour_for_no_graveyard_instances}`.
 * systems::skills: skill controllers and NPC displacements snap to the ground through the npcs
   heightmaps (`geo_data_height`); the wandering (fear) speed is the 7 m/s fallback (actor model
   stances not loaded); `Npc.StopMovement` writes the C# default stance / alertness; `OnMovement`
