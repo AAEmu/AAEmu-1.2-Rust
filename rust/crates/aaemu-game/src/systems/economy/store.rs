@@ -1049,7 +1049,7 @@ impl CSSellBackpackGoodsPacket {
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
         let base_price = super::specialty::sell_specialty(server, &p, self.obj_id);
-        tracing::warn!(
+        tracing::debug!(
             "CSSellBackpackGoods, ObjId: {}. BasePrice: {base_price}",
             self.obj_id
         );
@@ -1186,7 +1186,7 @@ impl CSChangeItemLookPacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "ChangeItemLook, ItemId: {}, LookId: {}",
             self.item_id,
             self.look_id

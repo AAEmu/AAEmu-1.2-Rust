@@ -778,7 +778,7 @@ impl ClientPacket for CSSellBackpackGoodsPacket {
                 return Ok(());
             };
             let base_price = sell_specialty(server, &me, self.obj_id);
-            tracing::warn!(
+            tracing::debug!(
                 "CSSellBackpackGoods, ObjId: {}. BasePrice: {base_price}",
                 self.obj_id
             );
