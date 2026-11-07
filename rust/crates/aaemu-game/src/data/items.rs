@@ -622,6 +622,13 @@ pub struct EquipSlotGroupMap {
     pub equip_slot_type_id: u32,
 }
 
+/// `equip_slot_groups`: the named groups `equip_slot_group_maps` joins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EquipSlotGroup {
+    pub id: u32,
+    pub name: String,
+}
+
 /// `GradeDistributions` (`item_grade_distributions`; `weights[i]` = `Weight{i}`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GradeDistributions {
@@ -983,6 +990,8 @@ pub struct ItemData {
     pub item_socket_level_limits: HashMap<u32, ItemSocketLevelLimit>,
     /// `item_sockets` (by lunagem item id).
     pub item_sockets: HashMap<u32, ItemSocket>,
+    /// `equip_slot_groups` (by id).
+    pub equip_slot_groups: HashMap<u32, EquipSlotGroup>,
     /// `equip_slot_group_maps` (by equip slot group id, in table order).
     pub equip_slot_group_maps: HashMap<u32, Vec<EquipSlotGroupMap>>,
     /// `_itemCapScales` (by skill id).
@@ -1151,11 +1160,19 @@ impl ItemData {
             .map(|s| s.equip_slot_group_id)
     }
 
-    /// Whether the gem's `equip_slot_group_id` covers `slot_type_id` (`equip_slot_group_maps`).
+    /// The `equip_slot_groups` row (`None` = a map / socket row names an unknown group).
+    pub fn equip_slot_group(&self, id: u32) -> Option<&EquipSlotGroup> {
+        self.equip_slot_groups.get(&id)
+    }
+
+    /// Whether the gem's `equip_slot_group_id` covers `slot_type_id` (`equip_slot_groups` +
+    /// `equip_slot_group_maps`). A group that is not in the parent table covers nothing.
     pub fn socket_group_allows(&self, group_id: u32, slot_type_id: u32) -> bool {
-        self.equip_slot_group_maps
-            .get(&group_id)
-            .is_some_and(|maps| maps.iter().any(|m| m.equip_slot_type_id == slot_type_id))
+        self.equip_slot_groups.contains_key(&group_id)
+            && self
+                .equip_slot_group_maps
+                .get(&group_id)
+                .is_some_and(|maps| maps.iter().any(|m| m.equip_slot_type_id == slot_type_id))
     }
 
     /// `GetItemCapScale(skillId)`.
@@ -1919,6 +1936,15 @@ impl ItemData {
             Ok(())
         })?;
 
+        for_each_row(conn, "SELECT * FROM equip_slot_groups", [], |r| {
+            let group = EquipSlotGroup {
+                id: r.u32("id")?,
+                name: r.string("name")?,
+            };
+            data.equip_slot_groups.insert(group.id, group);
+            Ok(())
+        })?;
+
         for_each_row(conn, "SELECT * FROM equip_slot_group_maps", [], |r| {
             let map = EquipSlotGroupMap {
                 id: r.u32("id")?,
@@ -1930,6 +1956,17 @@ impl ItemData {
                     "equip_slot_group_maps {}: bad slot type {}",
                     map.id,
                     map.equip_slot_type_id
+                );
+                return Ok(());
+            }
+            if !data
+                .equip_slot_groups
+                .contains_key(&map.equip_slot_group_id)
+            {
+                tracing::warn!(
+                    "equip_slot_group_maps {}: unknown equip slot group {}",
+                    map.id,
+                    map.equip_slot_group_id
                 );
                 return Ok(());
             }

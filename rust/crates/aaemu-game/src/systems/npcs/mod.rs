@@ -35,6 +35,7 @@ pub mod npc;
 pub mod portal;
 pub mod public_farm;
 pub mod schedule;
+pub mod schedule_events;
 pub mod schedule_item_manager;
 pub mod schedule_item_packets;
 pub mod schedule_item_persistence;
@@ -138,6 +139,8 @@ pub struct System {
     pub fish_schools: fish_school::FishSchoolManager,
     /// `ScheduleItemManager` (account-wide schedule-item progress and its prepared save).
     pub schedule_items: schedule_item_manager::ScheduleItemManager,
+    /// Scheduled-event announcement state (`Events:ScheduledEvents`, Rust only).
+    pub schedule_events: schedule_events::ScheduleEventState,
     /// Behaviour of other subsystems this one calls (installed by them at start).
     pub hooks: hooks::NpcsHooks,
 }
@@ -169,6 +172,8 @@ impl System {
             .await?;
         tracing::info!("Loaded schedule item progress of {accounts} accounts");
         schedule_item_session::start_tick_task(server);
+        // `Events:ScheduledEvents`: validate the allow-list and start the 30 s edge tick.
+        schedule_events::start(server);
         Ok(())
     }
 

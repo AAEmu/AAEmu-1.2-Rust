@@ -425,12 +425,12 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
 
     // Our backpack isn't null, we have the NPC, time to calculate the profits
     let player_id = p.character_id;
-    // The only evidenced carrier is the item's `made_unit_id`: the craft path stores the
-    // crafting `character_id` there (`craft.rs` -> `acquire_default_item_ex`), and the item
-    // packet writes it back to the client. Any other field the C# hoped for does not exist in
+    // The craft path stores the crafting character id in the item's `crafter_id` (and, before
+    // that column existed, in `made_unit_id`); `Item::crafter` reads both, and the item packet
+    // writes the value back to the client. Any other field the C# hoped for does not exist in
     // the 1.2 data.
-    let crafter_id = if backpack.made_unit_id != player_id {
-        backpack.made_unit_id
+    let crafter_id = if backpack.crafter() != player_id {
+        backpack.crafter()
     } else {
         0
     };

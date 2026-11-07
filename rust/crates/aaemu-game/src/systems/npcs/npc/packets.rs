@@ -532,7 +532,8 @@ impl ClientPacket for CSInteractNPCEndPacket {
 /// selected interaction id and `var1` (`FUN_393b3120`, log "Interaction Ex Selected"). The
 /// doodad interaction effects run through the skill `Interaction` effect, so this packet is
 /// the UI selection notice; whether the server must also act on the id / `var1` is
-/// capture-pending (`INTERACTION-EX-1`). It stays logged at debug.
+/// capture-pending (`INTERACTION-EX-1`, see `PORTING.md` "Gap audit verdicts (2026-11-07)").
+/// It stays logged at debug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSSelectInteractionExPacket {
     pub target_id: u32,

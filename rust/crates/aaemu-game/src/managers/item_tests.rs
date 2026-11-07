@@ -758,6 +758,97 @@ async fn private_mysql_load_user_items_deletes_a_merged_stack_row() {
     assert_eq!(persisted, 8);
 }
 
+/// Requires the private MySQL on 3317 (`AAEMU_TEST_MYSQL`); connection-local temporary copies,
+/// no persisted data is touched. The crafter character id the 1.2 client resolves the crafter
+/// name from must survive both the save (`save_item` column list / bind) and the reload
+/// (`ITEM_SELECT` / `item_row`).
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local item tables only"]
+async fn private_mysql_item_crafter_survives_save_and_load() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let url = std::env::var("AAEMU_TEST_MYSQL").expect("AAEMU_TEST_MYSQL");
+    let options = MySqlConnectOptions::from_str(&url).unwrap();
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in ["items", "item_containers"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO item_containers (container_id,container_type,slot_type,container_size,owner_id,mate_id) \
+         VALUES (65538,'ItemContainer',2,50,7,0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let id = 0x0100_0003u64;
+    sqlx::query(
+        "INSERT INTO items (`id`,`type`,`template_id`,`container_id`,`slot_type`,`slot`,`count`,`details`,\
+         `lifespan_mins`,`made_unit_id`,`crafter_id`,`unsecure_time`,`unpack_time`,`owner`,`created_at`,`grade`,`flags`,`ucc`) \
+         VALUES (?, 'AAEmu.Game.Models.Game.Items.Item', 1000, 65538, 2, 0, 1, NULL, 0, 0, 4242, \
+         '0001-01-01 00:00:00', '0001-01-01 00:00:00', 7, '0001-01-01 00:00:00', 0, 0, 0)",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let data = data_with_templates(vec![ItemTemplate::plain(1000, 20)]);
+    let container_ids = IdManager::new(crate::managers::id::CONTAINER_ID);
+    let item_ids = IdManager::new(ITEM_ID);
+    item_ids.initialize_with(&[id as u32]);
+    let manager = create_item_manager();
+    manager
+        .load_user_items(&pool, &data, 1, &container_ids, &item_ids)
+        .await
+        .unwrap();
+    assert_eq!(manager.item_by_id(id).expect("loaded").crafter_id, 4242);
+
+    // Change the crafter, save, and read it back with a fresh manager.
+    {
+        let container = manager.container_by_id(65538).expect("container");
+        let mut bag = container.lock().unwrap();
+        let item = bag.get_item_by_id_mut(id).expect("item");
+        item.crafter_id = 777;
+        item.dirty = true;
+    }
+    let mut tx = pool.begin().await.unwrap();
+    manager.save(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    manager.commit_save();
+    let persisted: i64 =
+        sqlx::query_scalar("SELECT CAST(crafter_id AS SIGNED) FROM items WHERE `id` = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted, 777);
+
+    let reloaded = create_item_manager();
+    reloaded
+        .load_user_items(&pool, &data, 1, &container_ids, &item_ids)
+        .await
+        .unwrap();
+    assert_eq!(reloaded.item_by_id(id).expect("reloaded").crafter_id, 777);
+}
+
 // ---- Character creation save (owner-scoped batch) ----
 
 /// The creation save writes only the new character's dirty containers and items, never another

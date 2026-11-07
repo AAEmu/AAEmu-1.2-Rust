@@ -1217,6 +1217,7 @@ impl ItemSkillHooks for EconomyForSkills {
             restored.details = taken.item.details.clone();
             restored.lifespan_mins = taken.item.lifespan_mins;
             restored.made_unit_id = taken.item.made_unit_id;
+            restored.crafter_id = taken.item.crafter_id;
             restored.create_time = taken.item.create_time;
             restored.unsecure_time = taken.item.unsecure_time;
             restored.unpack_time = taken.item.unpack_time;
@@ -1800,6 +1801,37 @@ impl ItemSkillHooks for EconomyForSkills {
         );
     }
 
+    fn renew_equipment(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        source_item_id: u64,
+        source_template_id: u32,
+        source_slot: u32,
+        target_item_id: u64,
+        target_slot: u32,
+        armor: Option<bool>,
+        npc_template_id: Option<u32>,
+    ) -> bool {
+        let kind = match armor {
+            None => super::renew::EnchantKind::Renew,
+            Some(false) => super::renew::EnchantKind::Weapon,
+            Some(true) => super::renew::EnchantKind::Armor,
+        };
+        super::renew::renew_equipment(
+            server,
+            player,
+            source_item_id,
+            source_template_id,
+            source_slot,
+            target_item_id,
+            target_slot,
+            kind,
+            npc_template_id,
+            &mut SharedRandom,
+        )
+    }
+
     fn give_fishing_loot(
         &self,
         _server: &GameServer,
@@ -2053,6 +2085,7 @@ impl crate::systems::services::music::SheetMusicInventory for EconomySheetMusic<
         };
         sheet.owner_id = u64::from(player.character_id);
         sheet.made_unit_id = player.character_id;
+        sheet.crafter_id = player.character_id;
         sheet.details.song_id = song_id;
         let data = txn.data();
         let bag = Inv::of(player).bag();

@@ -513,6 +513,7 @@ buff unchanged, absolute-value inference, real-compact loader for the three colu
 | `AreaTriggerManager` (+ aoe_shapes, wi_group_wis), `SubZoneManager`, `SphereQuestManager` (world side) | `area_trigger.rs`, `subzone.rs`, `sphere_quest.rs` | done | Quest effects via `QuestsBridge`. Area membership compares entity identity, so reconnecting with a reused object ID leaves the retained old session and enters the new one; this corrects the mirrored C# ID-only comparison and restores active school auras. Unchanged entities and overlapping aura counts are retained. Sub-zone index scan of the pak is slow in debug (~25 s). |
 | `PortalManager` (recall, district return, summoned portals, portal book, teleports) | `portal/` | done | Trial court check (`systems::social`), mates / slaves on instance change (`systems::vehicles`). |
 | `SpecialtyManager`, `PublicFarmManager`, `FishSchoolManager`, `GameScheduleManager` (+ NCrontab subset) | `specialty.rs`, `public_farm.rs`, `fish_school.rs`, `schedule.rs` | done | |
+| `SCScheduledEventStartedPacket` / `SCScheduledEventEndedPacket` (0x1ec / 0x1ed), `Events:ScheduledEvents` | `schedule_events.rs`, `config.rs` (`Events:ScheduledEvents`), `npcs/mod.rs` (start), `world/session.rs` (one call) | added | The C# never sent them (no sender at `a2ab80abd^`; only the opcode names existed). Wire from the 1.2 readers: Started `FUN_397b01f0` -> `FUN_398a7ed0` / `FUN_398a7d80` = `u32 id; 21 x i32; i32 changes; u8 priority; u8 startDate; u8 periodDate; u8 hour; u8 min; i32 periodMin; u8 weekDay; str openMsg` (fixed 102 bytes); Ended `FUN_397b0260` = `u32 id; str closeMsg`; both strings max 0x7f bytes. Handlers `FUN_391e1e10` (`OnScheduledEventStarted`, UI event 0x256) and `FUN_391e1f30` -> `FUN_3930b940` (`OnScheduledEventEnded`, UI event 0x257, only for the stored active id); the client keeps **one** active event id. **INFERRED** trigger and text (no original-server capture): a `game_schedules` window edge using the existing `schedule::check_data`, evaluated every 30 s over the configured allow-list; Started on the opening edge, Ended on the closing edge, Started to a player entering the world while the event is active. The first tick after startup seeds silently, so a restart does not re-announce running events. The `values` / `changes` / priority / date fields are sent as zeros (**INFERRED**: the handler stores them but only the message is displayed; the client constructors set priority 0x100 on their own copies). Texts come from the configuration (the shipped `game_schedules.name` values are Korean). Default off, empty list; unknown ids and duplicates are skipped at startup with a warning (the first duplicate wins), overlength messages are truncated on a UTF-8 boundary. Tests: byte-exact both packets, opening/closing edges to two characters, silent restart seed, late join, disabled/reset. |
 | `TimeManager.OnTimeOfDayChange` (NPC postures, doodad ToD triggers) | `doodad/manager.rs` | done | 10 s poller started by the doodad part (TimeManager has no callback). |
 | Cross-subsystem behaviour | `hooks.rs`, `bridges.rs` | done | `SkillsBridge` (skills), `EconomyBridge` (economy), `QuestsBridge` (quests) in `server.systems.npcs.hooks`; this subsystem implements `NpcSkillHooks`, `NpcEconomyHooks`, `LootNpcHooks`, `TreasureMapSource` (`bridges.rs`). See "Phase 3b wiring". |
 
@@ -545,7 +546,7 @@ connected by `systems::economy::wiring`).
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
-| `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
+| `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter in `crafter_id`; older rows / non-craft uses keep `made_unit_id`, see "Item crafter"), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). Equip and item use apply `items.actability_requirement` (error 508, see "Item use gates from data"). |
 | Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/{item_handlers,item_security}.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). The four secure packets are implemented from the 1.2 client (the C# only logged them); see the item-lock deviation. |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
@@ -1285,7 +1286,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `IndunGameData` (actions, events, zones, rooms), `Models/Game/Indun/{IndunZone, IndunRoom}` | `systems/instances/data.rs` | done | Same six event queries / four action queries in C# order; `EnterCount` hack (1000 for group 49 / channel dungeons, else 3); localized names. Real DB: 104 actions, 70 events, 20 zones, 13 rooms. |
+| `IndunGameData` (actions, events, zones, rooms), `Models/Game/Indun/{IndunZone, IndunRoom}` | `systems/instances/data.rs` | done | Same six event queries / four action queries in C# order; `EnterCount` hack (1000 for group 49 / channel dungeons, else 3); localized names. Real DB: 104 actions, 70 events, 20 zones, 13 rooms. `indun_zones.pvp` / `has_graveyard` are now enforced (`systems/skills/{relation,resurrect}.rs`; see the `systems::skills` dungeon-flags bullet). |
 | `BattlefieldGameData` + `Data/battlefields.json`, `TowerDefGameData`, `Models/Game/{InstantGame, TowerDefs}` data | `data.rs` | done | 7 battlefields (last `game_rule_sets` row wins), 24 tower defs / 89 valid progs. Tower defense skips orphan parents and orders waves by id. |
 | `WorldManager.CreateWorldInstance` / `RemoveWorld` / `CreateStaticInstances` (AutoCreate) / `WorldIdManager`, `WorldInstance.CleanupInstance` / `ChannelId` / `HasCharacter` / `GetCharacterCount` / `ListPlayerNames` | `worlds.rs`, `mod.rs` (start), `world/mod.rs` (`has_world`, `remove_world`, `leave_other_instance`, `WorldInstance::transfer_out`), `npcs::spawn_manager::SpawnManagers::remove` | done | Non-instanceable templates reuse their instance; fixed ids <= 100; per-instance `SpawnManager` created with the world and loaded by the dungeon loader / a background task. The cross-instance region switch happens when the client sends `CSInstanceLoaded` (the character is re-filed in the arrival instance; the next move finds it filed), as the C# `AddVisibleObject` region change. |
 | `Character.MainWorldPosition`, `Transform.CloneDetached` / `ApplyWorldSpawnPosition` / `MainWorldPosition.Clone()` | `worlds.rs`, `models/character.rs` (`main_world_position: Option<Transform>`), `db_character.rs` (save rule) | done | Saved inside an instance: the return point is written (C# `saveFromInstanceReturn`). |
@@ -1422,7 +1423,7 @@ live acceptance remain pending.
 | `ExpressTextManager`, `CSExpressEmotionPacket`, `SCEmotionExpressedPacket` | `systems/services/express_text.rs` | done | Deviation: an emote whose sender object id is not the sender's own character is dropped (the C# broadcast the client-supplied id). |
 | `LocalizationManager` | `systems/services/localization.rs` | done | 263 635 rows / 8 locales on the real DB. |
 | `ModelManager`, `Models/Game/Models/*` | `systems/services/models.rs` | done | Counts checked against compact.sqlite3 (gated test). |
-| `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). Upload sanity is Rust-only (`Music.MaxSongChars`, UTF-16 size mismatch only logs a warning (the client writer is not evidenced), owned source item (the client sends the music paper, not an instrument; `instrument_sounds` is not checked); see the deviation below). |
+| `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). Upload sanity is Rust-only (`music_note_limits` per Artistry grade, `Music.MaxSongChars`, owned source item; a UTF-16 size mismatch only logs a warning and the item is not required to be an instrument, the client sends the music paper; see the deviation below). |
 | `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). The radar / telescope feature is ported, not missing (gap-audit 2026-11-02 research `stealth.md` §0.1). Open items, none of them a port gap: shipyards are not sent in `SCTelescopeUnits` because the 1.2 client has no shipyard list wire format (only transfers, fish schools and the slave/ship list), so the C# "Add Shipyards" TODO is closed; the GM range is `World.RadarGmAccessLevel` (default `100`, the previous hard-coded value) instead of a hard-coded access-level check (`radar.rs` `gm_range_comes_from_config`); `evade_telescope` (buffs 4887 / 4950, "free from the telescope's gaze") is not consumed, as in the C# (which unit carries the buff is UNKNOWN). |
 | `Models/Tasks/ShutdownTask`, `SCNoticeMessagePacket` | `systems/services/shutdown.rs` | done | Count-down notices, final save, process exit; held in `server.systems.services.shutdown_task` (`SaveManager.ShutdownTask`). Buy-back wipe through `BUYBACK_WIPE` (economy). **Deviation:** the C# saved and exited without telling the clients (every client showed a disconnect error and quit). At T-0 the Rust task first broadcasts "The server is shutting down for maintenance.", refuses world entries (`GameServer::is_shutting_down`: `X2EnterWorld` / `CSSelectCharacter` / `CSSpawnCharacter` get `SCKicked(2)` + close), sends every connection `ConnCommand::ReturnToWorldList` (in-world: `LeaveWorldTask` to character select with no timer, i.e. save + `SCLeaveWorldGranted(1)` + `ChangeState(0)`; the client stays on its game connection and loads the lobby, so the world list request follows 2 s later: `GLPlayerReconnect` -> `LGPlayerReconnect` -> `SCReconnectAuth`, the `CSLeaveWorld(ServerSelect)` path, re-sent every 2 s to every connection still there, new ones included), waits up to 10 s for the clients to disconnect, kicks the rest with `SCKicked(2, "Server maintenance")`, then does the final save (3 tries), `shutdown::stop_server` (shared with the Ctrl+C path in `main.rs`) and the exit. A failed final save aborts the shutdown (as before: no exit) and reopens world entry; `/scripts shutdown cancel` is refused once T-0 passed. `/scripts forcedshutdown` still exits at once. |
 | `SusManager` | `systems/services/sus.rs` | done | `audit_char_sus` log + speed analysis. All 12 C# `LogActivity` sites are wired: crime / trial / coffer through `social::crime::sus_log`, `CSDestroyItem` (negative count) through `SusManager::log_activity_player_deferred` (`porting-md#10`). The 5 s `FinalizeTransform` caller runs from the move handler (see deviations). |
@@ -2039,15 +2040,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   differ between zero-extended sheet IDs and sign-extended native cache keys.
   No evidence establishes a safe ID-width or ownership-policy change here.
 
-* systems::services (music uploads, WP-M1, 2026-11-06): the C# stored any `CSSaveUserMusicNotes`
-  body. The Rust refuses (warn only, nothing queued, no packet -- the 1.2 client has no evidenced
-  failure path) when the song exceeds `Music.MaxSongChars` (default 3000, so normal uploads are
-  unchanged) or when `item_id` is not an item owned by the player. A `song_size` that differs from
-  the UTF-16 length is only logged (the client writer's size unit is not evidenced). The item is
-  NOT required to be an instrument: the client looks up a bag item by its 64-bit id
-  (`FUN_39079640` / `FUN_390799E0` -> `FUN_3961e9a0`, id at the packet's second field), which is
-  the music paper the following item cast (skill 22215) consumes; `instrument_sounds` is loaded
-  by the client for its own UI. The note grammar is still not parsed.
+* systems::services (music uploads, WP-M1, 2026-11-06; note limits 2026-11-07): the C# stored any
+  `CSSaveUserMusicNotes` body. The Rust refuses (warning, nothing queued, and
+  `SCErrorMsgPacket(UserNoteCannotSave)`) when the song is longer than the player's
+  `music_note_limits` row, when it exceeds the outer `Music.MaxSongChars` sanity bound (default
+  3000, above the data's 1000, so it never binds by default), or when `item_id` is not an item
+  owned by the player. A `song_size` that differs from the UTF-16 length is only logged (the
+  client writer's size unit is not evidenced). The item is NOT required to be an instrument: the
+  client looks up a bag item by its 64-bit id (`FUN_39079640` / `FUN_390799E0` -> `FUN_3961e9a0`,
+  id at the packet's second field), which is the music paper the following item cast (skill
+  22215) consumes; `instrument_sounds` is loaded by the client for its own UI (`dll.c:1559064`).
+  The limit is the 1.2 client's own: it loads `music_note_limits` (`dll.c:1207337`),
+  `X2UserMusic.GetCompositionLimitInfos` returns `{grade, compositionLimit}` per row
+  (`FUN_39079ea0`), the composition UI matches the player's `X2Ability.GetMyActabilityInfo(33)`
+  grade (actability 33 `예술`, Lua `user_music.alb`), and `SaveNotes`/`PreSaveNotes` allow a song
+  only when `XlStringLen(song) <= limit` (`FUN_39079640` / `FUN_390799e0` call `FUN_39082130`).
+  Its save error is `0x2aa user_note_cannot_save`, which is only shown when the note conversion
+  fails (`FUN_39428370(0x2aa)`); the UI also hard-caps the score input at 1000 characters
+  (`SetMaxTextLength(scoreEdit, 1000)`). A grade above the table's last step uses the highest
+  authored limit (1000), never a lower one. The note grammar is still not parsed: no server-side
+  format is evidenced, so a grammar failure remains a client-side refusal (0x2aa).
 
 * systems::skills (music): the C# (and this port) send `SCSkillStarted` only for casts with a
   cast time. The play (22213), pause (22214) and close-the-score (22217) skills are instant
@@ -2572,8 +2584,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   - `BackpackProfitShare` is read from the global runtime `FeaturesManager.Fsets`
     (`server.systems.services.features`), not `FeatureSet::default()`; the 1.2 sell / mail UI
     reads the same bit via `X2Player.GetFeatureSet("backpackProfitShare")`.
-  - The crafter id remains the item's `made_unit_id` (the only 1.2 carrier: the craft path
-    stores the crafting `character_id` there). The seller and crafter mail titles use the
+  - The crafter id comes from `Item::crafter()`: the dedicated `crafter_id` column, or the
+    legacy `made_unit_id` for packs crafted before that column existed (see "Item crafter").
+    The seller and crafter mail titles use the
     1.2 client `ui_texts` keys `sell_backpack_title` / `mail_sell_backpack_title_seller` /
     `mail_sell_backpack_title_crafter` from `localized_texts`, with the English C# strings as
     the fallback (never the untranslated `ui_texts.text` column). A sold pack with a crafter
@@ -3073,6 +3086,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   suppressed by `no_penalty` is unknown; only exp / durability are skipped, as the column name
   and the guard rows establish no more. **DEATH-3:** the first step's 0 s wait and the 600 s
   window replacing the C# 5-minute reset are data-driven, not captured.
+* systems::skills (dungeon `pvp` / `has_graveyard`, 2026-11-07): both `indun_zones` columns were
+  loaded but never read (the C# read neither). The server now mirrors the 1.2 client; the server
+  rules themselves are inferred.
+  * `pvp = 'f'`: `relation::can_attack` refuses a character-owned attacker (a player or a
+    mate/slave whose `GetOwnerCharacter` is a player) against another character-owned unit when
+    the target's zone group's `indun_zones` row has `pvp = false`. Evidence: the client builds
+    its relation context with `flag = (record+0x19 == 0)` (`FUN_390281c0`, x2game.dll.c:39376,
+    stored at relation+0x30), and the relation resolver `FUN_39838880` (~x2game.dll.c:1833560)
+    returns kind 2 (not hostile) early when `FUN_39837a40` reports that flag for two valid
+    combatants, before the faction / hostility branches. The client's kind-2 mapping is
+    **INFERRED** to mean non-hostile. `relation_to` is unchanged (the client's buff/heal mapping
+    is unproven) and NPC targets are not gated. `Dungeons.EnforceNoPvp` (default `true`)
+    restores the faction-only decision. Real data: groups 49 (Mirage Isle), 62 / 64 (Immortal
+    Isle) and 70-76 (Library) are `pvp = 'f'`. Tests:
+    `relation::tests::{no_pvp_instance_blocks_character_and_owned_unit_attacks,
+    pvp_instances_and_the_open_world_keep_faction_attacks,
+    skill_casts_are_refused_in_a_no_pvp_instance, config_off_restores_the_faction_only_decision}`;
+    gated `instances::tests::real_instances_data`.
+  * `has_graveyard = 'f'` (only groups 49 and 68): `respawn_portal` uses the closest open-world
+    return portal (`PortalManager.GetClosestReturnPortal`) and moves the character out of the
+    instance (`SCLoadInstancePacket`), then the Temple Priestess, then the saved
+    `MainWorldPosition` entry, then an in-place revive with a warning. Evidence for the split:
+    `X2Player.IsInIndunWithGraveyard` (`FUN_39495b20` = current zone's record exists and
+    `record+1 != 0`) selects `revive_indun` / "Revive at the entrance" (ui_texts 3843/3844) vs
+    the ordinary `revive` between `has_graveyard = t/f`; the exact `'f'` destination is
+    **INFERRED** (no capture). `Dungeons.NoGraveyardUseReturnPortal` (default `true`) restores
+    the C# priestess-only path; `has_graveyard = 't'` keeps the C# behaviour. Tests:
+    `resurrect::tests::{no_graveyard_instance_uses_the_return_portal,
+    graveyard_instance_keeps_the_priestess_only_behaviour,
+    no_graveyard_without_a_return_portal_uses_the_entry_position,
+    config_off_keeps_the_priestess_behaviour_for_no_graveyard_instances}`.
 * systems::skills: skill controllers and NPC displacements snap to the ground through the npcs
   heightmaps (`geo_data_height`); the wandering (fear) speed is the 7 m/s fallback (actor model
   stances not loaded); `Npc.StopMovement` writes the C# default stance / alertness; `OnMovement`
@@ -3368,6 +3412,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   debited scroll; before, the scroll was lost. The cast-path tests
   (`grade_enchant_cast_refunds_the_scroll_*`) drive `CSStartSkillPacket` and assert the
   scroll count.
+* systems::economy / skills (renew and physical enchant, 2026-11, stage 1): the C#
+  `RenewEquipment` (57), `PhysicalEnchantWeapon` (20) and `PhysicalEnchantArmor` (21) actions only
+  logged. Rust ports the 1.2 client's pair predicate `FUN_397cca90` (`X2RenewItem.Renew` ->
+  `FUN_394e92d0`): armor needs a `base_equipment` source and a non-`base_equipment` target with
+  the same armor-type record; a weapon needs the same holdable slot type and renew category, with
+  the renew category in 1..3. The client's toast ids are sent for the same refusals (20 slot out
+  of range, 27 item missing, 206 not a bag item, 1 not a renewable pair). For 20/21 the
+  enchanter's `physical_enchant_abilities` row (npc template id, armor flag, next enchant step)
+  is checked: `min_friendship > 0` is always unmet because 1.2 grants no NPC friendship
+  (`track_friendship` is false for every NPC), and the row's `success_ratio` is rolled. The next
+  enchant step is INFERRED as `temper_physical - 100 + 1` (`IT2-ENCHANT-LEVEL`). Stage 1 never
+  changes an item: what a success consumes / transforms is capture-blocked (`IT2-STAGE2`); the
+  outcome is logged. The enchanter NPC is the cast's NPC operand when it has one, else the
+  character's current interaction object (`CSInteractNPC`), because the 1.2 cast carries no NPC.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -4469,7 +4527,7 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   item task packets queued earlier (the C# sends those inline first too). `quests::events::with_quests`
   logs an error and returns `None` when the thread already holds the ops lock instead of hanging.
 
-* `CharacterManager.Create` (starter action bar, WP-N1, 2026-11-06): the C# assigned every supply sequentially from slot 10 in `character_supplies` order, so the teleport scroll and the two emote items landed at 10 / 11 / 12 while the 1.2 client's `default_action_bar_actions` authors 18791 -> 10, 18792 -> 11, 4045 -> 12. The Rust loads that table (`data/character_templates.rs`) and places the granted supplies at the authored slots; supplies without a row take the next free slot from 13 on (417 -> 13 in the shipped data), so class supplies no longer share the default bar. The client also loads the table itself (`dll.c:1688905`); its use there is UNKNOWN (likely the reset action-bar button), so matching the authored slots is the safe reading.
+* `CharacterManager.Create` (starter action bar, WP-N1, 2026-11-06): the C# assigned every supply sequentially from slot 10 in `character_supplies` order, so the teleport scroll and the two emote items landed at 10 / 11 / 12 while the 1.2 client's `default_action_bar_actions` authors 18791 -> 10, 18792 -> 11, 4045 -> 12. The Rust loads that table (`data/character_templates.rs`) and places the granted supplies at the authored slots; supplies without a row take the next free slot from 13 on (417 -> 13 in the shipped data), so class supplies no longer share the default bar. The client also loads the table itself (`dll.c:1688905`); its use there is UNKNOWN (likely the reset action-bar button), so matching the authored slots is the safe reading. `default_inventory_tabs` / `default_inventory_tab_groups` are client-only: the 1.2 client loads both itself (`dll.c:1475546-1475711`) and the server has no tab packet or persisted tab state to apply them to, so they stay unread server-side.
 * `CharacterManager.Create` saved only the `characters` row (`SaveDirectlyToDatabase`); the starting supplies (`item_containers` / `items`) waited for the next `SaveManager` run or the departure save. A server stop or crash in that window kept the character but lost its items, and the next select built empty containers. `db_character::save_new_character_locked` now writes the new character's dirty containers and items in the same transaction (`ItemManager::prepare_save_for_owner`). Creation holds the save transaction lock from before inventory registration through commit or cleanup; setup errors and failed saves discard the rejected containers/items before releasing the name and character ID, without consuming other owners' changes or queued deletions. Canceled item deletions are recorded at each starter allocation, including IDs another owner releases after setup begins, and restored on rollback. Suite `rust/verify/newchar-items.vtest` uses a fresh character on every run, including reruns of its provisioned account.
 
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
@@ -6926,6 +6984,50 @@ Each fails on its mutation (grade filter `-1`, main-grade branch removed, equipm
 removed, per-row instead of summed counts, highest instead of lowest slot, `LockedOnly`
 downgraded to `Missing`, hand-out grade filter removed).
 
+## Item crafter (2026-11-07)
+
+The crafter of a crafted item is sent to the 1.2 client in the item record's `madeUnitId` field
+(items-crafting#11 / mysql-schema#8 crafter half; the audit's "items have no crafter id" row was
+stale for single-stack products, and stackables were still empty).
+
+- **Client field (EVIDENCED).** The standard item reader `FUN_3961f500`
+  (`x2game.dll.c:1301392`) reads `templateId`, `id`, `grade`, `flags`, `count`, `detailType`
+  + detail, `creationTime`, `lifespanMins`, one u32, `worldId`, `unsecure`, `unpack`; the u32 is
+  the item field at `+0x14` (`Item.Write`'s `MadeUnitId`). The tooltip builder `FUN_39423560`
+  (`:865915`) takes `piVar1[5]` (`+0x14`) and resolves a **character name** through
+  `FUN_390192e0` / `FUN_39018560`, and the `worldId` at `piVar1[0x2a]` to
+  `craftedWorldName`; there is no name string in the item detail (`FUN_3961edf0` has fixed
+  bodies only), so the field is an **id**, not a name, and the client resolves it itself.
+- **What the server wrote before.** `AcquireDefaultItemEx` filled it only when
+  `template.MaxCount == 1` (the removed C# `ItemContainer.cs` did the same), so crafted
+  equipment / trade packs carried the crafter but stackable products sent 0. The client reader
+  has no such restriction.
+- **Rust.** `items.crafter_id` (schema below) is set for **every** crafted product in
+  `acquire_default_item_ex`; single-stack products also keep `made_unit_id = crafter_id` and
+  the default `world_id`, as the C# did. `Item::crafter()` returns `crafter_id` and falls back
+  to `made_unit_id`, so rows written before the column (and the non-craft uses of
+  `made_unit_id`: fish template id, music sheet author) keep sending exactly what they sent
+  before. `Item::write` and `ItemTask::write_task_item_details` write `crafter()` into the
+  client field; specialty reads the same accessor. Mail attachments, auction lots, bank moves
+  and trade-packs moved through the system container carry the whole item, and the
+  cancelled-cast restore copies `crafter_id`; the craft path is the only writer.
+- **Deviation from the C#.** The C# limitation to `MaxCount == 1` is not evidenced by the
+  client; the Rust records stackables too. A stack merged from two crafters keeps the first
+  crafter's id (the same value the client shows for the stack); this is the best a single
+  wire field can express and is recorded here rather than inventing a per-unit crafter.
+- **Schema.** `SQL/updates/2026-11-07_aaemu_game_item_crafter.sql` (guarded: adds
+  `crafter_id int unsigned NOT NULL DEFAULT 0` after `made_unit_id` only when missing) and the
+  base `SQL/aaemu_game.sql`. `ItemManager::save` / `load_user_items` carry the column.
+- **Tests.** `item::tests::crafted_item_write_puts_the_crafter_id_in_the_made_unit_field` and
+  `item::tests::item_without_a_crafter_column_keeps_the_legacy_made_unit_id_on_the_wire`
+  (byte-exact against the `FUN_3961f500` layout), `item_task::tests::item_add_writes_the_crafter_id_in_the_made_unit_field`,
+  the craft flow assertions in `craft_batch_consumes_materials_adds_products_and_reschedules`
+  and `craft_trade_pack_equips_into_backpack_slot`, and the MySQL round trip
+  `private_mysql_item_crafter_survives_save_and_load` (gated by `AAEMU_TEST_MYSQL`).
+- **Left as-is.** Craft pay (`CSSetCraftingPayPacket`) rules stay capture-pending (see "Craft
+  material grades and product grade"); `doodad_func_craft_grade_ratios` has 0 rows; the Mia
+  mail variants stay capture-pending.
+
 ## Recipe learning and the learned-craft gate (2026-11-04)
 
 `TrainCraftEffect` was trace-only in the C# and in the port, so a recipe item was consumed and
@@ -7067,16 +7169,23 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
 
 ## Static-table and feature verdicts (2026-11-06, recorded so they are not reopened)
 
-* **`equip_slot_groups` (24 rows) is not read; `equip_slot_group_maps` (48 rows) is.**
-  Equipping keeps the hard-coded `allowed_gear_slots` (`models/container.rs:93`, the C#
-  `EquipmentContainer.GetAllowedGearSlots`); the maps are read only by the lunagem check
-  (`item_sockets.equip_slot_group_id` -> `equip_slot_group_maps` -> target slot type,
-  `data/items.rs:1154-1159`, `systems/economy/item_effects.rs:755`). The optional data guard
-  (every map row matches the hard-coded table) is not needed until the group table gains a
-  consumer.
+* **`equip_slot_groups` (24 rows) is loaded; `equip_slot_group_maps` has 48 rows, 47 loaded.**
+  The group table is the parent of the maps, and the lunagem check now requires it
+  (`item_sockets.equip_slot_group_id` -> `equip_slot_groups` + `equip_slot_group_maps` ->
+  target slot type, `data/items.rs`, `systems/economy/item_effects.rs`). Map 10 names the
+  missing group 9 and is skipped at load, like the orphan `item_sockets` rows. Equipping keeps
+  the hard-coded `allowed_gear_slots` (`models/container.rs`, the C#
+  `EquipmentContainer.GetAllowedGearSlots`): the data has no target equip-slot column, so it
+  cannot express that rule. The real-data guard
+  `real_compact_equip_slot_groups_guard_the_hard_coded_slots` checks that every mapped slot
+  type is one the hard-coded table accepts and that the nine base groups still name the same
+  equip slots.
 * **`item_bags` has 5 rows whose ids do not resolve** (no item template references them). The
   1.2 client loads the table itself (`strings.txt:13953`); there is no reachable template and
   no known server rule, so there is nothing to load. Do not reopen.
+* **`item_tools` (130 rows) is client-side**: the 1.2 client loads `item_id, asset_id` for the
+  tool visual (`strings.txt` 13836), and `crafts.tool_id` is 0 in all 7 010 rows, so no server
+  check uses it.
 * **`expert_limits` prices are empty:** every `up_price` / `down_price` is 0 and `advantage` is
   a client display value (31 rows checked). The server uses the limit columns for
   labor/expand steps and charges the configured items, so there is no price to enforce.
@@ -7179,3 +7288,48 @@ Tests: `version_24_keeps_the_32_entry_surface_table_without_moving_the_nodes`,
 `strict_surface_rule_is_off_by_default`, `strict_surface_rule_honours_the_house_and_group_skips`,
 `strict_surface_rule_does_nothing_without_surface_data`, the gated
 `real_compact_db_doodads` (2,361 rows) and `real_main_world_surface` (known coordinates).
+
+## Gap audit verdicts (2026-11-07)
+
+Closing batch for the remaining `D:/aaemu-audits/gap-audit-2026-11-02` research of 2026-11-07
+(`research/batch-2026-11-07.md`). Client evidence is the 1.2 decompile
+`D:/aa-re/client12/out-x2game/x2game.dll.c` ("dll.c") and the packed tables, read-only; server
+paths are relative to `rust/crates/aaemu-game/src/`. Verdicts: **client-only** (the client acts
+from its own tables / UI, the server has nothing to send), **debug-only**, **no 1.2 trigger**
+(nothing in the 1.2 client or data sends it), **capture-blocked** (needs a real-client /
+original-server capture) and **done elsewhere**. No behaviour changes come from this batch
+except the new, still unsent 0x07e definition.
+
+| item | verdict | evidence |
+|---|---|---|
+| `skills.start_autoattack` | client-only | Client only: the loader `LoadSkillDescs` (`dll.c:1578270`) maps column 104 to template `+0x158`; `FUN_39390f80` (`dll.c:742551`) special-cases the default melee skill (`DAT_39ac769c` = 2 in `x2game_unpacked_data.dll`) and keeps the combat stance alive for a `+0x158` skill; `FUN_39355ee0` (`dll.c:689991`) refreshes the stance timestamp `+0x5fc0` in 1000 ms windows and sets the actor combat flag `+0x428` for `DAT_39ac7424` = 10000 ms. No packet is sent. Data: 313 of 15,126 skills have the flag; skills 2 / 3 / 4 have `'f'`. Server auto-attack stays default-skill driven (`systems/skills/handlers.rs:471-474`, `systems/skills/skill.rs:2902`, `:2945`). |
+| `skills.stop_autoattack` | client-only | Loader column 105 -> `+0x159`; 146 rows. Only the copy constructor reads it; no consumer found by a byte-read search (INFERRED unused). Nothing to port. |
+| `skills.auto_fire` | client-only | Loader column 7 -> `+0x19`; readers `FUN_392c6830` (`dll.c:565429`, the key-hold cast loop) and `FUN_39390900` (`dll.c:742241`, suppresses the failure text while repeating). 26 rows. |
+| special effects 34-38 (Anim, FxGroup, FxGroupAnim, Projectile, ProjectileAnim) | client-only | The client loads `special_effects` itself (`strings.txt:14202`), so the visuals need no server state; rows 2,319 / 768 / 545 / 1,019 / 168. The server only logs (`systems/skills/effects/special/mod.rs:291`, fall-through `:378-393`; the `PROJECTILE` const is at `:28`). |
+| special effect 42 (OpacityControl) | client-only | 26 rows; an NPC spawn/despawn fade the client plays from its own tables. |
+| special effect 48 (Combo) | client-only | 29 rows; `value1` = next skill, `value2` = window in ms; the client drives the combo chain. |
+| special effect 55 (Detach) | client-only | 15 rows; the C# body only logged and its unmount is commented out (`special/mod.rs:378-379`). |
+| special effect 63 (CombatText) | client-only | 20 rows, all `value1..4` 0; nothing carries a text id, so there is nothing to send. |
+| special effects 67 (CombatDice) / 70 (NotifyQuest) | done elsewhere | 67 is the plot combat-dice marker (`systems/skills/plots.rs:644`); 70 fires in `plots::finish_item_plot`. |
+| special effects 76-78 (ClearProjectile, RetrieveProjectile, AddFxToProjectile) | client-only | 26 / 8 / 7 rows; projectile visuals the client owns. |
+| special effect 19 (SpawnBomb) | capture-blocked | 2 rows (skills 10492 / 10503, `value1` npc 376 "Bomb"); the `SCBombUpdated` 0xaa reader is `FUN_397c6a10` (`dll.c:1721438`, `bc bombId`) but the owner / timer / explosion rules are UNKNOWN (`research/combat-ai.md` WP-7). Do not schedule; a capture of skill 10492 is needed. |
+| special effects 84 / 88 / 89 (ReportBotArrested, ApplyBotTrial, ArrestBot) | capture-blocked | One row each; the trial state machine is UNKNOWN (`research/combat-ai.md` WP-4). `SCSuspectGoingBotTrial` is typed but never sent (`systems/social/packets/trial.rs:319-320`). |
+| special effects 20 / 21 / 57 (PhysicalEnchantWeapon / Armor, RenewEquipment) | done elsewhere | Implemented by `feat/items9` (`systems/skills/effects/special/mod.rs:312-313`, `:338`). |
+| `CSQuestStartWith` 0x0db | no 1.2 trigger (log-only correct) | Client writer `FUN_397c5450` (`dll.c:1720446`) + `FUN_397be540` (`dll.c:1715866`, `u8 type` tail). Only two send sites: type 2 level-up, `FUN_39378660` (`dll.c:719962`, call at `:720032`), and type 3 NPC emotion, `FUN_39378930` (`dll.c:720132`, call at `:720204`); types 1 / 4 are never sent. The server already starts level-up quests (`systems/quests/events.rs:970`); the single emotion act 20923 points at missing component 15266 (orphan). Reader and log-only handler: `systems/quests/packets.rs:533-595`. |
+| `SCShowQuestArea` 0x1af | debug-only | Reader `FUN_397b7940` (`dll.c:1710613`) = `u32 questType`, `Area{i64,i64,f32}`, `f32 radius`; handler `FUN_391df7b0` (`dll.c:372352`) -> `FUN_393840b0` (`dll.c:731288`) stores `{questType, LOCAL PLAYER position, radius}` and ignores the packet's area; `FUN_393822f0` (`dll.c:729680`) draws each entry as a debug sphere labelled `"stype: %u"` (`dll.c:729703`). Keep defined-only (`systems/quests/ui_packets.rs:15-46`). |
+| `SCQuestAcceptConditional` 0x14a | capture-blocked | Reader `FUN_397b5d80` (`dll.c:1709358`) = two `u32`; handler `FUN_391dbed0` (`dll.c:369454`) -> `FUN_39376690` (`dll.c:718056`) raises event 0xec `START_QUEST_CONTEXT_SPHERE`; the native sender `FUN_393762c0` (`dll.c:717811`) validates NPC/doodad reach and the sphere id, then sends `CSStartQuestContext` 0xd5. Which quests get the dialog instead of the auto start is UNKNOWN; data has 485 `QuestActConAcceptSphere` acts and 4 `SphereAcceptQuest` spheres (1040, 1453, 1520, 2236). The server starts sphere quests on entry (`systems/quests/events.rs:1091`). |
+| `SCQuestList` 0x065 | client-only (no-op) | Handler `FUN_391dc0d0` (`dll.c:369556`) -> `FUN_39375e40` (`dll.c:717468`) is an empty function. |
+| `SCQuestMailSent` 0x150 | no 1.2 trigger | Reader `FUN_397b5f00` (`dll.c:1709428`) = one `u32`; the shipped `quest_mails` table has one test row and no client sender exists. Skip. |
+| `SCAchievementReseted` 0x1ff | no 1.2 trigger | Deliberately never sent (see "Achievement producers (live wiring)" above and `systems/social/packets/misc.rs:366-369`). |
+| `SCWorldInteractionSkillList` 0x07e | definition done; sender capture-blocked | Reader `FUN_397c2d70` (`dll.c:1718587`) + `FUN_397bef50` (`dll.c:1716216`, vtable `399b36e4`): `bc, bc, {bc, bc, u32, bc, i32 interactCount (at most 10 read), i32 extraInfo, u32[interactCount]}, u8 mouseButton, i32 modifierKeys`. Handler `FUN_391d9080` (`dll.c:367102`) -> `FUN_393b7440` (`dll.c:773715`) copies the 0x40-byte info, resolves the second `bc` through the world-object table (`FUN_39035110`, `dll.c:52819`) as the doodad and starts `skillId[0]` after the `max_interaction_doodad_distance` check (`FUN_39093800`, `dll.c:129660`). Definition and byte test: `systems/npcs/doodad/packets.rs`; not sent (trigger unknown, CAP-INT-1). |
+| `SCWorldInteractionCanceled` 0x07f | capture-blocked | Reader `FUN_397c6540` (`dll.c:1721218`) = `bc interactedUnitId, u32 interactedDoodadId`. Defined (`systems/npcs/doodad/packets.rs:110-128`) but never sent. INFERRED trigger: the server ends an active interaction effect; the client also drops the doodad through `SCDoodadRemoved`, so the benefit is unproven. |
+| `CSSelectInteractionEx` 0x06b | capture-blocked | Lua `X2Interaction.SelectInteraction` `FUN_3947dac0` (`dll.c:937501`): with an interaction effect object it calls `FUN_393b3120` (`dll.c:770058`), which sends `bc targetId, i32 interactionEx, i32 var1` and closes the window; otherwise the client starts the skill locally and sends nothing special. The original server's reply is UNKNOWN; the server keeps the reader / debug log (`systems/npcs/npc/packets.rs:531-569`). |
+| `SCItemTaskNotify` 0x091 | client-only (no-op) | Reader `FUN_397b3810` (`dll.c:1707570`); handler `FUN_391d5370` (`dll.c:364346`) only logs `OnItemTaskNotify` and returns. Definition: `systems/economy/item_notify_packets.rs:121-157`. |
+| `SCCraftItemUnlock` 0x0f5 | no server action | Reader `FUN_397b4c60` (`dll.c:1708521`) = one `u8` slot type, one `u8` slot index; handler `FUN_391d9700` (`dll.c:367435`) -> `FUN_397d2200` (`dll.c:1730226`) re-reads the slot as unlocked (a refresh). The server never locks craft materials (`systems/economy/craft.rs:451-453` only checks what the bag can pay), so there is nothing to release. |
+| `SCItemDetailUpdated` 0x093 | done elsewhere | Reader `FUN_397b3840` (`dll.c:1707581`); handler `FUN_394e47b0` (`dll.c:1021672`) copies the detail into the slot in place. In-place detail changes already travel in `SCItemTaskSuccess` update tasks. |
+| `SCMileageChanged` 0x101 | no source of mileage (capture-blocked if wanted) | Reader `FUN_397c66b0` (`dll.c:1721278`) = `bc unitId, i32 mileage`; handler `FUN_391d9ea0` (`dll.c:367848`) -> `FUN_39357390` (`dll.c:691067`) raises UI event 0xbd, consumed as floating combat text on the mount. `Mate.mileage` is stored (`models/mate.rs:30`, `systems/vehicles/mates.rs:973`) but no code changes it and no compact column feeds it. |
+| `SCMineAmount` 0x124 | client-only | Reader `FUN_397af1b0` (`dll.c:1703958`) = `i32 amount`; event `MINE_AMOUNT` (0xd4) is registered but no Lua listens and no native code raises it. |
+| `SCHouseFarm` 0xc3 | capture-blocked | Reader `FUN_397aece0` (`dll.c:1703709`) = string name, `i32 total`, `i32 harvestable`; the handler shows the `HOUSE_FARM_MSG` chat line. The retail trigger is UNKNOWN and farm bookkeeping is not implemented (`research/housing.md` WP-F1). |
+| `SCHouseBuildPayChanged` 0xbf | no 1.2 trigger | Reader `FUN_397b4000` (`dll.c:1707972`) = `u16 tl, i32 moneyAmount`; only the setter `CSChangeHousePay` would send it, and that C->S opcode does not exist in 1.2 (`systems/housing/packets.rs:56-61`). |
+| `SCHouseOwnerNameChanged` 0xcb | no 1.2 trigger | Reader `FUN_397b44b0` (`dll.c:1708167`) = `u16 tl, string newName`; 1.2 has no in-world house rename (only the character-select rename), so nothing sends it (`systems/social/packets/misc.rs:248-253`). |
+| todos-1#13 leftovers | done / capture-pending | Loot-pack inherited grade: `systems/economy/item_effects.rs:1794-1797` (the descriptor `FUN_396e91c0`, `dll.c:1506218`, cannot name the ActAbility; ITEM-LOOT-GRADE). Skinize on an already skinized item keeps `ITEM_LOOK_CONVERT_AS_NOT_USE_AS_SKIN`: `ui_texts` has no more specific look-conversion text (`systems/economy/bridges.rs:1899-1901`). Expand-expert failure sends `STORE_UNKNOWN_ERROR` (`systems/economy/store.rs:1098`). `SwapAction::DoNothing` is unreachable. |

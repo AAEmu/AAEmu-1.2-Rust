@@ -42,6 +42,10 @@
             "Enabled": true,
             "Start": "",
             "End": ""
+        },
+        "ScheduledEvents": {
+            "Enabled": false,
+            "Events": []
         }
     }
 }

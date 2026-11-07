@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 68,
-    "never_sent": 53
+    "typeless": 67,
+    "never_sent": 52
   },
   "typeless": [
     "SCAiDebugPacket",
@@ -71,7 +71,6 @@
     "SCUnkPacket8",
     "SCWorldAABBPacket",
     "SCWorldAimPointPacket",
-    "SCWorldInteractionSkillListPacket",
     "SCWorldRayCastingResultPacket"
   ],
   "never_sent": [
@@ -113,8 +112,6 @@
     "SCRaceCondPacket",
     "SCRacingPacket",
     "SCRacingResultPacket",
-    "SCScheduledEventEndedPacket",
-    "SCScheduledEventStartedPacket",
     "SCSearchListPacket",
     "SCShowQuestAreaPacket",
     "SCSpamReportedPacket",
@@ -126,6 +123,7 @@
     "SCUnknownPacket",
     "SCUnlockCurrencySlotPacket",
     "SCWorldInteractionCanceledPacket",
+    "SCWorldInteractionSkillListPacket",
     "SCWorldMessagePacket",
     "SCWorldQueuePacket"
   ]

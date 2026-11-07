@@ -437,6 +437,7 @@ impl ItemsData {
             count: 1,
             lifespan_mins: 0,
             made_unit_id: 0,
+            crafter_id: 0,
             world_id,
             create_time: now,
             unsecure_time: 0,

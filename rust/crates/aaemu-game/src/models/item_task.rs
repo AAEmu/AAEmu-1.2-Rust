@@ -364,7 +364,7 @@ pub fn write_task_item_details(s: &mut PacketStream, item: &Item) {
     write_padded_details(s, item);
     s.write_i64(item.create_time)
         .write_i32(item.lifespan_mins)
-        .write_u32(item.made_unit_id)
+        .write_u32(item.crafter())
         .write_u8(item.world_id)
         .write_i64(item.unsecure_time)
         .write_i64(item.unpack_time);
@@ -751,5 +751,32 @@ mod tests {
             s.len(),
             3 + 4 + 8 + 1 + 1 + 4 + 2 + 128 + 8 + 4 + 4 + 1 + 8 + 8
         );
+    }
+
+    /// The craft result (`ItemTask::add`) carries the crafter in the client's `madeUnitId`
+    /// field, the value the 1.2 tooltip resolves to the crafter's name.
+    #[test]
+    fn item_add_writes_the_crafter_id_in_the_made_unit_field() {
+        let mut i = item();
+        i.crafter_id = 42;
+        let mut s = PacketStream::new();
+        ItemTask::add(&i).write(&mut s);
+        let mut w = PacketStream::new();
+        w.write_u8(5).write_u8(2).write_u8(4);
+        w.write_u32(500)
+            .write_u64(0x11)
+            .write_u8(0)
+            .write_u8(0)
+            .write_i32(3)
+            .write_i16(128)
+            .write_u8(0);
+        w.write_raw(&[0u8; 127]);
+        w.write_i64(77)
+            .write_i32(0)
+            .write_u32(42)
+            .write_u8(1)
+            .write_i64(0)
+            .write_i64(0);
+        assert_eq!(s.as_bytes(), w.as_bytes());
     }
 }

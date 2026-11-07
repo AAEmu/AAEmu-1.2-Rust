@@ -67,6 +67,18 @@ pub struct DungeonsConfig {
         deserialize_with = "lenient"
     )]
     pub kick_on_battlefield_faction_change: bool,
+    /// `EnforceNoPvp` (Rust-only, default `true`): inside an instance whose `indun_zones` row
+    /// has `pvp = false`, a character-owned attacker cannot attack another character-owned
+    /// unit. The 1.2 client already resolves such a pair as non-hostile
+    /// (`FUN_390281c0` / `FUN_39837a40`); `false` restores the pre-rule faction-only decision.
+    #[serde(rename = "enforcenopvp", deserialize_with = "lenient")]
+    pub enforce_no_pvp: bool,
+    /// `NoGraveyardUseReturnPortal` (Rust-only, default `true`): in an instance whose
+    /// `indun_zones` row has `has_graveyard = false`, a temple resurrection uses the closest
+    /// open-world return portal (the client's ordinary "Revive", not "Revive at the entrance")
+    /// before the instance's Temple Priestess. Inferred destination, see `PORTING.md`.
+    #[serde(rename = "nograveyardusereturnportal", deserialize_with = "lenient")]
+    pub no_graveyard_use_return_portal: bool,
 }
 
 impl Default for DungeonsConfig {
@@ -77,6 +89,8 @@ impl Default for DungeonsConfig {
             auto_team_disband_kick_time: 30,
             auto_create: Vec::new(),
             kick_on_battlefield_faction_change: true,
+            enforce_no_pvp: true,
+            no_graveyard_use_return_portal: true,
         }
     }
 }
@@ -92,6 +106,8 @@ mod tests {
                 "AutoCleanupAfterKick": false,
                 "AutoTeamDisbandKickTime": 15,
                 "KickOnBattlefieldFactionChange": false,
+                "EnforceNoPvp": false,
+                "NoGraveyardUseReturnPortal": false,
                 "AutoCreate": [ { "Id": 1, "Name": "arche_mall_world", "Channel": 0 } ]
             },
             "World": { "MaxInstances": 7 }
@@ -100,6 +116,8 @@ mod tests {
         assert!(!c.dungeons.auto_cleanup_after_kick);
         assert_eq!(c.dungeons.auto_team_disband_kick_time, 15);
         assert!(!c.dungeons.kick_on_battlefield_faction_change);
+        assert!(!c.dungeons.enforce_no_pvp);
+        assert!(!c.dungeons.no_graveyard_use_return_portal);
         assert!(
             AppConfig::default()
                 .dungeons
@@ -112,6 +130,8 @@ mod tests {
         let d = AppConfig::default();
         assert!(d.dungeons.auto_cleanup_after_kick);
         assert_eq!(d.dungeons.auto_team_disband_kick_time, 30);
+        assert!(d.dungeons.enforce_no_pvp);
+        assert!(d.dungeons.no_graveyard_use_return_portal);
         assert_eq!(d.world.max_instances, 32);
     }
 
