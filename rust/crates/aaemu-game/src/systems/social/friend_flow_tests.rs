@@ -116,7 +116,7 @@ async fn add_friend_refusals_answer_unknown_self_and_duplicate() {
 }
 
 #[tokio::test]
-async fn add_friend_of_a_character_that_blocked_the_owner_stays_silent() {
+async fn add_friend_of_a_character_that_blocked_the_owner_answers_unknown_user() {
     let server = test_server();
     let mut a = pc(&server, 1, "Al");
     let b = pc(&server, 2, "Bob");
@@ -125,7 +125,13 @@ async fn add_friend_of_a_character_that_blocked_the_owner_stays_silent() {
 
     a.send(&server, cs::CSAddFriendPacket, name_body("Bob"))
         .await;
-    assert!(a.frames().is_empty());
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCAddFriendPacket,
+            body(&SCAddFriendPacket::failure(551, "Bob"))
+        )]
+    );
     assert!(a.p.data().friends.is_empty());
 }
 

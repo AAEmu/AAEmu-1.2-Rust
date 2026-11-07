@@ -182,8 +182,8 @@ pub async fn friend_infos(server: &GameServer, ids: &[u32]) -> Vec<FriendInfo> {
 /// exist." from `FriendInfo.name` and the localized text for the others). Adding yourself is
 /// refused with 501: a deviation from the C# `AddFriend`, which only rejected a missing or
 /// duplicate id (recorded in `PORTING.md`). The already-a-friend id 502 is INFERRED (no
-/// dedicated client text). A target that blocked the owner stays silent (capture-pending,
-/// case `BLOCK-LIST-2`). There is no list-size cap (no client constant exists).
+/// dedicated client text). A target that blocked the owner is answered with 551 as if
+/// unknown (capture-pending, case `BLOCK-LIST-2`). There is no list-size cap (no client constant exists).
 pub async fn add_friend(server: &GameServer, owner: &PlayerRef, name: &str) {
     let Some(friend) = friend_info_by_name(server, name).await else {
         owner.send(SCAddFriendPacket::failure(USER_NOT_EXIST, name));
@@ -202,6 +202,9 @@ pub async fn add_friend(server: &GameServer, owner: &PlayerRef, name: &str) {
         .character_by_id(friend.character_id)
         .is_some_and(|target| is_blocked_by(&target, owner.character_id))
     {
+        // The client has no "target blocked you" text; answer with the unknown-user error
+        // (551) so the owner gets a reply without learning about the block.
+        owner.send(SCAddFriendPacket::failure(USER_NOT_EXIST, name));
         return;
     }
     let id = match server.ids.friend.get_next_id() {
