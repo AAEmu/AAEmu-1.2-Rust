@@ -392,10 +392,11 @@ async fn upload_accepts_exactly_max_song_chars() {
 }
 
 #[tokio::test]
-async fn upload_rejects_a_mismatched_song_size() {
+async fn upload_accepts_a_mismatched_song_size() {
+    // The client writer's size unit is not evidenced: warn, do not drop.
     let (server, mut client, _player, instrument, _) = upload_fixture();
     upload(&server, &mut client, 4, instrument, "abc").await;
-    assert!(server.systems.services.music.queued_upload(1).is_none());
+    assert!(server.systems.services.music.queued_upload(1).is_some());
 }
 
 #[tokio::test]
