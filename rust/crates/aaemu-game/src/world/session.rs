@@ -996,6 +996,7 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
     crate::systems::social::session::on_notify_in_game_trial(server, &p);
     crate::systems::social::session::on_notify_in_game_achievements(server, &p);
     crate::systems::npcs::schedule_item_session::on_enter(server, &p);
+    crate::systems::npcs::schedule_events::on_enter(server, &p);
     tracing::info!("NotifyInGame: {name} ({id})");
 }
 
