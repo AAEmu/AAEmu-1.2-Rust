@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 67,
-    "never_sent": 54
+    "never_sent": 52
   },
   "typeless": [
     "SCAiDebugPacket",
@@ -112,8 +112,6 @@
     "SCRaceCondPacket",
     "SCRacingPacket",
     "SCRacingResultPacket",
-    "SCScheduledEventEndedPacket",
-    "SCScheduledEventStartedPacket",
     "SCSearchListPacket",
     "SCShowQuestAreaPacket",
     "SCSpamReportedPacket",

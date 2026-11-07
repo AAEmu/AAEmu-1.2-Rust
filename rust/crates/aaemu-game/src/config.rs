@@ -733,6 +733,40 @@ pub struct EventsConfig {
     /// `Events:Halloween`.
     #[serde(rename = "halloween")]
     pub halloween: HalloweenConfig,
+    /// `Events:ScheduledEvents`.
+    #[serde(rename = "scheduledevents")]
+    pub scheduled_events: ScheduledEventsConfig,
+}
+
+/// `Events:ScheduledEvents` (Rust only, gap audit `sc-unused-3#3`): the allow-list of
+/// `game_schedules` rows whose window edges are announced with `SCScheduledEventStartedPacket`
+/// (0x1ec) / `SCScheduledEventEndedPacket` (0x1ed). Off by default: the wire format is
+/// client-evidenced, but the original trigger and message text are INFERRED (no original-server
+/// capture exists). An empty list announces nothing. The client keeps one active event id, so
+/// configuring overlapping events means a later Started replaces the earlier one.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScheduledEventsConfig {
+    #[serde(rename = "enabled", deserialize_with = "lenient")]
+    pub enabled: bool,
+    /// The allow-list in announcement order (`system::npcs::schedule_events`).
+    #[serde(rename = "events")]
+    pub events: Vec<ScheduledEventEntry>,
+}
+
+/// One allow-listed event: the `game_schedules` row and the texts the client shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ScheduledEventEntry {
+    /// `game_schedules.id` (must exist; invalid and duplicate ids are skipped at startup).
+    #[serde(rename = "scheduleid", deserialize_with = "lenient")]
+    pub schedule_id: i32,
+    /// The banner text of the opening edge (`SCScheduledEventStartedPacket.openMsg`).
+    #[serde(rename = "openmsg")]
+    pub open_msg: String,
+    /// The banner text of the closing edge (`SCScheduledEventEndedPacket.closeMsg`).
+    #[serde(rename = "closemsg")]
+    pub close_msg: String,
 }
 
 /// `Events:Halloween`: the window applied in memory to the retail Halloween rows of
@@ -1837,6 +1871,33 @@ mod tests {
         assert!(!cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "2026-10-14T00:00:00Z");
         assert_eq!(cfg.events.halloween.end, "2026-11-01T00:00:00Z");
+    }
+
+    #[test]
+    fn scheduled_events_default_off_and_bind_leniently() {
+        let cfg = AppConfig::from_value(json!({})).unwrap();
+        assert!(!cfg.events.scheduled_events.enabled);
+        assert!(cfg.events.scheduled_events.events.is_empty());
+
+        let cfg = AppConfig::from_value(json!({
+            "Events": { "ScheduledEvents": {
+                "Enabled": "True",
+                "Events": [
+                    { "ScheduleId": "14", "OpenMsg": "Weekend dungeon open",
+                      "CloseMsg": "Weekend dungeon closed" }
+                ]
+            } }
+        }))
+        .unwrap();
+        assert!(cfg.events.scheduled_events.enabled);
+        assert_eq!(
+            cfg.events.scheduled_events.events,
+            vec![ScheduledEventEntry {
+                schedule_id: 14,
+                open_msg: "Weekend dungeon open".into(),
+                close_msg: "Weekend dungeon closed".into(),
+            }]
+        );
     }
 
     #[test]
