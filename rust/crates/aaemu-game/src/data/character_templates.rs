@@ -539,6 +539,11 @@ mod tests {
             .blocked_names
             .iter()
             .any(|n| n.text == "GM" && !n.partial_match));
+        // Shipped 1.2 data: the authored starter action bar (services-misc#7).
+        assert_eq!(
+            data.default_action_bar_actions,
+            vec![(18791, 10), (18792, 11), (4045, 12)]
+        );
         // Shipped 1.2 data: lowercase Latin and Hangul syllables, no digits.
         assert!(data.allowed_name_chars.contains(&'a'));
         assert!(data.allowed_name_chars.contains(&'가'));
