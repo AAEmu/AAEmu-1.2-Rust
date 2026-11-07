@@ -524,6 +524,49 @@ Victory reward event chains are not implemented. Existing NPC skills, AI and que
 handle controller behavior and ordinary drops; confirm the event's gameplay with
 the target 1.2 client before exposing it to players.
 
+## Scheduled event announcements (`Events:ScheduledEvents`)
+
+The server can announce the opening and closing of a `game_schedules` window; the 1.2 client
+shows `SCScheduledEventStartedPacket` (0x1ec) as a centre banner and turns on its day-event HUD
+button, and `SCScheduledEventEndedPacket` (0x1ed) closes it. The feature is **off by default**
+and announces only allow-listed schedule ids. The packet layout is taken from the 1.2 client;
+the original zone server's trigger and texts are not captured, so the behaviour below is
+**inferred**.
+
+Add this to the game's `Config.Local.json`:
+
+```json
+{
+  "Events": {
+    "ScheduledEvents": {
+      "Enabled": true,
+      "Events": [
+        {
+          "ScheduleId": 14,
+          "OpenMsg": "The weekend dungeon is open.",
+          "CloseMsg": "The weekend dungeon has closed."
+        }
+      ]
+    }
+  }
+}
+```
+
+`ScheduleId` is a `game_schedules.id` of `compact.sqlite3` (14 is the shipped
+`[주말던전] 영원의 섬` weekend-dungeon window; query the file with any SQLite tool).
+`OpenMsg` / `CloseMsg` are sent verbatim and cut to 127 UTF-8 bytes (the client's buffer).
+The list is validated at startup: an unknown schedule id is skipped with a warning, a
+duplicate id keeps the first entry, and an overlength message is warned about.
+`Enabled: false` or an empty `Events` list (the default) disables the feature.
+
+The list is evaluated every 30 seconds with the schedule check that already gates scheduled
+NPCs, doodads and quests. The first evaluation after a restart only records the current state,
+so a running event is not re-announced; players entering the world while it is open receive
+Started. The 1.2 client keeps **one** active event at a time: with overlapping windows a later
+Started replaces the previous one and the earlier id's Ended is ignored, so allow-list one
+event per time window. Rows without a dated end (the all-zero placeholder rows) stay open
+forever under this check; use rows with real dates.
+
 ## Dungeon PvP and resurrection flags
 
 `compact.sqlite3` `indun_zones` stores `pvp` and `has_graveyard` per dungeon zone
