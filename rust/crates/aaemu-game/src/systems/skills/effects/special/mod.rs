@@ -382,7 +382,8 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         // `value2` window in ms): neither needs a server action, so both only log.
         // NotifyQuest (70) already fires in plots::finish_item_plot. DeclareIndependence (71)
         // is routed to the social subsystem (`SocialForSkills::apply_special_effect`).
-        // Every other class only logs (`if (caster is Character) Logger.Debug(...)`).
+        // Every other class only logs (`if (caster is Character) Logger.Debug(...)`); the
+        // 2026-11-07 verdicts for the remaining types are in `PORTING.md`.
         _ => match special_type_name(kind) {
             Some("Unk9") | None => {
                 // `Type.GetType` finds no class: logged unless it is a projectile.
