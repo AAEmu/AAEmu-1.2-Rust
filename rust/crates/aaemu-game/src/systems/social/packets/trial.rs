@@ -644,10 +644,13 @@ cs_packet!(
         tracing::trace!("NaviOpenBounty, ObjId: {}", self.obj_id);
         let p = active_char!(conn);
         let board = server.systems.social.bounties.board(server).await;
+        // The count is one byte: clamp the rows to it so count and written rows agree.
+        let mut rows = board.rows;
+        rows.truncate(MAX_BOUNTY_LIST_ENTRIES);
         p.send(SCBountyListPacket {
             total: board.total,
-            count: board.rows.len() as u8,
-            bounties: board.rows,
+            count: rows.len() as u8,
+            bounties: rows,
         });
         Ok(())
     }
