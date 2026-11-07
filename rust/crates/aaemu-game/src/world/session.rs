@@ -989,6 +989,8 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
                 .guild_chat(e.faction.id, &e.faction.name, &server.ids.chat)
                 .join(&p);
         }
+        // A granted guild rename is still pending: show the leader the dialog again.
+        crate::systems::social::expedition::prompt_rename_if_allowed(server, &p);
     }
     // Connection.ActiveChar.UpdateGearBonuses(null, null)
     crate::systems::skills::stats::update_gear_bonuses(server, &p, None, None);

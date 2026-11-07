@@ -28,9 +28,10 @@ grename Renamed Guild
 gexpectrenamed Renamed Guild
 expectdb "SELECT name FROM expeditions WHERE id=(SELECT expedition_id FROM expedition_members WHERE name='${leader}')" "Renamed Guild" 20
 sync renamed 4
-# The right was spent by the rename above: another one is refused and nothing changes.
+# The right was spent by the rename above: another one is refused and nothing changes
+# (`grename` drains the reply, so `expectseen` looks at what it already read).
 grename No Offer
-expecterror 32
+expectseen 32
 expectdb "SELECT name FROM expeditions WHERE id=(SELECT expedition_id FROM expedition_members WHERE name='${leader}')" "Renamed Guild" 10
 # Taken name -> the dialog re-opens with error 299; the guild keeps its name.
 gmraw testguild rename

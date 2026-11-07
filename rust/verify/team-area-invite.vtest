@@ -23,8 +23,9 @@ waitpeer 120 ${joiner}
 waitpeer 120 ${refuser}
 areainvite 0 party
 expectpkt SCTeamAreaInvitedPacket 10
-sync invites 3
 expectpkt SCTeamMemberJoinedPacket 20
+# (before the barrier: `sync` reads and drops packets while it waits)
+sync invites 3
 # A second request inside the 30 s server cooldown: s = false, r = remaining milliseconds.
 areainvite 0 party
 expectareacool 5
