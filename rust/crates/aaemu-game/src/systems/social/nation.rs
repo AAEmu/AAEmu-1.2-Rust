@@ -254,6 +254,9 @@ pub struct NationManager {
     /// nation the offer belongs to. The 1.2 client can only send the nation half of
     /// `CSRenameExpedition` from that dialog (RENAME-7).
     rename_offers: Mutex<HashMap<u32, u32>>,
+    /// Offline members the last periodic save wrote (`nation id`, ids); pruned from
+    /// `offline_members` by [`commit_save`](NationManager::commit_save) once that save committed.
+    pub(super) saved_offline: Mutex<Vec<(u32, Vec<u32>)>>,
 }
 
 /// Why a nation rename was refused.
@@ -873,6 +876,26 @@ impl NationManager {
         }
     }
 
+    /// Drops one character from every nation's offline-member list (a kick moved its faction, so
+    /// a later save must not write the nation back).
+    pub fn remove_offline_member(&self, character_id: u32) {
+        for nation in self.write().iter_mut() {
+            nation.offline_members.retain(|&id| id != character_id);
+        }
+    }
+
+    /// After the save transaction committed: the offline members it wrote need no further
+    /// rewrites. Members added or kept since the snapshot stay untouched.
+    pub fn commit_save(&self) {
+        let saved = std::mem::take(&mut *self.saved_offline.lock().expect("nation saved poisoned"));
+        let mut nations = self.write();
+        for (id, members) in saved {
+            if let Some(nation) = nations.iter_mut().find(|n| n.id == id) {
+                nation.offline_members.retain(|m| !members.contains(m));
+            }
+        }
+    }
+
     /// This subsystem's part of `SaveManager.DoSave`: nations, their relation rows, the
     /// founding expedition's `mother` and the offline members' `faction_id`, in one
     /// transaction.
@@ -889,9 +912,20 @@ impl NationManager {
             .map(|p| p.character_id)
             .collect();
         let mut written = 0;
+        let mut saved = Vec::new();
         for nation in &nations {
             written += write_nation(server, tx, nation, &online).await?;
+            let members: Vec<u32> = nation
+                .offline_members
+                .iter()
+                .copied()
+                .filter(|id| !online.contains(id))
+                .collect();
+            if !members.is_empty() {
+                saved.push((nation.id, members));
+            }
         }
+        *self.saved_offline.lock().expect("nation saved poisoned") = saved;
         Ok(written)
     }
 }
@@ -2907,6 +2941,11 @@ pub(super) async fn kick_offline(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    server
+        .systems
+        .social
+        .nations
+        .remove_offline_member(character_id);
     // The offline owner keeps its loaded HouseRefs; move them while the save lock is still
     // held, so no concurrent save writes the old faction back (NATION-5 follow-up).
     crate::systems::housing::update_owned_housing_faction(server, character_id, origin);
@@ -3127,6 +3166,11 @@ async fn kick_online_target(
     };
     faction::set_faction(server, target, origin).await;
     persist_faction(server, target_id, origin).await;
+    server
+        .systems
+        .social
+        .nations
+        .remove_offline_member(target_id);
     let result = SCFactionKickToOriginResultPacket {
         tgt_name: name,
         id: target_id,
