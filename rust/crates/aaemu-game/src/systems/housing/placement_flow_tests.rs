@@ -21,6 +21,9 @@ use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::ai::collision::terrain::tests::Plane;
 use crate::systems::ai::collision::world::CellContent;
+use crate::systems::npcs::heightmap::{
+    HeightmapConfig, HeightmapWorlds, WorldHeightmap, CELL_HMAP_RESOLUTION,
+};
 use crate::systems::npcs::subzone::Area;
 use crate::systems::skills::data::BuffTemplate;
 use crate::test_support::*;
@@ -97,6 +100,7 @@ fn data() -> GameData {
         main_model_id: 1083,
         hp: 1000,
         garden_radius: 11.0,
+        is_sellable: true,
         taxation: Some(Taxation {
             id: 1,
             tax: 0,
@@ -207,8 +211,12 @@ fn packet(x: f32, y: f32) -> CSCreateHousePacket {
 /// Drives `CSCreateHouse` through `ops::build` and returns the refusal code (if any). The
 /// refused design must not create a house.
 fn build_error(f: &mut Fixture, x: f32, y: f32) -> Option<i16> {
+    build_error_for(f, packet(x, y))
+}
+
+fn build_error_for(f: &mut Fixture, p: CSCreateHousePacket) -> Option<i16> {
     let before = f.server.systems.housing.manager.count();
-    ops::build(&f.server, &f.player, 1001, &packet(x, y));
+    ops::build(&f.server, &f.player, 1001, &p);
     assert_eq!(
         f.server.systems.housing.manager.count(),
         before,
@@ -267,6 +275,29 @@ async fn area_338_captured_spot_is_refused_and_the_fitting_spot_is_accepted() {
     assert_eq!(houses.len(), 1, "the fitting footprint is accepted");
     let pos = houses[0].data().unit.transform.local();
     assert_eq!((pos.x, pos.y), ACCEPTED);
+}
+
+#[tokio::test]
+async fn a_mounted_builder_at_the_ghost_is_in_range() {
+    let f = fixture(data());
+    let mut mate = crate::models::mate::Mate::new(1, 1);
+    mate.unit.owner_id = f.player.character_id;
+    mate.owner_obj_id = f.player.obj_id;
+    mate.unit.transform.set_xyz(ACCEPTED.0, ACCEPTED.1, 100.0);
+    let mate = crate::world::Entity::new(f.server.ids.object.get_next_id().unwrap(), mate);
+    let world = f.server.world.world(0).unwrap();
+    world.spawn(&mate, &f.server.view_ctx());
+    world.attach_child(
+        &crate::world::WorldObject::from(&mate),
+        &crate::world::WorldObject::from(&f.player),
+    );
+    f.player
+        .data()
+        .unit
+        .transform
+        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    ops::build(&f.server, &f.player, 1001, &packet(ACCEPTED.0, ACCEPTED.1));
+    assert_eq!(f.server.systems.housing.manager.count(), 1);
 }
 
 #[tokio::test]
@@ -481,4 +512,147 @@ async fn two_house_builds_at_the_same_spot_race_and_one_wins() {
             == crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_OVERLAP_HOUSE),
         "{codes_a:?} {codes_b:?}"
     );
+}
+
+/// A flat heightmap (0 m) over the world cell that contains the accepted footprint, so the
+/// `Z` guard has a ground reference. Mirrors the real `heightmap.dat` layout.
+fn install_flat_heightmap(server: &GameServer) {
+    const COEF: f64 = 65535.0 / (4096.0 / 4.0);
+    const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usize;
+    let map = WorldHeightmap::with_size(0, "main_world", 16, 16, COEF);
+    assert!(map.insert_cell(14, 14, vec![0u16; CELL_POINTS]));
+    server
+        .systems
+        .npcs
+        .heightmaps
+        .install(Arc::new(HeightmapWorlds::from_parts(
+            Arc::new(crate::data::client_files::ClientFileManager::new()),
+            vec![map],
+            HashMap::from([(TEST_ZONE, 0)]),
+            HeightmapConfig {
+                heightmaps_enable: true,
+                ..Default::default()
+            },
+        )));
+}
+
+#[tokio::test]
+async fn a_build_request_from_far_away_is_refused_with_too_far_away() {
+    let mut f = fixture(data());
+    assert_eq!(
+        build_error(&mut f, ACCEPTED.0 + 1000.0, ACCEPTED.1),
+        Some(crate::systems::economy::error_message::TOO_FAR_AWAY)
+    );
+}
+
+#[tokio::test]
+async fn a_house_z_far_above_or_below_the_terrain_is_refused() {
+    let mut f = fixture(data());
+    install_flat_heightmap(&f.server);
+    f.player
+        .data()
+        .unit
+        .transform
+        .set_xyz(ACCEPTED.0, ACCEPTED.1, 200.0);
+    let mut high = packet(ACCEPTED.0, ACCEPTED.1);
+    high.z = 200.0;
+    assert_eq!(
+        build_error_for(&mut f, high),
+        Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_HIGH)
+    );
+    f.player
+        .data()
+        .unit
+        .transform
+        .set_xyz(ACCEPTED.0, ACCEPTED.1, -200.0);
+    let mut low = packet(ACCEPTED.0, ACCEPTED.1);
+    low.z = -200.0;
+    assert_eq!(
+        build_error_for(&mut f, low),
+        Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW)
+    );
+}
+
+fn place_seller_house(f: &mut Fixture) -> crate::world::HouseRef {
+    ops::build(&f.server, &f.player, 1001, &packet(ACCEPTED.0, ACCEPTED.1));
+    assert_eq!(f.server.systems.housing.manager.count(), 1);
+    f.server.systems.housing.manager.all()[0].clone()
+}
+
+fn errors(client: &mut TestClient) -> Vec<i16> {
+    client
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+        .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_purchase_from_far_away_is_refused_with_too_far_away() {
+    let mut f = fixture(data());
+    let house = place_seller_house(&mut f);
+    assert!(ops::set_for_sale(&f.server, &house, 100, 0, None));
+    let mut buyer_client = TestClient::new(&f.server, 2, 1002);
+    let mut character = test_character(2, "Buyer", ACCEPTED.0 + 200.0, ACCEPTED.1);
+    character.money = 1000;
+    let buyer = spawn_player(
+        &f.server,
+        &buyer_client,
+        character,
+        f.server.ids.object.get_next_id().unwrap(),
+    );
+    let tl = house.data().unit.tl_id;
+    assert!(!ops::buy_house(&f.server, tl, 100, &buyer));
+    assert_eq!(
+        errors(&mut buyer_client),
+        vec![crate::systems::economy::error_message::TOO_FAR_AWAY]
+    );
+    assert_eq!(house.data().unit.owner_id, 1);
+}
+
+#[tokio::test]
+async fn a_purchase_that_would_exceed_the_accounts_group_limit_is_refused() {
+    let mut data = data();
+    data.systems
+        .housing
+        .max_construct_count
+        .insert((GROUP, 18), 1);
+    let mut f = fixture(data);
+    let house = place_seller_house(&mut f);
+    // The buyer already owns a category-18 house in area 338's group.
+    let world = f.server.world.world(0).unwrap();
+    let buyer_house = manager::create(&f.server, DESIGN, 101, &world, 0, 0).unwrap();
+    {
+        let mut h = buyer_house.data();
+        h.id = f.server.ids.housing.get_next_id().unwrap();
+        h.unit.owner_id = 2;
+        h.co_owner_id = 2;
+        h.account_id = 1002;
+        h.unit.transform.set_xyz(15320.0, 14640.0, 100.0);
+        h.unit.transform.zone_id = TEST_ZONE;
+        h.place_date = manager::now() - 100;
+        h.protection_end_date = manager::now() + 14 * 86400;
+    }
+    manager::set_current_step(&f.server, &buyer_house, -1, false);
+    assert!(f.server.systems.housing.manager.insert(&buyer_house));
+    assert!(ops::set_for_sale(&f.server, &house, 100, 0, None));
+    let mut buyer_client = TestClient::new(&f.server, 2, 1002);
+    let mut character = test_character(2, "Buyer", ACCEPTED.0, ACCEPTED.1);
+    character.money = 1000;
+    let buyer = spawn_player(
+        &f.server,
+        &buyer_client,
+        character,
+        f.server.ids.object.get_next_id().unwrap(),
+    );
+    let tl = house.data().unit.tl_id;
+    assert!(!ops::buy_house(&f.server, tl, 100, &buyer));
+    assert_eq!(
+        errors(&mut buyer_client),
+        vec![
+            crate::systems::economy::error_message::HOUSE_CANNOT_CONSTRUCT_IN_AREA_BY_MAX_CONSTRUCT_COUNT
+        ]
+    );
+    assert_eq!(house.data().unit.owner_id, 1);
 }

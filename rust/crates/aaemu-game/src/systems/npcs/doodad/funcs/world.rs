@@ -8,14 +8,15 @@ use super::{error_message as err, send_debug_message, send_error, set_to_next_ph
 use crate::models::doodad::BondDoodad;
 use crate::models::transform::{PositionAndRotation, Quaternion};
 use crate::packets::world::SCCharacterReturnDistrictsPacket;
+use crate::systems::instances::packets::{SCSystemDungeonStatePacket, SystemDungeonChannel};
 use crate::systems::npcs::doodad::packets::SCBondDoodadPacket;
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::{
     bond_kind, DoodadFuncAttachment, DoodadFuncBinding, DoodadFuncEnterInstance,
-    DoodadFuncEnterSysInstance, DoodadFuncExitIndun, DoodadFuncRemoveInstance,
+    DoodadFuncEnterSysInstance, DoodadFuncExitIndun, DoodadFuncRemoveInstance, FuncTemplate,
 };
 use crate::systems::npcs::portal;
-use crate::world::{WorldInstance, WorldObject};
+use crate::world::{DoodadRef, WorldInstance, WorldObject};
 
 /// `DoodadFuncBinding.Use`: sets the recall point of the caster.
 pub fn binding(f: &DoodadFuncBinding, ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) {
@@ -73,6 +74,14 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    // A transfer passenger must leave the carriage before taking a bench / ship seat.
+    if crate::systems::vehicles::transfers::is_boarded(ctx.server, player) {
+        crate::systems::vehicles::bind_error(
+            player,
+            crate::systems::economy::error_message::SLAVE_UNBIND_FIRST,
+        );
+        return;
+    }
     if f.bond_kind_id > bond_kind::BOND_INVALID {
         let character_id = player.data().id;
         // ask for a free meta number for landing
@@ -155,13 +164,6 @@ fn quaternion_inverse(q: Quaternion) -> Quaternion {
     }
 }
 
-/// Saves the return point in the main world (`MainWorldPosition =
-/// Transform.CloneDetached(character)`).
-fn save_main_world_position(server: &crate::server::GameServer, player: &crate::world::PlayerRef) {
-    let t = crate::systems::instances::worlds::clone_detached(server, player);
-    player.data().main_world_position = Some(t);
-}
-
 /// `DoodadFuncEnterInstance.Use`.
 pub fn enter_instance(
     f: &DoodadFuncEnterInstance,
@@ -191,16 +193,7 @@ pub fn enter_instance(
         );
         return;
     }
-    let (has_mwp, instance) = {
-        let c = player.data();
-        (
-            c.main_world_position.is_some(),
-            c.unit.transform.instance_id,
-        )
-    };
-    if !has_mwp || instance == crate::models::character::DEFAULT_INSTANCE_ID {
-        save_main_world_position(server, player);
-    }
+    crate::systems::instances::worlds::ensure_main_world_position(server, player);
     crate::systems::instances::indun::request_dungeon_instance(server, player, f.zone_id, 0);
 }
 
@@ -219,21 +212,128 @@ pub fn enter_sys_instance(
         return;
     };
     let server = ctx.server;
-    // Set main world when requesting to exit the main world or if it was never set before
-    let (has_mwp, instance) = {
-        let c = player.data();
-        (
-            c.main_world_position.is_some(),
-            c.unit.transform.instance_id,
-        )
-    };
-    if !has_mwp || instance == crate::models::character::DEFAULT_INSTANCE_ID {
-        save_main_world_position(server, player);
+    // A selective entrance of a channel dungeon opens the channel dialog instead of entering
+    // channel 0. The live instances of the dungeon are the list; with none, the first player
+    // creates the channel the old way (request channel 0 and enter it).
+    if f.selective && crate::systems::instances::indun::instance_has_channels(server, f.zone_id) {
+        if let Some(zone) = crate::systems::instances::indun::zone_by_id(server, f.zone_id) {
+            let live = crate::systems::instances::indun::live_zone_instances(server, zone.zone_key);
+            if !live.is_empty() {
+                let channels: Vec<SystemDungeonChannel> = live
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (world, dungeon))| SystemDungeonChannel {
+                        index: index as i32,
+                        instance_id: world.id,
+                        restrict: dungeon.indun_zone.max_players as i32,
+                        current: crate::systems::instances::worlds::character_count(world) as i32,
+                    })
+                    .collect();
+                tracing::info!(
+                    "DoodadFuncEnterSysInstance: zone {} offers {} channel(s)",
+                    f.zone_id,
+                    channels.len()
+                );
+                player.send(SCSystemDungeonStatePacket {
+                    zone_key: f.zone_id,
+                    channels,
+                });
+                return;
+            }
+        }
     }
-    // With or without channel support the C# enters channel 0 ("TODO: Deal with channel
-    // dialog").
-    let _ = crate::systems::instances::indun::instance_has_channels(server, f.zone_id);
+    // Set main world when requesting to exit the main world or if it was never set before
+    crate::systems::instances::worlds::ensure_main_world_position(server, player);
     let _ = crate::systems::instances::indun::request_system_instance(server, player, f.zone_id, 0);
+}
+
+/// The doodad half of `CSSelectSysInstanceChannelPacket`: the client picked a row of the
+/// `SC 0x206` channel dialog (`X2.EnterSystemDungeon` -> `FUN_3930c420` -> CS 0x13d). The
+/// checks mirror that client function: the doodad exists, its first `DoodadFuncEnterSysInstance`
+/// func is `selective`, it is in reach, and its zone group has `select_channel`.
+pub fn select_sys_instance_channel(
+    server: &crate::server::GameServer,
+    player: &crate::world::PlayerRef,
+    inst_id: u32,
+    doodad_obj_id: u32,
+) {
+    let Some(world) = server.world.world_of(&WorldObject::from(player)) else {
+        return;
+    };
+    let Some(doodad) = world.doodad(doodad_obj_id) else {
+        tracing::debug!(
+            "SelectSysInstance: doodad {doodad_obj_id} not found for {}",
+            player.data().unit.name
+        );
+        return;
+    };
+    // The client checks the template's first EnterSysInstance func (FUN_3983c230).
+    let Some((func, skill_id)) = template_enter_func(server, &doodad) else {
+        tracing::debug!("SelectSysInstance: doodad {doodad_obj_id} has no EnterSysInstance func");
+        return;
+    };
+    if !func.selective {
+        tracing::debug!("SelectSysInstance: doodad {doodad_obj_id} entrance is not selective");
+        return;
+    }
+    let Some(zone) = crate::systems::instances::indun::zone_by_id(server, func.zone_id) else {
+        return;
+    };
+    if !server
+        .game_data
+        .systems
+        .instances
+        .indun
+        .dungeon_zone(zone.group_id)
+        .is_some_and(|z| z.select_channel)
+    {
+        tracing::debug!(
+            "SelectSysInstance: zone group {} has no select_channel",
+            zone.group_id
+        );
+        return;
+    }
+    if !crate::systems::npcs::doodad::packets::in_func_reach(server, player, &doodad, skill_id) {
+        tracing::debug!(
+            "SelectSysInstance: {} is out of reach of doodad {doodad_obj_id}",
+            player.data().unit.name
+        );
+        return;
+    }
+    crate::systems::instances::indun::enter_selected_system_instance(
+        server,
+        player,
+        zone.zone_key,
+        zone.group_id,
+        inst_id,
+    );
+}
+
+/// The template's first `DoodadFuncEnterSysInstance` func and its `func_skill_id` (the client's
+/// `FUN_3983c230` returns the first func of type 0x4a of the doodad template).
+fn template_enter_func(
+    server: &crate::server::GameServer,
+    doodad: &DoodadRef,
+) -> Option<(DoodadFuncEnterSysInstance, u32)> {
+    let data = &server.game_data.systems.npcs.doodad;
+    let (template_id, deleted) = {
+        let d = doodad.data();
+        (d.template_id, d.phase.deleted)
+    };
+    if deleted {
+        return None;
+    }
+    let template = data.template(template_id)?;
+    for group in &template.func_groups {
+        for func in data.funcs_for_group(group.id) {
+            if let Some(FuncTemplate::EnterSysInstance(f)) =
+                data.func_template(func.func_id, &func.func_type)
+            {
+                return Some((f.clone(), func.skill_id));
+            }
+        }
+    }
+    None
 }
 
 /// `DoodadFuncExitIndun.Use`.

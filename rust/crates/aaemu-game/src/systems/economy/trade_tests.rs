@@ -9,7 +9,9 @@ use crate::net::packet::{encode, PacketDef};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::systems::economy::inventory::Inv;
-use crate::systems::economy::tests::{give, item_at, log_item_events, run, world, World, STACK};
+use crate::systems::economy::tests::{
+    give, item_at, log_item_events, run, world, world_with, World, STACK,
+};
 use crate::systems::economy::trade::*;
 
 fn body_of<P: Marshal>(p: &P) -> Vec<u8> {
@@ -69,6 +71,149 @@ fn ok(w: &mut World, who: u8) {
     run::<CSTradeOkPacket>(w, who, &[]);
 }
 
+/// Two factions whose mothers (148 / 149) are hostile, the test players' own faction 101 being
+/// friendly to itself.
+fn hostile_world() -> World {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::faction::{relation_state, FactionRelations};
+    let mut data = crate::systems::economy::tests::test_data();
+    for (id, mother) in [(101, 148), (102, 149), (148, 0), (149, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..SystemFaction::default()
+        });
+    }
+    // `player_relation` reads the runtime table (`FactionManager.Load`), not the raw rows.
+    data.systems.social.relations =
+        FactionRelations::from_rows(&[(148, 149, relation_state::HOSTILE)]).expect("relations");
+    world_with(data)
+}
+
+/// `SCErrorMsgPacket::new(code, 0, true)` body, the code the 1.2 client shows for the same
+/// trade check itself (e.g. `FUN_394fddf0` -> `FUN_39428370(0x9a)` for `too_far_away`).
+fn error_frame(code: i16) -> (u16, Vec<u8>) {
+    let mut s = PacketStream::new();
+    s.write_i16(code)
+        .write_i16(code)
+        .write_u32(0)
+        .write_bool(true);
+    (sc::SCErrorMsgPacket, s.into_bytes())
+}
+
+/// `SCCannotStartTradePacket(other, 0)`, the client's generic refusal (it shows error 538).
+fn cannot_trade(other: u32) -> (u16, Vec<u8>) {
+    let mut s = PacketStream::new();
+    s.write_bc(other).write_i32(0);
+    (sc::SCCannotStartTradePacket, s.into_bytes())
+}
+
+#[tokio::test]
+async fn hostile_players_cannot_trade_but_the_same_faction_can() {
+    let mut w = hostile_world();
+    // Alice (101) and Bob (101) are friendly: the normal handshake works with faction data.
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    cancel_trade(&w.server, w.pa.obj_id, 0, 0);
+    w.a.drain();
+    w.b.drain();
+    // Bob joins the hostile mother faction: the request is refused before it reaches him.
+    w.pb.data().unit.faction_id = 102;
+    assert_eq!(
+        crate::systems::social::faction::player_relation(&w.server, &w.pa, &w.pb),
+        crate::systems::social::faction::relation_state::HOSTILE
+    );
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(w.a.drain(), vec![cannot_trade(0x101)]);
+    assert!(w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    // And no invitation is left behind: accepting now does nothing.
+    run::<CSStartTradePacket>(&mut w, 1, &bc(0x100));
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn a_faction_change_between_request_and_accept_refuses_the_trade() {
+    let mut w = hostile_world();
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(w.b.drain(), vec![(sc::SCCanStartTradePacket, bc(0x100))]);
+    w.pb.data().unit.faction_id = 102;
+    run::<CSStartTradePacket>(&mut w, 1, &bc(0x100));
+    assert_eq!(w.a.drain(), vec![cannot_trade(0x101)]);
+    assert!(w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn out_of_range_trade_request_and_accept_are_refused() {
+    // 100 m apart: the client constant 25.0 (sqrt = 5 m) refuses.
+    let mut w = world();
+    w.pb.data().unit.transform.set_xyz(200.0, 100.0, 100.0);
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(
+        w.a.drain(),
+        vec![error_frame(super::error_message::TOO_FAR_AWAY)]
+    );
+    assert!(w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    // Back in range the invitation is issued; Bob walks away before accepting.
+    w.pb.data().unit.transform.set_xyz(101.0, 100.0, 100.0);
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(w.b.drain(), vec![(sc::SCCanStartTradePacket, bc(0x100))]);
+    w.pb.data().unit.transform.set_xyz(200.0, 100.0, 100.0);
+    run::<CSStartTradePacket>(&mut w, 1, &bc(0x100));
+    assert_eq!(
+        w.a.drain(),
+        vec![error_frame(super::error_message::TOO_FAR_AWAY)]
+    );
+    assert!(w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    // The client boundary is `distance < 5` (`FUN_39093860` refuses `>= sqrt(25)`): 5.0 m is
+    // already out of range, 4.9 m is not.
+    w.pb.data().unit.transform.set_xyz(104.9, 100.0, 100.0);
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(w.b.drain(), vec![(sc::SCCanStartTradePacket, bc(0x100))]);
+    cancel_trade(&w.server, w.pa.obj_id, 0, 0);
+    w.a.drain();
+    w.b.drain();
+    w.pb.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(
+        w.a.drain(),
+        vec![error_frame(super::error_message::TOO_FAR_AWAY)]
+    );
+    assert!(w.b.drain().is_empty());
+}
+
+#[tokio::test]
+async fn dead_player_cannot_request_or_accept_a_trade() {
+    let mut w = world();
+    // Dead target: silently ignored, as the 1.2 client does (`FUN_394fddf0` returns before
+    // sending when `IsDead`); no trade and no invitation.
+    w.pb.data().unit.hp = 0;
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    run::<CSStartTradePacket>(&mut w, 1, &bc(0x100));
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    // Dead requester: the request is ignored as well.
+    w.pa.data().unit.hp = 0;
+    w.pb.data().unit.hp = 100;
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    // Alive again: invitation; the target dies before accepting, so the accept is refused.
+    w.pa.data().unit.hp = 100;
+    run::<CSCanStartTradePacket>(&mut w, 0, &bc(0x101));
+    assert_eq!(w.b.drain(), vec![(sc::SCCanStartTradePacket, bc(0x100))]);
+    w.pb.data().unit.hp = 0;
+    run::<CSStartTradePacket>(&mut w, 1, &bc(0x100));
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
 #[tokio::test]
 async fn trade_departure_cancels_peer_and_reconnect_starts_without_stale_cleanup() {
     use crate::test_support::{spawn_player, test_character, TestClient};
@@ -114,12 +259,10 @@ async fn trade_departure_cancels_peer_and_reconnect_starts_without_stale_cleanup
             .character_by_obj_id(departed.obj_id)
             .is_none());
         let mut reconnected = TestClient::new(&w.server, 3, 1001);
-        let player = spawn_player(
-            &w.server,
-            &reconnected,
-            test_character(1, "Alice", 100.0, 100.0),
-            departed.obj_id,
-        );
+        let mut alice = test_character(1, "Alice", 100.0, 100.0);
+        alice.unit.hp = 100;
+        alice.unit.max_hp = 100;
+        let player = spawn_player(&w.server, &reconnected, alice, departed.obj_id);
         reconnected.conn.active_char = Some(player.clone());
         w.a = reconnected;
         w.pa = player;
@@ -931,6 +1074,39 @@ async fn item_bound_after_lock_aborts_the_trade_without_paying() {
         .get_item_by_id_mut(id)
         .unwrap()
         .flags |= ITEM_FLAG_SOUL_BOUND;
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .all(|(op, _)| *op != sc::SCTradeMadePacket));
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    assert_untouched(&w, id, 4, (100, 500));
+}
+
+#[tokio::test]
+async fn item_locked_after_lock_aborts_the_trade_without_paying() {
+    use crate::models::item::ITEM_FLAG_SECURE;
+    let mut w = world();
+    w.pa.data().money = 100;
+    w.pb.data().money = 500;
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 4, 0);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 2);
+    putup_money(&mut w, 1, 300);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    // The offered stack becomes locked after both sides locked.
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .flags |= ITEM_FLAG_SECURE;
     w.a.drain();
     w.b.drain();
     ok(&mut w, 1);

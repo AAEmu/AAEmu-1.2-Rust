@@ -2,18 +2,20 @@
 //! reports and achievements. Most of them have no sender in the 1.2 C# (noted on each); they
 //! exist so the owning features can be ported against them.
 
+use aaemu_commons::helpers::convert_coord_to_long;
+use aaemu_commons::{Marshal, PacketStream};
 use chrono::{DateTime, Utc};
 
 use super::{active_char, cs_packet, sc_packet};
 use crate::models::char_data::CountUnreadMail;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
-use crate::opcodes::cs;
+use crate::opcodes::{cs, sc};
+use crate::packets::packet_def;
 use crate::systems::social::achievement::AchievementInfo;
 use crate::systems::social::dominion::{
     DominionData, DominionSiegeTimers, DominionTerritoryData, DominionUnkData,
 };
-use aaemu_commons::helpers::convert_coord_to_long;
 
 // ---- Dominion ----
 
@@ -81,7 +83,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCDominionDeletedPacket(id)` (not sent by the 1.2 C#).
+    /// Native 1.2 `OnDominionDeleted` (opcode 0x01e). Deserializer `FUN_397b79f0` reads the
+    /// zone group; the client drops its cached dominion record and fires the deleted alarm.
     SCDominionDeletedPacket { id: u16 } |self, s| {
         s.write_u16(self.id);
     }
@@ -99,14 +102,60 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCDominionTaxBalancedPacket(id, peaceTaxMoney, peaceTaxAaPoint)` (not sent by the 1.2
-    /// C#).
+    /// Native 1.2 `OnDominionTaxBalanced` (opcode 0x023). Deserializer `FUN_397b7b60` reads the
+    /// zone group, the peace-fund money and the peace-fund AA points; the client clears its
+    /// cached current house/hunt tax and stores the two peace values.
     SCDominionTaxBalancedPacket { id: u16, peace_tax_money: i32, peace_tax_aa_point: i32 } |self, s| {
         s.write_u16(self.id)
             .write_i32(self.peace_tax_money)
             .write_i32(self.peace_tax_aa_point);
     }
 );
+
+/// Native 1.2 `OnDominionNonPvPStarted` (opcode 0x024; the 1.2 opcode table still names the
+/// constant `CDominionStartUnkPacket`). Deserializer `FUN_397b7bb0` reads a u16 zone group, a
+/// DateTime start and a u16 duration in minutes; the client caches `start + minutes*60` as the
+/// window end and fires `DOMINION_NON_PVP_STATE`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SCDominionNonPvPStartedPacket {
+    pub id: u16,
+    pub start: DateTime<Utc>,
+    pub minutes: u16,
+}
+
+packet_def!(
+    SCDominionNonPvPStartedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::CDominionStartUnkPacket
+);
+
+impl Marshal for SCDominionNonPvPStartedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u16(self.id)
+            .write_date_time(self.start)
+            .write_u16(self.minutes);
+    }
+}
+
+/// Native 1.2 `OnDominionNonPvPStopped` (opcode 0x025; the 1.2 opcode table still names the
+/// constant `SCDominionEndUnkPacket`). Deserializer `FUN_397b7c00` reads the zone group; the
+/// client clears its cached window end and fires the `non_pvp_duration_ended` state event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SCDominionNonPvPStoppedPacket {
+    pub id: u16,
+}
+
+packet_def!(
+    SCDominionNonPvPStoppedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCDominionEndUnkPacket
+);
+
+impl Marshal for SCDominionNonPvPStoppedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u16(self.id);
+    }
+}
 
 sc_packet!(
     /// `SCDominionTaxRatePacket(id, taxRate)` (not sent by the 1.2 C#).
@@ -116,10 +165,19 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCNationalMonumentChangedPacket(id, type, x, y, z)` (not sent by the 1.2 C#).
-    SCNationalMonumentChangedPacket { id: u16, monument_type: i64, x: f32, y: f32, z: f32 } |self, s| {
+    /// `SCNationalMonumentChangedPacket(zone, nationalMonumentDbId, x, y, z)` (0x022; the 1.2
+    /// client handler `FUN_392f35f0` stores `dbId` and the three coordinates in the dominion
+    /// record; never sent by the 1.2 C#). `dbId` is the persistent doodad row id of the
+    /// territory statue (`siege_zones.monument_doodad_id`).
+    SCNationalMonumentChangedPacket {
+        id: u16,
+        national_monument_db_id: i64,
+        x: f32,
+        y: f32,
+        z: f32
+    } |self, s| {
         s.write_u16(self.id)
-            .write_i64(self.monument_type)
+            .write_i64(self.national_monument_db_id)
             .write_i64(convert_coord_to_long(self.x))
             .write_i64(convert_coord_to_long(self.y))
             .write_f32(self.z);
@@ -127,8 +185,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCNationalTaxRatePacket(id, taxRate, prevTaxRate, changedTime)` (not sent by the 1.2
-    /// C#).
+    /// `SCNationalTaxRatePacket(zone, taxRate, prevTaxRate, changedTime)` (0x021; the 1.2
+    /// client handler `FUN_392f39b0` stores the rate and time in the dominion record and shows
+    /// ui_texts 5675; never sent by the 1.2 C#). The rate is permille/10 (0-1000).
     SCNationalTaxRatePacket { id: u16, tax_rate: i32, prev_tax_rate: i32, changed_time: DateTime<Utc> } |self, s| {
         s.write_u16(self.id)
             .write_i32(self.tax_rate)
@@ -138,8 +197,7 @@ sc_packet!(
 );
 
 cs_packet!(
-    /// `CSUpdateDominionTaxRatePacket`. `CSUpdateNationalTaxRatePacket`
-    /// has no 1.2 opcode (0xfff) and is not registered.
+    /// `CSUpdateDominionTaxRatePacket` (0x012): the expedition leader sets the territory tax.
     CSUpdateDominionTaxRatePacket { id: u16, tax_rate: i32 }
     read |s| { Ok(Self { id: s.read_u16()?, tax_rate: s.read_i32()? }) }
     handle |self, server, conn| {
@@ -149,10 +207,30 @@ cs_packet!(
     }
 );
 
+cs_packet!(
+    /// `CSUpdateNationalTaxRatePacket` (0x013): `{zoneGroup u16, rate u32}` (1.2 client
+    /// `FUN_392f42f0` -> `FUN_397ab4d0`; the client validates `rate <= 1000`). The C# left the
+    /// opcode at 0xfff and only logged it.
+    CSUpdateNationalTaxRatePacket { id: u16, tax_rate: u32 }
+    read |s| { Ok(Self { id: s.read_u16()?, tax_rate: s.read_u32()? }) }
+    handle |self, server, conn| {
+        let player = active_char!(conn);
+        crate::systems::social::dominion::update_national_tax_rate(
+            server,
+            &player,
+            self.id,
+            self.tax_rate,
+        );
+        Ok(())
+    }
+);
+
 // ---- Names ----
 
 sc_packet!(
     /// `SCCharacterRenamedPacket(characterId, oldName, newName)` (not sent by the 1.2 C#).
+    /// Client serializer `FUN_397b7820`; handler `FUN_391df6e0`. Sent by
+    /// `systems::services::character_rename` on a GM rename.
     SCCharacterRenamedPacket { character_id: u32, old_name: String, new_name: String } |self, s| {
         s.write_u32(self.character_id)
             .write_str(&self.old_name)
@@ -305,13 +383,54 @@ impl SCAchievementResetedPacket {
     }
 }
 
+/// The `SCInvitationCanceled` kinds, as mapped by the 1.2 client `FUN_39182930` (RE-UI1).
+///
+/// EVIDENCED (client decompile): `kind -> popup type` is `1,2 -> 2`, `3 -> 4`, `4 -> 3`,
+/// `5 -> 9`, `6 -> 6`, `7 -> 0x29`, and the handler closes **every** popup of that type (there
+/// is no invitation id on the wire). The invitation each popup type belongs to follows from
+/// the handler that creates it: type 2 = `SCAskToJoinTeam` / `SCAskToJoinTeamArea`, type 3 =
+/// `SCExpeditionInvitation`, type 4 = `SCFamilyInvitation`, type 6 = `SCInviteJury`, type 9 =
+/// `SCDuelRequested`, type 0x29 = `SCFactionImmigrateInvite`.
+///
+/// The 1-vs-2 split between the named and the area team invitation is UNKNOWN: both kinds close
+/// the same popup type, so the client cannot tell them apart. This server sends kind 1 for a
+/// named and kind 2 for an area invitation (INFERRED).
+pub mod invitation_canceled_kind {
+    /// A named team / raid invitation (`SCAskToJoinTeam`).
+    pub const TEAM: u8 = 1;
+    /// An area team invitation (`SCAskToJoinTeamArea`); INFERRED, see the module docs.
+    pub const TEAM_AREA: u8 = 2;
+    /// A family invitation (`SCFamilyInvitation`). Never sent: 1.2 has no server timeout and
+    /// the trigger is unknown.
+    pub const FAMILY: u8 = 3;
+    /// An expedition (guild) invitation (`SCExpeditionInvitation`).
+    pub const EXPEDITION: u8 = 4;
+    /// A duel challenge (`SCDuelRequested`).
+    pub const DUEL: u8 = 5;
+    /// A jury / trial invitation (`SCInviteJury`). Never sent: the trigger is unknown.
+    pub const JURY: u8 = 6;
+    /// A nation (faction) immigrate invitation (`SCFactionImmigrateInvite`).
+    pub const NATION: u8 = 7;
+}
+
+sc_packet!(
+    /// `SCInvitationCanceled(kind)`: closes the invitee's popup of the popup type the kind maps
+    /// to. Reader `FUN_397b8490` takes exactly one `u8`; handler `FUN_391d6930` ->
+    /// `FUN_39182930`. See [`invitation_canceled_kind`] for the mapping and the evidence.
+    SCInvitationCanceledPacket { kind: u8 } |self, s| {
+        s.write_u8(self.kind);
+    }
+);
+
 pub fn register(reg: &mut PacketRegistry) {
-    reg.register::<CSUpdateDominionTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateDominionTaxRatePacket);
+    reg.register::<CSUpdateDominionTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateDominionTaxRatePacket)
+        .register::<CSUpdateNationalTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateNationalTaxRatePacket);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::packet::PacketDef;
     use crate::net::registry::ClientPacket;
     use crate::systems::social::dominion;
     use crate::systems::social::packets::body;
@@ -320,6 +439,28 @@ mod tests {
 
     fn t(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(secs, 0).unwrap()
+    }
+
+    /// `SCInvitationCanceled`: one `u8` kind, matching the client reader `FUN_397b8490`.
+    #[test]
+    fn invitation_canceled_is_one_kind_byte() {
+        assert_eq!(
+            SCInvitationCanceledPacket::OPCODE,
+            sc::SCInvitationCanceledPacket
+        );
+        for kind in [
+            invitation_canceled_kind::TEAM,
+            invitation_canceled_kind::TEAM_AREA,
+            invitation_canceled_kind::EXPEDITION,
+            invitation_canceled_kind::DUEL,
+            invitation_canceled_kind::NATION,
+        ] {
+            assert_eq!(body(&SCInvitationCanceledPacket { kind }), vec![kind]);
+        }
+        // The client reader consumes exactly one byte (slot 0x44).
+        let mut s = PacketStream::from_bytes(vec![invitation_canceled_kind::EXPEDITION]);
+        assert_eq!(s.read_u8().unwrap(), invitation_canceled_kind::EXPEDITION);
+        assert_eq!(s.remaining(), 0);
     }
 
     #[test]
@@ -466,6 +607,7 @@ mod tests {
             }),
             e
         );
+        assert_eq!(SCDominionDeletedPacket::OPCODE, sc::SCDominionDeletedPacket);
         assert_eq!(body(&SCDominionDeletedPacket { id: 0x0102 }), vec![2, 1]);
         let mut e = PacketStream::new();
         e.write_u16(3).write_u32(4).write_u64(5).write_bool(true);
@@ -479,12 +621,40 @@ mod tests {
             e.into_bytes()
         );
         assert_eq!(
+            SCDominionTaxBalancedPacket::OPCODE,
+            sc::SCDominionTaxBalancedPacket
+        );
+        assert_eq!(
             body(&SCDominionTaxBalancedPacket {
                 id: 1,
                 peace_tax_money: 2,
                 peace_tax_aa_point: -1
             }),
             vec![1, 0, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
+        // Native Deserialize 0x397B7BB0: u16 zone group, DateTime start, u16 minutes.
+        assert_eq!(
+            SCDominionNonPvPStartedPacket::OPCODE,
+            sc::CDominionStartUnkPacket
+        );
+        let mut e = PacketStream::new();
+        e.write_u16(25).write_i64(1000).write_u16(120);
+        assert_eq!(
+            body(&SCDominionNonPvPStartedPacket {
+                id: 25,
+                start: t(1000),
+                minutes: 120
+            }),
+            e.into_bytes()
+        );
+        // Native Deserialize 0x397B7C00: only the zone group.
+        assert_eq!(
+            SCDominionNonPvPStoppedPacket::OPCODE,
+            sc::SCDominionEndUnkPacket
+        );
+        assert_eq!(
+            body(&SCDominionNonPvPStoppedPacket { id: 0x0102 }),
+            vec![2, 1]
         );
         assert_eq!(
             body(&SCDominionTaxRatePacket {
@@ -502,7 +672,7 @@ mod tests {
         assert_eq!(
             body(&SCNationalMonumentChangedPacket {
                 id: 1,
-                monument_type: 2,
+                national_monument_db_id: 2,
                 x: 10.5,
                 y: 20.0,
                 z: 30.0
@@ -701,6 +871,15 @@ mod tests {
             CSUpdateDominionTaxRatePacket {
                 id: 0x0102,
                 tax_rate: 10
+            }
+        );
+        // CS 0x013 `{zoneGroup u16, rate u32}` (client `FUN_392f42f0`; rate is 0..=1000).
+        let mut s = PacketStream::from_bytes(vec![2, 1, 0xE8, 3, 0, 0]);
+        assert_eq!(
+            CSUpdateNationalTaxRatePacket::read(&mut s).unwrap(),
+            CSUpdateNationalTaxRatePacket {
+                id: 0x0102,
+                tax_rate: 1000
             }
         );
     }

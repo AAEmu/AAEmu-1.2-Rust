@@ -70,6 +70,9 @@ fn repair_in_containers(
     let mut tasks = Vec::new();
     let mut repair_cost = 0i32;
     let mut repaired = Vec::new();
+    // Items are only recorded here; they are changed after the gold debit succeeded, so a
+    // refused payment never leaves a repaired item behind.
+    let mut plan: Vec<(ContainerRef, u64, u8)> = Vec::new();
     for target in items.iter().flatten() {
         let id = target.item_id;
         let Some(container) = containers
@@ -149,18 +152,10 @@ fn repair_in_containers(
             );
             continue;
         }
-        let mut c = container.lock().expect("container poisoned");
-        if let Some(i) = c.get_item_by_id_mut(id) {
-            let was_destroyed = i.details.durability == 0;
-            i.details.durability = max;
-            i.dirty = true;
-            tasks.push(ItemTask::update(i));
-            repaired.push((i.clone(), was_destroyed));
-        }
-        drop(c);
+        plan.push((container.clone(), id, max));
         repair_cost = total_cost;
     }
-    if repair_cost > 0 {
+    let paid = if repair_cost > 0 {
         // ChangeMoney(SlotType.Inventory, -repairCost) (default task DepositMoney)
         inventory::change_money_at(
             &mut txn.out(),
@@ -168,7 +163,21 @@ fn repair_in_containers(
             slot_type::INVENTORY,
             -repair_cost,
             task_type::DEPOSIT_MONEY,
-        );
+        )
+    } else {
+        true
+    };
+    if paid {
+        for (container, id, max) in plan {
+            let mut c = container.lock().expect("container poisoned");
+            if let Some(i) = c.get_item_by_id_mut(id) {
+                let was_destroyed = i.details.durability == 0;
+                i.details.durability = max;
+                i.dirty = true;
+                tasks.push(ItemTask::update(i));
+                repaired.push((i.clone(), was_destroyed));
+            }
+        }
     }
     txn.out().send(
         player,

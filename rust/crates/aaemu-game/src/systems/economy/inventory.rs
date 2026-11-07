@@ -15,13 +15,13 @@ use std::sync::{Arc, MutexGuard};
 
 use chrono::Utc;
 
-use crate::data::items::{TemplateKind, EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK};
+use crate::data::items::{ItemTemplate, TemplateKind, EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK};
 use crate::data::ItemData;
 use crate::models::container::{
     equip_slot, slot_type, ContainerRef, ItemContainer, ItemEnv, ItemRules,
 };
 use crate::models::item::{Item, ItemClass};
-use crate::models::item_task::{task_type, ItemFxList, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
 use crate::world::{PlayerRef, WorldObject};
@@ -103,7 +103,7 @@ impl<'a> ItemTxn<'a> {
 
     /// Queue for the character packets sent during this operation.
     pub fn out(&mut self) -> Out<'_> {
-        Out::Queue(&mut self.env.fx)
+        Out::Queue(self.server, &mut self.env.fx)
     }
 
     /// Ends the operation now (same as dropping it).
@@ -308,9 +308,42 @@ impl Inv {
         (ids, units)
     }
 
+    /// [`all_items_by_template`](Self::all_items_by_template) without secured stacks.
+    pub fn all_items_by_template_unlocked(
+        &self,
+        types: Option<&[u8]>,
+        template_id: u32,
+        grade: i32,
+    ) -> (Vec<u64>, i32) {
+        let default = [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK];
+        let types = match types {
+            Some(t) if !t.is_empty() => t,
+            _ => &default,
+        };
+        let mut ids = Vec::new();
+        let mut units = 0;
+        for st in types {
+            if let Some(c) = self.get(*st) {
+                let (i, u) = c
+                    .lock()
+                    .expect("container poisoned")
+                    .items_by_template_unlocked(template_id, grade);
+                ids.extend(i);
+                units += u;
+            }
+        }
+        (ids, units)
+    }
+
     /// `GetItemsCount(templateId, grade)` (Inventory + Equipment + Bank).
     pub fn items_count(&self, template_id: u32, grade: i32) -> i32 {
         self.all_items_by_template(None, template_id, grade).1
+    }
+
+    /// [`items_count`](Self::items_count) without secured stacks: a locked item cannot pay.
+    pub fn items_count_unlocked(&self, template_id: u32, grade: i32) -> i32 {
+        self.all_items_by_template_unlocked(None, template_id, grade)
+            .1
     }
 
     /// `GetItemsCount(slotType, templateId, grade)`.
@@ -319,12 +352,18 @@ impl Inv {
             .1
     }
 
-    /// `CheckItems(slotType, templateId, count)`.
+    /// [`items_count_in`](Self::items_count_in) without secured stacks.
+    pub fn items_count_in_unlocked(&self, st: u8, template_id: u32, grade: i32) -> i32 {
+        self.all_items_by_template_unlocked(Some(&[st]), template_id, grade)
+            .1
+    }
+
+    /// `CheckItems(slotType, templateId, count)`: locked stacks cannot satisfy a requirement.
     pub fn check_items(&self, st: u8, template_id: u32, count: i32) -> bool {
         let total = self.get(st).map_or(0, |c| {
             c.lock()
                 .expect("container poisoned")
-                .items_by_template(template_id, -1)
+                .items_by_template_unlocked(template_id, -1)
                 .1
         });
         total >= count
@@ -867,6 +906,18 @@ pub fn split_or_move_item_ex(
         if target_item.is_none() {
             target_item = dref.get_item_by_slot(i32::from(to_slot)).cloned();
         }
+        // A locked item cannot be split, merged, moved or swapped (the 1.2 client refuses every
+        // drag that touches it with `item_secure_condition`; `FUN_390455d0`, `FUN_39045850`).
+        // The packet handlers report 664 before reaching this core guard.
+        if from_item
+            .as_ref()
+            .is_some_and(super::item_security::is_locked)
+            || target_item
+                .as_ref()
+                .is_some_and(super::item_security::is_locked)
+        {
+            return false;
+        }
         // Check if containers can accept the items
         if let Some(f) = &from_item {
             if !dref.can_accept(f, data.template(f.template_id), i32::from(to_slot)) {
@@ -1055,6 +1106,33 @@ pub fn split_or_move_item_ex(
         }
         (action, from_item, target_item, s.slot_type, dref.slot_type)
     };
+
+    // The 1.2 client refuses the equip below the item's actability requirement before the move
+    // is sent (`FUN_394e41f0` -> `FUN_394e1a90`, error 508); the same check guards every other
+    // caller that can put an item into the equipment container. The packet handlers answer 508
+    // themselves; this is the silent last line of defence.
+    let incoming = if src_type == slot_type::EQUIPMENT
+        && dst_type != slot_type::EQUIPMENT
+        && matches!(action, SwapAction::DoEquipInEmptySlot | SwapAction::DoSwap)
+    {
+        // Equipping into an empty slot (`DoEquipInEmptySlot`) or swapping an occupied bag
+        // slot: the target item moves into the equipment slot the source leaves.
+        target_item.as_ref()
+    } else if dst_type == slot_type::EQUIPMENT && src_type != slot_type::EQUIPMENT {
+        from_item.as_ref()
+    } else {
+        None
+    };
+    if let (Some(item), Some(player)) =
+        (incoming, txn.server.world.character_by_id(inv.character_id))
+    {
+        if data
+            .template(item.template_id)
+            .is_some_and(|t| !meets_item_actability(txn.server, &player, t))
+        {
+            return false;
+        }
+    }
 
     // ---- Two-handed weapon handling ----
     let mut un_equip_offhand = false;
@@ -1549,10 +1627,12 @@ pub fn send_error_message_to(out: &mut Out<'_>, player: &PlayerRef, error: i16) 
 
 /// Where a character's own packets go: straight to its connection, or queued with the item
 /// effects of the running [`ItemTxn`] (the C# sends everything inline, so the order of item
-/// task packets and these packets must be kept).
+/// task packets and these packets must be kept). Both variants carry the server, because an
+/// upward money change reports the `MY_GOLD` achievement through it (queued in the item effects
+/// or in the achievement deferral, never under the character or operation lock).
 pub enum Out<'a> {
-    Direct,
-    Queue(&'a mut ItemFxList),
+    Direct(&'a GameServer),
+    Queue(&'a GameServer, &'a mut ItemFxList),
 }
 
 impl Out<'_> {
@@ -1562,8 +1642,8 @@ impl Out<'_> {
         packet: impl crate::net::packet::ServerPacket + 'static,
     ) {
         match self {
-            Out::Direct => player.send(packet),
-            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Packet {
+            Out::Direct(_) => player.send(packet),
+            Out::Queue(_, fx) => fx.push(ItemFx::Packet {
                 owner: player.character_id,
                 packet: Box::new(packet),
             }),
@@ -1582,8 +1662,10 @@ pub fn change_money(
     task: u8,
 ) -> bool {
     let mut tasks = Vec::new();
+    let mut gold_report = None;
     {
         let mut c = player.data();
+        let before = c.money;
         match from {
             slot_type::INVENTORY => {
                 if i64::from(amount) > c.money {
@@ -1615,6 +1697,24 @@ pub fn change_money(
                 tasks.push(ItemTask::MoneyChangeBank(amount));
             }
             _ => {}
+        }
+        // `MY_GOLD` is a high-water record: only an upward change of the carried purse is
+        // reported. The character lock is released here; the report itself runs from the item
+        // effects (`Out::Queue`) or the achievement deferral (`Out::Direct`), never inside this
+        // function's lock.
+        if c.money > before {
+            gold_report = Some(c.money);
+        }
+    }
+    if let Some(money) = gold_report {
+        match &mut *out {
+            Out::Direct(server) => {
+                crate::systems::social::achievement_hooks::report_gold(server, player, money);
+            }
+            Out::Queue(_, fx) => fx.push(ItemFx::Money {
+                owner: player.character_id,
+                money,
+            }),
         }
     }
     out.send(
@@ -1762,12 +1862,12 @@ pub fn change_labor(
             // Inside an `ItemTxn` (the ops lock is held): `AddExp` ends in quest events, which
             // take the non-reentrant ops lock themselves. Queue it behind the item tasks;
             // `fx::flush` applies it after the lock is released, before the labor packet below.
-            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Exp {
+            Out::Queue(_, fx) => fx.push(ItemFx::Exp {
                 owner: player.character_id,
                 exp: xp_to_add,
                 add_ability_exp: true,
             }),
-            Out::Direct => {
+            Out::Direct(_) => {
                 if let Some(h) = server.systems.economy.hooks.progression.get() {
                     h.add_exp(server, player, xp_to_add, true);
                 }
@@ -1824,6 +1924,97 @@ pub(crate) fn item_use_zone_allowed(
         send_error_message(player, error_message::ITEM_CANNOT_USE_HERE, 0, true);
     }
     !banned
+}
+
+/// The 1.2 client's item actability check (`FUN_394e1a90`, called by the use/equip action
+/// `FUN_390447d0` and the equip-drag validation `FUN_394e41f0`): with
+/// `items.actability_requirement` > 0 the character's points in `items.actability_group_id`,
+/// plus the house act-ability bonus (`FUN_390b3a80`), must reach the requirement. The client
+/// shows `actability_not_enough_point` (508) through `FUN_39428370(0x1fc)`.
+pub fn meets_item_actability(
+    server: &GameServer,
+    player: &PlayerRef,
+    template: &ItemTemplate,
+) -> bool {
+    let requirement = i64::from(template.actability_requirement);
+    if requirement <= 0 {
+        return true;
+    }
+    let group_id = template.actability_group_id;
+    let points = {
+        let c = player.data();
+        c.actability
+            .actabilities
+            .iter()
+            .find(|a| a.id == group_id.max(0) as u32)
+            .map_or(0, |a| i64::from(a.point))
+    };
+    let me = WorldObject::from(player);
+    let bonus = server.world.world_of(&me).map_or(0, |world| {
+        let pos = world.world_pos_rot(&me);
+        crate::systems::housing::act_ability_bonus_at_in_world(
+            server, world.id, group_id, pos.x, pos.y,
+        )
+    });
+    points.saturating_add(i64::from(bonus)) >= requirement
+}
+
+/// Refuses the item use / equip with the client's `actability_not_enough_point` (508) and the
+/// actability group as the error `kind` (as `craft.rs` does for crafts). Returns whether the
+/// action was refused; the caller must then leave the item where it is.
+pub fn refuse_item_actability(server: &GameServer, player: &PlayerRef, template_id: u32) -> bool {
+    let Some(template) = server.game_data.items.template(template_id) else {
+        return false;
+    };
+    if meets_item_actability(server, player, template) {
+        return false;
+    }
+    send_error_message(
+        player,
+        error_message::ACTABILITY_NOT_ENOUGH_POINT,
+        template.actability_group_id.max(0) as u32,
+        true,
+    );
+    true
+}
+
+/// The 1.2 client's equip actability gate for a `SplitOrMoveItem` request: resolves the item
+/// that would enter the character's equipment container and refuses it when the actability
+/// requirement is unmet. Two request shapes put the *target* item into the equipment slot: the
+/// client sends an empty equipment slot as the source (`DoEquipInEmptySlot`), and a swap of an
+/// equipped item onto an occupied bag / bank slot moves that target item into the vacated
+/// equipment slot (`DoSwap`). The source item may live in a coffer (opened through a bank
+/// doodad), which `Inv` does not hold, so item ids also resolve through the server item manager.
+#[allow(clippy::too_many_arguments)]
+pub fn equip_actability_refused(
+    server: &GameServer,
+    player: &PlayerRef,
+    from_type: u8,
+    from_item_id: u64,
+    to_type: u8,
+    to_item_id: u64,
+    to_slot: u8,
+) -> bool {
+    let inv = Inv::of(player);
+    let resolve = |id: u64| {
+        inv.item_by_id(id)
+            .or_else(|| server.items.item_by_id(id))
+            .map(|i| i.template_id)
+    };
+    let template_id = if from_type == slot_type::EQUIPMENT && to_type != slot_type::EQUIPMENT {
+        inv.item_by_id(to_item_id)
+            .or_else(|| inv.item_at(to_type, to_slot))
+            .or_else(|| server.items.item_by_id(to_item_id))
+            .map(|i| i.template_id)
+    } else if from_type != slot_type::EQUIPMENT
+        && to_type == slot_type::EQUIPMENT
+        && from_item_id != 0
+    {
+        resolve(from_item_id)
+    } else {
+        None
+    };
+    template_id.is_some_and(|id| refuse_item_actability(server, player, id))
 }
 
 /// `Character.ItemUse(item)` (`Events.OnItemUse` -> quests).

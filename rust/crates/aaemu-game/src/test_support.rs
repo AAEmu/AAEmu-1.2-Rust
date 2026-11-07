@@ -33,11 +33,29 @@ pub fn test_server_with(data: GameData) -> GameServer {
 }
 
 /// [`test_server_with`] with a caller-built `main_world` template (e.g. more than one zone key).
-pub fn test_server_with_world(mut data: GameData, world: WorldTemplate) -> GameServer {
-    let mut config = AppConfig {
+pub fn test_server_with_world(data: GameData, world: WorldTemplate) -> GameServer {
+    let config = AppConfig {
         id: 1,
         ..AppConfig::default()
     };
+    test_server_with_world_config(data, world, config)
+}
+
+/// [`test_server_with`] with a caller configuration (e.g. `character_name_use_allowed_chars`).
+pub fn test_server_with_config(data: GameData, config: AppConfig) -> GameServer {
+    test_server_with_world_config(
+        data,
+        WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
+        config,
+    )
+}
+
+/// [`test_server_with_world`] with a caller configuration.
+pub fn test_server_with_world_config(
+    mut data: GameData,
+    world: WorldTemplate,
+    mut config: AppConfig,
+) -> GameServer {
     config.connections.mysql_provider.host = "127.0.0.1".into();
     config.connections.mysql_provider.port = 1; // nothing listens here
     let db = MySqlPoolOptions::new()

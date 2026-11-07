@@ -92,6 +92,8 @@ pub fn restore(server: &GameServer, row: &ShipyardRow) -> Option<ShipyardRef> {
         z_rot: row.z_rot,
         money_amount: row.money_amount,
         actions: row.actions,
+        // capture-pending: the C# restored `OriginItemId`; the 1.2 client's meaning of
+        // `ShipyardData.Type` is unproven, so the value is unchanged.
         kind: template.origin_item_id,
         kind2: row.owner_id,
         owner_name: row.owner_name.clone(),

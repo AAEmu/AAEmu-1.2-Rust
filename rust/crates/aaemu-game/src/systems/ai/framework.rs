@@ -93,6 +93,12 @@ pub enum AiKind {
 
 impl AiKind {
     /// `AiUtils.GetAiByType(type, owner)` (`None` = `null`, no AI).
+    ///
+    /// AI 11 `siegeweapon_place` and AI 12 `bomb` are no AI by design: the C#
+    /// `GetAiByType` / `AiParams.CreateByType` return `null` for both and the 1.2 data has no
+    /// `npc_ai_params` row, so the 61 placeholder / test / cutscene NPCs (e.g. NPC 52, the
+    /// `mother ...` templates, `QA_TEST_*`) and the 3 bomb / flying-machine pilot NPCs have no
+    /// behaviour to port.
     pub fn by_type(t: Option<AiParamType>) -> Option<Self> {
         use AiParamType as T;
         Some(match t? {
@@ -266,6 +272,9 @@ pub struct NpcAi {
     pub path_handler: AiPathHandler,
     /// `AiFollowUnitObj`.
     pub follow_unit: Option<WorldObject>,
+    /// The `ai_command_sets` id (whose `can_interact` is `'f'`) that currently makes the NPC
+    /// non-interactable; `None` = interactable. See [`super::interaction`].
+    pub locked_command_set: Option<u32>,
     pub ai_file_name: String,
     pub ai_file_name2: String,
     pub ai_skill_id: u32,
@@ -316,6 +325,7 @@ impl NpcAi {
             current_command_run_time_ms: 0,
             path_handler: AiPathHandler::default(),
             follow_unit: None,
+            locked_command_set: None,
             ai_file_name: String::new(),
             ai_file_name2: String::new(),
             ai_skill_id: 0,
@@ -529,6 +539,21 @@ impl<'a> AiCtx<'a> {
             behavior
         );
         if let Some(cur) = self.ai.current {
+            // WP-5b: the command set runs across `RunCommandSet`, `FollowPath` and
+            // `FollowUnit`; leaving them for any other behavior abandons the set (the state
+            // machine never returns to it), so a `can_interact = 'f'` lock is released here
+            // too, not only on the queue-empty path (INFERRED, see PORTING.md).
+            let run = |b: BehaviorKind| {
+                matches!(
+                    b,
+                    BehaviorKind::RunCommandSet
+                        | BehaviorKind::FollowPath
+                        | BehaviorKind::FollowUnit
+                )
+            };
+            if self.ai.locked_command_set.is_some() && run(cur) && !behavior.is_some_and(run) {
+                super::interaction::release(self);
+            }
             behaviors::exit(self, cur);
         }
         self.ai.current = behavior;

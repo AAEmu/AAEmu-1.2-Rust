@@ -179,7 +179,7 @@ impl Marshal for SCLpManagedPacket {
 /// Declares a C->S packet with a `Read` that only reads and logs.
 macro_rules! log_only_packet {
     ($name:ident, $level:ident, |$s:ident| $read:block) => {
-        #[doc = concat!("`", stringify!($name), "` (read and logged only, as in C#).")]
+        #[doc = concat!("`", stringify!($name), "` (read and logged only; client-local or diagnostic, see the comment at the use).")]
         #[derive(Debug, Clone, PartialEq)]
         pub struct $name(pub String);
 
@@ -239,12 +239,18 @@ impl ClientPacket for CSCleanupLogicLinkPacket {
         })
     }
 }
+// The client's console-command usage report. The server has no console and the 1.2 C#
+// handler only logged it; keep it at debug (`MISC-CS-1`, capture-pending if it ever needs an
+// answer).
 log_only_packet!(CSConsoleCmdUsedPacket, debug, |s| {
     format!(", Cmd: {}", s.read_string()?)
 });
-log_only_packet!(CSCriminalLockedPacket, warn, |s| {
+// The client's criminal-lock notice. It carries no server-side state the 1.2 server used
+// (the C# handler was log-only), so debug avoids warning on every notice.
+log_only_packet!(CSCriminalLockedPacket, debug, |s| {
     format!(", Id: {}", s.read_u32()?)
 });
+// The client's editor-mode toggle. Editor mode is client-local; the C# only logged it.
 log_only_packet!(CSEditorGameModePacket, debug, |s| {
     let on = s.read_bool()?;
     let _x = s.read_i64()?;
@@ -275,6 +281,8 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
+// The second password is not supported (owner decision 2026-11-06); both requests are
+// log-only like they were before the feature existed.
 log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
     let _ = s;
     String::new()
@@ -283,7 +291,9 @@ log_only_packet!(CSSetupSecondPassword, debug, |s| {
     let _ = s;
     String::new()
 });
-log_only_packet!(CSResturnAddrsPacket, warn, |s| {
+// The client's anti-cheat return-address report. The server does not use it (the C# handler
+// was log-only); debug keeps it out of the warning log (`MISC-CS-1`).
+log_only_packet!(CSResturnAddrsPacket, debug, |s| {
     let code_base = s.read_u32()?;
     let code_size = s.read_u32()?;
     let f = s.read_u32()?;
@@ -766,7 +776,15 @@ impl ClientPacket for CSUpdateActionSlotPacket {
     }
 }
 
-/// `CSRestrictCheckPacket`.
+/// `CSRestrictCheckPacket`: `u32 characterId ; u8 code`, answered with
+/// `SCResultRestrictCheckPacket`. The client's handler `FUN_391e0ea0` reads `code` (+0x10) and
+/// `result` (+0x14): `code 0` is the chat restriction (`result 1` -> chat flag off +
+/// `restrict_start`, `result 0` -> flag on + `restrict_end`), `code 1` is the character-select
+/// connection check (`result 1` blocks the enter with `error_character_connection_restrict`).
+/// The stock client sends only code 1 itself when entering the world from the lobby and never
+/// code 0; a modified client can. Code 0 answers the persisted `chat_restricted_until` mute;
+/// code 1 always answers 0 because the server has no login-restriction store yet (a separate
+/// moderation feature).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRestrictCheckPacket {
     pub character_id: u32,
@@ -785,14 +803,22 @@ impl ClientPacket for CSRestrictCheckPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
+        server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let result = if self.code == 0 {
+                match server.world.character_by_id(self.character_id) {
+                    Some(p) => u8::from(p.data().chat_restricted(chrono::Utc::now().timestamp())),
+                    None => 0,
+                }
+            } else {
+                0
+            };
             conn.send(&SCResultRestrictCheckPacket {
                 character_id: self.character_id,
                 code: self.code,
-                result: 0,
+                result,
             });
             Ok(())
         })
@@ -903,6 +929,61 @@ mod tests {
                 result: 0
             }),
             e.into_bytes()
+        );
+    }
+
+    async fn restrict_check(server: &GameServer, conn: &mut GameConnection, code: u8) {
+        use crate::net::packet::encode_raw;
+        let mut s = PacketStream::new();
+        s.write_u32(1).write_u8(code);
+        server
+            .handle_frame(
+                conn,
+                &encode_raw(1, cs::CSRestrictCheckPacket, s.as_bytes()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restrict_check_answers_the_persisted_chat_mute() {
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Al", 10.0, 10.0), 0x100);
+        a.conn.active_char = Some(pa.clone());
+        a.drain();
+
+        // Code 0 (chat): a live mute answers result 1.
+        pa.data().chat_restricted_until = chrono::Utc::now().timestamp() + 120;
+        restrict_check(&server, &mut a.conn, 0).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 0, 1])]
+        );
+
+        // An expired mute is cleared by the same check and answers result 0.
+        pa.data().chat_restricted_until = chrono::Utc::now().timestamp() - 1;
+        restrict_check(&server, &mut a.conn, 0).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 0, 0])]
+        );
+        assert_eq!(pa.data().chat_restricted_until, 0, "expired mute cleared");
+
+        // Code 1 is the lobby connection check: no store, always allowed.
+        pa.data().chat_restricted_until = chrono::Utc::now().timestamp() + 120;
+        restrict_check(&server, &mut a.conn, 1).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 1, 0])]
+        );
+
+        // Unmuted: result 0.
+        pa.data().chat_restricted_until = 0;
+        restrict_check(&server, &mut a.conn, 0).await;
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCResultRestrictCheckPacket, vec![1, 0, 0, 0, 0, 0])]
         );
     }
 

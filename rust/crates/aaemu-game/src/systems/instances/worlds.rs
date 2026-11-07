@@ -24,7 +24,7 @@ use crate::server::GameServer;
 use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::world::{session, PlayerRef, WorldInstance, WorldObject};
 
-use super::packets::SCProcessingInstancePacket;
+use super::packets::{SCProcessingInstancePacket, SCSystemDungeonChannelPacket};
 
 /// `WorldInstance` members the Rust `world::WorldInstance` does not carry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -312,6 +312,23 @@ pub fn clone_detached(server: &GameServer, p: &PlayerRef) -> Transform {
     clone
 }
 
+/// `Character.MainWorldPosition` save of the instance entry paths: `MainWorldPosition =
+/// Transform.CloneDetached(character)` when it was never set or the player is still in the
+/// default instance (the C# rule `DoodadFuncEnterInstance` / `DoodadFuncEnterSysInstance` and
+/// the system-dungeon channel pick share).
+pub fn ensure_main_world_position(server: &GameServer, p: &PlayerRef) {
+    let (has_mwp, instance) = {
+        let c = p.data();
+        (
+            c.main_world_position.is_some(),
+            c.unit.transform.instance_id,
+        )
+    };
+    if !has_mwp || instance == DEFAULT_INSTANCE_ID {
+        p.data().main_world_position = Some(clone_detached(server, p));
+    }
+}
+
 /// `character.Transform.ApplyWorldSpawnPosition(wsp, newInstanceId)`. Note (C#): the rotation
 /// is stored as given (degrees from `world_spawns.json`) and the `ZoneId` setter fires
 /// `OnZoneChange(old, new)`; both mirrored (the zone change, the instance membership and the
@@ -410,6 +427,25 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
         server.world.leave_other_instance(&obj, world.id);
         let changes = world.add_visible_object(&obj, &server.view_ctx());
         session::handle_zone_changes(server, changes);
+        // The arrival's `SCUnitState` exchange is done: resend the bounty totals of the wanted
+        // characters now in sight, and this character's total to its viewers (WP-SL3a).
+        crate::systems::social::bounty::on_character_entered(server, p);
+    }
+    // `SC 0x207` after the load: the client only accepts the index when the instance and zone
+    // match the ones the load just set, so it waits for this confirmation.
+    if let Some(pending) = server
+        .systems
+        .instances
+        .indun
+        .take_channel_select(p.character_id)
+    {
+        if pending.instance_id == instance_id {
+            p.send(SCSystemDungeonChannelPacket {
+                zone_id: pending.zone_id,
+                instance_id,
+                instance_index: pending.index,
+            });
+        }
     }
     tracing::debug!("InstanceLoaded.");
 }

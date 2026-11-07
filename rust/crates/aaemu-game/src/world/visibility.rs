@@ -19,6 +19,7 @@ use crate::packets::world_objects::{
     SCHouseStatePacket, SCMateStatePacket, SCShipyardStatePacket, SCSlaveStatePacket,
     SCTargetChangedPacket, SCUnitAttachedPacket,
 };
+use crate::systems::npcs::npc::packets::SCNpcInteractionStatusChangedPacket;
 
 /// `AttachUnitReason.None`.
 const ATTACH_UNIT_REASON_NONE: u8 = 0;
@@ -108,13 +109,21 @@ pub(crate) fn add_visible_object(
         }
         WorldObject::Npc(e) => {
             let name = owner_name(ctx, e.data().unit.owner_id);
-            let (state, points) = {
+            let (state, points, interactable) = {
                 let mut n = e.data();
                 let state = unit_state::npc_unit_state(e.obj_id, &mut n, &name, now);
-                (state, points_of(e.obj_id, &n.unit))
+                (state, points_of(e.obj_id, &n.unit), n.interactable)
             };
             target.send(state);
             target.send(points);
+            // WP-5b: a player that enters sight later must learn the NPC's interaction state
+            // (interactable is the default; only the `false` state is sent). INFERRED.
+            if !interactable {
+                target.send(SCNpcInteractionStatusChangedPacket {
+                    npc_obj_id: e.obj_id,
+                    interactable: false,
+                });
+            }
             base_add(world, obj, target, ctx);
         }
         WorldObject::Doodad(d) => {
@@ -213,9 +222,26 @@ pub(crate) fn add_visible_object(
             // C#: `IsVisible = true` here.
             e.core().set_visible(true);
             let name = owner_name(ctx, e.data().unit.owner_id);
-            let state = unit_state::transfer_unit_state(e.obj_id, &mut e.data(), &name, now);
+            let (state, attached) = {
+                let mut t = e.data();
+                let state = unit_state::transfer_unit_state(e.obj_id, &mut t, &name, now);
+                (state, t.attached_characters.clone())
+            };
             target.send(state);
             base_add(world, obj, target, ctx);
+            // A viewer that arrives after the board needs the seat too (`AttachedCharacters`
+            // has no wire form of its own; the C# never sent it). C# AttachedCharacters were
+            // bare `Character`s, so `point` is the 1.2 client's requirement.
+            for (point, char_obj_id) in attached {
+                if char_obj_id > 0 && world.character_by_obj_id(char_obj_id).is_some() {
+                    target.send(SCUnitAttachedPacket {
+                        child_obj_id: char_obj_id,
+                        point,
+                        reason: ATTACH_UNIT_REASON_NONE,
+                        obj_id: e.obj_id,
+                    });
+                }
+            }
         }
         WorldObject::Shipyard(e) => {
             let name = owner_name(ctx, e.data().unit.owner_id);

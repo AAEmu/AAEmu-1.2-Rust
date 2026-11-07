@@ -9,8 +9,9 @@ use chrono::{NaiveDateTime, Utc};
 use futures::future::BoxFuture;
 
 use super::accounts::{self, TickKind};
+use super::premium;
 use super::tasks::{GameTask, TaskState};
-use crate::net::connection::AccountPayment;
+use crate::managers::account::AccountState;
 use crate::server::GameServer;
 use crate::systems::skills::packets_special::{SCBmPointPacket, SCICSCashPointPacket};
 use crate::systems::skills::progress::SCCharacterLaborPowerChangedPacket;
@@ -20,7 +21,8 @@ pub const MAX_LABOR: i16 = 2000;
 /// `MaxLaborPremium`.
 pub const MAX_LABOR_PREMIUM: i16 = 5000;
 
-/// `GetMaxLabor(isPremium)`.
+/// `GetMaxLabor(isPremium)`: the C# constants, now only the fallback when
+/// `premium_benefits` is empty ([`premium::max_labor`] reads the table).
 pub fn get_max_labor(is_premium: bool) -> i16 {
     if is_premium {
         MAX_LABOR_PREMIUM
@@ -94,7 +96,7 @@ fn now() -> NaiveDateTime {
 async fn do_add_labor(
     server: &GameServer,
     account_id: u32,
-    premium: bool,
+    max_labor: i16,
     connection_id: u32,
     add_labor: i32,
 ) {
@@ -103,8 +105,7 @@ async fn do_add_labor(
     if let Some(p) = server.world.character_by_connection(connection_id) {
         let add = {
             let mut c = p.data();
-            let max_labor_to_add =
-                (i32::from(get_max_labor(premium)) - i32::from(c.labor_power)).max(0);
+            let max_labor_to_add = (i32::from(max_labor) - i32::from(c.labor_power)).max(0);
             let add = add_labor.min(max_labor_to_add);
             if add > 0 {
                 c.change_labor_power(add as i16);
@@ -131,7 +132,7 @@ async fn do_add_labor(
             return;
         }
         // Offline labor (login / character select): no character cache to update.
-        accounts::add_labor_capped(server, account_id, add_labor, get_max_labor(premium)).await;
+        accounts::add_labor_capped(server, account_id, add_labor, max_labor).await;
     }
 }
 
@@ -146,7 +147,11 @@ pub async fn do_tick(server: &GameServer) {
         if account_id == 0 {
             continue;
         }
-        let premium = accounts::connection_payment().premium_state(Utc::now().timestamp());
+        // WP-B: the payment / premium state lives in the account registry (the task only has a
+        // `ConnectionHandle`), and the exact max labor comes from `premium_benefits`.
+        let state = accounts::expire_lazily(server, account_id).await;
+        let premium = state.payment.premium_state(Utc::now().timestamp());
+        let max_labor = premium::max_labor_for_state(server, &state);
         let active_char = server.world.character_by_connection(handle.id);
         let details = accounts::get_account_details(server, account_id).await;
         let due = |last: Option<NaiveDateTime>, minutes: i32| {
@@ -157,7 +162,7 @@ pub async fn do_tick(server: &GameServer) {
         if config.labor.tick_minutes > 0 && due(details.last_labor_tick, config.labor.tick_minutes)
         {
             let add = config.labor.get_tick_amount(premium);
-            do_add_labor(server, account_id, premium, handle.id, add).await;
+            do_add_labor(server, account_id, max_labor, handle.id, add).await;
         }
 
         // Distribute Credits if needed
@@ -223,7 +228,7 @@ pub fn offline_ticks(
 pub async fn add_offline_labor(
     server: &GameServer,
     account_id: u32,
-    payment: &AccountPayment,
+    state: &AccountState,
     last_login: Option<NaiveDateTime>,
     connection_id: u32,
 ) {
@@ -232,10 +237,11 @@ pub async fn add_offline_labor(
     if ticks_to_add <= 0 {
         return;
     }
-    let premium = payment.premium_state(Utc::now().timestamp());
+    let premium = state.payment.premium_state(Utc::now().timestamp());
     let add_labor = config.get_tick_amount(premium).wrapping_mul(ticks_to_add);
+    let max_labor = premium::max_labor_for_state(server, state);
     // `connection.ActiveChar` is always null here (called from `X2EnterWorld`).
-    do_add_labor(server, account_id, premium, connection_id, add_labor).await;
+    do_add_labor(server, account_id, max_labor, connection_id, add_labor).await;
 }
 
 /// `DateTime.MinValue` for unset DATETIME columns.
@@ -280,10 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn default_payment_is_premium_until_2030() {
-        let p = AccountPayment::default();
+    fn default_payment_is_permanent_premium() {
+        let p = crate::net::connection::AccountPayment::default();
         assert!(p.premium_state(1_800_000_000));
-        assert!(!p.premium_state(1_900_000_000));
+        assert!(p.premium_state(4_000_000_000), "no end date");
     }
 
     /// A spawned non-premium player with `labor` memory labor on account 1001 (the account the
@@ -306,7 +312,7 @@ mod tests {
         crate::systems::skills::progress::change_labor(&server, &p, -100, 0);
         assert_eq!(p.data().labor_power, 900);
         // The database row still reads the pre-spend 1000 while the player is online.
-        do_add_labor(&server, 1001, false, p.conn.id, 10).await;
+        do_add_labor(&server, 1001, MAX_LABOR, p.conn.id, 10).await;
         assert_eq!(
             p.data().labor_power,
             910,
@@ -321,7 +327,7 @@ mod tests {
         crate::systems::skills::progress::change_labor(&server, &p, -100, 0);
         assert_eq!(p.data().labor_power, 1900);
         // The database row is still at the cap.
-        do_add_labor(&server, 1001, false, p.conn.id, 10).await;
+        do_add_labor(&server, 1001, MAX_LABOR, p.conn.id, 10).await;
         assert_eq!(
             p.data().labor_power,
             1910,
@@ -333,14 +339,68 @@ mod tests {
     async fn economy_labor_spend_also_keeps_regeneration() {
         let server = test_server();
         let (_client, p) = labor_player(&server, 1000);
-        let mut out = crate::systems::economy::inventory::Out::Direct;
+        let mut out = crate::systems::economy::inventory::Out::Direct(&server);
         crate::systems::economy::inventory::change_labor(&mut out, &server, &p, -100, 0);
         assert_eq!(p.data().labor_power, 900);
-        do_add_labor(&server, 1001, false, p.conn.id, 10).await;
+        do_add_labor(&server, 1001, MAX_LABOR, p.conn.id, 10).await;
         assert_eq!(
             p.data().labor_power,
             910,
             "regenerated labor must be added to the spent balance"
+        );
+    }
+
+    #[tokio::test]
+    async fn labor_tick_uses_the_account_state_not_the_default() {
+        use crate::managers::account::AccountState;
+        use crate::net::connection::{AccountPayment, PaymentMethodType};
+
+        let server = test_server();
+        server.config.update(|c| {
+            c.labor.tick_minutes = 5;
+            c.labor.tick_amount = 5;
+            c.labor.tick_amount_premium = 10;
+            c.credits.tick_minutes = 0;
+            c.loyalty.tick_minutes = 0;
+        });
+        let (_client, p) = labor_player(&server, 1998);
+        server.accounts.set_state(
+            1001,
+            AccountState {
+                payment: AccountPayment {
+                    method: PaymentMethodType::None,
+                    location: 1,
+                    start_time: 0,
+                    end_time: 0,
+                },
+                premium_point: 0,
+            },
+        );
+        do_tick(&server).await;
+        assert_eq!(
+            p.data().labor_power,
+            2000,
+            "a normal account is capped at the non-premium max labor (1998 + 5 would be 2003)"
+        );
+
+        p.data().labor_power = 4995;
+        server.accounts.set_state(
+            1001,
+            AccountState {
+                payment: AccountPayment {
+                    method: PaymentMethodType::Premium,
+                    location: 1,
+                    start_time: 0,
+                    end_time: 1_893_456_000,
+                },
+                premium_point: 1,
+            },
+        );
+        do_tick(&server).await;
+        assert_eq!(
+            p.data().labor_power,
+            5000,
+            "a premium account regenerates to the premium max labor"
         );
     }
 
@@ -356,7 +416,7 @@ mod tests {
         c.is_online = true;
         // During `select_character` the lock spans the load and the world registration.
         let transaction = server.save.transaction_lock().await;
-        let mut tick = Box::pin(do_add_labor(&server, 1001, false, client.conn.id, 10));
+        let mut tick = Box::pin(do_add_labor(&server, 1001, MAX_LABOR, client.conn.id, 10));
         // The tick first fails `update_tick_times` against the closed test pool, which needs up
         // to one 200 ms acquire timeout (two on the unguarded mutant path); 1 s leaves room for
         // that before the tick can reach the lock and block on it for the rest of the window.

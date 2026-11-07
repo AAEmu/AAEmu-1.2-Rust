@@ -15,12 +15,11 @@ STATUS (live producers)
            managers) run at the end of the packet (server.rs::handle_frame).
   WIRED:   k10 (level-up refresh), k11, k12, k16, k17, k18 (labor-attached points only), k19
            (zone-conflict honor only), k20, k21 (via level-up refresh), k22, k23, k25, k27, k28,
-           k30, k32, k33, k34, k35, k36, k37, k38, k39, k40, k41, k43, k44, k45, k46, k47, k48,
-           k50, k51 (plain FAIL only), k42, k52-k55 (join events + entry), k9 (runtime).
-  PARTIAL: k14 MY_GOLD (entry + level-up refresh only; no live money hook: change_money has no
-           server handle), k18 (quest/other point sources only at entry/level-up refresh).
-  REMAINING (not wired, deliberately): k26 KILL_SLAVE (Q5), k29 GET_ITEM_TYPE (needs a
-           delta-carrying acquisition site, see its row), k49 MY_DISHONORABLE_POINT (Q2),
+           k29 (genuine acquisitions only), k30, k32, k33, k34, k35, k36, k37, k38, k39, k40,
+           k41, k43, k44, k45, k46, k47, k48, k50, k51 (plain FAIL only), k42, k52-k55 (join
+           events + entry), k9 (runtime), k14 (money change facade).
+  PARTIAL: k18 (quest/other point sources only at entry/level-up refresh).
+  REMAINING (not wired, deliberately): k26 KILL_SLAVE (Q5), k49 MY_DISHONORABLE_POINT (Q2),
            k57-60 siege results (Q1), siege honor of k19.
 
 Scope: the 55 char_records kinds referenced by achievement_objectives in
@@ -55,6 +54,11 @@ k9  COMPLETE_ACHIEVEMENT  v1=achievement id, v2=0. Done in runtime (refresh_queu
 k10 CHAR_LEVEL      v1/v2=0            abs  level                       back_credit_values
 k12 PLAY_TIME       v1/v2=0            abs  online_time/3600 (HOURS)    back_credit_values
 k14 MY_GOLD         v1/v2=0            abs  money/10000 (GOLD)          back_credit_values
+                    live: every upward change of the carried purse queues an ItemFx::Money
+                    (economy/inventory.rs change_money, the quest reward deposit hook and the
+                    equipped-fish sale); fx::flush -> achievement_hooks::report_gold reports the
+                    absolute gold after the character / economy locks are released, at most once
+                    per character per second (the newest suppressed value is kept).
 k18 GET_ACTABILITY  v1=actability_groups.id (1..23), v2=0
                     abs  actability row point (proficiency)            back_credit_values
 k21 ABILITY_LEVEL   v1=ability id (1..10, same numbering), v2=0
@@ -107,17 +111,23 @@ k26 KILL_SLAVE      v1=slaves.id (2 = siege catapult), v2=1 (single authored row
                     vehicles/mod.rs::on_do_die (L348) -> vehicles/slaves.rs::do_die.
 k29 GET_ITEM_TYPE   v1=items.id, v2=grade id or -1 (ANY). All 216 rows are -1 in 1.2.
                     count; +count of acquired items matching template (+grade if v2>=0)
-                    economy/fx.rs::flush ItemFx::Acquired (L87-97) -> QuestItemHooks::
-                    on_items_acquired; runs AFTER ItemTxn drop (guard released in
-                    ItemTxn::drop L109-115), and only for count>0.
-                    DANGER - the same ItemFx::Acquired fires for container MOVES
-                    (models/container.rs L611-616: !same_container, count=final_count) and for
-                    stack MERGES (L924-929: count=item.count = new total, not the delta), so a
-                    naive credit double-counts warehouse<->bag moves and over-counts merges.
-                    Credit from a source-tagged/delta-carrying acquisition site (add a
-                    source/added field to ItemFx::Acquired or use the explicit
-                    acquire_default_item/try_add_new_item returns) - do not wire k29 to
-                    on_items_acquired as-is.
+                    economy/fx.rs::flush ItemFx::Acquired -> report_achievement
+                    (char_record_kind::GET_ITEM_TYPE, RecordMatch::GradeWildcard with
+                    grade: None; every 1.2 row is the -1 wildcard). The event carries `added`
+                    (units that entered the receiving container) and a `source`
+                    (models/item_task.rs::AcquiredSource), set at both container sites:
+                    - models/container.rs add_or_move_inner: NewItem when the item is new to
+                      every container (loot, craft product, quest reward, purchase, GM),
+                      MailTake from a mail container, Trade from another character's container
+                      (a coffer is ContainerKind::Coffer - its slot type is TRADE - so it stays
+                      Transfer), Transfer for the character's own container moves/re-slots;
+                    - acquire_default_item_ex stack merge: NewUnits with added = the merged
+                      delta (count stays the new total for the quest OnAcquiredItem event).
+                    Only NewItem/NewUnits/MailTake/Trade credit: bag<->bank/coffer moves and
+                    re-stacks of already owned stacks do not. The report runs from fx::flush
+                    after ItemTxn/character locks are released (queued while the economy lock is
+                    held); an unlocked-transaction flush that may still hold a character lock
+                    skips it.
 k30 MAKE_ITEM_TYPE  v1=items.id, v2=grade id or -1 (all 581 rows -1)
                     count; +count crafted with matching template (+grade)
                     economy/craft.rs::end_craft (L505); hand_out_products (L605) has the

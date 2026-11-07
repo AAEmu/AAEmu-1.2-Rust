@@ -51,7 +51,7 @@ pub fn build_registry() -> PacketRegistry {
     let mut r = PacketRegistry::new();
     c2g::register(&mut r); // X2EnterWorld, leave world, character list
     c2g_world::register(&mut r); // character lifecycle, world entry, movement, chat
-    c2g_misc::register(&mut r); // CSEditCharacter (log-only), CSTurretState (vehicles)
+    c2g_misc::register(&mut r); // log-only packets, CSTurretState (vehicles)
     proxy::register(&mut r); // level-2 proxy packets
     crate::systems::register_packets(&mut r);
     for (level, opcode, old, new) in r.duplicates() {
@@ -69,9 +69,19 @@ mod tests {
         let registry = super::build_registry();
         let supported: Vec<_> = crate::opcodes::cs::NAMES
             .iter()
-            .filter(|(opcode, _)| *opcode != 0xfff)
+            // `CSICSBuyAAPointPacket` (0x137) is a known 1.2 client opcode, but AA points
+            // are not supported (owner decision 2026-11-06), so no handler is registered.
+            // `CSCreate/Change/Clear/CheckSecondPasswordPacket` (0x126..=0x129) are known
+            // 1.2 client opcodes, but the second password is not supported (owner decision
+            // 2026-11-06), so no handler is registered.
+            .filter(|(opcode, _)| {
+                *opcode != 0xfff
+                    && *opcode != crate::opcodes::cs::CSICSBuyAAPointPacket
+                    && !matches!(*opcode, 0x126..=0x129)
+            })
             .collect();
-        assert_eq!(supported.len(), 249);
+        // 252 with the owner-approved native 1.2 CS 0x13d (system-dungeon channel pick).
+        assert_eq!(supported.len(), 252);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -88,6 +98,8 @@ mod tests {
         assert!(r.duplicates().is_empty(), "{:?}", r.duplicates());
         let mut systems = crate::net::registry::PacketRegistry::new();
         crate::systems::register_packets(&mut systems);
+        // 13 `c2g`, 22 `c2g_world`, 2 `c2g_misc` (the native national tax 0x013 moved to
+        // `systems::social::packets::misc` in stage 4) plus every subsystem registration.
         assert_eq!(r.len(), 13 + 22 + 2 + systems.len());
     }
 
@@ -144,7 +156,18 @@ mod tests {
             // `CSSendBountyUpdatePacket` (0x120) and `CSChangeAutoUseAAPointPacket` (0x133) are not
             // named by the C# 1.2 opcode tables and the C#
             // never handled them; the real client sends them (client CS table, PORTING.md).
+            // `CSUpdateNationalTaxRatePacket` is the owner-approved native 1.2 0x013
+            // (`FUN_392f42f0`; handled by `systems::social::packets::misc`); the C# left it at
+            // 0xfff (opcodes.rs comment).
+            // `CSSetCraftingPayPacket` is the owner-approved native 1.2 0x08d
+            // (`FUN_394d7230`; handled by `systems::economy::craft` as a validated no-op); the
+            // C# left it at 0xfff.
+            // `CSSelectSysInstanceChannelPacket` (0x13d) is the 1.2 client's system-dungeon
+            // channel pick (writer FUN_397bca60); the C# never registered it.
             let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
+                || opcode == crate::opcodes::cs::CSUpdateNationalTaxRatePacket
+                || opcode == crate::opcodes::cs::CSSetCraftingPayPacket
+                || opcode == crate::opcodes::cs::CSSelectSysInstanceChannelPacket
                 || matches!(opcode, 0x11f | 0x120 | 0x130 | 0x133);
             if !expected.contains_key(&(level, opcode)) && opcode != 0xfff && !rust_only {
                 missing.push(format!(

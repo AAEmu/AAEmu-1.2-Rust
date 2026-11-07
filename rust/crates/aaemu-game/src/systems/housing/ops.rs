@@ -17,9 +17,8 @@ use super::hooks::{
 };
 use super::manager::{
     self, broadcast, error_message as err, now, send_error, set_permission, tax_due_date,
-    template_of, update_house_faction, update_tax_info, world_of, APPRAISAL_CERTIFICATE,
-    BOUND_TAX_CERTIFICATE, COPPER_PER_CERTIFICATE, FACTION_MONSTROSITY, FOR_SALE_MARKER_DOODAD_ID,
-    HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE,
+    template_of, update_house_faction, update_tax_info, world_of, BOUND_TAX_CERTIFICATE,
+    FACTION_MONSTROSITY, FOR_SALE_MARKER_DOODAD_ID, HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE,
 };
 use super::packets::{
     CSCreateHousePacket, CSDecorateHousePacket, SCConstructHouseTaxPacket,
@@ -80,7 +79,7 @@ pub fn construct_house_tax(
     design_id: u32,
     x: f32,
     y: f32,
-    _z: f32,
+    z: f32,
 ) {
     let _operation = server
         .systems
@@ -92,6 +91,12 @@ pub fn construct_house_tax(
         tracing::error!("ConstructHouseTax: unknown design {design_id} (NullReferenceException)");
         return;
     };
+    if let Err(error) =
+        super::placement::validate_placement_range(server, player, x, y, z, template.garden_radius)
+    {
+        send_error(player, error);
+        return;
+    }
     let account = player.data().account_id;
     let instance = player.data().unit.transform.instance_id;
     let info = match super::dominion::tax::quote_at(server, account, template, true, instance, x, y)
@@ -142,7 +147,7 @@ pub fn house_tax_info(server: &GameServer, player: &PlayerRef, tl: u16) {
     let now = now();
     let weeks_without_pay = if h.protection_end_date <= now {
         1
-    } else if tax_due_date(&h) <= now {
+    } else if tax_due_date(server, &h) <= now {
         0
     } else {
         -1
@@ -304,6 +309,9 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
                 Some(HouseConstructionError::InvalidDesign) => err::BAG_INVALID_ITEM,
                 Some(HouseConstructionError::InsufficientPayment) => {
                     err::MAIL_NOT_ENOUGH_MONEY_TO_PAY_TAXES
+                }
+                Some(HouseConstructionError::ItemLocked) => {
+                    crate::systems::economy::error_message::ITEM_SECURE_CONDITION
                 }
                 None => crate::systems::economy::error_message::INVALID_TAXATION,
             },
@@ -939,9 +947,10 @@ pub fn return_house_items_with_payment(
 // Sale
 // ---------------------------------------------------------------------------------------------
 
-/// `CalculateSaleCertifcates(house, salePrice)`: one appraisal certificate per 100 gold.
-pub fn calculate_sale_certificates(sale_price: u32) -> i32 {
-    let n = (f64::from(sale_price) / COPPER_PER_CERTIFICATE).ceil() as i32;
+/// `CalculateSaleCertifcates(house, salePrice)`: one appraisal certificate per
+/// `content_configs` 37 copper (100 gold with the shipped 1,000,000).
+pub fn calculate_sale_certificates(server: &GameServer, sale_price: u32) -> i32 {
+    let n = (f64::from(sale_price) / manager::copper_per_certificate(server)).ceil() as i32;
     n.max(1)
 }
 
@@ -1057,6 +1066,13 @@ pub fn set_for_sale(
         return false;
     }
     if price == 0 || i32::try_from(price).is_err() {
+        if let Some(player) = seller {
+            // `house_cannot_sell_as_too_low_price` (650); an unrepresentable price is
+            // anti-cheat and stays silent.
+            if price == 0 {
+                send_error(player, err::HOUSE_CANNOT_SELL_AS_TOO_LOW_PRICE);
+            }
+        }
         return false;
     }
     // The tax timer can still be waiting to demolish an expired house. Do not charge
@@ -1064,15 +1080,42 @@ pub fn set_for_sale(
     if house.data().protection_end_date <= now() {
         return false;
     }
-    if seller.is_some_and(|player| house.data().unit.owner_id != player.character_id) {
-        return false;
+    if let Some(player) = seller {
+        let (owner, step, tax_due) = {
+            let h = house.data();
+            (
+                h.unit.owner_id,
+                h.current_step,
+                tax_due_date(server, &h) <= now(),
+            )
+        };
+        if owner != player.character_id {
+            send_error(player, err::HOUSE_CANNOT_SELL_AS_NOT_OWNER);
+            return false;
+        }
+        if step != -1 {
+            send_error(player, err::HOUSE_CANNOT_SELL_AS_UNDER_CONSTRUCTION);
+            return false;
+        }
+        // A property whose tax bill is already due cannot be listed; the 1.2 client has the
+        // dedicated `house_cannot_sell_as_delayed_tax` text.
+        if tax_due {
+            send_error(player, err::HOUSE_CANNOT_SELL_AS_DELAYED_TAX);
+            return false;
+        }
     }
     if !template_of(server, house).is_some_and(|t| t.is_sellable) {
+        if let Some(player) = seller {
+            send_error(player, err::HOUSE_CANNOT_SELL_AS_TYPE);
+        }
         return false;
     }
     // Check if buyer exists (we just check if the name exists)
     let buyer_name = server.names.get_character_name(buyer_id);
     if buyer_id != 0 && buyer_name.is_none() {
+        if let Some(player) = seller {
+            send_error(player, err::HOUSE_CANNOT_SELL_AS_DESIGNATED_BUYER_NOT_FOUND);
+        }
         return false;
     }
     let buyer_name = buyer_name.unwrap_or_default();
@@ -1081,9 +1124,17 @@ pub fn set_for_sale(
         if h.sell_price == price && h.sell_to_player_id == buyer_id {
             return true;
         }
+        // A different listing needs a cancel first; otherwise the seller pays the appraisal
+        // certificates again. GM listings (no seller) keep replacing the sale.
+        if seller.is_some() && h.sell_price != 0 {
+            if let Some(player) = seller {
+                send_error(player, err::HOUSE_CANNOT_SELL_AS_ALREADY_FOR_SALE);
+            }
+            return false;
+        }
     }
     if let Some(seller) = seller {
-        let cert = calculate_sale_certificates(price);
+        let cert = calculate_sale_certificates(server, price);
         let hooks = server.systems.housing.hooks.get();
         if !hooks.pay_house_sale_certificates(server, seller, cert) {
             send_error(seller, err::HOUSE_CANNOT_SELL_AS_NOT_ENOUGH_SEAL);
@@ -1150,7 +1201,8 @@ pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificate
     if h.sell_price == 0 {
         return true;
     }
-    let cert = calculate_sale_certificates(h.sell_price);
+    let cert = calculate_sale_certificates(server, h.sell_price);
+    let cert_item = manager::appraisal_certificate(server);
     let owner = server.world.character_by_id(h.unit.owner_id);
     // Can only return certificates if owner is online and is the one resetting the sale
     if cert > 0 && return_certificates {
@@ -1165,24 +1217,21 @@ pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificate
                 zone_group_text(server, &h),
                 quote_arg(&h.unit.name)
             ),
-            text: format!(
-                "body('{}', {APPRAISAL_CERTIFICATE}, {cert})",
-                quote_arg(&h.unit.name)
-            ),
+            text: format!("body('{}', {cert_item}, {cert})", quote_arg(&h.unit.name)),
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
             ..HouseMail::default()
         };
         let hooks = server.systems.housing.hooks.get();
         if let Some(owner) = &owner {
-            if !hooks.send_mail_with_new_items(server, owner, mail, APPRAISAL_CERTIFICATE, cert) {
+            if !hooks.send_mail_with_new_items(server, owner, mail, cert_item, cert) {
                 tracing::warn!("CancelForSale - Failed to create Appraisal Certificates for mail");
                 return false;
             }
         } else {
             let mut mail = mail;
             mail.attachments.push(MailAttachment::NewItem {
-                template_id: APPRAISAL_CERTIFICATE,
+                template_id: cert_item,
                 count: cert,
                 grade: 0,
                 owner_id: h.unit.owner_id,
@@ -1305,7 +1354,26 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
         send_error(player, err::HOUSE_CANNOT_BUY_AS_OWNER);
         return false;
     }
-    // NOTE (C#): check tax due maybe ?
+    // The sale window is opened from the house's name plaque. Refuse a purchase from far
+    // away with the client's generic `too_far_away` (154). Capture-pending HOUSE-5: the
+    // exact 1.2 house-interaction range (the 10.x house list uses 18 m).
+    let (hx, hy, hz) = {
+        let t = h.unit.transform;
+        (t.x, t.y, t.z)
+    };
+    if !super::placement::caster_in_range(server, player, hx, hy, hz, 0.0) {
+        send_error(player, err::TOO_FAR_AWAY);
+        return false;
+    }
+    // Buying must not bypass the construction account rules (houseless /
+    // existing_category_id / max_construct_count). Capture-pending HOUSE-3.
+    if let Err(error) = super::placement::purchase_allowed(server, player, &house) {
+        send_error(player, error);
+        return false;
+    }
+    // NOTE (C#): check tax due maybe ? Capture-pending HOUSE-4: a buy-specific overdue-tax
+    // answer (the 1.2 table has no purchase tax error; the seller's delayed-tax refusal is
+    // `house_cannot_sell_as_delayed_tax`, 645).
     if player.data().money < i64::from(sale_price) {
         send_error(player, err::HOUSE_CANNOT_BUY_AS_NOT_ENOUGH_MONEY);
         return false;
@@ -1424,7 +1492,7 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
 // ---------------------------------------------------------------------------------------------
 
 /// `DecorateHouse(player, houseTlId, designId, pos, quat, parentObjId, itemId)`: `Ok(false)` =
-/// failed (the packet sends `HouseCannotDecorate`), `Err` = the C# throws.
+/// failed (the refusal code has already been sent), `Err` = the C# throws.
 pub fn decorate_house(
     server: &GameServer,
     player: &PlayerRef,
@@ -1443,8 +1511,16 @@ pub fn decorate_house(
     let Some(item) = hooks.inventory_item(server, player, p.item_id).filter(|i| {
         i.owner_id == u64::from(char_id) && i.slot_type == slot_type::INVENTORY && i.count > 0
     }) else {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     };
+    if item.secure {
+        send_error(
+            player,
+            crate::systems::economy::error_message::ITEM_SECURE_CONDITION,
+        );
+        return Ok(false);
+    }
     // Check House
     let Some(house) = server
         .systems
@@ -1463,6 +1539,7 @@ pub fn decorate_house(
             .all(f32::is_finite)
         || p.quat.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() <= f64::EPSILON
     {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     }
     if !manager::allowed_to_interact(server, &house, player)
@@ -1472,6 +1549,7 @@ pub fn decorate_house(
             .housing
             .decoration_accepts_item(p.design_id, item.template_id)
     {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     }
     let ucc_id = if item.ucc_id > 0 {
@@ -1497,11 +1575,38 @@ pub fn decorate_house(
         })?;
     let world = world_of(server, &house).ok_or("house without world")?;
     if player.data().unit.transform.instance_id != world.id || house.data().current_step != -1 {
+        send_error(player, err::HOUSE_NOT_DECORATABLE_STATE);
         return Ok(false);
     }
     let Some(template) = template_of(server, &house) else {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     };
+    // The 1.2 client refuses the decoration item when the player is farther than 30 m from
+    // the placement position (`FUN_393a8fa0`, `_DAT_399d2464` = 900) and answers
+    // `too_far_to_decorate_house` (199). The packet position is house-local.
+    let (hx, hy, hz, yaw) = {
+        let h = house.data();
+        let t = h.unit.transform;
+        (t.x, t.y, t.z, t.rot_z)
+    };
+    let (sin, cos) = yaw.sin_cos();
+    let target = (
+        hx + p.x * cos - p.y * sin,
+        hy + p.x * sin + p.y * cos,
+        hz + p.z,
+    );
+    if !super::placement::caster_in_range(server, player, target.0, target.1, target.2, 0.0) {
+        send_error(player, err::TOO_FAR_TO_DECORATE_HOUSE);
+        return Ok(false);
+    }
+    // `GetHouseAtLocation` uses the garden square; a decoration outside it is out of garden.
+    if template.garden_radius > 0.0
+        && (p.x.abs() > template.garden_radius || p.y.abs() > template.garden_radius)
+    {
+        send_error(player, err::HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN);
+        return Ok(false);
+    }
     let house_id = house.data().id;
     let mut decoration_count = 0;
     let mut group_count = 0;
@@ -1526,16 +1631,22 @@ pub fn decorate_house(
     if [template.deco_limit, template.absolute_deco_limit]
         .into_iter()
         .any(|limit| limit > 0 && decoration_count >= limit)
-        || server
-            .game_data
-            .systems
-            .housing
-            .decoration_limit(
-                template.housing_deco_limit_id,
-                design.deco_act_ability_group_id,
-            )
-            .is_some_and(|limit| group_count >= limit)
     {
+        send_error(player, err::HOUSE_TOO_MANY_DECORATIONS);
+        return Ok(false);
+    }
+    if server
+        .game_data
+        .systems
+        .housing
+        .decoration_limit(
+            template.housing_deco_limit_id,
+            design.deco_act_ability_group_id,
+        )
+        .is_some_and(|limit| group_count >= limit)
+    {
+        // `CanDecorateHouse` -> `acatbility_deco_arrang_fail` (629).
+        send_error(player, err::ACATBILITY_DECO_ARRANG_FAIL);
         return Ok(false);
     }
     let house_obj = WorldObject::from(&house);
@@ -1596,6 +1707,7 @@ pub fn decorate_house(
     };
     if !paid {
         server.ids.object.release_id(doodad.obj_id);
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     }
     world.attach_child(&house_obj, &WorldObject::from(&doodad));

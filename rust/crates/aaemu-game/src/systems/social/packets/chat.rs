@@ -1,17 +1,75 @@
 //! Chat channel packets (`CSSendChatMessagePacket` itself is registered by `packets::c2g_world`
 //! and routed through [`crate::world::session::send_chat_message`]).
 
-use super::{active_char, cs_packet};
+use super::{active_char, cs_packet, sc_packet};
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::{cs, sc};
 use crate::packets::raw_body_packet;
 use crate::packets::world::SCChatMessagePacket;
 use crate::systems::social::{
-    chat::{chat_type, ChatChannel},
-    util::send_error,
+    chat::{chat_refusal, chat_type, send_chat_refusal, ChatChannel},
+    util::send_chat_failure,
 };
 use aaemu_commons::{Marshal, PacketStream};
+
+sc_packet!(
+    /// `SCChatFailedPacket` (S 0x0d1): `i16 ErrorMessage ; string chname (max 10)`.
+    ///
+    /// Reader `FUN_397c2950`; its handler `FUN_391d8de0` raises the client's `CHAT_FAILED(error,
+    /// chname)` Lua event. The chat-event handler in `chat_msg_event.alb` displays the error
+    /// text; the channel name is capped at the 10 bytes the reader accepts.
+    SCChatFailedPacket {
+        error: i16,
+        channel_name: String
+    } |self, s| {
+        s.write_i16(self.error).write_str(&self.channel_name);
+    }
+);
+
+impl SCChatFailedPacket {
+    /// The `chname` length the 1.2 reader accepts (`FUN_397c2950`).
+    pub const MAX_CHANNEL_NAME_BYTES: usize = 10;
+
+    pub fn new(error: i16, channel_name: &str) -> Self {
+        let mut end = channel_name.len().min(Self::MAX_CHANNEL_NAME_BYTES);
+        while !channel_name.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            error,
+            channel_name: channel_name[..end].to_string(),
+        }
+    }
+}
+
+sc_packet!(
+    /// `SCRestrictInfoPacket` (S 0x1c8), the chat-ban notice: `string chname (max 11) ;
+    /// i32 index ; u8 restrictCode ; u32 duration ; i64 startDate ; i64 endDate`.
+    ///
+    /// Reader `FUN_397c4570` reads `chname` (max 11 bytes), then `FUN_397beb40` reads the
+    /// record in that order. Handler `FUN_391e0be0` passes only `duration` to `FUN_393c4170`,
+    /// which raises the system line `restrict_remain_time` with `duration / 60 + 1` minutes;
+    /// the 1.2 client reads neither `index`, `restrictCode`, `startDate` nor `endDate`. The
+    /// server sends `index = 0`, `restrictCode = 0` (chat), `duration` = remaining seconds of
+    /// the persisted mute, and `start`/`end` = the notice time / `chat_restricted_until`
+    /// (the mute start is not persisted; both fields are ignored by the client, INFERRED).
+    SCRestrictInfoPacket {
+        chname: String,
+        index: i32,
+        code: u8,
+        duration: u32,
+        start: i64,
+        end: i64
+    } |self, s| {
+        s.write_str(&self.chname)
+            .write_i32(self.index)
+            .write_u8(self.code)
+            .write_u32(self.duration)
+            .write_i64(self.start)
+            .write_i64(self.end);
+    }
+);
 
 cs_packet!(
     /// `CSJoinUserChatChannelPacket`: temporary user channel create/join.
@@ -19,8 +77,12 @@ cs_packet!(
     read |s| { Ok(Self { name: s.read_string()?, pwd: s.read_string()?, create: s.read_bool()? }) }
     handle |self, server, conn| {
         let p = active_char!(conn);
-        if let Err(error) = server.chat.join_user_channel(&p, &self.name, &self.pwd, self.create, &server.ids.chat) {
-            send_error(&p, error);
+        if let Err(failure) =
+            server
+                .chat
+                .join_user_channel(&p, &self.name, &self.pwd, self.create, &server.ids.chat)
+        {
+            send_chat_failure(&p, &server.config.chat, failure);
         }
         Ok(())
     }
@@ -32,8 +94,8 @@ cs_packet!(
     read |s| { Ok(Self { chat: s.read_i64()? }) }
     handle |self, server, conn| {
         let p = active_char!(conn);
-        if let Err(error) = server.chat.leave_user_channel(&p, self.chat, &server.ids.chat) {
-            send_error(&p, error);
+        if let Err(failure) = server.chat.leave_user_channel(&p, self.chat, &server.ids.chat) {
+            send_chat_failure(&p, &server.config.chat, failure);
         }
         Ok(())
     }
@@ -96,7 +158,23 @@ pub async fn send_user_chat(
             return;
         }
     }
-    let sender = crate::world::session::chat_sender(&p.data(), p.obj_id);
+    // SL4b: the user-channel input is the other outgoing chat path (`chat_type::USER` 15), so
+    // the same level gate / mute check applies. The sender identity and the refusal share one
+    // character lock.
+    let (sender, refusal) = {
+        let mut c = p.data();
+        let refusal = chat_refusal(
+            &server.config.chat,
+            &mut c,
+            chat_type::USER,
+            chrono::Utc::now().timestamp(),
+        );
+        (crate::world::session::chat_sender(&c, p.obj_id), refusal)
+    };
+    if let Some(refusal) = refusal {
+        send_chat_refusal(&p, refusal);
+        return;
+    }
     let message = SCChatMessagePacket {
         chat_type: chat_type::USER,
         sender: Some(sender),
@@ -104,11 +182,12 @@ pub async fn send_user_chat(
         ability: packet.ability,
         language_type: packet.language_type,
     };
-    if let Err(error) = server
-        .chat
-        .send_user_message(&p, packet.unk1, packet.unk2 as u32, &message)
+    if let Err(failure) =
+        server
+            .chat
+            .send_user_message(&p, packet.unk1, packet.unk2 as u32, &message)
     {
-        send_error(&p, error);
+        send_chat_failure(&p, &server.config.chat, failure);
     }
 }
 
@@ -240,5 +319,54 @@ mod tests {
             body.as_bytes(),
             expected([0xFE, 0xFF, 0, 0, 0, 0, 0, 0], None, "hi", 3)
         );
+    }
+
+    #[test]
+    fn restrict_info_writes_the_reader_layout() {
+        // Reader `FUN_397c4570` (chname) -> `FUN_397beb40` (index, restrictCode, duration,
+        // startDate, endDate); independent little-endian literals.
+        let packet = SCRestrictInfoPacket {
+            chname: "Crook".into(),
+            index: 0,
+            code: 0,
+            duration: 601,
+            start: 1_700_000_000,
+            end: 1_700_000_601,
+        };
+        let mut body = PacketStream::new();
+        packet.write(&mut body);
+        assert_eq!(
+            body.as_bytes(),
+            vec![
+                5, 0, b'C', b'r', b'o', b'o', b'k', // string chname
+                0, 0, 0, 0, // i32 index
+                0, // u8 restrictCode
+                0x59, 0x02, 0, 0, // u32 duration (601 s)
+                0, 0xF1, 0x53, 0x65, 0, 0, 0, 0, // i64 startDate (1_700_000_000)
+                0x59, 0xF3, 0x53, 0x65, 0, 0, 0, 0, // i64 endDate (1_700_000_601)
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_failed_writes_i16_error_then_the_channel_name() {
+        // Reader `FUN_397c2950`: `i16 ErrorMessage ; string chname (max 10)`.
+        let packet = SCChatFailedPacket::new(467, "Party");
+        let mut body = PacketStream::new();
+        packet.write(&mut body);
+        assert_eq!(
+            body.as_bytes(),
+            vec![0xD3, 0x01, 5, 0, b'P', b'a', b'r', b't', b'y']
+        );
+    }
+
+    #[test]
+    fn chat_failed_channel_name_is_capped_at_ten_bytes_on_a_char_boundary() {
+        // The 1.2 reader's `chname` buffer is 10 bytes; a longer name must not overflow it.
+        let packet = SCChatFailedPacket::new(270, "Party 1 of Al");
+        assert_eq!(packet.channel_name, "Party 1 of");
+        // A multi-byte character that would straddle the cap is dropped whole.
+        let packet = SCChatFailedPacket::new(270, "éééééé");
+        assert_eq!(packet.channel_name, "ééééé");
     }
 }

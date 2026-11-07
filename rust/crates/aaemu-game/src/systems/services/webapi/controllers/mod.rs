@@ -1,10 +1,14 @@
 //! `Services/WebApi/Controllers` and `Services/WebApi/Models`.
 
 mod auction;
+mod dominion;
 mod mail;
+mod online;
 
 pub use auction::AuctionController;
+pub use dominion::DominionController;
 pub use mail::MailController;
+pub use online::OnlineController;
 
 use chrono::NaiveDateTime;
 use sqlx::Row;

@@ -261,6 +261,14 @@ pub fn validate(
             "skill_urk_target_combat",
             target_unit.and_then(|t| t.with_unit(|x| x.unit().is_in_battle)) == Some(false),
         ),
+        // `UnitReqsKindType.CanLearnCraft` (0x13): CraftId, must not have learned it. The C#
+        // branch was commented out (`UnitReqs.cs:96`, a2ab80abd^); the 1.2 data has 9 skills
+        // using it, all training skills for a gated craft. Deviation recorded in PORTING.md.
+        0x13 => ret_value(
+            "skill_urk_can_learn_craft",
+            v1,
+            player.is_some_and(|p| !p.data().learned_crafts.contains(&v1)),
+        ),
         0x14 => {
             let range = v2 as f32 / 1000.0;
             let o = super::geometry::Target::Obj(owner.clone());
@@ -542,8 +550,16 @@ pub fn validate(
             )
         }
         0x43 => {
-            // TimedRewardsManager.GetMaxLabor(premium) - LaborPower
-            let remaining = player.map_or(0, |p| max_labor() - i32::from(p.data().labor_power));
+            // TimedRewardsManager.GetMaxLabor(premium) - LaborPower. Read both values under one
+            // data guard: two `p.data()` temporaries in one expression would lock the same std
+            // Mutex twice and deadlock (`max_labor` only needs the account id).
+            let remaining = player.map_or(0, |p| {
+                let (account_id, labor_power) = {
+                    let c = p.data();
+                    (c.account_id, c.labor_power)
+                };
+                max_labor(server, account_id) - i32::from(labor_power)
+            });
             ret_value("skill_urk_labor_power_margin", v1, v1 as i32 <= remaining)
         }
         0x45 => ret(
@@ -587,13 +603,11 @@ pub fn validate(
 pub const QUEST_STEP_PROGRESS: u8 = 4;
 pub const QUEST_STEP_READY: u8 = 6;
 
-/// `TimedRewardsManager.GetMaxLabor(player.Connection.Payment.PremiumState)` (every
-/// connection's `AccountPayment` is the default premium one until 2030).
-pub fn max_labor() -> i32 {
-    let premium = crate::systems::services::accounts::connection_payment()
-        .premium_state(chrono::Utc::now().timestamp());
-    i32::from(crate::systems::services::timed_rewards::get_max_labor(
-        premium,
+/// `TimedRewardsManager.GetMaxLabor(player.Connection.Payment.PremiumState)` with the account's
+/// real payment / premium grade (`premium_benefits.max_labor`).
+pub fn max_labor(server: &GameServer, account_id: u32) -> i32 {
+    i32::from(crate::systems::services::premium::max_labor(
+        server, account_id,
     ))
 }
 
@@ -804,5 +818,70 @@ mod treasure_tests {
             can_use_skill(&server, &other, &owner, &caster),
             ReqResult::OK
         );
+    }
+}
+
+#[cfg(test)]
+mod labor_margin_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::managers::account::AccountState;
+    use crate::net::connection::{AccountPayment, PaymentMethodType};
+    use crate::test_support::{
+        finishes_in_time, spawn_player, test_character, test_server, TestClient,
+    };
+
+    fn result_for(premium: bool) -> ReqResult {
+        let server = Arc::new(test_server());
+        let client = TestClient::new(&server, 1, 1001);
+        let mut character = test_character(1, "Laborer", 100.0, 100.0);
+        character.labor_power = 1998;
+        let player = spawn_player(&server, &client, character, 0x101);
+        server.accounts.set_state(
+            1001,
+            AccountState {
+                payment: AccountPayment {
+                    method: if premium {
+                        PaymentMethodType::Premium
+                    } else {
+                        PaymentMethodType::None
+                    },
+                    location: 1,
+                    start_time: 0,
+                    end_time: 0,
+                },
+                premium_point: i32::from(premium),
+            },
+        );
+        let req = UnitReq {
+            id: 1,
+            owner_id: 0,
+            owner_type: String::new(),
+            kind: 0x43,
+            value1: 5,
+            value2: 0,
+        };
+        let owner = WorldObject::from(&player);
+        // The regression was a self-deadlock: two `Player::data()` guards alive in one
+        // expression. Run on the helper thread so a future reintroduction fails (panics) instead
+        // of hanging the whole test binary.
+        finishes_in_time("unit req 0x43", move || {
+            validate(&server, &req, &owner, None)
+        })
+    }
+
+    #[tokio::test]
+    async fn labor_margin_req_caps_by_the_account_payment() {
+        // 2000 - 1998 = 2 < 5: a normal account refuses the 5-labor margin.
+        assert_eq!(
+            result_for(false),
+            ReqResult {
+                key: "skill_urk_labor_power_margin",
+                value: 5
+            }
+        );
+        // The premium cap (5000) satisfies it.
+        assert_eq!(result_for(true), ReqResult::OK);
     }
 }

@@ -227,8 +227,9 @@ pub trait NpcSkillHooks: Send + Sync {
         _zone_id: u32,
         _pos: PositionAndRotation,
         _delay_ms: i32,
-    ) {
+    ) -> Option<crate::world::DoodadRef> {
         not_ported("SpawnDoodad");
+        None
     }
 
     /// `npc.Template.PetItemId` (0 = none).
@@ -288,7 +289,9 @@ pub trait NpcSkillHooks: Send + Sync {
 
     /// `SlaveManager.Create(owner, skillItem, positionOverride)` (`SpawnSlave`). `placement` is
     /// the `SummonPos` spot the client chose (`None` for a self-targeted summon item cast);
-    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded).
+    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded). `client_spawn` is
+    /// `Some(hide_spawn_effect)` when the cast was synthesized from `CSSpawnSlave` (0x02e): the
+    /// placement then keeps the client yaw and the packet's hide flag.
     fn spawn_slave(
         &self,
         _server: &GameServer,
@@ -296,6 +299,7 @@ pub trait NpcSkillHooks: Send + Sync {
         _skill_item: &SkillCaster,
         _placement: Option<SummonPlacement>,
         _max_range: f32,
+        _client_spawn: Option<bool>,
     ) {
         not_ported("SlaveManager.Create");
     }
@@ -669,6 +673,23 @@ pub trait ItemSkillHooks: Send + Sync {
     ) -> i32 {
         not_ported("Bag.ConsumeItem");
         0
+    }
+
+    /// `Inventory.Bag.ConsumeItem(taskType, templateId, amount, item)`: verify and consume
+    /// `amount` from the one bag item `item_id`, under one container lock. `Some(true)` when
+    /// exactly `amount` was consumed; `Some(false)` when the item is not the player's bag item
+    /// with `expected_template_id` or is secure; `None` when the implementation does not track
+    /// items (tests / hooks).
+    fn consume_bag_item_by_id(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _task_type: u8,
+        _item_id: u64,
+        _expected_template_id: u32,
+        _amount: i32,
+    ) -> Option<bool> {
+        None
     }
 
     /// `ItemManager.GetItemByItemId(sourceItemId)` and, when it exists,

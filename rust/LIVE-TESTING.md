@@ -205,10 +205,13 @@ $TC load   --config testclient.local.json --login 127.0.0.1:21237 --bots 50 --pr
 ```
 
 Scenarios: `login` (login server only), `lobby` (+ game lobby, stream join, character
-creation, quit), `full` (everything above), `combat` (`full` + three melee hits on a Solzreed
-fox, which fights back; logout then takes the 5-minute in-combat timer), `load` (login,
-create, select, spawn, move, chat, leave). `parity` exits with 2 when there are findings,
-`load` when a bot failed.
+creation, quit), `edit` (lobby create, `CSEditCharacter` of the appearance, checks
+`SCEditCharacterResponse`, relists and checks the changed entry, quit; needs
+`Login:PreSelectCharacterPeriod` on - the game applies it at registration - and while the period
+is on world entry is refused, so only this scenario runs on that stack), `full` (everything above),
+`combat` (`full` + three melee hits on a Solzreed fox, which fights back; logout then takes the
+5-minute in-combat timer), `load` (login, create, select, spawn, move, chat, leave). `parity`
+exits with 2 when there are findings, `load` when a bot failed.
 
 `questitem` (`full`'s login/create/select/spawn, then GM setup and a quest-item cast loop) uses
 the Detection Orb (item 17594, use skill 16881) of quest 2394 "Searching for Answers" on the
@@ -238,6 +241,20 @@ id (`doodads` prints the template and object id of every doodad in sight), and `
 <npc template|0>` starts one from an NPC. The bot decodes `SCDoodadCompleteQuestPacket` (0x14d)
 into `GameState::doodad_complete_quests` as `(doodad object id, quest id)` and prints it decoded,
 so a ready report doodad can be checked with `expectpkt SCDoodadCompleteQuestPacket` before `cqd`.
+
+The same script drives crafting, mail and the auction house. The C->S bodies follow the 1.2
+client writer functions (not the server readers), and the S->C replies are decoded from the client
+reader layouts: `cexec <craft> <doodad obj id> <count>` sends `CSExecuteCraft`
+(`FUN_397bbfc0`) and prints `SCCraftItemUnlock` / `SCCraftFailed`; `maillist` sends the empty
+`CSListMail` and decodes every `SCMailList` header (`FUN_398a5a00`) and `SCMailListEnd`;
+`mailread <isSent 0|1> <mailId>` sends `CSReadMail` (`FUN_397ba350`) and decodes `SCMailBody`
+(`FUN_397af2d0` / `FUN_398a5e60`) with its attachments; `aucpost <npc template> <item template>
+<start> <buyout> <duration>` walks to an auctioneer NPC, interacts and sends `CSAuctionPost`
+(`FUN_397bae70`), printing the `SCAuctionPosted` lot id; `aucbid <npc template> <lot id> <money>`
+sends `CSBidAuction` (`FUN_397bb050` / `FUN_398a6880`) and prints `SCAuctionBid` /
+`SCAuctionMessage`. `item <template> <count>` supplies the lot item. A second character is needed
+to bid on a lot (the server refuses the seller's own bid); bidding twice with it produces the
+outbid refund mail, which `maillist` / `mailread` can then read.
 
 `portal` (GM account, same prerequisites as `questitem`) records a book entry with `/add_portal`, deletes it
 with `CSDeletePortal` and requires `SCPortalDeleted`, then teleports next to the Harpa Training Ground Memory Tome
@@ -273,6 +290,13 @@ that updates the armor with the rune, and exactly one consumed lunafrost. It the
 (`CSSwapItems` to the head slot) and repeats the cast on the worn item. The stat bonus of the worn rune is
 not visible on the wire (see the `gear_bonuses_include_the_rune_modifiers` unit test); the server log must show
 no warning or error around the `StartSkill: Id 11285` lines.
+`socket` (GM account, same prerequisites as `questitem`) checks the lunagem socket rules: it adds
+a grade-4 chest armor (19327) and two lunagems with the GM `/item add` command. A hands lunagem
+(30959, `item_sockets` group 18) on the chest is rejected with `SCErrorMsg` 18 (`invalid_target`)
+and the gem is not consumed (a second cast of the same stack is rejected too). A chest lunagem
+(30958, group 17, no level limit) is installed on the armor: `SCItemSocketingLunagemResult` with
+result 1, the armor id, the gem template and `install=true`, a `Socketing` item task (99) that
+updates the armor, and exactly one `SkillReagents` task that consumes the gem stack.
 `craft` (GM account, same prerequisites as `questitem`) spawns an Archeum Workbench (doodad 566, `/spawn doodad`),
 adds 100 Gilda Stars (item 23633), tops the bot's labor up by 12 (`/labor 12`; GM commands can only add labor) and sends
 `CSExecuteCraft` for craft 8000001 (3 labor per craft) with count 100, so the batch outlasts the labor. It requires at
@@ -404,10 +428,6 @@ With 200 concurrent logins the C# login server times out on its MySQL connection
 * `RUST_LOG=info,aaemu_game::net=debug,aaemu_login::network=debug` logs every game packet
   (`GamePacket: C->S ...` / `S->C ...`) and the login connections, which is the server-side trace
   of a client session.
-* `AAEMU_LOG_MS=1` writes every log time as `HH:MM:SS.ffffff` (six fractional digits) instead of
-  `HH:MM:SS`, console and `Server.log` alike; off by default. `Scripts/live-stack.sh start` passes
-  it through to both servers (`AAEMU_LOG_MS=1 Scripts/live-stack.sh start`). The skill-parity audit
-  uses it to align the server's packet log with client traces (`docs/client/LUA-DRIVER.md`).
 * `RUST_LOG=aaemu_game::net::fields=trace` additionally logs every client packet's level, opcode
   name and full hex body (the bytes after the opcode; off unless the target is enabled). Use it to
   compare what the original 1.2 client sends with another client's packets. It dumps everything

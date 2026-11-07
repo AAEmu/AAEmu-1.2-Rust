@@ -11,7 +11,9 @@ use aaemu_game::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObje
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 
-use crate::game::{GameClient, GameEvent, ItemTaskInfo, Packet, UnitInfo, LEVEL_PROXY};
+use crate::game::{
+    read_character, Appearance, GameClient, GameEvent, ItemTaskInfo, Packet, UnitInfo, LEVEL_PROXY,
+};
 use crate::login::LoginClient;
 use crate::record::Recorder;
 use crate::stream::StreamClient;
@@ -27,6 +29,7 @@ mod plant;
 mod portal;
 mod questitem;
 mod script;
+mod socket;
 
 /// Which scenario to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +40,9 @@ pub enum Kind {
     /// Login + game lobby: enter world, FinishState burst, character list, stream join,
     /// character creation, then quit.
     Lobby,
+    /// Lobby character edit (`CSEditCharacter`, pre-select period): create, edit the appearance,
+    /// check `SCEditCharacterResponse`, relist and check the changed entry, then quit.
+    Edit,
     /// Everything: lobby, select + spawn, move, chat, skill on an NPC, inventory move, quest
     /// accept, leave world.
     Full,
@@ -86,6 +92,10 @@ pub enum Kind {
     /// 14602 cast at doodad 841, see `scenario/portal.rs`). GM account.
     #[serde(rename = "portal")]
     Portal,
+    /// Lunagem socketing (skill 23728): a wrong slot group is rejected with error 18 and the gem
+    /// survives, a fitting gem is installed and consumed (see `scenario/socket.rs`). GM account.
+    #[serde(rename = "socket")]
+    Socket,
     /// A craft batch that runs out of labor ends with the `SCErrorMsg` 148 the client needs to
     /// unlock its craft window (Gilda Star disintegration at an Archeum Workbench, see
     /// `scenario/craft.rs`). GM account.
@@ -110,6 +120,7 @@ impl std::str::FromStr for Kind {
         Ok(match s {
             "login" => Self::Login,
             "lobby" => Self::Lobby,
+            "edit" => Self::Edit,
             "full" => Self::Full,
             "load" => Self::Load,
             "combat" => Self::Combat,
@@ -123,12 +134,13 @@ impl std::str::FromStr for Kind {
             "ghost" => Self::Ghost,
             "lunafrost" => Self::Lunafrost,
             "portal" => Self::Portal,
+            "socket" => Self::Socket,
             "craft" => Self::Craft,
             "reconnect" => Self::Reconnect,
             "script" => Self::Script,
             "busy" => Self::Busy,
             _ => bail!(
-                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, craft, script, busy, load)"
+                "unknown scenario '{s}' (login, lobby, edit, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, socket, craft, script, busy, load)"
             ),
         })
     }
@@ -480,11 +492,13 @@ mod creation_tests {
         let mut characters = vec![CharInfo {
             id: 1,
             name: "Existing".into(),
+            appearance: Default::default(),
         }];
         assert!(character_to_select(&characters, "Fresh", true).is_err());
         characters.push(CharInfo {
             id: 2,
             name: "Fresh".into(),
+            appearance: Default::default(),
         });
         assert_eq!(
             character_to_select(&characters, "fresh", true).unwrap().id,
@@ -534,9 +548,20 @@ async fn open_lobby(
     let cookie = login.enter_world(cfg.game_server_id).await?;
     r.var("cookie", cookie.cookie);
     r.var("game_port", cookie.port);
+    let queue_note = login.queue_updates.last().map_or_else(String::new, |q| {
+        format!(
+            ", {} queue update(s), last position {}/{}",
+            login.queue_updates.len(),
+            q.my_turn,
+            q.normal_length
+        )
+    });
     r.end(
         s,
-        format!("{}:{} cookie {}", cookie.ip, cookie.port, cookie.cookie),
+        format!(
+            "{}:{} cookie {}{queue_note}",
+            cookie.ip, cookie.port, cookie.cookie
+        ),
     );
     if kind == Kind::Login {
         return Ok(None);
@@ -764,10 +789,12 @@ mod control_character_tests {
             CharInfo {
                 id: 10,
                 name: "Unrelated".into(),
+                appearance: Default::default(),
             },
             CharInfo {
                 id: 42,
                 name: "Owner".into(),
+                appearance: Default::default(),
             },
         ];
         assert_eq!(control_character(&characters, "owner", None).unwrap(), 42);
@@ -918,6 +945,85 @@ async fn run_inner(
         },
     );
 
+    if kind == Kind::Edit {
+        let s = r.begin("game.edit");
+        let before = game
+            .state
+            .characters
+            .iter()
+            .find(|c| c.id == ch.id)
+            .map(|c| c.appearance)
+            .context("created character missing from the lobby list")?;
+        ensure!(
+            before.hair_color_id == 0,
+            "unexpected starting appearance {before:?}"
+        );
+        let wanted = Appearance {
+            kind: before.kind,
+            hair_color_id: 7,
+            skin_color_id: 3,
+            model_id: before.model_id,
+        };
+        game.edit_character(ch.id, &ch.name, wanted).await?;
+        let packet = game
+            .wait_for("SCEditCharacterResponsePacket", |p| {
+                p.is_sc(sc::SCEditCharacterResponsePacket)
+            })
+            .await?;
+        let mut body = packet.stream();
+        let edited = read_character(&mut body)?;
+        ensure!(body.remaining() == 0, "trailing edit response bytes");
+        ensure!(edited.id == ch.id, "edited id {} != {}", edited.id, ch.id);
+        ensure!(
+            edited.name == ch.name,
+            "edit changed the name to {}",
+            edited.name
+        );
+        ensure!(
+            edited.appearance == wanted,
+            "edit response appearance {:?} != {wanted:?}",
+            edited.appearance
+        );
+        r.var("hair", edited.appearance.hair_color_id);
+        r.end(
+            s,
+            format!(
+                "hair {} skin {}",
+                edited.appearance.hair_color_id, edited.appearance.skin_color_id
+            ),
+        );
+
+        // A relist must carry the edit (the lobby copy the server lists was updated).
+        let s = r.begin("game.relist");
+        game.state.characters.clear();
+        game.state.char_list_done = false;
+        game.list_characters().await?;
+        game.wait_for("last SCCharacterListPacket", |p| {
+            p.is_sc(sc::SCCharacterListPacket) && p.body.first() == Some(&1)
+        })
+        .await?;
+        let relisted = game
+            .state
+            .characters
+            .iter()
+            .find(|c| c.id == ch.id)
+            .context("edited character missing from the relisted lobby")?;
+        ensure!(
+            relisted.appearance == wanted,
+            "relisted appearance {:?} != {wanted:?}",
+            relisted.appearance
+        );
+        r.end(s, format!("hair {}", relisted.appearance.hair_color_id));
+        drop(stream);
+
+        let s = r.begin("game.quit");
+        game.leave_world(0).await?;
+        game.drain(Duration::from_millis(500), Duration::from_secs(2))
+            .await?;
+        r.end(s, "");
+        return Ok(());
+    }
+
     if kind == Kind::Lobby {
         let s = r.begin("game.quit");
         game.leave_world(0).await?;
@@ -976,6 +1082,11 @@ async fn run_inner(
     }
     if kind == Kind::Portal {
         portal::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Socket {
+        socket::run(&mut game, r).await?;
         drop(stream);
         return Ok(());
     }
@@ -1753,9 +1864,9 @@ async fn summon_mate(
     item_id: u64,
     previous_obj: Option<u32>,
 ) -> anyhow::Result<MateView> {
-    // `spawn_mount` only despawns a mate that is still active (a leftover of an earlier
-    // aborted run, or a corpse that was never dismissed) and spawns nothing in that case, so
-    // the use is repeated once when no SCMateSpawned follows.
+    // Using the summon item of the mate that is already out dismisses it (the 1.2 toggle), so
+    // a leftover active mate makes the first use spawn nothing; repeat once when no
+    // SCMateSpawned follows.
     let spawned_before = game.state.mate_spawn_count;
     let default_timeout = game.timeout;
     game.timeout = Duration::from_secs(6);
@@ -2435,6 +2546,7 @@ mod mate_revive_tests {
         );
         assert_eq!("none".parse::<ReviveMethod>().unwrap(), ReviveMethod::None);
         assert!("x".parse::<ReviveMethod>().is_err());
+        assert_eq!("edit".parse::<Kind>().unwrap(), Kind::Edit);
         assert_eq!("mate-revive".parse::<Kind>().unwrap(), Kind::MateRevive);
         assert_eq!("cometsboon".parse::<Kind>().unwrap(), Kind::CometsBoon);
     }

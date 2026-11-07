@@ -1,5 +1,10 @@
 ﻿{
+	"Characters": {
+		"MaxPerAccount": 6, // base slots; must equal the login server's Login:MaxCharactersPerAccount
+		"PreSelectPeriod": false // fallback for Login:PreSelectCharacterPeriod; the login's value is applied at registration
+	},
 	"Account": {
+		"DefaultPayment": "premium",
 		"AccessLevelDefault": 0,
 		"AccessLevelFirstAccount": 100,
 		"AccessLevelFirstCharacter": 100,

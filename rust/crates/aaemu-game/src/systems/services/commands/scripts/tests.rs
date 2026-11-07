@@ -340,8 +340,30 @@ fn registered_commands_match_the_csharp_scripts() {
                     | ["joinsiege"]
                     | ["leavesiege"]
                     | ["dungeon"]
+                    | ["nation", "nations"]
+                    | ["testguild"]
                     | ["allowguildrename", "allow_guild_rename"]
                     | ["renameguild", "rename_guild"]
+                    | ["premium", "setpremium"]
+                    | ["mail"]
+                    | ["rename"]
+                    | ["delay_tax_due_date"]
+                    | ["resend_house_tax_mail"]
+                    | ["set_bounty_money"]
+                    | ["clear_crime_status"]
+                    | ["set_crime_value"]
+                    | ["set_jury"]
+                    | ["imprison"]
+                    | ["restrict_chat"]
+                    | ["auction_post_siege_items", "auction_post_siege"]
+                    | ["auction_cancel"]
+                    | ["schedule_siege"]
+                    | ["stop_siege", "off_siege"]
+                    | ["delete_dominion"]
+                    | ["change_dominion_owner"]
+                    | ["bestow_dominion"]
+                    | ["set_dominion_non_pvp"]
+                    | ["set_dominion_limit"]
             )
         })
         .collect();
@@ -390,9 +412,12 @@ fn load_resolves_collisions_like_csharp() {
     let m = CommandManager::default();
     assert!(super::load(&m, &ScriptEnv::default()));
     let keys = m.get_command_keys();
-    // Original commands plus Dominion administration, collection and player registration, and
-    // the guild rename controls.
-    assert_eq!(keys.len(), 98);
+    // Original commands plus Dominion administration, collection and player registration,
+    // the Rust-only `/premium` / `/mail` admin commands, the seven
+    // retail tax / crime / social commands of WP-SL6b, the retail chat mute of WP-SL4b, the
+    // retail auction GM keys, the seven siege / dominion commands of WP-SL6a and the two
+    // guild rename controls (`off_siege` is an alias key).
+    assert_eq!(keys.len(), 120);
     // `GoldCmd` (registered after `AddGold`) owns `gold`, and `AddGold`'s aliases lead to it.
     for alias in ["gold", "addgold", "add_gold"] {
         let c = m.get_command_interface_by_name(alias).expect(alias);

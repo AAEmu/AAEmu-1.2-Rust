@@ -8,7 +8,7 @@ use crate::server::GameServer;
 use crate::systems::ai::collision::world::{ObjKind, Owner};
 use crate::systems::economy::error_message as err;
 use crate::systems::npcs::subzone::{self, Area};
-use crate::world::{PlayerRef, WorldInstance};
+use crate::world::{PlayerRef, WorldInstance, WorldObject};
 
 /// `FUN_393312a0` / `FUN_398971c0`: the placement cells are 4 m squares.
 const FOOTPRINT_CELL: f32 = 4.0;
@@ -16,6 +16,16 @@ const FOOTPRINT_CELL: f32 = 4.0;
 const FOOTPRINT_MAX_CELLS: i32 = 12;
 /// `FUN_39335860`: the unit/doodad collision query uses entity mask 0x1f.
 const UNIT_OVERLAP_MASK: u32 = 0x1f;
+/// `FUN_39333d40`: the house builder refuses when the caster is farther than the checked
+/// radius plus this margin from the ghost's position. `_DAT_399cf898` in the 1.2 client is
+/// 30.0; the radius it adds is the template/model radius at desc `+0x40`. The server has no
+/// render-model bounds, so it uses the template `garden_radius` as that radius (never smaller
+/// than the ghost in the shipped data). Capture-pending HOUSE-1: the exact 1.2 radius source.
+const PLACEMENT_RANGE_MARGIN: f32 = 30.0;
+/// A house/decoration Z is refused only when it is clearly impossible: 100 m above or below
+/// the heightmap. The client's own vertical rules sample the ghost model box (`FUN_39332180`)
+/// and are not reproducible without render-model bounds; capture-pending HOUSE-2.
+const MAX_GROUND_HEIGHT_DELTA: f32 = 100.0;
 
 /// `FUN_39897070`: categories that require a matching housing-area group/category.
 fn restricted_category(category: u32) -> bool {
@@ -219,6 +229,187 @@ fn validate_unit_overlap(
     Ok(())
 }
 
+/// `FUN_39333d40`: true when `(x, y, z)` is within `radius + 30 m` of the caster.
+/// A rider, a seated player or a passenger has a parent-relative (seat) local transform, so the
+/// distance must use the composed world position (`Transform.World`).
+pub fn caster_in_range(
+    server: &GameServer,
+    player: &PlayerRef,
+    x: f32,
+    y: f32,
+    z: f32,
+    radius: f32,
+) -> bool {
+    let me = WorldObject::from(player);
+    let pos = server
+        .world
+        .world_of(&me)
+        .map(|world| world.world_pos_rot(&me))
+        .unwrap_or_else(|| player.data().unit.transform.local());
+    let dx = pos.x - x;
+    let dy = pos.y - y;
+    let dz = pos.z - z;
+    let limit = radius + PLACEMENT_RANGE_MARGIN;
+    dx * dx + dy * dy + dz * dz <= limit * limit
+}
+
+/// `FUN_39333d40`: the house builder's own distance check (error 0x9a `TOO_FAR_AWAY`).
+pub fn validate_placement_range(
+    server: &GameServer,
+    player: &PlayerRef,
+    x: f32,
+    y: f32,
+    z: f32,
+    garden_radius: f32,
+) -> Result<(), i16> {
+    if caster_in_range(server, player, x, y, z, garden_radius.max(0.0)) {
+        Ok(())
+    } else {
+        Err(err::TOO_FAR_AWAY)
+    }
+}
+
+/// The client places the house on the terrain under the ghost; a forged packet may send any
+/// Z. Refuse only a clearly impossible height (100 m above/below the heightmap), so sea
+/// farms and the client's own auto-Z always pass. Capture-pending HOUSE-2.
+fn validate_ground_height(
+    server: &GameServer,
+    world: &WorldInstance,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> Result<(), i16> {
+    let Some(maps) = server.systems.npcs.heightmaps.get() else {
+        return Ok(());
+    };
+    if !maps.config.heightmaps_enable {
+        return Ok(());
+    }
+    let Ok(ground) = maps.world_height(world.template.id, x, y) else {
+        return Ok(());
+    };
+    if z > ground + MAX_GROUND_HEIGHT_DELTA {
+        return Err(err::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_HIGH);
+    }
+    if z < ground - MAX_GROUND_HEIGHT_DELTA {
+        return Err(err::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW);
+    }
+    Ok(())
+}
+
+/// `FUN_39897280` / `validate_groups`: the account rules of the construction check, without
+/// the footprint. Used for both a new house and a purchase (a buyer must not bypass the
+/// `houseless` / `existing_category_id` / `max_construct_count` rules by buying).
+fn validate_account_groups(
+    server: &GameServer,
+    data: &HousingData,
+    areas: &[&Area],
+    x: f32,
+    y: f32,
+    account: u32,
+    category: u32,
+) -> Result<(), i16> {
+    let centre = areas_at(areas, x, y);
+    let centre_ids = centre.iter().map(|area| area.id).collect::<Vec<_>>();
+    let restricted = restricted_category(category);
+    let has_limit = centre_ids
+        .iter()
+        .filter_map(|id| data.areas.get(id))
+        .filter_map(|group_id| data.groups.get(group_id))
+        .any(|group| {
+            data.group_categories
+                .get(&group.id)
+                .is_some_and(|categories| categories.contains(&category))
+                && data
+                    .max_construct_count
+                    .get(&(group.id, category))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+        });
+    if !(restricted || has_limit) {
+        return Ok(());
+    }
+    if restricted && centre_ids.is_empty() {
+        // `FUN_39333e20`: a centre outside every polygon is the category-area error.
+        return Err(err::HOUSE_CANNOT_LOACATE_INVALID_CATEGORY_AREA);
+    }
+    if centre_ids.is_empty() {
+        return Ok(());
+    }
+    let owned_categories = server
+        .systems
+        .housing
+        .manager
+        .by_account(account)
+        .iter()
+        .filter_map(|house| {
+            data.template(house.data().unit.template_id)
+                .map(|t| t.category_id)
+        })
+        .collect::<Vec<_>>();
+    let owned_counts = owned_group_counts(server, data, account);
+    match validate_groups(
+        data,
+        &centre_ids,
+        category,
+        &owned_categories,
+        &owned_counts,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            // Outside the restricted categories the client does not check the
+            // area/category pairing; only an authored construct limit can fire.
+            if restricted || error == err::HOUSE_CANNOT_CONSTRUCT_IN_AREA_BY_MAX_CONSTRUCT_COUNT {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// `CSBuyHouse` eligibility: the buyer must be able to own this house's category in the
+/// group at its present position, with the same account rules the builder applies. The 1.2
+/// client error table has no purchase-specific eligibility text, so the construction errors
+/// (615/616/766) are reused. Capture-pending HOUSE-3: retail purchase eligibility/faction
+/// rules (the C# `BuyHouse` had none).
+pub fn purchase_allowed(
+    server: &GameServer,
+    player: &PlayerRef,
+    house: &crate::world::HouseRef,
+) -> Result<(), i16> {
+    let account = player.data().account_id;
+    let (instance, position, template_id) = {
+        let h = house.data();
+        (
+            h.unit.transform.instance_id,
+            h.unit.transform.local(),
+            h.unit.template_id,
+        )
+    };
+    let data = &server.game_data.systems.housing;
+    if data.areas.is_empty() {
+        return Ok(());
+    }
+    let Some(template) = data.template(template_id) else {
+        return Ok(());
+    };
+    let Some(world) = server.world.world(instance) else {
+        return Ok(());
+    };
+    let areas = housing_areas(&server.game_data, world.template.id);
+    validate_account_groups(
+        server,
+        data,
+        &areas,
+        position.x,
+        position.y,
+        account,
+        template.category_id,
+    )
+}
+
 /// `FUN_39331f30` (mode 2/2 in `FUN_393349e0`): the existing grid house is its snapped
 /// axis-aligned 4n box and touching edges do not overlap (strict inequalities).
 fn snapped_squares_overlap(a: (f32, f32), a_cells: i32, b: (f32, f32), b_cells: i32) -> bool {
@@ -243,6 +434,7 @@ pub fn validate_house(
     if ![x, y, z].into_iter().all(f32::is_finite) {
         return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
+    validate_placement_range(server, player, x, y, z, template.garden_radius)?;
     let (instance, account) = {
         let c = player.data();
         (c.unit.transform.instance_id, c.account_id)
@@ -254,6 +446,7 @@ pub fn validate_house(
     if world.template.zone_id_at(x, y) == 0 {
         return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
+    validate_ground_height(server, &world, x, y, z)?;
     let data = &server.game_data.systems.housing;
     let fort = super::dominion::fort::placement_owner(server, player, template, x, y)?;
     if fort.is_none() {
@@ -274,62 +467,7 @@ pub fn validate_house(
     };
     if fort.is_none() && !data.areas.is_empty() {
         let areas = housing_areas(&server.game_data, world.template.id);
-        let centre = areas_at(&areas, x, y);
-        let centre_ids = centre.iter().map(|area| area.id).collect::<Vec<_>>();
-        let restricted = restricted_category(template.category_id);
-        let has_limit = centre_ids
-            .iter()
-            .filter_map(|id| data.areas.get(id))
-            .filter_map(|group_id| data.groups.get(group_id))
-            .any(|group| {
-                data.group_categories
-                    .get(&group.id)
-                    .is_some_and(|categories| categories.contains(&template.category_id))
-                    && data
-                        .max_construct_count
-                        .get(&(group.id, template.category_id))
-                        .copied()
-                        .unwrap_or(0)
-                        > 0
-            });
-        if restricted || has_limit {
-            if restricted && centre_ids.is_empty() {
-                // `FUN_39333e20`: a centre outside every polygon is the category-area error.
-                return Err(err::HOUSE_CANNOT_LOACATE_INVALID_CATEGORY_AREA);
-            }
-            if !centre_ids.is_empty() {
-                let owned_categories = server
-                    .systems
-                    .housing
-                    .manager
-                    .by_account(account)
-                    .iter()
-                    .filter_map(|house| {
-                        data.template(house.data().unit.template_id)
-                            .map(|t| t.category_id)
-                    })
-                    .collect::<Vec<_>>();
-                let owned_counts = owned_group_counts(server, data, account);
-                match validate_groups(
-                    data,
-                    &centre_ids,
-                    template.category_id,
-                    &owned_categories,
-                    &owned_counts,
-                ) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        // Outside the restricted categories the client does not check the
-                        // area/category pairing; only an authored construct limit can fire.
-                        if restricted
-                            || error == err::HOUSE_CANNOT_CONSTRUCT_IN_AREA_BY_MAX_CONSTRUCT_COUNT
-                        {
-                            return Err(error);
-                        }
-                    }
-                }
-            }
-        }
+        validate_account_groups(server, data, &areas, x, y, account, template.category_id)?;
         if cells > 0 {
             for ix in 0..cells {
                 for iy in 0..cells {
@@ -382,25 +520,43 @@ pub fn validate_house(
     Ok(())
 }
 
+/// The `housing_groups` rows of the housing areas that contain `transform`'s position, in area
+/// order. `None` when the world instance / world template / housing polygons are unknown, the
+/// same cases in which [`can_extend_house`] refuses.
+fn groups_at<'a>(
+    server: &'a GameServer,
+    transform: &crate::models::transform::Transform,
+) -> Option<Vec<&'a super::data::HousingGroup>> {
+    let world = server.world.world(transform.instance_id)?;
+    let data = &server.game_data.systems.housing;
+    let pos = transform.local();
+    let areas =
+        subzone::get_housing_zone_by_position(&server.game_data, &world.template, pos.x, pos.y)
+            .ok()?;
+    Some(
+        areas
+            .iter()
+            .filter_map(|id| data.areas.get(id))
+            .filter_map(|id| data.groups.get(id))
+            .collect(),
+    )
+}
+
+/// The first `housing_groups` row containing the house (area order, like [`validate_groups`]).
+/// Overlapping polygons resolve first-wins; the shipped areas of one house normally share one
+/// group.
+pub fn house_group<'a>(
+    server: &'a GameServer,
+    transform: &crate::models::transform::Transform,
+) -> Option<&'a super::data::HousingGroup> {
+    groups_at(server, transform)?.into_iter().next()
+}
+
 /// Beginner plots in the original data (`housing_groups.can_extend = false`) expire rather
 /// than accepting another weekly payment. Ordinary or unclassified plots retain normal taxes.
 pub fn can_extend_house(server: &GameServer, house: &crate::world::HouseRef) -> bool {
     let transform = house.data().unit.transform;
-    let Some(world) = server.world.world(transform.instance_id) else {
-        return false;
-    };
-    let data = &server.game_data.systems.housing;
-    let pos = transform.local();
-    let Ok(areas) =
-        subzone::get_housing_zone_by_position(&server.game_data, &world.template, pos.x, pos.y)
-    else {
-        return false;
-    };
-    !areas
-        .iter()
-        .filter_map(|id| data.areas.get(id))
-        .filter_map(|id| data.groups.get(id))
-        .any(|group| !group.can_extend)
+    groups_at(server, &transform).is_some_and(|groups| groups.iter().all(|group| group.can_extend))
 }
 
 #[cfg(test)]
@@ -466,14 +622,17 @@ mod tests {
             validate_house(&server, &player, &template, 500., 500., 100.),
             Ok(())
         );
+        player.data().unit.transform.set_xyz(50., 50., 100.);
         assert_eq!(
             validate_house(&server, &player, &template, 50., 50., 100.),
             Err(err::HOUSE_CANNOT_LOACATE_INVALID_CATEGORY_AREA)
         );
+        player.data().unit.transform.set_xyz(2500., 500., 100.);
         assert_eq!(
             validate_house(&server, &player, &template, 2500., 500., 100.),
             Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA)
         );
+        player.data().unit.transform.set_xyz(500., 500., 100.);
         let mut h = House::new(7, 1);
         h.unit.tl_id = 7;
         h.unit.scale = 1.0;

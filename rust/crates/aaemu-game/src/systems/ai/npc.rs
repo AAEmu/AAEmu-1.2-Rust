@@ -7,6 +7,10 @@
 //! Locking: every function copies what it needs out of an object's data lock and releases it
 //! before calling into the world (broadcasts, visibility) or into another object.
 
+use std::collections::HashMap;
+use std::sync::Once;
+
+use crate::data::formulas::FormulaKind;
 use crate::models::movement::{
     GameStanceType, MoveKind, MoveType, MoveTypeActorFlags, MoveTypeFlags, UnitMove,
 };
@@ -240,16 +244,154 @@ pub fn is_dead(obj: &WorldObject) -> bool {
     obj.with_unit(|u| u.unit().is_dead()).unwrap_or(false)
 }
 
-/// `BaseUnit.CanSeeTarget(target)`: visible and not stealthed.
-///
-/// Deviation from the C#: `CanSeeTarget` tested buff tag 100 (`TagsEnum.Stealth`), but the 1.2
-/// client hides a unit from `buffs.stealth` (the buff table it ships), so the server uses the
-/// same column (71 stealth buffs; 30 lack tag 100, 10 tag-100 buffs are not stealth).
-pub fn can_see_target(server: &GameServer, target: &WorldObject) -> bool {
-    if !target.is_visible() {
+/// The unit that owns `obj` (`BaseUnit.Owner` link of the client's `CanDetect`): mates and
+/// slaves only, 0 when it has no live owner.
+fn owner_obj_id(obj: &WorldObject) -> Option<u32> {
+    let id = match obj {
+        WorldObject::Mate(m) => m.data().owner_obj_id,
+        WorldObject::Slave(s) => {
+            let d = s.data();
+            if d.summoner_obj_id != 0 {
+                d.summoner_obj_id
+            } else {
+                d.owner_obj_id
+            }
+        }
+        _ => 0,
+    };
+    (id != 0).then_some(id)
+}
+
+/// The client's party/raid slot rule of `CanDetect` (`FUN_39308ca0`): the target is one of the
+/// observer's team members. Only players are in teams; an NPC observer skips the lookup.
+fn same_team(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
+    if observer.as_player().is_none() || target.as_player().is_none() {
         return false;
     }
-    !buffs::has_stealth(server, target)
+    let Some(team) = server
+        .systems
+        .social
+        .teams
+        .team_by_obj_id(observer.obj_id())
+    else {
+        return false;
+    };
+    let target_id = target.obj_id();
+    team.members
+        .iter()
+        .flatten()
+        .any(|m| m.character.obj_id == target_id)
+}
+
+/// The `FUN_39358ab0` half of the client's party rule is not resolved: it compares the +0x24 /
+/// +0x2c fields of the block at unit +0x3c28 (capture-pending), not a faction relation. The
+/// server approximates it with the faction relation not being hostile.
+fn not_hostile(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
+    let faction = |o: &WorldObject| o.with_unit(|u| u.unit().faction_id).unwrap_or(0);
+    crate::systems::social::faction::relation_state_live(server, faction(observer), faction(target))
+        != crate::systems::social::faction::relation_state::HOSTILE
+}
+
+fn unit_level(obj: &WorldObject) -> u8 {
+    obj.with_unit(|u| u.unit().level).unwrap_or(1)
+}
+
+/// `UnitAttribute.DetectStealthRangeMul` (`unit attribute 94`), the `+percent` detection range
+/// modifier the client reads with `FUN_390B3A80(94, 0)`.
+fn detect_stealth_range_mul(obj: &WorldObject) -> f64 {
+    obj.with_unit(|u| {
+        u.unit()
+            .calculate_with_bonuses(0.0, UnitAttribute::DetectStealthRangeMul, now_ms())
+    })
+    .unwrap_or(0.0)
+}
+
+/// The 1.2 client's `ClientUnit::CanDetect(observer, target)` (x2game `FUN_3935a2b0`), the
+/// stealth visibility rule the server mirrors for its own decisions:
+///
+/// 1. the same unit / the observer's owner link is always visible;
+/// 2. a party / raid member that is not hostile is always visible (`FUN_39308ca0` +
+///    `FUN_39358ab0`);
+/// 3. a target with an `buffs.anti_stealth` effect (the client's "cannot hide" byte at +8) is
+///    always visible;
+/// 4. an observer with a `buffs.detect_stealth` effect sees stealthed units at any distance
+///    (server-side use of the column; the client's `CanDetect` does not read it);
+/// 5. otherwise the target is visible only inside the detection range: formula 4
+///    `DetectStealthRangeFront` when the target is in front of the observer, formula 10
+///    `DetectStealthRangeBack` when it is behind, with `source_level` = observer level,
+///    `target_level` = target level and `stealth_level` = the highest `ab_level` of the target's
+///    `buffs.stealth` effects, scaled by `(100 + DetectStealthRangeMul) / 100`
+///    (`DAT_3999cf90` = 0.01).
+///
+/// Deviation: the client compares the range with the distance between the two colliders; the
+/// server uses `BaseUnit.GetDistanceTo` (planar centre distance with both model radii
+/// subtracted).
+pub fn can_detect(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
+    let (observer_id, target_id) = (observer.obj_id(), target.obj_id());
+    if observer_id == target_id {
+        return true;
+    }
+    // The client checks only `observer.Owner == target`; the server also accepts the reverse
+    // (the observer is the target's owner), so a stealthed mate / slave is visible to its owner.
+    if owner_obj_id(observer) == Some(target_id) || owner_obj_id(target) == Some(observer_id) {
+        return true;
+    }
+    if same_team(server, observer, target) && not_hostile(server, observer, target) {
+        return true;
+    }
+    let state = buffs::stealth_state(server, target);
+    if !state.stealthed || state.anti_stealth {
+        return true;
+    }
+    if buffs::has_detect_stealth(server, observer) {
+        return true;
+    }
+    let front = is_front(server, observer, target, 1.0);
+    let kind = if front {
+        FormulaKind::DetectStealthRangeFront
+    } else {
+        FormulaKind::DetectStealthRangeBack
+    };
+    let Some(formula) = server.game_data.formulas.get_formula_by_kind(kind) else {
+        stealth_formula_unavailable(kind);
+        return true;
+    };
+    let Some(expression) = formula.expression() else {
+        stealth_formula_unavailable(kind);
+        return true;
+    };
+    let mut params = HashMap::new();
+    params.insert("source_level", f64::from(unit_level(observer)));
+    params.insert("target_level", f64::from(unit_level(target)));
+    params.insert("stealth_level", f64::from(state.level));
+    let Ok(base) = expression.evaluate(&params) else {
+        stealth_formula_unavailable(kind);
+        return true;
+    };
+    let range = (detect_stealth_range_mul(observer) + 100.0) * 0.01 * base;
+    let distance = f64::from(distance_to(server, observer, target, false));
+    distance < range
+}
+
+/// A missing or broken stealth formula must not blind the AI, and a failed evaluation must not
+/// log on every tick: both use the visible fallback and report once per process.
+fn stealth_formula_unavailable(kind: FormulaKind) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::error!(
+            "stealth detection: formula {kind:?} is missing or failed to evaluate;              stealthed units stay visible"
+        );
+    });
+}
+
+/// `BaseUnit.CanSeeTarget(target)`: visible and detectable (see [`can_detect`]).
+///
+/// Deviation from the C#: `CanSeeTarget` tested buff tag 100 (`TagsEnum.Stealth`) with no
+/// distance / angle, but the 1.2 client hides a unit from `buffs.stealth` and decides with its
+/// `CanDetect` formulas / unit attribute 94, so the server mirrors that (71 stealth buffs; 30
+/// lack tag 100, 10 tag-100 buffs are not stealth).
+pub fn can_see_target(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
+    target.is_visible() && can_detect(server, observer, target)
 }
 
 /// `BaseUnit.UnitIsVisible(unit)`: the unit's region is one of the owner's neighbour regions.
@@ -514,10 +656,7 @@ pub const WALKER_MAX_DROP: f32 = 12.0;
 /// A walker is never resolved above its current level plus the collision service's step-up
 /// allowance ([`crate::systems::ai::collision::GROUND_PROBE_UP`], 2 m): a cave's heightmap
 /// column is the surface above its roof, so accepting that (or the spawner Z) would teleport
-/// the walker out of the cave. Nor is it resolved more than [`WALKER_MAX_DROP`] below its
-/// level: the terrain under an instance hall is not its floor. A probe hit out of that range is
-/// no floor, and the navigation height (the navmesh with `GeoDataMode`) decides next. With no
-/// reachable floor the current level is kept.
+/// the walker out of the cave. With no reachable floor the current level is kept.
 #[allow(clippy::too_many_arguments)]
 pub fn reference_height_in(
     server: &GameServer,

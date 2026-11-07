@@ -1,8 +1,8 @@
-//! C->G packets of `Core/Packets/C2G` whose C# `Read` only logs: `CSEditCharacterPacket` and the
-//! log-only packets the 1.2 C# defines but never registers (opcode 0xfff, commented out in
-//! `GameNetwork`): `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
+//! C->G packets of `Core/Packets/C2G` whose C# `Read` only logs: the log-only packets the 1.2 C#
+//! defines but never registers (opcode 0xfff, commented out in `GameNetwork`):
+//! `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
 //! `CSSearchListPacket`, `CSChangeExpeditionSponsorPacket`, `CSChangeSlaveTargetPacket`,
-//! `CSSetTeamOfficerPacket`, `CSUpdateNationalTaxRatePacket`.
+//! `CSSetTeamOfficerPacket`.
 //!
 //! `CSTurretStatePacket` is decoded here but handled by the vehicles subsystem: the 1.2 client's
 //! aim producers (`39425490` / `39425580`) send the controlled unit's slave object id with the
@@ -46,11 +46,6 @@ macro_rules! log_only_packet {
         }
     };
 }
-
-log_only_packet!(
-    /// `CSEditCharacterPacket` (0x023): `// TODO ... create`, the body is not read.
-    CSEditCharacterPacket, error, "CSEditCharacterPacket is not implemented!" {}
-);
 
 /// `CSTurretStatePacket` (0x036): `bc unitId, f32 pitch, f32 yaw` (1.2 client writer
 /// `397c7640`). The unit is the slave the client controls, and the aim is in that model's frame.
@@ -141,18 +136,10 @@ log_only_packet!(
     }
 );
 
-log_only_packet!(
-    /// `CSUpdateNationalTaxRatePacket` (not registered in 1.2).
-    CSUpdateNationalTaxRatePacket, debug, "UpdateNationalTaxRate, Id: {}, TaxRate: {}" {
-        id: u16 => read_u16,
-        tax_rate: i32 => read_i32,
-    }
-);
-
-/// Registers the packets of this module that the 1.2 `GameNetwork` registers.
+/// Registers the packets of this module that the 1.2 `GameNetwork` registers. The native 1.2
+/// national tax opcode (0x013) lives in `systems::social::packets::misc`.
 pub fn register(r: &mut PacketRegistry) {
-    r.register::<CSEditCharacterPacket>(LEVEL_PLAIN, cs::CSEditCharacterPacket)
-        .register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket);
+    r.register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket);
 }
 
 #[cfg(test)]
@@ -226,16 +213,6 @@ mod tests {
             }
         );
         let mut s = stream(|s| {
-            s.write_u16(3).write_i32(-4);
-        });
-        assert_eq!(
-            CSUpdateNationalTaxRatePacket::read(&mut s).unwrap(),
-            CSUpdateNationalTaxRatePacket {
-                id: 3,
-                tax_rate: -4
-            }
-        );
-        let mut s = stream(|s| {
             s.write_u32(7).write_u32(8);
         });
         assert_eq!(
@@ -244,14 +221,6 @@ mod tests {
                 unk_id: 7,
                 unk2_id: 8
             }
-        );
-        // CSEditCharacterPacket reads nothing.
-        let mut s = stream(|s| {
-            s.write_u8(9);
-        });
-        assert_eq!(
-            CSEditCharacterPacket::read(&mut s).unwrap(),
-            CSEditCharacterPacket {}
         );
     }
 }

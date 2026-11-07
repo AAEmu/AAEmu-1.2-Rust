@@ -15,7 +15,10 @@ use super::state::{
 };
 
 pub async fn load(server: &GameServer) -> anyhow::Result<()> {
-    let states = load_rows(&server.db).await?;
+    let mut states = load_rows(&server.db).await?;
+    // A declaration describes one weekly cycle. One whose cycle cannot still be running is
+    // discarded on restart instead of waiting for the next tick (WP-SD2a).
+    clear_stale_declarations(&mut states, chrono::Utc::now().timestamp());
     validate_loaded_identity(server, &states)?;
     server
         .systems
@@ -104,8 +107,26 @@ pub fn validate_loaded_identity(
                 "active dominion siege expedition is missing"
             );
         }
+        if let Some(declaration) = state.declaration {
+            anyhow::ensure!(
+                expedition_exists(declaration.attacker_expedition_id),
+                "persisted dominion declaration expedition is missing"
+            );
+        }
     }
     Ok(())
+}
+
+/// A declaration is only meaningful while its weekly cycle can still run. The longest cycle
+/// is a week, so anything older than that is discarded on restart (WP-SD2a).
+pub(crate) fn clear_stale_declarations(states: &mut [DominionState], now: i64) {
+    for state in states {
+        if state.declaration.is_some_and(|declaration| {
+            declaration.cycle_auction_start.saturating_add(7 * 86_400) <= now
+        }) {
+            state.declaration = None;
+        }
+    }
 }
 
 pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
@@ -142,7 +163,27 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
                 starts_at: row.try_get("siege_starts_at")?,
                 ends_at: row.try_get("siege_ends_at")?,
                 ended_at: row.try_get("siege_ended_at")?,
+                reinforced: row.try_get("siege_reinforced")?,
+                defender_ni: row.try_get("siege_defender_ni")?,
+                defender_nr: row.try_get("siege_defender_nr")?,
+                outcome_credited: row.try_get("siege_outcome_credited")?,
+                materialised_from_declaration: false,
+                calendar_cycle: 0,
                 participants: BTreeMap::new(),
+            })
+        };
+        let declaration_attacker: u32 = row.try_get("declaration_attacker")?;
+        let declaration = if declaration_attacker == 0 {
+            None
+        } else {
+            Some(super::state::Declaration {
+                attacker_expedition_id: declaration_attacker,
+                declared_at: row.try_get("declaration_at")?,
+                cycle_auction_start: row.try_get("declaration_cycle")?,
+                hq_obj_id: 0,
+                hq_x: row.try_get("declaration_hq_x")?,
+                hq_y: row.try_get("declaration_hq_y")?,
+                hq_z: row.try_get("declaration_hq_z")?,
             })
         };
         let state = DominionState {
@@ -155,12 +196,17 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             owner_expedition_id: row.try_get("owner_expedition_id")?,
             ownership_generation: row.try_get("ownership_generation")?,
             reign_start_at: row.try_get("reign_start_at")?,
+            claimed_at: row.try_get("claimed_at")?,
             last_siege_end_at: row.try_get("last_siege_end_at")?,
             tax_rate: row.try_get("tax_rate")?,
             national_tax_rate: row.try_get("national_tax_rate")?,
             last_paid_at: row.try_get("last_paid_at")?,
             last_tax_rate_changed_at: row.try_get("last_tax_rate_changed_at")?,
             last_national_tax_rate_changed_at: row.try_get("last_national_tax_rate_changed_at")?,
+            national_monument_db_id: row.try_get("national_monument_db_id")?,
+            national_monument_x: row.try_get("national_monument_x")?,
+            national_monument_y: row.try_get("national_monument_y")?,
+            national_monument_z: row.try_get("national_monument_z")?,
             non_pvp_start_at: row.try_get("non_pvp_start_at")?,
             non_pvp_duration_min: row.try_get("non_pvp_duration_min")?,
             treasury: Treasury {
@@ -173,7 +219,9 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             tower_destroyed: row.try_get("tower_destroyed")?,
             tower_hp: row.try_get("tower_hp")?,
             last_siege_id: row.try_get("last_siege_id")?,
+            declaration,
             siege,
+            ephemeral: false,
         };
         if states.insert(state.zone_group_id, state).is_some() {
             anyhow::bail!("duplicate dominion zone group");
@@ -257,23 +305,75 @@ pub async fn write_batch(
     Ok(batch.changed_count())
 }
 
+/// Writes only the national tax columns of one territory. The full row (including the
+/// treasury) stays with the periodic financial save, which is the only path allowed to commit
+/// treasury changes with houses / mail / wallets (managers/save.rs). The in-memory row keeps
+/// its dirty flag, so the next financial save writes the same values again.
+pub async fn write_national_tax_rate(
+    pool: &MySqlPool,
+    zone_group_id: u32,
+    rate: u16,
+    changed_at: i64,
+) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE dominions SET national_tax_rate = ?, last_national_tax_rate_changed_at = ?          WHERE zone_group_id = ?",
+    )
+    .bind(rate)
+    .bind(changed_at)
+    .bind(zone_group_id)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
+/// Writes only the national monument columns of one territory (zeroes clear it). The full
+/// row stays with the periodic financial save; a missing row (a test-only ephemeral territory)
+/// affects no rows.
+pub async fn write_national_monument(
+    pool: &MySqlPool,
+    zone_group_id: u32,
+    db_id: i64,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE dominions SET national_monument_db_id = ?, national_monument_x = ?,          national_monument_y = ?, national_monument_z = ? WHERE zone_group_id = ?",
+    )
+    .bind(db_id)
+    .bind(x)
+    .bind(y)
+    .bind(z)
+    .bind(zone_group_id)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sqlx::Result<()> {
     let siege = state.siege.as_ref();
     sqlx::query(
         "REPLACE INTO dominions (zone_group_id,tower_house_id,instance_id,guard_tower_setting_id,\
-         owner_expedition_id,ownership_generation,reign_start_at,last_siege_end_at,tax_rate,\
+         owner_expedition_id,ownership_generation,reign_start_at,claimed_at,last_siege_end_at,tax_rate,\
          national_tax_rate,last_paid_at,last_tax_rate_changed_at,last_national_tax_rate_changed_at,\
+         national_monument_db_id,national_monument_x,national_monument_y,national_monument_z,\
          cur_house_tax_money,cur_hunt_tax_money,peace_tax_money,cur_house_tax_aa_point,peace_tax_aa_point,\
          tower_destroyed,tower_hp,last_siege_id,siege_id,attacker_expedition_id,defender_expedition_id,\
          siege_ownership_generation,siege_status,siege_outcome,siege_scheduled_at,siege_starts_at,\
-         siege_ends_at,siege_ended_at,non_pvp_start_at,non_pvp_duration_min) \
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         siege_ends_at,siege_ended_at,siege_reinforced,siege_defender_ni,siege_defender_nr,\
+         siege_outcome_credited,non_pvp_start_at,non_pvp_duration_min,\
+         declaration_attacker,declaration_at,declaration_cycle,declaration_hq_x,\
+         declaration_hq_y,declaration_hq_z) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(state.zone_group_id).bind(state.tower.house_id).bind(state.tower.instance_id)
     .bind(state.tower.guard_tower_setting_id).bind(state.owner_expedition_id)
-    .bind(state.ownership_generation).bind(state.reign_start_at).bind(state.last_siege_end_at)
+    .bind(state.ownership_generation).bind(state.reign_start_at).bind(state.claimed_at)
+    .bind(state.last_siege_end_at)
     .bind(state.tax_rate).bind(state.national_tax_rate).bind(state.last_paid_at)
     .bind(state.last_tax_rate_changed_at).bind(state.last_national_tax_rate_changed_at)
+    .bind(state.national_monument_db_id).bind(state.national_monument_x)
+    .bind(state.national_monument_y).bind(state.national_monument_z)
     .bind(state.treasury.cur_house_tax_money).bind(state.treasury.cur_hunt_tax_money)
     .bind(state.treasury.peace_tax_money).bind(state.treasury.cur_house_tax_aa_point)
     .bind(state.treasury.peace_tax_aa_point).bind(state.tower_destroyed).bind(state.tower_hp).bind(state.last_siege_id)
@@ -282,7 +382,16 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
     .bind(siege.map_or(0, |s| s.status as u8)).bind(siege.map_or(0, |s| s.outcome as u8))
     .bind(siege.map_or(0, |s| s.scheduled_at)).bind(siege.map_or(0, |s| s.starts_at))
     .bind(siege.map_or(0, |s| s.ends_at)).bind(siege.map_or(0, |s| s.ended_at))
+    .bind(siege.is_some_and(|s| s.reinforced))
+    .bind(siege.map_or(0, |s| s.defender_ni)).bind(siege.map_or(0, |s| s.defender_nr))
+    .bind(siege.is_some_and(|s| s.outcome_credited))
     .bind(state.non_pvp_start_at).bind(state.non_pvp_duration_min)
+    .bind(state.declaration.map_or(0, |d| d.attacker_expedition_id))
+    .bind(state.declaration.map_or(0, |d| d.declared_at))
+    .bind(state.declaration.map_or(0, |d| d.cycle_auction_start))
+    .bind(state.declaration.map_or(0.0, |d| d.hq_x))
+    .bind(state.declaration.map_or(0.0, |d| d.hq_y))
+    .bind(state.declaration.map_or(0.0, |d| d.hq_z))
     .execute(&mut **tx).await?;
     Ok(())
 }

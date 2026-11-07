@@ -1207,6 +1207,25 @@ impl WorldManager {
             out.send(&p.conn);
         }
     }
+
+    /// Sends `packet` to every online character whose current zone is `zone_key`.
+    ///
+    /// Rust only: the C# had no zone broadcast. The 1.2 `SCDoodadPhaseMsg` handler accepts a
+    /// zone-wide message without a local doodad (`is_msg_to_zone`, WP-UI1), so its recipients
+    /// cannot come from the doodad's viewer set. A zone key belongs to one world template
+    /// (`WorldTemplates::get_world_id_by_zone_key`), so filtering by `Transform.ZoneId` is the
+    /// same as filtering the doodad's world instance.
+    pub fn broadcast_to_zone(&self, zone_key: u32, packet: &dyn ServerPacket) {
+        if zone_key == 0 {
+            return;
+        }
+        let mut out = crate::net::connection::Fanout::new(packet);
+        for p in self.all_characters() {
+            if p.data().unit.transform.zone_id == zone_key {
+                out.send(&p.conn);
+            }
+        }
+    }
 }
 
 /// `GameObject.BroadcastPacket(packet, self)`: every player around `obj`, plus `obj` itself

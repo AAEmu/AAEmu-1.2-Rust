@@ -34,11 +34,13 @@
 //!   reconstructs the ones the character's current state can prove through
 //!   [`refresh_current`].
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 
-use super::achievement::CharRecords;
+use super::achievement::{char_record_kind, CharRecords};
 use super::achievement_manager::{
-    back_credit_values, AchievementContent, InitialSnapshot, RecordReport,
+    back_credit_values, AchievementContent, InitialSnapshot, RecordReport, COPPER_PER_GOLD,
 };
 use super::achievement_rewards::{deliver_pending, RewardDelivery};
 use super::achievement_runtime::RefreshOutcome;
@@ -283,6 +285,23 @@ pub fn report_inputs(
     report
 }
 
+/// The `char_records` ids an [`AchievementInput::Increment`] of `kind_id` would move: the
+/// content rows the matcher selects, ascending. For a character that is not loaded (an offline
+/// siege participant) a producer persists the increment to these rows, so the next entry's
+/// [`initial_snapshot`] evaluates the record like any other loaded one.
+pub fn increment_record_ids(server: &GameServer, kind_id: u32, matcher: RecordMatch) -> Vec<u32> {
+    let content = AchievementContent::new(&server.game_data.systems.social.achievements);
+    let mut ids: Vec<u32> = content
+        .data()
+        .char_records
+        .values()
+        .filter(|record| record.kind_id == kind_id && matcher.matches(record))
+        .map(|record| record.id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// Re-reports everything the character's **current** state can prove (the entry back-credit
 /// units: level, ability levels, actability points, hours online, carried gold, the current
 /// party / raid / family / expedition memberships and the completed quest bitset) and evaluates
@@ -345,6 +364,19 @@ pub fn retry_pending_rewards(server: &GameServer, player: &PlayerRef) -> RewardD
     deliver_pending(server, player)
 }
 
+/// Queues the character's carried copper after an upward money change.
+///
+/// The next [`AchievementHooks::flush_deferred`] reports the absolute `MY_GOLD` (kind 14) value,
+/// at most once per character per second (a value suppressed by the throttle is kept and
+/// reported by a later flush). Safe to call while the caller holds foreign locks (an `ItemTxn`,
+/// a container, the character): it only appends to the deferred queue and never takes the
+/// character lock or the economy operation lock.
+pub fn report_gold(server: &GameServer, player: &PlayerRef, money: i64) {
+    if let Some(h) = server.systems.hooks.achievements.get() {
+        h.report_gold(player, money);
+    }
+}
+
 /// What the other subsystems call to credit achievements, through `server.systems.hooks`
 /// (`HookSlot<dyn AchievementHooks>`; see `systems::report_achievements`).
 ///
@@ -366,6 +398,11 @@ pub trait AchievementHooks: Send + Sync {
     /// lock the report path also takes).
     fn refresh_later(&self, player: &PlayerRef);
 
+    /// Queues the character's carried copper after an upward money change; the next
+    /// [`Self::flush_deferred`] reports it as the `MY_GOLD` value, throttled to at most one
+    /// report per character per second.
+    fn report_gold(&self, player: &PlayerRef, money: i64);
+
     /// Runs the queued events. A no-op while this thread still holds the economy operation lock.
     fn flush_deferred(&self, server: &GameServer);
 }
@@ -374,12 +411,57 @@ pub trait AchievementHooks: Send + Sync {
 enum Deferred {
     Report(PlayerRef, Vec<AchievementInput>),
     Refresh(PlayerRef),
+    /// The character's carried copper after an upward money change.
+    Gold(PlayerRef, i64),
+}
+
+/// The most characters whose `MY_GOLD` reports the throttle remembers; at the cap the maps are
+/// cleared (at worst one extra report, and a pending value waits for the next money change)
+/// rather than growing without bound.
+const MAX_GOLD_TRACKED: usize = 4096;
+
+/// Per-character `MY_GOLD` report bookkeeping: at most one report per second, and the newest
+/// value the throttle suppressed is kept for the next report.
+#[derive(Debug, Default)]
+struct GoldDelivery {
+    /// `character id -> unix second of the last report`.
+    last_report: HashMap<u32, i64>,
+    /// `character id -> the newest carried copper waiting for the throttle`.
+    pending: HashMap<u32, i64>,
+}
+
+impl GoldDelivery {
+    /// Records a queued value; the newest (highest) value of a batch wins.
+    fn stage(&mut self, character_id: u32, money: i64) {
+        let entry = self.pending.entry(character_id).or_default();
+        *entry = (*entry).max(money);
+        if self.pending.len() > MAX_GOLD_TRACKED || self.last_report.len() > MAX_GOLD_TRACKED {
+            self.pending.clear();
+            self.last_report.clear();
+        }
+    }
+
+    /// The copper to report now, or `None` while this character's throttle window is open or
+    /// nothing is pending.
+    fn claim(&mut self, character_id: u32, now: i64) -> Option<i64> {
+        if self
+            .last_report
+            .get(&character_id)
+            .is_some_and(|last| *last >= now)
+        {
+            return None;
+        }
+        let money = self.pending.remove(&character_id)?;
+        self.last_report.insert(character_id, now);
+        Some(money)
+    }
 }
 
 /// The live [`AchievementHooks`] (installed by `social::bridges::install`).
 #[derive(Default)]
 pub struct LiveAchievementHooks {
     deferred: std::sync::Mutex<Vec<Deferred>>,
+    gold: std::sync::Mutex<GoldDelivery>,
 }
 
 impl LiveAchievementHooks {
@@ -388,6 +470,29 @@ impl LiveAchievementHooks {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(event);
+    }
+
+    /// Reports the character's pending gold at `now` if the throttle window is open.
+    fn deliver_gold(&self, server: &GameServer, player: &PlayerRef, now: DateTime<Utc>) {
+        let money = {
+            let mut gold = self.gold.lock().unwrap_or_else(|e| e.into_inner());
+            gold.claim(player.character_id, now.timestamp())
+        };
+        let Some(money) = money else { return };
+        let value = money.div_euclid(COPPER_PER_GOLD);
+        if value <= 0 {
+            return;
+        }
+        report_inputs(
+            server,
+            player,
+            [AchievementInput::Absolute {
+                kind_id: char_record_kind::MY_GOLD,
+                value,
+                matcher: RecordMatch::Any,
+            }],
+            now,
+        );
     }
 }
 
@@ -422,6 +527,12 @@ impl AchievementHooks for LiveAchievementHooks {
         self.queue(Deferred::Refresh(player.clone()));
     }
 
+    fn report_gold(&self, player: &PlayerRef, money: i64) {
+        if money > 0 {
+            self.queue(Deferred::Gold(player.clone(), money));
+        }
+    }
+
     fn flush_deferred(&self, server: &GameServer) {
         if crate::systems::economy::System::ops_held_on_this_thread() {
             return;
@@ -432,14 +543,26 @@ impl AchievementHooks for LiveAchievementHooks {
             if batch.is_empty() {
                 return;
             }
+            // One stamp per batch, so a burst of gold changes queued in one operation is
+            // throttled as one report of its final value.
+            let now = Utc::now();
+            {
+                let mut gold = self.gold.lock().unwrap_or_else(|e| e.into_inner());
+                for event in &batch {
+                    if let Deferred::Gold(player, money) = event {
+                        gold.stage(player.character_id, *money);
+                    }
+                }
+            }
             for event in batch {
                 match event {
                     Deferred::Report(player, inputs) => {
-                        report_inputs(server, &player, inputs, Utc::now());
+                        report_inputs(server, &player, inputs, now);
                     }
                     Deferred::Refresh(player) => {
-                        refresh_current(server, &player, Utc::now());
+                        refresh_current(server, &player, now);
                     }
+                    Deferred::Gold(player, _) => self.deliver_gold(server, &player, now),
                 }
             }
         }
@@ -1056,5 +1179,32 @@ mod tests {
         assert_eq!(again.rewards, RewardDelivery::default());
         assert_eq!(achievement_ops(&mut f.client), [sc::SCAchievementsPacket]);
         assert_eq!(bag_items(&f).len(), 1);
+    }
+
+    #[test]
+    fn gold_reports_keep_the_newest_value_of_a_batch() {
+        let mut delivery = GoldDelivery::default();
+        delivery.stage(7, 5_000_000);
+        delivery.stage(7, 4_000_000);
+        assert_eq!(delivery.claim(7, 1_000), Some(5_000_000));
+    }
+
+    #[test]
+    fn gold_reports_are_throttled_per_character_per_second() {
+        let mut delivery = GoldDelivery::default();
+        delivery.stage(7, 2_000_000);
+        assert_eq!(delivery.claim(7, 1_000), Some(2_000_000));
+        // Same second: suppressed, while a newer value keeps waiting.
+        delivery.stage(7, 3_000_000);
+        assert_eq!(delivery.claim(7, 1_000), None);
+        assert_eq!(delivery.claim(7, 1_000), None);
+        // The next second reports the newest value.
+        assert_eq!(delivery.claim(7, 1_001), Some(3_000_000));
+        // Nothing pending: no report even outside the window.
+        assert_eq!(delivery.claim(7, 1_002), None);
+        // Another character has its own window and pending value.
+        delivery.stage(8, 9_000_000);
+        assert_eq!(delivery.claim(7, 1_002), None);
+        assert_eq!(delivery.claim(8, 1_002), Some(9_000_000));
     }
 }

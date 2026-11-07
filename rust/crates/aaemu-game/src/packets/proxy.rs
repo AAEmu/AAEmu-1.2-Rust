@@ -104,6 +104,16 @@ fn tick_count() -> u32 {
 
 // ---- C->S --------------------------------------------------------------------------------------
 
+/// `SCTrionConfigPacket` from `Account:Trion` (WP-UI4). The client treats the URLs as folders.
+fn trion_config_packet(cfg: &crate::config::TrionConfig) -> SCTrionConfigPacket {
+    SCTrionConfigPacket {
+        activate: cfg.activate,
+        auth_url: cfg.auth_url.clone(),
+        platform_url: cfg.platform_url.clone(),
+        commerce_url: cfg.commerce_url.clone(),
+    }
+}
+
 /// `FinishStatePacket` (0x001): drives the CryNetwork state machine and, for state 0, sends the
 /// lobby configuration burst.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,10 +122,6 @@ pub struct FinishStatePacket {
 }
 
 impl FinishStatePacket {
-    /// Test URLs (C#: "TODO - config files"). The client treats them as folders.
-    pub const AUTH_URL: &'static str = "http://localhost/aaemu/login";
-    pub const PLATFORM_URL: &'static str = "http://localhost/aaemu/platform";
-    pub const COMMERCE_URL: &'static str = "http://localhost/aaemu/shop";
     /// `levelname` when `Connection.ActiveChar` is null (always the case in the lobby).
     pub const LOBBY_LEVEL: &'static str = "w_hanuimaru_1";
     /// `_scAccountInitPacket`.
@@ -150,23 +156,38 @@ impl ClientPacket for FinishStatePacket {
                         checksum: 0,
                         immersive: 1,
                     });
+                    // WP-B: the account registry is the source of truth; the connection keeps a
+                    // cached copy (set by `AccountManager.Add`). Read it before SCInitialConfig:
+                    // WP-J selects the restriction flags by the effective payment method.
+                    let state =
+                        crate::systems::services::accounts::state(server, conn.account_id());
                     conn.send(&SCInitialConfigPacket {
                         fsets: server.systems.services.features(server),
+                        restrictions: *server
+                            .config
+                            .account
+                            .restrictions
+                            .for_payment(state.payment.method),
+                        idle_kick_time: server.config.account.idle_kick_time,
                     });
-                    conn.send(&SCTrionConfigPacket {
-                        activate: true,
-                        auth_url: Self::AUTH_URL.into(),
-                        platform_url: Self::PLATFORM_URL.into(),
-                        commerce_url: Self::COMMERCE_URL.into(),
-                    });
-                    let p = conn.payment.clone();
+                    let trion = &server.config.account.trion;
+                    conn.send(&trion_config_packet(trion));
+                    conn.payment = state.payment.clone();
+                    let p = state.payment;
                     conn.send(&SCAccountInfoPacket {
                         pay_method: p.method as i32,
                         pay_location: p.location,
                         pay_start: p.start_time,
                         pay_end: p.end_time,
                     });
-                    conn.send(&SCChatSpamDelayPacket);
+                    let spam = &server.config.chat;
+                    conn.send(&SCChatSpamDelayPacket {
+                        version: 0,
+                        chat_type_groups: spam.packet_groups(),
+                        chat_group_delays: spam.packet_delays(),
+                        apply_config: spam.apply_config.clone(),
+                        detect_config: spam.detect_config.clone(),
+                    });
                     conn.send(&SCAccountAttributeConfigPacket {
                         used: Self::ACCOUNT_INIT,
                     });
@@ -184,11 +205,27 @@ impl ClientPacket for FinishStatePacket {
                 3..=6 => conn.send(&ChangeStatePacket {
                     state: self.state + 1,
                 }),
-                7 => conn.send(&SCUpdatePremiumPointPacket {
-                    point: 1,
-                    old_pg: 1,
-                    pg: 1,
-                }),
+                7 => {
+                    // The C# sent a hard-coded (1, 1, 1); send the account's real point and
+                    // grade (client handler FUN_39186340 stores the point at player+0x68c and
+                    // only raises the grade-change event when oldPg != pg).
+                    let state = crate::systems::services::accounts::expire_lazily(
+                        server,
+                        conn.account_id(),
+                    )
+                    .await;
+                    let point = crate::systems::services::premium::effective_point(
+                        server,
+                        &state,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    let grade = crate::systems::services::premium::grade_for_point(server, point);
+                    conn.send(&SCUpdatePremiumPointPacket {
+                        point,
+                        old_pg: grade,
+                        pg: grade,
+                    });
+                }
                 s => tracing::info!("Unknown state: {s}"),
             }
             Ok(())
@@ -418,6 +455,52 @@ mod tests {
         assert_eq!(
             encode(&FastPongPacket { sent: 9 }),
             vec![0xDD, 0x02, 0x16, 0x00, 9, 0, 0, 0]
+        );
+    }
+
+    fn trion_frame(activate: bool, urls: [&str; 3]) -> Vec<u8> {
+        let mut want = vec![0xDD, 0x01, 0x00, 0x00, 0x07, 0x00, u8::from(activate)];
+        for url in urls {
+            want.extend_from_slice(&(url.len() as u16).to_le_bytes());
+            want.extend_from_slice(url.as_bytes());
+        }
+        want
+    }
+
+    #[test]
+    fn trion_config_defaults_keep_todays_bytes() {
+        let defaults = crate::config::AccountConfig::default().trion;
+        assert_eq!(
+            encode(&trion_config_packet(&defaults)),
+            trion_frame(
+                true,
+                [
+                    "http://localhost/aaemu/login",
+                    "http://localhost/aaemu/platform",
+                    "http://localhost/aaemu/shop",
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn trion_config_overrides_the_lobby_bytes() {
+        let cfg = crate::config::TrionConfig {
+            activate: false,
+            auth_url: "https://auth.example.test/l".into(),
+            platform_url: "https://platform.example.test".into(),
+            commerce_url: "https://shop.example.test/c".into(),
+        };
+        assert_eq!(
+            encode(&trion_config_packet(&cfg)),
+            trion_frame(
+                false,
+                [
+                    "https://auth.example.test/l",
+                    "https://platform.example.test",
+                    "https://shop.example.test/c",
+                ]
+            )
         );
     }
 }

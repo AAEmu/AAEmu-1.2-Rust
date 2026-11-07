@@ -1,7 +1,7 @@
 //! Port of `Core/Managers/NameManager` and `StringExtensions.NormalizeName`.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{OnceLock, RwLock};
 
 use regex::Regex;
 use sqlx::mysql::MySqlPool;
@@ -53,6 +53,10 @@ struct Names {
 #[derive(Debug)]
 pub struct NameManager {
     regex: Regex,
+    /// `allowed_name_chars` (native 1.2 `sub_395728B0`): ASCII letters always pass; every other
+    /// character must be listed. `None` when the table was not loaded (keeps the regex-only
+    /// behaviour for tests and old data).
+    allowed_chars: OnceLock<HashSet<char>>,
     inner: RwLock<Names>,
 }
 
@@ -76,8 +80,30 @@ impl NameManager {
             .unwrap_or_else(|| Regex::new(DEFAULT_CHARACTER_NAME_REGEX).expect("valid regex"));
         Self {
             regex,
+            allowed_chars: OnceLock::new(),
             inner: RwLock::new(Names::default()),
         }
+    }
+
+    /// Installs the `allowed_name_chars` whitelist (native 1.2 `FUN_39572620`). An empty slice
+    /// leaves the whitelist disabled, so a compact without the table keeps the regex-only rules.
+    pub fn set_allowed_name_chars(&self, chars: impl IntoIterator<Item = char>) {
+        let set: HashSet<char> = chars.into_iter().collect();
+        if set.is_empty() {
+            return;
+        }
+        // The whitelist is fixed for the life of the server.
+        let _ = self.allowed_chars.set(set);
+    }
+
+    /// `sub_395728B0`: a one-byte alphabetic character or space is accepted directly; every
+    /// other character must be in `allowed_name_chars`.
+    fn name_chars_allowed(&self, name: &str) -> bool {
+        let Some(allowed) = self.allowed_chars.get() else {
+            return true;
+        };
+        name.chars()
+            .all(|ch| ch == ' ' || ch.is_ascii_alphabetic() || allowed.contains(&ch))
     }
 
     /// `Load()`: `SELECT id, name, account_id, deleted FROM characters`. Deleted names keep their
@@ -162,7 +188,7 @@ impl NameManager {
             }
             return CharacterCreateError::NameAlreadyExists;
         }
-        if name.trim().is_empty() || !self.regex.is_match(name) {
+        if name.trim().is_empty() || !self.regex.is_match(name) || !self.name_chars_allowed(name) {
             return CharacterCreateError::InvalidCharacters;
         }
         CharacterCreateError::Ok
@@ -223,6 +249,42 @@ impl NameManager {
             n.accounts.insert(id, account_id);
             tracing::info!("AddCharacterName, Registered account {account_id} for {name} ({id})");
         }
+    }
+
+    /// Renames a registered character (the lobby edit and the GM rename). One write lock swaps
+    /// the name mapping, so no reader sees the character with neither or with both names; the
+    /// id and account registrations stay. Returns `false` and changes nothing when the id is not
+    /// registered or the name belongs to another character. The caller owns the database write
+    /// under `SaveManager::transaction_lock`, which is the same lock character create uses.
+    pub fn rename_character(&self, id: u32, new_name: &str) -> bool {
+        let normalized = normalize_name(new_name);
+        let mut n = self.inner.write().expect("names poisoned");
+        let Some(old) = n.ids.get(&id).cloned() else {
+            tracing::error!("AddCharacterName, cannot rename unknown character Id {id}");
+            return false;
+        };
+        if let Some(&owner) = n.names.get(&normalized) {
+            if owner != id {
+                tracing::error!(
+                    "AddCharacterName, cannot rename {old} ({id}) to {normalized}: the name belongs to character {owner}"
+                );
+                return false;
+            }
+        }
+        if old != normalized {
+            n.names.remove(&old);
+            tracing::info!("AddCharacterName, renamed {old} to {normalized} ({id})");
+        }
+        n.ids.insert(id, normalized.clone());
+        n.names.insert(normalized, id);
+        true
+    }
+
+    /// Both maps under one read lock (the rename atomicity test).
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> (HashMap<u32, String>, HashMap<String, u32>) {
+        let n = self.inner.read().expect("names poisoned");
+        (n.ids.clone(), n.names.clone())
     }
 
     /// `RemoveCharacterId`.

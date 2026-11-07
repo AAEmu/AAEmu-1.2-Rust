@@ -54,6 +54,8 @@ pub struct GameServer {
     /// A weak self reference for the timers that outlive a packet handler.
     self_ref: std::sync::OnceLock<std::sync::Weak<GameServer>>,
     next_connection_id: AtomicU32,
+    /// Monotonic order of the slot-occupancy reports sent to the login server's world queue.
+    occupancy_sequence: std::sync::Mutex<u32>,
     /// Set while the graceful shutdown returns the players to the world list: entering the world
     /// is refused (`systems::services::shutdown`).
     shutting_down: AtomicBool,
@@ -61,6 +63,18 @@ pub struct GameServer {
 
 impl GameServer {
     pub fn new(config: AppConfig, db: MySqlPool, game_data: GameData) -> Self {
+        tracing::info!(
+            "Character slots: base {} per account (purchased extra_character_slots are added); the login server's Login:MaxCharactersPerAccount must match",
+            config.characters.max_per_account
+        );
+        tracing::info!(
+            "Character pre-select period {}; the login server's Login:PreSelectCharacterPeriod must match",
+            if config.characters.pre_select_period {
+                "on"
+            } else {
+                "off"
+            }
+        );
         let ids = Arc::new(IdManagers::default());
         let world = Arc::new(WorldManager::default());
         let reply_delay = ReplyDelay::resolve(&config.debug.reply_delay);
@@ -72,8 +86,23 @@ impl GameServer {
                 crate::models::character::DEFAULT_INSTANCE_ID,
             );
         }
+        let names = NameManager::new(config.character_name_regex.as_deref());
+        if config.character_name_use_allowed_chars {
+            if game_data.characters.allowed_name_chars.is_empty() {
+                tracing::warn!(
+                    "CharacterNameUseAllowedChars is enabled but compact.sqlite3 has no allowed_name_chars rows; keeping the regex-only rule"
+                );
+            } else {
+                tracing::info!(
+                    "CharacterNameUseAllowedChars is enabled: the 1.2 allowed_name_chars whitelist overrides CharacterNameRegex for names it does not list (digits, Cyrillic)"
+                );
+                names.set_allowed_name_chars(
+                    game_data.characters.allowed_name_chars.iter().copied(),
+                );
+            }
+        }
         Self {
-            names: Arc::new(NameManager::new(config.character_name_regex.as_deref())),
+            names: Arc::new(names),
             chat: ChatManager::new(&ids.chat),
             ids,
             items: Arc::new(ItemManager::default()),
@@ -95,6 +124,7 @@ impl GameServer {
             login: LoginLink::default(),
             self_ref: std::sync::OnceLock::new(),
             next_connection_id: AtomicU32::new(1),
+            occupancy_sequence: std::sync::Mutex::new(0),
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -154,6 +184,31 @@ impl GameServer {
         } else {
             0
         }
+    }
+
+    /// Slot occupancy reported to the login server's world queue: accounts in the lobby or world
+    /// plus world cookies the client has not consumed yet (they expire, see
+    /// `EnterWorldManager::PENDING_TOKEN_LIFETIME`).
+    pub fn world_occupancy(&self) -> u32 {
+        let accounts = u32::try_from(self.accounts.count()).unwrap_or(u32::MAX);
+        let pending = u32::try_from(self.enter_world.pending_count()).unwrap_or(u32::MAX);
+        accounts.saturating_add(pending)
+    }
+
+    /// The next occupancy report as `(sequence, occupancy)`. The sequence lock serialises the
+    /// snapshot with its order, so the login server can discard a report that was taken before a
+    /// newer one even when the two are sent from different tasks.
+    pub fn next_occupancy(&self) -> (u32, u32) {
+        let mut sequence = self
+            .occupancy_sequence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *sequence = sequence.wrapping_add(1);
+        if *sequence == 0 {
+            *sequence = 1;
+        }
+        let sequence = *sequence;
+        (sequence, self.world_occupancy())
     }
 
     /// Decodes and dispatches one frame payload for `conn`.

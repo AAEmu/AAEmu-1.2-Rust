@@ -7,7 +7,7 @@
 use crate::packets::world::{ChatSender, SCChatMessagePacket};
 use crate::server::GameServer;
 use crate::systems::social::chat::chat_type;
-use crate::systems::social::util::{error, send_error};
+use crate::systems::social::util::{error, send_chat_failure, send_error, ChatFailure};
 use crate::world::PlayerRef;
 
 /// `Character.IsOnline` setter, after the flag changed (`if (!value) SetOffline(this)`).
@@ -69,6 +69,13 @@ pub fn on_leave_world(server: &GameServer, p: &PlayerRef) {
     on_leave_world_family(server, p);
     // A pending guild invitation does not outlive the invited character's session.
     server.expeditions.drop_invitation(p.character_id);
+    // A guild or nation rename offer dies with the session too.
+    server.expeditions.clear_rename_offer(p.character_id);
+    server
+        .systems
+        .social
+        .nations
+        .clear_rename_offer(p.character_id);
     let exp = p.data().unit.expedition_id;
     if exp != 0 {
         crate::systems::social::expedition::on_character_logout(server, p, exp);
@@ -120,7 +127,11 @@ pub fn route_chat(
                         );
                     }
                 }
-                None => send_error(me, error::CHAT_NOT_IN_RAID),
+                None => send_chat_failure(
+                    me,
+                    &server.config.chat,
+                    ChatFailure::new(error::CHAT_NOT_IN_RAID, "Raid"),
+                ),
             }
             true
         }
@@ -141,7 +152,11 @@ pub fn route_chat(
                             language_type,
                         );
                 }
-                None => send_error(me, error::CHAT_NOT_IN_PARTY),
+                None => send_chat_failure(
+                    me,
+                    &server.config.chat,
+                    ChatFailure::new(error::CHAT_NOT_IN_PARTY, "Party"),
+                ),
             }
             true
         }

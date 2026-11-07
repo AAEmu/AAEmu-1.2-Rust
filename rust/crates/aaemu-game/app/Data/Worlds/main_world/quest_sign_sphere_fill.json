@@ -1,0 +1,50 @@
+[
+  {
+    "quest_id": 1650,
+    "component_id": 7764,
+    "sphere_id": 650,
+    "zone": 142,
+    "x": 14253.21,
+    "y": 14999.57,
+    "z": 121.855,
+    "radius": 6.0,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  },
+  {
+    "quest_id": 6213,
+    "component_id": 26636,
+    "sphere_id": 2270,
+    "zone": 144,
+    "x": 13566.53,
+    "y": 15877.48,
+    "z": 176.108,
+    "radius": 5.0,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  },
+  {
+    "quest_id": 6216,
+    "component_id": 26646,
+    "sphere_id": 2271,
+    "zone": 158,
+    "x": 21036.317,
+    "y": 8311.61,
+    "z": 371.852,
+    "radius": 5.0,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  },
+  {
+    "quest_id": 5716,
+    "component_id": 24586,
+    "sphere_id": 933,
+    "zone": 186,
+    "x": 13635.52,
+    "y": 10355.82,
+    "z": 194.372,
+    "radius": 8.0,
+    "source": "quest_area_sphere.g",
+    "radius_source": "10x_area"
+  }
+]

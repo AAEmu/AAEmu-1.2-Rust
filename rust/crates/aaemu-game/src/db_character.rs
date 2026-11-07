@@ -41,6 +41,7 @@ const CHARACTER_COLUMNS: &str = "CAST(id AS SIGNED) AS id, CAST(account_id AS SI
      faction_name, CAST(expedition_id AS SIGNED) AS expedition_id, CAST(family AS SIGNED) AS family, \
      CAST(dead_count AS SIGNED) AS dead_count, dead_time, CAST(rez_wait_duration AS SIGNED) AS rez_wait_duration, \
      rez_time, CAST(rez_penalty_duration AS SIGNED) AS rez_penalty_duration, leave_time, \
+     chat_restricted_until, \
      CAST(money AS SIGNED) AS money, CAST(money2 AS SIGNED) AS money2, CAST(honor_point AS SIGNED) AS honor_point, \
      CAST(vocation_point AS SIGNED) AS vocation_point, \
      CAST(crime_point AS SIGNED) AS crime_point, CAST(crime_record AS SIGNED) AS crime_record, \
@@ -63,10 +64,57 @@ fn opt_int(r: &MySqlRow, col: &str) -> Result<i64> {
     Ok(r.try_get::<Option<i64>, _>(col)?.unwrap_or(0))
 }
 
+/// The faction consequences of a crime-point change, decided under the character's data lock by
+/// [`Character::check_wanted_threshold`].
+///
+/// The caller must run
+/// [`systems::social::faction::apply_crime_faction_change`](crate::systems::social::faction::apply_crime_faction_change)
+/// **after** releasing the character's data lock: both changes broadcast and touch houses /
+/// guild / party.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CrimeFactionChange {
+    /// Infamy crossed 3000 while the saved faction is not Pirate: run `SetFaction(Pirate)`.
+    pub became_pirate: bool,
+    /// The saved faction is Pirate and infamy reached 0: return to the race/gender template
+    /// faction (the home faction) and credit the "Repentant" achievement (kind 49).
+    pub pardoned: bool,
+}
+
+impl CrimeFactionChange {
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            became_pirate: self.became_pirate || other.became_pirate,
+            pardoned: self.pardoned || other.pardoned,
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        !self.became_pirate && !self.pardoned
+    }
+}
+
 impl Character {
-    /// `CheckWantedThreshold` (the buff / faction part; `SetFaction` side effects on houses,
-    /// guild and party are not ported — see PORTING.md).
-    pub fn check_wanted_threshold(&mut self, server: &GameServer, now_ms: i64) {
+    /// `CheckWantedThreshold` (the buff part) and the pirate / pardon decision. The faction field
+    /// itself is deliberately left unchanged here: the caller runs
+    /// [`systems::social::faction::apply_crime_faction_change`](crate::systems::social::faction::apply_crime_faction_change)
+    /// after releasing the character's data lock, because the change broadcasts and touches
+    /// houses / guild / party.
+    ///
+    /// The decision uses the saved faction ([`persisted_faction`]), not the live one: a duel /
+    /// battlefield corps shows a temporary Red / Blue / corps faction, and testing that would
+    /// re-fire `SetFaction(Pirate)` for a character who is already a pirate (ending the
+    /// temporary faction and kicking the party). It also means a pirate whose infamy reaches 0
+    /// while showing a temporary faction is pardoned (the saved faction is still Pirate).
+    ///
+    /// Pardon rule (owner-approved 2026-11-06, research `pirate-return.md`): a character whose
+    /// **saved** faction is Pirate and whose infamy reaches exactly 0 returns to the home
+    /// faction. Below 3000 does not release a pirate; only 0 does.
+    #[must_use = "run faction::apply_crime_faction_change after releasing the character's data lock"]
+    pub fn check_wanted_threshold(
+        &mut self,
+        server: &GameServer,
+        now_ms: i64,
+    ) -> CrimeFactionChange {
         let add = |c: &mut Character, id: u32| {
             if c.unit.buffs.check_buff(id) {
                 return;
@@ -83,17 +131,18 @@ impl Character {
                 None => tracing::error!("CheckWantedThreshold: no buff template {id}"),
             }
         };
+        let mut change = CrimeFactionChange::default();
         if self.infamy_point >= PIRATE_CRIME_POINT_THRESHOLD {
             add(self, BUFF_WANTED);
             add(self, BUFF_CONTEMPTUOUS);
-            if self.unit.faction_id != FACTION_PIRATE {
+            if persisted_faction(self) != FACTION_PIRATE {
                 tracing::warn!(
                     "Character {} ({}) has {} infamy: SetFaction(Pirate)",
                     self.id,
                     self.unit.name,
                     self.infamy_point
                 );
-                self.unit.faction_id = FACTION_PIRATE;
+                change.became_pirate = true;
             }
         } else {
             if self.crime_point >= WANTED_CRIME_POINT_THRESHOLD {
@@ -102,7 +151,16 @@ impl Character {
                 self.unit.buffs.remove_buff(BUFF_WANTED);
             }
             self.unit.buffs.remove_buff(BUFF_CONTEMPTUOUS);
+            if self.infamy_point <= 0 && persisted_faction(self) == FACTION_PIRATE {
+                tracing::info!(
+                    "Character {} ({}) reached 0 infamy: set_faction to the home faction",
+                    self.id,
+                    self.unit.name
+                );
+                change.pardoned = true;
+            }
         }
+        change
     }
 }
 
@@ -176,21 +234,25 @@ pub async fn load_character(
     c.rez_time = unix(dt(&row, "rez_time"));
     c.rez_penalty_duration = int(&row, "rez_penalty_duration")? as i32;
     c.leave_time = unix(dt(&row, "leave_time"));
+    c.chat_restricted_until = unix(dt(&row, "chat_restricted_until"));
     c.money = int(&row, "money")?;
     c.money2 = int(&row, "money2")?;
     c.honor_point = int(&row, "honor_point")? as i32;
     c.vocation_point = int(&row, "vocation_point")? as i32;
     let now_ms = Utc::now().timestamp_millis();
     // CrimePoint / InfamyPoint setters: clamp to >= 0 and CheckWantedThreshold (only on change).
+    // The load only restores the wanted buffs; the `SetFaction(Pirate)` the threshold asks for
+    // needs the live world and runs in `world::session::select_loaded` (`Character.Load` is also
+    // used for the lobby list / deletion checks, where there is no player to notify).
     let crime = (int(&row, "crime_point")? as i16).max(0);
     if crime != 0 {
         c.crime_point = crime;
-        c.check_wanted_threshold(server, now_ms);
+        let _ = c.check_wanted_threshold(server, now_ms);
     }
     let infamy = (int(&row, "crime_record")? as i32).max(0);
     if infamy != 0 {
         c.infamy_point = infamy;
-        c.check_wanted_threshold(server, now_ms);
+        let _ = c.check_wanted_threshold(server, now_ms);
     }
     c.jury_point = int(&row, "jury_point")? as i32;
     c.hostile_faction_kills = int(&row, "hostile_faction_kills")? as u32;
@@ -603,6 +665,10 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
     // `systems::report_achievement`, and `CSNotifyInGamePacket` pushes the entry snapshot.
     crate::systems::social::achievement_persistence::load_character_achievements(pool, c).await?;
 
+    // Crafts learned from recipe items / TrainCraftEffect (`character_crafts`).
+    c.learned_crafts =
+        crate::systems::economy::craft_learning::load_character_crafts(pool, id).await?;
+
     // LoadActionSlots(connection)
     if let Ok(Some(r)) =
         sqlx::query("SELECT slots FROM `characters` WHERE `id` = ? AND `account_id` = ?")
@@ -975,14 +1041,14 @@ pub async fn save_character(
         (`id`,`account_id`,`name`,`access_level`,`race`,`gender`,`unit_model_params`,`level`,`experience`,`recoverable_exp`,\
         `hp`,`mp`,`consumed_lp`,`ability1`,`ability2`,`ability3`,\
         `world_id`,`zone_id`,`x`,`y`,`z`,`roll`,`pitch`,`yaw`,\
-        `faction_id`,`faction_name`,`expedition_id`,`family`,`dead_count`,`dead_time`,`rez_wait_duration`,`rez_time`,`rez_penalty_duration`,`leave_time`,\
+        `faction_id`,`faction_name`,`expedition_id`,`family`,`dead_count`,`dead_time`,`rez_wait_duration`,`rez_time`,`rez_penalty_duration`,`leave_time`,`chat_restricted_until`,\
         `money`,`money2`,`honor_point`,`vocation_point`,`crime_point`,`crime_record`,`jury_point`,\
         `hostile_faction_kills`,`pvp_honor`,`died_in_pvp`,`died_in_pvp_war_zone`,\
         `delete_request_time`,`transfer_request_time`,`delete_time`,`auto_use_aapoint`,`prev_point`,`point`,`gift`,\
         `num_inv_slot`,`num_bank_slot`,`expanded_expert`,`slots`,`created_at`,`updated_at`,`return_district`,`online_time`,\
         `arrest_count`, `accept_guilty_count`, `accept_trial_count`, `not_guilty_count`, `guilty_count`, `evidence_reported_count`, `bot_reported_count`, `reported_as_bot_count`,\
         `offline_guilty_time`,`offline_guilty_region`) VALUES \
-        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
+        (?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?)",
     )
     .bind(c.id)
     .bind(c.account_id)
@@ -1018,6 +1084,7 @@ pub async fn save_character(
     .bind(from_unix(c.rez_time))
     .bind(c.rez_penalty_duration)
     .bind(from_unix(c.leave_time))
+    .bind(from_unix(c.chat_restricted_until))
     .bind(c.money)
     .bind(c.money2)
     .bind(c.honor_point)
@@ -1204,6 +1271,13 @@ pub async fn save_character(
     // Achievements (records + progress). Written after the `characters` REPLACE above, so its
     // ON DELETE CASCADE cannot drop the rows this snapshot re-inserts.
     crate::systems::social::achievement_persistence::save_character_achievements(tx, c).await?;
+    // Learned crafts (`character_crafts`; only the ids added since the last committed save).
+    crate::systems::economy::craft_learning::save_character_crafts(
+        tx,
+        c.id,
+        &c.learned_crafts_unsaved,
+    )
+    .await?;
     // Later phase: Mates.Save.
     Ok(())
 }
@@ -1327,7 +1401,7 @@ async fn save_active_buffs(tx: &mut Transaction<'_, MySql>, c: &Character) {
 /// the state it had before the call (`save_character` advances `updated` and clears the removed
 /// lists while it works, so it runs on a clone that is applied only after the commit).
 pub async fn save_directly_to_database(pool: &MySqlPool, c: &mut Character) -> bool {
-    save_directly(pool, c, None).await
+    save_directly(pool, c, None, None).await
 }
 
 /// Character creation: [`save_directly_to_database`] plus the new character's containers and
@@ -1338,7 +1412,61 @@ pub async fn save_directly_to_database(pool: &MySqlPool, c: &mut Character) -> b
 /// until commit or cleanup, excluding world snapshots of a partially created character.
 pub(crate) async fn save_new_character_locked(server: &GameServer, c: &mut Character) -> bool {
     let batch = server.items.prepare_save_for_owner(c.id);
-    save_directly(&server.db, c, Some((&server.items, batch))).await
+    save_directly(&server.db, c, Some((&server.items, batch)), None).await
+}
+
+/// The lobby character edit: the rebuilt starting kit replaces everything the creation-time save
+/// wrote for this character. In one transaction the old item/container rows and the create-time
+/// ability/skill rows are deleted, then the `characters` row and the rebuilt items are written.
+/// The caller holds `server.save.transaction_lock()`.
+pub(crate) async fn save_edited_character_locked(
+    server: &GameServer,
+    c: &mut Character,
+    batch: crate::managers::item::ItemSaveBatch,
+) -> bool {
+    save_directly(&server.db, c, Some((&server.items, batch)), Some(c.id)).await
+}
+
+/// Deletes the rows a lobby edit rebuilds. Only for a never-played character, and only the
+/// creation containers (equipment, bag, bank; `mate_id = 0`): a never-played character can
+/// already own mail attachments, auction/trade/system items and mate/slave equipment, whose
+/// container and item rows must survive the rebuild.
+async fn clear_rebuilt_character_rows(tx: &mut Transaction<'_, MySql>, owner: u32) -> Result<()> {
+    use crate::models::container::slot_type;
+    let creation_slots = format!(
+        "{}, {}, {}",
+        slot_type::EQUIPMENT,
+        slot_type::INVENTORY,
+        slot_type::BANK
+    );
+    sqlx::query(&format!(
+        concat!(
+            "DELETE i FROM `items` i JOIN `item_containers` ic ",
+            "ON ic.container_id = i.container_id ",
+            "WHERE ic.owner_id = ? AND ic.mate_id = 0 AND ic.slot_type IN ({})"
+        ),
+        creation_slots
+    ))
+    .bind(owner)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(&format!(
+        concat!(
+            "DELETE FROM `item_containers` ",
+            "WHERE `owner_id` = ? AND `mate_id` = 0 AND `slot_type` IN ({})"
+        ),
+        creation_slots
+    ))
+    .bind(owner)
+    .execute(&mut **tx)
+    .await?;
+    for table in ["skills", "abilities", "actabilities", "appellations"] {
+        sqlx::query(&format!("DELETE FROM `{table}` WHERE `owner` = ?"))
+            .bind(owner)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn save_directly(
@@ -1348,6 +1476,7 @@ async fn save_directly(
         &crate::managers::item::ItemManager,
         crate::managers::item::ItemSaveBatch,
     )>,
+    rebuild_owner: Option<u32>,
 ) -> bool {
     let mut saved = c.clone();
     let manager = items.as_ref().map(|(manager, _)| *manager);
@@ -1355,6 +1484,9 @@ async fn save_directly(
         let mut tx = pool.begin().await?;
         let now = Utc::now().timestamp();
         let written = async {
+            if let Some(owner) = rebuild_owner {
+                clear_rebuilt_character_rows(&mut tx, owner).await?;
+            }
             save_character(&mut tx, &mut saved, now).await?;
             if let Some((manager, batch)) = items {
                 manager.write_prepared(&mut tx, batch).await?;
@@ -1387,6 +1519,9 @@ async fn save_directly(
     .await;
     match res {
         Ok(()) => {
+            // The direct save committed the rows this snapshot carried; drop them so the next
+            // snapshot does not rewrite them.
+            saved.learned_crafts_unsaved.clear();
             *c = saved;
             true
         }
@@ -1513,6 +1648,7 @@ mod tests {
         "completed_quests",
         "character_records",
         "character_achievements",
+        "character_crafts",
     ];
 
     /// Replaces each live table with a connection-local copy of its actual schema, so the test
@@ -1531,6 +1667,40 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// A duelling / battlefield pirate keeps the saved faction 161 while showing Red / Blue /
+    /// corps. The infamy threshold must read the saved faction: testing the live one would
+    /// re-fire `SetFaction(Pirate)` (end the temporary faction and kick the party / duel).
+    #[tokio::test]
+    async fn a_temporary_faction_does_not_rearm_the_pirate_change() {
+        use crate::data::skills::{BuffKind, BuffTemplate};
+        use crate::data::GameData;
+        use crate::test_support::test_server_with;
+
+        let mut data = GameData::empty();
+        for id in [BUFF_WANTED, BUFF_CONTEMPTUOUS] {
+            data.skills
+                .buffs
+                .insert(id, BuffTemplate::simple(id, BuffKind::Good));
+        }
+        let server = test_server_with(data);
+        let mut duellist = Character::new(1, 1, UnitCustomModelParams::default());
+        duellist.unit.faction_id = 160; // Red team while the saved faction is Pirate.
+        duellist.unit.origin_faction_id = FACTION_PIRATE;
+        duellist.unit.faction_temporary = true;
+        duellist.infamy_point = PIRATE_CRIME_POINT_THRESHOLD;
+        assert!(
+            !duellist.check_wanted_threshold(&server, 0).became_pirate,
+            "a saved pirate in a temporary faction is not converted again"
+        );
+        assert_eq!(duellist.unit.faction_id, 160);
+
+        // A plain non-pirate at the threshold still converts.
+        let mut criminal = Character::new(2, 1, UnitCustomModelParams::default());
+        criminal.unit.faction_id = 101;
+        criminal.infamy_point = PIRATE_CRIME_POINT_THRESHOLD;
+        assert!(criminal.check_wanted_threshold(&server, 0).became_pirate);
     }
 
     #[test]
@@ -1593,6 +1763,130 @@ mod tests {
             .unwrap();
             assert_eq!(saved, (i64::from(expected.0), i64::from(expected.1), 6));
         }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_chat_restriction_survives_character_reload() {
+        use crate::test_support::{test_character, test_server_with};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let mut server = test_server_with(crate::data::GameData::empty());
+        server.db = pool.clone();
+
+        let until = Utc::now().timestamp() + 3_600;
+        let mut character = test_character(1, "ChatRestrict", 100.0, 100.0);
+        character.account_id = 1;
+        character.created = Utc::now().timestamp();
+        character.chat_restricted_until = until;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let saved: chrono::NaiveDateTime =
+            sqlx::query_scalar("SELECT `chat_restricted_until` FROM `characters` WHERE `id` = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unix(Some(saved)), until);
+
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!(loaded.chat_restricted_until, until);
+
+        character.chat_restricted_until = 0;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!(loaded.chat_restricted_until, 0);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_learned_crafts_survive_character_reload() {
+        use crate::data::character_templates::CharacterTemplate;
+        use crate::data::GameData;
+        use crate::test_support::test_server_with;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let mut data = GameData::empty();
+        data.characters.templates.insert(
+            17,
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                creatable: true,
+                ..Default::default()
+            },
+        );
+        let mut server = test_server_with(data);
+        server.db = pool.clone();
+
+        let mut character = Character::new(1, 1, UnitCustomModelParams::default());
+        character.race = 1;
+        character.gender = 1;
+        character.unit.name = "CraftReload".into();
+        character.created = Utc::now().timestamp();
+        assert!(character.learn_craft(987));
+        assert!(character.learn_craft(480));
+        assert_eq!(character.learned_crafts_unsaved.len(), 2);
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let mut loaded = Character::new(1, 1, UnitCustomModelParams::default());
+        loaded.race = 1;
+        loaded.gender = 1;
+        load_character_details(&server, &mut loaded).await.unwrap();
+        assert_eq!(
+            loaded.learned_crafts,
+            std::collections::HashSet::from([987u32, 480])
+        );
+        assert!(loaded.learned_crafts_unsaved.is_empty());
         pool.close().await;
     }
 
@@ -2178,6 +2472,111 @@ mod tests {
         character.unit.cooldowns = crate::models::unit::UnitCooldowns::default();
         assert!(save_directly_to_database(&pool, &mut character).await);
         assert!(fetch_character_cooldowns(&pool, 1).await.is_empty());
+        pool.close().await;
+    }
+
+    /// Offline infamy reduction (a quest reward / crime change saved while the character was
+    /// away) leaves the faction to the select path, exactly like the pirate conversion. The
+    /// select sees saved faction 161 with infamy 0 and pardons through the shared helper; a
+    /// following save persists the home faction.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_select_pardons_an_offline_pirate_at_zero_infamy() {
+        use crate::data::character_templates::CharacterTemplate;
+        use crate::data::GameData;
+        use crate::systems::social::achievement::char_record_kind;
+        use crate::systems::social::achievement_flow_tests::one_achievement;
+        use crate::test_support::{test_character, test_experience, test_server_with, TestClient};
+        use crate::world::session::{select_loaded, SelectDbData};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let mut data = GameData::empty();
+        data.experience = test_experience(55);
+        data.characters.templates.insert(
+            0x11,
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                creatable: true,
+                faction_id: 101,
+                ..Default::default()
+            },
+        );
+        data.systems.social.achievements = one_achievement(
+            1380,
+            1,
+            0,
+            2401,
+            char_record_kind::MY_DISHONORABLE_POINT,
+            0,
+            0,
+        );
+        let mut server = test_server_with(data);
+        server.db = pool.clone();
+        let server = std::sync::Arc::new(server);
+        server.set_self();
+        crate::systems::social::install_hooks(&server);
+
+        let now = Utc::now().timestamp();
+        let mut character = test_character(1, "OfflinePirate", 100.0, 100.0);
+        character.unit.faction_id = FACTION_PIRATE;
+        character.crime_point = 0;
+        character.infamy_point = 0;
+        character.created = now;
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, now)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let (loaded, _) = load_character(&server, 1, character.account_id)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!(loaded.unit.faction_id, FACTION_PIRATE);
+
+        let mut client = TestClient::new(&server, 1, character.account_id);
+        select_loaded(&server, &mut client.conn, loaded, SelectDbData::default()).unwrap();
+        let player = client.conn.active_char.clone().expect("selected");
+        {
+            let c = player.data();
+            assert_eq!(c.unit.faction_id, 101, "the select pardoned the pirate");
+            assert_eq!(persisted_faction(&c), 101);
+            assert_eq!(
+                c.achievement_state.record_value(2401),
+                1,
+                "repentant (kind 49) credited at select"
+            );
+        }
+
+        let mut saved = player.data().clone();
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut saved, now)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let faction: i64 = sqlx::query_scalar(
+            "SELECT CAST(faction_id AS SIGNED) FROM `characters` WHERE `id` = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(faction, 101, "the next save persists the home faction");
         pool.close().await;
     }
 

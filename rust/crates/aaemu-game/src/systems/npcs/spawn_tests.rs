@@ -1794,6 +1794,7 @@ async fn activation_reclaim_protects_activity_and_stale_targets_expire() {
             1,
         ),
         cancel: CancelToken::new(),
+        extend_ms: 0,
     });
     // Persistent escort work (follow target).
     server.systems.ai.ais.add_ai(&escorting, AiKind::Dummy);
@@ -3227,6 +3228,7 @@ async fn real_data_quest_fill_spawns_on_terrain() {
             heightmaps_enable: true,
             geo_data_mode: true,
             pre_load_terrain: false,
+            placement_strict_surface: false,
         },
     ));
     let bai: Arc<dyn BaiFiles + Send + Sync> = Arc::new(ClientBaiFiles(files.clone()));

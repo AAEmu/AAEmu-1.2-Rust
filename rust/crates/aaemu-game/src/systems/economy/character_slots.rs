@@ -2,8 +2,10 @@
 //! client lists its characters.
 //!
 //! Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. The former C# body only logged.
-//! The game server stores the purchased count on `accounts.extra_character_slots`; the login
-//! server still advertises its fixed base slot count.
+//! The game server stores the purchased count on `accounts.extra_character_slots`; the client
+//! adds it to the base slots the login server advertises (`FUN_394ccef0`), so `SCGetSlotCount`
+//! sends only the purchased count. The character creation limit (`Characters:MaxPerAccount` plus
+//! the purchased count) enforces the same sum.
 
 use crate::packets::g2c::SCGetSlotCountPacket;
 use crate::server::GameServer;

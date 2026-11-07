@@ -16,10 +16,15 @@ pub mod opcodes {
 }
 
 /// `LGRegisterGameServerPacket`: response to `GLRegisterGameServerPacket`.
-/// Body: `[u8 result]` (0 = success, 1 = error).
+/// Body: `[u8 result]` (0 = success, 1 = error), plus the Rust-only
+/// `[u8 preSelectCharacterPeriod]` tail. The tail tells the game the period the login advertises
+/// (`Login:PreSelectCharacterPeriod` in `ACJoinResponse.afs`), so the two servers cannot
+/// disagree; a reader that predates it ignores the byte, and this reader treats a missing byte
+/// as false.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LgRegisterGameServer {
     pub result: GsRegisterResult,
+    pub pre_select_character_period: bool,
 }
 
 impl LgRegisterGameServer {
@@ -29,14 +34,23 @@ impl LgRegisterGameServer {
         } else {
             GsRegisterResult::Error
         };
-        Ok(Self { result })
+        let pre_select_character_period = if s.remaining() > 0 {
+            s.read_u8()? != 0
+        } else {
+            false
+        };
+        Ok(Self {
+            result,
+            pre_select_character_period,
+        })
     }
 }
 
 impl OutgoingPacket for LgRegisterGameServer {
     const OPCODE: u16 = opcodes::LG_REGISTER_GAME_SERVER;
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
-        s.write_u8(self.result as u8);
+        s.write_u8(self.result as u8)
+            .write_u8(u8::from(self.pre_select_character_period));
         Ok(())
     }
 }
@@ -132,15 +146,17 @@ mod tests {
     fn encodings_match_csharp() {
         assert_eq!(
             frame(&LgRegisterGameServer {
-                result: GsRegisterResult::Success
+                result: GsRegisterResult::Success,
+                pre_select_character_period: false
             }),
-            "0300000000"
+            "040000000000"
         );
         assert_eq!(
             frame(&LgRegisterGameServer {
-                result: GsRegisterResult::Error
+                result: GsRegisterResult::Error,
+                pre_select_character_period: false
             }),
-            "0300000001"
+            "040000000100"
         );
         let enter = LgPlayerEnter {
             account_id: AccountId(5),

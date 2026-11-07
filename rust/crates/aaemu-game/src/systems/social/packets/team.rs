@@ -6,7 +6,7 @@ use super::{active_char, cs_packet, sc_packet};
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::cs;
-use crate::systems::social::team::LootingRule;
+use crate::systems::social::team::{risky_action, LootingRule};
 
 /// The character fields `TeamMember.Write` / `WritePerson` read (a snapshot).
 #[derive(Debug, Clone, PartialEq)]
@@ -114,8 +114,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCAskToJoinTeamAreaPacket(teamId, senderId, senderName, isParty)` (never sent by the
-    /// 1.2 C#).
+    /// `SCAskToJoinTeamAreaPacket(teamId, senderId, senderName, isParty)`: sent for area
+    /// invitations (the 1.2 C# never sent it).
     SCAskToJoinTeamAreaPacket { team_id: u32, sender_id: u32, sender_name: String, is_party: bool } |self, s| {
         s.write_u32(self.team_id)
             .write_u32(self.sender_id)
@@ -185,7 +185,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCTeamAreaInvitedPacket(r, s)` (never sent by the 1.2 C#).
+    /// `SCTeamAreaInvitedPacket(r, s)`: `s = true` acknowledges an area invitation (`r` is
+    /// ignored by the client); `s = false` carries the remaining cooldown in milliseconds
+    /// (`r * 0.001` seconds). The 1.2 C# never sent it.
     SCTeamAreaInvitedPacket { r: u32, s: bool } |self, st| {
         st.write_u32(self.r).write_bool(self.s);
     }
@@ -347,32 +349,57 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSLeaveTeamPacket` (logged only, as in C#; leaving goes through
-    /// `CSAskRiskyTeamActionPacket`).
+    /// `CSLeaveTeamPacket`: the direct form of `CSAskRiskyTeamActionPacket` action LEAVE.
+    /// The 1.2 client sends it from the confirmation callback (`FUN_39309670` ->
+    /// `FUN_393095c0`), not from the initial click.
     CSLeaveTeamPacket { team_id: u32 }
     read |s| { Ok(Self { team_id: s.read_u32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("LeaveTeam, TeamId: {}", self.team_id);
+        let p = active_char!(conn);
+        server.systems.social.teams.ask_risky_team(
+            server,
+            &p,
+            self.team_id,
+            p.character_id,
+            risky_action::LEAVE,
+        );
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSKickTeamMemberPacket` (logged only, as in C#).
+    /// `CSKickTeamMemberPacket`: the direct form of `CSAskRiskyTeamActionPacket` action KICK
+    /// (the 1.2 client's confirmation callback).
     CSKickTeamMemberPacket { team_id: u32, member_id: u32 }
     read |s| { Ok(Self { team_id: s.read_u32()?, member_id: s.read_u32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("KickTeamMember, TeamId: {}, MemberId: {}", self.team_id, self.member_id);
+        let p = active_char!(conn);
+        server.systems.social.teams.ask_risky_team(
+            server,
+            &p,
+            self.team_id,
+            self.member_id,
+            risky_action::KICK,
+        );
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSDismissTeamPacket` (logged only, as in C#).
+    /// `CSDismissTeamPacket`: the direct form of `CSAskRiskyTeamActionPacket` action DISMISS
+    /// (the 1.2 client's confirmation callback sends itself as the target,
+    /// `FUN_39308c10` -> `FUN_397abeb0(team, ownCharacterId, 2)`).
     CSDismissTeamPacket { team_id: u32 }
     read |s| { Ok(Self { team_id: s.read_u32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("DismissTeam, TeamId: {}", self.team_id);
+        let p = active_char!(conn);
+        server.systems.social.teams.ask_risky_team(
+            server,
+            &p,
+            self.team_id,
+            p.character_id,
+            risky_action::DISMISS,
+        );
         Ok(())
     }
 );
@@ -684,6 +711,23 @@ mod tests {
                 ins_id: 9
             }),
             vec![1, 0, 0, 0x80, 0x3F, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0]
+        );
+        // `SCAskToJoinTeamAreaPacket`: the same writer as `SCAskToJoinTeamPacket` (team id,
+        // sender id, sender name, isParty), checked against the client handler's parsed
+        // `(teamId, senderId, senderName, isParty)` fields.
+        assert_eq!(
+            body(&SCAskToJoinTeamAreaPacket {
+                team_id: 5,
+                sender_id: 7,
+                sender_name: "Al".into(),
+                is_party: true
+            }),
+            vec![5, 0, 0, 0, 7, 0, 0, 0, 2, 0, b'A', b'l', 1]
+        );
+        // `SCTeamAreaInvitedPacket(r, s)`: the client reads a u32 and a bool.
+        assert_eq!(
+            body(&SCTeamAreaInvitedPacket { r: 3, s: true }),
+            vec![3, 0, 0, 0, 1]
         );
         assert_eq!(
             body(&SCTeamLootingRuleChangedPacket {

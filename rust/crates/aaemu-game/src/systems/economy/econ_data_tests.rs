@@ -20,6 +20,7 @@ use crate::server::GameServer;
 use crate::systems::economy::hooks::{NpcEconomyHooks, NpcShopInfo};
 use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
+use super::item_notify_packets::SCItemAcquisitionPacket;
 use super::item_timers;
 use super::loot::ScriptedRng;
 use super::loot_data::{Loot, LootPack};
@@ -703,6 +704,220 @@ async fn make_loot_public_finishes_pending_rolls() {
     assert!(g.items[&3].player_rolls.is_empty());
 }
 
+/// Enables `Loot:AnnounceToParty` for the server of a test world.
+fn enable_party_announcements(w: &World) {
+    w.server.config.update(|c| c.loot.announce_to_party = true);
+}
+
+/// Installs the fake team (id 5, the tag team of [`Tagged`]) and the tag team hook.
+fn team_and_tag(w: &World, members: Vec<PlayerRef>) {
+    let lm = &w.server.systems.economy.loot;
+    lm.hooks.teams.install(Arc::new(TeamOf(members)));
+    lm.hooks.npcs.install(Arc::new(Tagged));
+}
+
+/// The loot entry `index` as the announcement carries it (the loot stack, not the granted item).
+fn loot_stack(w: &World, index: u16) -> Item {
+    let c = w.server.systems.economy.loot.container(NPC_OBJ);
+    let item = c.lock().unwrap().items[&index].item.clone();
+    item
+}
+
+fn kill_with_team(w: &World, npc: &NpcRef) {
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(npc), None, &mut rng);
+}
+
+#[tokio::test]
+async fn party_loot_announcement_reaches_the_other_member_in_range() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    team_and_tag(&w, vec![w.pa.clone(), w.pb.clone()]);
+    enable_party_announcements(&w);
+    kill_with_team(&w, &npc);
+    w.a.drain();
+    w.b.drain();
+    let announced = loot_stack(&w, 1);
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    let want = SCItemAcquisitionPacket {
+        kind: 1,
+        char_name: "Alice".into(),
+        items: vec![announced],
+    };
+    assert_eq!(
+        w.b.drain(),
+        vec![(sc::SCItemAcquisitionPacket, body(&want))],
+        "the other party member in range must receive one announcement for Alice's pickup"
+    );
+    assert!(
+        !w.a.drain_ops().contains(&sc::SCItemAcquisitionPacket),
+        "the looter must not receive their own announcement"
+    );
+}
+
+#[tokio::test]
+async fn party_loot_announcement_skips_looter_outsider_and_far_member() {
+    let mut w = world_with(data());
+    // Cy is not in the party; Dave is a party member far outside the loot range (400 m).
+    let mut c = TestClient::new(&w.server, 3, 1003);
+    let pc = spawn_player(&w.server, &c, test_character(3, "Cy", 102.0, 100.0), 0x102);
+    c.conn.active_char = Some(pc);
+    let mut d = TestClient::new(&w.server, 4, 1004);
+    let pd = spawn_player(
+        &w.server,
+        &d,
+        test_character(4, "Dave", 500.0, 100.0),
+        0x103,
+    );
+    d.conn.active_char = Some(pd.clone());
+    c.drain();
+    d.drain();
+    let npc = spawn_npc(&mut w);
+    team_and_tag(&w, vec![w.pa.clone(), w.pb.clone(), pd]);
+    enable_party_announcements(&w);
+    kill_with_team(&w, &npc);
+    w.a.drain();
+    w.b.drain();
+    // Bob is the only other party member in range; he still receives it.
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    assert_eq!(
+        w.b.drain_ops(),
+        vec![sc::SCItemAcquisitionPacket],
+        "the party member in range must receive the announcement"
+    );
+    assert!(
+        !w.a.drain_ops().contains(&sc::SCItemAcquisitionPacket),
+        "the looter must not receive their own announcement"
+    );
+    assert!(
+        !c.drain_ops().contains(&sc::SCItemAcquisitionPacket),
+        "a character that is not in the loot's party must not receive it"
+    );
+    assert!(
+        !d.drain_ops().contains(&sc::SCItemAcquisitionPacket),
+        "a party member outside the loot range must not receive it"
+    );
+}
+
+#[tokio::test]
+async fn party_loot_announcement_is_off_by_default() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    team_and_tag(&w, vec![w.pa.clone(), w.pb.clone()]);
+    assert!(
+        !w.server.config.loot.announce_to_party,
+        "Loot:AnnounceToParty defaults to false"
+    );
+    kill_with_team(&w, &npc);
+    w.a.drain();
+    w.b.drain();
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    assert!(
+        w.b.drain().is_empty(),
+        "with the default configuration the pickup sends nothing new"
+    );
+}
+
+#[tokio::test]
+async fn party_loot_announcement_caps_a_loot_all_at_255_items() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    team_and_tag(&w, vec![w.pa.clone(), w.pb.clone()]);
+    enable_party_announcements(&w);
+    kill_with_team(&w, &npc);
+    w.a.drain();
+    w.b.drain();
+    // Replace the generated stacks with 300 single-unit loot entries.
+    let template = w
+        .server
+        .game_data
+        .items
+        .template(super::tests::STACK)
+        .cloned()
+        .expect("STACK template");
+    let c = w.server.systems.economy.loot.container(NPC_OBJ);
+    {
+        let mut g = c.lock().unwrap();
+        g.items.clear();
+        let mut items = Vec::new();
+        for _ in 0..300 {
+            items.push(Item::create(
+                0,
+                &template,
+                1,
+                0,
+                1,
+                &w.server.game_data.items,
+                0,
+            ));
+        }
+        g.register_items(items);
+    }
+    LootManager::open_bag(&w.server, &w.pa, NPC_OBJ, true);
+    assert_eq!(w.server.systems.economy.loot.item_count(NPC_OBJ), 0);
+    let frames = w.b.drain();
+    let announcements: Vec<_> = frames
+        .iter()
+        .filter(|(op, _)| *op == sc::SCItemAcquisitionPacket)
+        .collect();
+    assert_eq!(
+        announcements.len(),
+        1,
+        "one loot-all pickup sends one announcement"
+    );
+    let body = &announcements[0].1;
+    assert_eq!(body[0], 1, "kind 1");
+    assert_eq!(&body[1..3], &[5, 0], "\"Alice\" length");
+    assert_eq!(&body[3..8], b"Alice");
+    assert_eq!(body[8], 255, "the item count caps at the u8 limit");
+}
+
+#[tokio::test]
+async fn party_loot_announcement_covers_a_dice_win() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    team_and_tag(&w, vec![w.pa.clone(), w.pb.clone()]);
+    enable_party_announcements(&w);
+    kill_with_team(&w, &npc);
+    w.a.drain();
+    w.b.drain();
+    // The BoP stack (index 3) is rolled: Alice starts the roll, Bob wins it.
+    let announced = loot_stack(&w, 3);
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 3, false
+    ));
+    w.a.drain();
+    w.b.drain();
+    let mut rng = ScriptedRng::new(&[20], &[]);
+    LootManager::do_player_roll(&w.server, &w.pa, NPC_OBJ, 3, true, &mut rng);
+    w.a.drain();
+    w.b.drain();
+    let mut rng = ScriptedRng::new(&[80], &[]);
+    LootManager::do_player_roll(&w.server, &w.pb, NPC_OBJ, 3, true, &mut rng);
+    let want = SCItemAcquisitionPacket {
+        kind: 1,
+        char_name: "Bob".into(),
+        items: vec![announced],
+    };
+    let frames = w.a.drain();
+    assert!(
+        frames
+            .iter()
+            .any(|(op, b)| *op == sc::SCItemAcquisitionPacket && *b == body(&want)),
+        "the other party member receives the dice winner's pickup"
+    );
+    assert!(
+        !w.b.drain_ops().contains(&sc::SCItemAcquisitionPacket),
+        "the dice winner must not receive their own announcement"
+    );
+}
+
 #[test]
 fn loot_c2s_packets_decode() {
     let mut s = PacketStream::new();
@@ -1363,6 +1578,16 @@ fn real_compact_db_items_and_loot() {
     assert_eq!(d.enchanting_supports.len(), 12);
     assert_eq!(d.socket_chance.len(), 8);
     assert_eq!(d.item_cap_scales.len(), 225);
+    // 1340 rows, 1335 distinct item ids (five ids are listed twice under different names): the
+    // 1.2 client loads them into a set too (`FUN_395a72d0`).
+    assert_eq!(d.item_cap_scale_forbids.len(), 1335);
+    assert!(d.cap_scale_forbidden(2986));
+    assert!(!d.cap_scale_forbidden(27309));
+    let rod = d.template(27309).expect("iron fishing rod");
+    assert_eq!(
+        (rod.actability_group_id, rod.actability_requirement),
+        (7, 10000)
+    );
     assert_eq!(d.grade_distributions.len(), 25);
     assert_eq!(d.loot_pack_dropping_npc.len(), 3988);
     assert_eq!(
@@ -1448,6 +1673,11 @@ fn real_compact_db_items_and_loot() {
             .sum::<usize>(),
         3084
     );
+    // Item security: 135 `item_categories.secure`, one exception, 4320 minute (72 h) delay.
+    assert_eq!(econ.secure_categories.len(), 135);
+    assert_eq!(econ.secure_exceptions.len(), 1);
+    assert!(econ.secure_exceptions.contains(&3006));
+    assert_eq!(econ.security_unlock_delay_minutes, 4320);
     assert_eq!(econ.conversion.reagents.len(), 1324);
     assert_eq!(econ.conversion.conversions.len(), 317);
     assert_eq!(econ.conversion.products.len(), 305);
@@ -1549,4 +1779,71 @@ fn item_proc_roll_is_percent_and_cooldown_blocks_until_it_elapses() {
         crate::models::item::ItemProc::new(5).apply(&d, 0, || 0),
         None
     );
+}
+
+/// The three socket rule tables load cleanly and agree with the shipped 1.2 `compact.sqlite3`:
+/// every gem id that has an `items` row is loaded, every loaded gem has a slot group with at
+/// least one mapped slot type, and every `item_socket_num_limits` row names a real
+/// `EquipmentItemSlotType` and grade.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_socket_rule_tables_are_consistent() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let d = ItemData::load(&conn).unwrap();
+
+    // 31 slot ids x 12 grades; no row is rejected by the loader.
+    assert_eq!(d.item_socket_num_limits.len(), 372);
+    for ((slot_id, grade), limit) in &d.item_socket_num_limits {
+        assert!(
+            (1..=crate::data::items::equipment_item_slot_type::COSPLAY).contains(slot_id),
+            "num limit {} names a non-existent slot {slot_id}",
+            limit.id
+        );
+        assert!(
+            (0..=i32::from(crate::data::items::item_grade::MYTHIC)).contains(grade),
+            "num limit {} names a non-existent grade {grade}",
+            limit.id
+        );
+        assert!(limit.num_socket <= 7);
+    }
+
+    // The level table has no dangling ids.
+    assert_eq!(d.item_socket_level_limits.len(), 108);
+    for (item_id, limit) in &d.item_socket_level_limits {
+        assert!(
+            d.templates.contains_key(item_id),
+            "level limit {} names missing item {item_id}",
+            limit.id
+        );
+        assert_eq!(d.template(*item_id).unwrap().category_id, 152);
+    }
+
+    // 123 raw item_sockets rows: 15 belong to test/removed items with no `items` row, so the
+    // loader skips them; all 108 real lunagems load and every group has a slot-type map.
+    let raw: i64 = conn
+        .query_row("SELECT COUNT(*) FROM item_sockets", [], |r| r.get(0))
+        .unwrap();
+    let joinable: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM item_sockets s JOIN items i ON i.id = s.item_id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 123);
+    assert_eq!(raw - joinable, 15);
+    assert_eq!(d.item_sockets.len(), joinable as usize);
+    for (item_id, socket) in &d.item_sockets {
+        assert!(d.templates.contains_key(item_id));
+        let maps = d
+            .equip_slot_group_maps
+            .get(&socket.equip_slot_group_id)
+            .unwrap_or_else(|| panic!("socket {} has no slot group map", socket.id));
+        assert!(!maps.is_empty());
+    }
 }

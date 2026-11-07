@@ -54,6 +54,8 @@ pub struct DoodadManager {
     forced_phase_ratio: Mutex<Option<i32>>,
     /// Test rolls consumed one per `PhaseRatio` roll before `forced_phase_ratio` applies.
     phase_ratio_queue: Mutex<VecDeque<i32>>,
+    /// Last territory siege period observed per zone group (WP-S3 `SiegePeriod` watcher).
+    pub siege_phase: super::siege_phase::Watcher,
 }
 
 impl Default for DoodadManager {
@@ -65,6 +67,7 @@ impl Default for DoodadManager {
             climates: RwLock::new(HashMap::new()),
             forced_phase_ratio: Mutex::new(None),
             phase_ratio_queue: Mutex::new(VecDeque::new()),
+            siege_phase: super::siege_phase::Watcher::default(),
         }
     }
 }
@@ -203,6 +206,13 @@ pub fn create(
         _ => {}
     }
     let doodad = Entity::new(obj_id, d);
+    // WP-S3: the period watcher indexes only the phases with a SiegePeriod function.
+    server
+        .systems
+        .npcs
+        .doodads
+        .siege_phase
+        .refresh(server, &doodad);
     if !skip_phase_init {
         // Task.Run(() => doodad.InitDoodad())
         match (server.self_arc(), tokio::runtime::Handle::try_current()) {
@@ -241,6 +251,12 @@ pub fn delete(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRe
         d.phase.deleted = true;
         d.phase.func_task = 0; // deviation: cancel the FuncTask (see the module docs)
     }
+    server
+        .systems
+        .npcs
+        .doodads
+        .siege_phase
+        .untrack(doodad.obj_id);
     super::natural::forget(server, doodad); // drop the saved growth state of a world doodad
     super::logic::clear_links(&DoodadCtx::new(server, world.clone(), doodad.clone()));
     world.delete(doodad);
@@ -467,7 +483,9 @@ fn create_player_doodad_with_labor(
     let placement_guard = validate_placement.then(|| world.placement_guard());
     if validate_placement {
         if let Some(template) = server.game_data.systems.npcs.doodad.template(id) {
-            if let Some(refusal) = placement::refusal(server, &world, player, template, pos) {
+            if let Some(refusal) =
+                placement::refusal(server, &world, player, template, item_template_id, pos)
+            {
                 drop(placement_guard);
                 tracing::warn!(
                     "{char_name}: doodad {id} not placed at {pos:?}: {refusal:?} ({})",
@@ -699,8 +717,11 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         player.send(error_msg(error_message::FAILED_TO_USE_ITEM));
         return;
     };
-    // The 1.2 seed builder's rules (`FUN_393a8fa0`): area, water, 30 m 3D range, doodads, units.
-    if let Some(refusal) = placement::refusal(server, &world, player, template, pos) {
+    // The 1.2 seed builder's rules (`FUN_393a8fa0`): area, water, 30 m 3D range, doodads, units,
+    // then the Territory Statue blueprint's dominion gate.
+    if let Some(refusal) =
+        placement::refusal(server, &world, player, template, item.template_id, pos)
+    {
         tracing::warn!(
             "CreateDoodad, doodad {} at {pos:?} refused: {refusal:?}",
             p.id
@@ -752,7 +773,18 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         return;
     };
     create_player_doodad_with_labor(
-        server, player, p.id, pos, p.z_rot, p.scale, p.item_id, farm_type, 0, 0, false, labor_cost,
+        server,
+        player,
+        p.id,
+        pos,
+        p.z_rot,
+        p.scale,
+        p.item_id,
+        farm_type,
+        item.template_id,
+        0,
+        false,
+        labor_cost,
         true,
     );
 }

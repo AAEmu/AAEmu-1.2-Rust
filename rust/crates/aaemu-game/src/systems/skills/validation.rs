@@ -5,10 +5,12 @@ use crate::world::WorldObject;
 
 use super::geometry::{world_pos, Target};
 use super::state::SkillRun;
+use super::types::skill_result;
 use super::unit_reqs::skill_result_for_key;
+use crate::systems::economy::inventory::Inv;
 
 /// Extra range for a doodad target, covering the distance from its origin to its edge.
-const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
+pub(crate) const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
 /// How far above the source and the destination the obstacle ray is cast. This was the Rust/C#-era
@@ -171,7 +173,7 @@ pub(super) fn check_resources(
 /// caster without any one of the required items gets `NEED_REAGENT` with the missing item's
 /// template id as the value: the 1.2 client's result handler (`FUN_39390900`, 0x24) puts an
 /// item name into the text from that value.
-pub(super) fn check_reagents(
+pub(crate) fn check_reagents(
     server: &GameServer,
     template: &super::data::SkillTemplate,
     caster: &WorldObject,
@@ -199,6 +201,14 @@ pub(super) fn check_reagents(
         .iter()
         .find(|r| !enough(r))
         .map_or(0, |r| r.item_id);
+    // The reagent exists but every stack of it is locked (`ItemFlag.Secure`): the 1.2 client
+    // has a dedicated `SkillResult.ItemLocked` for this, instead of "need reagent".
+    let locked_only = reagents
+        .iter()
+        .any(|r| !enough(r) && Inv::of(player).items_count(r.item_id, -1) >= i32::from(r.amount));
+    if locked_only {
+        return Err((skill_result::ITEM_LOCKED, missing));
+    }
     Err((skill_result_for_key("skill_need_reagent"), missing))
 }
 
@@ -239,6 +249,48 @@ pub(super) fn check_build_materials(
     });
     if missing {
         return fail("skill_need_reagent");
+    }
+    Ok(())
+}
+
+/// The 1.2 client's cap-scale target check (`FUN_3939dc20`, SkillResult INVALID_TARGET
+/// 0x22): a skill carrying the `ItemCapScale` (special 112) or `ItemCapScaleReset` (111)
+/// effect refuses a target item whose template is in `item_cap_scale_forbids`
+/// (`FUN_395a72d0`, the client's "scalable" property). Runs before the cast takes resources
+/// or the source item, so the temper is kept.
+pub(super) fn check_cap_scale_target(
+    server: &GameServer,
+    caster: &WorldObject,
+    skill: &super::data::SkillTemplate,
+    caster_caster: &super::types::SkillCaster,
+    target_caster: &super::types::SkillCastTarget,
+) -> Result<(), (u8, u32)> {
+    if !matches!(caster_caster, super::types::SkillCaster::Item { .. }) {
+        return Ok(());
+    }
+    let super::types::SkillCastTarget::Item { id, .. } = target_caster else {
+        return Ok(());
+    };
+    let Some(player) = caster.as_player() else {
+        return Ok(());
+    };
+    let cap_scale_effect = skill.effects.iter().any(|e| {
+        e.template.is_some_and(|(kind, effect_id)| {
+            matches!(
+                server.game_data.systems.skills.effect(kind, effect_id),
+                Some(super::data::EffectTemplate::Special(s))
+                    if s.special_effect_type_id == 111 || s.special_effect_type_id == 112
+            )
+        })
+    });
+    if !cap_scale_effect {
+        return Ok(());
+    }
+    let Some(item) = Inv::of(player).item_by_id(*id) else {
+        return Ok(());
+    };
+    if server.game_data.items.cap_scale_forbidden(item.template_id) {
+        return Err((skill_result::INVALID_TARGET, 0));
     }
     Ok(())
 }

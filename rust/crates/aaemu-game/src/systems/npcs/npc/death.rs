@@ -14,12 +14,13 @@
 //!    `CharacterTagging.ClearAllTaggers()`, `CurrentAggroTarget = null`,
 //!    `Spawner?.DoDespawn(this)` (`spawn_manager::on_npc_died`). `Ai?.GoToDead()` is the AI's.
 //!
-//! Not ported here: mate experience (`MateManager.GetActiveMates` + "Pet gained .. XP"
-//! messages, owned by the mates subsystem).
+//! Not ported here: mate experience (`MateManager.GetActiveMates`, owned by the mates
+//! subsystem).
 
 use crate::server::GameServer;
 use crate::systems::skills::combat::MAX_LOOTING_RANGE;
 use crate::systems::skills::geometry::{distance_to, Target};
+use crate::systems::skills::progress::{grant_honor, HonorSource};
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{
     lowest_party_level, AchievementInput, RecordMatch,
@@ -105,11 +106,26 @@ fn tagging_of(npc: &NpcRef) -> (u32, u32, Vec<u32>) {
 pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObject>) {
     let me = WorldObject::from(npc);
     let gd = &server.game_data;
-    let (npc_level, kill_exp) = {
+    let (npc_level, kill_exp, honor_point) = {
         let mut n = npc.data();
         n.dead_time_ms = chrono::Utc::now().timestamp_millis();
         let kill_exp = super::stats::npc_stats(gd, &n).map_or(0, |s| s.kill_exp);
-        (n.unit.level, kill_exp)
+        // `npcs.honor_point`: honor for the kill-exp-eligible players (INFERRED from the
+        // column name and its 54 boss rows; the C# never read it).
+        let honor_point = gd
+            .systems
+            .npcs
+            .npc
+            .template(n.unit.template_id)
+            .map_or(0, |t| t.honor_point);
+        (n.unit.level, kill_exp, honor_point)
+    };
+    let honor_rate = server.config.get().world.honor_rate;
+    let grant_npc_kill_honor = |p: &PlayerRef| {
+        if honor_point > 0 {
+            let base = (honor_rate * f64::from(honor_point)).round_ties_even() as i32;
+            grant_honor(server, p, HonorSource::NpcKill, base);
+        }
     };
     let (tag_team, tagger_id, dealers) = tagging_of(npc);
     let quests = server.systems.npcs.hooks.quests.get();
@@ -184,6 +200,8 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
                 q.add_exp(server, ck, kill_exp, npc.obj_id);
             }
             report_kill(server, ck, npc);
+            // The killer is the only kill-exp credit when nobody holds tagging rights.
+            grant_npc_kill_honor(ck);
             // The killer's active mates (vehicles subsystem).
             crate::systems::vehicles::mates::reward_kill_exp(server, ck, kill_exp);
         }
@@ -200,6 +218,8 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
                 if let Some(q) = &quests {
                     q.add_exp(server, pl, exp, npc.obj_id);
                 }
+                // Same eligibility as the kill exp: no party split (UNKNOWN, see PORTING.md).
+                grant_npc_kill_honor(pl);
             }
             // mateKillXp: mateMod is 0.66 in a raid, else plMod.
             let mate_mod = if is_raid { 0.66 } else { pl_mod };

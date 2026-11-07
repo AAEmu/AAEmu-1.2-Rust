@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::data::world_templates::WorldSpawnPosition;
+use crate::data::world_templates::{WorldSpawnPosition, WorldTemplate, XmlWorldZone};
 use crate::data::GameData;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -25,6 +25,7 @@ const FAKE_SKILL: u32 = 999;
 #[derive(Default)]
 struct Builder {
     data: DoodadData,
+    skills: Vec<(u32, i32)>,
 }
 
 impl Builder {
@@ -78,6 +79,29 @@ impl Builder {
         self
     }
 
+    /// A func row of `func_type` (no template needed by the phase packet handler).
+    fn func(mut self, group: u32, func_type: &str, next_phase: i32, skill_id: u32) -> Self {
+        let key = self.data.funcs_by_id.len() as u32 + 1;
+        let f = DoodadFunc {
+            group_id: group,
+            func_id: key,
+            func_key: key,
+            func_type: func_type.into(),
+            next_phase,
+            skill_id,
+            ..DoodadFunc::default()
+        };
+        self.data.funcs_by_id.insert(key, f.clone());
+        self.data.funcs_by_groups.entry(group).or_default().push(f);
+        self
+    }
+
+    /// A game-data skill with `max_range` (the phase packet's reach check).
+    fn skill(mut self, id: u32, max_range: i32) -> Self {
+        self.skills.push((id, max_range));
+        self
+    }
+
     fn phase_func(mut self, group: u32, t: FuncTemplate) -> Self {
         let (class, id) = (t.func_type(), t.id());
         self.data
@@ -97,10 +121,49 @@ impl Builder {
         self
     }
 
+    /// Sets `phase_msg` / `is_msg_to_zone` on func group `group` (template copy and the
+    /// `_allFuncGroups` copy the packet send looks up).
+    fn phase_msg(mut self, group_id: u32, message: &str, to_zone: bool) -> Self {
+        for g in self
+            .data
+            .all_func_groups
+            .iter_mut()
+            .filter(|g| g.id == group_id)
+        {
+            g.phase_msg = message.to_string();
+            g.is_msg_to_zone = to_zone;
+        }
+        for t in self.data.templates.values_mut() {
+            for g in t.func_groups.iter_mut().filter(|g| g.id == group_id) {
+                g.phase_msg = message.to_string();
+                g.is_msg_to_zone = to_zone;
+            }
+        }
+        self
+    }
+
     fn server(self) -> GameServer {
         let mut gd = GameData::empty();
         gd.systems.npcs.doodad = self.data;
+        for (id, max_range) in self.skills {
+            gd.systems
+                .skills
+                .add_skill(crate::systems::skills::data::SkillTemplate {
+                    id,
+                    max_range,
+                    ..Default::default()
+                });
+        }
         let s = test_server_with(gd);
+        s.systems.npcs.doodads.tasks.set_manual(true);
+        s
+    }
+
+    /// [`Self::server`] with a caller-built world template (e.g. more than one zone key).
+    fn server_with_world(self, world: WorldTemplate) -> GameServer {
+        let mut gd = GameData::empty();
+        gd.systems.npcs.doodad = self.data;
+        let s = test_server_with_world(gd, world);
         s.systems.npcs.doodads.tasks.set_manual(true);
         s
     }
@@ -149,6 +212,9 @@ fn fx(b: Builder) -> Fx {
         test_character(1, "Alpha", 100.0, 100.0),
         player_obj_id,
     );
+    player.data().unit.max_hp = 1000;
+    player.data().unit.hp = 1000;
+    client.conn.active_char = Some(player.clone());
     client.drain();
     let world = server.world.world(0).unwrap();
     Fx {
@@ -200,6 +266,20 @@ impl Fx {
             .into_iter()
             .filter(|f| f.0 == sc::SCDoodadPhaseChangedPacket)
             .map(|f| u32::from_le_bytes(f.1[3..7].try_into().unwrap()))
+            .collect()
+    }
+
+    /// `(doodad obj id, func group id)` of the drained `SCDoodadPhaseMsgPacket`s.
+    fn phase_msgs(&mut self) -> Vec<(u32, u32)> {
+        self.client
+            .drain()
+            .into_iter()
+            .filter(|f| f.0 == sc::SCDoodadPhaseMsgPacket)
+            .map(|f| {
+                let doodad = u32::from_le_bytes([f.1[0], f.1[1], f.1[2], 0]);
+                let group = u32::from_le_bytes(f.1[3..7].try_into().unwrap());
+                (doodad, group)
+            })
             .collect()
     }
 }
@@ -1937,7 +2017,10 @@ async fn real_compact_db_template_2336() {
         Some(FuncTemplate::FakeUse(t)) if t.fake_skill_id > 0 => t.fake_skill_id,
         _ => FAKE_SKILL,
     };
-    let mut f = fx(Builder { data });
+    let mut f = fx(Builder {
+        data,
+        ..Default::default()
+    });
     let d = f.doodad(2336);
     // Start phase 4651; its ToD (20:00) has not passed at 12:00.
     assert_eq!(group(&d), 4651);
@@ -1972,7 +2055,10 @@ async fn real_compact_db_weather_marker_2768_chain_transitions() {
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     let data = DoodadData::load_from(&conn).unwrap();
-    let f = fx(Builder { data });
+    let f = fx(Builder {
+        data,
+        ..Default::default()
+    });
     // One roll per phase func, in actual_func_id order. The first 2768: 7026 (RatioChange 186 @7000
     // and 187 @2500 miss, 188 @500 hits) -> 7055, where 383 (self-respawn @2000) hits. The
     // replacement 2768 does the same, then its 7055 misses 383 / 384 / 385 and hits 387 (-> 3225),
@@ -2006,7 +2092,10 @@ async fn real_compact_db_day_night_boards_settle_on_the_variant_at_night() {
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     let data = DoodadData::load_from(&conn).unwrap();
-    let f = fx(Builder { data });
+    let f = fx(Builder {
+        data,
+        ..Default::default()
+    });
     f.server.time.set(22.0);
     // The first respawn func of each board hits.
     f.server
@@ -2032,6 +2121,307 @@ async fn real_compact_db_day_night_boards_settle_on_the_variant_at_night() {
         assert_eq!(spawner.ratio_respawn_chain_depth(), 0, "board {board}");
     }
     assert_eq!(f.world.all_doodads().len(), cases.len());
+}
+
+// ---- `CSChangeDoodadPhasePacket` (client-acknowledged Bubble / OpenPaper phase) ----
+
+fn phase_packet_body(obj_id: u32, skill: u32, next_phase: u32, func_id: u32) -> Vec<u8> {
+    let mut s = aaemu_commons::PacketStream::new();
+    s.write_bc(obj_id)
+        .write_u32(skill)
+        .write_u32(next_phase)
+        .write_u32(func_id);
+    s.into_bytes()
+}
+
+fn run_phase_packet(f: &mut Fx, body: &[u8]) {
+    use crate::net::registry::ClientPacket;
+    let mut s = aaemu_commons::PacketStream::from_bytes(body.to_vec());
+    let p = crate::systems::npcs::doodad::packets::CSChangeDoodadPhasePacket::read(&mut s)
+        .expect("read");
+    futures::executor::block_on(p.handle(&f.server, &mut f.client.conn)).expect("handle");
+}
+
+#[tokio::test]
+async fn change_doodad_phase_moves_a_bubble_of_the_current_group() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    d.data().transform.set_xyz(100.0, 100.0, 100.0);
+    f.client.drain();
+    assert_eq!(group(&d), 10);
+
+    // Func key 1 is the Bubble row.
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
+    assert_eq!(group(&d), 20);
+    assert_eq!(f.phase_packets(), vec![20]);
+
+    // A replay of the same func no longer belongs to the (new) current group.
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
+    assert_eq!(group(&d), 20);
+    assert!(f.phase_packets().is_empty());
+}
+
+#[tokio::test]
+async fn change_doodad_phase_refuses_another_group_type_or_target_phase() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1), (30, 2)])
+        .func(10, "DoodadFuncBubble", 20, 0)
+        .func(10, "DoodadFuncUse", 30, 0)
+        .func(30, "DoodadFuncOpenPaper", 20, 0);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    d.data().transform.set_xyz(100.0, 100.0, 100.0);
+    f.client.drain();
+
+    // Func 2 is a Use, not a client-side Bubble / OpenPaper.
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 30, 2));
+    // Func 3 is not in the current group.
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 3));
+    // Wrong target phase for func 1.
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 30, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+}
+
+#[tokio::test]
+async fn change_doodad_phase_refuses_out_of_reach() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 7)
+        .skill(7, 4);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    // Player is at (100, 100); 30 m is beyond the 4 m skill + the 15 m doodad allowance.
+    d.data().transform.set_xyz(130.0, 100.0, 100.0);
+    f.client.drain();
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 7, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+}
+
+#[tokio::test]
+async fn change_doodad_phase_never_uses_the_client_skill_for_range() {
+    // The func has no skill (structurally the same as Bubble funcs 6279, 9407, 9965); the
+    // packet's forged skill claims a 1000 m range.
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0)
+        .skill(FAKE_SKILL, 1000);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    // 30 m: beyond the 5 m doodad interaction distance + the 15 m allowance.
+    d.data().transform.set_xyz(130.0, 100.0, 100.0);
+    f.client.drain();
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, FAKE_SKILL, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+
+    // 18 m is inside the fixed bound; the forged skill does not widen it.
+    d.data().transform.set_xyz(118.0, 100.0, 100.0);
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, FAKE_SKILL, 20, 1));
+    assert_eq!(group(&d), 20);
+}
+
+#[tokio::test]
+async fn change_doodad_phase_refuses_a_doodad_scheduled_for_despawn() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    d.data().transform.set_xyz(100.0, 100.0, 100.0);
+    f.client.drain();
+    f.server
+        .systems
+        .npcs
+        .spawns
+        .set_despawn_field(d.obj_id, tokio::time::Instant::now());
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+}
+
+#[tokio::test]
+async fn change_doodad_phase_refuses_a_dead_caster() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    d.data().transform.set_xyz(100.0, 100.0, 100.0);
+    f.client.drain();
+    f.player.data().unit.hp = 0;
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+}
+
+// ---- `SCDoodadPhaseMsg` (WP-UI1) ----
+
+#[tokio::test]
+async fn phase_msg_is_sent_to_viewers_only() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11)
+        .phase_msg(11, "The furnace is overheated!", false);
+    let mut f = fx(b);
+    // Same zone, out of the 5x5 sector neighbourhood of the doodad.
+    let mut far_client = TestClient::new(&f.server, 2, 1002);
+    let _far = spawn_player(
+        &f.server,
+        &far_client,
+        test_character(2, "Beta", 900.0, 900.0),
+        0x811,
+    );
+    let d = f.doodad(TEMPLATE);
+    f.client.drain();
+    far_client.drain();
+
+    f.use_(&d);
+    assert_eq!(f.phase_msgs(), vec![(d.obj_id, 11)]);
+    assert!(far_client
+        .drain()
+        .iter()
+        .all(|p| p.0 != sc::SCDoodadPhaseMsgPacket));
+}
+
+#[tokio::test]
+async fn phase_group_without_a_message_sends_nothing() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.client.drain();
+
+    f.use_(&d);
+    assert!(f.phase_msgs().is_empty());
+}
+
+#[tokio::test]
+async fn an_unchanged_func_group_sends_no_phase_msg() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_msg(10, "start", false)
+        .phase_msg(11, "normal", false);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.client.drain();
+
+    manager::set_func_group_id(&f.server, &d, 11);
+    assert_eq!(f.phase_msgs(), vec![(d.obj_id, 11)]);
+    manager::set_func_group_id(&f.server, &d, 11);
+    assert!(f.phase_msgs().is_empty());
+}
+
+#[tokio::test]
+async fn spawn_time_initial_group_sends_no_phase_msg() {
+    // The saved-state / spawner phase is assigned before the doodad is spawned; even a
+    // zone-wide message of that group must not announce a transition nobody saw.
+    const OTHER: u32 = 12;
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (OTHER, 2)])
+        .phase_msg(11, "saved phase", true)
+        .phase_msg(OTHER, "next phase", true);
+    let mut f = fx(b);
+    let d = manager::create(&f.server, &f.world, 0x500, TEMPLATE, None, true).unwrap();
+    d.data().transform.set_xyz(120.0, 130.0, 100.0);
+    f.client.drain();
+
+    manager::set_func_group_id(&f.server, &d, 11);
+    assert!(f.phase_msgs().is_empty(), "not spawned yet");
+
+    manager::spawn(&f.server, &f.world, &d);
+    manager::init_doodad(&f.server, &f.world, &d);
+    f.client.drain();
+    manager::set_func_group_id(&f.server, &d, OTHER);
+    assert_eq!(f.phase_msgs(), vec![(d.obj_id, OTHER)]);
+}
+
+fn two_zone_world() -> WorldTemplate {
+    const OTHER_ZONE: u32 = 200;
+    let mut t = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
+    t.xml_world.zones.insert(
+        OTHER_ZONE,
+        XmlWorldZone {
+            zone_key: OTHER_ZONE,
+            name: "other".into(),
+            origin_x: 0,
+            origin_y: 0,
+            cells: Default::default(),
+            spawn_position: Default::default(),
+        },
+    );
+    t.zone_keys.push(OTHER_ZONE);
+    for x in 16..32 {
+        for y in 0..32 {
+            assert!(t.set_zone_key_at(x, y, OTHER_ZONE));
+        }
+    }
+    t
+}
+
+#[tokio::test]
+async fn zone_wide_phase_msg_reaches_the_whole_zone_only() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_msg(11, "The school of fish appears.", true);
+    let server = b.server_with_world(two_zone_world());
+    let mut near = TestClient::new(&server, 1, 1001);
+    let _near = spawn_player(
+        &server,
+        &near,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    let mut same_zone_far = TestClient::new(&server, 2, 1002);
+    let same_far = spawn_player(
+        &server,
+        &same_zone_far,
+        test_character(2, "Beta", 900.0, 900.0),
+        0x811,
+    );
+    let mut other_zone = TestClient::new(&server, 3, 1003);
+    let other = spawn_player(
+        &server,
+        &other_zone,
+        test_character(3, "Gamma", 1200.0, 900.0),
+        0x812,
+    );
+    assert_eq!(same_far.data().unit.transform.zone_id, TEST_ZONE);
+    assert_eq!(other.data().unit.transform.zone_id, 200);
+    let world = server.world.world(0).unwrap();
+    let d = manager::create(&server, &world, 0x500, TEMPLATE, None, true).unwrap();
+    d.data().transform.set_xyz(120.0, 130.0, 100.0);
+    manager::spawn(&server, &world, &d);
+    manager::init_doodad(&server, &world, &d);
+    near.drain();
+    same_zone_far.drain();
+    other_zone.drain();
+
+    manager::set_func_group_id(&server, &d, 11);
+    let msgs = |c: &mut TestClient| -> Vec<(u32, u32)> {
+        c.drain()
+            .into_iter()
+            .filter(|p| p.0 == sc::SCDoodadPhaseMsgPacket)
+            .map(|p| {
+                (
+                    u32::from_le_bytes([p.1[0], p.1[1], p.1[2], 0]),
+                    u32::from_le_bytes(p.1[3..7].try_into().unwrap()),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(msgs(&mut near), vec![(d.obj_id, 11)]);
+    assert_eq!(msgs(&mut same_zone_far), vec![(d.obj_id, 11)]);
+    assert!(msgs(&mut other_zone).is_empty());
 }
 
 // ---- growth state of world-spawned doodads (`natural`) ----

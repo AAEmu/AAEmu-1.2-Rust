@@ -6,7 +6,8 @@
 //! `SCMailListEndPacket`, `SCMailBodyPacket`, `SCMailReceiverOpenedPacket`,
 //! `SCAttachmentTakenPacket`, `SCChargeMoneyPaidPacket`, `SCMailDeletedPacket`,
 //! `SCMailReturnedPacket`, `SCMailStatusUpdatedPacket`, `SCMailRemovedPacket`,
-//! `SCQuestRewardedByMailPacket` (`SCCountUnreadMailPacket` is the phase-2 one).
+//! `SCQuestRewardedByMailPacket` and the defined-but-never-sent `SCQuestMailSentPacket`
+//! (`SCCountUnreadMailPacket` is the phase-2 one).
 
 use aaemu_commons::{Marshal, PacketStream};
 
@@ -330,6 +331,9 @@ impl Marshal for SCMailRemovedPacket {
     }
 }
 
+/// `SCQuestMailSentPacket` (`0x150`, one `u32`, reader `FUN_397b5f00`). Defined for the quest
+/// mail feature; no server path sends it yet (trigger capture-pending, case `QUEST-MAIL-1`).
+pub use crate::systems::quests::packets::SCQuestMailSentPacket;
 /// `SCQuestRewardedByMailPacket`: one definition per opcode (`crate::systems::quests::packets::SCQuestRewardedByMailPacket`).
 pub use crate::systems::quests::packets::SCQuestRewardedByMailPacket;
 
@@ -432,6 +436,9 @@ impl CSSendMailPacket {
             inventory::send_error_message(&p, error_message::MAIL_FAIL_MAILBOX_NOT_FOUND, 0, true);
             return;
         }
+        // capture-pending (BLOCK-LIST-3): the 1.2 client has no mail-side block filter and no
+        // error/system text for mail from a blocked player was found, so 1.2 retail's rule is
+        // unknown. Mail is delivered as before; see PORTING.md.
         let mut txn = ItemTxn::begin(server);
         let result = mail_character::send_mail_to_player(
             &mut txn,
@@ -688,7 +695,21 @@ impl CSPayChargeMoneyPacket {
             self.mail_id,
             self.auto_use_aa_point
         );
-        if !mail::pay_housing_tax(server, &p, self.mail_id, self.auto_use_aa_point) {
+        // A nation treaty request (`MAIL_NATION_REQUEST_FRIEND`) is paid through the same
+        // charge-money button (`X2Mail.PayCurrentMailChargeMoney` in the 1.2 `read_mail.alb`);
+        // every other charge mail is the house tax bill (NATION-15).
+        let is_treaty = server
+            .systems
+            .economy
+            .mail
+            .get_mail_by_id(self.mail_id)
+            .is_some_and(|m| m.mail_type == mail::mail_type::NATION_REQUEST_FRIEND);
+        let paid = if is_treaty {
+            crate::systems::social::nation::pay_friend_treaty(server, &p, self.mail_id)
+        } else {
+            mail::pay_housing_tax(server, &p, self.mail_id, self.auto_use_aa_point)
+        };
+        if !paid {
             tracing::warn!(
                 "PayChargeMoney failed, mailId: {}, autoUseAAPoint: {}",
                 self.mail_id,

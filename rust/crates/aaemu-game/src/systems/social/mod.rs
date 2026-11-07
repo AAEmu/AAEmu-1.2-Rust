@@ -18,26 +18,32 @@ pub mod achievement_manager;
 pub mod achievement_persistence;
 pub mod achievement_rewards;
 pub mod achievement_runtime;
+pub mod bounty;
+pub mod bounty_runtime;
 pub mod bridges;
 pub mod chat;
 pub mod config;
 pub mod crime;
 pub mod dominion;
+pub mod dominion_notifications;
 pub mod duel;
 pub mod expedition;
 pub mod faction;
 pub mod family;
 pub mod friend;
 pub mod hooks;
+pub mod nation;
 pub mod packets;
 pub mod ranking_data;
 pub mod ranking_manager;
 pub mod ranking_packets;
 pub mod ranking_persistence;
 pub mod ranking_runtime;
+pub mod rename;
 pub mod session;
 pub mod team;
 pub mod trial;
+pub mod ui_packets;
 pub mod util;
 pub mod zone_conflict;
 
@@ -46,11 +52,21 @@ pub(crate) mod achievement_flow_tests;
 #[cfg(test)]
 mod achievement_game_data_tests;
 #[cfg(test)]
+mod bounty_flow_tests;
+#[cfg(test)]
+mod expedition_rename_tests;
+#[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod friend_flow_tests;
 #[cfg(test)]
 mod guild_flow_tests;
 #[cfg(test)]
 mod manager_tests;
+#[cfg(test)]
+mod nation_stage4_tests;
+#[cfg(test)]
+mod nation_tests;
 #[cfg(test)]
 pub(crate) mod ranking_flow_tests;
 #[cfg(test)]
@@ -71,6 +87,8 @@ pub struct Data {
     pub achievements: achievement::AchievementGameData,
     /// `ranks` / `rank_scopes` / `rank_rewards` and their links (`RankingGameData.Load`).
     pub ranking: ranking_data::RankingGameData,
+    /// `content_configs` 46 / 50 / 51 / 54 (nation diplomacy periods and the treaty cost).
+    pub nation: nation::NationSettings,
 }
 
 impl Data {
@@ -80,6 +98,7 @@ impl Data {
             relations: faction::FactionRelations::load(ctx)?,
             achievements: achievement::AchievementGameData::load(ctx.conn)?,
             ranking: ranking_data::RankingGameData::load(ctx)?,
+            nation: nation::NationSettings::load(ctx.conn)?,
         })
     }
 }
@@ -87,11 +106,18 @@ impl Data {
 /// Managers of this subsystem (`server.systems.social`).
 #[derive(Debug, Default)]
 pub struct System {
+    /// Serialises every faction-name change across the expedition and nation stores
+    /// (`rename::lock_names`, RENAME-6).
+    pub(crate) name_lock: std::sync::Mutex<()>,
     pub teams: team::TeamManager,
     pub families: family::FamilyManager,
+    /// Runtime player nations (`nations` / `nation_relations`).
+    pub nations: nation::NationManager,
     pub duels: duel::DuelManager,
     pub crimes: crime::CrimeManager,
     pub trials: trial::TrialManager,
+    /// The wanted-player bounty ledger, its placement permits and its persistence.
+    pub bounties: bounty::BountyManager,
     /// `ZoneManager.GetConflicts()` runtime state (`ZoneConflict`).
     pub conflicts: zone_conflict::ZoneConflictManager,
     /// The ranking boards' score store (`ranking_manager`).
@@ -107,6 +133,18 @@ impl System {
         install_hooks(server);
         // ZoneManager.Load: SetState(Conflict) of the open zones schedules their timers.
         zone_conflict::ZoneConflictManager::start(server);
+        // Player nations and their relation overlay.
+        server
+            .systems
+            .social
+            .nations
+            .load(&server.db)
+            .await
+            .context("NationManager")?;
+        nation::rebuild_treaty_mail_tracking(server)
+            .await
+            .context("Nation treaty mail tracking")?;
+        nation::start_tick(server);
         server
             .systems
             .social
@@ -115,8 +153,16 @@ impl System {
             .await
             .context("FamilyManager")?;
         team::TeamManager::start_tick(server);
+        expedition::start_tick(server);
         // CrimeManager.Load, TrialManager.Load (court rooms + the 5 s TrialUpdateTask).
         server.systems.social.crimes.load(server).await?;
+        server
+            .systems
+            .social
+            .bounties
+            .load(&server.db)
+            .await
+            .context("BountyManager")?;
         server.systems.social.trials.load(server);
         trial::TrialManager::start_tick(server);
         // Ranking scores (`character_rank_scores`) and the closed-period payout ledger.
@@ -135,12 +181,15 @@ impl System {
     /// number of rows written.
     pub async fn save(
         &self,
-        _server: &GameServer,
+        server: &GameServer,
         tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
         stage: SaveStage,
     ) -> crate::Result<usize> {
         if matches!(stage, SaveStage::AfterCharacters) {
-            return self.ranking.save(tx).await;
+            let mut written = self.ranking.save(tx).await?;
+            written += self.nations.save(server, tx).await?;
+            written += self.bounties.save(tx).await?;
+            return Ok(written);
         }
         if matches!(stage, SaveStage::AfterItems) {
             // SaveManager.DoSave: `CrimeManager.Instance.Save(connection, transaction)`.

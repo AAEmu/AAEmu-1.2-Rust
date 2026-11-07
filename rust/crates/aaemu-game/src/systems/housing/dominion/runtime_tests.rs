@@ -1,4 +1,4 @@
-use super::super::state::SiegeSide;
+use super::super::state::{SiegeOutcome, SiegeSide, SiegeStatus};
 use super::*;
 use crate::data::world_data::{SystemFaction, Zone};
 use crate::data::GameData;
@@ -16,6 +16,7 @@ use crate::world::{Entity, PlayerRef};
 struct Fixture {
     server: GameServer,
     player: PlayerRef,
+    client: TestClient,
     house: HouseRef,
     skill: SkillRef,
     plot: Arc<PlotState>,
@@ -166,6 +167,7 @@ fn fixture(start_offset_ms: i64) -> Fixture {
     Fixture {
         server,
         player,
+        client,
         house,
         skill,
         plot,
@@ -426,4 +428,72 @@ async fn zero_hp_notification_is_restart_safe_before_the_death_callback() {
     assert!(restarted.get(25).unwrap().tower_destroyed);
     assert!(handle_tower_death(&f.server, &WorldObject::from(&f.house)));
     assert!(f.house.data().unit.buffs.check_buff(ENGRAVABLE_BUFF));
+}
+
+/// The forced last-member dismissal applies the released dominion to the world runtime and
+/// broadcasts the finished phase (the same calls as the GM cancel), instead of only clearing the
+/// authority row.
+#[tokio::test]
+async fn a_forced_last_member_dismissal_applies_and_broadcasts_the_released_dominion() {
+    use crate::opcodes::sc;
+
+    let mut f = fixture(300_001);
+    f.server.expeditions.with_mut(20, |e| {
+        e.faction.owner_id = f.player.character_id;
+        e.faction.owner_name = "Attacker".into();
+        e.faction.mother_id = 101;
+        e.members[0].role = 255;
+    });
+    f.player.data().unit.faction_id = 101;
+    // The fixture declares the dominion for expedition 10; make it the guild's territory and
+    // keep a foreign attacker/participant so the released roster has something to remove.
+    let mut state = f.server.systems.housing.dominions.get(25).unwrap();
+    state.owner_expedition_id = 20;
+    let siege = state.siege.as_mut().unwrap();
+    siege.attacker_expedition_id = 10;
+    siege.defender_expedition_id = 20;
+    for participant in siege.participants.values_mut() {
+        participant.expedition_id = 10;
+    }
+    state.validate().expect("valid released fixture");
+    f.server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![state])
+        .expect("restore test dominion");
+    f.client.drain();
+
+    crate::systems::social::expedition::leave_forced(&f.server, &f.player).await;
+
+    let guild = f.server.expeditions.get(20).expect("guild row");
+    assert!(guild.is_disbanded && guild.members.is_empty());
+    let state = f
+        .server
+        .systems
+        .housing
+        .dominions
+        .get(25)
+        .expect("released dominion");
+    assert_eq!(state.owner_expedition_id, 0);
+    let siege = state.siege.expect("siege history");
+    assert_eq!(siege.status, SiegeStatus::Finished);
+    assert_eq!(siege.outcome, SiegeOutcome::Cancelled);
+    // `apply_tower_state`: the tower loses the old guild and returns to full hp (the cancelled
+    // siege had left it destroyed), and the client sees the authoritative phase snapshot.
+    let (expedition_id, hp, max_hp) = {
+        let h = f.house.data();
+        (h.unit.expedition_id, h.unit.hp, h.unit.max_hp)
+    };
+    assert_eq!(expedition_id, 0);
+    assert_eq!(hp, max_hp);
+    let frames = f.client.drain();
+    assert!(
+        frames.iter().any(|(op, _)| *op == sc::SCDominionDataPacket),
+        "the client gets the released dominion snapshot"
+    );
+    assert!(
+        frames.iter().any(|(op, _)| *op == sc::SCSiegeStatePacket),
+        "the client gets the finished siege phase"
+    );
 }

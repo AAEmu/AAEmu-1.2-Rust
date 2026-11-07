@@ -538,6 +538,18 @@ fn use_skill_impl(
         return result;
     }
     let template = skill.template.clone();
+    // The client refuses a cap-scale cast on an `item_cap_scale_forbids` target before it is
+    // sent (`FUN_3939dc20` -> SkillResult INVALID_TARGET 0x22); a forged cast is refused here
+    // before the source item is taken, and answers `SCSkillStarted` with result 0x22.
+    if let Err(result) = super::validation::check_cap_scale_target(
+        server,
+        caster,
+        &template,
+        &caster_caster,
+        target_caster,
+    ) {
+        return result;
+    }
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
     let Some(target) = &resolved_target else {
         if let Some(npc) = caster.as_npc() {
@@ -893,25 +905,16 @@ fn use_skill_impl(
                 kind: SkillTaskKind::Cast,
                 skill: skill.clone(),
                 cancel: cancel.clone(),
+                extend_ms: 0,
             })
         });
-        let skill2 = skill.clone();
-        let ctx2 = ctx.clone();
-        let scheduled = super::tasks::schedule(server, i64::from(cast_time), move |srv| {
-            // CastTask.Execute. A cancelled token means `stop` ran: it took the task slot and
-            // released the timeline id. A skill flagged `cancelled` by something else (a cancel
-            // effect, a failed requirement) still holds its id: `cast` ends it, exactly once
-            // (`end_skill` takes the id), instead of this closure dropping it.
-            if cancel.is_cancelled() {
-                return;
-            }
-            cast(&srv, &skill2, &ctx);
-        });
-        if !scheduled {
-            // No scheduler (server shutting down): finish the cast right away instead of
-            // leaving the task slot - and the timeline id - set forever.
-            cast(server, skill, &ctx2);
-        }
+        schedule_cast_completion(
+            server,
+            skill.clone(),
+            ctx.clone(),
+            cancel,
+            i64::from(cast_time),
+        );
     } else {
         if is_player_music_skill(server, &template, caster) {
             skill.state().music_started_pending = true;
@@ -1144,13 +1147,103 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     if !std::mem::take(&mut skill.state().gcd_started) {
         start_global_cooldown(server, skill, caster, now);
     }
-    caster.with_unit(|u| u.unit_mut().skill_state.skill_task = None);
+    // Clear only this skill's task: the timer claims the slot before calling `cast`, and a new
+    // cast of another skill (or a reused auto-attack skill) must keep its own slot.
+    caster.with_unit(|u| {
+        let slot = &mut u.unit_mut().skill_state.skill_task;
+        if slot
+            .as_ref()
+            .is_some_and(|task| Arc::ptr_eq(&task.skill, skill))
+        {
+            *slot = None;
+        }
+    });
     consume_mana(server, skill, caster);
     start_skill_cooldown(server, skill, caster, now);
     if t.channeling_time > 0 {
         start_channeling(server, skill, ctx);
     } else {
         schedule_effects(server, skill, ctx);
+    }
+}
+
+/// What the cast timer found under the caster's task lock.
+enum CastTimerAction {
+    /// The task still owns the slot and owes no further wait: this call completes the cast.
+    Complete,
+    /// The task owns the slot and a delayed `DisturbCasting` added a wait: wake again then.
+    Rearm(i64),
+    /// The slot is gone or belongs to another task: a stop, a completion or a newer cast won.
+    Stale,
+}
+
+/// Arms the completion timer of a direct cast. The timer reads the cast's pending `extend_ms`
+/// from the caster's task slot under the slot lock; [`delay_cast`] adds to it, so a timer that
+/// wakes while a delay is pending re-arms itself for that wait instead of completing. Both
+/// paths act on the same slot under one lock, so a cast completes exactly once and a cancelled
+/// cast never does. (A wall-clock deadline would not follow a paused test clock.)
+fn schedule_cast_completion(
+    server: &GameServer,
+    skill: SkillRef,
+    ctx: CastCtx,
+    cancel: CancelToken,
+    wait_ms: i64,
+) {
+    let skill2 = skill.clone();
+    let ctx2 = ctx.clone();
+    let cancel2 = cancel.clone();
+    let scheduled = super::tasks::schedule(server, wait_ms, move |srv| {
+        cast_completion_tick(&srv, &skill2, &ctx2, &cancel2);
+    });
+    if !scheduled {
+        // No scheduler (server shutting down): finish the cast right away instead of leaving
+        // the task slot - and the timeline id - set forever.
+        cast(server, &skill, &ctx);
+    }
+}
+
+/// `CastTask.Execute`: completes the cast once its (possibly delayed) end time is reached.
+fn cast_completion_tick(
+    server: &GameServer,
+    skill: &SkillRef,
+    ctx: &CastCtx,
+    cancel: &CancelToken,
+) {
+    // A cancelled token means `stop` ran: it took the task slot and released the timeline id.
+    // A skill flagged `cancelled` by something else (a cancel effect, a failed requirement)
+    // still holds its id: `cast` ends it, exactly once (`end_skill` takes the id).
+    if cancel.is_cancelled() {
+        return;
+    }
+    let action = ctx
+        .caster
+        .with_unit(|u| {
+            let slot = &mut u.unit_mut().skill_state.skill_task;
+            let Some(task) = slot.as_mut() else {
+                return CastTimerAction::Stale;
+            };
+            if task.kind != SkillTaskKind::Cast
+                || !Arc::ptr_eq(&task.skill, skill)
+                || task.cancel != *cancel
+            {
+                return CastTimerAction::Stale;
+            }
+            if task.extend_ms > 0 {
+                return CastTimerAction::Rearm(std::mem::take(&mut task.extend_ms));
+            }
+            // Claim the completion under the same lock `delay_cast` extends under: an extension
+            // that runs after this sees no task and does not announce a delay for a cast that
+            // is already ending.
+            *slot = None;
+            CastTimerAction::Complete
+        })
+        .unwrap_or(CastTimerAction::Stale);
+    match action {
+        CastTimerAction::Complete => cast(server, skill, ctx),
+        CastTimerAction::Rearm(wait_ms) => {
+            schedule_cast_completion(server, skill.clone(), ctx.clone(), cancel.clone(), wait_ms);
+        }
+        CastTimerAction::Stale => {}
     }
 }
 
@@ -1235,6 +1328,7 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             },
             skill: skill.clone(),
             cancel: cancel.clone(),
+            extend_ms: 0,
         })
     });
     if t.channeling_tick > 0 {
@@ -2651,6 +2745,25 @@ pub fn consume_mana(server: &GameServer, skill: &SkillRun, caster: &WorldObject)
         c.skill_char.last_cast_ms = now_ms();
         c.skill_char.is_in_post_cast = true;
     }
+}
+
+/// Extends a running direct cast's end by `delay_ms` (`DisturbCasting` with a delay, WP-1:
+/// the 1.2 client adds the delay to the cast bar when it receives `SCCastingDelayed`). Returns
+/// the cast skill's id, or `None` when the unit is not in a direct `Cast` task (a plot or a
+/// channel is not extended), the task is being cancelled, or it is already completing.
+pub fn delay_cast(unit: &WorldObject, delay_ms: i64) -> Option<u32> {
+    if delay_ms <= 0 {
+        return None;
+    }
+    unit.with_unit(|u| {
+        let task = u.unit_mut().skill_state.skill_task.as_mut()?;
+        if task.kind != SkillTaskKind::Cast || task.skill.cancelled() {
+            return None;
+        }
+        task.extend_ms = task.extend_ms.saturating_add(delay_ms);
+        Some(task.skill.id)
+    })
+    .flatten()
 }
 
 /// `Unit.InterruptSkills()`.

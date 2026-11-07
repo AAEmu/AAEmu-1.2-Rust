@@ -3,6 +3,7 @@
 //! socket-level round trip. MySQL is not available (the pool points at a closed port), so the
 //! UCC `Save` step fails exactly like an uncaught C# MySqlException would.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,15 +21,65 @@ use super::opcodes::{ct, tc};
 use super::packet::{encode, StreamServerPacket};
 use super::protocol::{handle_frame, REGISTERED};
 use super::s2c::*;
-use super::world::{ActiveCharacter, ItemUcc, StreamDoodad, StreamWorld, ITEM_CREST_INK};
+use super::ucc::{crest_printer_cost, CrestPrinterCost, CREST_STAMP_SKILL};
+use super::world::{
+    ActiveCharacter, ItemUcc, StreamDoodad, StreamWorld, ITEM_CREST_BRAINSTORM, ITEM_CREST_INK,
+};
 use crate::config::AppConfig;
+use crate::data::items::{ItemTemplate, TemplateKind};
 use crate::data::GameData;
+use crate::models::item_task::task_type;
 use crate::net::connection::GameConnection;
 use crate::opcodes::cs;
+use crate::systems::npcs::doodad::data::DoodadData;
+use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncStampMaker, FuncTemplate};
 use crate::GameServer;
 
 // ---------------------------------------------------------------------------------------------
 // helpers
+
+/// `doodad_funcs` rows 6314 / 11693 / 19145 and their `doodad_func_stamp_makers` rows (the
+/// 1.2 compact values: 3038 -> 50000 + 1x 11127, 1470 -> 10000).
+fn install_crest_printers(doodad: &mut DoodadData) {
+    let mut rows = HashMap::new();
+    for (id, money, item, count) in [
+        (2, 50_000, ITEM_CREST_BRAINSTORM, 1),
+        (3, 10_000, 0, 1),
+        (4, 50_000, ITEM_CREST_BRAINSTORM, 1),
+    ] {
+        rows.insert(
+            id,
+            FuncTemplate::StampMaker(DoodadFuncStampMaker {
+                id,
+                consume_money: money,
+                item_id: ITEM_CREST_INK,
+                consume_item_id: item,
+                consume_count: count,
+            }),
+        );
+    }
+    doodad.func_templates.insert("DoodadFuncStampMaker", rows);
+    let func = |group, key, func_id| DoodadFunc {
+        group_id: group,
+        func_id,
+        func_key: key,
+        func_type: "DoodadFuncStampMaker".into(),
+        next_phase: -1,
+        sound_id: 0,
+        skill_id: CREST_STAMP_SKILL,
+        perm_id: 0,
+        count: 0,
+    };
+    doodad
+        .funcs_by_groups
+        .insert(6944, vec![func(6944, 6314, 2)]);
+    doodad
+        .funcs_by_groups
+        .insert(2260, vec![func(2260, 11693, 3)]);
+    doodad
+        .funcs_by_groups
+        .insert(22729, vec![func(22729, 19145, 4)]);
+}
 
 fn test_server() -> GameServer {
     let mut config = AppConfig {
@@ -46,11 +97,14 @@ fn test_server() -> GameServer {
     // `ConfirmDefaultUcc` creates a Crest Ink (the C# hack-fix template).
     data.items.templates.insert(
         ITEM_CREST_INK,
-        crate::data::items::ItemTemplate::new(
-            ITEM_CREST_INK,
-            crate::data::items::TemplateKind::Ucc,
-        ),
+        ItemTemplate::new(ITEM_CREST_INK, TemplateKind::Ucc),
     );
+    // The custom-upload reagent of the crest printer rows.
+    data.items.templates.insert(
+        ITEM_CREST_BRAINSTORM,
+        ItemTemplate::new(ITEM_CREST_BRAINSTORM, TemplateKind::Item),
+    );
+    install_crest_printers(&mut data.systems.npcs.doodad);
     GameServer::new(config, db, data)
 }
 
@@ -153,6 +207,13 @@ impl StreamWorld for TestWorld {
     fn doodads_in_cell(&self, instance_id: u32, _x: i32, _y: i32) -> Option<Vec<StreamDoodad>> {
         (instance_id == 1).then(|| self.doodads.clone())
     }
+    fn doodad(&self, instance_id: u32, obj_id: u32) -> Option<StreamDoodad> {
+        if instance_id == 0 {
+            self.doodads.iter().find(|d| d.obj_id == obj_id).cloned()
+        } else {
+            None
+        }
+    }
     fn character_name(&self, character_id: u32) -> Option<String> {
         (character_id == 7).then(|| "Abc".to_string())
     }
@@ -212,6 +273,95 @@ async fn joined(world: Arc<TestWorld>) -> (GameServer, StreamClient, GameClient)
     .unwrap();
     assert_eq!(c.drain(), vec![hex("01 00 00")]);
     (server, c, g)
+}
+
+// ---------------------------------------------------------------------------------------------
+// WP-U1 crest printer fixtures
+
+/// The `bc` of the crest printer the upload tests stand at.
+const PRINTER_OBJ: u32 = 0x2001;
+
+fn printer(obj_id: u32, template_id: u32, func_group_id: u32) -> StreamDoodad {
+    StreamDoodad {
+        obj_id,
+        template_id,
+        x: 2.0,
+        y: 0.0,
+        z: 100.0,
+        roll: 0,
+        pitch: 0,
+        yaw: 0,
+        scale: 1.0,
+        func_group_id,
+        time_left: 0,
+        plant_time: 0,
+    }
+}
+
+/// Doodad 3038 ("Crest Printer"): `doodad_funcs` 6314 -> row 2 (50000 + 1x 11127).
+fn printer_3038() -> StreamDoodad {
+    printer(PRINTER_OBJ, 3038, 6944)
+}
+
+/// Doodad 1470 (test doodad): `doodad_funcs` 11693 -> row 3 (10000, no item).
+fn printer_1470() -> StreamDoodad {
+    printer(PRINTER_OBJ, 1470, 2260)
+}
+
+/// [`joined`] plus a synthetic world instance 0 with the live doodad `p` (at 2 m from the
+/// player). The stream fake answers `doodad()` from the same snapshot.
+async fn joined_printer(p: StreamDoodad) -> (GameServer, StreamClient, GameClient) {
+    let (server, c, g) = joined(Arc::new(TestWorld {
+        doodads: vec![p.clone()],
+    }))
+    .await;
+    server.world.create_world_instance(
+        Arc::new(crate::data::world_templates::WorldTemplate::synthetic(
+            0,
+            "main_world",
+            2,
+            2,
+            crate::test_support::TEST_ZONE,
+        )),
+        0,
+    );
+    let mut d = crate::models::doodad::Doodad::new(p.template_id);
+    d.func_group_id = p.func_group_id;
+    d.transform.set_xyz(p.x, p.y, p.z);
+    let d = crate::world::Entity::new(p.obj_id, d);
+    server.world.world(0).unwrap().add_object(&d);
+    (server, c, g)
+}
+
+/// `CTStartUploadEmblemStreamPacket` body: `bc ; uccId(-1) ; dataSize ; DefaultUcc`.
+fn start_upload_body(bc: u32, data_size: i32) -> Vec<u8> {
+    let mut body = vec![
+        (bc & 0xFF) as u8,
+        ((bc >> 8) & 0xFF) as u8,
+        ((bc >> 16) & 0xFF) as u8,
+    ];
+    body.extend((-1i64).to_le_bytes());
+    body.extend(data_size.to_le_bytes());
+    body.extend(appearance());
+    body
+}
+
+fn give_item(server: &GameServer, player: &crate::world::PlayerRef, template_id: u32, count: i32) {
+    let id = u64::from(server.ids.item.get_next_id().unwrap());
+    let item = crate::models::item::Item::create(
+        id,
+        server.game_data.items.template(template_id).unwrap(),
+        count,
+        0,
+        1,
+        &server.game_data.items,
+        0,
+    );
+    let bag = crate::systems::economy::inventory::Inv::of(player).bag();
+    bag.lock()
+        .unwrap()
+        .add_new_item(item, -1, &server.game_data.items)
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -976,10 +1126,10 @@ async fn ucc_download_flow() {
 
 #[tokio::test]
 async fn ucc_simple_upload() {
-    let world = Arc::new(TestWorld::default());
-    let (server, mut c, mut g) = joined(world.clone()).await;
-    let mut start = hex("03 02 01  00 00 00 00 00 00 00 00  00 00 00 00");
-    start.extend(appearance());
+    let (server, mut c, mut g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 60_000;
+    let start = start_upload_body(PRINTER_OBJ, 0);
     c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
         .await
         .unwrap();
@@ -990,9 +1140,9 @@ async fn ucc_simple_upload() {
         .await
         .is_err());
 
-    // Upload status -> ConfirmDefaultUcc: id 1, End, 5 gold taken (no balance check: 100 copper
-    // becomes -49900), the Crest Ink is created, then the MySQL save fails (no database in
-    // tests), which closes the connection like the uncaught C# exception: no ink in the bag.
+    // Upload status -> ConfirmDefaultUcc: id 1, End, the row's 50000 taken (60000 -> 10000),
+    // the Crest Ink is created, then the MySQL save fails (no database in tests), which closes
+    // the connection like the uncaught C# exception: no ink in the bag.
     let res = c
         .recv(&server, &frame(ct::CT_EMBLEM_STREAM_UPLOAD_STATUS, &[1]))
         .await;
@@ -1006,8 +1156,7 @@ async fn ucc_simple_upload() {
             hex("53  01  01 B0 3C FF FF  00  00 00 00 00")
         )]
     );
-    let p = server.world.character_by_connection(77).unwrap();
-    assert_eq!(p.data().money, 100 - 50_000);
+    assert_eq!(p.data().money, 60_000 - 50_000);
     assert!(bag_items(&p).is_empty());
     let stored = server.streams.ucc.get_ucc(1).unwrap();
     assert_eq!(stored.ty, UccType::Simple);
@@ -1022,14 +1171,15 @@ async fn ucc_simple_upload() {
 
 #[tokio::test]
 async fn ucc_custom_upload() {
-    let world = Arc::new(TestWorld::default());
-    let (server, mut c, mut g) = joined(world.clone()).await;
-    let mut start = hex("03 02 01  00 00 00 00 00 00 00 00  05 00 00 00");
-    start.extend(appearance());
+    let (server, mut c, mut g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let start = start_upload_body(PRINTER_OBJ, 5);
     c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
         .await
         .unwrap();
-    assert_eq!(c.drain(), vec![hex("0A 00  00  00 00 00 00")]);
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
 
     c.recv(
         &server,
@@ -1040,7 +1190,7 @@ async fn ucc_custom_upload() {
     )
     .await
     .unwrap();
-    assert_eq!(c.drain(), vec![hex("0A 00  00  00 00 00 00")]);
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
     // Last part completes the upload -> ConfirmDefaultUcc (save fails without MySQL).
     let res = c
         .recv(
@@ -1061,13 +1211,40 @@ async fn ucc_custom_upload() {
     assert_eq!(stored.ty, UccType::Complex);
     assert_eq!(stored.uploader_id, 555);
     assert_eq!(stored.data, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-    assert_eq!(game_frames(&mut g).len(), 1); // the money task
-                                              // The save failed before the Crest Ink went to the bag.
-    let p = server.world.character_by_connection(77).unwrap();
+    // A custom image costs the reagent only: the row's 50000 is not charged on this path
+    // (client `X2Ucc.GetMakeUccConsumeInfo` shows the item, not the money).
+    let frames = game_frames(&mut g);
+    assert_eq!(frames[0].0, crate::opcodes::sc::SCItemTaskSuccessPacket);
+    assert_eq!(
+        frames[0].1.first(),
+        Some(&task_type::IMPRINT_UCC),
+        "the reagent removal is an IMPRINT_UCC item task"
+    );
+    assert!(
+        !frames.iter().any(
+            |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
+                && body.first() == Some(&task_type::DEPOSIT_MONEY)
+        ),
+        "no money task on a custom upload"
+    );
+    // The save failed before the Crest Ink went to the bag, the reagent is gone and the money
+    // is untouched.
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        0
+    );
     assert!(bag_items(&p).is_empty());
 
     // C# never clears _complexUploadParts: a second custom upload on the same stream
-    // connection throws.
+    // connection throws. The pre-checks need money and the reagent again so the packet reaches
+    // the queue.
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
     assert!(c
         .recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
         .await
@@ -1097,9 +1274,16 @@ async fn ucc_confirm_crest_ink_in_csharp_order() {
     let world = Arc::new(TestWorld::default());
     let (server, _c, mut g) = joined(world).await;
     let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    let cost = CrestPrinterCost {
+        consume_money: 50_000,
+        consume_item_id: ITEM_CREST_BRAINSTORM,
+        consume_count: 1,
+    };
 
     // Before Save(ucc): the money task is sent at once and the ink exists (not in the bag).
-    let item = charge_and_create_crest_ink(&server, &p, 42).expect("crest ink created");
+    let item =
+        charge_and_create_crest_ink(&server, &p, 42, &cost, false).expect("crest ink created");
     assert_eq!(item.template_id, ITEM_CREST_INK);
     assert_eq!(item.ucc_id, 42);
     assert_eq!(item.count, 1);
@@ -1125,6 +1309,277 @@ async fn ucc_confirm_crest_ink_in_csharp_order() {
     assert_eq!(frames[0].0, crate::opcodes::sc::SCItemTaskSuccessPacket);
     assert_eq!(frames[0].1[0], task_type::GAIN_ITEM_WITH_UCC);
     assert_eq!(frames[0].1[1], 1); // one ItemAdd task
+}
+
+// ---------------------------------------------------------------------------------------------
+// WP-U1: crest printer upload validation (housing-farm-ucc#1)
+
+/// (a) A live doodad with no `StampMaker` func in its current group is not a crest printer: the
+/// packet is dropped with no reply, no queue entry and no charge.
+#[tokio::test]
+async fn crest_upload_refuses_a_plain_doodad() {
+    let (server, mut c, _g) = joined_printer(printer(PRINTER_OBJ, 1470, 9999)).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    let start = start_upload_body(PRINTER_OBJ, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert!(c.drain().is_empty());
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+    assert!(!c.conn.is_closing());
+}
+
+/// (a) An unknown `bc` (no live doodad in the player's instance) is refused the same way.
+#[tokio::test]
+async fn crest_upload_refuses_an_unknown_doodad() {
+    let (server, mut c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    let start = start_upload_body(0x00_9999, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert!(c.drain().is_empty());
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+}
+
+/// Rule 2: the printer must be within the func-skill reach (14435 + 15 m). At 100 m it is not.
+#[tokio::test]
+async fn crest_upload_refuses_an_out_of_reach_printer() {
+    let mut far = printer_3038();
+    far.x = 102.0;
+    let (server, mut c, _g) = joined_printer(far).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    let start = start_upload_body(PRINTER_OBJ, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert!(c.drain().is_empty());
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+}
+
+/// (b) 3038 with less than the row's 50000: refused, nothing charged, no queue entry.
+#[tokio::test]
+async fn crest_upload_refuses_3038_without_the_money() {
+    let (server, mut c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 49_999;
+    let start = start_upload_body(PRINTER_OBJ, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert!(c.drain().is_empty());
+    assert_eq!(p.data().money, 49_999);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+}
+
+/// (c) 3038 with the money: the row's 50000 (not the old constant) is charged and the UCC is
+/// registered with the new id; the row's reagent is not touched on a default upload.
+#[tokio::test]
+async fn crest_upload_3038_charges_the_row_money() {
+    let (server, mut c, mut g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let start = start_upload_body(PRINTER_OBJ, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  01  00 00 00 00")]);
+    let res = c
+        .recv(&server, &frame(ct::CT_EMBLEM_STREAM_UPLOAD_STATUS, &[1]))
+        .await;
+    assert!(res.is_err()); // the MySQL save fails in tests, as before
+    assert_eq!(c.drain(), vec![hex("0A 00  02  00 00 00 00")]);
+    assert_eq!(p.data().money, 0);
+    assert_eq!(
+        game_frames(&mut g),
+        vec![(
+            crate::opcodes::sc::SCItemTaskSuccessPacket,
+            hex("53  01  01 B0 3C FF FF  00  00 00 00 00")
+        )]
+    );
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        1,
+        "a default pattern charges no reagent"
+    );
+    assert_eq!(server.streams.ucc.get_ucc(1).unwrap().ty, UccType::Simple);
+}
+
+/// (d) A custom upload without the row's reagent is refused before any queue entry.
+#[tokio::test]
+async fn crest_custom_upload_requires_the_reagent() {
+    let (server, mut c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    let start = start_upload_body(PRINTER_OBJ, 5);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert!(c.drain().is_empty());
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+}
+
+/// (d) With the reagent: it is consumed exactly once, the ink carries the new UCC id and the
+/// custom path charges **no money** (it succeeds with an empty purse). A second call without
+/// the reagent changes nothing.
+#[tokio::test]
+async fn crest_custom_reagent_is_consumed_once_with_the_ink() {
+    use super::ucc::{add_crest_ink, charge_and_create_crest_ink};
+    let (server, _c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 0;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let cost = CrestPrinterCost {
+        consume_money: 50_000,
+        consume_item_id: ITEM_CREST_BRAINSTORM,
+        consume_count: 1,
+    };
+    let item = charge_and_create_crest_ink(&server, &p, 7, &cost, true).expect("crest ink");
+    assert_eq!(p.data().money, 0, "a custom image never takes money");
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        0
+    );
+    assert_eq!(item.ucc_id, 7);
+    add_crest_ink(&server, &p, item);
+    let ink = bag_items(&p)
+        .into_iter()
+        .find(|i| i.ucc_id == 7)
+        .expect("ink in the bag");
+    assert_eq!(ink.template_id, ITEM_CREST_INK);
+
+    // Without the reagent again: refused before any charge.
+    let money = p.data().money;
+    assert!(charge_and_create_crest_ink(&server, &p, 8, &cost, true).is_none());
+    assert_eq!(p.data().money, money);
+}
+
+/// Rule 5: the confirm re-checks the mutable state. Money spent between the start and the
+/// confirm drops the queued upload without a reply, registration or charge.
+#[tokio::test]
+async fn crest_confirm_rechecks_the_balance() {
+    let (server, mut c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    let start = start_upload_body(PRINTER_OBJ, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  01  00 00 00 00")]);
+    p.data().money = 0;
+    let res = c
+        .recv(&server, &frame(ct::CT_EMBLEM_STREAM_UPLOAD_STATUS, &[1]))
+        .await;
+    assert!(res.is_ok(), "a refusal is not a connection error");
+    assert!(c.drain().is_empty(), "no End / failure status (UNKNOWN)");
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.len(), 0, "the UCC is not registered");
+    assert_eq!(p.data().money, 0);
+}
+
+/// (e) The 1470 printer row charges its own 10000, not 50000.
+#[tokio::test]
+async fn crest_upload_1470_charges_its_row_money() {
+    let (server, mut c, mut g) = joined_printer(printer_1470()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 10_000;
+    let start = start_upload_body(PRINTER_OBJ, 0);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  01  00 00 00 00")]);
+    let res = c
+        .recv(&server, &frame(ct::CT_EMBLEM_STREAM_UPLOAD_STATUS, &[1]))
+        .await;
+    assert!(res.is_err());
+    assert_eq!(p.data().money, 0);
+    // SCItemTaskSuccessPacket(DepositMoney = 83, [MoneyChange(-10000)], [])
+    assert_eq!(
+        game_frames(&mut g),
+        vec![(
+            crate::opcodes::sc::SCItemTaskSuccessPacket,
+            hex("53  01  01 F0 D8 FF FF  00  00 00 00 00")
+        )]
+    );
+}
+
+/// (f) A full bag leaves the new ink in `_allItems` (the C# `Orphaned` path), unchanged.
+#[tokio::test]
+async fn crest_ink_is_orphaned_when_the_bag_is_full() {
+    use super::ucc::{add_crest_ink, charge_and_create_crest_ink};
+    let (server, _c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    for _ in 0..50 {
+        give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    }
+    assert_eq!(bag_items(&p).len(), 50);
+    let cost = CrestPrinterCost {
+        consume_money: 0,
+        consume_item_id: 0,
+        consume_count: 0,
+    };
+    let item = charge_and_create_crest_ink(&server, &p, 42, &cost, false).expect("crest ink");
+    let id = item.id;
+    add_crest_ink(&server, &p, item);
+    assert_eq!(bag_items(&p).len(), 50, "the bag is still full");
+    assert!(
+        server.items.item_by_id(id).is_some(),
+        "the orphaned ink stays in _allItems"
+    );
+}
+
+/// The shipped rows resolve to the expected cost (3038 groups 6944 / 22729, 1470 group 2260);
+/// the Insignia Drafting Table (group 5689) is a `StampMaker` but not a crest printer.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_stamp_maker_rows_resolve_to_expected_cost() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = DoodadData::load_from(&conn).unwrap();
+    let crest = crest_printer_cost(&data, 6944).unwrap();
+    assert_eq!(
+        crest,
+        CrestPrinterCost {
+            consume_money: 50_000,
+            consume_item_id: ITEM_CREST_BRAINSTORM,
+            consume_count: 1,
+        }
+    );
+    assert_eq!(crest_printer_cost(&data, 22729), Some(crest));
+    assert_eq!(
+        crest_printer_cost(&data, 2260),
+        Some(CrestPrinterCost {
+            consume_money: 10_000,
+            consume_item_id: 0,
+            consume_count: 1,
+        })
+    );
+    // Item 16169 ("Insignia Stamp") is not Crest Ink.
+    assert_eq!(crest_printer_cost(&data, 5689), None);
 }
 
 // ---------------------------------------------------------------------------------------------

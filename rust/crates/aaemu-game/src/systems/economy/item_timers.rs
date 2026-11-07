@@ -2,6 +2,10 @@
 //! `ItemTimerTask` started by `LoadUserItems`: expiration by end time and by online minutes,
 //! recharge buff expiry, `LifespanExpiration` removals) and `Inventory.SetInitialItemExpirationTimers`
 //! (the `SCSyncItemLifespanPacket`s sent with the inventory at login).
+//!
+//! The C# only ticked the player's equipment / bag / warehouse; the mate `EQUIPMENT_MATE`
+//! containers of online owners tick here too, and their expiry answers with
+//! `SCMateEquipmentExpiredPacket` instead of a bag item task (see `PORTING.md`).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,11 +13,12 @@ use std::time::Duration;
 use crate::data::items::bind_type;
 use crate::models::container::{expire_item, slot_type, ContainerRef, MIN_DATE_TIME};
 use crate::models::item::{Item, ITEM_FLAG_UNPACKED};
-use crate::models::item_task::task_type;
+use crate::models::item_task::{task_type, ItemFx};
 use crate::server::GameServer;
 use crate::world::{PlayerRef, WorldObject};
 
 use super::inventory::{Inv, ItemTxn};
+use super::item_effect_packets::SCMateEquipmentExpiredPacket;
 use super::item_packets::SCSyncItemLifespanPacket;
 
 /// `ItemManager.LastTimerCheck` (+ `ItemTimerLock`).
@@ -56,8 +61,24 @@ pub fn start(server: &Arc<GameServer>) {
     });
 }
 
+/// The per-container expiration rule of `UpdateItemContainerTimers`: a predefined end time in
+/// the past, or the online-minute countdown reaching zero.
+fn expiry_due(item: &mut Item, delta_minutes: f64, now: i64) -> bool {
+    if item.expiration_time > MIN_DATE_TIME && item.expiration_time <= now {
+        return true; // Item expired by predefined end time
+    }
+    if item.expiration_online_minutes_left > 0.0 {
+        item.expiration_online_minutes_left -= delta_minutes;
+        item.dirty = true;
+        if item.expiration_online_minutes_left <= 0.0 {
+            return true; // online timed lifespan is done
+        }
+    }
+    false
+}
+
 /// `ItemManager.UpdateItemTimers()`: only the containers of online characters tick (equipment,
-/// bag, warehouse). Returns the number of expired items.
+/// bag, warehouse, and the gear of their mates). Returns the number of expired items.
 pub fn update_item_timers(server: &GameServer, now_ms: i64) -> i32 {
     let delta_ms = server.systems.economy.item_timers.take_delta(now_ms);
     let delta_minutes = delta_ms as f64 / 60_000.0;
@@ -80,8 +101,64 @@ pub fn update_item_timers(server: &GameServer, now_ms: i64) -> i32 {
             }
         }
     }
+    res += update_mate_equipment_timers(server, delta_minutes, now_ms);
     if res > 0 {
         tracing::warn!("{res} item(s) expired and have been removed.");
+    }
+    res
+}
+
+/// Mate gear expiry: the persistent `EQUIPMENT_MATE` containers of online owners each tick once.
+/// A mate that is not spawned still has its container (`MateEquipmentContainer` outlives the
+/// spawn), so its items expire too, but only the owner's current pet can act on the packet; the
+/// client ignores a `SCMateEquipmentExpired` for any other tl id (`FUN_394e5a90`).
+/// The C# (`UpdateItemTimers`) never ticked these containers; see `PORTING.md`.
+fn update_mate_equipment_timers(server: &GameServer, delta_minutes: f64, now_ms: i64) -> i32 {
+    let now = now_ms.div_euclid(1000);
+    let mut res = 0;
+    for container in server.items.all_containers() {
+        let (owner_id, mate_id) = {
+            let c = container.lock().expect("container poisoned");
+            if c.slot_type != slot_type::EQUIPMENT_MATE {
+                continue;
+            }
+            (c.owner_id, c.mate_id)
+        };
+        // Timers only run for online owners, like the bag / warehouse containers.
+        let Some(player) = server.world.character_by_id(owner_id) else {
+            continue;
+        };
+        let mate_tl_id = server
+            .systems
+            .economy
+            .item_effects
+            .hooks()
+            .mate_by_id(server, &player, mate_id)
+            .map(|m| m.data().unit.tl_id);
+        let mut txn = ItemTxn::begin(server);
+        let mut c = container.lock().expect("container poisoned");
+        for i in (0..c.items.len()).rev() {
+            let item = &mut c.items[i];
+            if !expiry_due(item, delta_minutes, now) {
+                continue;
+            }
+            let (id, slot) = (item.id, item.slot as u8);
+            res += 1;
+            if let Some(mate_tl_id) = mate_tl_id {
+                txn.env.fx.send(
+                    player.character_id,
+                    SCMateEquipmentExpiredPacket {
+                        mate_tl_id,
+                        slot_type: slot_type::EQUIPMENT_MATE,
+                        slot_index: slot,
+                    },
+                );
+            }
+            // No item task for a mate-container item: the packet above makes the client remove it
+            // from the pet, and a `LifespanExpiration` task would be a bag / equipment task the
+            // client does not expect for `EQUIPMENT_MATE`.
+            c.remove_item_task(task_type::INVALID, id, true, &mut txn.env);
+        }
     }
     res
 }
@@ -136,23 +213,24 @@ pub fn update_item_container_timers(
                 }
             }
             // Check if item itself needs to be expired
-            let mut do_expire = false;
-            if item.expiration_time > MIN_DATE_TIME && item.expiration_time <= now {
-                do_expire = true; // Item expired by predefined end time
-            } else if item.expiration_online_minutes_left > 0.0 {
-                item.expiration_online_minutes_left -= delta_minutes;
-                item.dirty = true;
-                if item.expiration_online_minutes_left <= 0.0 {
-                    do_expire = true; // online timed lifespan is done
-                }
-            }
-            if do_expire {
+            if expiry_due(item, delta_minutes, now) {
                 res += 1;
                 let id = item.id;
                 txn.env
                     .fx
                     .push(expire_item(item).with_owner(player.character_id));
                 c.remove_item_task(task_type::LIFESPAN_EXPIRATION, id, true, &mut txn.env);
+                continue;
+            }
+            // A pending unlock whose delay has elapsed: clear the lock and tell the client
+            // (`ITEM_UNLOCK_EXCESS`).
+            if let Some(task) = super::item_security::finalize_expired(item, now) {
+                txn.env.fx.push(ItemFx::Tasks {
+                    owner: player.character_id,
+                    task: task_type::ITEM_UNLOCK_EXCESS,
+                    tasks: vec![task],
+                    force_remove: Vec::new(),
+                });
             }
         }
         let _ = owner;

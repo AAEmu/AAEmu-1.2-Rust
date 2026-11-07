@@ -1,7 +1,7 @@
 //! Explicit siege scheduling for the 1.2 world server. Historical static plans are not timers.
 
 use super::prelude::*;
-use crate::systems::housing::dominion::{runtime, SiegeSide};
+use crate::systems::housing::dominion::{reinforce, runtime, DominionError, SiegeSide};
 
 pub struct Dominion;
 
@@ -194,7 +194,15 @@ fn participation(
             );
             return Ok(());
         }
-        manager.register_participant(zone, player.character_id, current_expedition, side, now)
+        let cap = reinforce::participant_cap(&previous, side);
+        manager.register_participant_with_cap(
+            zone,
+            player.character_id,
+            current_expedition,
+            side,
+            now,
+            cap,
+        )
     } else {
         match manager.unregister_participant(zone, player.character_id) {
             Ok(removed) => {
@@ -224,7 +232,25 @@ fn participation(
                 ),
             );
         }
-        Err(error) => CommandManager::send_error_text(command, out, &error.to_string()),
+        Err(error) => {
+            if join {
+                // The 1.2 client has no siege-participation CS; these are its own error texts
+                // for a full roster and a defender whose reinforcement wave has not arrived.
+                let error_id = match error {
+                    DominionError::ParticipantLimit => {
+                        Some(crate::systems::economy::error_message::SIEGE_PARTICIPANT_FULL)
+                    }
+                    DominionError::ReinforceBlocked => {
+                        Some(crate::systems::economy::error_message::SIEGE_BLOCK_DEFENSE_REINFORCE)
+                    }
+                    _ => None,
+                };
+                if let Some(error_id) = error_id {
+                    crate::systems::social::util::send_error(&player, error_id);
+                }
+            }
+            CommandManager::send_error_text(command, out, &error.to_string())
+        }
     }
     Ok(())
 }
@@ -285,16 +311,27 @@ impl Command for Dominion {
         let server = ctx.server()?;
         let manager = &server.systems.housing.dominions;
         if args.is_empty() || args[0] == "info" {
+            let now = chrono::Utc::now().timestamp();
             for state in manager.all() {
+                let calendar = crate::systems::social::dominion::snapshot(server, &state, now)
+                    .map(|data| {
+                        (
+                            data.siege_timers.siege_period,
+                            data.siege_timers.started.timestamp(),
+                        )
+                    })
+                    .unwrap_or((0, 0));
                 CommandManager::send_normal_text(
                     self,
                     out,
                     &format!(
-                        "Zone {}: expedition {}, tower {}, tax {}%, siege {:?}",
+                        "Zone {}: expedition {}, tower {}, tax {}%, period {} from {}, siege {:?}",
                         state.zone_group_id,
                         state.owner_expedition_id,
                         state.tower.house_id,
                         state.tax_rate,
+                        calendar.0,
+                        calendar.1,
                         state.siege.as_ref().map(|s| (
                             s.siege_id,
                             s.status,
@@ -304,6 +341,93 @@ impl Command for Dominion {
                     ),
                 );
             }
+            return Ok(());
+        }
+        if args[0] == "undeclare" {
+            // Cancel an accepted siege declaration (WP-SD2b). The in-game cancel trigger is
+            // UNKNOWN, so this command is the shipped route; a zero offense team is
+            // broadcast. The zone defaults to the caller's territory.
+            let zone = match args.get(1).map(String::as_str) {
+                Some(value) => match try_parse::<u32>(value) {
+                    Some(zone) => zone,
+                    None => {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    }
+                },
+                None => {
+                    let player = ctx.player()?;
+                    let zone_id = player.data().unit.transform.zone_id;
+                    match server
+                        .game_data
+                        .zones
+                        .zone_by_key(zone_id)
+                        .map(|zone| zone.group_id)
+                    {
+                        Some(zone) => zone,
+                        None => {
+                            CommandManager::send_error_text(
+                                self,
+                                out,
+                                "You are not in a dominion zone",
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            match crate::systems::housing::dominion::declare::cancel(server, zone) {
+                Ok(()) => CommandManager::send_normal_text(
+                    self,
+                    out,
+                    &format!("Zone {zone}: siege declaration cancelled"),
+                ),
+                Err(error) => {
+                    CommandManager::send_error_text(self, out, &error.to_string());
+                }
+            }
+            return Ok(());
+        }
+        if args[0] == "clock" {
+            // The test clock only drives the calendar; without the calendar it could only
+            // make the persisted siege deadlines disagree with what the client shows.
+            if !server
+                .systems
+                .housing
+                .calendar
+                .settings(&server.config.housing)
+                .enabled
+            {
+                CommandManager::send_error_text(
+                    self,
+                    out,
+                    "The siege calendar is disabled (Housing.SiegeCalendar)",
+                );
+                return Ok(());
+            }
+            let value = match args.get(1).map(String::as_str) {
+                Some(value) if value.eq_ignore_ascii_case("off") || value == "0" => None,
+                Some(value) => match try_parse::<i64>(value) {
+                    Some(now) if now >= 0 => Some(now),
+                    _ => {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    }
+                },
+                None => {
+                    CommandManager::send_default_help_text(self, out);
+                    return Ok(());
+                }
+            };
+            server.systems.housing.calendar.set_clock(value);
+            CommandManager::send_normal_text(
+                self,
+                out,
+                &format!(
+                    "Siege calendar clock: {}",
+                    value.map_or_else(|| "real time".to_string(), |now| now.to_string())
+                ),
+            );
             return Ok(());
         }
         let Some(zone) = args.get(1).and_then(|v| try_parse::<u32>(v)) else {
@@ -403,7 +527,13 @@ impl Command for Dominion {
                 let Some(end) = start.checked_add(duration) else {
                     return Ok(());
                 };
-                manager.schedule_siege(zone, attacker, start, end, now)
+                // Freeze the defender's authored roster row into the siege record.
+                let limits = previous
+                    .as_ref()
+                    .and_then(|state| reinforce::limits(server, state.owner_expedition_id));
+                let limits =
+                    limits.unwrap_or(crate::systems::housing::dominion::SiegeLimits::NATIVE);
+                manager.schedule_siege_with_limits(zone, attacker, start, end, now, limits)
             }
             "register" => {
                 let Some(name) = args.get(2) else {
@@ -422,7 +552,11 @@ impl Command for Dominion {
                         return Ok(());
                     }
                 };
-                manager.register_participant(zone, character, expedition, side, now)
+                let cap = previous.as_ref().map_or(
+                    crate::systems::housing::dominion::ParticipantCap::NATIVE,
+                    |state| reinforce::participant_cap(state, side),
+                );
+                manager.register_participant_with_cap(zone, character, expedition, side, now, cap)
             }
             "unregister" => {
                 let Some(name) = args.get(2) else {
@@ -474,10 +608,10 @@ impl Command for Dominion {
     }
 
     fn get_command_line_help(&self) -> String {
-        "info | collect <zoneGroupId> | schedule <zoneGroupId> <attackerExpeditionId> <startDelaySeconds> | register <zoneGroupId> <character> attacker|defender | unregister <zoneGroupId> <character> | headquarters <zoneGroupId> attacker|defender <doodadObjectId> | cancel <zoneGroupId>".into()
+        "info | clock <unixSeconds|off> | collect <zoneGroupId> | schedule <zoneGroupId> <attackerExpeditionId> <startDelaySeconds> | register <zoneGroupId> <character> attacker|defender | unregister <zoneGroupId> <character> | headquarters <zoneGroupId> attacker|defender <doodadObjectId> | cancel <zoneGroupId>".into()
     }
     fn get_command_help_text(&self) -> String {
-        "Manage explicit siege schedules and participants using the original zone duration. Collect actual property tax revenue as the current guild leader. Bind an authored headquarters in its current siege phase; bindings must be restored after server restart.".into()
+        "Manage explicit siege schedules and participants using the original zone duration. Set a non-persistent test clock for the weekly siege calendar, or restore real time with 'off'. Collect actual property tax revenue as the current guild leader. Bind an authored headquarters in its current siege phase; bindings must be restored after server restart.".into()
     }
 }
 
@@ -489,8 +623,8 @@ mod tests {
     use crate::data::GameData;
     use crate::models::house::House;
     use crate::opcodes::sc;
-    use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
-    use crate::systems::housing::dominion::{DominionError, DominionState};
+    use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate, SiegeSettings};
+    use crate::systems::housing::dominion::{DominionError, DominionState, SiegeLimits};
     use crate::systems::skills::data::BuffTemplate;
     use crate::systems::social::expedition::{
         member_from_character, Expedition, ExpeditionRolePolicy,
@@ -509,6 +643,10 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with(|_| {})
+    }
+
+    fn fixture_with(configure: impl FnOnce(&mut GameData)) -> Fixture {
         let mut data = GameData::empty();
         data.zones.zones.insert(
             TEST_ZONE,
@@ -548,6 +686,7 @@ mod tests {
                 ..Default::default()
             });
         }
+        configure(&mut data);
         let server = harness::server_with(data);
         server.systems.services.commands.access_levels.load(&[
             ("joinsiege".into(), 0),
@@ -821,7 +960,7 @@ mod tests {
         }
         let full = state(&f);
         let (_, out) = harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
-        assert!(out[0].contains("100-character capacity"));
+        assert!(out[0].contains("participant capacity"));
         assert_eq!(state(&f), full);
         harness::run_at(&f.server, &f.defender.p, "joinsiege 25", 0).await;
         assert!(state(&f)
@@ -846,6 +985,107 @@ mod tests {
                 .count(),
             100
         );
+    }
+
+    #[tokio::test]
+    async fn joinsiege_enforces_the_data_caps_with_the_clients_error_ids() {
+        let mut f = fixture_with(|data| {
+            data.systems.housing.castles.siege_settings.insert(
+                1,
+                SiegeSettings {
+                    total_castles: 1,
+                    num_defenders: 50,
+                    num_reinforcements: 20,
+                },
+            );
+        });
+        let now = chrono::Utc::now().timestamp();
+        // The fixture scheduled with the native defaults; replace it with a siege that froze
+        // the authored row (1 held castle: 50 defenders + 20 reinforcements), as the GM
+        // schedule command now does.
+        f.server
+            .systems
+            .housing
+            .dominions
+            .cancel_siege(ZONE, now)
+            .unwrap();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege_with_limits(
+                ZONE,
+                20,
+                now,
+                now + 3_600,
+                now,
+                SiegeLimits { ni: 50, nr: 70 },
+            )
+            .unwrap();
+        // The authority itself still allows the native 100; the command applies the frozen
+        // cap.
+        for character in 1_000..1_070 {
+            f.server
+                .systems
+                .housing
+                .dominions
+                .register_participant(ZONE, character, 20, SiegeSide::Attacker, now)
+                .unwrap();
+        }
+        for character in 2_000..2_050 {
+            f.server
+                .systems
+                .housing
+                .dominions
+                .register_participant(ZONE, character, 10, SiegeSide::Defender, now)
+                .unwrap();
+        }
+        let error_ids = |pc: &mut harness::Pc| -> Vec<i16> {
+            pc.packets()
+                .into_iter()
+                .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+                .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+                .collect()
+        };
+        harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
+        assert_eq!(
+            error_ids(&mut f.attacker),
+            vec![crate::systems::economy::error_message::SIEGE_PARTICIPANT_FULL]
+        );
+        assert!(!state(&f)
+            .siege
+            .as_ref()
+            .unwrap()
+            .participants
+            .contains_key(&1));
+
+        harness::run_at(&f.server, &f.defender.p, "joinsiege 25", 0).await;
+        assert_eq!(
+            error_ids(&mut f.defender),
+            vec![crate::systems::economy::error_message::SIEGE_BLOCK_DEFENSE_REINFORCE]
+        );
+        assert!(!state(&f)
+            .siege
+            .as_ref()
+            .unwrap()
+            .participants
+            .contains_key(&2));
+
+        // The wave opens the defender's remaining 20 slots.
+        let siege_id = state(&f).siege.as_ref().unwrap().siege_id;
+        f.server
+            .systems
+            .housing
+            .dominions
+            .mark_reinforced(ZONE, siege_id, now, now)
+            .unwrap();
+        harness::run_at(&f.server, &f.defender.p, "joinsiege 25", 0).await;
+        assert!(state(&f)
+            .siege
+            .as_ref()
+            .unwrap()
+            .participants
+            .contains_key(&2));
     }
 
     #[tokio::test]
@@ -936,5 +1176,35 @@ mod tests {
         world.remove_object(replacement.obj_id);
         harness::run_at(&f.server, &replacement, "joinsiege 25", 0).await;
         assert_eq!(state(&f), empty);
+    }
+
+    #[tokio::test]
+    async fn test_clock_requires_the_calendar_and_only_moves_the_calendar() {
+        let f = fixture();
+        let (_, out) = harness::run(&f.server, &f.attacker.p, "dominion clock 2000000000").await;
+        assert_eq!(
+            out,
+            [harness::error(
+                "dominion",
+                "The siege calendar is disabled (Housing.SiegeCalendar)"
+            )]
+        );
+        assert_eq!(f.server.systems.housing.calendar.clock(), None);
+
+        f.server
+            .config
+            .update(|config| config.housing.siege_calendar = true);
+        let (_, out) = harness::run(&f.server, &f.attacker.p, "dominion clock 2000000000").await;
+        assert_eq!(
+            out,
+            [harness::normal(
+                "dominion",
+                "Siege calendar clock: 2000000000"
+            )]
+        );
+        assert_eq!(
+            f.server.systems.housing.calendar.clock(),
+            Some(2_000_000_000)
+        );
     }
 }

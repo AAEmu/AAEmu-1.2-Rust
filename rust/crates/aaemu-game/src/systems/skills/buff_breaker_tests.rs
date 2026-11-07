@@ -319,6 +319,7 @@ fn channel(server: &GameServer, owner: &WorldObject, matching: bool) -> (SkillRe
             kind: SkillTaskKind::EndChanneling { channel_doodad: 0 },
             skill: skill.clone(),
             cancel: cancel.clone(),
+            extend_ms: 0,
         });
     });
     (skill, cancel)
@@ -406,6 +407,13 @@ fn mount_data(d: &mut GameData) {
             scale: 1.0,
             ..Default::default()
         },
+    );
+    d.systems.vehicles.model_bindings.insert(
+        77,
+        vec![
+            crate::systems::vehicles::data::attach_point::DRIVER,
+            crate::systems::vehicles::data::attach_point::PASSENGER0,
+        ],
     );
     d.items.templates.insert(
         60_091,
@@ -607,6 +615,7 @@ async fn buff_breakers_cancel_only_the_corresponding_channel_without_reentering_
             kind: SkillTaskKind::EndChanneling { channel_doodad: 0 },
             skill: skill.clone(),
             cancel: cancel.clone(),
+            extend_ms: 0,
         });
     });
     let template = server.game_data.systems.skills.buff(GLIDER).unwrap();

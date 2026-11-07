@@ -631,6 +631,25 @@ impl MailManager {
         self.state().all.get_mut(id).map(f)
     }
 
+    /// Updates the cached sender / receiver names of a renamed character. Returns the number of
+    /// changed name fields. The caller owns `SaveManager::transaction_lock`, so no save can
+    /// snapshot the old names after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut st = self.state();
+        let mut changed = 0;
+        for (_, mail) in st.all.iter_mut() {
+            if mail.header.sender_id == character_id && mail.header.sender_name != new_name {
+                mail.header.sender_name = new_name.to_string();
+                changed += 1;
+            }
+            if mail.header.receiver_id == character_id && mail.receiver_name != new_name {
+                mail.receiver_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// `AllPlayerMails.Count`.
     pub fn count(&self) -> usize {
         self.state().all.len()
@@ -1246,7 +1265,12 @@ fn notify_new_mail_at(
     // If unread and ready to deliver
     if m.header.status != mail_status::READ && m.body.recv_date <= time && !m.is_delivered {
         if let Some(player) = server.world.character_by_name(receiver_name) {
-            // TODO: Mia mail stuff
+            // Mia mail (types 11 MIA_SEND / 12 MIA_RECV) is the separate commercial mailbox in
+            // the 1.2 client (`mailbox/comercialmail/*`, `X2MiaMail`, `unreadMiaMail`), fed by
+            // the cash shop path, not by this notifier. The C# branch was empty as well.
+            // Whether this packet should carry `unreadMiaMail` instead of the ordinary count is
+            // capture-pending (case `MIA-MAIL-1`); the existing `update_received` routing
+            // (MIA_RECV -> mia_received, everything else -> received) is therefore unchanged.
             let add_body = m.mail_type == mail_type::CHARGED;
             let count = {
                 let mut c = player.data();

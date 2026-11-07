@@ -12,7 +12,10 @@
 use rand::Rng;
 
 use super::data::DoodadData;
-use super::packets::{error_message, error_msg, SCDoodadPhaseChangedPacket, SCDoodadSoundPacket};
+use super::packets::{
+    error_message, error_msg, SCDoodadPhaseChangedPacket, SCDoodadPhaseMsgPacket,
+    SCDoodadSoundPacket,
+};
 use super::runtime::DoodadCtx;
 use super::templates::{doodad_func_group_kind, DoodadFunc, FuncTemplate};
 use super::{db, funcs, phase_funcs, tasks};
@@ -94,20 +97,74 @@ pub fn refresh_phase_caches(data: &DoodadData, d: &mut Doodad) {
 /// The `FuncGroupId` setter: on a change, `PhaseTime = now`, `Save()` when persistent, and the
 /// current funcs / phase funcs / ToD trigger caches.
 pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
-    let save = {
+    let (save, previous) = {
         let mut d = doodad.data();
         if value == d.func_group_id {
             return;
         }
+        let previous = d.func_group_id;
         d.func_group_id = value;
         d.phase.interaction_counts.clear();
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
-        persistent
+        (persistent, previous)
     };
+    // The phase a doodad leaves no longer owns its area triggers. A duration-0
+    // `DoodadFuncClout` (3410 safe zone 720, 4307 clout 992/1008) would otherwise stay until
+    // the doodad is deleted, and every warmup would add another copy.
+    crate::systems::npcs::area_trigger::remove_doodad_func_group_triggers(server, doodad, previous);
     if save {
         db::save(server, doodad);
+    }
+    // WP-S3 period phase funcs only look at doodads whose current phase has a SiegePeriod
+    // function; keep that index current without polling every world object.
+    server
+        .systems
+        .npcs
+        .doodads
+        .siege_phase
+        .refresh(server, doodad);
+    notify_phase_msg(server, doodad, value);
+}
+
+/// `SCDoodadPhaseMsg` for a func group whose `phase_msg` is authored (WP-UI1).
+///
+/// INFERRED trigger (the C# never sent the packet): a real func-group change of a doodad that is
+/// already in the world. The spawn-time initial group (`DoodadManager.Create`'s `GetFuncGroupId`
+/// and the saved-state restore, `FuncGroupId = phaseId`) is set before the doodad is spawned
+/// (`region().is_none()`), so it is not announced. Recipients: every viewer for a normal group
+/// (the same broadcast as `SCDoodadPhaseChanged`); every character whose zone key is the
+/// doodad's for `is_msg_to_zone`, because the client needs no local doodad in that mode
+/// (`FUN_3902e0f0`). INFERRED: "zone" is the doodad's zone key, not the zone group.
+fn notify_phase_msg(server: &GameServer, doodad: &DoodadRef, func_group_id: u32) {
+    let Some(group) = server
+        .game_data
+        .systems
+        .npcs
+        .doodad
+        .func_group(func_group_id)
+    else {
+        return;
+    };
+    // Empty / whitespace-only messages (the data has `' '` rows) send nothing.
+    if group.phase_msg.trim().is_empty() || doodad.region().is_none() {
+        return;
+    }
+    let packet = SCDoodadPhaseMsgPacket {
+        doodad_obj_id: doodad.obj_id,
+        func_group_id,
+    };
+    let obj = WorldObject::from(doodad);
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    if group.is_msg_to_zone {
+        let pos = world.world_pos_rot(&obj);
+        let zone_key = world.template.zone_id_at(pos.x, pos.y);
+        server.world.broadcast_to_zone(zone_key, &packet);
+    } else {
+        crate::world::broadcast(&world, obj, &packet, false);
     }
 }
 
@@ -254,6 +311,68 @@ pub fn doodad_has_matching_climate(ctx: &DoodadCtx<'_>) -> bool {
         .contains(&template.climate_id)
 }
 
+/// The buff id from `blocked_child_doodads` that blocks a player's use of `doodad`, if any: the
+/// doodad's parent unit carries an active buff of that template id and its row lists this doodad
+/// template. `Transform.parent_obj_id` is the attach parent (`attach_child`); the doodad's own
+/// `parent_obj_id` is the fallback for paths that only set the wire field.
+pub fn blocking_parent_buff(
+    server: &GameServer,
+    world: &WorldInstance,
+    doodad: &DoodadRef,
+) -> Option<u32> {
+    let (template_id, parent_obj_id) = {
+        let d = doodad.data();
+        let parent = if d.transform.parent_obj_id != 0 {
+            d.transform.parent_obj_id
+        } else {
+            d.parent_obj_id
+        };
+        (d.template_id, parent)
+    };
+    if parent_obj_id == 0 {
+        return None;
+    }
+    let parent = world.object(parent_obj_id)?;
+    let blocked = &server.game_data.systems.skills.blocked_child_doodads;
+    parent
+        .with_unit(|u| {
+            u.unit()
+                .buffs
+                .effects
+                .iter()
+                .map(|b| b.template.id)
+                .find(|&buff_id| blocked.blocks(buff_id, template_id))
+        })
+        .flatten()
+}
+
+/// Refuses a blocked `blocked_child_doodads` child doodad use by a player: the existing
+/// `NO_INTERACTION_AVAILABLE` error (no new packet) and `Character.SkillCancelled`, so the
+/// skills refund the cast's item / labor cost. Returns true when the caller must stop.
+pub fn refuse_blocked_child_doodad(
+    server: &GameServer,
+    world: &WorldInstance,
+    doodad: &DoodadRef,
+    caster: Option<&WorldObject>,
+) -> bool {
+    let Some(player) = caster.and_then(WorldObject::as_player) else {
+        return false;
+    };
+    let Some(buff_id) = blocking_parent_buff(server, world, doodad) else {
+        return false;
+    };
+    let (template_id, obj_id) = {
+        let d = doodad.data();
+        (d.template_id, doodad.obj_id)
+    };
+    tracing::debug!(
+        "Use refused: doodad {obj_id} (template {template_id}) is blocked by buff {buff_id} on its parent"
+    );
+    player.send(error_msg(error_message::NO_INTERACTION_AVAILABLE));
+    funcs::skills_hook(server).cancel_skill(server, player);
+    true
+}
+
 /// A use that meets another thread's phase reservation is dropped (the C# `Doodad.Use` waited on
 /// the doodad lock and then ran). A dropped use of an instance door left the player pressing it
 /// with no answer at all, so the player is told to try again.
@@ -296,6 +415,12 @@ pub fn use_doodad(
     let Some(caster) = caster else {
         return;
     };
+
+    // `blocked_child_doodads` (buff 6064 -> 6560, buff 6245 -> 3446) is a parent-side
+    // interaction block, before any func / phase func runs.
+    if refuse_blocked_child_doodad(server, &ctx.world, &ctx.doodad, Some(caster)) {
+        return;
+    }
 
     // Fix #1443 (defense in depth): refuse interaction with a doodad scheduled for despawn.
     if server
@@ -522,6 +647,58 @@ pub fn despawn_or_delete(ctx: &DoodadCtx<'_>) {
     }
 }
 
+/// The result of an externally driven phase change (a WP-S3 period boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalPhaseChange {
+    /// The doodad was in `expected_group` and the change ran.
+    Applied,
+    /// The doodad is deleted or no longer in `expected_group`: nothing to do.
+    Skipped,
+    /// Another thread holds the phase-operation reservation: retry later.
+    Busy,
+}
+
+/// An externally driven phase change (a period boundary, WP-S3): only while the doodad is
+/// still in `expected_group`, checked and applied under one phase-operation reservation.
+pub(crate) fn do_change_phase_if_group(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    expected_group: u32,
+    next_phase: i32,
+) -> ExternalPhaseChange {
+    let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        return ExternalPhaseChange::Busy;
+    };
+    {
+        let d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id != expected_group {
+            return ExternalPhaseChange::Skipped;
+        }
+    }
+    // A nested `Operation::enter` on this thread is allowed.
+    do_change_phase(ctx, caster, next_phase);
+    ExternalPhaseChange::Applied
+}
+
+/// [`despawn_or_delete`] for an externally driven final phase, under the same expected-group
+/// check.
+pub(crate) fn despawn_or_delete_if_group(
+    ctx: &DoodadCtx<'_>,
+    expected_group: u32,
+) -> ExternalPhaseChange {
+    let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        return ExternalPhaseChange::Busy;
+    };
+    {
+        let d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id != expected_group {
+            return ExternalPhaseChange::Skipped;
+        }
+    }
+    despawn_or_delete(ctx);
+    ExternalPhaseChange::Applied
+}
+
 /// `DoPhaseFuncs(caster, ref nextPhase)`: `true` = the phase did not pass (abort).
 fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase: &mut i32) -> bool {
     if *next_phase <= 0 {
@@ -674,3 +851,7 @@ mod tests;
 #[cfg(test)]
 #[path = "guard_time_tests.rs"]
 mod guard_time_tests;
+
+#[cfg(test)]
+#[path = "blocked_child_tests.rs"]
+mod blocked_child_tests;

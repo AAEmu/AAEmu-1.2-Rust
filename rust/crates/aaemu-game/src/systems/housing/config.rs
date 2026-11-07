@@ -23,7 +23,7 @@ impl crate::config::ConfigEnum for DominionPropertyTaxBase {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct HousingConfig {
     #[serde(
@@ -31,6 +31,69 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient_enum"
     )]
     pub dominion_property_tax_base: DominionPropertyTaxBase,
+    /// Drives the weekly siege periods from `siege_zones`/`siege_plans` instead of the
+    /// explicit GM schedule alone. Default off: the calendar is a server policy, not a
+    /// recovered 1.2 world-server setting. `Housing.SiegeCalendar`.
+    #[serde(rename = "siegecalendar", deserialize_with = "crate::config::lenient")]
+    pub siege_calendar: bool,
+    /// Offset of the `siege_zones` weekday/hour/minute columns, e.g. `+09:00`. Empty or
+    /// `local` uses the server's current local offset; the retail timezone is UNKNOWN.
+    /// `Housing.SiegeCalendarTimezone`.
+    #[serde(rename = "siegecalendartimezone")]
+    pub siege_calendar_timezone: String,
+    /// How many territories one expedition may own before a new claim is refused with
+    /// `TOO_MANY_OWNED_DOMINIONS` (441). The 1.2 limit is UNKNOWN; `siege_settings` has
+    /// reinforcement rows for 0..=10 held castles, so 10 is the non-binding default.
+    /// `Housing.DominionClaimLimit`.
+    #[serde(
+        rename = "dominionclaimlimit",
+        default = "default_dominion_claim_limit",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub dominion_claim_limit: u32,
+    /// World-space offset from the lodestone where the server spawns the defender's HQ
+    /// doodad (3410) at the warmup of a declared siege. The retail rule is UNKNOWN; the
+    /// default `[0, 0, 0]` disables the automatic spawn and keeps the GM-bound HQ behaviour.
+    /// `Housing.DefenseHqOffset`.
+    #[serde(rename = "defensehqoffset")]
+    pub defense_hq_offset: [f32; 3],
+    /// Gate merchant packs 224/225 ("siege-time goods", defense / attack side) to the
+    /// warmup and siege periods of the NPC's territory and to registered participants of
+    /// the pack's side. The rule is INFERRED from the 1.2 pack names only (`merchant_packs`:
+    /// "defense-side goods sold during a siege" / "siege-side goods sold during a siege");
+    /// there is no capture of the retail restriction or its side rule. `false` (default)
+    /// keeps the previous behaviour: both packs sell at any time to anyone.
+    /// `Housing.SiegeShopGate`.
+    #[serde(rename = "siegeshopgate", deserialize_with = "crate::config::lenient")]
+    pub siege_shop_gate: bool,
+    /// Apply the 1.2 client's place-skin terrain material rule to player doodad placements:
+    /// the terrain material under the spot must be one of the template's
+    /// `doodad_place_skins` kinds, else `DOODAD_SIM_AREA` (276). `false` (default) keeps the
+    /// previous behaviour (no terrain material check). See `PORTING.md`.
+    /// `Housing.PlacementStrictSurface`.
+    #[serde(
+        rename = "placementstrictsurface",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub placement_strict_surface: bool,
+}
+
+fn default_dominion_claim_limit() -> u32 {
+    10
+}
+
+impl Default for HousingConfig {
+    fn default() -> Self {
+        Self {
+            dominion_property_tax_base: DominionPropertyTaxBase::default(),
+            siege_calendar: false,
+            siege_calendar_timezone: String::new(),
+            dominion_claim_limit: default_dominion_claim_limit(),
+            defense_hq_offset: [0.0; 3],
+            siege_shop_gate: false,
+            placement_strict_surface: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -58,5 +121,73 @@ mod tests {
             "Housing": { "DominionPropertyTaxBase": "unknown" }
         }))
         .is_err());
+    }
+
+    #[test]
+    fn dominion_claim_limit_defaults_to_ten_and_binds_numbers_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.dominion_claim_limit, 10);
+        for value in [serde_json::json!(1), serde_json::json!("1")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "DominionClaimLimit": value }
+            }))
+            .unwrap();
+            assert_eq!(config.housing.dominion_claim_limit, 1);
+        }
+    }
+
+    #[test]
+    fn defense_hq_offset_defaults_to_disabled_and_binds_three_numbers() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.defense_hq_offset, [0.0, 0.0, 0.0]);
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": { "DefenseHqOffset": [10.5, -4.0, 2.0] }
+        }))
+        .unwrap();
+        assert_eq!(config.housing.defense_hq_offset, [10.5, -4.0, 2.0]);
+    }
+
+    #[test]
+    fn siege_shop_gate_defaults_off_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.siege_shop_gate);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeShopGate": value }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_shop_gate);
+        }
+    }
+
+    #[test]
+    fn placement_strict_surface_defaults_off_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.placement_strict_surface);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "PlacementStrictSurface": value }
+            }))
+            .unwrap();
+            assert!(config.housing.placement_strict_surface);
+        }
+    }
+
+    #[test]
+    fn siege_calendar_binds_off_by_default_and_accepts_a_timezone() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.siege_calendar);
+        assert!(default.housing.siege_calendar_timezone.is_empty());
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": {
+                    "SiegeCalendar": value,
+                    "SiegeCalendarTimezone": "+09:00"
+                }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_calendar);
+            assert_eq!(config.housing.siege_calendar_timezone, "+09:00");
+        }
     }
 }

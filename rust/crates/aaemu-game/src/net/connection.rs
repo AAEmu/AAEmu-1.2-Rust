@@ -36,21 +36,41 @@ pub enum PaymentMethodType {
     None = 5,
 }
 
-/// `AccountPayment` with its C# defaults (TODO in C#: load real payment info).
+impl PaymentMethodType {
+    /// The 1.2 `SCAccountInfo.payMethod` value (`FUN_397aeb90`); `None` for an unknown one.
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Premium),
+            3 => Some(Self::Demo),
+            5 => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// `AccountPayment` (the Rust server loads the real payment from `aaemu_game.accounts`; see
+/// `systems::services::premium`). The default is the owner decision of 2026-11-03: premium with
+/// no end date.
 #[derive(Debug, Clone)]
 pub struct AccountPayment {
     pub method: PaymentMethodType,
     pub location: i32,
     /// `DateTime.MinValue` -> 0.
     pub start_time: UnixTime,
-    /// `new DateTime(2030, 1, 1)`.
+    /// Unix seconds; `0` = no end date (permanent), as for the default premium plan. GM grants
+    /// always carry their own end.
     pub end_time: UnixTime,
 }
 
 impl AccountPayment {
-    /// `PremiumState`: premium method and `now` inside `[StartTime, EndTime]` (unix seconds).
+    /// `PremiumState`: premium method and `now` inside `[StartTime, EndTime]` (unix seconds),
+    /// where `EndTime == 0` means permanent. The C# used `new DateTime(2030, 1, 1)` as a
+    /// placeholder end for all accounts; the owner decided on 2026-11-03 that the configured
+    /// default premium is permanent.
     pub fn premium_state(&self, now: UnixTime) -> bool {
-        self.method == PaymentMethodType::Premium && now >= self.start_time && now <= self.end_time
+        self.method == PaymentMethodType::Premium
+            && now >= self.start_time
+            && (self.end_time == 0 || now <= self.end_time)
     }
 }
 
@@ -60,7 +80,7 @@ impl Default for AccountPayment {
             method: PaymentMethodType::Premium,
             location: 1,
             start_time: 0,
-            end_time: 1_893_456_000,
+            end_time: 0,
         }
     }
 }
@@ -286,6 +306,8 @@ pub struct GameConnection {
     account_id: Arc<AtomicU32>,
     last_ping_ms: Arc<AtomicI64>,
     pub state: GameState,
+    /// Cached copy of `AccountManager::state` (`systems::services::accounts`); the registry / MySQL
+    /// is the source of truth, refreshed at login and on every `CSListCharacter`.
     pub payment: AccountPayment,
     /// `Characters.Values` in insertion (load) order.
     pub characters: Vec<Character>,
@@ -301,6 +323,8 @@ pub struct GameConnection {
     closing: bool,
     /// `Debug:ReplyDelay` (`None` = off).
     delay: Option<Arc<ReplyDelayConn>>,
+    /// Last allowed chat time per chat-spam group (`FUN_393C2540`'s `lastSend` array).
+    pub chat_spam_last: [Option<std::time::Instant>; 15],
 }
 
 impl std::fmt::Debug for GameConnection {
@@ -353,6 +377,7 @@ impl GameConnection {
             commands,
             closing: false,
             delay: None,
+            chat_spam_last: [None; 15],
         };
         (conn, handle)
     }

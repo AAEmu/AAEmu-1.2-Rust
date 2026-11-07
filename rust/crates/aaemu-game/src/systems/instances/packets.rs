@@ -174,7 +174,51 @@ impl ClientPacket for CSInstanceLoadedPacket {
     }
 }
 
-/// `CSUnknownInstancePacket` (read and ignored).
+/// `CSSelectSysInstanceChannelPacket`: the channel the player picked in the system-dungeon
+/// dialog (`X2.EnterSystemDungeon` -> `FUN_3930c420` -> CS 0x13d). Local name; the 1.2 name is
+/// unverified. Writer `FUN_397bca60` (x2game.dll.c:1714704): `u32 instId` then the 3-byte
+/// `bc` doodad object id (`FUN_397acfc0(instId, doodadId)`), 7 bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CSSelectSysInstanceChannelPacket {
+    /// The world instance id of the picked channel (a row `instId` of SC 0x206).
+    pub inst_id: u32,
+    /// The entrance doodad the client opened the dialog with.
+    pub doodad_obj_id: u32,
+}
+
+impl ClientPacket for CSSelectSysInstanceChannelPacket {
+    const NAME: &'static str = "CSSelectSysInstanceChannelPacket";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
+        Ok(Self {
+            inst_id: s.read_u32()?,
+            doodad_obj_id: s.read_bc()?,
+        })
+    }
+
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if let Some(me) = conn.active_char.clone() {
+                crate::systems::npcs::doodad::funcs::world::select_sys_instance_channel(
+                    server,
+                    &me,
+                    self.inst_id,
+                    self.doodad_obj_id,
+                );
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `CSUnknownInstancePacket` 0x13e: a post-load notice of the world instance the client is in,
+/// not a channel pick (the pick is CS 0x13d; re-indun-interact Q1d). It is client-local: the
+/// server already knows the instance, so the notice is read and ignored at debug
+/// (`MISC-CS-1`; capture-pending if it ever needs an answer).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CSUnknownInstancePacket {
     pub kind: u16,
@@ -198,7 +242,15 @@ impl ClientPacket for CSUnknownInstancePacket {
         _server: &'a GameServer,
         _conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            tracing::debug!(
+                "CSUnknownInstance (post-load notice, ignored): kind {}, zoneId {}, instId {}",
+                self.kind,
+                self.zone_id,
+                self.inst_id
+            );
+            Ok(())
+        })
     }
 }
 
@@ -378,6 +430,10 @@ pub fn register(reg: &mut PacketRegistry) {
     );
     reg.register::<CSLeaveInstantGamePacket>(LEVEL_PLAIN, cs::CSLeaveInstantGamePacket);
     reg.register::<CSUnknownInstancePacket>(LEVEL_PLAIN, cs::CSUnknownInstancePacket);
+    reg.register::<CSSelectSysInstanceChannelPacket>(
+        LEVEL_PLAIN,
+        cs::CSSelectSysInstanceChannelPacket,
+    );
 }
 
 // ------------------------------------------------------------------------------------------
@@ -397,6 +453,76 @@ packet_def!(
 impl Marshal for SCProcessingInstancePacket {
     fn write(&self, s: &mut PacketStream) {
         s.write_i32(self.zone_id);
+    }
+}
+
+/// One channel row of [`SCSystemDungeonStatePacket`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemDungeonChannel {
+    /// 0-based; the client shows `index + 1`.
+    pub index: i32,
+    /// World instance id of the channel.
+    pub instance_id: u32,
+    /// Maximum players of the channel.
+    pub restrict: i32,
+    /// Players currently inside.
+    pub current: i32,
+}
+
+/// `SCSystemDungeonStatePacket` (1.2 opcode `SCUnkPacket15` 0x206): the channel list of a
+/// system dungeon, sent when a selective entrance of a `select_channel` dungeon is used.
+/// Reader `FUN_397b8c30` (x2game.dll.c:1711542): `u32 zoneKey ; i32 count` (the client
+/// clamps it to 0x20) `; count x { i32 index ; u32 instId ; i32 restrict ; i32 current }`.
+/// `zoneKey` is the `zones.id` of the entrance func (the client's `GetSystemDungeonName`
+/// lookup `FUN_397f2140` is keyed by it, and the record's `zone_key` is compared with the
+/// current zone).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SCSystemDungeonStatePacket {
+    pub zone_key: u32,
+    pub channels: Vec<SystemDungeonChannel>,
+}
+packet_def!(
+    SCSystemDungeonStatePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCUnkPacket15
+);
+impl Marshal for SCSystemDungeonStatePacket {
+    fn write(&self, s: &mut PacketStream) {
+        // The client reads at most 0x20 rows (FUN_397b8c30 clamps the count to 0x20).
+        let count = self.channels.len().min(0x20);
+        s.write_u32(self.zone_key).write_i32(count as i32);
+        for c in self.channels.iter().take(count) {
+            s.write_i32(c.index)
+                .write_u32(c.instance_id)
+                .write_i32(c.restrict)
+                .write_i32(c.current);
+        }
+    }
+}
+
+/// `SCSystemDungeonChannelPacket` (1.2 opcode `SCUnkPacket16` 0x207): the channel the player
+/// was loaded into, sent after the load. Reader `FUN_397b03b0` (x2game.dll.c:1704865):
+/// `i32 zoneId ; u32 instanceId ; i32 instanceIndex`; the client stores the index only when
+/// both the instance and the zone match the values of its last `SCLoadInstance`, so this must
+/// follow that load. `instanceIndex` is 0-based (the client's `GetInstanceIndex` adds 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCSystemDungeonChannelPacket {
+    /// The zone id the load sent (`SCLoadInstance.zoneId`).
+    pub zone_id: i32,
+    pub instance_id: u32,
+    /// 0-based channel index.
+    pub instance_index: i32,
+}
+packet_def!(
+    SCSystemDungeonChannelPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCUnkPacket16
+);
+impl Marshal for SCSystemDungeonChannelPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_i32(self.zone_id)
+            .write_u32(self.instance_id)
+            .write_i32(self.instance_index);
     }
 }
 
@@ -524,6 +650,10 @@ impl Marshal for SCInstantGameInviteTimeoutPacket {
 }
 
 /// `SCInviteToInstantGamePacket(zoneInstanceId, rulesetId, corps, qualifiedId)`.
+///
+/// The qualified id is the game's zone instance plus a per-game invitation counter; the client
+/// echoes it in `CSJoinInstantGame` / `CSEnteredInstantGameWorld` and a value that no longer
+/// matches the live invitation is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCInviteToInstantGamePacket {
     pub zone_instance_id: ZoneInstanceId,
@@ -794,6 +924,90 @@ impl Marshal for SCTowerDefWaveStartPacket {
     fn write(&self, s: &mut PacketStream) {
         self.key.write(s);
         s.write_u32(self.event_zone_id).write_u32(self.step);
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// Racing (defined only: nothing sends these yet, see WP-R2 / CAP-RACE-1 in PORTING.md)
+// ------------------------------------------------------------------------------------------
+
+/// Maximum rows the 1.2 client reads from `SCRacingResultPacket`: its reader (`FUN_397b0340`)
+/// loops `min(count, DAT_39a12644)` and the cap is 10.
+pub const RACING_RESULT_MAX_ROWS: usize = 10;
+
+/// `SCRaceCondPacket(rc, type, after)`: a race state change. The 1.2 reader (`FUN_397b88d0`)
+/// reads `u8` rc (stream slot 0x44), `u32` type (0x3c) and `u32` after (0x3c). `type` is
+/// INFERRED to be the race track id (`X2Racing.GetTrackName` takes the same id) and `after`
+/// the milliseconds until the next state (INFERRED from `race_tracks.*_delay`); the client
+/// state constants are 0 WAIT, 1 READY, 2 START, 3 PLAY, 4 CHECK, 5 END (`dll.c:938602`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCRaceCondPacket {
+    pub rc: u8,
+    pub track_id: u32,
+    pub after_ms: u32,
+}
+packet_def!(
+    SCRaceCondPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCRaceCondPacket
+);
+impl Marshal for SCRaceCondPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u8(self.rc)
+            .write_u32(self.track_id)
+            .write_u32(self.after_ms);
+    }
+}
+
+/// `SCRacingPacket(rc, record, v1)`: a checkpoint / split of the local run. The 1.2 reader
+/// (`FUN_397b8950`) reads `u8` rc (0x44), `u32` record (0x3c) and `i32` v1 (0x4c). `record` is
+/// INFERRED to be the elapsed milliseconds and `v1` the checkpoint index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCRacingPacket {
+    pub rc: u8,
+    pub record_ms: u32,
+    pub v1: i32,
+}
+packet_def!(
+    SCRacingPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCRacingPacket
+);
+impl Marshal for SCRacingPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u8(self.rc)
+            .write_u32(self.record_ms)
+            .write_i32(self.v1);
+    }
+}
+
+/// `SCRacingResultPacket(rows)`: the run standings. The 1.2 reader (`FUN_397b0340`) reads
+/// `i32` count, then `min(count, 10)` rows of `{u32 type, u32 record}` (`FUN_397a8870`); a
+/// longer list is truncated here (with a warning) so the client never sees a count it would
+/// not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SCRacingResultPacket {
+    pub rows: Vec<(u32, u32)>,
+}
+packet_def!(
+    SCRacingResultPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCRacingResultPacket
+);
+impl Marshal for SCRacingResultPacket {
+    fn write(&self, s: &mut PacketStream) {
+        let emitted = self.rows.len().min(RACING_RESULT_MAX_ROWS);
+        if self.rows.len() > emitted {
+            tracing::warn!(
+                rows = self.rows.len(),
+                emitted,
+                "SCRacingResultPacket rows exceed the 1.2 client cap; truncating"
+            );
+        }
+        s.write_i32(emitted as i32);
+        for (kind, record) in &self.rows[..emitted] {
+            s.write_u32(*kind).write_u32(*record);
+        }
     }
 }
 

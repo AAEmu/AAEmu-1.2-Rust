@@ -1,0 +1,8 @@
+{
+	"Loot": {
+		// Send SCItemAcquisitionPacket (kind 1) to the other team members in loot range when
+		// a character picks up loot. Default false: the kind-1 semantics and the loot sources
+		// are INFERRED from the 1.2 client (WP-IT1); enable after one live look at the chat tab.
+		"AnnounceToParty": false
+	}
+}

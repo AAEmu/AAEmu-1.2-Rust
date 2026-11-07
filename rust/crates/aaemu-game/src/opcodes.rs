@@ -257,6 +257,14 @@ pub mod cs {
     pub const CSEnterBeautySalonPacket: u16 = 0x12e;
     pub const CSRankCharacterPacket: u16 = 0x12f;
     pub const CSRequestSecondPasswordKeyTablesPacket: u16 = 0x125;
+    /// 1.2 client `0x126`, serializer `FUN_397b14d0` (`u32 keyId`, `u8 tableIndex`, string pass).
+    pub const CSCreateSecondPasswordPacket: u16 = 0x126;
+    /// 1.2 client `0x127`, serializer `FUN_397b1560` (`u32 keyId`, old/new table index, two strings).
+    pub const CSChangeSecondPasswordPacket: u16 = 0x127;
+    /// 1.2 client `0x128`, serializer `FUN_397b1650` (`u32 keyId`, `u8 tableIndex`, string pass).
+    pub const CSClearSecondPasswordPacket: u16 = 0x128;
+    /// 1.2 client `0x129`, serializer `FUN_397b16e0` (`u32 keyId`, `u8 tableIndex`, string pass).
+    pub const CSCheckSecondPasswordPacket: u16 = 0x129;
     pub const CSRankSnapshotPacket: u16 = 0x130;
     pub const CSRequestSpecialtyCurrentPacket: u16 = 0x131;
     pub const CSIdleStatusPacket: u16 = 0x132;
@@ -264,13 +272,26 @@ pub mod cs {
     pub const CSThisTimeUnpackItemPacket: u16 = 0x134;
     pub const CSPremiumServiceBuyPacket: u16 = 0x135;
     pub const CSPremiumServiceListPacket: u16 = 0x136;
+    /// 1.2 client `0x137` (serializer `FUN_397b17f0`, `i32 cashMoney`); WP-D implements it.
+    pub const CSICSBuyAAPointPacket: u16 = 0x137;
     pub const CSTakeAllAttachmentItemPacket: u16 = 0x139;
     pub const CSTakeScheduleItemPacket: u16 = 0x13b;
     pub const CSPremiumServiceMsgPacket: u16 = 0x13c;
+    /// System-dungeon channel pick (`X2.EnterSystemDungeon` after the SC 0x206 dialog).
+    /// Name unverified; 1.2 writer `FUN_397bca60` `{u32 instId, bc doodadObjId}`. The C# table
+    /// had no 1.2 opcode. Owner-approved exception to "never edit opcodes.rs".
+    pub const CSSelectSysInstanceChannelPacket: u16 = 0x13d;
     pub const CSUnknownInstancePacket: u16 = 0x13e;
     pub const CSSetupSecondPassword: u16 = 0x140;
-    pub const CSUpdateNationalTaxRatePacket: u16 = 0xfff;
-    pub const CSSetCraftingPayPacket: u16 = 0xfff;
+    /// National tax change `(u16 zoneGroup, u32 rate)`; the 1.2 client builder is
+    /// `FUN_392f42f0` (`local_14 = 0x13`), setter `FUN_397ab4d0`. The C# table had no
+    /// 1.2 opcode (0xfff). Owner-approved exception to "never edit opcodes.rs".
+    pub const CSUpdateNationalTaxRatePacket: u16 = 0x013;
+    /// `X2Craft.SetCraftingPay` sends this with `FUN_394d7230` (`local_14 = 0x8d`; the
+    /// doodad obj id at packet `+0xc` and the money at `+0x10` through `FUN_397b0ca0`). The
+    /// C# table had no 1.2 opcode (0xfff). Owner-approved exception to "never edit
+    /// opcodes.rs" (2026-11-05).
+    pub const CSSetCraftingPayPacket: u16 = 0x08d;
 
     /// `(opcode, name)` pairs, for logging unknown / not-yet-ported packets.
     pub const NAMES: &[(u16, &str)] = &[
@@ -289,6 +310,7 @@ pub mod cs {
         (0x00e, "CSLeaveExpeditionPacket"),
         (0x00f, "CSKickFromExpeditionPacket"),
         (0x012, "CSUpdateDominionTaxRatePacket"),
+        (0x013, "CSUpdateNationalTaxRatePacket"),
         (0x015, "CSFactionImmigrationInvitePacket"),
         (0x016, "CSFactionImmigrationInviteReplyPacket"),
         (0x017, "CSFactionImmigrateToOriginPacket"),
@@ -523,6 +545,10 @@ pub mod cs {
         (0x12e, "CSEnterBeautySalonPacket"),
         (0x12f, "CSRankCharacterPacket"),
         (0x125, "CSRequestSecondPasswordKeyTablesPacket"),
+        (0x126, "CSCreateSecondPasswordPacket"),
+        (0x127, "CSChangeSecondPasswordPacket"),
+        (0x128, "CSClearSecondPasswordPacket"),
+        (0x129, "CSCheckSecondPasswordPacket"),
         (0x130, "CSRankSnapshotPacket"),
         (0x131, "CSRequestSpecialtyCurrentPacket"),
         (0x132, "CSIdleStatusPacket"),
@@ -530,13 +556,14 @@ pub mod cs {
         (0x134, "CSThisTimeUnpackItemPacket"),
         (0x135, "CSPremiumServiceBuyPacket"),
         (0x136, "CSPremiumServiceListPacket"),
+        (0x137, "CSICSBuyAAPointPacket"),
         (0x139, "CSTakeAllAttachmentItemPacket"),
         (0x13b, "CSTakeScheduleItemPacket"),
         (0x13c, "CSPremiumServiceMsgPacket"),
+        (0x13d, "CSSelectSysInstanceChannelPacket"),
         (0x13e, "CSUnknownInstancePacket"),
         (0x140, "CSSetupSecondPassword"),
-        (0xfff, "CSUpdateNationalTaxRatePacket"),
-        (0xfff, "CSSetCraftingPayPacket"),
+        (0x08d, "CSSetCraftingPayPacket"),
     ];
 }
 

@@ -16,7 +16,7 @@ use crate::stream::opcodes::ct;
 use crate::stream::s2c::{
     TCCharNameQueriedPacket, TCItemUccDataPacket, TCJoinResponsePacket, TCUccCharNamePacket,
 };
-use crate::stream::ucc::active_character;
+use crate::stream::ucc::{active_player, can_pay, crest_printer_cost, CREST_STAMP_SKILL};
 
 /// A C->S stream packet: opcode, name and the body reader.
 pub trait StreamClientPacket: Sized + std::fmt::Debug {
@@ -348,6 +348,12 @@ client_packet!(
 );
 
 impl CTStartUploadEmblemStreamPacket {
+    /// `bc` must be a live doodad of the player's instance whose current func group is a crest
+    /// printer (`DoodadFuncStampMaker` creating Crest Ink), the player must be in reach of it,
+    /// and the printer row's cost must be there **before** any upload queue entry is made: the
+    /// money for a default pattern, the reagent for a custom image (`data_size > 0`), as the
+    /// client's `GetMakeUccConsumeInfo` shows. A refusal is a warning and a drop: the 1.2
+    /// refusal reply is UNKNOWN (CAP-UCC-1) and the stream connection stays open.
     pub async fn handle(self, server: &GameServer, conn: &mut StreamConnection) -> Result<()> {
         tracing::warn!(
             "Create UCC Crest, printer bc:{}, UccId:{}, dataSize:{}",
@@ -355,14 +361,87 @@ impl CTStartUploadEmblemStreamPacket {
             self.ucc_id,
             self.data_size
         );
-        // TODO (C#): check if bc points to a Crest Printer (and you are nearby)
-        let character = active_character(server, conn)?;
+        let player = active_player(server, conn)?;
+        if self.data_size < 0 {
+            tracing::warn!(
+                "CTStartUploadEmblemStream refused: negative data size {} (stream connection {})",
+                self.data_size,
+                conn.id
+            );
+            return Ok(());
+        }
+        let instance_id = player.data().unit.transform.instance_id;
+        let Some(doodad) = server.streams.world().doodad(instance_id, self.bc) else {
+            tracing::warn!(
+                "CTStartUploadEmblemStream refused: bc {} is not a live doodad of instance {} (stream connection {})",
+                self.bc,
+                instance_id,
+                conn.id
+            );
+            return Ok(());
+        };
+        let Some(cost) =
+            crest_printer_cost(&server.game_data.systems.npcs.doodad, doodad.func_group_id)
+        else {
+            tracing::warn!(
+                "CTStartUploadEmblemStream refused: doodad {} (template {}, func group {}) is not a crest printer (stream connection {})",
+                self.bc,
+                doodad.template_id,
+                doodad.func_group_id,
+                conn.id
+            );
+            return Ok(());
+        };
+        // Reach: the same func-skill rule the doodad interaction uses (skill 14435 + the 15 m
+        // allowance). The handle comes from the real world (the snapshot above is the stream
+        // lookup); in production both are the same live object.
+        let Some(doodad_ref) = server
+            .world
+            .world(instance_id)
+            .and_then(|world| world.doodad(self.bc))
+        else {
+            tracing::warn!(
+                "CTStartUploadEmblemStream refused: doodad {} is not live in instance {} (stream connection {})",
+                self.bc,
+                instance_id,
+                conn.id
+            );
+            return Ok(());
+        };
+        if !crate::systems::npcs::doodad::packets::in_func_reach(
+            server,
+            &player,
+            &doodad_ref,
+            CREST_STAMP_SKILL,
+        ) {
+            tracing::warn!(
+                "CTStartUploadEmblemStream refused: player is out of reach of crest printer {} (stream connection {})",
+                self.bc,
+                conn.id
+            );
+            return Ok(());
+        }
+        let custom = self.data_size > 0;
+        if !can_pay(&player, &cost, custom) {
+            tracing::warn!(
+                "CTStartUploadEmblemStream refused: the default-pattern money ({}) or the custom-image reagent ({} x {}) is missing for crest printer {} (stream connection {})",
+                cost.consume_money,
+                cost.consume_item_id,
+                cost.consume_count,
+                self.bc,
+                conn.id
+            );
+            return Ok(());
+        }
         let mut ucc = self.ucc;
-        ucc.uploader_id = character.id;
-        if self.data_size == 0 {
-            server.streams.ucc.add_default_ucc(conn, ucc)
+        ucc.uploader_id = player.data().id;
+        if custom {
+            server
+                .streams
+                .ucc
+                .start_upload(conn, self.data_size, ucc, cost)
         } else {
-            server.streams.ucc.start_upload(conn, self.data_size, ucc)
+            server.streams.ucc.add_default_ucc(conn, ucc, cost)
         }
     }
 }

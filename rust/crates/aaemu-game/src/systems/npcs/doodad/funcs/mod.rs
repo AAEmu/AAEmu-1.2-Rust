@@ -49,6 +49,9 @@ pub mod error_message {
     pub const INTERACTION_RECOVER_PARENT: i16 = 14;
     pub const BAG_FULL: i16 = 25;
     pub const NOT_ENOUGH_ITEM: i16 = 27;
+    /// The 1.2 client's own message for a coin-item purchase it cannot afford
+    /// (`FUN_393bac20` sends `SCErrorMsg(0x1e3)` = `not_enough_coin`).
+    pub const NOT_ENOUGH_COIN: i16 = 483;
     pub const STORE_INVALID_ITEM: i16 = 87;
     pub const BAG_INVALID_ITEM: i16 = 181;
     pub const FAILED_TO_USE_ITEM: i16 = 207;
@@ -58,6 +61,7 @@ pub mod error_message {
     pub const BACKPACK_OCCUPIED: i16 = 315;
     pub const COFFER_IN_USE: i16 = 329;
     pub const STORE_BACKPACK_NOGOODS: i16 = 361;
+    pub const STORE_ONE_TIME_SALE: i16 = 752;
 }
 
 /// `Item.Coins` (`DoodadFuncLootItem.ItemId == 500` gives money).
@@ -65,18 +69,21 @@ pub const ITEM_COINS: u32 = 500;
 
 /// `DoodadFunc.Use(caster, owner, skillId, nextPhase)` → the template's `Use`. Phase func
 /// templates (`is_phase_func`) have no `DoodadFuncTemplate.Use` and are ignored.
+///
+/// Returns `false` only when the func did not run or a `DoodadFuncPurchase` did not grant its
+/// item (the other funcs have no result the caller needs).
 pub fn use_func(
     t: &FuncTemplate,
     ctx: &DoodadCtx<'_>,
     caster: Option<&WorldObject>,
     skill_id: u32,
     next_phase: i32,
-) {
+) -> bool {
     let Some(_operation) = super::phase::Operation::enter(&ctx.doodad) else {
-        return;
+        return false;
     };
     if !super::gathering::allows_template(ctx.server, &ctx.doodad, t, skill_id, caster) {
-        return;
+        return false;
     }
     use FuncTemplate as F;
     match t {
@@ -85,7 +92,7 @@ pub fn use_func(
         F::LootPack(f) => items::loot_pack(f, ctx, caster, skill_id),
         F::RecoverItem(f) => items::recover_item(f, ctx, caster, skill_id, next_phase),
         F::RemoveItem(f) => items::remove_item(f, ctx, caster),
-        F::Purchase(f) => items::purchase(f, ctx, caster),
+        F::Purchase(f) => return items::purchase(f, ctx, caster),
         F::BuyFish(f) => items::buy_fish(f, ctx, caster),
         F::ConvertFish(f) => items::convert_fish_with_id(ctx, caster, f.id),
         F::CleanupLogicLink(_) => {
@@ -189,24 +196,18 @@ pub fn use_func(
             tracing::trace!("DoodadFuncPuzzleRoll");
             set_to_next_phase(ctx, true);
         }
-        // --- C# stubs (logging only) ---
-        F::EvidenceItemLoot(_) => tracing::warn!("DoodadFuncEvidenceItemLoot"),
-        F::TreeByProductsCollect(_) => tracing::trace!("DoodadFuncTreeByproductsCollect"),
-        F::AreaTrigger(_)
-        | F::AuctionUi(_)
-        | F::BankUi(_)
-        | F::Bubble(_)
-        | F::Butcher(_)
+        // Gathering chains: the 1.2 tables only carry the func id (`doodad_func_butchers`,
+        // `doodad_func_fruit_picks`, ...), and the authored loot / depletion / regrowth
+        // lives in the next func group (e.g. apple tree 317: FruitPick 27 -> 3278 LootItem
+        // -> 2215; 20-32 funcs of each kind lead to a `LootItem` group). The C# bodies only
+        // logged, so a player harvesting such a doodad got nothing and the phase never
+        // advanced. A player caster advances when the row has an authored next phase; a row
+        // without one (`NULL`/`-1`/0) keeps the old behaviour. The interaction skill that
+        // opened the cast already pays its own cost, so no tool or labor gate is added here
+        // (INFERRED from the authored chains; see PORTING.md).
+        F::Butcher(_)
         | F::Catch(_)
         | F::CerealHarvest(_)
-        | F::Climb(_)
-        | F::CofferPerm(_)
-        | F::CraftAct(_)
-        | F::CraftCancel(_)
-        | F::CraftGetItem(_)
-        | F::CraftInfo(_)
-        | F::CraftPack(_)
-        | F::CraftStart(_)
         | F::CropHarvest(_)
         | F::CrystalCollect(_)
         | F::DairyCollect(_)
@@ -217,11 +218,36 @@ pub fn use_func(
         | F::FiberCollect(_)
         | F::FruitPick(_)
         | F::GassExtract(_)
-        | F::HousingArea(_)
-        | F::InsertCounter(_)
         | F::MachinePartsCollect(_)
         | F::MedicalingredientMine(_)
         | F::Mow(_)
+        | F::PlantCollect(_)
+        | F::SeedCollect(_)
+        | F::SkinOff(_)
+        | F::SoilCollect(_)
+        | F::SpiceCollect(_)
+        | F::TreeByProductsCollect(_) => {
+            tracing::trace!("{} next phase {next_phase}", t.func_type());
+            set_to_next_phase(ctx, is_player(caster) && next_phase > 0);
+        }
+        // --- C# stubs (logging only) ---
+        // A phase-func contribution for the crime system (`social/bridges.rs`); the `Use`
+        // arm has nothing to answer.
+        F::EvidenceItemLoot(_) => tracing::trace!("DoodadFuncEvidenceItemLoot"),
+        F::AreaTrigger(_)
+        | F::AuctionUi(_)
+        | F::BankUi(_)
+        | F::Bubble(_)
+        | F::Climb(_)
+        | F::CofferPerm(_)
+        | F::CraftAct(_)
+        | F::CraftCancel(_)
+        | F::CraftGetItem(_)
+        | F::CraftInfo(_)
+        | F::CraftPack(_)
+        | F::CraftStart(_)
+        | F::HousingArea(_)
+        | F::InsertCounter(_)
         | F::NaviMarkPosToMap(_)
         | F::NaviNaming(_)
         | F::NaviOpenBounty(_)
@@ -229,12 +255,7 @@ pub fn use_func(
         | F::NaviRemove(_)
         | F::OpenPaper(_)
         | F::ParentInfo(_)
-        | F::PlantCollect(_)
         | F::RenewItem(_)
-        | F::SeedCollect(_)
-        | F::SkinOff(_)
-        | F::SoilCollect(_)
-        | F::SpiceCollect(_)
         | F::StampMaker(_)
         | F::StoreUi(_)
         | F::UccImprint(_) => tracing::trace!("{}", t.func_type()),
@@ -243,6 +264,7 @@ pub fn use_func(
             debug_assert!(t.is_phase_func());
         }
     }
+    true
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -564,6 +564,24 @@ pub(super) fn damage_with_aoe(
     if !test_drive && !house_removal && !can_attack(server, &caster_t, &trg_t) {
         return;
     }
+    // `buffs.immune_damage` threshold immunity: a flagged buff such as Physical Resist Potion
+    // (275, 50) or Perfect Defense (2071, 2000) ignores only hits at or below its value. The
+    // comparison uses the final post-mitigation hit that `reduce_current_hp` would apply.
+    if buffs::damage_immune_threshold(server, &trg, damage_type)
+        .is_some_and(|limit| i64::from(value) <= limit)
+    {
+        let mut p = SCUnitDamagedPacket::new(
+            args.cast,
+            args.caster_caster,
+            caster.obj_id(),
+            trg.obj_id(),
+            0,
+            0,
+        );
+        p.hit_type = SkillHitType::Immune;
+        broadcast(server, &trg, &p, false);
+        return;
+    }
     // Reflection is part of the landed hit: it is applied before the victim's own HP change
     // and uses the pre-absorption amount, like the `Damaged` event below. Internal damage modes
     // (test drive, abandoned-house removal) and GM damage (which bypasses this function) never
@@ -1218,11 +1236,25 @@ pub fn skill_controller(server: &GameServer, t: &SkillControllerTemplate, args: 
     }
     match super::super::controllers::create(server, t, caster, &args.target, 0.0, 0.0, 0.0, 0.0) {
         Some(sc) => super::super::controllers::activate(server, &sc),
-        None => tracing::warn!(
-            "SkillControllerTemplate.Apply: factory returned null for sc_id={} kind={} — controller class not implemented",
-            t.id,
-            t.kind_id
-        ),
+        // WP-9 (combat-ai analysis, 2026-11-05): Rope (5), Anchor (6) and Flowgraph (8) have
+        // no generic controller by design (Rope is handled by the harpoon family, Flowgraph is
+        // test skill 23969 only, Anchor two monster skills), so this is an expected debug
+        // message. Other unimplemented kinds stay warnings.
+        None => {
+            if matches!(t.kind_id, 5 | 6 | 8) {
+                tracing::debug!(
+                    "SkillControllerTemplate.Apply: factory returned null for sc_id={} kind={} — controller class not implemented",
+                    t.id,
+                    t.kind_id
+                );
+            } else {
+                tracing::warn!(
+                    "SkillControllerTemplate.Apply: factory returned null for sc_id={} kind={} — controller class not implemented",
+                    t.id,
+                    t.kind_id
+                );
+            }
+        }
     }
 }
 

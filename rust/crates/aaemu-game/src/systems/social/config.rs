@@ -6,9 +6,11 @@
 //! `ExpeditionManager.Load` throw on `new Regex(null)`); the Rust defaults are the values of the
 //! shipped `Expedition.json` so tests and minimal configurations work.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
-use crate::config::lenient;
+use crate::config::{lenient, lenient_map};
 use crate::systems::social::expedition::ExpeditionRolePolicy;
 
 /// `WorldSpawnPosition` (the members the configuration uses).
@@ -224,6 +226,124 @@ impl Default for JusticeConfig {
     }
 }
 
+/// The 1.2 chat-spam delay configuration (`Configurations/Chat.json`).
+///
+/// `SCChatSpamDelayPacket` carries 15 chat-type groups (one byte per client chat type) and one
+/// delay per group. The client caches them and refuses a message while the previous one's delay
+/// has not elapsed (native `FUN_393C2540`, localized message `0x108`). The server enforces the
+/// same values, so a modified client cannot bypass the limit.
+///
+/// The retail values are not present in `compact.sqlite3` and were not captured, so the shipped
+/// `Chat.json` keeps every delay at 0 (the previous C# behaviour, **capture-pending** case
+/// `CHAT-SPAM-1`). Set `ChatGroupDelays[i]` in milliseconds to enable the limit for group `i`;
+/// `ChatTypeGroups` maps the client's chat types `0..=14` to those groups. The server refuses a
+/// message earlier than the group delay (minus the jitter grace) with `SCErrorMsgPacket(0x108)`,
+/// the code the client's own throttle displays.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Group index for each chat type `0..=14` (default: one group per type).
+    #[serde(rename = "chattypegroups")]
+    pub chat_type_groups: Vec<u8>,
+    /// Milliseconds between two messages of a group.
+    #[serde(rename = "chatgroupdelays")]
+    pub chat_group_delays_ms: Vec<u32>,
+    /// `SCChatSpamDelayPacket.applyConfig` (retail contents unknown).
+    #[serde(rename = "applyconfig")]
+    pub apply_config: String,
+    /// `SCChatSpamDelayPacket.detectConfig` (retail contents unknown).
+    #[serde(rename = "detectconfig")]
+    pub detect_config: String,
+    /// Answer a channel-bound chat failure with `SCChatFailedPacket(error, channel name)`
+    /// instead of the `SCErrorMsgPacket` toast.
+    ///
+    /// Default `false`: which failures retail 1.2 answered with `SCChatFailed` is not captured
+    /// (`CHAT-FAILED-1`, capture-pending), so the default keeps the previous frames.
+    #[serde(rename = "chatfailedpacket", deserialize_with = "lenient")]
+    pub chat_failed_packet: bool,
+    /// Minimum character level for each chat type (the 1.2 `ChatType`, e.g. `"0"` Say, `"1"`
+    /// Shout, `"-3"` Whisper); a missing entry or `0` means no gate (the previous behaviour).
+    ///
+    /// A sender below the configured level is refused with
+    /// `CHAT_CANNOT_SEND_SINCE_LEVEL_LOW` 786 and the message is not routed. Characters with
+    /// `access_level >= 100` (the same GM threshold as the closed-zone bypass) are exempt.
+    /// Retail's per-type levels are not evidenced, so the shipped `Chat.json` leaves the map
+    /// empty (capture-pending `CHAT-LEVEL-1`).
+    #[serde(rename = "minlevelbychattype", deserialize_with = "lenient_map")]
+    pub min_level_by_chat_type: BTreeMap<i16, u8>,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            // The C# packet sent every chat type in group 0; tests use these defaults. The
+            // shipped Chat.json assigns one group per type.
+            chat_type_groups: vec![0; 15],
+            // Flow tests use the defaults: keep the limit off unless the shipped Chat.json is
+            // loaded. The file enables the public-channel delays.
+            chat_group_delays_ms: vec![0; 15],
+            apply_config: String::new(),
+            detect_config: String::new(),
+            chat_failed_packet: false,
+            min_level_by_chat_type: BTreeMap::new(),
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Group of a client chat type (`0..=14`); out-of-range groups fall back to 0.
+    pub fn type_group(&self, chat_type: usize) -> usize {
+        self.chat_type_groups
+            .get(chat_type)
+            .map_or(chat_type, |&g| usize::from(g))
+            .min(14)
+    }
+
+    /// Delay of a group; missing entries mean "no limit".
+    pub fn delay_ms(&self, group: usize) -> u32 {
+        self.chat_group_delays_ms.get(group).copied().unwrap_or(0)
+    }
+
+    /// `MinLevelByChatType` for a chat type; missing = `0` = no gate.
+    pub fn min_level(&self, chat_type: i16) -> u8 {
+        self.min_level_by_chat_type
+            .get(&chat_type)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The 15 group bytes written by `SCChatSpamDelayPacket`.
+    pub fn packet_groups(&self) -> [u8; 15] {
+        let mut out = [0u8; 15];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.type_group(i) as u8;
+        }
+        out
+    }
+
+    /// The 15 delays (seconds) written by `SCChatSpamDelayPacket`.
+    pub fn packet_delays(&self) -> [f32; 15] {
+        let mut out = [0.0f32; 15];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.delay_ms(i) as f32 / 1000.0;
+        }
+        out
+    }
+}
+
+/// The Rust-only `Social` section (`Configurations/Social.json`): feature switches for social
+/// content whose 1.2 behaviour is not fully evidenced yet.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SocialConfig {
+    /// Fill the `CSNaviOpenBounty` answer from the bounty ledger instead of the empty list.
+    ///
+    /// Default `false`: the C# comment records that a filled board broke the 1.2 client Lua and
+    /// the cause was never confirmed on the original client (`PORTING.md`, BOUNTY-board).
+    #[serde(rename = "bountyboard", deserialize_with = "lenient")]
+    pub bounty_board: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
@@ -235,6 +355,8 @@ mod tests {
         for f in [
             "Configurations/Expedition.json",
             "Configurations/Justice.json",
+            "Configurations/Chat.json",
+            "Configurations/Social.json",
         ] {
             let text = std::fs::read_to_string(root.join(f)).expect("config file");
             let v: serde_json::Value = serde_json::from_str(&crate::config::relax_json(
@@ -272,5 +394,43 @@ mod tests {
         assert_eq!(j.jails[1].pos.y, 9566.0);
         assert!(j.keep_history && j.allow_jury_escape);
         assert_eq!(j.bot_report_prime_suspect_count, 5);
+        let c = &cfg.chat;
+        assert_eq!(c.packet_groups(), std::array::from_fn(|i| i as u8));
+        // The shipped limits are off: the retail delays are not evidenced (CHAT-SPAM-1).
+        assert!(c.chat_group_delays_ms.iter().all(|&ms| ms == 0));
+        assert!(c.packet_delays().iter().all(|&s| s == 0.0));
+        // Retail's SCChatFailed failures are not captured (CHAT-FAILED-1): the toast stays.
+        assert!(!c.chat_failed_packet);
+        // Retail's per-type levels are not evidenced (CHAT-LEVEL-1): no gate.
+        assert!(c.min_level_by_chat_type.is_empty());
+        assert_eq!(c.min_level(1), 0);
+        // The bounty board stays off until an original-client run passes (BOUNTY-board).
+        assert!(!cfg.social.bounty_board);
+    }
+
+    #[test]
+    fn min_level_map_binds_numeric_keys_and_string_values() {
+        let cfg: super::ChatConfig = serde_json::from_value(serde_json::json!({
+            "minlevelbychattype": { "1": 15, "-3": "20", "0": 0 }
+        }))
+        .expect("bind");
+        assert_eq!(cfg.min_level(1), 15);
+        assert_eq!(cfg.min_level(-3), 20);
+        assert_eq!(cfg.min_level(0), 0);
+        assert_eq!(cfg.min_level(7), 0);
+    }
+
+    #[test]
+    fn chat_groups_and_delays_clamp_and_fall_back() {
+        let c = super::ChatConfig {
+            chat_type_groups: vec![9, 99],
+            chat_group_delays_ms: vec![500],
+            ..Default::default()
+        };
+        assert_eq!(c.type_group(0), 9);
+        assert_eq!(c.type_group(1), 14); // clamped
+        assert_eq!(c.type_group(7), 7); // missing entry = identity
+        assert_eq!(c.delay_ms(9), 0); // missing delay = off
+        assert_eq!(c.packet_groups()[1], 14);
     }
 }

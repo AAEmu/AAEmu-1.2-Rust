@@ -23,7 +23,10 @@ use crate::models::npc::Npc;
 use crate::net::packet::{encode, ServerPacket};
 use crate::opcodes::{cs, sc};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
-use crate::systems::npcs::doodad::templates::{DoodadFuncEnterInstance, DoodadFuncExitIndun};
+use crate::systems::npcs::doodad::templates::{
+    DoodadFunc, DoodadFuncEnterInstance, DoodadFuncEnterSysInstance, DoodadFuncExitIndun,
+    DoodadFuncGroups, DoodadTemplate, FuncTemplate,
+};
 use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::test_support::{test_character, TestClient, TEST_ZONE};
 use crate::world::unit_state::UNIT_STATE_FORCED_BUFFS;
@@ -54,6 +57,17 @@ const DUNGEON_SPAWN: WorldSpawnPosition = WorldSpawnPosition {
 
 fn body(p: &dyn ServerPacket) -> Vec<u8> {
     encode(p)[6..].to_vec()
+}
+
+/// The `qualified_id` of the last `SCInviteToInstantGame` in `frames` (body layout:
+/// `zone_instance_id`, `ruleset_id`, `corps`, `qualified_id`).
+fn invite_qualified_id(frames: &[(u16, Vec<u8>)]) -> u64 {
+    let (_, b) = frames
+        .iter()
+        .rev()
+        .find(|(op, _)| *op == sc::SCInviteToInstantGamePacket)
+        .expect("an instant game invitation");
+    u64::from_le_bytes(b[13..21].try_into().expect("qualified id"))
 }
 
 fn zone(id: u32, key: u32, group: u32) -> Zone {
@@ -1004,6 +1018,512 @@ fn use_exit_func(server: &GameServer, p: &PlayerRef) {
         &ctx,
         Some(&WorldObject::from(p)),
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// System-dungeon channel select (SC 0x206 / CS 0x13d / SC 0x207, WP-X1)
+// ---------------------------------------------------------------------------------------------
+
+/// `zones.id` of the library dungeon (the entrance func's `zone_id`).
+const LIB_ZONE: u32 = 209;
+/// `zones.zone_key` (the value `SCLoadInstance` sends).
+const LIB_ZONE_KEY: u32 = 296;
+const LIB_GROUP: u32 = 70;
+const LIB_SPAWN: WorldSpawnPosition = WorldSpawnPosition {
+    world_id: 3,
+    zone_id: LIB_ZONE_KEY,
+    x: 400.0,
+    y: 400.0,
+    z: 10.0,
+    yaw: 90.0,
+    pitch: 0.0,
+    roll: 0.0,
+};
+
+/// A selective (`7457`) and a plain (`7458`) entrance doodad, like the real rows 2-9.
+fn add_sys_entrance(
+    data: &mut GameData,
+    template_id: u32,
+    group_id: u32,
+    func_id: u32,
+    selective: bool,
+) {
+    use crate::systems::npcs::doodad::templates::doodad_func_group_kind;
+    let dd = &mut data.systems.npcs.doodad;
+    dd.templates.insert(
+        template_id,
+        DoodadTemplate {
+            id: template_id,
+            func_groups: vec![DoodadFuncGroups {
+                id: group_id,
+                almighty: template_id,
+                group_kind_id: doodad_func_group_kind::START,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    dd.func_templates
+        .entry("DoodadFuncEnterSysInstance")
+        .or_default()
+        .insert(
+            func_id,
+            FuncTemplate::EnterSysInstance(DoodadFuncEnterSysInstance {
+                id: func_id,
+                zone_id: LIB_ZONE,
+                faction_id: 0,
+                selective,
+            }),
+        );
+    let func = DoodadFunc {
+        group_id,
+        func_id,
+        func_key: func_id,
+        func_type: "DoodadFuncEnterSysInstance".into(),
+        next_phase: -1,
+        // The real rows 2-9 bind the entrance interaction skills 24354-24373; a skill-bound
+        // func is how `Doodad.Use` dispatches a Phase func (`func_for_skill`).
+        skill_id: 24354,
+        ..Default::default()
+    };
+    dd.funcs_by_groups.insert(group_id, vec![func.clone()]);
+    dd.funcs_by_id.insert(func_id, func);
+}
+
+fn library_data() -> GameData {
+    let mut data = dungeon_data();
+    let lib = zone(LIB_ZONE, LIB_ZONE_KEY, LIB_GROUP);
+    data.zones.zone_id_to_key.insert(lib.id, lib.zone_key);
+    data.zones.groups.entry(lib.group_id).or_insert(ZoneGroup {
+        id: lib.group_id,
+        name: "group_70".into(),
+        ..ZoneGroup::default()
+    });
+    data.zones.zones.insert(lib.zone_key, lib);
+    data.systems
+        .instances
+        .zone_order
+        .zones
+        .push((LIB_ZONE_KEY, LIB_GROUP));
+    data.systems.instances.indun.zones.insert(
+        LIB_GROUP,
+        IndunZone {
+            zone_group_id: LIB_GROUP,
+            name: "library".into(),
+            level_min: 1,
+            level_max: 55,
+            max_players: 190,
+            select_channel: true,
+            ..IndunZone::default()
+        },
+    );
+    add_sys_entrance(&mut data, 7457, 9001, 9002, true);
+    add_sys_entrance(&mut data, 7458, 9003, 9004, false);
+    data
+}
+
+fn library_server(data: GameData) -> Arc<GameServer> {
+    let mirage_spawn = WorldSpawnPosition {
+        world_id: 2,
+        zone_id: MIRAGE_ZONE,
+        x: 300.0,
+        y: 300.0,
+        z: 50.0,
+        yaw: 200.0,
+        ..WorldSpawnPosition::default()
+    };
+    build_server(
+        data,
+        vec![
+            instance_template(1, "instance_test", DUNGEON_ZONE, DUNGEON_SPAWN),
+            instance_template(2, "arche_mall_world", MIRAGE_ZONE, mirage_spawn),
+            instance_template(3, "instance_library_1", LIB_ZONE_KEY, LIB_SPAWN),
+        ],
+        vec![
+            lookup("instance_test", DUNGEON_SPAWN),
+            lookup("arche_mall_world", mirage_spawn),
+            lookup("instance_library_1", LIB_SPAWN),
+        ],
+        None,
+    )
+}
+
+async fn create_library(server: &GameServer, channel: u32) -> Arc<dungeon::Dungeon> {
+    let d = indun::create_system_instance(server, None, LIB_ZONE_KEY, channel, false, 0)
+        .expect("library instance");
+    await_loader(&d).await;
+    d
+}
+
+fn spawn_sys_entrance(
+    server: &GameServer,
+    template_id: u32,
+    group_id: u32,
+    obj_id: u32,
+) -> crate::world::DoodadRef {
+    let mut d = Doodad::new(template_id);
+    d.func_group_id = group_id;
+    d.transform.set_xyz(100.0, 100.0, 100.0);
+    d.transform.zone_id = TEST_ZONE;
+    let d = Entity::new(obj_id, d);
+    let world = server.world.world(0).unwrap();
+    world.spawn(&d, &server.view_ctx());
+    d
+}
+
+fn use_sys_entrance(server: &GameServer, p: &PlayerRef, doodad: &crate::world::DoodadRef) {
+    let world = server.world.world(0).unwrap();
+    crate::systems::npcs::doodad::manager::use_doodad(
+        server,
+        &world,
+        doodad,
+        Some(&WorldObject::from(p)),
+        24354,
+        0,
+    );
+}
+
+fn select_body(inst_id: u32, doodad_obj_id: u32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u32(inst_id).write_bc(doodad_obj_id);
+    s.into_bytes()
+}
+
+#[tokio::test]
+async fn selective_system_entrance_sends_the_live_channel_list() {
+    let server = library_server(library_data());
+    let first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD001);
+    a.frames();
+
+    use_sys_entrance(&server, &a.p, &doodad);
+    let f = a.frames();
+    let expected = body(&SCSystemDungeonStatePacket {
+        zone_key: LIB_ZONE,
+        channels: vec![
+            SystemDungeonChannel {
+                index: 0,
+                instance_id: first.world_id().unwrap(),
+                restrict: 190,
+                current: 0,
+            },
+            SystemDungeonChannel {
+                index: 1,
+                instance_id: second.world_id().unwrap(),
+                restrict: 190,
+                current: 0,
+            },
+        ],
+    });
+    assert!(
+        f.contains(&(sc::SCUnkPacket15, expected)),
+        "0x206 list: {f:?}"
+    );
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert_eq!(a.instance(), 0, "the list alone does not move the player");
+}
+
+#[tokio::test]
+async fn selecting_the_second_channel_loads_the_player_there_and_sends_0x207() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 137.5, 88.0);
+    a.p.data().unit.transform.set_xyz(137.5, 88.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD002);
+    doodad.data().transform.set_xyz(137.5, 88.0, 100.0);
+    use_sys_entrance(&server, &a.p, &doodad);
+    let list = a.frames();
+    assert!(list.iter().any(|(op, _)| *op == sc::SCUnkPacket15));
+    assert!(
+        a.p.data().main_world_position.is_none(),
+        "the dialog alone saves no return point"
+    );
+
+    // CS 0x13d with the second row's instId loads the player into that instance.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    let expected_load = load_instance(
+        second_id,
+        LIB_ZONE_KEY,
+        LIB_SPAWN.x,
+        LIB_SPAWN.y,
+        LIB_SPAWN.z,
+        (0.0, 0.0, worlds::deg_to_rad(LIB_SPAWN.yaw)),
+    );
+    assert!(
+        f.contains(&(sc::SCLoadInstancePacket, expected_load)),
+        "load into the picked channel: {f:?}"
+    );
+    assert_eq!(a.instance(), second_id);
+    let mwp = a.p.data().main_world_position.expect("return point saved");
+    assert_eq!((mwp.instance_id, mwp.zone_id), (0, TEST_ZONE));
+    assert_eq!((mwp.x, mwp.y, mwp.z), (137.5, 88.0, 100.0));
+
+    // The channel was loaded already, so SC 0x207 follows SCLoadInstance directly: the zone
+    // of the load, the instance and the 0-based index.
+    let expected = body(&SCSystemDungeonChannelPacket {
+        zone_id: LIB_ZONE_KEY as i32,
+        instance_id: second_id,
+        instance_index: 1,
+    });
+    assert!(f.contains(&(sc::SCUnkPacket16, expected)), "0x207: {f:?}");
+
+    // It is answered once; the load confirmation does not repeat it.
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let f = a.frames();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCUnkPacket16),
+        "0x207 once: {f:?}"
+    );
+}
+
+#[tokio::test]
+async fn selecting_a_channel_that_is_still_loading_sends_0x207_after_instance_loaded() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = indun::create_system_instance(&server, None, LIB_ZONE_KEY, 1, false, 0)
+        .expect("library instance");
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD008);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    assert!(f
+        .iter()
+        .any(|(op, _)| *op == sc::SCProcessingInstancePacket));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCUnkPacket16));
+    assert_eq!(a.instance(), 0);
+
+    // The loader moves the player once the channel is ready.
+    await_loader(&second).await;
+    assert_eq!(a.instance(), second_id);
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let f = a.frames();
+    let expected = body(&SCSystemDungeonChannelPacket {
+        zone_id: LIB_ZONE_KEY as i32,
+        instance_id: second_id,
+        instance_index: 1,
+    });
+    assert!(
+        f.contains(&(sc::SCUnkPacket16, expected)),
+        "0x207 after load: {f:?}"
+    );
+}
+
+#[tokio::test]
+async fn channel_select_saves_the_main_world_position_only_on_a_successful_pick() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 137.5, 88.0);
+    a.p.data().unit.transform.set_xyz(137.5, 88.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD009);
+    doodad.data().transform.set_xyz(137.5, 88.0, 100.0);
+    // A return point from an earlier visit must survive a refused pick.
+    let sentinel = crate::models::transform::Transform {
+        instance_id: 0,
+        zone_id: TEST_ZONE,
+        x: -1.0,
+        y: -2.0,
+        z: -3.0,
+        ..Default::default()
+    };
+    a.p.data().main_world_position = Some(sentinel);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+    assert_eq!(
+        a.p.data().main_world_position,
+        Some(sentinel),
+        "the dialog saves nothing"
+    );
+
+    // A refused pick (unknown doodad) leaves the saved position untouched.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, 0xDEAD),
+    )
+    .await;
+    a.frames();
+    assert_eq!(a.p.data().main_world_position, Some(sentinel));
+
+    // A successful pick replaces it with the pre-entry position: the player is still in the
+    // default instance, so the direct entrance's save rule applies.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    a.frames();
+    let mwp = a.p.data().main_world_position.expect("return point saved");
+    assert_eq!((mwp.instance_id, mwp.zone_id), (0, TEST_ZONE));
+    assert_eq!((mwp.x, mwp.y, mwp.z), (137.5, 88.0, 100.0));
+    assert_eq!(a.instance(), second_id);
+}
+
+#[tokio::test]
+async fn selected_channel_full_refuses_with_the_normal_instance_quota_error() {
+    let mut data = library_data();
+    data.systems
+        .instances
+        .indun
+        .zones
+        .get_mut(&LIB_GROUP)
+        .unwrap()
+        .max_players = 1;
+    let server = library_server(data);
+    let b = Pc::new(&server, 2, "Beta", 100.0, 100.0);
+    let full = indun::create_system_instance(&server, Some(&b.p), LIB_ZONE_KEY, 0, false, 0)
+        .expect("library instance");
+    await_loader(&full).await;
+    let full_id = full.world_id().unwrap();
+    assert!(worlds::has_character(
+        &full.world(&server).unwrap(),
+        b.p.character_id
+    ));
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD003);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(full_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    let error = body(&crate::packets::world::SCErrorMsgPacket::new(
+        worlds::error_message::INSTANCE_QUOTA,
+        0,
+        true,
+    ));
+    assert!(
+        f.contains(&(sc::SCErrorMsgPacket, error)),
+        "full error: {f:?}"
+    );
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCUnkPacket16));
+    assert_eq!(a.instance(), 0);
+}
+
+#[tokio::test]
+async fn selection_ignores_a_bad_doodad_out_of_reach_and_a_stale_instance() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD004);
+    let plain = spawn_sys_entrance(&server, 7458, 9003, 0xD005);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+
+    // Unknown doodad object id.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, 0xDEAD),
+    )
+    .await;
+    // A non-selective entrance of the same zone.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, plain.obj_id),
+    )
+    .await;
+    // A stale / unknown world instance id.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(0x00C0_FFEE, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    assert!(f.is_empty(), "ignored picks send nothing: {f:?}");
+    assert_eq!(a.instance(), 0);
+
+    // Out of reach (> 5 m + 15 m doodad allowance).
+    doodad.data().transform.set_xyz(1000.0, 100.0, 100.0);
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCUnkPacket16));
+    assert_eq!(a.instance(), 0);
+}
+
+#[tokio::test]
+async fn non_selective_entrance_still_enters_channel_zero() {
+    let server = library_server(library_data());
+    let first = create_library(&server, 0).await;
+    let first_id = first.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7458, 9003, 0xD006);
+    a.frames();
+
+    use_sys_entrance(&server, &a.p, &doodad);
+    let f = a.frames();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCUnkPacket15),
+        "no channel list: {f:?}"
+    );
+    let expected = load_instance(
+        first_id,
+        LIB_ZONE_KEY,
+        LIB_SPAWN.x,
+        LIB_SPAWN.y,
+        LIB_SPAWN.z,
+        (0.0, 0.0, worlds::deg_to_rad(LIB_SPAWN.yaw)),
+    );
+    assert!(f.contains(&(sc::SCLoadInstancePacket, expected)));
+    assert_eq!(a.instance(), first_id);
+}
+
+#[tokio::test]
+async fn selective_entrance_without_a_live_instance_creates_channel_zero() {
+    let server = library_server(library_data());
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD007);
+    a.frames();
+
+    use_sys_entrance(&server, &a.p, &doodad);
+    let f = a.frames();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCUnkPacket15),
+        "no list without a live instance: {f:?}"
+    );
+    assert!(f
+        .iter()
+        .any(|(op, _)| *op == sc::SCProcessingInstancePacket));
+    let dungeons = server.systems.instances.all_dungeons();
+    assert_eq!(dungeons.len(), 1);
+    await_loader(&dungeons[0]).await;
+    assert_eq!(a.instance(), dungeons[0].world_id().unwrap());
 }
 
 /// `CSInstanceLoaded` after `SCLoadInstance` re-files the character in the arrival instance's
@@ -1974,6 +2494,7 @@ fn camp_server_with(
         30,
         2,
         false,
+        7,
         tweak,
     )
 }
@@ -1994,6 +2515,7 @@ fn camp_server_with_score(
         kill_score,
         assist_score,
         false,
+        7,
         tweak,
     )
 }
@@ -2001,7 +2523,7 @@ fn camp_server_with_score(
 /// [`camp_server`] in the arena ranking board's zone group (77) with the gladiator duel's
 /// authored points (win 4, lose 1).
 fn camp_server_ranked(corps_size: u32, victory_score: i32) -> Arc<GameServer> {
-    camp_server_build(corps_size, victory_score, 0, 30, 2, true, |r| {
+    camp_server_build(corps_size, victory_score, 0, 30, 2, true, 7, |r| {
         r.rank_win_point = 4;
         r.rank_lose_point = 1;
     })
@@ -2015,6 +2537,7 @@ fn camp_server_build(
     kill_score: i32,
     assist_score: i32,
     ranked: bool,
+    battlefield_id: u32,
     tweak: impl FnOnce(&mut GameRuleSet),
 ) -> Arc<GameServer> {
     let mut data = GameData::empty();
@@ -2046,7 +2569,7 @@ fn camp_server_build(
         time_ending: 0,
         time_playing: 15,
         victory_score,
-        battlefield_id: 7,
+        battlefield_id,
         victory_kill_count,
         killstreak_skills: [0; 24],
         ..GameRuleSet::default()
@@ -2066,7 +2589,7 @@ fn camp_server_build(
         .battlefields
         .battlefield_buffs
         .insert(
-            7,
+            battlefield_id,
             vec![BattleFieldBuff {
                 id: 27,
                 buff_id: 8246,
@@ -2096,12 +2619,12 @@ fn camp_server_build(
         ],
     );
     data.systems.instances.battlefields.battlefields = HashMap::from([(
-        7,
+        battlefield_id,
         Battlefield {
-            id: 7,
+            id: battlefield_id,
             zone_key: CAMP_ZONE,
             spawns: Some(BattlefieldSpawns {
-                battlefield_id: 7,
+                battlefield_id,
                 corps1_spawn: Some(point(1101.1, 401.5)),
                 corps2_spawn: Some(point(1229.0, 530.0)),
             }),
@@ -2188,23 +2711,30 @@ async fn battlefield_queue_match_join_score_and_end() {
             zone_instance_id: zid,
             ruleset_id: 22,
             corps: c,
-            qualified_id: 1,
+            qualified_id: 0,
         })
     };
-    assert_eq!(
-        e.frames(),
-        vec![(sc::SCInviteToInstantGamePacket, invite(corps::CORPS2))]
-    );
-    assert_eq!(
-        f.frames(),
-        vec![(sc::SCInviteToInstantGamePacket, invite(corps::CORPS1))]
-    );
+    let e_invite = e.frames();
+    let f_invite = f.frames();
+    assert_eq!(e_invite.len(), 1);
+    assert_eq!(f_invite.len(), 1);
+    assert_eq!(e_invite[0].0, sc::SCInviteToInstantGamePacket);
+    assert_eq!(f_invite[0].0, sc::SCInviteToInstantGamePacket);
+    // The invitation body is unchanged up to the qualified id, which is per invitation.
+    assert_eq!(&e_invite[0].1[..13], &invite(corps::CORPS2)[..13]);
+    assert_eq!(&f_invite[0].1[..13], &invite(corps::CORPS1)[..13]);
+    let e_id = invite_qualified_id(&e_invite);
+    let f_id = invite_qualified_id(&f_invite);
+    assert_ne!(e_id, 0);
+    assert_ne!(e_id, f_id, "each invitation carries its own id");
 
     // ---- Both accept (CSJoinInstantGame) and are moved to their corps spawn.
-    let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
-    e.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
-    f.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    let mut e_join = vec![1];
+    e_join.extend_from_slice(&e_id.to_le_bytes());
+    e.frame(&server, cs::CSJoinInstantGamePacket, &e_join).await;
+    let mut f_join = vec![1];
+    f_join.extend_from_slice(&f_id.to_le_bytes());
+    f.frame(&server, cs::CSJoinInstantGamePacket, &f_join).await;
     assert!(e.frames().contains(&(
         sc::SCLoadInstancePacket,
         load_instance(100, CAMP_ZONE, 1229.0, 530.0, 199.0, (0.0, 0.0, 0.0))
@@ -2217,9 +2747,12 @@ async fn battlefield_queue_match_join_score_and_end() {
     assert!(e.p.data().main_world_position.is_some());
 
     // ---- Entered: joined packet + corps faction; the second entry starts the game.
-    let entered = 1u64.to_le_bytes();
-    e.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
+    e.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &e_id.to_le_bytes(),
+    )
+    .await;
     let ef = e.frames();
     assert_eq!(ef[0].0, sc::SCInstantGameJoinedPacket);
     assert_eq!(
@@ -2232,8 +2765,12 @@ async fn battlefield_queue_match_join_score_and_end() {
     );
     assert_eq!(e.p.data().unit.faction_id, 160);
     assert_eq!(e.p.data().unit.origin_faction_id, 101);
-    f.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
+    f.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &f_id.to_le_bytes(),
+    )
+    .await;
     let ff = f.frames();
     assert!(ff.iter().any(|(op, _)| *op == sc::SCInstantGameStartPacket));
     assert!(e
@@ -2380,14 +2917,11 @@ async fn battlefield_decline_requeues() {
     // Not full (drill camp): kept in the queue list.
     assert!(!game.is_full());
     assert_eq!(mgr.queue_list().len(), 1);
-    assert!(h
-        .frames()
-        .iter()
-        .any(|(op, _)| *op == sc::SCInviteToInstantGamePacket));
+    let invite_id = invite_qualified_id(&h.frames());
     // Decline: removed from the game, applied again (no Cancel: that would reset the 1.2
     // client to not-applied).
     let mut decline = vec![0];
-    decline.extend_from_slice(&1u64.to_le_bytes());
+    decline.extend_from_slice(&invite_id.to_le_bytes());
     h.frame(&server, cs::CSJoinInstantGamePacket, &decline)
         .await;
     assert!(!game.has_player(&h.p));
@@ -2407,6 +2941,231 @@ async fn battlefield_decline_requeues() {
     h.frame(&server, cs::CSCancelInstantGamePacket, &[]).await;
     assert!(!game.has_player(&h.p));
     assert!(!instant_game::player_can_enter(&server, &h.p) || h.instance() == 0);
+}
+
+/// `SCInviteToInstantGame.qualified_id` is per game + invitation: a join / entered-world
+/// response that echoes another value is stale and ignored.
+#[tokio::test]
+async fn battlefield_stale_qualified_ids_are_ignored() {
+    let server = camp_server(1, 60);
+    let mut p = Pc::new(&server, 7, "Invited", 100.0, 100.0);
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    let invite_id = invite_qualified_id(&p.frames());
+    let stale_id = invite_id.wrapping_add(1);
+    let mut stale = vec![1];
+    stale.extend_from_slice(&stale_id.to_le_bytes());
+
+    p.frame(&server, cs::CSJoinInstantGamePacket, &stale).await;
+    assert!(p.frames().is_empty(), "a stale join is ignored");
+    assert_eq!(p.instance(), 0);
+
+    let mut join = vec![1];
+    join.extend_from_slice(&invite_id.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    assert_eq!(p.instance(), game.world_id);
+    p.frames();
+
+    p.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &stale_id.to_le_bytes(),
+    )
+    .await;
+    assert!(p.frames().is_empty(), "a stale entered-world is ignored");
+    assert!(game.st().members.is_empty());
+
+    p.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &invite_id.to_le_bytes(),
+    )
+    .await;
+    assert!(p.ops().contains(&sc::SCInstantGameJoinedPacket));
+    assert_eq!(game.st().members.len(), 1);
+}
+
+/// Declining replaces the invitation: the previous id is stale and ignored.
+#[tokio::test]
+async fn battlefield_reinvite_replaces_the_qualified_id() {
+    let server = camp_server(1, 60);
+    let mut p = Pc::new(&server, 7, "Reinvited", 100.0, 100.0);
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    let first = invite_qualified_id(&p.frames());
+    let mut decline = vec![0];
+    decline.extend_from_slice(&first.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &decline)
+        .await;
+    p.frames();
+    instant_game::battlefield_tick(&server);
+    let second = invite_qualified_id(&p.frames());
+    assert_ne!(first, second);
+
+    let mut stale = vec![1];
+    stale.extend_from_slice(&first.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &stale).await;
+    assert!(p.frames().is_empty(), "the previous invitation is stale");
+    assert_eq!(p.instance(), 0);
+
+    let mut join = vec![1];
+    join.extend_from_slice(&second.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    assert_eq!(p.instance(), game.world_id);
+}
+
+/// `PlayerCanEnter` now gates `ApplyToBattlefield`: a duelling, seated-jury or jailed
+/// character cannot queue (the C# had the checks but never called them).
+#[tokio::test]
+async fn battlefield_apply_refuses_a_duel_jury_or_jail() {
+    use crate::systems::social::crime::buff;
+
+    let server = camp_server(1, 60);
+    let mut duelist = Pc::new(&server, 7, "Duelist", 100.0, 100.0);
+    let opponent = Pc::new(&server, 8, "Opponent", 110.0, 100.0);
+    server
+        .systems
+        .social
+        .duels
+        .duel_request(&server, &duelist.p, opponent.p.character_id);
+    assert!(!instant_game::player_can_enter(&server, &duelist.p));
+    assert!(!instant_game::player_can_enter(&server, &opponent.p));
+    duelist.frames();
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &duelist.p);
+    assert_eq!(server.systems.instances.instant_games.queued(7), None);
+    assert!(duelist.frames().is_empty());
+
+    // A seated juror (`JURY` 3621) and the jail states of the crime system.
+    for (id, buff_id) in [
+        (9, buff::JURY),
+        (10, buff::FORCIBLY_AWAITING_TRIAL),
+        (11, buff::PRISONER_NUIAN),
+        (12, buff::PRISONER_HARANYAN),
+    ] {
+        let mut pc = Pc::new(&server, id, &format!("Held{id}"), 100.0, 100.0);
+        pc.frames();
+        assert!(instant_game::player_can_enter(&server, &pc.p));
+        {
+            let mut c = pc.p.data();
+            c.unit.buffs.add_buff(
+                crate::models::buff::Buff::new(
+                    BuffTemplate::simple(buff_id, BuffKind::Good),
+                    crate::models::buff::SkillCaster::default(),
+                    None,
+                    0,
+                ),
+                0,
+                0,
+                0,
+            );
+        }
+        assert!(
+            !instant_game::player_can_enter(&server, &pc.p),
+            "buff {buff_id}"
+        );
+        instant_game::apply_to_battlefield(&server, 7, corps::ANY, &pc.p);
+        assert_eq!(
+            server.systems.instances.instant_games.queued(7),
+            None,
+            "buff {buff_id}"
+        );
+        assert!(pc.frames().is_empty(), "buff {buff_id}");
+    }
+}
+
+/// A kill teleport restarts the victim's (and the Gladiator killer's) ZWUnitFell tracker at
+/// the spawn, so a fall from before the death cannot deal damage after the respawn.
+#[tokio::test(start_paused = true)]
+async fn battlefield_kill_teleport_resets_fall_tracking() {
+    use crate::systems::ai::collision::fall::zone_fall_vel;
+
+    let server = camp_server_build(1, 60, 0, 30, 2, false, 11, |r| {
+        r.id = 28;
+        r.time_resurrection_delay = 1;
+    });
+    let (a, mut b, game) = started_1v1_on(&server, 11).await;
+    assert_eq!(game.battlefield.id, instant_game::game_type::GLADIATOR);
+    let fall = &server.systems.ai.collision.fall;
+    // Both units were falling from high above before the kill.
+    for p in [&a.p, &b.p] {
+        assert_eq!(fall.sample(p.obj_id, 1000.0, Some(0.0), 0), None);
+        assert!(fall.state(p.obj_id).unwrap().airborne);
+    }
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(b
+        .frames()
+        .iter()
+        .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket));
+    // The victim and the Gladiator killer respawn at their corps spawn (z 199 in this fixture).
+    for p in [&a.p, &b.p] {
+        let state = fall.state(p.obj_id).expect("fall state");
+        assert!(!state.airborne, "the teleport restarts the fall grounded");
+        assert_eq!(state.max_down_vel, 0.0);
+        assert_eq!(state.start_z, 199.0, "restarted at the spawn z");
+        assert_eq!(fall.sample(p.obj_id, 199.0, Some(199.0), 2000), None);
+        // The zone gate cannot see the old fall any more: no ZWUnitFell, no fall damage.
+        assert_eq!(zone_fall_vel(32000, state.start_z, 199.0), None);
+    }
+}
+
+/// Ending a game unbinds the members' `OnKill` handlers even when a member has no origin
+/// faction (the `LeaveInstantGame` faction check returns early): removal itself unbinds.
+#[tokio::test]
+async fn battlefield_end_unbinds_kill_events_without_an_origin_faction() {
+    let server = camp_server(1, 60);
+    let mut p = Pc::new(&server, 7, "Allied", 100.0, 100.0);
+    // The drill camp's first player takes corps 2 (faction 160): give that faction up front,
+    // so entering makes no temporary change and the character has no origin faction.
+    p.p.data().unit.faction_id = 160;
+    instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    let id = invite_qualified_id(&p.frames());
+    let mut join = vec![1];
+    join.extend_from_slice(&id.to_le_bytes());
+    p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+    p.frame(
+        &server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &id.to_le_bytes(),
+    )
+    .await;
+    assert_eq!(game.st().members.len(), 1);
+    assert_eq!(p.p.data().unit.origin_faction_id, 0);
+    assert_eq!(
+        server
+            .systems
+            .instances
+            .events
+            .characters
+            .count(&p.p, CharEvent::Kill),
+        1
+    );
+    instant_game::destroy_game(&server, &game);
+    assert_eq!(
+        server
+            .systems
+            .instances
+            .events
+            .characters
+            .count(&p.p, CharEvent::Kill),
+        0
+    );
+    assert!(server.systems.instances.instant_games.games().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2538,9 +3297,9 @@ async fn battlefield_entered_requires_actual_instance_and_subscribes_kills_once(
         .instant_games
         .current(&p.p)
         .unwrap();
-    p.frames();
+    let invite_id = invite_qualified_id(&p.frames());
     let original_faction = p.p.data().unit.faction_id;
-    let entered = 1u64.to_le_bytes();
+    let entered = invite_id.to_le_bytes();
     p.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
         .await;
     assert!(p.frames().is_empty());
@@ -2597,22 +3356,41 @@ async fn battlefield_entered_requires_actual_instance_and_subscribes_kills_once(
 
 /// Two players matched, joined and entered on battlefield 7; the game has started.
 async fn started_1v1(server: &Arc<GameServer>) -> (Pc, Pc, Arc<instant_game::InstantGame>) {
+    started_1v1_on(server, 7).await
+}
+
+/// [`started_1v1`] on the given battlefield (7 = Drill Camp, 11 = Gladiator).
+async fn started_1v1_on(
+    server: &Arc<GameServer>,
+    battlefield_id: u32,
+) -> (Pc, Pc, Arc<instant_game::InstantGame>) {
     let mut a = Pc::new(server, 5, "Echo", 100.0, 100.0);
     let mut b = Pc::new(server, 6, "Foxtrot", 120.0, 100.0);
     for pc in [&a, &b] {
-        instant_game::apply_to_battlefield(server, 7, corps::ANY, &pc.p);
+        instant_game::apply_to_battlefield(server, battlefield_id, corps::ANY, &pc.p);
     }
     instant_game::battlefield_tick(server);
     let game = server.systems.instances.instant_games.games()[0].clone();
+    let a_id = invite_qualified_id(&a.frames());
+    let b_id = invite_qualified_id(&b.frames());
     let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
+    join.extend_from_slice(&a_id.to_le_bytes());
     a.frame(server, cs::CSJoinInstantGamePacket, &join).await;
+    join.truncate(1);
+    join.extend_from_slice(&b_id.to_le_bytes());
     b.frame(server, cs::CSJoinInstantGamePacket, &join).await;
-    let entered = 1u64.to_le_bytes();
-    a.frame(server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
-    b.frame(server, cs::CSEnteredInstantGameWorldPacket, &entered)
-        .await;
+    a.frame(
+        server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &a_id.to_le_bytes(),
+    )
+    .await;
+    b.frame(
+        server,
+        cs::CSEnteredInstantGameWorldPacket,
+        &b_id.to_le_bytes(),
+    )
+    .await;
     a.frames();
     b.frames();
     (a, b, game)
@@ -2658,13 +3436,17 @@ async fn battlefield_kill_and_assist_scores_come_from_game_score_rules() {
     instant_game::battlefield_tick(&server);
     let game = server.systems.instances.instant_games.games()[0].clone();
     assert_eq!(game.rule_set.id, 8);
-    let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
-    let entered = 1u64.to_le_bytes();
     for pc in [&mut a, &mut b, &mut c] {
+        let id = invite_qualified_id(&pc.frames());
+        let mut join = vec![1];
+        join.extend_from_slice(&id.to_le_bytes());
         pc.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
-        pc.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-            .await;
+        pc.frame(
+            &server,
+            cs::CSEnteredInstantGameWorldPacket,
+            &id.to_le_bytes(),
+        )
+        .await;
         pc.frames();
     }
     assert_eq!(game.st().members.len(), 3);
@@ -2849,13 +3631,17 @@ async fn a_battlefield_result_scores_the_arena_ranking_board() {
         instant_game::apply_to_battlefield(&server, 7, corps::ANY, &p.p);
     }
     instant_game::battlefield_tick(&server);
-    let mut join = vec![1];
-    join.extend_from_slice(&1u64.to_le_bytes());
-    let entered = 1u64.to_le_bytes();
     for p in [&mut e, &mut f] {
+        let id = invite_qualified_id(&p.frames());
+        let mut join = vec![1];
+        join.extend_from_slice(&id.to_le_bytes());
         p.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
-        p.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
-            .await;
+        p.frame(
+            &server,
+            cs::CSEnteredInstantGameWorldPacket,
+            &id.to_le_bytes(),
+        )
+        .await;
     }
     // Nothing is scored while the game runs.
     let ranking = &server.systems.social.ranking;
@@ -2884,6 +3670,122 @@ async fn a_battlefield_result_scores_the_arena_ranking_board() {
     // The result is offered once: the destroy that follows does not score again.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(ranking.score_of(5, 1, period).unwrap().v1, 4);
+}
+
+/// The battlefield resurrects the victim after the running rule set's
+/// `time_resurrection_delay` (the 1.2 rows author 15 s), not after the C# hard-coded 6 s.
+#[tokio::test(start_paused = true)]
+async fn battlefield_resurrection_waits_the_rule_set_delay() {
+    let server = camp_server_with(1, 60, 0, |r| r.time_resurrection_delay = 15);
+    let (a, mut b, game) = started_1v1(&server).await;
+    assert_eq!(game.rule_set.time_resurrection_delay, 15);
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(14)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must still be dead 14 s after the kill"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must be resurrected 15 s after the kill"
+    );
+}
+
+/// The Gladiator rule set (28) authors a 5 s delay.
+#[tokio::test(start_paused = true)]
+async fn gladiator_resurrection_waits_five_seconds() {
+    let server = camp_server_build(1, 60, 0, 30, 2, false, 11, |r| {
+        r.id = 28;
+        r.time_resurrection_delay = 5;
+    });
+    let (a, mut b, game) = started_1v1_on(&server, 11).await;
+    assert_eq!(game.battlefield.id, instant_game::game_type::GLADIATOR);
+    assert_eq!(game.rule_set.time_resurrection_delay, 5);
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(4)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must still be dead 4 s after the kill"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "the victim must be resurrected 5 s after the kill"
+    );
+}
+
+/// A rule set without an authored delay (0 / NULL) keeps the old 6 s.
+#[tokio::test(start_paused = true)]
+async fn battlefield_resurrection_without_delay_keeps_six_seconds() {
+    let server = camp_server(1, 60);
+    let (a, mut b, game) = started_1v1(&server).await;
+    assert_eq!(game.rule_set.time_resurrection_delay, 0);
+    b.frames();
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(5)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "without an authored delay the victim must not resurrect before 6 s"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        b.frames()
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterResurrectedPacket),
+        "without an authored delay the victim must be resurrected at 6 s"
+    );
 }
 
 // ---- Return effect (world gates) inside instances ----

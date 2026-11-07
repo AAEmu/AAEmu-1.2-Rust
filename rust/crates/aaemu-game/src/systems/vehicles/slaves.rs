@@ -39,6 +39,8 @@ use crate::systems::skills::packets_special::{
 use crate::systems::skills::types::{
     BuffEventTriggerKind, BuffRemoveOn, KillReason, SkillCastTarget, SkillCaster,
 };
+use crate::systems::social::achievement::char_record_kind;
+use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{Entity, PlayerRef, SlaveRef, WorldInstance, WorldObject};
 
 use super::data::{attach_point, ShipModel, SlaveTemplate};
@@ -1623,6 +1625,18 @@ pub fn bind_slave(
         super::bind_error(character, error::SLAVE_UNBIND_FIRST);
         return;
     }
+    // A transfer passenger must unboard first; otherwise the slave seat and the transfer
+    // seat would both claim the character (and an unboard would drop the slave attachment).
+    if super::transfers::is_boarded(server, character) {
+        tracing::debug!(
+            "BindSlave: character {} is on a transfer; refusing seat {} of {}",
+            character.obj_id,
+            point,
+            obj_id
+        );
+        super::bind_error(character, error::SLAVE_UNBIND_FIRST);
+        return;
+    }
     let me = WorldObject::from(character);
     // The caller decides the reach: 12076 passes 4.0, 13863 the passenger reach, and the
     // doodad BoardTransfer path passes `None` because its own doodad func already checked the
@@ -1750,8 +1764,8 @@ pub fn bind_slave(
         super::ship_physics::set_driver(server, &slave, true);
     }
     world.attach_child(&WorldObject::from(&slave), &me);
-    // TODO (C#): move to attach point's position (done for ship cannons only: their gunner
-    // stands behind the barrel; every other seat keeps the C# origin placement).
+    // Only a manned cannon moves its gunner behind the barrel; every other seat keeps the C#
+    // origin placement.
     let (sx, sy, sz) = if is_manned_cannon(server, &slave) {
         gunner_seat_offset(server, &slave, point)
     } else {
@@ -2785,6 +2799,7 @@ pub fn create_from_skill(
     caster: &SkillCaster,
     placement: Option<crate::systems::skills::ext::SummonPlacement>,
     max_range: f32,
+    client_spawn: Option<bool>,
 ) {
     let SkillCaster::Item {
         item_id,
@@ -2815,10 +2830,11 @@ pub fn create_from_skill(
             &owner,
             item_id,
             item_template_id,
-            false,
+            client_spawn.unwrap_or(false),
             None,
             placement,
             max_range,
+            client_spawn.is_some(),
             lease,
             cooldown,
         )
@@ -2886,14 +2902,22 @@ pub(super) fn validated_summon_placement(
         if !super::ship_physics::is_summon_water(server, world, [p.x, p.y, p.z]) {
             return invalid("a ship must be summoned on water");
         }
-        super::ship_physics::water_surface(server, world, [p.x, p.y, p.z])
-    } else {
-        if super::ship_physics::is_water(server, world, [p.x, p.y, p.z]) {
-            return invalid("a land vehicle must be summoned on ground");
+        let surface = super::ship_physics::water_surface(server, world, [p.x, p.y, p.z]);
+        // The hull spawns on this surface; it must be the actual water, not a dry fallback.
+        if !super::ship_physics::is_water(server, world, [p.x, p.y, surface]) {
+            return invalid("a ship must be summoned on water");
         }
+        surface
+    } else {
         // The 1.2 land rule has no static ground: the spot sits on the terrain heightfield,
         // and a deck above it is refused later by the line-of-sight ray, not used as the floor.
-        summon_terrain(server, world, p.x, p.y)
+        let terrain = summon_terrain(server, world, p.x, p.y);
+        // Test the surface the vehicle is placed on, not the client's z: a client z above sea
+        // level must not hide a sea-floor spot.
+        if super::ship_physics::is_water(server, world, [p.x, p.y, terrain + 0.1]) {
+            return invalid("a land vehicle must be summoned on ground");
+        }
+        terrain
     };
     // The spawn height already carries the ship's waterline offset, so the 1.2 check runs on
     // exactly the transform `create_spawn_committed` places.
@@ -2918,6 +2942,212 @@ pub(super) fn validated_summon_placement(
         return invalid("inside collision");
     }
     Some(transform)
+}
+
+/// Turn `CSSpawnSlave` (0x02e) into the item-use cast the 1.2 client sends for a summon item:
+/// the packet's item must be the sender's inventory `SummonSlave` item for `slave_id`, and the
+/// cast is the item's own `use_skill_id` with a `SummonPos` target at the client's position.
+/// `start_skill` then runs the normal item-cast checks (ownership, zone, actability, stun /
+/// death / swim, cast time, cooldown, reagents); the `SpawnSlave` effect validates the placement
+/// with [`validated_client_spawn`]. The internal `SkillObject::Unk5(hideSpawnEffect)` marker
+/// tells the effect this placement came from the 0x02e packet.
+#[allow(clippy::too_many_arguments)]
+pub fn client_spawn_cast(
+    server: &GameServer,
+    owner: &PlayerRef,
+    slave_id: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    z_rot: f32,
+    item_id: u64,
+    hide_spawn_effect: bool,
+) -> Option<crate::systems::skills::handlers::CSStartSkillPacket> {
+    if item_id == 0 {
+        // The zero-item body has no evidenced sender; GM tools use their own spawn paths.
+        tracing::warn!("SpawnSlave: itemId 0 for slave {slave_id}; no item summon, ignored");
+        return None;
+    }
+    let found = super::mates::owned_item(server, owner, item_id)?;
+    let item_template_id = found.template_id;
+    // Exactly the item-summon ownership check (owner, inventory, class, template).
+    let Some(item) = owned_summon_item(server, owner, item_id, item_template_id) else {
+        tracing::warn!(
+            "SpawnSlave: item {item_id} is not {}'s inventory slave summon item",
+            owner.data().unit.name
+        );
+        return None;
+    };
+    let item_slave_id = match server
+        .game_data
+        .items
+        .template(item.template_id)
+        .map(|t| &t.kind)
+    {
+        Some(crate::data::items::TemplateKind::SummonSlave { slave_id }) => *slave_id,
+        _ => {
+            tracing::warn!("SpawnSlave: item {item_id} is not a slave summon item");
+            return None;
+        }
+    };
+    if item_slave_id != slave_id {
+        tracing::warn!(
+            "SpawnSlave: item {item_id} summons slave {item_slave_id}, not the requested {slave_id}"
+        );
+        return None;
+    }
+    let use_skill_id = server
+        .game_data
+        .items
+        .template(item.template_id)
+        .map_or(0, |t| t.use_skill_id);
+    if use_skill_id == 0 {
+        tracing::warn!("SpawnSlave: item {item_id} has no use skill");
+        return None;
+    }
+    Some(crate::systems::skills::handlers::CSStartSkillPacket {
+        skill_id: use_skill_id,
+        caster: SkillCaster::Item {
+            obj_id: owner.obj_id,
+            item_id: item.id,
+            item_template_id: item.template_id,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Position {
+            obj_id: 0,
+            x,
+            y,
+            z,
+            rot: z_rot,
+            obj_id1: 0,
+            obj_id2: 0,
+        },
+        flag: 0,
+        skill_object: crate::systems::skills::types::SkillObject::Unk5(i32::from(
+            hide_spawn_effect,
+        )),
+    })
+}
+
+/// The `CSSpawnSlave` position check: the same distance / surface / collision rules as
+/// [`validated_summon_placement`], keeping the client's yaw, plus the 1.2 land height rule.
+/// A spot the basic rules refuse gets `SlaveSpawnErrorInvalidArea` (583); a spot the full 1.2
+/// placement check refuses (line of sight / hull box) gets the placement path's
+/// `SLAVE_SPAWN_SHIP_NEED_MORE_SPACE` (100).
+#[allow(clippy::too_many_arguments)]
+fn validated_client_spawn(
+    server: &GameServer,
+    world: &WorldInstance,
+    owner: &PlayerRef,
+    template: &SlaveTemplate,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+) -> Option<Transform> {
+    let invalid = |reason: &str| {
+        tracing::warn!(
+            "SpawnSlave placement for template {} refused: {reason} at ({:.1},{:.1},{:.1})",
+            template.id,
+            x,
+            y,
+            z
+        );
+        error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+        None
+    };
+    if [x, y, z, yaw].iter().any(|v| !v.is_finite()) {
+        return invalid("non-finite coordinates");
+    }
+    let owner_pos = world.world_pos_rot(&WorldObject::from(owner));
+    // `slaves.spawn_valid_area_range` is the data-side limit (50 m in the 1.2 DB).
+    let limit = template.spawn_valid_area_range as f32;
+    let limit = if limit > 0.0 { limit } else { 50.0 };
+    let dx = x - owner_pos.x;
+    let dy = y - owner_pos.y;
+    if dx * dx + dy * dy > limit * limit {
+        return invalid("too far from the owner");
+    }
+    let mut transform = Transform {
+        instance_id: world.id,
+        zone_id: owner.data().unit.transform.zone_id,
+        ..Default::default()
+    };
+    let surface = if template.is_a_boat() {
+        if !super::ship_physics::is_summon_water(server, world, [x, y, z]) {
+            return invalid("a ship must be summoned on water");
+        }
+        let surface = super::ship_physics::water_surface(server, world, [x, y, z]);
+        if !super::ship_physics::is_water(server, world, [x, y, surface]) {
+            return invalid("a ship must be summoned on water");
+        }
+        surface
+    } else {
+        let terrain = summon_terrain(server, world, x, y);
+        // Test the surface the vehicle is placed on, not the client's z.
+        if super::ship_physics::is_water(server, world, [x, y, terrain + 0.1]) {
+            return invalid("a land vehicle must be summoned on ground");
+        }
+        if terrain - owner_pos.z > SUMMON_MAX_TERRAIN_ABOVE_OWNER {
+            return invalid("terrain too far above the owner");
+        }
+        terrain
+    };
+    let offset_z = if template.is_a_boat() {
+        summon_ship_hull(server, template).map_or(0.0, |(_, z, _)| z)
+    } else {
+        0.0
+    };
+    transform.set_position(x, y, surface + offset_z, 0.0, 0.0, yaw);
+    // A half-metre sphere just above the surface, exactly like the `SummonPos` placement.
+    let inside = crate::systems::ai::collision::overlaps_sphere(
+        server,
+        world.id,
+        [transform.x, transform.y, surface + 0.8],
+        0.5,
+        crate::systems::ai::collision::query::mask::SOLID_TERRAIN
+            & !crate::systems::ai::collision::query::mask::TERRAIN,
+    )
+    .unwrap_or(false);
+    if inside {
+        return invalid("inside collision");
+    }
+    if crate::systems::ai::collision::files(server).is_some()
+        && !summon_placement_clear_1_2(server, world, owner, template, &transform)
+    {
+        tracing::warn!(
+            "SpawnSlave placement for template {} refused: the 1.2 placement check failed at ({:.1},{:.1},{:.1})",
+            template.id,
+            transform.x,
+            transform.y,
+            transform.z
+        );
+        error(owner, error::SLAVE_SPAWN_SHIP_NEED_MORE_SPACE);
+        return None;
+    }
+    Some(transform)
+}
+
+/// Validate a spawn placement with the item-cast rules (distance, surface, collision, 1.2
+/// placement check): `client` keeps the client yaw and applies the 10 m land rule
+/// ([`validated_client_spawn`]); otherwise the C#/1.2 `SummonPos` yaw is the owner's + 90°.
+#[allow(clippy::too_many_arguments)]
+fn validate_summon_placement(
+    server: &GameServer,
+    world: &WorldInstance,
+    owner: &PlayerRef,
+    template: &SlaveTemplate,
+    placement: Option<crate::systems::skills::ext::SummonPlacement>,
+    max_range: f32,
+    client: bool,
+) -> Option<Transform> {
+    let p = placement?;
+    if client {
+        validated_client_spawn(server, world, owner, template, p.x, p.y, p.z, p.yaw)
+    } else {
+        validated_summon_placement(server, world, owner, template, Some(p), max_range)
+    }
 }
 
 /// `Create(owner, skillData, hideSpawnEffect, positionOverride)`.
@@ -2950,6 +3180,7 @@ pub fn create_for_owner<'a>(
         position_override,
         placement,
         max_range,
+        false,
         lease,
         cooldown,
     )
@@ -2965,6 +3196,7 @@ async fn create_for_owner_job(
     position_override: Option<Transform>,
     placement: Option<crate::systems::skills::ext::SummonPlacement>,
     max_range: f32,
+    client_placement: bool,
     lease: super::audit::Lease,
     cooldown: Option<SummonCooldownToken>,
 ) -> Option<SlaveRef> {
@@ -2994,9 +3226,15 @@ async fn create_for_owner_job(
     // the old C#-style placement stays in charge.
     let collision = crate::systems::ai::collision::files(server).is_some();
     let (position_override, searched) = if placement.is_some() {
-        let Some(transform) =
-            validated_summon_placement(server, &world, owner, &template, placement, max_range)
-        else {
+        let Some(transform) = validate_summon_placement(
+            server,
+            &world,
+            owner,
+            &template,
+            placement,
+            max_range,
+            client_placement,
+        ) else {
             // The placement was refused (error 583): the summon never happens, so do not leave
             // the skill cooldown/GCD that the skill system started.
             refund_summon_cooldown(owner, cooldown);
@@ -3031,6 +3269,7 @@ async fn create_for_owner_job(
         placement,
         max_range,
         searched,
+        client_placement,
         cooldown,
         &lease,
     )
@@ -3064,6 +3303,7 @@ pub fn create<'a>(
             None,
             0.0,
             false,
+            false,
             None,
             &lease,
         )
@@ -3083,6 +3323,7 @@ async fn create_with_placement(
     placement: Option<crate::systems::skills::ext::SummonPlacement>,
     max_range: f32,
     searched: bool,
+    client_placement: bool,
     cooldown: Option<SummonCooldownToken>,
     lease: &super::audit::Lease,
 ) -> Option<SlaveRef> {
@@ -3251,8 +3492,14 @@ async fn create_with_placement(
                     .vehicles
                     .slave_template(template_id)?;
                 if placement.is_some() {
-                    let Some(transform) = validated_summon_placement(
-                        server, world, owner, template, placement, max_range,
+                    let Some(transform) = validate_summon_placement(
+                        server,
+                        world,
+                        owner,
+                        template,
+                        placement,
+                        max_range,
+                        client_placement,
                     ) else {
                         refund_summon_cooldown(owner, cooldown);
                         return None;
@@ -3278,6 +3525,35 @@ async fn create_with_placement(
                         Some(transform) => position_override = Some(transform),
                         None => {
                             error(owner, error::SLAVE_SPAWN_SHIP_NEED_MORE_SPACE);
+                            refund_summon_cooldown(owner, cooldown);
+                            return None;
+                        }
+                    }
+                }
+            }
+            // The 1.2 land height rule for every item summon, after the owner could have moved
+            // and before the item commit / old-vehicle deletion. GM / ownerless spawns pass no
+            // item and keep the previous behaviour.
+            if item.is_some() {
+                if let (Some(chosen), Some(template)) = (
+                    position_override,
+                    server
+                        .game_data
+                        .systems
+                        .vehicles
+                        .slave_template(template_id),
+                ) {
+                    if !template.is_a_boat() {
+                        let terrain = summon_terrain(server, world, chosen.x, chosen.y);
+                        let owner_z = world.world_pos_rot(&WorldObject::from(owner)).z;
+                        if terrain - owner_z > SUMMON_MAX_TERRAIN_ABOVE_OWNER {
+                            tracing::warn!(
+                                "Slave {} land spawn at ({:.1},{:.1}) refused: terrain {terrain:.1} is more than {SUMMON_MAX_TERRAIN_ABOVE_OWNER} m above the owner ({owner_z:.1})",
+                                template.id,
+                                chosen.x,
+                                chosen.y
+                            );
+                            error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
                             refund_summon_cooldown(owner, cooldown);
                             return None;
                         }
@@ -3531,7 +3807,10 @@ fn apply_slave_bonuses(server: &GameServer, obj: &WorldObject, template: &SlaveT
                 0,
                 Bonus {
                     template: b.clone(),
-                    value: b.value, // TODO (C#): using LinearLevelBonus
+                    // Every 1.2 `unit_modifiers` Slave row has `linear_level_bonus = 0` (pinned
+                    // by `real_slave_unit_modifiers_have_no_linear_level_bonus`), so the linear
+                    // level term cannot change this value with the shipped data.
+                    value: b.value,
                 },
             );
         }
@@ -3965,7 +4244,6 @@ fn create_spawn_committed(
             }
             spawn_pos.z += offset_z;
         } else {
-            // TODO (C#): check for maximum height difference for summoning
             // The 1.2 land rule's ground is the terrain heightfield only.
             let h = summon_terrain(server, world, spawn_pos.x, spawn_pos.y);
             if h > 0.0 {
@@ -4643,6 +4921,61 @@ pub fn do_hp_change_trigger(server: &GameServer, slave: &SlaveRef, trigger_value
     update_slave_repair_points(server, slave);
 }
 
+/// KILL_SLAVE (kind 26, `value1` 2 = the siege catapult, `value2` 1 = the opposing side,
+/// INFERRED): destroying an enemy-side siege catapult during an active siege credits its
+/// killer. The authored achievement text asks for the opposing siege camp, so both characters
+/// must be on the roster and on different sides; a catapult outside a siege or killed by its
+/// own side credits nothing.
+fn credit_siege_catapult_kill(server: &GameServer, slave: &SlaveRef, killer: Option<&WorldObject>) {
+    const SIEGE_CATAPULT: u32 = 2;
+    let (template_id, owner_id, zone_id) = {
+        let d = slave.data();
+        (
+            d.unit.template_id,
+            d.unit.owner_id,
+            d.unit.transform.zone_id,
+        )
+    };
+    if template_id != SIEGE_CATAPULT || owner_id == 0 {
+        return;
+    }
+    let Some(killer) = killer.and_then(WorldObject::as_player) else {
+        return;
+    };
+    let Some(zone_group_id) = server
+        .game_data
+        .zones
+        .zone_by_key(zone_id)
+        .map(|zone| zone.group_id)
+    else {
+        return;
+    };
+    let Some(state) = server.systems.housing.dominions.get(zone_group_id) else {
+        return;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let Some(siege) = state.siege.as_ref().filter(|siege| siege.active_at(now)) else {
+        return;
+    };
+    let victim_side = siege.participants.get(&owner_id).map(|p| p.side);
+    let killer_side = siege.participants.get(&killer.character_id).map(|p| p.side);
+    if victim_side.is_none() || victim_side == killer_side {
+        return;
+    }
+    crate::systems::report_achievement(
+        server,
+        killer,
+        AchievementInput::Increment {
+            kind_id: char_record_kind::KILL_SLAVE,
+            amount: 1,
+            matcher: RecordMatch::Value1And2 {
+                value1: SIEGE_CATAPULT,
+                value2: 1,
+            },
+        },
+    );
+}
+
 /// `Slave.DoDie(killer, killReason)`.
 pub fn do_die(
     server: &GameServer,
@@ -4652,6 +4985,7 @@ pub fn do_die(
 ) {
     let _items = server.systems.economy.operation_scope();
     let _publication = server.systems.vehicles.slave_summons.publication_scope();
+    credit_siege_catapult_kill(server, slave, killer);
     let obj = WorldObject::from(slave);
     if let Some(world) = server.world.world_of(&obj) {
         audit_retirement(server, &world, slave);
@@ -4882,6 +5216,178 @@ fn mark_summoning_item_as_destroyed(server: &GameServer, slave: &SlaveRef) {
             force_remove: Vec::new(),
         });
     }
+}
+
+/// `CSRepairSlaveItemsPacket`: a repairman restores the destroyed slave summon items in the
+/// player's bag.
+///
+/// The 1.2 client's cost preview `GetTotalRepairsForSlaveItems` (`FUN_39447c20`) scans
+/// `items.impl_id = 8` (`ItemImplEnum.SummonSlave`, the mate variant scans impl 11), requires
+/// the item's destroyed flag, resolves the slave through `item_summon_slaves` and adds the
+/// slave template's `cost` (the client's `slaves` query selects `id, cost, ...` in that order;
+/// `FUN_39696380(slaveId)` +4). It then keeps only the slots whose owning container is the
+/// player's bag: `FUN_390457b0(location)` looks the slot's container up and the preview
+/// compares it with `*(inventory + 0xc34c)` (the bag container id). The bank slots
+/// `FUN_397d3130` also yields (key high byte 0x300) therefore never count, so the service is
+/// bag-only too. The 1.2 C# never implemented the handler. The reply follows
+/// the `RepairSlaveEffect` kit path: `SCItemTaskSuccess(ItemTaskType.RepairSlaves)` with one
+/// `ItemUpdate` per repaired item, then `ErrorMessageType.SlaveRepaired` (the client locale has
+/// `slave_repaired` / `slave_cannot_repair_already_spawned` for this service).
+pub fn repair_slave_items(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) {
+    use crate::data::items::TemplateKind;
+    use crate::systems::economy::error_message;
+    use crate::systems::economy::inventory::send_error_message_to;
+
+    if npc_obj_id == 0 || player.data().unit.current_interaction_object != npc_obj_id {
+        return;
+    }
+    let Some(world) = player_world(server, player) else {
+        return;
+    };
+    let Some(npc) = world.npc(npc_obj_id) else {
+        return;
+    };
+    let repairman = server
+        .systems
+        .economy
+        .hooks
+        .npcs
+        .get()
+        .and_then(|h| h.shop_info(server, &npc))
+        .is_some_and(|i| i.repairman);
+    if !repairman {
+        tracing::warn!(
+            "Attempting to repair slave items while not at a repairman, NPC: {}",
+            npc.obj_id
+        );
+        return;
+    }
+    let me = world.world_pos_rot(&WorldObject::from(player));
+    let them = world.world_pos_rot(&WorldObject::from(&npc));
+    if me.distance_to(&them, false) > 5.0 {
+        error(player, error_message::TOO_FAR_AWAY);
+        return;
+    }
+    let inv = Inv::of(player);
+    let containers: Vec<_> = [slot_type::INVENTORY]
+        .into_iter()
+        .filter_map(|t| inv.get(t))
+        .collect();
+    // (item id, slave db id, price). Skip rows whose template/slave data is missing instead of
+    // failing the whole request.
+    let mut destroyed: Vec<(u64, u32, i32)> = Vec::new();
+    for c in &containers {
+        let c = c.lock().expect("container poisoned");
+        for i in &c.items {
+            if i.class != ItemClass::SummonSlave || i.details.slave_is_destroyed == 0 {
+                continue;
+            }
+            let Some(template) = server.game_data.items.template(i.template_id) else {
+                continue;
+            };
+            let TemplateKind::SummonSlave { slave_id } = &template.kind else {
+                continue;
+            };
+            let Some(slave_template) = server.game_data.systems.vehicles.slave_template(*slave_id)
+            else {
+                continue;
+            };
+            destroyed.push((i.id, i.details.slave_db_id, slave_template.cost.max(0)));
+        }
+    }
+    if destroyed.is_empty() {
+        tracing::debug!(
+            "RepairSlaveItems: no destroyed slave item, NPC: {}",
+            npc.obj_id
+        );
+        return;
+    }
+    // A vehicle that is currently out cannot be repaired (`SLAVE_CANNOT_REPAIR_ALREADY_SPAWNED`).
+    if destroyed
+        .iter()
+        .any(|(_, db_id, _)| *db_id != 0 && get_slave_by_db_id(&world, *db_id).is_some())
+    {
+        error(player, error_message::SLAVE_CANNOT_REPAIR_ALREADY_SPAWNED);
+        return;
+    }
+    let total: i64 = destroyed.iter().map(|(_, _, cost)| i64::from(*cost)).sum();
+    let Ok(cost) = i32::try_from(total) else {
+        return;
+    };
+    let mut txn = ItemTxn::begin(server);
+    // Debit first (check and subtract under the character's one lock), refund what could not
+    // be repaired below: an item traded away between the scan and the update must not be paid.
+    if cost > 0
+        && !inventory::change_money(
+            &mut txn.out(),
+            player,
+            slot_type::INVENTORY,
+            slot_type::NONE,
+            cost,
+            task_type::DEPOSIT_MONEY,
+        )
+    {
+        return;
+    }
+    let (tasks, refund) = repair_destroyed_slave_items(&containers, &destroyed);
+    if refund > 0 {
+        inventory::change_money(
+            &mut txn.out(),
+            player,
+            slot_type::NONE,
+            slot_type::INVENTORY,
+            refund,
+            task_type::DEPOSIT_MONEY,
+        );
+    }
+    if tasks.is_empty() {
+        // Every scanned item vanished before the update: only the refund goes out, no empty
+        // RepairSlaves task and no "repaired" message.
+        return;
+    }
+    let mut out = txn.out();
+    out.send(
+        player,
+        SCItemTaskSuccessPacket {
+            action: item_task_type::REPAIR_SLAVES,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    send_error_message_to(&mut out, player, error_message::SLAVE_REPAIRED);
+}
+
+/// Applies the repair to the destroyed items that are still in `containers` (the player's own
+/// bag), returning the update tasks and the price of the items that vanished or were already
+/// repaired. No global item store is consulted: an item traded or mailed away is only refunded.
+fn repair_destroyed_slave_items(
+    containers: &[ContainerRef],
+    destroyed: &[(u64, u32, i32)],
+) -> (Vec<ItemTask>, i32) {
+    let mut tasks = Vec::new();
+    let mut refund = 0i32;
+    for (item_id, _, price) in destroyed {
+        let mut task = None;
+        for c in containers {
+            let mut c = c.lock().expect("container poisoned");
+            let Some(i) = c.get_item_by_id_mut(*item_id) else {
+                continue;
+            };
+            if i.class == ItemClass::SummonSlave && i.details.slave_is_destroyed != 0 {
+                // The NPC service completes at once: unlike a repair kit, no 10 minute timer.
+                i.details.slave_is_destroyed = 0;
+                i.details.slave_repair_start_time = 0;
+                i.dirty = true;
+                task = Some(super::packets::item_update(i));
+            }
+            break;
+        }
+        match task {
+            Some(task) => tasks.push(task),
+            None => refund = refund.saturating_add(*price),
+        }
+    }
+    (tasks, refund)
 }
 
 /// `Slave.RegenTick(delta)`.
@@ -5498,6 +6004,7 @@ mod summon_hull_overlap_tests {
     use crate::data::client_files::ClientFileManager;
     use crate::data::items::{ItemTemplate, TemplateKind};
     use crate::models::container::slot_type;
+    use crate::models::doodad::Doodad;
     use crate::models::item::Item;
     use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
     use crate::systems::ai::collision::terrain::tests::Plane;
@@ -5508,10 +6015,10 @@ mod summon_hull_overlap_tests {
     use crate::test_support::{spawn_player, test_character, TestClient};
 
     use super::{
-        create_for_owner, get_active_slave_by_owner_obj_id, hull_clear_at, model_box_clear_at,
-        overhead_clear_at, summon_candidate_1_2, summon_candidate_points, summon_model_box,
-        summon_offset_z, summon_placement_clear_1_2, summon_terrain, validated_summon_placement,
-        HullEnvelope, HullFootprint, ShipModel,
+        create_for_owner, get_active_slave_by_owner_obj_id, hull_clear_at, item_task_type,
+        model_box_clear_at, overhead_clear_at, summon_candidate_1_2, summon_candidate_points,
+        summon_model_box, summon_offset_z, summon_placement_clear_1_2, summon_terrain,
+        validated_summon_placement, HullEnvelope, HullFootprint, ShipModel,
     };
     use crate::systems::skills::ext::SummonPlacement;
     use aaemu_commons::PacketStream;
@@ -5709,6 +6216,10 @@ mod summon_hull_overlap_tests {
             test_character(1, "P", 500.0, 500.0),
             0x00F0_0001,
         );
+        // The fixture has no character stat pools; the cast validation reads hp and the 1.2
+        // summon use skill is `source_alive`.
+        p.data().unit.max_hp = 1000;
+        p.data().unit.hp = 1000;
         client.conn.active_char = Some(p.clone());
         (client, p)
     }
@@ -6150,7 +6661,17 @@ mod summon_hull_overlap_tests {
     /// `z`: the 1.2 rule has no static ground to fall back to.
     #[tokio::test]
     async fn a_client_placement_without_collision_uses_the_terrain_fallback() {
-        let s = crate::test_support::test_server_with(land_data());
+        // A low ocean level keeps the terrain fallback (0) on land; the world default (100)
+        // would make this sea floor and the new surface check refuse it.
+        let mut world = crate::data::world_templates::WorldTemplate::synthetic(
+            0,
+            "main_world",
+            2,
+            2,
+            crate::test_support::TEST_ZONE,
+        );
+        world.ocean_level = -1000.0;
+        let s = crate::test_support::test_server_with_world(land_data(), world);
         s.config.update(|c| c.physics.enable = false);
         let files = Arc::new(ClientFileManager::from_sources(
             &[],
@@ -6188,6 +6709,59 @@ mod summon_hull_overlap_tests {
             "the fallback must be the terrain helper: {t:?}"
         );
         assert!((t.z - 0.0).abs() < 1e-4, "no heightmap data: {t:?}");
+    }
+
+    /// A client placement whose *spawn surface* is under water is refused even when the
+    /// client's z is above sea level (the old check tested the client z, not the terrain).
+    #[tokio::test]
+    async fn a_client_placement_over_the_sea_floor_is_refused() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 60.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        let (mut client, p) = search_player(&s);
+        p.data().unit.transform.set_height(100.0);
+        let world = s.world.world(0).unwrap();
+        let placement = SummonPlacement {
+            x: 500.0,
+            y: 530.0,
+            z: 100.0,
+            yaw: 0.0,
+        };
+        assert!(
+            validated_summon_placement(&s, &world, &p, &land_template(), Some(placement), 0.0)
+                .is_none()
+        );
+        assert!(super::validated_client_spawn(
+            &s,
+            &world,
+            &p,
+            &land_template(),
+            500.0,
+            530.0,
+            100.0,
+            0.0
+        )
+        .is_none());
+        let codes: Vec<i16> = client
+            .drain()
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                super::error::SLAVE_SPAWN_ERROR_INVALID_AREA,
+                super::error::SLAVE_SPAWN_ERROR_INVALID_AREA
+            ]
+        );
     }
 
     /// A wall between the player and the spot still refuses the summon.
@@ -6338,6 +6912,796 @@ mod summon_hull_overlap_tests {
         assert!(
             (t.z - 100.0).abs() < 1e-4,
             "the terrain, not the low deck top: {t:?}"
+        );
+    }
+
+    /// Sends a `CSSpawnSlave` through the packet handler, as the client does. The handler now
+    /// starts the item's use-skill cast; the spawn (or refusal) runs asynchronously.
+    async fn send_spawn_slave(
+        s: &crate::GameServer,
+        client: &mut TestClient,
+        slave_id: u32,
+        at: (f32, f32, f32),
+        z_rot: f32,
+        item_id: u64,
+    ) {
+        use crate::net::registry::ClientPacket;
+        use crate::systems::vehicles::packets::CSSpawnSlavePacket;
+        CSSpawnSlavePacket {
+            slave_id,
+            x: at.0,
+            y: at.1,
+            z: at.2,
+            z_rot,
+            item_id,
+            slot_type: 0,
+            slot: 0,
+            hide_spawn_effect: false,
+        }
+        .handle(s, &mut client.conn)
+        .await
+        .unwrap();
+    }
+
+    fn error_codes(frames: &[(u16, Vec<u8>)]) -> Vec<i16> {
+        frames
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect()
+    }
+
+    /// The `SCSkillStarted` result bytes (the last byte of the failure body).
+    fn started_results(frames: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        frames
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCSkillStartedPacket)
+            .filter_map(|f| f.1.last().copied())
+            .collect()
+    }
+
+    async fn wait_for_slaves(s: &crate::GameServer, count: usize) -> Vec<super::SlaveRef> {
+        let world = s.world.world(0).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let live = super::all_slaves(&world);
+                if live.len() >= count {
+                    return live;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    async fn wait_for_error(client: &mut TestClient, codes: &[i16]) -> Vec<(u16, Vec<u8>)> {
+        let mut all = Vec::new();
+        for _ in 0..400 {
+            all.extend(client.drain());
+            if all.iter().any(|f| {
+                f.0 == crate::opcodes::sc::SCErrorMsgPacket
+                    && codes.contains(&i16::from_le_bytes([f.1[0], f.1[1]]))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        all
+    }
+
+    /// `CSSpawnSlave` runs the item-use cast: it spawns at the client's position and yaw after
+    /// the cast, commits the summon item exactly once and starts the skill cooldown.
+    #[tokio::test]
+    async fn csspawnslave_spawns_at_the_client_position_and_commits_once() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            1.25,
+            0x9110,
+        )
+        .await;
+        let spawned = wait_for_slaves(&s, 1).await;
+        let frames = client.drain();
+        assert_eq!(spawned.len(), 1, "the cart spawns");
+        let slave = &spawned[0];
+        let t = slave.data().unit.transform;
+        assert!(
+            (t.x - 500.0).abs() < 1e-4 && (t.y - 530.0).abs() < 1e-4,
+            "{t:?}"
+        );
+        assert!((t.z - 100.0).abs() < 1e-4, "{t:?}");
+        assert!(
+            (t.rot_z - 1.25).abs() < 1e-4,
+            "the client yaw is kept: {t:?}"
+        );
+        let tasks: Vec<&(u16, Vec<u8>)> = frames
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCItemTaskSuccessPacket)
+            .collect();
+        assert_eq!(tasks.len(), 1, "one item update: {:x?}", frames);
+        assert_eq!(tasks[0].1[0], item_task_type::UPDATE_SUMMON_MATE_ITEM);
+        let item =
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110).expect("the item stays");
+        assert_eq!(item.details.slave_db_id, slave.data().id);
+        assert_eq!(item.details.slave_type, 2);
+        assert!(
+            p.data().unit.cooldowns.cooldowns.contains_key(&RULE_SKILL),
+            "the cast started the skill cooldown"
+        );
+    }
+
+    /// The item-cast gates apply to the synthesized cast: a dead or stunned sender and a skill
+    /// on cooldown are refused before any placement / spawn work.
+    #[tokio::test]
+    async fn csspawnslave_refuses_dead_stunned_and_cooldown_senders() {
+        use crate::systems::skills::types::skill_result;
+
+        let flat = || {
+            world_on(
+                land_data(),
+                Plane {
+                    a: 100.0,
+                    b: 0.0,
+                    c: 0.0,
+                    n: 1024,
+                },
+                &[],
+            )
+        };
+        // Dead.
+        let s = flat();
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        p.data().unit.hp = 0;
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames = client.drain();
+        assert_eq!(
+            started_results(&frames).last().copied(),
+            Some(skill_result::SOURCE_DIED),
+            "{:x?}",
+            frames
+        );
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+
+        // Stunned.
+        let mut data = land_data();
+        data.systems
+            .skills
+            .add_buff(crate::systems::skills::data::BuffTemplate {
+                id: 10,
+                stun: true,
+                ..Default::default()
+            });
+        let s = world_on(
+            data,
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        let mut buff = crate::models::buff::Buff::new(
+            crate::systems::skills::buffs::net_template(
+                &s,
+                s.game_data.systems.skills.buff(10).unwrap(),
+            ),
+            crate::systems::skills::buffs::unit_caster(p.obj_id),
+            Some((1, 10)),
+            crate::world::now_ms(),
+        );
+        buff.state = crate::models::buff::effect_state::ACTING;
+        p.data().unit.buffs.effects.push(buff);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames = client.drain();
+        assert_eq!(
+            started_results(&frames).last().copied(),
+            Some(skill_result::CANNOT_CAST_IN_STUN),
+            "{:x?}",
+            frames
+        );
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+
+        // On cooldown.
+        let s = flat();
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        p.data()
+            .unit
+            .cooldowns
+            .add_cooldown(RULE_SKILL, 10_000, crate::world::now_ms());
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames = client.drain();
+        assert_eq!(
+            started_results(&frames).last().copied(),
+            Some(skill_result::COOLDOWN_TIME),
+            "{:x?}",
+            frames
+        );
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+    }
+
+    /// The item-use zone gate (`item_cannot_use_here` 440 + `ZONE_BANNED` 58) applies to the
+    /// synthesized cast.
+    #[tokio::test]
+    async fn csspawnslave_refuses_a_zone_banned_item() {
+        use crate::data::world_data::Zone;
+        use crate::systems::skills::data::zone_rules::BannedTag;
+        use crate::test_support::TEST_ZONE;
+
+        let mut data = land_data();
+        data.zones.zones.insert(
+            TEST_ZONE,
+            Zone {
+                id: 1,
+                zone_key: TEST_ZONE,
+                group_id: 45,
+                ..Default::default()
+            },
+        );
+        data.zones.zone_id_to_key.insert(1, TEST_ZONE);
+        data.systems
+            .skills
+            .zone_rules
+            .item_tags
+            .insert(RULE_ITEM, vec![471]);
+        data.systems.skills.zone_rules.banned_tags.insert(
+            45,
+            vec![BannedTag {
+                id: 1,
+                tag_id: 471,
+                banned_periods_id: 0,
+            }],
+        );
+        let s = world_on(
+            data,
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames = client.drain();
+        assert!(
+            error_codes(&frames).contains(&440),
+            "item_cannot_use_here: {:x?}",
+            frames
+        );
+        assert_eq!(
+            started_results(&frames).last().copied(),
+            Some(crate::systems::skills::unit_reqs::skill_result_for_key(
+                "SKILL_CANNOT_USE_HERE",
+            )),
+            "{:x?}",
+            frames
+        );
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+    }
+
+    /// A spot beyond `spawn_valid_area_range`, terrain more than 10 m above the owner, and a
+    /// land spot whose spawn surface is under water are refused with
+    /// `SlaveSpawnErrorInvalidArea`, and no item is committed.
+    #[tokio::test]
+    async fn csspawnslave_refuses_a_far_high_or_wrong_surface_spot() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 560.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames =
+            wait_for_error(&mut client, &[super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]).await;
+        assert!(error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+        assert_eq!(
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+                .unwrap()
+                .details
+                .slave_db_id,
+            0,
+            "a refused placement does not commit the item"
+        );
+
+        // The 1.2 land rule: the terrain is at most 10 m above the player.
+        let high = world_on(
+            land_data(),
+            Plane {
+                a: 111.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&high);
+        install_cast_hooks(&high);
+        let (mut client, p) = search_player(&high);
+        give_summon_item(&high, &p, 0x9110);
+        send_spawn_slave(
+            &high,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 111.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames =
+            wait_for_error(&mut client, &[super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]).await;
+        assert!(error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+        assert!(super::all_slaves(&high.world.world(0).unwrap()).is_empty());
+
+        // The client z is above sea level, but the spawn surface (terrain 60) is the sea floor.
+        let wet = world_on(
+            land_data(),
+            Plane {
+                a: 60.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&wet);
+        install_cast_hooks(&wet);
+        let (mut client, p) = search_player(&wet);
+        give_summon_item(&wet, &p, 0x9110);
+        send_spawn_slave(
+            &wet,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames =
+            wait_for_error(&mut client, &[super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]).await;
+        assert!(error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+        assert!(super::all_slaves(&wet.world.world(0).unwrap()).is_empty());
+    }
+
+    /// Without the item the packet names, `CSSpawnSlave` starts no cast and spawns nothing.
+    #[tokio::test]
+    async fn csspawnslave_without_an_owned_matching_item_spawns_nothing() {
+        // A second real land template so a mismatched slave id is not refused by the template
+        // lookup alone: only the item/template match can stop it spawning the item's slave.
+        let mut data = land_data();
+        let mut other = land_template();
+        other.id = RULE_SLAVE + 1;
+        data.systems
+            .vehicles
+            .slave_templates
+            .insert(RULE_SLAVE + 1, other);
+        let s = world_on(
+            data,
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        // Not owned; then owned but for another slave template.
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0xDEAD,
+        )
+        .await;
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE + 1,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        send_spawn_slave(&s, &mut client, RULE_SLAVE, (500.0, 530.0, 101.0), 0.0, 0).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(client.drain().is_empty(), "no cast was started");
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+        assert_eq!(
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+                .unwrap()
+                .details
+                .slave_db_id,
+            0
+        );
+    }
+
+    /// The item path's one-active-vehicle check still applies: a prior hull that cannot be
+    /// deleted refuses the packet spawn and keeps the prior vehicle and its item binding.
+    #[tokio::test]
+    async fn csspawnslave_keeps_the_item_path_one_active_vehicle_refusal() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let world = s.world.world(0).unwrap();
+        let prior = wait_for_slaves(&s, 1)
+            .await
+            .into_iter()
+            .next()
+            .expect("first cart");
+        let prior_obj = prior.obj_id;
+        let bound = crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+            .unwrap()
+            .details
+            .slave_db_id;
+        let mut doodad = Doodad::new(1);
+        doodad.item_id = 1;
+        doodad.item_template_id = 1;
+        let doodad = crate::world::Entity::new(0x00F0_0101, doodad);
+        world.add_object(&doodad);
+        prior.data().attached_doodads.push(doodad.obj_id);
+        // The first cast started its 10 s cooldown; clear it so this second press reaches the
+        // one-active-vehicle check instead of being refused as a cooldown re-press.
+        p.data().unit.cooldowns.remove_cooldown(RULE_SKILL);
+        p.data().unit.skill_last_used_ms = 0;
+        p.data().unit.global_cooldown_ms = 0;
+
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 520.0, 101.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames =
+            wait_for_error(&mut client, &[super::error::SLAVE_EQUIPMENT_LOADED_ITEM]).await;
+        assert!(error_codes(&frames).contains(&super::error::SLAVE_EQUIPMENT_LOADED_ITEM));
+        let live = super::all_slaves(&world);
+        assert_eq!(live.len(), 1, "the prior vehicle stays");
+        assert_eq!(live[0].obj_id, prior_obj);
+        assert_eq!(
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+                .unwrap()
+                .details
+                .slave_db_id,
+            bound,
+            "the binding is unchanged"
+        );
+    }
+
+    /// A boat `CSSpawnSlave` on water spawns on the water surface (the hull offset folded in).
+    #[tokio::test]
+    async fn csspawnslave_boat_on_water_spawns_on_the_surface() {
+        let s = world_at_with(search_data(), GROUND, &[]);
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, WATER),
+            1.0,
+            0x9110,
+        )
+        .await;
+        let spawned = wait_for_slaves(&s, 1).await;
+        assert_eq!(spawned.len(), 1, "the boat spawns");
+        let t = spawned[0].data().unit.transform;
+        let offset = summon_offset_z(&ShipModel {
+            mass_center_z: -4.0,
+            keel_height: 0.2,
+            ..Default::default()
+        });
+        assert!(
+            (t.z - (WATER + offset)).abs() < 1e-3,
+            "the water surface + hull offset: {t:?}"
+        );
+    }
+
+    /// The 1.2 full placement check refusal answers `SLAVE_SPAWN_SHIP_NEED_MORE_SPACE` (100):
+    /// a deck between the player and the chosen terrain point blocks the line of sight.
+    #[tokio::test]
+    async fn csspawnslave_refuses_a_hull_box_blocked_spot_with_100() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[(
+                Vec3::new(500.0, 515.0, 104.5),
+                Vec3::new(10.0, 25.0, 0.5),
+                false,
+            )],
+        );
+        install_empty_hull_loader(&s);
+        install_cast_hooks(&s);
+        let (mut client, p) = search_player(&s);
+        p.data().unit.transform.set_height(105.0);
+        give_summon_item(&s, &p, 0x9110);
+        send_spawn_slave(
+            &s,
+            &mut client,
+            RULE_SLAVE,
+            (500.0, 530.0, 105.0),
+            0.0,
+            0x9110,
+        )
+        .await;
+        let frames = wait_for_error(
+            &mut client,
+            &[super::error::SLAVE_SPAWN_SHIP_NEED_MORE_SPACE],
+        )
+        .await;
+        assert!(
+            error_codes(&frames).contains(&super::error::SLAVE_SPAWN_SHIP_NEED_MORE_SPACE),
+            "{:x?}",
+            frames
+        );
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+        assert_eq!(
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+                .unwrap()
+                .details
+                .slave_db_id,
+            0
+        );
+    }
+
+    /// A refused item summon (terrain > 10 m above the owner) returns before the item commit and
+    /// the old-vehicle deletion: the old vehicle and the item binding stay.
+    #[tokio::test]
+    async fn a_refused_land_summon_keeps_the_old_vehicle_and_binding() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.4,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        let (mut client, p) = search_player(&s);
+        p.data()
+            .unit
+            .transform
+            .set_position(500.0, 500.0, 300.0, 0.0, 0.0, 0.0);
+        give_summon_item(&s, &p, 0x9110);
+        let mut first_at = crate::models::transform::Transform::default();
+        first_at.set_position(500.0, 520.0, 308.0, 0.0, 0.0, 0.0);
+        let first = tokio::time::timeout(
+            Duration::from_secs(2),
+            create_for_owner(&s, &p, 0x9110, RULE_ITEM, false, Some(first_at), None, 0.0),
+        )
+        .await
+        .expect("first summon")
+        .expect("the first cart spawns");
+        let world = s.world.world(0).unwrap();
+        let bound = crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+            .unwrap()
+            .details
+            .slave_db_id;
+        assert_eq!(bound, first.data().id);
+
+        // 312 at y = 530 is 12 m above the player (300).
+        let mut second_at = crate::models::transform::Transform::default();
+        second_at.set_position(500.0, 530.0, 312.0, 0.0, 0.0, 0.0);
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            create_for_owner(&s, &p, 0x9110, RULE_ITEM, false, Some(second_at), None, 0.0),
+        )
+        .await
+        .expect("second summon");
+        assert!(second.is_none(), "the 10 m rule refuses the second spot");
+        assert!(
+            world.slave(first.obj_id).is_some(),
+            "the old vehicle is not deleted"
+        );
+        assert_eq!(
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
+                .unwrap()
+                .details
+                .slave_db_id,
+            bound,
+            "the item binding is unchanged"
+        );
+        let codes: Vec<i16> = client
+            .drain()
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect();
+        assert_eq!(codes, vec![super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]);
+    }
+
+    /// GM / ownerless spawns pass no item and keep the old behaviour at a cliff.
+    #[tokio::test]
+    async fn an_ownerless_spawn_at_a_cliff_skips_the_item_height_rule() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 111.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        let (_client, p) = search_player(&s);
+        let world = s.world.world(0).unwrap();
+        let mut at = crate::models::transform::Transform::default();
+        at.set_position(500.0, 530.0, 111.0, 0.0, 0.0, 0.0);
+        let spawned = super::create_core(
+            &s,
+            &world,
+            Some(&p),
+            None,
+            RULE_SLAVE,
+            None,
+            false,
+            Some(at),
+            None,
+        );
+        assert!(
+            spawned.is_some(),
+            "an item-less spawn at terrain 11 m above the owner still spawns"
+        );
+    }
+
+    /// A position override (no 1.2 search) whose land terrain is more than 10 m above the
+    /// owner is refused with `SlaveSpawnErrorInvalidArea` before the summon item is committed.
+    #[tokio::test]
+    async fn a_land_position_override_11_m_above_the_owner_is_refused() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 111.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[],
+        );
+        install_empty_hull_loader(&s);
+        let (mut client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9120);
+        let mut at = crate::models::transform::Transform::default();
+        at.set_position(500.0, 530.0, 111.0, 0.0, 0.0, 0.0);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            create_for_owner(&s, &p, 0x9120, RULE_ITEM, false, Some(at), None, 0.0),
+        )
+        .await
+        .expect("summon job");
+        assert!(result.is_none());
+        assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
+        let codes: Vec<i16> = client
+            .drain()
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect();
+        assert_eq!(codes, vec![super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]);
+        assert_eq!(
+            crate::systems::vehicles::mates::owned_item(&s, &p, 0x9120)
+                .unwrap()
+                .details
+                .slave_db_id,
+            0,
+            "the refusal is before the item commit"
         );
     }
 
@@ -6745,6 +8109,12 @@ mod summon_hull_overlap_tests {
     /// The 1.2 search with a summon item and cooldown skill, for the post-wait recheck tests.
     fn search_data() -> crate::data::GameData {
         let mut data = with_ship_data(crate::data::GameData::empty());
+        // MaxHp / MaxMp of a slave (unit_formulas kind 14 / 26, owner type 2) so a spawned
+        // hull is alive; the no-stat fixture made it die at once and mark the item destroyed.
+        data.formulas = crate::systems::vehicles::stats::tests::formulas(
+            &[(1, "1000", 14, 2), (2, "100", 26, 2)],
+            &[],
+        );
         data.items.templates.insert(
             RULE_ITEM,
             ItemTemplate {
@@ -6755,8 +8125,33 @@ mod summon_hull_overlap_tests {
                 ..ItemTemplate::plain(RULE_ITEM, 1)
             },
         );
+        // The summon item cast: target type 12 (`SummonPos`), effect 60 (`SpawnSlave`), a
+        // cooldown / GCD so the cast route's admission is observable.
+        data.systems.skills.add_effect(
+            crate::systems::skills::data::EffectKind::SpecialEffect,
+            crate::systems::skills::data::EffectTemplate::Special(
+                crate::systems::skills::data::effects::SpecialEffect {
+                    id: 1,
+                    special_effect_type_id: 60,
+                    value1: 0,
+                    value2: 0,
+                    value3: 0,
+                    value4: 0,
+                },
+            ),
+            1,
+        );
         data.systems.skills.add_skill(SkillTemplate {
             id: RULE_SKILL,
+            target_type: 12,
+            cooldown_time: 10_000,
+            default_gcd: true,
+            source_alive: true,
+            effects: vec![crate::systems::skills::tests::skill_effect(
+                1,
+                crate::systems::skills::data::EffectKind::SpecialEffect,
+                1,
+            )],
             ..Default::default()
         });
         data
@@ -6767,6 +8162,14 @@ mod summon_hull_overlap_tests {
             Some(super::TestSlaveLoader(Arc::new(|_, _| {
                 Box::pin(async { Ok(super::LoadedHull::default()) })
             })));
+    }
+
+    /// The item-use cast path needs the economy item hooks and the npcs / vehicles effect hooks
+    /// (the same set a live server installs), or `start_skill` cannot resolve the item.
+    fn install_cast_hooks(s: &crate::GameServer) {
+        crate::systems::economy::bridges::install(s);
+        crate::systems::npcs::install_hooks(s);
+        crate::systems::vehicles::install_hooks(s);
     }
 
     fn give_summon_item(s: &crate::GameServer, p: &crate::world::PlayerRef, item_id: u64) {
@@ -7104,6 +8507,10 @@ fn summon_terrain(server: &GameServer, world: &WorldInstance, x: f32, y: f32) ->
 /// between the ray end and the heightfield (the Bevy client port lifts its end the same way).
 const SUMMON_LOS_END_LIFT: f32 = 0.2;
 
+/// The 1.2 land summon rule (`FUN_39347fb0`): the candidate terrain may be at most this far
+/// above the player (`terrain - player_z <= 10`).
+const SUMMON_MAX_TERRAIN_ABOVE_OWNER: f32 = 10.0;
+
 /// The 1.2 line-of-sight rule: a ray from the player's eyes to the candidate hits nothing
 /// (static + terrain, rays 0x8F). No collision service counts as clear.
 fn summon_los_clear(server: &GameServer, instance_id: u32, from: [f32; 3], to: [f32; 3]) -> bool {
@@ -7268,7 +8675,9 @@ pub(crate) fn summon_candidate_1_2(
             None
         };
         let z = water.unwrap_or(terrain);
-        let terrain_ok = water.map_or(terrain - me.z <= 10.0, |water| terrain <= water);
+        let terrain_ok = water.map_or(terrain - me.z <= SUMMON_MAX_TERRAIN_ABOVE_OWNER, |water| {
+            terrain <= water
+        });
         if !terrain_ok {
             terrain_rej += 1;
         }
@@ -7363,7 +8772,7 @@ pub(super) fn summon_placement_clear_1_2(
         if terrain > water {
             return false;
         }
-    } else if terrain - me.z > 10.0 {
+    } else if terrain - me.z > SUMMON_MAX_TERRAIN_ABOVE_OWNER {
         return false;
     }
     // Land rays end just above the candidate's terrain point ([`SUMMON_LOS_END_LIFT`]); a deck
@@ -7511,3 +8920,11 @@ fn refund_summon_cooldown(owner: &PlayerRef, cooldown: Option<SummonCooldownToke
         );
     }
 }
+
+#[cfg(test)]
+#[path = "slave_repair_tests.rs"]
+mod slave_repair_tests;
+
+#[cfg(test)]
+#[path = "siege_kill_tests.rs"]
+mod siege_kill_tests;

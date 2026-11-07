@@ -92,7 +92,11 @@ pub async fn enter_world_login(
     // (`GLPlayerEnter` result 1 -> `ACEnterWorldDenied`), but two cookies can be granted for one
     // account before either client connects. The loser must not get a world entry: it would skip
     // the account registration and let the same characters be played twice.
-    if !account_manager_add(server, conn).await {
+    let added = account_manager_add(server, conn).await;
+    // The cookie was accepted (it still counted as an occupied slot); the account registration
+    // finished, so the login queue's occupancy snapshot can drop it now.
+    server.enter_world.forget(token);
+    if !added {
         let owner = server.accounts.connection_of(account_id).unwrap_or(0);
         tracing::warn!(
             "Enter world refused: account {account_id} is already connected on session {owner} (session {}); the existing session keeps the account",
@@ -123,7 +127,7 @@ pub async fn enter_world_login(
 
 /// `AccountManager.Add(connection)` (timed rewards included: `systems::services::accounts`).
 /// `false` = the account is already registered on another connection.
-async fn account_manager_add(server: &GameServer, conn: &GameConnection) -> bool {
+async fn account_manager_add(server: &GameServer, conn: &mut GameConnection) -> bool {
     crate::systems::services::accounts::add(server, conn).await
 }
 
@@ -138,9 +142,13 @@ fn send_account_info(conn: &mut GameConnection) {
     });
 }
 
-/// `Connection.LoadAccount()`: characters of the account (houses are a later phase).
+/// `Connection.LoadAccount()`: reload the account payment / premium state (WP-B, replacing the
+/// C# TODO "Load payment and account tier information"), send `SCAccountInfo`, then load the
+/// account's characters (houses are a later phase).
 async fn load_account(server: &GameServer, conn: &mut GameConnection) -> Result<()> {
-    // TODO (C#): Load payment and account tier information
+    let state = crate::systems::services::accounts::refresh_state(server, conn.account_id()).await;
+    conn.payment = state.payment.clone();
+    send_account_info(conn);
     conn.characters.clear();
     let (characters, packets) =
         crate::db_character::load_account_characters(server, conn.account_id()).await?;
@@ -189,7 +197,6 @@ impl ClientPacket for CSListCharacterPacket {
         Box::pin(async move {
             let extra_slots = crate::db::extra_character_slots(&server.db, conn.account_id()).await;
             conn.send(&SCGetSlotCountPacket { sc: extra_slots });
-            send_account_info(conn);
             load_account(server, conn).await?;
             let characters = std::mem::take(&mut conn.characters);
             send_character_list(conn, &characters);

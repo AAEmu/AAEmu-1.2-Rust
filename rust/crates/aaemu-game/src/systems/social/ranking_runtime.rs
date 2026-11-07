@@ -185,6 +185,19 @@ impl RankingState {
         self.scores.values()
     }
 
+    /// Updates the cached holder name of every stored score (character rename). Returns the
+    /// number of changed scores.
+    pub fn rename_holder(&mut self, new_name: &str) -> usize {
+        let mut changed = 0;
+        for score in self.scores.values_mut() {
+            if score.account != new_name {
+                score.account = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// The stored scores of one board, earliest period first.
     pub fn scores_of(&self, rank_id: u32) -> impl Iterator<Item = &RankScore> {
         self.scores
@@ -320,6 +333,78 @@ fn measure_score(measure: f32) -> Option<i32> {
     }
     // Rust's float-to-int cast saturates, so a huge measure tops out instead of wrapping.
     Some(measure.round() as i32)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Alarms
+// ---------------------------------------------------------------------------------------------
+
+/// `SCRankAlarmPacket.rank_alarm_kind`: which authored alarm message the client shows.
+///
+/// The numbering is INFERRED (CAP-UI-4): the client's handler branches on `kind == 1` for the
+/// end text and everything else for the start text, and the `ranks` SQL column order lists the
+/// start alarm before the end alarm, so `0` is the start and `1` the end. No capture proves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RankAlarmKind {
+    /// The contest is about to open (`start_time_alarm` minutes before its window start).
+    Start,
+    /// The contest has ended (`end_time_alarm` minutes after its window end).
+    End,
+}
+
+impl RankAlarmKind {
+    /// The `rank_alarm_kind` byte.
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Start => 0,
+            Self::End => 1,
+        }
+    }
+}
+
+/// The board alarms a tick that ran from `prev_tick` to `now` must send, once each.
+///
+/// The authored columns pair with the daily slot hours (`start_time_alarm` is signed minutes
+/// relative to the window start, `end_time_alarm` relative to its end): the only shipped board
+/// with alarms announces the fishing contest five minutes before the Saturday 20:00 slot, not
+/// before the weekly scoring period. An alarm is due when its moment lies in `(prev_tick, now]`.
+/// A board whose authored message is empty sends no alarm of that kind.
+///
+/// The caller keeps the once-per-(board, kind, period) state; this function only reports the
+/// crossings of one tick.
+pub fn alarms_due(
+    board: &RankDefinition,
+    prev_tick: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Vec<RankAlarmKind> {
+    let mut due = Vec::new();
+    if now <= prev_tick {
+        return due;
+    }
+    let start_message = !board.start_time_alarm_msg.trim().is_empty();
+    let end_message = !board.end_time_alarm_msg.trim().is_empty();
+    if !start_message && !end_message {
+        return due;
+    }
+    let start_offset = TimeDelta::minutes(i64::from(board.start_time_alarm));
+    let end_offset = TimeDelta::minutes(i64::from(board.end_time_alarm));
+    for window in board.windows_near(now) {
+        if start_message {
+            if let Some(at) = window.start.checked_add_signed(start_offset) {
+                if prev_tick < at && at <= now {
+                    due.push(RankAlarmKind::Start);
+                }
+            }
+        }
+        if end_message {
+            if let Some(at) = window.end.checked_add_signed(end_offset) {
+                if prev_tick < at && at <= now {
+                    due.push(RankAlarmKind::End);
+                }
+            }
+        }
+    }
+    due
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -521,6 +606,9 @@ mod tests {
             ed_year: 2014,
             ed_month: 1,
             ed_day: 1,
+            start_time_alarm: -5,
+            start_time_alarm_msg: "The contest starts soon.".to_string(),
+            end_time_alarm_msg: "The contest has ended.".to_string(),
             ..Default::default()
         }
     }
@@ -1150,6 +1238,138 @@ mod tests {
         let bytes = s.into_bytes();
         assert_eq!(bytes.len(), 18 + 3 * row_len);
         assert_eq!(&bytes[14..18], &[3, 0, 0, 0]);
+    }
+
+    #[test]
+    fn start_alarm_fires_when_the_clock_crosses_the_slot_start_offset() {
+        // The shipped shape: Saturday 20:00-22:00, start alarm -5 minutes, both messages.
+        let board = fishing(2, RankKind::FishingLength);
+        // The Friday before and the Sunday after are not the authored slot.
+        assert!(
+            alarms_due(&board, ts("2013-11-08 19:54:00"), ts("2013-11-08 19:56:00")).is_empty()
+        );
+        assert!(
+            alarms_due(&board, ts("2013-11-10 19:54:00"), ts("2013-11-10 19:56:00")).is_empty()
+        );
+        // 19:55 falls in this tick; the boundary itself belongs to the later tick.
+        assert!(
+            alarms_due(&board, ts("2013-11-09 19:54:00"), ts("2013-11-09 19:54:59")).is_empty()
+        );
+        assert_eq!(
+            alarms_due(&board, ts("2013-11-09 19:54:00"), ts("2013-11-09 19:55:00")),
+            [RankAlarmKind::Start]
+        );
+        assert_eq!(
+            alarms_due(&board, ts("2013-11-09 19:54:59"), ts("2013-11-09 19:55:00")),
+            [RankAlarmKind::Start]
+        );
+        // The moment is not crossed again in the following ticks.
+        for (prev, now) in [
+            ("2013-11-09 19:55:00", "2013-11-09 19:55:59"),
+            ("2013-11-09 19:55:59", "2013-11-09 19:56:00"),
+            ("2013-11-09 20:00:00", "2013-11-09 20:59:59"),
+        ] {
+            assert!(
+                alarms_due(&board, ts(prev), ts(now)).is_empty(),
+                "{prev}..{now}"
+            );
+        }
+    }
+
+    #[test]
+    fn end_alarm_fires_when_the_clock_crosses_the_slot_end() {
+        let board = fishing(2, RankKind::FishingLength);
+        assert!(
+            alarms_due(&board, ts("2013-11-09 21:58:00"), ts("2013-11-09 21:59:59")).is_empty()
+        );
+        assert_eq!(
+            alarms_due(&board, ts("2013-11-09 21:59:00"), ts("2013-11-09 22:00:00")),
+            [RankAlarmKind::End]
+        );
+        assert!(
+            alarms_due(&board, ts("2013-11-09 22:00:00"), ts("2013-11-09 22:01:00")).is_empty()
+        );
+    }
+
+    #[test]
+    fn each_alarm_is_due_once_per_contest_and_again_next_week() {
+        let board = fishing(2, RankKind::FishingLength);
+        // Walk one tick per minute over the whole Saturday: one start, one end.
+        let mut start = 0;
+        let mut end = 0;
+        for minute in 0..24 * 60 {
+            let prev = ts("2013-11-09 00:00:00") + TimeDelta::minutes(minute);
+            let now = prev + TimeDelta::minutes(1);
+            for kind in alarms_due(&board, prev, now) {
+                match kind {
+                    RankAlarmKind::Start => start += 1,
+                    RankAlarmKind::End => end += 1,
+                }
+            }
+        }
+        assert_eq!((start, end), (1, 1));
+        // The next Saturday is a new contest: both alarms are due again.
+        assert_eq!(
+            alarms_due(&board, ts("2013-11-16 19:54:00"), ts("2013-11-16 19:56:00")),
+            [RankAlarmKind::Start]
+        );
+        assert_eq!(
+            alarms_due(&board, ts("2013-11-16 21:59:00"), ts("2013-11-16 22:01:00")),
+            [RankAlarmKind::End]
+        );
+    }
+
+    #[test]
+    fn a_board_without_a_message_sends_no_alarm_of_that_kind() {
+        let mut silent = fishing(3, RankKind::FishingWeight);
+        silent.start_time_alarm_msg.clear();
+        silent.end_time_alarm_msg.clear();
+        assert!(alarms_due(
+            &silent,
+            ts("2013-11-09 19:54:00"),
+            ts("2013-11-09 19:56:00")
+        )
+        .is_empty());
+        assert!(alarms_due(
+            &silent,
+            ts("2013-11-09 21:59:00"),
+            ts("2013-11-09 22:01:00")
+        )
+        .is_empty());
+
+        // Only the end message is authored: the start crossing stays silent.
+        let mut end_only = fishing(3, RankKind::FishingWeight);
+        end_only.start_time_alarm_msg.clear();
+        assert!(alarms_due(
+            &end_only,
+            ts("2013-11-09 19:54:00"),
+            ts("2013-11-09 19:56:00")
+        )
+        .is_empty());
+        assert_eq!(
+            alarms_due(
+                &end_only,
+                ts("2013-11-09 21:59:00"),
+                ts("2013-11-09 22:01:00")
+            ),
+            [RankAlarmKind::End]
+        );
+    }
+
+    #[test]
+    fn an_expired_board_has_no_alarms() {
+        // The shipped contests ended 2014-01-01; a later clock must not fire them.
+        let board = fishing(2, RankKind::FishingLength);
+        assert!(
+            alarms_due(&board, ts("2026-11-07 19:54:00"), ts("2026-11-07 19:56:00")).is_empty()
+        );
+        // A backwards or empty interval crosses nothing.
+        assert!(
+            alarms_due(&board, ts("2013-11-09 19:56:00"), ts("2013-11-09 19:54:00")).is_empty()
+        );
+        assert!(
+            alarms_due(&board, ts("2013-11-09 19:55:00"), ts("2013-11-09 19:55:00")).is_empty()
+        );
     }
 
     #[test]

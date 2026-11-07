@@ -5,6 +5,7 @@
 //! `{int}::{to,from}_{le,be}_bytes` in std.
 
 pub mod aapak;
+pub mod character_slots;
 pub mod client_files;
 pub mod crash;
 pub mod dotnet_fmt;
@@ -16,6 +17,7 @@ pub mod models;
 pub mod mysql;
 pub mod net;
 pub mod packet_stream;
+pub mod password;
 pub mod utils;
 
 #[cfg(test)]
