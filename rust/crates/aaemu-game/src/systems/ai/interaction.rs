@@ -18,6 +18,9 @@ use super::framework::AiCtx;
 /// NPC non-interactable, a later command of another (`'t'`) set unlocks it again. Unknown set
 /// ids keep the NPC interactable, exactly like an NPC without a set.
 pub(crate) fn apply_command_set(c: &mut AiCtx<'_>, cmd_set_id: u32) {
+    if !c.server.config.interaction.command_set_lock {
+        return; // INFERRED rule disabled (Interaction.CommandSetLock, default off)
+    }
     let can_interact = c
         .server
         .game_data

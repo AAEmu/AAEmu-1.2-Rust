@@ -326,6 +326,10 @@ fn server() -> Arc<GameServer> {
 fn server_with_data(data: GameData) -> Arc<GameServer> {
     let server = Arc::new(test_server_with(data));
     server.set_self();
+    // The command-set interaction lock is opt-in; these flow tests exercise it.
+    server
+        .config
+        .update(|cfg| cfg.interaction.command_set_lock = true);
     crate::systems::skills::bind(&server);
     // The AI parts of the npcs NpcSkillHooks (`npcs::bridges::NpcSkills` at startup; its npc
     // stat overrides need npc data the bare test NPCs do not have).
@@ -2883,6 +2887,45 @@ async fn follow_unit_command_without_a_player_does_not_hang_the_set() {
         ))
     );
     assert_eq!(npc_pos(&npc), Vec3::new(100.0, 100.0, 100.0));
+}
+
+/// With `Interaction.CommandSetLock` off (the default) a `can_interact = 'f'` set locks nothing.
+#[tokio::test]
+async fn locked_command_set_is_ignored_without_the_config_flag() {
+    let server = server();
+    server
+        .config
+        .update(|cfg| cfg.interaction.command_set_lock = false);
+    let mut client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Talker", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 150)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(npc.data().interactable);
+    assert!(drain_op(&mut client, sc::SCNpcInteractionStatusChangedPacket).is_empty());
 }
 
 /// A set with `can_interact = 'f'` sends the status `false` to viewers when it starts, closes a

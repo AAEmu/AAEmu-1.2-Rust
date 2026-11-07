@@ -1972,6 +1972,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     debug because its meaning is UNKNOWN. Sets 20 and 33 are unreachable through
     `quest_components.ai_command_set_id` (no row names them) and set 1 is a test set, so the
     shipped quest content does not use this path.
+  * **Opt-in (`Interaction.CommandSetLock`, default `false`):** the 1.2 client only loads the
+    column (`x2game12.c` `LoadAiCommandSetDescs`, no consumer found) and 302 of 325 sets are 'f', so
+    the rule below is off unless the flag is set.
   * While an `ai_command_sets` row with `can_interact = 'f'` runs, the NPC's
     `Npc.interactable` flag is false: `SCNpcInteractionStatusChanged{npc, false}` goes to the
     players around it at set start, the visibility path repeats it to players that enter sight
