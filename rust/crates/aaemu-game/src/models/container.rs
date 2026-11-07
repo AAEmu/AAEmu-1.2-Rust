@@ -1064,10 +1064,17 @@ impl ItemContainer {
                 );
                 return None;
             };
-            // Add name if marked as crafter (single stack items only)
-            if crafter_id > 0 && template.max_count == 1 {
-                item.made_unit_id = crafter_id;
-                item.world_id = env.default_world_template_id;
+            // The 1.2 client shows the crafter of any item whose `madeUnitId` resolves to a
+            // character name (tooltip `FUN_39423560`), so record the crafter on every crafted
+            // product. `made_unit_id`/`world_id` keep the C# behaviour for single-stack items
+            // (the older carrier and the world the pack was made on); `crafter_id` is the
+            // dedicated column and reaches the same wire field through `Item::crafter`.
+            if crafter_id > 0 {
+                item.crafter_id = crafter_id;
+                if template.max_count == 1 {
+                    item.made_unit_id = crafter_id;
+                    item.world_id = env.default_world_template_id;
+                }
             }
             amount -= add;
             let pref = if matches!(template.kind, TemplateKind::Backpack { .. })

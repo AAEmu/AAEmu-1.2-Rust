@@ -428,6 +428,7 @@ CREATE TABLE IF NOT EXISTS `items` (
   `details` blob,
   `lifespan_mins` int NOT NULL,
   `made_unit_id` int unsigned NOT NULL DEFAULT '0',
+  `crafter_id` int unsigned NOT NULL DEFAULT '0' COMMENT 'Character id of the crafter (crafted items only, 0 = not crafted)',
   `unsecure_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `unpack_time` datetime NOT NULL DEFAULT '0001-01-01 00:00:00',
   `owner` int unsigned NOT NULL,

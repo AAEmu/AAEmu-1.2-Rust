@@ -842,8 +842,8 @@ impl ItemManager {
 async fn save_item(tx: &mut Transaction<'_, MySql>, item: &Item, container_id: u64) -> Result<()> {
     let res = sqlx::query(
         "REPLACE INTO items (`id`,`type`,`template_id`,`container_id`,`slot_type`,`slot`,`count`,`details`,`lifespan_mins`,`made_unit_id`,\
-         `unsecure_time`,`unpack_time`,`owner`,`created_at`,`grade`,`flags`,`ucc`,`expire_time`,`expire_online_minutes`,`charge_time`,`charge_count`) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         `crafter_id`,`unsecure_time`,`unpack_time`,`owner`,`created_at`,`grade`,`flags`,`ucc`,`expire_time`,`expire_online_minutes`,`charge_time`,`charge_count`) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(item.id)
     .bind(item.class.type_name())
@@ -855,6 +855,7 @@ async fn save_item(tx: &mut Transaction<'_, MySql>, item: &Item, container_id: u
     .bind(item.details_blob())
     .bind(item.lifespan_mins)
     .bind(item.made_unit_id)
+    .bind(item.crafter_id)
     .bind(from_unix(item.unsecure_time))
     .bind(from_unix(item.unpack_time))
     .bind(item.owner_id)
@@ -880,7 +881,7 @@ async fn save_item(tx: &mut Transaction<'_, MySql>, item: &Item, container_id: u
 const ITEM_SELECT: &str = "SELECT `type`, CAST(id AS UNSIGNED) AS id, CAST(template_id AS SIGNED) AS template_id, \
      CAST(container_id AS UNSIGNED) AS container_id, CAST(slot_type AS SIGNED) AS slot_type, \
      CAST(slot AS SIGNED) AS slot, CAST(`count` AS SIGNED) AS item_count, CAST(lifespan_mins AS SIGNED) AS lifespan_mins, \
-     CAST(made_unit_id AS SIGNED) AS made_unit_id, unsecure_time, unpack_time, created_at, CAST(`owner` AS UNSIGNED) AS owner, \
+     CAST(made_unit_id AS SIGNED) AS made_unit_id, CAST(crafter_id AS SIGNED) AS crafter_id, unsecure_time, unpack_time, created_at, CAST(`owner` AS UNSIGNED) AS owner, \
      CAST(flags AS SIGNED) AS flags, CAST(ucc AS SIGNED) AS ucc, details, CAST(grade AS SIGNED) AS grade, charge_time, \
      expire_time, (expire_online_minutes + 0E0) AS expire_online_minutes, CAST(charge_count AS SIGNED) AS charge_count \
      FROM items";
@@ -896,6 +897,7 @@ fn item_row(r: &MySqlRow) -> Result<ItemRow> {
         count: int(r, "item_count")? as i32,
         lifespan_mins: int(r, "lifespan_mins")? as i32,
         made_unit_id: int(r, "made_unit_id")? as u32,
+        crafter_id: int(r, "crafter_id")? as u32,
         unsecure_time: unix(dt(r, "unsecure_time")),
         unpack_time: unix(dt(r, "unpack_time")),
         created_at: unix(dt(r, "created_at")),

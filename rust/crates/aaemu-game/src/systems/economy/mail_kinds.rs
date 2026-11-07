@@ -579,8 +579,9 @@ impl MailForSpeciality {
     }
 
     /// `FinalizeForCrafter()`. The crafter's item gets the *seller* as owner (C# bug, mirrored).
+    /// `crafter_id` is the pack's crafter from `Item::crafter()` (the mail itself creates a new
+    /// payment item, not a mailed crafted item; the crafted item's own crafter travels with it).
     pub fn finalize_for_crafter(&mut self, txn: &mut ItemTxn<'_>) -> bool {
-        // TODO: test this part of the code (currently no crafter id support on items)
         if self.crafter_id == 0 {
             return false;
         }

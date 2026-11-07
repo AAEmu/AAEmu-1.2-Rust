@@ -545,7 +545,7 @@ connected by `systems::economy::wiring`).
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
-| `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
+| `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter in `crafter_id`; older rows / non-craft uses keep `made_unit_id`, see "Item crafter"), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). Equip and item use apply `items.actability_requirement` (error 508, see "Item use gates from data"). |
 | Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/{item_handlers,item_security}.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). The four secure packets are implemented from the 1.2 client (the C# only logged them); see the item-lock deviation. |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
@@ -2559,8 +2559,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   - `BackpackProfitShare` is read from the global runtime `FeaturesManager.Fsets`
     (`server.systems.services.features`), not `FeatureSet::default()`; the 1.2 sell / mail UI
     reads the same bit via `X2Player.GetFeatureSet("backpackProfitShare")`.
-  - The crafter id remains the item's `made_unit_id` (the only 1.2 carrier: the craft path
-    stores the crafting `character_id` there). The seller and crafter mail titles use the
+  - The crafter id comes from `Item::crafter()`: the dedicated `crafter_id` column, or the
+    legacy `made_unit_id` for packs crafted before that column existed (see "Item crafter").
+    The seller and crafter mail titles use the
     1.2 client `ui_texts` keys `sell_backpack_title` / `mail_sell_backpack_title_seller` /
     `mail_sell_backpack_title_crafter` from `localized_texts`, with the English C# strings as
     the fallback (never the untranslated `ui_texts.text` column). A sold pack with a crafter
@@ -6717,6 +6718,50 @@ plus the extended real-data `real_compact_db_craft_and_store_tables` (14 `requir
 Each fails on its mutation (grade filter `-1`, main-grade branch removed, equipment fallback
 removed, per-row instead of summed counts, highest instead of lowest slot, `LockedOnly`
 downgraded to `Missing`, hand-out grade filter removed).
+
+## Item crafter (2026-11-07)
+
+The crafter of a crafted item is sent to the 1.2 client in the item record's `madeUnitId` field
+(items-crafting#11 / mysql-schema#8 crafter half; the audit's "items have no crafter id" row was
+stale for single-stack products, and stackables were still empty).
+
+- **Client field (EVIDENCED).** The standard item reader `FUN_3961f500`
+  (`x2game.dll.c:1301392`) reads `templateId`, `id`, `grade`, `flags`, `count`, `detailType`
+  + detail, `creationTime`, `lifespanMins`, one u32, `worldId`, `unsecure`, `unpack`; the u32 is
+  the item field at `+0x14` (`Item.Write`'s `MadeUnitId`). The tooltip builder `FUN_39423560`
+  (`:865915`) takes `piVar1[5]` (`+0x14`) and resolves a **character name** through
+  `FUN_390192e0` / `FUN_39018560`, and the `worldId` at `piVar1[0x2a]` to
+  `craftedWorldName`; there is no name string in the item detail (`FUN_3961edf0` has fixed
+  bodies only), so the field is an **id**, not a name, and the client resolves it itself.
+- **What the server wrote before.** `AcquireDefaultItemEx` filled it only when
+  `template.MaxCount == 1` (the removed C# `ItemContainer.cs` did the same), so crafted
+  equipment / trade packs carried the crafter but stackable products sent 0. The client reader
+  has no such restriction.
+- **Rust.** `items.crafter_id` (schema below) is set for **every** crafted product in
+  `acquire_default_item_ex`; single-stack products also keep `made_unit_id = crafter_id` and
+  the default `world_id`, as the C# did. `Item::crafter()` returns `crafter_id` and falls back
+  to `made_unit_id`, so rows written before the column (and the non-craft uses of
+  `made_unit_id`: fish template id, music sheet author) keep sending exactly what they sent
+  before. `Item::write` and `ItemTask::write_task_item_details` write `crafter()` into the
+  client field; specialty reads the same accessor. Mail attachments, auction lots, bank moves
+  and trade-packs moved through the system container carry the whole item, and the
+  cancelled-cast restore copies `crafter_id`; the craft path is the only writer.
+- **Deviation from the C#.** The C# limitation to `MaxCount == 1` is not evidenced by the
+  client; the Rust records stackables too. A stack merged from two crafters keeps the first
+  crafter's id (the same value the client shows for the stack); this is the best a single
+  wire field can express and is recorded here rather than inventing a per-unit crafter.
+- **Schema.** `SQL/updates/2026-11-07_aaemu_game_item_crafter.sql` (guarded: adds
+  `crafter_id int unsigned NOT NULL DEFAULT 0` after `made_unit_id` only when missing) and the
+  base `SQL/aaemu_game.sql`. `ItemManager::save` / `load_user_items` carry the column.
+- **Tests.** `item::tests::crafted_item_write_puts_the_crafter_id_in_the_made_unit_field` and
+  `item::tests::item_without_a_crafter_column_keeps_the_legacy_made_unit_id_on_the_wire`
+  (byte-exact against the `FUN_3961f500` layout), `item_task::tests::item_add_writes_the_crafter_id_in_the_made_unit_field`,
+  the craft flow assertions in `craft_batch_consumes_materials_adds_products_and_reschedules`
+  and `craft_trade_pack_equips_into_backpack_slot`, and the MySQL round trip
+  `private_mysql_item_crafter_survives_save_and_load` (gated by `AAEMU_TEST_MYSQL`).
+- **Left as-is.** Craft pay (`CSSetCraftingPayPacket`) rules stay capture-pending (see "Craft
+  material grades and product grade"); `doodad_func_craft_grade_ratios` has 0 rows; the Mia
+  mail variants stay capture-pending.
 
 ## Recipe learning and the learned-craft gate (2026-11-04)
 

@@ -386,6 +386,7 @@ mod tests {
             count: 1,
             lifespan_mins: 0,
             made_unit_id: 0,
+            crafter_id: 0,
             world_id: 0,
             create_time: 0,
             unsecure_time: 0,

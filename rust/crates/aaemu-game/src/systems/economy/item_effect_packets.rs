@@ -291,7 +291,7 @@ mod tests {
             .write_u16(i.details.temper_magical)
             .write_i64(i.create_time)
             .write_i32(i.lifespan_mins)
-            .write_u32(i.made_unit_id)
+            .write_u32(i.crafter())
             .write_u8(i.world_id)
             .write_i64(i.unsecure_time)
             .write_i64(i.unpack_time);
