@@ -127,6 +127,70 @@ impl Marshal for SCWorldInteractionCanceledPacket {
     }
 }
 
+/// One `InteractionInfo` block of [`SCWorldInteractionSkillListPacket`] (0x40 bytes in the 1.2
+/// client).
+///
+/// The client reader `FUN_397bef50` (`x2game.dll.c:1716218`) reads `bc`, `bc`, `u32`, `bc`, then
+/// `i32 interactCount`, `i32 extraInfo` and `interactCount` `u32` skill ids, reading at most 10
+/// of them. Roles of the first `bc`, the `u32` and the fourth `bc` are UNKNOWN; the handler
+/// `FUN_393b7440` (`x2game.dll.c:773717`) resolves the second `bc` through the world-object
+/// table (`FUN_39035110`) as the interacted doodad and starts `skill_list[0]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldInteractionInfo {
+    /// First `bc`; role UNKNOWN.
+    pub unk1: u32,
+    /// Second `bc`: the interacted doodad object id (the handler's world-object lookup).
+    pub doodad_obj_id: u32,
+    /// `u32`; role UNKNOWN.
+    pub unk2: u32,
+    /// Fourth `bc`; role UNKNOWN.
+    pub unk3: u32,
+    /// `extraInfo` (`i32` on the wire before the skill list).
+    pub extra_info: i32,
+    /// `u32` skill ids. The client reads at most 10; a sender must not write more.
+    pub skill_list: Vec<u32>,
+}
+
+/// `SCWorldInteractionSkillListPacket`: the server-initiated doodad world-interaction list
+/// (opcode 0x07e; the client's `x2ui/interaction.alb` window).
+///
+/// sent_by: none (CAP-INT-1, trigger unknown). The 1.2 client reader is `FUN_397c2d70`
+/// (`x2game.dll.c:1718589`, vtable `399b36e4`) + `FUN_397bef50`: `bc`, `bc`,
+/// [`WorldInteractionInfo`], `u8 mouseButton`, `i32 modifierKeys`. The handler `FUN_391d9080`
+/// (`x2game.dll.c:367106`) copies the 0x40-byte info and starts the first skill when the player
+/// is within the interaction range. Roles of the two leading `bc` values are UNKNOWN. See
+/// `PORTING.md` ("Gap audit verdicts (2026-11-07)").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SCWorldInteractionSkillListPacket {
+    /// First top-level `bc`; role UNKNOWN.
+    pub unk1: u32,
+    /// Second top-level `bc`; role UNKNOWN.
+    pub unk2: u32,
+    pub info: WorldInteractionInfo,
+    pub mouse_button: u8,
+    pub modifier_keys: i32,
+}
+packet_def!(
+    SCWorldInteractionSkillListPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCWorldInteractionSkillListPacket
+);
+impl Marshal for SCWorldInteractionSkillListPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.unk1).write_bc(self.unk2);
+        s.write_bc(self.info.unk1)
+            .write_bc(self.info.doodad_obj_id)
+            .write_u32(self.info.unk2)
+            .write_bc(self.info.unk3)
+            .write_i32(self.info.skill_list.len() as i32)
+            .write_i32(self.info.extra_info);
+        for &id in &self.info.skill_list {
+            s.write_u32(id);
+        }
+        s.write_u8(self.mouse_button).write_i32(self.modifier_keys);
+    }
+}
+
 /// `SCDoodadSoundPacket(doodad, soundId)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCDoodadSoundPacket {
@@ -628,6 +692,44 @@ mod tests {
         };
         assert_eq!(p.opcode(), sc::SCWorldInteractionCanceledPacket);
         assert_eq!(body(&p), vec![0x23, 0x01, 0x00, 0x4d, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn sc_world_interaction_skill_list_bytes() {
+        // Reader FUN_397c2d70 + FUN_397bef50 (x2game.dll.c:1718589 / :1716218):
+        // bc, bc, { bc, bc, u32, bc, i32 count, i32 extraInfo, u32[count] }, u8 mouse, i32 mods.
+        let p = SCWorldInteractionSkillListPacket {
+            unk1: 0x01_0203,
+            unk2: 0x04_0506,
+            info: WorldInteractionInfo {
+                unk1: 0x07_0809,
+                doodad_obj_id: 0x0a_0b0c,
+                unk2: 0x1122_3344,
+                unk3: 0x0d_0e0f,
+                extra_info: -3,
+                skill_list: vec![0x1516_1718, 0x191a_1b1c],
+            },
+            mouse_button: 0x21,
+            modifier_keys: -5,
+        };
+        assert_eq!(p.opcode(), sc::SCWorldInteractionSkillListPacket);
+        assert_eq!(p.opcode(), 0x07e);
+        #[rustfmt::skip]
+        let want: Vec<u8> = vec![
+            0x03, 0x02, 0x01, // unk1
+            0x06, 0x05, 0x04, // unk2
+            0x09, 0x08, 0x07, // info.unk1
+            0x0c, 0x0b, 0x0a, // info.doodad_obj_id
+            0x44, 0x33, 0x22, 0x11, // info.unk2
+            0x0f, 0x0e, 0x0d, // info.unk3
+            0x02, 0x00, 0x00, 0x00, // interactCount
+            0xfd, 0xff, 0xff, 0xff, // extraInfo = -3
+            0x18, 0x17, 0x16, 0x15, // skill_list[0]
+            0x1c, 0x1b, 0x1a, 0x19, // skill_list[1]
+            0x21, // mouseButton
+            0xfb, 0xff, 0xff, 0xff, // modifierKeys = -5
+        ];
+        assert_eq!(body(&p), want);
     }
 
     #[test]

@@ -245,6 +245,11 @@ impl ItemContainer {
         self.free_slot_count
     }
 
+    /// `ContainerSize`.
+    pub fn size(&self) -> i32 {
+        self.size
+    }
+
     /// `PartOfPlayerInventory`.
     fn part_of_player_inventory(&self) -> bool {
         matches!(

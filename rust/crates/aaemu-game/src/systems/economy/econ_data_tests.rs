@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{
-    bind_type, EquipTemplate, FullGradeTemplate, GradeDistributions, ItemData, ItemTemplate,
-    LootPackDroppingNpc, TemplateKind, ITEM_COINS,
+    bind_type, EquipSlotGroup, EquipSlotGroupMap, EquipTemplate, FullGradeTemplate,
+    GradeDistributions, ItemData, ItemTemplate, LootPackDroppingNpc, TemplateKind, ITEM_COINS,
 };
 use crate::data::GameData;
-use crate::models::container::{equip_slot, slot_type};
+use crate::models::container::{allowed_gear_slots, equip_slot, slot_type};
 use crate::models::item::{EquipStat, Item, ItemClass};
 use crate::models::item_task::{task_type, ItemTask};
 use crate::models::npc::Npc;
@@ -1846,4 +1846,140 @@ fn real_compact_socket_rule_tables_are_consistent() {
             .unwrap_or_else(|| panic!("socket {} has no slot group map", socket.id));
         assert!(!maps.is_empty());
     }
+}
+
+/// `equip_slot_groups` is the parent of `equip_slot_group_maps`. The shipped 1.2 data has 24
+/// groups / 48 maps; every map group resolves, every mapped slot type is one the hard-coded
+/// `allowed_gear_slots` accepts, and the nine base groups describe the same equip slots the
+/// hard-coded table uses. The group table itself cannot express the target equip slot (no such
+/// column), so the hard-coded compatibility stays; this guard keeps the two in step.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_equip_slot_groups_guard_the_hard_coded_slots() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let d = ItemData::load(&conn).unwrap();
+
+    assert_eq!(d.equip_slot_groups.len(), 24);
+    // 48 raw map rows; map 10 names group 9, which has no `equip_slot_groups` row (a shipped
+    // dangling row), so the loader skips it like the orphan `item_sockets` rows.
+    let raw: i64 = conn
+        .query_row("SELECT COUNT(*) FROM equip_slot_group_maps", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let dangling: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM equip_slot_group_maps m              LEFT JOIN equip_slot_groups g ON g.id = m.equip_slot_group_id              WHERE g.id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 48);
+    assert_eq!(dangling, 1);
+    let maps: usize = d.equip_slot_group_maps.values().map(Vec::len).sum();
+    assert_eq!(maps as i64, raw - dangling);
+    for (group_id, group) in &d.equip_slot_groups {
+        let rows = d
+            .equip_slot_group_maps
+            .get(group_id)
+            .unwrap_or_else(|| panic!("group {group_id} ({}) has no map row", group.name));
+        assert!(!rows.is_empty(), "group {} has an empty map", group.id);
+        for map in rows {
+            assert!(
+                (1..=crate::data::items::equipment_item_slot_type::COSPLAY)
+                    .contains(&map.equip_slot_type_id),
+                "map {} names a non-existent slot type {}",
+                map.id,
+                map.equip_slot_type_id
+            );
+            assert!(
+                !allowed_gear_slots(map.equip_slot_type_id).is_empty(),
+                "map {} slot type {} is not in the hard-coded compatibility",
+                map.id,
+                map.equip_slot_type_id
+            );
+        }
+    }
+    for (group_id, rows) in &d.equip_slot_group_maps {
+        assert!(
+            d.equip_slot_groups.contains_key(group_id),
+            "map group {group_id} has no parent row"
+        );
+        assert!(!rows.is_empty());
+    }
+
+    // The base groups still name the same equip slots as `allowed_gear_slots`.
+    let group = |name: &str| {
+        d.equip_slot_groups
+            .values()
+            .find(|g| g.name == name)
+            .unwrap_or_else(|| panic!("missing group {name}"))
+    };
+    let slot_types = |name: &str| {
+        let mut v: Vec<u32> = d
+            .equip_slot_group_maps
+            .get(&group(name).id)
+            .unwrap()
+            .iter()
+            .map(|m| m.equip_slot_type_id)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    for (name, slot_type, slots) in [
+        ("head", 1, &[equip_slot::HEAD][..]),
+        ("chest", 3, &[equip_slot::CHEST][..]),
+        ("hands", 6, &[equip_slot::HANDS][..]),
+        ("feet", 7, &[equip_slot::FEET][..]),
+        ("back", 9, &[equip_slot::BACK][..]),
+        ("2handed", 16, &[equip_slot::MAINHAND][..]),
+        ("ranged", 18, &[equip_slot::RANGED][..]),
+        ("shield", 20, &[equip_slot::OFFHAND][..]),
+    ] {
+        assert_eq!(slot_types(name), vec![slot_type], "group {name}");
+        assert_eq!(
+            allowed_gear_slots(slot_type),
+            slots,
+            "slot type {slot_type}"
+        );
+    }
+    // "1handed" groups the main-hand and one-handed slot types; the hard-coded table keeps
+    // their distinct target sets.
+    assert_eq!(slot_types("1handed"), vec![14, 17]);
+    assert_eq!(allowed_gear_slots(14), &[equip_slot::MAINHAND]);
+    assert_eq!(
+        allowed_gear_slots(17),
+        &[equip_slot::MAINHAND, equip_slot::OFFHAND]
+    );
+}
+
+/// The parent `equip_slot_groups` row is required for a socket group to allow a slot type
+/// (a map alone is not enough). Fails without the group table consumer.
+#[test]
+fn socket_group_allows_requires_the_parent_group() {
+    let mut d = ItemData::default();
+    d.equip_slot_group_maps.insert(
+        23,
+        vec![EquipSlotGroupMap {
+            id: 1,
+            equip_slot_group_id: 23,
+            equip_slot_type_id: 3,
+        }],
+    );
+    assert!(!d.socket_group_allows(23, 3));
+    d.equip_slot_groups.insert(
+        23,
+        EquipSlotGroup {
+            id: 23,
+            name: "socket_chest".to_string(),
+        },
+    );
+    assert!(d.socket_group_allows(23, 3));
+    assert!(!d.socket_group_allows(23, 4));
+    assert!(!d.socket_group_allows(24, 3));
 }
