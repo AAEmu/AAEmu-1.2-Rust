@@ -32,6 +32,7 @@ struct Rec {
     item_count: i32,
     has_quest: bool,
     consumed: i32,
+    space: i32,
 }
 
 impl Rec {
@@ -73,6 +74,9 @@ impl EconomyBridge for Rec {
     ) -> Option<bool> {
         self.push(format!("lootpack {id} {skill} {task}"));
         self.loot_pack
+    }
+    fn bag_space_left_for_item(&self, _s: &GameServer, _p: &PlayerRef, _t: u32) -> i32 {
+        self.space
     }
     fn item_count(&self, _s: &GameServer, _p: &PlayerRef, t: u32) -> i32 {
         self.push(format!("count {t}"));
@@ -692,6 +696,65 @@ async fn remove_item_and_purchase() {
     assert_eq!(
         fx.client.drain(),
         vec![(sc::SCErrorMsgPacket, error_body(error_message::BAG_FULL))]
+    );
+}
+
+fn coin_purchase() -> FuncTemplate {
+    FuncTemplate::Purchase(DoodadFuncPurchase {
+        id: 1,
+        item_id: 70,
+        count: 1,
+        coin_item_id: 9,
+        coin_count: 5,
+        ..Default::default()
+    })
+}
+
+#[tokio::test]
+async fn coin_purchase_requires_full_price() {
+    // Holds 1 of 5 coins: refused before anything is consumed.
+    let fx = fixture(Rec {
+        space: 1,
+        item_count: 1,
+        consumed: 1,
+        ..Rec::default()
+    });
+    fx.run(coin_purchase(), 0, 0);
+    assert_eq!(fx.rec.calls(), vec!["count 9"]);
+    // Partial consume (race): the consumed coin is refunded, no item is granted.
+    let fx = fixture(Rec {
+        space: 1,
+        item_count: 5,
+        consumed: 1,
+        acquire_ok: true,
+        ..Rec::default()
+    });
+    fx.run(coin_purchase(), 0, 0);
+    let calls = fx.rec.calls();
+    assert!(
+        calls.contains(&"acquire 17 9 1 -1".to_string()),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.starts_with("acquire 17 70")),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn coin_purchase_grant_failure_refunds_paid_coin() {
+    let fx = fixture(Rec {
+        space: 1,
+        item_count: 5,
+        consumed: 5,
+        acquire_ok: false,
+        ..Rec::default()
+    });
+    fx.run(coin_purchase(), 0, 0);
+    let calls = fx.rec.calls();
+    assert!(
+        calls.contains(&"acquire 17 9 5 -1".to_string()),
+        "{calls:?}"
     );
 }
 
