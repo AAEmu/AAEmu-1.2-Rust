@@ -524,6 +524,36 @@ Victory reward event chains are not implemented. Existing NPC skills, AI and que
 handle controller behavior and ordinary drops; confirm the event's gameplay with
 the target 1.2 client before exposing it to players.
 
+## Dungeon PvP and resurrection flags
+
+`compact.sqlite3` `indun_zones` stores `pvp` and `has_graveyard` per dungeon zone
+group, and the 1.2 client reads both. The server now follows them. Two switches in
+`Configurations/Dungeons.json` (or `Config.Local.json`) control the new rules; both
+default to `true` and can be turned off to restore the old faction-only behaviour:
+
+```json
+{
+  "Dungeons": {
+    "EnforceNoPvp": true,
+    "NoGraveyardUseReturnPortal": true
+  }
+}
+```
+
+- `EnforceNoPvp`: in an instance whose `indun_zones.pvp` is `f` (Mirage Isle 49,
+  Immortal Isle 62/64, the Library 70-76), a player, pet or slave cannot attack
+  another player-owned unit. The 1.2 client already treats such pairs as
+  non-hostile; the server rule is inferred from that client behaviour. NPC targets
+  and the faction relation used for buffs and heals are unchanged.
+- `NoGraveyardUseReturnPortal`: in an instance whose `indun_zones.has_graveyard` is
+  `f` (Mirage Isle 49, the prologue 68), a temple resurrection sends the character
+  to the closest open-world return portal (the ordinary "Revive" the client shows
+  for those zones) and leaves the instance. If no return portal exists, the Temple
+  Priestess, then the instance entry point, then an in-place revive are used (with
+  a server warning). `has_graveyard = t` keeps the entrance/Priestess behaviour.
+  The destination is inferred; the client evidence is only which revive window it
+  shows.
+
 ## Logging
 
 Logging is not configured in `Config.json`. Both servers log to stdout; the

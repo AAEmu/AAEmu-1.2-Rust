@@ -951,6 +951,17 @@ fn real_instances_data() {
     let mirage = indun.dungeon_zone(49).unwrap();
     assert_eq!(mirage.max_players, 190);
     assert_eq!(mirage.enter_count, 1000);
+    // `pvp = 'f'` rows: Mirage Isle (49), Immortal Isle (62 / 64) and the Library (70-76).
+    for group in [49, 62, 64, 70, 71, 72, 73, 74, 75, 76] {
+        let zone = indun
+            .dungeon_zone(group)
+            .unwrap_or_else(|| panic!("zone group {group}"));
+        assert!(!zone.pvp, "zone group {group} must load pvp = false");
+    }
+    // `has_graveyard = 'f'` only for Mirage Isle (49) and the prologue (68).
+    assert!(!indun.dungeon_zone(49).unwrap().has_graveyard);
+    assert!(!indun.dungeon_zone(68).unwrap().has_graveyard);
+    assert!(indun.dungeon_zone(55).unwrap().has_graveyard);
     let nach = indun.dungeon_zone(55).unwrap();
     assert!(nach.party_only);
     assert_eq!(nach.item_id, 27965);
