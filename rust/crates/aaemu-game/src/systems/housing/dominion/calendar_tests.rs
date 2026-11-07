@@ -78,6 +78,13 @@ fn view(calendar: &SiegeCalendar, now: i64, declared: bool) -> PeriodView {
 }
 
 #[test]
+fn timezone_rejects_non_ascii_without_panicking() {
+    for v in ["+é", "+1é", "+1éé", "+ééé", "-１２３４", "+0é:00"] {
+        assert_eq!(CalendarTimeZone::parse(v), None, "{v}");
+    }
+}
+
+#[test]
 fn timezone_parses_offsets_and_defaults_to_server_local() {
     assert_eq!(CalendarTimeZone::parse(""), Some(CalendarTimeZone::Local));
     assert_eq!(

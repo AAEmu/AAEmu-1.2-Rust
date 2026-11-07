@@ -426,30 +426,41 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         send_error(player, err::STORE_ONE_TIME_SALE);
         return false;
     }
-    if eco.bag_consume_item(
+    // `ConsumeItem` is partial: it spends what it finds. Check the full price is held (locked
+    // stacks cannot pay) before spending, and refund only what was actually taken.
+    if eco.item_count(server, player, f.coin_item_id) < f.coin_count {
+        eco.release_shop_purchase(server, player, f.item_id, f.count);
+        send_error(player, err::NOT_ENOUGH_COIN);
+        return false;
+    }
+    let paid = eco.bag_consume_item(
         server,
         player,
         item_task::DOODAD_INTERACTION,
         f.coin_item_id,
         f.coin_count,
-    ) <= 0
-    {
+    );
+    let refund_paid = |paid: i32| {
+        if paid > 0 {
+            eco.acquire_item(
+                server,
+                player,
+                item_task::DOODAD_INTERACTION,
+                f.coin_item_id,
+                paid,
+                -1,
+            );
+        }
+    };
+    if paid != f.coin_count {
+        refund_paid(paid);
         eco.release_shop_purchase(server, player, f.item_id, f.count);
         send_error(player, err::NOT_ENOUGH_COIN);
         return false;
     }
-    // The coin is already spent: a failed grant gives it back (the stack just left the bag, so
-    // the refund fits) and releases the claim.
-    let refund_coin = || {
-        eco.acquire_item(
-            server,
-            player,
-            item_task::DOODAD_INTERACTION,
-            f.coin_item_id,
-            f.coin_count,
-            -1,
-        );
-    };
+    // The coin is already spent: a failed grant gives back exactly what was taken (the stack
+    // just left the bag, so the refund fits) and releases the claim.
+    let refund_coin = || refund_paid(paid);
     let name = player.data().unit.name.clone();
     if eco.is_auto_equip_trade_pack(server, f.item_id) {
         if !eco.try_equip_new_backpack(

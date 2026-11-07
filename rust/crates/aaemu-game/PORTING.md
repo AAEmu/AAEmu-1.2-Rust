@@ -1422,7 +1422,7 @@ live acceptance remain pending.
 | `ExpressTextManager`, `CSExpressEmotionPacket`, `SCEmotionExpressedPacket` | `systems/services/express_text.rs` | done | Deviation: an emote whose sender object id is not the sender's own character is dropped (the C# broadcast the client-supplied id). |
 | `LocalizationManager` | `systems/services/localization.rs` | done | 263 635 rows / 8 locales on the real DB. |
 | `ModelManager`, `Models/Game/Models/*` | `systems/services/models.rs` | done | Counts checked against compact.sqlite3 (gated test). |
-| `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). Upload sanity is Rust-only (`Music.MaxSongChars`, UTF-16 size check, owned item in `instrument_sounds`; see the deviation below). |
+| `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). Upload sanity is Rust-only (`Music.MaxSongChars`, UTF-16 size mismatch only logs a warning (the client writer is not evidenced), owned source item (the client sends the music paper, not an instrument; `instrument_sounds` is not checked); see the deviation below). |
 | `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). The radar / telescope feature is ported, not missing (gap-audit 2026-11-02 research `stealth.md` §0.1). Open items, none of them a port gap: shipyards are not sent in `SCTelescopeUnits` because the 1.2 client has no shipyard list wire format (only transfers, fish schools and the slave/ship list), so the C# "Add Shipyards" TODO is closed; the GM range is `World.RadarGmAccessLevel` (default `100`, the previous hard-coded value) instead of a hard-coded access-level check (`radar.rs` `gm_range_comes_from_config`); `evade_telescope` (buffs 4887 / 4950, "free from the telescope's gaze") is not consumed, as in the C# (which unit carries the buff is UNKNOWN). |
 | `Models/Tasks/ShutdownTask`, `SCNoticeMessagePacket` | `systems/services/shutdown.rs` | done | Count-down notices, final save, process exit; held in `server.systems.services.shutdown_task` (`SaveManager.ShutdownTask`). Buy-back wipe through `BUYBACK_WIPE` (economy). **Deviation:** the C# saved and exited without telling the clients (every client showed a disconnect error and quit). At T-0 the Rust task first broadcasts "The server is shutting down for maintenance.", refuses world entries (`GameServer::is_shutting_down`: `X2EnterWorld` / `CSSelectCharacter` / `CSSpawnCharacter` get `SCKicked(2)` + close), sends every connection `ConnCommand::ReturnToWorldList` (in-world: `LeaveWorldTask` to character select with no timer, i.e. save + `SCLeaveWorldGranted(1)` + `ChangeState(0)`; the client stays on its game connection and loads the lobby, so the world list request follows 2 s later: `GLPlayerReconnect` -> `LGPlayerReconnect` -> `SCReconnectAuth`, the `CSLeaveWorld(ServerSelect)` path, re-sent every 2 s to every connection still there, new ones included), waits up to 10 s for the clients to disconnect, kicks the rest with `SCKicked(2, "Server maintenance")`, then does the final save (3 tries), `shutdown::stop_server` (shared with the Ctrl+C path in `main.rs`) and the exit. A failed final save aborts the shutdown (as before: no exit) and reopens world entry; `/scripts shutdown cancel` is refused once T-0 passed. `/scripts forcedshutdown` still exits at once. |
 | `SusManager` | `systems/services/sus.rs` | done | `audit_char_sus` log + speed analysis. All 12 C# `LogActivity` sites are wired: crime / trial / coffer through `social::crime::sus_log`, `CSDestroyItem` (negative count) through `SusManager::log_activity_player_deferred` (`porting-md#10`). The 5 s `FinalizeTransform` caller runs from the move handler (see deviations). |
@@ -1878,7 +1878,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   blocked (INFERRED), 354 not blocked. Self-add is therefore a **deviation from the C#** (which
   accepted it); the client's own 501 text makes the refusal the better-supported behaviour.
   The already-a-friend and already-blocked ids have no client text and are INFERRED. A friend
-  add whose target blocked the owner stays silent (capture-pending, `BLOCK-LIST-2`). There is
+  add whose target blocked the owner is answered with 551 as if the name were unknown (no
+  block text exists in the client; capture-pending, `BLOCK-LIST-2`). There is
   no list-size cap: no client constant was found (UNKNOWN).
 
 * systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
@@ -1972,6 +1973,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     debug because its meaning is UNKNOWN. Sets 20 and 33 are unreachable through
     `quest_components.ai_command_set_id` (no row names them) and set 1 is a test set, so the
     shipped quest content does not use this path.
+  * **Opt-in (`Interaction.CommandSetLock`, default `false`):** the 1.2 client only loads the
+    column (`x2game12.c` `LoadAiCommandSetDescs`, no consumer found) and 302 of 325 sets are 'f', so
+    the rule below is off unless the flag is set.
   * While an `ai_command_sets` row with `can_interact = 'f'` runs, the NPC's
     `Npc.interactable` flag is false: `SCNpcInteractionStatusChanged{npc, false}` goes to the
     players around it at set start, the visibility path repeats it to players that enter sight
@@ -2036,13 +2040,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   No evidence establishes a safe ID-width or ownership-policy change here.
 
 * systems::services (music uploads, WP-M1, 2026-11-06): the C# stored any `CSSaveUserMusicNotes`
-  body. The Rust refuses (warn only, nothing queued, no packet — the 1.2 client has no evidenced
-  failure path) when `song_size` is not `song.encode_utf16().count()`, when the song exceeds
-  `Music.MaxSongChars` (default 3000, so normal uploads are unchanged), or when `item_id` is not
-  an item owned by the player whose template is in `instrument_sounds`. The client resolves the
-  same item before sending (`FUN_39079640` -> `FUN_3961e9a0`, item id at the packet's second
-  field) and loads `instrument_sounds` itself (`dll.c:1559064`). The note grammar is still not
-  parsed: no server-side format is evidenced.
+  body. The Rust refuses (warn only, nothing queued, no packet -- the 1.2 client has no evidenced
+  failure path) when the song exceeds `Music.MaxSongChars` (default 3000, so normal uploads are
+  unchanged) or when `item_id` is not an item owned by the player. A `song_size` that differs from
+  the UTF-16 length is only logged (the client writer's size unit is not evidenced). The item is
+  NOT required to be an instrument: the client looks up a bag item by its 64-bit id
+  (`FUN_39079640` / `FUN_390799E0` -> `FUN_3961e9a0`, id at the packet's second field), which is
+  the music paper the following item cast (skill 22215) consumes; `instrument_sounds` is loaded
+  by the client for its own UI. The note grammar is still not parsed.
 
 * systems::skills (music): the C# (and this port) send `SCSkillStarted` only for casts with a
   cast time. The play (22213), pause (22214) and close-the-score (22217) skills are instant

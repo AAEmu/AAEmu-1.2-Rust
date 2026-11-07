@@ -1344,6 +1344,10 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         // Serialize the current-phase check and the purchase with the phase machine, so the
         // phase cannot move between them.
         let Some(_operation) = super::doodad::phase::Operation::enter(doodad) else {
+            // Busy doodad: answer like the other reservation sites instead of staying silent.
+            player.send(super::doodad::packets::error_msg(
+                super::doodad::packets::error_message::NO_INTERACTION_AVAILABLE,
+            ));
             return;
         };
         let caster = WorldObject::from(player);

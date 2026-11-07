@@ -334,38 +334,31 @@ impl ClientPacket for CSSaveUserMusicNotesPacket {
                 return Ok(());
             };
             // The C# stored anything the client sent. Refuse what the 1.2 client cannot produce:
-            // a size that is not the string's UTF-16 length, a song above `Music.MaxSongChars`,
-            // or a source item that is not an owned instrument from `instrument_sounds`.
+            // a song above `Music.MaxSongChars`,
+            // or a source item the player does not own.
             // The song grammar stays unparsed (no evidenced server-side format).
             let song_len = self.song.encode_utf16().count();
             let size_mismatch = u32::try_from(song_len) != Ok(self.song_size);
-            let refusal = if size_mismatch {
-                Some(format!(
-                    "song_size {} does not match the {song_len} UTF-16 characters",
+            if size_mismatch {
+                // The client writer's size unit is not evidenced (no decompile hit), so a
+                // mismatch is logged and accepted instead of dropping the upload.
+                tracing::warn!(
+                    "CSSaveUserMusicNotesPacket: song_size {} does not match the {song_len} UTF-16 characters (accepted)",
                     self.song_size
-                ))
-            } else if song_len > server.config.music.max_song_chars {
+                );
+            }
+            let refusal = if song_len > server.config.music.max_song_chars {
                 Some(format!(
                     "song has {song_len} UTF-16 characters (max {})",
                     server.config.music.max_song_chars
                 ))
             } else {
                 let inv = crate::systems::economy::inventory::Inv::of(&p);
+                // The client sends the id of a bag item it found by its 64-bit id
+                // (`sub_3961E9A0` in `sub_39079640` / `sub_390799E0`), which is the music paper
+                // the later item cast consumes, not an instrument: only ownership is checked.
                 match inv.item_by_id(self.item_id) {
                     None => Some(format!("item {} is not owned", self.item_id)),
-                    Some(item)
-                        if !server
-                            .game_data
-                            .systems
-                            .services
-                            .instrument_sounds
-                            .contains(item.template_id) =>
-                    {
-                        Some(format!(
-                            "item {} (template {}) is not in instrument_sounds",
-                            self.item_id, item.template_id
-                        ))
-                    }
                     Some(_) => None,
                 }
             };

@@ -386,7 +386,7 @@ impl ClientPacket for CSStartInteractionPacket {
                 // An NPC running an AI command set with `can_interact = 'f'` is not interactable
                 // (INFERRED, see PORTING.md WP-5b): the client hides its marker, and a click that
                 // still arrives is ignored silently (no evidenced error message).
-                if !interactable {
+                if !interactable && server.config.interaction.command_set_lock {
                     tracing::debug!(
                         "StartInteraction refused: npc {} is not interactable",
                         self.npc_obj_id

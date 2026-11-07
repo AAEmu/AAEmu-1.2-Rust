@@ -1251,7 +1251,7 @@ impl ItemSkillHooks for EconomyForSkills {
         let inv = Inv::of(player);
         // The economy operation lock serialises item moves, so this count cannot change before
         // the debit below: a missing reagent consumes nothing.
-        if inv.items_count(template_id, -1) < amount {
+        if inv.items_count_unlocked(template_id, -1) < amount {
             return Some(false);
         }
         let consumed = inventory::consume_item(
@@ -1333,7 +1333,7 @@ impl ItemSkillHooks for EconomyForSkills {
         let mut txn = ItemTxn::begin(server);
         let inv = Inv::of(player);
         // Match both the availability check and Inventory.ConsumeItem's container set.
-        if inv.items_count(template_id, -1) < amount {
+        if inv.items_count_unlocked(template_id, -1) < amount {
             return None;
         }
         let snapshots: Vec<_> = [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK]
@@ -3739,7 +3739,7 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         let mut txn = ItemTxn::begin(server);
         let bag = Inv::of(player).bag();
         let mut bag = lock(&bag);
-        if count <= 0 || bag.items_by_template(certificate, -1).1 < count {
+        if count <= 0 || bag.items_by_template_unlocked(certificate, -1).1 < count {
             return false;
         }
         bag.consume_item(item_task::BUY_HOUSE, certificate, count, None, &mut txn.env) == count
@@ -3797,8 +3797,11 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
             if item.has_flag(crate::models::item::ITEM_FLAG_SECURE) {
                 return Err(HouseConstructionError::ItemLocked);
             }
-            let bound = bag.items_by_template(BOUND_TAX_CERTIFICATE, -1).1.max(0);
-            let unbound = bag.items_by_template(TAX_CERTIFICATE, -1).1.max(0);
+            let bound = bag
+                .items_by_template_unlocked(BOUND_TAX_CERTIFICATE, -1)
+                .1
+                .max(0);
+            let unbound = bag.items_by_template_unlocked(TAX_CERTIFICATE, -1).1.max(0);
             (bound, unbound)
         };
         if total < 0 {

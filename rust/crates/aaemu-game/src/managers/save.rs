@@ -388,6 +388,7 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
     server.systems.economy.mail.commit_save();
     server.systems.economy.auction.commit_save();
     server.systems.social.bounties.commit_save();
+    server.systems.social.nations.commit_save();
     server.items.commit_save();
     server
         .systems

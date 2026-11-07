@@ -58,6 +58,9 @@ impl CalendarTimeZone {
         if value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z") {
             return Some(Self::Fixed(FixedOffset::east_opt(0)?));
         }
+        if !value.is_ascii() {
+            return None; // the offset body is sliced by byte index below
+        }
         let sign = match value.as_bytes().first() {
             Some(b'+') => 1,
             Some(b'-') => -1,

@@ -25,6 +25,12 @@ pub struct InteractionConfig {
     /// Extra metres on top of [`NPC_INTERACTION_REACH_METERS`] for movement and latency.
     #[serde(rename = "npcreachtolerancemeters", deserialize_with = "lenient")]
     pub npc_reach_tolerance_meters: f32,
+    /// Enforce `ai_command_sets.can_interact = 'f'`: while such a set runs the NPC's marker is
+    /// off, open windows close and `CSStartInteraction` is refused. INFERRED rule (302 of the
+    /// 325 sets are 'f' and the 1.2 client only loads the column), so `false` (default) leaves
+    /// every NPC interactable.
+    #[serde(rename = "commandsetlock", deserialize_with = "lenient")]
+    pub command_set_lock: bool,
 }
 
 impl Default for InteractionConfig {
@@ -32,6 +38,7 @@ impl Default for InteractionConfig {
         Self {
             npc_reach_check: true,
             npc_reach_tolerance_meters: 2.0,
+            command_set_lock: false,
         }
     }
 }
@@ -45,6 +52,7 @@ mod tests {
         let default = AppConfig::default();
         assert!(default.interaction.npc_reach_check);
         assert_eq!(default.interaction.npc_reach_tolerance_meters, 2.0);
+        assert!(!default.interaction.command_set_lock);
 
         let config = AppConfig::from_value(serde_json::json!({
             "Interaction": {
