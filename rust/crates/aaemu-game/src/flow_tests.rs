@@ -479,7 +479,7 @@ fn expected_character_bytes(c: &Character) -> Vec<u8> {
                     s.write_u16(0).write_u16(0);
                     s.write_i64(item.create_time)
                         .write_i32(item.lifespan_mins)
-                        .write_u32(item.made_unit_id)
+                        .write_u32(item.crafter())
                         .write_u8(item.world_id)
                         .write_i64(item.unsecure_time)
                         .write_i64(item.unpack_time);

@@ -531,11 +531,11 @@ pub enum QuestStartWithTail {
 }
 
 /// `CSQuestStartWithPacket` (logged only at debug): `u32 quest, u32 component, u32 act,
-/// u8 type` and a typed tail. The 1.2 client writer `FUN_397c5450` / `FUN_397be540` builds it
-/// at `dll.c:720031` for type 2 = a player level reached, i.e. a `QuestActConAcceptLevelUp`
-/// start; the server starts those quests itself on level up (`events::on_level_up`), so the
-/// packet is an acknowledgement. The meanings of types 1 / 3 / 4 are unknown and
-/// capture-pending (`QUEST-START-WITH-1`).
+/// u8 type` and a typed tail. The 1.2 client writer `FUN_397c5450` / `FUN_397be540` has only
+/// two send sites: type 2 = a player level reached (`FUN_39378660`, a
+/// `QuestActConAcceptLevelUp` start) and type 3 = an NPC emotion
+/// (`FUN_39378930`); types 1 / 4 are never sent. The server starts those quests itself, so the
+/// packet needs no action; see `PORTING.md` ("Gap audit verdicts (2026-11-07)").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSQuestStartWithPacket {
     pub quest: u32,

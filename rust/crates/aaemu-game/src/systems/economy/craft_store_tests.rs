@@ -1079,7 +1079,11 @@ async fn craft_batch_consumes_materials_adds_products_and_reschedules() {
     craft::end_craft(&w.server, &pa);
     let product = item_at(&pa, 2, 1).expect("product");
     assert_eq!((product.template_id, product.count), (PRODUCT, 2));
-    assert_eq!(product.made_unit_id, 0); // stackable: no crafter name
+    // Every crafted product records its crafter; only single-stack items also fill the older
+    // `made_unit_id` carrier.
+    assert_eq!(product.crafter_id, 1);
+    assert_eq!(product.crafter(), 1);
+    assert_eq!(product.made_unit_id, 0);
     let mat = item_at(&pa, 2, 0).unwrap();
     assert_eq!(mat.count, 3);
     let f = w.a.drain();
@@ -1326,7 +1330,8 @@ async fn craft_trade_pack_equips_into_backpack_slot() {
     craft::end_craft(&w.server, &pa);
     let pack = Inv::of(&pa).equipped(equip_slot::BACKPACK).expect("pack");
     assert_eq!(pack.template_id, PACK);
-    assert_eq!(pack.made_unit_id, 1); // single-stack product carries the crafter
+    assert_eq!(pack.crafter_id, 1); // the pack records its crafter in the dedicated column
+    assert_eq!(pack.made_unit_id, 1); // and keeps the older single-stack carrier
     assert_eq!(item_at(&pa, 2, 0).unwrap().template_id, GLIDER);
     let ops = w.a.drain_ops();
     assert_eq!(
