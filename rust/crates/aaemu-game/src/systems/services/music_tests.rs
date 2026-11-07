@@ -407,10 +407,11 @@ async fn upload_rejects_an_unowned_item() {
 }
 
 #[tokio::test]
-async fn upload_rejects_an_owned_non_instrument() {
+async fn upload_accepts_an_owned_non_instrument_such_as_the_music_paper() {
+    // The client sends the bag item it found by id (the music paper), not an instrument.
     let (server, mut client, _player, _, other) = upload_fixture();
     upload(&server, &mut client, 3, other, "abc").await;
-    assert!(server.systems.services.music.queued_upload(1).is_none());
+    assert!(server.systems.services.music.queued_upload(1).is_some());
 }
 
 #[tokio::test]

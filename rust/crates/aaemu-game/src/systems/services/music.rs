@@ -335,7 +335,7 @@ impl ClientPacket for CSSaveUserMusicNotesPacket {
             };
             // The C# stored anything the client sent. Refuse what the 1.2 client cannot produce:
             // a song above `Music.MaxSongChars`,
-            // or a source item that is not an owned instrument from `instrument_sounds`.
+            // or a source item the player does not own.
             // The song grammar stays unparsed (no evidenced server-side format).
             let song_len = self.song.encode_utf16().count();
             let size_mismatch = u32::try_from(song_len) != Ok(self.song_size);
@@ -354,21 +354,11 @@ impl ClientPacket for CSSaveUserMusicNotesPacket {
                 ))
             } else {
                 let inv = crate::systems::economy::inventory::Inv::of(&p);
+                // The client sends the id of a bag item it found by its 64-bit id
+                // (`sub_3961E9A0` in `sub_39079640` / `sub_390799E0`), which is the music paper
+                // the later item cast consumes, not an instrument: only ownership is checked.
                 match inv.item_by_id(self.item_id) {
                     None => Some(format!("item {} is not owned", self.item_id)),
-                    Some(item)
-                        if !server
-                            .game_data
-                            .systems
-                            .services
-                            .instrument_sounds
-                            .contains(item.template_id) =>
-                    {
-                        Some(format!(
-                            "item {} (template {}) is not in instrument_sounds",
-                            self.item_id, item.template_id
-                        ))
-                    }
                     Some(_) => None,
                 }
             };
