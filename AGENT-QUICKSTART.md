@@ -15,8 +15,8 @@ Scripts/lane.sh new <name> --type fix   # worktree D:/aaemu-wt/<name>, target D:
                                     # runtime D:/aaemu-live-<name>, DBs lane_<name>_*, ports <prefix>xxx
 cd D:/aaemu-wt/<name>               # everything below runs from here
 Scripts/lane.sh info                # this lane's paths and ports
-Scripts/lane.sh sync && Scripts/lane.sh check   # latest main merged in + cargo xtask ci
-Scripts/lane.sh land                # merge into main and delete the whole lane
+Scripts/lane.sh sync && Scripts/lane.sh check   # latest rust-rewrite merged in + cargo xtask ci
+Scripts/lane.sh land                # merge into rust-rewrite and delete the whole lane
 Scripts/lane.sh list                # what lanes exist (yours must be gone when you are done)
 ```
 
@@ -43,14 +43,14 @@ sessions do not use it.
 
 | What | Path |
 |---|---|
-| Integration checkout (branch `main`, receives `lane.sh land` only) | `C:\Users\stsiakal\AAEmu-1.2-Rust`, pushed to the owners fork (remote `fork`); upstream `AAEmu/AAEmu-1.2-Rust` is fetch-only |
+| Integration checkout (branch `rust-rewrite`, receives `lane.sh land` only) | `C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2` — pushed to the main repository `https://github.com/AAEmu/AAEmu-1.2-Rust` (`git push aaemu12 rust-rewrite:main`). Never push to `origin`/`upstream` (AAEmu/AAEmu); the `fork` remote is retired. |
 | Lane worktrees / registry | `D:\aaemu-wt\<name>` / `D:\aaemu-lanes\<name>.env` |
 | Cargo build output | `D:\aaemu-target\<lane>` (lane's untracked `rust/.cargo/config.toml`; the integration checkout uses `D:\aaemu-target\main`) |
 | Lane runtime dirs (configs, binaries, logs, shots) | `D:\aaemu-live-<lane>\{rs-login,rs-game,bin,logs,shots}` |
 | Shared MySQL data (private instance) | `D:\aaemu-live\mysql` |
 | Secrets (DB password, test account password) | `D:\aaemu-live\cfg\` and the runtime `Config.Local.json` files — never print or commit them |
 | 1.2 client (read-only) | `D:\AA1.2` (`bin32\archeage.exe`, `game_pak`) |
-| Server game DB | `rust/crates/aaemu-game/app/Data/compact.sqlite3` (git-ignored; copy of `D:\aaemu-live\rs-game\Data\compact.sqlite3`) |
+| Server game DB | `rust/crates/aaemu-game/app/Data/compact.sqlite3` (git-ignored; source archive: `C:\Users\messe\Documents\MEGA downloads\ArcheAge_Server_Compact_r208088_v1.2.4.13_update_2026-01-23.7z`) |
 | 10.x reference client / zone server (read-only) | `D:\ArcheAge Returns 10.0.2.13 - 8yx - r575 - 2026-06-18` |
 | Reverse-engineering outputs | `D:\aa-re\` (CryPhysics, zone, client12) |
 
@@ -58,7 +58,7 @@ sessions do not use it.
 
 | Service | Address |
 |---|---|
-| Private MySQL (shared by all lanes) | `127.0.0.1:3317` (loopback only; lanes connect as `aaemu_local`, password in `D:\aaemu-live\cfg\`, see `D:/aaemu-lanes/machine.conf`) |
+| Private MySQL (shared by all lanes) | `127.0.0.1:3317` (root without password, loopback only) |
 | Lane stack: login (client) / internal | `127.0.0.1:<p>237` / `<p>234`, `<p>` = the lane's prefix 24–39 (`lane.sh info`) |
 | Lane stack: game / stream / web API | `127.0.0.1:<p>239` / `<p>250` / `<p>280` |
 | Old shared stack (integration checkout, not for sessions) | `21xxx`; `22xxx`/`23xxx` are taken by older ad-hoc stacks |
@@ -79,7 +79,7 @@ sessions do not use it.
 
 ## Rules that bite
 
-- **Keep about 30 GB free on D:; target dirs are huge** (10–90 GB each). Everything a session creates
+- **D: is nearly full and target dirs are huge** (10–90 GB each). Everything a session creates
   lives in its lane and goes away with `lane.sh land` / `lane.sh done`; never leave a target dir,
   runtime dir, database or dump behind. The lane's untracked `rust/.cargo/config.toml` sets its
   own `target-dir`, `jobs = 4`, the `rust-lld` linker and line-tables-only debug info. The live
