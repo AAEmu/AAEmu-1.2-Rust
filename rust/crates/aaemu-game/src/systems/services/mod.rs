@@ -79,6 +79,8 @@ pub struct Data {
     pub premium: premium::PremiumData,
     /// `instrument_sounds` item ids (user music uploads, WP-M1).
     pub instrument_sounds: music::InstrumentSounds,
+    /// `music_note_limits`: the 1.2 client's composition length limit per Artistry grade.
+    pub music_note_limits: music::MusicNoteLimits,
 }
 
 impl Data {
@@ -91,6 +93,7 @@ impl Data {
             expands: expands::ExpandData::load(ctx.conn)?,
             premium: premium::PremiumData::load(ctx.conn)?,
             instrument_sounds: music::InstrumentSounds::load(ctx.conn)?,
+            music_note_limits: music::MusicNoteLimits::load(ctx.conn)?,
         })
     }
 }
