@@ -727,6 +727,27 @@ pub trait ItemSkillHooks: Send + Sync {
         not_ported("Dyeing");
     }
 
+    /// `RenewEquipment` (57) and `PhysicalEnchantWeapon` / `PhysicalEnchantArmor` (20 / 21).
+    /// `armor`: `None` for RenewEquipment, `Some(false)` for the weapon enchant and
+    /// `Some(true)` for the armor enchant. Stage 1 validates the 1.2 client's pair predicate,
+    /// checks the enchanter's `physical_enchant_abilities` row and rolls it; no item changes.
+    /// `true` = the cast may continue.
+    #[allow(clippy::too_many_arguments)]
+    fn renew_equipment(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _source_item_id: u64,
+        _source_template_id: u32,
+        _source_slot: u32,
+        _target_item_id: u64,
+        _target_slot: u32,
+        _armor: Option<bool>,
+        _npc_template_id: Option<u32>,
+    ) -> bool {
+        false
+    }
+
     /// `FishingLoot`: `LootGameData.GetPack(zoneGroup.FishingLandLootPackId` (`land`) or
     /// `FishingSeaLootPackId)` + `GiveLootPack(character, Fishing, SkillEffectGainItem)`.
     /// `None` = no pack / an empty pack, `Some(false)` = the bag was full.

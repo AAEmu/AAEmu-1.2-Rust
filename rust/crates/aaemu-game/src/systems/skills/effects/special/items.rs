@@ -43,6 +43,7 @@ pub mod item_task {
 mod error {
     pub const BAG_FULL: i16 = 25;
     pub const BAG_INVALID_ITEM: i16 = 181;
+    pub const NOT_READY: i16 = 206;
     pub const SIEGE_ONLY_DEFENSE_OR_OFFENSE_TICKET_AT_ONCE: i16 = 463;
 }
 
@@ -98,6 +99,39 @@ fn item_target(t: &SkillCastTarget) -> Option<u64> {
         SkillCastTarget::Item { id, .. } => Some(id),
         _ => None,
     }
+}
+
+/// `SkillItem` of the caster object: `(item id, template id, bag slot)`.
+fn skill_item_slot(c: &SkillCaster) -> Option<(u64, u32, u32)> {
+    match *c {
+        SkillCaster::Item {
+            obj_id,
+            item_id,
+            item_template_id,
+            ..
+        } => Some((item_id, item_template_id, obj_id)),
+        _ => None,
+    }
+}
+
+/// `SkillCastItemTarget`: `(item id, bag slot)`.
+fn item_target_slot(t: &SkillCastTarget) -> Option<(u64, u32)> {
+    match *t {
+        SkillCastTarget::Item { obj_id, id, .. } => Some((id, obj_id)),
+        _ => None,
+    }
+}
+
+/// The enchanter NPC of a cast, when the cast itself names one. The 1.2 client keeps the NPC
+/// interaction open instead (`CSInteractNPC`), which the economy hook reads as a fallback.
+fn npc_template_of(args: &EffectArgs<'_>) -> Option<u32> {
+    if let Some(npc) = args.caster.as_ref().and_then(WorldObject::as_npc) {
+        return Some(npc.data().unit.template_id);
+    }
+    args.target
+        .as_obj()
+        .and_then(WorldObject::as_npc)
+        .map(|n| n.data().unit.template_id)
 }
 
 /// `character.BroadcastPacket(new SCSkillEndedPacket(skill.TlId), true)`.
@@ -311,6 +345,72 @@ pub fn dyeing(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         target_item_id,
         args.source.source_item.as_deref(),
     );
+}
+
+/// `RenewEquipment` (57): the source item is the base equipment and the target item the
+/// material (`FUN_397cca90`). Stage 1 only validates and logs the outcome (`IT2-STAGE2`).
+pub fn renew_equipment(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+    run_renew_effect(server, args, v, "RenewEquipment", None);
+}
+
+/// `PhysicalEnchantWeapon` (20) / `PhysicalEnchantArmor` (21): same pair predicate, plus the
+/// enchanter's `physical_enchant_abilities` row and its `success_ratio` roll. Stage 1 never
+/// changes an item (`IT2-STAGE2`).
+pub fn physical_enchant(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4], armor: bool) {
+    let name = if armor {
+        "PhysicalEnchantArmor"
+    } else {
+        "PhysicalEnchantWeapon"
+    };
+    run_renew_effect(server, args, v, name, Some(armor));
+}
+
+/// Shared body of 20 / 21 / 57: read the two item operands exactly as `FUN_394e92d0` does and
+/// hand them to the economy hook. A wrong operand type is the client's `0xce` toast.
+fn run_renew_effect(
+    server: &GameServer,
+    args: &EffectArgs<'_>,
+    v: [i32; 4],
+    name: &str,
+    armor: Option<bool>,
+) {
+    log_values(args, name, v);
+    let Some(p) = player_caster(args) else {
+        tracing::error!("Special effects: {name} caster is not a Character (InvalidCastException)");
+        return;
+    };
+    let Some((source_item_id, source_template_id, source_slot)) =
+        skill_item_slot(&args.caster_caster)
+    else {
+        tracing::error!(
+            "Special effects: {name} casterObj is not a SkillItem (InvalidCastException)"
+        );
+        send_error(p, error::NOT_READY);
+        cancel_skill(args, name);
+        return;
+    };
+    let Some((target_item_id, target_slot)) = item_target_slot(&args.target_caster) else {
+        tracing::error!(
+            "Special effects: {name} targetObj is not a SkillCastItemTarget (InvalidCastException)"
+        );
+        send_error(p, error::NOT_READY);
+        cancel_skill(args, name);
+        return;
+    };
+    let npc_template_id = npc_template_of(args);
+    if !server.systems.skills.ext.items().renew_equipment(
+        server,
+        p,
+        source_item_id,
+        source_template_id,
+        source_slot,
+        target_item_id,
+        target_slot,
+        armor,
+        npc_template_id,
+    ) {
+        cancel_skill(args, name);
+    }
 }
 
 /// `FishingLoot`: the land (target above z 101) or sea fishing loot pack of the target's zone
