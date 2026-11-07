@@ -15,7 +15,7 @@ use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
 use crate::world::{PlayerRef, WorldObject};
 
-use super::packets_special::SCCharacterResurrectedPacket;
+use super::packets_special::{SCCharacterResurrectedPacket, SCLoadInstancePacket};
 use super::stats::{stat, StatKind};
 use super::types::{KillReason, SkillCaster};
 
@@ -63,20 +63,68 @@ impl ClientPacket for CSResurrectCharacterPacket {
     }
 }
 
-/// The respawn point of `CSResurrectCharacterPacket` (`new Portal()` = X 0 when none).
-fn respawn_portal(server: &GameServer, p: &PlayerRef) -> Portal {
-    if let Some(portal) = crate::systems::housing::dominion::headquarters::respawn_portal(server, p)
-    {
-        return portal;
+/// A temple resurrection destination: the portal and the world instance it lives in.
+struct RespawnPoint {
+    portal: Portal,
+    instance_id: u32,
+}
+
+impl RespawnPoint {
+    fn in_place(instance_id: u32) -> Self {
+        Self {
+            portal: Portal::default(),
+            instance_id,
+        }
     }
-    let mut portal = Portal::default();
+}
+
+/// The current zone group's `indun_zones` row, if the zone belongs to an instance dungeon.
+fn dungeon_zone_of(
+    server: &GameServer,
+    zone_key: u32,
+) -> Option<&crate::systems::instances::data::IndunZone> {
+    let group_id = server.game_data.zones.zone_by_key(zone_key)?.group_id;
+    server
+        .game_data
+        .systems
+        .instances
+        .indun
+        .dungeon_zone(group_id)
+}
+
+/// The respawn point of `CSResurrectCharacterPacket` (`new Portal()` = X 0 when none).
+fn respawn_portal(server: &GameServer, p: &PlayerRef) -> RespawnPoint {
     let (instance_id, world_id, zone_key, faction_id) = {
         let c = p.data();
         let t = c.unit.transform;
         (t.instance_id, t.world_id, t.zone_id, c.unit.faction_id)
     };
+    if let Some(portal) = crate::systems::housing::dominion::headquarters::respawn_portal(server, p)
+    {
+        return RespawnPoint {
+            portal,
+            instance_id,
+        };
+    }
     if instance_id != DEFAULT_INSTANCE_ID {
+        // `indun_zones.has_graveyard = false`: the 1.2 client shows the ordinary "Revive"
+        // window instead of "Revive at the entrance" (`X2Player.IsInIndunWithGraveyard`,
+        // `FUN_39495b20` = record+1 != 0), so the ordinary shrine destination comes first.
+        // The exact destination is inferred (`PORTING.md`).
+        let no_graveyard = dungeon_zone_of(server, zone_key).is_some_and(|z| !z.has_graveyard);
+        if no_graveyard && server.config.dungeons.no_graveyard_use_return_portal {
+            let portal = crate::systems::npcs::portal::closest_return_portal(server, p);
+            // `id == 0` is `closest_return_portal`'s fail-safe (the current position); a real
+            // return point has an id and a main-world zone.
+            if portal.id != 0 && portal.zone_id != 0 {
+                return RespawnPoint {
+                    portal,
+                    instance_id: DEFAULT_INSTANCE_ID,
+                };
+            }
+        }
         // Inside dungeons or other instances, just respawn at the nearest Priestess
+        let mut portal = Portal::default();
         let world = server.world.world(instance_id);
         let priestess = world.as_ref().and_then(|w| {
             w.all_npcs()
@@ -95,8 +143,48 @@ fn respawn_portal(server: &GameServer, p: &PlayerRef) -> Portal {
             portal.z = pos.z;
             portal.z_rot = pos.rot_z;
             portal.yaw = pos.rot_z;
+            return RespawnPoint {
+                portal,
+                instance_id,
+            };
         }
-        return portal;
+        if no_graveyard && server.config.dungeons.no_graveyard_use_return_portal {
+            // The instance's saved entry position (`MainWorldPosition`) is the exit the code
+            // already knows; never fall through to the in-place (0, 0, 0) portal silently.
+            if let Some(mwp) = p.data().main_world_position {
+                tracing::warn!(
+                    "No return portal for {} ({}) in instance {} (has_graveyard = false); \
+                     using the instance entry position ({:.1}, {:.1}, {:.1})",
+                    p.data().unit.name,
+                    p.character_id,
+                    instance_id,
+                    mwp.x,
+                    mwp.y,
+                    mwp.z
+                );
+                return RespawnPoint {
+                    portal: Portal {
+                        world_id: mwp.world_id,
+                        zone_id: mwp.zone_id,
+                        x: mwp.x,
+                        y: mwp.y,
+                        z: mwp.z,
+                        z_rot: mwp.rot_z,
+                        yaw: mwp.rot_z,
+                        ..Portal::default()
+                    },
+                    instance_id: DEFAULT_INSTANCE_ID,
+                };
+            }
+            tracing::warn!(
+                "No graveyard, return portal or entry position for {} ({}) in instance {}; \
+                 reviving in place",
+                p.data().unit.name,
+                p.character_id,
+                instance_id
+            );
+        }
+        return RespawnPoint::in_place(instance_id);
     }
     // Check if the current zone is at War and if it has special respawn areas for factions
     let mut use_portal_id = 0;
@@ -122,7 +210,11 @@ fn respawn_portal(server: &GameServer, p: &PlayerRef) -> Portal {
         None
     };
     // Find the closest return portal (in the world) for the player if none has been found yet
-    faction_portal.unwrap_or_else(|| crate::systems::npcs::portal::closest_return_portal(server, p))
+    RespawnPoint {
+        portal: faction_portal
+            .unwrap_or_else(|| crate::systems::npcs::portal::closest_return_portal(server, p)),
+        instance_id: DEFAULT_INSTANCE_ID,
+    }
 }
 
 /// Grants a pending in-place resurrection offer: `SCNotifyResurrectionPacket` of the
@@ -144,11 +236,12 @@ pub fn resurrect_character(server: &GameServer, p: &PlayerRef, in_place: bool) {
         );
         return;
     }
-    let portal = if in_place {
-        Portal::default()
+    let respawn = if in_place {
+        RespawnPoint::in_place(p.data().unit.transform.instance_id)
     } else {
         respawn_portal(server, p)
     };
+    let portal = respawn.portal;
     let me = WorldObject::from(p);
     let hp = {
         let mut c = p.data();
@@ -206,20 +299,55 @@ pub fn resurrect_character(server: &GameServer, p: &PlayerRef, in_place: bool) {
         // The client does not answer a resurrection with `CSTeleportEnded`: apply the temple /
         // statue position to the server copy now so the destination zone (and its buffs) is
         // re-evaluated even if no movement packet follows.
-        let instance_id = p.data().unit.transform.instance_id;
-        crate::world::session::resurrect_at(
-            server,
-            p,
-            crate::models::transform::Transform {
-                instance_id,
+        let current_instance = p.data().unit.transform.instance_id;
+        if respawn.instance_id == current_instance {
+            crate::world::session::resurrect_at(
+                server,
+                p,
+                crate::models::transform::Transform {
+                    instance_id: current_instance,
+                    zone_id: portal.zone_id,
+                    x: portal.x,
+                    y: portal.y,
+                    z: portal.z,
+                    rot_z: portal.z_rot,
+                    ..Default::default()
+                },
+            );
+        } else {
+            // The destination is in another world (an open-world return portal of a
+            // `has_graveyard = false` instance, or the saved instance entry). Move the server
+            // copy and make the client load the destination world, like
+            // `systems::instances::worlds::return_to_main_world`.
+            p.data().set_disabled_set_position(true);
+            crate::world::session::teleport_character(
+                server,
+                p,
+                crate::models::transform::Transform {
+                    instance_id: respawn.instance_id,
+                    zone_id: portal.zone_id,
+                    x: portal.x,
+                    y: portal.y,
+                    z: portal.z,
+                    rot_z: portal.z_rot,
+                    ..Default::default()
+                },
+            );
+            let world_template_id = server
+                .world
+                .world(respawn.instance_id)
+                .map_or(0, |w| w.template.id);
+            p.send(SCLoadInstancePacket {
+                instance_id: world_template_id,
                 zone_id: portal.zone_id,
                 x: portal.x,
                 y: portal.y,
                 z: portal.z,
-                rot_z: portal.z_rot,
-                ..Default::default()
-            },
-        );
+                ang_x: 0.0,
+                ang_y: 0.0,
+                ang_z: portal.z_rot,
+            });
+        }
     }
     let (hp, mp) = {
         let c = p.data();
@@ -292,5 +420,151 @@ fn apply_revival_debuffs(server: &GameServer, p: &PlayerRef, in_place: bool) {
             crate::world::now_ms(),
         );
         super::buffs::add_buff(server, &me, b, 0, forced.max(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::world_data::Zone;
+    use crate::data::GameData;
+    use crate::models::transform::Transform;
+    use crate::systems::instances::data::IndunZone;
+    use crate::systems::npcs::portal::PortalTables;
+    use crate::test_support::{
+        spawn_player, test_character, test_server_with, TestClient, TEST_ZONE,
+    };
+
+    const MIRAGE_ZONE: u32 = 260;
+    const MIRAGE_GROUP: u32 = 49;
+    const GRAVEYARD_ZONE: u32 = 261;
+    const GRAVEYARD_GROUP: u32 = 55;
+
+    fn data() -> GameData {
+        let mut d = GameData::empty();
+        for (zone_key, group_id) in [
+            (TEST_ZONE, 1),
+            (MIRAGE_ZONE, MIRAGE_GROUP),
+            (GRAVEYARD_ZONE, GRAVEYARD_GROUP),
+        ] {
+            d.zones.zones.insert(
+                zone_key,
+                Zone {
+                    id: zone_key,
+                    name: format!("zone_{zone_key}"),
+                    zone_key,
+                    group_id,
+                    ..Zone::default()
+                },
+            );
+        }
+        d.systems.instances.indun.zones.insert(
+            MIRAGE_GROUP,
+            IndunZone {
+                zone_group_id: MIRAGE_GROUP,
+                name: "mirage".into(),
+                pvp: false,
+                has_graveyard: false,
+                ..IndunZone::default()
+            },
+        );
+        d.systems.instances.indun.zones.insert(
+            GRAVEYARD_GROUP,
+            IndunZone {
+                zone_group_id: GRAVEYARD_GROUP,
+                name: "graveyard".into(),
+                has_graveyard: true,
+                ..IndunZone::default()
+            },
+        );
+        d.systems.npcs.portal = PortalTables::from_parts(
+            vec![Portal {
+                id: 86,
+                name: "Respawn".into(),
+                x: 150.0,
+                y: 100.0,
+                z: 10.0,
+                sub_zone_id: 1,
+                ..Portal::default()
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("portal tables");
+        d
+    }
+
+    fn dead_player_in(server: &GameServer, zone_key: u32) -> (TestClient, PlayerRef) {
+        let client = TestClient::new(server, 1, 1);
+        let mut c = test_character(1, "A", 100.0, 100.0);
+        c.unit.hp = 0;
+        let p = spawn_player(server, &client, c, 0x101);
+        {
+            let mut d = p.data();
+            d.unit.transform.instance_id = 100;
+            d.unit.transform.world_id = 1;
+            d.unit.transform.zone_id = zone_key;
+        }
+        (client, p)
+    }
+
+    #[tokio::test]
+    async fn no_graveyard_instance_uses_the_return_portal() {
+        let server = test_server_with(data());
+        let (_client, p) = dead_player_in(&server, MIRAGE_ZONE);
+        let r = respawn_portal(&server, &p);
+        assert_eq!(r.instance_id, DEFAULT_INSTANCE_ID);
+        assert_eq!(r.portal.id, 86);
+        assert_eq!((r.portal.x, r.portal.y), (150.0, 100.0));
+        assert_ne!(r.portal.x, 0.0);
+    }
+
+    #[tokio::test]
+    async fn graveyard_instance_keeps_the_priestess_only_behaviour() {
+        let server = test_server_with(data());
+        let (_client, p) = dead_player_in(&server, GRAVEYARD_ZONE);
+        let r = respawn_portal(&server, &p);
+        // `has_graveyard = true` does not consult the open-world return portal; with no Temple
+        // Priestess in the instance the in-place portal stays, exactly as before the change.
+        assert_eq!(r.instance_id, 100);
+        assert_eq!(r.portal.x, 0.0);
+    }
+
+    #[tokio::test]
+    async fn no_graveyard_without_a_return_portal_uses_the_entry_position() {
+        let mut d = data();
+        d.systems.npcs.portal =
+            PortalTables::from_parts(Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                .expect("portal tables");
+        let server = test_server_with(d);
+        let (_client, p) = dead_player_in(&server, MIRAGE_ZONE);
+        p.data().main_world_position = Some(Transform {
+            instance_id: DEFAULT_INSTANCE_ID,
+            world_id: 1,
+            zone_id: TEST_ZONE,
+            x: 321.0,
+            y: 654.0,
+            z: 12.0,
+            ..Transform::default()
+        });
+        let r = respawn_portal(&server, &p);
+        assert_eq!(r.instance_id, DEFAULT_INSTANCE_ID);
+        assert_eq!(
+            (r.portal.x, r.portal.y, r.portal.z, r.portal.zone_id),
+            (321.0, 654.0, 12.0, TEST_ZONE)
+        );
+    }
+
+    #[tokio::test]
+    async fn config_off_keeps_the_priestess_behaviour_for_no_graveyard_instances() {
+        let server = test_server_with(data());
+        server
+            .config
+            .update(|c| c.dungeons.no_graveyard_use_return_portal = false);
+        let (_client, p) = dead_player_in(&server, MIRAGE_ZONE);
+        let r = respawn_portal(&server, &p);
+        assert_eq!(r.instance_id, 100);
+        assert_eq!(r.portal.x, 0.0);
     }
 }
