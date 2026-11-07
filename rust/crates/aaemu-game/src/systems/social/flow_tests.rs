@@ -2262,10 +2262,11 @@ async fn blocked_sender_is_silently_dropped_on_every_direct_path() {
         .await;
     assert!(a.frames().is_empty() && b.frames().is_empty());
 
-    // Friend add.
+    // Friend add: the adder gets the unknown-user failure (551), the blocker nothing.
     b.send(&server, cs::CSAddFriendPacket, name_body("Al"))
         .await;
-    assert!(a.frames().is_empty() && b.frames().is_empty());
+    assert!(a.frames().is_empty());
+    assert_eq!(b.frames().len(), 1);
     assert!(b.p.data().friends.is_empty());
 
     // Trade request.
