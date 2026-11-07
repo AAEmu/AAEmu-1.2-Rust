@@ -1588,10 +1588,21 @@ fn follow_unit_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     c.ai.idle_position = owner_pos(c);
 }
 
+/// `Ai.Owner.InterruptSkills()` of the settling behaviors (`Idle`, `HoldPosition`). Deviation: a
+/// tower defense controller keeps the wave plot it cast on spawn (`OnSpawn` `np_skills`), which
+/// runs for seconds while the AI settles from `Spawning` through `RunCommandSet` into
+/// `Idle`/`HoldPosition`; the C# interrupts it there too, so no wave ever appeared (PORTING.md,
+/// tower defense).
+fn interrupt_unless_event_controller(c: &AiCtx<'_>) {
+    if !crate::systems::instances::tower_def::owns_npc(c.server, &c.npc) {
+        ai_skills::interrupt_skills(c);
+    }
+}
+
 fn hold_position_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     npc::set_game_stance(&c.npc, GameStanceType::RELAXED);
     npc::set_alertness(&c.npc, MoveTypeAlertness::IDLE);
-    ai_skills::interrupt_skills(c);
+    interrupt_unless_event_controller(c);
     npc::stop_movement(c.server, &c.npc);
     // Ai.Owner.CurrentTarget = Ai.Owner (no packet)
     c.npc.data().unit.current_target = c.npc.obj_id;
@@ -1643,7 +1654,7 @@ fn idle_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     // Stop all actions and reset state
     npc::set_game_stance(&c.npc, GameStanceType::RELAXED);
     npc::set_alertness(&c.npc, MoveTypeAlertness::IDLE);
-    ai_skills::interrupt_skills(c);
+    interrupt_unless_event_controller(c);
     npc::stop_movement(c.server, &c.npc);
     set_target(c, None);
     if let Some(t) = current_target(c) {
