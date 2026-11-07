@@ -161,6 +161,8 @@ if "${MYSQL[@]}" -N -e "SHOW DATABASES LIKE '$DB_GAME'" | grep -q .; then
     DELETE FROM character_cooldowns WHERE character_id IN
       (SELECT id FROM characters WHERE name IN ($names));
     UPDATE characters SET deleted=1 WHERE name REGEXP '^Vn[0-9a-f]{16}\$';
+    -- A bot a suite let die (aggro-links) is revived: the next run casts as soon as it logs in.
+    UPDATE characters SET hp=100000, mp=100000 WHERE name IN ($names) AND hp<=0;
     -- Labor the GM suites granted (each run adds 5000; past the i16 range a cast no longer finds
     -- its labor cost).
     UPDATE accounts SET labor=0 WHERE account_id IN
