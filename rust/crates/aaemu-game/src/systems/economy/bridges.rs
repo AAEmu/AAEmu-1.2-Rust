@@ -1217,6 +1217,7 @@ impl ItemSkillHooks for EconomyForSkills {
             restored.details = taken.item.details.clone();
             restored.lifespan_mins = taken.item.lifespan_mins;
             restored.made_unit_id = taken.item.made_unit_id;
+            restored.crafter_id = taken.item.crafter_id;
             restored.create_time = taken.item.create_time;
             restored.unsecure_time = taken.item.unsecure_time;
             restored.unpack_time = taken.item.unpack_time;
@@ -2053,6 +2054,7 @@ impl crate::systems::services::music::SheetMusicInventory for EconomySheetMusic<
         };
         sheet.owner_id = u64::from(player.character_id);
         sheet.made_unit_id = player.character_id;
+        sheet.crafter_id = player.character_id;
         sheet.details.song_id = song_id;
         let data = txn.data();
         let bag = Inv::of(player).bag();

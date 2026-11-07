@@ -493,12 +493,12 @@ fn zone_group_of(server: &GameServer, zone_key: u32) -> u32 {
         .map_or(0, |z| z.group_id)
 }
 
-/// The equipped trade pack: (template id, item id, `MadeUnitId`).
+/// The equipped trade pack: (template id, item id, crafter character id).
 fn backpack(player: &PlayerRef) -> Option<(u32, u64, u32)> {
     let equipment = player.data().inventory.equipment().clone();
     let c = equipment.lock().expect("container poisoned");
     c.get_item_by_slot(equip_slot::BACKPACK)
-        .map(|i| (i.template_id, i.id, i.made_unit_id))
+        .map(|i| (i.template_id, i.id, i.crafter()))
 }
 
 fn send_error(player: &PlayerRef, error: i16) {
@@ -673,7 +673,7 @@ pub fn sell_specialty(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) 
         return base_price;
     }
     let price_ratio = ratio_for_specialty(server, player);
-    let Some((template_id, item_id, made_unit_id)) = backpack(player) else {
+    let Some((template_id, item_id, pack_crafter_id)) = backpack(player) else {
         send_error(player, error_message::STORE_BACKPACK_NOGOODS);
         return base_price;
     };
@@ -701,9 +701,10 @@ pub fn sell_specialty(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) 
         tracing::error!("SellSpecialty: npc template {npc_template_id} not found");
         return base_price;
     };
-    // TODO in C# too: the crafter of the pack.
-    let crafter_id = if made_unit_id != character_id {
-        made_unit_id
+    // The pack's crafter (the C# used the overloaded `MadeUnitId`; the dedicated column falls
+    // back to it for packs crafted before the column existed).
+    let crafter_id = if pack_crafter_id != character_id {
+        pack_crafter_id
     } else {
         0
     };
