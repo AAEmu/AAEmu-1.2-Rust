@@ -1215,8 +1215,10 @@ impl CSSetCraftingPayPacket {
             );
             return;
         };
-        {
-            let s = shipyard.data();
+        let data = {
+            // Check the owner and the range and write the wage under one shipyard lock, so a
+            // concurrent owner change cannot slip between the check and the write.
+            let mut s = shipyard.data();
             if s.data.kind2 != player.character_id {
                 tracing::warn!(
                     char_id = player.character_id,
@@ -1239,9 +1241,6 @@ impl CSSetCraftingPayPacket {
                 );
                 return;
             }
-        }
-        let data = {
-            let mut s = shipyard.data();
             s.data.money_amount = self.money_amount;
             s.is_dirty = true;
             s.data.clone()
