@@ -53,6 +53,8 @@ pub mod water;
 #[cfg(test)]
 mod action_event_tests;
 #[cfg(test)]
+mod arc_lightning_tests;
+#[cfg(test)]
 mod buff_tests;
 #[cfg(test)]
 mod cast_validation_tests;

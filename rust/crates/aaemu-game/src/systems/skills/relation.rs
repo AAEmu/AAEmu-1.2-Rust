@@ -115,6 +115,17 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     if me.obj_id() == target.obj_id() {
         return false;
     }
+    // Never your own mount / slave (or yourself through one), not even with Ctrl+F force attack
+    // or a Retribution flag, which would otherwise make the friendly pair attackable and raise
+    // Retribution on the owner (Arc Lightning hitting the caster's own mount).
+    if let (Some(me_owner), Some(target_owner)) = (
+        me.as_obj().and_then(|o| owner_character(server, o)),
+        target.as_obj().and_then(|o| owner_character(server, o)),
+    ) {
+        if me_owner.obj_id == target_owner.obj_id {
+            return false;
+        }
+    }
     // `indun_zones.pvp = false`: the 1.2 client resolves a character-owned pair as
     // non-hostile before faction logic (`FUN_390281c0` stores `pvp == 0` in the relation
     // context; `FUN_39837a40` returns that flag and `FUN_39838880` then yields relation
@@ -241,6 +252,47 @@ pub fn filter_with_relation(
             })
             .collect(),
     }
+}
+
+/// `tick_area_relation_id` 6 (Arc Lightning / Electric Shock 250, 5847, 7465: "Inflicts damage on
+/// you and allies within 2m"). It is not a `SkillTargetRelation` of the C# enum (the C# fell
+/// through `default => units`, so every unit in the radius, the caster and its mount included,
+/// received the spread DoT and the damage). The buff text says the DoT jumps from its holder to
+/// the HOLDER's allies, so the relation is read from the holder, not from the buff's caster.
+pub const TICK_AREA_HOLDER_ALLIES: u32 = 6;
+
+/// `tick_area_relation_id == TICK_AREA_HOLDER_ALLIES`: the holder itself and the units around it
+/// that are friendly to the holder. The caster, its mates / slaves and anything else owned by the
+/// caster's character never qualify, and the caster must be allowed to attack the unit (a harmful
+/// spread never lands on a unit the caster may not hit, so it cannot raise Retribution).
+pub fn filter_holder_allies(
+    server: &GameServer,
+    holder: &WorldObject,
+    caster: &WorldObject,
+    units: Vec<WorldObject>,
+) -> Vec<WorldObject> {
+    let holder_t = Target::Obj(holder.clone());
+    let caster_t = Target::Obj(caster.clone());
+    let caster_owner = owner_character(server, caster).map(|p| p.obj_id);
+    units
+        .into_iter()
+        .filter(|u| {
+            if u.same(holder) {
+                return true;
+            }
+            if u.same(caster)
+                || caster_owner.is_some_and(|c| {
+                    u.obj_id() == c || owner_character(server, u).is_some_and(|o| o.obj_id == c)
+                })
+            {
+                return false;
+            }
+            let t = Target::Obj(u.clone());
+            relation_to(server, &holder_t, &t) == RelationState::Friendly
+                && !can_attack(server, &holder_t, &t)
+                && can_attack(server, &caster_t, &t)
+        })
+        .collect()
 }
 
 /// `SkillTargetingUtil.IsRelationValid(relation, caster, target)`.
