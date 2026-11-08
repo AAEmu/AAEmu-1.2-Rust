@@ -126,6 +126,9 @@ pub mod water_debug_cmd;
 pub struct ScriptEnv {
     /// `FileManager.AppPath`.
     pub app_path: PathBuf,
+    /// The active era profile (`World.Profile`): commands that need a level cap before their
+    /// first execution read it here.
+    pub profile: crate::config::ServerProfile,
 }
 
 /// The common imports of the command modules.

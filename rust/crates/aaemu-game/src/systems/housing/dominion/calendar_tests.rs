@@ -350,26 +350,37 @@ fn disabled_calendar_is_reported_by_the_settings_and_invalid_schedules_are_rejec
         .cycle_for_week(ZONE, date(2014, 1, 5), &timezone())
         .is_none());
 
-    let settings = CalendarSettings::from_config(&HousingConfig {
-        siege_calendar: true,
-        siege_calendar_timezone: "+09:00".into(),
-        ..Default::default()
-    });
+    let settings = CalendarSettings::from_config(
+        &HousingConfig {
+            siege_calendar: Some(true),
+            siege_calendar_timezone: "+09:00".into(),
+            ..Default::default()
+        },
+        ServerProfile::EuAuroria,
+    );
     assert!(settings.enabled);
     assert_eq!(settings.timezone, timezone());
-    let default = CalendarSettings::from_config(&HousingConfig::default());
-    assert!(!default.enabled);
+    // A missing key follows the era profile: on for Auroria (the default), off for launch.
+    let default =
+        CalendarSettings::from_config(&HousingConfig::default(), ServerProfile::EuAuroria);
+    assert!(default.enabled);
     // The config default (empty string) is UTC, not the server's local offset.
     assert_eq!(
         default.timezone,
         CalendarTimeZone::Fixed(FixedOffset::east_opt(0).unwrap())
     );
+    assert!(
+        !CalendarSettings::from_config(&HousingConfig::default(), ServerProfile::EuLaunch).enabled
+    );
     // An explicit `local` still selects the server's local offset.
     assert_eq!(
-        CalendarSettings::from_config(&HousingConfig {
-            siege_calendar_timezone: "local".into(),
-            ..Default::default()
-        })
+        CalendarSettings::from_config(
+            &HousingConfig {
+                siege_calendar_timezone: "local".into(),
+                ..Default::default()
+            },
+            ServerProfile::EuAuroria,
+        )
         .timezone,
         CalendarTimeZone::Local
     );

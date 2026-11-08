@@ -125,7 +125,9 @@ fn fixture() -> Fixture {
         }
     }
     let server = test_server_with(data);
-    server.config.update(|c| c.housing.siege_calendar = true);
+    server
+        .config
+        .update(|c| c.housing.siege_calendar = Some(true));
     for (zone, house_id) in [(ZONE, 61), (OTHER_ZONE, 62), (LATER_ZONE, 63)] {
         let identity = TowerIdentity {
             house_id,
@@ -386,7 +388,9 @@ async fn a_won_camp_item_expires_when_the_declare_period_ends_and_the_timer_remo
 #[tokio::test]
 async fn a_disabled_calendar_posts_nothing() {
     let f = fixture();
-    f.server.config.update(|c| c.housing.siege_calendar = false);
+    f.server
+        .config
+        .update(|c| c.housing.siege_calendar = Some(false));
     tick_at(&f, utc(2014, 1, 8, 22, 30) + 60);
     assert!(lots(&f.server).is_empty());
 }

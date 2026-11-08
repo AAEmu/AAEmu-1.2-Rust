@@ -2,8 +2,6 @@
 //! `Character.ValidateAndFixExpAndLevel`, which `Character.Load` runs before the character list
 //! is written (it can change the level that is sent).
 
-/// `ExperienceManager.PlayerLevelCap`.
-pub const PLAYER_LEVEL_CAP: u8 = 55;
 /// `ExperienceManager.MateLevelCap`.
 pub const MATE_LEVEL_CAP: u8 = 50;
 
@@ -45,9 +43,13 @@ pub struct ExperienceTable {
 }
 
 impl ExperienceTable {
-    /// `ExperienceManager.Load(loader, PlayerLevelCap, MateLevelCap)` with the loader's checks
-    /// (levels must start at 1 without gaps, experience strictly increasing).
-    pub fn from_templates(templates: Vec<LevelTemplate>) -> Result<Self, ExperienceError> {
+    /// `ExperienceManager.Load(loader, playerLevelCap, MateLevelCap)` with the loader's checks
+    /// (levels must start at 1 without gaps, experience strictly increasing). The player cap
+    /// comes from the era profile (`ServerProfile::player_level_cap`).
+    pub fn from_templates(
+        templates: Vec<LevelTemplate>,
+        player_level_cap: u8,
+    ) -> Result<Self, ExperienceError> {
         let (mut last_exp, mut last_mate_exp) = (-1i32, -1i32);
         for (expected, t) in (1u32..).zip(&templates) {
             if u32::from(t.level) != expected {
@@ -64,7 +66,7 @@ impl ExperienceTable {
             last_mate_exp = t.total_mate_exp;
         }
         let mut table = Self::default();
-        table.load(templates, PLAYER_LEVEL_CAP, MATE_LEVEL_CAP)?;
+        table.load(templates, player_level_cap, MATE_LEVEL_CAP)?;
         Ok(table)
     }
 
@@ -161,7 +163,18 @@ impl ExperienceTable {
         } else {
             self.max_player_level
         };
-        if min_level >= max_level {
+        // No experience data at all (an empty `levels` table): C# turns every level into 0.
+        if max_level == 0 {
+            return Ok((0, 0.max(exp)));
+        }
+        // A character above the cap (for example one saved under `Kr12`, then the server
+        // switched to a 50-cap profile) keeps its level and gains no further levels. Exp is
+        // trimmed against its own level, exactly as a capped character is trimmed at the cap.
+        if min_level > max_level {
+            let overflow = 0.max(exp - self.exp_for_level(min_level, mate));
+            return Ok((min_level, overflow));
+        }
+        if min_level == max_level {
             let overflow = 0.max(exp - self.exp_for_level(max_level, mate));
             return Ok((max_level, overflow));
         }
@@ -171,11 +184,11 @@ impl ExperienceTable {
             .iter()
             .map(|t| if mate { t.total_mate_exp } else { t.total_exp })
             .collect();
-        // `List.BinarySearch(minLevel, count, exp)` with C#'s count. Note: the count is
-        // `Min(Count - minLevel, maxLevel)`, so the searched range may extend past maxLevel when
-        // the table has more rows than the cap (C# quirk, reproduced).
+        // `List.BinarySearch(minLevel, count, exp)`. The C# count was `Min(Count - minLevel,
+        // maxLevel)`, which searched past the cap when the table had more rows than the cap;
+        // with the profile cap the search must never return a level above it.
         let start = usize::from(min_level);
-        let count = (exp_by_level.len() - start).min(usize::from(max_level));
+        let count = (exp_by_level.len() - start).min(usize::from(max_level) - start);
         let index = match exp_by_level[start..start + count].binary_search(&exp) {
             Ok(i) => return Ok(((start + i + 1) as u8, 0)),
             Err(i) => start + i,
@@ -189,7 +202,9 @@ impl ExperienceTable {
     }
 
     /// `Character.ValidateAndFixExpAndLevel()` on `(level, experience)`; returns the fixed pair.
-    /// The level-up side effect (`Expedition?.OnCharacterRefresh`) is a later phase.
+    /// A level above the cap is kept (never lowered); partial exp beyond that level's total is
+    /// trimmed to it. The level-up side effect (`Expedition?.OnCharacterRefresh`) is a later
+    /// phase.
     pub fn validate_and_fix(
         &self,
         level: u8,
@@ -213,7 +228,7 @@ impl ExperienceTable {
 mod tests {
     use super::*;
 
-    fn table(n: u8) -> ExperienceTable {
+    fn table(n: u8, player_level_cap: u8) -> ExperienceTable {
         let t = (1..=n)
             .map(|l| LevelTemplate {
                 level: l,
@@ -222,7 +237,7 @@ mod tests {
                 skill_points: 0,
             })
             .collect();
-        ExperienceTable::from_templates(t).unwrap()
+        ExperienceTable::from_templates(t, player_level_cap).unwrap()
     }
 
     #[test]
@@ -234,7 +249,7 @@ mod tests {
             skill_points: 0,
         }];
         assert_eq!(
-            ExperienceTable::from_templates(bad).unwrap_err(),
+            ExperienceTable::from_templates(bad, 55).unwrap_err(),
             ExperienceError::MissingLevel(1)
         );
         let unsorted = vec![
@@ -252,16 +267,16 @@ mod tests {
             },
         ];
         assert_eq!(
-            ExperienceTable::from_templates(unsorted).unwrap_err(),
+            ExperienceTable::from_templates(unsorted, 55).unwrap_err(),
             ExperienceError::NotSortedByExp
         );
-        let t = table(60);
+        let t = table(60, 55);
         assert_eq!((t.max_player_level(), t.max_mate_level()), (55, 50));
     }
 
     #[test]
     fn level_lookup_matches_csharp() {
-        let t = table(55);
+        let t = table(55, 55);
         // exact hit on level 10's total exp
         assert_eq!(t.level_from_exp(900, 1, false).unwrap(), (10, 0));
         // between level 10 and 11
@@ -282,7 +297,7 @@ mod tests {
 
     #[test]
     fn validate_and_fix() {
-        let t = table(55);
+        let t = table(55, 55);
         // too little exp for the level: exp raised, level kept
         assert_eq!(t.validate_and_fix(10, 0).unwrap(), (10, 900));
         // enough exp for a higher level: level raised
@@ -296,6 +311,53 @@ mod tests {
         );
         // level 0 throws in C#
         assert!(t.validate_and_fix(0, 5).is_err());
+    }
+
+    #[test]
+    fn profile_cap_of_50_holds_when_the_table_has_more_rows() {
+        let t = table(55, 50);
+        assert_eq!((t.max_player_level(), t.max_mate_level()), (50, 50));
+        // A huge gain stops at the cap instead of reading the rows above it (the C# search
+        // range ran to `start + max_level`, so from level 1 it could return level 51).
+        assert_eq!(t.level_from_exp(9999, 1, false).unwrap(), (50, 9999 - 4900));
+        assert_eq!(
+            t.level_from_exp(9999, 49, false).unwrap(),
+            (50, 9999 - 4900)
+        );
+        assert_eq!(t.validate_and_fix(50, 6000).unwrap(), (50, 4900));
+    }
+
+    #[test]
+    fn kr12_cap_of_55_holds_with_the_real_101_row_table() {
+        let t = table(101, 55);
+        assert_eq!((t.max_player_level(), t.max_mate_level()), (55, 50));
+        // The requested case: a big gain from level 54 stops at 55, never at a row above it.
+        assert_eq!(
+            t.level_from_exp(999_999, 54, false).unwrap(),
+            (55, 999_999 - 5400)
+        );
+        // The C# search range also ran past the cap from lower levels. With the real 101-row
+        // table the past-the-end guard did not catch it, so the old code returned level 56
+        // from level 1; the clamped count is what keeps this at 55.
+        assert_eq!(
+            t.level_from_exp(999_999, 1, false).unwrap(),
+            (55, 999_999 - 5400)
+        );
+    }
+
+    #[test]
+    fn a_character_above_the_cap_keeps_its_level_and_does_not_level_up() {
+        let t = table(55, 50);
+        // Level 53 (saved under Kr12): exp below the level minimum is raised, level kept.
+        assert_eq!(t.validate_and_fix(53, 0).unwrap(), (53, 5200));
+        // Exp beyond the level 53 total is trimmed to that total, as at the cap.
+        assert_eq!(t.validate_and_fix(53, 6000).unwrap(), (53, 5200));
+        // A gain never returns the cap level (which would lower the character).
+        assert_eq!(
+            t.level_from_exp(9999, 53, false).unwrap(),
+            (53, 9999 - 5200)
+        );
+        assert_eq!(t.level_from_exp(4000, 53, false).unwrap(), (53, 0));
     }
 }
 

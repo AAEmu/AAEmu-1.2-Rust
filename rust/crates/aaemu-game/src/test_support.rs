@@ -36,6 +36,12 @@ pub fn test_server_with(data: GameData) -> GameServer {
 pub fn test_server_with_world(data: GameData, world: WorldTemplate) -> GameServer {
     let config = AppConfig {
         id: 1,
+        // The flow-test fixtures exercise the KR 1.2 systems directly; opt into player
+        // nations so they do not depend on the default era profile (`EuAuroria` has none).
+        social: crate::systems::social::config::SocialConfig {
+            player_nations: Some(true),
+            ..Default::default()
+        },
         ..AppConfig::default()
     };
     test_server_with_world_config(data, world, config)
@@ -96,6 +102,7 @@ pub fn test_experience(up_to: u8) -> crate::data::ExperienceTable {
                 skill_points: i32::from(level),
             })
             .collect(),
+        55,
     )
     .expect("test experience table")
 }

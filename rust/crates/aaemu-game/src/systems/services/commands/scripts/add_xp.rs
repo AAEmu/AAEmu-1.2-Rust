@@ -72,6 +72,7 @@ pub(crate) mod tests {
                     skill_points: 0,
                 })
                 .collect(),
+            55,
         )
         .expect("experience table");
         gd

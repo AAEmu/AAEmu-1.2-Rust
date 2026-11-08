@@ -32,10 +32,16 @@ pub struct HousingConfig {
     )]
     pub dominion_property_tax_base: DominionPropertyTaxBase,
     /// Drives the weekly siege periods from `siege_zones`/`siege_plans` instead of the
-    /// explicit GM schedule alone. Default off: the calendar is a server policy, not a
-    /// recovered 1.2 world-server setting. `Housing.SiegeCalendar`.
-    #[serde(rename = "siegecalendar", deserialize_with = "crate::config::lenient")]
-    pub siege_calendar: bool,
+    /// explicit GM schedule alone. It does **not** gate Auroria claims or the client
+    /// `FeatureSet.siege` bit: those follow the era profile. The era profile decides when the
+    /// key is missing (`World.Profile`: on for `EuAuroria` and `Kr12`, off for `EuLaunch`), an
+    /// explicit `true` / `false` wins. `Housing.SiegeCalendar`.
+    #[serde(
+        rename = "siegecalendar",
+        default,
+        deserialize_with = "crate::config::lenient_option"
+    )]
+    pub siege_calendar: Option<bool>,
     /// Offset of the `siege_zones` weekday/hour/minute columns, e.g. `+09:00`. Empty (the
     /// default) or `utc` is UTC; `local` uses the server's current local offset. UTC is the
     /// default because the Western 2014 schedule names the same wall-clock times as GMT
@@ -88,7 +94,7 @@ impl Default for HousingConfig {
     fn default() -> Self {
         Self {
             dominion_property_tax_base: DominionPropertyTaxBase::default(),
-            siege_calendar: false,
+            siege_calendar: None,
             siege_calendar_timezone: String::new(),
             dominion_claim_limit: default_dominion_claim_limit(),
             defense_hq_offset: [0.0; 3],
@@ -176,9 +182,11 @@ mod tests {
     }
 
     #[test]
-    fn siege_calendar_binds_off_by_default_and_accepts_a_timezone() {
+    fn siege_calendar_binds_explicitly_and_defaults_from_the_profile() {
         let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
-        assert!(!default.housing.siege_calendar);
+        // Missing key: the default profile (EuAuroria) enables sieges.
+        assert_eq!(default.housing.siege_calendar, None);
+        assert!(default.siege_calendar_enabled());
         assert!(default.housing.siege_calendar_timezone.is_empty());
         for value in [serde_json::json!(true), serde_json::json!("true")] {
             let config = crate::config::AppConfig::from_value(serde_json::json!({
@@ -188,8 +196,26 @@ mod tests {
                 }
             }))
             .unwrap();
-            assert!(config.housing.siege_calendar);
+            assert_eq!(config.housing.siege_calendar, Some(true));
+            assert!(config.siege_calendar_enabled());
             assert_eq!(config.housing.siege_calendar_timezone, "+09:00");
         }
+        // An explicit false wins over the Auroria profile; an explicit true wins over launch.
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": { "SiegeCalendar": false }
+        }))
+        .unwrap();
+        assert!(!config.siege_calendar_enabled());
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "EuLaunch" }
+        }))
+        .unwrap();
+        assert!(!config.siege_calendar_enabled());
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "EuLaunch" },
+            "Housing": { "SiegeCalendar": true }
+        }))
+        .unwrap();
+        assert!(config.siege_calendar_enabled());
     }
 }

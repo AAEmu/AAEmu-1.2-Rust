@@ -1,6 +1,5 @@
 {
     "FeatureSet": {
-        "siege": true,
         "premium": true,
         "itemSecure": true,
         "secondpass": false,

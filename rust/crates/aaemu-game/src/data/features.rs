@@ -7,7 +7,7 @@ use std::fmt;
 use aaemu_commons::{Marshal, PacketStream};
 use serde::Deserialize;
 
-use crate::config::{lenient, lenient_map};
+use crate::config::{lenient, lenient_map, lenient_option};
 
 /// `Feature` bit indexes (byte = value / 8, bit = value % 8). Only named members are listed;
 /// `flag_x_y` placeholders are omitted.
@@ -58,14 +58,22 @@ const MATE_LEVEL_LIMIT_INDEX: usize = 8;
 /// and its line. `AaPoint` (44) is not in that table; the client reads it in C++ (see its
 /// comment). `ExtraBits` overrides any bit by number, for the unnamed `flag_x_y` members.
 ///
-/// The defaults reproduce the bytes [`FeatureSet::initialized`] produces with the stock level
-/// caps, so a missing section keeps today's behaviour.
+/// Every named default is `true`/`false` except `siege` and `nations`: those are `None` and
+/// follow the era profile (`World.Profile`). With the `Kr12` profile the defaults reproduce
+/// the bytes [`FeatureSet::initialized`] produces with the stock level caps.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct FeatureSetConfig {
-    /// `siege` (bit 0, `x2game.dll.c:956485`).
-    #[serde(rename = "siege", deserialize_with = "lenient")]
-    pub siege: bool,
+    /// `siege` (bit 0, `x2game.dll.c:956485`). `None` = the era profile decides
+    /// (`World.Profile`: on for `EuAuroria` and `Kr12`, off for `EuLaunch`); an explicit
+    /// value wins.
+    #[serde(rename = "siege", default, deserialize_with = "lenient_option")]
+    pub siege: Option<bool>,
+    /// `nations` (bit 6, C# `Feature.Nations`). `None` = the era profile decides (KR 1.2 only);
+    /// an explicit value wins. Not exposed through `GetFeatureSet()`, so the client reads the
+    /// bit itself.
+    #[serde(rename = "nations", default, deserialize_with = "lenient_option")]
+    pub nations: Option<bool>,
     /// `premium` (bit 4, `x2game.dll.c:956509`).
     #[serde(rename = "premium", deserialize_with = "lenient")]
     pub premium: bool,
@@ -138,7 +146,8 @@ pub struct FeatureSetConfig {
 impl Default for FeatureSetConfig {
     fn default() -> Self {
         Self {
-            siege: true,
+            siege: None,
+            nations: None,
             premium: true,
             item_secure: true,
             secondpass: false,
@@ -194,10 +203,19 @@ impl FeatureSet {
 
     /// Applies [`FeatureSetConfig`] on top of [`FeatureSet::initialized`].
     ///
-    /// Every named switch sets exactly its bit. `extra_bits` is applied last, so it can also
-    /// override a named bit or turn a default-on unnamed bit off.
-    pub fn apply_config(&mut self, config: &FeatureSetConfig) {
-        self.set(Feature::Siege, config.siege);
+    /// Every named switch sets exactly its bit; an absent `siege` / `nations` key follows the
+    /// resolved server flags (`AppConfig::auroria_claims_enabled` /
+    /// `AppConfig::player_nations_enabled`, which default from the era profile). `extra_bits`
+    /// is applied last, so it can also override a named bit or turn a default-on unnamed bit
+    /// off.
+    pub fn apply_config(
+        &mut self,
+        config: &FeatureSetConfig,
+        siege_default: bool,
+        nations_default: bool,
+    ) {
+        self.set(Feature::Siege, config.siege.unwrap_or(siege_default));
+        self.set(Feature::Nations, config.nations.unwrap_or(nations_default));
         self.set(Feature::Premium, config.premium);
         self.set(Feature::ItemSecure, config.item_secure);
         self.set(Feature::Secondpass, config.secondpass);
@@ -306,9 +324,9 @@ impl fmt::Display for FeatureSet {
 mod tests {
     use super::*;
 
-    fn configured(config: &FeatureSetConfig) -> FeatureSet {
+    fn configured(config: &FeatureSetConfig, profile: crate::config::ServerProfile) -> FeatureSet {
         let mut f = FeatureSet::initialized(55, 50);
-        f.apply_config(config);
+        f.apply_config(config, profile.sieges(), profile.player_nations());
         f
     }
 
@@ -329,7 +347,10 @@ mod tests {
 
     #[test]
     fn default_config_reproduces_the_current_bytes() {
-        let f = configured(&FeatureSetConfig::default());
+        let f = configured(
+            &FeatureSetConfig::default(),
+            crate::config::ServerProfile::Kr12,
+        );
         assert_eq!(
             f.bytes(),
             &[0x5B, 55, 0x0F, 0x0F, 0xF9, 0x29, 0x33, 0x89, 50, 0x08, 0x1a]
@@ -338,11 +359,33 @@ mod tests {
     }
 
     #[test]
+    fn profile_drives_siege_and_nations_unless_explicit() {
+        use crate::config::ServerProfile;
+        let eu = configured(&FeatureSetConfig::default(), ServerProfile::EuAuroria);
+        assert!(eu.check(Feature::Siege));
+        assert!(!eu.check(Feature::Nations));
+        let launch = configured(&FeatureSetConfig::default(), ServerProfile::EuLaunch);
+        assert!(!launch.check(Feature::Siege));
+        assert!(!launch.check(Feature::Nations));
+        let kr = configured(&FeatureSetConfig::default(), ServerProfile::Kr12);
+        assert!(kr.check(Feature::Siege) && kr.check(Feature::Nations));
+        // An explicit key wins over the profile.
+        let explicit = FeatureSetConfig {
+            siege: Some(false),
+            nations: Some(true),
+            ..Default::default()
+        };
+        let f = configured(&explicit, ServerProfile::EuAuroria);
+        assert!(!f.check(Feature::Siege));
+        assert!(f.check(Feature::Nations));
+    }
+
+    #[test]
     fn aa_point_flag_sets_bit_44() {
         let mut config = FeatureSetConfig::default();
-        assert!(!configured(&config).check(Feature::AaPoint));
+        assert!(!configured(&config, crate::config::ServerProfile::Kr12).check(Feature::AaPoint));
         config.aa_point = true;
-        let f = configured(&config);
+        let f = configured(&config, crate::config::ServerProfile::Kr12);
         assert!(f.check(Feature::AaPoint));
         assert!(f.check_bit(44));
         assert_eq!(f.bytes()[5], 0x39);
@@ -351,13 +394,14 @@ mod tests {
     /// Flips one configured switch and asserts that exactly its bit changed; flipping it back
     /// restores every byte.
     fn assert_only_bit_flips(name: &str, bit: u8, apply: impl Fn(&mut FeatureSetConfig)) {
+        let profile = crate::config::ServerProfile::Kr12;
         let base_config = FeatureSetConfig::default();
-        let base = configured(&base_config);
+        let base = configured(&base_config, profile);
         let default_on = base.check_bit(bit);
 
         let mut flipped_config = base_config.clone();
         apply(&mut flipped_config);
-        let flipped = configured(&flipped_config);
+        let flipped = configured(&flipped_config, profile);
         for b in 0..(FSET_BYTES * 8) as u8 {
             let expected = if b == bit {
                 !default_on
@@ -369,12 +413,19 @@ mod tests {
 
         let mut restored_config = flipped_config;
         apply(&mut restored_config);
-        assert_eq!(configured(&restored_config), base, "{name}: flipped twice");
+        assert_eq!(
+            configured(&restored_config, profile),
+            base,
+            "{name}: flipped twice"
+        );
     }
 
     #[test]
     fn named_flags_flip_exactly_their_bit() {
-        assert_only_bit_flips("siege", 0, |c| c.siege = !c.siege);
+        assert_only_bit_flips("siege", 0, |c| c.siege = Some(!c.siege.unwrap_or(true)));
+        assert_only_bit_flips("nations", 6, |c| {
+            c.nations = Some(!c.nations.unwrap_or(true))
+        });
         assert_only_bit_flips("premium", 4, |c| c.premium = !c.premium);
         assert_only_bit_flips("itemSecure", 45, |c| c.item_secure = !c.item_secure);
         assert_only_bit_flips("secondpass", 46, |c| c.secondpass = !c.secondpass);
@@ -416,13 +467,16 @@ mod tests {
 
     #[test]
     fn extra_bits_only_change_the_listed_bits() {
-        let base = configured(&FeatureSetConfig::default());
+        let base = configured(
+            &FeatureSetConfig::default(),
+            crate::config::ServerProfile::Kr12,
+        );
         let mut config = FeatureSetConfig::default();
         config.extra_bits.insert(78, true);
         config.extra_bits.insert(34, true);
         config.extra_bits.insert(32, false);
         config.extra_bits.insert(87, true);
-        let f = configured(&config);
+        let f = configured(&config, crate::config::ServerProfile::Kr12);
         for b in 0..(FSET_BYTES * 8) as u8 {
             let expected = match b {
                 78 | 34 | 87 => true,
@@ -438,8 +492,11 @@ mod tests {
         let mut config = FeatureSetConfig::default();
         config.extra_bits.insert(200, true);
         assert_eq!(
-            configured(&config),
-            configured(&FeatureSetConfig::default())
+            configured(&config, crate::config::ServerProfile::Kr12),
+            configured(
+                &FeatureSetConfig::default(),
+                crate::config::ServerProfile::Kr12
+            )
         );
     }
 
@@ -452,7 +509,7 @@ mod tests {
             "extrabits": { "78": true, "32": "false" }
         }))
         .unwrap();
-        assert!(!config.siege);
+        assert_eq!(config.siege, Some(false));
         assert!(config.dwarf_warborn);
         assert!(config.aa_point);
         assert_eq!(config.extra_bits.get(&78), Some(&true));
