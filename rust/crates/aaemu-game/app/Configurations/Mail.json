@@ -7,6 +7,13 @@
 		"ReadRetentionDays": 5,
 		"UnreadRetentionDays": 30,
 		"SystemReadRetentionDays": 5,
-		"SystemUnreadRetentionDays": 90
+		"SystemUnreadRetentionDays": 90,
+		// System mail has no player sender to return unclaimed attachments to, so it is kept
+		// until the receiver claims them. Set true to follow the guide's deletion wording.
+		"DeleteSystemMailWithAttachments": false,
+		// Unix seconds of the first start with this version. The game server fills it from the
+		// 2026-11-08_aaemu_game_mail_retention.sql update marker; mail that existed then gets
+		// one full window from it. 0 disables the grace (e.g. in tests).
+		"RetentionGraceStartUnix": 0
 	}
 }

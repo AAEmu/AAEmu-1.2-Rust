@@ -1683,6 +1683,8 @@ mod tests {
         assert_eq!(cfg.mail.unread_retention_days, 30);
         assert_eq!(cfg.mail.system_read_retention_days, 5);
         assert_eq!(cfg.mail.system_unread_retention_days, 90);
+        assert!(!cfg.mail.delete_system_mail_with_attachments);
+        assert_eq!(cfg.mail.retention_grace_start_unix, 0);
         // Specialty.json, AccessLevels.json, CharacterSettings.json
         assert_eq!(cfg.specialty.trade_pack_mail_delay_in_minutes, 22.0 * 60.0);
         assert_eq!(cfg.access_level_of("help"), Some(0));

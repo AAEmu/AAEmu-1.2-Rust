@@ -1027,7 +1027,7 @@ async fn send_mail_level_and_repetition_limits() {
     );
     assert_eq!(w.pa.data().money, 1000);
 
-    // `MAIL_REPETITION`: three identical body texts in a row pass, the fourth is refused.
+    // `MAIL_REPETITION`: three identical mails in a row pass, the fourth is refused.
     w.pa.data().unit.level = 10;
     for _ in 0..3 {
         run::<CSSendMailPacket>(
@@ -1066,6 +1066,73 @@ async fn send_mail_level_and_repetition_limits() {
         &send_packet_body(near, "Bob", mail_type::EXPRESS),
     );
     assert!(w.a.drain_ops().contains(&sc::SCMailSentPacket));
+}
+
+#[tokio::test]
+async fn empty_body_item_mails_are_not_refused_as_repetition() {
+    let w = mail_world();
+    w.server.names.add_character(3, "Carl", 1003);
+    w.pa.data().money = 1000;
+    let mut slots = Vec::new();
+    for slot in 0..4 {
+        give(&w, &w.pa, slot_type::INVENTORY, SINGLE, 1, slot);
+        slots.push((slot_type::INVENTORY, slot as u8));
+    }
+    // Item-only mails have an empty body. They have no text to compare, so the repetition
+    // check must not refuse the fourth one even when every other field matches (the reported
+    // false positive was four item-only mails; the receiver does not change the empty body).
+    for (i, slot) in slots.iter().enumerate() {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert_eq!(
+            mail_character::send_mail_to_player(
+                &mut txn,
+                &w.pa,
+                mail_type::NORMAL,
+                "Bob",
+                "",
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                &ten_slots(&[*slot]),
+            ),
+            mail_result::SUCCESS,
+            "empty-body item mail {i} must not be a repetition"
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_text_to_a_different_receiver_is_not_a_repetition() {
+    let w = mail_world();
+    w.server.names.add_character(3, "Carl", 1003);
+    w.pa.data().money = 1000;
+    let send = |w: &World, to: &str| {
+        let mut txn = ItemTxn::begin(&w.server);
+        mail_character::send_mail_to_player(
+            &mut txn,
+            &w.pa,
+            mail_type::NORMAL,
+            to,
+            "t",
+            "same",
+            0,
+            0,
+            0,
+            0,
+            0,
+            &ten_slots(&[]),
+        )
+    };
+    for _ in 0..3 {
+        assert_eq!(send(&w, "Bob"), mail_result::SUCCESS);
+    }
+    // The key is (receiver, title, body): another character is a different mail.
+    assert_eq!(send(&w, "Carl"), mail_result::SUCCESS);
+    // The Carl mail broke the Bob streak, so the next Bob mail starts a new one.
+    assert_eq!(send(&w, "Bob"), mail_result::SUCCESS);
 }
 
 #[tokio::test]

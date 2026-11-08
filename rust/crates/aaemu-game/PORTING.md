@@ -554,7 +554,7 @@ connected by `systems::economy::wiring`).
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed`, recipe learning (`item_recipes`, `train_craft_effects`) | `systems/economy/{craft,craft_data,craft_learning}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. `TrainCraftEffect` teaches `item_recipes[source item]` (or the effect's craft without a source item), persisted in `character_crafts`; `Crafting.RequireLearnedRecipes` (default off) gates execution. |
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`; a multi-pack NPC sells the union of all its packs. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
-| `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data,mail_system}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. `/mail admin` sends an `ADMIN` system letter to an online or offline character. `quest_mails` / `quest_mail_attachments` are loaded; `SCQuestMailSentPacket` (0x150) is defined but never sent (trigger capture-pending, see the mail-leftovers deviation). Retention follows the client's `mail_guide` (5/30 normal, 5/90 system, configurable in `Configurations/Mail.json`); the level-10 send gate and the 3-repeat limit are enforced (see the 2026-11-08 mail bullets below). |
+| `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data,mail_system}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. `/mail admin` sends an `ADMIN` system letter to an online or offline character. `quest_mails` / `quest_mail_attachments` are loaded; `SCQuestMailSentPacket` (0x150) is defined but never sent (trigger capture-pending, see the mail-leftovers deviation). Retention follows the client's `mail_guide` (5/30 normal, 5/90 system, configurable in `Configurations/Mail.json`; system mail with unclaimed attachments is kept, player attachments are returned, REGISTERED/deleted-sender escrow is kept); the level-10 send gate and the 3-repeat limit are enforced (see the 2026-11-08 mail bullets below). |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
@@ -2508,26 +2508,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   unbid system lot and deletes its item (the lot-id argument and the refusal of player lots /
   lots with a bid are assumed). `client_id = 0` rows load normally on restart. The C# had
   neither command and no system-lot path.
-* systems::economy (mail retention, 2026-11-08): the flat 14-day receipt policy is replaced by
-  the 1.2 client's `mail_guide` (`ui_texts` 4465): normal mail (types 1-3, 4) is kept 5 days
-  after it was read or 30 days unread; system mail is kept 5 days after it was read or 90 days
-  unread. `Configurations/Mail.json` (`ReadRetentionDays`, `UnreadRetentionDays`,
-  `SystemReadRetentionDays`, `SystemUnreadRetentionDays`) overrides them. The read clock is
-  `open_date`, written when the mail is opened or an attachment is claimed; legacy read rows
-  without it use the receipt date (as the 10.x server does). Mail whose attachments are still
-  unclaimed keeps the unread deadline. Unread player mail is returned to its sender; the other
-  expired attachments (read mail, system mail, deleted sender) are deleted with a warning, as
-  the guide says mail is auto-deleted after its window. The commercial mailbox
+* systems::economy (mail retention, 2026-11-08; attachment-safety follow-up): the flat 14-day
+  receipt policy is replaced by the 1.2 client's `mail_guide` (`ui_texts` 4465): normal mail
+  (types 1-3, 4) is kept 5 days after it was read or 30 days unread; system mail is kept 5 days
+  after it was read or 90 days unread. `Configurations/Mail.json` (`ReadRetentionDays`,
+  `UnreadRetentionDays`, `SystemReadRetentionDays`, `SystemUnreadRetentionDays`) overrides
+  them. The read clock is `open_date`, written when the mail is opened or an attachment is
+  claimed; legacy read rows without it use the receipt date (as the 10.x server does). Mail
+  whose attachments are still unclaimed keeps the unread deadline. **Escrow is never destroyed
+  by the timer:** unread player mail and read player mail with unclaimed attachments are
+  returned to the sender; system mail with unclaimed attachments is kept until the receiver
+  claims it (there is no player sender to return it to) unless the operator sets
+  `DeleteSystemMailWithAttachments = true`; REGISTERED mail, self-addressed mail, a deleted
+  sender's mail and a letter already returned once are kept with a warning. Only
+  attachment-free mail is deleted after the window. A returned letter with unclaimed
+  attachments is kept forever (it never bounces twice). The commercial mailbox
   (`CHARGED`/`PROMOTION`/`MIA_*`) is not on this timer: its own guide (`ui_texts` 4464) says
   read mail is deleted at once and unread mail is kept.
+  **Upgrade grace:** the `2026-11-08_aaemu_game_mail_retention.sql` marker's
+  `updates.install_date` is the first start with this version; mail that already existed then
+  gets `deadline = max(rule, marker + window)` (`Mail.RetentionGraceStartUnix`, filled by
+  `main.rs`; 0 disables it). The marker script is `DO 0;` and records itself in `updates`.
 * systems::economy (mail send limits, 2026-11-08): `send_mail_to_player` refuses a sender below
   level 10 (`SCLevelRestrictionConfigPacket.mail`, the hard-coded C# value) with
-  `MailResult.LevelTooLow` (22), and refuses a fourth identical body text in a row with
+  `MailResult.LevelTooLow` (22), and refuses a fourth identical mail in a row with
   `SentSameMailTooManyTimes` (29). The latter is `MAIL_REPETITION` (`ui_texts` 6315: the same
   mail was sent "3 or more times in a row"); allowing three and refusing the fourth is
-  INFERRED from the text. The streak is per sender, in memory, and cleared on leave world.
-  `MAIL_COOL_TIME` (`ui_texts` 6314) names no interval in the 1.2 client or its data, so no
-  cool-time check is enforced.
+  INFERRED from the text. The key is (receiver, title, body text): the same text to another
+  character is a different mail, and a body-less item-only mail is never refused (it has no
+  content to compare); an empty-body send still breaks the streak. The streak is per sender,
+  in memory, and cleared on leave world. `MAIL_COOL_TIME` (`ui_texts` 6314) names no interval
+  in the 1.2 client or its data, so no cool-time check is enforced.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -6986,8 +6997,9 @@ are now honoured at craft execution (WP-I2 A/B; `systems::economy::{craft,craft_
   `0xfff`) and the packet is registered; the handler reads `(bc objId, i32 money)`. For the
   shipyard the packet names it refuses pay < 1, `pay x actions > 2,000,000,000` (the client's
   own cap, `FUN_394d7360`), a non-shipyard target and a sender who is not the shipyard's owner
-  (`kind2`, the persisted `owner_id`); otherwise it stores the per-action wage in
-  `ShipyardData.money_amount` and re-sends `SCShipyardState` to the nearby players. No payout
+  (`kind2`, the persisted `owner_id`); the checks and the write happen under one shipyard
+  lock. Otherwise it stores the per-action wage in `ShipyardData.money_amount` and re-sends
+  `SCShipyardState` to the nearby players. No payout
   or escrow is made: who pays the helper, when, and whether the owner's `pay x actions` is held
   are UNKNOWN (INFERRED store-only).
 - **Shipyard wage reading (2026-11-06, INFERRED strong).** `FUN_394d63e0` resolves the target

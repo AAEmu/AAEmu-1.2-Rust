@@ -22,6 +22,10 @@ use aaemu_game::{login, net, GameServer};
 use anyhow::Context;
 use sqlx::mysql::MySqlPoolOptions;
 
+/// Mail-retention upgrade marker; its `updates.install_date` anchors the grace for mail that
+/// already existed when this version first ran.
+const MAIL_RETENTION_UPDATE: &str = "2026-11-08_aaemu_game_mail_retention.sql";
+
 /// Splits the command line into the app path and the configuration arguments.
 fn split_args(args: Vec<String>) -> (PathBuf, Vec<String>) {
     match args.first() {
@@ -94,7 +98,8 @@ async fn run() -> anyhow::Result<()> {
     aaemu_commons::file_manager::remember_app_dir(&app_path);
     tracing::info!("Application directory: {}", app_path.display());
     // BuildConfiguration: JSON files, user secrets, environment, command line.
-    let config = AppConfig::load_with(&app_path, &config_args).context("loading configuration")?;
+    let mut config =
+        AppConfig::load_with(&app_path, &config_args).context("loading configuration")?;
 
     // Test the MySQL connection ("MySQL connection failed, check your configuration!" is fatal).
     let db = MySqlPoolOptions::new()
@@ -146,6 +151,33 @@ async fn run() -> anyhow::Result<()> {
         if !updated {
             tracing::error!("Failed to update database!");
             return wait_for_ctrl_c().await;
+        }
+        // The mail retention windows shorten the old 14-day policy to 5 days after read. The
+        // marker script's install date is the first start with this version: mail that already
+        // existed then gets one full window from it (`MailRetention::grace_start_unix`), so the
+        // first tick after an upgrade cannot delete old mail. An explicit config value wins.
+        if config.mail.retention_grace_start_unix == 0 {
+            match sqlx::query_scalar::<_, chrono::NaiveDateTime>(
+                "SELECT `install_date` FROM `updates` WHERE `script_name` = ?",
+            )
+            .bind(MAIL_RETENTION_UPDATE)
+            .fetch_optional(&mut *conn)
+            .await
+            {
+                Ok(Some(date)) => {
+                    config.mail.retention_grace_start_unix = date.and_utc().timestamp();
+                    tracing::info!(
+                        grace_start = config.mail.retention_grace_start_unix,
+                        "Mail retention upgrade grace anchored at the first run with this version"
+                    );
+                }
+                Ok(None) => tracing::warn!(
+                    "Mail retention update marker is missing; pre-existing mail gets no grace"
+                ),
+                Err(e) => tracing::warn!(
+                    "Mail retention update marker unreadable ({e}); pre-existing mail gets no grace"
+                ),
+            }
         }
     }
 

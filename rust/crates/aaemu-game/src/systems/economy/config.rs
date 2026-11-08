@@ -50,6 +50,24 @@ pub struct MailConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub system_unread_retention_days: i64,
+    /// Strict `mail_guide` deletion for system mail whose attachments are still unclaimed.
+    /// Default **false**: system mail has no player sender to return the escrow to, so it is
+    /// kept until the receiver claims the attachments. An operator can enable the guide's
+    /// wording (delete at the window) here.
+    #[serde(
+        rename = "deletesystemmailwithattachments",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub delete_system_mail_with_attachments: bool,
+    /// Unix seconds of the first start that installed the retention windows (the
+    /// `2026-11-08_aaemu_game_mail_retention.sql` marker). Mail that already existed then gets
+    /// `deadline = max(rule, this + window)`, so an upgrade cannot delete old mail on its first
+    /// tick. 0 disables the grace; the game server fills it from the update marker at startup.
+    #[serde(
+        rename = "retentiongracestartunix",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub retention_grace_start_unix: i64,
 }
 
 impl Default for MailConfig {
@@ -60,6 +78,9 @@ impl Default for MailConfig {
             unread_retention_days: 30,
             system_read_retention_days: 5,
             system_unread_retention_days: 90,
+            // There is no sender to return system attachments to: keep them by default.
+            delete_system_mail_with_attachments: false,
+            retention_grace_start_unix: 0,
         }
     }
 }

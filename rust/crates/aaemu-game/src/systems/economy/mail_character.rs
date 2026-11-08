@@ -155,7 +155,11 @@ pub fn send_mail_to_player(
     ) {
         return mail_result::INVALID_LETTER_FORMAT;
     }
-    if receiver_name.trim().is_empty() || server.names.get_character_id(receiver_name) == 0 {
+    if receiver_name.trim().is_empty() {
+        return mail_result::UNABLE_TO_FIND_RECIPIENT;
+    }
+    let receiver_id = server.names.get_character_id(receiver_name);
+    if receiver_id == 0 {
         return mail_result::UNABLE_TO_FIND_RECIPIENT;
     }
 
@@ -179,13 +183,15 @@ pub fn send_mail_to_player(
         }
     }
 
-    // `MAIL_REPETITION`: three identical body texts in a row are allowed, the fourth is not.
-    // Recorded only after the mail is stored below, so failed validations do not consume a try.
+    // `MAIL_REPETITION`: three identical mails in a row are allowed, the fourth is not. The
+    // key is (receiver, title, body); empty-body item-only mails have no text to compare and
+    // are never refused. Recorded only after the mail is stored below, so failed validations
+    // do not consume a try.
     if server
         .systems
         .economy
         .mail
-        .would_repeat_send(player.character_id, text)
+        .would_repeat_send(player.character_id, receiver_id, title, text)
     {
         return mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES;
     }
@@ -233,7 +239,7 @@ pub fn send_mail_to_player(
         .systems
         .economy
         .mail
-        .record_send(player.character_id, text);
+        .record_send(player.character_id, receiver_id, title, text);
     let Some(header) = server
         .systems
         .economy
