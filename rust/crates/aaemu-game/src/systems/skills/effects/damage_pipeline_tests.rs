@@ -738,6 +738,53 @@ async fn negative_level_heal_sends_no_packet_and_changes_no_hp() {
     assert!(npc.data().unit.hp > hp_before);
 }
 
+/// The 2026-11-08 bot run's `RestoreManaEffect 68: min > max` errors: NPC 21787 casting skill
+/// 18501 has the native `LevelDps` -8, and effect 68 (`level_md` 3, `level_va_start/end` 10)
+/// makes the "max" more negative than the "min". Not swapped columns; the caster has no positive
+/// range, so the effect is a no-op logged at debug. A player's positive range still restores.
+#[tokio::test]
+async fn negative_level_restore_mana_is_a_no_op_without_an_error() {
+    let effect = crate::systems::skills::data::effects::RestoreManaEffect {
+        id: 68,
+        use_fixed_value: false,
+        fixed_min: 0,
+        fixed_max: 0,
+        use_level_value: true,
+        level_md: 3.0,
+        level_va_start: 10,
+        level_va_end: 10,
+        percent: false,
+    };
+
+    let mut data = fixture_data();
+    data.formulas = crate::systems::vehicles::stats::tests::formulas(
+        &[(1, "100000", 14, 0), (2, "1000", 15, 0), (3, "-8", 12, 0)],
+        &[],
+    );
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+    let a = args((&player).into(), (&npc).into(), 1);
+    client.drain();
+    let (_, events) =
+        crate::test_support::capture_events(|| super::restore_mana(&server, &effect, &a));
+    assert_eq!(healed_values(&mut client), Vec::<i32>::new());
+    assert!(
+        events
+            .iter()
+            .all(|(level, message)| *level != tracing::Level::ERROR
+                || !message.contains("RestoreManaEffect")),
+        "{events:?}"
+    );
+
+    // Positive `LevelDps` restores mana normally.
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    let a = args((&player).into(), (&npc).into(), 1);
+    client.drain();
+    super::restore_mana(&server, &effect, &a);
+    let values = healed_values(&mut client);
+    assert_eq!(values.len(), 1, "{values:?}");
+    assert!(values[0] > 0, "{values:?}");
+}
+
 /// The `value` of every `SCUnitHealedPacket` the client received (health or mana).
 fn healed_values(client: &mut TestClient) -> Vec<i32> {
     client

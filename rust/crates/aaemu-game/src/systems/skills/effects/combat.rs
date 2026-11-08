@@ -1075,6 +1075,22 @@ pub fn restore_mana(server: &GameServer, e: &RestoreManaEffect, args: &EffectArg
             * level_md
             + 0.5) as i32;
     }
+    // A mana restore cannot produce a negative amount. The level term is the native
+    // `LevelDps`, which is -8 for an NPC at ability level 0 (`(floor((ab_level + 2) / 3) * 24 - 8)
+    // * npc_template * npc_kind * npc_grade`); RestoreManaEffect 68's `level_va_start/end` 10
+    // then makes the "max" more negative than the "min" (2026-11-08 bot run: NPC 21787 casting
+    // skill 18501, 32 `min > max` errors). The data's columns are not swapped; this caster has no
+    // positive range, so the effect is a no-op (logged at debug, not error).
+    if max <= 0 {
+        tracing::debug!(
+            effect = e.id,
+            min,
+            max,
+            "RestoreManaEffect: no positive mana restore"
+        );
+        return;
+    }
+    min = min.max(0);
     let Some(mut value) = rand_int(min, max) else {
         tracing::error!(
             "RestoreManaEffect {}: min > max (ArgumentOutOfRangeException)",
