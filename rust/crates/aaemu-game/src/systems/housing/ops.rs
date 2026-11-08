@@ -18,7 +18,7 @@ use super::hooks::{
 use super::manager::{
     self, broadcast, error_message as err, now, send_error, set_permission, tax_due_date,
     template_of, update_house_faction, update_tax_info, world_of, BOUND_TAX_CERTIFICATE,
-    FACTION_MONSTROSITY, FOR_SALE_MARKER_DOODAD_ID, HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE,
+    FACTION_MONSTROSITY, FOR_SALE_MARKER_DOODAD_ID,
 };
 use super::packets::{
     CSCreateHousePacket, CSDecorateHousePacket, SCConstructHouseTaxPacket,
@@ -865,12 +865,8 @@ pub fn return_house_items_with_payment(
     // Split items into mails of maximum 10 attachments
     let receiver_name = server.names.get_character_name(owner);
     let now_ms = crate::world::now_ms();
-    let recv_ms = now_ms
-        + if failed_to_pay_tax {
-            HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE * 3600 * 1000
-        } else {
-            0
-        };
+    // Deviation: every demolish mail is delivered at once (see PORTING.md).
+    let recv_ms = now_ms;
     let mut mail: Option<HouseMail> = None;
     let last = returned.len().saturating_sub(1);
     for (i, r) in returned.iter().enumerate() {

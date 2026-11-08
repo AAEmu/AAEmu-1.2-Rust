@@ -812,8 +812,8 @@ async fn tax_mail_and_demolition_timer() {
     let m = demolish[0];
     assert_eq!(m.sender_name, ".houseDemolish");
     assert_eq!(m.extra, i64::from(hid));
-    // Failed tax: returned 22 h later, no deposit.
-    assert_eq!(m.recv_date_ms - m.send_date_ms, 22 * 3600 * 1000);
+    // Failed tax: delivered instantly (no 22 h hold), no deposit.
+    assert_eq!(m.recv_date_ms, m.send_date_ms);
     assert_eq!(m.copper_coins, 0);
     assert_eq!(
         m.attachments,
