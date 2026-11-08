@@ -829,3 +829,98 @@ async fn authored_inverted_restore_range_still_reports_the_error() {
         "{events:?}"
     );
 }
+
+/// The guards must work through the real NPC stats path, which produced the 2026-11-08 bug: an
+/// NPC caster's `LevelDps` comes from `npc_stats` (formula 29 evaluated with `ab_level = 0`), not
+/// from the player formula the other tests use.
+#[tokio::test]
+async fn npc_caster_with_negative_level_dps_gets_no_heal_and_no_restore() {
+    use crate::systems::npcs::npc::data::NpcTemplate;
+
+    let mut data = fixture_data();
+    data.formulas = crate::systems::vehicles::stats::tests::formulas(
+        &[
+            (1, "100000", 14, 0),
+            (2, "1000", 15, 0),
+            (3, "100", 12, 0),
+            (
+                29,
+                "( floor( ( ab_level + 2 ) / 3 ) * 24 - 8 ) * ( npc_template * npc_kind * npc_grade )",
+                12,
+                1,
+            ),
+        ],
+        &[(29, 2, 1, 1.0), (29, 3, 1, 1.0), (29, 4, 1, 1.0)],
+    );
+    data.systems.npcs.npc.templates.insert(
+        1,
+        NpcTemplate {
+            id: 1,
+            npc_template_id: 1,
+            npc_kind_id: 1,
+            npc_grade_id: 1,
+            ..Default::default()
+        },
+    );
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+    crate::systems::npcs::install_hooks(&server);
+    let npc_obj = WorldObject::from(&npc);
+    assert_eq!(
+        crate::systems::skills::stats::stat(
+            &server,
+            &npc_obj,
+            crate::systems::skills::stats::StatKind::LevelDps
+        ),
+        -8.0
+    );
+
+    let a = args(npc_obj, (&player).into(), 1);
+    let heal = crate::systems::skills::data::effects::HealEffect {
+        id: 61,
+        use_fixed_heal: false,
+        fixed_min: 0,
+        fixed_max: 0,
+        use_level_heal: true,
+        level_md: 2.0,
+        level_va_start: 0,
+        level_va_end: 0,
+        percent: false,
+        use_charged_buff: false,
+        charged_buff_id: 0,
+        charged_mul: 0.0,
+        slave_applicable: false,
+        ignore_heal_aggro: false,
+        dps_multiplier: 1.0,
+        actability_group_id: 0,
+        actability_step: 0,
+        actability_mul: 0.0,
+        actability_add: 0.0,
+    };
+    let player_hp = player.data().unit.hp;
+    client.drain();
+    super::heal(&server, &heal, &a, None);
+    assert_eq!(healed_values(&mut client), Vec::<i32>::new());
+    assert_eq!(player.data().unit.hp, player_hp);
+
+    let restore = crate::systems::skills::data::effects::RestoreManaEffect {
+        id: 68,
+        use_fixed_value: false,
+        fixed_min: 0,
+        fixed_max: 0,
+        use_level_value: true,
+        level_md: 3.0,
+        level_va_start: 10,
+        level_va_end: 10,
+        percent: false,
+    };
+    let (_, events) =
+        crate::test_support::capture_events(|| super::restore_mana(&server, &restore, &a));
+    assert_eq!(healed_values(&mut client), Vec::<i32>::new());
+    assert!(
+        events
+            .iter()
+            .all(|(level, message)| *level != tracing::Level::ERROR
+                || !message.contains("RestoreManaEffect")),
+        "{events:?}"
+    );
+}
