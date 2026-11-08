@@ -422,8 +422,8 @@ async fn saved_health_restores_damage_and_dead_state_and_legacy_rows_use_constru
     for (step, saved, expected) in [
         (0, None, 664),
         (-1, None, 1000),
-        (0, Some(201), 201),
-        (1, Some(201), 201),
+        (0, Some(201), 664),
+        (1, Some(201), 830),
         (-1, Some(0), 0),
         (0, Some(9999), 664),
         (0, Some(-2), 0),
@@ -456,7 +456,8 @@ async fn saved_health_restores_damage_and_dead_state_and_legacy_rows_use_constru
         house.data().unit.hp = changed;
         manager::mark_hp_changed(&house, expected, changed);
         assert_eq!(house.data().is_dirty, expected != changed);
-        if expected != changed {
+        // Only a finished house keeps its persisted HP; an unfinished one reloads at its step maximum.
+        if expected != changed && step == -1 {
             let persisted = manager::save_row(&house).unwrap();
             assert_eq!(persisted.hp, Some(changed));
             let restarted = health_housing_server();
@@ -1721,4 +1722,142 @@ async fn private_mysql_housing_related_world_save_aborts_character_failure_and_r
             .unwrap();
     }
     pool.close().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Construction-time HP
+// ---------------------------------------------------------------------------------------------
+
+fn construction_hp_server() -> GameServer {
+    let mut data = test_housing_data();
+    let steps = |actions: [i32; 3]| {
+        actions
+            .into_iter()
+            .enumerate()
+            .map(|(i, num_actions)| {
+                (
+                    i as i32,
+                    super::data::HousingBuildStep {
+                        step: i as i16,
+                        model_id: 710 + i as u32,
+                        num_actions,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    };
+    // 400 = Cottage (1500 HP, 3 actions), 401 = Plaza (150000 HP, 50 actions), 402 = a
+    // guard-tower style template.
+    for (id, hp, actions, tower) in [
+        (400, 1500, [1, 1, 1], 0),
+        (401, 150_000, [30, 10, 10], 0),
+        (402, 1500, [1, 1, 1], 6),
+    ] {
+        data.systems
+            .housing
+            .add_template(super::data::HousingTemplate {
+                id,
+                hp,
+                guard_tower_setting_id: tower,
+                main_model_id: 700,
+                build_steps: steps(actions),
+                ..Default::default()
+            });
+    }
+    test_server_with(data)
+}
+
+fn hp_row(template_id: u32, owner: u32, current_step: i32, hp: Option<i32>) -> manager::HouseRow {
+    manager::HouseRow {
+        id: 7,
+        account_id: 1001,
+        owner,
+        template_id,
+        current_step,
+        name: "Home".into(),
+        x: 200.0,
+        y: 200.0,
+        z: 50.0,
+        place_date: manager::now(),
+        protected_until: manager::now() + 14 * 24 * 3600,
+        hp,
+        ..Default::default()
+    }
+}
+
+fn load_hp(server: &GameServer, row: &manager::HouseRow) -> (HouseRef, i32) {
+    static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+    let world = server.world.world(0).unwrap();
+    let mut row = row.clone();
+    row.id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let house = manager::load_house_row(server, &world, &row).unwrap();
+    let hp = house.data().unit.hp;
+    (house, hp)
+}
+
+#[tokio::test]
+async fn unfinished_house_reloaded_then_finished_has_full_hp() {
+    let server = construction_hp_server();
+    let (house, hp) = load_hp(&server, &hp_row(400, 1, 0, Some(375)));
+    assert_eq!(hp, 375); // the step-0 maximum
+    for expected in [750, 1125, 1500] {
+        manager::add_build_action(&server, &house);
+        assert_eq!(house.data().unit.hp, expected);
+    }
+    assert_eq!(house.data().current_step, -1);
+    assert_eq!(house.data().unit.max_hp, 1500);
+}
+
+#[tokio::test]
+async fn unfinished_house_ignores_a_stored_hp_that_differs_from_its_step_maximum() {
+    let server = construction_hp_server();
+    let (_, hp) = load_hp(&server, &hp_row(400, 1, 0, None));
+    assert_eq!(hp, 375);
+    let (_, hp) = load_hp(&server, &hp_row(400, 1, 1, Some(10)));
+    assert_eq!(hp, 750);
+}
+
+#[tokio::test]
+async fn finished_house_with_construction_time_hp_is_restored_to_full() {
+    let server = construction_hp_server();
+    for (template, stored, max) in [
+        (400, 375, 1500),
+        (400, 750, 1500),
+        (400, 1125, 1500),
+        (401, 141_168, 150_000), // Plaza-like: 150000 / 51 * 48
+    ] {
+        let (house, hp) = load_hp(&server, &hp_row(template, 1, -1, Some(stored)));
+        assert_eq!(hp, max, "template {template} stored {stored}");
+        assert!(house.data().is_dirty);
+    }
+}
+
+#[tokio::test]
+async fn finished_house_with_real_damage_keeps_its_hp() {
+    let server = construction_hp_server();
+    let (_, hp) = load_hp(&server, &hp_row(400, 1, -1, Some(400)));
+    assert_eq!(hp, 400);
+    let (_, hp) = load_hp(&server, &hp_row(400, 1, -1, Some(0)));
+    assert_eq!(hp, 0);
+    let (_, hp) = load_hp(&server, &hp_row(400, 1, -1, Some(9999)));
+    assert_eq!(hp, 1500); // over the maximum is clamped
+}
+
+#[tokio::test]
+async fn unowned_or_guard_tower_house_is_not_repaired() {
+    let server = construction_hp_server();
+    let (_, hp) = load_hp(&server, &hp_row(400, 0, -1, Some(375)));
+    assert_eq!(hp, 375);
+    let (_, hp) = load_hp(&server, &hp_row(402, 1, -1, Some(375)));
+    assert_eq!(hp, 375);
+}
+
+#[tokio::test]
+async fn real_damage_survives_a_step_change() {
+    let server = construction_hp_server();
+    let (house, _) = load_hp(&server, &hp_row(400, 1, 1, Some(750)));
+    house.data().unit.hp = 700; // damaged below the step maximum
+    manager::add_build_action(&server, &house);
+    assert_eq!(house.data().unit.hp, 1075); // 700 + (1125 - 750)
 }

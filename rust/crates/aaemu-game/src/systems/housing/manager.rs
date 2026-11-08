@@ -443,6 +443,57 @@ pub fn discard_created_house(server: &GameServer, house: &HouseRef) {
         .release_id(u32::from(house.data().unit.tl_id));
 }
 
+/// HP after the effective maximum moved from `old_max` to `new_max` (a construction step).
+pub fn construction_hp_after_step(hp: i32, old_max: i32, new_max: i32, max_hp: i32) -> i32 {
+    let hp = i64::from(hp) + i64::from(new_max) - i64::from(old_max);
+    hp.clamp(0, i64::from(max_hp.max(0))) as i32
+}
+
+/// Every effective maximum a house has while under construction (`house_collision_max_hp`
+/// for each step), computed with the same integer formula.
+fn construction_step_maxima(max_hp: i32, all_action: i32, step_count: i32) -> Vec<i32> {
+    if all_action <= 0 {
+        return Vec::new();
+    }
+    let denominator = i64::from(all_action) + 1;
+    (1..=step_count)
+        .map(|back| {
+            (i64::from(max_hp) / denominator * (denominator - i64::from(back)))
+                .clamp(0, i64::from(i32::MAX)) as i32
+        })
+        .collect()
+}
+
+/// HP a house loads with. An unfinished, owned, ordinary house loads at its step maximum
+/// (a dead one stays at 0); a finished house
+/// keeps its stored HP (clamped to the maximum) unless the stored value is exactly a
+/// construction-step maximum of an owned, ordinary house: an older build clamped the HP to the
+/// step maximum on load and never raised it on completion. The flag is set when repaired.
+fn loaded_house_hp(
+    h: &crate::models::house::House,
+    stored: Option<i32>,
+    repairable: bool,
+) -> (i32, bool) {
+    if h.current_step != -1 {
+        let step_max = crate::systems::ai::collision::objects::house_collision_max_hp(h).max(0);
+        return match stored {
+            // A dead house stays dead (resume_dead_houses finishes its removal), and ownerless
+            // or tower/fort houses keep the persisted value (their HP has its own authority).
+            Some(hp) if hp <= 0 || !repairable => (hp.clamp(0, step_max), false),
+            _ => (step_max, false),
+        };
+    }
+    let max_hp = h.unit.max_hp.max(0);
+    let hp = stored.unwrap_or(max_hp).clamp(0, max_hp);
+    if repairable
+        && hp < max_hp
+        && construction_step_maxima(h.unit.max_hp, h.all_action, h.build_step_count).contains(&hp)
+    {
+        return (max_hp, true);
+    }
+    (hp, false)
+}
+
 /// The `CurrentStep` setter: model, bound doodads (finished house) or their removal, and
 /// `BaseAction`. `loading` = `IsBeingLoadedFromDb` (bound doodads come from the DB instead).
 pub fn set_current_step(server: &GameServer, house: &HouseRef, value: i32, loading: bool) {
@@ -466,9 +517,14 @@ pub fn set_current_step(server: &GameServer, house: &HouseRef, value: i32, loadi
     let changed = {
         let mut h = house.data();
         let changed = h.current_step != value;
+        let old_max = crate::systems::ai::collision::objects::house_collision_max_hp(&h);
         h.current_step = value;
         h.is_dirty = true;
         h.unit.model_id = model;
+        // The effective maximum grows with every construction step; HP follows by the same
+        // delta so a finished house is at full HP while real damage is kept.
+        let new_max = crate::systems::ai::collision::objects::house_collision_max_hp(&h);
+        h.unit.hp = construction_hp_after_step(h.unit.hp, old_max, new_max, h.unit.max_hp);
         changed
     };
     let manager = &server.systems.housing.manager;
@@ -1282,8 +1338,20 @@ pub fn load_house_row(
         h.sell_to_player_id = r.sell_to;
         h.sell_price = r.sell_price;
         h.allow_recover = r.allow_recover;
-        let max_hp = crate::systems::ai::collision::objects::house_collision_max_hp(&h).max(0);
-        h.unit.hp = r.hp.unwrap_or(max_hp).clamp(0, max_hp);
+        let repairable = h.unit.owner_id != 0
+            && template.is_some_and(|t| t.hp > 0 && t.guard_tower_setting_id == 0);
+        let (hp, repaired) = loaded_house_hp(&h, r.hp, repairable);
+        h.unit.hp = hp;
+        if repaired {
+            h.is_dirty = true;
+            tracing::info!(
+                "House {} (template {}): restored construction-time HP {:?} to {}",
+                r.id,
+                r.template_id,
+                r.hp,
+                hp
+            );
+        }
     }
     if !server.systems.housing.manager.insert(&house) {
         tracing::error!(
