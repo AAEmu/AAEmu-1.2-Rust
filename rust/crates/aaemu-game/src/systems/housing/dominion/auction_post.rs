@@ -23,6 +23,8 @@
 //! Posting is idempotent per cycle through the persisted `dominions.auction_posted_cycle`
 //! marker, so a restart inside the auction period posts nothing twice.
 
+use std::sync::MutexGuard;
+
 use chrono::{DateTime, Utc};
 
 use crate::server::GameServer;
@@ -46,9 +48,11 @@ fn real_at(calendar_boundary: i64, calendar_now: i64, real_now: i64) -> Option<i
     calendar_boundary.checked_add(real_now.checked_sub(calendar_now)?)
 }
 
-/// Post the running cycle's camp lots. Runs inside the housing operation lock (called from
-/// `runtime::tick_once`); it takes the auction operation lock for the item/lot work.
-pub fn tick(server: &GameServer, now: i64) {
+/// Post the running cycle's camp lots. The caller holds the economy operation scope, the
+/// auction operation lock and the housing operation lock, in the documented
+/// auction -> housing -> authority order (`economy/operation_scope.rs`); `runtime::tick_once`
+/// does, and passes its auction guard in so this never re-acquires the non-reentrant lock.
+pub fn tick(server: &GameServer, now: i64, _auction: &MutexGuard<'_, ()>) {
     if now < 0 {
         return;
     }
@@ -68,7 +72,6 @@ pub fn tick(server: &GameServer, now: i64) {
     let claim_delay = calendar.siege_delay_after_claim_days();
     let real_now = chrono::Utc::now().timestamp();
     let auction = &server.systems.economy.auction;
-    let _op = auction.operation_lock();
     for state in server.systems.housing.dominions.all() {
         if state.owner_expedition_id == 0 {
             continue;

@@ -892,6 +892,9 @@ impl CalendarRuntime {
 pub fn tick_once(server: &GameServer) {
     let finished = {
         let _items = server.systems.economy.operation_scope();
+        // Documented order inside the scope (`economy/operation_scope.rs`):
+        // auction -> housing -> authority. `auction_post::tick` receives this guard.
+        let _auction = server.systems.economy.auction.operation_lock();
         let _operation = server
             .systems
             .housing
@@ -928,7 +931,7 @@ pub fn tick_once(server: &GameServer) {
         // Calendar phases. Broadcasts above (and those outside the tick) record the period they
         // sent, so only a period that was not announced yet produces a transition here.
         // WP-SD1c: the running cycle's camp lots are posted at the auction start.
-        super::auction_post::tick(server, calendar_now);
+        super::auction_post::tick(server, calendar_now, &_auction);
         // WP-SD2a: an accepted declaration becomes the cycle's siege at the warmup boundary.
         super::declare::tick(server, calendar_now);
         for transition in server.systems.housing.calendar.tick(server, calendar_now) {
