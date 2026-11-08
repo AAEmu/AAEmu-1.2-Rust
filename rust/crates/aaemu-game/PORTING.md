@@ -2613,8 +2613,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     legacy `made_unit_id` for packs crafted before that column existed (see "Item crafter").
     The seller and crafter mail titles use the
     1.2 client `ui_texts` keys `sell_backpack_title` / `mail_sell_backpack_title_seller` /
-    `mail_sell_backpack_title_crafter` from `localized_texts`, with the English C# strings as
-    the fallback (never the untranslated `ui_texts.text` column). A sold pack with a crafter
+    `mail_sell_backpack_title_crafter` from `localized_texts` (4745 / 6193 / 6194), with the
+    client's en_us strings ("Specialty Payment", "[Delivery]", "[Crafter]") as the fallback
+    (never the untranslated `ui_texts.text` column). The 6192 `mail_actual_gain_tip` split
+    wording and its percentages are rendered by the client from the body's `receiverCase` and
+    the seller/crafter counts. A sold pack with a crafter
     is covered by a flow test through the real mail bridge
     (`sold_pack_with_a_crafter_delivers_the_crafter_mail`).
   - **Trade-pack mail delay (2026-11-08):** the 1.2 client says the sale price plus 5 % interest

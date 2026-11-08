@@ -1438,7 +1438,7 @@ async fn system_mails_auction_commercial_speciality() {
         assert!(sp.finalize_for_seller(&mut txn));
     }
     assert_eq!(sp.mail.body.text, "body('', 130, 0, 0, 0, 0, 2, 0, 0, 15)");
-    assert_eq!(sp.mail.title, "Speciality Payment");
+    assert_eq!(sp.mail.title, "Specialty Payment");
     assert_eq!(sp.mail.mail_type, mail_type::SYS_SELL_BACKPACK);
     // 22 hours: `ui_texts` 4743 / 6195.
     assert!(sp.mail.body.recv_date >= mail::now() + 1320 * 60 - 2);
@@ -1507,7 +1507,7 @@ async fn speciality_coin_text_and_crafter() {
         5,
     );
     assert!(cr.finalize_for_seller(&mut txn));
-    assert_eq!(cr.mail.title, "Speciality Payment [Delivery]");
+    assert_eq!(cr.mail.title, "Specialty Payment [Delivery]");
     assert_eq!(
         cr.mail.body.text,
         "body('', 130, 1350, 1000, 50, 900, 1, 1, 0, 0)"
@@ -1528,7 +1528,7 @@ async fn speciality_coin_text_and_crafter() {
     assert!(cr.finalize_for_crafter(&mut txn));
     assert_eq!(cr.mail.receiver_name, "Carl");
     assert_eq!(cr.mail.header.receiver_id, 3);
-    assert_eq!(cr.mail.title, "Speciality Payment [Crafter]");
+    assert_eq!(cr.mail.title, "Specialty Payment [Crafter]");
     assert_eq!(
         cr.mail.body.text,
         "body('', 130, 1350, 1000, 50, 450, 0, 1, 0, 0)"
@@ -2478,6 +2478,27 @@ fn real_compact_db_mail_localization() {
     assert_eq!(d.item_name(u32::MAX, "Item:1"), "Item:1");
     assert!(d.item_names.len() > 30_000);
     assert!(d.quest_names.len() > 4_000);
+    // The specialty titles are the client's own texts (ui_texts 4745 / 6193 / 6194); the
+    // 6192 tip carries the production/transport split percentages.
+    assert_eq!(
+        d.ui_text("sell_backpack_title", "x"),
+        "Specialty Payment",
+        "ui_texts 4745"
+    );
+    assert_eq!(
+        d.ui_text("mail_sell_backpack_title_seller", "x"),
+        "Specialty Payment [Delivery]",
+        "ui_texts 6193"
+    );
+    assert_eq!(
+        d.ui_text("mail_sell_backpack_title_crafter", "x"),
+        "Specialty Payment [Crafter]",
+        "ui_texts 6194"
+    );
+    assert!(
+        d.ui_text("mail_actual_gain_tip", "").contains("$1"),
+        "ui_texts 6192"
+    );
 }
 
 #[tokio::test]
