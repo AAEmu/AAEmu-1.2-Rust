@@ -3071,6 +3071,17 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   by the `Resurrection` special effect and the free resurrection below
   `minimum_exp_loss_level`). The C# never checked, so any dead client could revive itself in
   place without an offer.
+* systems::skills (resurrection scrolls on dead targets, 2026-11-08): the three skills the
+  `Resurrection` special effect (type 22) audit singled out — 15066 "부활", 25518 "전투 중 부활"
+  (items 18456 / 32568 / 34022 through `items.use_skill_id`) and 26647 "저승의 문턱 탈출
+  주문서" (items 34018 / 34021, used by the dead character on itself) — are castable on a DEAD
+  player. `validation::check` honours the real flags (`target_alive 'f'`, `target_dead 't'`;
+  26647 also `source_dead 't'`) and the type-22 handler sends `SCNotifyResurrectionPacket`; no
+  dead-target filter along `CSStartSkill` -> `use_skill` refuses them. Regression tests:
+  `systems::skills::resurrection_target_tests` (hand-built data with the real flags, and an
+  ignored real-data test casting the shipped scroll items 32568 / 34018). `core-character#8`
+  is closed: every skill-based offer path goes through the one effect handler and the packet
+  stays as the 1.2 reader expects (no 10.x `inPlaceRemainCnt` / `reason`).
 * systems::skills: `Character.DoDie` is complete (exp / durability loss, escalating respawn timer,
   PvP honor / assists / kill counts, War-zone honor loss, `DropTradePackToFloor`). The PvP
   damage / heal histories are lists of (character id, unix ms) in `skill_char`.
