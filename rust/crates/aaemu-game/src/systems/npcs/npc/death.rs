@@ -102,6 +102,124 @@ fn tagging_of(npc: &NpcRef) -> (u32, u32, Vec<u32>) {
     (team, tagger, t.taggers.iter().map(|(id, _)| *id).collect())
 }
 
+/// The players a kill credits with quest progress: the tagging-rights holders (their party in
+/// looting range, else the tagger) and the Tag Share contributors when enabled. The killer is
+/// the only credit when nobody holds tagging rights.
+struct KillCredits {
+    eligible: Vec<PlayerRef>,
+    tag_share_extra: Vec<PlayerRef>,
+    tag_team: u32,
+    team: Option<crate::systems::social::team::Team>,
+}
+
+/// The `CharacterTagging` eligibility of [`before_death`], shared with the scripted-removal
+/// kill event ([`credit_scripted_kill`]).
+fn kill_credits(
+    server: &GameServer,
+    me: &WorldObject,
+    npc: &NpcRef,
+    killer_player: Option<&PlayerRef>,
+) -> KillCredits {
+    let (tag_team, tagger_id, dealers) = tagging_of(npc);
+    let teams = &server.systems.social.teams;
+
+    // Eligible players (CharacterTagging).
+    let mut eligible: Vec<PlayerRef> = Vec::new();
+    let tagger = (tagger_id != 0)
+        .then(|| server.world.character_by_obj_id(tagger_id))
+        .flatten();
+    let team = teams.active_team(tag_team);
+    if tag_team != 0 {
+        match &team {
+            // Just to check the team is still a valid team.
+            Some(team) => {
+                for m in team.members.iter().flatten() {
+                    if in_looting_range(server, &m.character, me)
+                        && !eligible.iter().any(|e| e.obj_id == m.character.obj_id)
+                    {
+                        eligible.push(m.character.clone());
+                    }
+                }
+            }
+            // A player has tag rights, but the team is not valid.
+            None => eligible.extend(tagger.clone()),
+        }
+    } else if let Some(t) = &tagger {
+        // A player has tag rights
+        eligible.push(t.clone());
+    }
+
+    // Tag Share contributors: quest progress (not XP / loot) for every damage contributor and
+    // their party / raid mates in range, on top of the eligible players (or the killer when
+    // nobody is eligible).
+    let mut tag_share_extra: Vec<PlayerRef> = Vec::new();
+    if server.config.world.tag_share_enabled {
+        let mut credited: Vec<u32> = eligible.iter().map(|p| p.obj_id).collect();
+        if eligible.is_empty() {
+            if let Some(ck) = killer_player {
+                credited.push(ck.obj_id);
+            }
+        }
+        for contributor in all_contributors(server, me, &dealers) {
+            if !credited.contains(&contributor.obj_id) {
+                credited.push(contributor.obj_id);
+                tag_share_extra.push(contributor);
+            }
+        }
+    }
+
+    KillCredits {
+        eligible,
+        tag_share_extra,
+        tag_team,
+        team,
+    }
+}
+
+/// The monster-hunt quest credit of a scripted removal (`KillNpcWithoutCorpseEffect`; C# 10.x
+/// PR #1792): the players a normal death credits (the tag / loot-rights holders and their party,
+/// plus the Tag Share contributors), with `fallback` credited when nobody holds tagging rights.
+/// No experience, loot or honor is granted.
+pub fn credit_scripted_kill(server: &GameServer, npc: &NpcRef, fallback: Option<&PlayerRef>) {
+    // Claim this life's kill under the NPC's data lock so a normal death running beside the
+    // removal (or a second application of the effect) cannot credit it again:
+    // `try_claim_death` uses the same latch.
+    {
+        let mut n = npc.data();
+        if n.unit.death_processed || n.unit.is_dead() {
+            return;
+        }
+        n.unit.death_processed = true;
+    }
+    let me = WorldObject::from(npc);
+    let credits = kill_credits(server, &me, npc, fallback);
+    let mut credited = credits.eligible;
+    if credited.is_empty() {
+        credited.extend(fallback.cloned());
+    }
+    credited.extend(credits.tag_share_extra);
+
+    // Everyone who gets a direct kill event below (same guard as `before_death`).
+    {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for p in &credited {
+            p.data()
+                .skill_char
+                .note_direct_kill_credit(npc.obj_id, now_ms);
+        }
+    }
+    if let Some(q) = server.systems.npcs.hooks.quests.get() {
+        for p in &credited {
+            q.on_npc_killed(server, p, npc);
+        }
+    }
+    // `CharacterTagging.ClearAllTaggers()` after the credit (C# #1792).
+    let mut n = npc.data();
+    n.unit.skill_state.tagging = Default::default();
+    n.tag_team = 0;
+    n.tagger_obj_id = 0;
+}
+
 /// `Npc.DoDie` before `base.DoDie`: kill experience and monster-hunt quest events.
 pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObject>) {
     let me = WorldObject::from(npc);
@@ -127,56 +245,14 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
             grant_honor(server, p, HonorSource::NpcKill, base);
         }
     };
-    let (tag_team, tagger_id, dealers) = tagging_of(npc);
-    let quests = server.systems.npcs.hooks.quests.get();
-    let teams = &server.systems.social.teams;
-
-    // Eligible players (CharacterTagging).
-    let mut eligible: Vec<PlayerRef> = Vec::new();
-    let tagger = (tagger_id != 0)
-        .then(|| server.world.character_by_obj_id(tagger_id))
-        .flatten();
-    let team = teams.active_team(tag_team);
-    if tag_team != 0 {
-        match &team {
-            // Just to check the team is still a valid team.
-            Some(team) => {
-                for m in team.members.iter().flatten() {
-                    if in_looting_range(server, &m.character, &me)
-                        && !eligible.iter().any(|e| e.obj_id == m.character.obj_id)
-                    {
-                        eligible.push(m.character.clone());
-                    }
-                }
-            }
-            // A player has tag rights, but the team is not valid.
-            None => eligible.extend(tagger.clone()),
-        }
-    } else if let Some(t) = &tagger {
-        // A player has tag rights
-        eligible.push(t.clone());
-    }
-
     let killer_player = killer.and_then(|k| k.as_player().cloned());
-
-    // Tag Share contributors: quest progress (not XP / loot) for every damage contributor and
-    // their party / raid mates in range, on top of the eligible players (or the killer when
-    // nobody is eligible).
-    let mut tag_share_extra: Vec<PlayerRef> = Vec::new();
-    if server.config.world.tag_share_enabled {
-        let mut credited: Vec<u32> = eligible.iter().map(|p| p.obj_id).collect();
-        if eligible.is_empty() {
-            if let Some(ck) = &killer_player {
-                credited.push(ck.obj_id);
-            }
-        }
-        for contributor in all_contributors(server, &me, &dealers) {
-            if !credited.contains(&contributor.obj_id) {
-                credited.push(contributor.obj_id);
-                tag_share_extra.push(contributor);
-            }
-        }
-    }
+    let quests = server.systems.npcs.hooks.quests.get();
+    let KillCredits {
+        eligible,
+        tag_share_extra,
+        tag_team,
+        team,
+    } = kill_credits(server, &me, npc, killer_player.as_ref());
 
     // Everyone who gets a direct kill event below. Marked before the first event is raised so a
     // team-shared ObjZoneKill of one of them cannot count the kill a second time for another.

@@ -27,7 +27,7 @@ use crate::server::GameServer;
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
 use crate::systems::quests::model::kind;
 use crate::systems::quests::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
-use crate::systems::skills::data::effects::EffectTemplate;
+use crate::systems::skills::data::effects::{EffectTemplate, KillNpcWithoutCorpseEffect};
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::effects::{EffectArgs, EffectSource};
 use crate::systems::skills::geometry::Target;
@@ -48,6 +48,8 @@ const KILL_SKILL: u32 = 10_002;
 const USE_SKILL: u32 = 10_003;
 /// 50 damage with `CheckCrime`.
 const CRIME_SKILL: u32 = 10_004;
+/// `KillNpcWithoutCorpseEffect` of the villager (the scripted retreat).
+const RETREAT_SKILL: u32 = 10_008;
 
 /// A channel of 80 ms whose target buff (`CHANNEL_BUFF`, 5 s) outlasts the channel, like
 /// 'Extract Earth Crystal' (skill 18449: 4 s channel, buff 3896 with 6 s).
@@ -86,6 +88,9 @@ const PVP_ZONE_KILL_QUEST: u32 = 500;
 /// A reward-only quest that pays `QuestActSupplyHonorPoint` [`HONOR_QUEST_POINT`].
 const HONOR_QUEST: u32 = 600;
 const HONOR_QUEST_POINT: i32 = 10;
+/// A reward-only quest whose Reward component lists a missing item before a real one.
+const REWARD_QUEST: u32 = 700;
+const MISSING_REWARD_ITEM: u32 = 999_999;
 
 /// `WorldInteractionType.Use`.
 const WI_USE: i32 = 19;
@@ -207,11 +212,29 @@ fn game_data() -> GameData {
         EffectTemplate::Damage(Box::new(crime)),
         900_004,
     );
+    s.add_effect(
+        EffectKind::KillNpcWithoutCorpseEffect,
+        EffectTemplate::KillNpcWithoutCorpse(KillNpcWithoutCorpseEffect {
+            id: 8,
+            npc_id: VILLAGER,
+            radius: 0.0,
+            give_exp: true,
+            vanish: false,
+        }),
+        900_008,
+    );
     for (skill_id, effect_type, kind, actual, target_type) in [
         (HIT_SKILL, 900_001, EffectKind::DamageEffect, 1, 4),
         (KILL_SKILL, 900_002, EffectKind::DamageEffect, 2, 4),
         (USE_SKILL, 900_003, EffectKind::InteractionEffect, 3, 8),
         (CRIME_SKILL, 900_004, EffectKind::DamageEffect, 4, 4),
+        (
+            RETREAT_SKILL,
+            900_008,
+            EffectKind::KillNpcWithoutCorpseEffect,
+            8,
+            4,
+        ),
     ] {
         let mut t = skill_template(skill_id);
         t.target_type = target_type;
@@ -426,6 +449,46 @@ fn game_data() -> GameData {
             point: HONOR_QUEST_POINT,
         },
     );
+    // A reward pool with a missing item template before a real one (the 1.2 data has 282
+    // `quest_act_supply_items` rows pointing at a missing item).
+    q.add_template(QuestTemplate {
+        id: REWARD_QUEST,
+        detail_id: crate::systems::quests::model::detail::NORMAL,
+        ..QuestTemplate::default()
+    });
+    let reward_component = |id: u32, kind_id: u8| QuestComponentTemplate {
+        id,
+        quest_id: REWARD_QUEST,
+        kind_id,
+        npc_ai_id: 1,
+        ..QuestComponentTemplate::default()
+    };
+    q.add_component(reward_component(REWARD_QUEST * 10 + 1, kind::START));
+    q.add_act(
+        REWARD_QUEST * 10 + 1,
+        REWARD_QUEST * 10 + 1,
+        REWARD_QUEST * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    q.add_component(reward_component(REWARD_QUEST * 10 + 2, kind::REWARD));
+    for (i, item_id) in [MISSING_REWARD_ITEM, QUEST_ITEM].into_iter().enumerate() {
+        let n = REWARD_QUEST * 10 + 2 + i as u32;
+        q.add_act(
+            REWARD_QUEST * 10 + 2,
+            n,
+            n,
+            1,
+            ActKind::SupplyItem {
+                item_id,
+                grade_id: 0,
+                show_action_bar: false,
+                cleanup: false,
+                drop_when_destroy: false,
+                destroy_when_drop: false,
+            },
+        );
+    }
     q.finish();
     gd.items.templates.insert(
         QUEST_ITEM,
@@ -586,6 +649,75 @@ async fn skill_kill_advances_the_hunt_quest_and_awards_exp() {
     // Npc.DoDie tail: the player is out of combat. (As in C#, the damage effect adds the
     // killing blow's aggro / tagger to the dead NPC after `DoDie` cleared them.)
     assert!(!a.p.data().unit.is_in_battle);
+}
+
+#[tokio::test]
+async fn scripted_retreat_credits_the_hunt_once_and_grants_no_exp() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Tagger", 100.0);
+    let mut b = pc(&server, 2, "Mate", 102.0);
+    let team_id = form_party(&server, &a.p, &b.p);
+    accept(&server, &a.p, HUNT_QUEST);
+    accept(&server, &b.p, HUNT_QUEST);
+    let npc = villager(&server, 0x200, 1_000);
+
+    // A's hit gives the party tagging rights (more than half of the max hp).
+    cast(
+        &server,
+        &mut a,
+        HIT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+    a.client.drain();
+    b.client.drain();
+    let (exp_a, exp_b) = (a.p.data().experience, b.p.data().experience);
+
+    // The scripted retreat removes the NPC without a corpse.
+    cast(
+        &server,
+        &mut a,
+        RETREAT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+
+    // Both tags holders get the monster-hunt credit, exactly once, and no experience.
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(quest_row(&server, &b.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(a.p.data().experience, exp_a);
+    assert_eq!(b.p.data().experience, exp_b);
+
+    // A normal death of the same NPC afterwards cannot credit the kill a second time.
+    crate::systems::npcs::npc::death::do_die(
+        &server,
+        &npc,
+        Some(&WorldObject::from(&a.p)),
+        crate::systems::npcs::npc::packets::kill_reason::DAMAGE,
+    );
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(a.p.data().experience, exp_a);
+}
+
+#[tokio::test]
+async fn quest_reward_skips_an_unknown_item_template() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Rewarded", 100.0);
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&server, &a.p, REWARD_QUEST, false),
+        Some(true)
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    // The missing first reward row is skipped; the real item is still given.
+    let bag = crate::systems::economy::inventory::Inv::of(&a.p).bag();
+    let items: Vec<(u32, i32)> = bag
+        .lock()
+        .expect("container poisoned")
+        .items
+        .iter()
+        .map(|i| (i.template_id, i.count))
+        .collect();
+    assert_eq!(items, vec![(QUEST_ITEM, 1)]);
+    a.client.drain();
 }
 
 #[tokio::test]

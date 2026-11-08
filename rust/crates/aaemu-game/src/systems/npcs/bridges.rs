@@ -1049,6 +1049,11 @@ fn kill_npc_without_corpse(
         remove_effects_and_delete(server, caster);
         return;
     }
+    // The skill caster is the fallback kill credit when the removed NPC has no tagging rights
+    // (C# #1792); for an NPC self-cast it is the NPC itself and no player is credited.
+    let fallback = server
+        .world
+        .character_by_obj_id(args.caster_caster.obj_id());
     let mut npcs: Vec<WorldObject> = around_radius(server, &args.target, e.radius, false)
         .into_iter()
         .filter(|o| o.as_npc().is_some())
@@ -1059,6 +1064,11 @@ fn kill_npc_without_corpse(
     for n in npcs {
         let template_id = n.as_npc().map_or(0, |n| n.data().unit.template_id);
         if template_id == e.npc_id {
+            // A scripted retreat is a kill for the monster-hunt objectives, but it grants no
+            // experience, loot or honor. Raised before the removal, once per life.
+            if let Some(npc) = caster.as_npc() {
+                super::npc::death::credit_scripted_kill(server, npc, fallback.as_ref());
+            }
             remove_effects_and_delete(server, caster);
         }
     }
