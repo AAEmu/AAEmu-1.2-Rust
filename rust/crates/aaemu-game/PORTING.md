@@ -2507,6 +2507,23 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   unbid system lot and deletes its item (the lot-id argument and the refusal of player lots /
   lots with a bid are assumed). `client_id = 0` rows load normally on restart. The C# had
   neither command and no system-lot path.
+* systems::economy (expired auction items, 2026-11-08): the item timer only visits the
+  equipment / bag / bank containers of online characters, so a timed item on the auction house
+  never expires while it sits in escrow (a re-listed camp lot, or any timed item, could be sold
+  and delivered after its lifetime ended). Rules: an already expired item cannot be posted
+  (refused with the client's existing invalid-item code 240, ui_texts 241 "cannot put up the
+  item", item kept); a lot whose escrow item expires before settlement is not delivered -- the
+  winner is refunded in full by the normal bid-fail mail and the item is deleted, with no
+  seller share and no `AUCTION_BUY`/`AUCTION_SOLD` credit (the refund mail is delivered before
+  any state change, so a refused mail leaves the lot for the next tick); and a delivery taken
+  from the mail after its item expired is deleted instead of entering the bag (covers mails
+  persisted before this fix and items that expire while the mail waits; the delivery mail
+  carries no price, so no refund is minted there). Timed items are otherwise still accepted:
+  only an already expired one is refused (no 1.2 evidence for a general timed-item rule). The
+  shared `item_timers::expired_at` matches the container timer's definition. Tests:
+  `an_expired_item_cannot_be_posted_and_reports_the_invalid_item_code`,
+  `an_item_that_expires_in_escrow_refunds_the_winner_and_is_deleted`,
+  `an_expired_auction_delivery_is_deleted_instead_of_taken`.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -4796,9 +4813,10 @@ and in NPC wandering / buff remaining times.
   `auction_start_posts_one_system_lot_per_running_zone_from_the_authored_data`,
   `posting_is_idempotent_on_a_repeated_tick_and_across_a_restart`,
   `a_later_rotation_week_posts_its_own_zones_lots`,
-  `a_won_camp_item_expires_when_the_declare_period_ends`,
-  `a_disabled_calendar_posts_nothing`, `a_zone_without_a_camp_item_posts_nothing`, and the
-  gated `auction_post_real_compact_db_prices_and_auction_gap`.
+  `a_won_camp_item_expires_when_the_declare_period_ends_and_the_timer_removes_it`,
+  `a_disabled_calendar_posts_nothing`, `a_zone_without_a_camp_item_posts_nothing`, the gated
+  `auction_post_real_compact_db_prices_and_auction_gap` and
+  `dominion_auction_post_marker_round_trips_through_its_row` (MySQL).
   The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
   open: the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
   `doodad_func_purchase_siege_tickets` has no rows) and siege hostility WP-SD7 (decision-blocked:
