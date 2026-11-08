@@ -5014,7 +5014,9 @@ and in NPC wandering / buff remaining times.
   * **741 `SIEGE_CANNOT_DECLARE_OBSTACLE`** (ui 5783 "there are obstacles nearby", INFERRED
     source text). Data: the house builder's collision query (`collision::box_obstacles`,
     mask 0x1f) at the spot; houses are the 633 rule, vegetation / brush / the caster and its
-    own mount do not refuse, and an incomplete query counts as blocked. `Housing.SiegeDeclareObstacleRadius`
+    own mount do not refuse, and an incomplete (saturated) query counts as blocked (unlike the house
+    builder, `housing/placement.rs`, which skips that marker; for a 0.35 m box the difference is
+    theoretical). `Housing.SiegeDeclareObstacleRadius`
     defaults to the player capsule radius 0.35 m (INFERRED; the retail radius is UNKNOWN,
     capture-pending).
   * **D1a 749 `LOCATE_INVALID_DOMINION_AREA`** for item 29800 "Blueprint: Territory
