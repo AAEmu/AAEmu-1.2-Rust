@@ -4715,12 +4715,16 @@ and in NPC wandering / buff remaining times.
     refuses only `900.0 < d²`, i.e. exactly 30 m is allowed; the 1.2 table has
     `too_far_to_decorate_house` 199) -> 199; the target must stay in the house's garden
     square used by `GetHouseAtLocation` (`|x|,|y| <= garden_radius`) -> `house_cannot_
-    decorate_out_of_garden` 289; the overall `deco_limit` / `absolute_deco_limit` cap ->
-    `house_too_many_decorations` 124 and the `housing_deco_limit_elems` act-ability group
+    decorate_out_of_garden` 289; the overall furniture cap -> `house_too_many_decorations` 124 (hard cap =
+    `absolute_deco_limit`, the template struct `+4` / SQL column 1 compared by the client's
+    `CanDecorateHouse` `0x39327C50`; `deco_limit` is only the base value its counter shows and
+    is no longer a refusal; only doodads with `owner_type == HOUSING` count, so crops sharing
+    the house id do not) and the `housing_deco_limit_elems` act-ability group and the `housing_deco_limit_elems` act-ability group
     cap -> `acatbility_deco_arrang_fail` 629 (the codes of the client's own
     `CanDecorateHouse`); a house still under construction / another instance ->
     `house_not_decoratable_state` 123; malformed pose / wrong parent / denied interaction ->
-    `house_cannot_decorate` 122. **Capture-pending HOUSE-6:** decoration surface/overlap and
+    `house_cannot_decorate` 122. Every refusal is logged (debug for the cheap validation
+    failures, info for 124 / 629 with the count and limit). **Capture-pending HOUSE-6:** decoration surface/overlap and
     the vertical floor/ceiling window are not checked (the client's checkers are not
     decoded); the server is permissive there.
   - `CSBuyHouse`: the buyer must be within 30 m of the house (the sale window comes from the

@@ -1487,6 +1487,17 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
 // DecorateHouse
 // ---------------------------------------------------------------------------------------------
 
+/// A cheap early `DecorateHouse` refusal: debug-logged, then answered with `code`.
+fn refuse(player: &PlayerRef, p: &CSDecorateHousePacket, code: i16, why: &str) {
+    tracing::debug!(
+        "DecorateHouse refused: house tl {} design {} item {}: error {code} ({why})",
+        p.house_tl,
+        p.design_id,
+        p.item_id
+    );
+    send_error(player, code);
+}
+
 /// `DecorateHouse(player, houseTlId, designId, pos, quat, parentObjId, itemId)`: `Ok(false)` =
 /// failed (the refusal code has already been sent), `Err` = the C# throws.
 pub fn decorate_house(
@@ -1507,7 +1518,12 @@ pub fn decorate_house(
     let Some(item) = hooks.inventory_item(server, player, p.item_id).filter(|i| {
         i.owner_id == u64::from(char_id) && i.slot_type == slot_type::INVENTORY && i.count > 0
     }) else {
-        send_error(player, err::HOUSE_CANNOT_DECORATE);
+        refuse(
+            player,
+            p,
+            err::HOUSE_CANNOT_DECORATE,
+            "item missing from the bag",
+        );
         return Ok(false);
     };
     if item.secure {
@@ -1525,7 +1541,7 @@ pub fn decorate_house(
         .by_tl(p.house_tl)
         .filter(|h| h.data().unit.tl_id == p.house_tl)
     else {
-        send_error(player, err::INVALID_HOUSE_INFO);
+        refuse(player, p, err::INVALID_HOUSE_INFO, "unknown house");
         return Ok(false);
     };
     if (p.parent_obj_id != 0 && p.parent_obj_id != house.obj_id)
@@ -1535,7 +1551,7 @@ pub fn decorate_house(
             .all(f32::is_finite)
         || p.quat.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() <= f64::EPSILON
     {
-        send_error(player, err::HOUSE_CANNOT_DECORATE);
+        refuse(player, p, err::HOUSE_CANNOT_DECORATE, "bad parent or pose");
         return Ok(false);
     }
     if !manager::allowed_to_interact(server, &house, player)
@@ -1545,7 +1561,12 @@ pub fn decorate_house(
             .housing
             .decoration_accepts_item(p.design_id, item.template_id)
     {
-        send_error(player, err::HOUSE_CANNOT_DECORATE);
+        refuse(
+            player,
+            p,
+            err::HOUSE_CANNOT_DECORATE,
+            "interaction denied or item/design mismatch",
+        );
         return Ok(false);
     }
     let ucc_id = if item.ucc_id > 0 {
@@ -1571,11 +1592,16 @@ pub fn decorate_house(
         })?;
     let world = world_of(server, &house).ok_or("house without world")?;
     if player.data().unit.transform.instance_id != world.id || house.data().current_step != -1 {
-        send_error(player, err::HOUSE_NOT_DECORATABLE_STATE);
+        refuse(
+            player,
+            p,
+            err::HOUSE_NOT_DECORATABLE_STATE,
+            "house unfinished or player in another instance",
+        );
         return Ok(false);
     }
     let Some(template) = template_of(server, &house) else {
-        send_error(player, err::HOUSE_CANNOT_DECORATE);
+        refuse(player, p, err::HOUSE_CANNOT_DECORATE, "no house template");
         return Ok(false);
     };
     // The 1.2 client refuses the decoration item when the player is farther than 30 m from
@@ -1593,14 +1619,24 @@ pub fn decorate_house(
         hz + p.z,
     );
     if !super::placement::caster_in_range(server, player, target.0, target.1, target.2, 0.0) {
-        send_error(player, err::TOO_FAR_TO_DECORATE_HOUSE);
+        refuse(
+            player,
+            p,
+            err::TOO_FAR_TO_DECORATE_HOUSE,
+            "caster too far from the target",
+        );
         return Ok(false);
     }
     // `GetHouseAtLocation` uses the garden square; a decoration outside it is out of garden.
     if template.garden_radius > 0.0
         && (p.x.abs() > template.garden_radius || p.y.abs() > template.garden_radius)
     {
-        send_error(player, err::HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN);
+        refuse(
+            player,
+            p,
+            err::HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN,
+            "target outside the garden",
+        );
         return Ok(false);
     }
     let house_id = house.data().id;
@@ -1609,6 +1645,10 @@ pub fn decorate_house(
     for d in world.doodads_by_house_db_id(house_id) {
         let (doodad_id, item_template_id) = {
             let d = d.data();
+            // Crops and other doodads share `owner_db_id` but are not furniture.
+            if d.owner_type != crate::models::doodad::doodad_owner_type::HOUSING {
+                continue;
+            }
             (d.template_id, d.item_template_id)
         };
         let Some(existing) = server
@@ -1624,23 +1664,36 @@ pub fn decorate_house(
             group_count += 1;
         }
     }
-    if [template.deco_limit, template.absolute_deco_limit]
-        .into_iter()
-        .any(|limit| limit > 0 && decoration_count >= limit)
-    {
+    // The 1.2 client (`CanDecorateHouse`, x2game `0x39327C50`) compares the house's furniture
+    // count with the template's `absolute_deco_limit` (struct +4, SQL column 1) only;
+    // `deco_limit` is the base value its furniture counter displays.
+    if template.absolute_deco_limit > 0 && decoration_count >= template.absolute_deco_limit {
+        tracing::info!(
+            "DecorateHouse refused: house {} template {} design {} item {}: error {}              ({decoration_count} decorations, absolute limit {})",
+            house_id,
+            template.id,
+            p.design_id,
+            item.template_id,
+            err::HOUSE_TOO_MANY_DECORATIONS,
+            template.absolute_deco_limit
+        );
         send_error(player, err::HOUSE_TOO_MANY_DECORATIONS);
         return Ok(false);
     }
-    if server
-        .game_data
-        .systems
-        .housing
-        .decoration_limit(
-            template.housing_deco_limit_id,
-            design.deco_act_ability_group_id,
-        )
-        .is_some_and(|limit| group_count >= limit)
-    {
+    let group_limit = server.game_data.systems.housing.decoration_limit(
+        template.housing_deco_limit_id,
+        design.deco_act_ability_group_id,
+    );
+    if let Some(limit) = group_limit.filter(|limit| group_count >= *limit) {
+        tracing::info!(
+            "DecorateHouse refused: house {} template {} design {} item {}: error {}              (group {}: {group_count} placed, limit {limit})",
+            house_id,
+            template.id,
+            p.design_id,
+            item.template_id,
+            err::ACATBILITY_DECO_ARRANG_FAIL,
+            design.deco_act_ability_group_id
+        );
         // `CanDecorateHouse` -> `acatbility_deco_arrang_fail` (629).
         send_error(player, err::ACATBILITY_DECO_ARRANG_FAIL);
         return Ok(false);
@@ -1703,7 +1756,7 @@ pub fn decorate_house(
     };
     if !paid {
         server.ids.object.release_id(doodad.obj_id);
-        send_error(player, err::HOUSE_CANNOT_DECORATE);
+        refuse(player, p, err::HOUSE_CANNOT_DECORATE, "item payment failed");
         return Ok(false);
     }
     world.attach_child(&house_obj, &WorldObject::from(&doodad));
