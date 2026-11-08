@@ -531,8 +531,7 @@ fn groups_at<'a>(
     let data = &server.game_data.systems.housing;
     let pos = transform.local();
     let areas =
-        subzone::get_housing_zone_by_position(&server.game_data, &world.template, pos.x, pos.y)
-            .ok()?;
+        subzone::get_housing_zone_by_position(&server.game_data, &world, pos.x, pos.y).ok()?;
     Some(
         areas
             .iter()

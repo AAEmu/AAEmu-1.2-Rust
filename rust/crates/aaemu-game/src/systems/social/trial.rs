@@ -604,12 +604,10 @@ fn generate_jury_list(
 }
 
 fn teleport(server: &GameServer, p: &PlayerRef, pos: SpawnPosition, reason: u8, fx: &mut Effects) {
-    let zone_id = server.world.world(pos.world_id).map_or(pos.zone_id, |w| {
-        server
-            .game_data
-            .worlds
-            .get_zone_id(Some(&w.template), pos.x, pos.y)
-    });
+    let zone_id = server
+        .world
+        .world(pos.world_id)
+        .map_or(pos.zone_id, |w| w.zone_id_at(pos.x, pos.y));
     let destination = crate::models::transform::Transform {
         instance_id: pos.world_id,
         world_id: pos.world_id,

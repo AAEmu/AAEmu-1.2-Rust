@@ -11,7 +11,7 @@ use aaemu_commons::{helpers, Marshal, PacketStream};
 use futures::future::BoxFuture;
 
 use crate::data::sqlite::for_each_row;
-use crate::data::world_templates::WorldTemplate;
+
 use crate::error::Result;
 use crate::models::doodad::doodad_owner_type;
 use crate::net::connection::GameConnection;
@@ -195,38 +195,24 @@ fn data(server: &GameServer) -> &PublicFarmData {
     &server.game_data.systems.npcs.public_farm
 }
 
-/// `SubZoneManager.GetSubZoneByPosition(worldTemplate, x, y)`.
+/// `SubZoneManager.GetSubZoneByPosition(worldTemplate, x, y)` for an object of `world`.
 pub fn sub_zones_by_position(
     server: &GameServer,
-    world_template: &WorldTemplate,
+    world: &WorldInstance,
     x: f32,
     y: f32,
 ) -> Vec<u32> {
-    super::subzone::get_sub_zone_by_position(&server.game_data, world_template, x, y)
+    super::subzone::get_sub_zone_by_position(&server.game_data, world, x, y)
 }
 
-/// `InPublicFarm(worldTemplate, pos)`.
-pub fn in_public_farm(
-    server: &GameServer,
-    world_template: &WorldTemplate,
-    pos: (f32, f32, f32),
-) -> bool {
-    data(server).sub_zones_in_public_farm(&sub_zones_by_position(
-        server,
-        world_template,
-        pos.0,
-        pos.1,
-    ))
+/// `InPublicFarm(worldTemplate, pos)` for an object of `world`.
+pub fn in_public_farm(server: &GameServer, world: &WorldInstance, pos: (f32, f32, f32)) -> bool {
+    data(server).sub_zones_in_public_farm(&sub_zones_by_position(server, world, pos.0, pos.1))
 }
 
 /// `GetFarmType(world, pos)` (`FarmGroupKind`).
 pub fn get_farm_type(server: &GameServer, world: &WorldInstance, pos: (f32, f32, f32)) -> u8 {
-    data(server).farm_type_of_sub_zones(&sub_zones_by_position(
-        server,
-        &world.template,
-        pos.0,
-        pos.1,
-    ))
+    data(server).farm_type_of_sub_zones(&sub_zones_by_position(server, world, pos.0, pos.1))
 }
 
 /// The common farm doodads of a character, grouped by farm kind in `FarmGroupKind` order.
@@ -253,7 +239,7 @@ pub fn get_common_farm_doodads(server: &GameServer, player: &PlayerRef) -> Commo
     };
     for doodad in spawns.get_player_doodads(character_id) {
         let pos = doodad_world_pos(&world, &doodad);
-        if in_public_farm(server, &world.template, pos) {
+        if in_public_farm(server, &world, pos) {
             let farm_type = get_farm_type(server, &world, pos);
             let doodad_farm_type = doodad.data().farm_type;
             if doodad_farm_type == farm_type {

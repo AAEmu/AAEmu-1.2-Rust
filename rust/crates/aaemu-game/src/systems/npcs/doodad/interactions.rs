@@ -329,7 +329,7 @@ fn crop_harvest(
     };
     if let Some(world) = server.world.world_of(&WorldObject::from(doodad)) {
         let pos = world.world_pos_rot(&WorldObject::from(doodad));
-        if public_farm::in_public_farm(server, &world.template, (pos.x, pos.y, pos.z)) {
+        if public_farm::in_public_farm(server, &world, (pos.x, pos.y, pos.z)) {
             let owner_id = doodad.data().owner_id;
             if public_farm::is_protected_by_public_farm(server, doodad, now_ms()) && owner_id != 0 {
                 if let Some(character) = caster.as_player() {
