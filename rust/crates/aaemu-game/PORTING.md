@@ -439,7 +439,12 @@ Decisions from the 2026-11-02 combat-ai analysis (`WP-9`), no behaviour change:
   elsewhere, Flowgraph test-only, Anchor two monster skills (score 2/10); the expected
   "controller class not implemented" log is `debug` for these kinds in `controllers.rs`,
   `buffs.rs` and `effects/combat.rs`. `CSCreateSkillController` (0x08b) stays client-built and
-  logged only, as in the C#.
+  logged only, as in the C#. The controller ids the packets name do not exist in the 1.2 data:
+  `skill_controllers` has rows only for kinds 1-8 (116/592/94/105/8/2/8/1), while the 31
+  glider skills reference id 2687 and arrest 20323 / objection 21379 reference 6821, neither
+  of which has a row; the 82 literal `'--- :null'` values are a data artefact
+  (`round6-trial-effects-controllers.md` 3). There is no server-side controller to load, so
+  log-only is correct.
 * **Auto-attack flags.** `skills.start_autoattack` (313 rows), `stop_autoattack` (146) and
   `auto_fire` (26) are not read by the server. The 1.2 client loads `skills` itself and drives
   auto-attack by re-sending skill ids below 5000, which the server already repeats
@@ -2607,8 +2612,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   notices now use the same `send_system_mail` path: `TAXRATE_CHANGED` (8) on a dominion tax
   rate change and `NATIONAL_TAX_RATE` (23) on a national tax rate change (see "National tax
   (RENAME-8)"). `BILLING` (6) already carries the house-tax bill / overdue notice
-  (`MailForTax`); `NATION_TAX_RECEIPT` (24), `USER_BILL` (22), `PROMOTION` (10), `SPAM` (4)
-  and the MIA / hero / mobilization types still have no evidenced 1.2 trigger and stay
+  (`MailForTax`). `USER_BILL` (22), `PROMOTION` (10) and `SPAM` (4) have no client mail view
+  or text in 1.2 (`read_mail.alb`; `round6-items-mail.md` 5), so they are closed as not 1.2
+  features. `NATION_TAX_RECEIPT` (24) has client texts (`ui_texts` 5635-5636) and a plausible
+  weekly national-tax trigger, but no sender yet; the MIA / hero / mobilization types stay
   capture-pending.
 * systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
   non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
@@ -3527,6 +3534,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the same armor-type record; a weapon needs the same holdable slot type and renew category, with
   the renew category in 1..3. The client's toast ids are sent for the same refusals (20 slot out
   of range, 27 item missing, 206 not a bag item, 1 not a renewable pair).
+  **Renew is not reachable in the 1.2 client:** `x2ui/renew_item.alb` and
+  `renew_item_view.alb` are 60-byte empty chunks (header plus one RETURN) in the r208022 pak, so
+  no player can open the window that calls `X2RenewItem.Renew`; the texts and the tooltip hook
+  exist but the dialog is not shipped (`round6-items-mail.md` 1a). Stage 2 and
+  `IT2-RENEW-SLOT` are therefore moot for real clients.
   **Physical enchant is a single-item cast and does not use that pair predicate.** Skills 10521 /
   10522 (`기본강화-무기` / `기본강화-방어구`) target type 9 (Item) and are common skills
   (auto-learn, no learn requirement, ability 0), so the client sends a plain `CSStartSkill`
@@ -3553,8 +3565,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   multiplier) is settled and enforced; otherwise it is a free enchant.
   **OPEN (`IT2-RENEW-SLOT`):** `item_target_slot` (`systems/skills/effects/special/items.rs:120`)
   treats `SkillCastItemTarget.obj_id` as a bag slot, while the enchant evidence says `obj_id` is
-  the owner's id. If that is right, real renew casts fail the slot range check. Needs a capture,
-  or a check of the renew request builder `FUN_394e92d0`; renew is left unchanged for now.
+  the owner's id. If that is right, real renew casts fail the slot range check. The renew
+  window is not shipped (above), so no real cast reaches this; the item is moot unless a
+  modified client sends it, and renew is left unchanged.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -6834,9 +6847,11 @@ and did not check the equipped glider. The Rust adds the 1.2 rules at these entr
 - **Not added:** an airborne requirement for deploying. The 1.2 glider skill has only the authored
   `unit_reqs` NotUnderWater and NoBuffTag 306 (`unit_reqs` 28592 / 28593), the client start path
   `FUN_393989e0` checks only the linked item (no stance / air test), and the startup lift
-  (`gliding_startup_speed`) is what takes off from the ground. The double-jump deploy height /
-  freefall gate (`OPTION_ITEM_USE_GLIDE_WITH_DOUBLE_JUMP`, option 57) remains capture-pending
-  (S14-C4).
+  (`gliding_startup_speed`) is what takes off from the ground. The double-jump deploy
+  (`OPTION_ITEM_USE_GLIDE_WITH_DOUBLE_JUMP`, option 57) is a client INPUT preference: the
+  client sends the normal deploy `CSStartSkill` when the jump key is pressed in the air, and
+  10.x has the same option and no airborne error, so there is no server gate to implement
+  (`round6-trial-effects-controllers.md` 4). S14-C4 is closed as not a server gap.
 - **Not gated:** the internal automatic backpack replacement (`Inventory.TryEquipNewBackPack` from
   loot / craft / quests). Those callers may hold the character lock, so a `buffs` check there could
   deadlock; the client-side interaction and equip gates that lead to them are covered above.
@@ -7342,7 +7357,8 @@ stale for single-stack products, and stackables were still empty).
   `private_mysql_item_crafter_survives_save_and_load` (gated by `AAEMU_TEST_MYSQL`).
 - **Left as-is.** Craft pay (`CSSetCraftingPayPacket`) is stored on the owner's shipyard only,
   with no payout (see "Craft material grades and product grade"); `doodad_func_craft_grade_ratios`
-  has 0 rows; the Mia mail variants stay capture-pending.
+  has 0 rows in 1.2 (and no table in 10.0), so there is nothing to implement
+  (`round6-items-mail.md` 2); the Mia mail variants stay capture-pending.
 
 ## Recipe learning and the learned-craft gate (2026-11-04)
 
@@ -7628,8 +7644,8 @@ except the new, still unsent 0x07e definition.
 | special effect 63 (CombatText) | client-only | 20 rows, all `value1..4` 0; nothing carries a text id, so there is nothing to send. |
 | special effects 67 (CombatDice) / 70 (NotifyQuest) | done elsewhere | 67 is the plot combat-dice marker (`systems/skills/plots.rs:644`); 70 fires in `plots::finish_item_plot`. |
 | special effects 76-78 (ClearProjectile, RetrieveProjectile, AddFxToProjectile) | client-only | 26 / 8 / 7 rows; projectile visuals the client owns. |
-| special effect 19 (SpawnBomb) | capture-blocked | 2 rows (skills 10492 / 10503, `value1` npc 376 "Bomb"); the `SCBombUpdated` 0xaa reader is `FUN_397c6a10` (`dll.c:1721438`, `bc bombId`) but the owner / timer / explosion rules are UNKNOWN (`research/combat-ai.md` WP-7). Do not schedule; a capture of skill 10492 is needed. |
-| special effects 84 / 88 / 89 (ReportBotArrested, ApplyBotTrial, ArrestBot) | capture-blocked | One row each; the trial state machine is UNKNOWN (`research/combat-ai.md` WP-4). `SCSuspectGoingBotTrial` is typed but never sent (`systems/social/packets/trial.rs:319-320`). |
+| special effect 19 (SpawnBomb) | retired content (not a gap) | 2 rows (skills 10492 "Install Bomb" / 10503 "Summon Bomb", `value1` npc 376 "Bomb"); npc 376 and buffs 2019 / 3177 ("bomb-dropping robot" / "cleaned robot") look like retired test/event content, and 10.x has no SpawnBomb symbol (`round6-trial-effects-controllers.md` 2, 10.x negative). The `SCBombUpdated` 0xaa reader remains defined (`FUN_397c6a10`, `dll.c:1721438`, `bc bombId`); do not schedule. |
+| special effects 84 / 88 / 89 (ReportBotArrested, ApplyBotTrial, ArrestBot) | wont (owner 2026-11-08) | 84 is fired by `buff_triggers` 3194 on the buff-4894 "Subdued" timeout, not orphaned (correcting `round6-trial-effects-controllers.md` 1.1); 88/89 are the objection / arrest skills of the same bot flow. The owner decided on 2026-11-08 not to implement bot arrest or bot trial, now or in future (`round6-trial-larceny-2.md` 1). `SCBotSuspectArrested` / `SCSuspectGoingBotTrial` stay typed and unsent (`systems/social/packets/trial.rs:319-320`). |
 | special effects 20 / 21 / 57 (PhysicalEnchantWeapon / Armor, RenewEquipment) | done elsewhere | Implemented by `feat/items9` (`systems/skills/effects/special/mod.rs:312-313`, `:338`). |
 | `CSQuestStartWith` 0x0db | no 1.2 trigger (log-only correct) | Client writer `FUN_397c5450` (`dll.c:1720446`) + `FUN_397be540` (`dll.c:1715866`, `u8 type` tail). Only two send sites: type 2 level-up, `FUN_39378660` (`dll.c:719962`, call at `:720032`), and type 3 NPC emotion, `FUN_39378930` (`dll.c:720132`, call at `:720204`); types 1 / 4 are never sent. The server already starts level-up quests (`systems/quests/events.rs:970`); the single emotion act 20923 points at missing component 15266 (orphan). Reader and log-only handler: `systems/quests/packets.rs:533-595`. |
 | `SCShowQuestArea` 0x1af | debug-only | Reader `FUN_397b7940` (`dll.c:1710613`) = `u32 questType`, `Area{i64,i64,f32}`, `f32 radius`; handler `FUN_391df7b0` (`dll.c:372352`) -> `FUN_393840b0` (`dll.c:731288`) stores `{questType, LOCAL PLAYER position, radius}` and ignores the packet's area; `FUN_393822f0` (`dll.c:729680`) draws each entry as a debug sphere labelled `"stype: %u"` (`dll.c:729703`). Keep defined-only (`systems/quests/ui_packets.rs:15-46`). |
@@ -7644,11 +7660,28 @@ except the new, still unsent 0x07e definition.
 | `SCCraftItemUnlock` 0x0f5 | no server action | Reader `FUN_397b4c60` (`dll.c:1708521`) = one `u8` slot type, one `u8` slot index; handler `FUN_391d9700` (`dll.c:367435`) -> `FUN_397d2200` (`dll.c:1730226`) re-reads the slot as unlocked (a refresh). The server never locks craft materials (`systems/economy/craft.rs:451-453` only checks what the bag can pay), so there is nothing to release. |
 | `SCItemDetailUpdated` 0x093 | done elsewhere | Reader `FUN_397b3840` (`dll.c:1707581`); handler `FUN_394e47b0` (`dll.c:1021672`) copies the detail into the slot in place. In-place detail changes already travel in `SCItemTaskSuccess` update tasks. |
 | `SCMileageChanged` 0x101 | no source of mileage (capture-blocked if wanted) | Reader `FUN_397c66b0` (`dll.c:1721278`) = `bc unitId, i32 mileage`; handler `FUN_391d9ea0` (`dll.c:367848`) -> `FUN_39357390` (`dll.c:691067`) raises UI event 0xbd, consumed as floating combat text on the mount. `Mate.mileage` is stored (`models/mate.rs:30`, `systems/vehicles/mates.rs:973`) but no code changes it and no compact column feeds it. |
-| `SCMineAmount` 0x124 | client-only | Reader `FUN_397af1b0` (`dll.c:1703958`) = `i32 amount`; event `MINE_AMOUNT` (0xd4) is registered but no Lua listens and no native code raises it. |
+| `SCMineAmount` 0x124 | client-only | Reader `FUN_397af1b0` (`dll.c:1703958`) = `i32 amount`; event `MINE_AMOUNT` (0xd4) is registered but no Lua listens and no native code raises it, and no compact table has a mine-amount column (`round6-items-mail.md` 6). Nothing to send. |
 | `SCHouseFarm` 0xc3 | capture-blocked | Reader `FUN_397aece0` (`dll.c:1703709`) = string name, `i32 total`, `i32 harvestable`; the handler shows the `HOUSE_FARM_MSG` chat line. The retail trigger is UNKNOWN and farm bookkeeping is not implemented (`research/housing.md` WP-F1). |
 | `SCHouseBuildPayChanged` 0xbf | no 1.2 trigger | Reader `FUN_397b4000` (`dll.c:1707972`) = `u16 tl, i32 moneyAmount`; only the setter `CSChangeHousePay` would send it, and that C->S opcode does not exist in 1.2 (`systems/housing/packets.rs:56-61`). |
 | `SCHouseOwnerNameChanged` 0xcb | no 1.2 trigger | Reader `FUN_397b44b0` (`dll.c:1708167`) = `u16 tl, string newName`; 1.2 has no in-world house rename (only the character-select rename), so nothing sends it (`systems/social/packets/misc.rs:248-253`). |
-| todos-1#13 leftovers | done / capture-pending | Loot-pack inherited grade: `systems/economy/item_effects.rs:1794-1797` (the descriptor `FUN_396e91c0`, `dll.c:1506218`, cannot name the ActAbility; ITEM-LOOT-GRADE). Skinize on an already skinized item keeps `ITEM_LOOK_CONVERT_AS_NOT_USE_AS_SKIN`: `ui_texts` has no more specific look-conversion text (`systems/economy/bridges.rs:1899-1901`). Expand-expert failure sends `STORE_UNKNOWN_ERROR` (`systems/economy/store.rs:1098`). `SwapAction::DoNothing` is unreachable. |
+| todos-1#13 leftovers | done (loot grade negligible) | Loot-pack inherited grade: `systems/economy/item_effects.rs:1794-1797` reads the source item's grade (the descriptor `FUN_396e91c0`, `dll.c:1506218`, cannot name the ActAbility). `gain_loot_pack_item_effects.inherit_grade` has 230 true rows, all with `consume_source_item = true` (already implemented); only effects 529-531 (loot packs 8397 / 6988 / 6894) are `inherit_grade = t` with `consume_source_item = f`, so the ActAbility-grade question affects 3 rows and is negligible (`round6-items-mail.md` 3). Skinize on an already skinized item keeps `ITEM_LOOK_CONVERT_AS_NOT_USE_AS_SKIN`: `ui_texts` has no more specific look-conversion text (`systems/economy/bridges.rs:1899-1901`). Expand-expert failure sends `STORE_UNKNOWN_ERROR` (`systems/economy/store.rs:1098`). `SwapAction::DoNothing` is unreachable. |
+
+## Round 6 closes (2026-11-08)
+
+Final doc passes for the round-6 research (`D:/aaemu-audits/gap-audit-2026-11-02/research/round6-*.md`);
+the code rows above were added by the lanes that landed them.
+
+* **`indun_zones.restore_item_time` (instances-pvp#10).** The 1.2 client never reads the column
+  (no reader in `x2game.dll.c`; `indun-events-2026-11-07.md` 2.1). The best reading — a re-entry
+  grace window before another entry item is consumed — is grade D: it comes from 3.0 / 10.0 data,
+  and 10.x stores the field without a consumer (`round6-interaction-quest-indun.md` 3). The
+  server stays correct to ignore it until capture C5; no default-off guess is added.
+* **Bot arrest / bot trial (owner decision, 2026-11-08).** NOT implemented, now or in future.
+  The 1.2 data would support most of it (`buff_triggers` 3163 applies buff 4868 "Prisoner" for
+  10 h on the 4894 timeout; `buff_skills` 229 / 296 grant arrest / instant judgment; buff 4759
+  comes from six cloaks' `items.buff_id` and already works), but the owner declined the feature
+  (`round6-trial-larceny-2.md` 1; `round6-plan.md`). Special effects 84/88/89 stay unhandled by
+  design; `SCBotSuspectArrested` / `SCSuspectGoingBotTrial` stay typed and unsent.
 
 ## Combat, heal and instance-zone fixes (2026-11-08)
 
