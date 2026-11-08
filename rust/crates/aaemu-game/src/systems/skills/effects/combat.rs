@@ -888,6 +888,19 @@ pub fn heal(
         let maximum = trg.with_unit(|u| u.unit().max_hp).unwrap_or(0).max(0);
         value = (i64::from(value) * i64::from(maximum) / 1000).clamp(0, i64::from(i32::MAX)) as i32;
     }
+    // A heal that computes no positive health restores nothing: send no heal/points packet and
+    // leave the HP unchanged. The 2026-11-08 bot run's buff 399 ticks (HealEffect 61, level heal
+    // with the native NPC `LevelDps` of -8 at ability level 0) produced `SCUnitHealedPacket`
+    // values of -1 and *removed* one HP per tick.
+    if value <= 0 {
+        tracing::debug!(
+            effect = e.id,
+            target = trg.obj_id(),
+            value,
+            "HealEffect: no positive heal"
+        );
+        return;
+    }
     let hit = if critical {
         HealHitType::CriticalHealHit
     } else {

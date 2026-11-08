@@ -680,3 +680,74 @@ async fn damage_pipeline_percent_uses_wide_arithmetic_and_never_emits_negative_d
         assert_eq!(npc.data().unit.hp, 1000_i32.saturating_sub(expected).max(0));
     }
 }
+
+/// The 2026-11-08 bot run's buff 399 ticks: a level heal (HealEffect 61, `level_md` 2) cast by an
+/// NPC whose native `LevelDps` is -8 (ability level 0) computed a negative value and sent an
+/// `SCUnitHealedPacket` of -1, removing one HP per tick. A heal without positive health must
+/// send nothing and change no HP; a positive heal still takes the normal path.
+#[tokio::test]
+async fn negative_level_heal_sends_no_packet_and_changes_no_hp() {
+    let negative_dps = |mut data: GameData| {
+        data.formulas = crate::systems::vehicles::stats::tests::formulas(
+            &[(1, "100000", 14, 0), (2, "1000", 15, 0), (3, "-8", 12, 0)],
+            &[],
+        );
+        data
+    };
+    let effect = crate::systems::skills::data::effects::HealEffect {
+        id: 61,
+        use_fixed_heal: false,
+        fixed_min: 0,
+        fixed_max: 0,
+        use_level_heal: true,
+        level_md: 2.0,
+        level_va_start: 0,
+        level_va_end: 0,
+        percent: false,
+        use_charged_buff: false,
+        charged_buff_id: 0,
+        charged_mul: 0.0,
+        slave_applicable: false,
+        ignore_heal_aggro: false,
+        dps_multiplier: 1.0,
+        actability_group_id: 0,
+        actability_step: 0,
+        actability_mul: 0.0,
+        actability_add: 0.0,
+    };
+
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(negative_dps(fixture_data()));
+    let a = args((&player).into(), (&npc).into(), 1);
+    let hp_before = npc.data().unit.hp;
+    client.drain();
+    super::heal(&server, &effect, &a, None);
+    assert_eq!(healed_values(&mut client), Vec::<i32>::new());
+    assert_eq!(npc.data().unit.hp, hp_before);
+
+    // Positive `LevelDps` (the character formula, 100 in `fixture_data`) still heals.
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    let a = args((&player).into(), (&npc).into(), 1);
+    npc.data().unit.hp = 500; // room below MaxHp for the heal
+    let hp_before = npc.data().unit.hp;
+    client.drain();
+    super::heal(&server, &effect, &a, None);
+    let values = healed_values(&mut client);
+    assert_eq!(values.len(), 1, "{values:?}");
+    assert!(values[0] > 0, "{values:?}");
+    assert!(npc.data().unit.hp > hp_before);
+}
+
+/// The `value` of every `SCUnitHealedPacket` the client received (health or mana).
+fn healed_values(client: &mut TestClient) -> Vec<i32> {
+    client
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == sc::SCUnitHealedPacket)
+        .map(|(_, body)| {
+            // CastAction::Skill (0 + u32 id + u16 tl), unit caster (0 + BC), target BC,
+            // heal type, heal hit type, then the i32 value.
+            i32::from_le_bytes(body[16..20].try_into().expect("heal value"))
+        })
+        .collect()
+}
