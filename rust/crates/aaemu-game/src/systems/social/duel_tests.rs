@@ -494,6 +494,32 @@ async fn end_timer_draw_and_hp_win() {
     assert!(f.duels().is_empty());
 }
 
+/// `DuelStop`: `IsInBattle = false` broadcasts `SCCombatClearedPacket`; the client entered combat
+/// through `SCCombatEngagedPacket` at duel start, so the packet is also sent when the flag was
+/// already false.
+#[tokio::test]
+async fn duel_end_clears_combat_for_both_duelists() {
+    let mut f = Fixture::new(true);
+    f.start().await;
+    f.pa.data().unit.is_in_battle = true;
+    f.pb.data().unit.is_in_battle = false;
+    let duel = f.duel();
+    f.duels().end_timer_task_execute(&f.server, &duel, 1).await;
+    // Nearby clients also see the other duelist's packet: count the one naming `obj_id`.
+    let count = |frames: Vec<(u16, Vec<u8>)>, obj_id: u32| {
+        let mut s = PacketStream::new();
+        s.write_bc(obj_id);
+        frames
+            .iter()
+            .filter(|fr| fr.0 == sc::SCCombatClearedPacket && fr.1 == s.as_bytes())
+            .count()
+    };
+    assert_eq!(count(f.a.drain(), 0x100), 1);
+    assert_eq!(count(f.b.drain(), 0x101), 1);
+    assert!(!f.pa.data().unit.is_in_battle);
+    assert!(!f.pb.data().unit.is_in_battle);
+}
+
 #[tokio::test]
 async fn refusal_sends_the_error_to_the_challenger() {
     let mut f = Fixture::new(true);

@@ -836,3 +836,58 @@ async fn real_instance_walkers_keep_the_floor_of_their_hall() {
         server.systems.ai.collision.remove(100);
     }
 }
+
+/// The Profane Temple (`instance_sal_temple`) end boss Akmit (12189) knocked back in its hall: the
+/// ground probe only finds the terrain far under the hall, which testers saw the boss land on
+/// (2026-11-08). The displaced position must stay at the hall level.
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_sal_temple_boss -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_sal_temple_boss_knockback_stays_on_the_hall_floor() {
+    use crate::models::npc::Npc;
+    use crate::systems::skills::effects::special::movement::move_npc;
+    use crate::world::{Entity, WorldObject};
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    crate::systems::ai::geodata::start(&server);
+    let name = "instance_sal_temple";
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_name(name)
+        .expect(name)
+        .clone();
+    let zone = template.zone_keys.first().copied().unwrap_or(0);
+    server.world.create_world_instance(Arc::new(template), 100);
+    let (x, y, z) = (615.5f32, 434.4f32, 148.8f32);
+    let npc = Entity::new(0x400, {
+        let mut n = Npc::new(12189);
+        n.unit.hp = 1000;
+        n.unit.max_hp = 1000;
+        n.unit.transform.set_xyz(x, y, z);
+        n.unit.transform.zone_id = zone;
+        n.unit.transform.instance_id = 100;
+        n.unit.transform.world_id = 100;
+        n.spawner_z = Some(z);
+        n
+    });
+    server
+        .world
+        .world(100)
+        .expect("instance")
+        .spawn(&npc, &server.view_ctx());
+    let _ = WorldObject::from(&npc);
+    for (dx, dy) in [(5.0, 0.0), (-5.0, 0.0), (0.0, 5.0), (0.0, -5.0)] {
+        npc.data().unit.transform.set_xyz(x, y, z);
+        move_npc(&server, &npc, (x + dx, y + dy, z), None, true);
+        let p = npc.data().unit.transform;
+        println!("knocked by ({dx}, {dy}): z = {:.2}", p.z);
+        assert!(
+            (p.z - z).abs() <= 12.0,
+            "the boss was displaced from {z} to {} under the hall",
+            p.z
+        );
+    }
+    server.world.remove_world(100);
+    server.systems.ai.collision.remove(100);
+}

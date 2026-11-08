@@ -797,8 +797,16 @@ impl DuelManager {
         }
 
         // The players cannot be attacked any more.
-        duel.challenger.data().unit.is_in_battle = false;
-        duel.challenged.data().unit.is_in_battle = false;
+        // C# `IsInBattle = false` (the setter broadcasts `SCCombatClearedPacket`). Duel start sends
+        // `SCCombatEngagedPacket` whatever the flag is, so a duelist whose flag was already
+        // false still gets the packet explicitly: the setter would stay silent.
+        for p in [&duel.challenger, &duel.challenged] {
+            let was = p.data().unit.is_in_battle;
+            crate::systems::skills::combat::set_in_battle(server, &WorldObject::from(p), false);
+            if !was {
+                p.send(crate::systems::skills::packets::SCCombatClearedPacket { obj_id: p.obj_id });
+            }
+        }
 
         self.duel_clean_up(id);
     }

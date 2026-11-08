@@ -577,3 +577,141 @@ async fn spawn_inside_a_building_over_a_missing_floor_keeps_its_height() {
     let z = spawn_z_at(&server, 500.0, 500.0, 100.5);
     assert!((z - 100.0).abs() < 0.1, "{z}");
 }
+
+// --- displaced / blinked / teleported NPCs (knockback, impulse, explosion, Blink, TeleportToUnit) ---
+
+mod displaced {
+    use super::*;
+    use crate::systems::skills::data::effects::{ImpulseEffect, PhysicalExplosionEffect};
+    use crate::systems::skills::effects::EffectSource;
+    use crate::systems::skills::effects::{special, unit_fx, EffectArgs};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::{NpcRef, WorldObject};
+
+    fn spawn_at(server: &GameServer, obj_id: u32, x: f32, z: f32) -> NpcRef {
+        let npc = Entity::new(obj_id, {
+            let mut n = Npc::new(1);
+            n.unit.hp = 1000;
+            n.unit.max_hp = 1000;
+            n.unit.transform.set_xyz(x, 500.0, z);
+            n.unit.transform.zone_id = TEST_ZONE;
+            n.spawner_z = Some(z);
+            n
+        });
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        npc
+    }
+
+    fn args(caster: &NpcRef, target: &NpcRef) -> EffectArgs<'static> {
+        let (c, t) = (WorldObject::from(caster), WorldObject::from(target));
+        EffectArgs {
+            caster: Some(c.clone()),
+            caster_caster: SkillCaster::Unit(c.obj_id()),
+            target: Target::Obj(t.clone()),
+            target_caster: SkillCastTarget::Unit(t.obj_id()),
+            cast: CastAction::Skill {
+                skill_id: 1,
+                tl_id: 1,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        }
+    }
+
+    fn z_of(npc: &NpcRef) -> f32 {
+        npc.data().unit.transform.z
+    }
+
+    /// The hall: its floor (193 m) is not in the collision world, the terrain is at 2 m.
+    fn hall() -> (GameServer, NpcRef, NpcRef) {
+        let server = cave_server(2.0);
+        let caster = spawn_at(&server, 0x300, 490.0, 193.0);
+        let target = spawn_at(&server, 0x301, 500.0, 193.0);
+        (server, caster, target)
+    }
+
+    #[tokio::test]
+    async fn hall_knockback_keeps_the_npc_at_its_level() {
+        let (server, caster, target) = hall();
+        special::execute(&server, 13, &args(&caster, &target), [5000, 0, 0, 0]);
+        let p = target.data().unit.transform;
+        assert!(p.x > 504.0, "knocked away: {p:?}");
+        assert!((p.z - 193.0).abs() <= 5.0, "dropped to the terrain: {p:?}");
+    }
+
+    #[tokio::test]
+    async fn hall_impulse_keeps_the_npc_at_its_level() {
+        let (server, caster, target) = hall();
+        let e = ImpulseEffect {
+            id: 1,
+            vel_impulse: [0.0; 3],
+            angvel_impulse: [0.0; 3],
+            impulse: [0.0, 5000.0, 0.0],
+            ang_impulse: [0.0; 3],
+        };
+        unit_fx::impulse(&server, &e, &args(&caster, &target));
+        let p = target.data().unit.transform;
+        assert!((p.x - 500.0).abs() > 0.5, "pushed: {p:?}");
+        assert!((p.z - 193.0).abs() <= 5.0, "dropped to the terrain: {p:?}");
+    }
+
+    #[tokio::test]
+    async fn hall_physical_explosion_keeps_the_npc_at_its_level() {
+        let (server, caster, target) = hall();
+        let e = PhysicalExplosionEffect {
+            id: 1,
+            radius: 20.0,
+            hole_size: 0.5,
+            pressure: 5000.0,
+        };
+        unit_fx::physical_explosion(&server, &e, &args(&caster, &target));
+        let p = target.data().unit.transform;
+        assert!(p.x > 502.0, "blown away: {p:?}");
+        assert!((p.z - 193.0).abs() <= 5.0, "dropped to the terrain: {p:?}");
+    }
+
+    #[tokio::test]
+    async fn knockback_still_lands_on_a_real_floor_a_few_metres_lower() {
+        // A real floor (collision terrain) 2 m below the NPC is reachable.
+        let server = cave_server(191.0);
+        let caster = spawn_at(&server, 0x300, 490.0, 193.0);
+        let target = spawn_at(&server, 0x301, 500.0, 193.0);
+        special::execute(&server, 13, &args(&caster, &target), [5000, 0, 0, 0]);
+        let p = target.data().unit.transform;
+        assert!(p.x > 504.0, "{p:?}");
+        assert!(
+            (p.z - 191.0).abs() < 0.1,
+            "did not land on the floor: {p:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knockback_ignores_a_floor_beyond_the_drop_limit() {
+        let server = cave_server(193.0 - super::super::WALKER_MAX_DROP - 1.0);
+        let caster = spawn_at(&server, 0x300, 490.0, 193.0);
+        let target = spawn_at(&server, 0x301, 500.0, 193.0);
+        special::execute(&server, 13, &args(&caster, &target), [5000, 0, 0, 0]);
+        assert!((z_of(&target) - 193.0).abs() < 0.1, "{}", z_of(&target));
+    }
+
+    #[tokio::test]
+    async fn hall_npc_blink_keeps_its_level() {
+        let (server, caster, target) = hall();
+        special::execute(&server, 11, &args(&caster, &target), [3, 0, 0, 0]);
+        assert!((z_of(&caster) - 193.0).abs() <= 5.0, "{}", z_of(&caster));
+    }
+
+    #[tokio::test]
+    async fn hall_npc_teleport_to_unit_lands_at_the_target_level() {
+        let (server, caster, target) = hall();
+        special::execute(&server, 47, &args(&caster, &target), [3000, 3000, 0, 0]);
+        let p = caster.data().unit.transform;
+        assert!(p.x > 495.0, "teleported next to the target: {p:?}");
+        assert!((p.z - 193.0).abs() <= 1.0, "dropped to the terrain: {p:?}");
+    }
+}

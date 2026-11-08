@@ -615,6 +615,25 @@ pub struct WorldConfig {
     /// over independent NPC AI updates and relax strict ordering.
     #[serde(rename = "aiworkerthreads", deserialize_with = "lenient")]
     pub ai_worker_threads: u32,
+    /// `NpcSpawnScatterTrigger`: a spawning NPC that would land within this distance (m, 3D) of
+    /// another live NPC is scattered instead (see `systems::npcs::stacked_npcs`).
+    #[serde(rename = "npcspawnscattertrigger", deserialize_with = "lenient")]
+    pub npc_spawn_scatter_trigger: f32,
+    /// `NpcSpawnScatterMin`: inner radius (m) of the scatter ring.
+    #[serde(rename = "npcspawnscattermin", deserialize_with = "lenient")]
+    pub npc_spawn_scatter_min: f32,
+    /// `NpcSpawnScatterMax`: outer radius (m) of the scatter ring; `0` disables scattering.
+    #[serde(rename = "npcspawnscattermax", deserialize_with = "lenient")]
+    pub npc_spawn_scatter_max: f32,
+    /// `StackedNpcCheckSeconds`: interval of the stacked-NPC check; `0` disables it.
+    #[serde(rename = "stackednpccheckseconds", deserialize_with = "lenient")]
+    pub stacked_npc_check_seconds: u64,
+    /// `StackedNpcRadius`: NPCs closer than this (m, 3D) count as stacked.
+    #[serde(rename = "stackednpcradius", deserialize_with = "lenient")]
+    pub stacked_npc_radius: f32,
+    /// `StackedNpcMinSeconds`: how long a stack must persist before it is logged.
+    #[serde(rename = "stackednpcminseconds", deserialize_with = "lenient")]
+    pub stacked_npc_min_seconds: u64,
 }
 
 impl Default for WorldConfig {
@@ -656,6 +675,12 @@ impl Default for WorldConfig {
             npc_warm_retention_seconds: 60,
             npc_resident_service_npcs: true,
             ai_worker_threads: 1,
+            npc_spawn_scatter_trigger: 1.0,
+            npc_spawn_scatter_min: 1.5,
+            npc_spawn_scatter_max: 3.0,
+            stacked_npc_check_seconds: 60,
+            stacked_npc_radius: 0.5,
+            stacked_npc_min_seconds: 120,
         }
     }
 }
@@ -1827,6 +1852,12 @@ mod tests {
         assert_eq!(cfg.world.npc_warm_retention_seconds, 60);
         assert!(cfg.world.npc_resident_service_npcs);
         assert_eq!(cfg.world.ai_worker_threads, 1);
+        assert_eq!(cfg.world.npc_spawn_scatter_trigger, 1.0);
+        assert_eq!(cfg.world.npc_spawn_scatter_min, 1.5);
+        assert_eq!(cfg.world.npc_spawn_scatter_max, 3.0);
+        assert_eq!(cfg.world.stacked_npc_check_seconds, 60);
+        assert_eq!(cfg.world.stacked_npc_radius, 0.5);
+        assert_eq!(cfg.world.stacked_npc_min_seconds, 120);
         // Binding is case-insensitive and accepts string values.
         let cfg = AppConfig::from_value(json!({
             "world": {
@@ -1835,7 +1866,13 @@ mod tests {
                 "NpcSpawnsPerTick": 8,
                 "npcwarmretentionseconds": "300",
                 "NpcResidentServiceNpcs": "False",
-                "AIWorkerThreads": "4"
+                "AIWorkerThreads": "4",
+                "NpcSpawnScatterTrigger": "2",
+                "npcspawnscattermin": 2.5,
+                "NpcSpawnScatterMax": "0",
+                "StackedNpcCheckSeconds": "30",
+                "StackedNpcRadius": 0.25,
+                "StackedNpcMinSeconds": "10"
             }
         }))
         .unwrap();
@@ -1845,6 +1882,12 @@ mod tests {
         assert_eq!(cfg.world.npc_warm_retention_seconds, 300);
         assert!(!cfg.world.npc_resident_service_npcs);
         assert_eq!(cfg.world.ai_worker_threads, 4);
+        assert_eq!(cfg.world.npc_spawn_scatter_trigger, 2.0);
+        assert_eq!(cfg.world.npc_spawn_scatter_min, 2.5);
+        assert_eq!(cfg.world.npc_spawn_scatter_max, 0.0);
+        assert_eq!(cfg.world.stacked_npc_check_seconds, 30);
+        assert_eq!(cfg.world.stacked_npc_radius, 0.25);
+        assert_eq!(cfg.world.stacked_npc_min_seconds, 10);
     }
 
     #[test]

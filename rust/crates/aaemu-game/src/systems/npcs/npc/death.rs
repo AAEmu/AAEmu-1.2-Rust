@@ -336,8 +336,8 @@ pub fn after_death(server: &GameServer, npc: &NpcRef, _killer: Option<&WorldObje
         crate::systems::skills::combat::clear_aggro_of_unit(server, &me, &po);
         let none_left = p.data().skill_char.is_in_aggro_list_of.is_empty();
         if none_left {
-            // Cancel combat
-            p.data().unit.is_in_battle = false;
+            // Cancel combat (`IsInBattle = false` broadcasts `SCCombatClearedPacket`)
+            crate::systems::skills::combat::set_in_battle(server, &po, false);
         }
     }
     {
@@ -452,6 +452,83 @@ mod tests {
             vec!["exp 256 140 513".to_string(), "kill 256 513".to_string()]
         );
         assert_eq!(npc2.data().tagger_obj_id, 0);
+    }
+
+    /// `Npc.ClearAllAggroTargetsAndCheckCombatState`: `player.IsInBattle = false` uses the setter,
+    /// which broadcasts `SCCombatClearedPacket`. A player still on another NPC's aggro list stays
+    /// in combat.
+    #[tokio::test]
+    async fn npc_death_sends_combat_cleared_to_every_freed_aggro_player() {
+        let server = test_server_with(super::super::manager::tests::npc_game_data());
+        crate::systems::npcs::install_hooks(&server);
+        let mut a = TestClient::new(&server, 1, 1001);
+        let mut b = TestClient::new(&server, 2, 1002);
+        let mut c = TestClient::new(&server, 3, 1003);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        let pb = spawn_player(&server, &b, test_character(2, "Beta", 101.0, 100.0), 0x101);
+        let pc = spawn_player(&server, &c, test_character(3, "Gamma", 102.0, 100.0), 0x102);
+        let npc = super::super::manager::create(&server, 0x200, 100).unwrap();
+        let other = super::super::manager::create(&server, 0x201, 100).unwrap();
+        let world = server.world.world(0).unwrap();
+        npc.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+        other.data().unit.transform.set_xyz(106.0, 100.0, 100.0);
+        world.spawn(&npc, &server.view_ctx());
+        world.spawn(&other, &server.view_ctx());
+        let npc_obj = WorldObject::from(&npc);
+        let other_obj = WorldObject::from(&other);
+        for p in [&pa, &pb, &pc] {
+            crate::systems::skills::combat::add_damage_aggro(
+                &server,
+                &npc_obj,
+                &WorldObject::from(p),
+                10,
+                10,
+            );
+            p.data().unit.is_in_battle = true;
+        }
+        // Gamma is also on another NPC's aggro list.
+        crate::systems::skills::combat::add_damage_aggro(
+            &server,
+            &other_obj,
+            &WorldObject::from(&pc),
+            10,
+            10,
+        );
+        assert!(!pc.data().skill_char.is_in_aggro_list_of.is_empty());
+        // The victim has no target of its own: the killer's clear block in `do_die_base` is skipped.
+        npc.data().unit.current_target = 0;
+        npc.data().unit.hp = 0;
+        a.drain();
+        b.drain();
+        c.drain();
+
+        let killer = WorldObject::from(&pa);
+        do_die(
+            &server,
+            &npc,
+            Some(&killer),
+            super::super::packets::kill_reason::DAMAGE,
+        );
+
+        // Nearby clients also see the others' packets: count the one naming `obj_id`.
+        let cleared = |frames: Vec<(u16, Vec<u8>)>, obj_id: u32| {
+            let mut s = aaemu_commons::PacketStream::new();
+            s.write_bc(obj_id);
+            frames
+                .iter()
+                .filter(|f| f.0 == sc::SCCombatClearedPacket && f.1 == s.as_bytes())
+                .count()
+        };
+        assert!(!pa.data().unit.is_in_battle);
+        assert!(!pb.data().unit.is_in_battle);
+        assert_eq!(cleared(a.drain(), 0x100), 1, "killer");
+        assert_eq!(
+            cleared(b.drain(), 0x101),
+            1,
+            "non-killer on the aggro table"
+        );
+        assert!(pc.data().unit.is_in_battle, "still on another NPC's list");
+        assert_eq!(cleared(c.drain(), 0x102), 0);
     }
 
     #[tokio::test]

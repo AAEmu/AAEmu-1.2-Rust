@@ -237,10 +237,10 @@ mod tests {
         // Rust-only additions: `/premium`, `/mail`, the seven retail
         // tax / crime / social commands of WP-SL6b, `/restrict_chat` of WP-SL4b, the two
         // auction GM keys, the seven siege / dominion commands of WP-SL6a and the two guild
-        // rename controls.
+        // rename controls and `/stackednpcs`.
         assert_eq!(
             server.systems.services.commands.get_command_keys().len(),
-            120
+            121
         );
         let (_, out) = harness::run(&server, &gm.p, "scripts what").await;
         assert_eq!(out, [harness::error("scripts", "Undefined action...")]);

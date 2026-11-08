@@ -16,6 +16,7 @@
 //! | [`npc`] | `NpcManager`, `NpcGameData`, `Npc` stats, `NpcSpawner`, NPC interaction packets |
 //! | [`doodad`] | `DoodadManager`, `Doodad` funcs / phases, `DoodadSpawner`, persistence, `SCDoodad*` |
 //! | [`spawn_manager`] | `SpawnManager` (one per world instance) |
+//! | [`stacked_npcs`] | Rust only: spawn scatter and the stacked-NPC check |
 //! | [`heightmap`] | `WorldCell` heightmaps, `WorldManager.GetHeight` |
 //! | [`terrain_surface`] | `surface.xml` detail materials -> doodad place kinds |
 //! | [`gimmick`] | `GimmickManager`, `GimmickGameData`, `GimmickSpawner` |
@@ -45,6 +46,7 @@ pub mod schedule_items;
 pub mod spawn_manager;
 pub mod specialty;
 pub mod sphere_quest;
+pub mod stacked_npcs;
 pub mod subzone;
 pub mod terrain_surface;
 
@@ -141,6 +143,8 @@ pub struct System {
     pub schedule_items: schedule_item_manager::ScheduleItemManager,
     /// Scheduled-event announcement state (`Events:ScheduledEvents`, Rust only).
     pub schedule_events: schedule_events::ScheduleEventState,
+    /// Stacked-NPC tracking of the periodic check (Rust only).
+    pub stacked: stacked_npcs::StackTracker,
     /// Behaviour of other subsystems this one calls (installed by them at start).
     pub hooks: hooks::NpcsHooks,
 }
@@ -174,6 +178,8 @@ impl System {
         schedule_item_session::start_tick_task(server);
         // `Events:ScheduledEvents`: validate the allow-list and start the 30 s edge tick.
         schedule_events::start(server);
+        // Periodic stacked-NPC check (`World.StackedNpcCheckSeconds`).
+        stacked_npcs::start(server);
         Ok(())
     }
 
