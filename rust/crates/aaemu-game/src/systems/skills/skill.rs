@@ -2408,13 +2408,16 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             );
             continue;
         };
-        // Position casts (ground / ballistic / summon placement) have no unit obj id: keep the
-        // original target so effects can read the chosen coordinates and rotation.
+        // Position casts (ground / ballistic / summon placement) have no unit obj id, and an
+        // item target keeps its `SkillCastItemTarget` (its `obj_id` is the owner, not the
+        // enchanted / dyed / socketed item); keep the original target for both so effects can
+        // read the chosen coordinates and the item.
         let this_target_caster = if matches!(
             ctx.target_caster,
             SkillCastTarget::Position { .. }
                 | SkillCastTarget::Position2 { .. }
                 | SkillCastTarget::Position3 { .. }
+                | SkillCastTarget::Item { .. }
         ) || target.obj_id() == ctx.target_caster.obj_id()
         {
             ctx.target_caster

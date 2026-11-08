@@ -727,10 +727,8 @@ pub trait ItemSkillHooks: Send + Sync {
         not_ported("Dyeing");
     }
 
-    /// `RenewEquipment` (57) and `PhysicalEnchantWeapon` / `PhysicalEnchantArmor` (20 / 21).
-    /// `armor`: `None` for RenewEquipment, `Some(false)` for the weapon enchant and
-    /// `Some(true)` for the armor enchant. Stage 1 validates the 1.2 client's pair predicate,
-    /// checks the enchanter's `physical_enchant_abilities` row and rolls it; no item changes.
+    /// `RenewEquipment` (57): the source item is the base equipment and the target item the
+    /// material. Stage 1 validates the 1.2 client's pair predicate; no item changes.
     /// `true` = the cast may continue.
     #[allow(clippy::too_many_arguments)]
     fn renew_equipment(
@@ -742,7 +740,19 @@ pub trait ItemSkillHooks: Send + Sync {
         _source_slot: u32,
         _target_item_id: u64,
         _target_slot: u32,
-        _armor: Option<bool>,
+    ) -> bool {
+        false
+    }
+
+    /// `PhysicalEnchantWeapon` (20) / `PhysicalEnchantArmor` (21): one item (`item_id`)
+    /// enchanted at an NPC. Stage 1 checks the enchanter's `physical_enchant_abilities` row and
+    /// rolls it; no item changes. `true` = the cast may continue.
+    fn physical_enchant(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _item_id: u64,
+        _armor: bool,
         _npc_template_id: Option<u32>,
     ) -> bool {
         false

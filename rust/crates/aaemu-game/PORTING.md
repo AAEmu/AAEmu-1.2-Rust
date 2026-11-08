@@ -3419,18 +3419,32 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   scroll count.
 * systems::economy / skills (renew and physical enchant, 2026-11, stage 1): the C#
   `RenewEquipment` (57), `PhysicalEnchantWeapon` (20) and `PhysicalEnchantArmor` (21) actions only
-  logged. Rust ports the 1.2 client's pair predicate `FUN_397cca90` (`X2RenewItem.Renew` ->
+  logged. **Renew** ports the 1.2 client's pair predicate `FUN_397cca90` (`X2RenewItem.Renew` ->
   `FUN_394e92d0`): armor needs a `base_equipment` source and a non-`base_equipment` target with
   the same armor-type record; a weapon needs the same holdable slot type and renew category, with
   the renew category in 1..3. The client's toast ids are sent for the same refusals (20 slot out
-  of range, 27 item missing, 206 not a bag item, 1 not a renewable pair). For 20/21 the
-  enchanter's `physical_enchant_abilities` row (npc template id, armor flag, next enchant step)
-  is checked: `min_friendship > 0` is always unmet because 1.2 grants no NPC friendship
-  (`track_friendship` is false for every NPC), and the row's `success_ratio` is rolled. The next
-  enchant step is INFERRED as `temper_physical - 100 + 1` (`IT2-ENCHANT-LEVEL`). Stage 1 never
-  changes an item: what a success consumes / transforms is capture-blocked (`IT2-STAGE2`); the
-  outcome is logged. The enchanter NPC is the cast's NPC operand when it has one, else the
-  character's current interaction object (`CSInteractNPC`), because the 1.2 cast carries no NPC.
+  of range, 27 item missing, 206 not a bag item, 1 not a renewable pair).
+  **Physical enchant is a single-item cast and does not use that pair predicate.** Skills 10521 /
+  10522 (`기본강화-무기` / `기본강화-방어구`) target type 9 (Item) and are common skills
+  (auto-learn, no learn requirement, ability 0), so the client sends a plain `CSStartSkill`
+  (caster = the player, target = one `SkillCastItemTarget`); the NPC dialog texts
+  (ui_texts 1428-1463) describe one item with money + archium and a 1x / 2x / 4x archium choice.
+  The enchanted item is the target's item id, looked up in the bag; `SkillCastItemTarget`'s
+  `obj_id` is the item owner (`FUN_394e92d0`), not a slot. Refusals use `ItemCannotUse` (24,
+  invalid item / wrong arm), `NotReady` (206, NPC ability ladder) and `NotEnoughFriendship` (28);
+  missing items use `NotEnoughItem` (27). The enchanter's `physical_enchant_abilities` row (npc
+  template id, armor flag, next enchant step) is checked: `min_friendship > 0` is always unmet
+  because 1.2 grants no NPC friendship (`track_friendship` is false for every NPC), and the row's
+  `success_ratio` is rolled. The next enchant step is INFERRED as `temper_physical - 100 + 1`
+  (`IT2-ENCHANT-LEVEL`). Stage 1 never changes an item: what a success consumes / transforms is
+  capture-blocked (`IT2-STAGE2`); the outcome is logged. The money / archium formula, the
+  multiplier effect, the great-success chance and the "enchant durability" storage are
+  capture-blocked (`IT2-COST`, log-only, never refused on a guessed cost). The enchanter NPC is
+  the cast's NPC operand when it has one, else the character's current interaction object
+  (`CSInteractNPC`), because the 1.2 cast carries no NPC. The skill effect dispatcher keeps an
+  item `SkillCastItemTarget` for all target-type-Item effects (the C# passed the original
+  `targetCaster` unchanged; the Rust rewrite used to replace it with `Unit(caster)` unless the
+  obj ids matched, so a single-item enchant never reached its handler).
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
