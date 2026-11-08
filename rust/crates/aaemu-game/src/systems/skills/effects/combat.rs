@@ -553,6 +553,9 @@ pub(super) fn damage_with_aoe(
     let value = aoe_multiplier
         .map_or(value, |multiplier| (value as f32 * multiplier) as i32)
         .max(1);
+    // Server policy: hits on an abandoned house remove a fixed share of its maximum HP. Applied
+    // before the packet, reflection and `reduce_current_hp` so the client sees the real damage.
+    let value = crate::systems::housing::abandoned_house_hit_damage(server, &trg, &caster, value);
     let absorbed = ((final_damage * (1.0 - reduction_mul)) as i32).max(0);
     let health_stolen = ((value as f32 * (e.health_steal_ratio as f32 / 100.0)) as i32).max(0);
     let mana_stolen = ((value as f32 * (e.mana_steal_ratio as f32 / 100.0)) as i32).max(0);

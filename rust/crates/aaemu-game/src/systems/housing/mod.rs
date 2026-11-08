@@ -200,6 +200,38 @@ pub fn demolish_by_player(server: &GameServer, player: &PlayerRef, house: &House
     ops::demolish(server, Some(player), house, false, false);
 }
 
+/// Server policy: a hit by another unit on an abandoned house (owner removed by tax demolition:
+/// no owner and the removal debuff 2250 active) removes at least
+/// `ceil(max_hp / Housing.AbandonedHouseHitsToBreak)`, so about that many hits break it. The
+/// house's own burn/removal ticks (caster == target) and non-positive damage are unchanged, and
+/// so is every house without the removal debuff (owned, protected, lodestones, forts).
+pub fn abandoned_house_hit_damage(
+    server: &GameServer,
+    target: &WorldObject,
+    caster: &WorldObject,
+    value: i32,
+) -> i32 {
+    let hits = server.config.get().housing.abandoned_house_hits_to_break;
+    if value <= 0 || hits == 0 || target.same(caster) {
+        return value;
+    }
+    let Some(house) = target.as_house() else {
+        return value;
+    };
+    let max_hp = {
+        let h = house.data();
+        if h.unit.owner_id != 0 || !h.unit.buffs.check_buff(manager::BUFF_REMOVAL_DEBUFF) {
+            return value;
+        }
+        crate::systems::ai::collision::objects::house_collision_max_hp(&h)
+    };
+    if max_hp <= 0 {
+        return value;
+    }
+    let share = (i64::from(max_hp) + i64::from(hits) - 1) / i64::from(hits);
+    value.max(share.min(i64::from(i32::MAX)) as i32)
+}
+
 /// The removal debuff (1.2: 10 damage / 15 s) and the "Burning House" buff (deviation: 30 damage
 /// / s) damage their abandoned house. Authorize those server-owned ticks without allowing
 /// ordinary self attacks. Buff 2250 is a `system` buff; buff 39 is not, so it is accepted only

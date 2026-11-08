@@ -76,6 +76,19 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub placement_strict_surface: bool,
+    /// Hits by other units on an abandoned (tax-demolished, ownerless) house remove at least
+    /// `max_hp / AbandonedHouseHitsToBreak`, so about this many hits break any house. `0`
+    /// disables the scaling. Server policy, not a 1.2 rule. `Housing.AbandonedHouseHitsToBreak`.
+    #[serde(
+        rename = "abandonedhousehitstobreak",
+        default = "default_abandoned_house_hits_to_break",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub abandoned_house_hits_to_break: u32,
+}
+
+fn default_abandoned_house_hits_to_break() -> u32 {
+    5
 }
 
 fn default_dominion_claim_limit() -> u32 {
@@ -92,6 +105,7 @@ impl Default for HousingConfig {
             defense_hq_offset: [0.0; 3],
             siege_shop_gate: false,
             placement_strict_surface: false,
+            abandoned_house_hits_to_break: default_abandoned_house_hits_to_break(),
         }
     }
 }
@@ -170,6 +184,19 @@ mod tests {
             }))
             .unwrap();
             assert!(config.housing.placement_strict_surface);
+        }
+    }
+
+    #[test]
+    fn abandoned_house_hits_to_break_defaults_to_five_and_binds_numbers_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.abandoned_house_hits_to_break, 5);
+        for value in [serde_json::json!(0), serde_json::json!("0")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "AbandonedHouseHitsToBreak": value }
+            }))
+            .unwrap();
+            assert_eq!(config.housing.abandoned_house_hits_to_break, 0);
         }
     }
 

@@ -1960,3 +1960,98 @@ async fn real_compact_house_burning_buff_ticks_30_per_second_and_death_cleanup()
     assert!(f.server.world.object(house.obj_id).is_none());
     assert!(f.server.systems.housing.manager.all().is_empty());
 }
+
+fn abandoned_hit(f: &Fixture, house: &HouseRef, value: i32) -> i32 {
+    super::abandoned_house_hit_damage(
+        &f.server,
+        &WorldObject::from(house),
+        &WorldObject::from(&f.player),
+        value,
+    )
+}
+
+fn set_hp(house: &HouseRef, max_hp: i32) {
+    let mut h = house.data();
+    h.unit.max_hp = max_hp;
+    h.unit.hp = max_hp;
+}
+
+#[tokio::test]
+async fn abandoned_house_hit_breaks_the_house_in_five_hits() {
+    use crate::systems::skills::combat as unit_combat;
+    use crate::systems::skills::types::KillReason;
+
+    for (max_hp, share) in [(150_000, 30_000), (1_003, 201)] {
+        let (f, house) = removal_fixture(removal_skills());
+        set_hp(&house, max_hp);
+        let attacker = WorldObject::from(&f.player);
+        let target = WorldObject::from(&house);
+        for hit in 1..=5 {
+            assert!(f.server.world.object(house.obj_id).is_some(), "hit {hit}");
+            let damage = abandoned_hit(&f, &house, 23);
+            assert_eq!(damage, share);
+            unit_combat::reduce_current_hp(
+                &f.server,
+                &target,
+                Some(&attacker),
+                damage,
+                KillReason::Damage,
+            );
+        }
+        assert_eq!(house.data().unit.hp, 0);
+        assert!(f.server.world.object(house.obj_id).is_none());
+    }
+}
+
+#[tokio::test]
+async fn abandoned_house_hit_never_reduces_larger_hits_or_turns_misses_into_hits() {
+    let (f, house) = removal_fixture(removal_skills());
+    set_hp(&house, 150_000);
+    assert_eq!(abandoned_hit(&f, &house, 90_000), 90_000);
+    assert_eq!(abandoned_hit(&f, &house, 0), 0);
+    assert_eq!(abandoned_hit(&f, &house, -5), -5);
+}
+
+#[tokio::test]
+async fn abandoned_house_hit_leaves_owned_protected_and_lodestone_houses_alone() {
+    let (f, house) = removal_fixture(removal_skills());
+    set_hp(&house, 150_000);
+    assert_eq!(abandoned_hit(&f, &house, 23), 30_000);
+    // Owned (also covers a protected, owned house).
+    house.data().unit.owner_id = f.player.character_id;
+    assert_eq!(abandoned_hit(&f, &house, 23), 23);
+    // Lodestone-like: ownerless without the removal debuff.
+    house.data().unit.owner_id = 0;
+    manager::set_removal_debuff(&f.server, &house, false);
+    assert_eq!(abandoned_hit(&f, &house, 23), 23);
+    manager::set_removal_debuff(&f.server, &house, true);
+    assert_eq!(abandoned_hit(&f, &house, 23), 30_000);
+    // The house's own ticks are never scaled.
+    let own = WorldObject::from(&house);
+    assert_eq!(
+        super::abandoned_house_hit_damage(&f.server, &own, &own, 30),
+        30
+    );
+}
+
+#[tokio::test]
+async fn abandoned_house_hit_scaling_follows_the_config_and_keeps_own_ticks() {
+    use crate::systems::skills::buffs;
+
+    let (f, house) = removal_fixture(removal_skills());
+    set_hp(&house, 150_000);
+    f.server
+        .config
+        .update(|c| c.housing.abandoned_house_hits_to_break = 0);
+    assert_eq!(abandoned_hit(&f, &house, 23), 23);
+    f.server
+        .config
+        .update(|c| c.housing.abandoned_house_hits_to_break = 10);
+    assert_eq!(abandoned_hit(&f, &house, 23), 15_000);
+    let burn = burning_buff(&house);
+    buffs::dispel_task(&f.server, house.obj_id, burn.index, burn.task_gen);
+    assert_eq!(house.data().unit.hp, 150_000 - 30);
+    let removal = removal_buff(&house);
+    buffs::dispel_task(&f.server, house.obj_id, removal.index, removal.task_gen);
+    assert_eq!(house.data().unit.hp, 150_000 - 40);
+}
