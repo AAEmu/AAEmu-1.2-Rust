@@ -3430,21 +3430,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (caster = the player, target = one `SkillCastItemTarget`); the NPC dialog texts
   (ui_texts 1428-1463) describe one item with money + archium and a 1x / 2x / 4x archium choice.
   The enchanted item is the target's item id, looked up in the bag; `SkillCastItemTarget`'s
-  `obj_id` is the item owner (`FUN_394e92d0`), not a slot. Refusals use `ItemCannotUse` (24,
-  invalid item / wrong arm), `NotReady` (206, NPC ability ladder) and `NotEnoughFriendship` (28);
-  missing items use `NotEnoughItem` (27). The enchanter's `physical_enchant_abilities` row (npc
-  template id, armor flag, next enchant step) is checked: `min_friendship > 0` is always unmet
-  because 1.2 grants no NPC friendship (`track_friendship` is false for every NPC), and the row's
-  `success_ratio` is rolled. The next enchant step is INFERRED as `temper_physical - 100 + 1`
-  (`IT2-ENCHANT-LEVEL`). Stage 1 never changes an item: what a success consumes / transforms is
-  capture-blocked (`IT2-STAGE2`); the outcome is logged. The money / archium formula, the
-  multiplier effect, the great-success chance and the "enchant durability" storage are
-  capture-blocked (`IT2-COST`, log-only, never refused on a guessed cost). The enchanter NPC is
-  the cast's NPC operand when it has one, else the character's current interaction object
-  (`CSInteractNPC`), because the 1.2 cast carries no NPC. The skill effect dispatcher keeps an
-  item `SkillCastItemTarget` for all target-type-Item effects (the C# passed the original
-  `targetCaster` unchanged; the Rust rewrite used to replace it with `Unit(caster)` unless the
-  obj ids matched, so a single-item enchant never reached its handler).
+  `obj_id` is the item owner (`FUN_394e92d0`), not a slot. The effect applies from
+  `application_method_id 2` (Source), so the effect target is the caster; the standard
+  `target.ObjId == targetCaster.ObjId ? targetCaster : SkillCastUnitTarget` rewrite (the C#
+  `ApplyEffects`, mirrored in Rust) therefore keeps the item target because the owner id is the
+  caster's. Refusals use `ItemCannotUse` (24, invalid item / wrong arm), `NotReady` (206, NPC
+  ability ladder) and `NotEnoughFriendship` (28); missing items use `NotEnoughItem` (27). The
+  enchanter's `physical_enchant_abilities` row (npc template id, armor flag, next enchant step)
+  is checked: `min_friendship > 0` is always unmet because 1.2 grants no NPC friendship
+  (`track_friendship` is false for every NPC), and the row's `success_ratio` is rolled. The next
+  enchant step is INFERRED as `temper_physical - 100 + 1` (`IT2-ENCHANT-LEVEL`). Stage 1 never
+  changes an item: what a success consumes / transforms is capture-blocked (`IT2-STAGE2`); the
+  outcome is logged. The money / archium formula, the multiplier effect, the great-success chance
+  and the "enchant durability" storage are capture-blocked (`IT2-COST`, log-only, never refused
+  on a guessed cost). The enchanter NPC is the cast's NPC operand when it has one, else the
+  character's current interaction object (`CSInteractNPC`), because the 1.2 cast carries no NPC.
+  **HARD RULE:** stage 2 of physical enchant (any change to the item: grade, durability,
+  destruction) must not land until the `IT2-COST` rule (money + archium, the 1x / 2x / 4x
+  multiplier) is settled and enforced; otherwise it is a free enchant.
+  **OPEN (`IT2-RENEW-SLOT`):** `item_target_slot` (`systems/skills/effects/special/items.rs:120`)
+  treats `SkillCastItemTarget.obj_id` as a bag slot, while the enchant evidence says `obj_id` is
+  the owner's id. If that is right, real renew casts fail the slot range check. Needs a capture,
+  or a check of the renew request builder `FUN_394e92d0`; renew is left unchanged for now.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up

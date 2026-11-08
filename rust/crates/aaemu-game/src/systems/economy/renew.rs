@@ -292,6 +292,10 @@ pub fn renew_equipment(
 /// base-equipment + material pair. The dialog selects a bag item (`X2Item.IsEnchantable` takes
 /// a bag slot); the item is looked up in the bag by id. Returns whether the cast may continue;
 /// on `false` an `SCErrorMsg` was sent and the skill cancelled.
+///
+/// **HARD RULE: stage 2 (any change to the item: grade, durability, destruction) must not land
+/// until the `IT2-COST` rule (money + archium, the 1x / 2x / 4x multiplier) is settled and
+/// enforced; otherwise it is a free enchant.**
 pub fn physical_enchant(
     server: &GameServer,
     player: &PlayerRef,

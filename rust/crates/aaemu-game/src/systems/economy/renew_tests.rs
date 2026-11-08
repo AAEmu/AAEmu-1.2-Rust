@@ -20,8 +20,12 @@ use crate::systems::economy::loot::ScriptedRng;
 use crate::systems::economy::renew::{renewable_pair, PhysicalEnchantAbility, RenewData};
 use crate::systems::economy::tests::{give, test_data, World};
 use crate::systems::skills::data::effects::{EffectKind, EffectTemplate, SpecialEffect};
+use crate::systems::skills::effects::special;
+use crate::systems::skills::effects::{EffectArgs, EffectSource};
+use crate::systems::skills::geometry::Target;
 use crate::systems::skills::handlers::CSStartSkillPacket;
-use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::systems::skills::state::SkillRun;
+use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
 use crate::test_support::{
     open_client_skills, spawn_player, test_character, test_server_with, TestClient,
 };
@@ -416,6 +420,49 @@ async fn renew_equipment_validates_and_logs_without_mutating() {
     assert_eq!(item(&w.pa, target).unwrap(), before_target);
     assert!(!w.pa.data().skill_char.skill_cancelled);
     assert!(w.a.drain().is_empty());
+}
+
+/// The `special::execute` wrapper of effect 57 still reaches the economy hook (the direct
+/// tests above call the hook, this one the skill effect action).
+#[tokio::test]
+async fn renew_equipment_effect_wrapper_validates_and_logs() {
+    let mut w = world();
+    let source = give(&w, &w.pa, slot_type::INVENTORY, SRC_WEAPON, 1, 0);
+    let target = give(&w, &w.pa, slot_type::INVENTORY, TGT_WEAPON, 1, 1);
+    let before_source = item(&w.pa, source).unwrap();
+    let before_target = item(&w.pa, target).unwrap();
+    let skill = SkillRun::new(
+        Arc::new(crate::systems::skills::tests::skill_template(57)),
+        1,
+    );
+    let args = EffectArgs {
+        caster: Some(WorldObject::from(&w.pa)),
+        caster_caster: SkillCaster::Item {
+            obj_id: 0,
+            item_id: source,
+            item_template_id: SRC_WEAPON,
+            type1: 0,
+            type2: 0,
+        },
+        target: Target::Obj(WorldObject::from(&w.pa)),
+        target_caster: SkillCastTarget::Item {
+            obj_id: 1,
+            id: target,
+            type1: 0,
+            type2: 0,
+        },
+        cast: CastAction::Skill {
+            skill_id: 57,
+            tl_id: 1,
+        },
+        source: EffectSource::from_skill(skill),
+        skill_object: &SkillObject::None,
+    };
+    special::execute(&w.server, 57, &args, [0; 4]);
+    assert!(!w.pa.data().skill_char.skill_cancelled);
+    assert!(w.a.drain().is_empty());
+    assert_eq!(item(&w.pa, source).unwrap(), before_source);
+    assert_eq!(item(&w.pa, target).unwrap(), before_target);
 }
 
 #[tokio::test]
