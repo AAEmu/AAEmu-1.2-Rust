@@ -441,6 +441,11 @@ pub fn get_attached(
             if m.header.status == mail_status::UNREAD && (took_money || !item_slot_list.is_empty())
             {
                 m.header.status = mail_status::READ;
+                // `mail_guide` keeps read mail for 5 days; claiming an attachment counts as
+                // reading it, so the read clock starts here when the body was never opened.
+                if m.open_date == 0 {
+                    m.open_date = mail::now();
+                }
                 m.is_dirty = true;
                 Some(m.mail_type)
             } else {

@@ -1,0 +1,12 @@
+{
+	"Mail": {
+		// Retention from the 1.2 client's mail guide (ui_texts 4465):
+		// normal mail - read 5 days, unread 30 days;
+		// system mail - read 5 days, unread 90 days.
+		// Mail whose attachments are still unclaimed keeps the unread deadline.
+		"ReadRetentionDays": 5,
+		"UnreadRetentionDays": 30,
+		"SystemReadRetentionDays": 5,
+		"SystemUnreadRetentionDays": 90
+	}
+}

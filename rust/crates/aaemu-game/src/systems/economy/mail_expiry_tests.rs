@@ -1,9 +1,11 @@
-//! Ordinary-mail lifecycle regressions. No wall-clock sleeps, fake manager, or wire round trips.
+//! Mail lifecycle regressions. No wall-clock sleeps, fake manager, or wire round trips.
+//! The windows are the 1.2 client's `mail_guide` (`ui_texts` 4465): normal mail 5 days read /
+//! 30 days unread, system mail 5 days read / 90 days unread; mail with unclaimed attachments
+//! keeps the unread deadline. The commercial mailbox (`ui_texts` 4464) has its own rules.
 //! Native 1.2 evidence: decomp/x2game12.c builders 393CCCD0 (money), 393CD1D0
 //! (delete), serializer 397BA450 (return), header/body at 1995740-42/1995902-09,
 //! and ui/scripts/x2ui/mailbox/mail/read_mail.lua:129-139
-//! (receipt vs send date). No ordinary-mail expiry field/TTL is exposed there: the
-//! 14-day receipt-time retention is an explicit server policy using the existing constant.
+//! (receipt vs send date).
 
 use super::*;
 use crate::net::registry::ClientPacket;
@@ -11,6 +13,35 @@ use crate::opcodes::sc;
 use crate::systems::economy::mail_character;
 use crate::systems::economy::mail_packets::CSTakeAttachmentSequentially;
 use crate::systems::economy::tests::{give, world, World, SINGLE};
+
+fn normal_unread_secs(server: &GameServer) -> i64 {
+    server.systems.economy.mail.retention().unread_secs
+}
+
+fn normal_read_secs(server: &GameServer) -> i64 {
+    server.systems.economy.mail.retention().read_secs
+}
+
+fn system_unread_secs(server: &GameServer) -> i64 {
+    server.systems.economy.mail.retention().system_unread_secs
+}
+
+fn system_read_secs(server: &GameServer) -> i64 {
+    server.systems.economy.mail.retention().system_read_secs
+}
+
+fn bob_mail_ids(server: &GameServer) -> Vec<i64> {
+    server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .filter(|(_, m)| m.header.receiver_id == 2)
+        .map(|(k, _)| k)
+        .collect()
+}
 
 fn mail_world() -> World {
     let w = world();
@@ -56,6 +87,236 @@ fn frame(opcode: u16, id: i64) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn mail_retention_defaults_are_the_client_windows() {
+    let r = MailRetention::default();
+    assert_eq!(
+        (
+            r.read_secs,
+            r.unread_secs,
+            r.system_read_secs,
+            r.system_unread_secs
+        ),
+        (
+            5 * SECONDS_PER_DAY,
+            30 * SECONDS_PER_DAY,
+            5 * SECONDS_PER_DAY,
+            90 * SECONDS_PER_DAY
+        )
+    );
+    let cfg = crate::systems::economy::config::MailConfig::default();
+    assert_eq!(MailRetention::from_config(&cfg), r);
+    // Negative input clamps to 0 instead of extending the window.
+    let cfg = crate::systems::economy::config::MailConfig {
+        read_retention_days: -1,
+        ..cfg
+    };
+    assert_eq!(MailRetention::from_config(&cfg).read_secs, 0);
+}
+
+#[tokio::test]
+async fn normal_unread_mail_is_kept_thirty_days_not_fourteen() {
+    let mut w = mail_world();
+    let (id, _) = send_player_mail(&w, mail_type::EXPRESS, 0, 0);
+    let recv = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(id)
+        .unwrap()
+        .body
+        .recv_date;
+    w.a.drain();
+    w.b.drain();
+    assert_eq!(normal_unread_secs(&w.server), 30 * SECONDS_PER_DAY);
+    tick(&w.server, recv + 14 * SECONDS_PER_DAY);
+    tick(&w.server, recv + normal_unread_secs(&w.server) - 1);
+    assert!(
+        w.server.systems.economy.mail.get_mail_by_id(id).is_some(),
+        "normal unread mail survives 14 days and the last second of its 30-day window"
+    );
+    tick(&w.server, recv + normal_unread_secs(&w.server));
+    let returned = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
+    assert!(returned.header.returned);
+    assert_eq!(
+        (returned.header.receiver_id, returned.header.sender_id),
+        (1, 2)
+    );
+}
+
+#[tokio::test]
+async fn normal_read_mail_expires_five_days_after_reading() {
+    let mut w = mail_world();
+    let (id, _) = send_player_mail(&w, mail_type::EXPRESS, 0, 0);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        mail_character::read_mail(&mut txn, &w.pb, false, id);
+    }
+    let opened = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
+    assert_eq!(opened.header.status, mail_status::READ);
+    assert!(opened.open_date > 0);
+    w.a.drain();
+    w.b.drain();
+    tick(
+        &w.server,
+        opened.open_date + normal_read_secs(&w.server) - 1,
+    );
+    assert!(w.server.systems.economy.mail.get_mail_by_id(id).is_some());
+    tick(&w.server, opened.open_date + normal_read_secs(&w.server));
+    assert!(
+        w.server.systems.economy.mail.get_mail_by_id(id).is_none(),
+        "read mail is deleted after the client's 5 days, not after 14"
+    );
+    assert_eq!(w.b.drain_ops(), vec![sc::SCMailDeletedPacket]);
+}
+
+#[tokio::test]
+async fn read_mail_with_unclaimed_attachments_keeps_the_unread_deadline() {
+    let mut w = mail_world();
+    let (id, ids) = send_player_mail(&w, mail_type::EXPRESS, 1, 0);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        mail_character::read_mail(&mut txn, &w.pb, false, id);
+    }
+    let opened = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
+    w.a.drain();
+    w.b.drain();
+    tick(
+        &w.server,
+        opened.open_date + normal_read_secs(&w.server) + 1,
+    );
+    assert!(
+        w.server.systems.economy.mail.get_mail_by_id(id).is_some(),
+        "an unclaimed attachment keeps the unread deadline (mail_guide)"
+    );
+    tick(
+        &w.server,
+        opened.body.recv_date + normal_unread_secs(&w.server),
+    );
+    assert!(w.server.systems.economy.mail.get_mail_by_id(id).is_none());
+    assert!(w.server.items.item_by_id(ids[0]).is_none());
+}
+
+#[tokio::test]
+async fn system_mail_has_ninety_day_unread_and_five_day_read_windows() {
+    let mut w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(send_system_mail(
+        &mut txn,
+        mail_type::SYS_EXPRESS,
+        ".questReward",
+        2,
+        "system",
+        "",
+        0,
+        vec![]
+    ));
+    assert!(send_system_mail(
+        &mut txn,
+        mail_type::SYS_SELL_BACKPACK,
+        ".sellBackpack",
+        2,
+        "read me",
+        "",
+        0,
+        vec![]
+    ));
+    drop(txn);
+    let ids = bob_mail_ids(&w.server);
+    assert_eq!(ids.len(), 2);
+    let (unread_id, read_id) = (ids[0], ids[1]);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        mail_character::read_mail(&mut txn, &w.pb, false, read_id);
+    }
+    let read_open = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(read_id)
+        .unwrap()
+        .open_date;
+    let recv = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(unread_id)
+        .unwrap()
+        .body
+        .recv_date;
+    w.a.drain();
+    w.b.drain();
+    assert_eq!(system_unread_secs(&w.server), 90 * SECONDS_PER_DAY);
+    assert_eq!(system_read_secs(&w.server), 5 * SECONDS_PER_DAY);
+    // Read system mail uses the same 5-day read window as normal mail.
+    tick(&w.server, read_open + system_read_secs(&w.server) - 1);
+    assert!(w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(read_id)
+        .is_some());
+    tick(&w.server, read_open + system_read_secs(&w.server));
+    assert!(w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(read_id)
+        .is_none());
+    // Unread system mail outlives the normal 30-day window.
+    tick(&w.server, recv + normal_unread_secs(&w.server) + 1);
+    assert!(w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(unread_id)
+        .is_some());
+    tick(&w.server, recv + system_unread_secs(&w.server));
+    assert!(w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(unread_id)
+        .is_none());
+}
+
+#[tokio::test]
+async fn commercial_mail_is_not_on_the_ordinary_mail_retention_timer() {
+    let mut w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(send_system_mail(
+        &mut txn,
+        mail_type::CHARGED,
+        ".inGameShop",
+        2,
+        "shop",
+        "",
+        0,
+        vec![]
+    ));
+    drop(txn);
+    let id = bob_mail_ids(&w.server)[0];
+    w.server
+        .systems
+        .economy
+        .mail
+        .with_mail_mut(id, |m| m.body.recv_date = now() - 365 * SECONDS_PER_DAY);
+    w.a.drain();
+    w.b.drain();
+    tick(&w.server, now());
+    assert!(
+        w.server.systems.economy.mail.get_mail_by_id(id).is_some(),
+        "the commercial mailbox has its own guide (ui_texts 4464)"
+    );
+}
+
+#[tokio::test]
 async fn expiry_receipt_boundary_returns_zero_one_ten_attachments_once() {
     for count in [0, 1, 10] {
         for kind in [mail_type::NORMAL, mail_type::EXPRESS] {
@@ -63,7 +324,7 @@ async fn expiry_receipt_boundary_returns_zero_one_ten_attachments_once() {
             let (id, ids) = send_player_mail(&w, kind, count, 125);
             let original = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
             let money = (w.pa.data().money, w.pb.data().money);
-            let due = original.body.recv_date + MAIL_EXPIRE_DELAY_SECS;
+            let due = original.body.recv_date + normal_unread_secs(&w.server);
             tick(&w.server, due - 1);
             assert!(
                 !w.server
@@ -110,7 +371,7 @@ async fn expiry_receipt_boundary_returns_zero_one_ten_attachments_once() {
                 assert_eq!((item.owner_id, item.slot_type), (1, slot_type::MAIL));
             }
             tick(&w.server, due);
-            tick(&w.server, due + MAIL_EXPIRE_DELAY_SECS - 1);
+            tick(&w.server, due + normal_unread_secs(&w.server) - 1);
             assert_eq!(
                 w.server.systems.economy.mail.get_mail_by_id(id).unwrap(),
                 returned
@@ -118,8 +379,8 @@ async fn expiry_receipt_boundary_returns_zero_one_ten_attachments_once() {
             assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
 
             // A returned letter has one last retention period; it never bounces back.
-            tick(&w.server, due + MAIL_EXPIRE_DELAY_SECS);
-            tick(&w.server, due + MAIL_EXPIRE_DELAY_SECS + 1);
+            tick(&w.server, due + normal_unread_secs(&w.server));
+            tick(&w.server, due + normal_unread_secs(&w.server) + 1);
             assert_eq!(w.server.systems.economy.mail.count(), 0);
             assert_eq!(w.pa.data().unread_mail.received, 0);
             assert_eq!(w.pb.data().unread_mail.received, 0);
@@ -179,7 +440,7 @@ async fn expiry_read_registered_self_and_deleted_sender_are_terminal() {
             .unwrap()
             .body
             .recv_date
-            + MAIL_EXPIRE_DELAY_SECS;
+            + normal_unread_secs(&w.server);
         w.a.drain();
         w.b.drain();
         tick(&w.server, due);
@@ -202,7 +463,7 @@ async fn expiry_zero_receipt_and_clock_rollback_obey_the_same_boundary() {
         m.body.send_date = 0;
         m.body.recv_date = 0;
     });
-    for time in [-1, 0, MAIL_EXPIRE_DELAY_SECS - 1] {
+    for time in [-1, 0, normal_unread_secs(&w.server) - 1] {
         tick(&w.server, time);
         assert!(
             !w.server
@@ -215,7 +476,7 @@ async fn expiry_zero_receipt_and_clock_rollback_obey_the_same_boundary() {
                 .returned
         );
     }
-    tick(&w.server, MAIL_EXPIRE_DELAY_SECS);
+    tick(&w.server, normal_unread_secs(&w.server));
     assert!(
         w.server
             .systems
@@ -271,7 +532,7 @@ async fn expiry_disposes_loose_escrow_but_preserves_a_stale_reference_to_taken_i
         .unwrap()
         .body
         .recv_date
-        + MAIL_EXPIRE_DELAY_SECS;
+        + normal_unread_secs(&w.server);
     tick(&w.server, due);
     tick(&w.server, due + 1);
     assert!(w.server.items.item_by_id(ids[0]).is_none());
@@ -290,7 +551,7 @@ async fn expiry_offline_return_reload_and_reconnect_do_not_repeat_refund() {
     let mut w = mail_world();
     let (id, ids) = send_player_mail(&w, mail_type::EXPRESS, 1, 75);
     w.server.systems.economy.mail.with_mail_mut(id, |m| {
-        m.body.recv_date = now() - MAIL_EXPIRE_DELAY_SECS - 10;
+        m.body.recv_date = now() - normal_unread_secs(&w.server) - 10;
     });
     w.server.world.world(0).unwrap().delete(&w.pa);
     w.server.world.world(0).unwrap().delete(&w.pb);
@@ -307,7 +568,7 @@ async fn expiry_offline_return_reload_and_reconnect_do_not_repeat_refund() {
         .unwrap()
         .body
         .recv_date
-        + MAIL_EXPIRE_DELAY_SECS;
+        + normal_unread_secs(&w.server);
     w.a.drain();
     w.b.drain();
     tick(&w.server, due);
@@ -370,7 +631,7 @@ async fn expiry_packet_edges_enforce_current_owner_before_timer_and_return_auth(
     for opcode in [0x09eu16, 0x0a1, 0x0a3, 0x09c] {
         let mut w = mail_world();
         let (id, ids) = send_player_mail(&w, mail_type::EXPRESS, 1, 25);
-        let past = now() - MAIL_EXPIRE_DELAY_SECS - 1;
+        let past = now() - normal_unread_secs(&w.server) - 1;
         w.server
             .systems
             .economy
@@ -431,7 +692,7 @@ async fn expiry_serializes_with_take_delete_and_send() {
             .unwrap()
             .body
             .recv_date
-            + MAIL_EXPIRE_DELAY_SECS;
+            + normal_unread_secs(&w.server);
         let sender_money = w.pa.data().money;
         let receiver_money = w.pb.data().money;
         // Force either lock acquisition order, then let a second tick, take, delete and
@@ -511,12 +772,12 @@ async fn expiry_preserves_system_tax_auction_quest_and_legacy_billing_metadata()
         .mail
         .with_mail_mut(id, |m| m.attach_money(25, 5000, 7000));
     let original = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
-    let due = original.body.recv_date + MAIL_EXPIRE_DELAY_SECS;
+    let due = original.body.recv_date + normal_unread_secs(&w.server);
     {
         let mut txn = ItemTxn::begin(&w.server);
+        // Normal-type system mail (sender id 0) follows the normal 30-day window; the
+        // system types below keep the 90-day one.
         for kind in [
-            mail_type::NORMAL,
-            mail_type::EXPRESS,
             mail_type::BILLING,
             mail_type::AUC_OFF_FAIL,
             mail_type::AUC_OFF_SUCCESS,
@@ -560,7 +821,7 @@ async fn expiry_preserves_system_tax_auction_quest_and_legacy_billing_metadata()
         ),
         (25, 5000, 7000)
     );
-    tick(&w.server, due + MAIL_EXPIRE_DELAY_SECS);
+    tick(&w.server, due + normal_unread_secs(&w.server));
     assert_eq!((w.pa.data().money, w.pb.data().money), money);
     for m in protected {
         assert_eq!(
@@ -580,7 +841,7 @@ async fn expiry_failed_return_does_not_publish_owner_or_success_then_retries() {
     mutate_item(&w.server, ids[0], |i| i.slot_type = slot_type::INVENTORY);
     w.a.drain();
     w.b.drain();
-    let due = original.body.recv_date + MAIL_EXPIRE_DELAY_SECS;
+    let due = original.body.recv_date + normal_unread_secs(&w.server);
     tick(&w.server, due);
     assert_eq!(
         w.server.systems.economy.mail.get_mail_by_id(id).unwrap(),
@@ -648,13 +909,13 @@ async fn expiry_old_save_ack_preserves_new_return_and_terminal_deletion() {
     let (id, _) = send_player_mail(&w, mail_type::EXPRESS, 1, 50);
     let mails = &w.server.systems.economy.mail;
     let before = mails.prepare_save();
-    let due = mails.get_mail_by_id(id).unwrap().body.recv_date + MAIL_EXPIRE_DELAY_SECS;
+    let due = mails.get_mail_by_id(id).unwrap().body.recv_date + normal_unread_secs(&w.server);
     tick(&w.server, due);
     mails.acknowledge_committed(before);
     assert!(mails.get_mail_by_id(id).unwrap().is_dirty);
     let returned = mails.prepare_save();
     assert_eq!(returned.dirty.len(), 1);
-    tick(&w.server, due + MAIL_EXPIRE_DELAY_SECS);
+    tick(&w.server, due + normal_unread_secs(&w.server));
     mails.acknowledge_committed(returned);
     assert_eq!(mails.state().deleted, vec![id]);
     assert!(mails.prepare_save().dirty.is_empty());
@@ -776,7 +1037,7 @@ async fn private_mysql_expiry_return_rollback_retry_reload_and_disposal() {
         m.header.sender_id = 1;
         m.header.sender_name = "Alice".into();
         m.header.receiver_id = 2;
-        m.body.recv_date = due - MAIL_EXPIRE_DELAY_SECS;
+        m.body.recv_date = due - normal_unread_secs(&original);
         m.body.send_date = m.body.recv_date;
         m.body.attachments.push(item_id);
         m.attach_money(125, 0, 0);
@@ -836,7 +1097,7 @@ async fn private_mysql_expiry_return_rollback_retry_reload_and_disposal() {
         m
     );
 
-    tick(&restarted, due + MAIL_EXPIRE_DELAY_SECS);
+    tick(&restarted, due + normal_unread_secs(&restarted));
     persist(&restarted, &pool, false).await;
     assert_eq!(restarted.systems.economy.mail.state().deleted, vec![id]);
     assert!(restarted.items.removed_items().contains(&item_id));

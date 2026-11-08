@@ -97,6 +97,9 @@ pub struct AppConfig {
     /// `Loot` (`Configurations/Loot.json`: party loot announcements).
     #[serde(rename = "loot")]
     pub loot: crate::systems::economy::config::LootAnnounceConfig,
+    /// `Mail` retention (`Configurations/Mail.json`; the 1.2 `mail_guide` windows).
+    #[serde(rename = "mail")]
+    pub mail: crate::systems::economy::config::MailConfig,
     /// `Quest` (Rust only: quest reward scaling, default off).
     #[serde(rename = "quest")]
     pub quest: crate::systems::quests::config::QuestConfig,
@@ -186,6 +189,7 @@ impl Default for AppConfig {
             housing: Default::default(),
             crafting: Default::default(),
             loot: Default::default(),
+            mail: Default::default(),
             quest: Default::default(),
             music: Default::default(),
             client_data: ClientDataConfig::default(),
@@ -1670,6 +1674,11 @@ mod tests {
                 id: 1
             }]
         );
+        // Mail.json: the 1.2 client's `mail_guide` windows.
+        assert_eq!(cfg.mail.read_retention_days, 5);
+        assert_eq!(cfg.mail.unread_retention_days, 30);
+        assert_eq!(cfg.mail.system_read_retention_days, 5);
+        assert_eq!(cfg.mail.system_unread_retention_days, 90);
         // Specialty.json, AccessLevels.json, CharacterSettings.json
         assert_eq!(cfg.specialty.trade_pack_mail_delay_in_minutes, 480.0);
         assert_eq!(cfg.access_level_of("help"), Some(0));

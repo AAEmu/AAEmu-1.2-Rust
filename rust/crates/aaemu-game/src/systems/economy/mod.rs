@@ -242,6 +242,11 @@ impl System {
         shop_limits::load(server).await?;
         tracing::debug!("economy: initializing specialty");
         specialty::initialize(server);
+        server
+            .systems
+            .economy
+            .mail
+            .set_retention(mail::MailRetention::from_config(&server.config.mail));
         tracing::debug!("economy: loading mails");
         server.systems.economy.mail.load(server).await?;
         mail::start_delivery_task(server);
