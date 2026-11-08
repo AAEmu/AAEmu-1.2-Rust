@@ -1378,6 +1378,25 @@ pub fn get_current_mail_list_for(server: &GameServer, character_id: u32) -> Vec<
     get_current_mail_list(&mut txn, character_id)
 }
 
+/// The unread counters `get_current_mail_list` would set for the character if it were online:
+/// every mail received by now, addressed to it and not read. Used at enter world, where the
+/// character is not registered yet (the C# reported 0 there, so offline mail never lit the alert).
+pub fn count_unread_mail_for(server: &GameServer, character_id: u32) -> CountUnreadMail {
+    let now = now();
+    let mut count = CountUnreadMail::default();
+    count.reset_received();
+    let st = server.systems.economy.mail.state();
+    for (_, m) in st.all.iter() {
+        if m.body.recv_date <= now
+            && m.header.receiver_id == character_id
+            && m.header.status != mail_status::READ
+        {
+            count.update_received(m.mail_type, 1);
+        }
+    }
+    count
+}
+
 /// `CheckAllMailTimings()` (the `MailDeliveryTask`).
 pub fn check_all_mail_timings(txn: &mut ItemTxn<'_>) {
     check_all_mail_timings_at(txn, now());

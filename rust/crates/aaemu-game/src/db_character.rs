@@ -687,8 +687,9 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
     let cooldown_rows = fetch_character_cooldowns(pool, id).await;
     apply_cooldown_rows(c, &cooldown_rows, Utc::now().timestamp_millis());
 
-    // Mails: MailManager.GetCurrentMailList(Id) runs while the character is not registered in
-    // the WorldManager yet, so the unread counters stay 0 (as in C#).
+    // Mails: the counters start at 0 here; `world::session::select_loaded` fills them with the
+    // real unread counts (the C# `GetCurrentMailList` ran before the character was in the world
+    // and always left them 0).
     c.unread_mail = CountUnreadMail::default();
     Ok(())
 }
