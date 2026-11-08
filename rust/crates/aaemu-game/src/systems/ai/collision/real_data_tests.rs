@@ -608,38 +608,57 @@ fn real_water_boat_summon_points() {
 /// Skill obstacle rays (`validation.rs`, `FUN_390B5540`: objtypes `SOLID_TERRAIN`, flags
 /// `SKILL_OBSTACLE`, `to` already shortened by the target radius) that the shared server logged
 /// as "Skill line of sight blocked" while the feet-level ray of 28286101a was in use: `(from, to,
-/// logged hit distance)`. All are skill 11918 at NPCs and hit plain terrain on gentle slopes
-/// (hit normals within 0.17 of straight up).
-const REFUSED_TERRAIN_RAYS: [([f32; 3], [f32; 3], f32); 6] = [
+/// production-logged distance, distance on the current grid)`. All are skill 11918 at NPCs and
+/// hit plain terrain on gentle slopes (hit normals within 0.17 of straight up).
+///
+/// The production distances were logged while the heightmap u16 grid used the C# coefficient
+/// (`65535 / (4096 / 4)`, 1/64 m steps, truncated). On 2026-11-08 the grid moved to
+/// `65535 / 4096` (1/16 m steps, rounded) so that heights above 1024 m fit (PORTING.md), which
+/// moves a stored sample by up to 4.7 cm (the rounding adds up to 3.1 cm to the old truncation's
+/// 1.6 cm downward bias). Ray 1 runs nearly parallel to its slope (it drops 0.72 m over the
+/// 4.36 m span, the terrain 0.62 m), so that shift moves its intersection from 3.638 m to
+/// 2.078 m while the terrain is the client's: at grid corner (20080, 7340) `heightmap.dat`
+/// holds 190.250 m, the old grid read 190.237 m and the current grid 190.253 m; `get_height` at
+/// the ray start reads 190.042 m / 190.059 m old / current, and the original-client recheck
+/// 0.4 km away at Hatora (20028.4, 7599.8) 179.2648 m matches the current grid (179.2027 m)
+/// about as well as the old one (179.1996 m). The production value stays for provenance; the
+/// current grid's value is the pinned replay.
+const REFUSED_TERRAIN_RAYS: [([f32; 3], [f32; 3], f32, f32); 6] = [
     (
         [20081.496, 7340.0938, 190.1103],
         [20085.46, 7341.905, 189.39467],
         3.638,
+        2.0780995,
     ),
     (
         [20105.953, 7335.5586, 187.4872],
         [20115.842, 7332.403, 187.5405],
         9.265,
+        8.231512,
     ),
     (
         [20549.164, 7251.6543, 194.1449],
         [20552.47, 7263.1826, 191.80545],
         0.706,
+        0.49256143,
     ),
     (
         [20550.197, 7255.8984, 193.4926],
         [20552.162, 7262.3022, 192.07394],
         1.900,
+        2.326965,
     ),
     (
         [20550.803, 7258.49, 193.0254],
         [20551.89, 7261.642, 192.25285],
         0.805,
+        1.1499643,
     ),
     (
         [20529.824, 7269.074, 188.9108],
         [20520.742, 7270.4155, 187.92221],
         3.848,
+        3.1512997,
     ),
 ];
 
@@ -672,11 +691,11 @@ async fn real_skill_obstacle_rays_refused_at_feet_level_clear_when_raised() {
         .expect("collision service")
     };
     let mut still_blocked = Vec::new();
-    for (i, (from, to, logged)) in REFUSED_TERRAIN_RAYS.iter().enumerate() {
+    for (i, (from, to, logged, expected)) in REFUSED_TERRAIN_RAYS.iter().enumerate() {
         let feet = cast(*from, *to, 0.0).unwrap_or_else(|| panic!("ray {} must hit", i + 1));
         assert!(
-            (feet.dist - logged).abs() < 0.01 && matches!(feet.owner, Some(Owner::Terrain)),
-            "ray {} hit {:?} at {}, the server logged terrain at {logged}",
+            (feet.dist - expected).abs() < 0.01 && matches!(feet.owner, Some(Owner::Terrain)),
+            "ray {} hit {:?} at {}, expected terrain at {expected} (production logged {logged})",
             i + 1,
             feet.owner,
             feet.dist
