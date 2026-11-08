@@ -6,7 +6,7 @@
 //! `Models/ClientData/{Hmap,NodeCell,AABB}.cs`; the binary reader and the bit-exact arithmetic
 //! were taken from `aaemu-tool-worldconverter/src/hmap.rs` (port of
 //! `Tools/WorldConverter/Models/Hmap.cs`). The C# `UpScale` quirk is replaced by the original
-//! client's own resampling rule (see `NodeCell::up_scale`, deviation in `PORTING.md`).
+//! client's own resampling rule (see `NodeCell::get_height`, deviation in `PORTING.md`).
 //!
 //! Cells are loaded on demand (`WorldCell.VerifyCellLoaded`) from the client sources
 //! (`ClientData.Sources`, read through [`ClientFileManager`]: the 24 GB game_pak is never
@@ -59,8 +59,8 @@ pub enum HeightError {
 /// `Models/ClientData/Hmap.cs` + `NodeCell.cs` + `AABB.cs` (the game server's copies).
 ///
 /// Reader and arithmetic adapted from `aaemu-tool-worldconverter/src/hmap.rs` (port of
-/// `Tools/WorldConverter/Models/Hmap.cs`). `UpScale` is **not** the C# one: the original 1.2
-/// client resamples a low-resolution node bilinearly over the node's own samples
+/// `Tools/WorldConverter/Models/Hmap.cs`). `UpScale` is **not** the C# one: a low-resolution
+/// node keeps its own samples and `get_height` resamples it bilinearly in f32
 /// (`AABevy1.2/crates/aa-world/src/heightmap.rs:240-255`), which the original-client recheck
 /// proved right (`D:/aaemu-audits/terrain-3way-2026-11-08/REPORT.md`). The trailing-bytes
 /// handling still follows the game's `NodeCell.cs`. All operand types mirror the C# (float vs
@@ -304,7 +304,6 @@ pub mod hmap {
             if !disabled_re_calc && n.version < 7 {
                 n.rescale_to_int();
             }
-            n.up_scale();
             Ok(n)
         }
 
@@ -368,23 +367,47 @@ pub mod hmap {
             Ok(self.raw_data_to_height(u32::from(raw)))
         }
 
-        /// `GetHeight(nX, nY)`. The data is always x-major 33 wide after `up_scale`
-        /// (and for a full-resolution node); the C# kept the original `nSize` as the stride on the
-        /// upscaled 33 x 33 array, so low-resolution sectors were read mirrored (deviation from
-        /// C#, see `PORTING.md`).
+        /// `GetHeight(nX, nY)`. A full-resolution node holds 33 x 33 samples (x-major). A
+        /// low-resolution node keeps its `size x size` samples and is resampled on read exactly
+        /// like the original 1.2 client (`AABevy1.2/crates/aa-world/src/heightmap.rs:240-255`,
+        /// `sample_node`): target `i` maps to source `i * (size - 1) / 32`, bilinear over the
+        /// node's own samples in f32, with the upper index clamped to `size - 2` (the far edge
+        /// is the last sample at fraction 1). The C# upscaled the node up front and then read
+        /// the 33-wide result with the wrong stride (it reused `nSize`), so low-resolution
+        /// sectors came out mirrored (deviation from C#, see `PORTING.md`). A 1 x 1 node (not
+        /// present in the 1.2 data; the client treats it as invalid) is our choice to cover the
+        /// sector with its one height.
         pub fn get_height(&self, n_x: u16, n_y: u16) -> Result<f32, HmapError> {
-            let stride = if self.p_hm_data.len() == 33 * 33 {
-                33
-            } else {
-                self.n_size
-            };
-            if stride > 0 {
-                let index = i32::from(n_x)
-                    .wrapping_mul(stride)
-                    .wrapping_add(i32::from(n_y));
+            if self.p_hm_data.len() == 33 * 33 {
+                let index = i32::from(n_x).wrapping_mul(33).wrapping_add(i32::from(n_y));
                 return self.get_height_by_index(index as u32);
             }
-            Ok(0.0)
+            if self.n_size <= 0 {
+                return Ok(0.0);
+            }
+            if n_x > 32 || n_y > 32 {
+                return Err(HmapError::IndexOutOfRange);
+            }
+            if self.n_size == 1 {
+                return self.get_height_by_index(0);
+            }
+            let n_size = self.n_size as usize;
+            if self.p_hm_data.len() != n_size * n_size {
+                return Err(HmapError::IndexOutOfRange);
+            }
+            let source_scale = (n_size - 1) as f32 / 32.0;
+            let (fx, fy) = (f32::from(n_x) * source_scale, f32::from(n_y) * source_scale);
+            let (ix, iy) = (
+                (fx.floor() as usize).min(n_size - 2),
+                (fy.floor() as usize).min(n_size - 2),
+            );
+            let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+            let h = |x: usize, y: usize| {
+                self.raw_data_to_height(u32::from(self.p_hm_data[x * n_size + y]))
+            };
+            let top = Self::lerp(h(ix, iy), h(ix + 1, iy), tx);
+            let bottom = Self::lerp(h(ix, iy + 1), h(ix + 1, iy + 1), tx);
+            Ok(Self::lerp(top, bottom, ty))
         }
 
         fn init(&mut self) {
@@ -413,68 +436,6 @@ pub mod hmap {
 
         fn lerp(s: f32, e: f32, t: f32) -> f32 {
             s + (e - s) * t
-        }
-
-        /// `RawDataToHeight` inverse: the raw sample that decodes closest to `height` (surface
-        /// bits zero). The stored grid is the 5 cm / `i_step` integer representation.
-        fn height_to_raw(&self, height: f32) -> u16 {
-            let step = 0.05f32 * self.i_step as f32;
-            let hdec = if step > 0.0 {
-                ((height - 0.05f32 * self.i_offset as f32) / step).round_ties_even()
-            } else {
-                0.0
-            };
-            (hdec.clamp(0.0, f32::from(u16::MAX >> 4)) as u16) << 4
-        }
-
-        /// Resample a low-resolution node (2..=32 samples per side) onto the 33 x 33 sector grid.
-        ///
-        /// This replaces the C# `UpScale` quirk: the original 1.2 client (`CTerrainNode`) keeps
-        /// `size x size` samples with spacing `64 / (size - 1)` m and bilinearly interpolates
-        /// them at the 2 m grid positions (`AABevy1.2/crates/aa-world/src/heightmap.rs:240-255`,
-        /// `sample_node`). Target `i` maps to source coordinate `i * (size - 1) / 32`; the upper
-        /// sample index is clamped to `size - 2` so the far edge (`i = 32`) lands on the last
-        /// sample with fraction 1. The C# `FindNearestSignificantPoints` used `size / 33` and
-        /// divided by `size`, so every target interpolated raw points (0,0)..(1,1), and
-        /// `GetHeight` then read the 33-wide result with the old `size` stride. The original
-        /// client (median 0.0001 m vs the Bevy resample) and the bake audit show the client rule
-        /// is right (`D:/aaemu-audits/terrain-3way-2026-11-08/REPORT.md`).
-        fn up_scale(&mut self) {
-            if self.n_size <= 0 || self.n_size >= 33 {
-                return;
-            }
-            let n_size = self.n_size as usize;
-            if self.p_hm_data.len() != n_size * n_size {
-                return;
-            }
-            // A degenerate 1 x 1 node covers the whole sector with one height.
-            if n_size == 1 {
-                self.p_hm_data = vec![self.p_hm_data[0]; 33 * 33];
-                return;
-            }
-            let source_scale = (n_size - 1) as f32 / 32.0;
-            let mut result = vec![0u16; 33 * 33];
-            for target_x in 0..=32usize {
-                for target_y in 0..=32usize {
-                    let (fx, fy) = (
-                        target_x as f32 * source_scale,
-                        target_y as f32 * source_scale,
-                    );
-                    let (ix, iy) = (
-                        (fx.floor() as usize).min(n_size - 2),
-                        (fy.floor() as usize).min(n_size - 2),
-                    );
-                    let (tx, ty) = (fx - ix as f32, fy - iy as f32);
-                    let h = |x: usize, y: usize| {
-                        self.raw_data_to_height(u32::from(self.p_hm_data[x * n_size + y]))
-                    };
-                    let top = Self::lerp(h(ix, iy), h(ix + 1, iy), tx);
-                    let bottom = Self::lerp(h(ix, iy + 1), h(ix + 1, iy + 1), tx);
-                    let height = Self::lerp(top, bottom, ty);
-                    result[target_x * 33 + target_y] = self.height_to_raw(height);
-                }
-            }
-            self.p_hm_data = result;
         }
     }
 }
@@ -1656,9 +1617,9 @@ mod tests {
 
     #[test]
     fn low_resolution_nodes_resample_like_the_client() {
-        // Sizes 2, 5, 9 and 17 (the low-resolution nodes of the 1.2 data). The stored sample is
-        // the integer nearest the client's bilinear height (the u16 grid cannot hold a
-        // fraction), so every target must be within half a stored step of the rule.
+        // Sizes 2, 5, 9 and 17 (the low-resolution nodes of the 1.2 data). The node keeps its
+        // own samples and `get_height` interpolates them in f32, so the only difference to the
+        // rule is the source samples' existing 5 cm decode.
         for size in [2usize, 5, 9, 17] {
             let data: Vec<u16> = (0..size * size)
                 .map(|i| ((i as u16 * 37 + 8) % 7 * 32) << 4)
@@ -1670,22 +1631,15 @@ mod tests {
             let h = hmap::Hmap::read(&file, false).unwrap().unwrap();
             let n = h.sorted_nodes()[0];
             assert_eq!(n.n_size, size as i32);
-            assert_eq!(n.p_hm_data.len(), 33 * 33);
+            // The node is not upscaled up front; the samples stay as read.
+            assert_eq!(n.p_hm_data, data);
             for x in 0..33usize {
                 for y in 0..33usize {
-                    let want = client_upscaled_hdec(&data, size, x, y);
-                    let raw = n.p_hm_data[x * 33 + y];
-                    assert!(
-                        (f32::from(raw >> 4) - want).abs() <= 0.5 + 1e-3,
-                        "size {size} sample ({x}, {y}): stored {}, rule {want}",
-                        raw >> 4
-                    );
-                    // The cell loader reads through `get_height`; it must use the 33 stride.
+                    let want = client_upscaled_hdec(&data, size, x, y) * 0.05;
                     let got = n.get_height(x as u16, y as u16).unwrap();
                     assert!(
-                        (got - want * 0.05).abs() <= 0.025 + 1e-3,
-                        "size {size} height ({x}, {y}): {got}, rule {}",
-                        want * 0.05
+                        (got - want).abs() <= 1e-3,
+                        "size {size} height ({x}, {y}): {got}, rule {want}"
                     );
                 }
             }
@@ -2103,7 +2057,10 @@ mod real_data_tests {
     /// node (n_size 5, 9 or 17), plus the sector-boundary case. The original 1.2 client agrees
     /// with Bevy there (median 0.0001 m, max 0.066 m) while the C# `UpScale` quirk put the
     /// server a median 10.6 m (max 25.6 m) away (`recheck-results.csv`). The client's resampling
-    /// rule must land within 0.1 m of the original client.
+    /// rule must land within 0.15 m of the original client: the resampling itself is exact
+    /// (f32 bilinear of the node's samples), and the remaining floor is the existing
+    /// `rescale_to_int` truncation of each source sample, up to `i_step * 5 cm` (0.0985 m at
+    /// worst here). A wrong rule misses by metres.
     #[test]
     #[ignore = "needs AAEMU_GAME_PAK"]
     fn real_low_resolution_node_heights() {
@@ -2143,8 +2100,10 @@ mod real_data_tests {
             let z = f64::from(t.get_height(&files, x as f32, y as f32).unwrap());
             let diff = (z - original).abs();
             println!("({x}, {y}): server {z}, original {original}, diff {diff}");
+            // 0.15 m, not 0.1: the source samples are already floored by the existing
+            // `rescale_to_int` (up to i_step * 5 cm); the resampling adds no step of its own.
             assert!(
-                diff <= 0.1,
+                diff <= 0.15,
                 "({x}, {y}): server {z}, original {original}, diff {diff}"
             );
             matches += 1;
