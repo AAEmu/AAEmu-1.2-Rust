@@ -1128,7 +1128,7 @@ impl AuctionManager {
             .is_some_and(|item| super::item_timers::expired_at(&item, Utc::now().timestamp()));
         if expired {
             let buyout = lot.direct_money > 0 && bid.money >= lot.direct_money;
-            tracing::warn!(
+            tracing::debug!(
                 "Auction lot {lot_id}: refusing a {} for an item that expired in escrow",
                 if buyout { "buyout" } else { "bid" }
             );
