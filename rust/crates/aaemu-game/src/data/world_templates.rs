@@ -1344,6 +1344,18 @@ mod tests {
     }
 
     #[test]
+    fn instance_zone_fallback_keeps_unassigned_ingrid_sectors_at_zero() {
+        // The instance fallback is only for positions outside the cell grid: an in-grid sector
+        // the XML never assigned keeps its key 0 (housing/doodad placement rely on that).
+        let mut t = WorldTemplate::synthetic(2, "instance_sal_temple", 2, 2, 240);
+        t.zone_key_by_regions[1 * 32 + 1] = 0; // sector (1, 1)
+        let world = crate::world::WorldInstance::new(100, std::sync::Arc::new(t));
+        assert_eq!(world.zone_id_at(70.0, 70.0), 0);
+        assert_eq!(world.zone_id_at(64.0 * 32.0 + 1.0, 64.0 * 15.0 + 1.0), 240);
+        assert_eq!(world.zone_id_at(2049.2637, 1003.5098), 240);
+    }
+
+    #[test]
     fn parent_dir_names() {
         assert_eq!(parent_directory_name("game/worlds/foo/world.xml"), "foo");
         let p = format!("C:{MAIN_SEPARATOR}x{MAIN_SEPARATOR}main_world{MAIN_SEPARATOR}world.xml");
