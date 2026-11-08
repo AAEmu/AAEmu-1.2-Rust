@@ -4811,6 +4811,19 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing (2026-11-08, calendar timezone default): `Housing.SiegeCalendarTimezone`
+  now defaults to **UTC** instead of the server's local offset (`""`/`utc`/`z` = UTC;
+  `local` and explicit `+HH:MM` offsets are still accepted). This is a **behaviour change**
+  for servers that never set the value: the territory claim window moves too, because
+  `claim_window_at` uses the same offset regardless of `Housing.SiegeCalendar` (the switch
+  only gates the weekly periods; the authored `open_weekday/open_hour/open_duration_hours`
+  claim window always follows the configured offset). The resolved offset and whether it came
+  from the configuration or the default are logged once at startup
+  (`systems/housing/mod.rs::System::start`). Evidence: `round6-siege.md` 1 (grade C, Total
+  ArcheAge 2014-11-20/25 lists the same wall-clock times as GMT); the original data's zone is
+  not proven, so `local` remains for servers that want it. Tests:
+  `timezone_parses_offsets_and_defaults_to_utc`,
+  `timezone_display_and_the_config_source_are_loggable`.
 * systems::housing / systems::social (WP-SD2a, 2026-11-06): the siege declaration is now
   persistent state, and the weekly calendar hands it over to the explicit siege record at the
   cycle's warmup start. `DominionState.declaration` holds the attacker expedition, the

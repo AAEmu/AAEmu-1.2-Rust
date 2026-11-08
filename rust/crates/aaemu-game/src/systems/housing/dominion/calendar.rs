@@ -58,6 +58,24 @@ impl Default for CalendarTimeZone {
     }
 }
 
+impl std::fmt::Display for CalendarTimeZone {
+    /// `UTC+09:00` / `UTC-05:30` / `server local time`; used by the one-line startup notice so
+    /// a server can see which offset actually applies (the claim window uses it even with the
+    /// siege calendar off).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => f.write_str("server local time"),
+            Self::Fixed(offset) => {
+                let minutes = offset.local_minus_utc() / 60;
+                let sign = if minutes < 0 { '-' } else { '+' };
+                let hours = minutes.abs() / 60;
+                let minutes = minutes.abs() % 60;
+                write!(f, "UTC{sign}{hours:02}:{minutes:02}")
+            }
+        }
+    }
+}
+
 impl CalendarTimeZone {
     /// `""`/`utc`/`z` = UTC (the default); `local` = server local; or an explicit `+HH:MM`,
     /// `+HHMM`, `+HH`.
@@ -183,6 +201,15 @@ impl CalendarSettings {
             enabled: config.siege_calendar,
             timezone: CalendarTimeZone::parse(&config.siege_calendar_timezone).unwrap_or_default(),
         }
+    }
+
+    /// Whether `Housing.SiegeCalendarTimezone` supplied the resolved offset. `false` means the
+    /// setting is empty or unusable, so [`CalendarTimeZone::default`] (UTC) applies. Used by
+    /// the one-time startup notice; the same resolved timezone also drives the territory claim
+    /// window (`claim_window_at`), not only the weekly calendar.
+    pub fn timezone_from_config(config: &HousingConfig) -> bool {
+        !config.siege_calendar_timezone.trim().is_empty()
+            && CalendarTimeZone::parse(&config.siege_calendar_timezone).is_some()
     }
 }
 

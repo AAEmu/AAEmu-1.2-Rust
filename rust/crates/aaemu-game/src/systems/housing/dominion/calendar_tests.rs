@@ -135,6 +135,39 @@ fn timezone_parses_offsets_and_defaults_to_utc() {
 }
 
 #[test]
+fn timezone_display_and_the_config_source_are_loggable() {
+    assert_eq!(CalendarTimeZone::default().to_string(), "UTC+00:00");
+    assert_eq!(
+        CalendarTimeZone::Fixed(FixedOffset::east_opt(9 * 3600).unwrap()).to_string(),
+        "UTC+09:00"
+    );
+    assert_eq!(
+        CalendarTimeZone::Fixed(FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()).to_string(),
+        "UTC-05:30"
+    );
+    assert_eq!(CalendarTimeZone::Local.to_string(), "server local time");
+
+    // Empty (the default) and unusable values fall back to UTC; an explicit value is reported
+    // as coming from the configuration.
+    assert!(!CalendarSettings::timezone_from_config(
+        &HousingConfig::default()
+    ));
+    assert!(!CalendarSettings::timezone_from_config(&HousingConfig {
+        siege_calendar_timezone: "local time".into(),
+        ..Default::default()
+    }));
+    for value in ["UTC", "z", "+09:00", "-0530", "local"] {
+        assert!(
+            CalendarSettings::timezone_from_config(&HousingConfig {
+                siege_calendar_timezone: value.into(),
+                ..Default::default()
+            }),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn weekly_cycle_crosses_every_period_boundary_and_the_week_boundary() {
     let calendar = weekly_calendar();
     let auction = epoch(2014, 1, 8, 22, 30);
