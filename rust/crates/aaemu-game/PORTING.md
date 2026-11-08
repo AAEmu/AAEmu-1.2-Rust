@@ -7338,3 +7338,13 @@ except the new, still unsent 0x07e definition.
 | `SCHouseBuildPayChanged` 0xbf | no 1.2 trigger | Reader `FUN_397b4000` (`dll.c:1707972`) = `u16 tl, i32 moneyAmount`; only the setter `CSChangeHousePay` would send it, and that C->S opcode does not exist in 1.2 (`systems/housing/packets.rs:56-61`). |
 | `SCHouseOwnerNameChanged` 0xcb | no 1.2 trigger | Reader `FUN_397b44b0` (`dll.c:1708167`) = `u16 tl, string newName`; 1.2 has no in-world house rename (only the character-select rename), so nothing sends it (`systems/social/packets/misc.rs:248-253`). |
 | todos-1#13 leftovers | done / capture-pending | Loot-pack inherited grade: `systems/economy/item_effects.rs:1794-1797` (the descriptor `FUN_396e91c0`, `dll.c:1506218`, cannot name the ActAbility; ITEM-LOOT-GRADE). Skinize on an already skinized item keeps `ITEM_LOOK_CONVERT_AS_NOT_USE_AS_SKIN`: `ui_texts` has no more specific look-conversion text (`systems/economy/bridges.rs:1899-1901`). Expand-expert failure sends `STORE_UNKNOWN_ERROR` (`systems/economy/store.rs:1098`). `SwapAction::DoNothing` is unreachable. |
+
+## Combat, heal and instance-zone fixes (2026-11-08)
+
+Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-08`, main
+`69074b51e`; line numbers are of the uncompressed `rs-game.log`). Data reference: the 1.2
+`compact.sqlite3`, read-only.
+
+| item | verdict | evidence and change |
+|---|---|---|
+| "melee auto-attack (skill 2) never lands" (1,088 run events, none a hit) | **correct as is — the CSV is an analysis artifact** | In `damage_with_aoe` an avoided attack is broadcast on its own (`effects/combat.rs:256` miss path, before the batch), while a landed hit is added to the skill's `CompressedGamePackets` (`:672`). The audit parsed only the individually traced `SCUnitDamagedPacket` lines (16,137, exactly the CSV rows), so for skill 2 it saw only the misses. The same run's compressed batches carry **19,831 skill-2 MeleeHit packets** (5,046 caster/target pairs; e.g. NPC 45428 hit Bosu 45374 ten times, damage 7-134, lines 96722-133314). The observed avoidance mix is the conditional mix of the misses (NPC attackers have base accuracy 100, so only the defender's dodge/block/parry appear; bots without a shield show dodge+parry only). No code change; a live check (`aaemu-testclient combat` vs the lane stack) also lands player auto-attacks. |
