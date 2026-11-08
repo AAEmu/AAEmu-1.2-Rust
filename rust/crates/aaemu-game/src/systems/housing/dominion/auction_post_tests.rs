@@ -5,11 +5,14 @@ use chrono::{TimeZone, Utc};
 use crate::data::items::ItemTemplate;
 use crate::data::GameData;
 use crate::models::container::slot_type;
+use crate::net::registry::ClientPacket;
 use crate::server::GameServer;
 use crate::systems::economy::auction::{auction_duration, AuctionBid};
 use crate::systems::economy::inventory::Inv;
+use crate::systems::economy::item_timers;
+use crate::systems::economy::mail;
+use crate::systems::economy::mail_packets::CSTakeAttachmentSequentially;
 use crate::systems::housing::data::{SiegePlan, SiegeZone};
-use crate::systems::housing::dominion::auction_post;
 use crate::systems::housing::dominion::state::TowerIdentity;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 
@@ -142,13 +145,26 @@ fn lots(server: &GameServer) -> Vec<crate::systems::economy::auction::AuctionLot
     server.systems.economy.auction.all_lots()
 }
 
+/// Walk the calendar with the GM test clock through the real dominion tick.
+fn tick_at(f: &Fixture, calendar_now: i64) {
+    f.server
+        .systems
+        .housing
+        .calendar
+        .set_clock(Some(calendar_now));
+    crate::systems::housing::dominion::runtime::tick_once(&f.server);
+}
+
 #[tokio::test]
 async fn auction_start_posts_one_system_lot_per_running_zone_from_the_authored_data() {
     let f = fixture();
     let auction = utc(2014, 1, 8, 22, 30);
     let declare = utc(2014, 1, 10, 22, 30);
     let warmup = utc(2014, 1, 12, 20, 30);
-    auction_post::tick(&f.server, auction + 60);
+    let real_before = Utc::now().timestamp();
+    // Exactly at the auction boundary, so the mapped post date is the real now.
+    tick_at(&f, auction);
+    let real_after = Utc::now().timestamp();
 
     let mut posted = lots(&f.server);
     posted.sort_by_key(|lot| lot.item_template_id());
@@ -161,9 +177,17 @@ async fn auction_start_posts_one_system_lot_per_running_zone_from_the_authored_d
         assert_eq!((lot.start_money, lot.direct_money), (PRICE, 0));
         assert_eq!(lot.duration, auction_duration::HOURS_48);
         assert_eq!(lot.end_time - lot.post_date, chrono::Duration::hours(48));
-        // The lot covers the authored cycle window, not the tick instant.
-        assert_eq!(lot.post_date.timestamp(), auction);
-        assert_eq!(lot.end_time.timestamp(), declare);
+        // The GM test clock walks the 2014 calendar, but the lot is dated on the real clock
+        // (the auction engine and item timers run there): all three boundaries carry the same
+        // `real_now - calendar_now` offset.
+        let offset = lot.post_date.timestamp() - auction;
+        assert!(
+            lot.post_date.timestamp() >= real_before - 5
+                && lot.post_date.timestamp() <= real_after + 5,
+            "post date {} is not on the real clock [{real_before}, {real_after}]",
+            lot.post_date.timestamp()
+        );
+        assert_eq!(lot.end_time.timestamp() - declare, offset);
         let item = f
             .server
             .items
@@ -174,7 +198,7 @@ async fn auction_start_posts_one_system_lot_per_running_zone_from_the_authored_d
             (item_template_id, 1, 0, slot_type::AUCTION)
         );
         // The won camp expires when the declare period ends (the warmup start).
-        assert_eq!(item.expiration_time, warmup);
+        assert_eq!(item.expiration_time - warmup, offset);
     }
     assert!(!posted
         .iter()
@@ -182,23 +206,10 @@ async fn auction_start_posts_one_system_lot_per_running_zone_from_the_authored_d
 }
 
 #[tokio::test]
-async fn the_dominion_tick_posts_the_camp_lots_at_the_auction_start() {
-    let f = fixture();
-    let auction = utc(2014, 1, 8, 22, 30);
-    f.server
-        .systems
-        .housing
-        .calendar
-        .set_clock(Some(auction + 60));
-    crate::systems::housing::dominion::runtime::tick_once(&f.server);
-    assert_eq!(lots(&f.server).len(), 2);
-}
-
-#[tokio::test]
 async fn posting_is_idempotent_on_a_repeated_tick_and_across_a_restart() {
     let f = fixture();
     let auction = utc(2014, 1, 8, 22, 30);
-    auction_post::tick(&f.server, auction + 60);
+    tick_at(&f, auction + 60);
     assert_eq!(lots(&f.server).len(), 2);
     assert_eq!(
         f.server
@@ -212,15 +223,15 @@ async fn posting_is_idempotent_on_a_repeated_tick_and_across_a_restart() {
     );
 
     // The same cycle's later ticks post nothing.
-    auction_post::tick(&f.server, auction + 120);
-    auction_post::tick(&f.server, auction + 3_600);
+    tick_at(&f, auction + 120);
+    tick_at(&f, auction + 3_600);
     assert_eq!(lots(&f.server).len(), 2);
 
     // A restart reloads the authority rows (the marker included) and the lots; the first tick
     // of the next process must not post a second time.
     let states = f.server.systems.housing.dominions.all();
     f.server.systems.housing.dominions.restore(states).unwrap();
-    auction_post::tick(&f.server, auction + 180);
+    tick_at(&f, auction + 180);
     assert_eq!(lots(&f.server).len(), 2);
     assert_eq!(
         f.server
@@ -239,14 +250,14 @@ async fn a_later_rotation_week_posts_its_own_zones_lots() {
     let f = fixture();
     // Week of 2014-01-12: only zone 43 (its own cycle) posts.
     let later_auction = utc(2014, 1, 15, 22, 30);
-    auction_post::tick(&f.server, later_auction + 60);
+    tick_at(&f, later_auction + 60);
     let posted = lots(&f.server);
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].item_template_id(), LATER_CAMP);
 
     // Week of 2014-01-26: zones 25/26 run again and get a new lot each.
     let second_auction = utc(2014, 1, 29, 22, 30);
-    auction_post::tick(&f.server, second_auction + 60);
+    tick_at(&f, second_auction + 60);
     let posted = lots(&f.server);
     assert_eq!(posted.len(), 3);
     assert_eq!(
@@ -269,24 +280,23 @@ async fn a_later_rotation_week_posts_its_own_zones_lots() {
 }
 
 #[tokio::test]
-async fn a_won_camp_item_expires_when_the_declare_period_ends() {
+async fn a_won_camp_item_expires_when_the_declare_period_ends_and_the_timer_removes_it() {
     let f = fixture();
     crate::systems::economy::wiring::install(&f.server);
     let auction = utc(2014, 1, 8, 22, 30);
     let warmup = utc(2014, 1, 12, 20, 30);
-    auction_post::tick(&f.server, auction + 60);
+    tick_at(&f, auction + 60);
 
     let lot = lots(&f.server)
         .into_iter()
         .find(|lot| lot.item_template_id() == CAMP)
         .expect("the camp lot");
     let item_id = lot.item_id();
-    // The bid must happen while the auction is running; the fixture's cycle is historical.
-    let mut running = lot.clone();
-    running.end_time = Utc::now() + chrono::Duration::hours(1);
-    f.server.systems.economy.auction.set_lot(running.clone());
+    // The GM test clock walks 2014; the lot is dated on the real clock, so it can be bid on.
+    assert!(lot.end_time > Utc::now(), "the lot runs on the real clock");
+    let offset = lot.post_date.timestamp() - auction;
 
-    let client = TestClient::new(&f.server, 9, 1009);
+    let mut client = TestClient::new(&f.server, 9, 1009);
     let mut character = test_character(9, "Bidder", 100.0, 100.0);
     character.money = i64::from(PRICE) * 2;
     let buyer = spawn_player(&f.server, &client, character, 0x300);
@@ -294,13 +304,14 @@ async fn a_won_camp_item_expires_when_the_declare_period_ends() {
         f.server.items.add_container(container);
     }
     f.server.names.add_character(9, "Bidder", 1009);
+    client.conn.active_char = Some(buyer.clone());
 
     f.server.systems.economy.auction.bid_on_auction_lot(
         &f.server,
         &buyer,
-        running.id,
+        lot.id,
         AuctionBid {
-            lot_id: running.id,
+            lot_id: lot.id,
             world_id: 0,
             bidder_id: 9,
             bidder_name: "Bidder".into(),
@@ -312,20 +323,20 @@ async fn a_won_camp_item_expires_when_the_declare_period_ends() {
             .systems
             .economy
             .auction
-            .lot(running.id)
+            .lot(lot.id)
             .unwrap()
             .bidder_id,
         9
     );
 
     // The auction ends: the winner is mailed the camp item, which keeps its declare-period
-    // expiry.
+    // expiry on the real clock.
     f.server
         .systems
         .economy
         .auction
-        .update_auction_house(&f.server, running.end_time + chrono::Duration::seconds(1));
-    assert!(f.server.systems.economy.auction.lot(running.id).is_none());
+        .update_auction_house(&f.server, lot.end_time + chrono::Duration::seconds(1));
+    assert!(f.server.systems.economy.auction.lot(lot.id).is_none());
     let buyer_mail = f
         .server
         .systems
@@ -335,21 +346,48 @@ async fn a_won_camp_item_expires_when_the_declare_period_ends() {
         .all
         .iter()
         .find(|(_, mail)| {
-            mail.mail_type == crate::systems::economy::mail::mail_type::AUC_BID_WIN
-                && mail.header.receiver_id == 9
+            mail.mail_type == mail::mail_type::AUC_BID_WIN && mail.header.receiver_id == 9
         })
         .map(|(_, mail)| mail.clone())
         .expect("the winner's mail");
     assert_eq!(buyer_mail.body.attachments, vec![item_id]);
     let delivered = f.server.items.item_by_id(item_id).expect("the item");
-    assert_eq!(delivered.expiration_time, warmup);
+    assert_eq!(delivered.expiration_time - warmup, offset);
+
+    // Take the delivery, then let the item timer pass the declare-period end: the won camp is
+    // really removed from the bag, not just marked.
+    CSTakeAttachmentSequentially {
+        mail_id: buyer_mail.id,
+    }
+    .handle(&f.server, &mut client.conn)
+    .await
+    .unwrap();
+    assert!(Inv::of(&buyer)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id(item_id)
+        .is_some());
+    let expiry = warmup + offset;
+    assert_eq!(
+        item_timers::update_item_timers(&f.server, (expiry + 1) * 1000),
+        1,
+        "the expired camp item is removed"
+    );
+    assert!(Inv::of(&buyer)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id(item_id)
+        .is_none());
+    assert!(f.server.items.item_by_id(item_id).is_none());
 }
 
 #[tokio::test]
 async fn a_disabled_calendar_posts_nothing() {
     let f = fixture();
     f.server.config.update(|c| c.housing.siege_calendar = false);
-    auction_post::tick(&f.server, utc(2014, 1, 8, 22, 30) + 60);
+    tick_at(&f, utc(2014, 1, 8, 22, 30) + 60);
     assert!(lots(&f.server).is_empty());
 }
 
@@ -365,7 +403,7 @@ async fn a_zone_without_a_camp_item_posts_nothing() {
         .get_mut(&ZONE)
         .unwrap()
         .declare_item_id = 0;
-    auction_post::tick(&f.server, utc(2014, 1, 8, 22, 30) + 60);
+    tick_at(&f, utc(2014, 1, 8, 22, 30) + 60);
     let posted = lots(&f.server);
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].item_template_id(), OTHER_CAMP);

@@ -38,6 +38,14 @@ fn utc_at(seconds: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(seconds, 0)
 }
 
+/// Map a calendar-clock boundary to the real clock, preserving the offset between the two
+/// clocks (`real = boundary + (real_now - calendar_now)`). The auction engine and the item
+/// timers always run on the real clock, so a cycle walked by the GM `/dominion clock` must
+/// still produce lots dated around the real now; with no test clock the offset is zero.
+fn real_at(calendar_boundary: i64, calendar_now: i64, real_now: i64) -> Option<i64> {
+    calendar_boundary.checked_add(real_now.checked_sub(calendar_now)?)
+}
+
 /// Post the running cycle's camp lots. Runs inside the housing operation lock (called from
 /// `runtime::tick_once`); it takes the auction operation lock for the item/lot work.
 pub fn tick(server: &GameServer, now: i64) {
@@ -119,7 +127,14 @@ pub fn tick(server: &GameServer, now: i64) {
             );
             continue;
         }
-        let Some(post_at) = utc_at(cycle.auction_start) else {
+        // All three lot timestamps use the same calendar->real mapping.
+        let Some(post_at) = real_at(cycle.auction_start, now, real_now).and_then(utc_at) else {
+            continue;
+        };
+        let Some(end_at) = real_at(cycle.declare_start, now, real_now).and_then(utc_at) else {
+            continue;
+        };
+        let Some(expires_at) = real_at(cycle.warmup_start, now, real_now) else {
             continue;
         };
         match server
@@ -136,8 +151,10 @@ pub fn tick(server: &GameServer, now: i64) {
             }
         }
         // Anchor the lot at the cycle's auction start, not this tick's instant: the auction
-        // period is the authored window and the lot ends exactly at the declare start.
-        let Some(lot) = AuctionManager::create_system_lot(
+        // period is the authored window and the lot ends exactly at the declare start. The
+        // engine's duration class is still the authored 48 h; the mapped end time is set
+        // explicitly so all three values use the same clock mapping.
+        let Some(mut lot) = AuctionManager::create_system_lot(
             server,
             item_template_id,
             template.price,
@@ -155,9 +172,9 @@ pub fn tick(server: &GameServer, now: i64) {
             );
             continue;
         };
+        lot.end_time = end_at;
         // The camp is only usable in the declare period, so the won item expires when the
         // period ends (warmup start) through the client's own item expiration timer.
-        let expires_at = cycle.warmup_start;
         let item_id = lot.item_id();
         server
             .items
