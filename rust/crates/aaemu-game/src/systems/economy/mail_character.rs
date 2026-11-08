@@ -139,6 +139,10 @@ pub fn send_mail_to_player(
     item_slots: &[(u8, u8)],
 ) -> u8 {
     let server = txn.server;
+    // Level gate the client is told about (`SCLevelRestrictionConfigPacket.mail = 10`).
+    if player.data().unit.level < mail::MAIL_MIN_SEND_LEVEL {
+        return mail_result::LEVEL_TOO_LOW;
+    }
     if money0 < 0 || money1 != 0 || money2 != 0 {
         return mail_result::INVALID_LETTER_FORMAT;
     }
@@ -173,6 +177,17 @@ pub fn send_mail_to_player(
         if super::item_security::is_locked(&item) {
             return mail_result::ITEM_LOCKED;
         }
+    }
+
+    // `MAIL_REPETITION`: three identical body texts in a row are allowed, the fourth is not.
+    // Recorded only after the mail is stored below, so failed validations do not consume a try.
+    if server
+        .systems
+        .economy
+        .mail
+        .would_repeat_send(player.character_id, text)
+    {
+        return mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES;
     }
 
     let mut mail = MailPlayerToPlayer::new(server, player, receiver_name);
@@ -214,6 +229,11 @@ pub fn send_mail_to_player(
     let Some(id) = mail::send_mail(txn, mail.mail) else {
         return mail_result::MAIL_ERROR_OCCURRED;
     };
+    server
+        .systems
+        .economy
+        .mail
+        .record_send(player.character_id, text);
     let Some(header) = server
         .systems
         .economy

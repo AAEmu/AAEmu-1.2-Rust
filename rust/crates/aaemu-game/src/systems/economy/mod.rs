@@ -290,6 +290,7 @@ pub fn on_leave_world(server: &GameServer, player: &crate::world::PlayerRef) {
     let id = player.character_id;
     e.store.wipe_buyback(server, id);
     e.craft.forget(id);
+    e.mail.clear_send_history(id);
     e.previous_backpack
         .lock()
         .unwrap_or_else(|e| e.into_inner())

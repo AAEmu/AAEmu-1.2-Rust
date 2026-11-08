@@ -172,6 +172,25 @@ pub struct MailRetention {
 /// Seconds in one day.
 pub const SECONDS_PER_DAY: i64 = 24 * 3600;
 
+/// Minimum character level to send player mail. The 1.2 client receives
+/// `SCLevelRestrictionConfigPacket` with `mail = 10` (`packets/proxy.rs`, the same hard-coded
+/// value as the C#); the 10.x server's `LevelRestrictions.MailLevel` default is also 10.
+pub const MAIL_MIN_SEND_LEVEL: u8 = 10;
+
+/// `mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES`: `MAIL_REPETITION` (`ui_texts` 6315) says the
+/// same mail was sent "3 or more times in a row". Three consecutive identical body texts are
+/// allowed; the fourth is refused. The exact boundary is INFERRED from the text, and
+/// `MAIL_COOL_TIME` (`ui_texts` 6314) names no interval at all, so that check is not enforced.
+pub const MAIL_REPEAT_LIMIT: u32 = 3;
+
+/// The last player-to-player body text and how many times it was sent in a row. In memory only
+/// (cleared when the character leaves the world), like the client's own anti-spam counter.
+#[derive(Debug, Clone, Default)]
+pub struct MailSendHistory {
+    pub last_text: String,
+    pub repeats: u32,
+}
+
 impl Default for MailRetention {
     fn default() -> Self {
         Self {
@@ -674,6 +693,8 @@ pub struct MailManager {
     trade_pack_mail_delay_minutes: Mutex<f64>,
     /// `Mail` retention (`Configurations/Mail.json`, the 1.2 `mail_guide` windows).
     retention: Mutex<MailRetention>,
+    /// Last body text per sender (`MAIL_REPETITION`), see [MailSendHistory].
+    send_history: Mutex<HashMap<u32, MailSendHistory>>,
 }
 
 #[derive(Debug)]
@@ -690,6 +711,7 @@ impl Default for MailManager {
             hooks: MailHooks::default(),
             trade_pack_mail_delay_minutes: Mutex::new(DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES),
             retention: Mutex::new(MailRetention::default()),
+            send_history: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -721,6 +743,35 @@ impl MailManager {
 
     pub fn set_retention(&self, retention: MailRetention) {
         *self.retention.lock().unwrap_or_else(|e| e.into_inner()) = retention;
+    }
+
+    /// Whether sending `text` now would be the fourth identical body in a row
+    /// (`MAIL_REPETITION`). The caller records the send after it succeeds.
+    pub fn would_repeat_send(&self, character_id: u32, text: &str) -> bool {
+        let history = self.send_history.lock().unwrap_or_else(|e| e.into_inner());
+        history
+            .get(&character_id)
+            .is_some_and(|h| h.last_text == text && h.repeats >= MAIL_REPEAT_LIMIT)
+    }
+
+    /// Records a successful player-to-player send for [`Self::would_repeat_send`].
+    pub fn record_send(&self, character_id: u32, text: &str) {
+        let mut history = self.send_history.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = history.entry(character_id).or_default();
+        if entry.last_text == text {
+            entry.repeats = entry.repeats.saturating_add(1);
+        } else {
+            entry.last_text = text.to_string();
+            entry.repeats = 1;
+        }
+    }
+
+    /// Forgets the sender's repetition streak (leave world).
+    pub fn clear_send_history(&self, character_id: u32) {
+        self.send_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&character_id);
     }
 
     /// `GetMailById(id)` (a copy).

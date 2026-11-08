@@ -2520,6 +2520,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the guide says mail is auto-deleted after its window. The commercial mailbox
   (`CHARGED`/`PROMOTION`/`MIA_*`) is not on this timer: its own guide (`ui_texts` 4464) says
   read mail is deleted at once and unread mail is kept.
+* systems::economy (mail send limits, 2026-11-08): `send_mail_to_player` refuses a sender below
+  level 10 (`SCLevelRestrictionConfigPacket.mail`, the hard-coded C# value) with
+  `MailResult.LevelTooLow` (22), and refuses a fourth identical body text in a row with
+  `SentSameMailTooManyTimes` (29). The latter is `MAIL_REPETITION` (`ui_texts` 6315: the same
+  mail was sent "3 or more times in a row"); allowing three and refusing the fourth is
+  INFERRED from the text. The streak is per sender, in memory, and cleared on leave world.
+  `MAIL_COOL_TIME` (`ui_texts` 6314) names no interval in the 1.2 client or its data, so no
+  cool-time check is enforced.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
