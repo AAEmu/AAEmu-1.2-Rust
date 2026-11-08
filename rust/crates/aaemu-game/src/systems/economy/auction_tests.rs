@@ -1503,6 +1503,126 @@ async fn an_item_that_expires_in_escrow_refunds_the_winner_and_is_deleted() {
     );
 }
 
+/// A bid or buyout on a lot whose escrow item already expired is refused before the debit, so
+/// the buyer's money never moves and no refund/duplicate can happen later.
+#[tokio::test]
+async fn an_expired_lot_refuses_bids_and_buyouts_before_any_money_moves() {
+    let (mut w, _log) = auction_world();
+    let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    w.server
+        .items
+        .update_item(item_id, |item| item.expiration_time = 1);
+    w.b.drain();
+    let before = money(&w.pb);
+    for bid in [10, 1000] {
+        run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, bid));
+        let frames = w.b.drain();
+        assert_eq!(frames.len(), 1, "only the refusal frame");
+        assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+        assert_eq!(
+            i16::from_le_bytes([frames[0].1[0], frames[0].1[1]]),
+            crate::systems::economy::error_message::CAN_NOT_PUTUP_ITEM
+        );
+        assert_eq!(money(&w.pb), before, "no money moved for bid {bid}");
+        let current = w.server.systems.economy.auction.lot(lot.id).unwrap();
+        assert_eq!((current.bidder_id, current.bid_money), (0, 0));
+    }
+}
+
+/// A failed refund mail at settlement changes nothing: the lot and its bidder survive for a
+/// retry. Once the mail can be delivered the item is released exactly once and the lot is
+/// removed, so a second tick cannot refund again.
+#[tokio::test]
+async fn a_failed_expired_lot_refund_keeps_the_lot_and_retries_once() {
+    let (mut w, log) = flaky_world();
+    let (item_id, lot) = post(&mut w, SWORD, 0, 0, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 700));
+    assert_eq!(money(&w.pb), 100_000 - 700);
+    w.server
+        .items
+        .update_item(item_id, |item| item.expiration_time = 1);
+
+    let ah = &w.server.systems.economy.auction;
+    log.accept.store(false, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, lot.end_time + Duration::seconds(1));
+    assert!(
+        ah.lot(lot.id).is_some(),
+        "the lot waits for the refund mail"
+    );
+    let pending = ah.lot(lot.id).unwrap();
+    assert_eq!((pending.bidder_id, pending.bid_money), (2, 700));
+    assert!(w.server.items.item_by_id(item_id).is_some());
+    assert!(log.delivered.lock().unwrap().is_empty());
+    assert_eq!(log.attempts.lock().unwrap().len(), 1);
+
+    log.accept.store(true, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, lot.end_time + Duration::seconds(2));
+    assert!(ah.lot(lot.id).is_none());
+    assert!(w.server.items.item_by_id(item_id).is_none());
+    let refunds: Vec<AuctionMail> = log
+        .delivered
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|mail| matches!(mail, AuctionMail::BidFail { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        refunds,
+        vec![AuctionMail::BidFail {
+            item_template_id: SWORD,
+            seller_id: 1,
+            buyout_price: 0,
+            listing_fee: 0,
+            previous_buyer_id: 2,
+            previous_bid: 700,
+        }],
+        "exactly one full refund"
+    );
+    ah.update_auction_house(&w.server, lot.end_time + Duration::seconds(3));
+    assert_eq!(
+        log.delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|mail| matches!(mail, AuctionMail::BidFail { .. }))
+            .count(),
+        1,
+        "the removed lot cannot refund again"
+    );
+}
+
+/// An expired lot whose winner no longer resolves cannot be refunded; the item is released
+/// once and the lot is removed instead of retrying a permanent failure forever.
+#[tokio::test]
+async fn an_unresolvable_expired_lot_winner_deletes_the_item_once_and_removes_the_lot() {
+    let (mut w, _log) = auction_world();
+    // The real mail port: a missing receiver name makes the refund mail fail at send.
+    crate::systems::economy::wiring::install(&w.server);
+    let (item_id, lot) = post(&mut w, SWORD, 0, 0, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 700));
+    w.server
+        .items
+        .update_item(item_id, |item| item.expiration_time = 1);
+    w.server.names.remove_character_id(2);
+
+    let ah = &w.server.systems.economy.auction;
+    ah.update_auction_house(&w.server, lot.end_time + Duration::seconds(1));
+    assert!(ah.lot(lot.id).is_none());
+    assert!(w.server.items.item_by_id(item_id).is_none());
+    let deleted = |server: &GameServer| {
+        server
+            .items
+            .removed_items()
+            .iter()
+            .filter(|id| **id == item_id)
+            .count()
+    };
+    assert_eq!(deleted(&w.server), 1, "the item row is released once");
+    ah.update_auction_house(&w.server, lot.end_time + Duration::seconds(2));
+    assert_eq!(deleted(&w.server), 1, "no second release");
+}
+
 /// A delivery that expires before the buyer takes it is deleted instead of entering the bag.
 /// This covers a mail persisted before the settlement guard and an item that expires while the
 /// mail waits; the delivery mail carries no price, so no refund is minted here.
@@ -1531,6 +1651,19 @@ async fn an_expired_auction_delivery_is_deleted_instead_of_taken() {
         1,
         &winner.id.to_le_bytes(),
     );
+    // The drop is reported the same way the item timer reports an expired bag item.
+    let frames = w.b.drain();
+    let lifespan = frames
+        .iter()
+        .find(|(op, _)| *op == sc::SCSyncItemLifespanPacket)
+        .expect("the expired attachment is reported like a bag item");
+    let mut expected = PacketStream::new();
+    expected
+        .write_bool(false)
+        .write_u64(item_id)
+        .write_u32(SWORD)
+        .write_i64(0);
+    assert_eq!(lifespan.1, expected.into_bytes());
     assert!(w.server.items.item_by_id(item_id).is_none());
     assert!(!Inv::of(&w.pb)
         .bag()

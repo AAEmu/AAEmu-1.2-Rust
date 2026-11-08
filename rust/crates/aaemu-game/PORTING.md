@@ -2512,17 +2512,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   never expires while it sits in escrow (a re-listed camp lot, or any timed item, could be sold
   and delivered after its lifetime ended). Rules: an already expired item cannot be posted
   (refused with the client's existing invalid-item code 240, ui_texts 241 "cannot put up the
-  item", item kept); a lot whose escrow item expires before settlement is not delivered -- the
+  item", item kept); a bid or buyout is refused with the same code before any money moves, so
+  a buyout can neither lose the buyer's debit nor refund an already-refunded old bidder a
+  second time; a lot whose escrow item expires before settlement is not delivered -- the
   winner is refunded in full by the normal bid-fail mail and the item is deleted, with no
   seller share and no `AUCTION_BUY`/`AUCTION_SOLD` credit (the refund mail is delivered before
-  any state change, so a refused mail leaves the lot for the next tick); and a delivery taken
-  from the mail after its item expired is deleted instead of entering the bag (covers mails
-  persisted before this fix and items that expire while the mail waits; the delivery mail
-  carries no price, so no refund is minted there). Timed items are otherwise still accepted:
-  only an already expired one is refused (no 1.2 evidence for a general timed-item rule). The
-  shared `item_timers::expired_at` matches the container timer's definition. Tests:
-  `an_expired_item_cannot_be_posted_and_reports_the_invalid_item_code`,
+  any state change, so a refused mail leaves the lot for the next tick; a winner that no
+  longer resolves to a character is released with an error instead of retrying forever); and a
+  delivery taken from the mail after its item expired is deleted instead of entering the bag
+  and reported to the client like an expired bag item (`SCSyncItemLifespanPacket`, `added =
+  false`); this covers mails persisted before this fix and items that expire while the mail
+  waits (the delivery mail carries no price, so no refund is minted there). Timed items are
+  otherwise still accepted: only an already expired one is refused (no 1.2 evidence for a
+  general timed-item rule). The shared `item_timers::expired_at` matches the container timer's
+  definition. Tests: `an_expired_item_cannot_be_posted_and_reports_the_invalid_item_code`,
+  `an_expired_lot_refuses_bids_and_buyouts_before_any_money_moves`,
   `an_item_that_expires_in_escrow_refunds_the_winner_and_is_deleted`,
+  `a_failed_expired_lot_refund_keeps_the_lot_and_retries_once`,
+  `an_unresolvable_expired_lot_winner_deletes_the_item_once_and_removes_the_lot`,
   `an_expired_auction_delivery_is_deleted_instead_of_taken`.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is

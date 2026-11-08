@@ -1117,6 +1117,29 @@ impl AuctionManager {
         {
             return;
         }
+        // An expired escrow item cannot be sold. Refuse before any money moves: a buyout would
+        // otherwise debit the buyer and refund the previous bidder, and the expired-lot
+        // settlement can only refund that already-refunded old bidder again (the buyout money
+        // would be lost and the refund duplicated). Same client code as the listing guard.
+        let expired = lot
+            .item
+            .as_ref()
+            .and_then(|item| server.items.item_by_id(item.id))
+            .is_some_and(|item| super::item_timers::expired_at(&item, Utc::now().timestamp()));
+        if expired {
+            let buyout = lot.direct_money > 0 && bid.money >= lot.direct_money;
+            tracing::warn!(
+                "Auction lot {lot_id}: refusing a {} for an item that expired in escrow",
+                if buyout { "buyout" } else { "bid" }
+            );
+            let mut txn = ItemTxn::begin(server);
+            inventory::send_error_message_to(
+                &mut txn.out(),
+                player,
+                error_message::CAN_NOT_PUTUP_ITEM,
+            );
+            return;
+        }
 
         {
             let mut txn = ItemTxn::begin(server);

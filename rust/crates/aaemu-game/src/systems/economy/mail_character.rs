@@ -3,7 +3,7 @@
 //! counters are the character's `unread_mail` (`Mails.UnreadMailCount`).
 
 use crate::data::items::ITEM_COINS;
-use crate::models::container::slot_type;
+use crate::models::container::{expire_item, slot_type};
 use crate::models::item_task::{task_type, ItemFxList};
 use crate::world::PlayerRef;
 
@@ -322,7 +322,7 @@ pub fn get_attached(
             if *item_id == 0 {
                 continue;
             }
-            let Some(attachment) = server.items.item_by_id(*item_id) else {
+            let Some(mut attachment) = server.items.item_by_id(*item_id) else {
                 // C#: the attachment object always exists; a vanished item cannot be moved.
                 tracing::error!("GetAttached: attachment {item_id} of mail {mail_id} not found");
                 continue;
@@ -337,6 +337,10 @@ pub fn get_attached(
                 tracing::warn!(
                     "GetAttached: auction item {item_id} of mail {mail_id} expired; deleting it instead of delivering"
                 );
+                // The same notification an expired bag item gets from the item timers.
+                txn.env
+                    .fx
+                    .push(expire_item(&mut attachment).with_owner(player.character_id));
                 if let Some(container) = server.items.holding_container(attachment.id) {
                     container
                         .lock()
