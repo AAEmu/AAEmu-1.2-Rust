@@ -512,6 +512,12 @@ pub fn scan_once(server: &GameServer, now: Instant) -> usize {
             .npcs
             .stacked
             .update(world.id, &ids, now, min_age);
+        tracing::debug!(
+            "StackedNpcCheck: instance {}: {} stack(s), {} due",
+            world.id,
+            stacks.len(),
+            due.len()
+        );
         for idx in due {
             let (infos, same) = describe_stack(server, &stacks[idx]);
             let p = infos[0].pos;
