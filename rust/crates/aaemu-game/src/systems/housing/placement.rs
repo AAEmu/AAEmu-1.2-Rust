@@ -443,7 +443,7 @@ pub fn validate_house(
         .world
         .world(instance)
         .ok_or(err::HOUSE_CANNOT_LOCATE_INVALID_AREA)?;
-    if world.template.zone_id_at(x, y) == 0 {
+    if world.zone_id_at(x, y) == 0 {
         return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
     validate_ground_height(server, &world, x, y, z)?;

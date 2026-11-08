@@ -144,7 +144,7 @@ fn zone_group_of(server: &GameServer, world: &WorldInstance, doodad: &DoodadRef)
     let zone_key = if zone_key > 0 {
         zone_key
     } else {
-        world.template.zone_id_at(x, y)
+        world.zone_id_at(x, y)
     };
     let zone = server.game_data.zones.zone_by_key(zone_key)?;
     (zone.group_id > 0).then_some(zone.group_id)

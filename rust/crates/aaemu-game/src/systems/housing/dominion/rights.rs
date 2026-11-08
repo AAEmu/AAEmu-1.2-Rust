@@ -40,7 +40,7 @@ fn province_state(
     let group = server
         .game_data
         .zones
-        .zone_by_key(world.template.zone_id_at(x, y))
+        .zone_by_key(world.zone_id_at(x, y))
         .ok_or(err::HOUSE_CANNOT_LOCATE_INVALID_AREA)?
         .group_id;
     if !server

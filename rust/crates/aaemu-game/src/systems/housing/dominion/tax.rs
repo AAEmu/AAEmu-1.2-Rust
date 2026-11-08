@@ -36,7 +36,7 @@ pub fn authority_at(
         return None;
     }
     let world = server.world.world(instance_id)?;
-    let zone = world.template.zone_id_at(x, y);
+    let zone = world.zone_id_at(x, y);
     let group = server.game_data.zones.zone_by_key(zone)?.group_id;
     authority_for_zone(server, group, instance_id)
 }

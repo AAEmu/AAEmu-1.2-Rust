@@ -765,3 +765,59 @@ async fn boarding_an_object_in_a_closed_zone_keeps_the_last_real_open_position()
         (0, TEST_ZONE, 100.0, 100.0)
     );
 }
+
+/// The instance maps are 2x2 cells (2048 m) and a unit can move a little past the east edge
+/// (`instance_sal_temple` at x=2049.3 in the 2026-11-08 bot run). Every movement there runs the
+/// open-position bookkeeping, whose `world_transform` zone lookup used to log
+/// `GetZoneId: Coordinates out of bounds` (8,518 ERROR lines in that run). An instance world has
+/// one zone, so it applies at every position.
+#[tokio::test]
+async fn instance_movement_past_the_edge_keeps_its_zone_without_an_error() {
+    let server = Arc::new(test_server_with(GameData::empty()));
+    let world = server.world.create_world_instance(
+        Arc::new(WorldTemplate::synthetic(
+            2,
+            "instance_sal_temple",
+            2,
+            2,
+            240,
+        )),
+        100,
+    );
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut character = test_character(1, "EdgeTester", 2040.0, 1000.0);
+    character.is_online = true;
+    character.unit.hp = 100;
+    character.unit.max_hp = 100;
+    let p = crate::world::Player::new(character, client.conn.handle());
+    server.world.try_add_character(&p);
+    world.spawn(&p, &server.view_ctx());
+    client.conn.active_char = Some(p.clone());
+    client.drain();
+    assert_eq!(p.region(), Some((100, 31, 15)));
+
+    let log = LogSink::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish(),
+    );
+    crate::world::session::move_unit(
+        &server,
+        &mut client.conn,
+        p.obj_id,
+        MoveType::new(MoveKind::Unit(UnitMove {
+            x: 2049.2637,
+            y: 1003.5098,
+            z: 154.0357,
+            vel_x: 10,
+            ..Default::default()
+        })),
+    )
+    .await;
+    tokio::task::yield_now().await;
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(!logged.contains("out of bounds"), "{logged}");
+    assert_eq!(p.data().unit.transform.zone_id, 240);
+}

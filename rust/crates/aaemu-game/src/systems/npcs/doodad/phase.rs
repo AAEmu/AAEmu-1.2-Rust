@@ -161,7 +161,7 @@ fn notify_phase_msg(server: &GameServer, doodad: &DoodadRef, func_group_id: u32)
     };
     if group.is_msg_to_zone {
         let pos = world.world_pos_rot(&obj);
-        let zone_key = world.template.zone_id_at(pos.x, pos.y);
+        let zone_key = world.zone_id_at(pos.x, pos.y);
         server.world.broadcast_to_zone(zone_key, &packet);
     } else {
         crate::world::broadcast(&world, obj, &packet, false);
@@ -294,7 +294,7 @@ pub fn doodad_has_matching_climate(ctx: &DoodadCtx<'_>) -> bool {
         } else {
             // If ZoneId wasn't set yet, calculate it
             let pos = ctx.world.world_pos_rot(&ctx.obj());
-            let zone_id = ctx.world.template.zone_id_at(pos.x, pos.y);
+            let zone_id = ctx.world.zone_id_at(pos.x, pos.y);
             ctx.doodad.data().transform.zone_id = zone_id;
             zone_id
         }

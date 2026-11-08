@@ -111,7 +111,7 @@ fn participation(
             server
                 .game_data
                 .zones
-                .zone_by_key(world.template.zone_id_at(position.x, position.y))
+                .zone_by_key(world.zone_id_at(position.x, position.y))
         })
         .map(|zone| zone.group_id);
     let Some(zone) = args

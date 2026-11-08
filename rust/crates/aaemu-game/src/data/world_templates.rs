@@ -719,11 +719,16 @@ impl WorldTemplate {
             .map(|i| self.zone_key_by_regions[i])
     }
 
-    /// Sets `ZoneKeyByRegions[sector_x, sector_y]`; returns false when out of bounds.
+    /// Sets `ZoneKeyByRegions[sector_x, sector_y]`; returns false when out of bounds. A new key
+    /// also joins `zone_keys`, so the zone list stays the set of keys the grid holds (a world is
+    /// only single-zone while every sector names its one key).
     pub fn set_zone_key_at(&mut self, sector_x: i32, sector_y: i32, zone_key: u32) -> bool {
         match self.region_index(sector_x, sector_y) {
             Some(i) => {
                 self.zone_key_by_regions[i] = zone_key;
+                if !self.zone_keys.contains(&zone_key) {
+                    self.zone_keys.push(zone_key);
+                }
                 true
             }
             None => false,
