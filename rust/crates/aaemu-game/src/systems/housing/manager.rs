@@ -26,8 +26,6 @@ use super::hooks::{mail_type, HouseMail, TaxMailUpdate, MAIL_STATUS_UNPAID};
 pub const FOR_SALE_MARKER_DOODAD_ID: u32 = 6760;
 /// `MaxHeavyTaxCounted`.
 pub const MAX_HEAVY_TAX_COUNTED: i32 = 10;
-/// `HoursForFailedTaxToReturnHouse`.
-pub const HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE: i64 = 22;
 /// `CopperPerCertificate` (fallback when `content_configs` 37 is missing).
 pub const COPPER_PER_CERTIFICATE: f64 = 1_000_000.0;
 /// `BuffConstants.Untouchable`.
