@@ -519,7 +519,9 @@ fn load_cell_height_map(
                         Err(e) => return CellLoad::Exception(format!("{e} ({file})")),
                     };
                     // (ushort)(height * Template.HeightMaxCoefficient): float * double,
-                    // saturating conversion (.NET 9+).
+                    // saturating conversion (.NET 9+). `HeightMaxCoefficient` covers the whole
+                    // 0..=MaxHeight range (deviation from C#, see PORTING.md), so only samples
+                    // above the world's maximum height saturate.
                     let value = (f64::from(height) * height_max_coefficient) as u16;
                     heights[(o_x * CELL_HMAP_RESOLUTION + o_y) as usize] = value;
                     if node.is_hole_sample(unit_x, unit_y) {
@@ -1332,7 +1334,8 @@ pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    const COEF: f64 = 65535.0 / (4096.0 / 4.0);
+    /// `HeightMaxCoefficient` of a 4096 m world (the whole terrain range fits the u16 grid).
+    const COEF: f64 = 65535.0 / 4096.0;
 
     #[test]
     fn node_surface_ids_follow_the_native_lower_sample_rule() {
@@ -1387,7 +1390,8 @@ mod tests {
         let mut h = vec![0u16; CELL_POINTS];
         for x in 0..CELL_HMAP_RESOLUTION {
             for y in 0..CELL_HMAP_RESOLUTION {
-                h[(x * CELL_HMAP_RESOLUTION + y) as usize] = (f64::from(x + 2 * y) * COEF) as u16;
+                h[(x * CELL_HMAP_RESOLUTION + y) as usize] =
+                    (f64::from(x + 2 * y) * COEF).round() as u16;
             }
         }
         assert!(t.insert_cell(0, 0, h));
@@ -1411,7 +1415,7 @@ mod tests {
         let f = w.files().clone();
         // grid point (5, 7) -> world (10, 14)
         let raw = t.get_raw_height_map_height(&f, 10, 14).unwrap();
-        let expect = ((f64::from(5 + 14) * COEF) as u16) as f64 / COEF;
+        let expect = ((f64::from(5 + 14) * COEF).round() as u16) as f64 / COEF;
         assert_eq!(raw, expect as f32);
         // odd coordinates use the same grid point (x % 1024 / 2)
         assert_eq!(t.get_raw_height_map_height(&f, 11, 15).unwrap(), raw);
@@ -1614,6 +1618,40 @@ mod tests {
             .is_none());
         // truncated header -> exception
         assert!(hmap::Hmap::read(&data[..10], false).is_err());
+    }
+
+    /// A client cell whose samples are at 1551.7 m must survive the u16 grid. The C#
+    /// `HeightMaxCoefficient` (`65535 / (4096 / 4)`) could only store up to 1024 m, so every
+    /// sample above it read back as 1024.0; the port's coefficient covers 0..=4096 m.
+    #[test]
+    fn heights_above_1024_m_round_trip_through_the_grid() {
+        use crate::data::pak::test_util::temp_path;
+        use crate::data::world_templates::WorldTemplate;
+
+        let root = temp_path("heightmap_above_1024");
+        let cell_dir = root.join("game/worlds/test_world/cells/000_000/client/terrain");
+        std::fs::create_dir_all(&cell_dir).unwrap();
+        // Full 33 x 33 sector nodes. `f_offset` 1500 + `f_range` 0.001 gives 0.05 m steps
+        // (`i_step` 1), so raw 0x40A0 decodes to 1500 + 1034 * 0.05 = 1551.7 m.
+        let data = vec![0x40A0u16; 33 * 33];
+        let nodes: Vec<Vec<u8>> = (0..SECTORS_PER_CELL * SECTORS_PER_CELL)
+            .map(|i| {
+                let (sx, sy) = (i / SECTORS_PER_CELL, i % SECTORS_PER_CELL);
+                node_bytes(7, 33, 1500.0, 0.001, &data, (sx as f32, sy as f32))
+            })
+            .collect();
+        std::fs::write(cell_dir.join("heightmap.dat"), file(&nodes)).unwrap();
+        let files = ClientFileManager::from_sources(&[root.to_string_lossy().into_owned()], &root);
+        let template = WorldTemplate::synthetic(0, "test_world", 1, 1, 100);
+        let t = WorldHeightmap::new(&template);
+
+        // One u16 step is 1 / (65535 / 4096) m = 6.25 cm.
+        let tolerance = (1.0 / COEF) as f32;
+        let raw = t.get_raw_height_map_height(&files, 0, 0).unwrap();
+        assert!((raw - 1551.7).abs() < tolerance, "{raw}");
+        assert!((t.grid_sample(&files, 0, 0) - 1551.7).abs() < tolerance);
+        assert!((t.get_height(&files, 0.0, 0.0).unwrap() - 1551.7).abs() < tolerance);
+        std::fs::remove_dir_all(root).ok();
     }
 }
 
@@ -1881,5 +1919,50 @@ mod real_data_tests {
             h.get_height(zone, s[0], s[1], s[2]),
             t.get_height(&files, s[0], s[1]).unwrap()
         );
+    }
+
+    /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game
+    /// real_heights_above_1024_m -- --ignored --nocapture`: the three highest points of the
+    /// 2026-11-08 client/server terrain cross-check
+    /// (`D:/aaemu-audits/terrain-3way-2026-11-08/REPORT.md`, `points.csv`: Bevy / bake). The
+    /// C# `HeightMaxCoefficient` read 1024.0 m at all three; the whole 0..=4096 m range must
+    /// round-trip now.
+    #[test]
+    #[ignore = "needs AAEMU_GAME_PAK"]
+    fn real_heights_above_1024_m() {
+        let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+            return;
+        };
+        let app = app_path();
+        let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+        let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+        let main = worlds.get_world_template_by_name("main_world").unwrap();
+        let h = HeightmapWorlds::new(
+            files.clone(),
+            &worlds,
+            HeightmapConfig {
+                heightmaps_enable: true,
+                ..Default::default()
+            },
+        );
+        let t = h.template(main.id).unwrap();
+        // (x, y, Bevy `height_at` as f32, bake) from `points.csv`.
+        let points: [(f32, f32, f32, f64); 3] = [
+            (26893.904, 9839.206, 1551.6947, 1551.589796),
+            (26850.271, 10020.228, 1551.0603, 1551.002063),
+            (26621.588, 10108.499, 1468.8883, 1469.144192),
+        ];
+        for (x, y, bevy, bake) in points {
+            let z = f64::from(t.get_height(&files, x, y).unwrap());
+            println!("({x}, {y}): server {z}, Bevy {bevy}, bake {bake}");
+            assert!(z > 1024.0, "({x}, {y}) still saturates at {z}");
+            // The server's bilinear rule and Bevy's native triangle rule differ by the local
+            // slope change (the audit's bound is 0.10 + 0.35 * twist); at these points they
+            // agree within 0.1 m. The 4 m bake is a coarser bilinear sample.
+            assert!(
+                (z - f64::from(bevy)).abs() <= 0.1,
+                "({x}, {y}): server {z}, Bevy {bevy}, bake {bake}"
+            );
+        }
     }
 }

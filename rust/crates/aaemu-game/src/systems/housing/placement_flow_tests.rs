@@ -517,7 +517,7 @@ async fn two_house_builds_at_the_same_spot_race_and_one_wins() {
 /// A flat heightmap (0 m) over the world cell that contains the accepted footprint, so the
 /// `Z` guard has a ground reference. Mirrors the real `heightmap.dat` layout.
 fn install_flat_heightmap(server: &GameServer) {
-    const COEF: f64 = 65535.0 / (4096.0 / 4.0);
+    const COEF: f64 = 65535.0 / 4096.0;
     const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usize;
     let map = WorldHeightmap::with_size(0, "main_world", 16, 16, COEF);
     assert!(map.insert_cell(14, 14, vec![0u16; CELL_POINTS]));

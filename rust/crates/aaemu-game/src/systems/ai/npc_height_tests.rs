@@ -30,8 +30,9 @@ use crate::world::Entity;
 
 use super::reference_height_in;
 
-/// `HeightMaxCoefficient` of the synthetic `main_world` (as in the heightmap tests).
-const COEF: f64 = 65535.0 / (4096.0 / 4.0);
+/// `HeightMaxCoefficient` of the synthetic `main_world` (as in the heightmap tests): the whole
+/// 0..=4096 m terrain range fits the u16 grid (deviation from C#, see PORTING.md).
+const COEF: f64 = 65535.0 / 4096.0;
 const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usize;
 
 /// A flat heightmap at `surface` metres for the test zone's cell (0, 0).
@@ -543,12 +544,22 @@ async fn terrain_without_the_hole_stops_the_ray_at_the_surface() {
 }
 
 #[tokio::test]
-async fn spawn_above_the_saturated_heightmap_ceiling_keeps_its_height() {
-    // 1030 m does not fit the u16 heightmap (1024 m ceiling): the "terrain" reads 1023.98 and
-    // is only a lower bound, so a spawn on the real surface must not be pulled down onto it.
+async fn spawn_between_1024_m_and_the_world_ceiling_snaps_onto_the_terrain() {
+    // 1030 m fits the u16 heightmap now (the old coefficient saturated at 1024 m): the
+    // terrain is a real floor and a spawn within the snap distance lands on it.
     let server = cave_server(1030.0);
-    assert_eq!(spawn_z(&server, 1027.0), 1027.0);
-    assert_eq!(spawn_z(&server, 1030.5), 1030.5);
+    let z = spawn_z(&server, 1032.0);
+    assert!((z - 1030.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_above_the_saturated_heightmap_ceiling_keeps_its_height() {
+    // 4096 m (main_world's `max_height`) is the u16 heightmap ceiling: the "terrain" reads
+    // 4096 and is only a lower bound, so a spawn on the real surface must not be pulled down
+    // onto it.
+    let server = cave_server(4096.0);
+    assert_eq!(spawn_z(&server, 4093.0), 4093.0);
+    assert_eq!(spawn_z(&server, 4096.5), 4096.5);
 }
 
 #[tokio::test]
