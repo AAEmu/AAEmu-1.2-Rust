@@ -10,6 +10,7 @@ use super::{doodad_func_permission as permission, CSExecuteCraft};
 use crate::data::{items::ItemTemplate, GameData};
 use crate::models::doodad::{doodad_owner_type, Doodad};
 use crate::models::house::{housing_permission, House};
+use crate::models::shipyard::{Shipyard, ShipyardData};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -22,7 +23,7 @@ use crate::systems::npcs::doodad::templates::{
 use crate::systems::skills::data::{EffectKind, EffectTemplate, SkillTemplate};
 use crate::systems::skills::types::SkillTargetType;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
-use crate::world::{DoodadRef, Entity, HouseRef, PlayerRef};
+use crate::world::{DoodadRef, Entity, HouseRef, PlayerRef, WorldObject};
 
 const TAX: u32 = 76;
 const CERTIFICATE: u32 = 31892;
@@ -552,4 +553,101 @@ fn set_crafting_pay_reads_the_client_writer_body() {
     let p = super::CSSetCraftingPayPacket::read_body(&mut s).unwrap();
     assert_eq!((p.obj_id, p.money_amount), (0x1234, 100_000));
     assert_eq!(s.remaining(), 0);
+}
+
+#[tokio::test]
+async fn set_crafting_pay_stores_the_wage_on_the_owners_shipyard_only() {
+    let server = test_server_with(GameData::empty());
+    server.names.add_character(1, "Alice", 1001);
+    server.names.add_character(2, "Bob", 1002);
+    let mut alice_client = TestClient::new(&server, 1, 1001);
+    let alice = spawn_player(
+        &server,
+        &alice_client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x100,
+    );
+    alice_client.conn.active_char = Some(alice.clone());
+    let mut bob_client = TestClient::new(&server, 2, 1002);
+    let bob = spawn_player(
+        &server,
+        &bob_client,
+        test_character(2, "Bob", 100.0, 100.0),
+        0x101,
+    );
+    bob_client.conn.active_char = Some(bob);
+    let obj_id = 0x200;
+    let mut sy = Shipyard::new(ShipyardData {
+        id: 1,
+        template_id: 3,
+        kind2: alice.character_id,
+        owner_name: "Alice".into(),
+        obj_id,
+        actions: 3,
+        ..ShipyardData::default()
+    });
+    sy.unit.transform.instance_id = 0;
+    sy.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    sy.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let shipyard = Entity::new(obj_id, sy);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&shipyard, &server.view_ctx());
+    alice_client.drain();
+    bob_client.drain();
+
+    // The owner's value is stored and re-sent in SCShipyardState, and the row carries it.
+    super::CSSetCraftingPayPacket {
+        obj_id,
+        money_amount: 5_000,
+    }
+    .run(&server, &mut alice_client.conn);
+    assert_eq!(shipyard.data().data.money_amount, 5_000);
+    assert!(shipyard.data().is_dirty);
+    assert_eq!(
+        crate::systems::vehicles::shipyards_db::snapshot(&shipyard).money_amount,
+        5_000
+    );
+    assert!(alice_client
+        .drain_ops()
+        .contains(&sc::SCShipyardStatePacket));
+
+    // The owner cannot clear the wage, store a negative/zero amount (INFERRED: wage >= 1)
+    // or exceed the client's 2,000,000,000 total (pay x actions).
+    for amount in [0, -1, 700_000_000, i32::MAX] {
+        super::CSSetCraftingPayPacket {
+            obj_id,
+            money_amount: amount,
+        }
+        .run(&server, &mut alice_client.conn);
+        assert_eq!(shipyard.data().data.money_amount, 5_000, "amount {amount}");
+    }
+    alice_client.drain();
+
+    // A non-owner cannot change it.
+    bob_client.drain();
+    super::CSSetCraftingPayPacket {
+        obj_id,
+        money_amount: 7_000,
+    }
+    .run(&server, &mut bob_client.conn);
+    assert_eq!(shipyard.data().data.money_amount, 5_000);
+    assert!(bob_client.drain_ops().is_empty());
+
+    // A non-shipyard craft target has no 1.2 craft-order structure to store the pay on.
+    let doodad = Entity::new(0x201, Doodad::new(BENCH));
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(WorldObject::from(&doodad), &server.view_ctx());
+    alice_client.drain();
+    super::CSSetCraftingPayPacket {
+        obj_id: 0x201,
+        money_amount: 9_000,
+    }
+    .run(&server, &mut alice_client.conn);
+    assert_eq!(shipyard.data().data.money_amount, 5_000);
 }

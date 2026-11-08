@@ -1128,8 +1128,9 @@ pub fn free_regrade_with(server: &GameServer, base_grade: i32, lucky_roll: u32) 
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSExecuteCraft>(LEVEL_PLAIN, cs::CSExecuteCraft);
     // 1.2 Lua `X2Craft.SetCraftingPay` -> `FUN_394d7230` (`local_14 = 0x8d`; the doodad obj
-    // id at `+0xc` and the money at `+0x10` via `FUN_397b0ca0`). Pay rules are UNKNOWN
-    // (capture-pending), so the handler only validates and logs.
+    // id at `+0xc` and the money at `+0x10` via `FUN_397b0ca0`). The client setter resolves a
+    // shipyard and sends the per-action wage; the handler stores it on the owner's shipyard
+    // and re-sends `SCShipyardState`. Pay rules (who is paid, when) stay UNKNOWN, no payout.
     reg.register::<CSSetCraftingPayPacket>(LEVEL_PLAIN, cs::CSSetCraftingPayPacket);
 }
 
@@ -1165,7 +1166,13 @@ sync_client_packet!(CSExecuteCraft);
 
 /// `CSSetCraftingPayPacket`. The 1.2 client writer `FUN_394d7230` sends opcode `0x8d` with the
 /// crafting doodad's obj id (`+0xc`) and the money (`+0x10`) through `FUN_397b0ca0`, in that
-/// order (bc, i32). The C# only logged it; here it is a validated no-op.
+/// order (bc, i32). The C# only logged it; the 1.2 client setter refuses pay < 1 and caps
+/// `pay x actions` at 2,000,000,000 copper, so the handler stores the per-action wage on the
+/// player's shipyard (`ShipyardData.money_amount`) and re-sends its state. Pay rules (who is
+/// paid, when, whether it is escrowed) stay UNKNOWN: no payout is made (INFERRED, see
+/// PORTING.md).
+const MAX_CRAFTING_PAY_TOTAL: i64 = 2_000_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSetCraftingPayPacket {
     pub obj_id: u32,
@@ -1182,22 +1189,68 @@ impl CSSetCraftingPayPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(player) = active(conn) else { return };
-        if self.money_amount < 0 {
+        // Pay rules are UNKNOWN (capture-pending). The 1.2 data has no craft-order table, so
+        // the only persisted "wage" field is the shipyard's `ShipyardData.money_amount`, which
+        // `SCShipyardState` sends back to the client. Store it there for the shipyard owner
+        // and make no payout. INFERRED: `crafting_pay` (`ui_texts` 881 "Wage:") is the
+        // shipyard craft window's wage and `pay` (1308 "currently set wage") is that field.
+        if self.money_amount <= 0 {
             tracing::warn!(
                 char_id = player.character_id,
                 obj_id = self.obj_id,
                 money = self.money_amount,
-                "SetCraftingPay: negative money, ignored (pay rules UNKNOWN, capture-pending)"
+                "SetCraftingPay: non-positive money, ignored (INFERRED: wage must be at least 1)"
             );
             return;
         }
-        let obj_exists = server.world.object(self.obj_id).is_some();
-        tracing::warn!(
-            char_id = player.character_id,
-            obj_id = self.obj_id,
-            money = self.money_amount,
-            obj_exists,
-            "SetCraftingPay logged, no state change (pay rules UNKNOWN, capture-pending)"
+        let Some(shipyard) = server
+            .world
+            .object(self.obj_id)
+            .and_then(|o| o.as_shipyard().cloned())
+        else {
+            tracing::debug!(
+                char_id = player.character_id,
+                obj_id = self.obj_id,
+                "SetCraftingPay: object is not a shipyard and 1.2 has no craft-order structure"
+            );
+            return;
+        };
+        {
+            let s = shipyard.data();
+            if s.data.kind2 != player.character_id {
+                tracing::warn!(
+                    char_id = player.character_id,
+                    obj_id = self.obj_id,
+                    owner = s.data.kind2,
+                    "SetCraftingPay: only the shipyard owner may set the wage"
+                );
+                return;
+            }
+            // The client caps `pay x actions` at 2,000,000,000 copper (`FUN_394d7360`); a
+            // crafted packet must not store a larger wage.
+            let total = i64::from(self.money_amount) * i64::from(s.data.actions.max(0));
+            if total > MAX_CRAFTING_PAY_TOTAL {
+                tracing::warn!(
+                    char_id = player.character_id,
+                    obj_id = self.obj_id,
+                    money = self.money_amount,
+                    actions = s.data.actions,
+                    "SetCraftingPay: pay x actions overflows, ignored"
+                );
+                return;
+            }
+        }
+        let data = {
+            let mut s = shipyard.data();
+            s.data.money_amount = self.money_amount;
+            s.is_dirty = true;
+            s.data.clone()
+        };
+        crate::systems::vehicles::broadcast(
+            server,
+            &WorldObject::from(&shipyard),
+            &crate::packets::world_objects::SCShipyardStatePacket { data },
+            true,
         );
     }
 }

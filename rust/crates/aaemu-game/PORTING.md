@@ -6983,9 +6983,13 @@ are now honoured at craft execution (WP-I2 A/B; `systems::economy::{craft,craft_
 - **`CSSetCraftingPayPacket` (owner-approved 2026-11-05).** The 1.2 Lua `X2Craft.SetCraftingPay`
   sends CS `0x8d` (`FUN_394d7230`, `local_14 = 0x8d`; the doodad obj id at packet `+0xc` and
   the money at `+0x10` through `FUN_397b0ca0`). The opcode table entry is now `0x08d` (was
-  `0xfff`) and the packet is registered; the handler reads `(bc objId, i32 money)`, rejects a
-  negative amount and otherwise logs only. Pay rules are UNKNOWN, so it changes no state
-  (capture-pending).
+  `0xfff`) and the packet is registered; the handler reads `(bc objId, i32 money)`. For the
+  shipyard the packet names it refuses pay < 1, `pay x actions > 2,000,000,000` (the client's
+  own cap, `FUN_394d7360`), a non-shipyard target and a sender who is not the shipyard's owner
+  (`kind2`, the persisted `owner_id`); otherwise it stores the per-action wage in
+  `ShipyardData.money_amount` and re-sends `SCShipyardState` to the nearby players. No payout
+  or escrow is made: who pays the helper, when, and whether the owner's `pay x actions` is held
+  are UNKNOWN (INFERRED store-only).
 - **Shipyard wage reading (2026-11-06, INFERRED strong).** `FUN_394d63e0` resolves the target
   only when its kind (`+0x410`) is 6 (`BaseUnitType.Shipyard`); the `SCShipyardState` body
   `FUN_3961ef40` puts the i32 `moneyAmount` at unit `+0x9c` (record `+0x2c`), the same field as
@@ -7058,9 +7062,9 @@ stale for single-stack products, and stackables were still empty).
   the craft flow assertions in `craft_batch_consumes_materials_adds_products_and_reschedules`
   and `craft_trade_pack_equips_into_backpack_slot`, and the MySQL round trip
   `private_mysql_item_crafter_survives_save_and_load` (gated by `AAEMU_TEST_MYSQL`).
-- **Left as-is.** Craft pay (`CSSetCraftingPayPacket`) rules stay capture-pending (see "Craft
-  material grades and product grade"); `doodad_func_craft_grade_ratios` has 0 rows; the Mia
-  mail variants stay capture-pending.
+- **Left as-is.** Craft pay (`CSSetCraftingPayPacket`) is stored on the owner's shipyard only,
+  with no payout (see "Craft material grades and product grade"); `doodad_func_craft_grade_ratios`
+  has 0 rows; the Mia mail variants stay capture-pending.
 
 ## Recipe learning and the learned-craft gate (2026-11-04)
 
