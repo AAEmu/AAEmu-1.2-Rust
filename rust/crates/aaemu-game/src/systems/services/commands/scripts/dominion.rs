@@ -544,7 +544,22 @@ impl Command for Dominion {
                 let character = server
                     .names
                     .get_character_id(&crate::managers::name::normalize_name(name));
-                let expedition = server.expeditions.expedition_of_character(character);
+                if character == 0 {
+                    CommandManager::send_error_text(
+                        self,
+                        out,
+                        &format!("No character named '{name}'"),
+                    );
+                    return Ok(());
+                }
+                let Some(expedition) = rights::current_expedition(server, character) else {
+                    CommandManager::send_error_text(
+                        self,
+                        out,
+                        "The character is not a current expedition member",
+                    );
+                    return Ok(());
+                };
                 let side = match args.get(3).map(String::as_str) {
                     Some("attacker") => SiegeSide::Attacker,
                     Some("defender") => SiegeSide::Defender,
@@ -924,15 +939,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_gm_register_path_also_applies_the_join_policy() {
+    async fn the_gm_register_path_reports_name_membership_and_policy_separately() {
         let mut f = fixture();
         let empty = state(&f);
         f.server.names.add_character(1, "Attacker", 1001);
+        f.server.names.add_character(3, "Outsider", 1003);
+        f.attacker.frames();
+
+        // Unknown name: its own message, no client error to any character.
+        let (_, out) = harness::run(
+            &f.server,
+            &f.attacker.p,
+            "dominion register 25 Nobody attacker",
+        )
+        .await;
+        assert_eq!(
+            out,
+            [harness::error("dominion", "No character named 'Nobody'")]
+        );
+        assert!(error_ids(&mut f.attacker).is_empty());
+        assert_eq!(state(&f), empty);
+
+        // Known name, no current expedition membership: its own message, no 581.
+        f.server
+            .expeditions
+            .with_mut(30, |guild| guild.members.clear())
+            .unwrap();
+        let (_, out) = harness::run(
+            &f.server,
+            &f.attacker.p,
+            "dominion register 25 Outsider attacker",
+        )
+        .await;
+        assert_eq!(
+            out,
+            [harness::error(
+                "dominion",
+                "The character is not a current expedition member"
+            )]
+        );
+        assert!(error_ids(&mut f.attacker).is_empty());
+        assert_eq!(state(&f), empty);
+
+        // Current member whose rank lacks join_siege: the client's 581.
         f.server
             .expeditions
             .with_mut(20, |guild| guild.policies[0].join_siege = false)
             .unwrap();
-        f.attacker.frames();
         let (_, out) = harness::run(
             &f.server,
             &f.attacker.p,
@@ -943,7 +996,6 @@ mod tests {
             out[0].contains("rank does not permit"),
             "the GM register path honours the rank policy"
         );
-        // The registering character is online, so it receives the client's own 581.
         assert_eq!(
             error_ids(&mut f.attacker),
             vec![crate::systems::economy::error_message::SIEGE_NO_RIGHTS_IN_EXPEDITION]
