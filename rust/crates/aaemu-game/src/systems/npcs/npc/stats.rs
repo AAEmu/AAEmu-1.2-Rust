@@ -165,7 +165,12 @@ impl NpcStatCalc<'_> {
             p.insert("fai", f64::from(b.fai));
         }
         if ab_level {
-            p.insert("ab_level", 0.0);
+            // Deviation from the C# `Npc.cs`, which passed 0: the 1.2 NPC formulas that read
+            // `ab_level` are level steps (id 29 `(floor((ab_level+2)/3)*24-8) * npc_*`, id 30
+            // `level_dps / ((ab_level / 50) + 1)`), so 0 produced -8 for every NPC. The
+            // character `LevelDps` (`ab_level = level`), `skills::skill::ab_level` for
+            // non-player units and the mate getters all bind the unit level; do the same here.
+            p.insert("ab_level", f64::from(self.level));
         }
         p.insert(
             "npc_template",
@@ -449,8 +454,9 @@ pub(crate) mod tests {
         // DpsInc = (floor(52/3*17.5 + 2500/15) + 70) * 1000 = (floor(303.33 + 166.67) + 70) * 1000
         let base = ((52.0f64 / 3.0) * 17.5 + 2500.0 / 15.0).floor();
         assert_eq!(s.dps_inc, ((base + 70.0) * 1000.0) as i32);
-        // LevelDps with ab_level = 0: (floor(2/3)*24 - 8) = -8
-        assert_eq!(s.level_dps, -8.0);
+        // LevelDps with ab_level = level 50: floor((50 + 2) / 3) * 24 - 8 = 400, times the
+        // template / kind / grade variables (all 1.0).
+        assert_eq!(s.level_dps, 400.0);
         // Dps = (30.5 + 21) * 1000, MDps = (12.25 + 21) * 1000
         assert_eq!(s.dps, 51500);
         assert_eq!(s.mdps, 33250);
@@ -495,5 +501,31 @@ pub(crate) mod tests {
         let mut t = t;
         t.no_exp = true;
         assert_eq!(calc(&f, &t, &b, 10).kill_exp, 0);
+    }
+
+    /// The real `compact.sqlite3` (`AAEMU_COMPACT_DB`): with `ab_level` bound to the NPC level
+    /// the 1.2 `LevelDps` formula is positive at every level for every NPC grade in the data.
+    /// Before the binding this was -8 (or less) for every NPC, whatever its level.
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn real_compact_db_npc_level_dps_is_positive_at_every_level() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let c =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let f = FormulaManager::load(&c).unwrap();
+        let b = Bonuses::default();
+        for grade in [1u8, 2, 3, 4, 5, 6, 7, 8] {
+            let t = template(grade);
+            for level in 1..=100u8 {
+                let s = calc(&f, &t, &b, level);
+                assert!(
+                    s.level_dps > 0.0,
+                    "grade {grade} level {level}: LevelDps {}",
+                    s.level_dps
+                );
+            }
+        }
     }
 }
