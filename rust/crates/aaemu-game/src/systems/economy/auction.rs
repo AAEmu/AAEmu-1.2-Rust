@@ -704,21 +704,32 @@ impl AuctionManager {
     /// item is deleted. No seller share is paid and no `AUCTION_BUY`/`AUCTION_SOLD` record is
     /// credited. The refund mail is delivered before any state changes: a refused mail keeps
     /// the lot for the next tick instead of losing the refund (a pending settlement would not
-    /// survive a restart).
+    /// survive a restart). A winner that no longer resolves to a character cannot be mailed;
+    /// the item is released with an error instead of retrying a permanent failure.
     fn refund_expired_lot(
         &self,
         server: &GameServer,
         lot: &AuctionLot,
         item: &Item,
+        buyer: &str,
         sold_amount: i32,
     ) {
-        if lot.bidder_id != 0 {
+        // Resolve the receiver like the sale path does (the stored name is authoritative at
+        // settlement). A receiver that no longer exists cannot get a mail: say so once and
+        // still release the item instead of retrying a permanent failure forever.
+        let buyer_id = server.names.get_character_id(buyer);
+        let buyer_id = if buyer_id != 0 {
+            buyer_id
+        } else {
+            lot.bidder_id
+        };
+        if buyer_id != 0 && server.names.get_character_name(buyer_id).is_some() {
             let refund = AuctionMail::BidFail {
                 item_template_id: item.template_id,
                 seller_id: lot.client_id,
                 buyout_price: lot.direct_money,
                 listing_fee: 0,
-                previous_buyer_id: lot.bidder_id,
+                previous_buyer_id: buyer_id,
                 previous_bid: sold_amount,
             };
             if !self.deliver_mail(server, &refund) {
@@ -728,9 +739,15 @@ impl AuctionManager {
                 );
                 return;
             }
+        } else {
+            tracing::error!(
+                "Auction lot {}: item {} expired in auction escrow and the winner {buyer:?} cannot receive a refund mail; deleting it",
+                lot.id,
+                item.template_id
+            );
         }
         tracing::warn!(
-            "Auction lot {}: item {} expired in auction escrow; refunded the winner and deleted it",
+            "Auction lot {}: item {} expired in auction escrow; deleted it",
             lot.id,
             item.template_id
         );
@@ -913,7 +930,7 @@ impl AuctionManager {
         // The item's own lifetime can end while it sits in escrow (no container timer visits
         // the auction container): never deliver it after that, refund the winner instead.
         if super::item_timers::expired_at(&new_item, Utc::now().timestamp()) {
-            self.refund_expired_lot(server, lot, &new_item, sold_amount);
+            self.refund_expired_lot(server, lot, &new_item, buyer, sold_amount);
             return;
         }
         let money_after_fee = f64::from(sold_amount) * 0.9;
