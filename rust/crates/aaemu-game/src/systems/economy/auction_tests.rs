@@ -1737,7 +1737,7 @@ async fn auction_requires_an_auctioneer_in_range() {
 async fn an_expired_item_cannot_be_posted_and_reports_the_invalid_item_code() {
     let (mut w, _log) = auction_world();
     let pa = w.pa.clone();
-    let item_id = give(&mut w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    let item_id = give(&w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
     w.server
         .items
         .update_item(item_id, |item| item.expiration_time = 1);
