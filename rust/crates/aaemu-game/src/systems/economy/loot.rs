@@ -361,6 +361,29 @@ pub fn generate_pack_v2(
     Ok(out)
 }
 
+/// Drops generated loot rows whose item template does not exist. A `loots` row can point at a
+/// missing item (185 of the 13 823 rows of the 1.2 compact data); one bad static row must not
+/// abort the rest of the pack (C# 10.x PR #1488). The rows are static data, so this is a debug
+/// event, not a warning.
+pub fn retain_known_items(
+    data: &crate::data::items::ItemData,
+    pack_id: u32,
+    list: Vec<GeneratedLoot>,
+) -> Vec<GeneratedLoot> {
+    list.into_iter()
+        .filter(|g| {
+            if g.item_id == ITEM_COINS || data.template(g.item_id).is_some() {
+                return true;
+            }
+            tracing::debug!(
+                "Loot pack {pack_id}: skipping unknown item template {}",
+                g.item_id
+            );
+            false
+        })
+        .collect()
+}
+
 /// `LootPack.GeneratePack(player, actabilityType, inheritedGrade)`.
 pub fn generate_pack_for_player(
     server: &GameServer,
@@ -372,7 +395,7 @@ pub fn generate_pack_for_player(
 ) -> Result<Vec<GeneratedLoot>, LootError> {
     let (drop, gold) = player_loot_rates(player, chrono::Utc::now().timestamp_millis());
     let lp = PlayerLoot { server, player };
-    generate_pack_v2(
+    let list = generate_pack_v2(
         pack,
         &server.game_data.items,
         LootConfig::from_world(&server.config.world),
@@ -382,7 +405,8 @@ pub fn generate_pack_for_player(
         actability_type,
         inherited_grade,
         rng,
-    )
+    )?;
+    Ok(retain_known_items(&server.game_data.items, pack.id, list))
 }
 
 /// `LootPack.GiveLootPack(character, actabilityType, taskType, generatedList, inheritedGrade)`.
@@ -417,6 +441,9 @@ pub fn give_loot_pack(
             }
         },
     };
+    // A generated list from another caller may still name a missing item template: skip that
+    // row instead of failing the whole pack (C# 10.x PR #1488).
+    let list = retain_known_items(txn.data(), pack.id, list);
     let inv = Inv::of(player);
     let money = player.data().money;
     // First check for room
@@ -439,9 +466,14 @@ pub fn give_loot_pack(
             continue;
         }
         let Some(t) = txn.data().template(g.item_id) else {
-            // C#: NullReferenceException on itemTemplate.FixedGrade
-            tracing::error!("GiveLootPack: unknown item template {}", g.item_id);
-            return false;
+            // The list was filtered above; a template that disappeared since then is skipped
+            // like any other unknown row.
+            tracing::debug!(
+                "GiveLootPack {}: skipping unknown item template {}",
+                pack.id,
+                g.item_id
+            );
+            continue;
         };
         let grade = if t.fixed_grade > 0 {
             t.fixed_grade

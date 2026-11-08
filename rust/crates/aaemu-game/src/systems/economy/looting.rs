@@ -523,7 +523,13 @@ impl LootManager {
                     None,
                     rng,
                 ) {
-                    Ok(r) => results.extend(r),
+                    // A loot row whose item template is missing is skipped, not fatal: one bad
+                    // static row must not abort the rest of the pack (C# 10.x PR #1488).
+                    Ok(r) => results.extend(loot::retain_known_items(
+                        &server.game_data.items,
+                        pack.id,
+                        r,
+                    )),
                     Err(e) => {
                         // C#: the exception escapes GenerateLoot.
                         tracing::error!("GenerateLoot for npc {}: {e}", npc.obj_id);
@@ -552,13 +558,14 @@ impl LootManager {
                     ) {
                         Some(i) => to_add.push(i),
                         None => {
-                            // C#: RegisterItems throws a NullReferenceException on the null item.
-                            g.register_items(to_add);
-                            tracing::error!(
-                                "GenerateLoot: unknown loot item template {}",
+                            // The rows were filtered above; a template that disappeared since
+                            // then is skipped like any other unknown row instead of dropping
+                            // the rest of the loot.
+                            tracing::debug!(
+                                "GenerateLoot: skipping unknown loot item template {}",
                                 r.item_id
                             );
-                            return;
+                            continue;
                         }
                     }
                 }
