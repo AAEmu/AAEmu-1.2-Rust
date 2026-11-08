@@ -176,21 +176,36 @@ fn kill_credits(
     }
 }
 
+/// Claims the scripted removal of this NPC life (`KillNpcWithoutCorpseEffect`) under the NPC's
+/// data lock. False when the NPC is already dead, its normal death is being processed, or the
+/// removal was claimed before. The flag is final for the life (damage does not clear it), so no
+/// other path can kill or credit the NPC between the claim and the removal. A respawned NPC is
+/// a new object and starts unclaimed.
+pub fn claim_scripted_removal(npc: &NpcRef) -> bool {
+    let mut n = npc.data();
+    if n.unit.scripted_removed || n.unit.death_processed || n.unit.is_dead() {
+        return false;
+    }
+    n.unit.scripted_removed = true;
+    true
+}
+
+/// Undoes [`claim_scripted_removal`] when the removal could not happen, so the NPC stays
+/// killable.
+pub fn unclaim_scripted_removal(npc: &NpcRef) {
+    npc.data().unit.scripted_removed = false;
+}
+
 /// The monster-hunt quest credit of a scripted removal (`KillNpcWithoutCorpseEffect`; C# 10.x
 /// PR #1792): the players a normal death credits (the tag / loot-rights holders and their party,
 /// plus the Tag Share contributors), with `fallback` credited when nobody holds tagging rights.
-/// No experience, loot or honor is granted.
+/// No experience, loot or honor is granted, and no other kill listener runs: C# #1792 only calls
+/// `QuestManager.DoOnMonsterHuntEvents`, so the KILL_NPC achievement, the attacker's `OnKill`,
+/// the instance `OnUnitKilled` and `GuardNpcDied` are not raised.
+///
+/// The caller owns the life through [`claim_scripted_removal`] and calls this after the NPC
+/// was actually removed.
 pub fn credit_scripted_kill(server: &GameServer, npc: &NpcRef, fallback: Option<&PlayerRef>) {
-    // Claim this life's kill under the NPC's data lock so a normal death running beside the
-    // removal (or a second application of the effect) cannot credit it again:
-    // `try_claim_death` uses the same latch.
-    {
-        let mut n = npc.data();
-        if n.unit.death_processed || n.unit.is_dead() {
-            return;
-        }
-        n.unit.death_processed = true;
-    }
     let me = WorldObject::from(npc);
     let credits = kill_credits(server, &me, npc, fallback);
     let mut credited = credits.eligible;
@@ -210,7 +225,7 @@ pub fn credit_scripted_kill(server: &GameServer, npc: &NpcRef, fallback: Option<
     }
     if let Some(q) = server.systems.npcs.hooks.quests.get() {
         for p in &credited {
-            q.on_npc_killed(server, p, npc);
+            q.on_npc_scripted_kill(server, p, npc);
         }
     }
     // `CharacterTagging.ClearAllTaggers()` after the credit (C# #1792).

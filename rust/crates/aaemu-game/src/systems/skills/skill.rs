@@ -38,6 +38,35 @@ use super::{broadcast, unit_reqs};
 /// `SkillsEnum.DigUpTreasureChestMarkedOnMap`.
 pub const DIG_UP_TREASURE_SKILL: u32 = 18_349;
 
+/// The NPC a `KillNpcWithoutCorpseEffect` removes: the matching-template NPC nearest the caster,
+/// restricted to the effect radius when it has one (`None` when none qualifies). Rust-only: the
+/// C# effect is a no-op for a character caster, so the port must not pick the first NPC of the
+/// template from the other side of the world for a player-cast quest skill.
+fn nearest_kill_npc(
+    server: &GameServer,
+    caster: &WorldObject,
+    template_id: u32,
+    radius: f32,
+) -> Option<crate::world::NpcRef> {
+    let world = world_of(server, caster)?;
+    let from = Target::Obj(caster.clone());
+    let mut best: Option<(f32, crate::world::NpcRef)> = None;
+    for npc in world.all_npcs() {
+        if npc.data().unit.template_id != template_id {
+            continue;
+        }
+        let to = Target::Obj(WorldObject::from(npc.clone()));
+        let distance = distance_to(server, &from, &to, true);
+        if radius > 0.0 && distance > radius {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(best, _)| distance < *best) {
+            best = Some((distance, npc));
+        }
+    }
+    best.map(|(_, npc)| npc)
+}
+
 /// The arguments a cast carries through its tasks.
 #[derive(Debug, Clone)]
 pub struct CastCtx {
@@ -2480,7 +2509,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 }
             }
         } else if let EffectTemplate::KillNpcWithoutCorpse(k) = template {
-            let npc = world_of(server, caster).and_then(|w| w.npc_by_template_id(k.npc_id));
+            let npc = nearest_kill_npc(server, caster, k.npc_id, k.radius);
             let effective = npc
                 .clone()
                 .or_else(|| target.as_obj().and_then(|o| o.as_npc().cloned()));
