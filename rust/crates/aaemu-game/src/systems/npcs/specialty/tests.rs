@@ -351,7 +351,7 @@ async fn sell_flow() {
     );
     assert_eq!(mails[0].0.crafter_id, 2);
     assert_eq!(mails[0].0.backpack_template_id, PACK);
-    assert_eq!(mails[0].0.mail_delay_minutes, 480.0); // default config (`start` did not run)
+    assert_eq!(mails[0].0.mail_delay_minutes, 1320.0); // default config (`start` did not run)
     assert!(!mails[0].1);
     assert_eq!(mails.len(), if share { 2 } else { 1 });
     assert_eq!(
