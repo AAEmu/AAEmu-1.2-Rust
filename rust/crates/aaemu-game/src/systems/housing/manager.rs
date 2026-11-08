@@ -32,6 +32,8 @@ pub const COPPER_PER_CERTIFICATE: f64 = 1_000_000.0;
 pub const BUFF_UNTOUCHABLE: u32 = 545;
 /// `BuffConstants.RemovalDebuff`.
 pub const BUFF_REMOVAL_DEBUFF: u32 = 2250;
+/// Unused 1.2 buff "Burning House" (30 fixed damage per second), applied with the removal debuff.
+pub const BUFF_BURNING_HOUSE: u32 = 39;
 /// `FactionsEnum.Monstrosity`.
 pub const FACTION_MONSTROSITY: u32 = 115;
 /// `Item.TaxCertificate` / `BoundTaxCertificate` / `AppraisalCertificate` (the appraisal item id
@@ -839,9 +841,11 @@ pub fn set_untouchable(server: &GameServer, house: &HouseRef, on: bool) {
     set_house_buff(server, house, BUFF_UNTOUCHABLE, on, "Untouchable buff");
 }
 
-/// `SetRemovalDebuff(house, isDeteriorating)`.
+/// `SetRemovalDebuff(house, isDeteriorating)`. Deviation: the unused 1.2 "Burning House" buff
+/// follows the removal debuff so an abandoned house visibly burns down (see `PORTING.md`).
 pub fn set_removal_debuff(server: &GameServer, house: &HouseRef, on: bool) {
     set_house_buff(server, house, BUFF_REMOVAL_DEBUFF, on, "Removal Debuff");
+    set_house_buff(server, house, BUFF_BURNING_HOUSE, on, "Burning House");
 }
 
 /// `UpdateHouseFaction(house, factionId)`.

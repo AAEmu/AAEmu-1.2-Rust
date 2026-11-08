@@ -109,7 +109,11 @@ fn unowned_lodestone_fixture() -> (GameServer, HouseRef, super::dominion::TowerI
             ..Default::default()
         },
     );
-    for id in [manager::BUFF_UNTOUCHABLE, manager::BUFF_REMOVAL_DEBUFF] {
+    for id in [
+        manager::BUFF_UNTOUCHABLE,
+        manager::BUFF_REMOVAL_DEBUFF,
+        manager::BUFF_BURNING_HOUSE,
+    ] {
         data.systems
             .skills
             .add_buff(crate::systems::skills::data::BuffTemplate {
@@ -152,6 +156,11 @@ async fn tax_timer_keeps_active_lodestone_attackable_and_protects_peace_unclaime
         .unit
         .buffs
         .check_buff(manager::BUFF_REMOVAL_DEBUFF));
+    assert!(!house
+        .data()
+        .unit
+        .buffs
+        .check_buff(manager::BUFF_BURNING_HOUSE));
     assert_eq!(house.data().current_step, 0);
     let now = manager::now();
     let authority = &server.systems.housing.dominions;
@@ -183,6 +192,11 @@ async fn tax_timer_keeps_active_lodestone_attackable_and_protects_peace_unclaime
             .unit
             .buffs
             .check_buff(manager::BUFF_REMOVAL_DEBUFF));
+        assert!(!house
+            .data()
+            .unit
+            .buffs
+            .check_buff(manager::BUFF_BURNING_HOUSE));
     }
     assert!(!manager::pay_weekly_tax(&server, &house));
     assert!(server.systems.economy.mail.state().all.is_empty());

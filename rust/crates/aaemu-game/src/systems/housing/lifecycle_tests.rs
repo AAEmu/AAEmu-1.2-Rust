@@ -1320,6 +1320,7 @@ async fn demolished_garden_plants_detach_in_world_coordinates_and_save_without_o
 }
 
 const REMOVAL_DAMAGE: u32 = 1876;
+const BURN_DAMAGE: u32 = 106;
 
 fn removal_skills() -> crate::systems::skills::Data {
     use crate::systems::skills::data::{BuffTemplate, EffectKind, EffectTemplate, TickEffect};
@@ -1356,6 +1357,28 @@ fn removal_skills() -> crate::systems::skills::Data {
         EffectKind::DamageEffect,
         EffectTemplate::Damage(Box::new(damage)),
         12864,
+    );
+    // The 1.2 "Burning House" buff is not a `system` buff.
+    data.add_buff(BuffTemplate {
+        id: manager::BUFF_BURNING_HOUSE,
+        duration: 99_999_999,
+        tick: 1_000.0,
+        stack_rule: 1,
+        max_stack: 1,
+        remove_on_death: true,
+        tick_effects: vec![TickEffect {
+            effect_id: 286,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+        }],
+        ..Default::default()
+    });
+    let mut burn = crate::systems::skills::tests::damage_effect(BURN_DAMAGE, 30);
+    burn.damage_type = 2;
+    data.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(burn)),
+        286,
     );
     data
 }
@@ -1397,6 +1420,44 @@ fn removal_buff(house: &HouseRef) -> crate::models::buff::Buff {
         .find(|b| b.template.id == manager::BUFF_REMOVAL_DEBUFF)
         .unwrap()
         .clone()
+}
+
+fn burning_buff(house: &HouseRef) -> crate::models::buff::Buff {
+    house
+        .data()
+        .unit
+        .buffs
+        .effects
+        .iter()
+        .find(|b| b.template.id == manager::BUFF_BURNING_HOUSE)
+        .unwrap()
+        .clone()
+}
+
+fn burning_args<'a>(
+    server: &GameServer,
+    house: &HouseRef,
+    skill_object: &'a crate::systems::skills::types::SkillObject,
+) -> crate::systems::skills::effects::EffectArgs<'a> {
+    use crate::systems::skills::effects::EffectSource;
+    use crate::systems::skills::types::CastAction;
+
+    let mut args = removal_args(server, house, skill_object);
+    args.cast = CastAction::Buff {
+        buff_id: manager::BUFF_BURNING_HOUSE,
+        owner_obj_id: house.obj_id,
+        index: burning_buff(house).index,
+    };
+    args.source = EffectSource::from_buff(
+        server
+            .game_data
+            .systems
+            .skills
+            .buff(manager::BUFF_BURNING_HOUSE)
+            .unwrap()
+            .clone(),
+    );
+    args
 }
 
 fn removal_args<'a>(
@@ -1457,6 +1518,132 @@ async fn abandoned_house_removal_tick_damages_only_after_demolition() {
     house.data().unit.owner_id = f.player.character_id;
     buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
     assert_eq!(house.data().unit.hp, hp - 10);
+}
+
+#[tokio::test]
+async fn abandoned_house_burning_ticks_30_per_second_and_removes_the_house_at_zero() {
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::{buffs, relation};
+
+    let (f, house) = removal_fixture(removal_skills());
+    let target = Target::Obj(WorldObject::from(&house));
+    assert!(!relation::can_attack(&f.server, &target, &target));
+    assert!(house
+        .data()
+        .unit
+        .buffs
+        .check_buff(manager::BUFF_REMOVAL_DEBUFF));
+    let buff = burning_buff(&house);
+    assert_eq!(buff.tick, 1_000.0);
+    let hp = house.data().unit.hp;
+    buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    assert_eq!(house.data().unit.hp, hp - 30);
+    buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    assert_eq!(house.data().unit.hp, hp - 60);
+    assert!(f.server.world.object(house.obj_id).is_some());
+    // An owned house cannot be burned by a leftover buff.
+    house.data().unit.owner_id = f.player.character_id;
+    buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    assert_eq!(house.data().unit.hp, hp - 60);
+    house.data().unit.owner_id = 0;
+    house.data().unit.hp = 30;
+    buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    assert_eq!(house.data().unit.hp, 0);
+    assert!(f.server.world.object(house.obj_id).is_none());
+    assert!(f.server.systems.housing.manager.all().is_empty());
+}
+
+#[tokio::test]
+async fn abandoned_house_carries_both_buffs_and_drops_them_with_the_removal_debuff() {
+    let (f, house) = removal_fixture(removal_skills());
+    for id in [manager::BUFF_REMOVAL_DEBUFF, manager::BUFF_BURNING_HOUSE] {
+        assert!(house.data().unit.buffs.check_buff(id));
+    }
+    manager::set_removal_debuff(&f.server, &house, false);
+    for id in [manager::BUFF_REMOVAL_DEBUFF, manager::BUFF_BURNING_HOUSE] {
+        assert!(!house.data().unit.buffs.check_buff(id));
+    }
+    manager::set_removal_debuff(&f.server, &house, true);
+    manager::set_removal_debuff(&f.server, &house, true);
+    for id in [manager::BUFF_REMOVAL_DEBUFF, manager::BUFF_BURNING_HOUSE] {
+        assert!(house.data().unit.buffs.check_buff(id));
+    }
+}
+
+#[tokio::test]
+async fn burning_damage_is_authorized_only_for_the_unowned_house_burning_buff() {
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    let (f, house) = removal_fixture(removal_skills());
+    let object = SkillObject::None;
+    let valid = burning_args(&f.server, &house, &object);
+    assert!(super::is_abandoned_house_removal_damage(
+        &f.server,
+        BURN_DAMAGE,
+        &valid
+    ));
+    // Each effect id only works with its own buff.
+    assert!(!super::is_abandoned_house_removal_damage(
+        &f.server,
+        REMOVAL_DAMAGE,
+        &valid
+    ));
+    let removal = removal_args(&f.server, &house, &object);
+    assert!(!super::is_abandoned_house_removal_damage(
+        &f.server,
+        BURN_DAMAGE,
+        &removal
+    ));
+    let mut rejected = Vec::new();
+    let mut args = valid.clone();
+    args.source.buff = None;
+    rejected.push(args);
+    let mut args = valid.clone();
+    args.source.buff = Some(Arc::new((**args.source.buff.as_ref().unwrap()).clone()));
+    rejected.push(args); // same ID on an untrusted template is insufficient
+    let mut args = valid.clone();
+    args.source.skill = Some(SkillRun::new(
+        Arc::new(crate::systems::skills::tests::skill_template(11404)),
+        1,
+    ));
+    rejected.push(args);
+    let mut args = valid.clone();
+    args.source.is_trigger = true;
+    rejected.push(args);
+    let mut args = valid.clone();
+    args.cast = CastAction::Skill {
+        skill_id: 11404,
+        tl_id: 1,
+    };
+    rejected.push(args);
+    let mut args = valid.clone();
+    args.cast = CastAction::Buff {
+        buff_id: manager::BUFF_BURNING_HOUSE,
+        owner_obj_id: house.obj_id,
+        index: burning_buff(&house).index + 100,
+    };
+    rejected.push(args);
+    let mut args = valid.clone();
+    args.caster = Some(WorldObject::from(&f.player));
+    args.caster_caster = SkillCaster::Unit(f.player.obj_id);
+    rejected.push(args);
+    let mut args = valid.clone();
+    args.target_caster = SkillCastTarget::Unit(f.player.obj_id);
+    rejected.push(args);
+    for args in rejected {
+        assert!(!super::is_abandoned_house_removal_damage(
+            &f.server,
+            BURN_DAMAGE,
+            &args
+        ));
+    }
+    house.data().unit.owner_id = f.player.character_id;
+    assert!(!super::is_abandoned_house_removal_damage(
+        &f.server,
+        BURN_DAMAGE,
+        &valid
+    ));
 }
 
 #[tokio::test]
@@ -1728,6 +1915,46 @@ async fn real_compact_house_removal_buff_tick_uses_original_damage_and_death_cle
     crate::systems::skills::buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
     assert_eq!(house.data().unit.hp, hp - 10);
     house.data().unit.hp = 10;
+    crate::systems::skills::buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    assert_eq!(house.data().unit.hp, 0);
+    assert!(f.server.world.object(house.obj_id).is_none());
+    assert!(f.server.systems.housing.manager.all().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB with original 1.2 skills"]
+async fn real_compact_house_burning_buff_ticks_30_per_second_and_death_cleanup() {
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let skills = crate::systems::skills::Data::load_from(
+        &db,
+        &crate::data::client_files::ClientFileManager::new(),
+    )
+    .unwrap();
+    let buff = skills.buff(manager::BUFF_BURNING_HOUSE).unwrap();
+    assert!(!buff.system);
+    assert_eq!(buff.duration, 99_999_999);
+    assert_eq!(buff.tick, 1_000.0);
+    assert_eq!(buff.tick_effects.len(), 1);
+    assert_eq!(buff.tick_effects[0].effect_id, 286);
+    let Some(EffectTemplate::Damage(effect)) = skills.effect(EffectKind::DamageEffect, BURN_DAMAGE)
+    else {
+        panic!("burning damage");
+    };
+    assert_eq!((effect.fixed_min, effect.fixed_max), (30, 30));
+    assert!(effect.use_fixed_damage);
+    let (f, house) = removal_fixture(skills);
+    let buff = burning_buff(&house);
+    let hp = house.data().unit.hp;
+    crate::systems::skills::buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    assert_eq!(house.data().unit.hp, hp - 30);
+    house.data().unit.hp = 30;
     crate::systems::skills::buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
     assert_eq!(house.data().unit.hp, 0);
     assert!(f.server.world.object(house.obj_id).is_none());
