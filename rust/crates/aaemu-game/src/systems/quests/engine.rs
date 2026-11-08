@@ -1768,6 +1768,49 @@ impl<'a> Ctx<'a> {
         true
     }
 
+    /// The checks [`Ctx::add_quest`] runs before it installs a quest, without the refusal
+    /// logging / packets: whether the character could start `quest_id` now. Used for the
+    /// `SCQuestAcceptConditional` sphere offer, so the dialog is only sent for a quest the
+    /// client's accept reply could actually start (level and start-component unit
+    /// requirements, schedule window, supply-item backpack rule, active / completed state).
+    pub fn can_offer_quest(&self, quest_id: u32) -> bool {
+        if self.has_quest(quest_id) {
+            return false;
+        }
+        let data = self.data;
+        let Some(template) = data.template(quest_id) else {
+            return false;
+        };
+        if !super::quest_schedule_allows(
+            &self.server.game_data.systems.npcs.schedule,
+            quest_id,
+            crate::systems::npcs::spawn_manager::unix_now(),
+        ) {
+            return false;
+        }
+        // The `CanAcceptSupplyItems` backpack check, without its error packet.
+        for c in template.components_of(&data.components, kind::SUPPLY) {
+            for &a in &c.acts {
+                let ActKind::SupplyItem { item_id, .. } = data.acts[a].kind else {
+                    continue;
+                };
+                if self.hooks.is_auto_equip_trade_pack(self.server, item_id)
+                    && !self
+                        .hooks
+                        .can_replace_glider_in_backpack_slot(self.server, self.c)
+                {
+                    return false;
+                }
+            }
+        }
+        for c in template.components_of(&data.components, kind::START) {
+            if !self.can_component_run(c.id) {
+                return false;
+            }
+        }
+        !(self.has_quest_completed(quest_id) && !template.repeatable)
+    }
+
     /// `AddQuest(questId, forcibly, questAcceptorType, acceptorId)`.
     pub fn add_quest(
         &mut self,

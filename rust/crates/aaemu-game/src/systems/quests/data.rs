@@ -109,6 +109,15 @@ pub struct DbSphereQuest {
     pub quest_trigger_id: u32,
 }
 
+/// `sphere_accept_quest_quests`: a quest offered by a `SphereAcceptQuest` sphere
+/// (`sphere_accept_quest_id` is the `sphere_detail_id` of the sphere row).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DbSphereAcceptQuestQuest {
+    pub id: u32,
+    pub sphere_accept_quest_id: u32,
+    pub quest_id: u32,
+}
+
 /// One `area` block of a `quest_sign_sphere.g` file, in zone-local coordinates (converted to
 /// world coordinates by the sphere manager, which has the world templates). A row read from an
 /// imported `quest_sign_sphere_fill.json` instead already holds world coordinates in `local`.
@@ -162,6 +171,8 @@ pub struct QuestData {
     /// `SphereGameData._sphereQuests` (+ key order).
     pub sphere_quests: HashMap<u32, DbSphereQuest>,
     pub sphere_quest_order: Vec<u32>,
+    /// `sphere_accept_quest_quests` (table order).
+    pub sphere_accept_quest_quests: Vec<DbSphereAcceptQuestQuest>,
     /// `spheres` keys in table order (`_spheres.Values` iteration).
     pub sphere_order: Vec<u32>,
     /// `quest_sign_sphere.g` areas of `main_world` (zone-local coordinates).
@@ -1480,6 +1491,15 @@ impl QuestData {
             }
             Ok(())
         })?;
+        for_each_row(conn, "SELECT * FROM sphere_accept_quest_quests", [], |r| {
+            self.sphere_accept_quest_quests
+                .push(DbSphereAcceptQuestQuest {
+                    id: r.u32("id")?,
+                    sphere_accept_quest_id: r.u32("sphere_accept_quest_id")?,
+                    quest_id: r.u32("quest_id")?,
+                });
+            Ok(())
+        })?;
         match dup {
             Some(id) => Err(err(format!("spheres / sphere_quests: duplicate id {id}"))),
             None => Ok(()),
@@ -1651,6 +1671,39 @@ impl QuestData {
                 .iter()
                 .map(|i| &self.spheres[i])
                 .find(|s| s.sphere_detail_id == sq.id && s.sphere_detail_type == "SphereQuest")
+            {
+                return s.id;
+            }
+        }
+        0
+    }
+
+    /// The quests offered by the `SphereAcceptQuest` sphere with `sphere_detail_id`
+    /// (`sphere_accept_quest_quests`, table order).
+    pub fn accept_quest_quests(&self, sphere_detail_id: u32) -> Vec<u32> {
+        self.sphere_accept_quest_quests
+            .iter()
+            .filter(|link| link.sphere_accept_quest_id == sphere_detail_id)
+            .map(|link| link.quest_id)
+            .collect()
+    }
+
+    /// The `SphereAcceptQuest` sphere that offers `quest_id` through
+    /// `sphere_accept_quest_quests` (0 = none). The first link row and the first matching
+    /// sphere row win, like the dictionary-order lookups above.
+    pub fn accept_quest_sphere_id(&self, quest_id: u32) -> u32 {
+        for link in &self.sphere_accept_quest_quests {
+            if link.quest_id != quest_id {
+                continue;
+            }
+            if let Some(s) = self
+                .sphere_order
+                .iter()
+                .map(|i| &self.spheres[i])
+                .find(|s| {
+                    s.sphere_detail_id == link.sphere_accept_quest_id
+                        && s.sphere_detail_type == "SphereAcceptQuest"
+                })
             {
                 return s.id;
             }

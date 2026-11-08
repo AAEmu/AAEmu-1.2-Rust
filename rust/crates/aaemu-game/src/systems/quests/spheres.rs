@@ -17,6 +17,7 @@ use super::data::{QuestData, RawSignSphere};
 use super::model::sphere_trigger;
 use super::packets::SCAreaTeamMessagePacket;
 use super::templates::ActKind;
+use super::ui_packets::SCQuestAcceptConditionalPacket;
 use crate::server::GameServer;
 use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
 use crate::world::{PlayerRef, WorldObject};
@@ -663,6 +664,36 @@ impl SphereQuestManager {
             };
             if !enter && !sphere.enter_or_leave {
                 continue;
+            }
+            if enter && sphere.sphere_detail_type == "SphereAcceptQuest" {
+                // The `SphereAcceptQuest` sphere offers its linked quest(s) with
+                // `SCQuestAcceptConditional` 0x14a instead of starting them; the client's
+                // `CSStartQuestContext` reply then runs the normal sphere start path. The
+                // entry trigger is INFERRED (CAP-QU-2): the area comes from the shipped
+                // `sphere_area_fill.json` and the link from `sphere_accept_quest_quests`, but
+                // no capture shows the retail send.
+                let (id, or) = (sphere.id, sphere.or_unit_reqs);
+                let can = super::events::with_quests(server, &player, None, move |ctx| {
+                    ctx.can_trigger_sphere(id, or)
+                })
+                .unwrap_or(false);
+                if can {
+                    for quest_id in data.accept_quest_quests(sphere.sphere_detail_id) {
+                        // The same rules as a normal quest start, without its refusal
+                        // logging / packets: only offer a quest the character could start.
+                        let eligible =
+                            super::events::with_quests(server, &player, None, move |ctx| {
+                                ctx.can_offer_quest(quest_id)
+                            })
+                            .unwrap_or(false);
+                        if eligible {
+                            player.send(SCQuestAcceptConditionalPacket {
+                                sphere_id: sphere.id,
+                                quest_id,
+                            });
+                        }
+                    }
+                }
             }
             if sphere.sphere_detail_type == "SphereBubble" {
                 player.send(SCAreaChatBubblePacket {
