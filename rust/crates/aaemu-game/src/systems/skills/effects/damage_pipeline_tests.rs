@@ -798,3 +798,34 @@ fn healed_values(client: &mut TestClient) -> Vec<i32> {
         })
         .collect()
 }
+
+/// An authored inverted range is a data error even when the computed maximum is <= 0, so the
+/// `min > max` error must not be swallowed by the negative-LevelDps no-op (fixed_min 100,
+/// fixed_max -200: `max <= 0 < min`, and the inversion is in the columns).
+#[tokio::test]
+async fn authored_inverted_restore_range_still_reports_the_error() {
+    let effect = crate::systems::skills::data::effects::RestoreManaEffect {
+        id: 69,
+        use_fixed_value: true,
+        fixed_min: 100,
+        fixed_max: -200,
+        use_level_value: false,
+        level_md: 1.0,
+        level_va_start: 0,
+        level_va_end: 0,
+        percent: false,
+    };
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    let a = args((&player).into(), (&npc).into(), 1);
+    client.drain();
+    let (_, events) =
+        crate::test_support::capture_events(|| super::restore_mana(&server, &effect, &a));
+    assert_eq!(healed_values(&mut client), Vec::<i32>::new());
+    assert!(
+        events
+            .iter()
+            .any(|(level, message)| *level == tracing::Level::ERROR
+                && message.contains("RestoreManaEffect")),
+        "{events:?}"
+    );
+}
