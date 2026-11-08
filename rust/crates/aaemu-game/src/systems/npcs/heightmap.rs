@@ -470,6 +470,14 @@ enum CellLoad {
     Exception(String),
 }
 
+/// The u16 grid value of a height sample: `round(height * coefficient)`, saturating at
+/// `u16::MAX`. The C# truncated `(ushort)(height * coefficient)`, which biased every sample
+/// down by up to one step (6.25 cm in `main_world`); rounding keeps the grid centred on the
+/// client's samples. `max_height * coefficient` is exactly `u16::MAX`, so it still maps there.
+fn encode_height(height: f32, coefficient: f64) -> u16 {
+    (f64::from(height) * coefficient).round() as u16
+}
+
 /// `WorldCell.LoadCellHeightMapFromClientData` (heightmap part).
 fn load_cell_height_map(
     files: &ClientFileManager,
@@ -518,11 +526,11 @@ fn load_cell_height_map(
                         Ok(h) => h,
                         Err(e) => return CellLoad::Exception(format!("{e} ({file})")),
                     };
-                    // (ushort)(height * Template.HeightMaxCoefficient): float * double,
-                    // saturating conversion (.NET 9+). `HeightMaxCoefficient` covers the whole
-                    // 0..=MaxHeight range (deviation from C#, see PORTING.md), so only samples
-                    // above the world's maximum height saturate.
-                    let value = (f64::from(height) * height_max_coefficient) as u16;
+                    // (ushort)(height * Template.HeightMaxCoefficient), but rounded instead of
+                    // truncated (deviation from C#, see PORTING.md). `HeightMaxCoefficient`
+                    // covers the whole 0..=MaxHeight range, so only samples above the world's
+                    // maximum height saturate.
+                    let value = encode_height(height, height_max_coefficient);
                     heights[(o_x * CELL_HMAP_RESOLUTION + o_y) as usize] = value;
                     if node.is_hole_sample(unit_x, unit_y) {
                         let bit = (o_x * CELL_HMAP_RESOLUTION + o_y) as usize;
@@ -1651,6 +1659,36 @@ mod tests {
         assert!((raw - 1551.7).abs() < tolerance, "{raw}");
         assert!((t.grid_sample(&files, 0, 0) - 1551.7).abs() < tolerance);
         assert!((t.get_height(&files, 0.0, 0.0).unwrap() - 1551.7).abs() < tolerance);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A sample exactly half a storage step (`2048 * (65535 / 4096)` = 32767.5) must round up
+    /// to 32768. The C# truncating cast stored 32767 and read 2047.97 m instead of 2048.03 m.
+    #[test]
+    fn height_at_half_a_storage_step_rounds_up() {
+        use crate::data::pak::test_util::temp_path;
+        use crate::data::world_templates::WorldTemplate;
+
+        let root = temp_path("heightmap_half_step");
+        let cell_dir = root.join("game/worlds/test_world/cells/000_000/client/terrain");
+        std::fs::create_dir_all(&cell_dir).unwrap();
+        // `f_offset` 2048 decodes every sample to exactly 2048.0 m (raw 0, `i_step` 1).
+        let data = vec![0u16; 33 * 33];
+        let nodes: Vec<Vec<u8>> = (0..SECTORS_PER_CELL * SECTORS_PER_CELL)
+            .map(|i| {
+                let (sx, sy) = (i / SECTORS_PER_CELL, i % SECTORS_PER_CELL);
+                node_bytes(7, 33, 2048.0, 0.001, &data, (sx as f32, sy as f32))
+            })
+            .collect();
+        std::fs::write(cell_dir.join("heightmap.dat"), file(&nodes)).unwrap();
+        let files = ClientFileManager::from_sources(&[root.to_string_lossy().into_owned()], &root);
+        let template = WorldTemplate::synthetic(0, "test_world", 1, 1, 100);
+        let t = WorldHeightmap::new(&template);
+
+        // 2048 * (65535 / 4096) = 32767.5 exactly: rounding stores 32768, truncation 32767.
+        assert_eq!(f64::from(2048.0f32) * COEF, 32767.5);
+        let raw = t.get_raw_height_map_height(&files, 0, 0).unwrap();
+        assert_eq!(raw, (32768.0 / COEF) as f32);
         std::fs::remove_dir_all(root).ok();
     }
 }
