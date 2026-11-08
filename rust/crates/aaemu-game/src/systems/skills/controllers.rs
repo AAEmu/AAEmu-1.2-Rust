@@ -251,7 +251,9 @@ fn geo_height(server: &GameServer, owner: &WorldObject) -> f32 {
 /// positive.
 fn ground_height(server: &GameServer, owner: &WorldObject, start_z: f32) -> f32 {
     let geo = geo_height(server, owner);
-    if geo > 0.0 {
+    // A height more than `WALKER_MAX_DROP` below the start is the terrain under an instance hall
+    // (its floor is not in the height data), not the ground the unit falls to.
+    if geo > 0.0 && geo >= start_z - crate::systems::ai::npc::WALKER_MAX_DROP {
         geo
     } else {
         start_z

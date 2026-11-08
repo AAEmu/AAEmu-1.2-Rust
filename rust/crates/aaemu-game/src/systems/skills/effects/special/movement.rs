@@ -13,6 +13,7 @@ use crate::models::movement::{
 use crate::models::transform::PositionAndRotation;
 use crate::packets::world::{SCErrorMsgPacket, SCOneUnitMovementPacket};
 use crate::server::GameServer;
+use crate::systems::ai::npc::WALKER_MAX_DROP;
 use crate::systems::economy::error_message as err;
 use crate::systems::skills::ground_snap_rules as ground_snap;
 use crate::world::{now_ms, NpcRef, PlayerRef, WorldObject};
@@ -58,6 +59,37 @@ fn time_of_day_ms() -> u32 {
     (now_ms().rem_euclid(86_400_000)) as u32
 }
 
+/// `GeoData.GetHeight(end)`: the end Z snaps to the ground when it is positive and within 5 m of
+/// it, else the computed end Z is kept (the C# `KnockBack` / `ImpulseEffect` rule).
+fn geo_snap(server: &GameServer, obj: &WorldObject, x: f32, y: f32, z: f32) -> f32 {
+    if let Some(world) = world_of(server, obj) {
+        let ground_z = crate::systems::npcs::npc::spawner::geo_data_height(server, &world, x, y);
+        if ground_z > 0.0 && (z - ground_z).abs() < 5.0 {
+            return ground_z;
+        }
+    }
+    z
+}
+
+/// The collision ground under `(x, y)` for a unit that comes from level `reference_z`, or `None`
+/// when it is not a floor the unit can reach: the halls of the instance dungeons are not in the
+/// collision world, so the probe (2048 m deep) only finds the terrain far below them. A floor
+/// more than [`WALKER_MAX_DROP`] under `reference_z` is no floor (nor one above `probe_z` + the
+/// probe's step-up allowance); the caller then falls back to the C# rule.
+pub(crate) fn bounded_ground_height(
+    server: &GameServer,
+    instance_id: u32,
+    x: f32,
+    y: f32,
+    reference_z: f32,
+    probe_z: f32,
+) -> Option<f32> {
+    let g = crate::systems::ai::collision::ground_height(server, instance_id, x, y, probe_z)?;
+    let lo = reference_z - WALKER_MAX_DROP;
+    let hi = reference_z.max(probe_z) + crate::systems::ai::collision::GROUND_PROBE_UP;
+    (g >= lo && g <= hi).then_some(g)
+}
+
 /// The server-side NPC displacement of `Blink` / `TeleportToUnit` / `KnockBack` /
 /// `ImpulseEffect`: optional `DisplacedUntil = now + 600 ms`, `Transform.Local.SetPosition`,
 /// optional `SCBlinkUnitPacket`, the stopping `SCOneUnitMovementPacket` and
@@ -77,34 +109,26 @@ pub(crate) fn move_npc(
     // (WZKnockBackUnit 0x39258BB0 / X2::Unit::Impulse 0x3925C7D0), so it stops at walls and
     // lands on the ground: `GetBlinkPosition` along the push, then the ground under the end
     // point (collision service).
-    let physics_end = if displaced {
-        crate::systems::ai::collision::displacement::clip_move(
+    let mut physics_clipped = false;
+    if displaced {
+        if let Some(p) = crate::systems::ai::collision::displacement::clip_move(
             server,
             instance_id,
             [start.x, start.y, start.z],
             [x, y, start.z],
-        )
-        .and_then(|p| {
-            let g = crate::systems::ai::collision::ground_height(
-                server,
-                instance_id,
-                p[0],
-                p[1],
-                z.max(p[2]),
-            )?;
-            Some((p[0], p[1], g))
-        })
-    } else {
-        None
-    };
-    if let Some(p) = physics_end {
-        (x, y, z) = p;
-    } else if let Some(world) = world_of(server, &obj) {
-        // `GeoData.GetHeight(end)`: snap to the ground when it is within 5 m.
-        let ground_z = crate::systems::npcs::npc::spawner::geo_data_height(server, &world, x, y);
-        if ground_z > 0.0 && (z - ground_z).abs() < 5.0 {
-            z = ground_z;
+        ) {
+            physics_clipped = true;
+            (x, y) = (p[0], p[1]);
+            if let Some(g) = bounded_ground_height(server, instance_id, x, y, start.z, z.max(p[2]))
+            {
+                z = g;
+            } else {
+                z = geo_snap(server, &obj, x, y, z);
+            }
         }
+    }
+    if !physics_clipped {
+        z = geo_snap(server, &obj, x, y, z);
     }
     let (rot_z, in_battle) = {
         let mut d = npc.data();
@@ -272,15 +296,17 @@ pub fn teleport_to_unit(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4])
     let Some(caster) = &args.caster else {
         return;
     };
-    // the ground at the end point (collision service; else the target's z as in C#)
-    let end_z = crate::systems::ai::collision::ground_height_or(
+    // the ground at the end point (collision service; else the target's z as in C#). A floor
+    // more than `WALKER_MAX_DROP` below the target is the terrain under a hall, not a floor.
+    let end_z = bounded_ground_height(
         server,
         caster.transform().instance_id,
         end_x,
         end_y,
         target_position.z,
-        || target_position.z,
-    );
+        target_position.z,
+    )
+    .unwrap_or(target_position.z);
     if let Some(p) = caster.as_player() {
         p.send(SCBlinkUnitPacket {
             obj_id: caster.obj_id(),
