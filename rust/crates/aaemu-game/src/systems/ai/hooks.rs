@@ -32,6 +32,10 @@ pub trait AiHooks: Send + Sync {
     /// world position; Ai.GoToSpawn()`.
     fn npc_spawn_positioned(&self, _server: &GameServer, _npc: &NpcRef) {}
 
+    /// The NPC was moved off its spawn spot (stacked-NPC separation): home / idle position =
+    /// its new world position, so it does not walk back into the stack. Rust only.
+    fn npc_home_moved(&self, _server: &GameServer, _npc: &NpcRef) {}
+
     /// `NpcSpawnerNpc.Spawn` after `npc.Spawn()`: `RegisterNpcEvents`, `npc.Simulation = new
     /// Simulation(npc)`, `Ai.LoadAiPathPoints(FollowPath)`.
     fn npc_spawned(&self, _server: &GameServer, _npc: &NpcRef, _follow_path: &str) {}
@@ -61,6 +65,10 @@ impl AiHooks for AiSubsystemHooks {
 
     fn npc_spawn_positioned(&self, server: &GameServer, npc: &NpcRef) {
         spawn_positioned(server, npc);
+    }
+
+    fn npc_home_moved(&self, server: &GameServer, npc: &NpcRef) {
+        home_moved(server, npc);
     }
 
     fn npc_spawned(&self, server: &GameServer, npc: &NpcRef, follow_path: &str) {
@@ -130,6 +138,16 @@ pub fn spawn_positioned(server: &GameServer, npc: &NpcRef) {
         c.ai.home_position = pos;
         c.ai.idle_position = pos;
         c.go_to_spawn();
+    });
+}
+
+/// [`AiHooks::npc_home_moved`]: the home / idle position follows the NPC's new world position.
+pub fn home_moved(server: &GameServer, npc: &NpcRef) {
+    let obj = WorldObject::from(npc);
+    let pos = super::npc::world_pos(server, &obj);
+    post(server, npc.obj_id, move |c| {
+        c.ai.home_position = pos;
+        c.ai.idle_position = pos;
     });
 }
 

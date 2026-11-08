@@ -3624,6 +3624,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the same coordinates never activates a spawner, and a placement whose member list is still
   empty stays queued and is retried once it is initialized, without movement or a reload.
 
+* systems::npcs / systems::services (2026-11-08, stacked NPCs; Rust only, the server owner's
+  request: glitched NPCs stacked on the test server). The spawn data places all of a spawner's NPCs
+  (`Count` / `min_population`, e.g. 12 Death Hunters), and several entries (different templates of
+  one spawner group), on identical coordinates, and idle NPCs never move, so they stay stacked.
+  (1) A spawn (`NpcSpawner::spawn_npc_template`) that would land within `World.NpcSpawnScatterTrigger`
+  (default 1.0 m, 3D) of another live, unparented NPC of the instance is scattered onto a ring of
+  `World.NpcSpawnScatterMin` .. `Max` (defaults 1.5 .. 3.0 m) at an evenly spread, randomly started
+  angle, ground-snapped like a spawn (`spawn_ground_z`, at most 1.5 m height change; no resolvable
+  ground = no scatter). The AI home / idle position is the scattered spot (it is read from the
+  transform in `spawn_positioned`), the spawner position is unchanged. `NpcSpawnScatterMax = 0`
+  disables it. Not scattered: `NpcGroup` formation members (authored offsets), spawns with an
+  owner (summons, quest spawns), flying and underwater NPCs, and parented NPCs.
+  (2) `systems::npcs::stacked_npcs` logs one `WARN` per stack (alive, unparented NPCs without an
+  aggro target within `World.StackedNpcRadius`, default 0.5 m) that persisted
+  `World.StackedNpcMinSeconds` (120); the pass runs every `World.StackedNpcCheckSeconds` (60, 0 =
+  off); a stack is logged again when its member set changes or after an hour.
+  (3) GM `/stackednpcs [radius|all]` (alias `/npcstacks`, access level 50) lists the stacks
+  (obj id, template, spawner id + template, position); `/stackednpcs fix [radius|all]` keeps the
+  first NPC of each stack and moves the others with the scatter logic (default ring when scattering
+  is disabled), sets their AI home position and broadcasts `SCOneUnitMovementPacket` (stop move)
+  at the new position.
+
 * systems::npcs (2026-10-14): prepared ordinary placements are kept in the warmed registry after
   their warm set loses its last player: the existing NPCs keep their state for
   `World.NpcWarmRetentionSeconds` (default `60`; `0` permits reclaiming on the first eligible

@@ -33,6 +33,12 @@
         "NpcSpawnsPerTick": 64,
         "NpcWarmRetentionSeconds": 60,
         "NpcResidentServiceNpcs": true,
-        "AiWorkerThreads": 1
+        "AiWorkerThreads": 1,
+        "NpcSpawnScatterTrigger": 1.0,
+        "NpcSpawnScatterMin": 1.5,
+        "NpcSpawnScatterMax": 3.0,
+        "StackedNpcCheckSeconds": 60,
+        "StackedNpcRadius": 0.5,
+        "StackedNpcMinSeconds": 120
     }
 }

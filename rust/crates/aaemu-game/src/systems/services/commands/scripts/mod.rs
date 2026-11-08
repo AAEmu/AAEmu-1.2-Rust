@@ -101,6 +101,7 @@ pub mod solo_party;
 pub mod spawn;
 pub mod spawn_grid;
 pub mod sphere;
+pub mod stacked_npcs_cmd;
 pub mod teleport;
 pub mod test_ai;
 pub mod test_chat_channel;
@@ -195,6 +196,11 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         // Around.cs
         (&["around", "near"], Arc::new(around::Around::new(env))),
+        // StackedNpcs (Rust only)
+        (
+            &["stackednpcs", "npcstacks"],
+            Arc::new(stacked_npcs_cmd::StackedNpcs::new(env)),
+        ),
         // AStarCmd.cs
         (&["pathfind", "pf"], Arc::new(roots::astar_cmd())),
         // BuildHouse.cs

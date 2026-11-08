@@ -30,6 +30,7 @@ use crate::server::GameServer;
 use crate::systems::ai::npc as ai_npc;
 use crate::systems::npcs::schedule::PeriodStatus;
 use crate::systems::npcs::spawn_manager::{self, backend};
+use crate::systems::npcs::stacked_npcs::{self, ScatterParams};
 use crate::systems::skills::controllers::calculate_distance;
 use crate::world::{NpcRef, WorldInstance, WorldObject};
 
@@ -2163,6 +2164,27 @@ fn spawn_npc_template(
             // position; a group member must not move the whole group onto its own floor.
             if offset.is_none() {
                 spawner.set_position(pos);
+            }
+        }
+    }
+    // Rust only (server owner's request 2026-11-08): an ordinary spawn that would land on
+    // another live NPC (the data places a spawner's NPCs and several entries on identical
+    // coordinates) is scattered onto a ring around it. Formation members keep their authored
+    // offsets, summons / quest spawns (an owner) their authored place, and flying / swimming
+    // NPCs (no ground to snap to) their position. The spawner position itself is unchanged;
+    // the AI home position is read from the transform below, so it is the scattered spot.
+    if offset.is_none() && owner_id == 0 && !can_fly && !underwater {
+        if let Some(params) = ScatterParams::from_config(&server.config.world) {
+            if let Some((x, y, z)) =
+                stacked_npcs::scatter_position(server, &world, 0, (pos.x, pos.y, pos.z), params)
+            {
+                pos.x = x;
+                pos.y = y;
+                pos.z = z;
+                pos.zone_id = server
+                    .game_data
+                    .worlds
+                    .get_zone_id(Some(&world.template), x, y);
             }
         }
     }

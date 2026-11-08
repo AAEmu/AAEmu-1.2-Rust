@@ -16,6 +16,7 @@
         "teleport": 50,
         "announce": 50,
         "despawn": 50,
+        "stackednpcs": 50,
         "dist": 50,
         "getattribute": 50,
         "heal": 50,
