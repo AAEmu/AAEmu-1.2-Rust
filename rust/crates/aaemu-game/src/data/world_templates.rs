@@ -720,8 +720,9 @@ impl WorldTemplate {
     }
 
     /// Sets `ZoneKeyByRegions[sector_x, sector_y]`; returns false when out of bounds. A new key
-    /// also joins `zone_keys`, so the zone list stays the set of keys the grid holds (a world is
-    /// only single-zone while every sector names its one key).
+    /// is also appended to `zone_keys`, which only grows: once an override has made a world
+    /// multi-zone it stays multi-zone, even if a later call overwrites the only sector that used
+    /// the key (the single-zone instance fallback then stops applying, which is the safe side).
     pub fn set_zone_key_at(&mut self, sector_x: i32, sector_y: i32, zone_key: u32) -> bool {
         match self.region_index(sector_x, sector_y) {
             Some(i) => {
@@ -1348,7 +1349,7 @@ mod tests {
         // The instance fallback is only for positions outside the cell grid: an in-grid sector
         // the XML never assigned keeps its key 0 (housing/doodad placement rely on that).
         let mut t = WorldTemplate::synthetic(2, "instance_sal_temple", 2, 2, 240);
-        t.zone_key_by_regions[1 * 32 + 1] = 0; // sector (1, 1)
+        t.zone_key_by_regions[32 + 1] = 0; // sector (1, 1)
         let world = crate::world::WorldInstance::new(100, std::sync::Arc::new(t));
         assert_eq!(world.zone_id_at(70.0, 70.0), 0);
         assert_eq!(world.zone_id_at(64.0 * 32.0 + 1.0, 64.0 * 15.0 + 1.0), 240);
