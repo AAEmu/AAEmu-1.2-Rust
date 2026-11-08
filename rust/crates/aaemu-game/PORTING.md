@@ -2369,8 +2369,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `save_rule_id` / `real_time` default to 0 / false when the `buffs` table lacks those columns.
 * Quests: `Character.Load` reads the rows; `systems::quests::on_character_selected` builds the
   live quests from them (template check, `QuestInitialized` / `RequestEvaluation`, daily reset).
-* Mail counts at select are always 0 — this matches the C#, whose `GetCurrentMailList` runs before
-  the character is registered in the WorldManager and therefore never counts.
+* Mail counts at select: deliberate deviation. The C# `Character.Load` -> `GetCurrentMailList` ran
+  before the character was in the WorldManager, so login always reported 0 unread mails and mail
+  that arrived offline never lit the client alert. The Rust counts the unread mail (`recv_date`
+  passed, receiver, not READ) at enter world (`mail::count_unread_mail_for`, 2026-11-08, testers
+  missed offline-created tax bills); no `SCGotMail` is sent at select.
 * `Character.OnZoneChange` into a closed or unknown zone: the system message is sent but the
   forced transport out (5 x `SCErrorMsg(ClosedZone)`, then `SCCharacterResurrected` at the closest
   return portal) is not done (needs PortalManager return portals / resurrection).

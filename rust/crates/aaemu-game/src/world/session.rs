@@ -613,6 +613,9 @@ pub fn select_loaded(
     c.obj_id = obj_id;
     // Character.Load: Mails.GetCurrentMailList (runs before the character is in the world).
     crate::systems::economy::mail::get_current_mail_list_for(server, c.id);
+    // The character is not in the world yet, so the call above counted nothing: count the
+    // unread mail (also the mail that arrived while offline) for SCCharacterState / SCCountUnreadMail.
+    c.unread_mail = crate::systems::economy::mail::count_unread_mail_for(server, c.id);
     let player = Player::new(c, conn.handle());
     // C# `WorldManager.TryAddCharacter`; unlike the C# the result is checked: an occupied world
     // entry means the character is already active, and continuing would give two live copies

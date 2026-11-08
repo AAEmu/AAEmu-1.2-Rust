@@ -896,3 +896,58 @@ async fn select_is_refused_during_the_pre_select_period() {
     assert_eq!(server.enter_world.character_owner(9), None);
     assert!(client.drain().is_empty());
 }
+
+#[tokio::test]
+async fn enter_world_reports_mail_that_arrived_offline() {
+    use crate::opcodes::sc;
+    use crate::systems::economy::mail::{mail_status, mail_type, now, BaseMail};
+    let server = test_server();
+    let add = |id: i64, mt: u8, status: u8, receiver: u32, recv_date: i64| {
+        let mut m = BaseMail::new();
+        m.id = id;
+        m.mail_type = mt;
+        m.header.status = status;
+        m.header.receiver_id = receiver;
+        m.body.recv_date = recv_date;
+        assert!(server.systems.economy.mail.state().all.add(id, m));
+    };
+    let past = now() - 10;
+    add(1, mail_type::NORMAL, mail_status::UNREAD, 7, past);
+    add(2, mail_type::BILLING, mail_status::UNPAID, 7, past);
+    add(3, mail_type::NORMAL, mail_status::READ, 7, past);
+    add(4, mail_type::NORMAL, mail_status::UNREAD, 7, now() + 3600);
+    add(5, mail_type::NORMAL, mail_status::UNREAD, 8, past);
+
+    let mut client = TestClient::new(&server, 1, 1007);
+    let character = test_character(7, "Offline", 100.0, 100.0);
+    client.conn.characters = vec![character.clone()];
+    assert_eq!(server.enter_world.reserve_character(7, 1), Ok(true));
+    session::select_loaded(
+        &server,
+        &mut client.conn,
+        character,
+        SelectDbData::default(),
+    )
+    .expect("select");
+    let player = client.conn.active_char.clone().unwrap();
+    let unread = player.data().unread_mail;
+    assert_eq!(
+        (
+            unread.received,
+            unread.mia_received,
+            unread.commercial_received
+        ),
+        (2, 0, 0)
+    );
+    let mut want = aaemu_commons::packet_stream::PacketStream::new();
+    for v in [0, 2, 0, 0] {
+        want.write_i32(v);
+    }
+    let sent: Vec<_> = client
+        .drain()
+        .into_iter()
+        .filter(|f| f.0 == sc::SCCountUnreadMailPacket)
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1, want.into_bytes());
+}
