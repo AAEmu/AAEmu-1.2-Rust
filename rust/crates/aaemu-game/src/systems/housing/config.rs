@@ -84,6 +84,58 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub placement_strict_surface: bool,
+    /// Distance in metres beyond a house's garden plot that also refuses a Siege Camp
+    /// declaration (`SIEGE_CANNOT_DECLARE_NEAR_HOUSE` 633). `0` (default) refuses only a spot
+    /// inside a plot, the reading the 1.2 text ("cannot declare near a house", ui 5020)
+    /// supports. The retail margin is UNKNOWN: INFERRED, capture-pending.
+    /// `Housing.SiegeDeclareHouseMargin`.
+    #[serde(
+        rename = "siegedeclarehousemargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_house_margin: f32,
+    /// Distance in metres from the declared spot at which a different zone group refuses the
+    /// declaration (`SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE` 661). `0` (default) refuses when
+    /// the spot itself lies in another zone group than the besieged dominion. The retail
+    /// margin is UNKNOWN: INFERRED, capture-pending. `Housing.SiegeDeclareZoneMargin`.
+    #[serde(
+        rename = "siegedeclarezonemargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_zone_margin: f32,
+    /// Enable the peace-area refusal (`SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS` 625). The 1.2
+    /// text is "cannot declare near a peace area" (ui 4837); the only 1.2 peace data is the
+    /// zone conflict table (a zone group with no `conflict_zones` row never leaves peace, and
+    /// a row's state can be `Peace`), but the declaration rule itself is UNKNOWN. `false`
+    /// (default) keeps the previous behaviour (no refusal). `Housing.SiegeDeclarePeaceCheck`.
+    #[serde(
+        rename = "siegedeclarepeacecheck",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_peace_check: bool,
+    /// Distance in metres from the declared spot within which another peace zone group
+    /// refuses the declaration when [`Self::siege_declare_peace_check`] is on. `0` (default)
+    /// only inspects the spot itself; a spot in the besieged group (required by the 661 rule)
+    /// is never a peace-zone refusal at 0. INFERRED, capture-pending.
+    /// `Housing.SiegeDeclarePeaceMargin`.
+    #[serde(
+        rename = "siegedeclarepeacemargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_peace_margin: f32,
+    /// Half extent in metres of the collision box tested around the declared spot
+    /// (`SIEGE_CANNOT_DECLARE_OBSTACLE` 741). The retail radius is UNKNOWN; the default is
+    /// the server's player capsule radius (0.35 m, `collision::displacement`). INFERRED,
+    /// capture-pending. `Housing.SiegeDeclareObstacleRadius`.
+    #[serde(
+        rename = "siegedeclareobstacleradius",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_obstacle_radius: f32,
+}
+
+fn default_siege_declare_obstacle_radius() -> f32 {
+    0.35
 }
 
 fn default_dominion_claim_limit() -> u32 {
@@ -100,6 +152,11 @@ impl Default for HousingConfig {
             defense_hq_offset: [0.0; 3],
             siege_shop_gate: false,
             placement_strict_surface: false,
+            siege_declare_house_margin: 0.0,
+            siege_declare_zone_margin: 0.0,
+            siege_declare_peace_check: false,
+            siege_declare_peace_margin: 0.0,
+            siege_declare_obstacle_radius: default_siege_declare_obstacle_radius(),
         }
     }
 }
@@ -179,6 +236,36 @@ mod tests {
             .unwrap();
             assert!(config.housing.placement_strict_surface);
         }
+    }
+
+    #[test]
+    fn siege_declare_placement_thresholds_default_and_bind() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.siege_declare_house_margin, 0.0);
+        assert_eq!(default.housing.siege_declare_zone_margin, 0.0);
+        assert!(!default.housing.siege_declare_peace_check);
+        assert_eq!(default.housing.siege_declare_peace_margin, 0.0);
+        assert_eq!(default.housing.siege_declare_obstacle_radius, 0.35);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeDeclarePeaceCheck": value }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_declare_peace_check);
+        }
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": {
+                "SiegeDeclareHouseMargin": 2.5,
+                "SiegeDeclareZoneMargin": "7.5",
+                "SiegeDeclarePeaceMargin": 100,
+                "SiegeDeclareObstacleRadius": "1.25"
+            }
+        }))
+        .unwrap();
+        assert_eq!(config.housing.siege_declare_house_margin, 2.5);
+        assert_eq!(config.housing.siege_declare_zone_margin, 7.5);
+        assert_eq!(config.housing.siege_declare_peace_margin, 100.0);
+        assert_eq!(config.housing.siege_declare_obstacle_radius, 1.25);
     }
 
     #[test]
