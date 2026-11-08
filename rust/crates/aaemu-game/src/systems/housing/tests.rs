@@ -381,7 +381,11 @@ fn housing_data(tax_item: bool) -> GameData {
             ..Default::default()
         },
     );
-    for id in [manager::BUFF_UNTOUCHABLE, manager::BUFF_REMOVAL_DEBUFF] {
+    for id in [
+        manager::BUFF_UNTOUCHABLE,
+        manager::BUFF_REMOVAL_DEBUFF,
+        manager::BUFF_BURNING_HOUSE,
+    ] {
         data.systems
             .skills
             .add_buff(crate::systems::skills::data::BuffTemplate {
@@ -538,6 +542,8 @@ async fn build_and_build_steps_flow() {
         assert!(h.allow_recover);
         assert_eq!((h.unit.owner_id, h.co_owner_id, h.account_id), (1, 1, 1001));
         assert!(h.unit.buffs.check_buff(manager::BUFF_UNTOUCHABLE));
+        assert!(!h.unit.buffs.check_buff(manager::BUFF_REMOVAL_DEBUFF));
+        assert!(!h.unit.buffs.check_buff(manager::BUFF_BURNING_HOUSE));
         (h.unit.tl_id, h.unit.transform.rot_z)
     };
     // zRot is quantized to the 1.2 sbyte rotation: round(1 / 2pi * 127) = 20.
@@ -800,6 +806,7 @@ async fn tax_mail_and_demolition_timer() {
         assert_eq!(h.permission, housing_permission::PUBLIC);
         assert_eq!(h.unit.faction_id, 0); // Monstrosity is not in the (empty) faction table
         assert!(h.unit.buffs.check_buff(manager::BUFF_REMOVAL_DEBUFF));
+        assert!(h.unit.buffs.check_buff(manager::BUFF_BURNING_HOUSE));
         assert!(!h.unit.buffs.check_buff(manager::BUFF_UNTOUCHABLE));
     }
     assert!(fx.eco.calls().contains(&format!("delete mails {hid}")));

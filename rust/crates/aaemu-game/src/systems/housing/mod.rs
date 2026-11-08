@@ -200,8 +200,10 @@ pub fn demolish_by_player(server: &GameServer, player: &PlayerRef, house: &House
     ops::demolish(server, Some(player), house, false, false);
 }
 
-/// The original 1.2 removal debuff damages its abandoned house every 15 seconds.
-/// Authorize that server-owned tick without allowing ordinary self attacks.
+/// The removal debuff (1.2: 10 damage / 15 s) and the "Burning House" buff (deviation: 30 damage
+/// / s) damage their abandoned house. Authorize those server-owned ticks without allowing
+/// ordinary self attacks. Buff 2250 is a `system` buff; buff 39 is not, so it is accepted only
+/// through the same server-template, caster == target == house and live-buff-entry checks.
 pub fn is_abandoned_house_removal_damage(
     server: &GameServer,
     effect_id: u32,
@@ -210,20 +212,21 @@ pub fn is_abandoned_house_removal_damage(
     use crate::models::buff::effect_state;
     use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster};
 
-    if effect_id != 1876 || args.source.skill.is_some() || args.source.is_trigger {
+    let (buff_id, needs_system) = match effect_id {
+        1876 => (manager::BUFF_REMOVAL_DEBUFF, true),
+        106 => (manager::BUFF_BURNING_HOUSE, false),
+        _ => return false,
+    };
+    if args.source.skill.is_some() || args.source.is_trigger {
         return false;
     }
     let (Some(source), Some(template)) = (
         args.source.buff.as_ref(),
-        server
-            .game_data
-            .systems
-            .skills
-            .buff(manager::BUFF_REMOVAL_DEBUFF),
+        server.game_data.systems.skills.buff(buff_id),
     ) else {
         return false;
     };
-    if !source.system || !Arc::ptr_eq(source, template) {
+    if (needs_system && !source.system) || !Arc::ptr_eq(source, template) {
         return false;
     }
     let Some(house) = args.target.as_obj().and_then(WorldObject::as_house) else {
@@ -239,20 +242,20 @@ pub fn is_abandoned_house_removal_damage(
         return false;
     }
     let CastAction::Buff {
-        buff_id: manager::BUFF_REMOVAL_DEBUFF,
+        buff_id: cast_buff_id,
         owner_obj_id,
         index,
     } = args.cast
     else {
         return false;
     };
-    if owner_obj_id != house.obj_id {
+    if cast_buff_id != buff_id || owner_obj_id != house.obj_id {
         return false;
     }
     let h = house.data();
     h.unit.owner_id == 0
         && h.unit.buffs.effect_by_index(index).is_some_and(|b| {
-            b.template.id == manager::BUFF_REMOVAL_DEBUFF
+            b.template.id == buff_id
                 && b.in_use
                 && b.state == effect_state::ACTING
                 && b.skill_id == 0

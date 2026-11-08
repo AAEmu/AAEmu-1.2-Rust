@@ -142,7 +142,11 @@ fn data() -> GameData {
                 points: AREA_338.to_vec(),
             }],
         );
-    for id in [manager::BUFF_UNTOUCHABLE, manager::BUFF_REMOVAL_DEBUFF] {
+    for id in [
+        manager::BUFF_UNTOUCHABLE,
+        manager::BUFF_REMOVAL_DEBUFF,
+        manager::BUFF_BURNING_HOUSE,
+    ] {
         data.systems.skills.add_buff(BuffTemplate {
             id,
             ..Default::default()
