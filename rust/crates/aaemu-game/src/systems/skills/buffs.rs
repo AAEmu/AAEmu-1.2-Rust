@@ -1518,7 +1518,7 @@ fn time_to_time_apply(
 }
 
 /// `BuffTemplate.DoAreaTick`.
-fn do_area_tick(
+pub(crate) fn do_area_tick(
     server: &GameServer,
     template: &Arc<BuffTemplate>,
     caster: Option<&WorldObject>,
@@ -1546,14 +1546,13 @@ fn do_area_tick(
         );
         return;
     };
-    let relation = SkillTargetRelation::from_raw(i64::from(template.tick_area_relation_id))
-        .unwrap_or(SkillTargetRelation::Any);
-    let units = super::relation::filter_with_relation(
-        server,
-        relation,
-        &Target::Obj(caster.clone()),
-        units,
-    );
+    let units = if template.tick_area_relation_id == super::relation::TICK_AREA_HOLDER_ALLIES {
+        super::relation::filter_holder_allies(server, owner, caster, units)
+    } else {
+        let relation = SkillTargetRelation::from_raw(i64::from(template.tick_area_relation_id))
+            .unwrap_or(SkillTargetRelation::Any);
+        super::relation::filter_with_relation(server, relation, &Target::Obj(caster.clone()), units)
+    };
     let data = &server.game_data.systems.skills;
     let cast = CastAction::Buff {
         buff_id: template.id,

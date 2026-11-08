@@ -618,7 +618,18 @@ pub(super) fn damage_with_aoe(
             );
         }
     }
-    if e.check_crime && relation_to(server, &caster_t, &trg_t) == RelationState::Friendly {
+    // Hitting yourself or your own mount / slave is never a crime (no Retribution, no evidence).
+    let own_unit = match (
+        owner_character(server, &caster),
+        owner_character(server, &trg),
+    ) {
+        (Some(c), Some(t)) => c.obj_id == t.obj_id,
+        _ => false,
+    };
+    if e.check_crime
+        && !own_unit
+        && relation_to(server, &caster_t, &trg_t) == RelationState::Friendly
+    {
         if !trg.with_base_unit(|b| b.buffs().check_buff(buff_constants::RETRIBUTION)) {
             unit_combat::set_criminal_state(server, &caster, true, &trg);
         }

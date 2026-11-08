@@ -217,6 +217,16 @@ fn fixture(always_public: bool) -> Fx {
 }
 
 fn fixture_with_limits(always_public: bool, overall_limit: u32, group_limit: Option<u32>) -> Fx {
+    fixture_with_deco_limits(always_public, 0, overall_limit, group_limit)
+}
+
+/// `deco_limit` is the base value the client displays; `absolute_deco_limit` is the hard cap.
+fn fixture_with_deco_limits(
+    always_public: bool,
+    deco_limit: u32,
+    absolute_deco_limit: u32,
+    group_limit: Option<u32>,
+) -> Fx {
     let mut data = GameData::empty();
     for (id, max_count) in [(CHAIR_ITEM, 1), (manager::APPRAISAL_CERTIFICATE, 1000)] {
         data.items
@@ -257,7 +267,8 @@ fn fixture_with_limits(always_public: bool, overall_limit: u32, group_limit: Opt
         garden_radius: 8.0,
         is_sellable: true,
         always_public,
-        deco_limit: overall_limit,
+        deco_limit,
+        absolute_deco_limit,
         housing_deco_limit_id: 1,
         taxation: Some(Taxation {
             id: 1,
@@ -1337,4 +1348,92 @@ async fn a_listed_house_cannot_be_relisted_at_another_price() {
     );
     assert_eq!(fx.house.data().sell_price, 100);
     assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
+}
+
+fn stock_items(fx: &Fx) {
+    let mut item = fx.eco.item.lock().unwrap();
+    item.max_count = 100;
+    item.count = 100;
+}
+
+#[tokio::test]
+async fn third_chest_of_a_two_chest_group_is_refused_with_the_group_error() {
+    let mut fx = fixture_with_deco_limits(false, 0, 0, Some(2));
+    stock_items(&fx);
+    for _ in 0..2 {
+        assert_eq!(
+            ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+            Ok(true)
+        );
+    }
+    fx.owner_client.drain();
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::ACATBILITY_DECO_ARRANG_FAIL]
+    );
+    assert_eq!(furniture(&fx).len(), 2);
+}
+
+#[tokio::test]
+async fn decoration_total_is_capped_by_the_absolute_limit_not_the_base_limit() {
+    // deco_limit 2 (the client's displayed base), absolute_deco_limit 4 (the hard cap).
+    let mut fx = fixture_with_deco_limits(false, 2, 4, None);
+    stock_items(&fx);
+    for placed in 1..=4 {
+        assert_eq!(
+            ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+            Ok(true),
+            "decoration {placed}"
+        );
+    }
+    fx.owner_client.drain();
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_TOO_MANY_DECORATIONS]
+    );
+    assert_eq!(furniture(&fx).len(), 4);
+}
+
+#[tokio::test]
+async fn doodads_sharing_the_house_id_but_not_housing_owned_are_not_counted() {
+    let fx = fixture_with_deco_limits(false, 0, 1, Some(1));
+    stock_items(&fx);
+    // A crop (same model and item as the decoration) planted in the garden: owner_db_id is the
+    // house id, owner_type is not HOUSING.
+    let world = fx.server.world.world(0).unwrap();
+    for owner_type in [doodad_owner_type::CHARACTER, doodad_owner_type::SYSTEM] {
+        let crop = crate::systems::npcs::doodad::manager::create(
+            &fx.server,
+            &world,
+            0,
+            CHAIR,
+            Some(&WorldObject::from(&fx.house)),
+            true,
+        )
+        .unwrap();
+        {
+            let mut d = crop.data();
+            d.owner_type = owner_type;
+            d.owner_db_id = 1;
+            d.item_template_id = CHAIR_ITEM;
+        }
+        crate::systems::npcs::doodad::manager::spawn(&fx.server, &world, &crop);
+    }
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(true)
+    );
+    // The real furniture now fills both the total (1) and the group (1) caps.
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
 }
