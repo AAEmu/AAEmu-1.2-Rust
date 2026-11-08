@@ -1,7 +1,7 @@
 //! Explicit siege scheduling for the 1.2 world server. Historical static plans are not timers.
 
 use super::prelude::*;
-use crate::systems::housing::dominion::{reinforce, runtime, DominionError, SiegeSide};
+use crate::systems::housing::dominion::{reinforce, rights, runtime, DominionError, SiegeSide};
 
 pub struct Dominion;
 
@@ -154,7 +154,7 @@ fn participation(
         let current_expedition = server
             .expeditions
             .expedition_of_character(player.character_id);
-        let Some(expedition) = server
+        let Some(_expedition) = server
             .expeditions
             .get(current_expedition)
             .filter(|expedition| {
@@ -182,11 +182,12 @@ fn participation(
             );
             return Ok(());
         };
-        let allowed = expedition
-            .member(player.character_id)
-            .and_then(|member| expedition.policy_by_role(member.role))
-            .is_some_and(|policy| policy.join_siege);
-        if !allowed {
+        if !rights::join_policy_allows(server, player.character_id, current_expedition) {
+            // The client's own text for a rank without the join policy (ui_texts 4661).
+            crate::systems::social::util::send_error(
+                &player,
+                crate::systems::economy::error_message::SIEGE_NO_RIGHTS_IN_EXPEDITION,
+            );
             CommandManager::send_error_text(
                 command,
                 out,
@@ -552,6 +553,21 @@ impl Command for Dominion {
                         return Ok(());
                     }
                 };
+                // Every roster join honours the rank policy; this GM path is no exception.
+                if !rights::join_policy_allows(server, character, expedition) {
+                    if let Some(target) = server.world.character_by_id(character) {
+                        crate::systems::social::util::send_error(
+                            &target,
+                            crate::systems::economy::error_message::SIEGE_NO_RIGHTS_IN_EXPEDITION,
+                        );
+                    }
+                    CommandManager::send_error_text(
+                        self,
+                        out,
+                        "The character's expedition rank does not permit siege participation",
+                    );
+                    return Ok(());
+                }
                 let cap = previous.as_ref().map_or(
                     crate::systems::housing::dominion::ParticipantCap::NATIVE,
                     |state| reinforce::participant_cap(state, side),
@@ -861,9 +877,17 @@ mod tests {
             .contains_key(&1));
     }
 
+    fn error_ids(pc: &mut harness::Pc) -> Vec<i16> {
+        pc.packets()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+            .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+            .collect()
+    }
+
     #[tokio::test]
     async fn unrelated_stale_or_rank_ineligible_members_cannot_join() {
-        let f = fixture();
+        let mut f = fixture();
         let empty = state(&f);
         let (_, out) = harness::run_at(&f.server, &f.outsider.p, "joinsiege 25", 0).await;
         assert!(out[0].contains("not attacking or defending"));
@@ -876,8 +900,14 @@ mod tests {
             .expeditions
             .with_mut(20, |guild| guild.policies[0].join_siege = false)
             .unwrap();
+        f.attacker.frames();
         let (_, out) = harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
         assert!(out[0].contains("rank does not permit"));
+        // The client's own refusal text is 581, not the declare path's 459.
+        assert_eq!(
+            error_ids(&mut f.attacker),
+            vec![crate::systems::economy::error_message::SIEGE_NO_RIGHTS_IN_EXPEDITION]
+        );
         assert_eq!(state(&f), empty);
         f.server
             .expeditions
@@ -891,6 +921,51 @@ mod tests {
             .unwrap();
         harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
         assert_eq!(state(&f), empty);
+    }
+
+    #[tokio::test]
+    async fn the_gm_register_path_also_applies_the_join_policy() {
+        let mut f = fixture();
+        let empty = state(&f);
+        f.server.names.add_character(1, "Attacker", 1001);
+        f.server
+            .expeditions
+            .with_mut(20, |guild| guild.policies[0].join_siege = false)
+            .unwrap();
+        f.attacker.frames();
+        let (_, out) = harness::run(
+            &f.server,
+            &f.attacker.p,
+            "dominion register 25 Attacker attacker",
+        )
+        .await;
+        assert!(
+            out[0].contains("rank does not permit"),
+            "the GM register path honours the rank policy"
+        );
+        // The registering character is online, so it receives the client's own 581.
+        assert_eq!(
+            error_ids(&mut f.attacker),
+            vec![crate::systems::economy::error_message::SIEGE_NO_RIGHTS_IN_EXPEDITION]
+        );
+        assert_eq!(state(&f), empty);
+
+        f.server
+            .expeditions
+            .with_mut(20, |guild| guild.policies[0].join_siege = true)
+            .unwrap();
+        harness::run(
+            &f.server,
+            &f.attacker.p,
+            "dominion register 25 Attacker attacker",
+        )
+        .await;
+        assert!(state(&f)
+            .siege
+            .as_ref()
+            .unwrap()
+            .participants
+            .contains_key(&1));
     }
 
     #[tokio::test]

@@ -769,14 +769,14 @@ impl CalendarRuntime {
     }
 
     /// The configured settings, warning once per invalid timezone value instead of silently
-    /// falling back to server local time. A repaired value resets the warning.
+    /// falling back to the UTC default. A repaired value resets the warning.
     pub fn settings(&self, config: &HousingConfig) -> CalendarSettings {
         let parsed = CalendarTimeZone::parse(&config.siege_calendar_timezone);
         let mut warned = self.lock_warned_timezone();
         if parsed.is_none() && !config.siege_calendar_timezone.trim().is_empty() {
             if warned.as_deref() != Some(config.siege_calendar_timezone.as_str()) {
                 tracing::warn!(
-                    "Housing.SiegeCalendarTimezone {:?} is not a valid UTC offset; the siege calendar uses server local time",
+                    "Housing.SiegeCalendarTimezone {:?} is not a valid UTC offset; the siege calendar uses its UTC default",
                     config.siege_calendar_timezone
                 );
                 *warned = Some(config.siege_calendar_timezone.clone());
@@ -927,6 +927,8 @@ pub fn tick_once(server: &GameServer) {
         super::reinforce::tick(server, real_now);
         // Calendar phases. Broadcasts above (and those outside the tick) record the period they
         // sent, so only a period that was not announced yet produces a transition here.
+        // WP-SD1c: the running cycle's camp lots are posted at the auction start.
+        super::auction_post::tick(server, calendar_now);
         // WP-SD2a: an accepted declaration becomes the cycle's siege at the warmup boundary.
         super::declare::tick(server, calendar_now);
         for transition in server.systems.housing.calendar.tick(server, calendar_now) {

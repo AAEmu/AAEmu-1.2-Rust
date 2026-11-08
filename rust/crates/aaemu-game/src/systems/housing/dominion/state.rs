@@ -247,6 +247,10 @@ pub struct DominionState {
     /// owner change before the warmup.
     pub declaration: Option<Declaration>,
     pub siege: Option<SiegeState>,
+    /// `Cycle::auction_start` of the last cycle whose declaration-auction camp lot this
+    /// territory posted automatically (WP-SD1c); 0 = none. Persisted so a restart inside the
+    /// auction period cannot post the same lot twice.
+    pub auction_posted_cycle: i64,
     /// A test-only authority row that must never reach `dominions` (the GM `nation dominion`
     /// hook uses a placeholder tower that would fail startup validation). Never persisted.
     pub ephemeral: bool,
@@ -279,6 +283,7 @@ impl DominionState {
             last_siege_id: 0,
             declaration: None,
             siege: None,
+            auction_posted_cycle: 0,
             ephemeral: false,
         }
     }
@@ -343,6 +348,7 @@ impl DominionState {
             self.last_tax_rate_changed_at,
             self.last_national_tax_rate_changed_at,
             self.non_pvp_start_at,
+            self.auction_posted_cycle,
         ]
         .iter()
         .any(|t| *t < 0)
@@ -1073,6 +1079,51 @@ impl DominionManager {
         });
         replace(&mut inner, state.clone(), revision);
         Ok(state)
+    }
+
+    /// Reserves this territory's automatic camp-lot post for `cycle_auction_start`
+    /// (WP-SD1c). The check and the marker write share the authority lock, so a repeated tick
+    /// or two racing callers post once; `Ok(false)` means another caller already reserved it.
+    /// The caller posts the lot and calls [`Self::release_auction_post`] when the post fails,
+    /// so a bad data row or a failed item creation is retried on a later tick.
+    pub fn claim_auction_post(
+        &self,
+        zone_group_id: u32,
+        cycle_auction_start: i64,
+    ) -> Result<bool, DominionError> {
+        if cycle_auction_start <= 0 {
+            return Err(DominionError::InvalidSchedule);
+        }
+        let mut inner = self.lock();
+        let Some(entry) = inner.states.get(&zone_group_id) else {
+            return Err(DominionError::Missing);
+        };
+        let mut state = entry.state.clone();
+        if state.auction_posted_cycle == cycle_auction_start {
+            return Ok(false);
+        }
+        let revision = next_revision(&inner)?;
+        state.auction_posted_cycle = cycle_auction_start;
+        replace(&mut inner, state, revision);
+        Ok(true)
+    }
+
+    /// Undoes [`Self::claim_auction_post`] after the lot could not be created. Only the same
+    /// cycle is cleared, so a later claim of another cycle is never dropped.
+    pub fn release_auction_post(&self, zone_group_id: u32, cycle_auction_start: i64) {
+        let mut inner = self.lock();
+        let Some(entry) = inner.states.get(&zone_group_id) else {
+            return;
+        };
+        if entry.state.auction_posted_cycle != cycle_auction_start {
+            return;
+        }
+        let Ok(revision) = next_revision(&inner) else {
+            return;
+        };
+        let mut state = entry.state.clone();
+        state.auction_posted_cycle = 0;
+        replace(&mut inner, state, revision);
     }
 
     /// Cancels the declaration of `expedition_id`. A declaration of another expedition (or

@@ -14,9 +14,11 @@
 //!   and the cached attacker team id is 0, which is exactly "declare ended with no declaration".
 //!
 //! This module is pure date arithmetic over the authored `siege_zones` columns and the
-//! `siege_plans` rotation; it never touches the world. The timezone is a server setting because
-//! the retail zone of those wall-clock columns is UNKNOWN. Weekday 0 = Sunday is INFERRED from
-//! the `siege_plans` week starts, which are all Sundays.
+//! `siege_plans` rotation; it never touches the world. The timezone is a server setting; its
+//! default is UTC because the Western 2014 schedule (Total ArcheAge, 2014-11-20/25, grade C)
+//! names the same wall-clock times in GMT as the Korean data (`round6-siege.md` 1). Weekday
+//! 0 = Sunday is INFERRED from the `siege_plans` week starts, which are all Sundays, and that
+//! reading is corroborated by those Sunday siege times (grade C).
 
 use chrono::{
     DateTime, Datelike, Days, Duration, FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime,
@@ -40,23 +42,33 @@ const MAX_SEARCH_WEEKS: i64 = 8;
 
 /// Wall-clock timezone of the `siege_zones` columns.
 ///
-/// The retail value is UNKNOWN; the configuration default is the server's local offset.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The default is UTC: the Western launch-era schedule (Total ArcheAge, 2014-11-20/25, grade C)
+/// lists the same wall-clock times the Korean data has, as GMT (`round6-siege.md` 1). The
+/// retail zone of the data is not proven, so a server can still select `local` or an explicit
+/// offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalendarTimeZone {
-    #[default]
     Local,
     Fixed(FixedOffset),
 }
 
+impl Default for CalendarTimeZone {
+    fn default() -> Self {
+        Self::Fixed(FixedOffset::east_opt(0).expect("UTC is a valid fixed offset"))
+    }
+}
+
 impl CalendarTimeZone {
-    /// `""`/`local` = server local; `utc`/`z`; or an explicit `+HH:MM`, `+HHMM`, `+HH`.
+    /// `""`/`utc`/`z` = UTC (the default); `local` = server local; or an explicit `+HH:MM`,
+    /// `+HHMM`, `+HH`.
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
-        if value.is_empty() || value.eq_ignore_ascii_case("local") {
-            return Some(Self::Local);
+        if value.is_empty() || value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z")
+        {
+            return Some(Self::default());
         }
-        if value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z") {
-            return Some(Self::Fixed(FixedOffset::east_opt(0)?));
+        if value.eq_ignore_ascii_case("local") {
+            return Some(Self::Local);
         }
         if !value.is_ascii() {
             return None; // the offset body is sliced by byte index below

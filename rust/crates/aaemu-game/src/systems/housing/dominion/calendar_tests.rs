@@ -85,8 +85,11 @@ fn timezone_rejects_non_ascii_without_panicking() {
 }
 
 #[test]
-fn timezone_parses_offsets_and_defaults_to_server_local() {
-    assert_eq!(CalendarTimeZone::parse(""), Some(CalendarTimeZone::Local));
+fn timezone_parses_offsets_and_defaults_to_utc() {
+    let utc = CalendarTimeZone::Fixed(FixedOffset::east_opt(0).unwrap());
+    assert_eq!(CalendarTimeZone::default(), utc);
+    assert_eq!(CalendarTimeZone::parse(""), Some(utc));
+    assert_eq!(CalendarTimeZone::parse("  "), Some(utc));
     assert_eq!(
         CalendarTimeZone::parse("local"),
         Some(CalendarTimeZone::Local)
@@ -321,7 +324,22 @@ fn disabled_calendar_is_reported_by_the_settings_and_invalid_schedules_are_rejec
     });
     assert!(settings.enabled);
     assert_eq!(settings.timezone, timezone());
-    assert!(!CalendarSettings::from_config(&HousingConfig::default()).enabled);
+    let default = CalendarSettings::from_config(&HousingConfig::default());
+    assert!(!default.enabled);
+    // The config default (empty string) is UTC, not the server's local offset.
+    assert_eq!(
+        default.timezone,
+        CalendarTimeZone::Fixed(FixedOffset::east_opt(0).unwrap())
+    );
+    // An explicit `local` still selects the server's local offset.
+    assert_eq!(
+        CalendarSettings::from_config(&HousingConfig {
+            siege_calendar_timezone: "local".into(),
+            ..Default::default()
+        })
+        .timezone,
+        CalendarTimeZone::Local
+    );
 }
 
 #[test]

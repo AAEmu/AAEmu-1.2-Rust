@@ -2,6 +2,7 @@
 //! [`calendar`] derives the weekly periods from them, while scheduling a siege explicitly
 //! (GM override) remains a separate administrative operation.
 
+pub mod auction_post;
 pub mod brief;
 pub mod calendar;
 pub mod credit;
