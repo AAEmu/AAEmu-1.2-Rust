@@ -538,14 +538,31 @@ pub(crate) fn loot_convert_fish_from_pack(
 ) -> Option<Vec<Item>> {
     let mut items = Vec::new();
     let pack = server.game_data.systems.economy.loot.pack(loot_pack_id)?;
+    // Same skip as the other loot paths (C# 10.x PR #1488): a bad static row must not become an
+    // `Item` with an unknown template. The roll only considers the remaining rows.
+    let loots: Vec<Loot> = pack
+        .loots
+        .iter()
+        .copied()
+        .filter(|l| {
+            if l.item_id == ITEM_COINS || server.game_data.items.template(l.item_id).is_some() {
+                return true;
+            }
+            tracing::debug!(
+                "Loot pack {loot_pack_id}: skipping unknown item template {}",
+                l.item_id
+            );
+            false
+        })
+        .collect();
     let mut drop_rate_max = 0u32;
-    for l in &pack.loots {
+    for l in &loots {
         drop_rate_max = drop_rate_max.wrapping_add(l.drop_rate);
     }
     // Random.Shared.Next(0, uint) binds to the float extension.
     let roll = rng.next_f32_range(0.0, drop_rate_max as f32);
     let mut acc = 0u32;
-    for l in &pack.loots {
+    for l in &loots {
         if (l.drop_rate.wrapping_add(acc)) as f32 >= roll {
             let id = server.items.new_id(&server.ids.item)?;
             items.push(Item {
