@@ -6,7 +6,7 @@
 		"RatioDecreaseTickMinutes": 1.0,
 		"RatioIncreasePerTick": 5.0,
 		"RatioRegenTickMinutes": 60.0,
-		"TradePackMailDelayInMinutes": 480.0,
+		"TradePackMailDelayInMinutes": 1320.0,
 		"NegotiationBonusPercent": 0.0,
 		"ScaleSaleLaborByCommerce": false
 	}

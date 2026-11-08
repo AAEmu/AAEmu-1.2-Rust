@@ -2609,6 +2609,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     the fallback (never the untranslated `ui_texts.text` column). A sold pack with a crafter
     is covered by a flow test through the real mail bridge
     (`sold_pack_with_a_crafter_delivers_the_crafter_mail`).
+  - **Trade-pack mail delay (2026-11-08):** the 1.2 client says the sale price plus 5 % interest
+    arrives by mail after 22 hours (`SOLD_BACKPACK_REFUND_SENT_BY_MAIL`, `ui_texts` 4743;
+    `sell_backpack_content`, 6195). The C# default `TradePackMailDelayInMinutes = 480`
+    (8 hours) is replaced by 1320 (22 hours) in `Configurations/Specialty.json` and in both
+    defaults; `/settradepackmaildelay` still overrides it. The demolition-notice delay (22 h in
+    the C# for a failed-tax demolish) is a separate deviation: see the housing row above.
   - **Capture-pending (NEGOTIATION-1):** the 1.2 client `ui_texts` (`sell_backpack_body2`,
     `bargaining_money`, `SPECIALTY_MARGIN` 626 / `SPECIALTY_COIN_MARGIN` 677) prove a Commerce-
     proficiency bargaining bonus and its notice mails, but no formula, threshold or percentage

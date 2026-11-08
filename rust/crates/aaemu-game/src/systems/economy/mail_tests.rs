@@ -1368,7 +1368,8 @@ async fn system_mails_auction_commercial_speciality() {
     assert_eq!(sp.mail.body.text, "body('', 130, 0, 0, 0, 0, 2, 0, 0, 15)");
     assert_eq!(sp.mail.title, "Speciality Payment");
     assert_eq!(sp.mail.mail_type, mail_type::SYS_SELL_BACKPACK);
-    assert!(sp.mail.body.recv_date >= mail::now() + 480 * 60 - 2);
+    // 22 hours: `ui_texts` 4743 / 6195.
+    assert!(sp.mail.body.recv_date >= mail::now() + 1320 * 60 - 2);
     let att = w
         .server
         .items

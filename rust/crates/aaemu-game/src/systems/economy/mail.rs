@@ -198,8 +198,11 @@ impl MailRetention {
     }
 }
 
-/// `AppConfiguration.Specialty.TradePackMailDelayInMinutes` default.
-pub const DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES: f64 = 480.0;
+/// `AppConfiguration.Specialty.TradePackMailDelayInMinutes` default. The 1.2 client says the
+/// trade-pack sale price, with 5 % interest, arrives by mail after 22 hours
+/// (`SOLD_BACKPACK_REFUND_SENT_BY_MAIL`, `ui_texts` 4743; `sell_backpack_content`, 6195). The
+/// C# default was 480 minutes (8 hours).
+pub const DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES: f64 = 22.0 * 60.0;
 
 /// `Item.Coins`, `Item.TaxCertificate`, `Item.BoundTaxCertificate`.
 pub const ITEM_COINS: u32 = 500;

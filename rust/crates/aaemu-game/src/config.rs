@@ -681,6 +681,8 @@ pub struct SpecialtyConfig {
     #[serde(rename = "ratioregentickminutes", deserialize_with = "lenient")]
     pub ratio_regen_tick_minutes: f64,
     #[serde(rename = "tradepackmaildelayinminutes", deserialize_with = "lenient")]
+    /// Delay of the trade-pack sale mail. The 1.2 client says the price plus 5 % interest
+    /// arrives after 22 hours (`ui_texts` 4743 / 6195); the C# default was 480 minutes.
     pub trade_pack_mail_delay_in_minutes: f64,
     /// `SpecialtyManager` negotiation ("bargaining") bonus, percent of the pre-interest sale
     /// price. The 1.2 client shows the bonus (`ui_texts` `sell_backpack_body2`,
@@ -705,7 +707,9 @@ impl Default for SpecialtyConfig {
             ratio_increase_per_tick: 5.0,
             ratio_decrease_tick_minutes: 1.0,
             ratio_regen_tick_minutes: 60.0,
-            trade_pack_mail_delay_in_minutes: 480.0,
+            // The 1.2 client says the trade-pack price, with 5 % interest, arrives by
+            // mail after 22 hours (`ui_texts` 4743 / 6195); the C# used 480 minutes.
+            trade_pack_mail_delay_in_minutes: 22.0 * 60.0,
             negotiation_bonus_percent: 0.0,
             scale_sale_labor_by_commerce: false,
         }
@@ -1680,7 +1684,7 @@ mod tests {
         assert_eq!(cfg.mail.system_read_retention_days, 5);
         assert_eq!(cfg.mail.system_unread_retention_days, 90);
         // Specialty.json, AccessLevels.json, CharacterSettings.json
-        assert_eq!(cfg.specialty.trade_pack_mail_delay_in_minutes, 480.0);
+        assert_eq!(cfg.specialty.trade_pack_mail_delay_in_minutes, 22.0 * 60.0);
         assert_eq!(cfg.access_level_of("help"), Some(0));
         assert_eq!(cfg.access_level_of("fly"), Some(50));
         assert_eq!(cfg.access_level_of("teleport"), Some(50));
