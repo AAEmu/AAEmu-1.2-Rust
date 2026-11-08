@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use super::data::{DbSphere, DbSphereAcceptQuestQuest, QuestData};
+use super::data::{DbSphere, DbSphereAcceptQuestQuest, DbSphereQuest, QuestData, RawSignSphere};
 use super::events;
 use super::model::kind;
 use super::packets::CSStartQuestContextPacket;
@@ -137,7 +137,7 @@ async fn entering_the_area_offers_the_quest_with_0x14a() {
     client.conn.active_char = Some(player.clone());
     let _ = client.drain();
 
-    server.systems.quests.spheres.tick(&server);
+    server.systems.quests.spheres.tick_at(&server, 1_000);
     let offer = vec![(
         sc::CSQuestAcceptConditionalPacket,
         // u32 sphere id (2236 = 0x8bc), u32 quest context id (5730 = 0x1662).
@@ -149,15 +149,20 @@ async fn entering_the_area_offers_the_quest_with_0x14a() {
         "the offer must not start the quest by itself"
     );
 
-    // Staying inside sends nothing more; leaving and re-entering offers again (once per
-    // entry, as long as the quest was not accepted).
-    server.systems.quests.spheres.tick(&server);
+    // Staying inside sends nothing more. A re-entry inside the 30 s offer cooldown is
+    // suppressed; after the cooldown the next entry offers again.
+    server.systems.quests.spheres.tick_at(&server, 2_000);
     assert!(client.drain().is_empty());
     player.data().unit.transform.set_xyz(500.0, 500.0, 100.0);
-    server.systems.quests.spheres.tick(&server);
+    server.systems.quests.spheres.tick_at(&server, 3_000);
     player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
-    server.systems.quests.spheres.tick(&server);
-    assert_eq!(client.drain(), offer);
+    server.systems.quests.spheres.tick_at(&server, 4_000);
+    assert!(client.drain().is_empty(), "entry inside the cooldown");
+    player.data().unit.transform.set_xyz(500.0, 500.0, 100.0);
+    server.systems.quests.spheres.tick_at(&server, 31_000);
+    player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick_at(&server, 32_000);
+    assert_eq!(client.drain(), offer, "entry after the cooldown");
 
     // The client answers with CSStartQuestContext carrying the sphere id; the existing start
     // path installs the quest with the sphere acceptor.
@@ -259,4 +264,269 @@ fn real_compact_db_accept_quest_spheres_map_to_their_quests() {
             "SphereAcceptQuest"
         );
     }
+}
+
+/// Quest 30 starts through its `quest_sign_sphere.g` area (sphere 5, a `SphereQuest` row).
+fn sign_sphere_quest(d: &mut QuestData) {
+    d.add_template(QuestTemplate {
+        id: 30,
+        ..QuestTemplate::default()
+    });
+    d.add_component(QuestComponentTemplate {
+        id: 301,
+        quest_id: 30,
+        kind_id: kind::START,
+        npc_ai_id: 1,
+        ..QuestComponentTemplate::default()
+    });
+    d.add_act(301, 301, 301, 0, ActKind::ConAcceptSphere { sphere_id: 5 });
+    d.add_component(QuestComponentTemplate {
+        id: 302,
+        quest_id: 30,
+        kind_id: kind::PROGRESS,
+        npc_ai_id: 1,
+        ..QuestComponentTemplate::default()
+    });
+    d.add_act(
+        302,
+        302,
+        302,
+        1,
+        ActKind::ObjMonsterHunt {
+            npc_id: 600,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    d.sphere_quests.insert(
+        1,
+        DbSphereQuest {
+            id: 1,
+            quest_id: 30,
+            quest_trigger_id: 0,
+        },
+    );
+    d.sphere_quest_order.push(1);
+    d.spheres.insert(
+        5,
+        DbSphere {
+            id: 5,
+            sphere_detail_id: 1,
+            sphere_detail_type: "SphereQuest".into(),
+            ..DbSphere::default()
+        },
+    );
+    d.sphere_order.push(5);
+}
+
+#[tokio::test]
+async fn client_sphere_start_checks_the_area_sphere() {
+    let (server, _rec) = server_with(accept_quest);
+    set_offer_area(&server);
+
+    // Far away: the client names the sphere but the server refuses the start.
+    let mut far_client = TestClient::new(&server, 1, 1001);
+    let mut far = test_character(1, "Far", 500.0, 500.0);
+    far.unit.level = 50;
+    let far_player = spawn_player(&server, &far_client, far, 0x100);
+    far_client.conn.active_char = Some(far_player.clone());
+    CSStartQuestContextPacket {
+        quest_context_id: QUEST,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: SPHERE,
+    }
+    .handle(&server, &mut far_client.conn)
+    .await
+    .unwrap();
+    assert!(
+        !events::has_quest(&far_player, QUEST),
+        "start from far away"
+    );
+
+    // 4 m outside the r=50 area is inside the 5 m client-lag tolerance.
+    let mut near_client = TestClient::new(&server, 2, 1002);
+    let mut near = test_character(2, "Near", 100.0, 100.0);
+    near.unit.level = 50;
+    near.unit.transform.set_xyz(100.0, 100.0, 154.0);
+    let near_player = spawn_player(&server, &near_client, near, 0x101);
+    near_client.conn.active_char = Some(near_player.clone());
+    CSStartQuestContextPacket {
+        quest_context_id: QUEST,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: SPHERE,
+    }
+    .handle(&server, &mut near_client.conn)
+    .await
+    .unwrap();
+    assert!(
+        events::has_quest(&near_player, QUEST),
+        "4 m outside is within the tolerance"
+    );
+
+    // 10 m outside: refused.
+    let mut out_client = TestClient::new(&server, 3, 1003);
+    let mut out = test_character(3, "Out", 100.0, 100.0);
+    out.unit.level = 50;
+    out.unit.transform.set_xyz(100.0, 100.0, 160.0);
+    let out_player = spawn_player(&server, &out_client, out, 0x102);
+    out_client.conn.active_char = Some(out_player.clone());
+    CSStartQuestContextPacket {
+        quest_context_id: QUEST,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: SPHERE,
+    }
+    .handle(&server, &mut out_client.conn)
+    .await
+    .unwrap();
+    assert!(!events::has_quest(&out_player, QUEST), "10 m outside");
+}
+
+#[tokio::test]
+async fn automatic_sphere_starter_still_starts_and_client_start_checks_the_sign_sphere() {
+    let (server, _rec) = server_with(sign_sphere_quest);
+    server.systems.quests.spheres.load(
+        &server.game_data.systems.quests,
+        &[RawSignSphere {
+            zone_id: 1,
+            quest_id: 30,
+            component_id: 301,
+            local: [100.0, 100.0, 100.0],
+            radius: 50.0,
+        }],
+        &[],
+        "main_world",
+        |_| (0, 0),
+    );
+
+    // A client start from far away is refused against the sign sphere too.
+    let mut far_client = TestClient::new(&server, 1, 1001);
+    let mut far = test_character(1, "Far", 500.0, 500.0);
+    far.unit.level = 50;
+    let far_player = spawn_player(&server, &far_client, far, 0x100);
+    far_client.conn.active_char = Some(far_player.clone());
+    CSStartQuestContextPacket {
+        quest_context_id: 30,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: 5,
+    }
+    .handle(&server, &mut far_client.conn)
+    .await
+    .unwrap();
+    assert!(!events::has_quest(&far_player, 30));
+
+    // The server's own automatic `QuestActConAcceptSphere` starter is not behind the client
+    // entry point and still starts on entry.
+    let mut inside_client = TestClient::new(&server, 2, 1002);
+    let mut inside = test_character(2, "Inside", 100.0, 100.0);
+    inside.unit.level = 50;
+    let inside_player = spawn_player(&server, &inside_client, inside, 0x101);
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert!(
+        events::has_quest(&inside_player, 30),
+        "automatic sphere starter"
+    );
+
+    // Dropped and started through the client path from inside the same sign sphere.
+    events::drop_quest(&server, &inside_player, 30, false);
+    assert!(!events::has_quest(&inside_player, 30));
+    inside_client.conn.active_char = Some(inside_player.clone());
+    CSStartQuestContextPacket {
+        quest_context_id: 30,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: 5,
+    }
+    .handle(&server, &mut inside_client.conn)
+    .await
+    .unwrap();
+    assert!(
+        events::has_quest(&inside_player, 30),
+        "client start inside the sign sphere"
+    );
+}
+
+#[tokio::test]
+async fn the_offer_cooldown_is_cleared_when_the_character_leaves_the_world() {
+    let (server, _rec) = server_with(accept_quest);
+    set_offer_area(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, eligible_character(), 0x100);
+    let _ = client.drain();
+
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert_eq!(client.drain().len(), 1, "initial offer");
+    player.data().unit.transform.set_xyz(500.0, 500.0, 100.0);
+    server.systems.quests.spheres.tick_at(&server, 1_500);
+    player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick_at(&server, 2_000);
+    assert!(client.drain().is_empty(), "re-entry inside the cooldown");
+
+    // Leaving the world drops the per-character sphere state, including the cooldown.
+    server
+        .systems
+        .quests
+        .spheres
+        .forget_character(player.character_id);
+    server.systems.quests.spheres.tick_at(&server, 3_000);
+    assert_eq!(client.drain().len(), 1, "offer after the state was cleared");
+}
+
+#[tokio::test]
+async fn becoming_eligible_inside_the_sphere_offers_the_quest() {
+    let (server, _rec) = server_with(accept_quest);
+    set_offer_area(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut low = character();
+    low.unit.level = 49;
+    let player = spawn_player(&server, &client, low, 0x100);
+    let _ = client.drain();
+
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert!(client.drain().is_empty(), "level 49: no offer");
+
+    player.data().unit.level = 50;
+    server.systems.quests.spheres.tick_at(&server, 2_000);
+    assert_eq!(client.drain().len(), 1, "level-up inside the sphere");
+
+    // Staying eligible does not repeat the offer.
+    server.systems.quests.spheres.tick_at(&server, 3_000);
+    assert!(client.drain().is_empty());
+
+    // A server-side eligibility transition while inside (here: the quest was taken and then
+    // dropped) offers again without waiting for the 30 s entry cooldown.
+    events::add_quest(&server, &player, QUEST, true);
+    assert!(events::has_quest(&player, QUEST));
+    let _ = client.drain(); // the quest-start packets
+    server.systems.quests.spheres.tick_at(&server, 3_500);
+    assert!(client.drain().is_empty(), "quest active: not eligible");
+    events::drop_quest(&server, &player, QUEST, false);
+    let _ = client.drain();
+    server.systems.quests.spheres.tick_at(&server, 4_000);
+    assert_eq!(client.drain().len(), 1, "transition back to eligible");
+}
+
+#[tokio::test]
+async fn the_offer_requires_the_start_component_to_accept_the_sphere() {
+    let (server, _rec) = server_with(|d| {
+        accept_quest(d);
+        // The linked start act names a different sphere than the offer: the client's reply
+        // would be refused by `starter_accepts`, so the offer must not be sent.
+        for act in &mut d.acts {
+            if let ActKind::ConAcceptSphere { sphere_id } = &mut act.kind {
+                *sphere_id = 999;
+            }
+        }
+    });
+    set_offer_area(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let _player = spawn_player(&server, &client, eligible_character(), 0x100);
+    let _ = client.drain();
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert!(client.drain().is_empty());
 }

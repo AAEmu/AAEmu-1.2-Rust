@@ -1384,6 +1384,31 @@ fn add_quest_from_sphere_impl(
     sphere_id: u32,
     answer_start_refusals: bool,
 ) -> Option<bool> {
+    // Root-cause guard: the client names both the quest and the sphere, and the start-act check
+    // (`starter_accepts`) only compares them with each other, so without this a client could
+    // start any `QuestActConAcceptSphere` quest from anywhere. The character must be inside the
+    // named sphere now, using the same area / sign-sphere geometry the sphere tick uses.
+    // Automatic starters call `ctx.add_quest` directly and do not pass through here.
+    let me = WorldObject::from(player.clone());
+    let world = server.world.world_of(&me).map(|w| w.template.name.clone());
+    let pos = world_position(server, &me);
+    let inside = world.is_some_and(|world| {
+        server.systems.quests.spheres.is_inside_sphere(
+            &world,
+            sphere_id,
+            pos,
+            super::spheres::START_TOLERANCE,
+        )
+    });
+    if !inside {
+        tracing::warn!(
+            character = %player.data().unit.name,
+            quest_id,
+            sphere_id,
+            "Client sphere quest start refused: the character is outside the sphere"
+        );
+        return Some(false);
+    }
     with_quests(server, player, None, move |ctx| {
         ctx.answer_start_refusals = answer_start_refusals;
         ctx.add_quest(quest_id, false, acceptor::SPHERE, sphere_id)
