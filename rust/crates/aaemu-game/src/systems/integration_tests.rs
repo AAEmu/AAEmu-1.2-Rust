@@ -1027,6 +1027,35 @@ async fn quest_reward_skips_an_unknown_item_template() {
 }
 
 #[tokio::test]
+async fn quest_reward_with_one_free_slot_gives_the_item_directly() {
+    let server = server_with(false);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut c = test_character(1, "Tight", 100.0, 100.0);
+    c.num_inventory_slots = 1;
+    c.inventory = crate::models::character::Inventory::standalone(1, 1, 50);
+    let player = spawn_player(&server, &client, c, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&server, &player, REWARD_QUEST, false),
+        Some(true)
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    // The filtered pool has one item, so the one free slot is enough: it is given directly
+    // instead of being counted against the missing-template row and mailed.
+    let bag = crate::systems::economy::inventory::Inv::of(&player).bag();
+    let items: Vec<(u32, i32)> = bag
+        .lock()
+        .expect("container poisoned")
+        .items
+        .iter()
+        .map(|i| (i.template_id, i.count))
+        .collect();
+    assert_eq!(items, vec![(QUEST_ITEM, 1)]);
+    client.drain();
+}
+
+#[tokio::test]
 async fn interaction_skill_on_a_doodad_advances_the_interaction_quest() {
     let server = server_with(false);
     let mut a = pc(&server, 1, "User", 100.0);
