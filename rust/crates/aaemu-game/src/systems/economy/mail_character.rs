@@ -327,6 +327,29 @@ pub fn get_attached(
                 tracing::error!("GetAttached: attachment {item_id} of mail {mail_id} not found");
                 continue;
             };
+            // An auction delivery whose item expired before it was taken must not enter the
+            // bag. The settlement guard refunds a lot that expired before settlement; this
+            // covers a delivery persisted before that guard or an item that expired while the
+            // mail waited. The price is not stored on the delivery mail, so no refund here.
+            if this_mail.mail_type == mail_type::AUC_BID_WIN
+                && crate::systems::economy::item_timers::expired_at(&attachment, mail::now())
+            {
+                tracing::warn!(
+                    "GetAttached: auction item {item_id} of mail {mail_id} expired; deleting it instead of delivering"
+                );
+                if let Some(container) = server.items.holding_container(attachment.id) {
+                    container
+                        .lock()
+                        .expect("container poisoned")
+                        .remove_item(attachment.id);
+                }
+                server.items.release_id(attachment.id, &server.ids.item);
+                mails.with_mail_mut(mail_id, |m| {
+                    m.header.attachments = m.header.attachments.wrapping_sub(1);
+                });
+                to_remove.push(*item_id);
+                continue;
+            }
             let money = player.data().money;
             let max_count = data
                 .template(attachment.template_id)

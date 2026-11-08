@@ -1471,6 +1471,85 @@ fn mails_to(server: &GameServer, receiver: u32) -> Vec<crate::systems::economy::
         .collect()
 }
 
+/// A lot whose escrow item expires before the auction ends is never delivered: the winner's
+/// bid is refunded in full by the normal bid-fail mail and the item is deleted; the seller
+/// gets neither the item nor a sale mail.
+#[tokio::test]
+async fn an_item_that_expires_in_escrow_refunds_the_winner_and_is_deleted() {
+    let (mut w, log) = auction_world();
+    let (item_id, lot) = post(&mut w, SWORD, 0, 0, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 700));
+    assert_eq!(money(&w.pb), 100_000 - 700);
+    log.take();
+    w.server
+        .items
+        .update_item(item_id, |item| item.expiration_time = 1);
+    let ah = &w.server.systems.economy.auction;
+    ah.update_auction_house(&w.server, lot.end_time + Duration::seconds(1));
+    assert!(ah.lot(lot.id).is_none());
+    assert!(ah.deleted_ids().contains(&lot.id));
+    assert!(w.server.items.item_by_id(item_id).is_none());
+    assert_eq!(
+        log.take(),
+        vec![AuctionMail::BidFail {
+            item_template_id: SWORD,
+            seller_id: 1,
+            buyout_price: 0,
+            listing_fee: 0,
+            previous_buyer_id: 2,
+            previous_bid: 700,
+        }],
+        "the winner is refunded in full; no sale or seller mail is sent"
+    );
+}
+
+/// A delivery that expires before the buyer takes it is deleted instead of entering the bag.
+/// This covers a mail persisted before the settlement guard and an item that expires while the
+/// mail waits; the delivery mail carries no price, so no refund is minted here.
+#[tokio::test]
+async fn an_expired_auction_delivery_is_deleted_instead_of_taken() {
+    let (mut w, _log) = auction_world();
+    crate::systems::economy::wiring::install(&w.server);
+    let (item_id, lot) = post(&mut w, SWORD, 0, 0, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 500));
+    w.server
+        .systems
+        .economy
+        .auction
+        .update_auction_house(&w.server, lot.end_time + Duration::seconds(1));
+    let winner = mails_to(&w.server, 2)
+        .into_iter()
+        .find(|mail| mail.mail_type == crate::systems::economy::mail::mail_type::AUC_BID_WIN)
+        .expect("the winner mail");
+    assert_eq!(winner.body.attachments, vec![item_id]);
+    w.server
+        .items
+        .update_item(item_id, |item| item.expiration_time = 1);
+    w.b.drain();
+    run::<crate::systems::economy::mail_packets::CSTakeAttachmentSequentially>(
+        &mut w,
+        1,
+        &winner.id.to_le_bytes(),
+    );
+    assert!(w.server.items.item_by_id(item_id).is_none());
+    assert!(!Inv::of(&w.pb)
+        .bag()
+        .lock()
+        .unwrap()
+        .items
+        .iter()
+        .any(|item| item.id == item_id));
+    let mail = w
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(winner.id)
+        .expect("the mail");
+    assert!(mail.body.attachments.is_empty());
+    assert_eq!(mail.header.attachments, 0);
+}
+
 #[tokio::test]
 async fn buyout_delivers_item_and_payment_by_mail() {
     let (mut w, _log) = auction_world();
@@ -1649,6 +1728,34 @@ async fn auction_requires_an_auctioneer_in_range() {
     let f = w.a.drain();
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+}
+
+/// An already expired item cannot be listed: no container timer visits the auction container,
+/// so it would otherwise be sold and delivered after its lifetime ended. The client's existing
+/// invalid-item code (240, "cannot put up the item") is used and the item stays in the bag.
+#[tokio::test]
+async fn an_expired_item_cannot_be_posted_and_reports_the_invalid_item_code() {
+    let (mut w, _log) = auction_world();
+    let pa = w.pa.clone();
+    let item_id = give(&mut w, &pa, slot_type::INVENTORY, SWORD, 1, 0);
+    w.server
+        .items
+        .update_item(item_id, |item| item.expiration_time = 1);
+    w.a.drain();
+    run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
+    assert!(w.server.systems.economy.auction.all_lots().is_empty());
+    assert_eq!(
+        Inv::of(&pa).item_by_id(item_id).map(|item| item.slot_type),
+        Some(slot_type::INVENTORY),
+        "the expired item stays in the bag"
+    );
+    let frames = w.a.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+    assert_eq!(
+        i16::from_le_bytes([frames[0].1[0], frames[0].1[1]]),
+        crate::systems::economy::error_message::CAN_NOT_PUTUP_ITEM
+    );
 }
 
 /// Posting, searching, buying and cancelling are the auction house's everyday traffic: they must
