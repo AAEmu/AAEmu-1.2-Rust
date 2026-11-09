@@ -1214,3 +1214,65 @@ fn real_compact_db_cash_shop_item_names() {
     );
     assert!(named > 1000);
 }
+
+/// Every item id of the shipped EU 1.2 example catalogue must exist in the real
+/// `compact.sqlite3`, so importing the file can never list a non-existent item.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_has_every_example_ics_eu_item() {
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+
+    let Ok(compact) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../SQL/examples/example-ics-eu-1.2.sql");
+    let sql = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let skus = sql
+        .split_once("REPLACE INTO `ics_skus`")
+        .expect("ics_skus statement")
+        .1
+        .split_once("VALUES")
+        .expect("ics_skus VALUES")
+        .1;
+    let mut item_ids = Vec::new();
+    for line in skus.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        assert!(line.starts_with('('), "unexpected ics_skus line: {line}");
+        let row = line.trim_start_matches('(');
+        let fields: Vec<&str> = row.split(',').collect();
+        assert!(fields.len() >= 4, "short ics_skus row: {line}");
+        item_ids.push(
+            fields[3]
+                .trim()
+                .parse::<u32>()
+                .unwrap_or_else(|e| panic!("item id in {line}: {e}")),
+        );
+        if line.ends_with(';') {
+            break;
+        }
+    }
+    assert_eq!(item_ids.len(), 129, "the catalogue ships 129 SKUs");
+
+    let conn = Connection::open_with_flags(compact, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open compact.sqlite3");
+    let mut missing = Vec::new();
+    for id in item_ids {
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .expect("items lookup");
+        if count == 0 {
+            missing.push(id);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "items missing from compact: {missing:?}"
+    );
+}

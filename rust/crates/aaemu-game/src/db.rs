@@ -8,7 +8,7 @@
 
 use chrono::{NaiveDateTime, Utc};
 use sqlx::mysql::{MySqlPool, MySqlRow};
-use sqlx::Row;
+use sqlx::{MySql, Row, Transaction};
 
 use crate::config::AppConfig;
 use crate::error::Result;
@@ -63,6 +63,16 @@ pub struct AccountDetails {
     pub last_labor_tick: Option<NaiveDateTime>,
     pub last_credits_tick: Option<NaiveDateTime>,
     pub last_loyalty_tick: Option<NaiveDateTime>,
+    /// UTC midnight of the last daily login reward (the idempotency claim).
+    pub last_daily_reward: Option<NaiveDateTime>,
+    /// UTC day number (`unix seconds / 86400`) of the hourly Loyalty counters.
+    pub loyalty_hour_day: i32,
+    /// In-world seconds counted in [`Self::loyalty_hour_day`].
+    pub loyalty_hour_seconds: i32,
+    /// Hourly Loyalty tokens granted in [`Self::loyalty_hour_day`].
+    pub loyalty_hour_taken: i32,
+    /// Last online sample (UTC) of the hourly Loyalty counters.
+    pub loyalty_hour_updated: Option<NaiveDateTime>,
     /// `accounts.pay_method` (`1` Premium, `3` Demo, `5` None, `0` = unset: use
     /// `Account:DefaultPayment`).
     pub pay_method: i32,
@@ -73,6 +83,31 @@ pub struct AccountDetails {
     pub pay_end: i64,
     /// `accounts.premium_point` (grade = `premium_grades` lookup, client `FUN_397a7d10`).
     pub premium_point: i32,
+}
+
+impl AccountDetails {
+    /// The hourly Loyalty counters as one value (see [`LoyaltyHourState`]).
+    pub fn loyalty_hour_state(&self) -> LoyaltyHourState {
+        LoyaltyHourState {
+            day: self.loyalty_hour_day,
+            seconds: i64::from(self.loyalty_hour_seconds),
+            taken: self.loyalty_hour_taken,
+            updated: self.loyalty_hour_updated,
+        }
+    }
+}
+
+/// The persisted hourly Loyalty counters of one account (`accounts.loyalty_hour_*`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoyaltyHourState {
+    /// UTC day number (`unix seconds / 86400`) the counters belong to (`0` = never sampled).
+    pub day: i32,
+    /// In-world seconds counted in `day`.
+    pub seconds: i64,
+    /// Hourly tokens granted in `day`.
+    pub taken: i32,
+    /// Last online sample (UTC); `None` = the account has never been sampled.
+    pub updated: Option<NaiveDateTime>,
 }
 
 /// `AccountManager.GetAccountDetailsInternal`, including the create-on-first-use insert.
@@ -99,7 +134,10 @@ pub(crate) async fn try_get_account_details(
     let row = sqlx::query(
         "SELECT CAST(account_id AS SIGNED) AS account_id, CAST(access_level AS SIGNED) AS access_level, \
          CAST(labor AS SIGNED) AS labor, CAST(credits AS SIGNED) AS credits, CAST(loyalty AS SIGNED) AS loyalty, \
-         last_updated, last_login, last_labor_tick, last_credits_tick, last_loyalty_tick, \
+         last_updated, last_login, last_labor_tick, last_credits_tick, last_loyalty_tick, last_daily_reward, \
+         CAST(loyalty_hour_day AS SIGNED) AS loyalty_hour_day, \
+         CAST(loyalty_hour_seconds AS SIGNED) AS loyalty_hour_seconds, \
+         CAST(loyalty_hour_taken AS SIGNED) AS loyalty_hour_taken, loyalty_hour_updated, \
          CAST(pay_method AS SIGNED) AS pay_method, CAST(pay_location AS SIGNED) AS pay_location, \
          CAST(pay_start AS SIGNED) AS pay_start, CAST(pay_end AS SIGNED) AS pay_end, \
          CAST(premium_point AS SIGNED) AS premium_point \
@@ -120,6 +158,11 @@ pub(crate) async fn try_get_account_details(
             last_labor_tick: dt(&row, "last_labor_tick"),
             last_credits_tick: dt(&row, "last_credits_tick"),
             last_loyalty_tick: dt(&row, "last_loyalty_tick"),
+            last_daily_reward: dt(&row, "last_daily_reward"),
+            loyalty_hour_day: int(&row, "loyalty_hour_day")? as i32,
+            loyalty_hour_seconds: int(&row, "loyalty_hour_seconds")? as i32,
+            loyalty_hour_taken: int(&row, "loyalty_hour_taken")? as i32,
+            loyalty_hour_updated: dt(&row, "loyalty_hour_updated"),
             pay_method: int(&row, "pay_method")? as i32,
             pay_location: int(&row, "pay_location")? as i32,
             pay_start: int(&row, "pay_start")?,
@@ -268,6 +311,227 @@ pub async fn add_account_points(
 pub enum AccountPointColumn {
     Credits,
     Loyalty,
+}
+
+/// Claims the daily login reward for `today` (a UTC midnight) and credits the configured daily
+/// amounts, all in one transaction. Returns `(credits, loyalty)` after the grant, or `None` when
+/// the account was already paid for `today` (or the statements fail; the transaction rolls back).
+///
+/// The claim is the atomic `last_daily_reward < today` guard on the row, so the login path and
+/// the midnight quest reset of an online account cannot both pay for the same day. It also
+/// resets the legacy divine clock, which previously happened on every daily-login call.
+pub async fn claim_daily_reward(
+    pool: &MySqlPool,
+    account_id: u32,
+    today: NaiveDateTime,
+    credits: i32,
+    loyalty: i32,
+) -> Option<(i32, i32)> {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("claim_daily_reward({account_id}): {e}");
+            return None;
+        }
+    };
+    // The account row normally exists (created by `get_account_details`); create it for the
+    // first-login race and for callers that reach the midnight hook without one.
+    if let Err(e) = sqlx::query(
+        "INSERT INTO accounts (account_id) VALUES (?) ON DUPLICATE KEY UPDATE account_id = account_id",
+    )
+    .bind(account_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!("claim_daily_reward({account_id}): {e}");
+        let _ = tx.rollback().await;
+        return None;
+    }
+    let claimed = sqlx::query(
+        "UPDATE accounts SET last_daily_reward = ? WHERE account_id = ? \
+         AND (last_daily_reward IS NULL OR last_daily_reward < ?)",
+    )
+    .bind(today)
+    .bind(account_id)
+    .bind(today)
+    .execute(&mut *tx)
+    .await;
+    match claimed {
+        Ok(r) if r.rows_affected() > 0 => {}
+        Ok(_) => {
+            let _ = tx.rollback().await;
+            return None;
+        }
+        Err(e) => {
+            tracing::error!("claim_daily_reward({account_id}): {e}");
+            let _ = tx.rollback().await;
+            return None;
+        }
+    }
+    for (column, amount) in [("credits", credits), ("loyalty", loyalty)] {
+        if amount <= 0 {
+            continue;
+        }
+        let sql = format!("UPDATE accounts SET {column} = {column} + ? WHERE account_id = ?");
+        if let Err(e) = sqlx::query(&sql)
+            .bind(amount)
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::error!("claim_daily_reward({account_id}): {e}");
+            let _ = tx.rollback().await;
+            return None;
+        }
+    }
+    if let Err(e) = sqlx::query(
+        "UPDATE accounts SET divine_clock_time = 0, divine_clock_taken = 0 WHERE account_id = ?",
+    )
+    .bind(account_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!("claim_daily_reward({account_id}): {e}");
+        let _ = tx.rollback().await;
+        return None;
+    }
+    let row = match sqlx::query(
+        "SELECT CAST(credits AS SIGNED) AS credits, CAST(loyalty AS SIGNED) AS loyalty \
+         FROM accounts WHERE account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("claim_daily_reward({account_id}): {e}");
+            let _ = tx.rollback().await;
+            return None;
+        }
+    };
+    let result = (
+        int(&row, "credits").ok()? as i32,
+        int(&row, "loyalty").ok()? as i32,
+    );
+    if let Err(e) = tx.commit().await {
+        tracing::error!("claim_daily_reward({account_id}): {e}");
+        return None;
+    }
+    Some(result)
+}
+
+/// Adds `amount` to `accounts.loyalty` and returns the new total (one transaction).
+pub async fn add_loyalty_returning(
+    pool: &MySqlPool,
+    account_id: u32,
+    amount: i32,
+) -> Result<Option<i32>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO accounts (account_id, loyalty) VALUES (?, ?) \
+         ON DUPLICATE KEY UPDATE loyalty = loyalty + ?",
+    )
+    .bind(account_id)
+    .bind(amount)
+    .bind(amount)
+    .execute(&mut *tx)
+    .await?;
+    let total = sqlx::query_scalar::<_, i64>(
+        "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|v| v as i32);
+    tx.commit().await?;
+    Ok(total)
+}
+
+/// Adds `amount` (when positive) to `accounts.loyalty` and stores the account's new hourly
+/// Loyalty counters in the same transaction. The counter write only applies while the row still
+/// holds the snapshot it was computed from ([`store_loyalty_hour_state_tx`]), so two ticking
+/// tasks that read the same state credit once. Returns the new total, or `None` when the
+/// snapshot was stale or the transaction failed (nothing was credited).
+pub async fn credit_hourly_loyalty(
+    pool: &MySqlPool,
+    account_id: u32,
+    amount: i32,
+    previous: LoyaltyHourState,
+    next: LoyaltyHourState,
+) -> Result<Option<i32>> {
+    let mut tx = pool.begin().await?;
+    if !store_loyalty_hour_state_tx(&mut tx, account_id, previous, next).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    if amount > 0 {
+        sqlx::query(
+            "INSERT INTO accounts (account_id, loyalty) VALUES (?, ?) \
+             ON DUPLICATE KEY UPDATE loyalty = loyalty + ?",
+        )
+        .bind(account_id)
+        .bind(amount)
+        .bind(amount)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let total = if amount > 0 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = ?",
+        )
+        .bind(account_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|v| v as i32)
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(total)
+}
+
+/// Stores the account's hourly Loyalty counters without granting a token. Returns whether the
+/// row still held the snapshot that produced `next`.
+pub async fn store_loyalty_hour_state(
+    pool: &MySqlPool,
+    account_id: u32,
+    previous: LoyaltyHourState,
+    next: LoyaltyHourState,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let changed = store_loyalty_hour_state_tx(&mut tx, account_id, previous, next).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Conditional counter write: applies `next` only while the row still holds `previous`
+/// (`loyalty_hour_updated` is NULL-safe compared). A concurrent tick that already wrote its own
+/// sample makes this a no-op, so the same interval can never be paid twice.
+async fn store_loyalty_hour_state_tx(
+    tx: &mut Transaction<'_, MySql>,
+    account_id: u32,
+    previous: LoyaltyHourState,
+    next: LoyaltyHourState,
+) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE accounts SET loyalty_hour_day = ?, loyalty_hour_seconds = ?, \
+         loyalty_hour_taken = ?, loyalty_hour_updated = ? \
+         WHERE account_id = ? AND loyalty_hour_day = ? AND loyalty_hour_seconds = ? \
+         AND loyalty_hour_taken = ? AND loyalty_hour_updated <=> ?",
+    )
+    .bind(next.day)
+    .bind(i32::try_from(next.seconds.clamp(0, i64::from(i32::MAX))).unwrap_or(i32::MAX))
+    .bind(next.taken.max(0))
+    .bind(next.updated)
+    .bind(account_id)
+    .bind(previous.day)
+    .bind(previous.seconds as i32)
+    .bind(previous.taken)
+    .bind(previous.updated)
+    .execute(&mut **tx)
+    .await?;
+    Ok(res.rows_affected() == 1)
 }
 
 /// `accounts.extra_character_slots` (0 when the account row does not exist).

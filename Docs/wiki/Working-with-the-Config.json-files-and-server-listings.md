@@ -311,7 +311,10 @@ schema creates the tables but ships no catalogue, because no 1.2 retail content 
 evidenced; the tabs, SKUs, prices, stock limits and currencies are server-owner
 policy. `SQL/examples/example-ics-default-en.sql` is an optional example catalogue
 (English labels and example prices) that can be imported and edited; it is not part
-of the base schema or the required updates. Check each SKU's `currency` (credits,
+of the base schema or the required updates. `SQL/examples/example-ics-eu-1.2.sql` is
+a second example catalogue of EU 1.2-era marketplace items (129 SKUs, including the
+Loyalty tab); most of its prices are INFERRED and must be reviewed before importing.
+Check each SKU's `currency` (credits,
 AA points, loyalty or coins) and price before importing. AA points are not
 supported: AA-priced SKUs (`currency = 1`) are refused with error 592 and nothing is
 debited.
