@@ -887,6 +887,25 @@ fn set_house_buff(server: &GameServer, house: &HouseRef, buff_id: u32, on: bool,
             crate::world::now_ms(),
         );
         crate::systems::skills::buffs::add_buff(server, &obj, b, 0, 0);
+        if buff_id == BUFF_BURNING_HOUSE {
+            // Buff 39's 1.2 duration (99,999,999 ms) is a placeholder for an unused buff. The
+            // shared fixed-DoT rule reads the fixed 30 as the total over the buff duration
+            // (client macro sub_398CFD40), so the authored duration would spread it over 27.8 h
+            // and the house would never burn down. The abandoned-house deviation keeps the
+            // documented 30 HP/s by running the buff as a permanent (duration 0) ticker, like
+            // the removal debuff it follows; `remove_buff` still ends it with that buff.
+            obj.with_base_unit(|u| {
+                if let Some(e) = u
+                    .buffs_mut()
+                    .effects
+                    .iter_mut()
+                    .find(|e| e.template.id == BUFF_BURNING_HOUSE && !e.is_ended())
+                {
+                    e.duration = 0;
+                    e.count = -1;
+                }
+            });
+        }
     } else if has {
         crate::systems::skills::buffs::remove_buff(server, &obj, buff_id);
     }

@@ -447,11 +447,17 @@ pub(super) fn damage_with_aoe(
             ) as f32;
         });
     }
+    // 1.2 DamageEffect fixed_min/fixed_max are the total over the buff duration, not one
+    // tick: the client macro for `total_min_damage`/`total_max_damage` returns the fixed
+    // term undivided (10.x sub_398CFD40/sub_398CFE10), and `min_damage`/`max_damage`
+    // divide it by duration/tick (sub_398CFFC0/sub_398D00C0). The scale is therefore
+    // applied after the standalone fixed override below, exactly like HealEffect above
+    // (HealEffect.cs: fixed -> * tick_modifier) and like the pre-bd90e0b73 C# order.
+    let mut tick_modifier = 1.0f32;
     if let Some(b) = &args.source.buff {
         if !b.tick_effects.is_empty() {
-            if b.duration != 0 {
-                min = (f64::from(min) * (b.tick / f64::from(b.duration))) as f32;
-                max = (f64::from(max) * (b.tick / f64::from(b.duration))) as f32;
+            if b.duration != 0 && !args.source.buff_permanent {
+                tick_modifier = (b.tick / f64::from(b.duration)) as f32;
             }
             buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageEtcDot, 0);
             buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedEtcDot, 0);
@@ -486,9 +492,16 @@ pub(super) fn damage_with_aoe(
     }
     // Preserve the existing standalone fixed-damage override. Combined fixed/percent
     // descriptors (4821, 4944, 6198, ...) contribute both terms to the base above.
-    if e.use_fixed_damage && !e.use_percent_damage {
+    let standalone_fixed = e.use_fixed_damage && !e.use_percent_damage;
+    if standalone_fixed {
         min = e.fixed_min as f32;
         max = e.fixed_max as f32;
+    }
+    // A buff trigger is a one-shot event, not a periodic tick, so its standalone fixed value
+    // stays whole; HealEffect likewise special-cases `IsTrigger` instead of the tick share.
+    if !(standalone_fixed && args.source.is_trigger) {
+        min *= tick_modifier;
+        max *= tick_modifier;
     }
     // Native 1.2 sub_3941B030 / sub_39354450: a buff source
     // uses BuffAttribute::Damage (3), including fixed damage; it is not a skill modifier.
@@ -822,7 +835,7 @@ pub fn heal(
     max = variable + level_max;
     let mut tick_modifier = 1.0f32;
     if let Some(b) = &args.source.buff {
-        if !b.tick_effects.is_empty() && b.duration != 0 {
+        if !b.tick_effects.is_empty() && b.duration != 0 && !args.source.buff_permanent {
             tick_modifier = (b.tick / f64::from(b.duration)) as f32;
         }
     }
@@ -1184,7 +1197,7 @@ pub fn mana_burn(server: &GameServer, e: &ManaBurnEffect, args: &EffectArgs<'_>)
     min += a;
     max += b;
     if let Some(bt) = &args.source.buff {
-        if !bt.tick_effects.is_empty() && bt.duration != 0 {
+        if !bt.tick_effects.is_empty() && bt.duration != 0 && !args.source.buff_permanent {
             min = (f64::from(min) * (bt.tick / f64::from(bt.duration))) as f32;
             max = (f64::from(max) * (bt.tick / f64::from(bt.duration))) as f32;
         }

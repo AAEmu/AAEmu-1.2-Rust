@@ -66,7 +66,9 @@ fn server() -> Arc<GameServer> {
     let s = &mut data.systems.skills;
     s.add_effect(EffectKind::BuffEffect, buff_effect(1, DOT), SPREAD_EFFECT);
     s.add_effect(EffectKind::BuffEffect, buff_effect(2, MARK), MARK_EFFECT);
-    let mut damage = crate::systems::skills::tests::damage_effect(3, 40);
+    // The fixed value is the total over the 8 s duration: 320 / (8000/1000) = 40 per tick,
+    // the damage the spread / Retribution assertions below expect (1.2 fixed-DoT rule).
+    let mut damage = crate::systems::skills::tests::damage_effect(3, 320);
     damage.check_crime = true;
     s.add_effect(
         EffectKind::DamageEffect,
