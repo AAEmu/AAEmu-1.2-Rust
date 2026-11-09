@@ -166,7 +166,18 @@ pub fn loot_item(
         )
     };
     if !res {
-        send_error(player, err::BAG_INVALID_ITEM);
+        // A valid item that did not fit is a full bag; BAG_INVALID_ITEM stays for the rest
+        // (unknown template, trade pack that cannot be equipped, ...).
+        let no_space = f.item_id != ITEM_COINS
+            && eco.bag_space_left_for_item(ctx.server, player, f.item_id) < count;
+        send_error(
+            player,
+            if no_space {
+                err::BAG_FULL
+            } else {
+                err::BAG_INVALID_ITEM
+            },
+        );
     } else if f.item_id != ITEM_COINS {
         // GET_LOOTITEM: the items granted by this loot roll.
         crate::systems::report_achievement(

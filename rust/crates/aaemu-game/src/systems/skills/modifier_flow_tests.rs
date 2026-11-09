@@ -762,3 +762,108 @@ async fn target_selected_area_skill_hits_the_primary_target() {
     assert_eq!(friend.data().unit.hp, 1000);
     assert_eq!(far.data().unit.hp, 1000);
 }
+
+/// Hell Spear / Summon Crows / Thwart (`target_alive` t, `target_dead` f): a corpse is not a
+/// target and must not use up a `target_area_count` slot.
+#[tokio::test]
+async fn area_skill_skips_corpses_before_the_target_count_trim() {
+    use crate::data::world_data::SystemFaction;
+    let mut data = data();
+    for id in [3, 4] {
+        data.factions.add(SystemFaction {
+            id,
+            ..Default::default()
+        });
+    }
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(skills::tests::damage_effect(1, 100))),
+        1,
+    );
+    let (server, _client, player, npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.faction_id = 4;
+    npc.data().unit.faction_id = 3;
+    let spawn = |obj: u32, y: f32, hp: i32| -> NpcRef {
+        let mut n = crate::models::npc::Npc::new(1);
+        n.unit.hp = hp;
+        n.unit.max_hp = 1000;
+        n.unit.faction_id = 3;
+        n.unit.transform.set_xyz(100.0, y, 100.0);
+        let n: NpcRef = crate::world::Entity::new(obj, n);
+        server.world.world(0).unwrap().spawn(&n, &server.view_ctx());
+        n
+    };
+    let corpse = spawn(0x201, 106.0, 0);
+    let alive = spawn(0x202, 108.0, 1000);
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            target_area_radius: 6,
+            target_area_count: 2,
+            target_alive: true,
+            target_dead: false,
+            target_relation: 4,
+            target_selection: 2,
+            effects: vec![skills::tests::skill_effect(1, EffectKind::DamageEffect, 1)],
+            ..skills::tests::skill_template(10135)
+        }),
+        1,
+    );
+    cast(&server, &player, npc.obj_id, &skill);
+    assert_eq!(npc.data().unit.hp, 900);
+    assert_eq!(alive.data().unit.hp, 900, "the living unit got the slot");
+    assert_eq!(corpse.data().unit.hp, 0);
+}
+
+/// Hell Spear (10135): radius 6, target_valid_height 1. A target 10 m above the caster is out
+/// of reach, one on a normal slope inside the radius (3 m up) is still hit.
+#[tokio::test]
+async fn area_skill_ignores_targets_far_above_the_centre() {
+    use crate::data::world_data::SystemFaction;
+    let mut data = data();
+    for id in [3, 4] {
+        data.factions.add(SystemFaction {
+            id,
+            ..Default::default()
+        });
+    }
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(skills::tests::damage_effect(1, 100))),
+        1,
+    );
+    let (server, _client, player, npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.faction_id = 4;
+    npc.data().unit.faction_id = 3;
+    let spawn = |obj: u32, y: f32, z: f32| -> NpcRef {
+        let mut n = crate::models::npc::Npc::new(1);
+        n.unit.hp = 1000;
+        n.unit.max_hp = 1000;
+        n.unit.faction_id = 3;
+        n.unit.transform.set_xyz(100.0, y, z);
+        let n: NpcRef = crate::world::Entity::new(obj, n);
+        server.world.world(0).unwrap().spawn(&n, &server.view_ctx());
+        n
+    };
+    let above = spawn(0x201, 103.0, 110.0);
+    let slope = spawn(0x202, 103.0, 102.5);
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            target_area_radius: 6,
+            target_valid_height: 1.0,
+            target_alive: true,
+            target_relation: 4,
+            target_selection: 2,
+            effects: vec![skills::tests::skill_effect(1, EffectKind::DamageEffect, 1)],
+            ..skills::tests::skill_template(10135)
+        }),
+        1,
+    );
+    cast(&server, &player, npc.obj_id, &skill);
+    assert_eq!(npc.data().unit.hp, 900);
+    assert_eq!(above.data().unit.hp, 1000, "10 m up is out of reach");
+    assert_eq!(
+        slope.data().unit.hp,
+        900,
+        "a slope within the radius still hits"
+    );
+}

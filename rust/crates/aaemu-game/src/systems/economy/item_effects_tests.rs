@@ -2195,6 +2195,20 @@ async fn gain_item_effect() {
     assert!(w.a.drain().is_empty());
 }
 
+#[tokio::test]
+async fn gain_item_that_does_not_fit_reports_a_full_bag() {
+    let mut w = world();
+    Inv::of(&w.pa).bag().lock().unwrap().set_container_size(0);
+    gain_item(&w.server, &w.pa, [STACK as i32, 1, 0, 0]);
+    let frames = w.a.drain();
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+    assert_eq!(
+        &frames[0].1[..2],
+        &super::error_message::BAG_FULL.to_le_bytes()
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // GainItemWithPosImprint / ExpToItem / RechargeItemBuff (data-derived bodies of C# stubs)
 // ---------------------------------------------------------------------------------------------
