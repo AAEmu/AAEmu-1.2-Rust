@@ -547,22 +547,31 @@ pub fn use_doodad(
 fn theft_evidence(ctx: &DoodadCtx<'_>, caster: &WorldObject, started_skill_id: u32) {
     let server = ctx.server;
     let caster_owner = owner_character(server, &ctx.world, caster);
-    let (owner_type, owner_id, owner_db_id) = {
+    let (owner_type, owner_id) = {
         let d = ctx.doodad.data();
-        (d.owner_type, d.owner_id, d.owner_db_id)
+        (d.owner_type, d.owner_id)
     };
-    // A garden plant is owned by its house, not by a character. Only the siege larceny window
-    // makes it lootable by a non-owner, so its use is theft only inside that window (and only
-    // when `Housing.SiegeLarcenyCrime` turns the normal evidence back on).
-    let larceny_window =
-        crate::systems::housing::dominion::larceny::covers_doodad(server, &ctx.doodad);
+    // A garden plant is owned by its house, not by a character. Its use is theft only when the
+    // siege larceny window (not a normal house permission such as PUBLIC) granted the access;
+    // the normal evidence then follows `Housing.SiegeLarcenyCrime`.
+    let larceny_house =
+        if crate::systems::housing::dominion::larceny::covers_doodad(server, &ctx.doodad) {
+            crate::systems::housing::dominion::larceny::house_of_doodad(server, &ctx.doodad)
+        } else {
+            None
+        };
+    let larceny_granted = match (&larceny_house, caster_owner.as_ref()) {
+        (Some(house), Some(player)) => {
+            !crate::systems::housing::allowed_to_interact(server, house, player)
+        }
+        _ => false,
+    };
     let owner_character_id = match owner_type {
         doodad_owner_type::CHARACTER => Some(owner_id),
-        doodad_owner_type::HOUSING if larceny_window => {
-            crate::systems::housing::house_by_id(server, owner_db_id)
-                .map(|house| house.data().unit.owner_id)
-                .filter(|id| *id != 0)
-        }
+        doodad_owner_type::HOUSING if larceny_granted => larceny_house
+            .as_ref()
+            .map(|house| house.data().unit.owner_id)
+            .filter(|id| *id != 0),
         _ => None,
     };
     let caster_owner_id = caster_owner.as_ref().map(|p| p.data().id);
@@ -573,7 +582,12 @@ fn theft_evidence(ctx: &DoodadCtx<'_>, caster: &WorldObject, started_skill_id: u
     }
     // The window's text says the crops are "used", not stolen; keep the footprint evidence
     // only when the configuration asks for the normal theft rule.
-    if crate::systems::housing::dominion::larceny::suppresses_theft_evidence(server, &ctx.doodad) {
+    if larceny_granted
+        && crate::systems::housing::dominion::larceny::suppresses_theft_evidence(
+            server,
+            &ctx.doodad,
+        )
+    {
         return;
     }
     let hooks = server.systems.npcs.hooks.skills.get();

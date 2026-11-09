@@ -538,6 +538,20 @@ fn real_compact_larceny_group_ids_are_the_shipped_farm_categories() {
 }
 
 #[tokio::test]
+async fn a_public_house_loot_inside_the_window_is_not_theft() {
+    let h = Harness::new(SiegeLarcenyMode::Opponents, true);
+    h.house.data().permission = housing_permission::PUBLIC;
+    h.mark_tower_destroyed();
+    let crop = h.mature_crop();
+    h.loot_skill_less(&crop, &h.opponent);
+    assert_eq!(h.loot.packs.lock().unwrap().len(), 1);
+    assert!(
+        h.evidence.criminals.lock().unwrap().is_empty(),
+        "normal house permission is not theft even with the crime switch on"
+    );
+}
+
+#[tokio::test]
 async fn theft_evidence_is_suppressed_by_default_and_restored_by_the_switch() {
     let h = Harness::new(SiegeLarcenyMode::Opponents, false);
     h.mark_tower_destroyed();
