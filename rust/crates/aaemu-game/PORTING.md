@@ -5928,9 +5928,65 @@ Data (1.2, joined through `effects.actual_type = 'SpecialEffect'`): 5009 / 9531
 `[1000, 20, 20, 0]` on 내부 충격 16410 / 20650 (effects 15588 / 27256), 6411 `[2000, 50, 50, 0]` on
 the Timeout trigger 2194 of buff 449 (effect 20330).
 
+### Skill rank formulas: mana cost and cast time (1.2 client)
+
+Mana and cast time are evaluated at the skill's own **rank level**, not at the caster's ability
+level (the C# `Skill.ManaCost` used `caster.GetAbLevel(AbilityId)` and ignored `Skill.Level`).
+Evidence (Ghidra `aa12u`, x2game): the tooltip entry `FUN_3941e750` reads the learned skill level
+(`FUN_390b9950` / `FUN_390b9920`; rank 1 for a class skill the character does not have), maps it
+through `FUN_39897fe0` to `L = ability_level + (rank - 1) * level_step`, and calls the evaluator
+`FUN_398a01b0(ctx, unit, L, ctx2, skill, kind, 0)`:
+
+```
+T     = max(0, (L - ability_level) * casting_inc * 0.001)                (FUN_398a7710)
+mana  = TRUNC( mana_cost + mana_level_md * (1 + T) * LevelMana(L) )      (kind 0)
+cast  = (int)(casting_time * (1 + T))                                    (kind 4)
+```
+
+followed by the caster's skill modifiers (`FUN_3989f900`) and, for the tooltip / cast bar, the
+cast-speed stat `(stat + 1000) / 1000` (`FUN_393543a0`); the kind-4 cast time is truncated to
+an integer before those modifiers. `LevelMana` is the character `unit_formulas` rows 12/13
+(`(L * 1.6 + 8) * 3 / 3.65`). The client truncates the final mana value: `FUN_398b56d0` takes
+the `DAT_3a5e41f0 = 1` truncation branch, and 32 of the 68 live readings have a fractional
+mana part >= 0.5 that the client truncated (Purge rank 1 raw 57.534 -> 57; Freezing Earth
+rank 8 raw 946.849 -> 946; Meteor Strike rank 2 raw 1814.795 -> 1814).
+
+`skill::effective_level` / `skill::rank_inc` / `skill::rank_for_level` /
+`skill::cast_skill_level` / `skill::level_and_inc` implement `L` and `T`; the mana charge
+(`Skill.ManaCost` -> `consume_mana`), the resource pre-check (`validation.rs`) and the plot
+`ManaCost` effect all read that same pair, so an allowed cast is charged exactly what it
+checked. The cast time is `skill::cast_time_ms` (the announced `SCSkillStarted` base/real time
+and the server timer) and the `casting_time` term of `skill::attack_delay`. Plot-driven casts
+(`plots.rs`) keep their own plot-event delays and the cast-speed stat; those delays are plot
+data, not `skills.casting_time`, so the rank term does not apply to them.
+
+Live confirmation against the original r208022 client
+(`D:/aaemu-audits/skill-tooltips-2026-11-09/`): 68 tooltip readings, 27 skills, ranks 1..=19,
+maxima `(55 - ability_level) / level_step + 1`, mana residual 0 and cast residual 0 on every
+row (the readings were taken with cast-speed stat 0, so the stat factor is 1.000 in all of
+them). The gated test `real_compact_skill_tooltips_match_the_1_2_client` pins all 68 rows
+against the real `compact.sqlite3`.
+
+Which rank applies (`FUN_3941e750`):
+
+* A character's class skill (`ability_id != 0`) uses the learned rank on the `SkillRun`
+  (`FUN_390b9950` / `FUN_390b9920`); variants (`IsVariantOfSkill`, e.g. the combo skills) run
+  at the learned base skill's rank, not at rank 1.
+* An `ability_id == 0` skill uses the rank from the character's level,
+  `(charLevel - ability_level) / level_step + 1`, learned or not (rank 1 when
+  `level_step <= 0`). This covers the item / default / interaction skills: 422 item use-skills
+  with `mana_level_md > 0` are ability 0, so their `LevelMana` argument is the character level.
+* A non-character caster (an NPC) keeps the effective level the old `Skill.ManaCost` used as
+  its `LevelMana` argument, the unit level or `ab_level_override`, whatever the `level_step`;
+  `T` is derived from that level. This keeps the former NPC cost (e.g. skill 23693 at NPC
+  level 54 still costs 11638) and applies only the new `casting_inc` term on top. The 68
+  readings are player-side (the client tooltip is player-side), so the NPC-side cost is
+  **capture-pending**; deviation from the C#: `Skill.ManaCost` scaled every caster by
+  `GetAbLevel(AbilityId)`, which for NPCs is the same level this keeps.
+
 ### Plot `ManaCost` special effect (type 39)
 
-The C# charged `value1 + value2 / 6.35` (with a TODO: "value2 is based on skill level somehow"). The 1.2 data shows `value1` = the skill's `mana_cost` and `value2` = `mana_level_md * 100` for 59 of the 68 plot-only skills that carry the effect (e.g. 11854: md 1.55, effect 0/155; 18132: mana_cost 30, effect 30/0). The 1.2 client shows the cost in the skill tooltip as `mana_cost + mana_level_md * f(ability level)` (Ghidra `aa12u`, x2game `FUN_3941e750` -> `manaCost` of `FUN_394ace10`, via the unit formulas 12 and 13: `(ab_level * 1.6 + 8) * 3 / 3.65`), and the cast pre-check (`validation.rs`) already requires exactly that amount. The effect therefore now charges `value1 + value2 / 100 * scale` with the same scale as `skill::mana_cost`; at ability level 55 skill 11854 costs 120 instead of 24. The scale is no longer hardcoded: `skill::mana_level_scale` evaluates the character `unit_formulas` rows of `compact.sqlite3` (kind 12 `LevelDps` = `(ab_level * 1.6 + 8) * 3`, id 12; kind 13 `LevelMana` = `level_dps / 3.65`, id 13) through the precompiled formula expressions. The C# `Skill.ManaCost` (`Skill.cs` ~line 1561) hardcodes `((abLevel - 1) * 1.6 + 8) * 3 / 3.65`; the data and the client decompile cited above have no `- 1` (and `CharStats` evaluates `LevelDps` with `ab_level = level` as well), so the data formula is used for both `ManaCost` paths: every skill's mana cost rises by `1.6 * 3 / 3.65 * mana_level_md` (about 1.3 * md mana). The divisor `value2 / 100` was re-checked against the data: of 84 distinct (skill, `ManaCost` effect values) rows reached through the skills' plots, 62 have `value1 == mana_cost` and `value2 / 100 == mana_level_md`; the other 22 have `mana_level_md` 0 or 1 with `value2` 1 or 100-600, i.e. an effect-only charge that the same formula takes at face value. Deviation from the C#: the charge side is inferred from the tooltip/data (no retail charge capture); the 9 plot-only skills whose effect differs from the skill row follow the same rule.
+The C# charged `value1 + value2 / 6.35` (with a TODO: "value2 is based on skill level somehow"). The 1.2 data shows `value1` = the skill's `mana_cost` and `value2` = `mana_level_md * 100` for 59 of the 68 plot-only skills that carry the effect (e.g. 11854: md 1.55, effect 0/155; 18132: mana_cost 30, effect 30/0). The 1.2 client shows the cost in the skill tooltip as `mana_cost + mana_level_md * (1 + T) * LevelMana(L)` (see the skill rank section above; Ghidra `aa12u`, x2game `FUN_3941e750` -> `manaCost` of `FUN_394ace10`), and the cast pre-check (`validation.rs`) already requires exactly that amount. The effect therefore charges `value1 + value2 / 100 * (1 + T) * scale` with the same `(L, T)` pair as `skill::mana_cost`, so the plot charge cannot decide a cast differently from the pre-check. The scale is no longer hardcoded: `skill::mana_level_scale` evaluates the character `unit_formulas` rows of `compact.sqlite3` (kind 12 `LevelDps` = `(level * 1.6 + 8) * 3`, id 12; kind 13 `LevelMana` = `level_dps / 3.65`, id 13) at `L` through the precompiled formula expressions. The divisor `value2 / 100` was re-checked against the data: of 84 distinct (skill, `ManaCost` effect values) rows reached through the skills' plots, 62 have `value1 == mana_cost` and `value2 / 100 == mana_level_md`; the other 22 have `mana_level_md` 0 or 1 with `value2` 1 or 100-600, i.e. an effect-only charge that the same formula takes at face value. Deviation from the C#: the charge side is inferred from the tooltip/data (no retail charge capture); the 9 plot-only skills whose effect differs from the skill row follow the same rule.
 
 ## Achievement producers (live wiring)
 
