@@ -46,8 +46,8 @@ pub struct PhysicsConfig {
     #[serde(rename = "voxels", deserialize_with = "lenient")]
     pub voxels: bool,
     /// The type-2 vegetation records of `object.dat` (trees / rocks that are not in
-    /// `vegetation.dat`; default off: +20.5% collision instances in main_world); unused at
-    /// `Terrain`.
+    /// `vegetation.dat`; default on: +48 023 collision instances in main_world, about 56 MB);
+    /// unused at `Terrain`.
     #[serde(rename = "objectvegetation", deserialize_with = "lenient")]
     pub object_vegetation: bool,
     /// Cells (1024 m) kept loaded around every player / ship / active NPC: 0 = only the cell
@@ -91,7 +91,7 @@ impl Default for PhysicsConfig {
             geometry: GeometryLevel::Full,
             vis_areas: true,
             voxels: true,
-            object_vegetation: false,
+            object_vegetation: true,
             load_radius_cells: 1,
             load_on_query: true,
             unload_after_seconds: 600,
