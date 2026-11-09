@@ -1446,8 +1446,9 @@ mod tests {
         let bl = t.get_raw_height_map_height(&f, 10, 16).unwrap();
         let br = t.get_raw_height_map_height(&f, 12, 16).unwrap();
         assert_eq!(h, lerp(lerp(tl, tr, 0.5), lerp(bl, br, 0.5), 0.5));
-        assert!((h - 20.5).abs() < 0.1, "{h}"); // u16 unit is 1/16 m
-                                                // Exactly on a grid point: offsets 0.
+        // The u16 unit is 1/16 m.
+        assert!((h - 20.5).abs() < 0.1, "{h}");
+        // Exactly on a grid point: offsets 0.
         assert_eq!(t.get_height(&f, 10.0, 14.0).unwrap(), tl);
     }
 
