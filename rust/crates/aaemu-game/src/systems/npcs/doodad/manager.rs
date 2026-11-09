@@ -570,6 +570,7 @@ fn create_player_doodad_with_labor(
                 d.owner_type = doodad_owner_type::HOUSING;
                 d.parent_obj_id = house.obj_id;
             }
+            crate::systems::housing::manager::mark_client_parent(server, &doodad);
             world.attach_child(&house_object, &WorldObject::from(&doodad));
         }
         None => doodad.data().owner_db_id = 0,

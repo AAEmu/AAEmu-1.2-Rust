@@ -4522,6 +4522,7 @@ impl item_effects::ItemEffectHooks for EconomyComposite {
                     d.owner_type = crate::models::doodad::doodad_owner_type::HOUSING;
                     d.parent_obj_id = h.house_obj_id;
                 }
+                crate::systems::housing::manager::mark_client_parent(server, &doodad);
                 // BackpackDoodadSpawn supplies world coordinates. Save stores the local
                 // transform, so convert before parenting just as player crop placement does.
                 crate::systems::npcs::doodad::funcs::world::attach_keeping_world(

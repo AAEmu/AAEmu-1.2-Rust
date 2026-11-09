@@ -1504,6 +1504,7 @@ pub fn attach_loaded_doodad(
         return false;
     };
     doodad.data().parent_obj_id = house.obj_id;
+    mark_client_parent(server, doodad);
     world.attach_child(&WorldObject::from(&house), &WorldObject::from(doodad));
     if server.config.world.use_persistent_house_doodads {
         let (template_id, attach_point) = {
@@ -1524,6 +1525,32 @@ pub fn attach_loaded_doodad(
         }
     }
     true
+}
+
+/// Whether `doodad` (owned by a house) is furniture: exactly what `decorate_house` counts and
+/// the 1.2 client's house decoration limit applies to.
+pub fn is_house_furniture(server: &GameServer, doodad: &DoodadRef) -> bool {
+    let (owner_type, template_id, item_template_id) = {
+        let d = doodad.data();
+        (d.owner_type, d.template_id, d.item_template_id)
+    };
+    owner_type == crate::models::doodad::doodad_owner_type::HOUSING
+        && server
+            .game_data
+            .systems
+            .housing
+            .decoration_for_item(template_id, item_template_id)
+            .is_some()
+}
+
+/// Sets `Doodad::client_unparented` for a doodad just parented to a house: crops, dropped
+/// backpacks and other non-furniture must not count toward the client's furniture limit
+/// (`HandleDoodadCreated` 0x390382D0 adds every house child to the decoration map that
+/// `CanDecorateHouse` 0x39327C50 limits). Bound doodads (attach point set) keep their parent.
+pub fn mark_client_parent(server: &GameServer, doodad: &DoodadRef) {
+    let unparent = doodad.data().attach_point == crate::models::unit::attach_point::NONE
+        && !is_house_furniture(server, doodad);
+    doodad.data().client_unparented = unparent;
 }
 
 /// `ReconcileBoundDoodads()`: spawns + saves missing bound doodads of finished houses and

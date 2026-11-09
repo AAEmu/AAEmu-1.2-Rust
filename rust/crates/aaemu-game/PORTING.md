@@ -4987,7 +4987,7 @@ and in NPC wandering / buff remaining times.
     `absolute_deco_limit`, the template struct `+4` / SQL column 1 compared by the client's
     `CanDecorateHouse` `0x39327C50`; `deco_limit` is only the base value its counter shows and
     is no longer a refusal; only doodads with `owner_type == HOUSING` count, so crops sharing
-    the house id do not) and the `housing_deco_limit_elems` act-ability group and the `housing_deco_limit_elems` act-ability group
+    the house id do not) **Deviation:** the 1.2 client adds every doodad created with the house as parent to the house's child map (`HandleDoodadCreated` `0x390382D0` -> `0x3935FC10`) and `CanDecorateHouse` `0x39327C50` compares that map's size, so crops and dropped backpacks counted as furniture client-side; `Doodad::write` sends such non-furniture house children (`client_unparented`, set by `housing::manager::mark_client_parent`) with parent 0 and world coordinates, while the server keeps them attached to the house and the `housing_deco_limit_elems` act-ability group and the `housing_deco_limit_elems` act-ability group
     cap -> `acatbility_deco_arrang_fail` 629 (the codes of the client's own
     `CanDecorateHouse`); a house still under construction / another instance ->
     `house_not_decoratable_state` 123; malformed pose / wrong parent / denied interaction ->
