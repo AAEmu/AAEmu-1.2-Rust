@@ -147,16 +147,18 @@ pub async fn claim_daily_reward(
 }
 
 /// Adds `amount` to `accounts.loyalty` and stores the hourly Loyalty counters in one
-/// transaction; returns the new total (`None` = nothing was written).
+/// transaction, but only while the row still holds `previous`; returns the new total
+/// (`None` = the snapshot was stale or nothing was written).
 pub async fn credit_hourly_loyalty(
     server: &GameServer,
     account_id: u32,
     amount: i32,
-    state: db::LoyaltyHourState,
+    previous: db::LoyaltyHourState,
+    next: db::LoyaltyHourState,
 ) -> Option<i32> {
     let lock = server.accounts.lock_of(account_id);
     let _g = lock.lock().await;
-    match db::credit_hourly_loyalty(&server.db, account_id, amount, state).await {
+    match db::credit_hourly_loyalty(&server.db, account_id, amount, previous, next).await {
         Ok(total) => total,
         Err(e) => {
             tracing::error!("credit_hourly_loyalty({account_id}): {e}");
@@ -165,16 +167,22 @@ pub async fn credit_hourly_loyalty(
     }
 }
 
-/// Stores the hourly Loyalty counters without granting a token.
+/// Stores the hourly Loyalty counters without granting a token, only while the row still holds
+/// `previous`. Returns whether the write applied.
 pub async fn store_loyalty_hour_state(
     server: &GameServer,
     account_id: u32,
-    state: db::LoyaltyHourState,
-) {
+    previous: db::LoyaltyHourState,
+    next: db::LoyaltyHourState,
+) -> bool {
     let lock = server.accounts.lock_of(account_id);
     let _g = lock.lock().await;
-    if let Err(e) = db::store_loyalty_hour_state(&server.db, account_id, state).await {
-        tracing::error!("store_loyalty_hour_state({account_id}): {e}");
+    match db::store_loyalty_hour_state(&server.db, account_id, previous, next).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::error!("store_loyalty_hour_state({account_id}): {e}");
+            false
+        }
     }
 }
 

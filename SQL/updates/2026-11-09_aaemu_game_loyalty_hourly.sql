@@ -14,3 +14,8 @@ ALTER TABLE `accounts`
   ADD COLUMN `loyalty_hour_seconds` INT NOT NULL DEFAULT 0 COMMENT 'In-world seconds counted today toward the next hourly Loyalty token' AFTER `loyalty_hour_day`,
   ADD COLUMN `loyalty_hour_taken` INT NOT NULL DEFAULT 0 COMMENT 'Hourly Loyalty tokens granted today' AFTER `loyalty_hour_seconds`,
   ADD COLUMN `loyalty_hour_updated` DATETIME NULL DEFAULT NULL COMMENT 'Last online sample (UTC) of the hourly Loyalty counters' AFTER `loyalty_hour_taken`;
+
+-- Deploy day: accounts paid by the old rule today must not be paid again. The old path had no
+-- day marker, so seed the claim with the UTC day of the last login; rows already claimed (or
+-- re-running this file) are left alone (`IS NULL` makes it idempotent).
+UPDATE `accounts` SET `last_daily_reward` = DATE(`last_login`) WHERE `last_daily_reward` IS NULL;

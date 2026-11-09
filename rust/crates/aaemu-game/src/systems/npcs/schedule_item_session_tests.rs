@@ -408,7 +408,7 @@ async fn eligibility_reads_the_account_payment_and_grade() {
 // MILEAGE_ITEM_TYPE rows: the reward is account Loyalty, never an item
 // ---------------------------------------------------------------------------------------------
 
-/// A takeable row whose reward is the 1.2 `MILEAGE_ITEM_TYPE` (28586, "Lulu's Ticket").
+/// A takeable row whose reward is the 1.2 `MILEAGE_ITEM_TYPE` (28586, Loyalty Token).
 fn mileage_row(id: i32) -> ScheduleItemDef {
     ScheduleItemDef {
         id,

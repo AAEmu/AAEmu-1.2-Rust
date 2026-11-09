@@ -1,4 +1,4 @@
--- Marketplace catalogue draft for AAEmu 1.2 (see marketplace-catalogue-1.2.md). Load after SQL/aaemu_game.sql.
+-- Marketplace catalogue draft for AAEmu 1.2 (see the research notes marketplace-catalogue-1.2.md, not in this repo). Load after SQL/aaemu_game.sql.
 -- REPLACE INTO with explicit ids (shop 2100001+, sku 1100001+, menu 2001+); re-runnable.
 -- Most prices are INFERRED (107 of 129 SKUs); only the rows with a period source in the
 -- research notes have evidence. Check every price and currency before importing.

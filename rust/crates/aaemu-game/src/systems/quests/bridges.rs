@@ -638,13 +638,16 @@ impl QuestHooks for GameQuestHooks {
         aggro_rating_percent(npc, obj_id)
     }
 
-    fn daily_account_login(&self, server: &GameServer, account_id: u32) {
+    fn daily_account_login(&self, server: &GameServer, account_id: u32, day: chrono::NaiveDate) {
         // TimedRewardsManager.DoDailyAccountLogin (systems::services; DB work as a task)
         let (Some(srv), Ok(rt)) = (server.self_arc(), tokio::runtime::Handle::try_current()) else {
             return;
         };
         rt.spawn(async move {
-            crate::systems::services::timed_rewards::do_daily_account_login(&srv, account_id).await;
+            crate::systems::services::timed_rewards::do_daily_account_login_on(
+                &srv, account_id, day,
+            )
+            .await;
         });
     }
 }

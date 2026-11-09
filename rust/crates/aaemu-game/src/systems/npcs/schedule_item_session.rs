@@ -391,6 +391,8 @@ async fn deliver_loyalty(
     accounts::notify_loyalty_grant(server, account_id, plan.item_count, total);
     let data = &server.game_data.systems.npcs.schedule_items;
     let commit = {
+        // Every progress-map mutation goes through the economy gate (see the module docs).
+        let _gate = server.systems.economy.ops_lock();
         let mut map = server.systems.npcs.schedule_items.lock();
         map.get_mut(&account_id)
             .map(|account| account.commit_claim(data, plan, now))

@@ -449,15 +449,22 @@ pub async fn add_loyalty_returning(
 }
 
 /// Adds `amount` (when positive) to `accounts.loyalty` and stores the account's new hourly
-/// Loyalty counters in the same transaction. Returns the new total, or `None` when the
-/// transaction failed (nothing was written, so the caller retries on the next tick).
+/// Loyalty counters in the same transaction. The counter write only applies while the row still
+/// holds the snapshot it was computed from ([`store_loyalty_hour_state_tx`]), so two ticking
+/// tasks that read the same state credit once. Returns the new total, or `None` when the
+/// snapshot was stale or the transaction failed (nothing was credited).
 pub async fn credit_hourly_loyalty(
     pool: &MySqlPool,
     account_id: u32,
     amount: i32,
-    state: LoyaltyHourState,
+    previous: LoyaltyHourState,
+    next: LoyaltyHourState,
 ) -> Result<Option<i32>> {
     let mut tx = pool.begin().await?;
+    if !store_loyalty_hour_state_tx(&mut tx, account_id, previous, next).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
     if amount > 0 {
         sqlx::query(
             "INSERT INTO accounts (account_id, loyalty) VALUES (?, ?) \
@@ -469,7 +476,6 @@ pub async fn credit_hourly_loyalty(
         .execute(&mut *tx)
         .await?;
     }
-    store_loyalty_hour_state_tx(&mut tx, account_id, state).await?;
     let total = if amount > 0 {
         sqlx::query_scalar::<_, i64>(
             "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = ?",
@@ -485,35 +491,47 @@ pub async fn credit_hourly_loyalty(
     Ok(total)
 }
 
-/// Stores the account's hourly Loyalty counters without granting a token.
+/// Stores the account's hourly Loyalty counters without granting a token. Returns whether the
+/// row still held the snapshot that produced `next`.
 pub async fn store_loyalty_hour_state(
     pool: &MySqlPool,
     account_id: u32,
-    state: LoyaltyHourState,
-) -> Result<()> {
+    previous: LoyaltyHourState,
+    next: LoyaltyHourState,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    store_loyalty_hour_state_tx(&mut tx, account_id, state).await?;
+    let changed = store_loyalty_hour_state_tx(&mut tx, account_id, previous, next).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(changed)
 }
 
+/// Conditional counter write: applies `next` only while the row still holds `previous`
+/// (`loyalty_hour_updated` is NULL-safe compared). A concurrent tick that already wrote its own
+/// sample makes this a no-op, so the same interval can never be paid twice.
 async fn store_loyalty_hour_state_tx(
     tx: &mut Transaction<'_, MySql>,
     account_id: u32,
-    state: LoyaltyHourState,
-) -> Result<()> {
-    sqlx::query(
+    previous: LoyaltyHourState,
+    next: LoyaltyHourState,
+) -> Result<bool> {
+    let res = sqlx::query(
         "UPDATE accounts SET loyalty_hour_day = ?, loyalty_hour_seconds = ?, \
-         loyalty_hour_taken = ?, loyalty_hour_updated = ? WHERE account_id = ?",
+         loyalty_hour_taken = ?, loyalty_hour_updated = ? \
+         WHERE account_id = ? AND loyalty_hour_day = ? AND loyalty_hour_seconds = ? \
+         AND loyalty_hour_taken = ? AND loyalty_hour_updated <=> ?",
     )
-    .bind(state.day)
-    .bind(i32::try_from(state.seconds.clamp(0, i64::from(i32::MAX))).unwrap_or(i32::MAX))
-    .bind(state.taken.max(0))
-    .bind(state.updated)
+    .bind(next.day)
+    .bind(i32::try_from(next.seconds.clamp(0, i64::from(i32::MAX))).unwrap_or(i32::MAX))
+    .bind(next.taken.max(0))
+    .bind(next.updated)
     .bind(account_id)
+    .bind(previous.day)
+    .bind(previous.seconds as i32)
+    .bind(previous.taken)
+    .bind(previous.updated)
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 /// `accounts.extra_character_slots` (0 when the account row does not exist).

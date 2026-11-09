@@ -1680,7 +1680,8 @@ async fn run_lines(
                         let (sent, received, mia, commercial_received) =
                             decode_count_unread(&mut s)?;
                         println!(
-                            "    SCGotMail type {} unread [{sent}, {received}, {mia},                              {commercial_received}]",
+                            "    SCGotMail type {} unread [{sent}, {received}, {mia}, \
+                             {commercial_received}]",
                             h.mail_type
                         );
                         if h.mail_type == 9 {

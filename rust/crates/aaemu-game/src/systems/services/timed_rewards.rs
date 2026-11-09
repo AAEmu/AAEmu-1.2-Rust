@@ -211,21 +211,29 @@ pub fn hourly_loyalty_update(
 
 /// One hourly-Loyalty sample of an in-world account: stores the counters and, when a token is
 /// due, credits it and pushes `SCBmPoint` (0x46) plus the `msg_gain_bmmileage` line to every
-/// online character of the account. A failed grant writes nothing, so the next tick retries.
-async fn tick_hourly_loyalty(server: &GameServer, account_id: u32, details: &AccountDetails) {
+/// online character of the account. The counter write is conditional on the sampled snapshot, so
+/// overlapping ticks credit once; a failed or stale write credits nothing and the next tick
+/// retries from the state it then reads.
+async fn tick_hourly_loyalty(
+    server: &GameServer,
+    account_id: u32,
+    details: &AccountDetails,
+    at: NaiveDateTime,
+) {
     let current = details.loyalty_hour_state();
-    let update = hourly_loyalty_update(current, now(), &server.config.loyalty);
+    let update = hourly_loyalty_update(current, at, &server.config.loyalty);
     if update.state == current {
         return;
     }
     if update.grant > 0 {
         if let Some(total) =
-            accounts::credit_hourly_loyalty(server, account_id, update.grant, update.state).await
+            accounts::credit_hourly_loyalty(server, account_id, update.grant, current, update.state)
+                .await
         {
             accounts::notify_loyalty_grant(server, account_id, update.grant, total);
         }
     } else {
-        accounts::store_loyalty_hour_state(server, account_id, update.state).await;
+        accounts::store_loyalty_hour_state(server, account_id, current, update.state).await;
     }
 }
 
@@ -234,6 +242,11 @@ async fn tick_hourly_loyalty(server: &GameServer, account_id: u32, details: &Acc
 /// Deviation: connections without an account (not entered yet) are skipped; the C#
 /// `GetAccountDetails(0)` would create an `accounts` row with id 0 for them.
 pub async fn do_tick(server: &GameServer) {
+    do_tick_at(server, now()).await;
+}
+
+/// [`do_tick`] with an explicit sample time (tests pin it away from the UTC day boundary).
+pub async fn do_tick_at(server: &GameServer, at: NaiveDateTime) {
     let config = &server.config;
     // The hourly Loyalty counters belong to the account, not the connection: an account with a
     // second connection (refused by `AccountManager.Add`, but possible in fixtures) is sampled
@@ -252,7 +265,7 @@ pub async fn do_tick(server: &GameServer) {
         let active_char = server.world.character_by_connection(handle.id);
         let details = accounts::get_account_details(server, account_id).await;
         let due = |last: Option<NaiveDateTime>, minutes: i32| {
-            last.unwrap_or_default_min() + chrono::Duration::minutes(i64::from(minutes)) <= now()
+            last.unwrap_or_default_min() + chrono::Duration::minutes(i64::from(minutes)) <= at
         };
 
         // Distribute Labor if needed (only for online labor)
@@ -268,7 +281,7 @@ pub async fn do_tick(server: &GameServer) {
         {
             accounts::add_credits(server, account_id, config.credits.get_tick_amount(premium))
                 .await;
-            accounts::update_tick_times(server, account_id, now(), TickKind::Credits).await;
+            accounts::update_tick_times(server, account_id, at, TickKind::Credits).await;
             if let Some(p) = &active_char {
                 let credits = accounts::get_account_details(server, account_id)
                     .await
@@ -279,7 +292,7 @@ pub async fn do_tick(server: &GameServer) {
 
         // Hourly Loyalty: in-world play time only, per account (see `hourly_loyalty_update`).
         if active_char.is_some() && loyalty_sampled.insert(account_id) {
-            tick_hourly_loyalty(server, account_id, &details).await;
+            tick_hourly_loyalty(server, account_id, &details, at).await;
         }
     }
 }
@@ -291,8 +304,19 @@ pub async fn do_tick(server: &GameServer) {
 /// account online across 00:00 UTC is paid by the reset, and its next login sees the day as
 /// already claimed.
 pub async fn do_daily_account_login(server: &GameServer, account_id: u32) {
+    do_daily_account_login_on(server, account_id, now().date()).await;
+}
+
+/// [`do_daily_account_login`] for an explicit UTC day. The midnight reset passes the day it was
+/// scheduled for, so a wake a few milliseconds early (wall clock still on the previous day) still
+/// pays the new day; the login path passes the current wall-clock day.
+pub async fn do_daily_account_login_on(
+    server: &GameServer,
+    account_id: u32,
+    day: chrono::NaiveDate,
+) {
     let config = &server.config;
-    let today = now().date().and_hms_opt(0, 0, 0).expect("midnight");
+    let today = day.and_hms_opt(0, 0, 0).expect("midnight");
     let Some((_credits, loyalty)) = accounts::claim_daily_reward(
         server,
         account_id,
@@ -754,7 +778,8 @@ mod tests {
     }
 
     /// The minute tick credits the hourly token for a **non-premium** account (no Patron rule)
-    /// and stops at `HourlyDailyMax`.
+    /// and stops at `HourlyDailyMax`. The sample time is pinned away from the UTC day boundary, so
+    /// the test cannot flip days between two calls.
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn hourly_loyalty_tick_grants_without_premium_and_stops_at_the_cap() {
@@ -772,18 +797,20 @@ mod tests {
         });
         let (mut client, p) = loyalty_player(&server);
         non_premium(&server);
+        let pinned = day_at(0, 12, 0);
         sqlx::query(
             "INSERT INTO accounts (account_id, loyalty_hour_day, loyalty_hour_seconds, \
              loyalty_hour_taken, loyalty_hour_updated) \
-             VALUES (1001, ?, 0, 0, UTC_TIMESTAMP() - INTERVAL 60 SECOND)",
+             VALUES (1001, ?, 0, 0, ?)",
         )
-        .bind(day_key(now()))
+        .bind(day_key(pinned))
+        .bind(pinned - chrono::Duration::seconds(60))
         .execute(&pool)
         .await
         .unwrap();
 
         for expected in 1..=3 {
-            do_tick(&server).await;
+            do_tick_at(&server, pinned + chrono::Duration::minutes(expected - 1)).await;
             let total: i64 = sqlx::query_scalar(
                 "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
             )
@@ -792,17 +819,10 @@ mod tests {
             .unwrap();
             assert_eq!(total, expected, "grant {expected} of the hourly rule");
             assert_eq!(p.data().bm_point, expected);
-            sqlx::query(
-                "UPDATE accounts SET loyalty_hour_updated = UTC_TIMESTAMP() - INTERVAL 60 SECOND \
-                 WHERE account_id = 1001",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
         }
 
         // Fourth full interval: the daily maximum already paid three.
-        do_tick(&server).await;
+        do_tick_at(&server, pinned + chrono::Duration::minutes(3)).await;
         let total: i64 = sqlx::query_scalar(
             "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
         )
@@ -835,7 +855,8 @@ mod tests {
     }
 
     /// An account online across 00:00 UTC is paid by the midnight reset; its next login that day
-    /// must not pay again (the `last_daily_reward` claim).
+    /// must not pay again (the `last_daily_reward` claim). The day is pinned, so the test cannot
+    /// flip days between its two calls.
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn daily_login_reward_is_granted_once_across_a_midnight() {
@@ -849,16 +870,18 @@ mod tests {
             c.loyalty.daily_login = 5;
         });
         let (mut client, p) = loyalty_player(&server);
+        let day = day_at(0, 12, 0).date();
         sqlx::query(
             "INSERT INTO accounts (account_id, loyalty, last_daily_reward) \
-             VALUES (1001, 0, UTC_TIMESTAMP() - INTERVAL 1 DAY)",
+             VALUES (1001, 0, ?)",
         )
+        .bind(day.and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::days(1))
         .execute(&pool)
         .await
         .unwrap();
 
         // The midnight quest reset of the account that stayed online.
-        do_daily_account_login(&server, 1001).await;
+        do_daily_account_login_on(&server, 1001, day).await;
         let total: i64 = sqlx::query_scalar(
             "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
         )
@@ -869,7 +892,7 @@ mod tests {
         assert_eq!(p.data().bm_point, 5, "the online character is pushed");
 
         // Its next login on the same UTC day (the reported double grant).
-        do_daily_account_login(&server, 1001).await;
+        do_daily_account_login_on(&server, 1001, day).await;
         let total: i64 = sqlx::query_scalar(
             "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
         )
@@ -887,5 +910,109 @@ mod tests {
             1,
             "only the midnight grant reaches the online character"
         );
+    }
+
+    /// The midnight reset passes the day it was scheduled for: a wake before the wall clock
+    /// reaches midnight still pays the new day, even though `today` is already claimed.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn daily_login_reward_uses_the_reset_target_day() {
+        let Some(pool) = private_accounts_pool().await else {
+            return;
+        };
+        let mut server = test_server();
+        server.db = pool.clone();
+        server.config.update(|c| {
+            c.credits.daily_login = 0;
+            c.loyalty.daily_login = 5;
+        });
+        let _ = loyalty_player(&server);
+        // Wall-clock "today", captured once; the reset's target is the next day. The function
+        // uses the passed day, so a midnight crossing cannot make this flaky.
+        let today = chrono::Utc::now().date_naive();
+        let tomorrow = today + chrono::Duration::days(1);
+        sqlx::query(
+            "INSERT INTO accounts (account_id, loyalty, last_daily_reward) VALUES (1001, 0, ?)",
+        )
+        .bind(today.and_hms_opt(0, 0, 0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        do_daily_account_login_on(&server, 1001, tomorrow).await;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            total, 5,
+            "the target day is claimed, not the wall-clock day"
+        );
+        let stored: Option<chrono::NaiveDateTime> =
+            sqlx::query_scalar("SELECT last_daily_reward FROM accounts WHERE account_id = 1001")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, tomorrow.and_hms_opt(0, 0, 0));
+    }
+
+    /// Two ticks that computed a grant from the same snapshot must pay once: the counter write
+    /// is conditional on that snapshot.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn hourly_loyalty_overlapping_ticks_pay_once() {
+        let Some(pool) = private_accounts_pool().await else {
+            return;
+        };
+        let pinned = day_at(0, 12, 0);
+        let previous = LoyaltyHourState {
+            day: day_key(pinned),
+            seconds: 0,
+            taken: 0,
+            updated: Some(pinned),
+        };
+        let next = LoyaltyHourState {
+            day: day_key(pinned),
+            seconds: 60,
+            taken: 1,
+            updated: Some(pinned + chrono::Duration::minutes(1)),
+        };
+        sqlx::query(
+            "INSERT INTO accounts (account_id, loyalty, loyalty_hour_day, \
+             loyalty_hour_seconds, loyalty_hour_taken, loyalty_hour_updated) \
+             VALUES (1001, 0, ?, 0, 0, ?)",
+        )
+        .bind(previous.day)
+        .bind(previous.updated)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (a, b) = tokio::join!(
+            crate::db::credit_hourly_loyalty(&pool, 1001, 1, previous, next),
+            crate::db::credit_hourly_loyalty(&pool, 1001, 1, previous, next)
+        );
+        let paid = [a.unwrap(), b.unwrap()];
+        assert_eq!(
+            paid.iter().flatten().count(),
+            1,
+            "one of the two same-snapshot ticks credits"
+        );
+        let total: i64 = sqlx::query_scalar(
+            "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(total, 1, "the same hour is paid once");
+        let state: (i64, i64) = sqlx::query_as(
+            "SELECT CAST(loyalty_hour_seconds AS SIGNED), CAST(loyalty_hour_taken AS SIGNED) \
+             FROM accounts WHERE account_id = 1001",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, (60, 1));
     }
 }
