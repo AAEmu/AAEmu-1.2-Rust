@@ -874,6 +874,51 @@ pub fn kill_unit(server: &GameServer, o: &WorldObject, aggro_for: Option<u32>) -
     }
 }
 
+/// The body of `DoOnMonsterHuntEvents(owner, npc)`: the monster hunt, monster group hunt and
+/// zone kill quest events. `killer`/`victim` feed `ZoneKill`; a scripted removal has no real
+/// killer, so its `Kill` event is skipped (C# #1792 calls only `DoOnMonsterHuntEvents`).
+fn dispatch_monster_hunt_events(
+    ctx: &mut Ctx<'_>,
+    npc_id: u32,
+    zone_group_id: u32,
+    killer: KillUnit,
+    victim: KillUnit,
+    with_kill: bool,
+) {
+    if with_kill {
+        // Credit every eligible contributor while the NPC's aggro table still exists.
+        dispatch_logged(
+            ctx,
+            &QuestEvent::Kill {
+                target: None,
+                killer: Some(killer.clone()),
+                victim: Some(victim.clone()),
+            },
+        );
+    }
+    // Individual monster kill
+    dispatch_logged(ctx, &QuestEvent::MonsterHunt { npc_id, count: 1 });
+    // Trigger NPC Group kills
+    for group in ctx.data.group_npcs.groups_of(npc_id) {
+        dispatch_logged(
+            ctx,
+            &QuestEvent::MonsterGroupHunt {
+                group_id: group,
+                count: 1,
+            },
+        );
+    }
+    // Zone kills (also handles the zone monster hunts)
+    dispatch_logged(
+        ctx,
+        &QuestEvent::ZoneKill {
+            zone_group_id,
+            killer,
+            victim,
+        },
+    );
+}
+
 /// `DoOnMonsterHuntEvents(owner, npc)` (`Npc.DoDie` for every eligible character).
 pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
     let (npc_id, zone_key) = {
@@ -888,36 +933,27 @@ pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
     let killer = kill_unit(server, &WorldObject::from(player.clone()), None);
     let victim = kill_unit(server, &WorldObject::from(npc.clone()), Some(player.obj_id));
     run_or_queue(server, player, move |ctx| {
-        // Credit every eligible contributor while the NPC's aggro table still exists.
-        dispatch_logged(
-            ctx,
-            &QuestEvent::Kill {
-                target: None,
-                killer: Some(killer.clone()),
-                victim: Some(victim.clone()),
-            },
-        );
-        // Individual monster kill
-        dispatch_logged(ctx, &QuestEvent::MonsterHunt { npc_id, count: 1 });
-        // Trigger NPC Group kills
-        for group in ctx.data.group_npcs.groups_of(npc_id) {
-            dispatch_logged(
-                ctx,
-                &QuestEvent::MonsterGroupHunt {
-                    group_id: group,
-                    count: 1,
-                },
-            );
-        }
-        // Zone kills (also handles the zone monster hunts)
-        dispatch_logged(
-            ctx,
-            &QuestEvent::ZoneKill {
-                zone_group_id,
-                killer,
-                victim,
-            },
-        );
+        dispatch_monster_hunt_events(ctx, npc_id, zone_group_id, killer, victim, true);
+    });
+}
+
+/// `DoOnMonsterHuntEvents(owner, npc)` for a scripted removal (`KillNpcWithoutCorpseEffect`,
+/// C# 10.x PR #1792). The C# calls only this method there, so no `OnKill` quest event is
+/// raised; the monster hunt / group hunt / zone kill objectives still count.
+pub fn on_npc_scripted_kill(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+    let (npc_id, zone_key) = {
+        let d = npc.data();
+        (d.unit.template_id, d.unit.transform.zone_id)
+    };
+    let zone_group_id = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map_or(0, |z| z.group_id);
+    let killer = kill_unit(server, &WorldObject::from(player.clone()), None);
+    let victim = kill_unit(server, &WorldObject::from(npc.clone()), Some(player.obj_id));
+    run_or_queue(server, player, move |ctx| {
+        dispatch_monster_hunt_events(ctx, npc_id, zone_group_id, killer, victim, false);
     });
 }
 

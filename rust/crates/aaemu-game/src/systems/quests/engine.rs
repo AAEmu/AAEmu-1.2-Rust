@@ -7,8 +7,8 @@ use std::sync::Arc;
 use super::data::QuestData;
 use super::hooks::QuestHooks;
 use super::model::{
-    condition, detail, error_msg, item_task, kind, npc_ai, status, ObjectiveStatus,
-    FACTION_MONSTROSITY,
+    condition, detail, error_msg, item_task, kind, npc_ai, status, ItemCreationDefinition,
+    ObjectiveStatus, FACTION_MONSTROSITY,
 };
 use super::packets::{
     quest_error, SCQuestContextCompletedPacket, SCQuestContextFailedPacket,
@@ -1025,9 +1025,26 @@ impl<'a> Ctx<'a> {
             return true;
         };
         let template_id = q.template_id;
-        // Distribute Items if needed
+        // Distribute Items if needed. Filter the pool once, before the free-slot check and the
+        // mail fallback: a reward item without a template (282 rows of the 1.2
+        // `quest_act_supply_items`) yields nothing and must not push the rest into the mail.
         if !q.reward_items.is_empty() && q.allow_item_rewards {
-            let pool = q.reward_items.clone();
+            let server = self.server;
+            let pool: Vec<ItemCreationDefinition> = q
+                .reward_items
+                .iter()
+                .filter(|item| {
+                    let known = server.game_data.items.template(item.template_id).is_some();
+                    if !known {
+                        tracing::debug!(
+                            "Quest {template_id}: skipping unknown reward item template {}",
+                            item.template_id
+                        );
+                    }
+                    known
+                })
+                .cloned()
+                .collect();
             let coins = q.reward_coins;
             let free = self
                 .c

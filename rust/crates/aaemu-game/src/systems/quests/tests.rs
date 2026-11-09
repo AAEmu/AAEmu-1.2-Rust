@@ -321,6 +321,30 @@ pub(super) fn server_with(build: impl FnOnce(&mut QuestData)) -> (GameServer, Ar
     build(&mut d);
     d.finish();
     let mut data = GameData::empty();
+    // The hand-built quest data references item ids that the fixtures never loaded. Seed them
+    // like the real item catalog so the reward filter (unknown templates are skipped) sees the
+    // same shape as production.
+    for act in &d.acts {
+        let item_id = match &act.kind {
+            ActKind::ConAcceptItem { item_id, .. }
+            | ActKind::ConAcceptItemEquip { item_id }
+            | ActKind::ConAcceptItemGain { item_id }
+            | ActKind::EtcItemObtain { item_id, .. }
+            | ActKind::ObjItemGather { item_id, .. }
+            | ActKind::ObjItemUse { item_id, .. }
+            | ActKind::ObjMateLevel { item_id, .. }
+            | ActKind::SupplyItem { item_id, .. }
+            | ActKind::SupplyRemoveItem { item_id }
+            | ActKind::SupplySelectiveItem { item_id, .. } => *item_id,
+            _ => 0,
+        };
+        if item_id > 0 {
+            data.items
+                .templates
+                .entry(item_id)
+                .or_insert_with(|| ItemTemplate::plain(item_id, 1000));
+        }
+    }
     data.systems.quests = d;
     let server = test_server_with(data);
     let rec = Arc::new(Rec::default());
@@ -6217,6 +6241,30 @@ fn castable_item_data(build: impl FnOnce(&mut QuestData)) -> GameData {
     build(&mut d);
     d.finish();
     let mut data = GameData::empty();
+    // The hand-built quest data references item ids that the fixtures never loaded. Seed them
+    // like the real item catalog so the reward filter (unknown templates are skipped) sees the
+    // same shape as production.
+    for act in &d.acts {
+        let item_id = match &act.kind {
+            ActKind::ConAcceptItem { item_id, .. }
+            | ActKind::ConAcceptItemEquip { item_id }
+            | ActKind::ConAcceptItemGain { item_id }
+            | ActKind::EtcItemObtain { item_id, .. }
+            | ActKind::ObjItemGather { item_id, .. }
+            | ActKind::ObjItemUse { item_id, .. }
+            | ActKind::ObjMateLevel { item_id, .. }
+            | ActKind::SupplyItem { item_id, .. }
+            | ActKind::SupplyRemoveItem { item_id }
+            | ActKind::SupplySelectiveItem { item_id, .. } => *item_id,
+            _ => 0,
+        };
+        if item_id > 0 {
+            data.items
+                .templates
+                .entry(item_id)
+                .or_insert_with(|| ItemTemplate::plain(item_id, 1000));
+        }
+    }
     data.systems.quests = d;
     data.systems.skills.add_effect(
         EffectKind::HealEffect,

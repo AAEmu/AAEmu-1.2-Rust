@@ -775,6 +775,14 @@ pub trait QuestsBridge: Send + Sync {
     /// `QuestManager` kill objective counting (`Npc.DoDie` → `OnKill`).
     fn on_npc_killed(&self, _server: &GameServer, _player: &PlayerRef, _npc: &NpcRef) {}
 
+    /// `QuestManager.DoOnMonsterHuntEvents` for a scripted removal (`KillNpcWithoutCorpseEffect`,
+    /// C# 10.x PR #1792): the monster hunt / monster group hunt / zone kill quest events only,
+    /// with no `OnKill` (there is no killer). Defaults to the full kill event for bridges that
+    /// do not distinguish the two.
+    fn on_npc_scripted_kill(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+        self.on_npc_killed(server, player, npc);
+    }
+
     /// `Npc.DoDie` experience reward hook is the skills / quests concern: the killer's
     /// `AddExp(KillExp)` — implemented by quests (`Character.AddExp` lives with progression).
     fn add_exp(&self, _server: &GameServer, _player: &PlayerRef, _exp: i32, _target_obj_id: u32) {}

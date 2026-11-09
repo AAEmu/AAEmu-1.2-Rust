@@ -767,6 +767,11 @@ pub struct UnitBase {
     /// `skills::combat::try_claim_death`; cleared when a living unit takes damage or HP is
     /// restored, so the next death of the same object is handled again.
     pub death_processed: bool,
+    /// Rust-only: a scripted removal (`KillNpcWithoutCorpseEffect`) claimed this life. Unlike
+    /// [`Self::death_processed`], damage does not clear it: the unit is being removed and no
+    /// later hit may run the death path. A new life (a respawned NPC is a new object) starts
+    /// with `false`.
+    pub scripted_removed: bool,
     // ---- phase 3 / npcs: add this subsystem's per-unit fields below ----
 
     // ---- phase 3 / economy: add this subsystem's per-unit fields below ----
@@ -835,6 +840,7 @@ impl Default for UnitBase {
             // ---- phase 3 / skills ----
             skill_state: Default::default(),
             death_processed: false,
+            scripted_removed: false,
             // ---- phase 3 / npcs ----
 
             // ---- phase 3 / economy ----

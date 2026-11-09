@@ -630,6 +630,33 @@ async fn fish_conversion_lottery_allocates_only_the_selected_reward() {
 }
 
 #[tokio::test]
+async fn fish_conversion_skips_an_unknown_item_template() {
+    use crate::systems::economy::loot::{loot_convert_fish_from_pack, ScriptedRng};
+    const MISSING: u32 = 999_993;
+    let mut game_data = data();
+    let pack = game_data.systems.economy.loot.packs.get_mut(&7866).unwrap();
+    for l in &mut pack.loots {
+        l.drop_rate = 10_000_000;
+    }
+    pack.loots.insert(
+        0,
+        Loot {
+            item_id: MISSING,
+            drop_rate: 10_000_000,
+            min_amount: 1,
+            max_amount: 1,
+            ..Default::default()
+        },
+    );
+    let fixture = Fixture::new(game_data);
+    // Roll 0 selects the first row; the missing template is skipped and the valid row wins.
+    let mut rng = ScriptedRng::new(&[], &[0.0]);
+    let selected = loot_convert_fish_from_pack(&fixture.server, FISH, 7866, &mut rng).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].template_id, TROPHY);
+}
+
+#[tokio::test]
 async fn fish_conversion_rejections_preserve_source_and_emit_no_success() {
     for case in 0..6 {
         let mut game_data = data();
