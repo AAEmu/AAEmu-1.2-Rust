@@ -29,6 +29,8 @@ fn server() -> GameServer {
     };
     config.connections.mysql_provider.host = "127.0.0.1".into();
     config.connections.mysql_provider.port = 1; // nothing listens here
+                                                // Walks across the map in one packet: the movement guard has its own tests.
+    config.world.move_guard_enabled = false;
     config.world.motd = "Welcome!".into();
     config.world.logout_message = "Bye".into();
     let db = MySqlPoolOptions::new()

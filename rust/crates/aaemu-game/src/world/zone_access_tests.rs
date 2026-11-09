@@ -128,6 +128,8 @@ fn data(respawn: bool) -> GameData {
 
 fn server(respawn: bool) -> Arc<GameServer> {
     let mut server = test_server_with(data(respawn));
+    // Walks across the map in one packet: the movement guard has its own tests.
+    server.config.update(|c| c.world.move_guard_enabled = false);
     let mut template = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
     for x in 16..32 {
         for y in 0..32 {

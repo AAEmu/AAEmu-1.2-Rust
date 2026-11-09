@@ -313,6 +313,8 @@ async fn recall_within_the_open_sea_keeps_the_turbulence_buff() {
 #[tokio::test]
 async fn walking_out_of_the_open_sea_removes_the_turbulence_buff() {
     let server = server();
+    // Walks across the map in one packet: the movement guard has its own tests.
+    server.config.update(|c| c.world.move_guard_enabled = false);
     let mut pc = Pc::new(&server, 1, "Sailor", SEA_START);
     assert!(pc.has_turbulence());
     let index = pc.buff_index();

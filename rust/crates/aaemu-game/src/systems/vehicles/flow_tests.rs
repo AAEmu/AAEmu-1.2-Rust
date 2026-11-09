@@ -61,6 +61,9 @@ mod deck_standing_tests;
 #[path = "mate_dash_skill_tests.rs"]
 mod mate_dash_skill_tests;
 
+#[path = "move_guard_flow_tests.rs"]
+mod move_guard_flow_tests;
+
 #[path = "pr38_regression_tests.rs"]
 mod pr38_regression_tests;
 
@@ -3591,6 +3594,8 @@ async fn client_motion_and_despawn_cannot_control_other_players_or_slaves() {
     use crate::world::Entity;
 
     let server = server_with(GameData::empty());
+    // Walks across the map in one packet: the movement guard has its own tests.
+    server.config.update(|c| c.world.move_guard_enabled = false);
     let mut a = TestClient::new(&server, 1, 1);
     let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
     a.conn.active_char = Some(pa.clone());

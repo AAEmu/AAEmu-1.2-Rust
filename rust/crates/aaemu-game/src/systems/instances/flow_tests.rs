@@ -3943,6 +3943,8 @@ async fn return_to_a_distant_instance_gate_refiles_visibility_without_movement()
     }
 
     let server = build_return_server();
+    // Walks across the map in one packet: the movement guard has its own tests.
+    server.config.update(|c| c.world.move_guard_enabled = false);
     let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
     let mut old = Pc::new(&server, 2, "Departure", 110.0, 100.0);
     let mut new = Pc::new(&server, 3, "Arrival", 120.0, 100.0);

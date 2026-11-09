@@ -1155,6 +1155,18 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
             if !controlled {
                 return;
             }
+            // The server position is the baseline: a move beyond the unit's speed budget is
+            // refused before it has any side effect. A riding / seat-bound player's own moves
+            // are ignored below, so they are not judged.
+            let ignored = target.as_player().is_some_and(|p| {
+                p.data().is_riding
+                    || crate::systems::vehicles::movement::player_bound_to_slave(&world, p)
+            });
+            if !ignored
+                && !crate::world::move_guard::guard_unit_move(server, &world, &me, &target, &mt, u)
+            {
+                return;
+            }
             // Its moving Pets, handle Pet XP for moving
             if let Some(mate) = target.as_mate() {
                 crate::systems::vehicles::movement::on_mate_unit_move(server, &me, mate, u);

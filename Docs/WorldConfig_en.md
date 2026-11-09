@@ -78,6 +78,38 @@ Example:
 - **Type**: `boolean`
 - **Description**: When `true`, players take no damage.
 
+### `MoveGuardEnabled`
+- **Type**: `boolean`
+- **Description**: Server-side movement guard (default: `true`). Every client-reported position of a player on foot, an owned mate or a driven land vehicle is checked against a speed budget kept per unit; a move beyond it is dropped, logged (`audit_char_sus`, category `Cheat`) and the client is teleported back to the server position.
+
+### `MoveGuardMaxSpeed`
+- **Type**: `number`
+- **Description**: Sustained horizontal speed in m/s the guard allows a player or mate (default: `30.0`).
+
+### `MoveGuardMaxUpSpeed`
+- **Type**: `number`
+- **Description**: Sustained upward speed in m/s (default: `30.0`); falling is never limited.
+
+### `MoveGuardBurstSeconds`
+- **Type**: `number`
+- **Description**: Seconds of speed the budget can bank, so lag spikes and dash skills are not refused (default: `3.0`).
+
+### `MoveGuardVehicleMaxSpeed`
+- **Type**: `number`
+- **Description**: Sustained speed in m/s of a client-driven land vehicle (default: `45.0`).
+
+### `MoveGuardExemptAccessLevel`
+- **Type**: `number`
+- **Description**: Characters at or above this access level are not checked (default: `50`).
+
+### `MoveGuardKickAfterViolations`
+- **Type**: `number`
+- **Description**: Disconnect a player after this many refused moves within `MoveGuardViolationWindowSeconds` (default: `0` = never).
+
+### `MoveGuardViolationWindowSeconds`
+- **Type**: `number`
+- **Description**: The window of `MoveGuardKickAfterViolations` (default: `60.0`).
+
 ### `GeoDataMode`
 - **Type**: `boolean`
 - **Description**: Enables loading GeoData/NavMesh (dungeons/navigation).
