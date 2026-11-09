@@ -162,6 +162,40 @@ and a `DisabledArsPhoneProvider` default that refuses ARS logins with a warning;
 placing the call needs telephone integration, so an operator must supply that
 implementation. It is not a configuration toggle.
 
+### Login abuse limits (`Security`)
+
+The login server limits password guessing, account creation and idle sockets. Every value is
+optional and `0` switches that limit off:
+
+```json
+{
+  "Security": {
+    "PasswordFailureLimit": 10,
+    "PasswordFailureWindowSeconds": 300,
+    "PasswordBlockSeconds": 300,
+    "AccountCreationsPerIpHour": 5,
+    "PreAuthTimeoutSeconds": 60
+  }
+}
+```
+
+- `PasswordFailureLimit` failed password attempts within `PasswordFailureWindowSeconds` block
+  further password attempts for `PasswordBlockSeconds`. Failures are counted per client IP and,
+  separately, per account name (case-insensitive); a successful login clears the account counter.
+  While blocked the login answers exactly as for a wrong password and does not query the database;
+  one warning is logged when a block starts. The state is in memory.
+- `AccountCreationsPerIpHour` caps the accounts one IP can create per hour through `AutoAccount`
+  (default stays on). Loopback addresses are exempt, so local development and bot farms on the
+  same machine are not limited. Over the limit the login answers as for a wrong password and logs
+  a warning.
+- `PreAuthTimeoutSeconds`: a connection that has not authenticated within this time is closed.
+  Authenticated connections (world list, character select, queue) are never timed out.
+
+Both servers log an `error` at startup when `SecretKey` is the shipped default (`test`) or shorter
+than 16 characters and the internal Login <-> Game link is not loopback (login:
+`InternalNetwork:Host`; game: `LoginNetwork:Host`). Set the same random 16+ character `SecretKey`
+in both `Config.Local.json` files.
+
 ### Environment variable mapping (login)
 
 You can define server entries via environment variables:

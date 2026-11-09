@@ -51,6 +51,12 @@ async fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config = AppConfig::load(&dir, &args)?;
     tracing::info!("Loaded configuration from {}", dir.display());
+    if let Some(warning) = aaemu_commons::secret::weak_secret_warning(
+        &config.secret_key,
+        &config.internal_network.host,
+    ) {
+        tracing::error!("{warning}");
+    }
 
     let shutdown = CancellationToken::new();
     tokio::spawn({

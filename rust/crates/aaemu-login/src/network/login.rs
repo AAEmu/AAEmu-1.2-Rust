@@ -921,10 +921,31 @@ async fn dispatch_messages(
     reader: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, FrameCodec>,
     shutdown: &CancellationToken,
 ) {
+    // Rust addition: a connection that has not authenticated by the deadline is closed, so idle
+    // sockets cannot pile up. `0` switches it off. Authenticated connections (world list,
+    // character select, queue) are never timed out.
+    let pre_auth_timeout =
+        Duration::from_secs(server.config.security.pre_auth_timeout_seconds.into());
+    let mut pre_auth_pending = !pre_auth_timeout.is_zero();
+    let pre_auth_deadline = tokio::time::sleep(pre_auth_timeout);
+    tokio::pin!(pre_auth_deadline);
     loop {
         let frame = tokio::select! {
             _ = conn.closed.cancelled() => break,
             _ = shutdown.cancelled() => break,
+            () = &mut pre_auth_deadline, if pre_auth_pending => {
+                if matches!(conn.state(), LoginState::Connected | LoginState::Authenticating) {
+                    tracing::debug!(
+                        "LoginConnection {} from {} did not authenticate within {} s, closing",
+                        conn.id(),
+                        conn.ip(),
+                        pre_auth_timeout.as_secs()
+                    );
+                    break;
+                }
+                pre_auth_pending = false;
+                continue;
+            }
             frame = reader.next() => frame,
         };
         let payload = match frame {

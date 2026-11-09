@@ -81,6 +81,7 @@ impl LoginServer {
             config.korea_auth.clone(),
             two_factor.clone(),
             config.reconnect.clone(),
+            &config.security,
         ));
         let auth = auth.unwrap_or_else(|| {
             Arc::new(DbAuthBackend {
