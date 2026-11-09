@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::data::GameData;
 use crate::models::doodad::Doodad;
 use crate::models::npc::Npc;
+use crate::models::unit::{SkillAttribute, SkillModifier, UnitModifierType};
 use crate::test_support::test_server_with;
 use crate::world::{Entity, WorldObject};
 
@@ -252,15 +253,13 @@ fn effective_level_and_casting_inc_term_match_the_1_2_client() {
     assert_eq!(super::skill::rank_inc(&t, 10), 0.0); // below ability_level clamps to 0
 }
 
-/// `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`: the rank level and the
+/// `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`: the learned rank and the
 /// `casting_inc` term change the cost, and the final value is truncated (75.75 -> 75), not
 /// rounded.
 #[tokio::test]
 async fn mana_cost_uses_the_rank_level_and_truncates_the_final_value() {
-    let server = test_server_with(formula_data());
-    let mut n = Npc::new(1);
-    n.unit.level = 55; // the unit-level scale the old formula used must not decide the cost
-    let npc = WorldObject::from(&Entity::new(0x201, n));
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(formula_data());
+    let caster = WorldObject::from(&player);
     let template = Arc::new(SkillTemplate {
         id: 9001,
         ability_id: FIGHT,
@@ -278,15 +277,15 @@ async fn mana_cost_uses_the_rank_level_and_truncates_the_final_value() {
         raw as i32, 75,
         "the fixture must have a fractional part >= 0.5"
     );
-    assert_eq!(super::skill::mana_cost(&server, &skill, &npc), 75);
+    assert_eq!(super::skill::mana_cost(&server, &skill, &caster), 75);
 }
 
-/// The 1.2 cast time: `casting_time * (1 + T)` (`FUN_398a01b0` kind 4) before the cast-speed
-/// stat, truncated to ms.
+/// The 1.2 cast time: `(int)(casting_time * (1 + T))` (`FUN_398a01b0` kind 4) before the
+/// cast-speed stat and the skill modifiers, truncated to ms.
 #[tokio::test]
 async fn cast_time_uses_the_rank_casting_inc_term() {
-    let server = test_server_with(GameData::empty());
-    let npc = WorldObject::from(&Entity::new(0x202, Npc::new(1)));
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(GameData::empty());
+    let caster = WorldObject::from(&player);
     let template = Arc::new(SkillTemplate {
         id: 10670,
         ability_id: FIGHT,
@@ -298,7 +297,103 @@ async fn cast_time_uses_the_rank_casting_inc_term() {
     });
     // rank 11 -> L 55 -> T 0.56: 2000 * 1.56 = 3120 ms.
     let skill = SkillRun::new(template, 11);
-    assert_eq!(super::skill::cast_time_ms(&server, &skill, &npc), 3120);
+    assert_eq!(super::skill::cast_time_ms(&server, &skill, &caster), 3120);
+}
+
+/// `FUN_398a01b0` kind 4 truncates `casting_time * (1 + T)` to an integer BEFORE the
+/// caster's skill modifiers: 999 * 1.07 = 1068.93 -> 1068, then +100% -> 2136 (not 2137).
+#[tokio::test]
+async fn cast_time_truncates_before_the_skill_modifiers() {
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(GameData::empty());
+    let template = Arc::new(SkillTemplate {
+        id: 9003,
+        ability_id: FIGHT,
+        ability_level: 10,
+        level_step: 10,
+        casting_inc: 7, // rank 2 -> L 20, T 0.07
+        casting_time: 999,
+        ..SkillTemplate::default()
+    });
+    player
+        .data()
+        .unit
+        .skill_modifiers
+        .add_modifiers(&[SkillModifier {
+            id: 1,
+            owner_id: 1,
+            tag_id: 0,
+            skill_attribute: SkillAttribute::CastTime,
+            unit_modifier_type: UnitModifierType::Percent,
+            value: 100,
+            skill_id: 9003,
+            synergy: false,
+        }]);
+    let caster = WorldObject::from(&player);
+    let skill = SkillRun::new(template, 2);
+    assert_eq!(super::skill::cast_time_ms(&server, &skill, &caster), 2136);
+}
+
+/// An `ability_id == 0` skill takes the rank from the character's level
+/// (`(charLevel - ability_level) / level_step + 1`), learned or not: a level-55 character
+/// pays the old `LevelMana(55)` value, not `LevelMana(1)`.
+#[tokio::test]
+async fn ability_0_skill_takes_the_rank_from_the_character_level() {
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(formula_data());
+    player.data().unit.level = 55;
+    let caster = WorldObject::from(&player);
+    let template = Arc::new(SkillTemplate {
+        id: 23693,
+        ability_id: 0,
+        ability_level: 1,
+        level_step: 1,
+        mana_cost: 0,
+        mana_level_md: 1.0,
+        ..SkillTemplate::default()
+    });
+    let skill = SkillRun::new(template, 1);
+    let scale55 = (55.0 * 1.6 + 8.0) * 3.0 / 3.65;
+    assert_eq!(scale55 as i32, 78);
+    assert_eq!(super::skill::mana_cost(&server, &skill, &caster), 78);
+}
+
+/// A non-character caster keeps its previous `LevelMana` argument: the unit level (or
+/// `ab_level_override`) for any `level_step`, with only the `casting_inc` term on top.
+#[tokio::test]
+async fn npc_skill_keeps_its_old_mana_cost() {
+    let server = test_server_with(formula_data());
+    let mut n = Npc::new(1);
+    n.unit.level = 54;
+    let npc = WorldObject::from(&Entity::new(0x203, n));
+    // Skill 23693's shape: ability 0, ability_level 1, level_step 0, md 150.
+    let flat = Arc::new(SkillTemplate {
+        id: 23693,
+        ability_id: 0,
+        ability_level: 1,
+        level_step: 0,
+        mana_cost: 0,
+        mana_level_md: 150.0,
+        ..SkillTemplate::default()
+    });
+    let old = (54.0 * 1.6 + 8.0) * 3.0 / 3.65 * 150.0;
+    assert_eq!(old as i32, 11_638);
+    assert_eq!(
+        super::skill::mana_cost(&server, &SkillRun::new(flat, 1), &npc),
+        11_638
+    );
+    // A step-1 ability-0 skill also keeps the unit level exactly.
+    let stepped = Arc::new(SkillTemplate {
+        id: 9002,
+        ability_id: 0,
+        ability_level: 1,
+        level_step: 1,
+        mana_cost: 0,
+        mana_level_md: 1.0,
+        ..SkillTemplate::default()
+    });
+    assert_eq!(
+        super::skill::mana_cost(&server, &SkillRun::new(stepped, 1), &npc),
+        ((54.0 * 1.6 + 8.0) * 3.0 / 3.65) as i32
+    );
 }
 
 /// A rank-1 cast is charged `TRUNC(mana_cost + mana_level_md * LevelMana(L))`, and the

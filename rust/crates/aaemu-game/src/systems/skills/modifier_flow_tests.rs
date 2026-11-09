@@ -302,9 +302,9 @@ async fn modifier_attack_delay_uses_the_weapon_and_matching_haste_once() {
             effects: vec![skills::tests::skill_effect(1, EffectKind::DamageEffect, 1)],
             ..skills::tests::skill_template(id)
         };
-        assert_eq!(super::attack_delay(&server, &t, 1, &me, true, 1000.0), base);
+        assert_eq!(super::attack_delay(&server, &t, 0, &me, true, 1000.0), base);
         apply_boost(&server, &player, 933);
-        assert!((super::attack_delay(&server, &t, 1, &me, true, 1000.0) - boosted).abs() < 0.001);
+        assert!((super::attack_delay(&server, &t, 0, &me, true, 1000.0) - boosted).abs() < 0.001);
         let skill = SkillRun::new(Arc::new(t), 1);
         let cancel = CancelToken::new();
         {
@@ -326,7 +326,7 @@ async fn modifier_attack_delay_uses_the_weapon_and_matching_haste_once() {
     apply_boost(&server, &player, 1447);
     let t = skills::tests::skill_template(4);
     assert_eq!(
-        super::attack_delay(&server, &t, 1, &me, true, 1000.0),
+        super::attack_delay(&server, &t, 0, &me, true, 1000.0),
         2250.0
     );
     // Haste and GCD are distinct attributes; the GCD factor is included once.
@@ -338,7 +338,7 @@ async fn modifier_attack_delay_uses_the_weapon_and_matching_haste_once() {
         },
     );
     assert_eq!(
-        super::attack_delay(&server, &t, 1, &me, true, 1000.0),
+        super::attack_delay(&server, &t, 0, &me, true, 1000.0),
         1125.0
     );
 }

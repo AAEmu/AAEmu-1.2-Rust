@@ -281,7 +281,7 @@ pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         tracing::error!("Special effects: ManaCost without a skill (NullReferenceException)");
         return;
     };
-    let (level, inc) = level_and_inc(skill);
+    let (level, inc) = level_and_inc(server, skill, caster);
     let mana = apply_skill_modifiers(
         server,
         skill,

@@ -2104,8 +2104,13 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
                     c.server, &c.obj, skill_id, &target,
                 );
                 if r == skill_result::SUCCESS {
+                    // The AI casts through `unit_use_skill`, whose NPC skills run at the
+                    // unit level (`ab_level_override` / level): pace the command with the
+                    // same effective level the cast uses.
+                    let level =
+                        crate::systems::skills::skill::ab_level(c.server, &c.obj, tpl.ability_id);
                     let cool_down = crate::systems::skills::skill::attack_delay(
-                        c.server, &tpl, 1, &c.obj, false, 0.0,
+                        c.server, &tpl, level, &c.obj, false, 0.0,
                     );
                     c.ai.current_command_run_time_ms = cool_down as i64;
                 }

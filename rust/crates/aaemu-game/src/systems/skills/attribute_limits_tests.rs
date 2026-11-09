@@ -192,7 +192,7 @@ async fn attribute_limits_extreme_buff_xp_haste_and_multiplier_units() {
                 id,
                 ..Default::default()
             },
-            1,
+            0,
             &obj,
             false,
             0.0,

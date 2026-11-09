@@ -197,6 +197,53 @@ async fn variant_of_a_learned_tree_skill_casts() {
     assert!(p.data().unit.skill_last_used_ms > 0);
 }
 
+/// A variant (`IsVariantOfSkill`) runs at the learned base skill's rank, not rank 1: the
+/// charge is the rank-5 formula (L 41, 70 mana), not the rank-1 one (17).
+#[tokio::test]
+async fn variant_skill_uses_the_learned_base_skill_rank() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
+         CREATE TABLE unit_formula_variables (id INTEGER, unit_formula_id INTEGER, variable_kind_id INTEGER, key INTEGER, value REAL);
+         CREATE TABLE wearable_formulas (id INTEGER, kind_id INTEGER, formula TEXT);
+         CREATE TABLE formulas (id INTEGER, formula TEXT);
+         INSERT INTO unit_formulas VALUES
+          (12, '(ab_level * 1.6 + 8) * 3', 12, 0),
+          (13, 'level_dps / 3.65', 13, 0);",
+    )
+    .unwrap();
+    let mut data = data();
+    data.formulas = crate::data::formulas::FormulaManager::load(&c).unwrap();
+    data.systems.skills.skills.insert(
+        VARIANT_SKILL,
+        Arc::new(SkillTemplate {
+            mana_cost: 10,
+            mana_level_md: 1.0,
+            ..tree_skill(VARIANT_SKILL)
+        }),
+    );
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut ch = test_character(1, "Caster", 100.0, 100.0);
+    ch.ability1 = ABILITY;
+    ch.unit.hp = 1000;
+    ch.unit.max_hp = 1000;
+    ch.unit.mp = 200;
+    ch.unit.max_mp = 200;
+    ch.skills.skills.push(Skill {
+        id: TREE_SKILL,
+        level: 5,
+    });
+    let player = spawn_player(&server, &client, ch, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    cast(&server, &mut client, &player, VARIANT_SKILL).await;
+    // rank 5 -> L = 1 + 4 * 10 = 41; LevelMana(41) = 60.493..., + 10 fixed -> 70.
+    assert_eq!(player.data().unit.mp, 200 - 70);
+}
+
 #[tokio::test]
 async fn ability_less_buff_quest_and_doodad_skills_stay_castable() {
     for skill in [BUFF_SKILL, QUEST_SKILL, DOODAD_SKILL] {

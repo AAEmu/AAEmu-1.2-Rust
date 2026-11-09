@@ -5879,25 +5879,27 @@ through `FUN_39897fe0` to `L = ability_level + (rank - 1) * level_step`, and cal
 `FUN_398a01b0(ctx, unit, L, ctx2, skill, kind, 0)`:
 
 ```
-T     = max(0, (L - ability_level) * casting_inc * 0.001)             (FUN_398a7710)
-mana  = TRUNC( mana_cost + mana_level_md * (1 + T) * LevelMana(L) )   (kind 0)
-cast  = casting_time * (1 + T)                                        (kind 4)
+T     = max(0, (L - ability_level) * casting_inc * 0.001)                (FUN_398a7710)
+mana  = TRUNC( mana_cost + mana_level_md * (1 + T) * LevelMana(L) )      (kind 0)
+cast  = (int)(casting_time * (1 + T))                                    (kind 4)
 ```
 
 followed by the caster's skill modifiers (`FUN_3989f900`) and, for the tooltip / cast bar, the
-cast-speed stat `(stat + 1000) / 1000` (`FUN_393543a0`). `LevelMana` is the character
-`unit_formulas` rows 12/13 (`(L * 1.6 + 8) * 3 / 3.65`). The client truncates the final mana
-value: `FUN_398b56d0` takes the `DAT_3a5e41f0 = 1` truncation branch, and 32 of the 68 live
-readings have a fractional mana part >= 0.5 that the client truncated (Purge rank 1 raw 57.534
--> 57; Freezing Earth rank 8 raw 946.849 -> 946; Meteor Strike rank 2 raw 1814.795 -> 1814).
+cast-speed stat `(stat + 1000) / 1000` (`FUN_393543a0`); the kind-4 cast time is truncated to
+an integer before those modifiers. `LevelMana` is the character `unit_formulas` rows 12/13
+(`(L * 1.6 + 8) * 3 / 3.65`). The client truncates the final mana value: `FUN_398b56d0` takes
+the `DAT_3a5e41f0 = 1` truncation branch, and 32 of the 68 live readings have a fractional
+mana part >= 0.5 that the client truncated (Purge rank 1 raw 57.534 -> 57; Freezing Earth
+rank 8 raw 946.849 -> 946; Meteor Strike rank 2 raw 1814.795 -> 1814).
 
-`skill::effective_level` / `skill::rank_inc` / `skill::level_and_inc` implement `L` and `T`; the
-mana charge (`Skill.ManaCost` -> `consume_mana`), the resource pre-check (`validation.rs`) and
-the plot `ManaCost` effect all read that same pair, so an allowed cast is charged exactly what
-it checked. The cast time is `skill::cast_time_ms` (the announced `SCSkillStarted` base/real
-time and the server timer) and the `casting_time` term of `skill::attack_delay`. Plot-driven
-casts (`plots.rs`) keep their own plot-event delays and the cast-speed stat; those delays are
-plot data, not `skills.casting_time`, so the rank term does not apply to them.
+`skill::effective_level` / `skill::rank_inc` / `skill::rank_for_level` /
+`skill::cast_skill_level` / `skill::level_and_inc` implement `L` and `T`; the mana charge
+(`Skill.ManaCost` -> `consume_mana`), the resource pre-check (`validation.rs`) and the plot
+`ManaCost` effect all read that same pair, so an allowed cast is charged exactly what it
+checked. The cast time is `skill::cast_time_ms` (the announced `SCSkillStarted` base/real time
+and the server timer) and the `casting_time` term of `skill::attack_delay`. Plot-driven casts
+(`plots.rs`) keep their own plot-event delays and the cast-speed stat; those delays are plot
+data, not `skills.casting_time`, so the rank term does not apply to them.
 
 Live confirmation against the original r208022 client
 (`D:/aaemu-audits/skill-tooltips-2026-11-09/`): 68 tooltip readings, 27 skills, ranks 1..=19,
@@ -5906,17 +5908,22 @@ row (the readings were taken with cast-speed stat 0, so the stat factor is 1.000
 them). The gated test `real_compact_skill_tooltips_match_the_1_2_client` pins all 68 rows
 against the real `compact.sqlite3`.
 
-Which rank applies: characters use the `SkillRun.level` they were created with (the learned
-rank; item / default / plot / quest skills and the AI's NPC skills are created at rank 1,
-`new Skill(template)`). For an NPC this means `L = ability_level` and `T = 0`, i.e. the same
-formula at the rank the AI casts, which moves an NPC's `LevelMana` argument from the unit level
-(`ab_level_override` / unit level) to the skill's own `ability_level`. The 68 readings are
-player-side (the client tooltip is player-side), so the NPC-side cost is **capture-pending**;
-deviation from the C#: `Skill.ManaCost` scaled every caster by `GetAbLevel(AbilityId)`. For
-`ability_id == 0` the client derives the rank from the character level
-(`(charLevel - ability_level) / level_step + 1`); those non-class skills run at their
-`SkillRun` rank in this server (1 on the template paths) and are not covered by the 68
-class-skill readings (capture-pending).
+Which rank applies (`FUN_3941e750`):
+
+* A character's class skill (`ability_id != 0`) uses the learned rank on the `SkillRun`
+  (`FUN_390b9950` / `FUN_390b9920`); variants (`IsVariantOfSkill`, e.g. the combo skills) run
+  at the learned base skill's rank, not at rank 1.
+* An `ability_id == 0` skill uses the rank from the character's level,
+  `(charLevel - ability_level) / level_step + 1`, learned or not (rank 1 when
+  `level_step <= 0`). This covers the item / default / interaction skills: 422 item use-skills
+  with `mana_level_md > 0` are ability 0, so their `LevelMana` argument is the character level.
+* A non-character caster (an NPC) keeps the effective level the old `Skill.ManaCost` used as
+  its `LevelMana` argument, the unit level or `ab_level_override`, whatever the `level_step`;
+  `T` is derived from that level. This keeps the former NPC cost (e.g. skill 23693 at NPC
+  level 54 still costs 11638) and applies only the new `casting_inc` term on top. The 68
+  readings are player-side (the client tooltip is player-side), so the NPC-side cost is
+  **capture-pending**; deviation from the C#: `Skill.ManaCost` scaled every caster by
+  `GetAbLevel(AbilityId)`, which for NPCs is the same level this keeps.
 
 ### Plot `ManaCost` special effect (type 39)
 
