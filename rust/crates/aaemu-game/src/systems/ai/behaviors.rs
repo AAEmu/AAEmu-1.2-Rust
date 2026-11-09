@@ -806,7 +806,10 @@ fn update_target(c: &mut AiCtx<'_>) -> bool {
     if npc::skill_controller_running(&c.obj) {
         return current_target(c).is_some();
     }
-    let abusers = sorted_abusers(c);
+    let mut abusers = sorted_abusers(c);
+    if c.server.config.ai.pull_aggro_enabled {
+        apply_pull_aggro(c, &mut abusers);
+    }
     for abuser in abusers {
         let Some(abuser) = abuser else { continue };
         if geo_data_mode(c) {
@@ -856,6 +859,14 @@ fn update_target(c: &mut AiCtx<'_>) -> bool {
 /// taunt stamp sorts above every unstamped entry and the latest stamp wins. Unstamped entries
 /// keep the total order; the stable sort keeps the table (obj id) order on ties.
 fn sorted_abusers(c: &AiCtx<'_>) -> Vec<Option<WorldObject>> {
+    sorted_entries(c)
+        .into_iter()
+        .map(|(id, _, _)| c.server.world.object(id))
+        .collect()
+}
+
+/// The aggro table as `(obj id, total, taunt stamp)` in the order of [`sorted_abusers`].
+fn sorted_entries(c: &AiCtx<'_>) -> Vec<(u32, i32, u64)> {
     let mut entries: Vec<(u32, i32, u64)> = c
         .npc
         .data()
@@ -872,9 +883,78 @@ fn sorted_abusers(c: &AiCtx<'_>) -> Vec<Option<WorldObject>> {
         (x, y) => y.cmp(&x),
     });
     entries
-        .into_iter()
-        .map(|(id, _, _)| c.server.world.object(id))
-        .collect()
+}
+
+/// Whether `update_target` would accept `abuser` as the target (visible, alive and, without
+/// geodata, present in the world).
+fn abuser_is_valid(c: &AiCtx<'_>, abuser: &WorldObject) -> bool {
+    if !npc::unit_is_visible(c.server, &c.obj, abuser) || npc::is_dead(abuser) {
+        return false;
+    }
+    geo_data_mode(c)
+        || (abuser.obj_id() > 0
+            && super::npc::world_unit(c.server, &c.obj, abuser.obj_id()).is_some())
+}
+
+/// Pull aggro (added deviation, `PORTING.md`, config `Ai.PullAggro*`): the NPC keeps its valid
+/// current aggro target until a challenger beats it. A taunt stamp beats an unstamped target
+/// (and an earlier stamp); otherwise the challenger's total has to exceed the target's total
+/// times the melee or ranged ratio. The chosen entry is moved to the front of `abusers`, so
+/// the normal selection loop picks it; with no valid current target nothing changes.
+fn apply_pull_aggro(c: &AiCtx<'_>, abusers: &mut Vec<Option<WorldObject>>) {
+    let current_id = c.npc.data().current_aggro_target;
+    if current_id == 0 {
+        return;
+    }
+    let entries = sorted_entries(c);
+    let Some(&(_, cur_total, cur_taunt)) = entries.iter().find(|e| e.0 == current_id) else {
+        return;
+    };
+    let Some(current) = c.server.world.object(current_id) else {
+        return;
+    };
+    if !abuser_is_valid(c, &current) {
+        return;
+    }
+    let cfg = &c.server.config.ai;
+    let base = f64::from(cur_total.max(0));
+    let mut chosen = current_id;
+    for &(id, total, taunt) in &entries {
+        if id == current_id {
+            continue;
+        }
+        let Some(challenger) = c.server.world.object(id) else {
+            continue;
+        };
+        if !abuser_is_valid(c, &challenger) {
+            continue;
+        }
+        let wins = if taunt != 0 {
+            cur_taunt == 0 || taunt > cur_taunt
+        } else if cur_taunt != 0 {
+            false
+        } else {
+            let melee =
+                npc::distance_to(c.server, &c.obj, &challenger, true) <= cfg.pull_aggro_melee_range;
+            let ratio = if melee {
+                cfg.pull_aggro_melee_ratio
+            } else {
+                cfg.pull_aggro_ranged_ratio
+            };
+            f64::from(total) > base * ratio
+        };
+        if wins {
+            chosen = id;
+            break;
+        }
+    }
+    if let Some(i) = abusers
+        .iter()
+        .position(|a| a.as_ref().is_some_and(|a| a.obj_id() == chosen))
+    {
+        let entry = abusers.remove(i);
+        abusers.insert(0, entry);
+    }
 }
 
 /// Drops the chase route and its bookkeeping, so the next chase step plans from scratch.

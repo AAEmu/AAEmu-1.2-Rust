@@ -30,6 +30,7 @@
 pub mod behaviors;
 pub mod collision;
 pub mod combat;
+pub mod config;
 pub mod data;
 pub mod framework;
 pub mod geodata;
