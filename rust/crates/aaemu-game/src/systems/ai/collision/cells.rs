@@ -101,6 +101,36 @@ pub enum DatError {
     Truncated,
 }
 
+/// One `SBrushChunk` (128 bytes) with `offset` added to its bbox and position (the sector
+/// offset in `brush.dat`, zero in `visareas.dat` / `object.dat`).
+fn brush_record(rec: &[u8], offset: Vec3) -> Option<BrushRecord> {
+    let m: Vec<f32> = (0..12)
+        .map(|j| f32_at(rec, 67 + 4 * j))
+        .collect::<Option<_>>()?;
+    Some(BrushRecord {
+        bbox: [vec3_at(rec, 0)? + offset, vec3_at(rec, 12)? + offset],
+        rnd_flags: u32_at(rec, 32)?,
+        rot_scale: Mat33::from_array([m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]),
+        pos: Vec3::new(m[3], m[7], m[11]) + offset,
+        material_id: u32_at(rec, 115)? as i32,
+        statobj: u32_at(rec, 123)? as i32,
+    })
+}
+
+/// One `SVegetationChunk` (64 bytes) with `offset` added.
+fn vegetation_record(rec: &[u8], offset: Vec3) -> Option<VegetationRecord> {
+    Some(VegetationRecord {
+        bbox: [vec3_at(rec, 0)? + offset, vec3_at(rec, 12)? + offset],
+        rnd_flags: u32_at(rec, 32)?,
+        pos: vec3_at(rec, 39)? + offset,
+        scale: f32_at(rec, 51)?,
+        group: u16::from_le_bytes([*rec.get(55)?, *rec.get(56)?]),
+        angle_x: *rec.get(57)?,
+        angle_y: *rec.get(58)?,
+        angle_z: *rec.get(60)?,
+    })
+}
+
 /// `brush.dat`.
 pub fn read_brushes(d: &[u8]) -> Result<Vec<BrushRecord>, DatError> {
     let ver = u32_at(d, 0).ok_or(DatError::Truncated)?;
@@ -116,21 +146,7 @@ pub fn read_brushes(d: &[u8]) -> Result<Vec<BrushRecord>, DatError> {
         for k in 0..size / 128 {
             let r = off + k * 128;
             let rec = d.get(r..r + 128).ok_or(DatError::Truncated)?;
-            let m: Vec<f32> = (0..12)
-                .map(|j| f32_at(rec, 67 + 4 * j).unwrap_or(0.0))
-                .collect();
-            let bmin = vec3_at(rec, 0).ok_or(DatError::Truncated)?;
-            let bmax = vec3_at(rec, 12).ok_or(DatError::Truncated)?;
-            out.push(BrushRecord {
-                bbox: [bmin + so, bmax + so],
-                rnd_flags: u32_at(rec, 32).ok_or(DatError::Truncated)?,
-                rot_scale: Mat33::from_array([
-                    m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10],
-                ]),
-                pos: Vec3::new(m[3], m[7], m[11]) + so,
-                material_id: u32_at(rec, 115).ok_or(DatError::Truncated)? as i32,
-                statobj: u32_at(rec, 123).ok_or(DatError::Truncated)? as i32,
-            });
+            out.push(brush_record(rec, so).ok_or(DatError::Truncated)?);
         }
     }
     Ok(out)
@@ -168,18 +184,7 @@ pub fn read_vegetation(d: &[u8]) -> Result<Vec<VegetationRecord>, DatError> {
         for k in 0..size / 64 {
             let r = off + k * 64;
             let rec = d.get(r..r + 64).ok_or(DatError::Truncated)?;
-            let bmin = vec3_at(rec, 0).ok_or(DatError::Truncated)?;
-            let bmax = vec3_at(rec, 12).ok_or(DatError::Truncated)?;
-            out.push(VegetationRecord {
-                bbox: [bmin + so, bmax + so],
-                rnd_flags: u32_at(rec, 32).ok_or(DatError::Truncated)?,
-                pos: vec3_at(rec, 39).ok_or(DatError::Truncated)? + so,
-                scale: f32_at(rec, 51).ok_or(DatError::Truncated)?,
-                group: u16::from_le_bytes([rec[55], rec[56]]),
-                angle_x: rec[57],
-                angle_y: rec[58],
-                angle_z: rec[60],
-            });
+            out.push(vegetation_record(rec, so).ok_or(DatError::Truncated)?);
         }
     }
     Ok(out)
@@ -258,6 +263,377 @@ pub fn read_vegetation_groups(xml: &str) -> Vec<VegetationGroup> {
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// visareas.dat / object.dat: the cell octrees (`COctreeNode::LoadCellObject`)
+// ---------------------------------------------------------------------------------------------
+
+/// A failure of the strict octree readers ([`read_visareas`], [`read_object_dat_voxels`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OctreeError {
+    #[error("truncated at {0}")]
+    Truncated(usize),
+    #[error("bad chunk version {0} (expected 4)")]
+    ChunkVersion(u32),
+    #[error("chunk size {found} != {expected} bytes remaining")]
+    ChunkSize { found: u32, expected: usize },
+    #[error("visarea chunk version {0} at {1}")]
+    AreaVersion(u32, usize),
+    #[error("octree node version {0} at {1}")]
+    NodeVersion(u32, usize),
+    #[error("octree nesting too deep at {0}")]
+    TooDeep(usize),
+    #[error("unknown object type {0} at {1}")]
+    UnknownType(u32, usize),
+    #[error("voxel version {0} at {1}")]
+    VoxelVersion(i32, usize),
+    #[error("object block overruns its node at {0}")]
+    BlockOverrun(usize),
+    #[error("implausible table size {0}")]
+    TableSize(u32),
+    #[error("{0} bytes left after the last area")]
+    Leftover(usize),
+}
+
+/// `eERType` of the octree object records (`sub_30225050`).
+pub mod er_type {
+    pub const BRUSH: u32 = 1;
+    pub const VEGETATION: u32 = 2;
+    pub const VOXEL: u32 = 6;
+    pub const DECAL: u32 = 9;
+    pub const WATER_VOLUME: u32 = 11;
+    pub const WATER_WAVE: u32 = 12;
+    pub const ROAD: u32 = 13;
+    pub const DISTANCE_CLOUD: u32 = 14;
+    pub const AUTO_CUBEMAP: u32 = 16;
+    pub const LIGHT_SHAPE: u32 = 23;
+}
+
+/// The fixed part of a voxel record (`SVoxelObjectChunkVer5`).
+const VOXEL_HEADER: usize = 198_775;
+/// `m_Matrix` inside the voxel record.
+const VOXEL_MATRIX: usize = 198_727;
+
+/// A voxel object (cave): a static trimesh the cell file stores finished, inside a
+/// zlib-compressed CGF block (`CVoxelObject::SetCompiledMeshData`, 0x301BC4D0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoxelRecord {
+    /// `m_WSBBox` (cell-local).
+    pub bbox: [Vec3; 2],
+    pub rnd_flags: u32,
+    /// `m_Matrix` rotation·scale rows (`+198727`, row-major 3×4) and translation (cell-local).
+    pub rot_scale: Mat33,
+    pub pos: Vec3,
+    /// Uncompressed size and the zlib stream of the first compiled block (the second block is
+    /// the same geometry); `None` without compiled blocks.
+    pub block: Option<(usize, Vec<u8>)>,
+}
+
+impl VoxelRecord {
+    /// The first compiled block: a CGF 0x745 container whose `MeshPhysicsData` is the trimesh.
+    pub fn inflate(&self) -> Option<Vec<u8>> {
+        let (size, z) = self.block.as_ref()?;
+        let out = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(z, *size).ok()?;
+        (out.len() == *size).then_some(out)
+    }
+}
+
+/// What the strict walker found in one `visareas.dat`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VisAreaFile {
+    /// The file's own model table (normalised paths, empty = unused slot); `statobj` indexes it.
+    pub objects: Vec<String>,
+    pub areas: usize,
+    pub brushes: Vec<BrushRecord>,
+    pub vegetation: Vec<VegetationRecord>,
+    pub voxels: Vec<VoxelRecord>,
+    /// Records of other types (decals, water volumes, …), walked and skipped.
+    pub other: usize,
+}
+
+struct Cursor<'a> {
+    d: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], OctreeError> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|&e| e <= self.d.len())
+            .ok_or(OctreeError::Truncated(self.pos))?;
+        let s = &self.d[self.pos..end];
+        self.pos = end;
+        Ok(s)
+    }
+
+    fn u32(&mut self) -> Result<u32, OctreeError> {
+        let p = self.pos;
+        u32_at(self.take(4)?, 0).ok_or(OctreeError::Truncated(p))
+    }
+}
+
+/// The model / material tables at the start of `visareas.dat` and `object.dat`:
+/// `u32 n; n × {u32; char[256]}`, twice. Returns the normalised model names.
+fn read_name_tables(c: &mut Cursor<'_>) -> Result<Vec<String>, OctreeError> {
+    let mut names = Vec::new();
+    for table in 0..2 {
+        let n = c.u32()?;
+        if n > 100_000 {
+            return Err(OctreeError::TableSize(n));
+        }
+        for _ in 0..n {
+            let e = c.take(260)?;
+            if table == 0 {
+                let raw = &e[4..];
+                let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                let s = String::from_utf8_lossy(&raw[..end]);
+                names.push(if s.trim().is_empty() {
+                    String::new()
+                } else {
+                    normalize_model_path(&s)
+                });
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Receives the object records of an octree walk (offsets cell-local).
+trait ObjectSink {
+    fn brush(&mut self, rec: &[u8]);
+    fn vegetation(&mut self, rec: &[u8]);
+    fn voxel(&mut self, rec: VoxelRecord);
+    fn other(&mut self) {}
+}
+
+fn walk_node(
+    c: &mut Cursor<'_>,
+    sink: &mut dyn ObjectSink,
+    depth: usize,
+) -> Result<(), OctreeError> {
+    if depth > 16 {
+        return Err(OctreeError::TooDeep(c.pos));
+    }
+    let start = c.pos;
+    let h = c.take(33)?;
+    let version = u32_at(h, 0).unwrap_or(0);
+    if version != 2 {
+        return Err(OctreeError::NodeVersion(version, start));
+    }
+    let block = u32_at(h, 28).unwrap_or(0) as usize;
+    let mask = h[32];
+    if block > 0 {
+        let end = c
+            .pos
+            .checked_add(block)
+            .filter(|&e| e <= c.d.len())
+            .ok_or(OctreeError::Truncated(c.pos))?;
+        while c.pos < end {
+            let at = c.pos;
+            let t = c.u32()?;
+            walk_object(c, sink, t, at)?;
+        }
+        if c.pos != end {
+            return Err(OctreeError::BlockOverrun(start));
+        }
+    }
+    for i in 0..8 {
+        if mask & (1 << i) != 0 {
+            walk_node(c, sink, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_object(
+    c: &mut Cursor<'_>,
+    sink: &mut dyn ObjectSink,
+    t: u32,
+    at: usize,
+) -> Result<(), OctreeError> {
+    use er_type::*;
+    // Fixed payload size and the offset of a point count (`count × 12` bytes follow).
+    let (fixed, count_at) = match t {
+        BRUSH => {
+            sink.brush(c.take(128)?);
+            return Ok(());
+        }
+        VEGETATION => {
+            sink.vegetation(c.take(64)?);
+            return Ok(());
+        }
+        VOXEL => return walk_voxel(c, sink, at),
+        DECAL => (111, None),
+        WATER_VOLUME => (119, Some(103)),
+        WATER_WAVE => (151, Some(91)),
+        ROAD => (63, Some(39)),
+        DISTANCE_CLOUD => (79, None),
+        AUTO_CUBEMAP => (95, None),
+        LIGHT_SHAPE => (91, None),
+        _ => return Err(OctreeError::UnknownType(t, at)),
+    };
+    let rec = c.take(fixed)?;
+    let mut points = 0usize;
+    if let Some(o) = count_at {
+        points = u32_at(rec, o).unwrap_or(0) as usize;
+        // The water volume has a second point list (count at +115).
+        if t == WATER_VOLUME {
+            points = points.saturating_add(u32_at(rec, 115).unwrap_or(0) as usize);
+        }
+    }
+    c.take(
+        points
+            .checked_mul(12)
+            .ok_or(OctreeError::Truncated(c.pos))?,
+    )?;
+    sink.other();
+    Ok(())
+}
+
+fn walk_voxel(c: &mut Cursor<'_>, sink: &mut dyn ObjectSink, at: usize) -> Result<(), OctreeError> {
+    let rec = c.take(VOXEL_HEADER)?;
+    let version = u32_at(rec, 39).unwrap_or(0) as i32;
+    if version != 5 {
+        return Err(OctreeError::VoxelVersion(version, at));
+    }
+    let mut block = None;
+    if rec[67] & 0x20 != 0 {
+        let n = c.u32()?;
+        for i in 0..n {
+            let size = c.u32()? as usize;
+            let b = c.take(size)?;
+            // `S` = compressed size + 4: the uncompressed size, then the zlib stream.
+            if i == 0 && size >= 4 {
+                block = u32_at(b, 0).map(|u| (u as usize, b[4..].to_vec()));
+            }
+        }
+    }
+    let m: Vec<f32> = (0..12)
+        .map(|j| f32_at(rec, VOXEL_MATRIX + 4 * j))
+        .collect::<Option<_>>()
+        .ok_or(OctreeError::Truncated(at))?;
+    sink.voxel(VoxelRecord {
+        bbox: [
+            vec3_at(rec, 0).ok_or(OctreeError::Truncated(at))?,
+            vec3_at(rec, 12).ok_or(OctreeError::Truncated(at))?,
+        ],
+        rnd_flags: u32_at(rec, 32).unwrap_or(0),
+        rot_scale: Mat33::from_array([m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]),
+        pos: Vec3::new(m[3], m[7], m[11]),
+        block,
+    });
+    Ok(())
+}
+
+impl ObjectSink for VisAreaFile {
+    fn brush(&mut self, rec: &[u8]) {
+        if let Some(b) = brush_record(rec, Vec3::ZERO) {
+            self.brushes.push(b);
+        }
+    }
+    fn vegetation(&mut self, rec: &[u8]) {
+        if let Some(v) = vegetation_record(rec, Vec3::ZERO) {
+            self.vegetation.push(v);
+        }
+    }
+    fn voxel(&mut self, rec: VoxelRecord) {
+        self.voxels.push(rec);
+    }
+    fn other(&mut self) {
+        self.other += 1;
+    }
+}
+
+/// Only the voxels of an `object.dat`.
+#[derive(Default)]
+struct VoxelSink(Vec<VoxelRecord>);
+
+impl ObjectSink for VoxelSink {
+    fn brush(&mut self, _: &[u8]) {}
+    fn vegetation(&mut self, _: &[u8]) {}
+    fn voxel(&mut self, rec: VoxelRecord) {
+        self.0.push(rec);
+    }
+}
+
+/// `cells/X_Y/client/visareas.dat` (`C3DEngine::LoadCellVisAreas`, `CVisAreaManager::
+/// SetCompiledData`): the cell's model table, then `nVisAreas + nPortals + nOcclAreas` areas,
+/// each `SVisAreaChunk` (264 B) [+ 12 B from version 3] + point list + octree of objects
+/// (+ 4 B tail at version 4). Positions are cell-local (no sector offset; add the cell origin).
+/// Strict: any deviation from the grammar, leftover bytes included, is an error.
+pub fn read_visareas(d: &[u8]) -> Result<VisAreaFile, OctreeError> {
+    let mut c = Cursor { d, pos: 0 };
+    let objects = read_name_tables(&mut c)?;
+    let header_at = c.pos;
+    let h = c.take(20)?;
+    let word = |i: usize| u32_at(h, 4 * i).unwrap_or(0);
+    if word(0) != 4 {
+        return Err(OctreeError::ChunkVersion(word(0)));
+    }
+    let remaining = d.len() - header_at;
+    if word(1) as usize != remaining {
+        return Err(OctreeError::ChunkSize {
+            found: word(1),
+            expected: remaining,
+        });
+    }
+    let n_areas = [word(2), word(3), word(4)]
+        .iter()
+        .try_fold(0u32, |a, &n| a.checked_add(n))
+        .filter(|&n| n <= 100_000)
+        .ok_or(OctreeError::TableSize(word(2)))?;
+    let mut out = VisAreaFile {
+        objects,
+        areas: n_areas as usize,
+        ..VisAreaFile::default()
+    };
+    for _ in 0..n_areas {
+        let at = c.pos;
+        let a = c.take(264)?;
+        let version = u32_at(a, 0).unwrap_or(0);
+        if !(2..=4).contains(&version) {
+            return Err(OctreeError::AreaVersion(version, at));
+        }
+        let objects_block = u32_at(a, 84).unwrap_or(0);
+        if version >= 3 {
+            c.take(12)?;
+        }
+        let n_points = c.u32()? as usize;
+        c.take(
+            n_points
+                .checked_mul(12)
+                .ok_or(OctreeError::Truncated(c.pos))?,
+        )?;
+        if objects_block > 4 && c.pos < d.len() {
+            walk_node(&mut c, &mut out, 0)?;
+        }
+        if version >= 4 {
+            c.take(4)?;
+        }
+    }
+    if c.pos != d.len() {
+        return Err(OctreeError::Leftover(d.len() - c.pos));
+    }
+    Ok(out)
+}
+
+/// The voxel objects of a `cells/X_Y/client/object.dat`: the same name tables and octree
+/// grammar as `visareas.dat` (its brushes duplicate `brush.dat` and are not returned). Strict:
+/// the octree must end at the end of the file.
+pub fn read_object_dat_voxels(d: &[u8]) -> Result<Vec<VoxelRecord>, OctreeError> {
+    let mut c = Cursor { d, pos: 0 };
+    read_name_tables(&mut c)?;
+    let mut sink = VoxelSink::default();
+    if c.pos < d.len() {
+        walk_node(&mut c, &mut sink, 0)?;
+    }
+    if c.pos != d.len() {
+        return Err(OctreeError::Leftover(d.len() - c.pos));
+    }
+    Ok(sink.0)
 }
 
 #[cfg(test)]
@@ -366,5 +742,182 @@ mod tests {
                 "game/objects/b.cgf".to_string()
             ]
         );
+    }
+
+    // ---- visareas.dat / object.dat ----
+
+    fn put_u32(v: &mut Vec<u8>, x: u32) {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+
+    /// Name tables: one model, no materials.
+    fn name_tables(name: &str) -> Vec<u8> {
+        let mut v = Vec::new();
+        put_u32(&mut v, 1);
+        put_u32(&mut v, 0);
+        let mut n = name.as_bytes().to_vec();
+        n.resize(256, 0);
+        v.extend_from_slice(&n);
+        put_u32(&mut v, 0);
+        v
+    }
+
+    fn brush_payload(statobj: u32, pos: [f32; 3]) -> Vec<u8> {
+        let mut r = vec![0u8; 128];
+        let mut m = [0f32; 12];
+        m[0] = 2.0;
+        m[5] = 2.0;
+        m[10] = 2.0;
+        m[3] = pos[0];
+        m[7] = pos[1];
+        m[11] = pos[2];
+        for (j, x) in m.iter().enumerate() {
+            r[67 + 4 * j..71 + 4 * j].copy_from_slice(&x.to_le_bytes());
+        }
+        r[123..127].copy_from_slice(&statobj.to_le_bytes());
+        r
+    }
+
+    fn voxel_payload(pos: [f32; 3], zlib: Option<(u32, &[u8])>) -> Vec<u8> {
+        let mut r = vec![0u8; VOXEL_HEADER];
+        r[39..43].copy_from_slice(&5u32.to_le_bytes());
+        for (j, x) in [
+            1.0f32, 0.0, 0.0, pos[0], 0.0, 1.0, 0.0, pos[1], 0.0, 0.0, 1.0, pos[2],
+        ]
+        .iter()
+        .enumerate()
+        {
+            r[VOXEL_MATRIX + 4 * j..VOXEL_MATRIX + 4 * j + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        if let Some((u, z)) = zlib {
+            r[67] |= 0x20;
+            put_u32(&mut r, 2);
+            for _ in 0..2 {
+                put_u32(&mut r, z.len() as u32 + 4);
+                put_u32(&mut r, u);
+                r.extend_from_slice(z);
+            }
+        }
+        r
+    }
+
+    /// One node (version 2) holding `objects`, no children.
+    fn node(objects: &[u8]) -> Vec<u8> {
+        let mut n = vec![0u8; 33];
+        n[0] = 2;
+        n[28..32].copy_from_slice(&(objects.len() as u32).to_le_bytes());
+        n.extend_from_slice(objects);
+        n
+    }
+
+    /// A `visareas.dat` with one area (version 4) holding `octree`.
+    fn visareas(octree: &[u8]) -> Vec<u8> {
+        let mut v = name_tables("Objects/Hall.cgf");
+        let mut body = Vec::new();
+        let mut area = vec![0u8; 264];
+        area[0] = 4;
+        area[84..88].copy_from_slice(&(octree.len() as u32 + 4).to_le_bytes());
+        body.extend_from_slice(&area);
+        body.extend_from_slice(&[0u8; 12]);
+        put_u32(&mut body, 1); // one point
+        body.extend_from_slice(&[0u8; 12]);
+        body.extend_from_slice(octree);
+        body.extend_from_slice(&[0u8; 4]);
+        put_u32(&mut v, 4);
+        put_u32(&mut v, 20 + body.len() as u32);
+        put_u32(&mut v, 1);
+        put_u32(&mut v, 0);
+        put_u32(&mut v, 0);
+        v.extend_from_slice(&body);
+        v
+    }
+
+    #[test]
+    fn visareas_walks_brushes_voxels_and_skips_other_records() {
+        let mut objs = Vec::new();
+        put_u32(&mut objs, er_type::BRUSH);
+        objs.extend_from_slice(&brush_payload(0, [1.0, 2.0, 3.0]));
+        put_u32(&mut objs, er_type::DECAL);
+        objs.extend_from_slice(&[0u8; 111]);
+        put_u32(&mut objs, er_type::ROAD);
+        let mut road = vec![0u8; 63];
+        road[39..43].copy_from_slice(&2u32.to_le_bytes());
+        objs.extend_from_slice(&road);
+        objs.extend_from_slice(&[0u8; 24]);
+        put_u32(&mut objs, er_type::VOXEL);
+        objs.extend_from_slice(&voxel_payload([5.0, 6.0, 7.0], Some((3, b"xyz"))));
+        let f = read_visareas(&visareas(&node(&objs))).expect("parse");
+        assert_eq!(f.objects, vec!["game/objects/hall.cgf".to_string()]);
+        assert_eq!(
+            (f.areas, f.brushes.len(), f.voxels.len(), f.other),
+            (1, 1, 1, 2)
+        );
+        let b = &f.brushes[0];
+        assert_eq!(b.statobj, 0);
+        assert_eq!(b.pos, Vec3::new(1.0, 2.0, 3.0));
+        let v = &f.voxels[0];
+        assert_eq!(v.pos, Vec3::new(5.0, 6.0, 7.0));
+        assert_eq!(v.block, Some((3, b"xyz".to_vec())));
+    }
+
+    #[test]
+    fn visareas_is_strict() {
+        let mut objs = Vec::new();
+        put_u32(&mut objs, er_type::BRUSH);
+        objs.extend_from_slice(&brush_payload(0, [0.0; 3]));
+        let good = visareas(&node(&objs));
+        assert!(read_visareas(&good).is_ok());
+        // Leftover bytes (the chunk size no longer matches).
+        let mut extra = good.clone();
+        extra.push(0);
+        assert!(matches!(
+            read_visareas(&extra),
+            Err(OctreeError::ChunkSize { .. })
+        ));
+        // An unknown object type.
+        let mut bad = Vec::new();
+        put_u32(&mut bad, 99);
+        bad.extend_from_slice(&[0u8; 16]);
+        assert!(matches!(
+            read_visareas(&visareas(&node(&bad))),
+            Err(OctreeError::UnknownType(99, _))
+        ));
+        // Truncated.
+        assert!(read_visareas(&good[..good.len() - 40]).is_err());
+    }
+
+    #[test]
+    fn object_dat_voxels_are_found_through_children() {
+        // Root with no objects, one child (mask bit 3) holding a voxel.
+        let mut vox = Vec::new();
+        put_u32(&mut vox, er_type::VOXEL);
+        vox.extend_from_slice(&voxel_payload([1.0, 1.0, 1.0], None));
+        let mut root = node(&[]);
+        root[32] = 1 << 3;
+        root.extend_from_slice(&node(&vox));
+        let mut d = name_tables("a.cgf");
+        d.extend_from_slice(&root);
+        let list = read_object_dat_voxels(&d).expect("parse");
+        assert_eq!(list.len(), 1);
+        assert!(list[0].inflate().is_none());
+        d.push(0);
+        assert!(matches!(
+            read_object_dat_voxels(&d),
+            Err(OctreeError::Leftover(1))
+        ));
+    }
+
+    #[test]
+    fn voxel_blocks_inflate() {
+        let raw = b"physics blob bytes".to_vec();
+        let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+        let rec = VoxelRecord {
+            bbox: [Vec3::ZERO; 2],
+            rnd_flags: 0,
+            rot_scale: Mat33::from_array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+            pos: Vec3::ZERO,
+            block: Some((raw.len(), z)),
+        };
+        assert_eq!(rec.inflate().as_deref(), Some(&raw[..]));
     }
 }
