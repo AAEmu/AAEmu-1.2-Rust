@@ -702,3 +702,57 @@ async fn modifier_channel_packet_and_ticks_share_a_snapshot_of_duration() {
         assert_eq!(npc.data().unit.hp, if boosted { 930 } else { 970 });
     }
 }
+
+/// Skill 11933 'Concussive Arrow': selection 2 (Target), relation Hostile, radius 6 m,
+/// `application_method` 1 damage. `around_radius` excludes its origin, so the primary target
+/// must be added back or a lone target takes nothing.
+#[tokio::test]
+async fn target_selected_area_skill_hits_the_primary_target() {
+    use crate::data::world_data::SystemFaction;
+    let mut data = data();
+    for id in [3, 4] {
+        data.factions.add(SystemFaction {
+            id,
+            ..Default::default()
+        });
+    }
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(skills::tests::damage_effect(1, 100))),
+        1,
+    );
+    let (server, _client, player, npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.faction_id = 4;
+    npc.data().unit.faction_id = 3;
+    let spawn = |obj: u32, faction: u32, y: f32| -> NpcRef {
+        let mut n = crate::models::npc::Npc::new(1);
+        n.unit.hp = 1000;
+        n.unit.max_hp = 1000;
+        n.unit.faction_id = faction;
+        n.unit.transform.set_xyz(100.0, y, 100.0);
+        let n: NpcRef = crate::world::Entity::new(obj, n);
+        server.world.world(0).unwrap().spawn(&n, &server.view_ctx());
+        n
+    };
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            target_area_radius: 6,
+            target_relation: 4,
+            target_selection: 2,
+            effects: vec![skills::tests::skill_effect(1, EffectKind::DamageEffect, 1)],
+            ..skills::tests::skill_template(11933)
+        }),
+        1,
+    );
+    // Lone target first: it must still be hit.
+    cast(&server, &player, npc.obj_id, &skill);
+    assert_eq!(npc.data().unit.hp, 900);
+    let bystander = spawn(0x201, 3, 108.0);
+    let friend = spawn(0x202, 4, 106.0);
+    let far = spawn(0x203, 3, 120.0);
+    cast(&server, &player, npc.obj_id, &skill);
+    assert_eq!(npc.data().unit.hp, 800, "primary target hit once per cast");
+    assert_eq!(bystander.data().unit.hp, 900);
+    assert_eq!(friend.data().unit.hp, 1000);
+    assert_eq!(far.data().unit.hp, 1000);
+}

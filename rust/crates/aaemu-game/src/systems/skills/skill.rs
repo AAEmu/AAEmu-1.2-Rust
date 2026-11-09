@@ -1964,6 +1964,12 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             if let Some(o) = target_self.as_obj() {
                 units.push(o.clone());
             }
+        } else if selection == Some(SkillTargetSelection::Target) {
+            // Deviation from C#: `around_radius` excludes its origin, so a lone primary target
+            // of a target-selected area skill (Concussive Arrow 11933) was never hit.
+            if let Some(o) = target_self.as_obj().filter(|o| o.is_unit()) {
+                units.push(o.clone());
+            }
         }
         let relation = SkillTargetRelation::from_raw(i64::from(t.target_relation))
             .unwrap_or(SkillTargetRelation::Any);
