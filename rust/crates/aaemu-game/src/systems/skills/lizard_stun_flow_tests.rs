@@ -36,7 +36,7 @@ const BLOOD: u32 = 5264;
 const LIZARD_OBJ: u32 = 0x200;
 
 /// The tables the quest needs, loaded from the real database.
-fn real_data() -> Option<GameData> {
+pub(super) fn real_data() -> Option<GameData> {
     let path = std::env::var("AAEMU_COMPACT_DB").ok()?;
     let conn =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
