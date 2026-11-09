@@ -1048,3 +1048,335 @@ async fn real_spawn_floor_audit() {
         t0.elapsed()
     );
 }
+
+/// Roam-target path checks (2026-11-08 measurement): for the NPC spawns of main_world (open
+/// terrain / town split by the brushes within 12 m) and two instance halls, how often is the
+/// straight segment spawn -> random point in 6 m blocked, by `clip_move` (capsule blink,
+/// shortfall > 0.5 m), by a slope-following ray at 1 m (static + terrain, 0x101) and by the
+/// same ray against static geometry only (0x001).
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_roam_path_block_rates -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_roam_path_block_rates() {
+    use crate::systems::npcs::heightmap::ReferenceHeightAi;
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    crate::systems::ai::geodata::start(&server);
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let worlds: [(&str, u32, usize); 3] = [
+        ("main_world", 0, 3000),
+        ("instance_sal_temple", 100, 400),
+        ("instance_library", 101, 400),
+    ];
+    for (name, id, take) in worlds {
+        if id != 0 {
+            let t = server
+                .game_data
+                .worlds
+                .get_world_template_by_name(name)
+                .expect(name)
+                .clone();
+            server.world.create_world_instance(Arc::new(t), id);
+        }
+        let zone = server
+            .game_data
+            .worlds
+            .get_world_template_by_name(name)
+            .unwrap()
+            .zone_keys
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let spawns = world_npc_spawns(name);
+        let step = (spawns.len() / take).max(1);
+        // [open, town] for main_world; [all] otherwise
+        #[derive(Default, Clone, Copy)]
+        struct Acc {
+            n: u32,
+            clip: u32,
+            ray_ts: u32,
+            ray_s: u32,
+            only_clip: u32,
+            only_ray_ts: u32,
+            clip_us: u128,
+            ray_us: u128,
+            h05: u32,
+            h15: u32,
+            veg: u32,
+            floorish: u32,
+        }
+        let mut acc = [Acc::default(), Acc::default()];
+        for s in spawns.iter().step_by(step) {
+            let from = *s;
+            let town = if id == 0 {
+                let boxes = super::box_obstacles(
+                    &server,
+                    id,
+                    [from[0], from[1], from[2] + 2.0],
+                    [12.0, 12.0, 6.0],
+                    0.0,
+                    0x001,
+                )
+                .unwrap_or_default();
+                boxes
+                    .iter()
+                    .filter(|(o, _)| matches!(o, Owner::Brush { .. }))
+                    .count()
+                    >= 3
+            } else {
+                false
+            };
+            for _ in 0..3 {
+                let x = (rnd() - 0.5) * 12.0 + from[0];
+                let y = (rnd() - 0.5) * 12.0 + from[1];
+                let z = crate::systems::ai::npc::reference_height_in(
+                    &server,
+                    id,
+                    Some(ReferenceHeightAi {
+                        can_fly: false,
+                        hold_or_idle: false,
+                        spawner_z: Some(from[2]),
+                        world_z: from[2],
+                    }),
+                    x,
+                    y,
+                    from[2],
+                    zone,
+                );
+                let to = [x, y, z];
+                let a = &mut acc[usize::from(town)];
+                a.n += 1;
+                let t0 = Instant::now();
+                let clipped = super::displacement::clip_move(&server, id, from, to);
+                a.clip_us += t0.elapsed().as_micros();
+                let full = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2)).sqrt();
+                let clip_blocked = clipped.is_some_and(|c| {
+                    let got = ((c[0] - from[0]).powi(2) + (c[1] - from[1]).powi(2)).sqrt();
+                    got < full - 0.5
+                });
+                let t1 = Instant::now();
+                let ray = |mask: u32| {
+                    super::raycast(
+                        &server,
+                        id,
+                        [from[0], from[1], from[2] + 1.0],
+                        [to[0], to[1], to[2] + 1.0],
+                        mask,
+                        ray_flags::DEFAULT,
+                    )
+                    .is_some_and(|h| h.is_some())
+                };
+                let r_ts = ray(mask::STATIC_TERRAIN);
+                a.ray_us += t1.elapsed().as_micros();
+                let r_s = ray(0x001);
+                let hit_at = |h: f32| {
+                    super::raycast(
+                        &server,
+                        id,
+                        [from[0], from[1], from[2] + h],
+                        [to[0], to[1], to[2] + h],
+                        0x001,
+                        ray_flags::DEFAULT,
+                    )
+                    .flatten()
+                };
+                a.h05 += u32::from(hit_at(0.5).is_some());
+                a.h15 += u32::from(hit_at(1.5).is_some());
+                if let Some(h) = hit_at(1.0) {
+                    a.veg += u32::from(matches!(h.owner, Some(Owner::Vegetation { .. })));
+                    a.floorish += u32::from(h.normal.z.abs() > 0.6);
+                }
+                a.clip += u32::from(clip_blocked);
+                a.ray_ts += u32::from(r_ts);
+                a.ray_s += u32::from(r_s);
+                a.only_clip += u32::from(clip_blocked && !r_s);
+                a.only_ray_ts += u32::from(r_ts && !r_s);
+            }
+        }
+        for (label, a) in ["open/all", "town"].iter().zip(acc.iter()) {
+            if a.n == 0 {
+                continue;
+            }
+            println!(
+                "{name} [{label}]: n={} clip_move blocked {} ({:.1}%), ray1m static+terrain {} ({:.1}%), ray1m static {} ({:.1}%); clip-only(not static ray) {}, terrain-only ray {}; clip {:.0} us, ray {:.0} us avg; static ray at 0.5 m {}, at 1.5 m {}; 1 m hits on vegetation {}, on floor-like surfaces (|n.z|>0.6) {}",
+                a.n,
+                a.clip,
+                100.0 * a.clip as f32 / a.n as f32,
+                a.ray_ts,
+                100.0 * a.ray_ts as f32 / a.n as f32,
+                a.ray_s,
+                100.0 * a.ray_s as f32 / a.n as f32,
+                a.only_clip,
+                a.only_ray_ts,
+                a.clip_us as f32 / a.n as f32,
+                a.ray_us as f32 / a.n as f32,
+                a.h05,
+                a.h15,
+                a.veg,
+                a.floorish,
+            );
+        }
+        if id != 0 {
+            server.world.remove_world(id);
+            server.systems.ai.collision.remove(id);
+        }
+    }
+}
+
+/// The production wall check (`walk::walk_blocked`) on the roam targets of the measurement above,
+/// and on every segment of every authored `Data/Path/*.path` route in main_world (split into
+/// 4 m pieces with the ground height under each end; routes in the air are skipped).
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_walk_check_rates -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_walk_check_rates() {
+    use crate::systems::npcs::heightmap::ReferenceHeightAi;
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    crate::systems::ai::geodata::start(&server);
+    let mut seed = 0x1234_5678_9ABC_DEF1u64;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / (1u64 << 24) as f32
+    };
+    // roam targets
+    let spawns = world_npc_spawns("main_world");
+    let step = (spawns.len() / 3000).max(1);
+    let (mut n, mut blocked, mut town_n, mut town_blocked) = (0u32, 0u32, 0u32, 0u32);
+    let t0 = Instant::now();
+    for s in spawns.iter().step_by(step) {
+        let town = super::box_obstacles(
+            &server,
+            0,
+            [s[0], s[1], s[2] + 2.0],
+            [12.0, 12.0, 6.0],
+            0.0,
+            0x001,
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter(|(o, _)| matches!(o, Owner::Brush { .. }))
+        .count()
+            >= 3;
+        for _ in 0..3 {
+            let x = (rnd() - 0.5) * 12.0 + s[0];
+            let y = (rnd() - 0.5) * 12.0 + s[1];
+            let z = crate::systems::ai::npc::reference_height_in(
+                &server,
+                0,
+                Some(ReferenceHeightAi {
+                    can_fly: false,
+                    hold_or_idle: false,
+                    spawner_z: Some(s[2]),
+                    world_z: s[2],
+                }),
+                x,
+                y,
+                s[2],
+                0,
+            );
+            let b = super::walk::walk_blocked(&server, 0, *s, [x, y, z]).unwrap_or(false);
+            if town {
+                town_n += 1;
+                town_blocked += u32::from(b);
+            } else {
+                n += 1;
+                blocked += u32::from(b);
+            }
+        }
+    }
+    println!(
+        "roam targets: open {blocked}/{n} blocked ({:.2}%), town {town_blocked}/{town_n} ({:.2}%), {:.0} us per check",
+        100.0 * blocked as f32 / n.max(1) as f32,
+        100.0 * town_blocked as f32 / town_n.max(1) as f32,
+        t0.elapsed().as_micros() as f32 / (n + town_n).max(1) as f32
+    );
+    // authored routes
+    let folder = app_path().join("Data/Path");
+    let mut files: Vec<_> = std::fs::read_dir(&folder)
+        .expect("Data/Path")
+        .filter_map(|f| f.ok())
+        .map(|f| f.path())
+        .collect();
+    files.sort();
+    let max_xy = (e.cells.0 as f32 * 1024.0, e.cells.1 as f32 * 1024.0);
+    let (mut segs, mut bad_segs, mut skipped_air, mut skipped_out, mut routes_bad) =
+        (0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut worst: Vec<(u32, String)> = Vec::new();
+    let t1 = Instant::now();
+    let mut checks = 0u32;
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap_or_default();
+        let pts = crate::systems::ai::path_handler::parse_path_file(&text);
+        let mut route_bad = 0;
+        for w in pts.windows(2) {
+            let (a, b) = (w[0].position, w[1].position);
+            let zero = |p: crate::systems::skills::controllers::Vec3| {
+                p.x == 0.0 && p.y == 0.0 && p.z == 0.0
+            };
+            if zero(a) || zero(b) {
+                continue;
+            }
+            if [a, b]
+                .iter()
+                .any(|p| p.x < 0.0 || p.y < 0.0 || p.x >= max_xy.0 || p.y >= max_xy.1)
+            {
+                skipped_out += 1;
+                continue;
+            }
+            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+            let pieces = (len / 4.0).ceil().max(1.0) as usize;
+            let ground = |t: f32| -> Option<[f32; 3]> {
+                let (x, y) = (a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                let z = a.z + (b.z - a.z) * t;
+                let g = super::ground_height_probe(&server, 0, x, y, z, 2.0, 12.0).flatten()?;
+                Some([x, y, g])
+            };
+            let mut prev = ground(0.0);
+            let mut seg_blocked = false;
+            let mut seg_air = prev.is_none();
+            for i in 1..=pieces {
+                let cur = ground(i as f32 / pieces as f32);
+                match (prev, cur) {
+                    (Some(p), Some(c)) => {
+                        checks += 1;
+                        seg_blocked |= super::walk::walk_blocked(&server, 0, p, c).unwrap_or(false);
+                    }
+                    _ => seg_air = true,
+                }
+                prev = cur;
+            }
+            if seg_air {
+                skipped_air += 1;
+                continue;
+            }
+            segs += 1;
+            if seg_blocked {
+                bad_segs += 1;
+                route_bad += 1;
+            }
+        }
+        if route_bad > 0 {
+            routes_bad += 1;
+            worst.push((
+                route_bad,
+                f.file_name().unwrap().to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    worst.sort_by(|a, b| b.cmp(a));
+    println!(
+        "{} route files: {segs} ground segments checked ({checks} pieces, {:.0} us each), {bad_segs} blocked in {routes_bad} routes; skipped {skipped_air} (no ground within 12 m / air), {skipped_out} outside main_world",
+        files.len(),
+        t1.elapsed().as_micros() as f32 / checks.max(1) as f32
+    );
+    println!("most blocked routes: {:?}", &worst[..worst.len().min(15)]);
+}

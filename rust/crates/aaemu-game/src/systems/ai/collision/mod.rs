@@ -37,11 +37,12 @@ pub mod objects;
 pub mod query;
 pub mod residency;
 pub mod terrain;
+pub mod walk;
 pub mod water_areas;
 pub mod world;
 
 #[cfg(test)]
-mod flow_tests;
+pub(crate) mod flow_tests;
 #[cfg(test)]
 mod real_data_tests;
 #[cfg(test)]

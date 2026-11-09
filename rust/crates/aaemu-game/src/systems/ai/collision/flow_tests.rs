@@ -38,6 +38,13 @@ fn box_cgf() -> Vec<u8> {
 
 fn server(ground: f32) -> crate::GameServer {
     let s = test_server();
+    enable_collision(&s, ground);
+    s
+}
+
+/// Turns the collision service on for a test server: the synthetic box model and a terrain
+/// plane at `ground`.
+pub(crate) fn enable_collision(s: &crate::GameServer, ground: f32) {
     let mut files = HashMap::new();
     files.insert("game/objects/test/box.cgf".to_string(), box_cgf());
     s.systems
@@ -57,7 +64,29 @@ fn server(ground: f32) -> crate::GameServer {
             n: 1024,
         }))
         .unwrap_or_else(|_| panic!("terrain"));
-    s
+}
+
+/// Walls: the 2 m box model scaled by `scale` (a cube of `2 * scale` m) centred at `pos`, one
+/// `(obj id, pos, scale)` per box. One call sets the whole list (a doodad sync replaces the
+/// previous colliders).
+pub(crate) fn add_wall_boxes(s: &crate::GameServer, boxes: &[(u32, Vec3, f32)]) {
+    let pw = super::phys_world(s, 0).expect("collision world");
+    super::load_cell(s, &pw, (0, 0));
+    let files = super::files(s).expect("files");
+    let models = super::model_cache(s, &files);
+    let list: Vec<DoodadInfo> = boxes
+        .iter()
+        .map(|&(obj_id, pos, scale)| DoodadInfo {
+            obj_id,
+            model: "cgf://objects/test/box.cgf".into(),
+            pos,
+            q: Quat::IDENTITY,
+            scale,
+            flags: collision_flags(false, false, false),
+        })
+        .collect();
+    let mut shapes = HashMap::new();
+    apply_doodads(&pw, &files, &models, &mut shapes, &list);
 }
 
 #[tokio::test]

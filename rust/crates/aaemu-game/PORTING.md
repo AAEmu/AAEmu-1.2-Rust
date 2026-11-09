@@ -1696,6 +1696,23 @@ blobs, 1.0 GB heap of which about 600 MB are the heightmap cells, 8 s; 1.0 µs p
   so a re-aggro against a victim standing in the same spot plans from the NPC's new position.
   Each replan logs at `debug` with its reason (`new target` / `target moved` /
   `path exhausted`).
+* **Walls on straight walks (2026-11-08, Rust only)**: the C# walked roaming, returning and
+  path-following NPCs in a straight line and only fixed their Z, so NPCs crossed walls
+  (testers' reports). With the collision service on, `collision::walk::wall_distance` casts one
+  ray against static geometry (mask 0x001, no terrain) 0.5 m above the ground from the NPC to
+  the target (ground Z interpolated between the ends); hits on floor-like surfaces
+  (`|normal.z| > 0.7`: ramps, stair treads) are skipped, so slopes and stairs never count as
+  walls. **Roaming** (`behaviors::choose_roaming_position`): up to 4 random targets are tried;
+  if all are blocked the farthest walk is cut 0.6 m before its wall (when at least 1.5 m
+  remain), else the roam cycle is skipped (3-6 s). **ReturnState** (`plan_return_route`): when
+  the straight way to the idle position is blocked and `GeoDataMode` is on, the NPC walks a
+  navmesh route (`geodata::plan_route`, the chase machinery; corners reached in XY within
+  0.25 m); without a route it walks straight and the 20 s timeout teleport stays the backstop.
+  The check runs once per chosen target / return, not per step. Flyers and swimmers
+  (`moves_freely`) are not checked. With `Physics.Enable` off nothing changes. **FollowPath**
+  is unchanged: of 1508 authored ground segments of `Data/Path` in main_world only 7 (0.5 %,
+  5 routes, mostly flying / golem routes) cross a wall. Tested by `ai::behaviors::walk_tests`
+  and (gated) `collision::real_data_tests::{real_roam_path_block_rates, real_walk_check_rates}`.
 
 Reference: the 10.0.2.13 `cryaisystem_dedicate.dll` (image base 0x31000000), notes in
 `D:\aa-re\zone\agent_geom\sub_navmesh.md` (§2 formats, §5 gaps) and
