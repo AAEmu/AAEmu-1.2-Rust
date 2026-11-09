@@ -947,6 +947,7 @@ fn set_house_buff(server: &GameServer, house: &HouseRef, buff_id: u32, on: bool,
                     .iter_mut()
                     .find(|e| e.template.id == BUFF_BURNING_HOUSE && !e.is_ended())
                 {
+                    e.permanent = true;
                     e.duration = 0;
                     e.count = -1;
                 }

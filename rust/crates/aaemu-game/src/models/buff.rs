@@ -74,6 +74,10 @@ pub struct Buff {
     /// Never persisted with the character (battlefield buffs, which are granted for one match
     /// and removed on leave): `should_persist` is false whatever the template's save rule.
     pub session_only: bool,
+    /// Runs as an endless ticker (`duration 0`, `count -1`) whatever the template authors:
+    /// the lifecycle steps and refreshes keep the duration at 0 and the fixed tick damage is
+    /// not divided over the template duration. Set by the abandoned-house burning buff.
+    pub permanent: bool,
 }
 
 /// `EffectState`.
@@ -114,6 +118,7 @@ impl Buff {
             task_gen: 0,
             exit_replace: false,
             session_only: false,
+            permanent: false,
         }
     }
 
@@ -427,7 +432,9 @@ impl Buffs {
                 e.skill_caster_bytes = buff.skill_caster_bytes;
                 e.session_only |= buff.session_only;
                 e.start_time_ms = now_ms;
-                e.duration = if e.template.stack_rule == stack_rule::EXTEND {
+                e.duration = if e.permanent {
+                    0
+                } else if e.template.stack_rule == stack_rule::EXTEND {
                     buff.duration.wrapping_add(remaining as i32)
                 } else {
                     buff.duration

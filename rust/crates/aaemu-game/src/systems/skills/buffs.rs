@@ -822,7 +822,7 @@ fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff, previous_cas
     combat::on_taunt_buff_refreshed(server, owner, b, previous_caster_obj_id);
     let now = now_ms();
     let Some(gen) = set_buff(owner, b.index, |e| {
-        if e.duration == 0 {
+        if e.duration == 0 && !e.permanent {
             e.duration = template.get_duration(e.ab_level);
         }
         e.tick = template.tick;
@@ -937,7 +937,7 @@ pub fn schedule_effect(server: &GameServer, owner: &WorldObject, index: u32, rep
             });
             start(server, owner, index);
             let Some((gen, delay)) = set_buff(owner, index, |e| {
-                if e.duration == 0 {
+                if e.duration == 0 && !e.permanent {
                     e.duration = template.get_duration(e.ab_level);
                 }
                 e.tick = template.tick;
@@ -1505,7 +1505,7 @@ fn time_to_time_apply(
         };
         let skill_object = SkillObject::None;
         let mut source = EffectSource::from_buff(template.clone());
-        source.buff_permanent = b.duration == 0 && b.count == -1;
+        source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
         let args = EffectArgs {
             caster: caster.cloned(),
             caster_caster: buff_skill_caster(b),
@@ -1584,7 +1584,7 @@ pub(crate) fn do_area_tick(
             };
             let skill_object = SkillObject::None;
             let mut source = EffectSource::from_buff(template.clone());
-            source.buff_permanent = b.duration == 0 && b.count == -1;
+            source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
             let args = EffectArgs {
                 caster: Some(caster.clone()),
                 caster_caster: buff_skill_caster(b),
