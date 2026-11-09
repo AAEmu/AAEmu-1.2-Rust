@@ -12,7 +12,7 @@
 //! containers (leaf). Every mutating mail operation runs inside an [`ItemTxn`]; packets are
 //! queued in `txn.env.fx` so they stay ordered with the item task packets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use aaemu_commons::{Marshal, PacketStream};
@@ -153,11 +153,89 @@ pub const COST_EXPRESS_ATTACHMENT: i32 = 80;
 pub const COST_FREE_ATTACHMENT_COUNT: i32 = 1;
 /// `MailManager.NormalMailDelay` (30 minutes), in seconds.
 pub const NORMAL_MAIL_DELAY_SECS: i64 = 30 * 60;
-/// Ordinary player mail retention (the formerly unused `MailManager.MailExpireDelay`).
-/// Policy: 14 days from scheduled receipt, including a fresh period after a return.
-pub const MAIL_EXPIRE_DELAY_SECS: i64 = 14 * 24 * 3600;
-/// `AppConfiguration.Specialty.TradePackMailDelayInMinutes` default.
-pub const DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES: f64 = 480.0;
+/// The 1.2 client's mail retention windows (`mail_guide`, `ui_texts` 4465): normal mail is
+/// kept 5 days after it was read or 30 days unread; system mail 5 days after it was read or
+/// 90 days unread. `Configurations/Mail.json` / [`crate::systems::economy::config::MailConfig`]
+/// override these; the values here are the client defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailRetention {
+    /// Read normal (player) mail.
+    pub read_secs: i64,
+    /// Unread normal (player) mail, and any mail whose attachments are still unclaimed.
+    pub unread_secs: i64,
+    /// Read system mail.
+    pub system_read_secs: i64,
+    /// Unread system mail.
+    pub system_unread_secs: i64,
+    /// Strict `mail_guide` deletion for system mail with unclaimed attachments. Default false:
+    /// system mail has no player sender to return the escrow to, so it is kept until claimed.
+    pub delete_system_mail_with_attachments: bool,
+    /// First start that installed the retention windows (unix seconds). Mail that existed then
+    /// gets `deadline = max(rule, this + window)`; 0 disables the upgrade grace.
+    pub grace_start_unix: i64,
+}
+
+/// Seconds in one day.
+pub const SECONDS_PER_DAY: i64 = 24 * 3600;
+
+/// Minimum character level to send player mail. The 1.2 client receives
+/// `SCLevelRestrictionConfigPacket` with `mail = 10` (`packets/proxy.rs`, the same hard-coded
+/// value as the C#); the 10.x server's `LevelRestrictions.MailLevel` default is also 10.
+pub const MAIL_MIN_SEND_LEVEL: u8 = 10;
+
+/// `mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES`: `MAIL_REPETITION` (`ui_texts` 6315) says the
+/// same mail was sent "3 or more times in a row". Three consecutive identical body texts are
+/// allowed; the fourth is refused. The exact boundary is INFERRED from the text, and
+/// `MAIL_COOL_TIME` (`ui_texts` 6314) names no interval at all, so that check is not enforced.
+pub const MAIL_REPEAT_LIMIT: u32 = 3;
+
+/// The last player-to-player mail sent in a row (`MAIL_REPETITION`). The key is the receiver,
+/// title and body text, so item-only mails with an empty body never match each other, and the
+/// same text sent to different characters is not "the same mail". Empty-body sends still reset
+/// the streak (they are different content), they just cannot be refused by this check.
+#[derive(Debug, Clone, Default)]
+pub struct MailSendHistory {
+    pub receiver_id: u32,
+    pub title: String,
+    pub text: String,
+    pub repeats: u32,
+}
+
+impl Default for MailRetention {
+    fn default() -> Self {
+        Self {
+            read_secs: 5 * SECONDS_PER_DAY,
+            unread_secs: 30 * SECONDS_PER_DAY,
+            system_read_secs: 5 * SECONDS_PER_DAY,
+            system_unread_secs: 90 * SECONDS_PER_DAY,
+            delete_system_mail_with_attachments: false,
+            grace_start_unix: 0,
+        }
+    }
+}
+
+impl MailRetention {
+    /// The configured windows. Negative day counts are clamped to 0 (expire immediately).
+    pub fn from_config(c: &super::config::MailConfig) -> Self {
+        fn days(days: i64) -> i64 {
+            days.max(0).saturating_mul(SECONDS_PER_DAY)
+        }
+        Self {
+            read_secs: days(c.read_retention_days),
+            unread_secs: days(c.unread_retention_days),
+            system_read_secs: days(c.system_read_retention_days),
+            system_unread_secs: days(c.system_unread_retention_days),
+            delete_system_mail_with_attachments: c.delete_system_mail_with_attachments,
+            grace_start_unix: c.retention_grace_start_unix.max(0),
+        }
+    }
+}
+
+/// `AppConfiguration.Specialty.TradePackMailDelayInMinutes` default. The 1.2 client says the
+/// trade-pack sale price, with 5 % interest, arrives by mail after 22 hours
+/// (`SOLD_BACKPACK_REFUND_SENT_BY_MAIL`, `ui_texts` 4743; `sell_backpack_content`, 6195). The
+/// C# default was 480 minutes (8 hours).
+pub const DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES: f64 = 22.0 * 60.0;
 
 /// `Item.Coins`, `Item.TaxCertificate`, `Item.BoundTaxCertificate`.
 pub const ITEM_COINS: u32 = 500;
@@ -296,17 +374,85 @@ impl BaseMail {
             && (self.mail_type == mail_type::NORMAL || self.mail_type == mail_type::EXPRESS)
     }
 
-    /// Only player mail belongs to this timer. System/quest rewards can also use NORMAL
-    /// but have sender id zero; tax, auction and commercial mail have separate owners.
-    fn is_expired_at(&self, time: UnixTime) -> bool {
-        self.header.sender_id > 0
-            && self.header.receiver_id > 0
-            && matches!(
-                self.mail_type,
-                mail_type::NORMAL | mail_type::EXPRESS | mail_type::REGISTERED
-            )
-            && self.body.recv_date <= time
-            && time.saturating_sub(self.body.recv_date) >= MAIL_EXPIRE_DELAY_SECS
+    /// The expiry return path: an expired mail with unclaimed attachments goes back to its
+    /// sender even after it was read (the guide promises the attachments are returned). A
+    /// REGISTERED letter, a self-addressed one or a letter already returned once stays put;
+    /// the caller keeps it instead of destroying the escrow.
+    pub fn can_return_expired_mail(&self) -> bool {
+        self.has_unclaimed_attachments()
+            && !self.header.returned
+            && self.header.sender_id != self.header.receiver_id
+            && self.header.sender_id > 0
+            && (self.mail_type == mail_type::NORMAL || self.mail_type == mail_type::EXPRESS)
+    }
+
+    /// Whether this mail keeps its own timer. The commercial mailbox (cash shop / ArcheBill)
+    /// has a separate guide (`comercial_mail_guide`, `ui_texts` 4464: read mail is deleted at
+    /// once, unread mail is kept), so its types never expire through the ordinary mailbox timer.
+    pub fn has_retention(&self) -> bool {
+        !matches!(
+            self.mail_type,
+            mail_type::INVALID_MAIL_TYPE
+                | mail_type::CHARGED
+                | mail_type::PROMOTION
+                | mail_type::MIA_SEND
+                | mail_type::MIA_RECV
+        )
+    }
+
+    /// Whether this mail is ordinary player mail (`mail_guide` "normal mail") rather than the
+    /// system mail bucket. Types 1-3 are the player-to-player letters; every other type that
+    /// reaches the ordinary mailbox is system mail.
+    pub fn is_normal_mail(&self) -> bool {
+        matches!(
+            self.mail_type,
+            mail_type::NORMAL | mail_type::EXPRESS | mail_type::REGISTERED | mail_type::SPAM
+        )
+    }
+
+    /// `mail_guide` (`ui_texts` 4465): a mail whose attachments are still unclaimed keeps the
+    /// unread deadline, whether or not it was opened.
+    fn has_unclaimed_attachments(&self) -> bool {
+        self.get_total_attachment_count() > 0
+    }
+
+    /// Mail expiry. Normal mail: 5 days after it was read, or 30 days unread. System mail:
+    /// 5 days after it was read, or 90 days unread. Mail with unclaimed attachments keeps the
+    /// unread deadline. System mail with unclaimed attachments is kept until claimed: there is
+    /// no player sender to return the escrow to, and destroying it would lose the items,
+    /// coins or billing. The strict `mail_guide` deletion is an explicit operator option.
+    /// The read clock is `open_date` (set when the mail is opened or when an attachment is
+    /// claimed); mails stored before those writes have no read time and use the receipt date,
+    /// like the 10.x server. Mail that existed before the retention update gets one full window
+    /// from the first start that installed it (the upgrade grace).
+    fn is_expired_at(&self, time: UnixTime, retention: &MailRetention) -> bool {
+        if !self.has_retention() || self.header.receiver_id == 0 || self.body.recv_date > time {
+            return false;
+        }
+        let unclaimed = self.has_unclaimed_attachments();
+        if unclaimed && !self.is_normal_mail() && !retention.delete_system_mail_with_attachments {
+            return false;
+        }
+        let (read_secs, unread_secs) = if self.is_normal_mail() {
+            (retention.read_secs, retention.unread_secs)
+        } else {
+            (retention.system_read_secs, retention.system_unread_secs)
+        };
+        let (window, base) = if self.header.status == mail_status::READ && !unclaimed {
+            let read_at = if self.open_date > 0 {
+                self.open_date
+            } else {
+                self.body.recv_date
+            };
+            (read_secs, read_at)
+        } else {
+            (unread_secs, self.body.recv_date)
+        };
+        let mut deadline = base.saturating_add(window);
+        if retention.grace_start_unix > 0 && self.body.recv_date < retention.grace_start_unix {
+            deadline = deadline.max(retention.grace_start_unix.saturating_add(window));
+        }
+        time >= deadline
     }
 
     /// `MailHeader` as written on the wire.
@@ -582,6 +728,13 @@ pub struct MailManager {
     pub hooks: MailHooks,
     /// `AppConfiguration.Specialty.TradePackMailDelayInMinutes` (`/settradepackmaildelay`).
     trade_pack_mail_delay_minutes: Mutex<f64>,
+    /// `Mail` retention (`Configurations/Mail.json`, the 1.2 `mail_guide` windows).
+    retention: Mutex<MailRetention>,
+    /// Last body text per sender (`MAIL_REPETITION`), see [MailSendHistory].
+    send_history: Mutex<HashMap<u32, MailSendHistory>>,
+    /// Mail ids whose "kept, cannot be returned" warning was already logged, so the 5-second
+    /// expiry tick does not repeat it.
+    kept_warned: Mutex<HashSet<i64>>,
 }
 
 #[derive(Debug)]
@@ -597,6 +750,9 @@ impl Default for MailManager {
             pending_save: Mutex::new(None),
             hooks: MailHooks::default(),
             trade_pack_mail_delay_minutes: Mutex::new(DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES),
+            retention: Mutex::new(MailRetention::default()),
+            send_history: Mutex::new(HashMap::new()),
+            kept_warned: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -619,6 +775,83 @@ impl MailManager {
             .trade_pack_mail_delay_minutes
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = minutes;
+    }
+
+    /// The active retention windows (`Configurations/Mail.json`).
+    pub fn retention(&self) -> MailRetention {
+        *self.retention.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_retention(&self, retention: MailRetention) {
+        *self.retention.lock().unwrap_or_else(|e| e.into_inner()) = retention;
+    }
+
+    /// Whether sending this mail now would be the fourth identical mail in a row
+    /// (`MAIL_REPETITION`). The key is (receiver, title, body): the same text sent to different
+    /// characters is not the same mail, and a body-less item-only mail has no text to compare,
+    /// so it is never refused here. The caller records the send after it succeeds.
+    pub fn would_repeat_send(
+        &self,
+        character_id: u32,
+        receiver_id: u32,
+        title: &str,
+        text: &str,
+    ) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let history = self.send_history.lock().unwrap_or_else(|e| e.into_inner());
+        history.get(&character_id).is_some_and(|h| {
+            h.receiver_id == receiver_id
+                && h.title == title
+                && h.text == text
+                && h.repeats >= MAIL_REPEAT_LIMIT
+        })
+    }
+
+    /// Records a successful player-to-player send for [`Self::would_repeat_send`]. An
+    /// empty-body send is recorded too, so it breaks the "in a row" streak of a text mail.
+    pub fn record_send(&self, character_id: u32, receiver_id: u32, title: &str, text: &str) {
+        let mut history = self.send_history.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = history.entry(character_id).or_default();
+        if entry.receiver_id == receiver_id && entry.title == title && entry.text == text {
+            entry.repeats = entry.repeats.saturating_add(1);
+        } else {
+            entry.receiver_id = receiver_id;
+            entry.title = title.to_string();
+            entry.text = text.to_string();
+            entry.repeats = 1;
+        }
+    }
+
+    /// Logs the "kept, cannot be returned" warning once per mail id.
+    pub fn warn_kept_once(&self, mail_id: i64, mail_type: u8, sender_id: u32) {
+        let mut warned = self.kept_warned.lock().unwrap_or_else(|e| e.into_inner());
+        if !warned.insert(mail_id) {
+            return;
+        }
+        tracing::warn!(
+            mail_id,
+            mail_type,
+            sender_id,
+            "Expired player mail with unclaimed attachments cannot be returned; keeping it"
+        );
+    }
+
+    /// A deleted mail id may be recycled; let the new letter log its own warning.
+    pub fn forget_kept_warning(&self, mail_id: i64) {
+        self.kept_warned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&mail_id);
+    }
+
+    /// Forgets the sender's repetition streak (leave world).
+    pub fn clear_send_history(&self, character_id: u32) {
+        self.send_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&character_id);
     }
 
     /// `GetMailById(id)` (a copy).
@@ -999,6 +1232,7 @@ pub fn delete_mail_in(server: &GameServer, st: &mut MailState, id: i64) -> bool 
         st.deletion_versions.insert(id, Arc::new(()));
     }
     server.ids.mail.release_id(id as u32);
+    server.systems.economy.mail.forget_kept_warning(id);
     true
 }
 
@@ -1329,7 +1563,8 @@ pub fn notify_delete_mail_by_name_if_online(
 pub fn get_current_mail_list(txn: &mut ItemTxn<'_>, character_id: u32) -> Vec<i64> {
     let server = txn.server;
     let now = now();
-    expire_ordinary_mail_at(txn, now);
+    let retention = server.systems.economy.mail.retention();
+    expire_due_mail_at(txn, now, &retention);
     // Try to grab the actual online Character object to send live updates
     let character = server.world.character_by_id(character_id);
     let mut st = server.systems.economy.mail.state();
@@ -1406,13 +1641,16 @@ pub fn check_all_mail_timings(txn: &mut ItemTxn<'_>) {
 pub fn check_all_mail_timings_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
     tracing::trace!("CheckAllMailTimings");
     // Expire before delivery: logging in after the deadline must not first announce stale mail.
-    expire_ordinary_mail_at(txn, time);
     let server = txn.server;
+    let retention = server.systems.economy.mail.retention();
+    expire_due_mail_at(txn, time, &retention);
     let mut st = server.systems.economy.mail.state();
     let undelivered: Vec<i64> = st
         .all
         .iter()
-        .filter(|(_, m)| m.body.recv_date <= time && !m.is_delivered && !m.is_expired_at(time))
+        .filter(|(_, m)| {
+            m.body.recv_date <= time && !m.is_delivered && !m.is_expired_at(time, &retention)
+        })
         .map(|(k, _)| k)
         .collect();
     let mut delivered = 0;
@@ -1428,7 +1666,7 @@ pub fn check_all_mail_timings_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
     }
 }
 
-fn expire_ordinary_mail_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
+fn expire_due_mail_at(txn: &mut ItemTxn<'_>, time: UnixTime, retention: &MailRetention) {
     let ids: Vec<_> = txn
         .server
         .systems
@@ -1437,7 +1675,7 @@ fn expire_ordinary_mail_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
         .state()
         .all
         .iter()
-        .filter(|(_, m)| m.is_expired_at(time))
+        .filter(|(_, m)| m.is_expired_at(time, retention))
         .map(|(id, _)| id)
         .collect();
     for id in ids {
@@ -1473,17 +1711,28 @@ fn refresh_received_count(
     c.unread_mail
 }
 
-/// Returns true when a requested ordinary mail has expired (also when a damaged escrow
-/// needs repair). Packet operations must not claim/delete/return it between timer ticks.
+/// `mail_guide` (`ui_texts` 4465) expiry action for a due mail: unread player mail, and any
+/// player mail with unclaimed attachments, is returned to the sender; system mail with
+/// unclaimed attachments is kept (there is no sender to return it to); mail whose escrow
+/// cannot be returned (REGISTERED, deleted sender, already returned) is kept, never destroyed.
+/// Only attachment-free mail is deleted, as the guide says.
+///
+/// Returns true when the mail left the receiver (returned or deleted) or a return is pending
+/// on a damaged escrow, so packet operations must not claim/delete/return it between timer
+/// ticks. Returns false when the mail stays valid (kept escrow or no expiry).
 /// All mutations use the caller's ItemTxn, like sends, takes and financial save snapshots.
 pub(super) fn expire_mail_at(txn: &mut ItemTxn<'_>, id: i64, time: UnixTime) -> bool {
     let server = txn.server;
+    let retention = server.systems.economy.mail.retention();
     let Some(mail) = server.systems.economy.mail.get_mail_by_id(id) else {
         return false;
     };
-    if !mail.is_expired_at(time) {
+    if !mail.is_expired_at(time, &retention) {
         return false;
     }
+    let unclaimed = mail.has_unclaimed_attachments();
+    // Unread player mail goes back to the sender (`CanReturnMail`), with or without
+    // attachments, exactly as before.
     if mail.can_return_mail()
         && server
             .names
@@ -1500,10 +1749,51 @@ pub(super) fn expire_mail_at(txn: &mut ItemTxn<'_>, id: i64, time: UnixTime) -> 
         }
         return true;
     }
+    if unclaimed {
+        if mail.is_normal_mail() {
+            // Read player mail with unclaimed attachments: the guide returns the attachments
+            // to the sender, so use the expiry return path even though the letter was opened.
+            if mail.can_return_expired_mail()
+                && server
+                    .names
+                    .get_character_name(mail.header.sender_id)
+                    .is_some()
+            {
+                if !return_expired_to_sender_at(txn, id, time) {
+                    tracing::debug!(
+                        mail_id = id,
+                        "Expired mail return deferred: escrow needs repair"
+                    );
+                }
+                return true;
+            }
+            // REGISTERED mail, a deleted sender, a self-addressed letter or one already
+            // returned once cannot be returned again. Keep the escrow: destroying it would
+            // delete items/coins the player can still claim. The warning is logged once per
+            // mail id (the expiry tick runs every 5 seconds).
+            server
+                .systems
+                .economy
+                .mail
+                .warn_kept_once(id, mail.mail_type, mail.header.sender_id);
+            return false;
+        }
+        // System mail has no player sender to return the escrow to. The default keeps it
+        // until the receiver claims it; only the operator's strict `mail_guide` mode below
+        // deletes it. `is_expired_at` already filters the default case, so this is reached
+        // only with `DeleteSystemMailWithAttachments = true`.
+        tracing::warn!(
+            mail_id = id,
+            mail_type = mail.mail_type,
+            items = mail.body.attachments.len(),
+            "Expired system mail with unclaimed attachments is deleted (strict config)"
+        );
+    }
 
-    // Read, registered, self-addressed, already returned, or sender deleted: terminal
-    // expiry. Only this receiver's mail escrow may be destroyed. A stale reference to
-    // an item already taken into a bag must never delete that item.
+    // Attachment-free mail (or system mail in the operator's strict mode) expires terminally:
+    // the guide says the letter is deleted after its window. Mail with unclaimed attachments
+    // never reaches the destroy loop below unless the operator opted into strict system-mail
+    // deletion: player attachments are returned to the sender, system attachments are kept.
     for &item_id in &mail.body.attachments {
         let Some(mut item) = server.items.item_by_id(item_id) else {
             continue;
@@ -1881,12 +2171,32 @@ pub fn return_to_sender(txn: &mut ItemTxn<'_>, mail_id: i64) -> bool {
 }
 
 fn return_to_sender_at(txn: &mut ItemTxn<'_>, mail_id: i64, time: UnixTime) -> bool {
+    return_to_sender_with(txn, mail_id, time, false)
+}
+
+/// Expiry return: also valid for a read player letter that still has unclaimed attachments
+/// (`can_return_expired_mail`). The letter flips once and the escrow moves once.
+fn return_expired_to_sender_at(txn: &mut ItemTxn<'_>, mail_id: i64, time: UnixTime) -> bool {
+    return_to_sender_with(txn, mail_id, time, true)
+}
+
+fn return_to_sender_with(
+    txn: &mut ItemTxn<'_>,
+    mail_id: i64,
+    time: UnixTime,
+    expired: bool,
+) -> bool {
     let server = txn.server;
     let mails = &server.systems.economy.mail;
     let Some(mail) = mails.get_mail_by_id(mail_id) else {
         return false;
     };
-    if !mail.can_return_mail() {
+    let can_return = if expired {
+        mail.can_return_expired_mail()
+    } else {
+        mail.can_return_mail()
+    };
+    if !can_return {
         return false;
     }
     let Some(original_sender) = server.names.get_character_name(mail.header.sender_id) else {

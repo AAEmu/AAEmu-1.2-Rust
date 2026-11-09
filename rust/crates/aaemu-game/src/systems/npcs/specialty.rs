@@ -237,7 +237,8 @@ impl Default for SpecialtyConfig {
             ratio_increase_per_tick: 5.0,
             ratio_decrease_tick_minutes: 1.0,
             ratio_regen_tick_minutes: 60.0,
-            trade_pack_mail_delay_in_minutes: 480.0,
+            // The 1.2 client's 22-hour trade-pack mail (`ui_texts` 4743 / 6195).
+            trade_pack_mail_delay_in_minutes: 22.0 * 60.0,
         }
     }
 }

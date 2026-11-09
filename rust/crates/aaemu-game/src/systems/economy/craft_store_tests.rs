@@ -2829,10 +2829,10 @@ async fn sold_pack_with_a_crafter_delivers_the_crafter_mail() {
     assert_eq!(mails.len(), 2, "seller and crafter mails: {mails:?}");
     assert!(mails
         .iter()
-        .any(|m| m.0 == 1 && m.1 == "Speciality Payment [Delivery]" && m.2 == 7644));
+        .any(|m| m.0 == 1 && m.1 == "Specialty Payment [Delivery]" && m.2 == 7644));
     assert!(mails
         .iter()
-        .any(|m| m.0 == 2 && m.1 == "Speciality Payment [Crafter]" && m.2 == 1911));
+        .any(|m| m.0 == 2 && m.1 == "Specialty Payment [Crafter]" && m.2 == 1911));
 }
 
 // ---------------------------------------------------------------------------------------------

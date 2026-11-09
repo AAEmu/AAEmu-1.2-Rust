@@ -242,6 +242,11 @@ impl System {
         shop_limits::load(server).await?;
         tracing::debug!("economy: initializing specialty");
         specialty::initialize(server);
+        server
+            .systems
+            .economy
+            .mail
+            .set_retention(mail::MailRetention::from_config(&server.config.mail));
         tracing::debug!("economy: loading mails");
         server.systems.economy.mail.load(server).await?;
         mail::start_delivery_task(server);
@@ -285,6 +290,7 @@ pub fn on_leave_world(server: &GameServer, player: &crate::world::PlayerRef) {
     let id = player.character_id;
     e.store.wipe_buyback(server, id);
     e.craft.forget(id);
+    e.mail.clear_send_history(id);
     e.previous_backpack
         .lock()
         .unwrap_or_else(|e| e.into_inner())

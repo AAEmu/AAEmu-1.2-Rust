@@ -139,6 +139,10 @@ pub fn send_mail_to_player(
     item_slots: &[(u8, u8)],
 ) -> u8 {
     let server = txn.server;
+    // Level gate the client is told about (`SCLevelRestrictionConfigPacket.mail = 10`).
+    if player.data().unit.level < mail::MAIL_MIN_SEND_LEVEL {
+        return mail_result::LEVEL_TOO_LOW;
+    }
     if money0 < 0 || money1 != 0 || money2 != 0 {
         return mail_result::INVALID_LETTER_FORMAT;
     }
@@ -151,7 +155,11 @@ pub fn send_mail_to_player(
     ) {
         return mail_result::INVALID_LETTER_FORMAT;
     }
-    if receiver_name.trim().is_empty() || server.names.get_character_id(receiver_name) == 0 {
+    if receiver_name.trim().is_empty() {
+        return mail_result::UNABLE_TO_FIND_RECIPIENT;
+    }
+    let receiver_id = server.names.get_character_id(receiver_name);
+    if receiver_id == 0 {
         return mail_result::UNABLE_TO_FIND_RECIPIENT;
     }
 
@@ -173,6 +181,19 @@ pub fn send_mail_to_player(
         if super::item_security::is_locked(&item) {
             return mail_result::ITEM_LOCKED;
         }
+    }
+
+    // `MAIL_REPETITION`: three identical mails in a row are allowed, the fourth is not. The
+    // key is (receiver, title, body); empty-body item-only mails have no text to compare and
+    // are never refused. Recorded only after the mail is stored below, so failed validations
+    // do not consume a try.
+    if server
+        .systems
+        .economy
+        .mail
+        .would_repeat_send(player.character_id, receiver_id, title, text)
+    {
+        return mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES;
     }
 
     let mut mail = MailPlayerToPlayer::new(server, player, receiver_name);
@@ -214,6 +235,11 @@ pub fn send_mail_to_player(
     let Some(id) = mail::send_mail(txn, mail.mail) else {
         return mail_result::MAIL_ERROR_OCCURRED;
     };
+    server
+        .systems
+        .economy
+        .mail
+        .record_send(player.character_id, receiver_id, title, text);
     let Some(header) = server
         .systems
         .economy
@@ -468,6 +494,11 @@ pub fn get_attached(
             if m.header.status == mail_status::UNREAD && (took_money || !item_slot_list.is_empty())
             {
                 m.header.status = mail_status::READ;
+                // `mail_guide` keeps read mail for 5 days; claiming an attachment counts as
+                // reading it, so the read clock starts here when the body was never opened.
+                if m.open_date == 0 {
+                    m.open_date = mail::now();
+                }
                 m.is_dirty = true;
                 Some(m.mail_type)
             } else {
