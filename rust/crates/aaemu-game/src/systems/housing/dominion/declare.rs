@@ -150,6 +150,184 @@ fn refuse(player: &crate::world::PlayerRef, error: i16) -> Result<(), i16> {
     Err(error)
 }
 
+/// The zone group of a spot, `None` when it has no authored zone (or zone group 0, which the
+/// 1.2 client's dominion check also refuses).
+fn zone_group_at(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    x: f32,
+    y: f32,
+) -> Option<u32> {
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let group = server
+        .game_data
+        .zones
+        .zone_by_key(world.zone_id_at(x, y))?
+        .group_id;
+    (group != 0).then_some(group)
+}
+
+/// The spots the distance checks inspect: the declared point, plus rings at fractions of
+/// `margin` in 16 directions. The 1.2 server's exact border query is UNKNOWN, so the ring
+/// sampling is an INFERRED approximation of "within `margin` of another zone".
+fn sample_points(x: f32, y: f32, margin: f32) -> Vec<(f32, f32)> {
+    let mut points = vec![(x, y)];
+    if margin.is_finite() && margin > 0.0 {
+        for step in 1..=4 {
+            let radius = margin * step as f32 / 4.0;
+            for direction in 0..16 {
+                let angle = std::f32::consts::TAU * direction as f32 / 16.0;
+                points.push((x + radius * angle.cos(), y + radius * angle.sin()));
+            }
+        }
+    }
+    points
+}
+
+/// 633: the spot is inside a house plot, or within `margin` metres of its edge. The server's
+/// house plot is the `garden_radius` square (`GetHouseAtLocation`); the client's shrunken
+/// collision box needs render bounds the server does not have.
+fn house_near(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    x: f32,
+    y: f32,
+    margin: f32,
+) -> bool {
+    if !x.is_finite() || !y.is_finite() {
+        return true;
+    }
+    if !margin.is_finite() || margin <= 0.0 {
+        return crate::systems::housing::house_at_location_in_world(server, world.id, x, y)
+            .is_some();
+    }
+    server.systems.housing.manager.all().iter().any(|house| {
+        let Some(template) = crate::systems::housing::manager::template_of(server, house) else {
+            return false;
+        };
+        let (hx, hy, instance) = {
+            let h = house.data();
+            (
+                h.unit.transform.x,
+                h.unit.transform.y,
+                h.unit.transform.instance_id,
+            )
+        };
+        if instance != world.id {
+            return false;
+        }
+        let radius = template.garden_radius.max(0.0);
+        let dx = ((x - hx).abs() - radius).max(0.0);
+        let dy = ((y - hy).abs() - radius).max(0.0);
+        dx * dx + dy * dy <= margin * margin
+    })
+}
+
+/// 661: the spot is outside the besieged dominion's zone group, or another zone group is
+/// within `margin` metres of it.
+fn other_zone_group_within(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    x: f32,
+    y: f32,
+    zone_group_id: u32,
+    margin: f32,
+) -> bool {
+    if zone_group_at(server, world, x, y) != Some(zone_group_id) {
+        return true;
+    }
+    if !margin.is_finite() || margin <= 0.0 {
+        return false;
+    }
+    sample_points(x, y, margin).into_iter().any(|(sx, sy)| {
+        zone_group_at(server, world, sx, sy).is_some_and(|group| group != zone_group_id)
+    })
+}
+
+/// A zone group at peace: a group with no `conflict_zones` row never enters a PvP state (the
+/// combat fallback is `ConflictType.Peace`, as in the C#), and a row whose current state is
+/// `Peace` is a peace zone now. This is the only 1.2 peace data available; the declaration
+/// rule itself is UNKNOWN (`PORTING.md`).
+fn is_peace_group(server: &GameServer, group: u32) -> bool {
+    match server.world.zone_conflicts.get(server, group) {
+        Some(conflict) => conflict.current_state == crate::data::world_data::conflict_type::PEACE,
+        None => true,
+    }
+}
+
+/// 625: another zone group at peace lies within `margin` metres. The besieged group itself is
+/// not a peace refusal: the siege zones are not `conflict_zones` rows, so counting it would
+/// refuse every declaration.
+fn peace_zone_within(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    x: f32,
+    y: f32,
+    zone_group_id: u32,
+    margin: f32,
+) -> bool {
+    if !x.is_finite() || !y.is_finite() {
+        return true;
+    }
+    sample_points(x, y, margin).into_iter().any(|(sx, sy)| {
+        zone_group_at(server, world, sx, sy)
+            .is_some_and(|group| group != zone_group_id && is_peace_group(server, group))
+    })
+}
+
+/// A slave or mate the caster owns (the camp spot is one metre in front of the caster, so its
+/// own mount must not refuse the placement).
+fn owned_companion(world: &crate::world::WorldInstance, character_id: u32, obj_id: u32) -> bool {
+    world.object(obj_id).is_some_and(|object| match object {
+        crate::world::WorldObject::Slave(slave) => slave.data().unit.owner_id == character_id,
+        crate::world::WorldObject::Mate(mate) => mate.data().unit.owner_id == character_id,
+        _ => false,
+    })
+}
+
+/// House placement's entity mask (`FUN_39335860`, `systems::housing::placement`).
+const OBSTACLE_MASK: u32 = 0x1f;
+
+/// 741: the collision query around the spot reports an obstacle. The query is the house
+/// builder's (`box_obstacles`); houses are the 633 rule, and vegetation, brush, the caster and
+/// its own mount are not obstacles. Terrain is reported only when the query cannot complete.
+fn obstacle_near(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    player: &crate::world::PlayerRef,
+    pos: (f32, f32, f32),
+    radius: f32,
+) -> bool {
+    if !radius.is_finite() || radius <= 0.0 {
+        return false;
+    }
+    use crate::systems::ai::collision::world::{ObjKind, Owner};
+    let Some(found) = crate::systems::ai::collision::box_obstacles(
+        server,
+        world.id,
+        [pos.0, pos.1, pos.2],
+        [radius, radius, radius],
+        0.0,
+        OBSTACLE_MASK,
+    ) else {
+        return false;
+    };
+    let character_id = player.character_id;
+    found.iter().any(|(owner, _)| match owner {
+        Owner::Terrain => true,
+        Owner::Object {
+            kind: ObjKind::House,
+            ..
+        } => false,
+        Owner::Object { obj_id, .. } => {
+            *obj_id != player.obj_id && !owned_companion(world, character_id, *obj_id)
+        }
+        Owner::Brush { .. } | Owner::Vegetation { .. } | Owner::Sentinel => false,
+    })
+}
+
 /// Validate an item cast of skill 16918 and record the declaration (WP-SD2b).
 ///
 /// The skill's source item was already taken by the cast path; a refusal returns `Err` so
@@ -158,11 +336,12 @@ fn refuse(player: &crate::world::PlayerRef, error: i16) -> Result<(), i16> {
 /// the declaration cannot race the period it was accepted in. The order of the refusals is
 /// this server's policy, the ids are the client's (ui_texts).
 ///
-/// Capture-pending (documented in PORTING.md): the placement thresholds behind 625 (near a
-/// resurrection point), 633 (near a house), 661 (near another zone) and 741 (obstacle), and
-/// the "siege too imminent" window behind 760, are UNKNOWN. They are not enforced here (no
-/// refusal today); 459 is used for a missing SiegeMaster policy although 581 is the other
-/// candidate text. The in-game cancel trigger is UNKNOWN; cancelling is a GM command.
+/// The placement refusals 633 (house), 661 (another zone group), 625 (peace area, behind a
+/// config switch) and 741 (obstacles) run after the authored `radius_declare` with the
+/// `Housing.SiegeDeclare*` thresholds; every numeric threshold is INFERRED/capture-pending
+/// (PORTING.md). The "siege too imminent" window behind 760 is UNKNOWN and not enforced;
+/// 459 is used for a missing SiegeMaster policy although 581 is the other candidate text.
+/// The in-game cancel trigger is UNKNOWN; cancelling is a GM command.
 pub fn handle_camp_use(
     server: &GameServer,
     args: &crate::systems::skills::effects::EffectArgs<'_>,
@@ -279,6 +458,55 @@ pub fn handle_camp_use(
         + (f64::from(pos.y) - f64::from(origin.y)).powi(2);
     if !distance2.is_finite() || distance2 < radius.powi(2) {
         return refuse(player, error::SIEGE_DECLARE_TOO_NEAR);
+    }
+    // The placement rules act on the camp's real position, which is one metre in front of
+    // the caster, in the caster's world.
+    let Some(player_world) = server
+        .world
+        .world_of(&crate::world::WorldObject::from(player))
+    else {
+        return refuse(player, error::SIEGE_DECLARE_NO_DOMINION);
+    };
+    let housing = &server.config.housing;
+    if house_near(
+        server,
+        &player_world,
+        pos.x,
+        pos.y,
+        housing.siege_declare_house_margin,
+    ) {
+        return refuse(player, error::SIEGE_CANNOT_DECLARE_NEAR_HOUSE);
+    }
+    if other_zone_group_within(
+        server,
+        &player_world,
+        pos.x,
+        pos.y,
+        zone,
+        housing.siege_declare_zone_margin,
+    ) {
+        return refuse(player, error::SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE);
+    }
+    if housing.siege_declare_peace_check
+        && peace_zone_within(
+            server,
+            &player_world,
+            pos.x,
+            pos.y,
+            zone,
+            housing.siege_declare_peace_margin,
+        )
+    {
+        return refuse(player, error::SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS);
+    }
+    if obstacle_near(
+        server,
+        &player_world,
+        player,
+        (pos.x, pos.y, pos.z),
+        housing.siege_declare_obstacle_radius,
+    ) {
+        return refuse(player, error::SIEGE_CANNOT_DECLARE_OBSTACLE);
     }
     // SiegeMaster rank policy (ui label 2385). 459 is the chosen text; 581 is the other
     // candidate (capture-pending).

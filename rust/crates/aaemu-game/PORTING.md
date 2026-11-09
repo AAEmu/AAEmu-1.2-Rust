@@ -5058,14 +5058,64 @@ and in NPC wandering / buff remaining times.
   `dominion::rights::join_policy_allows` (`/joinsiege` and `/dominion register`), so no path
   can add a member whose rank forbids joining. **Capture-pending assumptions:** the placement
   thresholds behind 625 (resurrection point), 633 (house), 661 (another zone) and 741
-  (obstacle), and the "siege too imminent" window behind 760, are UNKNOWN and are NOT
-  enforced (no refusal today); the cancellation trigger's UI is UNKNOWN. The check order is
-  this server's policy. Tests:
+  (obstacle), and the "siege too imminent" window behind 760, are UNKNOWN. The four
+  placement refusals are implemented with INFERRED thresholds in the WP-SD2b
+  placement-refusals bullet below (625 stays behind a default-off switch); 760 is not
+  enforced. The cancellation trigger's UI is UNKNOWN. The check order is this server's
+  policy. Tests:
   `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
   `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
   `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
   442/443, item kept each time), `unrelated_stale_or_rank_ineligible_members_cannot_join`
   (581 on the join path), `the_gm_register_path_also_applies_the_join_policy`.
+* systems::housing (WP-SD2b placement refusals, 2026-11-08): the four declaration placement
+  refusals run after the authored `radius_declare` (345) and before the rank policy (459),
+  each with a `Housing.SiegeDeclare*` threshold. Every numeric threshold is **INFERRED**:
+  the 1.2 texts name the situation but no capture or decompiled server rule gives a
+  distance (`round6-siege.md` "Thresholds"). The ids exist in the client error table
+  (`x2game.dll.c` cases 0x271 = 625, 0x279 = 633, 0x295 = 661, 0x2e5 = 741, 0x2ed = 749):
+  * **633 `SIEGE_CANNOT_DECLARE_NEAR_HOUSE`** (ui 5020 "cannot declare near a house",
+    INFERRED source text). Data: the house's `garden_radius` square, the same
+    `GetHouseAtLocation` query the server uses (`house_at_location_in_world`), with
+    `Housing.SiegeDeclareHouseMargin` metres beyond the plot. Default `0` refuses a spot
+    inside a plot only (the text's minimum reading); the retail margin is UNKNOWN,
+    capture-pending.
+  * **661 `SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE`** (ui 5159 "too close to another zone",
+    INFERRED source text). Data: the authored zone at the spot (`WorldInstance.zone_id_at`
+    -> `zones.group_id`) must be the besieged dominion's group; `Housing.SiegeDeclareZoneMargin`
+    metres additionally refuses when a different group is within that distance (ring
+    sampling of the zone grid, INFERRED approximation). Default `0` checks the spot itself
+    only; the retail margin is UNKNOWN, capture-pending.
+  * **625 `SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS`** (ui 4837 text "cannot declare near a
+    peace area"; the key name says resurrection point, the text is the reading used here).
+    Data source: the only 1.2 peace data is the zone conflict table (`conflict_zones`): a
+    group with no row never enters a PvP state, and the combat fallback is
+    `ConflictType.Peace` (`systems/skills/combat.rs`, C# `CharacterCombat.cs`), while a row
+    whose current state is `Peace` is peaceful now. `Housing.SiegeDeclarePeaceCheck`
+    defaults **false** because the declaration rule itself is UNKNOWN (the siege zones are
+    not conflict-zone rows, so the besieged group is never counted); when on,
+    `Housing.SiegeDeclarePeaceMargin` metres around the spot are sampled. INFERRED,
+    capture-pending.
+  * **741 `SIEGE_CANNOT_DECLARE_OBSTACLE`** (ui 5783 "there are obstacles nearby", INFERRED
+    source text). Data: the house builder's collision query (`collision::box_obstacles`,
+    mask 0x1f) at the spot; houses are the 633 rule, vegetation / brush / the caster and its
+    own mount do not refuse, and an incomplete (saturated) query counts as blocked (unlike the house
+    builder, `housing/placement.rs`, which skips that marker; for a 0.35 m box the difference is
+    theoretical). `Housing.SiegeDeclareObstacleRadius`
+    defaults to the player capsule radius 0.35 m (INFERRED; the retail radius is UNKNOWN,
+    capture-pending).
+  * **D1a 749 `LOCATE_INVALID_DOMINION_AREA`** for item 29800 "Blueprint: Territory
+    Statue" is unchanged: it is implemented in `systems::npcs::doodad::placement`
+    (`FUN_393a8fa0` step 7, `fort::state_at`, `re-placement-fakeuse.md` D1a) and covered by
+    the `CSCreateDoodadPacket` row above and the `territory_statue_*` tests; this change
+    adds no second gate.
+  Tests: `camp_placement_refuses_a_house_plot_and_honours_the_house_margin`,
+  `camp_placement_refuses_another_zone_group_and_honours_the_zone_margin`,
+  `camp_peace_check_is_off_by_default_and_honours_its_margin`,
+  `camp_placement_refuses_obstacles_and_honours_the_radius` (each drives the real
+  `CSStartSkillPacket` camp cast and fails without its check),
+  `siege_declare_placement_thresholds_default_and_bind` (config defaults and overrides).
+  The "siege too imminent" window behind 760 remains UNKNOWN and is not enforced.
 * systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
   doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
   stores it against the declaration (no siege record yet) and `bind_materialised` stamps it
