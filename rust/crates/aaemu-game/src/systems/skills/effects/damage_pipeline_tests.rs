@@ -14,6 +14,9 @@ use crate::models::doodad::Doodad;
 use crate::models::npc::Npc;
 use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType};
 use crate::opcodes::sc;
+use crate::server::GameServer;
+use crate::systems::skills::buffs;
+use crate::systems::skills::data::effects::{DamageEffect, HealEffect};
 use crate::test_support::TestClient;
 use crate::world::{Entity, WorldObject};
 
@@ -923,4 +926,236 @@ async fn npc_caster_with_negative_level_dps_gets_no_heal_and_no_restore() {
                 || !message.contains("RestoreManaEffect")),
         "{events:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fixed-damage DoT ticks.
+
+const DOT_BUFF: u32 = 9_100;
+const DOT_EFFECT: u32 = 9_101;
+const HEAL_DOT_BUFF: u32 = 9_102;
+const HEAL_DOT_EFFECT: u32 = 9_103;
+
+fn dot_data(effect: DamageEffect, duration: i32, tick: f64) -> GameData {
+    let mut data = fixture_data();
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        skills::data::EffectKind::DamageEffect,
+        skills::data::EffectTemplate::Damage(Box::new(effect)),
+        DOT_EFFECT,
+    );
+    skills.add_buff(skills::data::BuffTemplate {
+        id: DOT_BUFF,
+        duration,
+        tick,
+        tick_effects: vec![skills::data::TickEffect {
+            effect_id: DOT_EFFECT,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+        }],
+        ..Default::default()
+    });
+    data
+}
+
+fn fixed_dot_data(total: i32) -> GameData {
+    dot_data(
+        skills::tests::damage_effect(DOT_EFFECT, total),
+        11_000,
+        1_000.0,
+    )
+}
+
+fn percent_dot_data() -> GameData {
+    let mut effect = skills::tests::damage_effect(DOT_EFFECT, 0);
+    effect.use_fixed_damage = false;
+    effect.use_percent_damage = true;
+    effect.percent_min = 10;
+    effect.percent_max = 10;
+    dot_data(effect, 10_000, 1_000.0)
+}
+
+fn fixed_heal_dot_data(total: i32) -> GameData {
+    let mut data = fixture_data();
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        skills::data::EffectKind::HealEffect,
+        skills::data::EffectTemplate::Heal(HealEffect {
+            id: HEAL_DOT_EFFECT,
+            use_fixed_heal: true,
+            fixed_min: total,
+            fixed_max: total,
+            use_level_heal: false,
+            level_md: 0.0,
+            level_va_start: 0,
+            level_va_end: 0,
+            percent: false,
+            use_charged_buff: false,
+            charged_buff_id: 0,
+            charged_mul: 0.0,
+            slave_applicable: false,
+            ignore_heal_aggro: false,
+            dps_multiplier: 0.0,
+            actability_group_id: 0,
+            actability_step: 0,
+            actability_mul: 0.0,
+            actability_add: 0.0,
+        }),
+        HEAL_DOT_EFFECT,
+    );
+    skills.add_buff(skills::data::BuffTemplate {
+        id: HEAL_DOT_BUFF,
+        duration: 11_000,
+        tick: 1_000.0,
+        tick_effects: vec![skills::data::TickEffect {
+            effect_id: HEAL_DOT_EFFECT,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+        }],
+        ..Default::default()
+    });
+    data
+}
+
+/// Drive the real buff path: `apply_template` schedules the CREATED buff, and each
+/// `schedule_effect` reaches `time_to_time_apply` -> the effect. Returns the buff index.
+fn apply_tick_buff(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &WorldObject,
+    buff_id: u32,
+) -> u32 {
+    buffs::apply_template(
+        server,
+        server.game_data.systems.skills.buff(buff_id).unwrap(),
+        Some(caster),
+        &SkillCaster::Unit(caster.obj_id()),
+        target,
+        None,
+    );
+    target
+        .with_base_unit(|b| {
+            b.buffs()
+                .effects
+                .iter()
+                .find(|e| e.template.id == buff_id && !e.is_ended())
+                .map(|e| e.index)
+        })
+        .expect("buff applied")
+}
+
+fn tick_damage(server: &GameServer, target: &WorldObject, index: u32) -> i32 {
+    let before = target.with_unit(|u| u.unit().hp).unwrap();
+    buffs::schedule_effect(server, target, index, false);
+    before - target.with_unit(|u| u.unit().hp).unwrap()
+}
+
+fn tick_heal(server: &GameServer, target: &WorldObject, index: u32) -> i32 {
+    let before = target.with_unit(|u| u.unit().hp).unwrap();
+    buffs::schedule_effect(server, target, index, false);
+    target.with_unit(|u| u.unit().hp).unwrap() - before
+}
+
+/// 1.2 DamageEffect `fixed_min`/`fixed_max` are the **total** over the buff duration
+/// (client macro sub_398CFD40/sub_398CFFC0: `total_min_damage` is the fixed term,
+/// `min_damage` is that term / (duration / tick)). Buff 3910 ("Metal Poisoning",
+/// 11000 ms, 1000 ms tick, DamageEffect 3427 1800-2200) must therefore tick
+/// 1800-2200 x 1000/11000 = 164-200, not the whole range per tick.
+#[tokio::test]
+async fn damage_pipeline_fixed_dot_spreads_its_total_over_the_ticks() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(fixed_dot_data(1_100));
+    {
+        let mut n = npc.data();
+        n.unit.hp = 5_000;
+        n.unit.max_hp = 5_000;
+    }
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    let index = apply_tick_buff(&server, &caster, &target, DOT_BUFF);
+    client.drain();
+    let ticks: Vec<i32> = (0..11)
+        .map(|_| tick_damage(&server, &target, index))
+        .collect();
+    assert_eq!(
+        ticks,
+        vec![100; 11],
+        "a fixed DoT tick is the total spread over the duration, not the full total"
+    );
+    assert_eq!(npc.data().unit.hp, 5_000 - 1_100);
+}
+
+/// The same tick scaling that the current non-fixed path applies must stay in place.
+#[tokio::test]
+async fn damage_pipeline_percent_dot_tick_keeps_the_existing_scale() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(percent_dot_data());
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    let index = apply_tick_buff(&server, &caster, &target, DOT_BUFF);
+    client.drain();
+    let ticks: Vec<i32> = (0..10)
+        .map(|_| tick_damage(&server, &target, index))
+        .collect();
+    assert_eq!(ticks, vec![10; 10]);
+    assert_eq!(npc.data().unit.hp, 1_000 - 100);
+}
+
+/// The heal path applies the buff tick modifier after the fixed heal override
+/// (`HealEffect.Apply`); a fixed-damage DoT tick must produce the same share of its total.
+#[tokio::test]
+async fn damage_pipeline_fixed_dot_tick_matches_the_fixed_heal_tick() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(fixed_heal_dot_data(1_100));
+    {
+        let mut n = npc.data();
+        n.unit.hp = 3_000;
+        n.unit.max_hp = 5_000;
+    }
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    let index = apply_tick_buff(&server, &caster, &target, HEAL_DOT_BUFF);
+    client.drain();
+    let ticks: Vec<i32> = (0..11)
+        .map(|_| tick_heal(&server, &target, index))
+        .collect();
+    assert_eq!(ticks, vec![100; 11]);
+    assert_eq!(npc.data().unit.hp, 3_000 + 1_100);
+}
+
+/// A buff trigger is a one-shot event, not one tick of the buff: its standalone fixed damage
+/// keeps the authored value even when the source buff carries tick effects (the previous
+/// fixed-override order had the same result). Only periodic buff ticks spread the total.
+#[tokio::test]
+async fn damage_pipeline_fixed_trigger_keeps_its_full_value() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(fixed_dot_data(500));
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    let buff = server
+        .game_data
+        .systems
+        .skills
+        .buff(DOT_BUFF)
+        .unwrap()
+        .clone();
+    let mut source = EffectSource::from_buff(buff);
+    source.is_trigger = true;
+    let args = EffectArgs {
+        caster: Some(caster.clone()),
+        caster_caster: SkillCaster::Unit(player.obj_id),
+        target: Target::Obj(target.clone()),
+        target_caster: skills::types::SkillCastTarget::Unit(npc.obj_id),
+        cast: CastAction::Buff {
+            buff_id: DOT_BUFF,
+            owner_obj_id: npc.obj_id,
+            index: 0,
+        },
+        source,
+        skill_object: &skills::types::SkillObject::None,
+    };
+    let effect = skills::tests::damage_effect(DOT_EFFECT, 500);
+    client.drain();
+    damage(&server, &effect, &args, None);
+    assert_eq!(npc.data().unit.hp, 1_000 - 500);
 }

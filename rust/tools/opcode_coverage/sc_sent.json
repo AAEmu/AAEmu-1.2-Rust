@@ -4151,7 +4151,7 @@
           "text": "p.send(SCSpecialtyRatioPacket { ratio });"
         },
         {
-          "file": "rust/crates/aaemu-game/src/systems/npcs/specialty.rs",
+          "file": "rust/crates/aaemu-game/src/systems/economy/specialty.rs",
           "line": 806,
           "role": "struct_literal",
           "text": "me.send(SCSpecialtyRatioPacket { ratio });"
@@ -13407,7 +13407,7 @@
           "text": "p.send(SCSpecialtyCurrentPacket {"
         },
         {
-          "file": "rust/crates/aaemu-game/src/systems/npcs/specialty.rs",
+          "file": "rust/crates/aaemu-game/src/systems/economy/specialty.rs",
           "line": 870,
           "role": "struct_literal",
           "text": "me.send(SCSpecialtyCurrentPacket {"

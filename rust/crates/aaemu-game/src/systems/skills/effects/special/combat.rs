@@ -13,7 +13,7 @@ use super::super::super::packets::{SCCastingDelayedPacket, SCSkillCooldownResetP
 use super::super::super::packets_special::SCNotifyResurrectionPacket;
 use super::super::super::progress;
 use super::super::super::skill::{
-    apply_skill_modifiers, delay_cast, mana_level_scale, start_auto_skill, use_skill,
+    apply_skill_modifiers, delay_cast, level_and_inc, mana_level_scale, start_auto_skill, use_skill,
 };
 use super::super::super::state::{SkillRun, SkillTaskKind};
 use super::super::super::stats::{stat, StatKind};
@@ -254,16 +254,18 @@ pub fn skill_use(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     });
 }
 
-/// Mana of a plot `ManaCost` effect: `value1 + value2 / 100 * scale`, `scale` being
-/// [`mana_level_scale`] (the `LevelMana` data formula). Checked against `compact.sqlite3`
+/// Mana of a plot `ManaCost` effect: `value1 + value2 / 100 * (1 + T) * scale`, `scale` being
+/// [`mana_level_scale`] (the `LevelMana` data formula at the cast's skill level `L`) and `T`
+/// the cast's `casting_inc` rank term. Checked against `compact.sqlite3`
 /// (84 distinct (skill, effect values) rows of `SpecialEffect` type 39 reached through the
 /// skills' plots): 62 have `value1 == skills.mana_cost` and `value2 / 100 == skills.mana_level_md`,
-/// so the effect charges what the skill tooltip shows (`mana_cost + mana_level_md * scale`)
-/// instead of the C# guess `value2 / 6.35`. The 22 others are plot effects whose skill row has
-/// `mana_level_md` 0 or 1 (`value2` 1, 100-600): they charge an amount of their own, which this
-/// formula takes at face value (`value2` percent of the scale).
-fn plot_mana_cost(value1: i32, value2: i32, scale: f64) -> f64 {
-    f64::from(value1) + f64::from(value2) / 100.0 * scale
+/// so the effect charges what the skill tooltip shows
+/// (`mana_cost + mana_level_md * (1 + T) * scale`) instead of the C# guess `value2 / 6.35`.
+/// The 22 others are plot effects whose skill row has `mana_level_md` 0 or 1 (`value2` 1,
+/// 100-600): they charge an amount of their own, which this formula takes at face value
+/// (`value2` percent of the scaled term).
+fn plot_mana_cost(value1: i32, value2: i32, scale: f64, inc: f64) -> f64 {
+    f64::from(value1) + f64::from(value2) / 100.0 * (1.0 + inc) * scale
 }
 
 /// `ManaCost`: [`plot_mana_cost`] (skill modifiers applied) is taken from the character.
@@ -279,16 +281,13 @@ pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         tracing::error!("Special effects: ManaCost without a skill (NullReferenceException)");
         return;
     };
+    let (level, inc) = level_and_inc(server, skill, caster);
     let mana = apply_skill_modifiers(
         server,
         skill,
         caster,
         SkillAttribute::ManaCost,
-        plot_mana_cost(
-            v[0],
-            v[1],
-            mana_level_scale(server, caster, skill.template.ability_id),
-        ),
+        plot_mana_cost(v[0], v[1], mana_level_scale(server, level), inc),
     );
     unit_combat::reduce_current_mp(server, caster, mana as i32);
     let mut c = p.data();
@@ -551,8 +550,10 @@ mod mana_cost_tests {
         // (ab_level * 1.6 + 8) * 3 / 3.65
         let scale = (55.0 * 1.6 + 8.0) * 3.0 / 3.65;
         let tooltip = scale * 1.55;
-        assert!((plot_mana_cost(0, 155, scale) - tooltip).abs() < 1e-9);
+        assert!((plot_mana_cost(0, 155, scale, 0.0) - tooltip).abs() < 1e-9);
+        // The rank term scales only the level-mana part, as `mana_cost` does.
+        assert!((plot_mana_cost(0, 155, scale, 0.5) - tooltip * 1.5).abs() < 1e-9);
         // skill 18132 (mana_cost 30, md 0): fixed cost only
-        assert_eq!(plot_mana_cost(30, 0, scale), 30.0);
+        assert_eq!(plot_mana_cost(30, 0, scale, 0.5), 30.0);
     }
 }

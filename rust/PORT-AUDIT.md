@@ -489,7 +489,7 @@ Public methods with no Rust counterpart by name, and their verdicts:
 | `IAreaTriggerManager.cs` | IAreaTriggerManager | ported | `IAreaTriggerManager` → `aaemu-game/src/systems/npcs/area_trigger.rs` |
 | `IEnterWorldManager.cs` | IEnterWorldManager | ported | `IEnterWorldManager` → `aaemu-game/src/managers/enter_world.rs` |
 | `IFactionManager.cs` | IFactionManager | merged | `IFactionManager` merged into `aaemu-game/src/systems/social/faction.rs` |
-| `ISpecialtyManager.cs` | ISpecialtyManager | ported | `ISpecialtyManager` → `aaemu-game/src/systems/npcs/specialty.rs` |
+| `ISpecialtyManager.cs` | ISpecialtyManager | ported | `ISpecialtyManager` → `aaemu-game/src/systems/economy/specialty.rs` |
 | `ISphereQuestManager.cs` | ISphereQuestManager | ported | `ISphereQuestManager` → `aaemu-game/src/systems/npcs/sphere_quest.rs` |
 | `IStreamManager.cs` | IStreamManager | ported | `IStreamManager` → `aaemu-game/src/managers/stream.rs` |
 | `IWorldManager.cs` | IWorldManager | ported | `IWorldManager` → `aaemu-game/src/world/mod.rs` |
@@ -497,7 +497,7 @@ Public methods with no Rust counterpart by name, and their verdicts:
 | `PhysicsManager.cs` | PhysicsManager | merged | `PhysicsManager` merged into `aaemu-game/src/systems/ai/physics/mod.rs` |
 | `ShipStaticBarrierBaiIngestor.cs` | ShipStaticBarrierBaiIngestor, BaiLayers, Defaults, ReferenceEqualityComparer | merged | `ShipStaticBarrierBaiIngestor` merged into `aaemu-game/src/systems/ai/physics/barriers.rs`; `BaiLayers` merged into `systems/ai/physics/barriers.rs`; `Defaults` → `aaemu-game/src/systems/skills/ext.rs`; `ReferenceEqualityComparer` merged into `systems/ai/physics/barriers.rs` |
 | `SpawnManager.cs` | SpawnManager | ported | `SpawnManager` → `aaemu-game/src/systems/npcs/spawn_manager.rs` |
-| `SpecialtyManager.cs` | SpecialtyManager | ported | `SpecialtyManager` → `aaemu-game/src/systems/npcs/specialty.rs` |
+| `SpecialtyManager.cs` | SpecialtyManager | ported | `SpecialtyManager` → `aaemu-game/src/systems/economy/specialty.rs` |
 | `SphereQuestManager.cs` | SphereQuestManager | ported | `SphereQuestManager` → `aaemu-game/src/systems/npcs/sphere_quest.rs` |
 | `StreamManager.cs` | StreamManager | ported | `StreamManager` → `aaemu-game/src/managers/stream.rs` |
 | `WorldManager.cs` | WorldManager | ported | `WorldManager` → `aaemu-game/src/world/mod.rs` |
@@ -1469,7 +1469,7 @@ Public methods with no Rust counterpart by name, and their verdicts:
 | File | Types | Status | Rust |
 |---|---|---|---|
 | `Blocked.cs` | Blocked | merged | `Blocked` merged into `aaemu-game/src/models/char_data.rs` |
-| `Configurations.cs` | WindModelType, SeaWeatherModelType, Configurations, WorldConfig … | ported | `WindModelType` → `aaemu-game/src/config.rs`; `SeaWeatherModelType` → `aaemu-game/src/config.rs`; `Configurations` merged into `aaemu-game/src/config.rs`; `WorldConfig` → `aaemu-game/src/config.rs`; `DungeonLoadConfig` → `aaemu-game/src/systems/instances/config.rs`; `DungeonsConfig` → `aaemu-game/src/systems/instances/config.rs`; `AccountDeleteDelayTiming` → `aaemu-game/src/config.rs`; `AccountConfig` → `aaemu-game/src/config.rs`; `CurrencyValuesConfig` → `aaemu-game/src/config.rs`; `SpecialtyConfig` → `aaemu-game/src/systems/npcs/specialty.rs`; `ScriptsConfig` → `aaemu-game/src/config.rs`; `LoadStrategyType` → `aaemu-game/src/config.rs` |
+| `Configurations.cs` | WindModelType, SeaWeatherModelType, Configurations, WorldConfig … | ported | `WindModelType` → `aaemu-game/src/config.rs`; `SeaWeatherModelType` → `aaemu-game/src/config.rs`; `Configurations` merged into `aaemu-game/src/config.rs`; `WorldConfig` → `aaemu-game/src/config.rs`; `DungeonLoadConfig` → `aaemu-game/src/systems/instances/config.rs`; `DungeonsConfig` → `aaemu-game/src/systems/instances/config.rs`; `AccountDeleteDelayTiming` → `aaemu-game/src/config.rs`; `AccountConfig` → `aaemu-game/src/config.rs`; `CurrencyValuesConfig` → `aaemu-game/src/config.rs`; `SpecialtyConfig` → `aaemu-game/src/systems/economy/specialty.rs`; `ScriptsConfig` → `aaemu-game/src/config.rs`; `LoadStrategyType` → `aaemu-game/src/config.rs` |
 | `DominionData.cs` | DominionData, DominionTerritoryData, DominionSiegeTimers, DominionUnkData | ported | `DominionData` → `aaemu-game/src/systems/social/dominion.rs`; `DominionTerritoryData` → `aaemu-game/src/systems/social/dominion.rs`; `DominionSiegeTimers` → `aaemu-game/src/systems/social/dominion.rs`; `DominionUnkData` → `aaemu-game/src/systems/social/dominion.rs` |
 | `ErrorMessageType.cs` | ErrorMessageType | merged | `ErrorMessageType` merged into `aaemu-game/src/systems/economy/error_message.rs` |
 | `ExperienceLevelTemplate.cs` | ExperienceLevelTemplate | merged | `ExperienceLevelTemplate` merged into `aaemu-game/src/data/experience.rs` |
@@ -2113,7 +2113,7 @@ Public methods with no Rust counterpart by name, and their verdicts:
 | `ArmorGradeBuff.cs` | ArmorGradeBuff | ported | `ArmorGradeBuff` → `aaemu-game/src/data/items.rs` |
 | `ArmorType.cs` | ArmorType | ported | `ArmorType` → `aaemu-game/src/systems/economy/bridges.rs` |
 | `AuctionSettings.cs` | AuctionSettings | merged | `AuctionSettings` merged into `aaemu-game/src/systems/economy/auction.rs` |
-| `Backpack.cs` | Backpack | ported | `Backpack` → `aaemu-game/src/systems/npcs/specialty.rs` |
+| `Backpack.cs` | Backpack | ported | `Backpack` → `aaemu-game/src/systems/economy/specialty.rs` |
 | `BigFish.cs` | BigFish | merged | `BigFish` merged into `aaemu-game/src/models/item.rs` |
 | `BodyPart.cs` | BodyPart | ported | `BodyPart` → `aaemu-game/src/systems/npcs/npc/manager.rs` |
 | `EquipItem.cs` | EquipItem | ported | `EquipItem` → `aaemu-game/src/systems/economy/item_effect_packets.rs` |
@@ -2879,9 +2879,9 @@ Public methods with no Rust counterpart by name, and their verdicts:
 
 | File | Types | Status | Rust |
 |---|---|---|---|
-| `Specialty.cs` | Specialty | ported | `Specialty` → `aaemu-game/src/systems/npcs/specialty.rs` |
-| `SpecialtyBundleItem.cs` | SpecialtyBundleItem | ported | `SpecialtyBundleItem` → `aaemu-game/src/systems/npcs/specialty.rs` |
-| `SpecialtyNpc.cs` | SpecialtyNpc | ported | `SpecialtyNpc` → `aaemu-game/src/systems/npcs/specialty.rs` |
+| `Specialty.cs` | Specialty | ported | `Specialty` → `aaemu-game/src/systems/economy/specialty.rs` |
+| `SpecialtyBundleItem.cs` | SpecialtyBundleItem | ported | `SpecialtyBundleItem` → `aaemu-game/src/systems/economy/specialty.rs` |
+| `SpecialtyNpc.cs` | SpecialtyNpc | ported | `SpecialtyNpc` → `aaemu-game/src/systems/economy/specialty.rs` |
 
 ### `AAEmu.Game/Models/Game/Transfers`
 
@@ -3019,7 +3019,7 @@ Public methods with no Rust counterpart by name, and their verdicts:
 | `Remove.cs` | Remove | ported | `Remove` → `aaemu-game/src/systems/npcs/spawn_manager.rs` |
 | `RepairHouse.cs` | RepairHouse | merged | `RepairHouse` merged into `aaemu-game/src/systems/npcs/doodad/interactions.rs` |
 | `Seeding.cs` | Seeding | merged | `Seeding` merged into `aaemu-game/src/systems/npcs/doodad/interactions.rs` |
-| `SellBackpack.cs` | SellBackpack | merged | `SellBackpack` merged into `aaemu-game/src/systems/npcs/specialty.rs` |
+| `SellBackpack.cs` | SellBackpack | merged | `SellBackpack` merged into `aaemu-game/src/systems/economy/specialty.rs` |
 | `SkinOff.cs` | SkinOff | merged | `SkinOff` merged into `aaemu-game/src/systems/npcs/doodad/templates.rs` |
 | `Spray.cs` | Spray | merged | `Spray` merged into `aaemu-game/src/systems/npcs/doodad/interactions.rs` |
 | `SummonDoodad.cs` | SummonDoodad | ported | `SummonDoodad` → `aaemu-game/src/systems/npcs/doodad/interactions.rs` |
@@ -3267,8 +3267,8 @@ Public methods with no Rust counterpart by name, and their verdicts:
 
 | File | Types | Status | Rust |
 |---|---|---|---|
-| `SpecialtyRatioConsumeTask.cs` | SpecialtyRatioConsumeTask | merged | `SpecialtyRatioConsumeTask` merged into `aaemu-game/src/systems/npcs/specialty.rs` |
-| `SpecialtyRatioRegenTask.cs` | SpecialtyRatioRegenTask | merged | `SpecialtyRatioRegenTask` merged into `aaemu-game/src/systems/npcs/specialty.rs` |
+| `SpecialtyRatioConsumeTask.cs` | SpecialtyRatioConsumeTask | merged | `SpecialtyRatioConsumeTask` merged into `aaemu-game/src/systems/economy/specialty.rs` |
+| `SpecialtyRatioRegenTask.cs` | SpecialtyRatioRegenTask | merged | `SpecialtyRatioRegenTask` merged into `aaemu-game/src/systems/economy/specialty.rs` |
 
 ### `AAEmu.Game/Models/Tasks/TimedRewards`
 

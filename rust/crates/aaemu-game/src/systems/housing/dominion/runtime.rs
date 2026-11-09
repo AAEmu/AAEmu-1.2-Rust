@@ -695,13 +695,40 @@ pub fn apply_tower_state(server: &GameServer, state: &DominionState) {
             abort_character(server, character);
         }
     }
+    let mut rescaled: Option<i32> = None;
     {
         let mut h = house.data();
         h.unit.expedition_id = state.owner_expedition_id;
-        h.unit.hp = state
-            .tower_hp
-            .unwrap_or(h.unit.max_hp)
-            .clamp(0, h.unit.max_hp);
+        let max_hp = h.unit.max_hp;
+        let basis = h.pending_hp_basis.take();
+        let mut tower_hp = state.tower_hp;
+        // The dominion row's absolute tower_hp was saved against the house row's old HP basis:
+        // rescale it once like `load_house_row` did for the house HP.
+        if let (Some(hp), Some(basis)) = (tower_hp, basis) {
+            let scaled =
+                crate::systems::housing::manager::scale_loaded_structure_hp(hp, basis, max_hp);
+            if scaled != hp {
+                tower_hp = Some(scaled);
+                rescaled = Some(scaled);
+            }
+        }
+        h.unit.hp = tower_hp.unwrap_or(max_hp).clamp(0, max_hp);
+    }
+    if let Some(hp) = rescaled {
+        // Persist the converted value with the dominion row (the house row is saved with the
+        // new basis), so the conversion happens once.
+        if let Err(err) =
+            server
+                .systems
+                .housing
+                .dominions
+                .update_tower_hp(state.zone_group_id, state.tower, hp)
+        {
+            tracing::warn!(
+                "Dominion {}: could not persist the rescaled tower hp {hp}: {err:?}",
+                state.zone_group_id
+            );
+        }
     }
     crate::systems::housing::manager::set_untouchable(server, &house, !active);
     let obj = WorldObject::from(&house);

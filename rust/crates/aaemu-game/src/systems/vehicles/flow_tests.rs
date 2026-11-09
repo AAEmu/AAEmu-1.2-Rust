@@ -5171,6 +5171,65 @@ fn real_compact_db_vehicle_tables() {
     }
 }
 
+/// The Tower Cannon (slave 100, 성탑 대포) reaches the Nov 2014 video's target-frame value:
+/// formula 48 `(level * 70 + sta * 12)` at level 50 is 4,796, and the 1.2
+/// `unit_modifiers` row `(Slave, 100, MaxHealth, +100000)` adds exactly 100,000, so the server
+/// hands out **104,796** (`video-evidence/siege-2014-11-30-ollo.md` §1/§2.6, grade C). This
+/// pins the real rows and the loader/stats wiring that applies them.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_tower_cannon_max_hp_is_the_formula_plus_the_authored_bonus() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let mut data = GameData::empty();
+    data.formulas = crate::data::formulas::FormulaManager::load(&conn).expect("formulas");
+    data.characters.unit_attribute_limits = Arc::new(
+        crate::data::attribute_limits::UnitAttributeLimits::load(&conn).expect("attribute limits"),
+    );
+    data.systems.vehicles = load_real(&db, &[]);
+
+    // The authored rows, independent of the loader: level 50 + one MaxHealth bonus.
+    let template = &data.systems.vehicles.slave_templates[&100];
+    assert_eq!(template.level, 50);
+    let max_health: Vec<_> = template
+        .bonuses
+        .iter()
+        .filter(|b| b.attribute == crate::models::unit::UnitAttribute::MaxHealth)
+        .collect();
+    assert_eq!(max_health.len(), 1);
+    assert_eq!(max_health[0].value, 100_000);
+
+    let server = server_with(data);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Defender", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+    let slave = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        100,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("Tower Cannon spawn");
+    let d = slave.data();
+    assert_eq!(d.unit.level, 50);
+    assert_eq!(
+        d.unit.max_hp, 104_796,
+        "video target frame: 104,796 (formula 4,796 + unit_modifiers 100,000)"
+    );
+}
+
 /// The 1.2 `spawn_effects` slave rows: only the implemented dir ids 1/2 (position) and 1/2/3
 /// (orientation) occur, and every `sub_type` is a real slave template.
 #[test]

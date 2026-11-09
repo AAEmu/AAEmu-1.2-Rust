@@ -6,14 +6,28 @@ use serde::Deserialize;
 
 use crate::config::lenient;
 
-/// Opt-in schedules for tower defense events. Times and day intervals come from compact.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// Tower defense event schedules. With no explicit `Events`, the 1.2 open-world defaults are
+/// derived from the game data (`tower_def::default_events`); `Enabled: false` turns every
+/// event off and a non-empty `Events` overrides the derived list. Times and day intervals come
+/// from compact.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct TowerDefenseConfig {
     #[serde(rename = "enabled", deserialize_with = "lenient")]
     pub enabled: bool,
     #[serde(rename = "events")]
     pub events: Vec<TowerDefenseEventConfig>,
+}
+
+impl Default for TowerDefenseConfig {
+    fn default() -> Self {
+        Self {
+            // The 1.2 open-world rifts and the Halcyona war ran on every retail server; the
+            // derived defaults need no operator action. `Enabled: false` still turns them off.
+            enabled: true,
+            events: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -136,13 +150,25 @@ mod tests {
     }
 
     #[test]
-    fn tower_defense_schedules_bind_and_default_to_disabled() {
+    fn tower_defense_schedules_bind_and_default_to_enabled() {
+        // The 1.2 open-world events ran without operator action, so a missing `Enabled` keeps
+        // them on; the old default (off) left the Halcyona war and every rift unstarted.
         let config = AppConfig::from_value(serde_json::json!({"Dungeons": {"TowerDefense": {
             "Enabled": "true", "Events": [{"Id": "12", "WorldId": 0, "ZoneGroupId": 5, "ZoneId": 100}]
         }}})).unwrap();
         assert!(config.dungeons.tower_defense.enabled);
         assert_eq!(config.dungeons.tower_defense.events[0].id, 12);
         assert_eq!(config.dungeons.tower_defense.events[0].zone_group_id, 5);
-        assert!(!AppConfig::default().dungeons.tower_defense.enabled);
+        assert!(AppConfig::default().dungeons.tower_defense.enabled);
+        assert!(AppConfig::default()
+            .dungeons
+            .tower_defense
+            .events
+            .is_empty());
+        let off = AppConfig::from_value(serde_json::json!({"Dungeons": {"TowerDefense": {
+            "Enabled": false
+        }}}))
+        .unwrap();
+        assert!(!off.dungeons.tower_defense.enabled);
     }
 }

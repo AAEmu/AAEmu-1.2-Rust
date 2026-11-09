@@ -176,7 +176,12 @@ impl System {
                 let Some(server) = weak.upgrade() else {
                     break;
                 };
-                daily_reset(&server);
+                // The day the task was scheduled for, not `Utc::now()`: a wake a few
+                // milliseconds early still pays the new day.
+                let day = chrono::DateTime::from_timestamp_millis(next)
+                    .map(|d| d.date_naive())
+                    .unwrap_or_else(|| chrono::Utc::now().date_naive());
+                daily_reset_on(&server, day);
             }
         });
         tracing::info!("Loaded {} quests", data.templates.len());
@@ -456,13 +461,20 @@ impl System {
     }
 }
 
-/// `QuestDailyResetTask.Execute`.
+/// `QuestDailyResetTask.Execute` for the current wall-clock UTC day (callers outside the
+/// scheduler / tests).
 pub fn daily_reset(server: &GameServer) {
+    daily_reset_on(server, chrono::Utc::now().date_naive());
+}
+
+/// `QuestDailyResetTask.Execute` for the UTC day `day`: the scheduler passes the midnight it
+/// slept to, so a reset that wakes slightly early still pays the new day.
+pub fn daily_reset_on(server: &GameServer, day: chrono::NaiveDate) {
     let hooks = server.systems.quests.hooks();
     for p in server.world.all_characters() {
         events::with_quests(server, &p, None, |ctx| ctx.reset_daily_quests(true));
         let account = p.data().account_id;
-        hooks.daily_account_login(server, account);
+        hooks.daily_account_login(server, account, day);
     }
 }
 

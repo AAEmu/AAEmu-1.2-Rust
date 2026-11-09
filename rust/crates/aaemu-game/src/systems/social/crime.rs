@@ -974,13 +974,20 @@ impl CrimeManager {
         criminal: Option<&PlayerRef>,
         stolen: &DoodadRef,
     ) -> Option<DoodadRef> {
-        let (owner_type, owner_id, template_id) = {
+        let (owner_type, owner_id, owner_db_id, template_id) = {
             let d = stolen.data();
-            (d.owner_type, d.owner_id, d.template_id)
+            (d.owner_type, d.owner_id, d.owner_db_id, d.template_id)
         };
-        if owner_type != doodad_owner_type::CHARACTER {
-            return None;
-        }
+        // A garden plant is owned by its house. The caller only reaches this branch inside the
+        // siege larceny window with `Housing.SiegeLarcenyCrime` on (see `phase::theft_evidence`);
+        // the victim is the house owner.
+        let owner_id = match owner_type {
+            doodad_owner_type::CHARACTER => owner_id,
+            doodad_owner_type::HOUSING => crate::systems::housing::house_by_id(server, owner_db_id)
+                .map(|house| house.data().unit.owner_id)
+                .filter(|id| *id != 0)?,
+            _ => return None,
+        };
         let criminal = criminal?;
         let gender = criminal.data().gender;
         let pr = world_pos_rot(server, &WorldObject::from(stolen));
@@ -1189,6 +1196,27 @@ mod tests {
         c.infamy_point = 5;
         let (_, change) = add_crime(&s, &mut c, -10, 0);
         assert!(change.is_empty());
+        assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+    }
+
+    /// The video's Character Info shows `Crime Points 13 / 50` beside `Infamy Pts 13` (and
+    /// `3 / 3` after another redemption), and the wiki says "for every 1 Crime Point you
+    /// earn, you will gain 1 Infamy Point". They are separate fields: every report and every
+    /// reduction moves both by the same amount; only jail clears crime points while infamy
+    /// stays (asserted in `trial_flow_tests`). This is the real relation, not two values that
+    /// merely happen to be equal.
+    #[tokio::test]
+    async fn crime_points_and_infamy_move_together_on_gain_and_reduction() {
+        let s = server();
+        let mut c = crate::test_support::test_character(1, "Crook", 0.0, 0.0);
+        let (p, _) = add_crime(&s, &mut c, 13, 0);
+        assert_eq!((c.crime_point, c.infamy_point), (13, 13));
+        assert_eq!((p.crime_points, p.infamy_points), (13, 13));
+        let (p, _) = add_crime(&s, &mut c, -3, 0);
+        assert_eq!((c.crime_point, c.infamy_point), (10, 10));
+        assert_eq!((p.crime_points, p.infamy_points), (10, 10));
+        // The redemption message's "Total: 0" is the clamped pair, not crime points alone.
+        let (_, _) = add_crime(&s, &mut c, -30, 0);
         assert_eq!((c.crime_point, c.infamy_point), (0, 0));
     }
 

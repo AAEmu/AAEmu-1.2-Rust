@@ -13,6 +13,7 @@ pub mod logic;
 pub mod manager;
 pub mod natural;
 pub mod packets;
+pub mod permission;
 pub mod phase;
 pub mod phase_funcs;
 pub mod placement;
@@ -70,3 +71,7 @@ pub async fn save(
 #[cfg(test)]
 #[path = "gather_tests.rs"]
 mod gather_tests;
+
+#[cfg(test)]
+#[path = "permission_tests.rs"]
+mod permission_tests;

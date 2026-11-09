@@ -72,14 +72,37 @@ impl ClientPacket for CSStartSkillPacket {
     }
 }
 
-fn template_skill(server: &GameServer, id: u32) -> Option<SkillRef> {
+fn template_skill(server: &GameServer, id: u32, rank: u8) -> Option<SkillRef> {
     match server.game_data.systems.skills.skill(id).cloned() {
-        Some(t) => Some(SkillRun::new(t, 1)),
+        Some(t) => Some(SkillRun::new(t, rank)),
         None => {
             tracing::error!("StartSkill: skill {id} has no template (NullReferenceException)");
             None
         }
     }
+}
+
+/// The learned base skill a variant (`IsVariantOfSkill`, the combo skills) mirrors: the
+/// character's own skill with the same ability and ability level. A variant runs at that
+/// learned rank, not at rank 1.
+fn variant_skill_rank(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    skill_id: u32,
+) -> Option<u8> {
+    let data = &server.game_data.systems.skills;
+    let variant = data.skill(skill_id)?;
+    let character = player.data();
+    character
+        .skills
+        .skills
+        .iter()
+        .find(|s| {
+            data.skill(s.id).is_some_and(|base| {
+                base.ability_id == variant.ability_id && base.ability_level == variant.ability_level
+            })
+        })
+        .map(|s| s.level)
 }
 
 /// The C# bind-on-pickup exception (`CSStartSkillPacket`, commit bfdc3268 / PR #615) was added
@@ -295,7 +318,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     let is_auto = player.data().unit.is_auto_attack;
     if let SkillCaster::Mount { obj_id, .. } = p.caster {
         // Mount / slave skill
-        let Some(skill) = template_skill(server, skill_id) else {
+        let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
         };
         let Some(caster) = super::geometry::world_of(server, &me).and_then(|w| w.object(obj_id))
@@ -454,7 +477,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     } else if !data.skills.is_item_only_skill(skill_id)
         && (is_default || (is_common && !p.caster.is_item()))
     {
-        let Some(skill) = template_skill(server, skill_id) else {
+        let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
         };
         let (r, v) = skill::use_skill(
@@ -525,7 +548,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             );
             return;
         }
-        let Some(skill) = template_skill(server, skill_id) else {
+        let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
         };
         if skill_id != use_skill_id
@@ -614,7 +637,8 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         result = r;
         value = v;
     } else if skill_id > 0 && is_variant_of_skill(server, &player, skill_id) {
-        let Some(skill) = template_skill(server, skill_id) else {
+        let rank = variant_skill_rank(server, &player, skill_id).unwrap_or(1);
+        let Some(skill) = template_skill(server, skill_id, rank) else {
             return;
         };
         let (r, v) = skill::use_skill(
@@ -635,7 +659,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         // commands, buff-granted and quest skills, ...) are accepted: NPC / boss / GM skills
         // are never a client cast.
         tracing::debug!("StartSkill: Id {skill_id}, undefined use type");
-        let Some(skill) = template_skill(server, skill_id) else {
+        let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
         };
         if !data.skills.is_client_sourced_skill(skill_id) {

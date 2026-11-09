@@ -191,8 +191,10 @@ pub trait QuestHooks: Send + Sync {
         100.0
     }
 
-    /// `TimedRewardsManager.DoDailyAccountLogin(accountId)` (daily reset task).
-    fn daily_account_login(&self, _server: &GameServer, _account_id: u32) {}
+    /// `TimedRewardsManager.DoDailyAccountLogin(accountId)` for the UTC day the midnight reset
+    /// targets.
+    fn daily_account_login(&self, _server: &GameServer, _account_id: u32, _day: chrono::NaiveDate) {
+    }
 }
 
 /// The hooks used when nothing is installed.

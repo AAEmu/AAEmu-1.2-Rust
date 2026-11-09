@@ -47,6 +47,10 @@ pub struct House {
     /// `Equipment` (28 slots).
     pub equipment: Vec<Option<Item>>,
     pub is_dirty: bool,
+    /// The max HP the loaded row's `hp` was saved against, set only when it differed from the
+    /// era maximum. A dominion tower takes it once (`apply_tower_state`) to rescale the
+    /// persisted `tower_hp`, which would otherwise overwrite the proportional conversion.
+    pub pending_hp_basis: Option<i32>,
 }
 
 impl House {
@@ -74,6 +78,7 @@ impl House {
             attached_doodads: Vec::new(),
             equipment: vec![None; UNIT_EQUIPMENT_SLOTS],
             is_dirty: false,
+            pending_hp_basis: None,
         }
     }
 

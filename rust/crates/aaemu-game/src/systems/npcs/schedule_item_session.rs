@@ -20,10 +20,17 @@
 //! # Locking
 //!
 //! Every mutation of the progress map runs under the economy `ops_lock` (an [`ItemTxn`] for the
-//! take, the bare gate for the tick), like every mutation that must land on one side of the
+//! item take, the bare gate for the tick), like every mutation that must land on one side of the
 //! financial snapshot boundary; the map mutex is only ever taken inside it, never the other way
 //! round (`capture_financial_snapshot` uses the same order). No character lock is held across a
 //! container, mail or map call, and every packet is sent after the gate is released.
+//!
+//! The one exception is a `MILEAGE_ITEM_TYPE` row ([`MILEAGE_ITEM_TYPE`]): its reward is an
+//! `accounts.loyalty` credit (an async DB write), so the reservation is planned under the gate,
+//! the credit runs outside it, and [`AccountScheduleProgress::commit_claim`] then records the
+//! receipt under the map lock. One account has at most one in-world character, so no second take
+//! can interleave between the plan and the credit, and the receipt's own stale check keeps a
+//! concurrent accrual from writing it twice.
 //!
 //! # Exactly-once
 //!
@@ -60,6 +67,11 @@ use super::schedule_items::ScheduleEligibility;
 /// Seconds between two accrual ticks. One minute keeps the bar current without a packet per
 /// second; the client advances the visible timer between lists on its own.
 pub const TICK_SECONDS: u64 = 60;
+
+/// `MILEAGE_ITEM_TYPE` of the 1.2 client (`baselib.alb`): schedule rows with this item id pay
+/// account Loyalty Tokens, not a bag item. Item 28586 has `use_skill_id = 0` and cannot be used,
+/// so handing it out as an item would silently lose the reward.
+pub const MILEAGE_ITEM_TYPE: u32 = 28586;
 
 /// The overflow letter's sender (plain 1.2 text, see `achievement_rewards::OVERFLOW_MAIL_SENDER`
 /// for why it is not a locale lookup).
@@ -238,9 +250,9 @@ fn resend_account(server: &GameServer, account_id: u32) {
 ///
 /// Callers must not hold the character lock, an `ItemTxn`, the economy `ops_lock` or a container
 /// lock (`ops_lock` is not re-entrant).
-pub fn take(server: &GameServer, player: &PlayerRef, schedule_id: i32) -> TakeOutcome {
+pub async fn take(server: &GameServer, player: &PlayerRef, schedule_id: i32) -> TakeOutcome {
     let account_id = player.data().account_id;
-    let outcome = deliver(server, player, account_id, schedule_id);
+    let outcome = deliver(server, player, account_id, schedule_id).await;
     // Every packet goes out after the gate, the map and the containers are released.
     match outcome {
         TakeOutcome::Granted { by_mail } => {
@@ -258,8 +270,8 @@ pub fn take(server: &GameServer, player: &PlayerRef, schedule_id: i32) -> TakeOu
     outcome
 }
 
-/// Reserve, hand over, record - one gate.
-fn deliver(
+/// Reserve, hand over, record.
+async fn deliver(
     server: &GameServer,
     player: &PlayerRef,
     account_id: u32,
@@ -269,6 +281,36 @@ fn deliver(
     let evidence = eligibility(server, account_id, now);
     let data = &server.game_data.systems.npcs.schedule_items;
     let manager = &server.systems.npcs.schedule_items;
+
+    // A Loyalty Token row pays the account, not the bag (see [`MILEAGE_ITEM_TYPE`]); the credit
+    // is a DB write, so it cannot run under the synchronous item transaction below. The account
+    // has one in-world character, and `commit_claim` re-checks the reservation, so the receipt is
+    // still written exactly once.
+    if data
+        .get(schedule_id)
+        .is_some_and(|def| def.item_id == MILEAGE_ITEM_TYPE)
+    {
+        let plan = {
+            let _gate = server.systems.economy.ops_lock();
+            let mut map = manager.lock();
+            let Some(account) = map.get_mut(&account_id) else {
+                return TakeOutcome::Refused;
+            };
+            account.tick(now, data, &evidence);
+            account.plan_claim(
+                data,
+                schedule_id,
+                player.character_id,
+                ClaimMode::Manual,
+                now,
+                &evidence,
+            )
+        };
+        let Some(plan) = plan else {
+            return TakeOutcome::Refused;
+        };
+        return deliver_loyalty(server, account_id, &plan, now).await;
+    }
 
     let mut txn = ItemTxn::begin(server);
 
@@ -327,6 +369,41 @@ fn deliver(
         );
     }
     TakeOutcome::Granted { by_mail }
+}
+
+/// Credits a `MILEAGE_ITEM_TYPE` row to the account and commits the receipt. The account credit
+/// is the reward, so there is no bag/mail hand-over and `by_mail` is `false`.
+async fn deliver_loyalty(
+    server: &GameServer,
+    account_id: u32,
+    plan: &ClaimPlan,
+    now: i64,
+) -> TakeOutcome {
+    let Some(total) = accounts::add_loyalty_returning(server, account_id, plan.item_count).await
+    else {
+        tracing::warn!(
+            schedule_id = plan.schedule_id,
+            item_id = plan.item_id,
+            "schedule item loyalty reward could not be credited; take refused"
+        );
+        return TakeOutcome::Refused;
+    };
+    accounts::notify_loyalty_grant(server, account_id, plan.item_count, total);
+    let data = &server.game_data.systems.npcs.schedule_items;
+    let commit = {
+        // Every progress-map mutation goes through the economy gate (see the module docs).
+        let _gate = server.systems.economy.ops_lock();
+        let mut map = server.systems.npcs.schedule_items.lock();
+        map.get_mut(&account_id)
+            .map(|account| account.commit_claim(data, plan, now))
+    };
+    if !matches!(commit, Some(ClaimCommit::Committed { .. })) {
+        tracing::error!(
+            schedule_id = plan.schedule_id,
+            "schedule item loyalty credited but the receipt was refused"
+        );
+    }
+    TakeOutcome::Granted { by_mail: false }
 }
 
 /// The bag when the whole reward fits, otherwise one `SYS_EXPRESS` letter. `None`: nothing was

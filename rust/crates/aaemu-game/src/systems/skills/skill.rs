@@ -115,21 +115,78 @@ pub fn new_skill_for(
     owner: Option<&WorldObject>,
 ) -> SkillRef {
     let level = match owner {
+        // A character's rank is saturated like the stored/learned one: a skill above the
+        // current ability level would otherwise wrap to ~255 (`as u8`) and blow up L / T / mana.
+        // NPC skill levels stay the C# byte cast.
+        Some(o) if o.as_player().is_some() => {
+            rank_for_level(&template, ab_level(server, o, template.ability_id))
+        }
         Some(o) => SkillRun::level_for(&template, ab_level(server, o, template.ability_id)),
         None => 1,
     };
     SkillRun::new(template, level)
 }
 
-/// Mana per `mana_level_md` point at the caster's ability level: the character `unit_formulas`
-/// rows `LevelDps` (kind 12, `(ab_level * 1.6 + 8) * 3`) and `LevelMana` (kind 13,
+/// The 1.2 effective skill level `L` (`FUN_39897fe0`): `ability_level + (rank - 1) *
+/// level_step`.
+///
+/// This is the level the client's own tooltip computation passes to the skill evaluator
+/// (`FUN_3941e750`), not the player's ability level: a rank-1 skill uses its own
+/// `ability_level`. The client never has a rank below 1 for a usable skill, so a 0 (an
+/// unknown/never-learned skill) is read as rank 1.
+pub fn effective_level(t: &SkillTemplate, rank: u8) -> i32 {
+    t.ability_level + (i32::from(rank.max(1)) - 1) * t.level_step
+}
+
+/// The 1.2 rank for a caster level: `(level - ability_level) / level_step + 1`, at least 1;
+/// `level_step <= 0` is rank 1 (the client never divides by a zero step).
+pub fn rank_for_level(t: &SkillTemplate, level: i32) -> u8 {
+    crate::data::skills::stored_skill_level(t.ability_level, t.level_step, level)
+}
+
+/// The `casting_inc` rank term of the 1.2 skill evaluator (`FUN_398a7710`):
+/// `T = max(0, (L - ability_level) * casting_inc * 0.001)`. It multiplies both the mana
+/// `mana_level_md` term and the cast time.
+pub fn rank_inc(t: &SkillTemplate, level: i32) -> f64 {
+    (f64::from(level - t.ability_level) * f64::from(t.casting_inc) * 0.001).max(0.0)
+}
+
+/// The 1.2 skill level `L` a cast evaluates at (`FUN_3941e750` -> `FUN_39897fe0`):
+///
+/// - a character's class skill (`ability_id != 0`) uses the learned rank on the `SkillRun`;
+/// - an `ability_id == 0` skill takes the rank from the character's level
+///   (`(charLevel - ability_level) / level_step + 1`), learned or not;
+/// - a non-character caster (an NPC) keeps the effective level the old `Skill.ManaCost` used
+///   as its `LevelMana` argument: the unit level or `ab_level_override`, whatever the
+///   `level_step` (the server-side NPC cost is not client-visible; capture-pending).
+pub fn cast_skill_level(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
+    let t = &skill.template;
+    if caster.as_player().is_none() {
+        ab_level(server, caster, t.ability_id)
+    } else if t.ability_id == 0 {
+        effective_level(t, rank_for_level(t, ab_level(server, caster, 0)))
+    } else {
+        effective_level(t, skill.level)
+    }
+}
+
+/// The `(L, T)` pair of a cast: [`cast_skill_level`] and [`rank_inc`]. The mana charge, the
+/// mana pre-check and the plot `ManaCost` effect all read this pair, so a cast the pre-check
+/// allows is charged exactly the value it checked.
+pub fn level_and_inc(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> (i32, f64) {
+    let level = cast_skill_level(server, skill, caster);
+    (level, rank_inc(&skill.template, level))
+}
+
+/// Mana per `mana_level_md` point at skill level `level`: the character `unit_formulas` rows
+/// `LevelDps` (kind 12, `(level * 1.6 + 8) * 3`) and `LevelMana` (kind 13,
 /// `level_dps / 3.65`) of `compact.sqlite3`, evaluated through the precompiled formula
 /// expressions (no parsing per cast). 0 when the data has no such formulas.
 ///
-/// Deviation: the C# `Skill.ManaCost` hardcodes `((abLevel - 1) * 1.6 + 8) * 3 / 3.65`; the
-/// data formulas have no `- 1` (and `CharStats` evaluates `LevelDps` with `ab_level = level`
-/// too), so the data wins (see PORTING.md).
-pub fn mana_level_scale(server: &GameServer, caster: &WorldObject, ability_id: u8) -> f64 {
+/// Deviation: the C# `Skill.ManaCost` hardcodes `((abLevel - 1) * 1.6 + 8) * 3 / 3.65` with the
+/// caster's ability level; the 1.2 client evaluates the data formulas at the skill level `L`
+/// ([`effective_level`]), so the data and the client win (see PORTING.md).
+pub fn mana_level_scale(server: &GameServer, level: i32) -> f64 {
     use crate::data::formulas::{FormulaOwnerType, UnitFormulaKind};
     let formulas = &server.game_data.formulas;
     let (Some(dps), Some(mana)) = (
@@ -140,17 +197,22 @@ pub fn mana_level_scale(server: &GameServer, caster: &WorldObject, ability_id: u
     };
     let level_dps = dps.formula.evaluate(&std::collections::HashMap::from([(
         "ab_level",
-        f64::from(ab_level(server, caster, ability_id)),
+        f64::from(level),
     )]));
     mana.formula
         .evaluate(&std::collections::HashMap::from([("level_dps", level_dps)]))
 }
 
-/// `Skill.ManaCost(caster)`.
+/// `Skill.ManaCost(caster)`: `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`, then
+/// the caster's skill modifiers (`FUN_398a01b0` kind 0, then `FUN_3989f900`).
+///
+/// The original r208022 client truncates the final value, not rounds it: 68/68 tooltip
+/// readings reproduce exactly, 32 of them with a fractional mana part >= 0.5 (see PORTING.md).
 pub fn mana_cost(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
     let t = &skill.template;
-    let base = mana_level_scale(server, caster, t.ability_id);
-    let cost2 = base * f64::from(t.mana_level_md) + f64::from(t.mana_cost);
+    let (level, inc) = level_and_inc(server, skill, caster);
+    let base = mana_level_scale(server, level);
+    let cost2 = f64::from(t.mana_cost) + f64::from(t.mana_level_md) * (1.0 + inc) * base;
     let tags = server.game_data.systems.skills.skill_tags(t.id).to_vec();
     caster
         .with_unit(|u| {
@@ -159,6 +221,27 @@ pub fn mana_cost(server: &GameServer, skill: &SkillRun, caster: &WorldObject) ->
                 .apply(t.id, &tags, SkillAttribute::ManaCost, cost2)
         })
         .unwrap_or(cost2) as i32
+}
+
+/// The 1.2 cast time of a skill (`FUN_398a01b0` kind 4): `(int)(casting_time * (1 + T))`,
+/// then the caster's skill modifiers, then the cast-speed stat `(stat + 1000) / 1000`
+/// ([`StatKind::CastTimeMul`]), truncated to ms. `CastTimeMultiplier` is applied separately
+/// by the caller.
+pub fn cast_time_ms(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
+    let t = &skill.template;
+    if t.casting_time <= 0 {
+        return 0;
+    }
+    let (_, inc) = level_and_inc(server, skill, caster);
+    let base = (f64::from(t.casting_time) * (1.0 + inc)) as i32;
+    let mul = stat(server, caster, StatKind::CastTimeMul);
+    (mul * apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::CastTime,
+        f64::from(base),
+    )) as i32
 }
 
 /// `BaseUnit.ApplySkillModifiers(skill, attribute, value)`.
@@ -896,18 +979,7 @@ fn use_skill_impl(
         }
     }
     // Casting time
-    let mut cast_time = 0i32;
-    if template.casting_time > 0 {
-        let mul = stat(server, caster, StatKind::CastTimeMul);
-        cast_time = (mul
-            * apply_skill_modifiers(
-                server,
-                skill,
-                caster,
-                SkillAttribute::CastTime,
-                f64::from(template.casting_time),
-            )) as i32;
-    }
+    let mut cast_time = cast_time_ms(server, skill, caster);
     let ctm = skill.state().cast_time_multiplier;
     cast_time = (f64::from(cast_time) * f64::from(ctm)).round_ties_even() as i32;
     if cast_time > 0 {
@@ -2889,9 +2961,14 @@ fn unit_use_skill_impl(
 }
 
 /// `SkillManager.GetAttackDelay(template, caster, includeCooldown, additionalDelay)`.
+///
+/// `level` is the effective skill level `L` the caster runs the skill at (see
+/// [`cast_skill_level`]), for the 1.2 `(int)(casting_time * (1 + T))` term of the
+/// non-auto-attack branch.
 pub fn attack_delay(
     server: &GameServer,
     t: &SkillTemplate,
+    level: i32,
     caster: &WorldObject,
     include_cooldown: bool,
     additional: f64,
@@ -2937,7 +3014,8 @@ pub fn attack_delay(
             .min(f64::from(i32::MAX));
     }
     let cast_mul = stat(server, caster, StatKind::CastTimeMul);
-    let cast = f64::from(t.casting_time) * cast_mul;
+    let cast =
+        f64::from((f64::from(t.casting_time) * (1.0 + rank_inc(t, level))) as i32) * cast_mul;
     let cd = if include_cooldown {
         f64::from(t.cooldown_time) * (gcd_mul / 100.0)
     } else {
@@ -2957,7 +3035,8 @@ pub fn start_auto_skill(server: &GameServer, caster: &WorldObject, skill: &Skill
         skill: skill.clone(),
         cancel: cancel.clone(),
     });
-    let delay = attack_delay(server, &skill.template, caster, true, 1000.0) as i64;
+    let level = cast_skill_level(server, skill, caster);
+    let delay = attack_delay(server, &skill.template, level, caster, true, 1000.0) as i64;
     let obj_id = p.obj_id;
     let skill = skill.clone();
     if !schedule_auto_attack(server, obj_id, skill, cancel, delay) {
@@ -3039,7 +3118,8 @@ fn auto_attack_tick(
         return None;
     }
     let target = target?;
-    let delay = attack_delay(server, &skill.template, &me, true, 1000.0) as i64;
+    let level = cast_skill_level(server, skill, &me);
+    let delay = attack_delay(server, &skill.template, level, &me, true, 1000.0) as i64;
     if has_task || gcd >= now_ms() {
         return Some(delay);
     }

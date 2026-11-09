@@ -567,6 +567,35 @@ impl ServerProfile {
     pub fn sieges(self) -> bool {
         !matches!(self, Self::EuLaunch)
     }
+
+    /// The Archeum Lodestone max HP of the era, over the `r208022` `housings.hp` value
+    /// (1,000,000); `None` keeps the template value.
+    ///
+    /// `EuAuroria` is the NA Nov 2014 siege HUD's 4,100,000/4,100,000 bar
+    /// (`D:/aaemu-audits/video-evidence/siege-2014-11-30-ollo.md` §2.6, grade C; the same
+    /// Nov 2014 change is described in the period r/archeage thread "Wall HP went from 400k
+    /// to 1.2M and the lodestone went from 1M to 4M HP"). The value is a Trion Auroria
+    /// server balance change and is **not** in the `r208022` client data; the launch era had
+    /// no sieges, and `Kr12` keeps the template value.
+    pub fn lodestone_max_hp(self) -> Option<i32> {
+        match self {
+            Self::EuAuroria => Some(4_100_000),
+            Self::EuLaunch | Self::Kr12 => None,
+        }
+    }
+
+    /// The castle Defense Tower max HP of the era, over the `r208022` `housings.hp` value
+    /// (600,000); `None` keeps the template value.
+    ///
+    /// `EuAuroria` is the NA Nov 2014 target frame "Nuian Defense Tower" 1,500,000 HP
+    /// (`siege-2014-11-30-ollo.md` §1/§2.6, grade C). Like [`Self::lodestone_max_hp`] this is
+    /// a Trion Auroria server balance value, not a `r208022` data value.
+    pub fn defense_tower_max_hp(self) -> Option<i32> {
+        match self {
+            Self::EuAuroria => Some(1_500_000),
+            Self::EuLaunch | Self::Kr12 => None,
+        }
+    }
 }
 
 impl_config_enum!(ServerProfile {
@@ -949,6 +978,15 @@ pub struct CurrencyValuesConfig {
     pub tick_amount: i32,
     #[serde(rename = "tickamountpremium", deserialize_with = "lenient")]
     pub tick_amount_premium: i32,
+    /// Loyalty only: tokens per full `hourly_minutes` of in-world play (0 = off).
+    #[serde(rename = "hourlyamount", deserialize_with = "lenient")]
+    pub hourly_amount: i32,
+    /// Loyalty only: minutes of in-world play per hourly grant (0 = off).
+    #[serde(rename = "hourlyminutes", deserialize_with = "lenient")]
+    pub hourly_minutes: i32,
+    /// Loyalty only: most hourly tokens an account may receive in one UTC day (0 = off).
+    #[serde(rename = "hourlydailymax", deserialize_with = "lenient")]
+    pub hourly_daily_max: i32,
 }
 
 impl CurrencyValuesConfig {
@@ -970,6 +1008,9 @@ impl Default for CurrencyValuesConfig {
             tick_minutes: 5,
             tick_amount: 0,
             tick_amount_premium: 0,
+            hourly_amount: 0,
+            hourly_minutes: 0,
+            hourly_daily_max: 0,
         }
     }
 }
@@ -1983,6 +2024,8 @@ mod tests {
         assert!(cfg.siege_calendar_enabled());
         assert!(cfg.auroria_claims_enabled());
         assert_eq!(format!("{}", cfg.world.profile), "EuAuroria");
+        assert_eq!(cfg.world.profile.lodestone_max_hp(), Some(4_100_000));
+        assert_eq!(cfg.world.profile.defense_tower_max_hp(), Some(1_500_000));
 
         let cfg = AppConfig::from_value(json!({ "World": { "Profile": "EuLaunch" } })).unwrap();
         assert_eq!(cfg.world.profile, ServerProfile::EuLaunch);
@@ -1990,6 +2033,8 @@ mod tests {
         assert!(!cfg.player_nations_enabled());
         assert!(!cfg.siege_calendar_enabled());
         assert!(!cfg.auroria_claims_enabled());
+        assert_eq!(cfg.world.profile.lodestone_max_hp(), None);
+        assert_eq!(cfg.world.profile.defense_tower_max_hp(), None);
 
         let cfg = AppConfig::from_value(json!({ "World": { "Profile": "Kr12" } })).unwrap();
         assert_eq!(cfg.world.profile, ServerProfile::Kr12);
@@ -1997,6 +2042,8 @@ mod tests {
         assert!(cfg.player_nations_enabled());
         assert!(cfg.siege_calendar_enabled());
         assert!(cfg.auroria_claims_enabled());
+        assert_eq!(cfg.world.profile.lodestone_max_hp(), None);
+        assert_eq!(cfg.world.profile.defense_tower_max_hp(), None);
 
         // An explicit flag wins over the profile in both directions.
         let cfg = AppConfig::from_value(json!({

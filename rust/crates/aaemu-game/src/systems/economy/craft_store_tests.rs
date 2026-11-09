@@ -2361,6 +2361,17 @@ async fn convert_item_look_flow() {
 #[derive(Default)]
 struct Mailer(Mutex<Vec<SpecialtyMail>>);
 impl StoreHooks for Mailer {
+    fn npc_specialty_coin_id(&self, server: &GameServer, npc: &NpcRef) -> u32 {
+        let template_id = npc.data().unit.template_id;
+        server
+            .game_data
+            .systems
+            .npcs
+            .npc
+            .template(template_id)
+            .map_or(0, |t| t.specialty_coin_id)
+    }
+
     fn send_specialty_mail(
         &self,
         _server: &GameServer,
@@ -2949,6 +2960,350 @@ fn real_compact_db_craft_and_store_tables() {
         craft.skills.len(),
         store.specialty_packs.len()
     );
+}
+
+/// The four AyinMaiden 2014-10 trade-pack runs (NA, grade C; see
+/// `D:/aaemu-audits/video-evidence/trade-runs-2014-10-ayin.md`): the pack, its destination
+/// trader, the destination town's zone key, the ratio the video shows, the packs sold in the
+/// tick that bring the ratio there, and the amounts in the DB's copper-equivalent units
+/// (before the coin-item `/10000` division): base price, the window's pre-interest payment and
+/// the mailed payment with the 5 % interest.
+struct VideoPack {
+    name: &'static str,
+    pack: u32,
+    trader: u32,
+    zone_key: u32,
+    ratio: i32,
+    packs_sold: i32,
+    base: i32,
+    shown: i32,
+    mailed: i32,
+    coin: u32,
+}
+
+const VIDEO_PACKS: [VideoPack; 4] = [
+    VideoPack {
+        name: "Arcum Iris Lavaspice -> Kalina",
+        pack: 31866,
+        trader: 10691,
+        zone_key: 156, // Falcorth Plains
+        ratio: 124,
+        packs_sold: 11, // ceil(11 * 0.5) = 6 -> 130 - 6
+        base: 34310,
+        shown: 42544,
+        mailed: 44672,
+        coin: crate::data::items::ITEM_COINS,
+    },
+    VideoPack {
+        name: "Falcorth Snowlion Yarn -> Robert",
+        pack: 31845,
+        trader: 10643,
+        zone_key: 140, // Arcum Iris
+        ratio: 111,
+        packs_sold: 37, // ceil(37 * 0.5) = 19 -> 130 - 19
+        base: 34310,
+        shown: 38084,
+        mailed: 39988,
+        coin: crate::data::items::ITEM_COINS,
+    },
+    VideoPack {
+        name: "Tigerspine Grape Jam -> Jasmine",
+        pack: 31869,
+        trader: 10659,
+        zone_key: 141, // Sunrise Peninsula (Austera)
+        ratio: 130,
+        packs_sold: 0,
+        base: 39910,
+        shown: 51883,
+        mailed: 54477,
+        coin: crate::data::items::ITEM_COINS,
+    },
+    VideoPack {
+        name: "Mahadevi Elephant Cookies -> Delara",
+        pack: 31844,
+        trader: 8000003,
+        zone_key: 142, // Solzreed Peninsula
+        ratio: 130,
+        packs_sold: 0,
+        base: 10750,
+        shown: 13975,
+        mailed: 14674,
+        coin: 23633, // Gilda Star
+    },
+];
+
+/// The game data the specialty sale reads, loaded from the real 1.2 `compact.sqlite3`.
+fn real_specialty_data(path: &str) -> GameData {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = crate::data::client_files::ClientFileManager::from_sources(&[], &app);
+    let ctx = crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: &app,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.items = crate::data::ItemData::load(&conn).unwrap();
+    data.zones = crate::data::ZoneData::load(&conn, 0).unwrap();
+    data.systems.economy.store =
+        crate::systems::economy::store_data::StoreData::load(&ctx).unwrap();
+    data.systems.npcs.npc = crate::systems::npcs::npc::data::NpcData::load(&ctx).unwrap();
+    data
+}
+
+/// The 2014-10 video values through the live sale (`CSSellBackpackGoodsPacket` ->
+/// `economy::specialty::sell_specialty` -> the store hook), on the real compact data. The
+/// ratios are the video's town ratios, reached through the real sold-pack consume tick.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_specialty_payouts_match_the_2014_video() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let mut w = world_with_data(real_specialty_data(&path));
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer.clone());
+    assert_eq!(
+        w.server
+            .systems
+            .economy
+            .mail
+            .trade_pack_mail_delay_minutes(),
+        1320.0
+    );
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    let npcs: Vec<NpcRef> = VIDEO_PACKS
+        .iter()
+        .enumerate()
+        .map(|(i, case)| {
+            spawn_npc(
+                &mut w,
+                0x5000 + i as u32,
+                case.trader,
+                100.5 + i as f32 * 0.5,
+            )
+        })
+        .collect();
+
+    for (i, case) in VIDEO_PACKS.iter().enumerate() {
+        let group = w
+            .server
+            .game_data
+            .zones
+            .zone_by_key(case.zone_key)
+            .unwrap()
+            .group_id;
+        pa.data().unit.transform.zone_id = case.zone_key;
+        {
+            let sp = &w.server.systems.economy.specialty;
+            for _ in 0..case.packs_sold {
+                sp.add_sold_pack(case.pack, group);
+            }
+            if case.packs_sold > 0 {
+                sp.consume_ratio();
+            }
+            assert_eq!(
+                sp.ratio(case.pack, group) as i32,
+                case.ratio,
+                "{}",
+                case.name
+            );
+        }
+        // The client asks about the pack and is answered the video's ratio.
+        let mut s = PacketStream::new();
+        s.write_u32(case.pack);
+        run::<CSSpecialtyRatioPacket>(&mut w, 0, s.as_bytes());
+        assert_eq!(
+            w.a.drain(),
+            vec![(
+                sc::SCSpecialtyRatioPacket,
+                case.ratio.to_le_bytes().to_vec()
+            )],
+            "{}",
+            case.name
+        );
+
+        pa.data().labor_power = 200;
+        give(
+            &w,
+            &pa,
+            slot_type::EQUIPMENT,
+            case.pack,
+            1,
+            equip_slot::BACKPACK,
+        );
+        let before = mailer.0.lock().unwrap().len();
+        let mut s = PacketStream::new();
+        s.write_bc(npcs[i].obj_id);
+        run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+        let mails = mailer.0.lock().unwrap();
+        assert_eq!(mails.len(), before + 1, "{}", case.name);
+        let mail = &mails[before];
+        let (expected_base, expected_mailed) = if case.coin == crate::data::items::ITEM_COINS {
+            (case.base, case.mailed)
+        } else {
+            (
+                (case.base as f32 / 10000f32).round_ties_even() as i32,
+                (case.mailed as f32 / 10000f32).round_ties_even() as i32,
+            )
+        };
+        assert_eq!(mail.trade_pack_template_id, case.pack, "{}", case.name);
+        assert_eq!(mail.trade_rate, case.ratio, "{}", case.name);
+        assert_eq!(mail.interest_rate, 5, "{}", case.name);
+        assert_eq!(mail.item_count_bonus, 0, "{}", case.name);
+        assert_eq!(mail.item_reward_template_id, case.coin, "{}", case.name);
+        assert_eq!(mail.item_count_base, expected_base, "{}", case.name);
+        assert_eq!(mail.item_count_for_seller, expected_mailed, "{}", case.name);
+        assert_eq!(mail.item_count_for_crafter, 0, "{}", case.name);
+        assert_eq!(mail.crafter_id, 0, "{}", case.name);
+        // The formula pins the window payment (no interest) and the mail (+5 %).
+        assert_eq!(
+            specialty::sale_amounts(case.base, case.ratio, 0),
+            (case.shown, case.mailed),
+            "{}",
+            case.name
+        );
+        assert!(Inv::of(&pa).equipped(equip_slot::BACKPACK).is_none());
+        assert_eq!(pa.data().labor_power, 140, "{}", case.name);
+        assert_eq!(
+            w.server
+                .systems
+                .economy
+                .specialty
+                .sold_in_tick(case.pack, group),
+            1,
+            "{}",
+            case.name
+        );
+        // The item-task / labor / sale frames of this case, before the next ratio request.
+        w.a.drain();
+    }
+}
+
+/// The real mail path of the 2014-10 sale: 20 % crafter / 80 % seller, the 22 h delay and the
+/// 5 % interest on the mailed amount, and the Gilda Star trader's one-star payment.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_specialty_mail_split_and_delay_match_the_2014_video() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let mut w = world_with_data(real_specialty_data(&path));
+    crate::systems::economy::wiring::install(&w.server);
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    w.server.names.add_character(1, "Alice", 1001);
+    w.server.names.add_character(2, "Bob", 1002);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+
+    // Tigerspine Grape Jam at Jasmine (Austera, 130 %): base 39910 -> 51883 shown -> 54477
+    // mailed; the crafter gets 20 % = 10895, the seller 80 % = 43582.
+    pa.data().unit.transform.zone_id = 141;
+    let jasmine = spawn_npc(&mut w, 0x5100, 10659, 102.0);
+    let pack = give(
+        &w,
+        &pa,
+        slot_type::EQUIPMENT,
+        31869,
+        1,
+        equip_slot::BACKPACK,
+    );
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(jasmine.obj_id);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    let now = crate::systems::economy::mail::now();
+    let mails: Vec<(u32, String, i32, i64)> = w
+        .server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .map(|(_, m)| {
+            (
+                m.header.receiver_id,
+                m.title.clone(),
+                m.body.copper_coins,
+                m.body.recv_date,
+            )
+        })
+        .collect();
+    assert!(
+        mails.iter().any(|m| m.0 == 1
+            && m.1 == "Specialty Payment [Delivery]"
+            && m.2 == 43582
+            && (m.3 - now - 1320 * 60).abs() <= 5),
+        "{mails:?}"
+    );
+    assert!(
+        mails
+            .iter()
+            .any(|m| m.0 == 2 && m.1 == "Specialty Payment [Crafter]" && m.2 == 10895),
+        "{mails:?}"
+    );
+
+    // Mahadevi Elephant Cookies at Delara (Solzreed, 130 %): 1 Gilda Star, not copper.
+    pa.data().labor_power = 200;
+    pa.data().unit.transform.zone_id = 142;
+    let delara = spawn_npc(&mut w, 0x5101, 8000003, 101.0);
+    give(
+        &w,
+        &pa,
+        slot_type::EQUIPMENT,
+        31844,
+        1,
+        equip_slot::BACKPACK,
+    );
+    let mut s = PacketStream::new();
+    s.write_bc(delara.obj_id);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    let (attachment, recv_date) = {
+        let state = w.server.systems.economy.mail.state();
+        let mail = state
+            .all
+            .iter()
+            .map(|(_, m)| m)
+            .find(|m| m.header.receiver_id == 1 && m.title == "Specialty Payment")
+            .expect("the Gilda Star seller mail");
+        assert_eq!(mail.body.copper_coins, 0);
+        assert_eq!(mail.body.attachments.len(), 1);
+        (mail.body.attachments[0], mail.body.recv_date)
+    };
+    assert!((recv_date - crate::systems::economy::mail::now() - 1320 * 60).abs() <= 5);
+    let mail_container = Inv::of(&pa).get(slot_type::MAIL).expect("mail container");
+    let container = mail_container.lock().unwrap();
+    let att = container
+        .get_item_by_id(attachment)
+        .expect("Gilda Star attachment");
+    assert_eq!((att.template_id, att.count), (23633, 1));
 }
 
 fn sell_body(npc: u32, entries: &[(u8, u8, u64)]) -> Vec<u8> {

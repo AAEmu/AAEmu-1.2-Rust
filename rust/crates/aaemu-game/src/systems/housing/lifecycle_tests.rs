@@ -1554,6 +1554,57 @@ async fn abandoned_house_burning_ticks_30_per_second_and_removes_the_house_at_ze
 }
 
 #[tokio::test]
+async fn abandoned_house_burning_stays_permanent_through_the_created_step_and_refresh() {
+    use crate::models::buff::effect_state;
+    use crate::systems::skills::buffs;
+
+    let (f, house) = removal_fixture(removal_skills());
+    let buff = burning_buff(&house);
+    assert!(buff.permanent);
+    // Rewind to the state the timer sees right after `add_buff`: the CREATED step must not
+    // restore the authored 99,999,999 ms duration (it would divide the fixed 30 over 27 h).
+    WorldObject::from(&house).with_base_unit(|u| {
+        let e = u
+            .buffs_mut()
+            .effects
+            .iter_mut()
+            .find(|e| e.template.id == manager::BUFF_BURNING_HOUSE)
+            .unwrap();
+        e.state = effect_state::CREATED;
+    });
+    let hp = house.data().unit.hp;
+    buffs::dispel_task(&f.server, house.obj_id, buff.index, buff.task_gen);
+    let after = burning_buff(&house);
+    assert_eq!((after.duration, after.count), (0, -1));
+    buffs::dispel_task(&f.server, house.obj_id, after.index, after.task_gen);
+    assert_eq!(house.data().unit.hp, hp - 30);
+    // A refresh keeps it permanent too.
+    let obj = WorldObject::from(&house);
+    let template = f
+        .server
+        .game_data
+        .systems
+        .skills
+        .buff(manager::BUFF_BURNING_HOUSE)
+        .unwrap()
+        .clone();
+    let caster = crate::systems::skills::types::SkillCaster::Unit(house.obj_id);
+    let again = buffs::new_buff(
+        &f.server,
+        &template,
+        Some(&obj),
+        &caster,
+        None,
+        crate::world::now_ms(),
+    );
+    buffs::add_buff(&f.server, &obj, again, 0, 0);
+    let refreshed = burning_buff(&house);
+    assert_eq!((refreshed.duration, refreshed.count), (0, -1));
+    buffs::dispel_task(&f.server, house.obj_id, refreshed.index, refreshed.task_gen);
+    assert_eq!(house.data().unit.hp, hp - 60);
+}
+
+#[tokio::test]
 async fn abandoned_house_carries_both_buffs_and_drops_them_with_the_removal_debuff() {
     let (f, house) = removal_fixture(removal_skills());
     for id in [manager::BUFF_REMOVAL_DEBUFF, manager::BUFF_BURNING_HOUSE] {

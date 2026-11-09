@@ -48,10 +48,21 @@ struct Fixture {
 
 /// `bag_slots == 0` makes every reward overflow to the mail.
 fn fixture(rows: Vec<ScheduleItemDef>, bag_slots: u8) -> Fixture {
+    fixture_on(rows, bag_slots, None)
+}
+
+/// [`fixture`] with a real MySQL pool (the gated Loyalty tests); the server is built on it so
+/// `add_loyalty_returning` reaches the test's temporary `accounts` table.
+fn fixture_on(rows: Vec<ScheduleItemDef>, bag_slots: u8, pool: Option<sqlx::MySqlPool>) -> Fixture {
     let mut data = GameData::empty();
     data.items
         .templates
         .insert(REWARD_ITEM, ItemTemplate::plain(REWARD_ITEM, 1));
+    // Item 28586 exists in the real 1.2 data (research round 6 §2.2); the loyalty take must not
+    // hand it out even though its template is loaded.
+    data.items
+        .templates
+        .insert(MILEAGE_ITEM_TYPE, ItemTemplate::plain(MILEAGE_ITEM_TYPE, 1));
     data.systems.npcs.schedule_items = ScheduleItemData::from_rows(rows);
     data.systems.services.premium.grades = vec![
         crate::systems::services::premium::PremiumGrade {
@@ -65,7 +76,11 @@ fn fixture(rows: Vec<ScheduleItemDef>, bag_slots: u8) -> Fixture {
             point: 1,
         },
     ];
-    let server = Arc::new(test_server_with(data));
+    let mut server = test_server_with(data);
+    if let Some(pool) = pool {
+        server.db = pool;
+    }
+    let server = Arc::new(server);
     server.set_self();
     server.names.add_character(1, "Tester", 1);
     let mut client = TestClient::new(&server, 1, 1);
@@ -173,7 +188,7 @@ async fn a_take_grants_once_and_the_second_take_in_the_window_is_refused() {
     f.client.drain();
 
     assert_eq!(
-        take(&f.server, &f.player, 1),
+        take(&f.server, &f.player, 1).await,
         TakeOutcome::Granted { by_mail: false }
     );
     let bag = bag_items(&f);
@@ -185,7 +200,7 @@ async fn a_take_grants_once_and_the_second_take_in_the_window_is_refused() {
     assert_eq!(update_lists(&frames), [vec![(1, 1, 0)]]);
 
     // The term restarted (`cumulated = 0`): a second take is refused and grants nothing.
-    assert_eq!(take(&f.server, &f.player, 1), TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 1).await, TakeOutcome::Refused);
     assert_eq!(bag_items(&f).len(), 1);
     let frames = f.client.drain();
     assert!(sent(&frames).is_empty());
@@ -199,10 +214,10 @@ async fn a_take_before_the_term_is_ready_or_of_a_silent_row_is_refused() {
     restore(&f, 1, 0, 0);
     on_enter(&f.server, &f.player);
 
-    assert_eq!(take(&f.server, &f.player, 1), TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 1).await, TakeOutcome::Refused);
     // A silent row has no take button, and an unknown row does not exist.
-    assert_eq!(take(&f.server, &f.player, 2), TakeOutcome::Refused);
-    assert_eq!(take(&f.server, &f.player, 99), TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 2).await, TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 99).await, TakeOutcome::Refused);
     assert!(bag_items(&f).is_empty());
 }
 
@@ -211,10 +226,10 @@ async fn a_take_needs_an_entered_character() {
     let f = fixture(vec![row(1, true)], 50);
     restore(&f, 1, 0, 60);
     // Not entered yet.
-    assert_eq!(take(&f.server, &f.player, 1), TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 1).await, TakeOutcome::Refused);
     on_enter(&f.server, &f.player);
     on_leave(&f.server, &f.player);
-    assert_eq!(take(&f.server, &f.player, 1), TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 1).await, TakeOutcome::Refused);
     assert!(bag_items(&f).is_empty());
 }
 
@@ -226,14 +241,14 @@ async fn a_full_bag_sends_the_reward_by_mail_once() {
     f.client.drain();
 
     assert_eq!(
-        take(&f.server, &f.player, 1),
+        take(&f.server, &f.player, 1).await,
         TakeOutcome::Granted { by_mail: true }
     );
     assert_eq!(sent(&f.client.drain()), [(1, true)]);
     assert!(bag_items(&f).is_empty());
     assert_eq!(f.server.systems.economy.mail.state().all.len(), 1);
 
-    assert_eq!(take(&f.server, &f.player, 1), TakeOutcome::Refused);
+    assert_eq!(take(&f.server, &f.player, 1).await, TakeOutcome::Refused);
     assert_eq!(f.server.systems.economy.mail.state().all.len(), 1);
 }
 
@@ -243,7 +258,7 @@ async fn the_receipt_persists_through_the_save_snapshot() {
     restore(&f, 1, 0, 60);
     on_enter(&f.server, &f.player);
     assert_eq!(
-        take(&f.server, &f.player, 1),
+        take(&f.server, &f.player, 1).await,
         TakeOutcome::Granted { by_mail: false }
     );
 
@@ -387,4 +402,120 @@ async fn eligibility_reads_the_account_payment_and_grade() {
     assert!(evidence.paid_patron);
     assert_eq!(evidence.premium_grade_id, 2);
     assert!(!evidence.pc_bang);
+}
+
+// ---------------------------------------------------------------------------------------------
+// MILEAGE_ITEM_TYPE rows: the reward is account Loyalty, never an item
+// ---------------------------------------------------------------------------------------------
+
+/// A takeable row whose reward is the 1.2 `MILEAGE_ITEM_TYPE` (28586, Loyalty Token).
+fn mileage_row(id: i32) -> ScheduleItemDef {
+    ScheduleItemDef {
+        id,
+        kind: ScheduleItemKind::Every,
+        give_term: 1,
+        give_max: 2,
+        item_id: MILEAGE_ITEM_TYPE,
+        item_count: 7,
+        active_take: true,
+        on_air: true,
+        ..ScheduleItemDef::default()
+    }
+}
+
+/// A closed pool refuses the credit, and the take must still not put item 28586 in the bag.
+#[tokio::test]
+async fn a_mileage_row_never_hands_out_the_item() {
+    let mut f = fixture(vec![mileage_row(1)], 50);
+    restore(&f, 1, 0, 60);
+    on_enter(&f.server, &f.player);
+    f.client.drain();
+
+    assert_eq!(
+        take(&f.server, &f.player, 1).await,
+        TakeOutcome::Refused,
+        "the account credit failed, so nothing was handed over"
+    );
+    assert!(bag_items(&f).is_empty(), "28586 must not enter the bag");
+}
+
+/// The private MySQL pool of the gated test; `accounts` is a temporary table on its one
+/// connection, so the lane database is never touched.
+async fn private_pool() -> Option<sqlx::MySqlPool> {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return None;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("private MySQL");
+    sqlx::query(
+        "CREATE TEMPORARY TABLE accounts (account_id INT NOT NULL PRIMARY KEY, \
+         loyalty INT NOT NULL DEFAULT 0)",
+    )
+    .execute(&pool)
+    .await
+    .expect("temporary accounts table");
+    Some(pool)
+}
+
+/// `hand_over` of a 28586 row credits the account and pushes `SCBmPoint` + the gain message,
+/// leaving the bag empty (research round 6 §2.5 B1 / §3.5).
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+async fn a_mileage_row_credits_account_loyalty() {
+    let Some(pool) = private_pool().await else {
+        return;
+    };
+    let mut f = fixture_on(vec![mileage_row(1)], 50, Some(pool.clone()));
+    restore(&f, 1, 0, 60);
+    on_enter(&f.server, &f.player);
+    f.client.drain();
+
+    assert_eq!(
+        take(&f.server, &f.player, 1).await,
+        TakeOutcome::Granted { by_mail: false }
+    );
+    assert!(bag_items(&f).is_empty(), "28586 must not enter the bag");
+    let total: i64 =
+        sqlx::query_scalar("SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total, 7, "the row's item_count became account loyalty");
+    assert_eq!(f.player.data().bm_point, 7);
+
+    let frames = f.client.drain();
+    assert_eq!(sent(&frames), [(1, false)]);
+    let bm = frames
+        .iter()
+        .find(|(opcode, _)| *opcode == sc::SCBmPointPacket)
+        .expect("SCBmPointPacket");
+    assert_eq!(bm.1, 7i64.to_le_bytes().to_vec());
+    assert!(
+        frames
+            .iter()
+            .any(|(opcode, body)| *opcode == sc::SCChatMessagePacket
+                && String::from_utf8_lossy(body).contains("Loyalty Token")),
+        "the msg_gain_bmmileage line is shown"
+    );
+
+    // The receipt is recorded: the same window cannot pay twice.
+    assert_eq!(take(&f.server, &f.player, 1).await, TakeOutcome::Refused);
+    let total: i64 =
+        sqlx::query_scalar("SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total, 7);
 }

@@ -16,8 +16,8 @@ use crate::systems::services::premium;
 /// `RemoveDeadConnections` interval and ping timeout.
 pub const DEAD_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `AccountManager.Add(connection)`: registers the account, updates `last_login`, grants the
-/// daily login reward on a new (UTC) day and the offline labor. Returns `false` when the account
+/// `AccountManager.Add(connection)`: registers the account, updates `last_login`, claims the
+/// UTC day's daily login reward and grants the offline labor. Returns `false` when the account
 /// is already registered (the C# `Add` then returns early); the caller refuses the world entry.
 pub async fn add(server: &GameServer, conn: &mut GameConnection) -> bool {
     let account_id = conn.account_id();
@@ -30,11 +30,10 @@ pub async fn add(server: &GameServer, conn: &mut GameConnection) -> bool {
     // it on the connection for the lobby burst.
     let (state, _) = refresh_state_with_details(server, account_id).await;
     conn.payment = state.payment.clone();
-    let today = now.date().and_hms_opt(0, 0, 0).expect("midnight");
-    if last_login.is_none_or(|l| l < today) {
-        // Logged in for a new day
-        super::timed_rewards::do_daily_account_login(server, account_id).await;
-    }
+    // The claim on `accounts.last_daily_reward` decides whether this is the first login of the
+    // UTC day (a fresh account's row is created with `last_login = now`, so the old
+    // `last_login < today` test skipped its very first daily reward).
+    super::timed_rewards::do_daily_account_login(server, account_id).await;
     super::timed_rewards::add_offline_labor(server, account_id, &state, last_login, conn.id).await;
     true
 }
@@ -114,6 +113,111 @@ pub async fn add_loyalty(server: &GameServer, account_id: u32, amount: i32) -> b
     let lock = server.accounts.lock_of(account_id);
     let _g = lock.lock().await;
     db::add_account_points(&server.db, AccountPointColumn::Loyalty, account_id, amount).await
+}
+
+/// Adds `amount` to `accounts.loyalty` and returns the new total (`None` = the write failed).
+pub async fn add_loyalty_returning(
+    server: &GameServer,
+    account_id: u32,
+    amount: i32,
+) -> Option<i32> {
+    let lock = server.accounts.lock_of(account_id);
+    let _g = lock.lock().await;
+    match db::add_loyalty_returning(&server.db, account_id, amount).await {
+        Ok(total) => total,
+        Err(e) => {
+            tracing::error!("add_loyalty_returning({account_id}): {e}");
+            None
+        }
+    }
+}
+
+/// Claims the daily login reward of `today` (UTC midnight) and credits `credits` / `loyalty` in
+/// one transaction. `None` = already paid today (or the transaction failed).
+pub async fn claim_daily_reward(
+    server: &GameServer,
+    account_id: u32,
+    today: NaiveDateTime,
+    credits: i32,
+    loyalty: i32,
+) -> Option<(i32, i32)> {
+    let lock = server.accounts.lock_of(account_id);
+    let _g = lock.lock().await;
+    db::claim_daily_reward(&server.db, account_id, today, credits, loyalty).await
+}
+
+/// Adds `amount` to `accounts.loyalty` and stores the hourly Loyalty counters in one
+/// transaction, but only while the row still holds `previous`; returns the new total
+/// (`None` = the snapshot was stale or nothing was written).
+pub async fn credit_hourly_loyalty(
+    server: &GameServer,
+    account_id: u32,
+    amount: i32,
+    previous: db::LoyaltyHourState,
+    next: db::LoyaltyHourState,
+) -> Option<i32> {
+    let lock = server.accounts.lock_of(account_id);
+    let _g = lock.lock().await;
+    match db::credit_hourly_loyalty(&server.db, account_id, amount, previous, next).await {
+        Ok(total) => total,
+        Err(e) => {
+            tracing::error!("credit_hourly_loyalty({account_id}): {e}");
+            None
+        }
+    }
+}
+
+/// Stores the hourly Loyalty counters without granting a token, only while the row still holds
+/// `previous`. Returns whether the write applied.
+pub async fn store_loyalty_hour_state(
+    server: &GameServer,
+    account_id: u32,
+    previous: db::LoyaltyHourState,
+    next: db::LoyaltyHourState,
+) -> bool {
+    let lock = server.accounts.lock_of(account_id);
+    let _g = lock.lock().await;
+    match db::store_loyalty_hour_state(&server.db, account_id, previous, next).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::error!("store_loyalty_hour_state({account_id}): {e}");
+            false
+        }
+    }
+}
+
+/// Pushes a Loyalty grant to every online character of the account: the new account total
+/// (`SCBmPoint` 0x46) on each and the 1.2 `msg_gain_bmmileage` chat line
+/// (`ui_texts` id 5450, localised through the loaded `ui_texts`) on each. A character of the
+/// same account that was already selected would otherwise keep a stale `bm_point`.
+pub fn notify_loyalty_grant(server: &GameServer, account_id: u32, amount: i32, total: i32) {
+    use crate::packets::world::SCChatMessagePacket;
+    use crate::systems::skills::packets_special::SCBmPointPacket;
+    use crate::systems::social::chat::chat_type;
+
+    let message = crate::systems::economy::mail_data::localized_ui_text(
+        server,
+        "msg_gain_bmmileage",
+        "Acquired $1 Loyalty Token(s). (New Total: $2)",
+    )
+    .replace("$1", &amount.to_string())
+    .replace("$2", &total.to_string());
+    for p in server.world.all_characters() {
+        if p.data().account_id != account_id {
+            continue;
+        }
+        p.data().bm_point = i64::from(total);
+        p.send(SCBmPointPacket {
+            bm_point: i64::from(total),
+        });
+        p.send(SCChatMessagePacket {
+            chat_type: chat_type::SYSTEM,
+            sender: None,
+            message: message.clone(),
+            ability: 0,
+            language_type: 0,
+        });
+    }
 }
 
 /// `UpdateLabor(accountId, laborPower)`.

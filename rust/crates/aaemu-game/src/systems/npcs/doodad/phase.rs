@@ -399,6 +399,31 @@ fn answer_busy_instance_door(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) 
     }
 }
 
+/// Refuses a func whose `doodad_funcs.perm_id` the player does not satisfy. The 1.2 client
+/// filters these rows out before it starts a skill (`FUN_393b3300`, see `permission.rs`), so a
+/// client that sends the skill directly must get the client's permission-denial error. The
+/// running cast is cancelled so its item / labor cost is refunded (the same shape as
+/// [`refuse_blocked_child_doodad`]). Returns true when the caller must stop.
+pub(crate) fn refuse_func_permission(
+    ctx: &DoodadCtx<'_>,
+    player: &PlayerRef,
+    func: &DoodadFunc,
+) -> bool {
+    if super::permission::allows_func(ctx.server, &ctx.world, &ctx.doodad, player, func) {
+        return false;
+    }
+    tracing::debug!(
+        "Use refused: doodad {} func {} perm {} denies {}",
+        ctx.doodad.obj_id,
+        func.func_key,
+        func.perm_id,
+        player.data().unit.name
+    );
+    player.send(error_msg(error_message::INTERACTION_PERMISSION_DENY));
+    funcs::skills_hook(ctx.server).cancel_skill(ctx.server, player);
+    true
+}
+
 /// `Doodad.Use(caster, startedSkillId, funcGroupId)`.
 pub fn use_doodad(
     ctx: &DoodadCtx<'_>,
@@ -441,6 +466,25 @@ pub fn use_doodad(
         return;
     }
 
+    let player = caster.as_player();
+
+    // Siege larceny (ui 3334): crops, livestock and trees on private land are usable while the
+    // territory's lodestone is held. This is the shared `Doodad.Use` funnel, so the skill-bound
+    // `DoodadFuncUse` path and the skill-less `LootItem` / `LootPack` / `Cutdowning` path both
+    // pass it. Only the farm groups are gated here; houses, furniture, doors and coffers keep
+    // their own permission checks. The window grants produce only, never the uproot.
+    if let Some(player) = player {
+        if !crate::systems::housing::dominion::larceny::house_doodad_use_allowed(
+            server,
+            &ctx.doodad,
+            player,
+            started_skill_id,
+        ) {
+            player.send(error_msg(error_message::INTERACTION_PERMISSION_DENY));
+            return;
+        }
+    }
+
     if func_group_id > 0 {
         if !crate::systems::instances::mentoring::allows_phase_request(ctx, func_group_id) {
             return;
@@ -475,6 +519,27 @@ pub fn use_doodad(
                     "DoodadFuncLootItem" | "DoodadFuncLootPack" | "DoodadFuncCutdowning"
                 )
             }) {
+                // The client builds this list with the func's `perm` filter (`FUN_393bd290`);
+                // a direct `CSLootOpenBag` must not run a row the client would have hidden.
+                if let Some(player) = player {
+                    if chained {
+                        // A chained iteration runs after an earlier loot row already ran and
+                        // advanced the phase. The interaction (and its loot / cast) already
+                        // happened, so a denied bonus row is skipped silently instead of
+                        // sending 232 and refunding a cast whose effect is done.
+                        if !super::permission::allows_func(
+                            ctx.server,
+                            &ctx.world,
+                            &ctx.doodad,
+                            player,
+                            f,
+                        ) {
+                            continue;
+                        }
+                    } else if refuse_func_permission(ctx, player, f) {
+                        return;
+                    }
+                }
                 if do_func(ctx, Some(caster), started_skill_id, Some(f)) {
                     ctx.doodad.data().phase.list_group_id.clear();
                     return;
@@ -496,18 +561,28 @@ pub fn use_doodad(
                     set_func_group_id(server, &ctx.doodad, next);
                 }
             }
-        } else if do_func(
-            ctx,
-            Some(caster),
-            started_skill_id,
-            func_with_skill.as_ref(),
-        ) {
-            // FuncGroupId is the current phase, func.NextPhase or OverridePhase
-            let fg = ctx.doodad.data().func_group_id;
-            if fg != current {
-                do_change_phase(ctx, Some(caster), fg as i32);
+        } else {
+            // `FUN_393b3300` filters a skill interaction by the matched func's `perm` before
+            // the client starts it; a client that sends `CSStartSkill` itself bypasses that,
+            // so the same rule is enforced here, before the func runs or changes the phase.
+            if let (Some(player), Some(func)) = (player, func_with_skill.as_ref()) {
+                if refuse_func_permission(ctx, player, func) {
+                    return;
+                }
             }
-            return;
+            if do_func(
+                ctx,
+                Some(caster),
+                started_skill_id,
+                func_with_skill.as_ref(),
+            ) {
+                // FuncGroupId is the current phase, func.NextPhase or OverridePhase
+                let fg = ctx.doodad.data().func_group_id;
+                if fg != current {
+                    do_change_phase(ctx, Some(caster), fg as i32);
+                }
+                return;
+            }
         }
 
         theft_evidence(ctx, caster, started_skill_id);
@@ -535,10 +610,43 @@ fn theft_evidence(ctx: &DoodadCtx<'_>, caster: &WorldObject, started_skill_id: u
         let d = ctx.doodad.data();
         (d.owner_type, d.owner_id)
     };
+    // A garden plant is owned by its house, not by a character. Its use is theft only when the
+    // siege larceny window (not a normal house permission such as PUBLIC) granted the access;
+    // the normal evidence then follows `Housing.SiegeLarcenyCrime`.
+    let larceny_house =
+        if crate::systems::housing::dominion::larceny::covers_doodad(server, &ctx.doodad) {
+            crate::systems::housing::dominion::larceny::house_of_doodad(server, &ctx.doodad)
+        } else {
+            None
+        };
+    let larceny_granted = match (&larceny_house, caster_owner.as_ref()) {
+        (Some(house), Some(player)) => {
+            !crate::systems::housing::allowed_to_interact(server, house, player)
+        }
+        _ => false,
+    };
+    let owner_character_id = match owner_type {
+        doodad_owner_type::CHARACTER => Some(owner_id),
+        doodad_owner_type::HOUSING if larceny_granted => larceny_house
+            .as_ref()
+            .map(|house| house.data().unit.owner_id)
+            .filter(|id| *id != 0),
+        _ => None,
+    };
     let caster_owner_id = caster_owner.as_ref().map(|p| p.data().id);
     let is_different_character_owner =
-        owner_type == doodad_owner_type::CHARACTER && Some(owner_id) != caster_owner_id;
+        owner_character_id.is_some_and(|id| Some(id) != caster_owner_id);
     if !is_different_character_owner {
+        return;
+    }
+    // The window's text says the crops are "used", not stolen; keep the footprint evidence
+    // only when the configuration asks for the normal theft rule.
+    if larceny_granted
+        && crate::systems::housing::dominion::larceny::suppresses_theft_evidence(
+            server,
+            &ctx.doodad,
+        )
+    {
         return;
     }
     let hooks = server.systems.npcs.hooks.skills.get();
