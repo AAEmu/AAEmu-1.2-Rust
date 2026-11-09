@@ -706,6 +706,25 @@ impl DominionManager {
             .map(|entry| entry.state.clone())
     }
 
+    /// The 1.2 siege larceny window (`ui_texts` 3334 `in_siege_warning`): the territory's siege
+    /// is active and its attackers hold the Archeum Lodestone (`tower_destroyed`). The window
+    /// closes when the siege ends (the `active_at` deadline) or the lodestone is retaken
+    /// (`reset_tower_destroyed`); a capture / release clears the flag as well. Server logic:
+    /// the 1.2 data has no table for the rule (INFERRED, see `larceny`).
+    pub fn siege_larceny_window_open(&self, zone_group_id: u32, now_seconds: i64) -> bool {
+        if now_seconds < 0 {
+            return false;
+        }
+        self.lock().states.get(&zone_group_id).is_some_and(|entry| {
+            let state = &entry.state;
+            state.tower_destroyed
+                && state
+                    .siege
+                    .as_ref()
+                    .is_some_and(|siege| siege.active_at(now_seconds))
+        })
+    }
+
     pub fn all(&self) -> Vec<DominionState> {
         self.lock()
             .states

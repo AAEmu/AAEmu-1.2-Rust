@@ -974,13 +974,20 @@ impl CrimeManager {
         criminal: Option<&PlayerRef>,
         stolen: &DoodadRef,
     ) -> Option<DoodadRef> {
-        let (owner_type, owner_id, template_id) = {
+        let (owner_type, owner_id, owner_db_id, template_id) = {
             let d = stolen.data();
-            (d.owner_type, d.owner_id, d.template_id)
+            (d.owner_type, d.owner_id, d.owner_db_id, d.template_id)
         };
-        if owner_type != doodad_owner_type::CHARACTER {
-            return None;
-        }
+        // A garden plant is owned by its house. The caller only reaches this branch inside the
+        // siege larceny window with `Housing.SiegeLarcenyCrime` on (see `phase::theft_evidence`);
+        // the victim is the house owner.
+        let owner_id = match owner_type {
+            doodad_owner_type::CHARACTER => owner_id,
+            doodad_owner_type::HOUSING => crate::systems::housing::house_by_id(server, owner_db_id)
+                .map(|house| house.data().unit.owner_id)
+                .filter(|id| *id != 0)?,
+            _ => return None,
+        };
         let criminal = criminal?;
         let gender = criminal.data().gender;
         let pr = world_pos_rot(server, &WorldObject::from(stolen));

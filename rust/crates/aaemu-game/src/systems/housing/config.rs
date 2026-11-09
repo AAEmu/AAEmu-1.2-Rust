@@ -23,6 +23,34 @@ impl crate::config::ConfigEnum for DominionPropertyTaxBase {
     }
 }
 
+/// `Housing.SiegeLarceny`: who may loot the farm / garden doodads of a territory whose
+/// lodestone the attackers hold (`ui_texts` 3334 `in_siege_warning`). The English client text
+/// says "opponents", the Korean one "anyone else"; the EU default is [`Self::Opponents`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SiegeLarcenyMode {
+    /// Hostile to the land owner (the existing faction relation).
+    #[default]
+    Opponents,
+    /// Any player other than the owner (the Korean wording).
+    Anyone,
+    /// No siege larceny window.
+    Off,
+}
+
+impl crate::config::ConfigEnum for SiegeLarcenyMode {
+    fn parse_config(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("Opponents") || value == "0" {
+            Some(Self::Opponents)
+        } else if value.eq_ignore_ascii_case("Anyone") || value == "1" {
+            Some(Self::Anyone)
+        } else if value.eq_ignore_ascii_case("Off") || value == "2" {
+            Some(Self::Off)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct HousingConfig {
@@ -132,6 +160,24 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub siege_declare_peace_margin: f32,
+    /// The siege larceny window (`ui_texts` 3334 `in_siege_warning`): while a territory's siege
+    /// is active and its Archeum Lodestone is destroyed, `Opponents` (default, the English text)
+    /// or `Anyone` (the Korean text) may use the crops, livestock and trees on the territory's
+    /// private land; `Off` disables the window. Server logic: INFERRED from the string only.
+    /// `Housing.SiegeLarceny`.
+    #[serde(
+        rename = "siegelarceny",
+        deserialize_with = "crate::config::lenient_enum"
+    )]
+    pub siege_larceny: SiegeLarcenyMode,
+    /// Keep the normal theft evidence (footprint, item 18461 / 3 crime points after a report)
+    /// inside the siege larceny window. `false` (default) suppresses it: the window's text says
+    /// the crops are "used", not stolen. INFERRED. `Housing.SiegeLarcenyCrime`.
+    #[serde(
+        rename = "siegelarcenycrime",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_larceny_crime: bool,
     /// Half extent in metres of the collision box tested around the declared spot
     /// (`SIEGE_CANNOT_DECLARE_OBSTACLE` 741). The retail radius is UNKNOWN; the default is
     /// the server's player capsule radius (0.35 m, `collision::displacement`). INFERRED,
@@ -171,6 +217,8 @@ impl Default for HousingConfig {
             siege_declare_peace_check: false,
             siege_declare_peace_margin: 0.0,
             siege_declare_obstacle_radius: default_siege_declare_obstacle_radius(),
+            siege_larceny: SiegeLarcenyMode::default(),
+            siege_larceny_crime: false,
         }
     }
 }
@@ -293,6 +341,38 @@ mod tests {
         assert_eq!(config.housing.siege_declare_zone_margin, 7.5);
         assert_eq!(config.housing.siege_declare_peace_margin, 100.0);
         assert_eq!(config.housing.siege_declare_obstacle_radius, 1.25);
+    }
+
+    #[test]
+    fn siege_larceny_defaults_to_opponents_and_binds_strings_or_numbers() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.siege_larceny, SiegeLarcenyMode::Opponents);
+        assert!(!default.housing.siege_larceny_crime);
+        for (value, expected) in [
+            (serde_json::json!("anyone"), SiegeLarcenyMode::Anyone),
+            (serde_json::json!(1), SiegeLarcenyMode::Anyone),
+            (serde_json::json!("opponents"), SiegeLarcenyMode::Opponents),
+            (serde_json::json!(0), SiegeLarcenyMode::Opponents),
+            (serde_json::json!("off"), SiegeLarcenyMode::Off),
+            (serde_json::json!(2), SiegeLarcenyMode::Off),
+        ] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeLarceny": value }
+            }))
+            .unwrap();
+            assert_eq!(config.housing.siege_larceny, expected);
+        }
+        assert!(crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": { "SiegeLarceny": "unknown" }
+        }))
+        .is_err());
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeLarcenyCrime": value }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_larceny_crime);
+        }
     }
 
     #[test]

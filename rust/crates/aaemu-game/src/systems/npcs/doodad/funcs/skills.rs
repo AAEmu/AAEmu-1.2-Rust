@@ -86,8 +86,21 @@ pub fn use_(
                     );
                 }
                 Some(false) => {
-                    send_error(player, err::INTERACTION_PERMISSION_DENY);
-                    return;
+                    // Siege larceny (ui 3334): the window overrides the house permission for
+                    // farm / garden doodads while the territory's lodestone is held.
+                    let larceny = crate::systems::housing::house_by_id(server, owner_db_id)
+                        .is_some_and(|house| {
+                            crate::systems::housing::dominion::larceny::window_allows_house_doodad(
+                                server,
+                                &house,
+                                &ctx.doodad,
+                                player,
+                            )
+                        });
+                    if !larceny {
+                        send_error(player, err::INTERACTION_PERMISSION_DENY);
+                        return;
+                    }
                 }
                 Some(true) => {}
             }
