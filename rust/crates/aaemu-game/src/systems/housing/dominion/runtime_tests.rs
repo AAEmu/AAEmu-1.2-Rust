@@ -497,3 +497,44 @@ async fn a_forced_last_member_dismissal_applies_and_broadcasts_the_released_domi
         "the client gets the finished siege phase"
     );
 }
+
+#[tokio::test]
+async fn tower_hp_is_rescaled_once_with_the_house_hp_basis() {
+    let f = fixture(300_001);
+    let (_, identity) = tower_identity(&f.server, &f.house).unwrap();
+    let _ = identity;
+    let mut state = f.server.systems.housing.dominions.get(25).unwrap();
+    let siege = state.siege.as_mut().unwrap();
+    siege.status = SiegeStatus::Active;
+    siege.attacker_expedition_id = 10;
+    siege.defender_expedition_id = 20;
+    for participant in siege.participants.values_mut() {
+        participant.expedition_id = 10;
+    }
+    state.owner_expedition_id = 20;
+    state.tower_destroyed = false;
+    state.tower_hp = Some(500);
+    state.validate().expect("valid damaged fixture");
+    f.server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![state])
+        .expect("restore damaged dominion");
+    // The era maximum rose from the saved basis 1,000 to 4,000.
+    {
+        let mut h = f.house.data();
+        h.unit.max_hp = 4_000;
+        h.pending_hp_basis = Some(1_000);
+    }
+    let state = f.server.systems.housing.dominions.get(25).unwrap();
+    assert_eq!(state.tower_hp, Some(500));
+    apply_tower_state(&f.server, &state);
+    assert_eq!(f.house.data().unit.hp, 2_000);
+    assert_eq!(f.house.data().pending_hp_basis, None);
+    // Persisted in the dominion state, so a second apply keeps it.
+    let state = f.server.systems.housing.dominions.get(25).unwrap();
+    assert_eq!(state.tower_hp, Some(2_000));
+    apply_tower_state(&f.server, &state);
+    assert_eq!(f.house.data().unit.hp, 2_000);
+}

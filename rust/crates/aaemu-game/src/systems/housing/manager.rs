@@ -498,7 +498,7 @@ fn construction_step_maxima(max_hp: i32, all_action: i32, step_count: i32) -> Ve
 /// against (`housings.hp_basis`, or the template `housings.hp` for pre-era rows): scale by
 /// effective/basis so a full tower stays full, a damaged one keeps its fraction, and an
 /// already-scaled row (`basis == max_hp`) is left untouched. Leaves non-positive values alone.
-fn scale_loaded_structure_hp(stored: i32, basis: i32, max_hp: i32) -> i32 {
+pub(crate) fn scale_loaded_structure_hp(stored: i32, basis: i32, max_hp: i32) -> i32 {
     if stored <= 0 || basis <= 0 || max_hp <= 0 || basis == max_hp {
         return stored;
     }
@@ -1429,6 +1429,7 @@ pub fn load_house_row(
             );
         }
         if rescaled {
+            h.pending_hp_basis = Some(basis);
             // Persist the era-scaled value, so switching profiles does not rescale it again.
             h.is_dirty = true;
             tracing::info!(
