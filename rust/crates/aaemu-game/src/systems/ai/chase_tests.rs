@@ -412,3 +412,141 @@ async fn re_aggro_after_a_return_plans_from_the_new_position() {
     );
     assert_eq!(c.ai.path_node.end_point_pos, Vec3::new(120.0, 100.0, 100.0));
 }
+
+/// An NPC with base skill 2 (melee, weapon-slot range) and an optional ranged InCombat skill.
+fn melee_fixture(
+    scale: f32,
+    ranged: bool,
+    target_x: f32,
+) -> (Arc<crate::server::GameServer>, NpcRef, WorldObject) {
+    use crate::systems::ai::skills::SkillUseConditionKind;
+    use crate::systems::npcs::npc::data::NpcSkill;
+    use crate::systems::skills::data::SkillTemplate;
+
+    let mut data = GameData::empty();
+    let skills = if ranged {
+        vec![(
+            SkillUseConditionKind::InCombat.raw(),
+            vec![NpcSkill {
+                id: 1,
+                owner_id: 1,
+                owner_type: "Npcs".into(),
+                skill_id: 100,
+                skill_use_condition: 0,
+                skill_use_param1: 0.0,
+                skill_use_param2: 0.0,
+            }],
+        )]
+    } else {
+        Vec::new()
+    };
+    data.systems.npcs.npc.templates.insert(
+        1,
+        NpcTemplate {
+            id: 1,
+            base_skill_id: 2,
+            attack_start_range_scale: scale,
+            use_range_mod: true,
+            skills,
+            ..NpcTemplate::default()
+        },
+    );
+    data.systems.skills.skills.insert(
+        2,
+        Arc::new(SkillTemplate {
+            id: 2,
+            weapon_slot_for_range_id: 15,
+            max_range: 25,
+            ..Default::default()
+        }),
+    );
+    data.systems.skills.skills.insert(
+        100,
+        Arc::new(SkillTemplate {
+            id: 100,
+            min_range: 0,
+            max_range: 20,
+            ignore_global_cooldown: true,
+            ..Default::default()
+        }),
+    );
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    let mut n = Npc::new(1);
+    n.unit.hp = 1000;
+    n.unit.max_hp = 1000;
+    n.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let npc = Entity::new(0x300, n);
+    let mut target = Npc::new(2);
+    target.unit.hp = 1000;
+    target.unit.transform.set_xyz(target_x, 100.0, 100.0);
+    let target = WorldObject::from(Entity::new(0x301, target));
+    let world = server.world.world(0).unwrap();
+    world.spawn(&npc, &server.view_ctx());
+    world.spawn(&target, &server.view_ctx());
+    (server, npc, target)
+}
+
+#[tokio::test]
+async fn fallback_to_melee_while_the_ranged_skill_cools_down_closes_in() {
+    let (server, npc, target) = melee_fixture(1.7, true, 115.0);
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+    let mut c = AiCtx {
+        server: &server,
+        npc: npc.clone(),
+        obj: WorldObject::from(&npc),
+        ai: &mut ai,
+    };
+    // The ranged skill was just used: it is on cooldown, only melee skill 2 is left.
+    npc.data()
+        .unit
+        .cooldowns
+        .add_cooldown(100, 25_000, super::now_ms());
+    let res = super::pick_skill_and_use_it(
+        &mut c,
+        BehaviorKind::Attack,
+        crate::systems::ai::skills::SkillUseConditionKind::InCombat,
+        &target,
+        15.0,
+    );
+    assert_eq!(
+        res,
+        crate::systems::skills::types::skill_result::TOO_FAR_RANGE
+    );
+    let max = c.st(BehaviorKind::Attack).max_weapon_range;
+    assert!(1.7 * max <= 4.0 + 1e-4, "chase range {} too far", 1.7 * max);
+    for _ in 0..200 {
+        tick(&mut c, &target);
+    }
+    let x = npc.data().unit.transform.x;
+    assert!(x > 108.0, "npc parked at x = {x}");
+}
+
+#[tokio::test]
+async fn melee_base_skill_chase_range_is_capped_by_the_attack_start_scale() {
+    for scale in [1.0, 1.7, 2.5] {
+        let (server, npc, target) = melee_fixture(scale, false, 115.0);
+        let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+        let mut c = AiCtx {
+            server: &server,
+            npc: npc.clone(),
+            obj: WorldObject::from(&npc),
+            ai: &mut ai,
+        };
+        super::pick_skill_and_use_it(
+            &mut c,
+            BehaviorKind::Attack,
+            crate::systems::ai::skills::SkillUseConditionKind::InCombat,
+            &target,
+            15.0,
+        );
+        let max = c.st(BehaviorKind::Attack).max_weapon_range;
+        assert!(max > 0.0, "scale {scale}: fist default lost");
+        assert!(
+            scale * max <= 4.0 + 1e-4,
+            "scale {scale}: chase range {}",
+            scale * max
+        );
+    }
+}
