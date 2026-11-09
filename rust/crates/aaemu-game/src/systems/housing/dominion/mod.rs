@@ -10,6 +10,7 @@ pub mod db;
 pub mod declare;
 pub mod fort;
 pub mod headquarters;
+pub mod larceny;
 pub mod participants;
 pub mod peace;
 pub mod period;
@@ -33,6 +34,8 @@ mod fort_tests;
 mod headquarters_phase_tests;
 #[cfg(test)]
 mod headquarters_tests;
+#[cfg(test)]
+mod larceny_tests;
 #[cfg(test)]
 mod participants_tests;
 #[cfg(test)]

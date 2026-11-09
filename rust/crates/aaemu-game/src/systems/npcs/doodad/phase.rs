@@ -441,6 +441,22 @@ pub fn use_doodad(
         return;
     }
 
+    // Siege larceny (ui 3334): crops, livestock and trees on private land are usable while the
+    // territory's lodestone is held. This is the shared `Doodad.Use` funnel, so the skill-bound
+    // `DoodadFuncUse` path and the skill-less `LootItem` / `LootPack` / `Cutdowning` path both
+    // pass it. Only the farm groups are gated here; houses, furniture, doors and coffers keep
+    // their own permission checks.
+    if let Some(player) = caster.as_player() {
+        if !crate::systems::housing::dominion::larceny::house_doodad_use_allowed(
+            server,
+            &ctx.doodad,
+            player,
+        ) {
+            player.send(error_msg(error_message::INTERACTION_PERMISSION_DENY));
+            return;
+        }
+    }
+
     if func_group_id > 0 {
         if !crate::systems::instances::mentoring::allows_phase_request(ctx, func_group_id) {
             return;
@@ -535,10 +551,43 @@ fn theft_evidence(ctx: &DoodadCtx<'_>, caster: &WorldObject, started_skill_id: u
         let d = ctx.doodad.data();
         (d.owner_type, d.owner_id)
     };
+    // A garden plant is owned by its house, not by a character. Its use is theft only when the
+    // siege larceny window (not a normal house permission such as PUBLIC) granted the access;
+    // the normal evidence then follows `Housing.SiegeLarcenyCrime`.
+    let larceny_house =
+        if crate::systems::housing::dominion::larceny::covers_doodad(server, &ctx.doodad) {
+            crate::systems::housing::dominion::larceny::house_of_doodad(server, &ctx.doodad)
+        } else {
+            None
+        };
+    let larceny_granted = match (&larceny_house, caster_owner.as_ref()) {
+        (Some(house), Some(player)) => {
+            !crate::systems::housing::allowed_to_interact(server, house, player)
+        }
+        _ => false,
+    };
+    let owner_character_id = match owner_type {
+        doodad_owner_type::CHARACTER => Some(owner_id),
+        doodad_owner_type::HOUSING if larceny_granted => larceny_house
+            .as_ref()
+            .map(|house| house.data().unit.owner_id)
+            .filter(|id| *id != 0),
+        _ => None,
+    };
     let caster_owner_id = caster_owner.as_ref().map(|p| p.data().id);
     let is_different_character_owner =
-        owner_type == doodad_owner_type::CHARACTER && Some(owner_id) != caster_owner_id;
+        owner_character_id.is_some_and(|id| Some(id) != caster_owner_id);
     if !is_different_character_owner {
+        return;
+    }
+    // The window's text says the crops are "used", not stolen; keep the footprint evidence
+    // only when the configuration asks for the normal theft rule.
+    if larceny_granted
+        && crate::systems::housing::dominion::larceny::suppresses_theft_evidence(
+            server,
+            &ctx.doodad,
+        )
+    {
         return;
     }
     let hooks = server.systems.npcs.hooks.skills.get();
