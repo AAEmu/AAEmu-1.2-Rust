@@ -458,7 +458,7 @@ fn can_accept_trial_invites(
 ///
 /// The retail rule (2014 community documentation) is `(crime_points / 5) * (1 + infamy / 1000)`
 /// in integer arithmetic. The 2014-10-31 trial video confirms the `/ 5` part: the defendant's
-/// record is 76 crime points / 26 trial records, the Awaiting Trial window shows 15 minutes
+/// record is 76 crime points / 26 trial records, the trial dialogs' text shows 15 minutes (assumed to be this defendant's)
 /// (= 76 / 5), and the verdict's maximum option (the C# 1.2x factor) is the 18 minutes the judge
 /// announces. The C# replaced this with a per-evidence score (murder 20 / theft 8, x10 for
 /// victims under level 30) because it took the jury's scaled sentence for the base; that score
