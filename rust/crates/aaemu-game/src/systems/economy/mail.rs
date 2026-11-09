@@ -1648,9 +1648,9 @@ pub fn check_all_mail_timings_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
     let undelivered: Vec<i64> = st
         .all
         .iter()
-        .filter(|(_, m)| {
-            m.body.recv_date <= time && !m.is_delivered && !m.is_expired_at(time, &retention)
-        })
+        // Expired mail that survived `expire_due_mail_at` is kept on purpose (escrow it
+        // cannot return): it is still delivered, or it would wait in the database forever.
+        .filter(|(_, m)| m.body.recv_date <= time && !m.is_delivered)
         .map(|(k, _)| k)
         .collect();
     let mut delivered = 0;

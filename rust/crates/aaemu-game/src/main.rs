@@ -171,9 +171,17 @@ async fn run() -> anyhow::Result<()> {
                         "Mail retention upgrade grace anchored at the first run with this version"
                     );
                 }
-                Ok(None) => tracing::warn!(
-                    "Mail retention update marker is missing; pre-existing mail gets no grace"
-                ),
+                Ok(None) => {
+                    // No marker row (e.g. `AutoApplyUpdates` is off): anchor the grace at this
+                    // start, so an upgrade without the marker cannot delete old mail on the
+                    // first tick. The window then restarts with every start until the marker
+                    // script is applied.
+                    config.mail.retention_grace_start_unix = chrono::Utc::now().timestamp();
+                    tracing::warn!(
+                        grace_start = config.mail.retention_grace_start_unix,
+                        "Mail retention update marker is missing; anchoring the grace at this start"
+                    );
+                }
                 Err(e) => tracing::warn!(
                     "Mail retention update marker unreadable ({e}); pre-existing mail gets no grace"
                 ),
