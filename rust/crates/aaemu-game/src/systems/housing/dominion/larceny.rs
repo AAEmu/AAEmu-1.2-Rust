@@ -16,12 +16,16 @@
 //!   destroyed (`DominionState::tower_destroyed`) — the closest state to "occupied";
 //! * scope: the territory's zone group, and only farm/garden doodads on private land
 //!   (`doodad_owner_type::HOUSING`), classified by the 1.2 `doodad_groups` names:
-//!   group 2 "벌채 - 나무" (trees), 5 "축산 - 가축" (livestock), 12 "농사 - 작물" (crops) and
-//!   40 "농사 - 해양 작물" (marine crops). Houses, furniture, coffers and storage are not
-//!   farm groups and keep their own gates;
+//!   group 2 "벌채 - 나무" (trees), 3 "채집 - 약초" (herb / flower garden crops),
+//!   5 "축산 - 가축" (livestock), 12 "농사 - 작물" (crops) and 40 "농사 - 해양 작물" (marine
+//!   crops). Houses, furniture, coffers and storage are not farm groups and keep their own
+//!   gates;
 //! * `Anyone` allows any non-owner; `Opponents` uses the existing faction relation (the same
 //!   relation `can_attack` uses) between the player and the house's owner faction, which
 //!   `update_owned_housing_faction` keeps synced with the owner character;
+//! * `DoodadFuncRecoverItem` stays behind the normal house permission: the window grants use /
+//!   harvest of produce, not picking up the installation itself (barns, racks, coops, young
+//!   animals and flower beds are recoverable items only for the owner / a permitted player);
 //! * evidence is suppressed inside the window by default (`Housing.SiegeLarcenyCrime = false`);
 //!   an explicit `true` turns the normal footprint evidence back on.
 //!
@@ -38,8 +42,11 @@ use crate::systems::skills::types::RelationState;
 use crate::systems::social::nation::faction_exists;
 use crate::world::{DoodadRef, HouseRef, PlayerRef};
 
-/// `doodad_groups` ids of the 1.2 farm / garden doodads named by the larceny text.
-pub const LARCENY_DOODAD_GROUP_IDS: [u32; 4] = [2, 5, 12, 40];
+/// `doodad_groups` ids of the 1.2 farm / garden doodads named by the larceny text. Group 3
+/// (`채집 - 약초`) holds the plantable herbs and flowers (rose, lily, cotton, lavender,
+/// mushroom, ginseng, sunflower, ...); the other `item_spawn_doodads` groups are mining nodes,
+/// crafting benches, quest/level/test props, doors, housing furniture and the territory statue.
+pub const LARCENY_DOODAD_GROUP_IDS: [u32; 5] = [2, 3, 5, 12, 40];
 
 /// The configured larceny policy (`Housing.SiegeLarceny`).
 pub fn mode(server: &GameServer) -> SiegeLarcenyMode {
@@ -52,7 +59,8 @@ pub fn crime_enabled(server: &GameServer) -> bool {
     server.config.housing.siege_larceny_crime
 }
 
-/// A farm / garden doodad of the 1.2 data (trees, livestock, crops, marine crops).
+/// A farm / garden doodad of the 1.2 data (trees, herbs/flowers, livestock, crops, marine
+/// crops).
 pub fn is_larceny_doodad(server: &GameServer, doodad: &DoodadRef) -> bool {
     let template_id = doodad.data().template_id;
     server

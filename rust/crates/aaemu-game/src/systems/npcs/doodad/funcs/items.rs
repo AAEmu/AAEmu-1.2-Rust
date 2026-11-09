@@ -253,12 +253,6 @@ pub fn recover_item(
                     (h.unit.owner_id, h.allow_recover)
                 };
                 player.character_id == owner
-                    || crate::systems::housing::dominion::larceny::window_allows_house_doodad(
-                        ctx.server,
-                        &house,
-                        &ctx.doodad,
-                        player,
-                    )
                     || (allow_recover
                         && crate::systems::housing::allowed_to_interact(ctx.server, &house, player))
             });

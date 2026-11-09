@@ -16,10 +16,12 @@ use crate::systems::housing::config::{HousingConfig, SiegeLarcenyMode};
 use crate::systems::housing::dominion::runtime::tower_identity;
 use crate::systems::housing::dominion::{SiegeOutcome, SiegeStatus, TowerIdentity};
 use crate::systems::housing::{self, manager};
+use crate::systems::npcs::doodad::interactions::{self, world_interaction_type as wi};
 use crate::systems::npcs::doodad::phase;
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::{
-    DoodadFunc, DoodadFuncLootPack, DoodadFuncUse, DoodadGroups, DoodadTemplate, FuncTemplate,
+    DoodadFunc, DoodadFuncLootPack, DoodadFuncRecoverItem, DoodadFuncUse, DoodadGroups,
+    DoodadTemplate, FuncTemplate,
 };
 use crate::systems::npcs::hooks::{EconomyBridge, SkillsBridge};
 use crate::systems::skills::data::BuffTemplate;
@@ -31,16 +33,26 @@ const ZONE_GROUP: u32 = 25;
 const HOUSE_TEMPLATE: u32 = 300;
 const TOWER_TEMPLATE: u32 = 139;
 const CROP_TEMPLATE: u32 = 500;
+const HERB_TEMPLATE: u32 = 503;
+const BARN_TEMPLATE: u32 = 504;
+const RACK_TEMPLATE: u32 = 505;
+const FOAL_TEMPLATE: u32 = 506;
 const FURNITURE_TEMPLATE: u32 = 501;
 const COFFER_TEMPLATE: u32 = 502;
 const CROP_GROUP: u32 = 12; // 농사 - 작물
+const HERB_GROUP: u32 = 3; // 채집 - 약초
+const LIVESTOCK_GROUP: u32 = 5; // 축산 - 가축
 const FURNITURE_GROUP: u32 = 24; // 기타 - 인터랙션
 const USE_GROUP: u32 = 10;
 const USE_NEXT_GROUP: u32 = 11;
 const LOOT_GROUP: u32 = 20;
 const LOOT_NEXT_GROUP: u32 = 21;
+const RECOVER_GROUP: u32 = 30;
+const RECOVER_NEXT_GROUP: u32 = 31;
 const USE_FUNC: u32 = 900;
 const LOOT_FUNC: u32 = 901;
+const RECOVER_FUNC: u32 = 902;
+const RECOVER_SKILL: u32 = 11361;
 const SKILL: u32 = 4242;
 
 const DEFENDER_FACTION: u32 = 101;
@@ -156,7 +168,8 @@ fn game_data() -> GameData {
     }
     for group_id in [
         CROP_GROUP,
-        5,  // 축산 - 가축
+        HERB_GROUP,
+        LIVESTOCK_GROUP,
         2,  // 벌채 - 나무
         40, // 농사 - 해양 작물
         FURNITURE_GROUP,
@@ -171,6 +184,10 @@ fn game_data() -> GameData {
     }
     for (id, group_id) in [
         (CROP_TEMPLATE, CROP_GROUP),
+        (HERB_TEMPLATE, HERB_GROUP),
+        (BARN_TEMPLATE, LIVESTOCK_GROUP),
+        (RACK_TEMPLATE, LIVESTOCK_GROUP),
+        (FOAL_TEMPLATE, LIVESTOCK_GROUP),
         (FURNITURE_TEMPLATE, FURNITURE_GROUP),
         (COFFER_TEMPLATE, FURNITURE_GROUP),
     ] {
@@ -195,6 +212,24 @@ fn game_data() -> GameData {
                 id: USE_FUNC,
                 skill_id: 0,
             }),
+        );
+    doodad.funcs_by_groups.insert(
+        RECOVER_GROUP,
+        vec![DoodadFunc {
+            group_id: RECOVER_GROUP,
+            func_id: RECOVER_FUNC,
+            func_type: "DoodadFuncRecoverItem".into(),
+            next_phase: RECOVER_NEXT_GROUP as i32,
+            ..DoodadFunc::default()
+        }],
+    );
+    doodad
+        .func_templates
+        .entry("DoodadFuncRecoverItem")
+        .or_default()
+        .insert(
+            RECOVER_FUNC,
+            FuncTemplate::RecoverItem(DoodadFuncRecoverItem { id: RECOVER_FUNC }),
         );
     doodad
         .funcs_by_groups
@@ -376,6 +411,33 @@ impl Harness {
         self.doodad(CROP_TEMPLATE, USE_GROUP)
     }
 
+    fn herb(&self) -> DoodadRef {
+        self.doodad(HERB_TEMPLATE, USE_GROUP)
+    }
+
+    fn installation(&self, template_id: u32) -> DoodadRef {
+        self.doodad(template_id, USE_GROUP)
+    }
+
+    fn recoverable(&self, template_id: u32) -> DoodadRef {
+        self.doodad(template_id, RECOVER_GROUP)
+    }
+
+    /// The `CSLootOpenBag` recover branch (`RecoverItem.Execute`) for a house doodad.
+    fn recover_path(&self, doodad: &DoodadRef, player: &PlayerRef) -> bool {
+        let caster = WorldObject::from(player);
+        interactions::execute_interaction(
+            &self.server,
+            wi::RECOVER_ITEM,
+            &caster,
+            Some(&WorldObject::from(doodad)),
+            RECOVER_SKILL,
+            0,
+            None,
+        );
+        doodad.data().phase.to_next_phase
+    }
+
     fn mature_crop(&self) -> DoodadRef {
         self.doodad(CROP_TEMPLATE, LOOT_GROUP)
     }
@@ -442,6 +504,25 @@ async fn opponent_harvests_a_garden_crop_only_while_the_lodestone_is_held() {
 }
 
 #[tokio::test]
+async fn herbs_are_lootable_in_the_window() {
+    let h = Harness::new(SiegeLarcenyMode::Opponents, false);
+    let before = h.herb();
+    h.use_path(&before, &h.opponent);
+    assert!(
+        !advanced(&before),
+        "no window before the lodestone is destroyed"
+    );
+
+    h.mark_tower_destroyed();
+    let during = h.herb();
+    h.use_path(&during, &h.opponent);
+    assert!(
+        advanced(&during),
+        "group 3 herbs and flowers are garden crops"
+    );
+}
+
+#[tokio::test]
 async fn the_window_closes_when_the_siege_ends() {
     let h = Harness::new(SiegeLarcenyMode::Opponents, false);
     h.mark_tower_destroyed();
@@ -471,6 +552,55 @@ async fn same_faction_is_refused_in_opponents_mode_and_allowed_in_anyone_mode() 
     let crop = h.crop();
     h.use_path(&crop, &h.friend);
     assert!(advanced(&crop), "any non-owner is allowed in anyone mode");
+}
+
+#[tokio::test]
+async fn installations_cannot_be_recovered_in_the_window() {
+    let h = Harness::new(SiegeLarcenyMode::Anyone, false);
+    h.mark_tower_destroyed();
+    for template in [BARN_TEMPLATE, RACK_TEMPLATE, FOAL_TEMPLATE] {
+        let doodad = h.recoverable(template);
+        assert!(
+            !h.recover_path(&doodad, &h.opponent),
+            "template {template} must not be recovered as an item"
+        );
+        assert!(!doodad.data().phase.deleted, "template {template} stays");
+    }
+    // The owner keeps the normal recover right (the window does not remove it).
+    let own = h.recoverable(BARN_TEMPLATE);
+    assert!(h.recover_path(&own, &h.defender));
+}
+
+#[tokio::test]
+async fn installation_produce_is_harvestable_but_the_installation_is_not_removed() {
+    let h = Harness::new(SiegeLarcenyMode::Anyone, false);
+    h.mark_tower_destroyed();
+    let barn = h.installation(BARN_TEMPLATE);
+    h.use_path(&barn, &h.opponent);
+    assert!(
+        advanced(&barn),
+        "the barn's produce can be harvested in the window"
+    );
+    let rack = h.recoverable(RACK_TEMPLATE);
+    assert!(!h.recover_path(&rack, &h.opponent));
+    assert!(
+        !rack.data().phase.deleted,
+        "the aging rack is not picked up as an item"
+    );
+}
+
+#[tokio::test]
+async fn the_window_closes_when_the_territory_is_released() {
+    let h = Harness::new(SiegeLarcenyMode::Opponents, false);
+    h.mark_tower_destroyed();
+    h.server
+        .systems
+        .housing
+        .dominions
+        .release_expedition(10, chrono::Utc::now().timestamp());
+    let crop = h.crop();
+    h.use_path(&crop, &h.opponent);
+    assert!(!advanced(&crop), "a released territory closes the window");
 }
 
 #[tokio::test]
@@ -520,6 +650,7 @@ fn real_compact_larceny_group_ids_are_the_shipped_farm_categories() {
         .unwrap()
     };
     assert_eq!(group_name(2), "벌채 - 나무");
+    assert_eq!(group_name(3), "채집 - 약초");
     assert_eq!(group_name(5), "축산 - 가축");
     assert_eq!(group_name(12), "농사 - 작물");
     assert_eq!(group_name(40), "농사 - 해양 작물");
@@ -531,10 +662,28 @@ fn real_compact_larceny_group_ids_are_the_shipped_farm_categories() {
         )
         .unwrap()
     };
-    // The shipped potato crop, apple tree and chick.
+    // The shipped potato crop, apple tree, chick, herb seeds and the group-5 installations.
     assert_eq!(template_group(2259), 12);
     assert_eq!(template_group(1017), 2);
     assert_eq!(template_group(2673), 5);
+    assert_eq!(template_group(2269), 3);
+    assert_eq!(template_group(6035), 3);
+    assert_eq!(template_group(7172), 3);
+    assert_eq!(template_group(8035), 5); // barn
+    assert_eq!(template_group(6997), 5); // aging rack
+    assert_eq!(template_group(6180), 5); // coop
+    assert_eq!(template_group(8238), 5); // merchant's pond
+    let has_recover = |id: u32| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM doodad_func_groups g JOIN doodad_funcs f              ON f.doodad_func_group_id = g.id              WHERE g.doodad_almighty_id = ?1 AND f.actual_func_type = 'DoodadFuncRecoverItem'",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(has_recover(8035), 0); // barns have no item pickup
+    assert_eq!(has_recover(6997), 0); // racks have no item pickup
+    assert!(has_recover(5775) > 0); // the young-animal case the recover gate keeps
 }
 
 #[tokio::test]
