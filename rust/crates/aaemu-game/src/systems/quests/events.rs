@@ -1389,16 +1389,25 @@ fn add_quest_from_sphere_impl(
     // start any `QuestActConAcceptSphere` quest from anywhere. The character must be inside the
     // named sphere now, using the same area / sign-sphere geometry the sphere tick uses.
     // Automatic starters call `ctx.add_quest` directly and do not pass through here.
+    // A sphere with no known geometry cannot be checked; it keeps the earlier unchecked start
+    // instead of becoming unstartable.
+    let spheres = &server.systems.quests.spheres;
+    if !spheres.has_sphere_geometry(sphere_id) {
+        tracing::debug!(
+            quest_id,
+            sphere_id,
+            "Client sphere quest start: no geometry for the sphere, position not checked"
+        );
+        return with_quests(server, player, None, move |ctx| {
+            ctx.answer_start_refusals = answer_start_refusals;
+            ctx.add_quest(quest_id, false, acceptor::SPHERE, sphere_id)
+        });
+    }
     let me = WorldObject::from(player.clone());
     let world = server.world.world_of(&me).map(|w| w.template.name.clone());
     let pos = world_position(server, &me);
     let inside = world.is_some_and(|world| {
-        server.systems.quests.spheres.is_inside_sphere(
-            &world,
-            sphere_id,
-            pos,
-            super::spheres::START_TOLERANCE,
-        )
+        spheres.is_inside_sphere(&world, sphere_id, pos, super::spheres::START_TOLERANCE)
     });
     if !inside {
         tracing::warn!(

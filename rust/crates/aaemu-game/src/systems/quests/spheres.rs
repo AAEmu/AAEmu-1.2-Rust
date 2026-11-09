@@ -513,6 +513,15 @@ impl SphereQuestManager {
             .unwrap_or_default()
     }
 
+    /// Whether any world has area or sign-sphere geometry for `sphere_id`. A sphere without
+    /// geometry cannot be position-checked, so [`Self::is_inside_sphere`] does not apply to it.
+    pub fn has_sphere_geometry(&self, sphere_id: u32) -> bool {
+        self.areas
+            .get()
+            .is_some_and(|areas| areas.iter().any(|a| a.sphere_id == sphere_id))
+            || self.starters().iter().any(|s| s.sphere_id == sphere_id)
+    }
+
     /// Whether `pos` is inside the sphere `sphere_id` of `world_name` right now: a shipped
     /// `sphere_area_fill.json` area or a `quest_sign_sphere.g` starter area for that sphere,
     /// with `tolerance` metres of slack. This is the server-side presence check a client
@@ -770,24 +779,35 @@ impl SphereQuestManager {
                         )
                     });
                 let (id, or) = (sphere.id, sphere.or_unit_reqs);
-                let can = super::events::with_quests(server, &player, None, move |ctx| {
+                // `with_quests` returns `None` when the character's quest state is unavailable
+                // this tick; the sphere is then skipped without touching its offer state, so a
+                // transient failure cannot read as an eligibility transition (and bypass the
+                // offer cooldown) on the next tick.
+                let Some(can) = super::events::with_quests(server, &player, None, move |ctx| {
                     ctx.can_trigger_sphere(id, or)
-                })
-                .unwrap_or(false);
+                }) else {
+                    continue;
+                };
                 let mut offers: Vec<u32> = Vec::new();
+                let mut unavailable = false;
                 if can {
                     for quest_id in data.accept_quest_quests(sphere.sphere_detail_id) {
                         // The same rules as a normal quest start, without its refusal
                         // logging / packets: only offer a quest the character could start.
-                        let eligible =
-                            super::events::with_quests(server, &player, None, move |ctx| {
-                                ctx.can_offer_quest(quest_id, id)
-                            })
-                            .unwrap_or(false);
-                        if eligible {
-                            offers.push(quest_id);
+                        match super::events::with_quests(server, &player, None, move |ctx| {
+                            ctx.can_offer_quest(quest_id, id)
+                        }) {
+                            Some(true) => offers.push(quest_id),
+                            Some(false) => {}
+                            None => {
+                                unavailable = true;
+                                break;
+                            }
                         }
                     }
+                }
+                if unavailable {
+                    continue;
                 }
                 let eligible_now = !offers.is_empty();
                 let offer = eligible_now
