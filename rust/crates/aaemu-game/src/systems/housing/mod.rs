@@ -81,7 +81,7 @@ impl System {
             .systems
             .housing
             .calendar
-            .settings(&server.config.housing);
+            .settings(&server.config.housing, server.config.world.profile);
         let source =
             if dominion::calendar::CalendarSettings::timezone_from_config(&server.config.housing) {
                 "from Housing.SiegeCalendarTimezone"

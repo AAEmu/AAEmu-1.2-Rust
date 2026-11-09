@@ -26,6 +26,7 @@ use chrono::{
 };
 use std::collections::BTreeMap;
 
+use crate::config::ServerProfile;
 use crate::systems::housing::config::HousingConfig;
 use crate::systems::housing::data::{CastleReferenceData, SiegeRotation, SiegeZone};
 
@@ -196,9 +197,10 @@ pub struct CalendarSettings {
 }
 
 impl CalendarSettings {
-    pub fn from_config(config: &HousingConfig) -> Self {
+    /// The explicit `Housing.SiegeCalendar` value wins; a missing key follows the era profile.
+    pub fn from_config(config: &HousingConfig, profile: ServerProfile) -> Self {
         Self {
-            enabled: config.siege_calendar,
+            enabled: config.siege_calendar.unwrap_or_else(|| profile.sieges()),
             timezone: CalendarTimeZone::parse(&config.siege_calendar_timezone).unwrap_or_default(),
         }
     }

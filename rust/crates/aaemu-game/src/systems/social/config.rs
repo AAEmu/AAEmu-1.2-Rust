@@ -342,6 +342,14 @@ pub struct SocialConfig {
     /// the cause was never confirmed on the original client (`PORTING.md`, BOUNTY-board).
     #[serde(rename = "bountyboard", deserialize_with = "lenient")]
     pub bounty_board: bool,
+    /// Player nations (independence, diplomacy, national tax, monuments). `None` = the era
+    /// profile decides (`World.Profile`; KR 1.2 only). An explicit `true` / `false` wins.
+    #[serde(
+        rename = "playernations",
+        default,
+        deserialize_with = "crate::config::lenient_option"
+    )]
+    pub player_nations: Option<bool>,
 }
 
 #[cfg(test)]
@@ -406,6 +414,8 @@ mod tests {
         assert_eq!(c.min_level(1), 0);
         // The bounty board stays off until an original-client run passes (BOUNTY-board).
         assert!(!cfg.social.bounty_board);
+        // Player nations follow the era profile unless the key is explicit.
+        assert_eq!(cfg.social.player_nations, None);
     }
 
     #[test]

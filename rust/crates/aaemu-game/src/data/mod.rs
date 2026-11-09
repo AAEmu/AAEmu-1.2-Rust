@@ -85,12 +85,14 @@ impl GameData {
         app_path: &Path,
         client_sources: &[String],
         language: &str,
+        profile: crate::config::ServerProfile,
     ) -> Result<Self, GameDataError> {
         let path = app_path.join("Data").join("compact.sqlite3");
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
         let content_configs = ContentConfigs::load(&conn)?;
-        let experience = ExperienceTable::from_templates(load_levels(&conn)?)?;
+        let experience =
+            ExperienceTable::from_templates(load_levels(&conn)?, profile.player_level_cap())?;
         let items = ItemData::load(&conn)?;
         let localization = Localization::load(&conn, language)?;
         let factions = FactionData::load(&conn, &localization)?;
@@ -115,12 +117,15 @@ impl GameData {
             language,
         })?;
 
+        let mut features =
+            FeatureSet::initialized(experience.max_player_level(), experience.max_mate_level());
+        // The client feature bit follows the era profile; `Configurations/FeatureSet.json`
+        // (`FeatureSet::apply_config`) can still override it.
+        features.set(Feature::Nations, profile.player_nations());
+        features.set(Feature::Siege, profile.sieges());
         let data = GameData {
             content_configs,
-            features: FeatureSet::initialized(
-                experience.max_player_level(),
-                experience.max_mate_level(),
-            ),
+            features,
             experience,
             items,
             skills,
@@ -185,7 +190,7 @@ mod real_db_tests {
             return;
         };
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let exp = ExperienceTable::from_templates(load_levels(&conn).unwrap()).unwrap();
+        let exp = ExperienceTable::from_templates(load_levels(&conn).unwrap(), 55).unwrap();
         let items = ItemData::load(&conn).unwrap();
         let loc = Localization::load(&conn, "en_us").unwrap();
         let factions = FactionData::load(&conn, &loc).unwrap();

@@ -168,15 +168,29 @@ async fn run() -> anyhow::Result<()> {
 
     // FormulaManager.Load, ItemManager.Load and the orchestrated ILoadable game data (a failing
     // loader is fatal, as in the 1.2 C#).
+    tracing::info!(
+        "Server profile: {} (player level cap {}, player nations {}, siege calendar {}, Auroria claims {})",
+        config.world.profile,
+        config.world.profile.player_level_cap(),
+        config.player_nations_enabled(),
+        config.siege_calendar_enabled(),
+        config.auroria_claims_enabled()
+    );
     let mut game_data = GameData::load(
         &config.app_path,
         &config.client_data.sources,
         &config.default_language,
+        config.world.profile,
     )
     .context("Failed to load compact.sqlite3 database check if it exists!")?;
     // `FeatureSet` (`Configurations/FeatureSet.json`) overrides the `FeaturesManager.Initialize`
-    // bytes; the level limits stay the ones `GameData::load` took from the `levels` table.
-    game_data.features.apply_config(&config.feature_set);
+    // bytes; the level limits stay the ones `GameData::load` took from the `levels` table and
+    // the era profile.
+    game_data.features.apply_config(
+        &config.feature_set,
+        config.auroria_claims_enabled(),
+        config.player_nations_enabled(),
+    );
     tracing::info!("Client FeatureSet: {}", game_data.features);
     // The retail Halloween `game_schedules` rows are dated 2013/2014 and compact.sqlite3 is
     // read-only: `Events.Halloween` repeats the window in memory (`systems::npcs::schedule`).

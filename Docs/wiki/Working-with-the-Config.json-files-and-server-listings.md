@@ -1,7 +1,7 @@
 # Working with Config Files and Server Listings
 
 - Audience: Contributors, players, and testers
-- Last verified against: `main` on November 6, 2026
+- Last verified against: `main` on November 8, 2026
 - Prerequisites: Basic JSON editing and AAEmu project structure familiarity
 
 ## Overview
@@ -229,6 +229,52 @@ count the login server advertises and the pre-select period:
 
 Both can also be overridden in the game's `Config.Local.json` or with the
 environment variables `Characters__MaxPerAccount` and `Characters__PreSelectPeriod`.
+
+## Server era profile (`World:Profile`)
+
+The game server emulates a retail era. The owner decision of 2026-11-08 makes the Trion EU
+"Auroria" era the default: the Trion 1.2 build from the Conquest of Auroria (2014-11-04 NA /
+2014-11-06 EU) to the day before Secrets of Ayanad (2015-03-10).
+
+```json
+{
+  "World": {
+    "Profile": "EuAuroria"
+  }
+}
+```
+
+| Value | Era | Player level cap | Player nations | Sieges / Auroria claims |
+| --- | --- | --- | --- | --- |
+| `EuAuroria` (default) | Trion EU Auroria, 2014-11-04/06 to 2015-03-09 | 50 | off | on |
+| `EuLaunch` | Trion NA/EU launch, 2014-09-12/16 to 2014-11-03 | 50 | off | off |
+| `Kr12` | XL KR 1.2 data (`r208022`) | 55 | on | on |
+
+The profile only supplies **defaults**; explicit keys win:
+
+- `Social:PlayerNations` (client switch and server gate) defaults from the profile; set it to
+  `true` or `false` to override. The same value drives the client `FeatureSet.nations` bit.
+- `Housing:SiegeCalendar` defaults from the profile; set it to `true` or `false` to override.
+  It switches the inferred weekly siege calendar only. Auroria claims and the client
+  `FeatureSet.siege` bit follow the profile (`on` for `EuAuroria` / `Kr12`, `off` for
+  `EuLaunch`): under `EuAuroria`, `Housing:SiegeCalendar=false` (GM-scheduled sieges only)
+  still allows claims and shows the siege UI. An explicit `FeatureSet.siege` value still wins
+  for the client bit.
+- The player level limit (client `FeatureSet` byte 1) follows the profile cap. A character
+  saved above a lowered cap keeps its level and gains no further levels; experience is trimmed
+  at that character's level, exactly as it is at the cap today. Mates keep their own cap of 50.
+- A nation already stored in the database is not deleted when a profile without nations is
+  selected; the nation features refuse new actions instead.
+- **Upgrade note:** before the era profile existed, `Housing:SiegeCalendar` defaulted to
+  `false`. A configuration without the key now gets the weekly calendar from the default
+  profile (`EuAuroria`: on). The calendar rules are inferred from the 1.2 tables with
+  corroborated times; set `Housing:SiegeCalendar=false` to keep the old explicit-GM-only
+  calendar behaviour. That does not disable Auroria claims or the client siege UI.
+
+Set the key in `Configurations/World.json`, `Config.Local.json`, with the environment variable
+`World__Profile`, or on the command line (`--World:Profile=Kr12`). The active profile is logged
+once at startup. Trion dates and sources: `rust/crates/aaemu-game/PORTING.md`
+("Server era profile") and the audit research `research/trion-1.2-eu-na.md`.
 
 ## Account payment and premium (`Account:DefaultPayment`)
 
@@ -689,6 +735,7 @@ overridden in `Config.Local.json` or with `Social__BountyBoard`.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `BountyBoard` | `false` | Fill the `CSNaviOpenBounty` answer with the wanted-player board (characters that have an unpaid bounty) instead of the empty list. Rows are capped at the client's 20 entries and online / offline characters are both listed. `false` keeps the C# server's empty list. |
+| `PlayerNations` | `World:Profile` | Player nations (independence, diplomacy, national tax, monuments). The default follows the era profile (`on` for `Kr12`, `off` for `EuAuroria` / `EuLaunch`); an explicit `true` / `false` wins. When off, founding uses the existing precondition refusal and the client `FeatureSet.nations` bit is off. |
 
 **Capture-pending:** the C# server noted that a filled board broke the 1.2
 client Lua and the cause was never confirmed. Keep `BountyBoard` off until an
@@ -703,14 +750,15 @@ The client FeatureSet is the 11-byte blob the game server sends in
 `X2Player:GetFeatureSet()` (`FUN_39496b20`, `x2game.dll.c:956456`), where each
 named key is one bit. The game server reads `Configurations/FeatureSet.json`
 (section `FeatureSet`) at startup and applies it after loading the level caps.
-The shipped defaults are exactly the previous bytes, so the file changes
-nothing until an operator edits it. Override a key in `Config.Local.json` or
-with the environment form `FeatureSet__Siege=false`.
+Keys that follow the era profile are omitted from the shipped file, so the
+`World:Profile` value decides them; every other shipped key reproduces the
+previous bytes. Override a key in `Config.Local.json` or with the environment
+form `FeatureSet__Siege=false`.
 
 ```json
 {
   "FeatureSet": {
-    "siege": true,
+    "siege": false,
     "aaPoint": false,
     "ExtraBits": { "78": true }
   }
@@ -719,7 +767,8 @@ with the environment form `FeatureSet__Siege=false`.
 
 | Key | Bit | Default | What the client uses it for |
 | --- | --- | --- | --- |
-| `siege` | 0 | `true` | Siege / dominion UI. The exact window is INFERRED from the Lua key. |
+| `siege` | 0 | `World:Profile` | Siege / dominion UI. The exact window is INFERRED from the Lua key. The default follows the profile (on for `EuAuroria` / `Kr12`, off for `EuLaunch`), independently of `Housing:SiegeCalendar`; an explicit value wins. |
+| `nations` | 6 | `Social:PlayerNations` (profile) | Player-nation UI. The default is the resolved server flag (on for `Kr12`, off for the EU profiles); an explicit value wins. |
 | `premium` | 4 | `true` | Premium / Patron HUD and labor UI. |
 | `itemSecure` | 45 | `true` | Item-secure / lock handling and UI. |
 | `secondpass` | 46 | `false` | Second-password entry and its opcode path. The second password is not supported, so keep it off. |
@@ -742,12 +791,13 @@ with the environment form `FeatureSet__Siege=false`.
 | `ExtraBits` | any | `{}` | `bit -> bool` overrides for the unnamed `flag_x_y` bits (`0..=87`); a `false` value turns a default-on bit off. Bit 78 is the mate equipment whitelist. The C++ reads 32, 34, 41, 42, 47, 60 and 73 too, but their purpose is unresolved. |
 
 The C#-named bits that the client does not expose through `GetFeatureSet()`
-(`allowFamilyChanges` 1, `houseSale` 3, `nations` 6, `customUiButton` 39,
-`freeLpRaise` 53, `houseTaxPrepay` 84) have no named key; they keep their
-current defaults, and `ExtraBits` can override them like any other bit.
+(`allowFamilyChanges` 1, `houseSale` 3, `customUiButton` 39, `freeLpRaise` 53,
+`houseTaxPrepay` 84) have no named key; they keep their current defaults, and
+`ExtraBits` can override them like any other bit. `nations` (6) has a named key
+because it follows the era profile (see `World:Profile`).
 
 The player level limit (byte 1) and mate level limit (byte 8) are not part of
-this section: they keep coming from the `levels` table. The runtime GM command
+this section: they keep coming from the `levels` table and the era profile. The runtime GM command
 `/feature set` still changes bits after startup; `FeatureSet.json` is only the
 startup baseline. Every key's bit number and the client line that reads it are
 recorded in `rust/crates/aaemu-game/PORTING.md` (Client FeatureSet

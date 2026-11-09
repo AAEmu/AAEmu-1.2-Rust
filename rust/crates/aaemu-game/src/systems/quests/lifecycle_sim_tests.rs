@@ -320,7 +320,7 @@ impl Sim {
             .expect("levels")
             .map(|r| r.expect("level row"))
             .collect();
-        gd.experience = ExperienceTable::from_templates(levels).expect("experience");
+        gd.experience = ExperienceTable::from_templates(levels, 55).expect("experience");
 
         let mut zone_key_by_group = HashMap::new();
         let mut zone_key_by_id = HashMap::new();

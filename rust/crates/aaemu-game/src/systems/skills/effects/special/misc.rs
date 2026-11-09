@@ -563,7 +563,7 @@ pub fn spawn_doodad(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             .systems
             .housing
             .calendar
-            .settings(&server.config.housing)
+            .settings(&server.config.housing, server.config.world.profile)
             .enabled
     {
         let declare =

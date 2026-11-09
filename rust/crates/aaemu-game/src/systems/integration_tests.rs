@@ -161,6 +161,7 @@ fn game_data() -> GameData {
                 skill_points: 0,
             })
             .collect(),
+        55,
     )
     .expect("experience table");
     // The real 1.2 `item_configs` row (death durability loss ratio 2).

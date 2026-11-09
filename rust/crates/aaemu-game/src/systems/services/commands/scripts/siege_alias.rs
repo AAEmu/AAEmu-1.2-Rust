@@ -94,7 +94,7 @@ fn local_timestamp(
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     match settings.timezone {
         CalendarTimeZone::Fixed(offset) => offset
             .from_local_datetime(&naive)

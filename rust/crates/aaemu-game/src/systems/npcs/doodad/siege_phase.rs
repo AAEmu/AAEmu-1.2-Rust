@@ -157,7 +157,7 @@ fn any_period_source(server: &GameServer) -> bool {
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     if settings.enabled {
         return true;
     }

@@ -80,6 +80,7 @@ fn exp_table() -> ExperienceTable {
                 skill_points: 0,
             })
             .collect(),
+        55,
     )
     .expect("levels")
 }

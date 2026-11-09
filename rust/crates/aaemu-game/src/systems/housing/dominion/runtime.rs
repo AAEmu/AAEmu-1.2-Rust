@@ -770,7 +770,11 @@ impl CalendarRuntime {
 
     /// The configured settings, warning once per invalid timezone value instead of silently
     /// falling back to the UTC default. A repaired value resets the warning.
-    pub fn settings(&self, config: &HousingConfig) -> CalendarSettings {
+    pub fn settings(
+        &self,
+        config: &HousingConfig,
+        profile: crate::config::ServerProfile,
+    ) -> CalendarSettings {
         let parsed = CalendarTimeZone::parse(&config.siege_calendar_timezone);
         let mut warned = self.lock_warned_timezone();
         if parsed.is_none() && !config.siege_calendar_timezone.trim().is_empty() {
@@ -785,7 +789,7 @@ impl CalendarRuntime {
             *warned = None;
         }
         CalendarSettings {
-            enabled: config.siege_calendar,
+            enabled: config.siege_calendar.unwrap_or_else(|| profile.sieges()),
             timezone: parsed.unwrap_or_default(),
         }
     }
@@ -811,7 +815,7 @@ impl CalendarRuntime {
         if now < 0 {
             return Vec::new();
         }
-        let settings = self.settings(&server.config.housing);
+        let settings = self.settings(&server.config.housing, server.config.world.profile);
         if !settings.enabled {
             self.lock_periods().clear();
             return Vec::new();

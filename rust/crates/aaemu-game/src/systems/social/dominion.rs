@@ -42,7 +42,7 @@ fn calendar_view(server: &GameServer, state: &DominionState) -> Option<calendar:
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     if !settings.enabled {
         return None;
     }
@@ -226,7 +226,7 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing)
+        .settings(&server.config.housing, server.config.world.profile)
         .enabled;
     if let Some(siege) = state.siege.as_ref().filter(|s| {
         s.status != SiegeStatus::Finished
@@ -626,6 +626,13 @@ pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_r
 /// periodic dominion save. The rate is permille/10 (0-1000); applying it to collected tax and
 /// the weekly receipt mail (type 24) are capture-pending (RENAME-8).
 pub fn update_national_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, rate: u32) {
+    if !server.config.player_nations_enabled() {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    }
     let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
@@ -942,16 +949,26 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
     if !distance2.is_finite() || !range.is_finite() || range <= 0.0 || distance2 > range * range {
         return;
     }
+    // Auroria claims follow the era profile (`World.Profile`), independently of
+    // `Housing.SiegeCalendar`: the Trion launch era has no northern continent, while a
+    // calendar-off Auroria server still allows claims for GM-scheduled sieges. 662 is the
+    // existing "not yet a region where a territory can be proclaimed" refusal.
+    if !server.config.auroria_claims_enabled() {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_CLOSED,
+        );
+        return;
+    }
     // WP-S6 claim gates. The 1.2 client has no claim validator; it only renders the server's
     // error id, so the ids below are its error table (FUN_3956b860 in x2game.dll.c) and the
-    // order is this server policy. The authored `open_*` window applies regardless of
-    // `Housing.SiegeCalendar` (that switch only drives the inferred weekly cycle) and uses the
-    // real wall clock: the GM test clock is restricted to the calendar view.
+    // order is this server policy. The authored `open_*` window uses the real wall clock: the
+    // GM test clock is restricted to the calendar view.
     let settings = server
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     let window = calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles)
         .claim_window_at(zone, Utc::now().timestamp(), &settings.timezone);
     match window {
@@ -1984,6 +2001,10 @@ mod authority_tests {
     #[tokio::test]
     async fn snapshot_uses_live_tower_authored_limits_and_native_timer_seconds() {
         let f = fixture();
+        // This test pins the explicit-timer view; the calendar must not supply a cycle.
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar = Some(false));
         let mut state = owned(&f);
         state.national_monument_db_id = 77;
         state.national_monument_x = 10.5;
@@ -2958,6 +2979,54 @@ mod authority_tests {
     }
 
     #[tokio::test]
+    async fn auroria_claims_follow_the_profile_not_the_siege_calendar() {
+        use crate::config::ServerProfile;
+        let object = SkillObject::None;
+
+        // The launch era has no Auroria claims: even an explicitly enabled calendar (the GM
+        // schedule switch) does not enable them.
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server.config.update(|c| {
+            c.world.profile = ServerProfile::EuLaunch;
+            c.housing.siege_calendar = Some(true);
+        });
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_CLOSED]
+        );
+        assert_eq!(pack_id(&f.leader), Some(100));
+        assert!(f
+            .server
+            .systems
+            .housing
+            .dominions
+            .get(ZONE)
+            .is_none_or(|state| state.owner_expedition_id == 0));
+
+        // Auroria with the weekly calendar off (GM-scheduled sieges only) still claims.
+        let f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server.config.update(|c| {
+            c.world.profile = ServerProfile::EuAuroria;
+            c.housing.siege_calendar = Some(false);
+        });
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE)
+                .unwrap()
+                .owner_expedition_id,
+            EXPEDITION
+        );
+        assert_eq!(pack_id(&f.leader), None);
+    }
+
+    #[tokio::test]
     async fn ephemeral_seeded_dominions_do_not_count_toward_the_claim_limit() {
         let mut f = fixture();
         f.server
@@ -3083,7 +3152,9 @@ mod authority_tests {
     #[tokio::test]
     async fn a_fresh_claim_has_no_siege_cycle_during_the_authored_delay() {
         let f = fixture();
-        f.server.config.update(|c| c.housing.siege_calendar = true);
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar = Some(true));
         let object = SkillObject::None;
         give_pack(&f, 100, PURIFYING_ARCHEUM);
         declare_effect(&f.server, &args(&f, &object));
@@ -3109,7 +3180,9 @@ mod authority_tests {
     #[tokio::test]
     async fn a_captured_territory_does_not_get_the_fresh_claim_protection() {
         let f = fixture();
-        f.server.config.update(|c| c.housing.siege_calendar = true);
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar = Some(true));
         let auction = Utc
             .with_ymd_and_hms(2014, 1, 8, 22, 30, 0)
             .single()
@@ -3479,7 +3552,7 @@ mod authority_tests {
 
     fn enable_calendar(f: &Fixture) {
         f.server.config.update(|config| {
-            config.housing.siege_calendar = true;
+            config.housing.siege_calendar = Some(true);
             config.housing.siege_calendar_timezone = "+09:00".into();
         });
     }

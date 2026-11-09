@@ -48,7 +48,7 @@ pub fn tick(server: &GameServer, now: i64) {
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     if !settings.enabled {
         return;
     }
@@ -245,7 +245,7 @@ pub fn handle_camp_use(
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     let calendar = SiegeCalendar::from_castles(&server.game_data.systems.housing.castles);
     let Some(view) = calendar.view_for_declaration(zone, now, &settings.timezone, None, 0) else {
         return refuse(player, error::SIEGE_DECLARE_BAD_PERIOD);

@@ -1124,6 +1124,12 @@ pub fn declare_independence(
     name: &str,
     require_dominion: bool,
 ) -> std::result::Result<Nation, i16> {
+    // Player nations are KR-only content (no Trion 1.2 evidence; `PORTING.md`, NATION row).
+    // The refusal is the same one a failed ownership precondition uses, so no new error id is
+    // introduced.
+    if !server.config.player_nations_enabled() {
+        return Err(error_message::FACTION_SEPARATE_RIGHTS);
+    }
     let (character_id, current_expedition) = {
         let c = founder.data();
         (c.id, c.unit.expedition_id)
@@ -1255,6 +1261,12 @@ pub fn declare_independence(
 /// Special effect 71 `DeclareIndependence`: validates the accepted cast of skill 18540 and the
 /// CASTLE_CLAIM backpack, then runs [`declare_independence`] and persists the new nation.
 pub fn declare_independence_effect(server: &GameServer, args: &EffectArgs<'_>) {
+    if !server.config.player_nations_enabled() {
+        if let Some(player) = args.caster.as_ref().and_then(|c| c.as_player()) {
+            send_error(player, error_message::FACTION_SEPARATE_RIGHTS);
+        }
+        return;
+    }
     let Some(caster) = args.caster.as_ref() else {
         return;
     };
@@ -1321,6 +1333,9 @@ pub fn declare_independence_effect(server: &GameServer, args: &EffectArgs<'_>) {
 /// (`FUN_391d2380` -> `FUN_392f8e80(0)`) opens the dialog only when the player owns a user
 /// faction. The production trigger is unknown (RENAME-7); the GM hook and tests call this.
 pub fn offer_nation_rename_ui(server: &GameServer, p: &PlayerRef) -> std::result::Result<(), i16> {
+    if !server.config.player_nations_enabled() {
+        return Err(error_message::ONLY_NATION_OWNER);
+    }
     let Some(nation) = server.systems.social.nations.owned_by(p.character_id) else {
         return Err(error_message::ONLY_NATION_OWNER);
     };
@@ -1339,6 +1354,10 @@ pub fn offer_nation_rename_ui(server: &GameServer, p: &PlayerRef) -> std::result
 /// checked before anything changes; a rejected name re-opens the dialog via
 /// `SCFactionRetryRename` (xpdt false) and keeps the offer usable (RENAME-7).
 pub async fn rename_nation(server: &GameServer, p: &PlayerRef, id: u32, name: &str) {
+    if !server.config.player_nations_enabled() {
+        send_error(p, error_message::ONLY_NATION_OWNER);
+        return;
+    }
     let nations = &server.systems.social.nations;
     if !nations.has_rename_offer(p.character_id, id) {
         tracing::warn!(
@@ -1462,6 +1481,9 @@ pub async fn place_national_monument(
     y: f32,
     z: f32,
 ) -> std::result::Result<(), i16> {
+    if !server.config.player_nations_enabled() {
+        return Err(error_message::ONLY_NATION_OWNER);
+    }
     if ![x, y, z].iter().all(|v| v.is_finite()) {
         return Err(error_message::ONLY_NATION_OWNER);
     }
@@ -1643,6 +1665,9 @@ pub async fn remove_national_monument(
     king: &PlayerRef,
     zone: u16,
 ) -> std::result::Result<(), i16> {
+    if !server.config.player_nations_enabled() {
+        return Err(error_message::ONLY_NATION_OWNER);
+    }
     let (state, world, old_db_id) = {
         let _items = server.systems.economy.operation_scope();
         let _operation = server
@@ -1806,6 +1831,9 @@ pub fn declare_hostile(
     king: &PlayerRef,
     target: u32,
 ) -> std::result::Result<(), i16> {
+    if !server.config.player_nations_enabled() {
+        return Err(error_message::FACTION_RIGHTS);
+    }
     let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
         return Err(error_message::FACTION_RIGHTS);
     };
@@ -1912,6 +1940,9 @@ fn send_friend_treaty_mail(
 /// Sends one treaty-request mail now (the GM test hook; the periodic scheduler is
 /// [`send_due_treaty_mails`]). Returns the mail id.
 pub fn send_treaty_mail(server: &GameServer, nation_id: u32, target_id: u32) -> Option<i64> {
+    if !server.config.player_nations_enabled() {
+        return None;
+    }
     let nation = server.systems.social.nations.get(nation_id)?;
     let target = diplomacy_target(server, target_id)?;
     let now = Utc::now().timestamp();
@@ -1948,6 +1979,9 @@ pub fn send_treaty_mail(server: &GameServer, nation_id: u32, target_id: u32) -> 
 /// offered. A per-(nation, target) offer cooldown of at least `treaty_lead_hours` (persisted)
 /// stops a deleted / declined mail from being re-sent every tick (NATION-15).
 pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
+    if !server.config.player_nations_enabled() {
+        return 0;
+    }
     let nations = &server.systems.social.nations;
     let mails = &server.systems.economy.mail;
     let settings = server.game_data.systems.social.nation;
@@ -2061,6 +2095,11 @@ pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
 /// hostile declaration, expired offer, reused mail id, wrong owner) is deleted and refused. The
 /// mail fields beyond the charge (target tag in `extra`) are INFERRED (NATION-15).
 pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -> bool {
+    if !server.config.player_nations_enabled() {
+        // Same refusal a stale treaty mail gets; a disabled era has no treaties to pay.
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    }
     let mails = &server.systems.economy.mail;
     let Some(mail) = mails.get_mail_by_id(mail_id) else {
         send_error(payer, error_message::MAIL_INVALID);
@@ -2719,6 +2758,13 @@ fn send_kick_result(
 /// pre-send checks are 697 (not the king) and 736 (oneself); the server re-runs the reply
 /// checks on the invitee (`FUN_398a44d0`) and answers the king with the same codes.
 pub fn invite_citizen(server: &GameServer, king: &PlayerRef, invitee_name: &str) {
+    if !server.config.player_nations_enabled() {
+        send_error(
+            king,
+            error_message::FACTION_CANNOT_INVITE_IMMIGRATION_AS_NO_PERMISSION,
+        );
+        return;
+    }
     let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
         send_error(
             king,

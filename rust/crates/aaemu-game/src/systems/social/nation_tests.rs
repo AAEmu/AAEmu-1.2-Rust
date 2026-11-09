@@ -350,6 +350,58 @@ async fn independence_requires_the_owner_and_a_dominion() {
 }
 
 #[tokio::test]
+async fn nation_founding_follows_the_era_profile() {
+    use crate::config::ServerProfile;
+
+    // Default profile (EuAuroria) and EuLaunch: no player nations; the refusal is the same
+    // one a failed ownership precondition uses (40).
+    for profile in [ServerProfile::EuAuroria, ServerProfile::EuLaunch] {
+        let f = Fixture::new(true);
+        f.server.config.update(|c| {
+            c.world.profile = profile;
+            c.social.player_nations = None;
+        });
+        assert_eq!(
+            nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true)
+                .expect_err("the era has no player nations"),
+            crate::systems::economy::error_message::FACTION_SEPARATE_RIGHTS
+        );
+        assert!(f.server.systems.social.nations.all().is_empty());
+    }
+
+    // Kr12: founding works.
+    let f = Fixture::new(true);
+    f.server.config.update(|c| {
+        c.world.profile = ServerProfile::Kr12;
+        c.social.player_nations = None;
+    });
+    assert!(
+        nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true).is_ok()
+    );
+
+    // An explicit config value still wins over the profile, in both directions.
+    let f = Fixture::new(true);
+    f.server.config.update(|c| {
+        c.world.profile = ServerProfile::EuAuroria;
+        c.social.player_nations = Some(true);
+    });
+    assert!(
+        nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true).is_ok()
+    );
+
+    let f = Fixture::new(true);
+    f.server.config.update(|c| {
+        c.world.profile = ServerProfile::Kr12;
+        c.social.player_nations = Some(false);
+    });
+    assert_eq!(
+        nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true)
+            .expect_err("explicit false"),
+        crate::systems::economy::error_message::FACTION_SEPARATE_RIGHTS
+    );
+}
+
+#[tokio::test]
 async fn independence_skill_effect_needs_the_accepted_cast_and_the_claim_backpack() {
     let f = Fixture::new(true);
     // CASTLE_CLAIM backpack in slot 26 (skill 18540's link_backpack_type_id).

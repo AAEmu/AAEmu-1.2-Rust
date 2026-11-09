@@ -60,7 +60,7 @@ pub fn tick(server: &GameServer, now: i64, _auction: &MutexGuard<'_, ()>) {
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     if !settings.enabled {
         return;
     }
