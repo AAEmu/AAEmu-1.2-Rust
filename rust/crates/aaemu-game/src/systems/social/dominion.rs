@@ -3998,6 +3998,7 @@ mod authority_tests {
     fn add_house_plot(
         f: &mut Fixture,
         template_id: u32,
+        category_id: u32,
         x: f32,
         y: f32,
         garden_radius: f32,
@@ -4005,6 +4006,7 @@ mod authority_tests {
         let data = data_mut(f);
         data.systems.housing.add_template(HousingTemplate {
             id: template_id,
+            category_id,
             garden_radius,
             ..Default::default()
         });
@@ -4019,6 +4021,146 @@ mod authority_tests {
         assert!(f.server.systems.housing.manager.insert(&house));
         crate::systems::housing::manager::spawn_house(&f.server, &house);
         house
+    }
+
+    /// Adds a `Data/Portal/respawns.json` resurrection point (`PortalTables::respawns`) at
+    /// `(x, y)` in the synthetic `main_world`.
+    fn add_respawn_at(f: &mut Fixture, id: u32, x: f32, y: f32) {
+        let data = data_mut(f);
+        let mut respawns = data.systems.npcs.portal.respawns.portals.clone();
+        respawns.push(crate::data::world_data::Portal {
+            id,
+            name: format!("Respawn {id}"),
+            x,
+            y,
+            z: 100.0,
+            sub_zone_id: id,
+            ..Default::default()
+        });
+        data.systems.npcs.portal = crate::systems::npcs::portal::PortalTables::from_parts(
+            respawns,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+    }
+
+    /// Adds a `DoodadFuncHouseFarm` phase func to the doodad's (growth) func group, the 1.2
+    /// data's marker of a crop / livestock farm product.
+    fn add_farm_doodad_template(f: &mut Fixture, template_id: u32) {
+        let doodads = &mut data_mut(f).systems.npcs.doodad;
+        let group_id = 50_000 + template_id;
+        let group = crate::systems::npcs::doodad::templates::DoodadFuncGroups {
+            id: group_id,
+            almighty: template_id,
+            group_kind_id: crate::systems::npcs::doodad::templates::doodad_func_group_kind::NORMAL,
+            ..Default::default()
+        };
+        doodads.templates.insert(
+            template_id,
+            crate::systems::npcs::doodad::templates::DoodadTemplate {
+                id: template_id,
+                func_groups: vec![group],
+                ..Default::default()
+            },
+        );
+        doodads.phase_funcs.insert(
+            group_id,
+            vec![crate::systems::npcs::doodad::templates::DoodadPhaseFunc {
+                group_id,
+                func_id: 60_000 + template_id,
+                func_type: "DoodadFuncHouseFarm".into(),
+            }],
+        );
+    }
+
+    /// Spawns a doodad of `template_id` at `(x, y)` in instance 0 with `owner_id` /
+    /// `owner_type`.
+    fn add_owned_doodad_at(
+        f: &Fixture,
+        obj_id: u32,
+        template_id: u32,
+        x: f32,
+        y: f32,
+        owner_id: u32,
+        owner_type: u8,
+    ) -> crate::world::DoodadRef {
+        let mut d = crate::models::doodad::Doodad::new(template_id);
+        d.transform.set_xyz(x, y, 100.0);
+        d.transform.zone_id = TEST_ZONE;
+        d.owner_id = owner_id;
+        d.owner_type = owner_type;
+        // The fixture's players use fixed obj ids (0x100/0x101) the id manager does not know,
+        // so `get_next_id` can hand out 0x100 again and `add_object` would keep the player.
+        let doodad = Entity::new(obj_id, d);
+        let world = f.server.world.world(0).unwrap();
+        world.spawn(&doodad, &f.server.view_ctx());
+        doodad
+    }
+
+    /// Spawns a doodad planted by character 1 at `(x, y)` in instance 0.
+    fn add_doodad_at(f: &Fixture, template_id: u32, x: f32, y: f32) -> crate::world::DoodadRef {
+        add_owned_doodad_at(
+            f,
+            0xa000 + template_id,
+            template_id,
+            x,
+            y,
+            1,
+            crate::models::doodad::doodad_owner_type::CHARACTER,
+        )
+    }
+
+    /// Spawns a wild, unowned static node of `template_id` at `(x, y)` in instance 0.
+    fn add_wild_doodad_at(
+        f: &Fixture,
+        template_id: u32,
+        x: f32,
+        y: f32,
+    ) -> crate::world::DoodadRef {
+        add_owned_doodad_at(
+            f,
+            0xb000 + template_id,
+            template_id,
+            x,
+            y,
+            0,
+            crate::models::doodad::doodad_owner_type::SYSTEM,
+        )
+    }
+
+    /// Marks a square sub zone (id `sub_zone_id`) of the synthetic `main_world` as a public
+    /// farm area (`PublicFarmManager._farmZones`).
+    fn add_public_farm_area(f: &mut Fixture, sub_zone_id: u32, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let data = data_mut(f);
+        data.zones.zones.entry(TEST_ZONE).or_insert(Zone {
+            id: 1,
+            zone_key: TEST_ZONE,
+            group_id: ZONE,
+            ..Default::default()
+        });
+        let zone_id = data.zones.zones.get(&TEST_ZONE).unwrap().id;
+        data.systems
+            .npcs
+            .subzone
+            .sub_zones
+            .entry(0)
+            .or_default()
+            .insert(
+                zone_id,
+                vec![crate::systems::npcs::subzone::Area {
+                    id: sub_zone_id,
+                    name: format!("public farm {sub_zone_id}"),
+                    points: vec![[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]],
+                }],
+            );
+        data.systems
+            .npcs
+            .public_farm
+            .farm_zones
+            .entry(sub_zone_id)
+            .or_insert(crate::systems::npcs::public_farm::farm_group_kind::FARM);
     }
 
     fn set_declare_radius(f: &mut Fixture, radius: u32) {
@@ -4093,28 +4235,140 @@ mod authority_tests {
     async fn camp_placement_refuses_a_house_plot_and_honours_the_house_margin() {
         // 633: the camp spot (one metre in front of the caster) is inside a plot.
         let mut f = camp_fixture();
-        add_house_plot(&mut f, 71, 600.0, 101.0, 8.0);
+        add_house_plot(&mut f, 71, 1, 600.0, 101.0, 8.0);
         let (codes, kept) = cast_camp_errors(&mut f);
         assert!(codes.contains(&633), "house plot refusal: {codes:?}");
         assert!(kept, "a refused declaration keeps the camp");
         assert!(!declared(&f));
 
-        // Default margin 0: a plot 31 m away does not refuse.
+        // GameMeca's "about 10 m": a plot edge 9 m from the spot refuses.
         let mut f = camp_fixture();
-        add_house_plot(&mut f, 71, 600.0, 140.0, 8.0);
+        add_house_plot(&mut f, 71, 1, 600.0, 118.0, 8.0);
         let (codes, kept) = cast_camp_errors(&mut f);
-        assert!(codes.is_empty(), "house 31 m away allowed: {codes:?}");
+        assert!(codes.contains(&633), "house plot 9 m away: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        // 11 m away is outside the default margin: allowed.
+        let mut f = camp_fixture();
+        add_house_plot(&mut f, 71, 1, 600.0, 120.0, 8.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "house plot 11 m away: {codes:?}");
         assert!(!kept, "the accepted declaration consumes the camp");
         assert!(declared(&f));
 
-        // Config override: a 40 m margin refuses the same 31 m plot.
+        // Config override: a 40 m margin refuses the same 11 m plot.
         let mut f = camp_fixture();
         f.server
             .config
             .update(|c| c.housing.siege_declare_house_margin = 40.0);
-        add_house_plot(&mut f, 71, 600.0, 140.0, 8.0);
+        add_house_plot(&mut f, 71, 1, 600.0, 120.0, 8.0);
         let (codes, kept) = cast_camp_errors(&mut f);
         assert!(codes.contains(&633), "40 m house margin: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+    }
+
+    #[tokio::test]
+    async fn camp_placement_refuses_farm_plots_farm_doodads_and_public_farm_areas() {
+        // A farm plot (category 18 "thatched farm") is a house with a `garden_radius` plot:
+        // 9 m from its edge refuses, 11 m is allowed.
+        let mut f = camp_fixture();
+        add_house_plot(&mut f, 72, 18, 600.0, 118.0, 8.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "farm plot 9 m away: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        let mut f = camp_fixture();
+        add_house_plot(&mut f, 72, 18, 600.0, 120.0, 8.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "farm plot 11 m away: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // A planted private farm doodad (`DoodadFuncHouseFarm`) 9 m away refuses.
+        const FARM_DOODAD: u32 = 9_001;
+        let mut f = camp_fixture();
+        add_farm_doodad_template(&mut f, FARM_DOODAD);
+        add_doodad_at(&f, FARM_DOODAD, 600.0, 110.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "farm doodad 9 m away: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        // The same doodad 11 m away is allowed.
+        let mut f = camp_fixture();
+        add_farm_doodad_template(&mut f, FARM_DOODAD);
+        add_doodad_at(&f, FARM_DOODAD, 600.0, 112.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "farm doodad 11 m away: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // A public farm area (sub zone 966, a `_farmZones` farm) 9 m away refuses.
+        let mut f = camp_fixture();
+        add_public_farm_area(&mut f, 966, 590.0, 110.0, 620.0, 125.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "public farm 9 m away: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        // A public farm edge 11 m away is allowed.
+        let mut f = camp_fixture();
+        add_public_farm_area(&mut f, 966, 590.0, 112.0, 620.0, 125.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "public farm 11 m away: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // Config override: a 15 m farm margin refuses both 11 m cases.
+        let mut f = camp_fixture();
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_farm_margin = 15.0);
+        add_farm_doodad_template(&mut f, FARM_DOODAD);
+        add_doodad_at(&f, FARM_DOODAD, 600.0, 112.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "15 m farm margin (doodad): {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        let mut f = camp_fixture();
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_farm_margin = 15.0);
+        add_public_farm_area(&mut f, 966, 590.0, 112.0, 620.0, 125.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(
+            codes.contains(&633),
+            "15 m farm margin (public farm): {codes:?}"
+        );
+        assert!(kept);
+        assert!(!declared(&f));
+    }
+
+    #[tokio::test]
+    async fn camp_placement_ignores_wild_farm_template_nodes() {
+        // Clover (2277), azalea (2276), mushroom (453), rubber tree (369), cotton (1798),
+        // pearl clam (3511) and the other wild gathering nodes share the planted crops'
+        // `DoodadFuncHouseFarm` phase funcs (8,702 of the 43,463 static main_world spawns
+        // would match). An unowned wild node 9 m away is not farmland.
+        const WILD_CLOVER: u32 = 2_277;
+        let mut f = camp_fixture();
+        add_farm_doodad_template(&mut f, WILD_CLOVER);
+        add_wild_doodad_at(&f, WILD_CLOVER, 600.0, 110.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "wild node 9 m away: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // The same template planted by a character 9 m away refuses.
+        let mut f = camp_fixture();
+        add_farm_doodad_template(&mut f, WILD_CLOVER);
+        add_doodad_at(&f, WILD_CLOVER, 600.0, 110.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "planted node 9 m away: {codes:?}");
         assert!(kept);
         assert!(!declared(&f));
     }
@@ -4154,43 +4408,55 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn camp_peace_check_is_off_by_default_and_honours_its_margin() {
-        // The neighbouring group 26 has no `conflict_zones` row: it never leaves peace.
-        // Switch off (default): the spot 2 m from that group is allowed.
+    async fn camp_placement_refuses_resurrection_points_and_honours_the_margin() {
+        // GameMeca's "about 100 m": a resurrection point 99 m from the camp spot refuses.
         let mut f = camp_fixture();
-        set_declare_radius(&mut f, 10);
-        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
-        let (codes, kept) = cast_camp_errors(&mut f);
-        assert!(codes.is_empty(), "peace check off by default: {codes:?}");
-        assert!(!kept);
-        assert!(declared(&f));
-
-        // Switch on with a 1 m margin: the peace group is 2 m away, so still allowed.
-        let mut f = camp_fixture();
-        set_declare_radius(&mut f, 10);
-        f.server.config.update(|c| {
-            c.housing.siege_declare_peace_check = true;
-            c.housing.siege_declare_peace_margin = 1.0;
-        });
-        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        add_respawn_at(&mut f, 86, 600.0, 200.0);
         let (codes, kept) = cast_camp_errors(&mut f);
         assert!(
-            codes.is_empty(),
-            "peace group outside the margin: {codes:?}"
+            codes.contains(&625),
+            "resurrection point 99 m away: {codes:?}"
         );
+        assert!(kept, "a refused declaration keeps the camp");
+        assert!(!declared(&f));
+
+        // 101 m away is outside the default margin: allowed.
+        let mut f = camp_fixture();
+        add_respawn_at(&mut f, 86, 600.0, 202.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "resurrection point 101 m away: {codes:?}");
         assert!(!kept);
         assert!(declared(&f));
 
-        // Switch on with a 5 m margin: 625.
+        // Config switch off: the same 99 m point is ignored.
         let mut f = camp_fixture();
-        set_declare_radius(&mut f, 10);
-        f.server.config.update(|c| {
-            c.housing.siege_declare_peace_check = true;
-            c.housing.siege_declare_peace_margin = 5.0;
-        });
-        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_resurrect_check = false);
+        add_respawn_at(&mut f, 86, 600.0, 200.0);
         let (codes, kept) = cast_camp_errors(&mut f);
-        assert!(codes.contains(&625), "peace zone margin: {codes:?}");
+        assert!(codes.is_empty(), "resurrection check off: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // Config margin override: 50 m allows the 99 m point and refuses a 49 m one.
+        let mut f = camp_fixture();
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_resurrect_margin = 50.0);
+        add_respawn_at(&mut f, 86, 600.0, 200.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "50 m resurrect margin, 99 m: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        let mut f = camp_fixture();
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_resurrect_margin = 50.0);
+        add_respawn_at(&mut f, 86, 600.0, 150.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&625), "50 m margin, 49 m away: {codes:?}");
         assert!(kept);
         assert!(!declared(&f));
     }
