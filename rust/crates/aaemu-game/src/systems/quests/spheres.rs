@@ -6,7 +6,7 @@
 //! The C# has one manager per `WorldInstance` (with a static sphere list loaded from the first
 //! world); only `main_world` exists here, so there is one manager for the server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -17,6 +17,7 @@ use super::data::{QuestData, RawSignSphere};
 use super::model::sphere_trigger;
 use super::packets::SCAreaTeamMessagePacket;
 use super::templates::ActKind;
+use super::ui_packets::SCQuestAcceptConditionalPacket;
 use crate::server::GameServer;
 use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
 use crate::world::{PlayerRef, WorldObject};
@@ -67,6 +68,12 @@ impl SphereArea {
         distance3(self.xyz, pos) <= self.radius
     }
 }
+
+/// Slack for a client sphere start (`CSStartQuestContext`): the client can send its accept
+/// shortly after entering, before the server has its latest position, so the start is refused
+/// only when the character is clearly outside the sphere (INFERRED; 5 m is a few client ticks
+/// of running, well below the 6-30 m radius of the shipped offer spheres).
+pub const START_TOLERANCE: f32 = 5.0;
 
 /// Reads every `<app_path>/Data/Worlds/*/sphere_area_fill.json`; a missing file is empty and a
 /// malformed row is skipped (a bad data file must not fail the catalog). `known_sphere` is the
@@ -355,6 +362,24 @@ fn push_sphere(s: &mut Spheres, sphere_world: &str, r: &RawSignSphere, xyz: (f32
     }
 }
 
+/// The per-character area-sphere state (kept while the character stays in the world).
+#[derive(Debug, Default, Clone)]
+struct AreaState {
+    /// Area indexes the character was inside at the last tick (ascending).
+    inside: Vec<usize>,
+    /// Unix ms of the last `SCQuestAcceptConditional` offer per sphere id (edge cooldown).
+    offered_ms: HashMap<u32, i64>,
+    /// Whether the sphere offered a startable quest at the last evaluation (per sphere id).
+    /// A false -> true transition while inside offers again (a level-up among others), while
+    /// staying eligible does not repeat the offer.
+    eligible: HashMap<u32, bool>,
+}
+
+/// Minimum interval between two `SCQuestAcceptConditional` offers of the same sphere to the
+/// same character (INFERRED; suppresses the offer flapping when the character walks the area
+/// edge). It does not gate an eligibility transition while inside (e.g. a level-up).
+pub const OFFER_COOLDOWN_MS: i64 = 30_000;
+
 #[derive(Debug, Default)]
 struct Triggers {
     list: Vec<SphereQuestTrigger>,
@@ -372,9 +397,8 @@ pub struct SphereQuestManager {
     last_positions: Mutex<HashMap<u32, (f32, f32, f32)>>,
     /// `Data/Worlds/<world>/sphere_area_fill.json` (world coordinates, read-only).
     areas: OnceLock<Vec<SphereArea>>,
-    /// Area indexes the character was inside at the last tick (character id -> indexes,
-    /// ascending).
-    area_inside: Mutex<HashMap<u32, Vec<usize>>>,
+    /// Per-character area-sphere state (character id -> inside indexes / offer bookkeeping).
+    area_state: Mutex<HashMap<u32, AreaState>>,
     /// Serializes ticks.
     tick_lock: Mutex<()>,
 }
@@ -489,6 +513,33 @@ impl SphereQuestManager {
             .unwrap_or_default()
     }
 
+    /// Whether `pos` is inside the sphere `sphere_id` of `world_name` right now: a shipped
+    /// `sphere_area_fill.json` area or a `quest_sign_sphere.g` starter area for that sphere,
+    /// with `tolerance` metres of slack. This is the server-side presence check a client
+    /// `CSStartQuestContext` sphere start must pass (both ids come from the client).
+    pub fn is_inside_sphere(
+        &self,
+        world_name: &str,
+        sphere_id: u32,
+        pos: (f32, f32, f32),
+        tolerance: f32,
+    ) -> bool {
+        if let Some(areas) = self.areas.get() {
+            if areas.iter().any(|a| {
+                a.world == world_name
+                    && a.sphere_id == sphere_id
+                    && distance3(a.xyz, pos) <= a.radius + tolerance
+            }) {
+                return true;
+            }
+        }
+        self.starters().iter().any(|s| {
+            s.sphere.world_id == world_name
+                && s.sphere_id == sphere_id
+                && distance3(s.sphere.xyz, pos) <= s.sphere.radius + tolerance
+        })
+    }
+
     /// `SphereGameData.IsInsideAreaSphere(sphereId, value2, worldPosition, requiredComponentId)`.
     pub fn is_inside_area_sphere(
         &self,
@@ -587,9 +638,9 @@ impl SphereQuestManager {
             .lock()
             .expect("positions poisoned")
             .remove(&character_id);
-        self.area_inside
+        self.area_state
             .lock()
-            .expect("area inside poisoned")
+            .expect("area state poisoned")
             .remove(&character_id);
     }
 
@@ -612,7 +663,7 @@ impl SphereQuestManager {
     /// audience is UNKNOWN). On leave only a row with `enter_or_leave` set fires. The other
     /// sphere types (SphereSkill / SphereSound / SphereDoodadInteract / SphereBuff) are loaded
     /// but have no effect here (a separate content decision).
-    fn tick_area_spheres(&self, server: &GameServer) {
+    fn tick_area_spheres(&self, server: &GameServer, now: i64) {
         let Some(areas) = self.areas.get() else {
             return;
         };
@@ -621,6 +672,7 @@ impl SphereQuestManager {
         }
         let data = &server.game_data.systems.quests;
         let mut next: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut inside_players: Vec<(PlayerRef, Vec<usize>)> = Vec::new();
         let mut events: Vec<(PlayerRef, usize, bool)> = Vec::new();
         for player in server.world.all_characters() {
             if player.region().is_none() {
@@ -638,11 +690,11 @@ impl SphereQuestManager {
                 .map(|(i, _)| i)
                 .collect();
             let previous = self
-                .area_inside
+                .area_state
                 .lock()
-                .expect("area inside poisoned")
+                .expect("area state poisoned")
                 .get(&player.character_id)
-                .cloned()
+                .map(|st| st.inside.clone())
                 .unwrap_or_default();
             for &i in &inside {
                 if !previous.contains(&i) {
@@ -654,9 +706,22 @@ impl SphereQuestManager {
                     events.push((player.clone(), i, false));
                 }
             }
-            next.insert(player.character_id, inside);
+            next.insert(player.character_id, inside.clone());
+            inside_players.push((player.clone(), inside));
         }
-        *self.area_inside.lock().expect("area inside poisoned") = next;
+        {
+            let mut states = self.area_state.lock().expect("area state poisoned");
+            // Drop characters that left the world; keep their offer bookkeeping while inside.
+            states.retain(|id, _| next.contains_key(id));
+            for (id, inside) in next {
+                states.entry(id).or_default().inside = inside;
+            }
+        }
+        let entered: HashSet<(u32, usize)> = events
+            .iter()
+            .filter(|(_, _, enter)| *enter)
+            .map(|(p, i, _)| (p.character_id, *i))
+            .collect();
         for (player, area, enter) in events {
             let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
                 continue;
@@ -678,14 +743,94 @@ impl SphereQuestManager {
                 });
             }
         }
+        // `SphereAcceptQuest` offers: on entry and when a character already inside becomes
+        // eligible (a level-up, a schedule window opening, ...). The 0x14a packet replaces the
+        // automatic start; the client answers with `CSStartQuestContext`, whose position is
+        // re-validated by `events::add_quest_from_sphere_impl`. The entry trigger is INFERRED
+        // (CAP-QU-2): the area comes from the shipped `sphere_area_fill.json` and the link
+        // from `sphere_accept_quest_quests`, but no capture shows the retail send.
+        for (player, inside) in inside_players {
+            for &area in &inside {
+                let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
+                    continue;
+                };
+                if sphere.sphere_detail_type != "SphereAcceptQuest" {
+                    continue;
+                }
+                let entered_this_tick = entered.contains(&(player.character_id, area));
+                let (was_eligible, last_offer) = self
+                    .area_state
+                    .lock()
+                    .expect("area state poisoned")
+                    .get(&player.character_id)
+                    .map_or((false, None), |st| {
+                        (
+                            st.eligible.get(&sphere.id).copied().unwrap_or(false),
+                            st.offered_ms.get(&sphere.id).copied(),
+                        )
+                    });
+                let (id, or) = (sphere.id, sphere.or_unit_reqs);
+                let can = super::events::with_quests(server, &player, None, move |ctx| {
+                    ctx.can_trigger_sphere(id, or)
+                })
+                .unwrap_or(false);
+                let mut offers: Vec<u32> = Vec::new();
+                if can {
+                    for quest_id in data.accept_quest_quests(sphere.sphere_detail_id) {
+                        // The same rules as a normal quest start, without its refusal
+                        // logging / packets: only offer a quest the character could start.
+                        let eligible =
+                            super::events::with_quests(server, &player, None, move |ctx| {
+                                ctx.can_offer_quest(quest_id, id)
+                            })
+                            .unwrap_or(false);
+                        if eligible {
+                            offers.push(quest_id);
+                        }
+                    }
+                }
+                let eligible_now = !offers.is_empty();
+                let offer = eligible_now
+                    && if !entered_this_tick && !was_eligible {
+                        // An eligibility transition while inside is server-driven (level-up,
+                        // schedule window), not edge flapping: offer it without the cooldown.
+                        true
+                    } else {
+                        last_offer.is_none_or(|last| now - last >= OFFER_COOLDOWN_MS)
+                    };
+                if offer {
+                    for quest_id in offers {
+                        player.send(SCQuestAcceptConditionalPacket {
+                            sphere_id: id,
+                            quest_id,
+                        });
+                    }
+                }
+                let mut states = self.area_state.lock().expect("area state poisoned");
+                let st = states.entry(player.character_id).or_default();
+                st.eligible.insert(id, eligible_now);
+                if offer {
+                    st.offered_ms.insert(id, now);
+                }
+            }
+        }
     }
 
     /// One `Tick` (every 500 ms). A throwing quest event handler aborts the rest of the tick,
     /// like the C# exception caught around the whole tick.
     pub fn tick(&self, server: &GameServer) {
+        self.tick_at_impl(server, chrono::Utc::now().timestamp_millis());
+    }
+
+    /// [`Self::tick`] at a caller-chosen time (tests: the offer cooldown is wall-clock).
+    #[cfg(test)]
+    pub(crate) fn tick_at(&self, server: &GameServer, now: i64) {
+        self.tick_at_impl(server, now);
+    }
+
+    fn tick_at_impl(&self, server: &GameServer, now: i64) {
         let _serial = self.tick_lock.lock().expect("tick poisoned");
-        let now = chrono::Utc::now().timestamp_millis();
-        self.tick_area_spheres(server);
+        self.tick_area_spheres(server, now);
         // Add new player specific triggers
         let list = {
             let mut t = self.triggers.lock().expect("triggers poisoned");

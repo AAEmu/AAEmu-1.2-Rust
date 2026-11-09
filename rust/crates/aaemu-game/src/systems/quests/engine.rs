@@ -7,8 +7,8 @@ use std::sync::Arc;
 use super::data::QuestData;
 use super::hooks::QuestHooks;
 use super::model::{
-    condition, detail, error_msg, item_task, kind, npc_ai, status, ItemCreationDefinition,
-    ObjectiveStatus, FACTION_MONSTROSITY,
+    acceptor, condition, detail, error_msg, item_task, kind, npc_ai, status,
+    ItemCreationDefinition, ObjectiveStatus, FACTION_MONSTROSITY,
 };
 use super::packets::{
     quest_error, SCQuestContextCompletedPacket, SCQuestContextFailedPacket,
@@ -39,6 +39,25 @@ use crate::world::PlayerRef;
 pub struct Throw(pub String);
 
 pub type QResult<T = ()> = Result<T, Throw>;
+
+/// Why [`Ctx::start_refusal`] refuses to start a quest (`None` = it may start). The reason
+/// carries the component / item id the caller logs or answers with; the checks themselves are
+/// side-effect free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartRefusal {
+    /// The quest is already active (a non-forced start; a forced one drops and reinstalls it).
+    Active,
+    /// No `quest_contexts` row for the id.
+    UnknownQuest,
+    /// `game_schedule_quests`: the quest's schedule window is not in progress.
+    ScheduleWindow,
+    /// `CanAcceptSupplyItems`: this auto-equip trade pack cannot go to the backpack slot.
+    SupplyItem(u32),
+    /// The Start component's `unit_reqs` are not met.
+    ComponentUnitReq(u32),
+    /// Already completed and not repeatable.
+    Completed,
+}
 
 /// A snapshot of a unit taken before the character was locked (the current target).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1739,12 +1758,11 @@ impl<'a> Ctx<'a> {
         set_completed_quest_flag(&mut self.c.quests.completed, quest_id, completed)
     }
 
-    /// `CanAcceptSupplyItems`.
-    fn can_accept_supply_items(&mut self, template_id: u32) -> bool {
+    /// The `SupplyItem` act [`StartRefusal::SupplyItem`] refuses on, if any: an auto-equip
+    /// trade pack whose backpack slot cannot be freed. `None` = the supply items are fine.
+    fn supply_item_refusal(&self, template_id: u32) -> Option<u32> {
         let data = self.data;
-        let Some(t) = data.template(template_id) else {
-            return true;
-        };
+        let t = data.template(template_id)?;
         for c in t.components_of(&data.components, kind::SUPPLY) {
             for &a in &c.acts {
                 let ActKind::SupplyItem { item_id, .. } = data.acts[a].kind else {
@@ -1755,17 +1773,63 @@ impl<'a> Ctx<'a> {
                         .hooks
                         .can_replace_glider_in_backpack_slot(self.server, self.c)
                 {
-                    self.log_refusal(
-                        "AddQuest",
-                        template_id,
-                        &format!("backpack supply item {item_id} cannot be equipped"),
-                    );
-                    self.send_error(error_msg::BACKPACK_OCCUPIED);
-                    return false;
+                    return Some(item_id);
                 }
             }
         }
-        true
+        None
+    }
+
+    /// The checks [`Ctx::add_quest`] runs before it installs a quest (`None` = it may start),
+    /// shared with [`Ctx::can_offer_quest`]. The result says which refusal an
+    /// [`Ctx::add_quest`] caller should log / answer; this function itself has no side effects
+    /// (no logging, packets or state changes).
+    ///
+    /// `forcibly` is the GM path: like `add_quest`, it skips the active / schedule / supply /
+    /// start-component / completed refusals (an active or completed quest is dropped / cleared
+    /// by the caller) but still needs a `quest_contexts` row.
+    pub fn start_refusal(&self, quest_id: u32, forcibly: bool) -> Option<StartRefusal> {
+        let data = self.data;
+        let Some(template) = data.template(quest_id) else {
+            return Some(StartRefusal::UnknownQuest);
+        };
+        if !forcibly && self.has_quest(quest_id) {
+            return Some(StartRefusal::Active);
+        }
+        // `game_schedule_quests`: a scheduled quest is acceptable only inside its window.
+        if !forcibly
+            && !super::quest_schedule_allows(
+                &self.server.game_data.systems.npcs.schedule,
+                quest_id,
+                crate::systems::npcs::spawn_manager::unix_now(),
+            )
+        {
+            return Some(StartRefusal::ScheduleWindow);
+        }
+        if !forcibly {
+            if let Some(item_id) = self.supply_item_refusal(quest_id) {
+                return Some(StartRefusal::SupplyItem(item_id));
+            }
+            for c in template.components_of(&data.components, kind::START) {
+                if !self.can_component_run(c.id) {
+                    return Some(StartRefusal::ComponentUnitReq(c.id));
+                }
+            }
+        }
+        if !forcibly && self.has_quest_completed(quest_id) && !template.repeatable {
+            return Some(StartRefusal::Completed);
+        }
+        None
+    }
+
+    /// The checks [`Ctx::add_quest`] runs before it installs a quest, without the refusal
+    /// logging / packets: whether the character could start `quest_id` now. Used for the
+    /// `SCQuestAcceptConditional` sphere offer, so the dialog is only sent for a quest the
+    /// client's accept reply could actually start: the shared refusal rules plus the start
+    /// component's acceptor check for the sphere the client would send back.
+    pub fn can_offer_quest(&self, quest_id: u32, sphere_id: u32) -> bool {
+        self.start_refusal(quest_id, false).is_none()
+            && self.starter_accepts(quest_id, acceptor::SPHERE, sphere_id)
     }
 
     /// `AddQuest(questId, forcibly, questAcceptorType, acceptorId)`.
@@ -1776,75 +1840,70 @@ impl<'a> Ctx<'a> {
         acceptor_type: u8,
         acceptor_id: u32,
     ) -> bool {
-        if self.has_quest(quest_id) {
-            if forcibly {
-                tracing::info!("[GM] quest {quest_id}, added!");
-                self.drop_quest(quest_id, true, false);
-            } else {
-                self.log_refusal("AddQuest", quest_id, "the quest is already active");
-                return false;
-            }
+        // A forced start of an active quest drops the old run first; the non-forced refusal
+        // comes from `start_refusal` below.
+        if forcibly && self.has_quest(quest_id) {
+            tracing::info!("[GM] quest {quest_id}, added!");
+            self.drop_quest(quest_id, true, false);
         }
-        let data = self.data;
-        let Some(template) = data.template(quest_id) else {
-            tracing::error!("Failed to start new Quest {quest_id}, invalid Id");
-            return false;
-        };
-        // `game_schedule_quests`: a scheduled quest is acceptable only inside its window
-        // (`forcibly` = the GM path, like the component requirements below).
-        if !forcibly
-            && !super::quest_schedule_allows(
-                &self.server.game_data.systems.npcs.schedule,
-                quest_id,
-                crate::systems::npcs::spawn_manager::unix_now(),
-            )
-        {
-            self.log_refusal(
-                "AddQuest",
-                quest_id,
-                "its game schedule window is not in progress",
-            );
-            return false;
-        }
-        if !forcibly && !self.can_accept_supply_items(quest_id) {
-            return false;
-        }
-        // Check if start step components are active
-        for c in template.components_of(&data.components, kind::START) {
-            if !self.can_component_run(c.id) && !forcibly {
-                self.log_refusal(
-                    "AddQuest",
-                    quest_id,
-                    &format!("unit requirements of the start component {} not met", c.id),
-                );
-                if self.answer_start_refusals {
-                    if let Some(req) = self.first_failed_component_req(c.id) {
-                        // INFERRED (WP-QU1): kind = unit_reqs.kind_id, value = value1, and the
-                        // message id stays 0 (`unit_reqs` has no message column). The client
-                        // reader FUN_397b5d00 / bag FUN_397b1ef0 resolves the text from kind
-                        // and value; case NO_BUFF prints the buff name of value, case
-                        // EXCEPT_COMPLETE_QUEST_CONTEXT the quest name (ui-quests.md 1.1).
-                        self.send(SCQuestUnitReqFailedPacket {
-                            quest_id,
-                            unit_obj_id: self.c.obj_id,
-                            kind: req.kind as u8,
-                            message_id: 0,
-                            value: req.value1,
-                        });
+        if let Some(refusal) = self.start_refusal(quest_id, forcibly) {
+            match refusal {
+                StartRefusal::Active => {
+                    self.log_refusal("AddQuest", quest_id, "the quest is already active");
+                }
+                StartRefusal::UnknownQuest => {
+                    tracing::error!("Failed to start new Quest {quest_id}, invalid Id");
+                }
+                StartRefusal::ScheduleWindow => {
+                    self.log_refusal(
+                        "AddQuest",
+                        quest_id,
+                        "its game schedule window is not in progress",
+                    );
+                }
+                StartRefusal::SupplyItem(item_id) => {
+                    self.log_refusal(
+                        "AddQuest",
+                        quest_id,
+                        &format!("backpack supply item {item_id} cannot be equipped"),
+                    );
+                    self.send_error(error_msg::BACKPACK_OCCUPIED);
+                }
+                StartRefusal::ComponentUnitReq(component_id) => {
+                    self.log_refusal(
+                        "AddQuest",
+                        quest_id,
+                        &format!("unit requirements of the start component {component_id} not met"),
+                    );
+                    if self.answer_start_refusals {
+                        if let Some(req) = self.first_failed_component_req(component_id) {
+                            // INFERRED (WP-QU1): kind = unit_reqs.kind_id, value = value1, and
+                            // the message id stays 0 (`unit_reqs` has no message column). The
+                            // client reader FUN_397b5d00 / bag FUN_397b1ef0 resolves the text
+                            // from kind and value; case NO_BUFF prints the buff name of value,
+                            // case EXCEPT_COMPLETE_QUEST_CONTEXT the quest name (ui-quests.md
+                            // 1.1).
+                            self.send(SCQuestUnitReqFailedPacket {
+                                quest_id,
+                                unit_obj_id: self.c.obj_id,
+                                kind: req.kind as u8,
+                                message_id: 0,
+                                value: req.value1,
+                            });
+                        }
                     }
                 }
-                return false;
+                StartRefusal::Completed => {
+                    self.log_refusal("AddQuest", quest_id, "already completed and not repeatable");
+                    self.send_error(error_msg::QUEST_DAILY_LIMIT);
+                }
             }
+            return false;
         }
-        if self.has_quest_completed(quest_id) {
-            if forcibly {
-                tracing::info!("[GM] quest {quest_id}, added!");
-                self.set_completed_quest_flag(quest_id, false);
-            } else if !template.repeatable {
-                self.log_refusal("AddQuest", quest_id, "already completed and not repeatable");
-                self.send_error(error_msg::QUEST_DAILY_LIMIT);
-                return false;
-            }
+        // A forced start of a completed quest clears the flag.
+        if forcibly && self.has_quest_completed(quest_id) {
+            tracing::info!("[GM] quest {quest_id}, added!");
+            self.set_completed_quest_flag(quest_id, false);
         }
 
         if self.install_quest(quest_id, forcibly, acceptor_type, acceptor_id, "AddQuest") {
