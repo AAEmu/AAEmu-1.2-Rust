@@ -132,16 +132,25 @@ pub mod bond_kind {
     pub const BOND_DOLL_SIT: u32 = 10;
 }
 
-/// `DoodadFuncPermission` (`DoodadObj.Static`, byte enum).
+/// `DoodadFuncPermission` (`DoodadObj.Static`). The C# enum names were guesses; these are the
+/// 1.2 client's `FUN_393b3300` cases (see `doodad/permission.rs` for the evidence).
 pub mod doodad_func_permission {
-    pub const ANY: u8 = 0;
-    pub const PERMISSION1: u8 = 1;
-    pub const PERMISSION2: u8 = 2;
-    pub const OWNER_ONLY: u8 = 3;
-    pub const PERMISSION4: u8 = 4;
-    pub const OWNER_RAID_MEMBERS: u8 = 5;
-    pub const SAME_ACCOUNT: u8 = 6;
-    pub const ZONE_RESIDENTS: u8 = 8;
+    pub const ANY: u32 = 0;
+    /// Owner character only.
+    pub const OWNER: u32 = 1;
+    /// Owner or a member of the owner's family.
+    pub const FAMILY: u32 = 2;
+    /// Owner or a member of the owner's expedition (guild).
+    pub const EXPEDITION: u32 = 3;
+    /// Owner or a member of the owner's party / raid team.
+    pub const TEAM: u32 = 4;
+    /// Owner or a member of the owner's raid.
+    pub const RAID: u32 = 5;
+    pub const SAME_ACCOUNT: u32 = 6;
+    /// The doodad's zone is owned by the player's nation.
+    pub const NATION: u32 = 7;
+    /// The player has a house in the doodad's zone.
+    pub const ZONE_RESIDENT: u32 = 8;
 }
 
 /// `ModelKind` (`DoodadObj.Static`, uint enum).

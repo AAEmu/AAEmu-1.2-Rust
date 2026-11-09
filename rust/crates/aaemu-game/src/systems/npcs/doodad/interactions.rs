@@ -305,6 +305,13 @@ fn check_growth(
     let Some(func) = ctx.data().func_for_skill(group, skill_id).cloned() else {
         return;
     };
+    // `CheckGrowth` calls the template directly, so it needs the same `perm` gate as
+    // `Doodad.Use` (the 1.2 client filters the row in `FUN_393b3300`).
+    if let Some(player) = caster.as_player() {
+        if phase::refuse_func_permission(&ctx, player, &func) {
+            return;
+        }
+    }
     let grp = func.group_id;
     use_doodad_func(&ctx, &func, caster, skill_id);
     let group = doodad.data().func_group_id;
@@ -313,6 +320,11 @@ fn check_growth(
     };
     if i64::from(next.next_phase) == i64::from(grp) || next.next_phase == -1 {
         return;
+    }
+    if let Some(player) = caster.as_player() {
+        if phase::refuse_func_permission(&ctx, player, &next) {
+            return;
+        }
     }
     use_doodad_func(&ctx, &next, caster, skill_id);
 }
@@ -426,6 +438,11 @@ fn recover_item(
                         continue;
                     };
                     if matches!(t, FuncTemplate::RecoverItem(_)) {
+                        // The recover branch (`CSLootOpenBag` / `RecoverItem`) calls the
+                        // template directly; apply the row's `perm` like `Doodad.Use` does.
+                        if phase::refuse_func_permission(&ctx, player, func) {
+                            return;
+                        }
                         super::funcs::use_func(t, &ctx, Some(caster), skill_id, 0);
                         // Only a successful recovery clears the source item references.
                         // Keep the furniture when its owner denies access or the bag is full.
