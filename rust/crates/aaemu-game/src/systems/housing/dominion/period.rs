@@ -44,7 +44,7 @@ pub fn current_period(server: &GameServer, zone_group_id: u32) -> Option<u8> {
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     if !settings.enabled {
         return Some(calendar::PERIOD_PEACE);
     }

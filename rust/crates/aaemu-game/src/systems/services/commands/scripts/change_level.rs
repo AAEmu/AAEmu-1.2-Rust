@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use super::prelude::*;
-use crate::data::experience::{ExperienceTable, MATE_LEVEL_CAP, PLAYER_LEVEL_CAP};
+use crate::data::experience::{ExperienceTable, MATE_LEVEL_CAP};
 use crate::models::char_data::ability;
 use crate::systems::skills::progress::{self, SCLevelChangedPacket};
 
@@ -32,9 +32,11 @@ pub struct ChangeLevel {
 }
 
 impl ChangeLevel {
-    pub fn new(_env: &ScriptEnv) -> Self {
+    pub fn new(env: &ScriptEnv) -> Self {
         Self {
-            max_levels: Mutex::new((PLAYER_LEVEL_CAP, MATE_LEVEL_CAP)),
+            // The era profile's cap until a command runs; `execute` replaces it with the
+            // loaded `ExperienceTable` limits.
+            max_levels: Mutex::new((env.profile.player_level_cap(), MATE_LEVEL_CAP)),
         }
     }
 }

@@ -682,14 +682,77 @@ impl AuctionManager {
         report_auction(server, buyer_id, char_record_kind::AUCTION_BUY);
     }
 
-    /// Deletes the item of a lot that has no seller to return it to: the item row is queued for
-    /// deletion and its id released.
+    /// Deletes the item of a lot that has no seller to return it to: the holding container
+    /// loses it, the item row is queued for deletion and its id released. A player lot's item
+    /// sits in the seller's auction container; a system lot's is loose.
     fn delete_lot_item(&self, server: &GameServer, lot: &AuctionLot) {
         let Some(item) = &lot.item else { return };
         if server.items.item_by_id(item.id).is_none() {
             return;
         }
+        if let Some(container) = server.items.holding_container(item.id) {
+            container
+                .lock()
+                .expect("container poisoned")
+                .remove_item(item.id);
+        }
         server.items.release_id(item.id, &server.ids.item);
+    }
+
+    /// A lot whose escrow item's own lifetime ran out before settlement: nothing can be
+    /// delivered, so the winner is refunded in full through the normal bid-fail mail and the
+    /// item is deleted. No seller share is paid and no `AUCTION_BUY`/`AUCTION_SOLD` record is
+    /// credited. The refund mail is delivered before any state changes: a refused mail keeps
+    /// the lot for the next tick instead of losing the refund (a pending settlement would not
+    /// survive a restart). A winner that no longer resolves to a character cannot be mailed;
+    /// the item is released with an error instead of retrying a permanent failure.
+    fn refund_expired_lot(
+        &self,
+        server: &GameServer,
+        lot: &AuctionLot,
+        item: &Item,
+        buyer: &str,
+        sold_amount: i32,
+    ) {
+        // Resolve the receiver like the sale path does (the stored name is authoritative at
+        // settlement). A receiver that no longer exists cannot get a mail: say so once and
+        // still release the item instead of retrying a permanent failure forever.
+        let buyer_id = server.names.get_character_id(buyer);
+        let buyer_id = if buyer_id != 0 {
+            buyer_id
+        } else {
+            lot.bidder_id
+        };
+        if buyer_id != 0 && server.names.get_character_name(buyer_id).is_some() {
+            let refund = AuctionMail::BidFail {
+                item_template_id: item.template_id,
+                seller_id: lot.client_id,
+                buyout_price: lot.direct_money,
+                listing_fee: 0,
+                previous_buyer_id: buyer_id,
+                previous_bid: sold_amount,
+            };
+            if !self.deliver_mail(server, &refund) {
+                tracing::warn!(
+                    "Auction lot {}: the item expired but the refund mail was not delivered; keeping the lot for the next tick",
+                    lot.id
+                );
+                return;
+            }
+        } else {
+            tracing::error!(
+                "Auction lot {}: item {} expired in auction escrow and the winner {buyer:?} cannot receive a refund mail; deleting it",
+                lot.id,
+                item.template_id
+            );
+        }
+        tracing::warn!(
+            "Auction lot {}: item {} expired in auction escrow; deleted it",
+            lot.id,
+            item.template_id
+        );
+        self.delete_lot_item(server, lot);
+        self.remove_auction_lot(server, lot.id);
     }
 
     /// Sends the settlement now; when a mail fails the lot (or refund) stays pending for the
@@ -864,6 +927,12 @@ impl AuctionManager {
             self.remove_auction_lot(server, lot.id);
             return;
         };
+        // The item's own lifetime can end while it sits in escrow (no container timer visits
+        // the auction container): never deliver it after that, refund the winner instead.
+        if super::item_timers::expired_at(&new_item, Utc::now().timestamp()) {
+            self.refund_expired_lot(server, lot, &new_item, buyer, sold_amount);
+            return;
+        }
         let money_after_fee = f64::from(sold_amount) * 0.9;
         let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
         if !lot.is_system_lot() {
@@ -1046,6 +1115,29 @@ impl AuctionManager {
             || lot.end_time <= Utc::now()
             || bid.money <= lot.bid_money
         {
+            return;
+        }
+        // An expired escrow item cannot be sold. Refuse before any money moves: a buyout would
+        // otherwise debit the buyer and refund the previous bidder, and the expired-lot
+        // settlement can only refund that already-refunded old bidder again (the buyout money
+        // would be lost and the refund duplicated). Same client code as the listing guard.
+        let expired = lot
+            .item
+            .as_ref()
+            .and_then(|item| server.items.item_by_id(item.id))
+            .is_some_and(|item| super::item_timers::expired_at(&item, Utc::now().timestamp()));
+        if expired {
+            let buyout = lot.direct_money > 0 && bid.money >= lot.direct_money;
+            tracing::debug!(
+                "Auction lot {lot_id}: refusing a {} for an item that expired in escrow",
+                if buyout { "buyout" } else { "bid" }
+            );
+            let mut txn = ItemTxn::begin(server);
+            inventory::send_error_message_to(
+                &mut txn.out(),
+                player,
+                error_message::CAN_NOT_PUTUP_ITEM,
+            );
             return;
         }
 
@@ -1433,6 +1525,16 @@ impl AuctionManager {
             || (buyout_price > 0 && buyout_price < start_price)
             || duration > auction_duration::HOURS_48
         {
+            return;
+        }
+        // An already expired item must not enter escrow: no container timer visits the auction
+        // container, so it could otherwise be sold and delivered after its lifetime ended.
+        if super::item_timers::expired_at(&item, Utc::now().timestamp()) {
+            inventory::send_error_message_to(
+                &mut txn.out(),
+                player,
+                error_message::CAN_NOT_PUTUP_ITEM,
+            );
             return;
         }
         let Some(mut lot) = Self::create_auction_lot(

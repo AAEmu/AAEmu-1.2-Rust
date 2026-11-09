@@ -204,6 +204,33 @@ impl WorldInstance {
         self.template.valid_region(sx, sy).then_some((sx, sy))
     }
 
+    /// `WorldManager.GetZoneId` for an object of this instance.
+    ///
+    /// Inside the sector grid the authored `ZoneKeyByRegions` decides, including sectors the XML
+    /// never assigned (key 0); the instance fallback below must not fill those in.
+    ///
+    /// Outside the grid, a world with a single zone (every instance dungeon:
+    /// `instance_sal_temple`, the mall, ...) has that zone everywhere. Those maps declare
+    /// `cellXCount` x `cellYCount` cells (instance maps are 2x2 = 2048 m) and units can walk a
+    /// little past the east/north edge; the 2026-11-08 bot run logged 8,518 `GetZoneId` errors for
+    /// `instance_sal_temple` at x=2049.3/y=1003.5 and left the object's zone at 0. The single zone
+    /// is position-independent there, so it is returned without a bounds error. The main world
+    /// (instance 0) and multi-zone worlds keep the C# rule (0 and an error for positions outside
+    /// the grid).
+    pub fn zone_id_at(&self, x: f32, y: f32) -> u32 {
+        let sx = (x / REGION_SIZE as f32) as i32;
+        let sy = (y / REGION_SIZE as f32) as i32;
+        if self.template.valid_region(sx, sy) {
+            return self.template.zone_key_at(sx, sy).unwrap_or(0);
+        }
+        if self.id != crate::models::character::DEFAULT_INSTANCE_ID {
+            if let [zone_key] = self.template.zone_keys.as_slice() {
+                return *zone_key;
+            }
+        }
+        self.template.zone_id_at(x, y)
+    }
+
     /// `WorldManager.GetNeighbors(world, x, y)` (includes the region itself).
     pub fn neighbors(&self, (x, y): (i32, i32)) -> Vec<(i32, i32)> {
         let mut out = Vec::new();
@@ -730,7 +757,7 @@ impl WorldInstance {
     ) {
         grid.regions.entry(region).or_default().push(obj.clone());
         let world = self.world_pos_rot(obj);
-        let zone = self.template.zone_id_at(world.x, world.y);
+        let zone = self.zone_id_at(world.x, world.y);
         if zone == 0 {
             let local = obj.transform();
             tracing::debug!(

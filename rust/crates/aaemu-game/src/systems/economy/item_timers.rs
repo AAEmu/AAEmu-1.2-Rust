@@ -61,10 +61,16 @@ pub fn start(server: &Arc<GameServer>) {
     });
 }
 
+/// An item whose predefined end time has passed. Unlike [`expiry_due`] this is usable for an
+/// item outside a character container (auction escrow, mail), which no container timer visits.
+pub fn expired_at(item: &Item, now: i64) -> bool {
+    item.expiration_time > MIN_DATE_TIME && item.expiration_time <= now
+}
+
 /// The per-container expiration rule of `UpdateItemContainerTimers`: a predefined end time in
 /// the past, or the online-minute countdown reaching zero.
 fn expiry_due(item: &mut Item, delta_minutes: f64, now: i64) -> bool {
-    if item.expiration_time > MIN_DATE_TIME && item.expiration_time <= now {
+    if expired_at(item, now) {
         return true; // Item expired by predefined end time
     }
     if item.expiration_online_minutes_left > 0.0 {

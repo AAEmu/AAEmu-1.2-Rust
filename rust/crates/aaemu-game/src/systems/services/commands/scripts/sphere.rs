@@ -483,6 +483,7 @@ mod tests {
             &["sphere"],
             Arc::new(Sphere::new(&ScriptEnv {
                 app_path: app.to_path_buf(),
+                profile: crate::config::ServerProfile::default(),
             })),
         );
         server

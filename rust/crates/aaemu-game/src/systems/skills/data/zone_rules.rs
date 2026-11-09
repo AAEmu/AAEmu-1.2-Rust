@@ -83,7 +83,7 @@ pub(crate) fn current_group(server: &GameServer, caster: &WorldObject) -> Option
     server
         .game_data
         .zones
-        .zone_by_key(world.template.zone_id_at(pos.x, pos.y))
+        .zone_by_key(world.zone_id_at(pos.x, pos.y))
         .map(|zone| zone.group_id)
 }
 

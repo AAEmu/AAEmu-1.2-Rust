@@ -280,8 +280,13 @@ impl AiGeoData {
     }
 
     /// `WorldTemplate.GetZoneId(x, y)`: the zone key of the 64 m sector containing `pos` (0 when
-    /// the sector is outside the world), the same lookup `WorldTemplate::zone_id_at` uses.
+    /// the sector is outside the world), the same lookup `WorldTemplate::zone_id_at` uses. A
+    /// single-zone world (every instance map) is that zone outside the sector grid too, like
+    /// `WorldInstance::zone_id_at`.
     fn zone_key_of(&self, pos: Vec3) -> u32 {
+        if let [zone_key] = self.zone_keys.as_slice() {
+            return *zone_key;
+        }
         let sx = (pos.x / REGION_SIZE as f32) as i32;
         let sy = (pos.y / REGION_SIZE as f32) as i32;
         let regions_x = self.cell_x * SECTORS_PER_CELL;

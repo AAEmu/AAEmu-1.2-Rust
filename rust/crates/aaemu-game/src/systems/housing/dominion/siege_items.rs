@@ -125,7 +125,7 @@ pub fn refused(server: &GameServer, player: &PlayerRef, template_id: u32) -> boo
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     let explicit = state
         .siege
         .as_ref()

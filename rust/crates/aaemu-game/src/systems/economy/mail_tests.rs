@@ -930,12 +930,16 @@ fn spawn_mailbox(w: &World, x: f32, func: &str) -> u32 {
 }
 
 fn send_packet_body(doodad: u32, receiver: &str, mt: u8) -> Vec<u8> {
+    send_packet_body_text(doodad, receiver, mt, "t", "x")
+}
+
+fn send_packet_body_text(doodad: u32, receiver: &str, mt: u8, title: &str, text: &str) -> Vec<u8> {
     let mut s = PacketStream::new();
     s.write_u8(mt)
         .write_str(receiver)
         .write_u32(0)
-        .write_str("t")
-        .write_str("x")
+        .write_str(title)
+        .write_str(text)
         .write_u8(0)
         .write_i32(0)
         .write_i32(0)
@@ -994,6 +998,141 @@ async fn send_through_mailbox_packet() {
             money: false
         })
     );
+}
+
+#[tokio::test]
+async fn send_mail_level_and_repetition_limits() {
+    let mut w = mail_world();
+    w.pa.data().money = 1000;
+    let near = spawn_mailbox(&w, 103.0, "DoodadFuncNaviOpenMailbox");
+    w.a.drain();
+    w.b.drain();
+
+    // The client is told `SCLevelRestrictionConfigPacket.mail = 10`; below it the send fails.
+    w.pa.data().unit.level = 9;
+    run::<CSSendMailPacket>(
+        &mut w,
+        0,
+        &send_packet_body(near, "Bob", mail_type::EXPRESS),
+    );
+    let f = w.a.drain();
+    assert_eq!(ops(&f), vec![sc::SCMailFailedPacket]);
+    assert_eq!(
+        f[0].1,
+        body(&SCMailFailedPacket {
+            err: mail_result::LEVEL_TOO_LOW,
+            items: ten_slots(&[]),
+            money: false,
+        })
+    );
+    assert_eq!(w.pa.data().money, 1000);
+
+    // `MAIL_REPETITION`: three identical mails in a row pass, the fourth is refused.
+    w.pa.data().unit.level = 10;
+    for _ in 0..3 {
+        run::<CSSendMailPacket>(
+            &mut w,
+            0,
+            &send_packet_body(near, "Bob", mail_type::EXPRESS),
+        );
+        assert!(w.a.drain_ops().contains(&sc::SCMailSentPacket));
+    }
+    run::<CSSendMailPacket>(
+        &mut w,
+        0,
+        &send_packet_body(near, "Bob", mail_type::EXPRESS),
+    );
+    let f = w.a.drain();
+    assert_eq!(ops(&f), vec![sc::SCMailFailedPacket]);
+    assert_eq!(
+        f[0].1,
+        body(&SCMailFailedPacket {
+            err: mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES,
+            items: ten_slots(&[]),
+            money: false,
+        })
+    );
+
+    // A different body resets the streak; the old text then starts a fresh one.
+    run::<CSSendMailPacket>(
+        &mut w,
+        0,
+        &send_packet_body_text(near, "Bob", mail_type::EXPRESS, "t", "y"),
+    );
+    assert!(w.a.drain_ops().contains(&sc::SCMailSentPacket));
+    run::<CSSendMailPacket>(
+        &mut w,
+        0,
+        &send_packet_body(near, "Bob", mail_type::EXPRESS),
+    );
+    assert!(w.a.drain_ops().contains(&sc::SCMailSentPacket));
+}
+
+#[tokio::test]
+async fn empty_body_item_mails_are_not_refused_as_repetition() {
+    let w = mail_world();
+    w.server.names.add_character(3, "Carl", 1003);
+    w.pa.data().money = 1000;
+    let mut slots = Vec::new();
+    for slot in 0..4 {
+        give(&w, &w.pa, slot_type::INVENTORY, SINGLE, 1, slot);
+        slots.push((slot_type::INVENTORY, slot as u8));
+    }
+    // Item-only mails have an empty body. They have no text to compare, so the repetition
+    // check must not refuse the fourth one even when every other field matches (the reported
+    // false positive was four item-only mails; the receiver does not change the empty body).
+    for (i, slot) in slots.iter().enumerate() {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert_eq!(
+            mail_character::send_mail_to_player(
+                &mut txn,
+                &w.pa,
+                mail_type::NORMAL,
+                "Bob",
+                "",
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                &ten_slots(&[*slot]),
+            ),
+            mail_result::SUCCESS,
+            "empty-body item mail {i} must not be a repetition"
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_text_to_a_different_receiver_is_not_a_repetition() {
+    let w = mail_world();
+    w.server.names.add_character(3, "Carl", 1003);
+    w.pa.data().money = 1000;
+    let send = |w: &World, to: &str| {
+        let mut txn = ItemTxn::begin(&w.server);
+        mail_character::send_mail_to_player(
+            &mut txn,
+            &w.pa,
+            mail_type::NORMAL,
+            to,
+            "t",
+            "same",
+            0,
+            0,
+            0,
+            0,
+            0,
+            &ten_slots(&[]),
+        )
+    };
+    for _ in 0..3 {
+        assert_eq!(send(&w, "Bob"), mail_result::SUCCESS);
+    }
+    // The key is (receiver, title, body): another character is a different mail.
+    assert_eq!(send(&w, "Carl"), mail_result::SUCCESS);
+    // The Carl mail broke the Bob streak, so the next Bob mail starts a new one.
+    assert_eq!(send(&w, "Bob"), mail_result::SUCCESS);
 }
 
 #[tokio::test]
@@ -1366,9 +1505,10 @@ async fn system_mails_auction_commercial_speciality() {
         assert!(sp.finalize_for_seller(&mut txn));
     }
     assert_eq!(sp.mail.body.text, "body('', 130, 0, 0, 0, 0, 2, 0, 0, 15)");
-    assert_eq!(sp.mail.title, "Speciality Payment");
+    assert_eq!(sp.mail.title, "Specialty Payment");
     assert_eq!(sp.mail.mail_type, mail_type::SYS_SELL_BACKPACK);
-    assert!(sp.mail.body.recv_date >= mail::now() + 480 * 60 - 2);
+    // 22 hours: `ui_texts` 4743 / 6195.
+    assert!(sp.mail.body.recv_date >= mail::now() + 1320 * 60 - 2);
     let att = w
         .server
         .items
@@ -1434,7 +1574,7 @@ async fn speciality_coin_text_and_crafter() {
         5,
     );
     assert!(cr.finalize_for_seller(&mut txn));
-    assert_eq!(cr.mail.title, "Speciality Payment [Delivery]");
+    assert_eq!(cr.mail.title, "Specialty Payment [Delivery]");
     assert_eq!(
         cr.mail.body.text,
         "body('', 130, 1350, 1000, 50, 900, 1, 1, 0, 0)"
@@ -1455,7 +1595,7 @@ async fn speciality_coin_text_and_crafter() {
     assert!(cr.finalize_for_crafter(&mut txn));
     assert_eq!(cr.mail.receiver_name, "Carl");
     assert_eq!(cr.mail.header.receiver_id, 3);
-    assert_eq!(cr.mail.title, "Speciality Payment [Crafter]");
+    assert_eq!(cr.mail.title, "Specialty Payment [Crafter]");
     assert_eq!(
         cr.mail.body.text,
         "body('', 130, 1350, 1000, 50, 450, 0, 1, 0, 0)"
@@ -2405,6 +2545,27 @@ fn real_compact_db_mail_localization() {
     assert_eq!(d.item_name(u32::MAX, "Item:1"), "Item:1");
     assert!(d.item_names.len() > 30_000);
     assert!(d.quest_names.len() > 4_000);
+    // The specialty titles are the client's own texts (ui_texts 4745 / 6193 / 6194); the
+    // 6192 tip carries the production/transport split percentages.
+    assert_eq!(
+        d.ui_text("sell_backpack_title", "x"),
+        "Specialty Payment",
+        "ui_texts 4745"
+    );
+    assert_eq!(
+        d.ui_text("mail_sell_backpack_title_seller", "x"),
+        "Specialty Payment [Delivery]",
+        "ui_texts 6193"
+    );
+    assert_eq!(
+        d.ui_text("mail_sell_backpack_title_crafter", "x"),
+        "Specialty Payment [Crafter]",
+        "ui_texts 6194"
+    );
+    assert!(
+        d.ui_text("mail_actual_gain_tip", "").contains("$1"),
+        "ui_texts 6192"
+    );
 }
 
 #[tokio::test]

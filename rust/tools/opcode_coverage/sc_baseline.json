@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 67,
-    "never_sent": 52
+    "never_sent": 51
   },
   "typeless": [
     "SCAiDebugPacket",
@@ -107,7 +107,6 @@
     "SCNotifyUIMessagePacket",
     "SCPlaytimePacket",
     "SCPremiumPointChangedPacket",
-    "SCQuestAcceptConditionalPacket",
     "SCQuestMailSentPacket",
     "SCRaceCondPacket",
     "SCRacingPacket",

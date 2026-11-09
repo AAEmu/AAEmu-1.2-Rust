@@ -3,7 +3,7 @@
 //! counters are the character's `unread_mail` (`Mails.UnreadMailCount`).
 
 use crate::data::items::ITEM_COINS;
-use crate::models::container::slot_type;
+use crate::models::container::{expire_item, slot_type};
 use crate::models::item_task::{task_type, ItemFxList};
 use crate::world::PlayerRef;
 
@@ -139,6 +139,10 @@ pub fn send_mail_to_player(
     item_slots: &[(u8, u8)],
 ) -> u8 {
     let server = txn.server;
+    // Level gate the client is told about (`SCLevelRestrictionConfigPacket.mail = 10`).
+    if player.data().unit.level < mail::MAIL_MIN_SEND_LEVEL {
+        return mail_result::LEVEL_TOO_LOW;
+    }
     if money0 < 0 || money1 != 0 || money2 != 0 {
         return mail_result::INVALID_LETTER_FORMAT;
     }
@@ -151,7 +155,11 @@ pub fn send_mail_to_player(
     ) {
         return mail_result::INVALID_LETTER_FORMAT;
     }
-    if receiver_name.trim().is_empty() || server.names.get_character_id(receiver_name) == 0 {
+    if receiver_name.trim().is_empty() {
+        return mail_result::UNABLE_TO_FIND_RECIPIENT;
+    }
+    let receiver_id = server.names.get_character_id(receiver_name);
+    if receiver_id == 0 {
         return mail_result::UNABLE_TO_FIND_RECIPIENT;
     }
 
@@ -173,6 +181,19 @@ pub fn send_mail_to_player(
         if super::item_security::is_locked(&item) {
             return mail_result::ITEM_LOCKED;
         }
+    }
+
+    // `MAIL_REPETITION`: three identical mails in a row are allowed, the fourth is not. The
+    // key is (receiver, title, body); empty-body item-only mails have no text to compare and
+    // are never refused. Recorded only after the mail is stored below, so failed validations
+    // do not consume a try.
+    if server
+        .systems
+        .economy
+        .mail
+        .would_repeat_send(player.character_id, receiver_id, title, text)
+    {
+        return mail_result::SENT_SAME_MAIL_TOO_MANY_TIMES;
     }
 
     let mut mail = MailPlayerToPlayer::new(server, player, receiver_name);
@@ -214,6 +235,11 @@ pub fn send_mail_to_player(
     let Some(id) = mail::send_mail(txn, mail.mail) else {
         return mail_result::MAIL_ERROR_OCCURRED;
     };
+    server
+        .systems
+        .economy
+        .mail
+        .record_send(player.character_id, receiver_id, title, text);
     let Some(header) = server
         .systems
         .economy
@@ -322,11 +348,38 @@ pub fn get_attached(
             if *item_id == 0 {
                 continue;
             }
-            let Some(attachment) = server.items.item_by_id(*item_id) else {
+            let Some(mut attachment) = server.items.item_by_id(*item_id) else {
                 // C#: the attachment object always exists; a vanished item cannot be moved.
                 tracing::error!("GetAttached: attachment {item_id} of mail {mail_id} not found");
                 continue;
             };
+            // An auction delivery whose item expired before it was taken must not enter the
+            // bag. The settlement guard refunds a lot that expired before settlement; this
+            // covers a delivery persisted before that guard or an item that expired while the
+            // mail waited. The price is not stored on the delivery mail, so no refund here.
+            if this_mail.mail_type == mail_type::AUC_BID_WIN
+                && crate::systems::economy::item_timers::expired_at(&attachment, mail::now())
+            {
+                tracing::warn!(
+                    "GetAttached: auction item {item_id} of mail {mail_id} expired; deleting it instead of delivering"
+                );
+                // The same notification an expired bag item gets from the item timers.
+                txn.env
+                    .fx
+                    .push(expire_item(&mut attachment).with_owner(player.character_id));
+                if let Some(container) = server.items.holding_container(attachment.id) {
+                    container
+                        .lock()
+                        .expect("container poisoned")
+                        .remove_item(attachment.id);
+                }
+                server.items.release_id(attachment.id, &server.ids.item);
+                mails.with_mail_mut(mail_id, |m| {
+                    m.header.attachments = m.header.attachments.wrapping_sub(1);
+                });
+                to_remove.push(*item_id);
+                continue;
+            }
             let money = player.data().money;
             let max_count = data
                 .template(attachment.template_id)
@@ -441,6 +494,11 @@ pub fn get_attached(
             if m.header.status == mail_status::UNREAD && (took_money || !item_slot_list.is_empty())
             {
                 m.header.status = mail_status::READ;
+                // `mail_guide` keeps read mail for 5 days; claiming an attachment counts as
+                // reading it, so the read clock starts here when the body was never opened.
+                if m.open_date == 0 {
+                    m.open_date = mail::now();
+                }
                 m.is_dirty = true;
                 Some(m.mail_type)
             } else {

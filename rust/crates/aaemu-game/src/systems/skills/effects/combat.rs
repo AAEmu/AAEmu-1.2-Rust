@@ -903,6 +903,19 @@ pub fn heal(
         let maximum = trg.with_unit(|u| u.unit().max_hp).unwrap_or(0).max(0);
         value = (i64::from(value) * i64::from(maximum) / 1000).clamp(0, i64::from(i32::MAX)) as i32;
     }
+    // A heal that computes no positive health restores nothing: send no heal/points packet and
+    // leave the HP unchanged. The 2026-11-08 bot run's buff 399 ticks (HealEffect 61, level heal
+    // with the native NPC `LevelDps` of -8 at ability level 0) produced `SCUnitHealedPacket`
+    // values of -1 and *removed* one HP per tick.
+    if value <= 0 {
+        tracing::debug!(
+            effect = e.id,
+            target = trg.obj_id(),
+            value,
+            "HealEffect: no positive heal"
+        );
+        return;
+    }
     let hit = if critical {
         HealHitType::CriticalHealHit
     } else {
@@ -1077,6 +1090,33 @@ pub fn restore_mana(server: &GameServer, e: &RestoreManaEffect, args: &EffectArg
             * level_md
             + 0.5) as i32;
     }
+    // An authored inversion (`fixed_min > fixed_max` or `level_va_start > level_va_end`) is a
+    // data error and must still be reported even when the level term drives `max` to zero or
+    // below. Checked before the non-positive no-op, which only covers the mirrored C# NPC
+    // LevelDps bug (`ab_level` always 0 => -8, see systems/npcs/npc/stats.rs:167-168).
+    let authored_inverted = (e.use_fixed_value && e.fixed_min > e.fixed_max)
+        || (e.use_level_value && e.level_va_start > e.level_va_end);
+    if min > max && authored_inverted {
+        tracing::error!(
+            "RestoreManaEffect {}: min > max (ArgumentOutOfRangeException)",
+            e.id
+        );
+        return;
+    }
+    // A mana restore cannot produce a negative amount. RestoreManaEffect 68's
+    // `level_va_start/end` 10 makes the mirrored negative NPC LevelDps produce a "max" smaller
+    // than the "min" (2026-11-08 bot run: NPC 21787 casting skill 18501, 32 errors); this caster
+    // has no positive range, so the effect is a no-op (logged at debug, not error).
+    if max <= 0 {
+        tracing::debug!(
+            effect = e.id,
+            min,
+            max,
+            "RestoreManaEffect: no positive mana restore"
+        );
+        return;
+    }
+    min = min.max(0);
     let Some(mut value) = rand_int(min, max) else {
         tracing::error!(
             "RestoreManaEffect {}: min > max (ArgumentOutOfRangeException)",

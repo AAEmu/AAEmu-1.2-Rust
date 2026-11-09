@@ -94,7 +94,7 @@ fn local_timestamp(
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     match settings.timezone {
         CalendarTimeZone::Fixed(offset) => offset
             .from_local_datetime(&naive)
@@ -234,7 +234,7 @@ impl Command for ScheduleSiege {
     }
 
     fn get_command_help_text(&self) -> String {
-        "Schedule the accepted declaration's siege at a local wall-clock time using the zone's authored duration.".into()
+        "Schedule the accepted declaration's siege at a wall-clock time in Housing.SiegeCalendarTimezone (UTC by default) using the zone's authored duration.".into()
     }
 }
 
@@ -703,6 +703,11 @@ mod tests {
                 });
         }
         let server = harness::server_with(data);
+        // The GM `schedule_siege` time fields are wall-clock times in the configured calendar
+        // timezone (UTC by default). Pin it so the test does not depend on the host's zone.
+        server
+            .config
+            .update(|c| c.housing.siege_calendar_timezone = "+00:00".into());
         server.systems.services.commands.access_levels.load(&[
             ("joinsiege".into(), 0),
             ("leavesiege".into(), 0),
@@ -786,9 +791,12 @@ mod tests {
             .unwrap();
     }
 
-    fn local_fields(timestamp: i64) -> (i32, u32, u32, u32, u32) {
-        use chrono::{Datelike, TimeZone as _, Timelike};
-        let local = chrono::Local.timestamp_opt(timestamp, 0).single().unwrap();
+    /// The fixture's `Housing.SiegeCalendarTimezone` is `+00:00`, so these are the wall-clock
+    /// fields the GM `schedule_siege` command expects, independent of the host's local zone.
+    fn calendar_fields(timestamp: i64) -> (i32, u32, u32, u32, u32) {
+        use chrono::{Datelike, FixedOffset, TimeZone as _, Timelike};
+        let timezone = FixedOffset::east_opt(0).unwrap();
+        let local = timezone.timestamp_opt(timestamp, 0).single().unwrap();
         (
             local.year(),
             local.month(),
@@ -803,7 +811,7 @@ mod tests {
         let f = fixture();
         register_declaration(&f);
         let start = (chrono::Utc::now().timestamp() + 3_600) / 60 * 60;
-        let (year, month, day, hour, minute) = local_fields(start);
+        let (year, month, day, hour, minute) = calendar_fields(start);
         let (_, out) = harness::run(
             &f.server,
             &f.attacker.p,
@@ -821,6 +829,42 @@ mod tests {
         assert_eq!(siege.attacker_expedition_id, ATTACKER);
         assert_eq!(siege.defender_expedition_id, OWNER);
         assert_eq!((siege.starts_at, siege.ends_at), (start, start + 3_600));
+    }
+
+    /// The GM time fields are the configured calendar timezone's wall clock, not the host's
+    /// local zone (the UTC default moved the claim window too; this command must follow it).
+    #[tokio::test]
+    async fn schedule_siege_parses_the_wall_clock_in_the_configured_timezone() {
+        use chrono::{Datelike, FixedOffset, TimeZone as _, Timelike};
+        let f = fixture();
+        register_declaration(&f);
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar_timezone = "+02:00".into());
+        let start = (chrono::Utc::now().timestamp() + 3 * 3_600) / 60 * 60;
+        let timezone = FixedOffset::east_opt(2 * 3_600).unwrap();
+        let local = timezone.timestamp_opt(start, 0).single().unwrap();
+        let (year, month, day, hour, minute) = (
+            local.year(),
+            local.month(),
+            local.day(),
+            local.hour(),
+            local.minute(),
+        );
+        let (_, out) = harness::run(
+            &f.server,
+            &f.attacker.p,
+            &format!("schedule_siege {ZONE} {year} {month} {day} {hour} {minute}"),
+        )
+        .await;
+        assert_eq!(
+            out,
+            [harness::normal(
+                "schedule_siege",
+                &format!("Scheduled the siege of territory {ZONE} for {start} (attacker expedition {ATTACKER})")
+            )]
+        );
+        assert_eq!(state(&f).siege.unwrap().starts_at, start);
     }
 
     #[tokio::test]
@@ -849,7 +893,7 @@ mod tests {
         );
         register_declaration(&f);
         let past = chrono::Utc::now().timestamp() - 3_600;
-        let (year, month, day, hour, minute) = local_fields(past);
+        let (year, month, day, hour, minute) = calendar_fields(past);
         let (_, out) = harness::run(
             &f.server,
             &f.attacker.p,

@@ -22,13 +22,13 @@ use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
 use super::item_notify_packets::SCItemAcquisitionPacket;
 use super::item_timers;
-use super::loot::ScriptedRng;
+use super::loot::{give_loot_pack, GeneratedLoot, ScriptedRng};
 use super::loot_data::{Loot, LootPack};
 use super::loot_packets::*;
 use super::looting::*;
 use super::repair::{self, DurabilityLossTargets};
 use super::tests::{give, item_at, task_body, test_data, World};
-use crate::systems::economy::inventory::Inv;
+use crate::systems::economy::inventory::{Inv, ItemTxn};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 
 const PRICEY: u32 = 5000; // armor with a price (repair cost)
@@ -221,6 +221,163 @@ async fn npc_loot_is_generated_and_looted_with_loot_all() {
     let mut s = PacketStream::new();
     s.write_u16(0).write_u16(1).write_bc(NPC_OBJ).write_u8(0);
     run::<CSLootCloseBagPacket>(&mut w, 0, s.as_bytes());
+}
+
+#[tokio::test]
+async fn corpse_loot_skips_unknown_item_templates() {
+    const MISSING_1: u32 = 700_001;
+    const MISSING_2: u32 = 700_002;
+    let mut d = data();
+    let loot = |id, item, min, max| Loot {
+        id,
+        group: 0,
+        item_id: item,
+        drop_rate: 10_000_000,
+        min_amount: min,
+        max_amount: max,
+        loot_pack_id: 77,
+        grade_id: 0,
+        always_drop: true,
+    };
+    let loots = vec![
+        loot(1, MISSING_1, 1, 1),
+        loot(2, super::tests::STACK, 3, 3),
+        loot(3, MISSING_2, 1, 1),
+        loot(4, BOP, 1, 1),
+    ];
+    d.systems.economy.loot.packs.insert(
+        77,
+        LootPack {
+            id: 77,
+            group_count: 0,
+            loots_by_group_no: vec![(0, loots.clone())],
+            loots,
+            ..Default::default()
+        },
+    );
+    let mut w = world_with(d);
+    let npc = spawn_npc(&mut w);
+    // One dice + one count per row; the missing rows must not abort the pack.
+    let mut rng = ScriptedRng::new(&[], &[]);
+    LootManager::generate_loot_with(
+        &w.server,
+        &WorldObject::from(&npc),
+        Some(&WorldObject::from(&w.pa)),
+        &mut rng,
+    );
+    assert_eq!(w.server.systems.economy.loot.item_count(NPC_OBJ), 2);
+    let c = w.server.systems.economy.loot.container(NPC_OBJ);
+    let items: Vec<(u32, i32)> = c
+        .lock()
+        .unwrap()
+        .items
+        .values()
+        .map(|e| (e.item.template_id, e.item.count))
+        .collect();
+    assert_eq!(items, vec![(super::tests::STACK, 3), (BOP, 1)]);
+}
+
+#[tokio::test]
+async fn generated_loot_pack_skips_unknown_item_templates() {
+    const MISSING: u32 = 700_003;
+    let mut d = data();
+    let loot = |id, item| Loot {
+        id,
+        group: 0,
+        item_id: item,
+        drop_rate: 10_000_000,
+        min_amount: 1,
+        max_amount: 1,
+        loot_pack_id: 78,
+        grade_id: 0,
+        always_drop: true,
+    };
+    let loots = vec![loot(1, MISSING), loot(2, super::tests::STACK)];
+    d.systems.economy.loot.packs.insert(
+        78,
+        LootPack {
+            id: 78,
+            group_count: 0,
+            loots_by_group_no: vec![(0, loots.clone())],
+            loots,
+            ..Default::default()
+        },
+    );
+    let w = world_with(d);
+    let pack = w
+        .server
+        .game_data
+        .systems
+        .economy
+        .loot
+        .pack(78)
+        .expect("pack")
+        .clone();
+    // The shared player-pack path (item use, doodad loot pack, fishing).
+    let list = super::loot::generate_pack_for_player(
+        &w.server,
+        &pack,
+        &w.pa,
+        0,
+        None,
+        &mut ScriptedRng::new(&[], &[]),
+    )
+    .expect("generated");
+    assert_eq!(
+        list.iter().map(|g| g.item_id).collect::<Vec<_>>(),
+        vec![super::tests::STACK]
+    );
+}
+
+#[tokio::test]
+async fn give_loot_pack_skips_unknown_item_templates() {
+    let w = world_with(data());
+    let pack = LootPack {
+        id: 78,
+        ..Default::default()
+    };
+    let mut txn = ItemTxn::begin(&w.server);
+    let given = give_loot_pack(
+        &mut txn,
+        &w.pa,
+        &pack,
+        0,
+        task_type::LOOT,
+        Some(vec![
+            GeneratedLoot {
+                item_id: 700_001,
+                count: 1,
+                grade: 0,
+                group: 0,
+            },
+            GeneratedLoot {
+                item_id: super::tests::STACK,
+                count: 2,
+                grade: 0,
+                group: 0,
+            },
+            GeneratedLoot {
+                item_id: BOP,
+                count: 1,
+                grade: 0,
+                group: 0,
+            },
+        ]),
+        None,
+        &mut ScriptedRng::new(&[], &[]),
+    );
+    drop(txn);
+    assert!(given);
+    let bag = Inv::of(&w.pa).bag();
+    let mut items: Vec<(u32, i32)> = bag
+        .lock()
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| (i.template_id, i.count))
+        .collect();
+    items.sort();
+    assert_eq!(items, vec![(super::tests::STACK, 2), (BOP, 1)]);
 }
 
 fn kill_and_generate(w: &World, npc: &NpcRef) {

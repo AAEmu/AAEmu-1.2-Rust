@@ -32,12 +32,20 @@ pub struct HousingConfig {
     )]
     pub dominion_property_tax_base: DominionPropertyTaxBase,
     /// Drives the weekly siege periods from `siege_zones`/`siege_plans` instead of the
-    /// explicit GM schedule alone. Default off: the calendar is a server policy, not a
-    /// recovered 1.2 world-server setting. `Housing.SiegeCalendar`.
-    #[serde(rename = "siegecalendar", deserialize_with = "crate::config::lenient")]
-    pub siege_calendar: bool,
-    /// Offset of the `siege_zones` weekday/hour/minute columns, e.g. `+09:00`. Empty or
-    /// `local` uses the server's current local offset; the retail timezone is UNKNOWN.
+    /// explicit GM schedule alone. It does **not** gate Auroria claims or the client
+    /// `FeatureSet.siege` bit: those follow the era profile. The era profile decides when the
+    /// key is missing (`World.Profile`: on for `EuAuroria` and `Kr12`, off for `EuLaunch`), an
+    /// explicit `true` / `false` wins. `Housing.SiegeCalendar`.
+    #[serde(
+        rename = "siegecalendar",
+        default,
+        deserialize_with = "crate::config::lenient_option"
+    )]
+    pub siege_calendar: Option<bool>,
+    /// Offset of the `siege_zones` weekday/hour/minute columns, e.g. `+09:00`. Empty (the
+    /// default) or `utc` is UTC; `local` uses the server's current local offset. UTC is the
+    /// default because the Western 2014 schedule names the same wall-clock times as GMT
+    /// (`round6-siege.md` 1, grade C); the retail data's zone is not proven.
     /// `Housing.SiegeCalendarTimezone`.
     #[serde(rename = "siegecalendartimezone")]
     pub siege_calendar_timezone: String,
@@ -85,10 +93,62 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub abandoned_house_hits_to_break: u32,
+    /// Distance in metres beyond a house's garden plot that also refuses a Siege Camp
+    /// declaration (`SIEGE_CANNOT_DECLARE_NEAR_HOUSE` 633). `0` (default) refuses only a spot
+    /// inside a plot, the reading the 1.2 text ("cannot declare near a house", ui 5020)
+    /// supports. The retail margin is UNKNOWN: INFERRED, capture-pending.
+    /// `Housing.SiegeDeclareHouseMargin`.
+    #[serde(
+        rename = "siegedeclarehousemargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_house_margin: f32,
+    /// Distance in metres from the declared spot at which a different zone group refuses the
+    /// declaration (`SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE` 661). `0` (default) refuses when
+    /// the spot itself lies in another zone group than the besieged dominion. The retail
+    /// margin is UNKNOWN: INFERRED, capture-pending. `Housing.SiegeDeclareZoneMargin`.
+    #[serde(
+        rename = "siegedeclarezonemargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_zone_margin: f32,
+    /// Enable the peace-area refusal (`SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS` 625). The 1.2
+    /// text is "cannot declare near a peace area" (ui 4837); the only 1.2 peace data is the
+    /// zone conflict table (a zone group with no `conflict_zones` row never leaves peace, and
+    /// a row's state can be `Peace`), but the declaration rule itself is UNKNOWN. `false`
+    /// (default) keeps the previous behaviour (no refusal). `Housing.SiegeDeclarePeaceCheck`.
+    #[serde(
+        rename = "siegedeclarepeacecheck",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_peace_check: bool,
+    /// Distance in metres from the declared spot within which another peace zone group
+    /// refuses the declaration when [`Self::siege_declare_peace_check`] is on. `0` (default)
+    /// only inspects the spot itself; a spot in the besieged group (required by the 661 rule)
+    /// is never a peace-zone refusal at 0. INFERRED, capture-pending.
+    /// `Housing.SiegeDeclarePeaceMargin`.
+    #[serde(
+        rename = "siegedeclarepeacemargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_peace_margin: f32,
+    /// Half extent in metres of the collision box tested around the declared spot
+    /// (`SIEGE_CANNOT_DECLARE_OBSTACLE` 741). The retail radius is UNKNOWN; the default is
+    /// the server's player capsule radius (0.35 m, `collision::displacement`). INFERRED,
+    /// capture-pending. `Housing.SiegeDeclareObstacleRadius`.
+    #[serde(
+        rename = "siegedeclareobstacleradius",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_obstacle_radius: f32,
 }
 
 fn default_abandoned_house_hits_to_break() -> u32 {
     5
+}
+
+fn default_siege_declare_obstacle_radius() -> f32 {
+    0.35
 }
 
 fn default_dominion_claim_limit() -> u32 {
@@ -99,13 +159,18 @@ impl Default for HousingConfig {
     fn default() -> Self {
         Self {
             dominion_property_tax_base: DominionPropertyTaxBase::default(),
-            siege_calendar: false,
+            siege_calendar: None,
             siege_calendar_timezone: String::new(),
             dominion_claim_limit: default_dominion_claim_limit(),
             defense_hq_offset: [0.0; 3],
             siege_shop_gate: false,
             placement_strict_surface: false,
             abandoned_house_hits_to_break: default_abandoned_house_hits_to_break(),
+            siege_declare_house_margin: 0.0,
+            siege_declare_zone_margin: 0.0,
+            siege_declare_peace_check: false,
+            siege_declare_peace_margin: 0.0,
+            siege_declare_obstacle_radius: default_siege_declare_obstacle_radius(),
         }
     }
 }
@@ -201,9 +266,41 @@ mod tests {
     }
 
     #[test]
-    fn siege_calendar_binds_off_by_default_and_accepts_a_timezone() {
+    fn siege_declare_placement_thresholds_default_and_bind() {
         let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
-        assert!(!default.housing.siege_calendar);
+        assert_eq!(default.housing.siege_declare_house_margin, 0.0);
+        assert_eq!(default.housing.siege_declare_zone_margin, 0.0);
+        assert!(!default.housing.siege_declare_peace_check);
+        assert_eq!(default.housing.siege_declare_peace_margin, 0.0);
+        assert_eq!(default.housing.siege_declare_obstacle_radius, 0.35);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeDeclarePeaceCheck": value }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_declare_peace_check);
+        }
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": {
+                "SiegeDeclareHouseMargin": 2.5,
+                "SiegeDeclareZoneMargin": "7.5",
+                "SiegeDeclarePeaceMargin": 100,
+                "SiegeDeclareObstacleRadius": "1.25"
+            }
+        }))
+        .unwrap();
+        assert_eq!(config.housing.siege_declare_house_margin, 2.5);
+        assert_eq!(config.housing.siege_declare_zone_margin, 7.5);
+        assert_eq!(config.housing.siege_declare_peace_margin, 100.0);
+        assert_eq!(config.housing.siege_declare_obstacle_radius, 1.25);
+    }
+
+    #[test]
+    fn siege_calendar_binds_explicitly_and_defaults_from_the_profile() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        // Missing key: the default profile (EuAuroria) enables sieges.
+        assert_eq!(default.housing.siege_calendar, None);
+        assert!(default.siege_calendar_enabled());
         assert!(default.housing.siege_calendar_timezone.is_empty());
         for value in [serde_json::json!(true), serde_json::json!("true")] {
             let config = crate::config::AppConfig::from_value(serde_json::json!({
@@ -213,8 +310,26 @@ mod tests {
                 }
             }))
             .unwrap();
-            assert!(config.housing.siege_calendar);
+            assert_eq!(config.housing.siege_calendar, Some(true));
+            assert!(config.siege_calendar_enabled());
             assert_eq!(config.housing.siege_calendar_timezone, "+09:00");
         }
+        // An explicit false wins over the Auroria profile; an explicit true wins over launch.
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": { "SiegeCalendar": false }
+        }))
+        .unwrap();
+        assert!(!config.siege_calendar_enabled());
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "EuLaunch" }
+        }))
+        .unwrap();
+        assert!(!config.siege_calendar_enabled());
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "EuLaunch" },
+            "Housing": { "SiegeCalendar": true }
+        }))
+        .unwrap();
+        assert!(config.siege_calendar_enabled());
     }
 }

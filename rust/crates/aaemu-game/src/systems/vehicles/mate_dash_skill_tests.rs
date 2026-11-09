@@ -259,7 +259,7 @@ fn dash_server(db: &str) -> Arc<GameServer> {
         .collect::<Result<_, _>>()
         .expect("levels rows");
     drop(stmt);
-    data.experience = ExperienceTable::from_templates(levels).expect("experience");
+    data.experience = ExperienceTable::from_templates(levels, 55).expect("experience");
     data.features = crate::data::FeatureSet::initialized(
         data.experience.max_player_level(),
         data.experience.max_mate_level(),

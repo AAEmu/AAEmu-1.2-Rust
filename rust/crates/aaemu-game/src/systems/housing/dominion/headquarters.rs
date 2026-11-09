@@ -113,7 +113,7 @@ fn hq_position(
         || server
             .game_data
             .zones
-            .zone_by_key(world.template.zone_id_at(position.x, position.y))?
+            .zone_by_key(world.zone_id_at(position.x, position.y))?
             .group_id
             != state.zone_group_id
     {
@@ -546,7 +546,7 @@ pub fn respawn_portal(server: &GameServer, player: &PlayerRef) -> Option<Portal>
     }
     Some(Portal {
         world_id: world.template.id,
-        zone_id: world.template.zone_id_at(p.x, p.y),
+        zone_id: world.zone_id_at(p.x, p.y),
         x: p.x,
         y: p.y,
         z,

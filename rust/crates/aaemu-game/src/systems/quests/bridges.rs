@@ -264,6 +264,10 @@ impl QuestsBridge for QuestsForNpcs {
         super::events::on_npc_killed(server, player, npc);
     }
 
+    fn on_npc_scripted_kill(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+        super::events::on_npc_scripted_kill(server, player, npc);
+    }
+
     fn add_exp(&self, server: &GameServer, player: &PlayerRef, exp: i32, _target_obj_id: u32) {
         crate::systems::skills::progress::add_exp(server, player, exp, true);
     }

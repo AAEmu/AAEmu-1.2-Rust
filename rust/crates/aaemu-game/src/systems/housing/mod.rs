@@ -74,6 +74,24 @@ impl System {
     /// ([`load_for_world`], called by the npcs subsystem before the persistent doodads), as in
     /// the C#.
     pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
+        // Make the resolved wall-clock offset visible once: an empty
+        // `Housing.SiegeCalendarTimezone` means UTC, and that default also moves the territory
+        // claim window (`claim_window_at`), not only the weekly calendar.
+        let calendar = server
+            .systems
+            .housing
+            .calendar
+            .settings(&server.config.housing, server.config.world.profile);
+        let source =
+            if dominion::calendar::CalendarSettings::timezone_from_config(&server.config.housing) {
+                "from Housing.SiegeCalendarTimezone"
+            } else {
+                "default: Housing.SiegeCalendarTimezone is empty or unusable"
+            };
+        tracing::info!(
+            "Siege calendar / territory claim timezone: {} ({source}); it drives both the weekly periods and the claim window",
+            calendar.timezone
+        );
         // Housing rows are loaded with NPC spawns, before economy hooks and persisted mail.
         // Start billing only after those subsystems have finished loading their state.
         dominion::db::load(server).await?;

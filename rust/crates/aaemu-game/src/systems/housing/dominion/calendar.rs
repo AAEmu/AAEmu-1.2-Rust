@@ -14,9 +14,11 @@
 //!   and the cached attacker team id is 0, which is exactly "declare ended with no declaration".
 //!
 //! This module is pure date arithmetic over the authored `siege_zones` columns and the
-//! `siege_plans` rotation; it never touches the world. The timezone is a server setting because
-//! the retail zone of those wall-clock columns is UNKNOWN. Weekday 0 = Sunday is INFERRED from
-//! the `siege_plans` week starts, which are all Sundays.
+//! `siege_plans` rotation; it never touches the world. The timezone is a server setting; its
+//! default is UTC because the Western 2014 schedule (Total ArcheAge, 2014-11-20/25, grade C)
+//! names the same wall-clock times in GMT as the Korean data (`round6-siege.md` 1). Weekday
+//! 0 = Sunday is INFERRED from the `siege_plans` week starts, which are all Sundays, and that
+//! reading is corroborated by those Sunday siege times (grade C).
 
 use chrono::{
     DateTime, Datelike, Days, Duration, FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime,
@@ -24,6 +26,7 @@ use chrono::{
 };
 use std::collections::BTreeMap;
 
+use crate::config::ServerProfile;
 use crate::systems::housing::config::HousingConfig;
 use crate::systems::housing::data::{CastleReferenceData, SiegeRotation, SiegeZone};
 
@@ -40,23 +43,51 @@ const MAX_SEARCH_WEEKS: i64 = 8;
 
 /// Wall-clock timezone of the `siege_zones` columns.
 ///
-/// The retail value is UNKNOWN; the configuration default is the server's local offset.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The default is UTC: the Western launch-era schedule (Total ArcheAge, 2014-11-20/25, grade C)
+/// lists the same wall-clock times the Korean data has, as GMT (`round6-siege.md` 1). The
+/// retail zone of the data is not proven, so a server can still select `local` or an explicit
+/// offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalendarTimeZone {
-    #[default]
     Local,
     Fixed(FixedOffset),
 }
 
+impl Default for CalendarTimeZone {
+    fn default() -> Self {
+        Self::Fixed(FixedOffset::east_opt(0).expect("UTC is a valid fixed offset"))
+    }
+}
+
+impl std::fmt::Display for CalendarTimeZone {
+    /// `UTC+09:00` / `UTC-05:30` / `server local time`; used by the one-line startup notice so
+    /// a server can see which offset actually applies (the claim window uses it even with the
+    /// siege calendar off).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => f.write_str("server local time"),
+            Self::Fixed(offset) => {
+                let minutes = offset.local_minus_utc() / 60;
+                let sign = if minutes < 0 { '-' } else { '+' };
+                let hours = minutes.abs() / 60;
+                let minutes = minutes.abs() % 60;
+                write!(f, "UTC{sign}{hours:02}:{minutes:02}")
+            }
+        }
+    }
+}
+
 impl CalendarTimeZone {
-    /// `""`/`local` = server local; `utc`/`z`; or an explicit `+HH:MM`, `+HHMM`, `+HH`.
+    /// `""`/`utc`/`z` = UTC (the default); `local` = server local; or an explicit `+HH:MM`,
+    /// `+HHMM`, `+HH`.
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
-        if value.is_empty() || value.eq_ignore_ascii_case("local") {
-            return Some(Self::Local);
+        if value.is_empty() || value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z")
+        {
+            return Some(Self::default());
         }
-        if value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z") {
-            return Some(Self::Fixed(FixedOffset::east_opt(0)?));
+        if value.eq_ignore_ascii_case("local") {
+            return Some(Self::Local);
         }
         if !value.is_ascii() {
             return None; // the offset body is sliced by byte index below
@@ -166,11 +197,21 @@ pub struct CalendarSettings {
 }
 
 impl CalendarSettings {
-    pub fn from_config(config: &HousingConfig) -> Self {
+    /// The explicit `Housing.SiegeCalendar` value wins; a missing key follows the era profile.
+    pub fn from_config(config: &HousingConfig, profile: ServerProfile) -> Self {
         Self {
-            enabled: config.siege_calendar,
+            enabled: config.siege_calendar.unwrap_or_else(|| profile.sieges()),
             timezone: CalendarTimeZone::parse(&config.siege_calendar_timezone).unwrap_or_default(),
         }
+    }
+
+    /// Whether `Housing.SiegeCalendarTimezone` supplied the resolved offset. `false` means the
+    /// setting is empty or unusable, so [`CalendarTimeZone::default`] (UTC) applies. Used by
+    /// the one-time startup notice; the same resolved timezone also drives the territory claim
+    /// window (`claim_window_at`), not only the weekly calendar.
+    pub fn timezone_from_config(config: &HousingConfig) -> bool {
+        !config.siege_calendar_timezone.trim().is_empty()
+            && CalendarTimeZone::parse(&config.siege_calendar_timezone).is_some()
     }
 }
 

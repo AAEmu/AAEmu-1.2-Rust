@@ -1046,35 +1046,62 @@ fn kill_npc_without_corpse(
         return; // does not apply to the character
     }
     if e.vanish {
-        remove_effects_and_delete(server, caster);
-        return;
-    }
-    let mut npcs: Vec<WorldObject> = around_radius(server, &args.target, e.radius, false)
-        .into_iter()
-        .filter(|o| o.as_npc().is_some())
-        .collect();
-    if caster.as_npc().is_some() {
-        npcs.push(caster.clone());
-    }
-    for n in npcs {
-        let template_id = n.as_npc().map_or(0, |n| n.data().unit.template_id);
-        if template_id == e.npc_id {
+        // A vanishing scripted removal ends the life too (no quest credit, C# parity).
+        if let Some(npc) = caster.as_npc() {
+            if super::npc::death::claim_scripted_removal(npc)
+                && !remove_effects_and_delete(server, caster)
+            {
+                super::npc::death::unclaim_scripted_removal(npc);
+            }
+        } else {
             remove_effects_and_delete(server, caster);
         }
+        return;
+    }
+    if caster
+        .as_npc()
+        .is_none_or(|npc| npc.data().unit.template_id != e.npc_id)
+    {
+        return;
+    }
+    let npc = caster.as_npc().expect("checked above");
+    // The skill caster is the fallback kill credit when the removed NPC has no tagging rights
+    // (C# #1792); for an NPC self-cast it is the NPC itself and no player is credited.
+    let fallback = server
+        .world
+        .character_by_obj_id(args.caster_caster.obj_id());
+    // Claim this life before touching the world so no damage / death path can run in the gap.
+    if !super::npc::death::claim_scripted_removal(npc) {
+        return;
+    }
+    // Credit only when the removal actually happened. A scripted retreat is a kill for the
+    // monster-hunt objectives, but it grants no experience, loot or honor.
+    if remove_effects_and_delete(server, caster) {
+        super::npc::death::credit_scripted_kill(server, npc, fallback.as_ref());
+    } else {
+        super::npc::death::unclaim_scripted_removal(npc);
     }
 }
 
-/// `KillNpcWithoutCorpseEffect.RemoveEffectsAndDelete(unit)`.
-fn remove_effects_and_delete(server: &GameServer, unit: &WorldObject) {
+/// `KillNpcWithoutCorpseEffect.RemoveEffectsAndDelete(unit)`. Returns whether the NPC was
+/// actually removed. The C# removed only spawner-owned NPCs; a spawner-less NPC is deleted
+/// from the world here as well, so a credited scripted kill cannot be killed again.
+fn remove_effects_and_delete(server: &GameServer, unit: &WorldObject) -> bool {
     crate::systems::skills::buffs::remove_all_effects(server, unit);
     crate::systems::dispatch_buff_events(server, unit);
     let Some(npc) = unit.as_npc() else {
-        return;
+        return false;
+    };
+    let Some(world) = crate::systems::skills::geometry::world_of(server, unit) else {
+        return false;
     };
     if let Some(s) = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id) {
         s.do_despawn(server, npc);
         s.despawn_with_respawn(server, npc);
+        return true;
     }
+    crate::systems::npcs::npc::manager::delete(server, &world, npc);
+    true
 }
 
 /// `NpcControlEffect.Apply` on an NPC target (`systems::ai`: follow path, command sets,

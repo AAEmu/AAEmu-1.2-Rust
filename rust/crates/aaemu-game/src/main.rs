@@ -22,6 +22,10 @@ use aaemu_game::{login, net, GameServer};
 use anyhow::Context;
 use sqlx::mysql::MySqlPoolOptions;
 
+/// Mail-retention upgrade marker; its `updates.install_date` anchors the grace for mail that
+/// already existed when this version first ran.
+const MAIL_RETENTION_UPDATE: &str = "2026-11-08_aaemu_game_mail_retention.sql";
+
 /// Splits the command line into the app path and the configuration arguments.
 fn split_args(args: Vec<String>) -> (PathBuf, Vec<String>) {
     match args.first() {
@@ -94,7 +98,8 @@ async fn run() -> anyhow::Result<()> {
     aaemu_commons::file_manager::remember_app_dir(&app_path);
     tracing::info!("Application directory: {}", app_path.display());
     // BuildConfiguration: JSON files, user secrets, environment, command line.
-    let config = AppConfig::load_with(&app_path, &config_args).context("loading configuration")?;
+    let mut config =
+        AppConfig::load_with(&app_path, &config_args).context("loading configuration")?;
 
     // Test the MySQL connection ("MySQL connection failed, check your configuration!" is fatal).
     let db = MySqlPoolOptions::new()
@@ -147,6 +152,51 @@ async fn run() -> anyhow::Result<()> {
             tracing::error!("Failed to update database!");
             return wait_for_ctrl_c().await;
         }
+        // The mail retention windows shorten the old 14-day policy to 5 days after read. The
+        // marker script's install date is the first start with this version: mail that already
+        // existed then gets one full window from it (`MailRetention::grace_start_unix`), so the
+        // first tick after an upgrade cannot delete old mail. An explicit config value wins.
+        if config.mail.retention_grace_start_unix == 0 {
+            match sqlx::query_scalar::<_, chrono::NaiveDateTime>(
+                "SELECT `install_date` FROM `updates` WHERE `script_name` = ?",
+            )
+            .bind(MAIL_RETENTION_UPDATE)
+            .fetch_optional(&mut *conn)
+            .await
+            {
+                Ok(Some(date)) => {
+                    config.mail.retention_grace_start_unix = date.and_utc().timestamp();
+                    tracing::info!(
+                        grace_start = config.mail.retention_grace_start_unix,
+                        "Mail retention upgrade grace anchored at the first run with this version"
+                    );
+                }
+                Ok(None) => {
+                    // No marker row (`AutoApplyUpdates` off, or no `SQL/updates` folder):
+                    // anchor the grace at this start, so the first tick cannot delete old
+                    // mail, and record the (no-op) marker so later starts keep this anchor.
+                    let now = chrono::Utc::now();
+                    config.mail.retention_grace_start_unix = now.timestamp();
+                    if let Err(e) = sqlx::query(
+                        "INSERT IGNORE INTO `updates` (`script_name`,`installed`,`install_date`,`last_error`) VALUES (?, 1, ?, '')",
+                    )
+                    .bind(MAIL_RETENTION_UPDATE)
+                    .bind(now.naive_utc())
+                    .execute(&mut *conn)
+                    .await
+                    {
+                        tracing::warn!("Mail retention update marker not recorded ({e})");
+                    }
+                    tracing::warn!(
+                        grace_start = config.mail.retention_grace_start_unix,
+                        "Mail retention update marker was missing; anchoring the grace at this start"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    "Mail retention update marker unreadable ({e}); pre-existing mail gets no grace"
+                ),
+            }
+        }
     }
 
     // ClientFileManager.Initialize.
@@ -168,15 +218,29 @@ async fn run() -> anyhow::Result<()> {
 
     // FormulaManager.Load, ItemManager.Load and the orchestrated ILoadable game data (a failing
     // loader is fatal, as in the 1.2 C#).
+    tracing::info!(
+        "Server profile: {} (player level cap {}, player nations {}, siege calendar {}, Auroria claims {})",
+        config.world.profile,
+        config.world.profile.player_level_cap(),
+        config.player_nations_enabled(),
+        config.siege_calendar_enabled(),
+        config.auroria_claims_enabled()
+    );
     let mut game_data = GameData::load(
         &config.app_path,
         &config.client_data.sources,
         &config.default_language,
+        config.world.profile,
     )
     .context("Failed to load compact.sqlite3 database check if it exists!")?;
     // `FeatureSet` (`Configurations/FeatureSet.json`) overrides the `FeaturesManager.Initialize`
-    // bytes; the level limits stay the ones `GameData::load` took from the `levels` table.
-    game_data.features.apply_config(&config.feature_set);
+    // bytes; the level limits stay the ones `GameData::load` took from the `levels` table and
+    // the era profile.
+    game_data.features.apply_config(
+        &config.feature_set,
+        config.auroria_claims_enabled(),
+        config.player_nations_enabled(),
+    );
     tracing::info!("Client FeatureSet: {}", game_data.features);
     // The retail Halloween `game_schedules` rows are dated 2013/2014 and compact.sqlite3 is
     // read-only: `Events.Halloween` repeats the window in memory (`systems::npcs::schedule`).

@@ -478,8 +478,9 @@ pub struct WorldTemplate {
     pub name: String,
     /// Max height for this world's map data.
     pub max_height: f32,
-    /// `HeightMaxCoefficient`: u16 heightmap units per metre, `ushort.MaxValue / MaxHeight` (C#:
-    /// `/ (MaxHeight / 4.0)`, which saturated every height above `MaxHeight / 4`; see PORTING.md).
+    /// `HeightMaxCoefficient`, the u16 units per metre of the stored heightmap samples:
+    /// `ushort.MaxValue / MaxHeight` (C#: `ushort.MaxValue / (MaxHeight / 4.0)`, which
+    /// saturates every sample above `MaxHeight / 4`; see `PORTING.md`).
     pub height_max_coefficient: f64,
     /// Height of the ocean surface for this world.
     pub ocean_level: f32,
@@ -495,6 +496,18 @@ pub struct WorldTemplate {
     pub zone_keys: Vec<u32>,
     /// Xml data for this world.
     pub xml_world: XmlWorld,
+}
+
+/// u16 units per metre for a world whose terrain height range is `0..=max_height`:
+/// `ushort.MaxValue / MaxHeight`. C# used `ushort.MaxValue / (MaxHeight / 4.0)`, which could
+/// only store up to `MaxHeight / 4` metres; the whole range fits with this coefficient (6.25 cm
+/// per unit in `main_world`). A world without a height range gets 1 unit per metre.
+fn height_max_coefficient(max_height: f32) -> f64 {
+    if max_height > 0.0 {
+        f64::from(u16::MAX) / f64::from(max_height)
+    } else {
+        1.0
+    }
 }
 
 impl WorldTemplate {
@@ -550,7 +563,7 @@ impl WorldTemplate {
         t.cell_x = cell_x.max(0);
         t.cell_y = cell_y.max(0);
         t.max_height = 4096.0;
-        t.height_max_coefficient = f64::from(u16::MAX) / f64::from(t.max_height);
+        t.height_max_coefficient = height_max_coefficient(t.max_height);
         t.alloc_regions()
             .expect("synthetic world size must be reasonable");
         t.zone_key_by_regions.fill(zone_key);
@@ -623,7 +636,7 @@ impl WorldTemplate {
         self.max_height = xw.max_terrain_height;
         // pre-create region data
         self.alloc_regions()?;
-        self.height_max_coefficient = f64::from(u16::MAX) / f64::from(self.max_height);
+        self.height_max_coefficient = height_max_coefficient(self.max_height);
         self.xml_world = xw;
 
         // Read Zone XML
@@ -720,11 +733,17 @@ impl WorldTemplate {
             .map(|i| self.zone_key_by_regions[i])
     }
 
-    /// Sets `ZoneKeyByRegions[sector_x, sector_y]`; returns false when out of bounds.
+    /// Sets `ZoneKeyByRegions[sector_x, sector_y]`; returns false when out of bounds. A new key
+    /// is also appended to `zone_keys`, which only grows: once an override has made a world
+    /// multi-zone it stays multi-zone, even if a later call overwrites the only sector that used
+    /// the key (the single-zone instance fallback then stops applying, which is the safe side).
     pub fn set_zone_key_at(&mut self, sector_x: i32, sector_y: i32, zone_key: u32) -> bool {
         match self.region_index(sector_x, sector_y) {
             Some(i) => {
                 self.zone_key_by_regions[i] = zone_key;
+                if !self.zone_keys.contains(&zone_key) {
+                    self.zone_keys.push(zone_key);
+                }
                 true
             }
             None => false,
@@ -1103,6 +1122,10 @@ mod tests {
         assert_eq!((t.cell_x, t.cell_y), (2, 1));
         assert_eq!(t.ocean_level, 99.5);
         assert_eq!(t.max_height, 2048.0);
+        // The whole 0..=MaxHeight range fits the u16 storage (C# reserved four times the
+        // range: `65535 / (2048 / 4)` = 127.998 units per metre).
+        assert_eq!(t.height_max_coefficient, 65535.0 / 2048.0);
+        assert_eq!(t.max_height * t.height_max_coefficient as f32, 65535.0);
         assert_eq!(
             t.xml_world.resolution, 1024,
             "bad value falls back to default"
@@ -1337,6 +1360,18 @@ mod tests {
             ),
             Err(WorldError::ZoneKeyInMultipleWorlds { zone_key: 1, .. })
         ));
+    }
+
+    #[test]
+    fn instance_zone_fallback_keeps_unassigned_ingrid_sectors_at_zero() {
+        // The instance fallback is only for positions outside the cell grid: an in-grid sector
+        // the XML never assigned keeps its key 0 (housing/doodad placement rely on that).
+        let mut t = WorldTemplate::synthetic(2, "instance_sal_temple", 2, 2, 240);
+        t.zone_key_by_regions[32 + 1] = 0; // sector (1, 1)
+        let world = crate::world::WorldInstance::new(100, std::sync::Arc::new(t));
+        assert_eq!(world.zone_id_at(70.0, 70.0), 0);
+        assert_eq!(world.zone_id_at(64.0 * 32.0 + 1.0, 64.0 * 15.0 + 1.0), 240);
+        assert_eq!(world.zone_id_at(2049.2637, 1003.5098), 240);
     }
 
     #[test]

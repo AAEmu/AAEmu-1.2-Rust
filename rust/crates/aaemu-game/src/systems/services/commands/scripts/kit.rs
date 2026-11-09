@@ -247,7 +247,10 @@ mod tests {
         let cmd_dir = dir.join("Scripts").join("Commands");
         std::fs::create_dir_all(&cmd_dir).unwrap();
         std::fs::write(cmd_dir.join("kits.json"), json).unwrap();
-        ScriptEnv { app_path: dir }
+        ScriptEnv {
+            app_path: dir,
+            profile: crate::config::ServerProfile::default(),
+        }
     }
 
     const KITS: &str = r#"{
@@ -276,6 +279,7 @@ mod tests {
         // A missing file: an empty list.
         let none = AddKit::new(&ScriptEnv {
             app_path: std::env::temp_dir().join("aaemu-kit-test-missing"),
+            profile: crate::config::ServerProfile::default(),
         });
         assert!(none.kitconfig.itemkits.is_empty());
     }

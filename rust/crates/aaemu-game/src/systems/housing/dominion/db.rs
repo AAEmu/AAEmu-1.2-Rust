@@ -221,6 +221,7 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             last_siege_id: row.try_get("last_siege_id")?,
             declaration,
             siege,
+            auction_posted_cycle: row.try_get("auction_posted_cycle")?,
             ephemeral: false,
         };
         if states.insert(state.zone_group_id, state).is_some() {
@@ -363,8 +364,8 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
          siege_ends_at,siege_ended_at,siege_reinforced,siege_defender_ni,siege_defender_nr,\
          siege_outcome_credited,non_pvp_start_at,non_pvp_duration_min,\
          declaration_attacker,declaration_at,declaration_cycle,declaration_hq_x,\
-         declaration_hq_y,declaration_hq_z) \
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         declaration_hq_y,declaration_hq_z,auction_posted_cycle) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(state.zone_group_id).bind(state.tower.house_id).bind(state.tower.instance_id)
     .bind(state.tower.guard_tower_setting_id).bind(state.owner_expedition_id)
@@ -392,6 +393,7 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
     .bind(state.declaration.map_or(0.0, |d| d.hq_x))
     .bind(state.declaration.map_or(0.0, |d| d.hq_y))
     .bind(state.declaration.map_or(0.0, |d| d.hq_z))
+    .bind(state.auction_posted_cycle)
     .execute(&mut **tx).await?;
     Ok(())
 }

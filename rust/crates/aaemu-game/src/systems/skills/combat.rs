@@ -112,7 +112,7 @@ pub fn reduce_current_hp(
     // race does nothing at all (no points packet, no death side effects).
     let Some((old_hp, new_hp, mp, was_alive)) = target.with_unit(|u| {
         let u = u.unit_mut();
-        if u.hp <= 0 {
+        if u.hp <= 0 || u.scripted_removed {
             return (0, 0, 0, false);
         }
         // A living unit starts a new life. A claim left over from an earlier life whose
@@ -130,7 +130,7 @@ pub fn reduce_current_hp(
     };
     if !was_alive {
         tracing::debug!(
-            "damage on {} ignored: the unit is already dead",
+            "damage on {} ignored: the unit is dead or scripted-removed",
             target.obj_id()
         );
         return;
@@ -269,7 +269,8 @@ pub fn post_update_current_hp(
 /// fall damage, GM commands, PvP, NPC deaths): exactly one caller gets `true` and runs
 /// [`do_die_after_claim`], every later lethal hit of the same life gets `false` and does
 /// nothing. The flag is cleared when HP is restored or a living unit is damaged again, so an
-/// object (a repaired tower, a resurrected character) can die once per life.
+/// object (a repaired tower, a resurrected character) can die once per life. A scripted
+/// removal (`UnitBase::scripted_removed`) is final for the life, so it refuses every claim.
 ///
 /// Rust-only: the C# `ReduceCurrentHp` checked `Hp <= 0`, applied the damage and called
 /// `DoDie` without a lock, so two concurrent lethal hits could both run the death path.
@@ -277,7 +278,7 @@ pub fn try_claim_death(target: &WorldObject) -> bool {
     target
         .with_unit(|u| {
             let u = u.unit_mut();
-            if u.death_processed {
+            if u.death_processed || u.scripted_removed {
                 false
             } else {
                 u.death_processed = true;
@@ -325,6 +326,14 @@ pub fn do_die(
     kill_reason: KillReason,
 ) {
     if !try_claim_death(victim) {
+        // A scripted removal already ended this life; a direct DoDie on it is a quiet no-op
+        // (the unit was scripted-removed, not killed twice).
+        if victim
+            .with_unit(|u| u.unit().scripted_removed)
+            .unwrap_or(false)
+        {
+            return;
+        }
         let name = victim.with_base_unit(|b| b.name().to_string());
         tracing::warn!(
             "DoDie refused for {name} ({}): death already handled for this life",

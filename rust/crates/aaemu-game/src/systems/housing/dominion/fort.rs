@@ -76,7 +76,7 @@ pub fn state_at(server: &GameServer, instance_id: u32, x: f32, y: f32) -> Option
         return None;
     }
     let world = server.world.world(instance_id)?;
-    let zone = world.template.zone_id_at(x, y);
+    let zone = world.zone_id_at(x, y);
     let group = server.game_data.zones.zone_by_key(zone)?.group_id;
     let state = server.systems.housing.dominions.get(group)?;
     if state.owner_expedition_id == 0 || state.tower.instance_id != instance_id {

@@ -85,8 +85,11 @@ fn timezone_rejects_non_ascii_without_panicking() {
 }
 
 #[test]
-fn timezone_parses_offsets_and_defaults_to_server_local() {
-    assert_eq!(CalendarTimeZone::parse(""), Some(CalendarTimeZone::Local));
+fn timezone_parses_offsets_and_defaults_to_utc() {
+    let utc = CalendarTimeZone::Fixed(FixedOffset::east_opt(0).unwrap());
+    assert_eq!(CalendarTimeZone::default(), utc);
+    assert_eq!(CalendarTimeZone::parse(""), Some(utc));
+    assert_eq!(CalendarTimeZone::parse("  "), Some(utc));
     assert_eq!(
         CalendarTimeZone::parse("local"),
         Some(CalendarTimeZone::Local)
@@ -129,6 +132,39 @@ fn timezone_parses_offsets_and_defaults_to_server_local() {
     assert_eq!(CalendarTimeZone::parse("+24:00"), None);
     assert_eq!(CalendarTimeZone::parse("+09:60"), None);
     assert_eq!(CalendarTimeZone::parse("nonsense"), None);
+}
+
+#[test]
+fn timezone_display_and_the_config_source_are_loggable() {
+    assert_eq!(CalendarTimeZone::default().to_string(), "UTC+00:00");
+    assert_eq!(
+        CalendarTimeZone::Fixed(FixedOffset::east_opt(9 * 3600).unwrap()).to_string(),
+        "UTC+09:00"
+    );
+    assert_eq!(
+        CalendarTimeZone::Fixed(FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()).to_string(),
+        "UTC-05:30"
+    );
+    assert_eq!(CalendarTimeZone::Local.to_string(), "server local time");
+
+    // Empty (the default) and unusable values fall back to UTC; an explicit value is reported
+    // as coming from the configuration.
+    assert!(!CalendarSettings::timezone_from_config(
+        &HousingConfig::default()
+    ));
+    assert!(!CalendarSettings::timezone_from_config(&HousingConfig {
+        siege_calendar_timezone: "local time".into(),
+        ..Default::default()
+    }));
+    for value in ["UTC", "z", "+09:00", "-0530", "local"] {
+        assert!(
+            CalendarSettings::timezone_from_config(&HousingConfig {
+                siege_calendar_timezone: value.into(),
+                ..Default::default()
+            }),
+            "{value}"
+        );
+    }
 }
 
 #[test]
@@ -314,14 +350,40 @@ fn disabled_calendar_is_reported_by_the_settings_and_invalid_schedules_are_rejec
         .cycle_for_week(ZONE, date(2014, 1, 5), &timezone())
         .is_none());
 
-    let settings = CalendarSettings::from_config(&HousingConfig {
-        siege_calendar: true,
-        siege_calendar_timezone: "+09:00".into(),
-        ..Default::default()
-    });
+    let settings = CalendarSettings::from_config(
+        &HousingConfig {
+            siege_calendar: Some(true),
+            siege_calendar_timezone: "+09:00".into(),
+            ..Default::default()
+        },
+        ServerProfile::EuAuroria,
+    );
     assert!(settings.enabled);
     assert_eq!(settings.timezone, timezone());
-    assert!(!CalendarSettings::from_config(&HousingConfig::default()).enabled);
+    // A missing key follows the era profile: on for Auroria (the default), off for launch.
+    let default =
+        CalendarSettings::from_config(&HousingConfig::default(), ServerProfile::EuAuroria);
+    assert!(default.enabled);
+    // The config default (empty string) is UTC, not the server's local offset.
+    assert_eq!(
+        default.timezone,
+        CalendarTimeZone::Fixed(FixedOffset::east_opt(0).unwrap())
+    );
+    assert!(
+        !CalendarSettings::from_config(&HousingConfig::default(), ServerProfile::EuLaunch).enabled
+    );
+    // An explicit `local` still selects the server's local offset.
+    assert_eq!(
+        CalendarSettings::from_config(
+            &HousingConfig {
+                siege_calendar_timezone: "local".into(),
+                ..Default::default()
+            },
+            ServerProfile::EuAuroria,
+        )
+        .timezone,
+        CalendarTimeZone::Local
+    );
 }
 
 #[test]

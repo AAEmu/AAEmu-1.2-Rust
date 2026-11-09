@@ -397,9 +397,17 @@ impl MailForAuction {
 // ---------------------------------------------------------------------------------------------
 
 const TRADE_DELIVERY_NAME: &str = ".sellBackpack";
-const TRADE_DELIVERY_TITLE: &str = "Speciality Payment";
-const TRADE_DELIVERY_TITLE_SELLER: &str = "Speciality Payment [Delivery]";
-const TRADE_DELIVERY_TITLE_CRAFTER: &str = "Speciality Payment [Crafter]";
+/// Fallbacks for the client's own `ui_texts` titles (used only when `localized_texts` has no
+/// row, never the untranslated `ui_texts.text` column). The 1.2 en_us strings are
+/// `sell_backpack_title` (ui_texts 4745) = "Specialty Payment",
+/// `mail_sell_backpack_title_seller` (6193) = "Specialty Payment [Delivery]" and
+/// `mail_sell_backpack_title_crafter` (6194) = "Specialty Payment [Crafter]". The Korean
+/// titles name the shares ("[transport fee]" / "[production cost]"); the client's own mail
+/// view renders that split from the body's `receiverCase` and counts, plus the
+/// `mail_actual_gain_tip` text (6192) with percentages from `X2Trade.GetSellerShareRatio`.
+const TRADE_DELIVERY_TITLE: &str = "Specialty Payment";
+const TRADE_DELIVERY_TITLE_SELLER: &str = "Specialty Payment [Delivery]";
+const TRADE_DELIVERY_TITLE_CRAFTER: &str = "Specialty Payment [Crafter]";
 
 /// `MailForSpeciality` (trade pack payout).
 #[derive(Debug, Clone)]
@@ -520,7 +528,8 @@ impl MailForSpeciality {
         self.mail.header.receiver_id = self.sender_id;
         self.mail.receiver_name = self.sender_name.clone();
         // The 1.2 client's `ui_texts` tables (synced to every language in `localized_texts`)
-        // carry these titles as `sell_backpack_title` / `mail_sell_backpack_title_seller`.
+        // carry these titles as `sell_backpack_title` (4745) /
+        // `mail_sell_backpack_title_seller` (6193).
         self.mail.title = if self.crafter_id == 0 {
             super::mail_data::localized_ui_text(
                 txn.server,
@@ -535,6 +544,9 @@ impl MailForSpeciality {
             )
         };
         let (payout, payout_with_interest) = self.payouts();
+        // The client's `FillSellBackbackMailContents` builds the share breakdown from these
+        // fields (`receiverCase` 0 = crafter, 1 = seller, 2 = seller is crafter) and localizes
+        // the percentage tip itself (`mail_actual_gain_tip`, ui_texts 6192).
         if self.item_to_send == ITEM_COINS {
             self.mail.attach_money(self.item_count_seller, 0, 0);
             self.mail.body.text = format!(

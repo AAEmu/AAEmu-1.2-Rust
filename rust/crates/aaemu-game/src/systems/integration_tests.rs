@@ -27,7 +27,7 @@ use crate::server::GameServer;
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
 use crate::systems::quests::model::kind;
 use crate::systems::quests::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
-use crate::systems::skills::data::effects::EffectTemplate;
+use crate::systems::skills::data::effects::{EffectTemplate, KillNpcWithoutCorpseEffect};
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::effects::{EffectArgs, EffectSource};
 use crate::systems::skills::geometry::Target;
@@ -48,6 +48,10 @@ const KILL_SKILL: u32 = 10_002;
 const USE_SKILL: u32 = 10_003;
 /// 50 damage with `CheckCrime`.
 const CRIME_SKILL: u32 = 10_004;
+/// `KillNpcWithoutCorpseEffect` of the villager (the scripted retreat).
+const RETREAT_SKILL: u32 = 10_008;
+/// The same retreat with a 3 m radius filter.
+const RETREAT_RADIUS_SKILL: u32 = 10_009;
 
 /// A channel of 80 ms whose target buff (`CHANNEL_BUFF`, 5 s) outlasts the channel, like
 /// 'Extract Earth Crystal' (skill 18449: 4 s channel, buff 3896 with 6 s).
@@ -75,6 +79,8 @@ const DOODAD_TEMPLATE: u32 = 1000;
 const SMALL_BLOODSTAIN: u32 = 877;
 
 const HUNT_QUEST: u32 = 100;
+/// The same hunt with two kills, to observe a respawned life's credit.
+const HUNT2_QUEST: u32 = 701;
 const INTERACTION_QUEST: u32 = 200;
 /// `ObjZoneKill` with `team_share` / `is_party`, five villager kills.
 const ZONE_KILL_QUEST: u32 = 300;
@@ -86,6 +92,9 @@ const PVP_ZONE_KILL_QUEST: u32 = 500;
 /// A reward-only quest that pays `QuestActSupplyHonorPoint` [`HONOR_QUEST_POINT`].
 const HONOR_QUEST: u32 = 600;
 const HONOR_QUEST_POINT: i32 = 10;
+/// A reward-only quest whose Reward component lists a missing item before a real one.
+const REWARD_QUEST: u32 = 700;
+const MISSING_REWARD_ITEM: u32 = 999_999;
 
 /// `WorldInteractionType.Use`.
 const WI_USE: i32 = 19;
@@ -152,6 +161,7 @@ fn game_data() -> GameData {
                 skill_points: 0,
             })
             .collect(),
+        55,
     )
     .expect("experience table");
     // The real 1.2 `item_configs` row (death durability loss ratio 2).
@@ -207,11 +217,47 @@ fn game_data() -> GameData {
         EffectTemplate::Damage(Box::new(crime)),
         900_004,
     );
+    s.add_effect(
+        EffectKind::KillNpcWithoutCorpseEffect,
+        EffectTemplate::KillNpcWithoutCorpse(KillNpcWithoutCorpseEffect {
+            id: 8,
+            npc_id: VILLAGER,
+            radius: 0.0,
+            give_exp: true,
+            vanish: false,
+        }),
+        900_008,
+    );
+    s.add_effect(
+        EffectKind::KillNpcWithoutCorpseEffect,
+        EffectTemplate::KillNpcWithoutCorpse(KillNpcWithoutCorpseEffect {
+            id: 9,
+            npc_id: VILLAGER,
+            radius: 3.0,
+            give_exp: true,
+            vanish: false,
+        }),
+        900_009,
+    );
     for (skill_id, effect_type, kind, actual, target_type) in [
         (HIT_SKILL, 900_001, EffectKind::DamageEffect, 1, 4),
         (KILL_SKILL, 900_002, EffectKind::DamageEffect, 2, 4),
         (USE_SKILL, 900_003, EffectKind::InteractionEffect, 3, 8),
         (CRIME_SKILL, 900_004, EffectKind::DamageEffect, 4, 4),
+        (
+            RETREAT_SKILL,
+            900_008,
+            EffectKind::KillNpcWithoutCorpseEffect,
+            8,
+            4,
+        ),
+        (
+            RETREAT_RADIUS_SKILL,
+            900_009,
+            EffectKind::KillNpcWithoutCorpseEffect,
+            9,
+            4,
+        ),
     ] {
         let mut t = skill_template(skill_id);
         t.target_type = target_type;
@@ -361,6 +407,18 @@ fn game_data() -> GameData {
         },
         5,
     );
+    single_act_quest_count(
+        q,
+        HUNT2_QUEST,
+        ActKind::ObjMonsterHunt {
+            npc_id: VILLAGER,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+        2,
+    );
     single_act_quest(
         q,
         GROUP_HUNT_QUEST,
@@ -426,6 +484,46 @@ fn game_data() -> GameData {
             point: HONOR_QUEST_POINT,
         },
     );
+    // A reward pool with a missing item template before a real one (the 1.2 data has 282
+    // `quest_act_supply_items` rows pointing at a missing item).
+    q.add_template(QuestTemplate {
+        id: REWARD_QUEST,
+        detail_id: crate::systems::quests::model::detail::NORMAL,
+        ..QuestTemplate::default()
+    });
+    let reward_component = |id: u32, kind_id: u8| QuestComponentTemplate {
+        id,
+        quest_id: REWARD_QUEST,
+        kind_id,
+        npc_ai_id: 1,
+        ..QuestComponentTemplate::default()
+    };
+    q.add_component(reward_component(REWARD_QUEST * 10 + 1, kind::START));
+    q.add_act(
+        REWARD_QUEST * 10 + 1,
+        REWARD_QUEST * 10 + 1,
+        REWARD_QUEST * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    q.add_component(reward_component(REWARD_QUEST * 10 + 2, kind::REWARD));
+    for (i, item_id) in [MISSING_REWARD_ITEM, QUEST_ITEM].into_iter().enumerate() {
+        let n = REWARD_QUEST * 10 + 2 + i as u32;
+        q.add_act(
+            REWARD_QUEST * 10 + 2,
+            n,
+            n,
+            1,
+            ActKind::SupplyItem {
+                item_id,
+                grade_id: 0,
+                show_action_bar: false,
+                cleanup: false,
+                drop_when_destroy: false,
+                destroy_when_drop: false,
+            },
+        );
+    }
     q.finish();
     gd.items.templates.insert(
         QUEST_ITEM,
@@ -586,6 +684,376 @@ async fn skill_kill_advances_the_hunt_quest_and_awards_exp() {
     // Npc.DoDie tail: the player is out of combat. (As in C#, the damage effect adds the
     // killing blow's aggro / tagger to the dead NPC after `DoDie` cleared them.)
     assert!(!a.p.data().unit.is_in_battle);
+}
+
+#[tokio::test]
+async fn scripted_retreat_credits_the_hunt_once_and_grants_no_exp() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Tagger", 100.0);
+    let mut b = pc(&server, 2, "Mate", 102.0);
+    let team_id = form_party(&server, &a.p, &b.p);
+    accept(&server, &a.p, HUNT_QUEST);
+    accept(&server, &b.p, HUNT_QUEST);
+    let npc = villager(&server, 0x200, 1_000);
+
+    // A's hit gives the party tagging rights (more than half of the max hp).
+    cast(
+        &server,
+        &mut a,
+        HIT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+    a.client.drain();
+    b.client.drain();
+    let (exp_a, exp_b) = (a.p.data().experience, b.p.data().experience);
+
+    // The scripted retreat removes the NPC without a corpse.
+    cast(
+        &server,
+        &mut a,
+        RETREAT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+
+    // The removal is real: a spawner-less NPC is deleted from the world, and the stale handle
+    // carries the final scripted-removed state for this life.
+    assert!(server.world.world(0).unwrap().npc(npc.obj_id).is_none());
+    assert!(npc.data().unit.scripted_removed);
+
+    // Both tags holders get the monster-hunt credit, exactly once, and no experience.
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(quest_row(&server, &b.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(a.p.data().experience, exp_a);
+    assert_eq!(b.p.data().experience, exp_b);
+
+    // A damage kill after the retreat cannot credit or pay out a second time: the removed NPC
+    // is not targetable, and a direct hit on the stale handle is ignored by the latch.
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    crate::systems::skills::combat::reduce_current_hp(
+        &server,
+        &WorldObject::from(&npc),
+        Some(&WorldObject::from(&a.p)),
+        1_000_000,
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(quest_row(&server, &b.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(a.p.data().experience, exp_a);
+    assert_eq!(b.p.data().experience, exp_b);
+
+    // A direct DoDie is a quiet no-op, not a "DoDie refused" warning.
+    let (_, events) = crate::test_support::capture_events(|| {
+        crate::systems::npcs::npc::death::do_die(
+            &server,
+            &npc,
+            Some(&WorldObject::from(&a.p)),
+            crate::systems::npcs::npc::packets::kill_reason::DAMAGE,
+        );
+    });
+    assert!(!events
+        .iter()
+        .any(|(level, msg)| *level == tracing::Level::WARN && msg.contains("DoDie refused")));
+}
+
+#[tokio::test]
+async fn scripted_retreat_of_a_spawner_npc_respawns_a_fresh_life() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::data::world_templates::WorldSpawnPosition;
+    use crate::systems::npcs::npc::spawner::{NpcSpawner, NpcSpawnerInit, NpcSpawnerShared};
+    use crate::systems::npcs::npc::spawner_data::{NpcSpawnerNpc, NpcSpawnerTemplate};
+
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Tagger", 100.0);
+    accept(&server, &a.p, HUNT_QUEST);
+    accept(&server, &a.p, HUNT2_QUEST);
+    let world = server.world.world(0).unwrap();
+    let manager = server.systems.npcs.spawns.get_or_create(&world);
+
+    let member = NpcSpawnerNpc {
+        id: 7001,
+        npc_spawner_template_id: 7001,
+        member_id: VILLAGER,
+        member_type: "Npc".into(),
+        weight: 1.0,
+        unit_id: 0,
+    };
+    let template = NpcSpawnerTemplate {
+        id: 7001,
+        spawn_delay_min: 10.0,
+        spawn_delay_max: 10.0,
+        min_population: 1,
+        max_population: 1,
+        npcs: vec![member],
+        ..NpcSpawnerTemplate::default()
+    };
+    let spawner = Arc::new(NpcSpawner::new(
+        NpcSpawnerInit {
+            id: 7001,
+            spawner_id: 7001,
+            unit_id: VILLAGER,
+            follow_path: String::new(),
+            follow_npc: 0,
+            respawn_time: 15,
+            despawn_time: 20,
+            special_link: String::new(),
+            count: 1,
+            npc_spawner_ids: vec![7001],
+            parent_world: Some(0),
+            template: Some(Arc::new(template.clone())),
+            spawnable_npcs: Vec::new(),
+        },
+        NpcSpawnerShared::new(WorldSpawnPosition {
+            world_id: 0,
+            zone_id: crate::test_support::TEST_ZONE,
+            x: 105.0,
+            y: 100.0,
+            z: 100.0,
+            ..WorldSpawnPosition::default()
+        }),
+    ));
+    spawner.initialize_spawnable_npcs(Some(&template));
+    spawner.update(&server);
+    let npc = spawner
+        .spawned_npcs()
+        .values()
+        .flatten()
+        .next()
+        .cloned()
+        .expect("spawner NPC");
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .spawns
+            .npc_spawner_of(npc.obj_id)
+            .map(|s| s.id),
+        Some(7001)
+    );
+    {
+        let mut n = npc.data();
+        n.unit.faction_id = 0;
+        n.unit.hp = 1_000;
+        n.unit.max_hp = 1_000;
+    }
+
+    cast(
+        &server,
+        &mut a,
+        HIT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    a.client.drain();
+    let exp = a.p.data().experience;
+    cast(
+        &server,
+        &mut a,
+        RETREAT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+
+    assert!(world.npc(npc.obj_id).is_none());
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(
+        quest_row(&server, &a.p, HUNT2_QUEST),
+        Some((kind::PROGRESS, 1))
+    );
+    assert_eq!(a.p.data().experience, exp);
+    assert!(!manager.pending_respawns().is_empty());
+
+    // A damage kill on the removed handle does not credit or pay out again.
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    crate::systems::skills::combat::reduce_current_hp(
+        &server,
+        &WorldObject::from(&npc),
+        Some(&WorldObject::from(&a.p)),
+        1_000_000,
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(
+        quest_row(&server, &a.p, HUNT2_QUEST),
+        Some((kind::PROGRESS, 1))
+    );
+    assert_eq!(a.p.data().experience, exp);
+
+    // The spawner respawns the NPC; the new object is a fresh life that can be credited.
+    crate::systems::npcs::spawn_manager::advance_test_clock(Duration::from_secs(20));
+    manager.check_respawns_tick(&server);
+    spawner.update(&server);
+    let respawned = spawner
+        .spawned_npcs()
+        .values()
+        .flatten()
+        .next()
+        .cloned()
+        .expect("respawned NPC");
+    assert!(!Arc::ptr_eq(&respawned, &npc));
+    assert!(!respawned.data().unit.scripted_removed);
+    {
+        let mut n = respawned.data();
+        n.unit.faction_id = 0;
+        n.unit.hp = 1_000;
+        n.unit.max_hp = 1_000;
+    }
+
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(respawned.obj_id),
+    );
+    assert_eq!(
+        quest_row(&server, &a.p, HUNT2_QUEST),
+        Some((kind::READY, 2))
+    );
+    assert_eq!(a.p.data().experience, exp + VILLAGER_KILL_EXP);
+}
+
+#[tokio::test]
+async fn retreat_picks_the_matching_npc_nearest_the_caster() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Near", 100.0);
+    let mut b = pc(&server, 2, "Far", 600.0);
+    accept(&server, &a.p, HUNT_QUEST);
+    accept(&server, &b.p, HUNT_QUEST);
+    let world = server.world.world(0).unwrap();
+    // Spawn the far NPC first: the old `npc_by_template_id` lookup picked it.
+    let far = crate::systems::npcs::npc::manager::create(&server, 0x210, VILLAGER).unwrap();
+    far.data().unit.transform.set_xyz(500.0, 500.0, 100.0);
+    world.spawn(&far, &server.view_ctx());
+    let near = crate::systems::npcs::npc::manager::create(&server, 0x211, VILLAGER).unwrap();
+    near.data().unit.transform.set_xyz(101.0, 100.0, 100.0);
+    world.spawn(&near, &server.view_ctx());
+    for npc in [&near, &far] {
+        let mut n = npc.data();
+        n.unit.faction_id = 0;
+        n.unit.hp = 1_000;
+        n.unit.max_hp = 1_000;
+    }
+    near.data().tagger_obj_id = a.p.obj_id;
+    far.data().tagger_obj_id = b.p.obj_id;
+    a.client.drain();
+    b.client.drain();
+    let (exp_a, exp_b) = (a.p.data().experience, b.p.data().experience);
+
+    cast(
+        &server,
+        &mut a,
+        RETREAT_SKILL,
+        SkillCastTarget::Unit(near.obj_id),
+    );
+
+    assert!(world.npc(near.obj_id).is_none());
+    assert!(world.npc(far.obj_id).is_some());
+    assert_eq!(quest_row(&server, &a.p, HUNT_QUEST), Some((kind::READY, 1)));
+    assert_eq!(
+        quest_row(&server, &b.p, HUNT_QUEST),
+        Some((kind::PROGRESS, 0))
+    );
+    assert_eq!(a.p.data().experience, exp_a);
+    assert_eq!(b.p.data().experience, exp_b);
+}
+
+#[tokio::test]
+async fn retreat_outside_the_effect_radius_removes_nothing() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Caster", 100.0);
+    accept(&server, &a.p, HUNT_QUEST);
+    let world = server.world.world(0).unwrap();
+    let npc = crate::systems::npcs::npc::manager::create(&server, 0x220, VILLAGER).unwrap();
+    npc.data().unit.transform.set_xyz(110.0, 100.0, 100.0);
+    world.spawn(&npc, &server.view_ctx());
+    {
+        let mut n = npc.data();
+        n.unit.faction_id = 0;
+        n.unit.hp = 1_000;
+        n.unit.max_hp = 1_000;
+    }
+    npc.data().tagger_obj_id = a.p.obj_id;
+    a.client.drain();
+    let exp = a.p.data().experience;
+
+    // 10 m away with a 3 m effect radius: no NPC qualifies.
+    cast(
+        &server,
+        &mut a,
+        RETREAT_RADIUS_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+
+    assert!(world.npc(npc.obj_id).is_some());
+    assert!(!npc.data().unit.scripted_removed);
+    assert_eq!(
+        quest_row(&server, &a.p, HUNT_QUEST),
+        Some((kind::PROGRESS, 0))
+    );
+    assert_eq!(a.p.data().experience, exp);
+}
+
+#[tokio::test]
+async fn quest_reward_skips_an_unknown_item_template() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Rewarded", 100.0);
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&server, &a.p, REWARD_QUEST, false),
+        Some(true)
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    // The missing first reward row is skipped; the real item is still given.
+    let bag = crate::systems::economy::inventory::Inv::of(&a.p).bag();
+    let items: Vec<(u32, i32)> = bag
+        .lock()
+        .expect("container poisoned")
+        .items
+        .iter()
+        .map(|i| (i.template_id, i.count))
+        .collect();
+    assert_eq!(items, vec![(QUEST_ITEM, 1)]);
+    a.client.drain();
+}
+
+#[tokio::test]
+async fn quest_reward_with_one_free_slot_gives_the_item_directly() {
+    let server = server_with(false);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut c = test_character(1, "Tight", 100.0, 100.0);
+    c.num_inventory_slots = 1;
+    c.inventory = crate::models::character::Inventory::standalone(1, 1, 50);
+    let player = spawn_player(&server, &client, c, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&server, &player, REWARD_QUEST, false),
+        Some(true)
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    // The filtered pool has one item, so the one free slot is enough: it is given directly
+    // instead of being counted against the missing-template row and mailed.
+    let bag = crate::systems::economy::inventory::Inv::of(&player).bag();
+    let items: Vec<(u32, i32)> = bag
+        .lock()
+        .expect("container poisoned")
+        .items
+        .iter()
+        .map(|i| (i.template_id, i.count))
+        .collect();
+    assert_eq!(items, vec![(QUEST_ITEM, 1)]);
+    client.drain();
 }
 
 #[tokio::test]

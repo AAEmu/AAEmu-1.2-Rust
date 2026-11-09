@@ -238,9 +238,7 @@ pub fn refusal(
 ) -> Option<Refusal> {
     let (x, y, z) = pos;
     // F11: the 1.2 client refuses the restricted-zone seed with 276 before it starts a builder.
-    if template.restrict_zone_id != 0
-        && template.restrict_zone_id != world.template.zone_id_at(x, y)
-    {
+    if template.restrict_zone_id != 0 && template.restrict_zone_id != world.zone_id_at(x, y) {
         return Some(Refusal::Area);
     }
     let wet = crate::systems::ai::collision::is_water(server, world.id, x, y, z)

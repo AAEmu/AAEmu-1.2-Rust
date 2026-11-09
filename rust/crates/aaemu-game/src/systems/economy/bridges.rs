@@ -1810,14 +1810,7 @@ impl ItemSkillHooks for EconomyForSkills {
         source_slot: u32,
         target_item_id: u64,
         target_slot: u32,
-        armor: Option<bool>,
-        npc_template_id: Option<u32>,
     ) -> bool {
-        let kind = match armor {
-            None => super::renew::EnchantKind::Renew,
-            Some(false) => super::renew::EnchantKind::Weapon,
-            Some(true) => super::renew::EnchantKind::Armor,
-        };
         super::renew::renew_equipment(
             server,
             player,
@@ -1826,7 +1819,22 @@ impl ItemSkillHooks for EconomyForSkills {
             source_slot,
             target_item_id,
             target_slot,
-            kind,
+        )
+    }
+
+    fn physical_enchant(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        item_id: u64,
+        armor: bool,
+        npc_template_id: Option<u32>,
+    ) -> bool {
+        super::renew::physical_enchant(
+            server,
+            player,
+            item_id,
+            armor,
             npc_template_id,
             &mut SharedRandom,
         )
@@ -3586,6 +3594,13 @@ impl crate::systems::quests::hooks::QuestHooks for EconomyForQuests {
         count: i32,
         grade_id: u8,
     ) -> bool {
+        if server.game_data.items.template(template_id).is_none() {
+            // A reward item without a template (282 rows of the 1.2 `quest_act_supply_items`)
+            // is skipped like the C# 10.x loot fix (#1488): nothing can be created for it, and
+            // one bad static row must not fail the rest of the reward.
+            tracing::debug!("Quest reward: skipping unknown item template {template_id}");
+            return true;
+        }
         let mut txn = ItemTxn::unlocked(server);
         let inv = Self::inv_of(c);
         let ok = lock(&inv.bag()).acquire_default_item(
@@ -3673,6 +3688,19 @@ impl crate::systems::quests::hooks::QuestHooks for EconomyForQuests {
         }
         let defs: Vec<_> = items
             .iter()
+            .filter(|i| {
+                let known = server.game_data.items.template(i.template_id).is_some();
+                if !known {
+                    // Same skip as the bag path: a missing reward template must not fail the
+                    // whole mail-out. `create_quest_reward_mail_bodies` would reject every
+                    // definition on one unknown id.
+                    tracing::debug!(
+                        "Quest {quest_template_id}: skipping unknown reward item template {}",
+                        i.template_id
+                    );
+                }
+                known
+            })
             .map(|i| {
                 super::mail_kinds::ItemCreationDefinition::new(
                     i.template_id,
@@ -4457,7 +4485,7 @@ impl item_effects::ItemEffectHooks for EconomyComposite {
             return false;
         };
         let p = world.world_pos_rot(&me);
-        crate::systems::npcs::public_farm::in_public_farm(server, &world.template, (p.x, p.y, p.z))
+        crate::systems::npcs::public_farm::in_public_farm(server, &world, (p.x, p.y, p.z))
     }
 
     fn house_at(

@@ -201,10 +201,14 @@ pub fn add_exp_locked(
                 };
                 let old_exp = ab.exp;
                 let new_exp = if exp_delta > 0 {
-                    ab.exp.saturating_add(exp_delta).min(max_exp)
+                    ab.exp.saturating_add(exp_delta)
                 } else {
-                    (ab.exp + exp_delta).min(max_exp)
-                };
+                    ab.exp + exp_delta
+                }
+                // An ability already above the cap (a character saved under a higher cap)
+                // keeps that progress: never trim it below the larger of the cap and its
+                // current exp, on gains and losses alike.
+                .min(max_exp.max(old_exp));
                 if new_exp == old_exp {
                     continue;
                 }
@@ -1237,6 +1241,91 @@ mod tests {
         assert!(frames
             .iter()
             .any(|(op, _)| *op == sc::SCAbilitySwappedPacket));
+    }
+
+    #[tokio::test]
+    async fn the_era_cap_stops_experience_at_50_and_keeps_an_above_cap_level() {
+        let mut data = GameData::empty();
+        data.experience = crate::data::ExperienceTable::from_templates(
+            (1..=55u8)
+                .map(|level| crate::data::LevelTemplate {
+                    level,
+                    total_exp: i32::from(level) * 1_000,
+                    total_mate_exp: i32::from(level) * 1_000,
+                    skill_points: i32::from(level),
+                })
+                .collect(),
+            50,
+        )
+        .expect("cap 50 table");
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Capped", 100.0, 100.0);
+        character.unit.level = 50;
+        character.experience = 50_000;
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.drain();
+
+        // At the cap: the gain neither levels up nor accumulates beyond the level total.
+        add_exp(&server, &player, 10_000, false);
+        {
+            let c = player.data();
+            assert_eq!((c.unit.level, c.experience), (50, 50_000));
+        }
+
+        // A character saved above the cap keeps 53 and still gains no level.
+        player.data().unit.level = 53;
+        player.data().experience = 53_000;
+        add_exp(&server, &player, 10_000, false);
+        {
+            let c = player.data();
+            assert_eq!((c.unit.level, c.experience), (53, 53_000));
+        }
+    }
+
+    #[tokio::test]
+    async fn ability_experience_above_the_cap_is_not_trimmed_by_gains_or_losses() {
+        let mut data = GameData::empty();
+        data.experience = crate::data::ExperienceTable::from_templates(
+            (1..=55u8)
+                .map(|level| crate::data::LevelTemplate {
+                    level,
+                    total_exp: i32::from(level) * 1_000,
+                    total_mate_exp: i32::from(level) * 1_000,
+                    skill_points: i32::from(level),
+                })
+                .collect(),
+            50,
+        )
+        .expect("cap 50 table");
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Capped", 100.0, 100.0);
+        character.unit.level = 53;
+        character.experience = 53_000;
+        character.ability1 = 1;
+        character.ability2 = ability::NONE;
+        character.ability3 = ability::NONE;
+        character.abilities.get_mut(1).unwrap().exp = 55_000;
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.drain();
+
+        let ability_exp = |p: &crate::world::PlayerRef| {
+            p.data()
+                .abilities
+                .abilities
+                .iter()
+                .find(|a| a.id == 1)
+                .unwrap()
+                .exp
+        };
+        // A gain above the cap leaves the saved ability exp untouched (the old clamp
+        // lowered 55k to the level-50 total, 50k, and the next save persisted it).
+        add_exp(&server, &player, 1_000, true);
+        assert_eq!(ability_exp(&player), 55_000);
+        // A loss reduces it but does not snap it down to the cap.
+        add_exp(&server, &player, -1_000, true);
+        assert_eq!(ability_exp(&player), 54_000);
     }
 
     #[tokio::test]

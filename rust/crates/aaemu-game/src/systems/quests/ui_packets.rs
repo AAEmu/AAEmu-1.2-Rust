@@ -45,20 +45,31 @@ impl Marshal for SCShowQuestAreaPacket {
     }
 }
 
-/// `SCQuestAcceptConditional`: two `u32` values (the packet has no reader field names).
+/// `SCQuestAcceptConditional(sphereId, questContextId)`: the server offers a quest that the
+/// client shows as a start dialog for a sphere starter.
 ///
-/// sent_by: none (capture-pending). Client reader `FUN_397b5d80`
+/// sent_by: `spheres::SphereQuestManager::tick_area_spheres` on entry into a
+/// `SphereAcceptQuest` sphere (`sphere_area_fill.json` carries the areas of 1040, 1453 and
+/// 2236; the 1.2 `quest_sign_sphere.g` pack has none for these quests). The entry trigger is
+/// INFERRED (CAP-QU-2): the area and the `sphere_accept_quest_quests` link exist, but no
+/// capture shows the retail send. Client reader `FUN_397b5d80`
 /// (`x2game.dll.c:1709358`) reads two `u32` values; handler `FUN_391dbed0` ->
-/// `FUN_39376690(a, b)` raises `START_QUEST_CONTEXT_SPHERE` (event 0xec, the quest start
-/// dialog of a sphere starter). Which value is the quest id is UNKNOWN (CAP-QU-2).
+/// `FUN_39376690(a, b)` raises `START_QUEST_CONTEXT_SPHERE` (event 0xec) with the arguments
+/// in `(b, a)` order: `b` is the quest type the dialog looks up and `a` is the sphere id the
+/// accept reply must carry (the 1.2 `quest_context.alb` sphere handler calls
+/// `StartQuestContext(3, qtype, sphere, ...)`; the 0xeb doodad sibling was cross-checked).
+/// The client answers `CSStartQuestContext` 0xd5 with that sphere id
+/// (`systems/quests/events.rs::start_quest_context`).
 ///
 /// Naming: the 1.2 opcode table stores this S->C opcode as
 /// `sc::CSQuestAcceptConditionalPacket` (0x14a), a misnomer. `opcodes.rs` is never edited, so
 /// the constant is referenced as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCQuestAcceptConditionalPacket {
-    pub a: u32,
-    pub b: u32,
+    /// `spheres.id` of the `SphereAcceptQuest` sphere the player entered.
+    pub sphere_id: u32,
+    /// `quest_contexts.id` of the offered quest.
+    pub quest_id: u32,
 }
 packet_def!(
     SCQuestAcceptConditionalPacket,
@@ -67,7 +78,7 @@ packet_def!(
 );
 impl Marshal for SCQuestAcceptConditionalPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u32(self.a).write_u32(self.b);
+        s.write_u32(self.sphere_id).write_u32(self.quest_id);
     }
 }
 
@@ -108,10 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn quest_accept_conditional_is_two_u32() {
+    fn quest_accept_conditional_is_sphere_then_quest() {
+        // Reader FUN_397b5d80: `u32 a` (sphere id), then `u32 b` (quest context id).
         let p = SCQuestAcceptConditionalPacket {
-            a: 0x1122_3344,
-            b: 0x5566_7788,
+            sphere_id: 0x1122_3344,
+            quest_id: 0x5566_7788,
         };
         assert_eq!(
             body(&p),

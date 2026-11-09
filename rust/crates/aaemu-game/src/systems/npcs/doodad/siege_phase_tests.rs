@@ -293,7 +293,7 @@ fn world_with(data: GameData) -> World {
     let server = test_server_with(data);
     server.systems.npcs.doodads.tasks.set_manual(true);
     server.config.update(|config| {
-        config.housing.siege_calendar = true;
+        config.housing.siege_calendar = Some(true);
         config.housing.siege_calendar_timezone = "+00:00".into();
     });
     let client = TestClient::new(&server, 1, 1001);
@@ -524,7 +524,7 @@ async fn current_period_reports_owned_peace_and_explicit_warmup() {
     let other = world(camp());
     other.own();
     other.server.config.update(|config| {
-        config.housing.siege_calendar = false;
+        config.housing.siege_calendar = Some(false);
     });
     assert_eq!(period::current_period(&other.server, ZONE), Some(5));
 }

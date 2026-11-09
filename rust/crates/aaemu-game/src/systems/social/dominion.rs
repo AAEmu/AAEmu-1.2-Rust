@@ -42,7 +42,7 @@ fn calendar_view(server: &GameServer, state: &DominionState) -> Option<calendar:
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     if !settings.enabled {
         return None;
     }
@@ -226,7 +226,7 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing)
+        .settings(&server.config.housing, server.config.world.profile)
         .enabled;
     if let Some(siege) = state.siege.as_ref().filter(|s| {
         s.status != SiegeStatus::Finished
@@ -626,6 +626,13 @@ pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_r
 /// periodic dominion save. The rate is permille/10 (0-1000); applying it to collected tax and
 /// the weekly receipt mail (type 24) are capture-pending (RENAME-8).
 pub fn update_national_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, rate: u32) {
+    if !server.config.player_nations_enabled() {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    }
     let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
@@ -942,16 +949,26 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
     if !distance2.is_finite() || !range.is_finite() || range <= 0.0 || distance2 > range * range {
         return;
     }
+    // Auroria claims follow the era profile (`World.Profile`), independently of
+    // `Housing.SiegeCalendar`: the Trion launch era has no northern continent, while a
+    // calendar-off Auroria server still allows claims for GM-scheduled sieges. 662 is the
+    // existing "not yet a region where a territory can be proclaimed" refusal.
+    if !server.config.auroria_claims_enabled() {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_CLOSED,
+        );
+        return;
+    }
     // WP-S6 claim gates. The 1.2 client has no claim validator; it only renders the server's
     // error id, so the ids below are its error table (FUN_3956b860 in x2game.dll.c) and the
-    // order is this server policy. The authored `open_*` window applies regardless of
-    // `Housing.SiegeCalendar` (that switch only drives the inferred weekly cycle) and uses the
-    // real wall clock: the GM test clock is restricted to the calendar view.
+    // order is this server policy. The authored `open_*` window uses the real wall clock: the
+    // GM test clock is restricted to the calendar view.
     let settings = server
         .systems
         .housing
         .calendar
-        .settings(&server.config.housing);
+        .settings(&server.config.housing, server.config.world.profile);
     let window = calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles)
         .claim_window_at(zone, Utc::now().timestamp(), &settings.timezone);
     match window {
@@ -1984,6 +2001,10 @@ mod authority_tests {
     #[tokio::test]
     async fn snapshot_uses_live_tower_authored_limits_and_native_timer_seconds() {
         let f = fixture();
+        // This test pins the explicit-timer view; the calendar must not supply a cycle.
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar = Some(false));
         let mut state = owned(&f);
         state.national_monument_db_id = 77;
         state.national_monument_x = 10.5;
@@ -2958,6 +2979,54 @@ mod authority_tests {
     }
 
     #[tokio::test]
+    async fn auroria_claims_follow_the_profile_not_the_siege_calendar() {
+        use crate::config::ServerProfile;
+        let object = SkillObject::None;
+
+        // The launch era has no Auroria claims: even an explicitly enabled calendar (the GM
+        // schedule switch) does not enable them.
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server.config.update(|c| {
+            c.world.profile = ServerProfile::EuLaunch;
+            c.housing.siege_calendar = Some(true);
+        });
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_CLOSED]
+        );
+        assert_eq!(pack_id(&f.leader), Some(100));
+        assert!(f
+            .server
+            .systems
+            .housing
+            .dominions
+            .get(ZONE)
+            .is_none_or(|state| state.owner_expedition_id == 0));
+
+        // Auroria with the weekly calendar off (GM-scheduled sieges only) still claims.
+        let f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server.config.update(|c| {
+            c.world.profile = ServerProfile::EuAuroria;
+            c.housing.siege_calendar = Some(false);
+        });
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE)
+                .unwrap()
+                .owner_expedition_id,
+            EXPEDITION
+        );
+        assert_eq!(pack_id(&f.leader), None);
+    }
+
+    #[tokio::test]
     async fn ephemeral_seeded_dominions_do_not_count_toward_the_claim_limit() {
         let mut f = fixture();
         f.server
@@ -3083,7 +3152,9 @@ mod authority_tests {
     #[tokio::test]
     async fn a_fresh_claim_has_no_siege_cycle_during_the_authored_delay() {
         let f = fixture();
-        f.server.config.update(|c| c.housing.siege_calendar = true);
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar = Some(true));
         let object = SkillObject::None;
         give_pack(&f, 100, PURIFYING_ARCHEUM);
         declare_effect(&f.server, &args(&f, &object));
@@ -3109,7 +3180,9 @@ mod authority_tests {
     #[tokio::test]
     async fn a_captured_territory_does_not_get_the_fresh_claim_protection() {
         let f = fixture();
-        f.server.config.update(|c| c.housing.siege_calendar = true);
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar = Some(true));
         let auction = Utc
             .with_ymd_and_hms(2014, 1, 8, 22, 30, 0)
             .single()
@@ -3479,7 +3552,7 @@ mod authority_tests {
 
     fn enable_calendar(f: &Fixture) {
         f.server.config.update(|config| {
-            config.housing.siege_calendar = true;
+            config.housing.siege_calendar = Some(true);
             config.housing.siege_calendar_timezone = "+09:00".into();
         });
     }
@@ -3919,6 +3992,237 @@ mod authority_tests {
         cast_camp(&f.server, &mut f.client, &f.leader, item, CAMP_ITEM);
         assert!(errors(&mut f.client).contains(&443));
         assert_eq!(item_count(&f, &f.leader, CAMP_ITEM), 1);
+    }
+
+    /// Adds a finished house with a `garden_radius` plot at `(x, y)` in instance 0.
+    fn add_house_plot(
+        f: &mut Fixture,
+        template_id: u32,
+        x: f32,
+        y: f32,
+        garden_radius: f32,
+    ) -> HouseRef {
+        let data = data_mut(f);
+        data.systems.housing.add_template(HousingTemplate {
+            id: template_id,
+            garden_radius,
+            ..Default::default()
+        });
+        let mut h = House::new(500 + template_id, template_id);
+        h.current_step = -1;
+        h.unit.hp = 1_000;
+        h.unit.max_hp = 1_000;
+        h.unit.tl_id = (500 + template_id) as u16;
+        h.unit.transform.set_xyz(x, y, 100.0);
+        h.unit.transform.zone_id = TEST_ZONE;
+        let house = Entity::new(f.server.ids.object.get_next_id().unwrap(), h);
+        assert!(f.server.systems.housing.manager.insert(&house));
+        crate::systems::housing::manager::spawn_house(&f.server, &house);
+        house
+    }
+
+    fn set_declare_radius(f: &mut Fixture, radius: u32) {
+        data_mut(f)
+            .systems
+            .housing
+            .castles
+            .guard_tower_settings
+            .get_mut(&SETTING)
+            .unwrap()
+            .radius_declare = radius;
+    }
+
+    /// A living physics collider at `(x, y, z)`, as the house-overlap tests install.
+    fn install_obstacle(f: &Fixture, obj_id: u32, x: f32, y: f32, z: f32) {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        let _ = f
+            .server
+            .systems
+            .ai
+            .collision
+            .test_files
+            .set(Arc::new(HashMap::new()));
+        let _ = f.server.systems.ai.collision.test_terrain.set(Arc::new(
+            crate::systems::ai::collision::terrain::tests::Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+        ));
+        let physics =
+            crate::systems::ai::collision::phys_world(&f.server, 0).expect("physics world");
+        let cell = ((x / 1024.0).floor() as i32, (y / 1024.0).floor() as i32);
+        physics
+            .lock()
+            .insert_cell(crate::systems::ai::collision::world::CellContent {
+                cell,
+                ..Default::default()
+            });
+        assert!(physics
+            .lock()
+            .sync_living(
+                obj_id,
+                &crate::systems::ai::collision::data::LivingParams::default(),
+                aaemu_physics::math::Vec3::new(x, y, z),
+            )
+            .is_some());
+    }
+
+    /// Casts the camp once and answers the error ids the client received.
+    fn cast_camp_errors(f: &mut Fixture) -> (Vec<i16>, bool) {
+        f.member_client.drain();
+        let item = give_camp_item(f, &f.member, CAMP_ITEM);
+        cast_camp(&f.server, &mut f.member_client, &f.member, item, CAMP_ITEM);
+        let codes = errors(&mut f.member_client);
+        let kept = item_count(f, &f.member, CAMP_ITEM) == 1;
+        (codes, kept)
+    }
+
+    fn declared(f: &Fixture) -> bool {
+        f.server
+            .systems
+            .housing
+            .dominions
+            .get(ZONE)
+            .is_some_and(|state| state.declaration.is_some())
+    }
+
+    #[tokio::test]
+    async fn camp_placement_refuses_a_house_plot_and_honours_the_house_margin() {
+        // 633: the camp spot (one metre in front of the caster) is inside a plot.
+        let mut f = camp_fixture();
+        add_house_plot(&mut f, 71, 600.0, 101.0, 8.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "house plot refusal: {codes:?}");
+        assert!(kept, "a refused declaration keeps the camp");
+        assert!(!declared(&f));
+
+        // Default margin 0: a plot 31 m away does not refuse.
+        let mut f = camp_fixture();
+        add_house_plot(&mut f, 71, 600.0, 140.0, 8.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "house 31 m away allowed: {codes:?}");
+        assert!(!kept, "the accepted declaration consumes the camp");
+        assert!(declared(&f));
+
+        // Config override: a 40 m margin refuses the same 31 m plot.
+        let mut f = camp_fixture();
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_house_margin = 40.0);
+        add_house_plot(&mut f, 71, 600.0, 140.0, 8.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "40 m house margin: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+    }
+
+    #[tokio::test]
+    async fn camp_placement_refuses_another_zone_group_and_honours_the_zone_margin() {
+        // 661: region (1,0) is zone key `TEST_ZONE + 1` (group 26), the caster's dominion
+        // record is group 25; the authored radius is lowered so 345 cannot answer first.
+        let mut f = camp_fixture();
+        set_declare_radius(&mut f, 10);
+        f.member.data().unit.transform.set_xyz(70.0, 32.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&661), "other zone group: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        // Default margin 0: a spot in group 25, 2 m from the group-26 border, is allowed.
+        let mut f = camp_fixture();
+        set_declare_radius(&mut f, 10);
+        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "inside the besieged group: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // Config override: a 5 m margin sees the neighbouring group and refuses.
+        let mut f = camp_fixture();
+        set_declare_radius(&mut f, 10);
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_zone_margin = 5.0);
+        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&661), "5 m zone margin: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+    }
+
+    #[tokio::test]
+    async fn camp_peace_check_is_off_by_default_and_honours_its_margin() {
+        // The neighbouring group 26 has no `conflict_zones` row: it never leaves peace.
+        // Switch off (default): the spot 2 m from that group is allowed.
+        let mut f = camp_fixture();
+        set_declare_radius(&mut f, 10);
+        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "peace check off by default: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // Switch on with a 1 m margin: the peace group is 2 m away, so still allowed.
+        let mut f = camp_fixture();
+        set_declare_radius(&mut f, 10);
+        f.server.config.update(|c| {
+            c.housing.siege_declare_peace_check = true;
+            c.housing.siege_declare_peace_margin = 1.0;
+        });
+        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(
+            codes.is_empty(),
+            "peace group outside the margin: {codes:?}"
+        );
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // Switch on with a 5 m margin: 625.
+        let mut f = camp_fixture();
+        set_declare_radius(&mut f, 10);
+        f.server.config.update(|c| {
+            c.housing.siege_declare_peace_check = true;
+            c.housing.siege_declare_peace_margin = 5.0;
+        });
+        f.member.data().unit.transform.set_xyz(100.0, 65.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&625), "peace zone margin: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+    }
+
+    #[tokio::test]
+    async fn camp_placement_refuses_obstacles_and_honours_the_radius() {
+        // Default 0.35 m: an obstacle at the camp spot refuses.
+        let mut f = camp_fixture();
+        install_obstacle(&f, 0x900, 600.0, 101.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&741), "obstacle at the spot: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
+
+        // The same obstacle 2 m away is outside the default radius: allowed.
+        let mut f = camp_fixture();
+        install_obstacle(&f, 0x900, 602.0, 101.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "obstacle outside the radius: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // Config override: a 3 m radius refuses the 2 m obstacle.
+        let mut f = camp_fixture();
+        f.server
+            .config
+            .update(|c| c.housing.siege_declare_obstacle_radius = 3.0);
+        install_obstacle(&f, 0x900, 602.0, 101.0, 100.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&741), "3 m obstacle radius: {codes:?}");
+        assert!(kept);
+        assert!(!declared(&f));
     }
 
     #[tokio::test]

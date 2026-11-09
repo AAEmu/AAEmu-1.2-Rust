@@ -807,6 +807,7 @@ CREATE TABLE IF NOT EXISTS `dominions` (
   `declaration_hq_x` float NOT NULL DEFAULT 0,
   `declaration_hq_y` float NOT NULL DEFAULT 0,
   `declaration_hq_z` float NOT NULL DEFAULT 0,
+  `auction_posted_cycle` bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (`zone_group_id`),
   UNIQUE KEY `dominions_tower` (`tower_house_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

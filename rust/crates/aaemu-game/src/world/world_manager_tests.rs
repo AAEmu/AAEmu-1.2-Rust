@@ -625,3 +625,40 @@ async fn initialize_subscribes_active_region_tick_as_async() {
     // Not on the synchronous tick-manager thread.
     assert_eq!(server.systems.services.tick.on_tick.subscriber_count(), 0);
 }
+
+/// A single-zone instance world (`instance_sal_temple` is 2x2 cells = 2048 m; the 2026-11-08 bot
+/// run reached x=2049.3) has its only zone at every position, without a bounds error. The C#
+/// out-of-bounds rule still applies to the main world and multi-zone worlds.
+#[test]
+fn instance_zone_lookup_covers_positions_past_the_cell_grid() {
+    let temple = world_instance(
+        WorldTemplate::synthetic(2, "instance_sal_temple", 2, 2, 240),
+        100,
+    );
+    let (zone, events) =
+        crate::test_support::capture_events(|| temple.zone_id_at(2049.2637, 1003.5098));
+    assert_eq!(zone, 240);
+    assert!(
+        events
+            .iter()
+            .all(|(level, _)| *level != tracing::Level::ERROR),
+        "{events:?}"
+    );
+    assert_eq!(temple.zone_id_at(-1.0, -1.0), 240);
+
+    let main = world_instance(WorldTemplate::synthetic(0, "main_world", 2, 2, 100), 0);
+    let (zone, events) = crate::test_support::capture_events(|| main.zone_id_at(4096.0, 0.0));
+    assert_eq!(zone, 0);
+    assert!(events
+        .iter()
+        .any(|(level, _)| *level == tracing::Level::ERROR));
+
+    let mut two = WorldTemplate::synthetic(3, "two_zones", 1, 1, 300);
+    two.zone_keys.push(301);
+    let two = world_instance(two, 101);
+    let (zone, events) = crate::test_support::capture_events(|| two.zone_id_at(4096.0, 0.0));
+    assert_eq!(zone, 0);
+    assert!(events
+        .iter()
+        .any(|(level, _)| *level == tracing::Level::ERROR));
+}
