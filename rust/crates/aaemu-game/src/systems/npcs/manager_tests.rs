@@ -1,7 +1,6 @@
 //! Port of AAEmu.UnitTests/Game/Core/Managers/PortalManagerTests.cs,
-//! AAEmu.UnitTests/Game/Core/Managers/UnitManagers/NpcManagerTests.cs,
-//! AAEmu.UnitTests/Game/Core/Managers/SubZoneManagerTests.cs and
-//! AAEmu.UnitTests/Game/Core/Managers/World/ExampleTests.cs (`SpecialtyManager.GetValueOfOne`).
+//! AAEmu.UnitTests/Game/Core/Managers/UnitManagers/NpcManagerTests.cs and
+//! AAEmu.UnitTests/Game/Core/Managers/SubZoneManagerTests.cs.
 //!
 //! The C# `Constructor_DoesNotCallDeps` tests check that the DI constructors touch none of
 //! their injected managers. The Rust managers have no injected dependencies, so these assert
@@ -10,7 +9,6 @@
 use super::npc::data::NpcTemplate;
 use super::npc::manager::{NpcManager, TemplateLook};
 use super::portal::PortalManager;
-use super::specialty::SpecialtyManager;
 use super::subzone::SubZoneData;
 use crate::data::client_files::ClientFileManager;
 use crate::data::world_data::ZoneData;
@@ -52,10 +50,4 @@ fn load_calls_get_worlds() {
         .expect("load");
     assert!(d.sub_zones.is_empty());
     assert!(d.housing_zones.is_empty());
-}
-
-/// `ExampleTests.SampleTest`.
-#[test]
-fn sample_test() {
-    assert_eq!(SpecialtyManager::get_value_of_one(), 1);
 }

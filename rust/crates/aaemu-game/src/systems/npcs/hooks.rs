@@ -346,34 +346,6 @@ pub trait EconomyBridge: Send + Sync {
     /// (called once per respawn tick).
     fn make_loot_public_tick(&self, _server: &GameServer, _world_id: u32) {}
 
-    /// `SpecialtyManager.SellSpecialty` mails: `new MailForSpeciality(...)` +
-    /// `FinalizeForSeller()` (`for_crafter == false`) / `FinalizeForCrafter()` + `Send()`.
-    /// Returns `Send()`'s result. Default: mails are not ported (false -> the sale stops with
-    /// `MailUnknownFailure` for the seller mail, as a failed send does in C#).
-    fn send_specialty_mail(
-        &self,
-        _server: &GameServer,
-        _player: &PlayerRef,
-        _mail: &crate::systems::npcs::specialty::SpecialtyMail,
-        _for_crafter: bool,
-    ) -> bool {
-        false
-    }
-
-    /// `Inventory.Equipment.ConsumeItem(task, templateId, count, preferredItem)` (selling the
-    /// equipped trade pack). Returns the number consumed.
-    fn consume_equipment_item(
-        &self,
-        _server: &GameServer,
-        _player: &PlayerRef,
-        _task: u8,
-        _template_id: u32,
-        _count: i32,
-        _preferred_item_id: u64,
-    ) -> i32 {
-        0
-    }
-
     // ---- doodad funcs / world interactions / coffers (`systems::npcs::doodad`) ----
 
     /// `ItemManager.IsAutoEquipTradePack(templateId)` (`BackpackTemplate` not bound on equip).

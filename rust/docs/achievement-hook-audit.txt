@@ -163,8 +163,8 @@ k37 SELL_ITEM       v1=sold trade-pack items.id, v2=destination npc template id
                     economy/specialty.rs::sell_specialty (L293; this is the registered
                     CSSellBackpackGoodsPacket path via economy/store.rs:184+815), report after
                     the ItemTxn block (L383-399) that consumes the pack and 60 labor.
-                    Deviations: systems/npcs/specialty.rs::sell_specialty (L662) is a second
-                    unregistered implementation - do not double-credit both.
+                    The second, unregistered npcs implementation was removed on 2026-11-09;
+                    this is now the only sale path.
 k38 MAKE_HOUSING    v1=housings.id (design id), v2=0, count
                     +1 when a house reaches its finished step
                     housing/manager.rs::set_current_step (L395) when value==-1 && !loading &&
