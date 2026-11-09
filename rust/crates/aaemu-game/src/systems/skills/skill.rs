@@ -3118,7 +3118,7 @@ fn auto_attack_tick(
         return None;
     }
     let target = target?;
-    let level = cast_skill_level(server, &skill, &me);
+    let level = cast_skill_level(server, skill, &me);
     let delay = attack_delay(server, &skill.template, level, &me, true, 1000.0) as i64;
     if has_task || gcd >= now_ms() {
         return Some(delay);
