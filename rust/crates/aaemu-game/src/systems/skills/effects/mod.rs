@@ -34,6 +34,10 @@ pub struct EffectSource {
     pub buff: Option<Arc<BuffTemplate>>,
     pub amount: i32,
     pub is_trigger: bool,
+    /// The live buff instance is endless (duration 0, endless tick count): it has no authored
+    /// total to spread, so a fixed tick value stays per tick even if the template carries a
+    /// finite placeholder duration (the housing "Burning House" deviation, PORTING.md).
+    pub buff_permanent: bool,
     /// `buff_triggers.use_damage_amount`: the effect's fixed value is per-mille of the event's
     /// damage amount instead of a flat value (1.2 `heal_effects`: 30 = 3%).
     pub use_damage_amount: bool,

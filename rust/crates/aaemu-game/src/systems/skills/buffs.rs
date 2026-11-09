@@ -1504,13 +1504,15 @@ fn time_to_time_apply(
             continue;
         };
         let skill_object = SkillObject::None;
+        let mut source = EffectSource::from_buff(template.clone());
+        source.buff_permanent = b.duration == 0 && b.count == -1;
         let args = EffectArgs {
             caster: caster.cloned(),
             caster_caster: buff_skill_caster(b),
             target: Target::Obj(owner.clone()),
             target_caster: SkillCastTarget::Unit(owner.obj_id()),
             cast,
-            source: EffectSource::from_buff(template.clone()),
+            source,
             skill_object: &skill_object,
         };
         effects::apply(server, kind, eff, &args, None);
@@ -1581,13 +1583,15 @@ pub(crate) fn do_area_tick(
                 continue;
             };
             let skill_object = SkillObject::None;
+            let mut source = EffectSource::from_buff(template.clone());
+            source.buff_permanent = b.duration == 0 && b.count == -1;
             let args = EffectArgs {
                 caster: Some(caster.clone()),
                 caster_caster: buff_skill_caster(b),
                 target: Target::Obj(trg.clone()),
                 target_caster: SkillCastTarget::Unit(trg.obj_id()),
                 cast,
-                source: EffectSource::from_buff(template.clone()),
+                source,
                 skill_object: &skill_object,
             };
             effects::apply(server, kind, eff, &args, None);
@@ -2278,6 +2282,7 @@ fn execute_trigger(
                 buff: Some(template.clone()),
                 amount,
                 is_trigger: true,
+                buff_permanent: false,
                 use_damage_amount: t.use_damage_amount,
                 always_hit: false,
                 source_item: None,
@@ -2292,6 +2297,7 @@ fn execute_trigger(
                 buff: None,
                 amount: 0,
                 is_trigger: false,
+                buff_permanent: false,
                 use_damage_amount: t.use_damage_amount,
                 always_hit: false,
                 source_item: None,
