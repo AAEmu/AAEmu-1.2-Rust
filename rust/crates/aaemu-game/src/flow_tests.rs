@@ -236,19 +236,21 @@ async fn lobby_flow_end_to_end() {
     let frames = c.drain();
     assert_eq!(frames.len(), 2);
     let resp = &frames[0];
-    // [dd 01 00 00][00 00] reason=0 gm=0 token=77 port=1250 wf=<now> pubKeySize=0 pubKey=""
+    // [dd 01 00 00][00 00] reason=0 gm=0 token=<stream ticket> port=1250 wf=<now> pubKeySize=0 pubKey=""
     assert_eq!(resp.len(), 6 + 2 + 1 + 4 + 2 + 8 + 2 + 2);
-    assert_eq!(
-        resp[..15],
-        hex("DD 01 00 00  00 00  00 00  00  4D 00 00 00  E2 04")[..]
-    );
+    assert_eq!(resp[..9], hex("DD 01 00 00  00 00  00 00  00")[..]);
+    assert_eq!(resp[13..15], hex("E2 04")[..]);
+    // The token is a random nonzero ticket, not the connection id.
+    let ticket = u32::from_le_bytes(resp[9..13].try_into().unwrap());
+    assert_ne!(ticket, 0);
     let wf = i64::from_le_bytes(resp[15..23].try_into().unwrap());
     assert!((wf - chrono::Utc::now().timestamp()).abs() < 30);
     assert_eq!(resp[23..], hex("00 00  00 00")[..]);
     assert_eq!(frames[1], l2(pp::ChangeStatePacket, &[0, 0, 0, 0]));
     assert_eq!(c.conn.account_id(), 1000);
     assert!(server.accounts.contains(1000));
-    assert_eq!(server.streams.account_for(77), Some(1000));
+    assert_eq!(server.streams.account_for(ticket), Some(1000));
+    assert_eq!(server.streams.ticket_for(77), Some(ticket));
 
     // The cookie is consumed: a second connection with it is refused and shut down.
     let mut c2 = client(&server, 78);
@@ -677,7 +679,7 @@ async fn a_second_cookie_for_a_connected_account_is_refused() {
         Some(1),
         "the existing session keeps the account"
     );
-    assert_eq!(server.streams.account_for(2), None);
+    assert_eq!(server.streams.ticket_for(2), None);
 }
 
 #[tokio::test]

@@ -146,19 +146,20 @@ pub async fn enter_world_login(
         conn.shutdown();
         return Ok(());
     }
-    if !server.streams.add_token(account_id, conn.id) {
+    // The stream join ticket is random, not the connection id (see `StreamManager`).
+    let Some(stream_ticket) = server.streams.add_token(account_id, conn.id) else {
         // StreamManager.AddToken: Dictionary.Add throws for a connection that already entered.
         return Err(GameError::Protocol(format!(
             "stream token for connection {} already registered",
             conn.id
         )));
-    }
+    };
 
     let gm = false; // connection.GetAttribute("gmFlag") != null — never set in 1.2
     conn.send(&X2EnterWorldResponsePacket {
         reason: 0,
         gm,
-        token: conn.id,
+        token: stream_ticket,
         port: server.config.stream_network.port,
         world_time: unix_time_now(),
     });

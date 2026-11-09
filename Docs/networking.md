@@ -257,9 +257,9 @@ their ports for orchestrators and container health checks.
 ### Stream connections (`src/stream/`)
 
 The client opens a second connection to the stream port (sent in `X2EnterWorldResponse`) and joins
-it with `CTJoin(accountId, cookie)`, where the cookie is its game connection id registered during
-`X2EnterWorld`. The stream carries doodad cell streaming and UCC (crest / emblem) uploads and
-downloads.
+it with `CTJoin(accountId, cookie)`, where the cookie is the random join ticket issued during
+`X2EnterWorld` (`X2EnterWorldResponse.token`). Until `CTJoin` is accepted only `CTJoin` is served.
+The stream carries doodad cell streaming and UCC (crest / emblem) uploads and downloads.
 
 - `listener.rs` is the same reader + writer task pattern; `StreamConnection` (owned by the task)
   holds the doodad request table and the linked game connection, and `StreamConnectionHandle` /

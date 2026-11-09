@@ -124,8 +124,10 @@ async fn serve_with(
         }
     }
 
-    // OnDisconnect: only the table entry is removed (UCC queues are left alone, as in C#).
+    // OnDisconnect: the table entry goes, and so does the connection's pending UCC upload /
+    // download state (the C# left it behind for ever).
     server.streams.connections.remove(id);
+    server.streams.ucc.drop_connection(id);
     drop(conn); // closes the writer channel; queued frames are flushed first
     let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
     tracing::info!("Client from {} disconnected", peer.ip());

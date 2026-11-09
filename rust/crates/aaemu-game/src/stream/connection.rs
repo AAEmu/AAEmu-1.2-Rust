@@ -70,6 +70,10 @@ impl StreamConnectionTable {
     }
 }
 
+/// Cell requests one stream connection keeps alive at once; the oldest is dropped beyond that
+/// (Rust addition, the C# table grew without bound).
+pub const MAX_LIVE_CELL_REQUESTS: usize = 256;
+
 /// `StreamConnection`.
 pub struct StreamConnection {
     pub id: u32,
@@ -129,9 +133,27 @@ impl StreamConnection {
 
     /// `GetNextRequestId(doodads)`: ids start at 0.
     pub fn next_request_id(&mut self, doodads: Vec<StreamDoodad>) -> i32 {
+        // Rust addition: the client abandons requests without telling the server
+        // (`CTCancelCell` does nothing), so the oldest one makes room.
+        if self.requests.len() >= MAX_LIVE_CELL_REQUESTS {
+            let latest = self.request_id;
+            let oldest = self
+                .requests
+                .keys()
+                .copied()
+                .max_by_key(|id| latest.wrapping_sub(*id) as u32);
+            if let Some(oldest) = oldest {
+                self.requests.remove(&oldest);
+            }
+        }
         self.request_id = self.request_id.wrapping_add(1);
         self.requests.insert(self.request_id, doodads);
         self.request_id
+    }
+
+    /// Number of live cell requests.
+    pub fn request_count(&self) -> usize {
+        self.requests.len()
     }
 
     pub fn request(&self, request_id: i32) -> Option<&Vec<StreamDoodad>> {

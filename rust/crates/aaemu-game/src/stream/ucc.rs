@@ -309,7 +309,16 @@ impl UccManager {
             let Some(handle) = st.complex_upload_parts.get_mut(&conn.id) else {
                 return Ok(());
             };
-            handle.add_part(part);
+            if !handle.add_part(part) {
+                // More data than declared (or an endless stream of parts): drop the upload and
+                // the connection.
+                st.complex_upload_parts.remove(&conn.id);
+                st.upload_queue.remove(&conn.id);
+                return Err(GameError::Protocol(format!(
+                    "UccManager.UploadPart: stream connection {} sent more than its declared upload",
+                    conn.id
+                )));
+            }
             if handle.upload_complete() {
                 // FinalizeUpload writes into the UCC that StartUpload queued.
                 let data = handle.finalize();
@@ -329,6 +338,21 @@ impl UccManager {
             });
             Ok(())
         }
+    }
+
+    /// Drops the pending upload / download state of a closed stream connection (Rust addition:
+    /// the C# left these entries behind for ever).
+    pub fn drop_connection(&self, connection_id: u32) {
+        let mut st = self.state();
+        st.upload_queue.remove(&connection_id);
+        st.complex_upload_parts.remove(&connection_id);
+        st.download_queue.remove(&connection_id);
+    }
+
+    /// Entries left in the download queue (tests).
+    #[cfg(test)]
+    pub fn download_queue_len(&self) -> usize {
+        self.state().download_queue.len()
     }
 
     /// `AddDefaultUcc(defaultUcc, connection)`.

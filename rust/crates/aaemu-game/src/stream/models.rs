@@ -206,6 +206,15 @@ impl Ucc {
     }
 }
 
+/// Most bytes one custom UCC (crest image) upload may declare and accumulate. A 1.2 crest is a
+/// small image; no client limit is documented in this repository, so 1 MiB is the cap (Rust
+/// addition).
+pub const MAX_UCC_UPLOAD_BYTES: i32 = 1 << 20;
+
+/// Most parts of one upload (`CTUploadEmblemStream` carries at most 3096 bytes; empty parts do
+/// not advance the size, so the parts are counted too). Rust addition.
+pub const MAX_UCC_UPLOAD_PARTS: usize = 4096;
+
 /// `UccPart`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UccPart {
@@ -232,9 +241,17 @@ impl UccUploadHandle {
         }
     }
 
-    pub fn add_part(&mut self, part: UccPart) {
-        self.uploaded_size = self.uploaded_size.wrapping_add(part.data.len() as i32);
+    /// Adds a part. `false` (nothing added) when the part would carry the upload past its
+    /// declared size or past [`MAX_UCC_UPLOAD_PARTS`] parts. Deviation: the C# accepted any
+    /// number of bytes and parts.
+    pub fn add_part(&mut self, part: UccPart) -> bool {
+        let uploaded = i64::from(self.uploaded_size) + part.data.len() as i64;
+        if uploaded > i64::from(self.expected_size) || self.parts.len() >= MAX_UCC_UPLOAD_PARTS {
+            return false;
+        }
+        self.uploaded_size = uploaded as i32;
         self.parts.push(part);
+        true
     }
 
     pub fn upload_complete(&self) -> bool {
@@ -279,20 +296,38 @@ mod tests {
     #[test]
     fn upload_handle() {
         let mut h = UccUploadHandle::new(5);
-        h.add_part(UccPart {
+        let part = |index: u32, data: &[u8]| UccPart {
             total: 5,
-            index: 0,
-            size: 3,
-            data: vec![1, 2, 3],
-        });
+            index,
+            size: data.len() as i32,
+            data: data.to_vec(),
+        };
+        assert!(h.add_part(part(0, &[1, 2, 3])));
         assert!(!h.upload_complete());
-        h.add_part(UccPart {
-            total: 5,
-            index: 1,
-            size: 2,
-            data: vec![4, 5],
-        });
+        // More than was declared is refused and changes nothing.
+        assert!(!h.add_part(part(1, &[4, 5, 6])));
+        assert_eq!(h.uploaded_size, 3);
+        assert!(h.add_part(part(1, &[4, 5])));
         assert!(h.upload_complete());
         assert_eq!(h.finalize(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn upload_handle_caps_the_part_count() {
+        let mut h = UccUploadHandle::new(MAX_UCC_UPLOAD_BYTES);
+        for index in 0..MAX_UCC_UPLOAD_PARTS {
+            assert!(h.add_part(UccPart {
+                total: 1,
+                index: index as u32,
+                size: 0,
+                data: Vec::new(),
+            }));
+        }
+        assert!(!h.add_part(UccPart {
+            total: 1,
+            index: 0,
+            size: 0,
+            data: Vec::new(),
+        }));
     }
 }
