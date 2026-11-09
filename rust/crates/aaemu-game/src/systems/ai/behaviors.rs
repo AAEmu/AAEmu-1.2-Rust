@@ -317,6 +317,10 @@ fn owner_pos(c: &AiCtx<'_>) -> Vec3 {
     npc::world_pos(c.server, &c.obj)
 }
 
+/// The reach of the melee base skill (id 2): the `PickSkillAndUseIt` guard distance and the cap
+/// of the `MoveInRange` stop distance.
+const MELEE_ATTACK_RANGE: f32 = 4.0;
+
 /// `Behavior.PickSkillAndUseIt(kind, target, targetDist)`.
 pub fn pick_skill_and_use_it(
     c: &mut AiCtx<'_>,
@@ -376,10 +380,6 @@ pub fn pick_skill_and_use_it(
     if !skills.is_empty() {
         picked = skills[rand::thread_rng().gen_range(0..skills.len())];
     }
-    // Hackfix for Melee attack. Needs to look at the held weapon (if any) or default to 3m
-    if picked == 2 && target_dist > 4.0 {
-        return skill_result::TOO_FAR_RANGE;
-    }
     let Some(skill) = ai_skills::new_skill(c, picked) else {
         // new Skill(null) throws NullReferenceException in the C#.
         tracing::error!(
@@ -388,7 +388,14 @@ pub fn pick_skill_and_use_it(
         );
         return res;
     };
-    set_weapon_range(c, k, &skill, target);
+    // Deviation from the C#: SetWeaponRange runs before the melee hackfix below. The C# returned
+    // TOO_FAR_RANGE first, so after a ranged skill went on cooldown the stale (long) weapon range
+    // kept MoveInRange parking the NPC at that range while it only had skill 2 to use.
+    set_weapon_range(c, k, &skill);
+    // Hackfix for Melee attack. Needs to look at the held weapon (if any) or default to 3m
+    if picked == 2 && target_dist > MELEE_ATTACK_RANGE {
+        return skill_result::TOO_FAR_RANGE;
+    }
     let mut delay2 = (t.base_skill_delay * 1000.0) as i64;
     if t.base_skill_delay == 0.0 {
         delay2 = rand::thread_rng().gen_range(1500..1550);
@@ -706,7 +713,6 @@ fn set_weapon_range(
     c: &mut AiCtx<'_>,
     k: BehaviorKind,
     skill: &crate::systems::skills::state::SkillRef,
-    target: &WorldObject,
 ) {
     let skill_range = crate::systems::skills::skill::apply_skill_modifiers(
         c.server,
@@ -718,9 +724,11 @@ fn set_weapon_range(
     let mut min_range_check = f64::from(skill.template.min_range);
     let mut max_range_check = skill_range;
     if skill.template.weapon_slot_for_range_id > 0 {
+        // Deviation from the C#: the range comes from the NPC's own weapon. The C# read the
+        // target's (the player's) holdable, so the chase range followed the player's weapon.
         let (mut min_w, mut max_w) = (0.0f32, 3.0f32); // Fist default
         if let Some(h) =
-            ai_skills::weapon_holdable(c, target, skill.template.weapon_slot_for_range_id)
+            ai_skills::weapon_holdable(c, &c.obj, skill.template.weapon_slot_for_range_id)
         {
             min_w = h.0;
             max_w = h.1;
@@ -728,9 +736,19 @@ fn set_weapon_range(
         min_range_check = f64::from(min_w);
         max_range_check = f64::from(max_w);
     }
+    let mut max_range_check = max_range_check as f32;
+    // Deviation from the C#: MoveInRange stops at `attack_start_range_scale * max_weapon_range`,
+    // but the melee base skill (id 2) is only used within MELEE_ATTACK_RANGE. Cap the chase range
+    // so a scale above 1 (or a long-range holdable) cannot park the NPC out of melee reach.
+    if skill.id == 2 {
+        let scale = template_scalars(c).attack_start_range_scale;
+        if scale > 0.0 {
+            max_range_check = max_range_check.min(MELEE_ATTACK_RANGE / scale);
+        }
+    }
     let s = c.st(k);
     s.min_weapon_range = min_range_check as f32;
-    s.max_weapon_range = max_range_check as f32;
+    s.max_weapon_range = max_range_check;
 }
 
 /// `Behavior.CheckFollowPath()`.
@@ -2866,7 +2884,7 @@ fn wild_boar_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
             if target_dist >= skill.template.min_range as f32
                 && target_dist <= skill.template.max_range as f32
             {
-                set_weapon_range(c, k, &skill, &target);
+                set_weapon_range(c, k, &skill);
                 let result = use_skill(c, k, skill, Some(&target), 0.0);
                 if result == skill_result::COOLDOWN_TIME {
                     pick_skill_and_use_it(
