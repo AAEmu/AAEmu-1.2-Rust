@@ -93,16 +93,27 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub abandoned_house_hits_to_break: u32,
-    /// Distance in metres beyond a house's garden plot that also refuses a Siege Camp
-    /// declaration (`SIEGE_CANNOT_DECLARE_NEAR_HOUSE` 633). `0` (default) refuses only a spot
-    /// inside a plot, the reading the 1.2 text ("cannot declare near a house", ui 5020)
-    /// supports. The retail margin is UNKNOWN: INFERRED, capture-pending.
-    /// `Housing.SiegeDeclareHouseMargin`.
+    /// Distance in metres beyond a house's garden plot that refuses a Siege Camp declaration
+    /// (`SIEGE_CANNOT_DECLARE_NEAR_HOUSE` 633). Farm and garden plot house designs use the
+    /// same `garden_radius` plot, so they are refused too. GameMeca 2013-04-22 (grade C) says
+    /// the camp may not be declared within about 10 m of houses (incl. farmland); the default
+    /// is `10.0`. `0` refuses only a spot inside a plot. `Housing.SiegeDeclareHouseMargin`.
     #[serde(
         rename = "siegedeclarehousemargin",
         deserialize_with = "crate::config::lenient"
     )]
     pub siege_declare_house_margin: f32,
+    /// Distance in metres from farmland that refuses a Siege Camp declaration
+    /// (`SIEGE_CANNOT_DECLARE_NEAR_HOUSE` 633). Farmland is a public farm area (a
+    /// `PublicFarmManager._farmZones` sub zone, where common-farm doodads may be planted) or
+    /// a planted farm doodad (a template with a `DoodadFuncHouseFarm` phase func, or a doodad
+    /// carrying a `farm_type`). GameMeca 2013-04-22 (grade C) says about 10 m from houses
+    /// (incl. farmland); the default is `10.0`. `Housing.SiegeDeclareFarmMargin`.
+    #[serde(
+        rename = "siegedeclarefarmmargin",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_declare_farm_margin: f32,
     /// Distance in metres from the declared spot at which a different zone group refuses the
     /// declaration (`SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE` 661). `0` (default) refuses when
     /// the spot itself lies in another zone group than the besieged dominion. The retail
@@ -112,26 +123,25 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub siege_declare_zone_margin: f32,
-    /// Enable the peace-area refusal (`SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS` 625). The 1.2
-    /// text is "cannot declare near a peace area" (ui 4837); the only 1.2 peace data is the
-    /// zone conflict table (a zone group with no `conflict_zones` row never leaves peace, and
-    /// a row's state can be `Peace`), but the declaration rule itself is UNKNOWN. `false`
-    /// (default) keeps the previous behaviour (no refusal). `Housing.SiegeDeclarePeaceCheck`.
+    /// Enable the resurrection-point refusal (`SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS` 625).
+    /// GameMeca 2013-04-22 (grade C): the camp may not be declared within about 100 m of a
+    /// resurrection point. The server's resurrection points are the `Data/Portal/respawns.json`
+    /// portals (`PortalTables::respawns`). `true` (default) applies the rule.
+    /// `Housing.SiegeDeclareResurrectCheck`.
     #[serde(
-        rename = "siegedeclarepeacecheck",
+        rename = "siegedeclareresurrectcheck",
         deserialize_with = "crate::config::lenient"
     )]
-    pub siege_declare_peace_check: bool,
-    /// Distance in metres from the declared spot within which another peace zone group
-    /// refuses the declaration when [`Self::siege_declare_peace_check`] is on. `0` (default)
-    /// only inspects the spot itself; a spot in the besieged group (required by the 661 rule)
-    /// is never a peace-zone refusal at 0. INFERRED, capture-pending.
-    /// `Housing.SiegeDeclarePeaceMargin`.
+    pub siege_declare_resurrect_check: bool,
+    /// Distance in metres (horizontal) from the declared spot to the nearest resurrection
+    /// point that refuses the declaration when [`Self::siege_declare_resurrect_check`] is
+    /// on. GameMeca 2013-04-22 (grade C) says "about 100 m"; the default is `100.0`. `0`
+    /// refuses only a spot on a resurrection point. `Housing.SiegeDeclareResurrectMargin`.
     #[serde(
-        rename = "siegedeclarepeacemargin",
+        rename = "siegedeclareresurrectmargin",
         deserialize_with = "crate::config::lenient"
     )]
-    pub siege_declare_peace_margin: f32,
+    pub siege_declare_resurrect_margin: f32,
     /// Half extent in metres of the collision box tested around the declared spot
     /// (`SIEGE_CANNOT_DECLARE_OBSTACLE` 741). The retail radius is UNKNOWN; the default is
     /// the server's player capsule radius (0.35 m, `collision::displacement`). INFERRED,
@@ -166,10 +176,11 @@ impl Default for HousingConfig {
             siege_shop_gate: false,
             placement_strict_surface: false,
             abandoned_house_hits_to_break: default_abandoned_house_hits_to_break(),
-            siege_declare_house_margin: 0.0,
+            siege_declare_house_margin: 10.0,
+            siege_declare_farm_margin: 10.0,
             siege_declare_zone_margin: 0.0,
-            siege_declare_peace_check: false,
-            siege_declare_peace_margin: 0.0,
+            siege_declare_resurrect_check: true,
+            siege_declare_resurrect_margin: 100.0,
             siege_declare_obstacle_radius: default_siege_declare_obstacle_radius(),
         }
     }
@@ -268,30 +279,33 @@ mod tests {
     #[test]
     fn siege_declare_placement_thresholds_default_and_bind() {
         let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(default.housing.siege_declare_house_margin, 0.0);
+        assert_eq!(default.housing.siege_declare_house_margin, 10.0);
+        assert_eq!(default.housing.siege_declare_farm_margin, 10.0);
         assert_eq!(default.housing.siege_declare_zone_margin, 0.0);
-        assert!(!default.housing.siege_declare_peace_check);
-        assert_eq!(default.housing.siege_declare_peace_margin, 0.0);
+        assert!(default.housing.siege_declare_resurrect_check);
+        assert_eq!(default.housing.siege_declare_resurrect_margin, 100.0);
         assert_eq!(default.housing.siege_declare_obstacle_radius, 0.35);
-        for value in [serde_json::json!(true), serde_json::json!("true")] {
+        for value in [serde_json::json!(false), serde_json::json!("false")] {
             let config = crate::config::AppConfig::from_value(serde_json::json!({
-                "Housing": { "SiegeDeclarePeaceCheck": value }
+                "Housing": { "SiegeDeclareResurrectCheck": value }
             }))
             .unwrap();
-            assert!(config.housing.siege_declare_peace_check);
+            assert!(!config.housing.siege_declare_resurrect_check);
         }
         let config = crate::config::AppConfig::from_value(serde_json::json!({
             "Housing": {
                 "SiegeDeclareHouseMargin": 2.5,
+                "SiegeDeclareFarmMargin": "3.5",
                 "SiegeDeclareZoneMargin": "7.5",
-                "SiegeDeclarePeaceMargin": 100,
+                "SiegeDeclareResurrectMargin": 50,
                 "SiegeDeclareObstacleRadius": "1.25"
             }
         }))
         .unwrap();
         assert_eq!(config.housing.siege_declare_house_margin, 2.5);
+        assert_eq!(config.housing.siege_declare_farm_margin, 3.5);
         assert_eq!(config.housing.siege_declare_zone_margin, 7.5);
-        assert_eq!(config.housing.siege_declare_peace_margin, 100.0);
+        assert_eq!(config.housing.siege_declare_resurrect_margin, 50.0);
         assert_eq!(config.housing.siege_declare_obstacle_radius, 1.25);
     }
 

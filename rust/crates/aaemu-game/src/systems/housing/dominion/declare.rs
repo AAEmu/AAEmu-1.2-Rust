@@ -246,35 +246,123 @@ fn other_zone_group_within(
     })
 }
 
-/// A zone group at peace: a group with no `conflict_zones` row never enters a PvP state (the
-/// combat fallback is `ConflictType.Peace`, as in the C#), and a row whose current state is
-/// `Peace` is a peace zone now. This is the only 1.2 peace data available; the declaration
-/// rule itself is UNKNOWN (`PORTING.md`).
-fn is_peace_group(server: &GameServer, group: u32) -> bool {
-    match server.world.zone_conflicts.get(server, group) {
-        Some(conflict) => conflict.current_state == crate::data::world_data::conflict_type::PEACE,
-        None => true,
-    }
-}
-
-/// 625: another zone group at peace lies within `margin` metres. The besieged group itself is
-/// not a peace refusal: the siege zones are not `conflict_zones` rows, so counting it would
-/// refuse every declaration.
-fn peace_zone_within(
+/// 633 farmland: the spot is inside a public farm area, or within `margin` metres of one.
+/// The public farm areas are the `PublicFarmManager._farmZones` sub zone polygons, the data
+/// the server already uses to decide whether a placement is a common-farm planting. The sub
+/// zone test is a point-in-polygon test, so "within `margin`" is sampled like the 661 rule.
+fn public_farm_near(
     server: &GameServer,
     world: &crate::world::WorldInstance,
     x: f32,
     y: f32,
-    zone_group_id: u32,
     margin: f32,
 ) -> bool {
     if !x.is_finite() || !y.is_finite() {
         return true;
     }
+    let farm_zones = &server.game_data.systems.npcs.public_farm.farm_zones;
+    if farm_zones.is_empty() {
+        return false;
+    }
+    let margin = if margin.is_finite() {
+        margin.max(0.0)
+    } else {
+        0.0
+    };
     sample_points(x, y, margin).into_iter().any(|(sx, sy)| {
-        zone_group_at(server, world, sx, sy)
-            .is_some_and(|group| group != zone_group_id && is_peace_group(server, group))
+        crate::systems::npcs::subzone::get_sub_zone_by_position(&server.game_data, world, sx, sy)
+            .into_iter()
+            .any(|sub_zone_id| farm_zones.contains_key(&sub_zone_id))
     })
+}
+
+/// Whether a doodad template is a farm product: one of its phase funcs is
+/// `DoodadFuncHouseFarm` (the crop / livestock growth phase, 368 rows / 147 templates in the
+/// 1.2 data).
+fn template_is_house_farm(server: &GameServer, template_id: u32) -> bool {
+    let doodads = &server.game_data.systems.npcs.doodad;
+    let Some(template) = doodads.template(template_id) else {
+        return false;
+    };
+    template.func_groups.iter().any(|group| {
+        doodads
+            .phase_funcs
+            .get(&group.id)
+            .is_some_and(|funcs| funcs.iter().any(|f| f.func_type == "DoodadFuncHouseFarm"))
+    })
+}
+
+/// 633 farmland: a planted farm doodad lies within `margin` metres of the spot. The doodads
+/// are the common-farm plantings (the ones carrying a `farm_type`) and any template with a
+/// `DoodadFuncHouseFarm` phase func, which covers the crops and livestock of private / public
+/// farms alike (the plot they stand on may be a public farm area or a house garden).
+fn farm_doodad_near(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    x: f32,
+    y: f32,
+    margin: f32,
+) -> bool {
+    if !x.is_finite() || !y.is_finite() {
+        return true;
+    }
+    let margin = if margin.is_finite() {
+        margin.max(0.0)
+    } else {
+        0.0
+    };
+    world.all_doodads().into_iter().any(|doodad| {
+        let (template_id, farm_type) = {
+            let d = doodad.data();
+            (d.template_id, d.farm_type)
+        };
+        if farm_type == crate::systems::npcs::public_farm::farm_group_kind::INVALID
+            && !template_is_house_farm(server, template_id)
+        {
+            return false;
+        }
+        let position = world.world_pos_rot(&crate::world::WorldObject::Doodad(doodad.clone()));
+        let dx = f64::from(x) - f64::from(position.x);
+        let dy = f64::from(y) - f64::from(position.y);
+        dx * dx + dy * dy <= f64::from(margin) * f64::from(margin)
+    })
+}
+
+/// 625: a resurrection point lies within `margin` metres (horizontal) of the spot. The
+/// server's resurrection points are the `Data/Portal/respawns.json` portals
+/// (`PortalTables::respawns`, `PortalManager.Load`); their zone is always computed against
+/// `main_world` (`portal::respawn_zone`), so the rule only applies there.
+fn resurrection_near(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    x: f32,
+    y: f32,
+    margin: f32,
+) -> bool {
+    if !x.is_finite() || !y.is_finite() {
+        return true;
+    }
+    if world.template.id != server.game_data.worlds.default_world_template_id() {
+        return false;
+    }
+    let margin = if margin.is_finite() {
+        margin.max(0.0)
+    } else {
+        0.0
+    };
+    server
+        .game_data
+        .systems
+        .npcs
+        .portal
+        .respawns
+        .portals
+        .iter()
+        .any(|point| {
+            let dx = f64::from(x) - f64::from(point.x);
+            let dy = f64::from(y) - f64::from(point.y);
+            dx * dx + dy * dy <= f64::from(margin) * f64::from(margin)
+        })
 }
 
 /// A slave or mate the caster owns (the camp spot is one metre in front of the caster, so its
@@ -336,12 +424,14 @@ fn obstacle_near(
 /// the declaration cannot race the period it was accepted in. The order of the refusals is
 /// this server's policy, the ids are the client's (ui_texts).
 ///
-/// The placement refusals 633 (house), 661 (another zone group), 625 (peace area, behind a
-/// config switch) and 741 (obstacles) run after the authored `radius_declare` with the
-/// `Housing.SiegeDeclare*` thresholds; every numeric threshold is INFERRED/capture-pending
-/// (PORTING.md). The "siege too imminent" window behind 760 is UNKNOWN and not enforced;
-/// 459 is used for a missing SiegeMaster policy although 581 is the other candidate text.
-/// The in-game cancel trigger is UNKNOWN; cancelling is a GM command.
+/// The placement refusals 633 (house or farmland), 661 (another zone group), 625
+/// (resurrection point, behind a config switch that defaults on) and 741 (obstacles) run
+/// after the authored `radius_declare` with the `Housing.SiegeDeclare*` thresholds. GameMeca
+/// 2013-04-22 (grade C) gives "about 100 m" from a resurrection point and "about 10 m" from
+/// houses (incl. farmland) for 625/633; 661 and 741 are INFERRED (PORTING.md). The "siege
+/// too imminent" window behind 760 is UNKNOWN and not enforced; 459 is used for a missing
+/// SiegeMaster policy although 581 is the other candidate text. The in-game cancel trigger
+/// is UNKNOWN; cancelling is a GM command.
 pub fn handle_camp_use(
     server: &GameServer,
     args: &crate::systems::skills::effects::EffectArgs<'_>,
@@ -474,6 +564,18 @@ pub fn handle_camp_use(
         pos.x,
         pos.y,
         housing.siege_declare_house_margin,
+    ) || public_farm_near(
+        server,
+        &player_world,
+        pos.x,
+        pos.y,
+        housing.siege_declare_farm_margin,
+    ) || farm_doodad_near(
+        server,
+        &player_world,
+        pos.x,
+        pos.y,
+        housing.siege_declare_farm_margin,
     ) {
         return refuse(player, error::SIEGE_CANNOT_DECLARE_NEAR_HOUSE);
     }
@@ -487,14 +589,13 @@ pub fn handle_camp_use(
     ) {
         return refuse(player, error::SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE);
     }
-    if housing.siege_declare_peace_check
-        && peace_zone_within(
+    if housing.siege_declare_resurrect_check
+        && resurrection_near(
             server,
             &player_world,
             pos.x,
             pos.y,
-            zone,
-            housing.siege_declare_peace_margin,
+            housing.siege_declare_resurrect_margin,
         )
     {
         return refuse(player, error::SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS);

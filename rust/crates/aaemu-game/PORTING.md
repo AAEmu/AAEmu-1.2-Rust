@@ -5098,30 +5098,40 @@ and in NPC wandering / buff remaining times.
   siege-participation rights in the expedition") is the roster join's `join_siege` refusal
   (ui 4656 "can join siege"); both player and GM roster-registration paths use
   `dominion::rights::join_policy_allows` (`/joinsiege` and `/dominion register`), so no path
-  can add a member whose rank forbids joining. **Capture-pending assumptions:** the placement
-  thresholds behind 625 (resurrection point), 633 (house), 661 (another zone) and 741
-  (obstacle), and the "siege too imminent" window behind 760, are UNKNOWN. The four
-  placement refusals are implemented with INFERRED thresholds in the WP-SD2b
-  placement-refusals bullet below (625 stays behind a default-off switch); 760 is not
-  enforced. The cancellation trigger's UI is UNKNOWN. The check order is this server's
-  policy. Tests:
+  can add a member whose rank forbids joining. **Threshold sources:** 625 (resurrection
+  point, about 100 m) and 633 (houses / farmland, about 10 m) follow GameMeca 2013-04-22
+  (grade C, `web-capture-substitutes.md` Part B.3); 661 (another zone) and 741 (obstacle)
+  remain INFERRED, and the "siege too imminent" window behind 760 is UNKNOWN and not
+  enforced. See the WP-SD2b placement-refusals bullet below. The cancellation trigger's UI
+  is UNKNOWN. The check order is this server's policy. Tests:
   `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
   `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
   `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
   442/443, item kept each time), `unrelated_stale_or_rank_ineligible_members_cannot_join`
   (581 on the join path), `the_gm_register_path_also_applies_the_join_policy`.
-* systems::housing (WP-SD2b placement refusals, 2026-11-08): the four declaration placement
-  refusals run after the authored `radius_declare` (345) and before the rank policy (459),
-  each with a `Housing.SiegeDeclare*` threshold. Every numeric threshold is **INFERRED**:
-  the 1.2 texts name the situation but no capture or decompiled server rule gives a
-  distance (`round6-siege.md` "Thresholds"). The ids exist in the client error table
-  (`x2game.dll.c` cases 0x271 = 625, 0x279 = 633, 0x295 = 661, 0x2e5 = 741, 0x2ed = 749):
-  * **633 `SIEGE_CANNOT_DECLARE_NEAR_HOUSE`** (ui 5020 "cannot declare near a house",
-    INFERRED source text). Data: the house's `garden_radius` square, the same
-    `GetHouseAtLocation` query the server uses (`house_at_location_in_world`), with
-    `Housing.SiegeDeclareHouseMargin` metres beyond the plot. Default `0` refuses a spot
-    inside a plot only (the text's minimum reading); the retail margin is UNKNOWN,
-    capture-pending.
+* systems::housing (WP-SD2b placement refusals, 2026-11-08; thresholds reworked
+  2026-11-09): the four declaration placement refusals run after the authored
+  `radius_declare` (345) and before the rank policy (459), each with a
+  `Housing.SiegeDeclare*` threshold. GameMeca 2013-04-22 (Park Hanjin,
+  https://www.gamemeca.com/view.php?gid=276862, summarised in `web-capture-substitutes.md`
+  Part B.3) is a **grade C** Korean 1.2-era source: the camp may be declared anywhere
+  except within "about 100 m" of a resurrection point and "about 10 m" of houses (incl.
+  farmland). Its distances are approximate ("about"), so they are the defaults of 625/633,
+  not exact bounds. 661 and 741 stay **INFERRED** (`round6-siege.md` "Thresholds"). The ids
+  exist in the client error table (`x2game.dll.c` cases 0x271 = 625, 0x279 = 633,
+  0x295 = 661, 0x2e5 = 741, 0x2ed = 749):
+  * **633 `SIEGE_CANNOT_DECLARE_NEAR_HOUSE`** (ui 5020 "cannot declare near a house").
+    Data: a house's `garden_radius` square, the same `GetHouseAtLocation` query the server
+    uses (`house_at_location_in_world`), with `Housing.SiegeDeclareHouseMargin` metres
+    beyond the plot (default **10**, GameMeca "about 10 m"; farm and garden plot house
+    designs use the same square, so they are included). Farmland is additionally refused
+    with `Housing.SiegeDeclareFarmMargin` metres (default **10**, same source): a public
+    farm area (a `PublicFarmManager._farmZones` sub zone polygon, the data the server
+    already uses for common-farm planting; the margin is ring-sampled, the same INFERRED
+    approximation as 661) and a planted farm doodad (a template with a
+    `DoodadFuncHouseFarm` phase func, the 1.2 data's crop / livestock marker, or a doodad
+    carrying a `farm_type`; the distance is to the doodad's world position). The two
+    margins are server-configurable; `0` refuses only a spot inside the plot / farm area.
   * **661 `SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE`** (ui 5159 "too close to another zone",
     INFERRED source text). Data: the authored zone at the spot (`WorldInstance.zone_id_at`
     -> `zones.group_id`) must be the besieged dominion's group; `Housing.SiegeDeclareZoneMargin`
@@ -5129,15 +5139,17 @@ and in NPC wandering / buff remaining times.
     sampling of the zone grid, INFERRED approximation). Default `0` checks the spot itself
     only; the retail margin is UNKNOWN, capture-pending.
   * **625 `SIEGE_CANNOT_DECLARE_NEAR_RESURRECT_POS`** (ui 4837 text "cannot declare near a
-    peace area"; the key name says resurrection point, the text is the reading used here).
-    Data source: the only 1.2 peace data is the zone conflict table (`conflict_zones`): a
-    group with no row never enters a PvP state, and the combat fallback is
-    `ConflictType.Peace` (`systems/skills/combat.rs`, C# `CharacterCombat.cs`), while a row
-    whose current state is `Peace` is peaceful now. `Housing.SiegeDeclarePeaceCheck`
-    defaults **false** because the declaration rule itself is UNKNOWN (the siege zones are
-    not conflict-zone rows, so the besieged group is never counted); when on,
-    `Housing.SiegeDeclarePeaceMargin` metres around the spot are sampled. INFERRED,
-    capture-pending.
+    peace area"; the key name and GameMeca say resurrection point, which is the reading
+    used here). Data source: the `Data/Portal/respawns.json` portals
+    (`PortalTables::respawns`, loaded by `PortalManager.Load`; the server's resurrection
+    points, `portal::closest_return_portal` / `respawn_zone`). Their zone is always computed
+    against `main_world` (`portal::respawn_zone`), so the rule applies in the main world
+    only. `Housing.SiegeDeclareResurrectMargin` metres (default **100**, GameMeca "about
+    100 m", horizontal distance to the nearest point) refuses when
+    `Housing.SiegeDeclareResurrectCheck` is on (default **true**). An empty respawn table
+    refuses nothing. The previous peace-area reading (zone conflict `Peace` state, default
+    off) is removed: the source and the key name name a resurrection point, not a zone
+    state.
   * **741 `SIEGE_CANNOT_DECLARE_OBSTACLE`** (ui 5783 "there are obstacles nearby", INFERRED
     source text). Data: the house builder's collision query (`collision::box_obstacles`,
     mask 0x1f) at the spot; houses are the 633 rule, vegetation / brush / the caster and its
@@ -5152,11 +5164,13 @@ and in NPC wandering / buff remaining times.
     the `CSCreateDoodadPacket` row above and the `territory_statue_*` tests; this change
     adds no second gate.
   Tests: `camp_placement_refuses_a_house_plot_and_honours_the_house_margin`,
+  `camp_placement_refuses_farm_plots_farm_doodads_and_public_farm_areas`,
+  `camp_placement_refuses_resurrection_points_and_honours_the_margin`,
   `camp_placement_refuses_another_zone_group_and_honours_the_zone_margin`,
-  `camp_peace_check_is_off_by_default_and_honours_its_margin`,
   `camp_placement_refuses_obstacles_and_honours_the_radius` (each drives the real
-  `CSStartSkillPacket` camp cast and fails without its check),
-  `siege_declare_placement_thresholds_default_and_bind` (config defaults and overrides).
+  `CSStartSkillPacket` camp cast, checks the 9/11 m and 99/101 m boundaries and fails
+  without its check), `siege_declare_placement_thresholds_default_and_bind` (config
+  defaults and overrides).
   The "siege too imminent" window behind 760 remains UNKNOWN and is not enforced.
 * systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
   doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
