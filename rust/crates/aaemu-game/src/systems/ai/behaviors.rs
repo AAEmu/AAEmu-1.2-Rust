@@ -1755,8 +1755,10 @@ fn return_state_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     }
     if c.ai.param.as_ref().is_some_and(|p| !p.go_return_state()) {
         on_completed_return_no_teleport(c);
+    } else {
+        // Not for an NPC that was just sent idle.
+        plan_return_route(c);
     }
-    plan_return_route(c);
     let s = c.st(k);
     s.timeout_time = now_ms() + 20_000;
     s.enter = true;

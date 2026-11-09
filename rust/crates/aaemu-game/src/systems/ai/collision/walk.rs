@@ -17,7 +17,7 @@
 
 use crate::server::GameServer;
 
-use super::query::ray_flags;
+use super::query::{mask, ray_flags};
 
 /// Height above the ground of the probe ray (m).
 pub const WALK_PROBE_HEIGHT: f32 = 0.5;
@@ -47,7 +47,7 @@ pub fn wall_distance(
         (b[2] - a[2]) / len,
     ];
     for _ in 0..=MAX_FLOOR_HITS {
-        let hit = super::raycast(server, instance_id, a, b, 0x001, ray_flags::DEFAULT)?;
+        let hit = super::raycast(server, instance_id, a, b, mask::STATIC, ray_flags::DEFAULT)?;
         let Some(h) = hit else {
             return Some(None);
         };
