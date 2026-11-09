@@ -150,23 +150,16 @@ pub fn geo_data_height(server: &GameServer, obj: &WorldObject, pos: Vec3) -> f32
     }
 }
 
-/// `Npc.FindPath(abuser)`: a route from the NPC to the abuser as `FoundPath`; a chased player
-/// gets the debug chat lines the C# sends.
-///
-/// The route is the navmesh corridor pulled tight with the funnel algorithm (or the straight
-/// line when it crosses only linked triangles), see [`PathNode::find_smooth_path`]. When the
-/// navmesh cannot give one (waypoint zones, edges unknown, forbidden areas in the way) the C#
-/// pipeline remains: the A* node positions, `ReducePath`.
-pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
+/// The route from the NPC to `target` as `FoundPath` (see [`npc_find_path`]); the number of
+/// raw steps, `None` when there is no geodata or the search failed (`FoundPath` is then empty).
+/// Also used for the walk home of a returning NPC, which has no victim.
+pub fn plan_route(c: &mut AiCtx<'_>, target: Vec3) -> Option<usize> {
     let me = super::npc::world_pos(c.server, &c.obj);
-    let target = super::npc::world_pos(c.server, abuser);
     c.ai.path_node.start_point_pos = me;
     c.ai.path_node.end_point_pos = target;
     c.ai.path_node.zone_key = c.obj.transform().zone_id;
     c.ai.path_node.found_path.clear();
-    let Some(geo) = geo_of(c.server, &c.obj) else {
-        return;
-    };
+    let geo = geo_of(c.server, &c.obj)?;
     let (start, end) = (c.ai.path_node.start_point_pos, c.ai.path_node.end_point_pos);
     let smooth = match c
         .ai
@@ -176,7 +169,7 @@ pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("FindPath for npc {}: {}", c.npc.obj_id, e.0);
-            return;
+            return None;
         }
     };
     let raw_steps = match smooth {
@@ -184,15 +177,25 @@ pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
             c.ai.path_node.found_path = s.points.into();
             s.corridor_len
         }
-        None => {
-            let Some(raw) = fallback_path(c, &geo, start, end, me, target) else {
-                return;
-            };
-            raw
-        }
+        None => fallback_path(c, &geo, start, end, me, target)?,
     };
     // Chase regeneration compares with the victim's actual position, not a node's centroid.
     c.ai.path_node.end_point_pos = target;
+    Some(raw_steps)
+}
+
+/// `Npc.FindPath(abuser)`: a route from the NPC to the abuser as `FoundPath`; a chased player
+/// gets the debug chat lines the C# sends.
+///
+/// The route is the navmesh corridor pulled tight with the funnel algorithm (or the straight
+/// line when it crosses only linked triangles), see [`PathNode::find_smooth_path`]. When the
+/// navmesh cannot give one (waypoint zones, edges unknown, forbidden areas in the way) the C#
+/// pipeline remains: the A* node positions, `ReducePath`.
+pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
+    let target = super::npc::world_pos(c.server, abuser);
+    let Some(raw_steps) = plan_route(c, target) else {
+        return;
+    };
     if let Some(p) = abuser.as_player() {
         crate::world::session::send_message(
             p,

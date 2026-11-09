@@ -1755,10 +1755,34 @@ fn return_state_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     }
     if c.ai.param.as_ref().is_some_and(|p| !p.go_return_state()) {
         on_completed_return_no_teleport(c);
+    } else {
+        // Not for an NPC that was just sent idle.
+        plan_return_route(c);
     }
     let s = c.st(k);
     s.timeout_time = now_ms() + 20_000;
     s.enter = true;
+}
+
+/// The straight way home crosses a wall: walk the navmesh route instead (deviation from the
+/// C#, see `PORTING.md`). Without a route (no collision service, `GeoDataMode` off, no
+/// navmesh) the NPC walks straight and the 20 s timeout teleport remains the backstop.
+fn plan_return_route(c: &mut AiCtx<'_>) {
+    reset_chase_path(c);
+    if !geo_data_mode(c) || moves_freely(c) {
+        return;
+    }
+    let idle = c.ai.idle_position;
+    if wall_ahead(c, idle).is_none() {
+        return;
+    }
+    let steps = super::geodata::plan_route(c, idle);
+    tracing::debug!(
+        npc = c.npc.obj_id,
+        steps = c.ai.path_node.found_path.len(),
+        raw = steps,
+        "return route planned around a wall"
+    );
 }
 
 fn return_state_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
@@ -1769,7 +1793,25 @@ fn return_state_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     let move_flags = npc::real_movement_flags(move_speed);
     move_speed *= delta_seconds(delta_ms);
     let idle = c.ai.idle_position;
-    let arrived = npc_move_towards(c, idle, move_speed as f32, move_flags, 1.0);
+    // Corners of the planned detour first (see `plan_return_route`); reached in XY like the
+    // chase waypoints.
+    let mut goal = idle;
+    let pos = owner_pos(c);
+    while let Some(next) = c.ai.path_node.found_path.front().copied() {
+        if calculate_distance(pos, next, false) > 0.25 {
+            goal = next;
+            break;
+        }
+        c.ai.path_node.found_path.pop_front();
+    }
+    let detour = goal != idle;
+    let arrived = npc_move_towards(
+        c,
+        goal,
+        move_speed as f32,
+        move_flags,
+        if detour { 0.25 } else { 1.0 },
+    ) && !detour;
     let can_fly = c.npc.data().can_fly;
     // Flyers return through the air: the ground 2D distance would end the return while the
     // NPC is still below its home altitude at the same XY.
@@ -1799,6 +1841,7 @@ fn on_completed_return(c: &mut AiCtx<'_>) {
 }
 
 fn on_completed_return_no_teleport(c: &mut AiCtx<'_>) {
+    reset_chase_path(c);
     c.go_to_idle();
 }
 
@@ -1811,9 +1854,14 @@ fn roaming_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     }
     let zero = |v: Vec3| v.x == 0.0 && v.y == 0.0 && v.z == 0.0;
     if zero(c.st(k).roam_target) && now_ms() > c.st(k).next_roaming {
-        let next = calc_next_roaming_position(c);
-        c.st(k).roam_target = next;
-        broadcast_posture(c, false);
+        match choose_roaming_position(c) {
+            Some(next) => {
+                c.st(k).roam_target = next;
+                broadcast_posture(c, false);
+            }
+            // Walled in: skip this roam cycle (deviation from the C#, see PORTING.md).
+            None => c.st(k).next_roaming = now_ms() + rand::thread_rng().gen_range(3..6) * 1000,
+        }
     }
     let target = c.st(k).roam_target;
     if zero(target) {
@@ -1831,6 +1879,79 @@ fn roaming_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
         s.next_roaming = now_ms() + rand::thread_rng().gen_range(3..6) * 1000;
         broadcast_posture(c, true);
     }
+}
+
+/// How far in front of a wall a shortened walk stops (m).
+const WALL_MARGIN: f32 = 0.6;
+/// A shortened roam walk must still be at least this long (m); roaming ends below 1 m.
+const MIN_SHORT_WALK: f32 = 1.5;
+/// Roam targets tried before the move is shortened or the cycle skipped.
+const ROAM_CANDIDATES: usize = 4;
+
+/// The horizontal distance to the first wall on the straight walk from the NPC to `to`, or
+/// `None` when the way is clear, the NPC moves freely (flyers, swimmers) or the collision
+/// service is off (the C# straight walk). The check runs once per chosen target / route
+/// segment, not per movement step.
+fn wall_ahead(c: &AiCtx<'_>, to: Vec3) -> Option<f32> {
+    if moves_freely(c) {
+        return None;
+    }
+    let from = owner_pos(c);
+    super::collision::walk::wall_distance(
+        c.server,
+        c.obj.transform().instance_id,
+        [from.x, from.y, from.z],
+        [to.x, to.y, to.z],
+    )
+    .flatten()
+}
+
+/// `calc_next_roaming_position` that never picks a target behind a wall: a few random
+/// candidates, else the walk to the farthest one cut short before its wall, else `None`
+/// (skip this roam cycle). Without the collision service the first candidate is taken, as in
+/// the C#.
+fn choose_roaming_position(c: &AiCtx<'_>) -> Option<Vec3> {
+    let mut best: Option<(f32, Vec3)> = None;
+    for _ in 0..ROAM_CANDIDATES {
+        let cand = calc_next_roaming_position(c);
+        let Some(wall) = wall_ahead(c, cand) else {
+            return Some(cand);
+        };
+        if best.is_none_or(|(d, _)| wall > d) {
+            best = Some((wall, cand));
+        }
+    }
+    let (wall, cand) = best?;
+    let from = owner_pos(c);
+    let stop = wall - WALL_MARGIN;
+    let total = calculate_distance(from, cand, false);
+    if stop < MIN_SHORT_WALK || total <= 0.0 {
+        return None;
+    }
+    let f = stop / total;
+    let (x, y) = (
+        from.x + (cand.x - from.x) * f,
+        from.y + (cand.y - from.y) * f,
+    );
+    let (can_fly, spawner_z, zone) = {
+        let n = c.npc.data();
+        (n.can_fly, n.spawner_z, n.unit.transform.zone_id)
+    };
+    let z = npc::reference_height_in(
+        c.server,
+        c.obj.transform().instance_id,
+        Some(crate::systems::npcs::heightmap::ReferenceHeightAi {
+            can_fly,
+            hold_or_idle: false,
+            spawner_z,
+            world_z: from.z,
+        }),
+        x,
+        y,
+        from.z,
+        zone,
+    );
+    Some(Vec3::new(x, y, z))
 }
 
 /// `AiUtils.CalcNextRoamingPosition(ai)` (taken from x2ai.lua).
@@ -3355,3 +3476,7 @@ mod fish_movement_tests;
 #[cfg(test)]
 #[path = "chase_tests.rs"]
 mod chase_tests;
+
+#[cfg(test)]
+#[path = "walk_tests.rs"]
+mod walk_tests;

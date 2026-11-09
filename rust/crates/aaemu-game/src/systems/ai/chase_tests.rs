@@ -17,7 +17,7 @@ use super::super::geodata::bai::{BaiFiles, UsedAreaNames};
 use super::super::geodata::manager::AiGeoData;
 use super::super::{geodata, npc};
 
-struct Files(HashMap<String, Vec<u8>>);
+pub(super) struct Files(pub(super) HashMap<String, Vec<u8>>);
 
 impl BaiFiles for Files {
     fn files_in_directory(&self, dir: &str, pattern: &str) -> Vec<String> {

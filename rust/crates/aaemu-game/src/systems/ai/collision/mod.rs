@@ -37,11 +37,12 @@ pub mod objects;
 pub mod query;
 pub mod residency;
 pub mod terrain;
+pub mod walk;
 pub mod water_areas;
 pub mod world;
 
 #[cfg(test)]
-mod flow_tests;
+pub(crate) mod flow_tests;
 #[cfg(test)]
 mod real_data_tests;
 #[cfg(test)]
@@ -302,6 +303,7 @@ pub fn load_cell(server: &GameServer, pw: &PhysWorld, cell: (i32, i32)) {
             vegetation: level == GeometryLevel::Full,
             visareas: server.config.physics.vis_areas,
             voxels: server.config.physics.voxels,
+            object_vegetation: server.config.physics.object_vegetation,
         };
         world::prepare_cell_with(&files, &models, &pw.world_name, &groups, cell, &load)
     };

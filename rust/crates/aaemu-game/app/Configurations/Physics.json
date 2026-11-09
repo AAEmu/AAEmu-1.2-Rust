@@ -4,6 +4,7 @@
         "Geometry": "Full",
         "VisAreas": true,
         "Voxels": true,
+        "ObjectVegetation": true,
         "LoadRadiusCells": 1,
         "LoadOnQuery": true,
         "UnloadAfterSeconds": 600,
