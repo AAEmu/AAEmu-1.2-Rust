@@ -312,9 +312,9 @@ main_world is 35×38 cells, of which 1,225 exist in 10.x (1,205 in 1.2).
 | file | count | total size | content | zone loader / physics |
 |---|---|---|---|---|
 | `cells/X_Y/client/terrain/heightmap.dat` | 1,225 | 389 MB (1.2: 702 MB) | terrain heights (quadtree nodes) | `Seamless_LoadCellTerrain` 0x3015D4A0 → CryPhysics **terrain heightfield** (`ent_terrain`). Queries: `GetTerrainElevation` (I3DEngine vt+1064, 38 call sites), `GetTerrainZ` (+1080, housing). **Rust: `npcs::heightmap` reads it (done).** |
-| `cells/X_Y/client/terrain/cover.ctc` | 1,220 | 1.79 GB | terrain texture/cover (surface-type layer) | surface types for doodad/house placement (`CannotPlaceDoodad`, surface-hack). Rust: not read. |
+| `cells/X_Y/client/terrain/cover.ctc` | 1,220 | 1.79 GB | terrain texture/cover (surface-type layer) | surface types for doodad/house placement (`CannotPlaceDoodad`, surface-hack). Rust: `visareas.dat` brushes, vegetation and voxel (cave) meshes are loaded by `ai::collision::cells::read_visareas` (2026-11-08); the rest is not read. |
 | `cells/X_Y/client/statobjs.dat` | 1,225 | 7.7 MB | per-cell model name list (`u32 n; {u32; char[256]}`) | brush model table |
-| `cells/X_Y/client/object.dat` | 1,225 | 416 MB | the same model list + material table + octree object nodes (`SOcTreeNodeChunk`) | `PrecacheCGFFromCell` 0x301601C0 + octree loader. **Rust: `ai::physics::objects_file` reads only the water areas from it.** |
+| `cells/X_Y/client/object.dat` | 1,225 | 416 MB | the same model list + material table + octree object nodes (`SOcTreeNodeChunk`) | `PrecacheCGFFromCell` 0x301601C0 + octree loader. **Rust: `ai::physics::objects_file` reads the water areas; `ai::collision::cells::read_object_dat_voxels` the voxel (cave) meshes; its brushes duplicate `brush.dat`.** |
 | `cells/X_Y/client/brush.dat` | 1,225 | 34 MB | **244,297 brush instances**. Header `u32 ver=1; u32 off[256]; u32 size[256]` (16×16 sectors of 64 m). 128-byte `SBrushChunk` records: AABB, flags, sector-local `Matrix34` @67, material id @115, **statobj index @123** | loaders 0x3017CC30 → 0x3017BA50 → `_LoadBrush` 0x3021E840. `CBrush::Physicalize` 0x30111970 creates a **static entity** with the model's phys geoms 0x1000 (collide), 0x1001 (no-collide) and 0x1002 (obstruct). **Rust: missing.** |
 | `cells/X_Y/client/vegetation.dat` | 1,225 | 156 MB | **2,429,076 instances**. Header with 4×4 sectors of 256 m; 64-byte `SVegetationChunk` (sector-local pos @39, scale @51, `u16 group` @55, packed angles) | `CVegetation::Physicalize` 0x30103DC0. Static whenever the group model has physics (`e_on_demand_physics`). 85% of instances are physical. **Rust: missing.** |
 | `world.xml` / `vegetation.xml` | 1 / 1 | 6.1 MB / 3.6 MB | zones, cells, sectors / 4,145 vegetation groups (`modelFileName`, …) | |
@@ -399,15 +399,13 @@ ballistic projectiles. `PrimitiveWorldIntersection` (37 sites) is used for capsu
 sweeps: blink, resurrect/teleport positions, mount/unmount, and building.
 
 ### 2.7 Gap summary vs. the Rust server
-Rust already loads: heightmaps (`npcs::heightmap`), water bodies from `object.dat`
+Rust already loads: static brush, vegetation, `visareas.dat` (instance halls) and voxel (cave) colliders (`ai::collision`), heightmaps (`npcs::heightmap`), water bodies from `object.dat`
 (`ai::physics::{objects_file,water}`), and the `.bai` navmesh (`ai::geodata`).
 
 Missing:
-* **static brush colliders** (`brush.dat` + `statobjs.dat` + CGF `MeshPhysicsData`);
-* **vegetation colliders** (`vegetation.dat` + `vegetation.xml` + CGF);
 * **doodad/house colliders** from their models;
 * terrain surface types (`cover.ctc`, `surface.xml`);
-* visareas and indoor geometry;
+* `visareas.dat` areas / portals as volumes (their brushes and voxels are loaded; the visibility areas themselves are not used);
 * level entities: areas and static gimmicks from `entities.xml`;
 * terrain holes.
 

@@ -441,6 +441,11 @@ fn real_server_with(e: &Env, geo_data_mode: bool) -> crate::server::GameServer {
     config.connections.mysql_provider.host = "127.0.0.1".into();
     config.connections.mysql_provider.port = 1;
     config.world.geo_data_mode = geo_data_mode;
+    if std::env::var_os("AAEMU_NO_VISAREAS").is_some() {
+        // The audit's "before" run: brush.dat and vegetation.dat only.
+        config.physics.vis_areas = false;
+        config.physics.voxels = false;
+    }
     let db = sqlx::mysql::MySqlPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(200))
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
@@ -768,9 +773,9 @@ fn world_npc_spawns(world: &str) -> Vec<[f32; 3]> {
     spawns
 }
 
-/// The instance halls whose floor model is not in the collision world (the dungeon halls are
-/// `object.dat` / `big_object.dat` models): the NPC spawns sit 44-200 m above the terrain, which
-/// is all the ground probe finds. A walker must keep standing where the world authored it (the
+/// The instance halls whose floor model was not in the collision world before `visareas.dat`
+/// was loaded (the halls are `visareas.dat` brushes, not `object.dat` / `big_object.dat`): the NPC
+/// spawns sit 44-200 m above the terrain, which is all the ground probe finds without them. A walker must keep standing where the world authored it (the
 /// navmesh height with `GeoDataMode`, else its level) instead of dropping to that terrain with its
 /// first step (Kroloal Cradle monsters stood 191 m below their spawns, out of reach).
 /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_instance_walkers -- --ignored --nocapture`
@@ -860,6 +865,10 @@ async fn real_sal_temple_boss_knockback_stays_on_the_hall_floor() {
     let zone = template.zone_keys.first().copied().unwrap_or(0);
     server.world.create_world_instance(Arc::new(template), 100);
     let (x, y, z) = (615.5f32, 434.4f32, 148.8f32);
+    assert!(
+        super::ground_height(&server, 100, x, y, z).is_some_and(|h| (h - 148.84).abs() < 0.2),
+        "the Akmit floor of the hall"
+    );
     let npc = Entity::new(0x400, {
         let mut n = Npc::new(12189);
         n.unit.hp = 1000;
@@ -890,4 +899,152 @@ async fn real_sal_temple_boss_knockback_stays_on_the_hall_floor() {
     }
     server.world.remove_world(100);
     server.systems.ai.collision.remove(100);
+}
+
+/// Every `visareas.dat` and `object.dat` of every world parses strictly (no leftover bytes) and
+/// the voxels inflate to a physics mesh.
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_visareas_parse -- --ignored --nocapture`
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_visareas_parse_every_file() {
+    let Some(e) = env() else { return };
+    let worlds = WorldTemplates::load(&e.files, &app_path()).expect("world templates");
+    let (mut files, mut voxels, mut bad) = (0, 0, Vec::new());
+    for t in worlds.templates() {
+        for cx in 0..t.cell_x {
+            for cy in 0..t.cell_y {
+                let dir = format!("game/worlds/{}/cells/{cx:03}_{cy:03}/client", t.name);
+                if let Some(d) = e.files.read_file(&format!("{dir}/visareas.dat")) {
+                    files += 1;
+                    match cells::read_visareas(&d) {
+                        Ok(f) => {
+                            for v in &f.voxels {
+                                voxels += 1;
+                                let ok = v.inflate().is_some_and(|b| {
+                                    super::models::load_model("v", &b)
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|m| m.collides())
+                                });
+                                if !ok {
+                                    bad.push(format!("{dir}: voxel without a mesh"));
+                                }
+                            }
+                        }
+                        Err(err) => bad.push(format!("{dir}/visareas.dat: {err}")),
+                    }
+                }
+                if let Some(d) = e.files.read_file(&format!("{dir}/object.dat")) {
+                    files += 1;
+                    match cells::read_object_dat_voxels(&d) {
+                        Ok(list) => voxels += list.len(),
+                        Err(err) => bad.push(format!("{dir}/object.dat: {err}")),
+                    }
+                }
+            }
+        }
+    }
+    println!("{files} files, {voxels} voxels, {} failures", bad.len());
+    assert!(bad.is_empty(), "{bad:#?}");
+    assert!(files > 0 && voxels > 0);
+}
+
+/// Floors the static collision of `visareas.dat` and the cave voxels now provide: the Profane
+/// Temple hall under Akmit, the Dahuta cave and a library hall.
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_visareas_and_voxel_floors() {
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    let t = server
+        .game_data
+        .worlds
+        .get_world_template_by_name("instance_sal_temple")
+        .expect("sal_temple")
+        .clone();
+    server.world.create_world_instance(Arc::new(t), 100);
+    let h = super::ground_height(&server, 100, 615.5, 434.4, 148.8);
+    println!("sal_temple Akmit floor {h:?}");
+    assert!(h.is_some_and(|h| (h - 148.84).abs() < 0.2), "{h:?}");
+    let h = super::ground_height(&server, 0, 11935.0, 16408.0, 291.8);
+    println!("Dahuta cave floor {h:?}");
+    assert!(h.is_some_and(|h| (h - 291.11).abs() < 1.0), "{h:?}");
+    let t = server
+        .game_data
+        .worlds
+        .get_world_template_by_name("instance_library")
+        .expect("library")
+        .clone();
+    server.world.create_world_instance(Arc::new(t), 101);
+    let spawns = world_npc_spawns("instance_library");
+    let on_floor = spawns
+        .iter()
+        .take(200)
+        .filter(|s| {
+            super::ground_height(&server, 101, s[0], s[1], s[2])
+                .is_some_and(|h| (h - s[2]).abs() < 2.0)
+        })
+        .count();
+    println!(
+        "library: {on_floor}/{} spawns with a floor within 2 m",
+        spawns.len().min(200)
+    );
+    assert!(on_floor * 2 > spawns.len().min(200));
+}
+
+/// Static audit: how many NPC spawns of each world have a floor within 2 m of their Z through
+/// `ground_height`. Run with `AAEMU_NO_VISAREAS=1` for the "before" numbers.
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_spawn_floor_audit -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_spawn_floor_audit() {
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    let t0 = Instant::now();
+    let (mut total, mut ok_total) = (0, 0);
+    for (i, t) in server
+        .game_data
+        .worlds
+        .templates()
+        .to_vec()
+        .into_iter()
+        .enumerate()
+    {
+        let path = app_path().join(format!("Data/Worlds/{}/npc_spawns.json", t.name));
+        if !path.exists() {
+            continue;
+        }
+        let spawns = world_npc_spawns(&t.name);
+        let id = if t.name == "main_world" {
+            0
+        } else {
+            200 + i as u32
+        };
+        if id != 0 {
+            server.world.create_world_instance(Arc::new(t.clone()), id);
+        }
+        let ok = spawns
+            .iter()
+            .filter(|s| {
+                super::ground_height(&server, id, s[0], s[1], s[2])
+                    .is_some_and(|h| (h - s[2]).abs() <= 2.0)
+            })
+            .count();
+        println!(
+            "{}: {} spawns, {} with a floor within 2 m",
+            t.name,
+            spawns.len(),
+            ok
+        );
+        total += spawns.len();
+        ok_total += ok;
+        if id != 0 {
+            server.world.remove_world(id);
+            server.systems.ai.collision.remove(id);
+        }
+    }
+    println!(
+        "total {total}, floor within 2 m: {ok_total}, {:?}",
+        t0.elapsed()
+    );
 }

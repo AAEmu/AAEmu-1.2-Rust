@@ -51,6 +51,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "futures",
+ "miniz_oxide",
  "rand",
  "regex",
  "roxmltree",

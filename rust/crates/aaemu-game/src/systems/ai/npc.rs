@@ -641,8 +641,9 @@ pub fn reference_height(
 /// How far below its current level a walker can find its floor in one step (m): a steep slope or a
 /// ledge. The ground probe reaches [`crate::systems::ai::collision::GROUND_PROBE_DOWN`] down, and
 /// where the floor a unit stands on is not in the collision world, the only thing it hits is the
-/// terrain far below: the halls of the instance dungeons are models of the world's `object.dat` /
-/// `big_object.dat`, which the collision loader does not read, so the NPCs of Kroloal Cradle (about
+/// terrain far below: the halls of the instance dungeons are brushes of the cell's `visareas.dat`
+/// (loaded by the collision world since 2026-11-08; the bound stays as a safety net for halls
+/// whose file fails to parse), so before that the NPCs of Kroloal Cradle (about
 /// 191 m above their world's terrain), Howling Abyss (86 m), Sharpwind Mines (138 m), the Library
 /// (77 m) and others fell to that terrain with their first step. A floor deeper than this is not the
 /// ground under the walker.
