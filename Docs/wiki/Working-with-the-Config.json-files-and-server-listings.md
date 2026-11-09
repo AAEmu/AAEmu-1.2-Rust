@@ -502,7 +502,15 @@ the same Bearer credential as the `/api` routes:
 ## Tower defense event schedules
 
 Tower defense controllers are reserved for events instead of spawning permanently.
-Automatic events are disabled by default. A level-100 GM can use `/towerdef list`
+With no `Events` list, the server derives the 1.2 open-world events from the data and
+runs them by default: the Halcyona war (18, started when zone group 22 reaches War) and
+its victory follow-ups (19, 20), the Crimson Rift (3, 5), the Grimghast Rift (13, 15),
+the Hasla Rift (12) and the Oblivion Rift / Clockwork Rebellion (28, 29, 31, 32).
+`"Enabled": false` turns every event off; a non-empty `Events` list replaces the
+derived schedule, and an event the data cannot run (no authored controller positions
+or a closed zone) is skipped at startup with a warning and is not listed as enabled.
+The startup log prints the enabled list with each event's zone group and zone.
+A level-100 GM can use `/towerdef list`
 in the event's zone to see its world/zone/group identity, which definitions are ready,
 and why others are unavailable.
 `/towerdef start <id>` starts the event in the GM's current world instance and zone
@@ -550,7 +558,10 @@ intend to test; this preflight checks content availability, not live client game
 Definitions 19 and 20 are the victory follow-ups of the Golden Plains war (18): the
 death of the losing side's relic in its last wave starts them in the same zone, so do not
 put them in `Events` (a configured follow-up is never started by the clock).
-The other definitions of the 1.2 data have no authored positions and stay unavailable:
+Definitions 6 (Sungold Fields), 8 and 27 (Reedwind) pass this preflight but stand in a
+closed 1.2 zone, so the derived defaults leave them off; they still run if listed
+explicitly in an open world. The other definitions of the 1.2 data have no authored
+positions and stay unavailable:
 4, 14, 16, 17, 21, 23, 24, 25 and 26 (`/towerdef list` names the missing spawner), and
 Mistmerrow's conflict configuration references definition 33, which is absent from
 the shipped compact and still needs its event content restored.

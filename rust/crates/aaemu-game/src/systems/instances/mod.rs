@@ -15,7 +15,8 @@
 //! (character / world events, indun events and actions), [`instant_game`]
 //! (`InstantGameManager`, `InstantGame`), [`packets`], [`config`] (`Dungeons` section).
 //!
-//! Tower defense: [`tower_def`] extends the C# data/packet port with an opt-in runtime.
+//! Tower defense: [`tower_def`] extends the C# data/packet port with a runtime that runs the
+//! 1.2 open-world events by default (`Dungeons.TowerDefense.Enabled: false` turns them off).
 
 pub mod config;
 pub mod data;

@@ -1,8 +1,12 @@
 //! Tower defense event lifecycle for the 1.2 compact tables. The C# port supplied only
 //! data and packets. Controllers use authored spawn positions; their summons retain normal
 //! NPC skill/AI behavior. No client opcodes or rewards are synthesized here.
+//!
+//! With no explicit `Dungeons.TowerDefense.Events`, [`default_events`] derives the 1.2
+//! open-world schedule from the data (the Halcyona war and its victory follow-ups, the
+//! time-of-day rifts). `Enabled: false` turns everything off.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context};
@@ -102,6 +106,10 @@ struct State {
     /// Victory follow-ups (and the zone of the event that triggered them) waiting for the next
     /// tick to start.
     pending_chain: Vec<(EventKey, u32)>,
+    /// The schedules the clock walks: an explicit config list or the validated 1.2 defaults.
+    events: Vec<TowerDefenseEventConfig>,
+    /// `events` came from `Dungeons.TowerDefense.Events` (read the live config each tick).
+    events_from_config: bool,
 }
 
 /// Mutations are serialized with the NPC subsystem's reentrant spawn lock. The state
@@ -163,6 +171,157 @@ fn followups_of(server: &GameServer, parent: &TowerDef, npc: u32) -> Vec<u32> {
         .collect();
     ids.sort_unstable();
     ids
+}
+
+/// Every victory follow-up the waves of `parent` can start (each `kill_npc_id` death).
+fn victory_followups(server: &GameServer, parent: &TowerDef) -> Vec<u32> {
+    let data = &server.game_data.systems.instances.tower_defs;
+    let mut ids = BTreeSet::new();
+    for prog_id in &parent.progs {
+        let Some(p) = data.progs.get(prog_id) else {
+            continue;
+        };
+        for target in &p.kill_targets {
+            ids.extend(followups_of(server, parent, target.kill_target_id));
+        }
+    }
+    ids.into_iter().collect()
+}
+
+/// `main_world`'s instance id (`DefaultWorldTemplateId`; the world templates always give it 0).
+const MAIN_WORLD_ID: u32 = 0;
+
+/// The zone group and zone key of a definition's target controller positions, optionally
+/// restricted to `expected_group`. The authored positions are the only data that names the
+/// zone of a tower defense definition.
+fn event_zone(
+    server: &GameServer,
+    def: &TowerDef,
+    expected_group: Option<u32>,
+) -> Option<(u16, u32)> {
+    let spawns = server.systems.npcs.spawns.get(MAIN_WORLD_ID)?;
+    spawns
+        .tower_def_spawners(def.target_npc_spawn_id)
+        .into_iter()
+        .find_map(|s| {
+            let position = s.position();
+            let zone = server.game_data.zones.zone_by_key(position.zone_id)?;
+            if expected_group.is_some_and(|group| zone.group_id != group) {
+                return None;
+            }
+            Some((u16::try_from(zone.group_id).ok()?, zone.zone_key))
+        })
+}
+
+/// The schedules the server runs. An explicit `Dungeons.TowerDefense.Events` list wins;
+/// otherwise the 1.2 open-world defaults are derived; `Enabled: false` leaves nothing.
+pub fn effective_events(server: &GameServer) -> Vec<TowerDefenseEventConfig> {
+    let config = &server.config.dungeons.tower_defense;
+    if !config.enabled {
+        return Vec::new();
+    }
+    if !config.events.is_empty() {
+        return config.events.clone();
+    }
+    default_events(server)
+}
+
+/// Derives the open-world schedule of the 1.2 data:
+/// * every open `conflict_zones` row with a `war_tower_def_id` (Halcyona group 22 -> 18) and
+///   the victory follow-ups its waves can start (19, 20);
+/// * every time-of-day scheduled definition whose target controller stands in an open 1.2 zone:
+///   the Crimson Rift (3 Cinderstone Moor, 5 Ynystere), the Grimghast Rift (13 Cinderstone
+///   Moor, 15 Ynystere), the Hasla Rift (12) and the 1.2 Oblivion Rift / Clockwork Rebellion
+///   (28/31 Lilyut Hills, 29/32 Tigerspine Mountains).
+///
+/// Definitions with `tod` 0 are not time scheduled (war, victory, kill-triggered and test/dev
+/// definitions), definitions without authored controller positions cannot run (14, 16, 17, ...)
+/// and definitions in a closed 1.2 zone stay off (Sungold Fields 6, Reedwind 8/27, Mistmerrow
+/// 33, which is also absent from `tower_defs`). The zones mirror the server's `closed` flag.
+pub fn default_events(server: &GameServer) -> Vec<TowerDefenseEventConfig> {
+    let data = &server.game_data.systems.instances.tower_defs;
+    let zones = &server.game_data.zones;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut war_ids = HashSet::new();
+
+    for conflict in &zones.conflicts {
+        if conflict.closed || conflict.war_tower_def_id == 0 {
+            continue;
+        }
+        let group = u32::from(conflict.zone_group_id);
+        let Some(def) = data.tower_defs.get(&conflict.war_tower_def_id) else {
+            tracing::warn!(
+                group = conflict.zone_group_id,
+                id = conflict.war_tower_def_id,
+                "Default tower defense war event names an unknown definition"
+            );
+            continue;
+        };
+        let Some((_, zone_key)) = event_zone(server, def, Some(group)) else {
+            tracing::warn!(
+                id = def.id,
+                group,
+                "Default tower defense war event has no controller positions in its zone group"
+            );
+            continue;
+        };
+        if seen.insert((def.id, conflict.zone_group_id)) {
+            out.push(TowerDefenseEventConfig {
+                id: def.id,
+                world_id: MAIN_WORLD_ID,
+                zone_group_id: conflict.zone_group_id,
+                zone_id: zone_key,
+            });
+        }
+        war_ids.insert(def.id);
+        for id in victory_followups(server, def) {
+            if seen.insert((id, conflict.zone_group_id)) {
+                out.push(TowerDefenseEventConfig {
+                    id,
+                    world_id: MAIN_WORLD_ID,
+                    zone_group_id: conflict.zone_group_id,
+                    zone_id: zone_key,
+                });
+            }
+        }
+    }
+
+    let mut timed: Vec<&TowerDef> = data
+        .tower_defs
+        .values()
+        .filter(|def| {
+            def.time_of_day > 0.0 && !war_ids.contains(&def.id) && !is_victory_followup(server, def)
+        })
+        .collect();
+    timed.sort_by_key(|def| def.id);
+    for def in timed {
+        let Some((zone_group_id, zone_key)) = event_zone(server, def, None) else {
+            tracing::warn!(
+                id = def.id,
+                "Default tower defense event has no authored controller positions"
+            );
+            continue;
+        };
+        if zones.zone_by_key(zone_key).is_some_and(|zone| zone.closed) {
+            tracing::debug!(
+                id = def.id,
+                zone = zone_key,
+                "Closed-zone tower defense event stays off"
+            );
+            continue;
+        }
+        if seen.insert((def.id, zone_group_id)) {
+            out.push(TowerDefenseEventConfig {
+                id: def.id,
+                world_id: MAIN_WORLD_ID,
+                zone_group_id,
+                zone_id: zone_key,
+            });
+        }
+    }
+    out.sort_by_key(|event| event.id);
+    out
 }
 
 fn valid_seconds(seconds: f32) -> bool {
@@ -387,29 +546,73 @@ pub fn validate(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Res
 
 pub fn initialize(server: &GameServer) -> anyhow::Result<()> {
     let config = &server.config.dungeons.tower_defense;
+    let explicit = !config.events.is_empty();
+    let events = effective_events(server);
+    let mut accepted = Vec::new();
     if config.enabled {
         let mut seen = HashSet::new();
-        for c in &config.events {
-            let key = EventKey::from(c);
+        for c in events {
+            let key = EventKey::from(&c);
             if !seen.insert(key) {
-                bail!("Duplicate tower defense schedule {}", c.id);
+                if explicit {
+                    bail!("Duplicate tower defense schedule {}", c.id);
+                }
+                tracing::warn!(
+                    id = c.id,
+                    "Skipping duplicate default tower defense schedule"
+                );
+                continue;
             }
-            validate(server, key, c.zone_id)
-                .with_context(|| format!("Tower defense schedule {}", c.id))?;
-            let def = definition(server, c.id)?;
-            if !def.time_of_day.is_finite()
-                || !(0.0..24.0).contains(&def.time_of_day)
-                || def.time_of_day_day_interval == 0
-            {
-                bail!("Tower defense {} has an invalid game-time schedule", c.id);
+            let checked = validate(server, key, c.zone_id)
+                .with_context(|| format!("Tower defense schedule {}", c.id))
+                .and_then(|()| {
+                    let def = definition(server, c.id)?;
+                    if !def.time_of_day.is_finite()
+                        || !(0.0..24.0).contains(&def.time_of_day)
+                        || def.time_of_day_day_interval == 0
+                    {
+                        bail!("Tower defense {} has an invalid game-time schedule", c.id);
+                    }
+                    Ok(())
+                });
+            match checked {
+                Ok(()) => accepted.push(c),
+                // A default derived from the data must not keep the server from starting.
+                Err(error) if !explicit => {
+                    tracing::warn!(
+                        id = c.id,
+                        %error,
+                        "Skipping unavailable default tower defense event"
+                    );
+                }
+                Err(error) => return Err(error),
             }
         }
+        let list = accepted
+            .iter()
+            .map(|event| {
+                format!(
+                    "{} (group {}, zone {})",
+                    event.id, event.zone_group_id, event.zone_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::info!(
+            source = if explicit { "config" } else { "1.2 defaults" },
+            count = accepted.len(),
+            "Tower defense events enabled: {list}"
+        );
     }
-    manager(server)
-        .state
-        .lock()
-        .expect("tower defense poisoned")
-        .previous_hour = Some(server.time.get_time());
+    {
+        let mut state = manager(server)
+            .state
+            .lock()
+            .expect("tower defense poisoned");
+        state.events = accepted;
+        state.events_from_config = explicit;
+        state.previous_hour = Some(server.time.get_time());
+    }
     Ok(())
 }
 
@@ -1044,6 +1247,23 @@ fn schedule_tick(server: &GameServer) {
     if !hour.is_finite() || !(0.0..=24.0).contains(&hour) {
         return;
     }
+    let (stored, from_config) = {
+        let state = manager(server)
+            .state
+            .lock()
+            .expect("tower defense poisoned");
+        (state.events.clone(), state.events_from_config)
+    };
+    // An explicit config list is read live (GM / configuration reload); the derived 1.2
+    // defaults are validated once at startup.
+    let events = if from_config {
+        config.events.clone()
+    } else {
+        stored
+    };
+    if events.is_empty() {
+        return;
+    }
     let mut starts = Vec::new();
     let mut stops = Vec::new();
     {
@@ -1056,7 +1276,7 @@ fn schedule_tick(server: &GameServer) {
         if wrapped {
             state.day += 1;
         }
-        for c in &config.events {
+        for c in &events {
             let key = EventKey::from(c);
             let Some(def) = server
                 .game_data
