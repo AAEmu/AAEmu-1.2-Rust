@@ -41,7 +41,7 @@ pub fn use_(
     let server = ctx.server;
     let owner = ctx.obj();
     let pos = ctx.world.world_pos_rot(&owner);
-    if public_farm::in_public_farm(server, &ctx.world.template, (pos.x, pos.y, pos.z)) {
+    if public_farm::in_public_farm(server, &ctx.world, (pos.x, pos.y, pos.z)) {
         let owner_id = ctx.doodad.data().owner_id;
         if public_farm::is_protected_by_public_farm(server, &ctx.doodad, now_ms()) && owner_id != 0
         {

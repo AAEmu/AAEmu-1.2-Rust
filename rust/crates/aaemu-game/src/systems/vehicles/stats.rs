@@ -262,8 +262,11 @@ impl Eval<'_> {
                 ))
             }
             S::LevelDps if combat => {
-                let ab = if mate { self.level() } else { 0.0 };
-                let p = HashMap::from([("level", self.level()), ("ab_level", ab)]);
+                // The mate (owner 5) and slave (owner 2) level formulas read `ab_level`; the
+                // slave getter passed 0 (mirroring the C# `Slave.cs`), but `slaves.level` is a
+                // real 1..50 template level (e.g. id 46 `(ab_level + 1) ^ 1.2 + 5`), and the
+                // mate getter and the rest of the unit code bind the level.
+                let p = HashMap::from([("level", self.level()), ("ab_level", self.level())]);
                 f64::from(self.formula(K::LevelDps, &p) as f32)
             }
             S::DpsInc if combat => self.inc(K::MeleeDpsInc, A::MeleeDpsInc),
@@ -520,6 +523,22 @@ pub(crate) mod tests {
         // MaxHp uses the mate_kind variable (7) then CalculateWithBonuses (+10%); the regen
         // getters pass the raw MateKindId (3).
         assert_eq!(v, vec![77.0, 3.0, 10.0]);
+    }
+
+    #[tokio::test]
+    async fn slave_level_dps_uses_the_slave_level_as_ab_level() {
+        let mut data = crate::data::GameData::empty();
+        // The real 1.2 slave LevelDps formula (unit_formulas id 46, owner 2).
+        data.formulas = formulas(&[(46, "(ab_level + 1) ^ 1.2 + 5", 12, 2)], &[]);
+        let server = crate::test_support::test_server_with(data);
+        let unit = UnitBase {
+            level: 50,
+            ..Default::default()
+        };
+        // 51 ^ 1.2 + 5 = 116.94..; with ab_level 0 the formula gives 6.
+        let expected = f64::from(((51.0f64).powf(1.2) + 5.0) as f32);
+        let v = stats_of(&server, VehicleKind::Slave, &unit, &[StatKind::LevelDps]);
+        assert_eq!(v, vec![expected]);
     }
 
     #[tokio::test]

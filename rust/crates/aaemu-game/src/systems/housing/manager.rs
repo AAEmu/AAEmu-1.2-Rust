@@ -1325,7 +1325,7 @@ pub fn load_house_row(
             .transform
             .set_position(r.x, r.y, r.z, r.roll, r.pitch, r.yaw);
         h.unit.transform.instance_id = world.id;
-        h.unit.transform.zone_id = world.template.zone_id_at(r.x, r.y);
+        h.unit.transform.zone_id = world.zone_id_at(r.x, r.y);
     }
     let loading = server.config.world.use_persistent_house_doodads;
     set_current_step(server, &house, r.current_step, loading);

@@ -1345,17 +1345,9 @@ impl SpawnManager {
     }
 
     /// World id, zone id and `DegToRad` of a loaded position.
-    fn fix_position(
-        &self,
-        server: &GameServer,
-        p: &mut crate::data::world_templates::WorldSpawnPosition,
-        rotate: bool,
-    ) {
+    fn fix_position(&self, p: &mut crate::data::world_templates::WorldSpawnPosition, rotate: bool) {
         p.world_id = self.world.id;
-        p.zone_id = server
-            .game_data
-            .worlds
-            .get_zone_id(Some(&self.world.template), p.x, p.y);
+        p.zone_id = self.world.zone_id_at(p.x, p.y);
         if rotate {
             p.yaw = deg_to_rad(p.yaw);
             p.pitch = deg_to_rad(p.pitch);
@@ -1413,7 +1405,7 @@ impl SpawnManager {
                     stats.npc_missing_templates += 1;
                     continue;
                 }
-                self.fix_position(server, &mut def.base.position, true);
+                self.fix_position(&mut def.base.position, true);
                 let event = !def.npc_spawner_ids.is_empty() && def.npc_spawner_ids != [0];
                 let fake_before = server.systems.npcs.spawns.peek_fake_spawner_id();
                 let added = self.add_npc_spawner(server, def)?;
@@ -1434,7 +1426,7 @@ impl SpawnManager {
 
     fn load_doodad_spawns(
         &self,
-        server: &GameServer,
+        _server: &GameServer,
         world_path: &Path,
         exists: &TemplateExists<'_>,
         stats: &mut LoadStats,
@@ -1474,7 +1466,7 @@ impl SpawnManager {
                 }
                 let mut inner = self.inner();
                 def.base.id = inner.next_id;
-                self.fix_position(server, &mut def.base.position, true);
+                self.fix_position(&mut def.base.position, true);
                 let unit_id = def.base.unit_id;
                 let key = inner.next_id;
                 inner
@@ -1491,7 +1483,7 @@ impl SpawnManager {
     /// `LoadTransferSpawns` / `LoadSlaveSpawns` (not reversed, no duplicate filter).
     fn load_simple_spawns(
         &self,
-        server: &GameServer,
+        _server: &GameServer,
         world_path: &Path,
         prefix: &str,
         exists: &dyn Fn(u32) -> bool,
@@ -1525,7 +1517,7 @@ impl SpawnManager {
                 }
                 let mut inner = self.inner();
                 def.base.id = inner.next_id;
-                self.fix_position(server, &mut def.base.position, true);
+                self.fix_position(&mut def.base.position, true);
                 let key = inner.next_id;
                 if transfer {
                     inner.transfer_spawners.insert(key, def);
@@ -1543,7 +1535,7 @@ impl SpawnManager {
     /// `LoadGimmickSpawns` (no `DegToRad`; `UnitId == 0` is accepted).
     fn load_gimmick_spawns(
         &self,
-        server: &GameServer,
+        _server: &GameServer,
         world_path: &Path,
         exists: &TemplateExists<'_>,
         stats: &mut LoadStats,
@@ -1578,7 +1570,7 @@ impl SpawnManager {
                         entry + 1
                     ));
                 };
-                self.fix_position(server, position, false);
+                self.fix_position(position, false);
                 let mut inner = self.inner();
                 def.id = inner.next_id;
                 let key = inner.next_id;

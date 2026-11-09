@@ -4477,7 +4477,7 @@ impl item_effects::ItemEffectHooks for EconomyComposite {
             return false;
         };
         let p = world.world_pos_rot(&me);
-        crate::systems::npcs::public_farm::in_public_farm(server, &world.template, (p.x, p.y, p.z))
+        crate::systems::npcs::public_farm::in_public_farm(server, &world, (p.x, p.y, p.z))
     }
 
     fn house_at(

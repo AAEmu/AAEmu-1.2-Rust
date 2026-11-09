@@ -192,10 +192,7 @@ impl SocialHooks for GameSocialHooks {
     ) -> Option<DoodadRef> {
         use crate::systems::npcs::doodad::spawner::{DoodadSpawner, DoodadSpawnerDef, SpawnerBase};
         let world = server.world.world(instance_id)?;
-        let zone_id = server
-            .game_data
-            .worlds
-            .get_zone_id(Some(&world.template), pos.0, pos.1);
+        let zone_id = world.zone_id_at(pos.0, pos.1);
         let mut base = SpawnerBase {
             unit_id: template_id,
             ..SpawnerBase::default()

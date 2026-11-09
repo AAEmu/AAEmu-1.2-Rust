@@ -734,7 +734,7 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         h.skill_consume_labor_power(server, item.use_skill_id)
     });
 
-    let in_public_farm = public_farm::in_public_farm(server, &world.template, pos);
+    let in_public_farm = public_farm::in_public_farm(server, &world, pos);
     let farm_type = if in_public_farm {
         public_farm::get_farm_type(server, &world, pos)
     } else {

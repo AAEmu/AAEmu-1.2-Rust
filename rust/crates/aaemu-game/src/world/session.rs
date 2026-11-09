@@ -315,7 +315,7 @@ pub fn resurrect_at(server: &GameServer, p: &PlayerRef, destination: Transform) 
     let mut destination = destination;
     // The zone the server lands in is the one at the coordinates; the caller's zone id is only
     // a fallback for an out-of-bounds position.
-    let derived = world.template.zone_id_at(destination.x, destination.y);
+    let derived = world.zone_id_at(destination.x, destination.y);
     if derived > 0 {
         destination.zone_id = derived;
     }

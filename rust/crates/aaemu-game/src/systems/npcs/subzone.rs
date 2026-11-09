@@ -24,6 +24,7 @@ use crate::net::registry::{ClientPacket, PacketRegistry};
 use crate::opcodes::cs;
 use crate::server::GameServer;
 use crate::systems::DataLoadCtx;
+use crate::world::WorldInstance;
 
 /// `Area` (a sub zone / housing polygon).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -335,14 +336,15 @@ pub fn is_inside(polygon: &[[f32; 3]], p: [f32; 3]) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 /// `SubZoneManager.GetSubZoneByPosition(worldTemplate, x, y)`: the sub zone ids containing the
-/// position.
+/// position. Takes the instance for the instance-aware zone lookup (an instance's only zone at
+/// positions outside its cell grid; the authored sector inside it).
 pub fn get_sub_zone_by_position(
     data: &GameData,
-    world_template: &WorldTemplate,
+    world: &WorldInstance,
     x: f32,
     y: f32,
 ) -> Vec<u32> {
-    let zone_key = data.worlds.get_zone_id(Some(world_template), x, y);
+    let zone_key = world.zone_id_at(x, y);
     let mut found = Vec::new();
     let Some(zone) = data.zones.zone_by_key(zone_key) else {
         return found;
@@ -351,7 +353,7 @@ pub fn get_sub_zone_by_position(
         .systems
         .npcs
         .subzone
-        .sub_zones_of(world_template.id, zone.id)
+        .sub_zones_of(world.template.id, zone.id)
     {
         if is_inside(&sub_zone.points, [x, y, 0.0]) {
             found.push(sub_zone.id);
@@ -360,20 +362,22 @@ pub fn get_sub_zone_by_position(
     if found.is_empty() {
         debug!(
             "No subzone found at this position! WorldId: {}, Pos: {x} , {y}",
-            world_template.id
+            world.template.id
         );
     }
     found
 }
 
 /// Housing area ids containing a position. A zone without housing areas is an empty result.
+/// Takes the instance for the instance-aware zone lookup, like
+/// [`get_sub_zone_by_position`].
 pub fn get_housing_zone_by_position(
     data: &GameData,
-    world_template: &WorldTemplate,
+    world: &WorldInstance,
     x: f32,
     y: f32,
 ) -> std::result::Result<Vec<u32>, String> {
-    let zone_key = data.worlds.get_zone_id(Some(world_template), x, y);
+    let zone_key = world.zone_id_at(x, y);
     let Some(zone) = data.zones.zone_by_key(zone_key) else {
         return Ok(Vec::new());
     };
@@ -383,7 +387,7 @@ pub fn get_housing_zone_by_position(
         .npcs
         .subzone
         .housing_zones
-        .get(&world_template.id)
+        .get(&world.template.id)
         .and_then(|z| z.get(&zone_id))
     else {
         return Ok(Vec::new());
@@ -575,8 +579,9 @@ mod real_data_tests {
             .worlds
             .get_world_template_by_name("main_world")
             .unwrap();
+        let main_world = WorldInstance::new(0, std::sync::Arc::new(main.clone()));
         // Original client Shape126 in zone142 uses engine Id=0 and housing database value1=52.
-        let ids = get_housing_zone_by_position(&data, main, 13944.868, 14216.393).unwrap();
+        let ids = get_housing_zone_by_position(&data, &main_world, 13944.868, 14216.393).unwrap();
         assert!(ids.contains(&52), "unexpected housing ids: {ids:?}");
         assert_eq!(data.systems.housing.areas.get(&52), Some(&1));
         assert!(data.systems.housing.group_categories[&1].contains(&1));
@@ -627,6 +632,7 @@ mod real_data_tests {
         data.worlds = worlds;
         data.systems.npcs.subzone = d;
         let main = data.worlds.get_world_template_by_id(main_id).unwrap();
+        let main_world = WorldInstance::new(0, std::sync::Arc::new(main.clone()));
         let mut hits = 0;
         let mut tried = 0;
         for list in data.systems.npcs.subzone.sub_zones[&main_id].values() {
@@ -640,7 +646,9 @@ mod real_data_tests {
                     .fold([0f32; 2], |a, p| [a[0] + p[0], a[1] + p[1]]);
                 let n = area.points.len() as f32;
                 tried += 1;
-                if get_sub_zone_by_position(&data, main, c[0] / n, c[1] / n).contains(&area.id) {
+                if get_sub_zone_by_position(&data, &main_world, c[0] / n, c[1] / n)
+                    .contains(&area.id)
+                {
                     hits += 1;
                 }
             }

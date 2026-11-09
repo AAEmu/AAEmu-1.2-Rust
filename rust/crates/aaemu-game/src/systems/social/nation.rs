@@ -1505,7 +1505,7 @@ pub async fn place_national_monument(
         if monument_distance((here.x, here.y, here.z), (x, y, z)) > NATIONAL_MONUMENT_RANGE {
             return Err(error_message::NATION_OWNER_AT_POS_ONLY);
         }
-        let zone_key = world.template.zone_id_at(x, y);
+        let zone_key = world.zone_id_at(x, y);
         if server
             .game_data
             .zones

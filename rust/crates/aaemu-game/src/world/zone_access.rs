@@ -52,7 +52,7 @@ pub fn zone_access_allowed(
             .world
             .worlds()
             .iter()
-            .any(|w| w.id == instance && is_closed(server, w.template.zone_id_at(x, y)))
+            .any(|w| w.id == instance && is_closed(server, w.zone_id_at(x, y)))
 }
 
 pub(super) fn cancel(player: &PlayerRef) {
@@ -68,7 +68,7 @@ fn world_transform(server: &GameServer, player: &PlayerRef) -> Option<Transform>
     t.set_position(pos.x, pos.y, pos.z, pos.rot_x, pos.rot_y, pos.rot_z);
     t.parent_obj_id = 0;
     t.world_id = world.template.id;
-    t.zone_id = world.template.zone_id_at(t.x, t.y);
+    t.zone_id = world.zone_id_at(t.x, t.y);
     Some(t)
 }
 
@@ -86,7 +86,7 @@ fn safe_destination(server: &GameServer, t: &Transform) -> bool {
         && server.world.worlds().iter().any(|w| {
             w.id == t.instance_id
                 && w.template.id == t.world_id
-                && w.template.zone_id_at(t.x, t.y) == t.zone_id
+                && w.zone_id_at(t.x, t.y) == t.zone_id
         })
 }
 

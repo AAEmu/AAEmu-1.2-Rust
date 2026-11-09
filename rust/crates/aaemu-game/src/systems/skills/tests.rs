@@ -1032,6 +1032,55 @@ async fn npc_skill_use_hits_player() {
     assert_eq!(f.player.data().unit.hp, 0);
 }
 
+const LEVEL_DPS_SKILL: u32 = 10_006;
+
+#[tokio::test]
+async fn npc_level_damage_uses_the_npc_level_as_ab_level() {
+    let mut d = data();
+    d.formulas = crate::systems::npcs::npc::stats::tests::npc_formulas();
+    d.systems.npcs.npc.templates.insert(
+        1234,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1234,
+            npc_template_id: 9,
+            npc_kind_id: 1,
+            npc_grade_id: 1,
+            ..Default::default()
+        },
+    );
+    let mut level_damage = damage_effect(5, 0);
+    level_damage.use_fixed_damage = false;
+    level_damage.use_level_damage = true;
+    level_damage.level_md = 10.0;
+    level_damage.level_va_start = 0;
+    level_damage.level_va_end = 0;
+    d.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(level_damage)),
+        900_005,
+    );
+    let mut skill = skill_template(LEVEL_DPS_SKILL);
+    skill
+        .effects
+        .push(skill_effect(900_005, EffectKind::DamageEffect, 5));
+    d.systems.skills.add_skill(skill);
+    let f = fixture_with(d);
+    // The NPC attribute hook is installed by `systems::npcs` at startup.
+    crate::systems::npcs::install_hooks(&f.server);
+    f.npc.data().unit.level = 50;
+    f.player.data().unit.hp = 50_000;
+    f.player.data().unit.max_hp = 50_000;
+    let npc = WorldObject::from(&f.npc);
+    let me = WorldObject::from(&f.player);
+    let r = super::skill::unit_use_skill(&f.server, &npc, LEVEL_DPS_SKILL, &me);
+    assert_eq!(r, super::types::skill_result::SUCCESS);
+    let damage = 50_000 - f.player.data().unit.hp;
+    // LevelDps(level 50) = (floor((50 + 2) / 3) * 24 - 8) * 1.0 * 1.0 * 1.0 = 400;
+    // level_md 10 -> 4000. With ab_level 0 the term is -8 * 10 and the damage pipeline
+    // floors the hit at 1.
+    assert!((3500..=4500).contains(&damage), "damage {damage}");
+}
+
 // ------------------------------------------------------------------ combat rules
 
 const COOLDOWN_SKILL: u32 = 10_004;
