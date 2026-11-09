@@ -350,7 +350,13 @@ impl Ctx<'_> {
                 true
             }
             SupplyJuryPoint { point } => {
-                self.c.jury_point = self.c.jury_point.wrapping_add(*point);
+                // `Character.JuryPoint` setter: the client's jury point counter only changes
+                // when it receives `SCJuryPointChangedPacket` (C# `QuestActSupplyJuryPoint`
+                // went through the property; the direct field write here sent nothing).
+                let value = self.c.jury_point.wrapping_add(*point);
+                if let Some(pkt) = crate::systems::social::crime::set_jury_point(self.c, value) {
+                    self.send(pkt);
+                }
                 true
             }
             SupplyLivingPoint { point } => {

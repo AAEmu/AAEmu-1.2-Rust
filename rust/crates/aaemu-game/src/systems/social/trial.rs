@@ -455,28 +455,24 @@ fn can_accept_trial_invites(
 }
 
 /// `CalculateJailTime()`.
-fn calculate_jail_time(server: &GameServer, t: &mut TrialData) {
-    let mut default_minutes = 0i32;
-    for e in &t.evidence {
-        let mut score = match e.crime_kind {
-            crime::crime_kind::MURDER => 20,
-            crime::crime_kind::THEFT => 8,
-            _ => 0,
-        };
-        if let Some(v) = server.world.character_by_id(e.victim) {
-            if v.data().unit.level < 30 {
-                score *= 10;
-            }
-        }
-        default_minutes = default_minutes.saturating_add(score);
-    }
-    t.jail_time = default_minutes;
-    let (infamy, faction) = {
+///
+/// The retail rule (2014 community documentation) is `(crime_points / 5) * (1 + infamy / 1000)`
+/// in integer arithmetic. The 2014-10-31 trial video confirms the `/ 5` part: the defendant's
+/// record is 76 crime points / 26 trial records, the Awaiting Trial window shows 15 minutes
+/// (= 76 / 5), and the verdict's maximum option (the C# 1.2x factor) is the 18 minutes the judge
+/// announces. The C# replaced this with a per-evidence score (murder 20 / theft 8, x10 for
+/// victims under level 30) because it took the jury's scaled sentence for the base; that score
+/// gives 164 minutes for the same record. The dialog's amount and the packet's `jail_minutes`
+/// are this base, not an extra penalty (ui_text 2666: "a $2 minute sentence will be automatically
+/// enforced"). The video's infamy was below 1000, so the `/ 1000` term and the non-maximum jury
+/// factors keep the 2014 formula / C# guesses; they are not pinned by this video.
+fn calculate_jail_time(t: &mut TrialData) {
+    let (crime_point, infamy, faction) = {
         let c = t.defendant.data();
-        (c.infamy_point, c.unit.faction_id)
+        (c.crime_point, c.infamy_point, c.unit.faction_id)
     };
-    t.jail_time = t
-        .jail_time
+    let minutes = i32::from(crime_point) / 5;
+    t.jail_time = minutes
         .saturating_mul(1 + infamy / 1000)
         .clamp(0, MAX_JAIL_MINUTES);
     if faction == factions::PIRATE {
@@ -1084,6 +1080,9 @@ fn finalize_verdict(
         }
     }
     let is_guilty = most_voted > 1;
+    // The five guilt buttons scale the base sentence. The C# guessed these rates; only the
+    // top rate (1.2x) is pinned by the 2014-10-31 video (15 base -> the announced 18), the
+    // other rates stay capture-pending.
     let round = |f: f32| f64::from(t.jail_time as f32 * f).round_ties_even() as i32;
     let (sentence_type, sentence_time) = match most_voted {
         0 | 1 => (sentence_result::NOT_GUILTY, 0),
@@ -1153,7 +1152,7 @@ fn create_trial_case(
     };
     tracing::debug!("TrialStep.DefendantAwaitingTrial - {id}");
     t.evidence = server.systems.social.crimes.crimes_of_player(did, false);
-    calculate_jail_time(server, &mut t);
+    calculate_jail_time(&mut t);
     if trials.contains_key(&id) {
         return None;
     }
@@ -1943,7 +1942,7 @@ impl TrialManager {
             return;
         };
         t.evidence.push(e.clone());
-        calculate_jail_time(server, t);
+        calculate_jail_time(t);
         let entry = server.systems.social.crimes.record_entry(server, e);
         t.send_packets(&SCCrimeRecordsPacket {
             trial_id: t.id,

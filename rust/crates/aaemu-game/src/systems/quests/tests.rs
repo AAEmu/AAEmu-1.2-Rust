@@ -6556,3 +6556,71 @@ async fn pirate_reaching_zero_infamy_through_the_quest_act_returns_home() {
         "the faction change the client turns into ui_text 2297: {frames:x?}"
     );
 }
+
+/// `QuestActSupplyJuryPoint` goes through the `Character.JuryPoint` setter: the 1.2 client's
+/// jury point counter only changes on `SCJuryPointChangedPacket` (the C# raised it from the
+/// property; the direct field write here sent nothing).
+#[tokio::test]
+async fn supply_jury_point_sends_the_changed_packet() {
+    use crate::systems::social::packets::trial::SCJuryPointChangedPacket;
+
+    const QUEST: u32 = 9_002;
+    let mut quests = QuestData::default();
+    quests.add_template(quest(QUEST));
+    let c = QUEST * 10;
+    quests.add_component(component(c + 1, QUEST, kind::START));
+    quests.add_act(c + 1, c + 1, c + 1, 0, ActKind::ConAutoComplete);
+    quests.add_component(component(c + 2, QUEST, kind::PROGRESS));
+    quests.add_act(
+        c + 2,
+        c + 2,
+        c + 2,
+        1,
+        ActKind::ObjCraft {
+            craft_id: QUEST,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    quests.add_component(component(c + 3, QUEST, kind::REWARD));
+    quests.add_act(
+        c + 3,
+        c + 3,
+        c + 3,
+        0,
+        ActKind::SupplyJuryPoint { point: 1 },
+    );
+    quests.finish();
+
+    let mut data = GameData::empty();
+    data.systems.quests = quests;
+    let server = std::sync::Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::social::install_hooks(&server);
+    super::install_hooks(&server);
+
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut character = test_character(1, "Juror", 100.0, 100.0);
+    character.is_online = true;
+    let player = spawn_player(&server, &client, character, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+
+    assert!(events::add_quest(&server, &player, QUEST, false).is_some());
+    server.systems.quests.run_queued_evaluations(&server);
+    events::on_craft(&server, &player, QUEST);
+    server.systems.quests.run_queued_evaluations(&server);
+
+    assert_eq!(player.data().jury_point, 1);
+    let frames = client.drain();
+    let expected =
+        crate::systems::social::packets::body(&SCJuryPointChangedPacket { jury_point: 1 });
+    assert!(
+        frames
+            .iter()
+            .any(|(op, body)| *op == sc::SCJuryPointChangedPacket && *body == expected),
+        "jury point change packet: {frames:x?}"
+    );
+}
