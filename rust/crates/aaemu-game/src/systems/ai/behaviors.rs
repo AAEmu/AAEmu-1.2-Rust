@@ -2105,7 +2105,7 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
                 );
                 if r == skill_result::SUCCESS {
                     let cool_down = crate::systems::skills::skill::attack_delay(
-                        c.server, &tpl, &c.obj, false, 0.0,
+                        c.server, &tpl, 1, &c.obj, false, 0.0,
                     );
                     c.ai.current_command_run_time_ms = cool_down as i64;
                 }
