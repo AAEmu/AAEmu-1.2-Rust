@@ -522,7 +522,21 @@ pub fn use_doodad(
                 // The client builds this list with the func's `perm` filter (`FUN_393bd290`);
                 // a direct `CSLootOpenBag` must not run a row the client would have hidden.
                 if let Some(player) = player {
-                    if refuse_func_permission(ctx, player, f) {
+                    if chained {
+                        // A chained iteration runs after an earlier loot row already ran and
+                        // advanced the phase. The interaction (and its loot / cast) already
+                        // happened, so a denied bonus row is skipped silently instead of
+                        // sending 232 and refunding a cast whose effect is done.
+                        if !super::permission::allows_func(
+                            ctx.server,
+                            &ctx.world,
+                            &ctx.doodad,
+                            player,
+                            f,
+                        ) {
+                            continue;
+                        }
+                    } else if refuse_func_permission(ctx, player, f) {
                         return;
                     }
                 }
