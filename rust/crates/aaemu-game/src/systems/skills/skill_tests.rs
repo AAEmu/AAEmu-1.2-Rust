@@ -253,6 +253,25 @@ fn effective_level_and_casting_inc_term_match_the_1_2_client() {
     assert_eq!(super::skill::rank_inc(&t, 10), 0.0); // below ability_level clamps to 0
 }
 
+/// A character's skill whose `ability_level` is above the caster's level is rank 1, not the
+/// wrapped byte (~255) that blew up L / T / mana; auto-attack and casts agree on L.
+#[tokio::test]
+async fn new_skill_for_a_character_below_the_skill_level_is_rank_one() {
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(GameData::empty());
+    let caster = WorldObject::from(&player);
+    let template = Arc::new(SkillTemplate {
+        id: 9002,
+        ability_id: FIGHT,
+        ability_level: 99,
+        level_step: 4,
+        casting_inc: 14,
+        ..SkillTemplate::default()
+    });
+    let skill = super::skill::new_skill_for(&server, template, Some(&caster));
+    assert_eq!(skill.level, 1);
+    assert_eq!(super::skill::cast_skill_level(&server, &skill, &caster), 99);
+}
+
 /// `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`: the learned rank and the
 /// `casting_inc` term change the cost, and the final value is truncated (75.75 -> 75), not
 /// rounded.

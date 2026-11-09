@@ -115,6 +115,12 @@ pub fn new_skill_for(
     owner: Option<&WorldObject>,
 ) -> SkillRef {
     let level = match owner {
+        // A character's rank is saturated like the stored/learned one: a skill above the
+        // current ability level would otherwise wrap to ~255 (`as u8`) and blow up L / T / mana.
+        // NPC skill levels stay the C# byte cast.
+        Some(o) if o.as_player().is_some() => {
+            rank_for_level(&template, ab_level(server, o, template.ability_id))
+        }
         Some(o) => SkillRun::level_for(&template, ab_level(server, o, template.ability_id)),
         None => 1,
     };
@@ -3029,7 +3035,7 @@ pub fn start_auto_skill(server: &GameServer, caster: &WorldObject, skill: &Skill
         skill: skill.clone(),
         cancel: cancel.clone(),
     });
-    let level = effective_level(&skill.template, skill.level);
+    let level = cast_skill_level(server, skill, caster);
     let delay = attack_delay(server, &skill.template, level, caster, true, 1000.0) as i64;
     let obj_id = p.obj_id;
     let skill = skill.clone();
@@ -3112,7 +3118,7 @@ fn auto_attack_tick(
         return None;
     }
     let target = target?;
-    let level = effective_level(&skill.template, skill.level);
+    let level = cast_skill_level(server, &skill, &me);
     let delay = attack_delay(server, &skill.template, level, &me, true, 1000.0) as i64;
     if has_task || gcd >= now_ms() {
         return Some(delay);
