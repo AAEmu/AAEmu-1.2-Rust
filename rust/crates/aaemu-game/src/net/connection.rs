@@ -325,7 +325,18 @@ pub struct GameConnection {
     delay: Option<Arc<ReplyDelayConn>>,
     /// Last allowed chat time per chat-spam group (`FUN_393C2540`'s `lastSend` array).
     pub chat_spam_last: [Option<std::time::Instant>; 15],
+    /// Unknown or unreadable packets seen on this connection (Rust addition, log throttling).
+    bad_packets: u32,
+    /// `CSSpawnCharacter` / `CSNotifyInGame` already ran for the selected character; a replay is
+    /// ignored (it would subscribe to the time manager again and re-run the join hooks). Reset
+    /// by `select_character`.
+    pub spawn_handled: bool,
+    pub in_game_notified: bool,
 }
+
+/// Unknown or unreadable packets of one connection that are logged at `error`; later ones are
+/// logged at `debug` (the real client legitimately sends some not-yet-ported opcodes).
+pub const BAD_PACKET_ERROR_LOG_LIMIT: u32 = 10;
 
 impl std::fmt::Debug for GameConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -378,8 +389,24 @@ impl GameConnection {
             closing: false,
             delay: None,
             chat_spam_last: [None; 15],
+            bad_packets: 0,
+            spawn_handled: false,
+            in_game_notified: false,
         };
         (conn, handle)
+    }
+
+    /// Counts one unknown or unreadable packet; `true` while it is still worth an `error` log
+    /// (the first [`BAD_PACKET_ERROR_LOG_LIMIT`] of the connection).
+    pub fn note_bad_packet(&mut self) -> bool {
+        self.bad_packets = self.bad_packets.saturating_add(1);
+        if self.bad_packets == BAD_PACKET_ERROR_LOG_LIMIT + 1 {
+            tracing::warn!(
+                "session {}: more than {BAD_PACKET_ERROR_LOG_LIMIT} unknown or unreadable packets, logging the rest at debug",
+                self.id
+            );
+        }
+        self.bad_packets <= BAD_PACKET_ERROR_LOG_LIMIT
     }
 
     /// Attaches `Debug:ReplyDelay` to this connection and every handle made from it.

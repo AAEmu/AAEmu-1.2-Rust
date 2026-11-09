@@ -285,6 +285,18 @@ downloads.
 | Login | `Network.Host` / `Port` (clients), `InternalNetwork.Host` / `Port` (game servers), `GameServers[]` (world list and the address handed to clients), `SecretKey`, `urls` |
 | Game | `Network.Host` / `Port`, `StreamNetwork.Host` / `Port`, `LoginNetwork.Host` / `Port`, `SecretKey`, `Id` / `AdditionalesId`, `Network.NumConnections` (load level) |
 
+The game listener also limits unauthenticated and abusive peers (Rust addition; `0` switches a limit off):
+
+| Key (`Network.`) | Default | Meaning |
+| --- | --- | --- |
+| `PreAuthTimeoutSeconds` | 30 | A connection that has not completed `X2EnterWorld` within this time is closed |
+| `MaxUnauthenticatedPerIp` | 256 | Simultaneous connections per IP that have not completed `X2EnterWorld`; further sockets are dropped at accept |
+| `MaxFramesPerSecond` | 500 | Sustained inbound frames per second of one connection; exceeding it closes the connection |
+| `FrameBurstSeconds` | 5 | Seconds of `MaxFramesPerSecond` a connection may burst above the rate |
+| `EnterWorldFailureLimit` | 5 | Failed `X2EnterWorld` attempts (invalid or foreign cookie) from one IP within the window that block the IP |
+| `EnterWorldFailureWindowSeconds` | 60 | The window the failures are counted in |
+| `EnterWorldBlockSeconds` | 300 | How long a blocked IP's `X2EnterWorld` is refused without checking the cookie |
+
 `SecretKey` must match on both servers. For LAN or remote clients, set `GameServers[].Host` to an
 address the client can reach and bind the game and stream listeners to `*` or that address. See
 [Working with the Config.json files and server listings](wiki/Working-with-the-Config.json-files-and-server-listings.md).

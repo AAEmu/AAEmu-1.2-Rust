@@ -1,9 +1,9 @@
 //! `GameNetwork.Start` + the per-session parts of `GameProtocolHandler`
 //! (`OnConnect` / `OnReceive` / `OnDisconnect`).
 
-use std::collections::VecDeque;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aaemu_commons::net::FrameCodec;
@@ -13,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use crate::config::NetworkConfig;
 use crate::net::connection::{ConnCommand, GameConnection};
 use crate::net::outbox::{outbox, OutFrame, OutboxReceiver};
 use crate::net::reply_delay::ReplyDelayConn;
@@ -22,6 +23,112 @@ use crate::server::GameServer;
 const WRITE_BATCH_FRAMES: usize = 256;
 /// A batch the client does not accept within this time means it stopped reading.
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Per-connection limits of the network path (Rust addition), resolved from the `Network`
+/// section: the pre-auth timeout and the inbound frame rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetLimits {
+    /// A connection that has not completed `X2EnterWorld` within this time is closed.
+    pub pre_auth_timeout: Option<Duration>,
+    /// `(frames per second, burst capacity in frames)`.
+    pub frame_rate: Option<(f64, f64)>,
+}
+
+impl NetLimits {
+    pub fn from_config(cfg: &NetworkConfig) -> Self {
+        let rate = f64::from(cfg.max_frames_per_second);
+        Self {
+            pre_auth_timeout: (cfg.pre_auth_timeout_seconds > 0)
+                .then(|| Duration::from_secs(cfg.pre_auth_timeout_seconds.into())),
+            frame_rate: (cfg.max_frames_per_second > 0)
+                .then(|| (rate, rate * f64::from(cfg.frame_burst_seconds.max(1)))),
+        }
+    }
+}
+
+/// Token bucket for the inbound frame rate of one connection: `rate` tokens per second up to
+/// `capacity`, one token per frame.
+#[derive(Debug)]
+pub struct TokenBucket {
+    rate: f64,
+    capacity: f64,
+    tokens: f64,
+    last: tokio::time::Instant,
+}
+
+impl TokenBucket {
+    /// A full bucket.
+    pub fn new(rate: f64, capacity: f64, now: tokio::time::Instant) -> Self {
+        Self {
+            rate,
+            capacity,
+            tokens: capacity,
+            last: now,
+        }
+    }
+
+    /// Takes one token; `false` when the bucket is empty (the caller exceeded the rate).
+    pub fn try_take(&mut self, now: tokio::time::Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Counts the connections per IP that have not completed `X2EnterWorld` yet.
+#[derive(Debug, Default, Clone)]
+pub struct PreAuthLimiter {
+    counts: Arc<Mutex<HashMap<IpAddr, u32>>>,
+}
+
+/// Holds one pre-auth slot of an IP; dropping it frees the slot.
+#[derive(Debug)]
+pub struct PreAuthGuard {
+    counts: Arc<Mutex<HashMap<IpAddr, u32>>>,
+    ip: IpAddr,
+}
+
+impl PreAuthLimiter {
+    /// Takes a slot for `ip`; `None` when it already holds `cap` of them (`cap == 0` = no cap).
+    pub fn acquire(&self, ip: IpAddr, cap: u32) -> Option<PreAuthGuard> {
+        let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        let count = counts.entry(ip).or_insert(0);
+        if cap > 0 && *count >= cap {
+            return None;
+        }
+        *count += 1;
+        Some(PreAuthGuard {
+            counts: self.counts.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for PreAuthGuard {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Completes at `deadline`; never when there is none.
+async fn pre_auth_wait(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
 
 /// Binds `Network.Host:Port` (`"*"` = any) and serves connections until the task is dropped.
 pub async fn run(server: Arc<GameServer>) -> std::io::Result<()> {
@@ -33,16 +140,39 @@ pub async fn run(server: Arc<GameServer>) -> std::io::Result<()> {
     };
     let listener = TcpListener::bind((host, cfg.port)).await?;
     tracing::info!("Network started on {}", listener.local_addr()?);
+    let limiter = PreAuthLimiter::default();
     loop {
         let (socket, peer) = listener.accept().await?;
+        let network = &server.config.network;
+        let Some(guard) = limiter.acquire(peer.ip(), network.max_unauthenticated_per_ip) else {
+            tracing::debug!(
+                "Dropping connection from {}: too many unauthenticated connections",
+                peer.ip()
+            );
+            continue;
+        };
+        let limits = NetLimits::from_config(network);
         let server = server.clone();
-        tokio::spawn(async move { serve(server, socket, peer).await });
+        tokio::spawn(async move { serve_with(server, socket, peer, limits, Some(guard)).await });
     }
 }
 
-/// Drives one client connection: a reader/dispatcher loop owning the [`GameConnection`] plus a
-/// writer task fed by its outbox ([`write_frames`]).
+/// Drives one client connection with the configured limits (see [`serve_with`]).
 pub async fn serve(server: Arc<GameServer>, socket: TcpStream, peer: SocketAddr) {
+    let limits = NetLimits::from_config(&server.config.network);
+    serve_with(server, socket, peer, limits, None).await;
+}
+
+/// Drives one client connection: a reader/dispatcher loop owning the [`GameConnection`] plus a
+/// writer task fed by its outbox ([`write_frames`]). `pre_auth` is the connection's slot in the
+/// per-IP unauthenticated cap; it is released once `X2EnterWorld` succeeded.
+pub async fn serve_with(
+    server: Arc<GameServer>,
+    socket: TcpStream,
+    peer: SocketAddr,
+    limits: NetLimits,
+    mut pre_auth: Option<PreAuthGuard>,
+) {
     let id = server.next_connection_id();
     tracing::info!("Connect from {} established, session id: {id}", peer.ip());
     let _ = socket.set_nodelay(true);
@@ -69,15 +199,42 @@ pub async fn serve(server: Arc<GameServer>, socket: TcpStream, peer: SocketAddr)
     // must release the session's reservation, remove a half-left world entry and free the
     // account (see `DisconnectCleanup`). It is disarmed once `on_disconnect` returned.
     let mut cleanup = DisconnectCleanup::new(&server, handle);
+    let started = tokio::time::Instant::now();
+    let mut pre_auth_deadline = limits.pre_auth_timeout.map(|t| started + t);
+    let mut bucket = limits
+        .frame_rate
+        .map(|(rate, capacity)| TokenBucket::new(rate, capacity, started));
 
     while !conn.is_closing() {
         tokio::select! {
+            () = pre_auth_wait(pre_auth_deadline) => {
+                tracing::info!(
+                    "session {id}: no X2EnterWorld within {} s from {}, closing the connection",
+                    limits.pre_auth_timeout.map_or(0, |t| t.as_secs()),
+                    peer.ip()
+                );
+                break;
+            }
             frame = reader.next() => match frame {
                 Some(Ok(payload)) => {
+                    if let Some(bucket) = bucket.as_mut() {
+                        if !bucket.try_take(tokio::time::Instant::now()) {
+                            tracing::warn!(
+                                "session {id}: more than {} frames/s from {}, closing the connection",
+                                limits.frame_rate.map_or(0.0, |(rate, _)| rate),
+                                peer.ip()
+                            );
+                            break;
+                        }
+                    }
                     if let Err(e) = server.handle_frame(&mut conn, &payload).await {
                         // GameProtocolHandler.OnReceive catch-all: connection.Shutdown()
                         tracing::error!("session {id}: {e}");
                         break;
+                    }
+                    if conn.account_id() != 0 {
+                        pre_auth = None;
+                        pre_auth_deadline = None;
                     }
                 }
                 Some(Err(e)) => {
@@ -104,6 +261,7 @@ pub async fn serve(server: Arc<GameServer>, socket: TcpStream, peer: SocketAddr)
         }
     }
 
+    drop(pre_auth);
     on_disconnect(&server, &mut conn).await;
     cleanup.complete();
     drop(cleanup);
@@ -603,5 +761,56 @@ mod tests {
         assert!(server.connections.get(1).is_none());
         assert_eq!(server.streams.account_for(1), None);
         drop(player);
+    }
+
+    #[test]
+    fn token_bucket_allows_the_burst_then_the_sustained_rate() {
+        let t0 = tokio::time::Instant::now();
+        // 2 frames/s, burst of 3.
+        let mut bucket = super::TokenBucket::new(2.0, 3.0, t0);
+        assert!(bucket.try_take(t0));
+        assert!(bucket.try_take(t0));
+        assert!(bucket.try_take(t0));
+        assert!(!bucket.try_take(t0));
+        // Half a second refills one token.
+        assert!(bucket.try_take(t0 + Duration::from_millis(500)));
+        assert!(!bucket.try_take(t0 + Duration::from_millis(500)));
+        // A long pause refills only up to the capacity.
+        let later = t0 + Duration::from_secs(60);
+        for _ in 0..3 {
+            assert!(bucket.try_take(later));
+        }
+        assert!(!bucket.try_take(later));
+    }
+
+    #[test]
+    fn net_limits_follow_the_config_and_zero_switches_them_off() {
+        let cfg = crate::config::NetworkConfig::default();
+        let limits = super::NetLimits::from_config(&cfg);
+        assert_eq!(limits.pre_auth_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(limits.frame_rate, Some((500.0, 2500.0)));
+        let off = crate::config::NetworkConfig {
+            pre_auth_timeout_seconds: 0,
+            max_frames_per_second: 0,
+            ..cfg
+        };
+        let limits = super::NetLimits::from_config(&off);
+        assert_eq!(limits.pre_auth_timeout, None);
+        assert_eq!(limits.frame_rate, None);
+    }
+
+    #[test]
+    fn pre_auth_limiter_caps_one_ip_and_frees_slots_on_drop() {
+        let limiter = super::PreAuthLimiter::default();
+        let a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let b: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+        let g1 = limiter.acquire(a, 2).expect("first");
+        let _g2 = limiter.acquire(a, 2).expect("second");
+        assert!(limiter.acquire(a, 2).is_none());
+        // Another IP has its own budget; 0 = unlimited.
+        assert!(limiter.acquire(b, 2).is_some());
+        let _many: Vec<_> = (0..1000).map(|_| limiter.acquire(b, 0).unwrap()).collect();
+        drop(g1);
+        assert!(limiter.acquire(a, 2).is_some());
     }
 }

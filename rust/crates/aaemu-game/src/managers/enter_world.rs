@@ -3,12 +3,14 @@
 //! phase.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long a world cookie waits for the client to connect to the game server before it stops
-/// counting as an occupied slot. A client connects immediately after `ACWorldCookie`; the expiry
-/// only keeps a cookie whose client vanished from blocking the login queue for ever.
+/// counting as an occupied slot and is refused by [`EnterWorldManager::login`]. A client connects
+/// immediately after `ACWorldCookie`; the expiry keeps a cookie whose client vanished from
+/// blocking the login queue for ever and from being guessed long after it was issued.
 pub const PENDING_TOKEN_LIFETIME: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
@@ -45,6 +47,96 @@ pub enum AddAccountResult {
     ReplacedStale { stale_account: u32 },
 }
 
+/// Most IPs the [`EnterWorldThrottle`] tracks; further IPs are not tracked until entries expire.
+const THROTTLE_MAX_TRACKED_IPS: usize = 65_536;
+/// Expired entries are dropped whenever the table has this many entries.
+const THROTTLE_PRUNE_AT: usize = 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct ThrottleEntry {
+    failures: u32,
+    window_start: Instant,
+    blocked_until: Option<Instant>,
+}
+
+/// Per-IP throttle for failed `X2EnterWorld` attempts (Rust addition): `limit` failures within
+/// `window` block the IP for `block`. The caller passes the clock so the logic is testable.
+#[derive(Debug, Default)]
+pub struct EnterWorldThrottle {
+    ips: Mutex<HashMap<IpAddr, ThrottleEntry>>,
+}
+
+impl EnterWorldThrottle {
+    /// `true` while `ip` is blocked. `limit == 0` (throttle off) never blocks.
+    pub fn is_blocked(&self, ip: IpAddr, limit: u32, now: Instant) -> bool {
+        if limit == 0 {
+            return false;
+        }
+        let mut ips = self.ips.lock().unwrap_or_else(|p| p.into_inner());
+        match ips.get(&ip).and_then(|e| e.blocked_until) {
+            Some(until) if now < until => true,
+            Some(_) => {
+                ips.remove(&ip);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Counts one failed attempt from `ip`; returns `true` when this failure blocked the IP.
+    pub fn record_failure(
+        &self,
+        ip: IpAddr,
+        limit: u32,
+        window: Duration,
+        block: Duration,
+        now: Instant,
+    ) -> bool {
+        if limit == 0 {
+            return false;
+        }
+        let mut ips = self.ips.lock().unwrap_or_else(|p| p.into_inner());
+        if ips.len() >= THROTTLE_PRUNE_AT {
+            ips.retain(|_, e| match e.blocked_until {
+                Some(until) => now < until,
+                None => now.saturating_duration_since(e.window_start) < window,
+            });
+        }
+        if ips.len() >= THROTTLE_MAX_TRACKED_IPS && !ips.contains_key(&ip) {
+            return false;
+        }
+        let entry = ips.entry(ip).or_insert(ThrottleEntry {
+            failures: 0,
+            window_start: now,
+            blocked_until: None,
+        });
+        if entry.blocked_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        if entry.blocked_until.is_some()
+            || now.saturating_duration_since(entry.window_start) >= window
+        {
+            *entry = ThrottleEntry {
+                failures: 0,
+                window_start: now,
+                blocked_until: None,
+            };
+        }
+        entry.failures += 1;
+        if entry.failures >= limit {
+            entry.blocked_until = Some(now + block);
+            return true;
+        }
+        false
+    }
+
+    /// Number of tracked IPs (tests).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.ips.lock().unwrap().len()
+    }
+}
+
 #[derive(Debug)]
 pub struct EnterWorldManager {
     /// `_accounts`: login-server connection id (the client's cookie / token) -> pending account.
@@ -54,7 +146,7 @@ pub struct EnterWorldManager {
     /// second connection can neither enter the same character twice nor load its row while the
     /// previous session is still saving it.
     characters: Mutex<HashMap<u32, u32>>,
-    /// Rust addition for the login queue: how long an unconsumed world cookie counts as a slot.
+    /// Rust addition: how long an unconsumed world cookie counts as a slot and can be used.
     token_lifetime: Duration,
 }
 
@@ -83,9 +175,8 @@ impl EnterWorldManager {
     /// lifetime, plus accepted cookies whose account registration is in flight. Together with
     /// `AccountManager::count` this is the world's occupancy reported to the login queue.
     ///
-    /// Expired entries are only skipped here, never removed: `login()` must keep accepting a
-    /// cookie of any age (with the queue disabled its behaviour is exactly as before the queue
-    /// existed). `add_account` prunes them when a connection id is reused.
+    /// Expired entries are only skipped here, never removed; `add_account` prunes them when a
+    /// connection id is reused.
     pub fn pending_count(&self) -> usize {
         let accounts = self
             .accounts
@@ -134,15 +225,19 @@ impl EnterWorldManager {
 
     /// The token check of `Login(connection, accountId, token)`. The cookie is only marked as
     /// accepted here (still counted as an occupied slot); [`Self::forget`] removes it once the
-    /// account registration finished. A cookie has no age limit here: with the queue disabled its
-    /// lifetime must behave exactly as before the queue existed.
+    /// account registration finished. Deviation from the C# (cookies never expire): an unconsumed
+    /// cookie older than the token lifetime is refused like an unknown one.
     pub fn login(&self, account_id: u32, token: u32) -> LoginDecision {
         let mut accounts = self
             .accounts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
         match accounts.get_mut(&token) {
             Some(entry) if entry.consumed => LoginDecision::InvalidToken,
+            Some(entry) if now.saturating_duration_since(entry.created) >= self.token_lifetime => {
+                LoginDecision::InvalidToken
+            }
             Some(entry) if entry.account_id == account_id => {
                 entry.consumed = true;
                 LoginDecision::Accepted
@@ -275,19 +370,61 @@ mod tests {
     }
 
     #[test]
-    fn world_queue_expiry_only_changes_the_occupancy_not_token_acceptance() {
+    fn an_expired_cookie_is_neither_counted_nor_accepted() {
         let m = EnterWorldManager {
             token_lifetime: Duration::ZERO,
             ..Default::default()
         };
         m.add_account(10, 111, false);
-        // Not counted as an occupied slot...
         assert_eq!(m.pending_count(), 0);
-        // ...but a client that connects late still enters, exactly as before the queue existed.
+        assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
+        // A fresh cookie is accepted, and once accepted its age no longer matters.
+        let m = EnterWorldManager::default();
+        m.add_account(10, 111, false);
         assert_eq!(m.login(10, 111), LoginDecision::Accepted);
         assert_eq!(m.pending_count(), 1);
         m.forget(111);
         assert_eq!(m.pending_count(), 0);
+    }
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::from([10, 0, 0, last])
+    }
+
+    #[test]
+    fn throttle_blocks_after_the_limit_and_recovers_after_the_block() {
+        let t = EnterWorldThrottle::default();
+        let (window, block) = (Duration::from_secs(60), Duration::from_secs(300));
+        let t0 = Instant::now();
+        for i in 0..4 {
+            assert!(!t.record_failure(ip(1), 5, window, block, t0 + Duration::from_secs(i)));
+            assert!(!t.is_blocked(ip(1), 5, t0 + Duration::from_secs(i)));
+        }
+        assert!(t.record_failure(ip(1), 5, window, block, t0 + Duration::from_secs(5)));
+        assert!(t.is_blocked(ip(1), 5, t0 + Duration::from_secs(6)));
+        // Other IPs are unaffected.
+        assert!(!t.is_blocked(ip(2), 5, t0 + Duration::from_secs(6)));
+        // Still blocked just before the block ends, free right after (the entry is pruned).
+        assert!(t.is_blocked(ip(1), 5, t0 + Duration::from_secs(304)));
+        assert!(!t.is_blocked(ip(1), 5, t0 + Duration::from_secs(306)));
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn throttle_failures_outside_the_window_do_not_add_up_and_zero_is_off() {
+        let t = EnterWorldThrottle::default();
+        let (window, block) = (Duration::from_secs(60), Duration::from_secs(300));
+        let t0 = Instant::now();
+        for i in 0..10 {
+            // One failure every 61 s never reaches 5 within a window.
+            assert!(!t.record_failure(ip(1), 5, window, block, t0 + Duration::from_secs(61 * i)));
+        }
+        assert!(!t.is_blocked(ip(1), 5, t0 + Duration::from_secs(700)));
+        for _ in 0..100 {
+            assert!(!t.record_failure(ip(3), 0, window, block, t0));
+        }
+        assert!(!t.is_blocked(ip(3), 0, t0));
+        assert_eq!(t.len(), 1);
     }
 
     #[test]

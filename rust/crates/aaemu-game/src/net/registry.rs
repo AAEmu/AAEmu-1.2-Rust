@@ -38,7 +38,11 @@ fn dispatch<'a, P: ClientPacket>(
             packet.handle(server, conn)
         }
         Err(e) => {
-            tracing::error!("GamePacket: C->S {} failed to read: {e}", P::NAME);
+            if conn.note_bad_packet() {
+                tracing::error!("GamePacket: C->S {} failed to read: {e}", P::NAME);
+            } else {
+                tracing::debug!("GamePacket: C->S {} failed to read: {e}", P::NAME);
+            }
             Box::pin(async move { Err(e) })
         }
     }

@@ -706,6 +706,8 @@ pub fn select_loaded(
     // character whose wallet still equals it).
     server.save.seed_committed_money(&player);
     conn.active_char = Some(player.clone());
+    conn.spawn_handled = false;
+    conn.in_game_notified = false;
     crate::systems::quests::on_character_selected(server, &player);
     // Mates of every instance despawned, pending vehicle despawn task aborted.
     crate::systems::vehicles::on_character_selected(server, &player);
@@ -972,6 +974,12 @@ pub fn spawn_character(server: &GameServer, conn: &mut GameConnection, visual: V
         conn.shutdown();
         return;
     };
+    // Deviation from the C#: a replayed CSSpawnCharacter would subscribe to the time manager
+    // again; it is ignored until the next character select.
+    if std::mem::replace(&mut conn.spawn_handled, true) {
+        tracing::debug!("session {}: CSSpawnCharacter replay ignored", conn.id);
+        return;
+    }
     conn.state = GameState::World;
     let state = {
         let mut c = player.data();
@@ -1033,6 +1041,11 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
         tracing::error!("CSNotifyInGamePacket without an active character");
         return;
     };
+    // Deviation from the C#: a replayed CSNotifyInGame would re-run the join hooks.
+    if std::mem::replace(&mut conn.in_game_notified, true) {
+        tracing::debug!("session {}: CSNotifyInGame replay ignored", conn.id);
+        return;
+    }
     set_online(server, &p, true);
     spawn(server, &p);
     let (zone, race, faction, expedition, name, id) = {

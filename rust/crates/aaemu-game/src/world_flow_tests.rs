@@ -666,6 +666,38 @@ async fn time_of_day_subscription() {
     assert!(a.drain().is_empty());
 }
 
+/// A replayed `CSSpawnCharacter` / `CSNotifyInGame` is ignored: it would subscribe to the time
+/// manager again and re-run the join hooks. A new character select re-arms both.
+#[tokio::test]
+async fn spawn_and_notify_in_game_replays_are_ignored() {
+    use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+    let server = std::sync::Arc::new(test_server());
+    server.set_self();
+    let mut a = TestClient::new(&server, 1, 7);
+    let p = spawn_player(
+        &server,
+        &a,
+        test_character(1, "Replayer", 1000.0, 1000.0),
+        0x100,
+    );
+    a.conn.active_char = Some(p.clone());
+
+    let subscribers = || p.subscribers().len();
+    let before = subscribers();
+    session::spawn_character(&server, &mut a.conn, Default::default());
+    assert_eq!(subscribers(), before + 1);
+    a.drain();
+    session::spawn_character(&server, &mut a.conn, Default::default());
+    assert_eq!(subscribers(), before + 1);
+    assert!(a.drain().is_empty());
+
+    session::notify_in_game(&server, &mut a.conn);
+    assert!(a.conn.in_game_notified);
+    a.drain();
+    session::notify_in_game(&server, &mut a.conn);
+    assert!(a.drain().is_empty());
+}
+
 /// Quitting the game frees the account at once and closes the connection, so an immediate relog
 /// is not refused with "already connected" (enter world denied, reason 1). A stale connection
 /// that closes later must not unregister the new login of the same account.

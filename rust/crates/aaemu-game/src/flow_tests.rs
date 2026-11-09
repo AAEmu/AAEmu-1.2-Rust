@@ -538,6 +538,8 @@ async fn dispatch_edge_cases() {
     );
 
     let mut c = client(&server, 1);
+    // Past `X2EnterWorld` (before it only that packet is dispatched).
+    c.conn.set_account_id(1000);
     // Ping -> Pong echoes tm/when/local
     let body = bytes(|s| {
         s.write_i64(11).write_i64(22).write_u32(33);
@@ -756,4 +758,217 @@ async fn tcp_session_roundtrip() {
     }
     assert!(server.connections.is_empty());
     assert!(!server.accounts.contains(5));
+}
+
+/// A connection that has not completed `X2EnterWorld` may only send `X2EnterWorld`: anything else
+/// closes it without running a handler (no reply, no database access).
+#[tokio::test]
+async fn a_packet_before_x2_enter_world_closes_the_connection() {
+    let server = test_server();
+    for frame in [
+        c2s_l1(cs::CSListCharacterPacket, &[0, 0, 0, 0, 0, 0]),
+        c2s_l1(cs::CSLeaveWorldPacket, &[2]),
+        l2(pp::PingPacket, &[0; 20]),
+        l2(pp::FinishStatePacket, &[0, 0, 0, 0]),
+        // An unregistered opcode is not exempt either.
+        c2s_l1(0x7FF, &[]),
+    ] {
+        let mut c = client(&server, 90);
+        server.handle_frame(&mut c.conn, &frame).await.unwrap();
+        assert!(c.conn.is_closing(), "frame {frame:02x?}");
+        assert!(c.drain().is_empty());
+        assert_eq!(c.conn.account_id(), 0);
+    }
+    // An unknown frame level is still a protocol error.
+    let mut c = client(&server, 91);
+    assert!(server
+        .handle_frame(&mut c.conn, &[0xDD, 0x07, 0, 0])
+        .await
+        .is_err());
+}
+
+/// A second `X2EnterWorld` on a connection that already has an account is refused and leaves the
+/// first account's registration alone.
+#[tokio::test]
+async fn a_second_x2_enter_world_is_refused() {
+    let server = test_server();
+    server.enter_world.add_account(5, 9, false);
+    server.enter_world.add_account(6, 10, false);
+    let mut c = client(&server, 92);
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, 9)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(c.conn.account_id(), 5);
+    assert!(!c.conn.is_closing());
+    c.drain();
+
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(6, 10)),
+        )
+        .await
+        .unwrap();
+    assert!(c.conn.is_closing());
+    assert_eq!(c.conn.account_id(), 5);
+    assert!(server.accounts.contains(5));
+    assert!(!server.accounts.contains(6));
+    assert!(c.drain().is_empty());
+    // The second cookie was never consumed.
+    assert_eq!(
+        server.enter_world.login(6, 10),
+        crate::managers::LoginDecision::Accepted
+    );
+}
+
+/// After `Network.EnterWorldFailureLimit` failed attempts an IP is refused without the cookie
+/// being checked, so a correct cookie cannot be reached by guessing.
+#[tokio::test]
+async fn repeated_bad_cookies_block_the_ip() {
+    let server = test_server();
+    server.enter_world.add_account(5, 9, false);
+    let limit = server.config.network.enter_world_failure_limit;
+    assert_eq!(limit, 5);
+    for i in 0..limit {
+        let mut c = client(&server, 100 + i);
+        server
+            .handle_frame(
+                &mut c.conn,
+                &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, 1000 + i)),
+            )
+            .await
+            .unwrap();
+        assert!(c.conn.is_closing());
+    }
+    let mut c = client(&server, 200);
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, 9)),
+        )
+        .await
+        .unwrap();
+    assert!(c.conn.is_closing());
+    assert_eq!(c.conn.account_id(), 0);
+    assert!(!server.accounts.contains(5));
+    // The right cookie was not even looked at.
+    assert_eq!(
+        server.enter_world.login(5, 9),
+        crate::managers::LoginDecision::Accepted
+    );
+}
+
+type LoopbackClient =
+    tokio_util::codec::Framed<tokio::net::TcpStream, aaemu_commons::net::FrameCodec>;
+
+/// Reads frames until the server closes the socket (`true`) or `wait` passes (`false`).
+async fn closed_within(client: &mut LoopbackClient, wait: Duration) -> bool {
+    use futures::StreamExt;
+    tokio::time::timeout(wait, async {
+        while let Some(frame) = client.next().await {
+            if frame.is_err() {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn limited(timeout_ms: Option<u64>, rate: Option<(f64, f64)>) -> crate::net::listener::NetLimits {
+    crate::net::listener::NetLimits {
+        pre_auth_timeout: timeout_ms.map(Duration::from_millis),
+        frame_rate: rate,
+    }
+}
+
+/// Starts `serve_with` on a loopback socket and returns the framed client side.
+async fn serve_loopback(
+    server: &Arc<GameServer>,
+    limits: crate::net::listener::NetLimits,
+) -> LoopbackClient {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = server.clone();
+    tokio::spawn(async move {
+        let (sock, peer) = listener.accept().await.unwrap();
+        crate::net::listener::serve_with(srv, sock, peer, limits, None).await;
+    });
+    tokio_util::codec::Framed::new(
+        tokio::net::TcpStream::connect(addr).await.unwrap(),
+        aaemu_commons::net::FrameCodec,
+    )
+}
+
+#[tokio::test]
+async fn a_connection_that_never_enters_is_closed_after_the_pre_auth_timeout() {
+    let server = Arc::new(test_server());
+    let mut silent = serve_loopback(&server, limited(Some(200), None)).await;
+    assert!(closed_within(&mut silent, Duration::from_secs(10)).await);
+    for _ in 0..50 {
+        if server.connections.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(server.connections.is_empty());
+}
+
+#[tokio::test]
+async fn an_authenticated_connection_is_not_closed_by_the_pre_auth_timeout() {
+    use futures::SinkExt;
+
+    let server = Arc::new(test_server());
+    server.enter_world.add_account(5, 9, false);
+    let mut client = serve_loopback(&server, limited(Some(200), None)).await;
+    client
+        .send(c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, 9)))
+        .await
+        .unwrap();
+    assert!(!closed_within(&mut client, Duration::from_millis(700)).await);
+    assert!(server.accounts.contains(5));
+}
+
+#[tokio::test]
+async fn a_connection_over_the_frame_rate_is_closed() {
+    use futures::SinkExt;
+
+    let server = Arc::new(test_server());
+    server.enter_world.add_account(5, 9, false);
+    // 1 frame/s with a burst of 5: X2EnterWorld plus a few unknown frames pass, a flood does not.
+    let mut client = serve_loopback(&server, limited(None, Some((1.0, 5.0)))).await;
+    client
+        .send(c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, 9)))
+        .await
+        .unwrap();
+    for _ in 0..30 {
+        if client.send(c2s_l1(0x7FF, &[])).await.is_err() {
+            break;
+        }
+    }
+    assert!(closed_within(&mut client, Duration::from_secs(10)).await);
+}
+
+/// Unknown or unreadable packets are logged at `error` only for the first ten of a connection;
+/// none of them closes it (the real client sends not-yet-ported opcodes).
+#[tokio::test]
+async fn unknown_packets_are_counted_per_connection_and_do_not_close_it() {
+    let server = test_server();
+    let mut c = client(&server, 93);
+    c.conn.set_account_id(1000);
+    for i in 1..=12 {
+        server
+            .handle_frame(&mut c.conn, &c2s_l1(0x7FF, &[]))
+            .await
+            .unwrap();
+        assert!(!c.conn.is_closing(), "packet {i}");
+    }
+    // The 13th is the first one past the limit of ten.
+    assert!(!c.conn.note_bad_packet());
+    let mut fresh = client(&server, 94);
+    assert!(fresh.conn.note_bad_packet());
 }
