@@ -518,9 +518,10 @@ fn load_cell_height_map(
                         Ok(h) => h,
                         Err(e) => return CellLoad::Exception(format!("{e} ({file})")),
                     };
-                    // (ushort)(height * Template.HeightMaxCoefficient): float * double,
-                    // saturating conversion (.NET 9+).
-                    let value = (f64::from(height) * height_max_coefficient) as u16;
+                    // C#: (ushort)(height * Template.HeightMaxCoefficient), float * double,
+                    // saturating conversion (.NET 9+). The coefficient covers the whole
+                    // `max_height` range here (see PORTING.md), so only the unit rounding differs.
+                    let value = (f64::from(height) * height_max_coefficient).round() as u16;
                     heights[(o_x * CELL_HMAP_RESOLUTION + o_y) as usize] = value;
                     if node.is_hole_sample(unit_x, unit_y) {
                         let bit = (o_x * CELL_HMAP_RESOLUTION + o_y) as usize;
@@ -1332,7 +1333,7 @@ pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    const COEF: f64 = 65535.0 / (4096.0 / 4.0);
+    const COEF: f64 = 65535.0 / 4096.0;
 
     #[test]
     fn node_surface_ids_follow_the_native_lower_sample_rule() {
@@ -1381,6 +1382,29 @@ mod tests {
         assert!(!t.grid_is_hole(&files, 4000, 5));
     }
 
+    #[test]
+    fn heights_above_1024m_round_trip() {
+        // The old coefficient (max_height / 4) saturated at 1023.98 m; now the u16 covers max_height.
+        let t = WorldHeightmap::with_size(0, "test_world", 2, 2, COEF);
+        let mut h = vec![0u16; CELL_POINTS];
+        for (i, m) in [1500.0f64, 2000.0, 4095.0].into_iter().enumerate() {
+            h[i] = (m * COEF).round() as u16;
+        }
+        assert!(t.insert_cell(0, 0, h));
+        for (i, m) in [1500.0f32, 2000.0, 4095.0].into_iter().enumerate() {
+            let got = t.get_height_map_data_in_cell(0, 0, 0, i as i32).unwrap();
+            assert!((got - m).abs() <= 1.0 / COEF as f32, "{m} -> {got}");
+        }
+        assert!(COEF.recip() < 0.07, "precision is at least 1/16 m");
+    }
+
+    #[test]
+    fn synthetic_template_covers_max_height() {
+        let t = WorldTemplate::synthetic(0, "main_world", 1, 1, 1);
+        assert_eq!(t.height_max_coefficient, f64::from(u16::MAX) / 4096.0);
+        assert_eq!((4095.0 * t.height_max_coefficient).round() as u16, 65519);
+    }
+
     fn synthetic() -> HeightmapWorlds {
         let t = WorldHeightmap::with_size(0, "test_world", 2, 2, COEF);
         // Cell (0,0): height(x, y) = x_index (in metres: 2 m grid → value = index units).
@@ -1422,8 +1446,8 @@ mod tests {
         let bl = t.get_raw_height_map_height(&f, 10, 16).unwrap();
         let br = t.get_raw_height_map_height(&f, 12, 16).unwrap();
         assert_eq!(h, lerp(lerp(tl, tr, 0.5), lerp(bl, br, 0.5), 0.5));
-        assert!((h - 20.5).abs() < 0.05, "{h}");
-        // Exactly on a grid point: offsets 0.
+        assert!((h - 20.5).abs() < 0.1, "{h}"); // u16 unit is 1/16 m
+                                                // Exactly on a grid point: offsets 0.
         assert_eq!(t.get_height(&f, 10.0, 14.0).unwrap(), tl);
     }
 
@@ -1881,5 +1905,53 @@ mod real_data_tests {
             h.get_height(zone, s[0], s[1], s[2]),
             t.get_height(&files, s[0], s[1]).unwrap()
         );
+    }
+
+    /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game main_world_spawn_terrain_clamp
+    /// -- --ignored --nocapture`: counts main_world NPC spawns whose terrain sits at the old
+    /// 1024 m clamp (coefficient `max_height / 4`) and at the new one.
+    #[test]
+    #[ignore = "needs AAEMU_GAME_PAK"]
+    fn main_world_spawn_terrain_clamp() {
+        let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+            return;
+        };
+        let app = app_path();
+        let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+        let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+        let main = worlds.get_world_template_by_name("main_world").unwrap();
+        let new_coef = main.height_max_coefficient;
+        let old_coef = f64::from(u16::MAX) / (f64::from(main.max_height) / 4.0);
+        let make =
+            |coef| WorldHeightmap::with_size(main.id, &main.name, main.cell_x, main.cell_y, coef);
+        let (old, new) = (make(old_coef), make(new_coef));
+        let text =
+            std::fs::read_to_string(app.join("Data/Worlds/main_world/npc_spawns.json")).unwrap();
+        let doc = json::parse(&text).unwrap();
+        let (mut n, mut old_clamped, mut new_clamped, mut max_new) = (0, 0, 0, 0f32);
+        for e in json::array(&doc).unwrap() {
+            let Some(p) = e
+                .as_object()
+                .and_then(|o| json::prop(o, "Position"))
+                .and_then(|p| p.as_object())
+            else {
+                continue;
+            };
+            let x = json::f32_or(p, "X", 0.0).unwrap();
+            let y = json::f32_or(p, "Y", 0.0).unwrap();
+            let (Ok(a), Ok(b)) = (old.get_height(&files, x, y), new.get_height(&files, x, y))
+            else {
+                continue;
+            };
+            n += 1;
+            old_clamped += usize::from(a >= main.max_height / 4.0 - 0.05);
+            new_clamped += usize::from(b >= main.max_height - 0.05);
+            max_new = max_new.max(b);
+        }
+        eprintln!(
+            "{n} spawns: terrain at the old 1024 m clamp {old_clamped}, at the new ceiling {new_clamped}; max terrain {max_new:.2} m"
+        );
+        assert!(n > 1000);
+        assert_eq!(new_clamped, 0);
     }
 }

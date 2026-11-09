@@ -478,7 +478,8 @@ pub struct WorldTemplate {
     pub name: String,
     /// Max height for this world's map data.
     pub max_height: f32,
-    /// `HeightMaxCoefficient = ushort.MaxValue / (MaxHeight / 4.0)`.
+    /// `HeightMaxCoefficient`: u16 heightmap units per metre, `ushort.MaxValue / MaxHeight` (C#:
+    /// `/ (MaxHeight / 4.0)`, which saturated every height above `MaxHeight / 4`; see PORTING.md).
     pub height_max_coefficient: f64,
     /// Height of the ocean surface for this world.
     pub ocean_level: f32,
@@ -549,7 +550,7 @@ impl WorldTemplate {
         t.cell_x = cell_x.max(0);
         t.cell_y = cell_y.max(0);
         t.max_height = 4096.0;
-        t.height_max_coefficient = f64::from(u16::MAX) / (f64::from(t.max_height) / 4.0);
+        t.height_max_coefficient = f64::from(u16::MAX) / f64::from(t.max_height);
         t.alloc_regions()
             .expect("synthetic world size must be reasonable");
         t.zone_key_by_regions.fill(zone_key);
@@ -622,7 +623,7 @@ impl WorldTemplate {
         self.max_height = xw.max_terrain_height;
         // pre-create region data
         self.alloc_regions()?;
-        self.height_max_coefficient = f64::from(u16::MAX) / (f64::from(self.max_height) / 4.0);
+        self.height_max_coefficient = f64::from(u16::MAX) / f64::from(self.max_height);
         self.xml_world = xw;
 
         // Read Zone XML

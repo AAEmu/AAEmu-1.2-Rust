@@ -2062,8 +2062,8 @@ pub(crate) fn spawn_ground_z(
 ) -> Option<f32> {
     use crate::systems::ai::collision as col;
     // The heightmap stores `height * coefficient` in a u16, so heights saturate at
-    // `max_height / 4` (1024 m in main_world): a terrain "floor" there is only a lower bound.
-    let saturated = |h: f32| h >= world.template.max_height / 4.0 - 0.05;
+    // `max_height`: a terrain "floor" there is only a lower bound.
+    let saturated = |h: f32| h >= world.template.max_height - 0.05;
     if let Some(Some(floor)) = col::ground_height_probe(
         server,
         world.id,

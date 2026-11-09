@@ -493,6 +493,8 @@ buff unchanged, absolute-value inference, real-compact loader for the three colu
 
 ### systems::npcs
 
+**Deviation: heightmap u16 scale (2026-11-08).** C# `HeightMaxCoefficient = ushort.MaxValue / (MaxHeight / 4.0)` (64 units/m in main_world) saturated every terrain height above 1023.98 m, flattening mountain tops (88 of 25 299 main_world NPC spawns sat on the clamp; real terrain peaks at about 1250 m). Rust uses `ushort.MaxValue / MaxHeight` (16 units/m, ceiling 4096 m, `world_templates.rs`) and rounds instead of truncating when quantising. The source `heightmap.dat` heights are multiples of 0.05 m x `iStep` (`NodeCell::raw_data_to_height`), so 1/16 m loses at most about 3 cm. Gated test: `main_world_spawn_terrain_clamp`.
+
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `NpcManager.Load` (customs, body parts, templates, equip packs, postures, unit modifiers, initial buffs, merchants / goods) | `npc/data.rs` | done | 13 382 templates on the real DB. Every `merchants` row of an NPC is kept (`merchant_pack_ids`), as the 1.2 client unions the packs; the C# kept only the last one. Creatures.xml names, `LoadAiParams` not ported. Also loads `aggro_links` / `npc_aggro_links` (130 groups, 643 rows, 572 NPC templates, rows with a missing NPC / group skipped) into `NpcData::aggro_links`; the rule that reads them is `systems::ai` (see below). |
@@ -1605,8 +1607,8 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   C# 1 m rule, with three additions: a spawn 1 m or more above a floor under the water surface
   (a surface swimmer) stays; a probe miss under solid, non-hole terrain less than
   `SPAWN_SINK_SNAP` (6 m) deep is lifted onto the terrain (the client drew it buried), and
-  anything under a hole stays; a floor at the heightmap ceiling (`max_height / 4` = 1024 m in
-  main_world, the u16 height storage saturates) is not trusted; a spawn 1 m or more above a floor
+  anything under a hole stays; a floor at the heightmap ceiling (`max_height` = 4096 m, the u16 height storage
+  saturates) is not trusted; a spawn 1 m or more above a floor
   and inside the bounding box of a loaded brush at least 6 m tall (a building / castle shell,
   `inside_brush_bounds`) keeps its Z: the Two Crowns throne hall (about 100 crowd NPCs at
   Z 242.8 around 13575-13636, 10427-10475) has no floor in our collision (the stairs brush's slab
