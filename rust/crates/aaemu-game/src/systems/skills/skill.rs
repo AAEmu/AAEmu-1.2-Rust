@@ -26,7 +26,10 @@ use super::packets::{
     SCSkillEndedPacket, SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
 };
 use super::relation::{can_attack, filter_with_relation, owner_character, relation_to};
-use super::state::{AutoAttackSlot, CancelToken, SkillRef, SkillRun, SkillTaskKind, SkillTaskSlot};
+use super::state::{
+    AutoAttackSlot, CancelToken, PlotCooldownSnapshot, SkillRef, SkillRun, SkillTaskKind,
+    SkillTaskSlot,
+};
 use super::stats::{equip_slot, slot_type, stat, stats, StatKind};
 use super::types::{
     skill_result, ApplicationMethod, BuffRemoveOn, CastAction, DamageType, RelationState,
@@ -870,6 +873,7 @@ fn use_skill_impl(
         state.effect_cancelled = false;
         state.music_started_pending = false;
         state.gcd_started = false;
+        state.plot_cooldown_snapshot = None;
         state.hit_types.clear();
     }
     caster.with_unit(|u| u.unit_mut().skill_state.condition_chance = true);
@@ -969,7 +973,19 @@ fn use_skill_impl(
     if let Some(plot_id) = template.plot_id {
         if template.plot_only {
             // Plot-only skills never enter `cast`; commit cooldowns once at acceptance,
-            // before a plot can finish synchronously.
+            // before a plot can finish synchronously. A plot cancelled while still casting
+            // gives them back (`refund_cancelled_plot_cooldown`).
+            let tag = template.cooldown_tag_id.max(0) as u32;
+            let snapshot = caster.with_unit(|u| {
+                let u = u.unit_mut();
+                PlotCooldownSnapshot {
+                    skill_cooldown_end: u.cooldowns.cooldowns.get(&template.id).copied(),
+                    tag_id: tag,
+                    tag_cooldown_end: u.cooldowns.tag_cooldowns.get(&tag).copied(),
+                    global_cooldown_ms: u.global_cooldown_ms,
+                }
+            });
+            skill.state().plot_cooldown_snapshot = snapshot;
             start_global_cooldown(server, skill, caster, now);
             start_skill_cooldown(server, skill, caster, now);
         }
@@ -2733,6 +2749,56 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
                     matcher: RecordMatch::Value1(t.id),
                 },
             );
+        }
+    }
+}
+
+/// A `plot_only` skill commits its GCD and cooldown when it is accepted. A plot cancelled
+/// while it is still in its casting phase (before any damage or other effect landed) restores the
+/// caster's cooldown state from before the use (so the shared tag cooldown returns to what it was
+/// rather than being wiped) and tells the client.
+pub(super) fn refund_cancelled_plot_cooldown(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+) {
+    let Some(snap) = skill.state().plot_cooldown_snapshot.take() else {
+        return;
+    };
+    let id = skill.template.id;
+    let restored = caster.with_unit(|u| {
+        let u = u.unit_mut();
+        let restore = |map: &mut std::collections::HashMap<u32, i64>,
+                       key: u32,
+                       prev: Option<i64>| match prev {
+            Some(end) => {
+                map.insert(key, end);
+            }
+            None => {
+                map.remove(&key);
+            }
+        };
+        restore(&mut u.cooldowns.cooldowns, id, snap.skill_cooldown_end);
+        if snap.tag_id != 0 {
+            restore(
+                &mut u.cooldowns.tag_cooldowns,
+                snap.tag_id,
+                snap.tag_cooldown_end,
+            );
+        }
+        u.global_cooldown_ms = snap.global_cooldown_ms;
+    });
+    if restored.is_none() {
+        return;
+    }
+    if let Some(o) = owner_character(server, caster) {
+        for gcd in [false, true] {
+            o.send(SCSkillCooldownResetPacket {
+                obj_id: caster.obj_id(),
+                skill_id: id,
+                tag_id: if gcd { 0 } else { snap.tag_id },
+                gcd,
+            });
         }
     }
 }

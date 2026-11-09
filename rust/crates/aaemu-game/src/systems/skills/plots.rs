@@ -43,6 +43,9 @@ pub struct PlotStateInner {
     pub variables: [i32; 12],
     pub combat_dice_roll: u8,
     pub is_casting: bool,
+    /// A damage or other non-special, non-buff effect already landed (a cancel after that keeps
+    /// the skill's cooldown).
+    pub effect_landed: bool,
     pub is_channeling: bool,
     /// `ChanneledBuffs` (unit, buff id).
     pub channeled_buffs: Vec<(WorldObject, u32)>,
@@ -267,7 +270,14 @@ pub async fn execute_tree(server: &GameServer, plot_id: u32, state: &Arc<PlotSta
             continue;
         }
         if state.cancellation_requested() {
-            if state.inner().is_casting {
+            let (casting, landed) = {
+                let inner = state.inner();
+                (inner.is_casting, inner.effect_landed)
+            };
+            if casting && !landed {
+                super::skill::refund_cancelled_plot_cooldown(server, &state.skill, state.caster());
+            }
+            if casting {
                 let tl = state.skill.tl_id();
                 broadcast(
                     server,
@@ -1181,6 +1191,14 @@ fn apply_plot_effect(
         let (Some(kind), Some(template)) = (kind, template) else {
             return;
         };
+        if !matches!(
+            template,
+            EffectTemplate::Special(_)
+                | EffectTemplate::SkillController(_)
+                | EffectTemplate::Buff(_)
+        ) {
+            state.inner().effect_landed = true;
+        }
         let args = EffectArgs {
             caster: source.as_obj().cloned(),
             caster_caster: state.ctx.caster_caster,

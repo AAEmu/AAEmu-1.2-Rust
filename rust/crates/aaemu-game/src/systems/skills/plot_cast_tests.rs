@@ -255,3 +255,66 @@ async fn real_compact_akmit_terrifying_roar_plot_carries_its_cast_time() {
         "plot 338 must send a 5000 ms cast event; got {times:?}"
     );
 }
+
+/// A `plot_only` skill commits its GCD and cooldown when accepted; cancelling the plot while it
+/// is still casting (no effect has landed) hands both back and tells the client.
+#[tokio::test]
+async fn plot_only_cancelled_during_casting_restores_cooldown_and_gcd() {
+    let mut data = GameData::empty();
+    synthetic_plot(&mut data);
+    let (server, mut client, player, npc) = fixture(data);
+    let skill: SkillRef = SkillRun::new(
+        Arc::new(SkillTemplate {
+            id: SKILL,
+            plot_id: Some(1),
+            plot_only: true,
+            custom_gcd: 500,
+            cooldown_time: 30_000,
+            cooldown_tag_id: 9,
+            ..Default::default()
+        }),
+        1,
+    );
+    let caster = WorldObject::from(&player);
+    let (result, _) = use_skill(
+        &server,
+        &skill,
+        &caster,
+        SkillCaster::Unit(player.obj_id),
+        &mut SkillCastTarget::Unit(npc.obj_id),
+        Some(SkillObject::None),
+        false,
+    );
+    assert_eq!(result, skill_result::SUCCESS);
+    {
+        let p = player.data();
+        assert!(p.unit.cooldowns.cooldowns.contains_key(&SKILL));
+        assert!(p.unit.cooldowns.tag_cooldowns.contains_key(&9));
+        assert!(p.unit.global_cooldown_ms > 0);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client.drain_frames();
+    skill
+        .state()
+        .active_plot
+        .clone()
+        .unwrap()
+        .request_cancellation();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    {
+        let p = player.data();
+        assert!(!p.unit.cooldowns.cooldowns.contains_key(&SKILL));
+        assert!(!p.unit.cooldowns.tag_cooldowns.contains_key(&9));
+        assert_eq!(p.unit.global_cooldown_ms, 0);
+    }
+    let resets = client
+        .drain_frames()
+        .iter()
+        .filter(|f| {
+            f.bytes.get(1) == Some(&1)
+                && u16::from_le_bytes([f.bytes[4], f.bytes[5]])
+                    == crate::opcodes::sc::SCSkillCooldownResetPacket
+        })
+        .count();
+    assert_eq!(resets, 2, "skill reset and GCD reset");
+}

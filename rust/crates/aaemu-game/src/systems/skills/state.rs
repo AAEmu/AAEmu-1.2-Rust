@@ -65,6 +65,18 @@ pub struct SkillRunState {
     /// A player's timed cast already started the global cooldown when it was accepted (the 1.2
     /// client counts it from the cast start), so `skill::cast` must not restart it at cast end.
     pub gcd_started: bool,
+    /// The caster's cooldown state from just before a `plot_only` skill committed its GCD and
+    /// cooldown at acceptance; restored when the plot is cancelled during its casting phase.
+    pub plot_cooldown_snapshot: Option<PlotCooldownSnapshot>,
+}
+
+/// See [`SkillRunState::plot_cooldown_snapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlotCooldownSnapshot {
+    pub skill_cooldown_end: Option<i64>,
+    pub tag_id: u32,
+    pub tag_cooldown_end: Option<i64>,
+    pub global_cooldown_ms: i64,
 }
 
 /// `Skill`: a template + level and the per-use state, shared by the cast and its tasks.
