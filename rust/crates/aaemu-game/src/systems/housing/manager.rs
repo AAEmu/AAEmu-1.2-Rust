@@ -493,15 +493,31 @@ fn construction_step_maxima(max_hp: i32, all_action: i32, step_count: i32) -> Ve
         .collect()
 }
 
+/// Stored HP of an era-scaled structure (a lodestone or a defense tower whose effective maximum
+/// moved from the template `housings.hp` to the era value). Rows were saved against the old
+/// maximum, so scale the stored value by the effective/template factor: a full tower stays full
+/// and a damaged one keeps its fraction. Leaves ordinary houses and non-positive values alone.
+fn scale_loaded_structure_hp(stored: i32, template_hp: i32, max_hp: i32) -> i32 {
+    if stored <= 0 || template_hp <= 0 || max_hp <= 0 || template_hp == max_hp {
+        return stored;
+    }
+    (i64::from(stored) * i64::from(max_hp) / i64::from(template_hp)).clamp(0, i64::from(max_hp))
+        as i32
+}
+
 /// HP a house loads with. An unfinished, owned, ordinary house loads at its step maximum
 /// (a dead one stays at 0); a finished house
 /// keeps its stored HP (clamped to the maximum) unless the stored value is exactly a
 /// construction-step maximum of an owned, ordinary house: an older build clamped the HP to the
 /// step maximum on load and never raised it on completion. The flag is set when repaired.
+/// `template_hp` is the authored `housings.hp`: when the effective maximum differs (an
+/// era-scaled structure) the stored value is already proportionally scaled and the old-build
+/// construction-step repair does not apply.
 fn loaded_house_hp(
     h: &crate::models::house::House,
     stored: Option<i32>,
     repairable: bool,
+    template_hp: i32,
 ) -> (i32, bool) {
     if h.current_step != -1 {
         let step_max = crate::systems::ai::collision::objects::house_collision_max_hp(h).max(0);
@@ -515,6 +531,7 @@ fn loaded_house_hp(
     let max_hp = h.unit.max_hp.max(0);
     let hp = stored.unwrap_or(max_hp).clamp(0, max_hp);
     if repairable
+        && h.unit.max_hp == template_hp
         && hp < max_hp
         && construction_step_maxima(h.unit.max_hp, h.all_action, h.build_step_count).contains(&hp)
     {
@@ -1369,7 +1386,11 @@ pub fn load_house_row(
         h.allow_recover = r.allow_recover;
         let repairable = h.unit.owner_id != 0
             && template.is_some_and(|t| t.hp > 0 && t.guard_tower_setting_id == 0);
-        let (hp, repaired) = loaded_house_hp(&h, r.hp, repairable);
+        let template_hp = template.map_or(h.unit.max_hp, |t| t.hp);
+        let stored =
+            r.hp.map(|hp| scale_loaded_structure_hp(hp, template_hp, h.unit.max_hp));
+        let rescaled = stored != r.hp;
+        let (hp, repaired) = loaded_house_hp(&h, stored, repairable, template_hp);
         h.unit.hp = hp;
         if repaired {
             h.is_dirty = true;
@@ -1379,6 +1400,18 @@ pub fn load_house_row(
                 r.template_id,
                 r.hp,
                 hp
+            );
+        }
+        if rescaled {
+            // Persist the era-scaled value, so switching profiles does not rescale it again.
+            h.is_dirty = true;
+            tracing::info!(
+                "House {} (template {}): scaled stored HP {:?} to {} for the era maximum {}",
+                r.id,
+                r.template_id,
+                r.hp,
+                hp,
+                h.unit.max_hp
             );
         }
     }

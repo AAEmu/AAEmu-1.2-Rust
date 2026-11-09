@@ -224,7 +224,11 @@ async fn concurrent_lethal_hits_kill_a_player_once() {
 /// slave of a player (a manned siege cannon). The direct NPC kill above keeps its 50 exp loss.
 #[tokio::test]
 async fn player_kills_lose_no_experience_or_durability() {
-    let server = Arc::new(test_server_with(npc_data()));
+    // The authored death durability ratio (2) makes the durability half of
+    // `character_death_losses` observable: it must only be returned with the PvE penalty.
+    let mut data = npc_data();
+    data.items.config.death_durability_loss_ratio = 2;
+    let server = Arc::new(test_server_with(data));
     server.set_self();
 
     let mut client = TestClient::new(&server, 1, 1001);
@@ -245,6 +249,21 @@ async fn player_kills_lose_no_experience_or_durability() {
     killer_client.conn.active_char = Some(killer.clone());
     let killer_obj = WorldObject::from(&killer);
     client.drain();
+
+    // Direct return-value check: the helper reports the PvE exp and durability losses only
+    // when the penalty applies; both are zero for the PvP decision below.
+    use crate::systems::skills::combat;
+    assert_eq!(
+        combat::character_death_losses(&server, &victim, true),
+        (50, 2)
+    );
+    victim.data().experience = 20_500;
+    victim.data().recoverable_exp = 0;
+    client.drain();
+    assert_eq!(
+        combat::character_death_losses(&server, &victim, false),
+        (0, 0)
+    );
 
     for (label, attacker) in [
         ("player", killer_obj.clone()),
@@ -275,6 +294,14 @@ async fn player_kills_lose_no_experience_or_durability() {
             KillReason::Unknown,
         );
         client.drain();
+
+        let penalty = combat::death_penalty_applies(&server, &victim, Some(&attacker));
+        assert!(!penalty, "{label}: PvP death is penalty-free");
+        assert_eq!(
+            combat::character_death_losses(&server, &victim, penalty),
+            (0, 0),
+            "{label}: no exp or durability loss"
+        );
 
         crate::systems::skills::combat::do_die(
             &server,
@@ -315,6 +342,10 @@ async fn player_kills_lose_no_experience_or_durability() {
         KillReason::Unknown,
     );
     client.drain();
+    assert!(
+        combat::death_penalty_applies(&server, &victim, Some(&victim_obj)),
+        "a self-inflicted death keeps the PvE penalty"
+    );
     crate::systems::skills::combat::do_die(
         &server,
         &victim_obj,

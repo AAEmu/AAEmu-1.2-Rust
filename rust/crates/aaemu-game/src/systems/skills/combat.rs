@@ -409,7 +409,7 @@ fn do_die_after_claim(
         // cannons, battlefield pets) and a PvP kill (another player, or a mate / slave owned by
         // one) take no exp and no death durability loss; the killing blow's attribution is the
         // killer object (a skill / DoT passes its original caster), so a lethal DoT counts.
-        let penalty = !killer_is_no_penalty(server, killer) && !killer_is_player(server, p, killer);
+        let penalty = death_penalty_applies(server, p, killer);
         (lost_exp, durability_loss) = character_death_losses(server, p, penalty);
         wait = p.data().rez_wait_duration;
     }
@@ -588,6 +588,17 @@ fn killer_is_player(server: &GameServer, victim: &PlayerRef, killer: Option<&Wor
     };
     super::relation::owner_character(server, killer)
         .is_some_and(|owner| owner.character_id != victim.character_id)
+}
+
+/// Whether a player death pays the PvE exp / durability loss: false for a `no_penalty` NPC and
+/// for a PvP kill (another player, or that player's mate / slave). A self-inflicted death
+/// (`killer` is the victim, e.g. fall damage) keeps the penalty.
+pub(super) fn death_penalty_applies(
+    server: &GameServer,
+    victim: &PlayerRef,
+    killer: Option<&WorldObject>,
+) -> bool {
+    !killer_is_no_penalty(server, killer) && !killer_is_player(server, victim, killer)
 }
 
 /// The player's zone is a zone group whose dominion siege is running (`SiegeState::active_at`).

@@ -4662,25 +4662,33 @@ startup. Timeline and sources: `D:/aaemu-audits/gap-audit-2026-11-02/research/tr
   `ServerProfile::lodestone_max_hp` / `defense_tower_max_hp` (EuAuroria 4,100,000 / 1,500,000,
   EuLaunch and Kr12 keep the data value) with explicit `Housing.LodestoneMaxHp` /
   `Housing.DefenseTowerMaxHp` overrides, applied in `housing::manager::structure_max_hp`
-  (lodestone = `guard_tower_setting_id != 0`; defense tower = `housings` 119/169). A loaded
-  house keeps its persisted current HP, so switching the profile on an existing database is
-  not a migration. The **Tower Cannon** needed no change: slave 100's formula 48 gives 4,796 at
-  level 50 and the 1.2 `unit_modifiers` row `(Slave, 100, MaxHealth, +100000)` brings it to
-  **104,796**, matching the video's target frame. Tests: `era_profiles_scale_castle_structures...`,
+  (lodestone = `guard_tower_setting_id != 0`; defense tower = `housings` 119/169). A row saved
+  against the template maximum is scaled proportionally on load
+  (`loaded_house_hp` / `scale_loaded_structure_hp`), so a full tower stays full and a damaged
+  one keeps its fraction: a tower stored at 600,000 loads at 1,500,000 under `EuAuroria`, and
+  at 600,000 under `Kr12`. The **Tower Cannon** needed no change: slave 100's formula 48 gives
+  4,796 at level 50 and the 1.2 `unit_modifiers` row `(Slave, 100, MaxHealth, +100000)` brings
+  it to **104,796**, matching the video's target frame. Tests:
+  `era_profiles_scale_castle_structures...`, `era_scaled_structures_scale_their_persisted_hp_on_load`,
   gated `real_compact_castle_structure_hp_matches_the_recorded_data_values` and gated
   `real_compact_tower_cannon_max_hp_is_the_formula_plus_the_authored_bonus`.
+* **Castle walls stay at the `r208022` data values on purpose (2026-11-09, r6-siege-video).**
+  Wall templates 121-130 and 158-167 keep 400,000 HP (gates 1,000,000). The only source for a
+  1.2M wall value is the press/forum description of the Nov 2014 change ("Wall HP went from
+  400k to 1.2M"); no video shows a wall's HP bar and no gate value is reported. The press
+  value (1.2M) is recorded here for reference only and is **not** applied.
 * **PvP deaths have no death penalty (2026-11-09, r6-siege-video).** The same video's siege
   death dialog reads "You lost 0 XP" (§2.8, grade C); the 1.2 client has the `ui_texts` "No XP
   lost." and the period rules list exp/durability losses only for PvE (fandom Combat "Death by
   Player" has no negative effects; Ars Technica 2014-09 "If you die in PvP, you lose 0 XP";
   mmogah "you don't lose experience or item durability"; the 1.2 patch notes list exp-loss
-  exemptions only for Guard NPCs, summoned NPCs and Origin mobs). `Character.DoDie` now sets
-  the loss flag false when the killer is another player or a mate / slave owned by one
-  (`skills::combat::killer_is_player`), in addition to the existing `no_penalty` NPC rule; a
-  self-inflicted death (fall damage passes the victim as attacker) still pays the PvE penalty.
-  The C# applied the exp loss unconditionally on the PvP path (deviation, deliberate).
-  Tests: `player_kills_lose_no_experience_or_durability`,
-  `character_death_by_another_player_loses_no_experience`.
+  exemptions only for Guard NPCs, summoned NPCs and Origin mobs). `Character.DoDie` asks
+  `skills::combat::death_penalty_applies`: false when the killer is another player or a mate /
+  slave owned by one, in addition to the existing `no_penalty` NPC rule; a self-inflicted death
+  (fall damage passes the victim as attacker) still pays the PvE penalty. The C# applied the
+  exp loss unconditionally on the PvP path (deviation, deliberate). Tests:
+  `player_kills_lose_no_experience_or_durability` (also pins the `character_death_losses`
+  durability return), `character_death_by_another_player_loses_no_experience`.
 * **Not modelled (owner decision):** Patron / free-player rules, APEX and labor potions are out
   of scope for the profile.
 

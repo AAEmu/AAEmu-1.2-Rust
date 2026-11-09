@@ -1765,7 +1765,16 @@ fn construction_hp_server() -> GameServer {
                 ..Default::default()
             });
     }
-    test_server_with(data)
+    // These tests pin the construction-step HP rules against the authored template values;
+    // `Kr12` keeps them (the `EuAuroria` profile would scale the guard-tower template 402).
+    let config = crate::config::AppConfig {
+        world: crate::config::WorldConfig {
+            profile: crate::config::ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    test_server_with_config(data, config)
 }
 
 fn hp_row(template_id: u32, owner: u32, current_step: i32, hp: Option<i32>) -> manager::HouseRow {
@@ -1939,6 +1948,35 @@ async fn era_profiles_scale_castle_structures_and_leave_ordinary_houses_alone() 
     let server = test_server_with_config(castle_structure_data(), explicit);
     assert_eq!(create_max_hp(&server, 139), 2_000_000);
     assert_eq!(create_max_hp(&server, 119), 900_000);
+}
+
+/// Existing rows were saved against the template maximum. When the era profile raises it, a
+/// full tower stays full and a damaged one keeps its fraction (`stored / template_hp * max`).
+#[tokio::test]
+async fn era_scaled_structures_scale_their_persisted_hp_on_load() {
+    use crate::config::{AppConfig, ServerProfile};
+    let server = test_server_with(castle_structure_data());
+    let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(600_000)));
+    assert_eq!(hp, 1_500_000, "a full tower stays full");
+    assert_eq!(house.data().unit.max_hp, 1_500_000);
+    // A damaged tower keeps its fraction: 300,000 / 600,000 = 50 % -> 750,000 / 1,500,000.
+    let (_, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(300_000)));
+    assert_eq!(hp, 750_000);
+    // Old full lodestone rows scale too (1,000,000 -> 4,100,000).
+    let (_, hp) = load_hp(&server, &hp_row(139, 1, -1, Some(1_000_000)));
+    assert_eq!(hp, 4_100_000);
+
+    let kr = AppConfig {
+        world: crate::config::WorldConfig {
+            profile: ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server = test_server_with_config(castle_structure_data(), kr);
+    let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(600_000)));
+    assert_eq!(hp, 600_000, "Kr12 keeps the authored maximum");
+    assert_eq!(house.data().unit.max_hp, 600_000);
 }
 
 /// The shipped `r208022` `housings.hp` rows the video comparison rests on. The era values are
