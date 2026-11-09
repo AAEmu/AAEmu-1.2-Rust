@@ -964,16 +964,24 @@ async fn failed_house_creation_releases_allocated_tl_id() {
 
 async fn ensure_temporary_housing_health_column(pool: &sqlx::MySqlPool) {
     // Both callers have just created a connection-local temporary housings table.
-    // This also lets the gate run before the new migration is applied to the private DB.
-    let health = sqlx::query("SHOW COLUMNS FROM housings LIKE 'hp'")
-        .fetch_optional(pool)
-        .await
-        .unwrap();
-    if health.is_none() {
-        sqlx::query("ALTER TABLE housings ADD COLUMN hp INT NULL DEFAULT NULL")
-            .execute(pool)
+    // This also lets the gate run before the new migrations are applied to the private DB.
+    for (column, ddl) in [
+        (
+            "hp",
+            "ALTER TABLE housings ADD COLUMN hp INT NULL DEFAULT NULL",
+        ),
+        (
+            "hp_basis",
+            "ALTER TABLE housings ADD COLUMN hp_basis INT NULL DEFAULT NULL",
+        ),
+    ] {
+        let present = sqlx::query(&format!("SHOW COLUMNS FROM housings LIKE '{column}'"))
+            .fetch_optional(pool)
             .await
             .unwrap();
+        if present.is_none() {
+            sqlx::query(ddl).execute(pool).await.unwrap();
+        }
     }
 }
 
@@ -1318,13 +1326,18 @@ async fn private_mysql_housing_health_rollback_retry_and_restart_preserve_damage
     let mut server = health_housing_server();
     server.db = pool.clone();
     let house = house(&server, 61);
+    // Damage persistence is defined for a finished building; an unfinished one loads at its
+    // construction-step maximum (`loaded_house_hp`).
+    house.data().current_step = -1;
     house.data().unit.hp = 321;
     let mut tx = pool.begin().await.unwrap();
     manager::save(&server, &mut tx).await.unwrap();
     tx.commit().await.unwrap();
     manager::commit_save(&server);
     assert!(!house.data().is_dirty);
-    assert_eq!(super::db::load_rows(&pool).await.unwrap()[0].hp, Some(321));
+    let stored = super::db::load_rows(&pool).await.unwrap();
+    assert_eq!(stored[0].hp, Some(321));
+    assert_eq!(stored[0].hp_basis, Some(1_000), "the saved HP basis");
     house.data().unit.hp = 201;
     manager::mark_hp_changed(&house, 321, 201);
     let mut tx = pool.begin().await.unwrap();
@@ -1380,7 +1393,7 @@ async fn private_mysql_housing_health_rollback_retry_and_restart_preserve_damage
         &legacy[0],
     )
     .unwrap();
-    assert_eq!(loaded.data().unit.hp, 664);
+    assert_eq!(loaded.data().unit.hp, 1_000);
     assert!(loaded.data().is_dirty);
     sqlx::query("DROP TEMPORARY TABLE housings")
         .execute(&pool)
@@ -1977,6 +1990,55 @@ async fn era_scaled_structures_scale_their_persisted_hp_on_load() {
     let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(600_000)));
     assert_eq!(hp, 600_000, "Kr12 keeps the authored maximum");
     assert_eq!(house.data().unit.max_hp, 600_000);
+}
+
+/// The saved HP basis makes scaling a one-time conversion: a pre-era damaged tower is scaled on
+/// the first load and saved with the new basis, so the next load keeps it instead of healing it
+/// (the earlier template-only rule scaled 750,000 again to 1,500,000).
+#[tokio::test]
+async fn era_scaled_hp_scales_once_and_survives_save_reload() {
+    let server = test_server_with(castle_structure_data());
+    // A pre-era damaged tower: 300,000 / 600,000 = 50 % -> 750,000.
+    let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(300_000)));
+    assert_eq!(hp, 750_000);
+    let saved = manager::save_row_for(&server, &house).expect("rescaled row is dirty");
+    assert_eq!(saved.hp, Some(750_000));
+    assert_eq!(saved.hp_basis, Some(1_500_000));
+    let (_, hp) = load_hp(&server, &saved);
+    assert_eq!(hp, 750_000, "a reload must not scale again");
+}
+
+/// A Kr12 <-> EuAuroria switch converts the saved HP by the old/new basis factor in both
+/// directions; each save records the maximum the HP is then relative to.
+#[tokio::test]
+async fn switching_era_profiles_converts_the_stored_hp_both_ways() {
+    use crate::config::{AppConfig, ServerProfile};
+    // A tower saved under Kr12: 300,000 of 600,000 (50 %).
+    let mut kr_row = hp_row(119, 1, -1, Some(300_000));
+    kr_row.hp_basis = Some(600_000);
+    let kr = AppConfig {
+        world: crate::config::WorldConfig {
+            profile: ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server_kr = test_server_with_config(castle_structure_data(), kr);
+    let (_, hp) = load_hp(&server_kr, &kr_row);
+    assert_eq!(hp, 300_000, "the authored maximum: no scaling");
+
+    let server_eu = test_server_with_config(castle_structure_data(), AppConfig::default());
+    let (house, hp) = load_hp(&server_eu, &kr_row);
+    assert_eq!(hp, 750_000, "50 % of the EuAuroria maximum");
+    let eu_row = manager::save_row_for(&server_eu, &house).expect("basis changed -> dirty");
+    assert_eq!(eu_row.hp, Some(750_000));
+    assert_eq!(eu_row.hp_basis, Some(1_500_000));
+
+    let (house, hp) = load_hp(&server_kr, &eu_row);
+    assert_eq!(hp, 300_000, "back to 50 % of the Kr12 maximum");
+    let kr_row = manager::save_row_for(&server_kr, &house).expect("basis changed -> dirty");
+    assert_eq!(kr_row.hp, Some(300_000));
+    assert_eq!(kr_row.hp_basis, Some(600_000));
 }
 
 /// The shipped `r208022` `housings.hp` rows the video comparison rests on. The era values are

@@ -4662,15 +4662,22 @@ startup. Timeline and sources: `D:/aaemu-audits/gap-audit-2026-11-02/research/tr
   `ServerProfile::lodestone_max_hp` / `defense_tower_max_hp` (EuAuroria 4,100,000 / 1,500,000,
   EuLaunch and Kr12 keep the data value) with explicit `Housing.LodestoneMaxHp` /
   `Housing.DefenseTowerMaxHp` overrides, applied in `housing::manager::structure_max_hp`
-  (lodestone = `guard_tower_setting_id != 0`; defense tower = `housings` 119/169). A row saved
-  against the template maximum is scaled proportionally on load
-  (`loaded_house_hp` / `scale_loaded_structure_hp`), so a full tower stays full and a damaged
-  one keeps its fraction: a tower stored at 600,000 loads at 1,500,000 under `EuAuroria`, and
-  at 600,000 under `Kr12`. The **Tower Cannon** needed no change: slave 100's formula 48 gives
-  4,796 at level 50 and the 1.2 `unit_modifiers` row `(Slave, 100, MaxHealth, +100000)` brings
-  it to **104,796**, matching the video's target frame. Tests:
-  `era_profiles_scale_castle_structures...`, `era_scaled_structures_scale_their_persisted_hp_on_load`,
-  gated `real_compact_castle_structure_hp_matches_the_recorded_data_values` and gated
+  (lodestone = `guard_tower_setting_id != 0`; defense tower = `housings` 119/169). A row is
+  scaled proportionally on load against the maximum it was saved under
+  (`loaded_house_hp` / `scale_loaded_structure_hp`); the basis is persisted in the new
+  `housings.hp_basis` column (`SQL/updates/2026-11-09_aaemu_game_housings_hp_basis.sql`; NULL
+  means the template HP). A full tower stays full, a damaged one keeps its fraction, and a
+  reload does not scale again: a tower stored at 600,000 loads at 1,500,000 under `EuAuroria`
+  and at 600,000 under `Kr12`; switching profiles converts by the old/new basis factor in both
+  directions. (Without the basis, the first version healed a saved 750,000 tower to
+  1,500,000 on every restart.) The **Tower Cannon** needed no change: slave 100's formula 48
+  gives 4,796 at level 50 and the 1.2 `unit_modifiers` row `(Slave, 100, MaxHealth, +100000)`
+  brings it to **104,796**, matching the video's target frame. Tests:
+  `era_profiles_scale_castle_structures...`,
+  `era_scaled_structures_scale_their_persisted_hp_on_load`,
+  `era_scaled_hp_scales_once_and_survives_save_reload`,
+  `switching_era_profiles_converts_the_stored_hp_both_ways`, gated
+  `real_compact_castle_structure_hp_matches_the_recorded_data_values` and gated
   `real_compact_tower_cannon_max_hp_is_the_formula_plus_the_authored_bonus`.
 * **Castle walls stay at the `r208022` data values on purpose (2026-11-09, r6-siege-video).**
   Wall templates 121-130 and 158-167 keep 400,000 HP (gates 1,000,000). The only source for a
