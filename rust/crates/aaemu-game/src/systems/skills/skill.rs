@@ -2061,7 +2061,19 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
         let relation = SkillTargetRelation::from_raw(i64::from(t.target_relation))
             .unwrap_or(SkillTargetRelation::Any);
-        let units = filter_with_relation(server, relation, &caster_t, units);
+        let mut units = filter_with_relation(server, relation, &caster_t, units);
+        // Corpses (or the living, for a resurrection) never take an area slot. A template with
+        // neither flag set (57 radius skills) is left unfiltered rather than refusing everyone.
+        if t.target_alive || t.target_dead {
+            units.retain(|o| {
+                !o.is_unit()
+                    || super::geometry::alive_dead_allows(
+                        t.target_alive,
+                        t.target_dead,
+                        o.with_unit(|u| u.unit().hp).unwrap_or(0),
+                    )
+            });
+        }
         possible.extend(units.into_iter().map(Target::Obj));
         if selection == Some(SkillTargetSelection::Source) && target_self.as_obj().is_none() {
             possible.push(target_self.clone());

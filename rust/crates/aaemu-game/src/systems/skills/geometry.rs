@@ -400,3 +400,9 @@ mod tests {
         assert!(!radius_fits_region(2.0, 32.0, 10.0));
     }
 }
+
+/// The `target_alive` / `target_dead` template flags against a unit's hp: a living unit needs
+/// `target_alive`, a dead one `target_dead` (plot target filter and area skills).
+pub(super) fn alive_dead_allows(target_alive: bool, target_dead: bool, hp: i32) -> bool {
+    (target_alive || hp == 0) && (target_dead || hp > 0)
+}

@@ -902,7 +902,7 @@ fn filter_targets(
         .filter(|o| o.is_unit())
         .filter(|o| {
             let hp = o.with_unit(|u| u.unit().hp).unwrap_or(0);
-            (t.target_alive || hp == 0) && (t.target_dead || hp > 0)
+            super::geometry::alive_dead_allows(t.target_alive, t.target_dead, hp)
         })
         .filter(|o| !args.hit_once || !hit.contains(&o.obj_id()))
         .filter(|o| {
