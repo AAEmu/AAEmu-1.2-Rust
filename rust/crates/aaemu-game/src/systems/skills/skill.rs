@@ -2048,6 +2048,11 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         possible.push(target_self.clone());
     } else if t.target_area_radius > 0 {
         let mut units = super::geometry::around_radius(server, target_self, area_radius, true);
+        // `around_radius` compares only x/y: drop candidates far above or below the area centre
+        // (a ground-target area uses the target point's z).
+        let limit = super::geometry::area_vertical_limit(area_radius, t.target_valid_height);
+        let origin_z = world_pos(server, target_self).z;
+        units.retain(|o| (world_pos(server, &Target::Obj(o.clone())).z - origin_z).abs() <= limit);
         if selection == Some(SkillTargetSelection::Source) {
             if let Some(o) = target_self.as_obj() {
                 units.push(o.clone());
