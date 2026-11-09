@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use chrono::{NaiveDateTime, Utc};
+use chrono::{NaiveDateTime, Timelike, Utc};
 use futures::future::BoxFuture;
 
 use super::accounts::{self, TickKind};
@@ -165,6 +165,9 @@ pub fn hourly_loyalty_update(
     now: NaiveDateTime,
     config: &crate::config::CurrencyValuesConfig,
 ) -> HourlyLoyaltyUpdate {
+    // `loyalty_hour_updated` is a DATETIME(0): sample on whole seconds so the stored value and
+    // the elapsed time computed from it agree (a fractional sample lost ~0.5-1 s per tick).
+    let now = now.with_nanosecond(0).unwrap_or(now);
     let interval_seconds = i64::from(config.hourly_minutes) * 60;
     if config.hourly_amount <= 0 || config.hourly_daily_max <= 0 || interval_seconds <= 0 {
         return HourlyLoyaltyUpdate {
@@ -606,6 +609,36 @@ mod tests {
         assert_eq!(granted, 3, "four samples grant three tokens and stop");
         assert_eq!(state.taken, 3);
         assert_eq!(state.seconds, 240, "play time keeps counting past the cap");
+    }
+
+    #[test]
+    fn hourly_loyalty_samples_on_whole_seconds_like_the_datetime_column() {
+        let config = hourly_config(60);
+        let start = day_at(0, 10, 0);
+        let state = LoyaltyHourState {
+            day: day_key(start),
+            seconds: 0,
+            taken: 0,
+            updated: Some(start),
+        };
+        let at = start + chrono::Duration::milliseconds(60_700);
+        let update = hourly_loyalty_update(state, at, &config);
+        assert_eq!(
+            update.state.updated,
+            Some(start + chrono::Duration::seconds(60))
+        );
+        assert_eq!(update.state.seconds, 60);
+        // The next tick (another 60.7 s) is measured from the stored whole second.
+        let next = hourly_loyalty_update(
+            update.state,
+            at + chrono::Duration::milliseconds(60_700),
+            &config,
+        );
+        assert_eq!(next.state.seconds, 121);
+        assert_eq!(
+            next.state.updated,
+            Some(start + chrono::Duration::seconds(121))
+        );
     }
 
     #[test]
