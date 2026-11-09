@@ -273,7 +273,7 @@ fn route_enter_world_response_connection_not_found_does_not_throw() {
     let sut = create_sut(&[]);
 
     sut.games
-        .route_enter_world_response(CONNECTION_ID, GS_ID1, 0);
+        .route_enter_world_response(CONNECTION_ID, GS_ID1, 0, 0);
 }
 
 /// The routed result reaches the connection's session (`CompleteEnterWorldRequest(gsId, 42)`),
@@ -305,7 +305,7 @@ async fn route_enter_world_response_connection_found_delegates_to_session() {
 
     server
         .games
-        .route_enter_world_response(conn.id(), GS_ID1, 42);
+        .route_enter_world_response(conn.id(), GS_ID1, 42, 0);
     let task = conn.take_enter_world_task().unwrap();
     tokio::time::timeout(Duration::from_secs(5), task)
         .await

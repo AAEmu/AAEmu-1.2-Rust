@@ -295,8 +295,11 @@ async fn reconnect_list_world_and_enter_world() {
             connection_id
         }
     );
+    // The game server's random world cookie, not the login connection id.
+    const GAME_COOKIE: u32 = 0x5EED_C0DE;
+    assert_ne!(GAME_COOKIE, connection_id.0);
     let cookie = l2c::AcWorldCookie::new(
-        connection_id.0,
+        GAME_COOKIE,
         "127.0.0.1".parse().unwrap(),
         true,
         "127.0.0.1",
@@ -313,6 +316,7 @@ async fn reconnect_list_world_and_enter_world() {
             online: 0,
             sequence: 0,
             has_online: true,
+            cookie: GAME_COOKIE,
         },
     )
     .await;
@@ -338,6 +342,7 @@ async fn reconnect_list_world_and_enter_world() {
             online: 0,
             sequence: 0,
             has_online: true,
+            cookie: 0,
         },
     )
     .await;

@@ -10,7 +10,8 @@ use crate::lenient::LenientRead;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AccountId(pub u32);
 
-/// Identifier of a client connection to the login server. Doubles as the world cookie.
+/// Identifier of a client connection to the login server (no longer the world cookie, which the
+/// game server generates).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnectionId(pub u32);
 

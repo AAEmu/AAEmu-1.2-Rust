@@ -693,15 +693,19 @@ fn registered_opcodes_match_ct_offsets() {
 #[tokio::test]
 async fn join_with_token_from_enter_world() {
     let server = Arc::new(test_server());
-    // login -> game: LGPlayerEnter(account 1000, connection 4242)
+    // login -> game: LGPlayerEnter(account 1000, connection 4242); the game issues the cookie
+    let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
+    server.login.set(Some(login_tx));
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
-    // X2EnterWorld(account 1000, cookie 4242) on game connection 77 -> StreamManager.AddToken
+    let reply = login_rx.try_recv().unwrap();
+    let cookie = reply[16..20].to_vec();
+    // X2EnterWorld(account 1000, that cookie) on game connection 77 -> StreamManager.AddToken
     let mut g = game_connection(&server, 77);
     let mut x2 = vec![0xDD, 0x01, 0x00, 0x00];
     x2.extend_from_slice(&cs::X2EnterWorldPacket.to_le_bytes());
-    x2.extend(hex(
-        "00 00 00 00  00 00 00 00  E8 03 00 00  92 10 00 00  00 00 00 00  00",
-    ));
+    x2.extend(hex("00 00 00 00  00 00 00 00  E8 03 00 00"));
+    x2.extend(cookie);
+    x2.extend(hex("00 00 00 00  00"));
     x2.extend_from_slice(&[0; 8]);
     server.handle_frame(&mut g.0, &x2).await.unwrap();
     // The join ticket is random, not the connection id.

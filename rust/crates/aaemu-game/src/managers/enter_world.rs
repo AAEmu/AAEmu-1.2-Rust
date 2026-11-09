@@ -16,6 +16,8 @@ pub const PENDING_TOKEN_LIFETIME: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 struct PendingToken {
     account_id: u32,
+    /// The login server's connection id of the client the cookie was issued for.
+    connection_id: u32,
     created: Instant,
     /// The cookie was accepted by `login()` and the account registration is in flight. It still
     /// occupies a slot (`AccountManager.count()` does not include the account yet), but a second
@@ -37,14 +39,28 @@ pub enum LoginDecision {
 /// Outcome of [`EnterWorldManager::add_account`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddAccountResult {
-    /// Send `GLPlayerEnterPacket` with this `result` byte.
-    Reply(u8),
-    /// The connection id was already registered for `stale_account` (a client that got its
-    /// world cookie but never connected to the game server). The login server reuses a
-    /// connection id only after that connection closed, so the old entry is replaced; reply 0.
-    /// (C# `Dictionary.Add` throws there, no reply is sent and the login link breaks: every
-    /// later login on the reused id is denied.)
-    ReplacedStale { stale_account: u32 },
+    /// The account is already connected: answer `GLPlayerEnterPacket` with result 1 (and no
+    /// cookie); nothing was registered.
+    AlreadyConnected,
+    /// A world cookie was issued: answer with result 0 and this random cookie, which the login
+    /// server relays to the client in `ACWorldCookie`.
+    Registered { cookie: u32 },
+    /// The connection id was still pending for `stale_account` (a client that got its world
+    /// cookie but never connected to the game server). The login server reuses a connection id
+    /// only after that connection closed, so the old entry is replaced; reply 0 with the new
+    /// `cookie`. (C# `Dictionary.Add` throws there, no reply is sent and the login link breaks:
+    /// every later login on the reused id is denied.)
+    ReplacedStale { stale_account: u32, cookie: u32 },
+}
+
+impl AddAccountResult {
+    /// The cookie that was issued, if any.
+    pub fn cookie(&self) -> Option<u32> {
+        match *self {
+            Self::AlreadyConnected => None,
+            Self::Registered { cookie } | Self::ReplacedStale { cookie, .. } => Some(cookie),
+        }
+    }
 }
 
 /// Most IPs the [`EnterWorldThrottle`] tracks; further IPs are not tracked until entries expire.
@@ -139,7 +155,8 @@ impl EnterWorldThrottle {
 
 #[derive(Debug)]
 pub struct EnterWorldManager {
-    /// `_accounts`: login-server connection id (the client's cookie / token) -> pending account.
+    /// `_accounts`: random world cookie (Rust: generated here, not the login connection id) ->
+    /// pending account.
     accounts: Mutex<HashMap<u32, PendingToken>>,
     /// character id -> game connection id. The session that is entering or playing the character;
     /// taken before the select's MySQL load and kept until the departure save has finished, so a
@@ -194,8 +211,9 @@ impl EnterWorldManager {
 
 impl EnterWorldManager {
     /// `AddAccount` bookkeeping. `already_connected` is `accountManager.Contains(accountId)`:
-    /// such accounts are refused with result 1 and not registered; otherwise the cookie is
-    /// registered and result 0 is returned.
+    /// such accounts are refused with result 1 and not registered; otherwise a random non-zero
+    /// cookie, unique among the pending ones, is registered and returned (Rust deviation: the C#
+    /// used the login connection id, a small sequential integer anyone could guess).
     pub fn add_account(
         &self,
         account_id: u32,
@@ -203,27 +221,48 @@ impl EnterWorldManager {
         already_connected: bool,
     ) -> AddAccountResult {
         if already_connected {
-            return AddAccountResult::Reply(1);
+            return AddAccountResult::AlreadyConnected;
         }
         let mut accounts = self
             .accounts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self::prune_expired(&mut accounts, self.token_lifetime);
-        let pending = PendingToken {
-            account_id,
-            created: Instant::now(),
-            consumed: false,
+        // A reused login connection id replaces its stale entry. An accepted (consumed) entry is
+        // mid-registration and stays.
+        let stale = accounts
+            .iter()
+            .find(|(_, token)| token.connection_id == connection_id && !token.consumed)
+            .map(|(cookie, token)| (*cookie, token.account_id));
+        if let Some((stale_cookie, _)) = stale {
+            accounts.remove(&stale_cookie);
+        }
+        let cookie = loop {
+            let cookie = rand::random::<u32>();
+            if cookie != 0 && !accounts.contains_key(&cookie) {
+                break cookie;
+            }
         };
-        match accounts.insert(connection_id, pending) {
-            Some(stale) => AddAccountResult::ReplacedStale {
-                stale_account: stale.account_id,
+        accounts.insert(
+            cookie,
+            PendingToken {
+                account_id,
+                connection_id,
+                created: Instant::now(),
+                consumed: false,
             },
-            None => AddAccountResult::Reply(0),
+        );
+        match stale {
+            Some((_, stale_account)) => AddAccountResult::ReplacedStale {
+                stale_account,
+                cookie,
+            },
+            None => AddAccountResult::Registered { cookie },
         }
     }
 
-    /// The token check of `Login(connection, accountId, token)`. The cookie is only marked as
+    /// The token check of `Login(connection, accountId, token)`; `token` is the world cookie
+    /// [`Self::add_account`] issued, not the login connection id. The cookie is only marked as
     /// accepted here (still counted as an occupied slot); [`Self::forget`] removes it once the
     /// account registration finished. Deviation from the C# (cookies never expire): an unconsumed
     /// cookie older than the token lifetime is refused like an unknown one.
@@ -326,46 +365,88 @@ mod tests {
     #[test]
     fn add_and_login_follow_csharp() {
         let m = EnterWorldManager::default();
-        assert_eq!(m.add_account(10, 111, false), AddAccountResult::Reply(0));
+        let a = m.add_account(10, 111, false);
+        let cookie_a = a.cookie().unwrap();
+        assert_eq!(a, AddAccountResult::Registered { cookie: cookie_a });
         // Contains(accountId): refused, nothing registered.
-        assert_eq!(m.add_account(11, 112, true), AddAccountResult::Reply(1));
-        // A reused connection id replaces the stale entry (C#: Dictionary.Add throws).
         assert_eq!(
-            m.add_account(12, 111, false),
-            AddAccountResult::ReplacedStale { stale_account: 10 }
+            m.add_account(11, 112, true),
+            AddAccountResult::AlreadyConnected
         );
+        // A reused connection id replaces the stale entry (C#: Dictionary.Add throws).
+        let b = m.add_account(12, 111, false);
+        let cookie_b = b.cookie().unwrap();
         assert_eq!(
-            m.login(10, 111),
+            b,
+            AddAccountResult::ReplacedStale {
+                stale_account: 10,
+                cookie: cookie_b
+            }
+        );
+        // The stale cookie died with its entry.
+        assert_eq!(m.login(10, cookie_a), LoginDecision::InvalidToken);
+        assert_eq!(
+            m.login(10, cookie_b),
             LoginDecision::AccountMismatch { expected: 12 }
         );
+        let c = m.add_account(10, 111, false);
+        let cookie_c = c.cookie().unwrap();
         assert_eq!(
-            m.add_account(10, 111, false),
-            AddAccountResult::ReplacedStale { stale_account: 12 }
+            c,
+            AddAccountResult::ReplacedStale {
+                stale_account: 12,
+                cookie: cookie_c
+            }
         );
         // Wrong account for a known token: refused, entry kept.
         assert_eq!(
-            m.login(99, 111),
+            m.login(99, cookie_c),
             LoginDecision::AccountMismatch { expected: 10 }
         );
         assert_eq!(m.login(11, 112), LoginDecision::InvalidToken);
-        assert_eq!(m.login(10, 111), LoginDecision::Accepted);
+        assert_eq!(m.login(10, cookie_c), LoginDecision::Accepted);
         // Consumed: a second connection with the same token is refused.
-        assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
+        assert_eq!(m.login(10, cookie_c), LoginDecision::InvalidToken);
         assert_eq!(m.login(10, 0), LoginDecision::InvalidToken);
+    }
+
+    #[test]
+    fn the_cookie_is_random_and_not_the_login_connection_id() {
+        let m = EnterWorldManager::default();
+        let mut cookies = std::collections::HashSet::new();
+        for connection_id in 1..=200u32 {
+            let cookie = m
+                .add_account(10 + connection_id, connection_id, false)
+                .cookie()
+                .unwrap();
+            assert_ne!(cookie, 0);
+            assert!(
+                cookies.insert(cookie),
+                "cookies are unique among pending ones"
+            );
+        }
+        // Presenting the login connection id instead of the cookie is refused (a random cookie
+        // colliding with a small id would name another account, never this one).
+        for connection_id in 1..=200u32 {
+            assert_ne!(
+                m.login(10 + connection_id, connection_id),
+                LoginDecision::Accepted
+            );
+        }
     }
 
     #[test]
     fn world_queue_slot_occupancy_counts_accepted_cookies_until_forgotten() {
         let m = EnterWorldManager::default();
-        m.add_account(10, 111, false);
+        let first = m.add_account(10, 111, false).cookie().unwrap();
         m.add_account(10, 112, false);
         assert_eq!(m.pending_count(), 2);
         // Accepted: the account registration is in flight, so the slot is still occupied.
-        assert_eq!(m.login(10, 111), LoginDecision::Accepted);
+        assert_eq!(m.login(10, first), LoginDecision::Accepted);
         assert_eq!(m.pending_count(), 2);
         // The same token cannot be used twice.
-        assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
-        m.forget(111);
+        assert_eq!(m.login(10, first), LoginDecision::InvalidToken);
+        m.forget(first);
         assert_eq!(m.pending_count(), 1);
     }
 
@@ -375,15 +456,15 @@ mod tests {
             token_lifetime: Duration::ZERO,
             ..Default::default()
         };
-        m.add_account(10, 111, false);
+        let cookie = m.add_account(10, 111, false).cookie().unwrap();
         assert_eq!(m.pending_count(), 0);
-        assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
+        assert_eq!(m.login(10, cookie), LoginDecision::InvalidToken);
         // A fresh cookie is accepted, and once accepted its age no longer matters.
         let m = EnterWorldManager::default();
-        m.add_account(10, 111, false);
-        assert_eq!(m.login(10, 111), LoginDecision::Accepted);
+        let cookie = m.add_account(10, 111, false).cookie().unwrap();
+        assert_eq!(m.login(10, cookie), LoginDecision::Accepted);
         assert_eq!(m.pending_count(), 1);
-        m.forget(111);
+        m.forget(cookie);
         assert_eq!(m.pending_count(), 0);
     }
 

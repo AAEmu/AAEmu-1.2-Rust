@@ -179,30 +179,43 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                 connection_id,
                 server.accounts.contains(account_id),
             ) {
-                AddAccountResult::Reply(result) => {
-                    if result != 0 {
-                        // C# `AddAccount`: `GLPlayerEnter(..., 1)` when the account is already
-                        // connected; the login server answers the client's pending enter-world
-                        // request with `ACEnterWorldDenied(1)`.
-                        tracing::warn!(
-                            "LGPlayerEnter refused: account {account_id} is already connected (session {}); replying {result}",
-                            server.accounts.connection_of(account_id).unwrap_or(0)
-                        );
-                    }
+                AddAccountResult::AlreadyConnected => {
+                    // C# `AddAccount`: `GLPlayerEnter(..., 1)` when the account is already
+                    // connected; the login server answers the client's pending enter-world
+                    // request with `ACEnterWorldDenied(1)`.
+                    tracing::warn!(
+                        "LGPlayerEnter refused: account {account_id} is already connected (session {}); replying 1",
+                        server.accounts.connection_of(account_id).unwrap_or(0)
+                    );
                     let (sequence, online) = server.next_occupancy();
                     server.login.send(&GLPlayerEnterPacket {
                         connection_id,
                         gs_id: server.config.id,
-                        result,
+                        result: 1,
                         online,
                         sequence,
+                        cookie: 0,
+                    });
+                }
+                AddAccountResult::Registered { cookie } => {
+                    let (sequence, online) = server.next_occupancy();
+                    server.login.send(&GLPlayerEnterPacket {
+                        connection_id,
+                        gs_id: server.config.id,
+                        result: 0,
+                        online,
+                        sequence,
+                        cookie,
                     });
                 }
                 // C#: `_accounts.Add` throws ArgumentException inside LGPlayerEnterPacket.Read
                 // (no reply, the login link dies). Found by live testing: a client that takes
                 // its world cookie but never connects leaves the entry behind, and the login
                 // server hands the same (pooled) connection id to the next client.
-                AddAccountResult::ReplacedStale { stale_account } => {
+                AddAccountResult::ReplacedStale {
+                    stale_account,
+                    cookie,
+                } => {
                     tracing::warn!(
                         "LGPlayerEnter: connection id {connection_id} was still pending for account {stale_account} (never entered); replaced by account {account_id}"
                     );
@@ -213,6 +226,7 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                         result: 0,
                         online,
                         sequence,
+                        cookie,
                     });
                 }
             }

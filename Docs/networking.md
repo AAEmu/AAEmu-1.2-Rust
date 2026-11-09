@@ -203,7 +203,9 @@ sequenceDiagram
 
 `initiate_enter_world` sends `LGPlayerEnter` and spawns a background task that waits for the
 game server's answer with the configured enter-world timeout; it then sends `ACWorldCookie` or
-`ACEnterWorldDenied`. The cookie is the login connection id. `ACWorldCookie` carries the address
+`ACEnterWorldDenied`. The cookie is a random value the game server generated for the entry and
+returned in `GLPlayerEnter` (an old game server sends none; the login connection id is used then,
+with a warning). `ACWorldCookie` carries the address
 from `GameServers[].Host` / `Port`, except that a client connected from the login server's own
 machine gets its own address.
 

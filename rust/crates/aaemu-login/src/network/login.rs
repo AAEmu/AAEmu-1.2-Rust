@@ -53,6 +53,8 @@ pub struct EnterWorldResult {
     pub success: bool,
     pub server: Option<GameServer>,
     pub denial_reason: u8,
+    /// The game server's world cookie; 0 = none (the connection id is sent instead).
+    pub cookie: u32,
 }
 
 struct PendingEnterWorld {
@@ -571,6 +573,7 @@ impl LoginConnection {
         games: &GameController,
         gs_id: GameServerId,
         result: u8,
+        cookie: u32,
     ) {
         let mut s = self.session.lock().unwrap();
         if s.state != LoginState::EnteringWorld {
@@ -610,6 +613,7 @@ impl LoginConnection {
                 success,
                 server,
                 denial_reason: result,
+                cookie,
             });
         }
     }
@@ -658,7 +662,11 @@ async fn run_enter_world_background(
         r = tokio::time::timeout(timeout, rx) => match r {
             Ok(Ok(result)) => {
                 let sent = match (&result.success, &result.server) {
-                    (true, Some(gs)) => conn.send_world_cookie(&gs.host, gs.port),
+                    (true, Some(gs)) => {
+                        // An old game server sends no cookie: fall back to the connection id.
+                        let cookie = if result.cookie == 0 { conn.id().0 } else { result.cookie };
+                        conn.send_world_cookie(cookie, &gs.host, gs.port)
+                    }
                     _ => conn.send_enter_world_denied(result.denial_reason),
                 };
                 if let Err(e) = sent {
@@ -749,9 +757,9 @@ impl LoginClient for LoginConnection {
         })
     }
 
-    fn send_world_cookie(&self, host: &str, port: u16) -> Result<(), PacketError> {
+    fn send_world_cookie(&self, cookie: u32, host: &str, port: u16) -> Result<(), PacketError> {
         self.send_packet(&AcWorldCookie::new(
-            self.id().0,
+            cookie,
             self.ip,
             self.is_locally_connected,
             host,

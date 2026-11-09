@@ -53,7 +53,7 @@ pub trait LoginClient: Send + Sync {
     fn send_otp_prompt(&self, maximum_tries: i32, current_try: i32) -> Result<(), PacketError>;
     fn send_cert_prompt(&self, maximum_tries: i32, current_try: i32) -> Result<(), PacketError>;
     fn send_ars_prompt(&self, session_code: &str, timeout: Duration) -> Result<(), PacketError>;
-    fn send_world_cookie(&self, host: &str, port: u16) -> Result<(), PacketError>;
+    fn send_world_cookie(&self, cookie: u32, host: &str, port: u16) -> Result<(), PacketError>;
     fn send_enter_world_denied(&self, reason: u8) -> Result<(), PacketError>;
 }
 
