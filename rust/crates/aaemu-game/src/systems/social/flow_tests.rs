@@ -3473,6 +3473,7 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
             tower_hp: None,
             last_siege_id: 1,
             declaration: None,
+            auction_posted_cycle: 0,
             siege: Some(SiegeState {
                 siege_id: 1,
                 attacker_expedition_id: 88,

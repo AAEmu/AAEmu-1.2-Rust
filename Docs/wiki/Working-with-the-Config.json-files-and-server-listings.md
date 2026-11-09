@@ -903,6 +903,33 @@ only, not from a capture of the retail server. Keep the switch off until an orig
 capture shows how the retail shop behaved. The implementation and the open question are
 recorded in `rust/crates/aaemu-game/PORTING.md` (WP-SD4a).
 
+## Siege calendar and territory claim-window timezone
+
+`Housing.SiegeCalendarTimezone` is the wall-clock offset of the `siege_zones` weekday/hour
+columns. It defaults to **UTC** (`""` or `utc`); `local` selects the server's own offset and
+an explicit `+HH:MM` / `-HH:MM` value overrides both:
+
+```json
+{
+  "Housing": {
+    "SiegeCalendarTimezone": "local"
+  }
+}
+```
+
+The same offset drives two things, even though `Housing.SiegeCalendar` (off by default) only
+gates the weekly siege periods:
+
+* the weekly auction / declare / warmup / siege periods when `Housing.SiegeCalendar` is on;
+* the authored `open_weekday` / `open_hour` / `open_duration_hours` territory **claim window**,
+  always (with or without the switch).
+
+A server that leaves the setting empty therefore runs both on UTC; this is a behaviour change
+from earlier releases, where an empty value meant the host's local time. The resolved offset
+and whether it came from the configuration or the default are logged once at startup. The UTC
+default follows the Western 2014 schedule (grade C in `round6-siege.md`); the original data's
+zone is not proven, so use `local` or an explicit offset if your players' clock differs.
+
 ## Strict doodad placement surface check
 
 The 1.2 client checks the terrain material under a player doodad placement (its

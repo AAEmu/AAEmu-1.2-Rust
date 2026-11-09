@@ -2531,6 +2531,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   unbid system lot and deletes its item (the lot-id argument and the refusal of player lots /
   lots with a bid are assumed). `client_id = 0` rows load normally on restart. The C# had
   neither command and no system-lot path.
+* systems::economy (expired auction items, 2026-11-08): the item timer only visits the
+  equipment / bag / bank containers of online characters, so a timed item on the auction house
+  never expires while it sits in escrow (a re-listed camp lot, or any timed item, could be sold
+  and delivered after its lifetime ended). Rules: an already expired item cannot be posted
+  (refused with the client's existing invalid-item code 240, ui_texts 241 "cannot put up the
+  item", item kept); a bid or buyout is refused with the same code before any money moves, so
+  a buyout can neither lose the buyer's debit nor refund an already-refunded old bidder a
+  second time; a lot whose escrow item expires before settlement is not delivered -- the
+  winner is refunded in full by the normal bid-fail mail and the item is deleted, with no
+  seller share and no `AUCTION_BUY`/`AUCTION_SOLD` credit (the refund mail is delivered before
+  any state change, so a refused mail leaves the lot for the next tick; a winner that no
+  longer resolves to a character is released with an error instead of retrying forever); and a
+  delivery taken from the mail after its item expired is deleted instead of entering the bag
+  and reported to the client like an expired bag item (`SCSyncItemLifespanPacket`, `added =
+  false`); this covers mails persisted before this fix and items that expire while the mail
+  waits (the delivery mail carries no price, so no refund is minted there). Timed items are
+  otherwise still accepted: only an already expired one is refused (no 1.2 evidence for a
+  general timed-item rule). The shared `item_timers::expired_at` matches the container timer's
+  definition. Tests: `an_expired_item_cannot_be_posted_and_reports_the_invalid_item_code`,
+  `an_expired_lot_refuses_bids_and_buyouts_before_any_money_moves`,
+  `an_item_that_expires_in_escrow_refunds_the_winner_and_is_deleted`,
+  `a_failed_expired_lot_refund_keeps_the_lot_and_retries_once`,
+  `an_unresolvable_expired_lot_winner_deletes_the_item_once_and_removes_the_lot`,
+  `an_expired_auction_delivery_is_deleted_instead_of_taken`.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -4813,11 +4837,14 @@ and in NPC wandering / buff remaining times.
   character or change the schedule; leaving also cancels the caller's engraving.
   `systems/housing/dominion/calendar.rs` adds the weekly period calendar from the 1.2 tables
   behind `Housing.SiegeCalendar` (default off, so the explicit GM path and its tests are
-  unchanged) and `Housing.SiegeCalendarTimezone` (empty/`local` = server local; the retail
-  timezone is UNKNOWN, INFERRED). Period ids/order, boundary arithmetic, the five wire
-  durations and the peace `started` = next auction start are EVIDENCED by the client
-  (`FUN_3956fc70`, `FUN_3946ba60`, `FUN_39838ff0`/`FUN_39839040`, `FUN_39839740`,
-  `FUN_3946be90`); weekday 0 = Sunday is INFERRED from the Sunday `siege_plans` weeks. The
+  unchanged) and `Housing.SiegeCalendarTimezone` (empty/`utc` = UTC, the default; `local` =
+  server local; the default is UTC because the Western launch-era schedule lists the same
+  wall-clock times as GMT, `round6-siege.md` 1, grade C). Period ids/order, boundary
+  arithmetic, the five wire durations and the peace `started` = next auction start are
+  EVIDENCED by the client (`FUN_3956fc70`, `FUN_3946ba60`, `FUN_39838ff0`/`FUN_39839040`,
+  `FUN_39839740`, `FUN_3946be90`); weekday 0 = Sunday is INFERRED from the Sunday
+  `siege_plans` weeks and corroborated (grade C) by the November 2014 Western schedule's
+  Sunday sieges at the table's times (`round6-siege.md` 1). The
   plan-week -> siege-Sunday mapping is also INFERRED: a plan week starts on Sunday and the
   authored warmup/siege weekday 0 is the Sunday that ends that week (a lower weekday rolls
   forward), the only reading that keeps the authored order auction Wed -> declare Fri ->
@@ -4826,16 +4853,40 @@ and in NPC wandering / buff remaining times.
   declare -> peace
   (client "unearned_win", `FUN_392f7db0`); a declared siege follows 2 -> 3 -> 4 -> 5. Only
   the week's rotating zone pair gets a cycle; other weeks stay in peace with the next cycle's
-  auction start. The plan rotation is deduplicated from `siege_plans` and, after the 2014
-  table, extended by the three-week modulo policy measured from 2014-01-05 (INFERRED server
-  policy; the retail recurrence is UNKNOWN). Explicit GM schedules keep their own timers and
+  auction start. The three-week pair rotation is corroborated (grade C) by the November 2014
+  Western schedule, whose consecutive weeks siege different pairs (`round6-siege.md` 1); the
+  plan rotation is deduplicated from `siege_plans` and, after the 2014 table, extended by the
+  three-week modulo policy measured from 2014-01-05 (the extrapolation stays an INFERRED
+  server policy; the retail recurrence beyond the table is UNKNOWN). Explicit GM schedules
+  keep their own timers and
   override the calendar for that territory. `/dominion clock <unixSeconds|off>` sets a
   non-persistent test clock for live verification of every period; it only drives the weekly
   calendar view. Explicit siege deadlines/tick transitions and the persisted state always use
   the real clock, and the command is refused while `Housing.SiegeCalendar` is disabled.
   GM scheduling with player registration is the chosen server policy for actually running a
-  siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
-  (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
+  siege; the camps can also be posted as system lots with the GM `auction_post_siege_items`
+  command (WP-SD1b). Automatic posting at the auction period (WP-SD1c) is implemented by
+  `systems/housing/dominion/auction_post.rs`: on the first tick of a zone's auction period it
+  posts that zone's `siege_zones.declare_item_id` as a system lot. The lot count and item ids
+  come from the data (one per zone in the running rotation week; the six distinct camps in the
+  shipped table), the lot is anchored at the cycle's `auction_start` with the 48 h duration
+  class (the authored auction -> declare gap), the start bid is the item template's `price`
+  (5,000,000 copper), there is no buyout and the seller is the system (`client_id = 0`).
+  **INFERRED, capture-pending:** one lot per zone in the running pair (the six distinct camp
+  items cover the three pairs), the 48 h class rather than a lot that could be cut short, the start bid and
+  no-buyout choice, and that no siege-specific bid rule exists (increment, tie-break, outbid
+  refund and bid eligibility stay the normal auction engine's). Posting is idempotent per
+  cycle through the persisted `dominions.auction_posted_cycle` marker (a restart inside the
+  auction period posts nothing twice; a failed item creation releases the marker so the next
+  tick retries). The won camp item expires when the declare period ends (the cycle's
+  `warmup_start`) through the item's own `expiration_time` timer. Tests:
+  `auction_start_posts_one_system_lot_per_running_zone_from_the_authored_data`,
+  `posting_is_idempotent_on_a_repeated_tick_and_across_a_restart`,
+  `a_later_rotation_week_posts_its_own_zones_lots`,
+  `a_won_camp_item_expires_when_the_declare_period_ends_and_the_timer_removes_it`,
+  `a_disabled_calendar_posts_nothing`, `a_zone_without_a_camp_item_posts_nothing`, the gated
+  `auction_post_real_compact_db_prices_and_auction_gap` and
+  `dominion_auction_post_marker_round_trips_through_its_row` (MySQL).
   The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
   open: the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
   `doodad_func_purchase_siege_tickets` has no rows) and siege hostility WP-SD7 (decision-blocked:
@@ -4848,6 +4899,19 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing (2026-11-08, calendar timezone default): `Housing.SiegeCalendarTimezone`
+  now defaults to **UTC** instead of the server's local offset (`""`/`utc`/`z` = UTC;
+  `local` and explicit `+HH:MM` offsets are still accepted). This is a **behaviour change**
+  for servers that never set the value: the territory claim window moves too, because
+  `claim_window_at` uses the same offset regardless of `Housing.SiegeCalendar` (the switch
+  only gates the weekly periods; the authored `open_weekday/open_hour/open_duration_hours`
+  claim window always follows the configured offset). The resolved offset and whether it came
+  from the configuration or the default are logged once at startup
+  (`systems/housing/mod.rs::System::start`). Evidence: `round6-siege.md` 1 (grade C, Total
+  ArcheAge 2014-11-20/25 lists the same wall-clock times as GMT); the original data's zone is
+  not proven, so `local` remains for servers that want it. Tests:
+  `timezone_parses_offsets_and_defaults_to_utc`,
+  `timezone_display_and_the_config_source_are_loggable`.
 * systems::housing / systems::social (WP-SD2a, 2026-11-06): the siege declaration is now
   persistent state, and the weekly calendar hands it over to the explicit siege record at the
   cycle's warmup start. `DominionState.declaration` holds the attacker expedition, the
@@ -4905,15 +4969,22 @@ and in NPC wandering / buff remaining times.
   cancels the effect. Cancelling is `dominion undeclare [zone]` (the GM command), which clears
   the declaration and broadcasts the zero offense team; the in-game trigger is UNKNOWN
   (destroying/removing the camp is the candidate), so it is capture-pending.
-  **Capture-pending assumptions:** 459 is used for the missing policy although 581 is the
-  other candidate text; the placement thresholds behind 625 (resurrection point), 633
-  (house), 661 (another zone) and 741 (obstacle), and the "siege too imminent" window behind
-  760, are UNKNOWN and are NOT enforced (no refusal today); the cancellation trigger's UI is
-  UNKNOWN. The check order is this server's policy. Tests:
+  The error split is now decided from the 1.2 texts and policy labels: 459
+  `SIEGE_MASTER_ONLY` (ui 2613 "only the siege commander") is the declaration's
+  `siege_master` refusal, and 581 `SIEGE_NO_RIGHTS_IN_EXPEDITION` (ui 4661 "you have no
+  siege-participation rights in the expedition") is the roster join's `join_siege` refusal
+  (ui 4656 "can join siege"); both player and GM roster-registration paths use
+  `dominion::rights::join_policy_allows` (`/joinsiege` and `/dominion register`), so no path
+  can add a member whose rank forbids joining. **Capture-pending assumptions:** the placement
+  thresholds behind 625 (resurrection point), 633 (house), 661 (another zone) and 741
+  (obstacle), and the "siege too imminent" window behind 760, are UNKNOWN and are NOT
+  enforced (no refusal today); the cancellation trigger's UI is UNKNOWN. The check order is
+  this server's policy. Tests:
   `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
   `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
   `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
-  442/443, item kept each time).
+  442/443, item kept each time), `unrelated_stale_or_rank_ineligible_members_cannot_join`
+  (581 on the join path), `the_gm_register_path_also_applies_the_join_policy`.
 * systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
   doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
   stores it against the declaration (no siege record yet) and `bind_materialised` stamps it
@@ -4992,7 +5063,7 @@ and in NPC wandering / buff remaining times.
   are zone groups 54/56); outside the recurring `open_weekday/open_hour/open_duration_hours`
   window it is `DOMINION_NOT_DECLARE_TIME` 582 (case `0x246`; ui_texts 4662, whose `$2 weekday
   $3 o'clock $4 hours` parameters are exactly those columns). The window is computed by
-  `dominion::calendar::claim_window_at` (weekday 0 = Sunday INFERRED as everywhere else) and
+  `dominion::calendar::claim_window_at` (weekday 0 = Sunday, as corroborated above) and
   applies **regardless of `Housing.SiegeCalendar`**: that switch drives the inferred weekly
   cycle, not the authored claim columns. It uses the **real wall clock**; the GM
   `/dominion clock` is restricted to the calendar view. `open_duration_hours >= 168` covers the

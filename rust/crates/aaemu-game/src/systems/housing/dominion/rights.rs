@@ -9,6 +9,46 @@ use crate::world::{HouseRef, PlayerRef, WorldObject};
 use super::state::DominionState;
 use super::{fort, runtime};
 
+/// The expedition rank policy of a roster join (`join_siege`, ui label 4656 "can join
+/// siege"). A rank without it is refused with the client's own 581
+/// (`SIEGE_NO_RIGHTS_IN_EXPEDITION`, ui_texts 4661 "you have no siege-participation rights in
+/// the expedition"). The declaration path keeps 459 (`SIEGE_MASTER_ONLY`) for the separate
+/// `siege_master` policy (`declare.rs`).
+///
+/// Both roster-registration entry points use this: the player `/joinsiege` command and the
+/// GM `/dominion register` command, so no path can add a member whose rank forbids joining.
+pub fn join_policy_allows(server: &GameServer, character_id: u32, expedition_id: u32) -> bool {
+    expedition_id != 0
+        && current_expedition(server, character_id) == Some(expedition_id)
+        && server
+            .expeditions
+            .get(expedition_id)
+            .is_some_and(|expedition| {
+                expedition
+                    .member(character_id)
+                    .and_then(|member| expedition.policy_by_role(member.role))
+                    .is_some_and(|policy| policy.join_siege)
+            })
+}
+
+/// The character's current expedition when both links agree: the character's expedition id, the
+/// expedition's member row, and a live (not disbanded) guild. `None` is the "not a current
+/// expedition member" state, which callers report separately from the rank policy.
+pub fn current_expedition(server: &GameServer, character_id: u32) -> Option<u32> {
+    if character_id == 0 {
+        return None;
+    }
+    let expedition_id = server.expeditions.expedition_of_character(character_id);
+    if expedition_id == 0 {
+        return None;
+    }
+    server
+        .expeditions
+        .get(expedition_id)
+        .filter(|expedition| !expedition.is_disbanded && expedition.member(character_id).is_some())
+        .map(|_| expedition_id)
+}
+
 fn current_member(server: &GameServer, player: &PlayerRef, expedition_id: u32) -> bool {
     expedition_id != 0
         && player.data().unit.expedition_id == expedition_id

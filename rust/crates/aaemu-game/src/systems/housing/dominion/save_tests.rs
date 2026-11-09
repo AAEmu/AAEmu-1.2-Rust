@@ -255,6 +255,85 @@ async fn dominion_declaration_round_trips_through_its_row() {
     pool.close().await;
 }
 
+/// The automatic camp-lot marker (`auction_posted_cycle`) survives the same row round trip, so
+/// a restart inside the auction period still knows the lot was posted.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local authority tables only"]
+async fn dominion_auction_post_marker_round_trips_through_its_row() {
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).unwrap();
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in ["dominions", "dominion_siege_participants"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    if sqlx::query("SHOW COLUMNS FROM dominions LIKE 'auction_posted_cycle'")
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .is_none()
+    {
+        sqlx::query(
+            "ALTER TABLE dominions ADD COLUMN `auction_posted_cycle` bigint NOT NULL DEFAULT 0 AFTER `declaration_hq_z`",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let f = fixture();
+    let cycle = 1_388_000_000;
+    assert!(f
+        .server
+        .systems
+        .housing
+        .dominions
+        .claim_auction_post(25, cycle)
+        .unwrap());
+    let batch = f.server.systems.housing.dominions.prepare_save();
+    let mut tx = pool.begin().await.unwrap();
+    super::db::write_batch(&mut tx, &batch).await.unwrap();
+    tx.commit().await.unwrap();
+    let loaded = super::db::load_rows(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|state| state.zone_group_id == 25)
+        .unwrap();
+    assert_eq!(loaded.auction_posted_cycle, cycle);
+    // A marker of the same cycle is not claimed twice after the reload.
+    f.server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![loaded.clone()])
+        .unwrap();
+    assert!(!f
+        .server
+        .systems
+        .housing
+        .dominions
+        .claim_auction_post(25, cycle)
+        .unwrap());
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart() {
     let f = fixture();
