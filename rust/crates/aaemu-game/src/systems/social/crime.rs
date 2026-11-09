@@ -1199,6 +1199,27 @@ mod tests {
         assert_eq!((c.crime_point, c.infamy_point), (0, 0));
     }
 
+    /// The video's Character Info shows `Crime Points 13 / 50` beside `Infamy Pts 13` (and
+    /// `3 / 3` after another redemption), and the wiki says "for every 1 Crime Point you
+    /// earn, you will gain 1 Infamy Point". They are separate fields: every report and every
+    /// reduction moves both by the same amount; only jail clears crime points while infamy
+    /// stays (asserted in `trial_flow_tests`). This is the real relation, not two values that
+    /// merely happen to be equal.
+    #[tokio::test]
+    async fn crime_points_and_infamy_move_together_on_gain_and_reduction() {
+        let s = server();
+        let mut c = crate::test_support::test_character(1, "Crook", 0.0, 0.0);
+        let (p, _) = add_crime(&s, &mut c, 13, 0);
+        assert_eq!((c.crime_point, c.infamy_point), (13, 13));
+        assert_eq!((p.crime_points, p.infamy_points), (13, 13));
+        let (p, _) = add_crime(&s, &mut c, -3, 0);
+        assert_eq!((c.crime_point, c.infamy_point), (10, 10));
+        assert_eq!((p.crime_points, p.infamy_points), (10, 10));
+        // The redemption message's "Total: 0" is the clamped pair, not crime points alone.
+        let (_, _) = add_crime(&s, &mut c, -30, 0);
+        assert_eq!((c.crime_point, c.infamy_point), (0, 0));
+    }
+
     /// Infamy 1 keeps a pirate a pirate: the return needs exactly 0 (item 32212's text); and a
     /// non-pirate whose infamy reaches 0 gets no faction change at all.
     #[tokio::test]

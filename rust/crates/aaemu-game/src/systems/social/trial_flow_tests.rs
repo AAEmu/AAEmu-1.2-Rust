@@ -304,7 +304,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
     for pc in [&mut d, &mut j1, &mut j2, &mut arrestor] {
         trial_frames(&mut pc.client);
     }
-    // Murder of a level-10 victim: 20 * 10 minutes.
+    // One murder record; the sentence comes from the defendant's crime points (60 / 5 = 12).
     assert!(server.systems.social.crimes.insert(murder(50, 1, 2)));
 
     // Jury queue: eligible players of the mother faction (the criminal and the guard are not).
@@ -365,14 +365,14 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
         f[4].1,
         body(&SCAskImprisonOrTrialPacket {
             crime_value: 60,
-            jail_minutes: 200
+            jail_minutes: 12
         })
     );
     assert_eq!(
         f[5].1,
         body(&SCTrialWaitStatusPacket {
             order: 0,
-            sentence_time_ms: 200 * 60_000
+            sentence_time_ms: 12 * 60_000
         })
     );
     // Neighbours see the arrest.
@@ -388,7 +388,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
         let c = d.p.data();
         assert_eq!(c.arrest_count, 1);
         // CreateTrialCase runs CalculateJailTime before EnterCourtJail: region = Nuian (0).
-        assert_eq!((c.offline_guilty_time, c.offline_guilty_region), (200, 0));
+        assert_eq!((c.offline_guilty_time, c.offline_guilty_region), (12, 0));
     }
     assert!(trials.is_player_in_court(1));
 
@@ -421,7 +421,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
         body(&SCJuryWaitStatusPacket {
             count: 0,
             total: 2,
-            sentence_time_ms: 200 * 60_000
+            sentence_time_ms: 12 * 60_000
         })
     );
     assert_eq!(
@@ -470,7 +470,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
             defendant_race: 1,
             defendant_faction: 101,
             trial_id: tid,
-            sentence_time_ms: 200 * 60_000,
+            sentence_time_ms: 12 * 60_000,
             judge_id: 0
         })
     );
@@ -546,7 +546,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
         body(&SCJuryWaitStatusPacket {
             count: 1,
             total: 2,
-            sentence_time_ms: 200 * 60_000
+            sentence_time_ms: 12 * 60_000
         })
     );
     {
@@ -567,7 +567,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
         vec![body(&SCJuryWaitStatusPacket {
             count: 1,
             total: 2,
-            sentence_time_ms: 200 * 60_000
+            sentence_time_ms: 12 * 60_000
         })]
     );
     assert_eq!(trials.jury_queue(NUIA), vec![3]);
@@ -601,7 +601,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
             vec![body(&SCJuryWaitStatusPacket {
                 count: 2,
                 total: 2,
-                sentence_time_ms: 200 * 60_000
+                sentence_time_ms: 12 * 60_000
             })]
         );
     }
@@ -737,7 +737,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
             count: 2,
             total: 2,
             sentence_type: sentence_result::GUILTY4,
-            sentence_time: 200 * 60_000
+            sentence_time: 12 * 60_000
         })
     );
     assert_eq!(
@@ -781,7 +781,7 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
             .buffs
             .effect_from_buff_id(buff::PRISONER_NUIAN)
             .expect("prisoner buff");
-        assert_eq!(prisoner.duration, 200 * 60_000);
+        assert_eq!(prisoner.duration, 12 * 60_000);
         assert!(!c.unit.buffs.check_buff(buff::TRIAL_DEFENDANT));
     }
     // The evidence is archived (KeepHistory).
@@ -850,6 +850,151 @@ async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
     );
 }
 
+/// The 2014-10-31 video's trial: 76 crime points, 26 records (3 murders, 10 assaults,
+/// 13 thefts), the Awaiting Trial window shows 15 minutes and the judge announces 18 minutes.
+/// Retail computes the base from the crime points (`76 / 5 = 15`), not from the evidence score
+/// (the C# per-record score gives 3*20 + 13*8 = 164 for the same record); the jury's 120 %
+/// option is the announced 18.
+#[tokio::test]
+async fn video_trial_sentence_is_crime_points_over_five_and_the_max_verdict() {
+    let server = justice_server();
+    let trials = &server.systems.social.trials;
+    trials.initialize_doodads(&[("justice.1.seat.1".into(), seat(0x900, 400.0))]);
+    let mut d = player(&server, 1, "Ayin", |c| {
+        c.crime_point = 76;
+        c.infamy_point = 76;
+    });
+    let mut j = player(&server, 2, "Juror", |c| c.jury_point = 1);
+    // 3 murders + 10 assaults + 13 thefts = the video's 26 trial records.
+    for id in 50..53 {
+        assert!(server.systems.social.crimes.insert(murder(id, 1, 99)));
+    }
+    for id in 60..70 {
+        assert!(server.systems.social.crimes.insert(CrimeEvent {
+            crime_kind: crime_kind::ASSAULT,
+            ..murder(id, 1, 99)
+        }));
+    }
+    for id in 70..83 {
+        assert!(server.systems.social.crimes.insert(CrimeEvent {
+            crime_kind: crime_kind::THEFT,
+            ..murder(id, 1, 99)
+        }));
+    }
+    trials.update_jury_queues(&server);
+    let tid = trials.arrest_criminal(&server, &d.p, None).expect("trial");
+    let f = trial_frames(&mut d.client);
+    assert_eq!(
+        find(&f, sc::SCAskImprisonOrTrialPacket),
+        vec![body(&SCAskImprisonOrTrialPacket {
+            crime_value: 76,
+            jail_minutes: 15
+        })]
+    );
+    assert_eq!(
+        find(&f, sc::SCTrialWaitStatusPacket),
+        vec![body(&SCTrialWaitStatusPacket {
+            order: 0,
+            sentence_time_ms: 15 * 60_000
+        })]
+    );
+    assert_eq!(trials.get_trial(tid).unwrap().jail_time, 15);
+    assert_eq!(d.p.data().offline_guilty_time, 15);
+
+    send(&server, &mut d, cs::CSReplyImprisonOrTrialPacket, |s| {
+        s.write_bool(true);
+    })
+    .await;
+    trials.update_tick(&server, util::now_ms() + 1).await;
+    let (race, faction) = {
+        let c = d.p.data();
+        (c.race, c.unit.faction_id)
+    };
+    assert_eq!(
+        find(&trial_frames(&mut d.client), sc::SCCrimeDataPacket),
+        vec![body(&SCCrimeDataPacket {
+            defendant_id: 1,
+            defendant_name: "Ayin".into(),
+            defendant_race: race,
+            defendant_faction: faction,
+            trial_id: tid,
+            sentence_time_ms: 15 * 60_000,
+            judge_id: 0,
+        })]
+    );
+    send(&server, &mut j, cs::CSReplyInviteJuryPacket, |s| {
+        s.write_bool(true).write_u32(tid);
+    })
+    .await;
+    trials.update_tick(&server, util::now_ms() + 1).await;
+    advance_to_verdict(&server, &mut d, std::slice::from_mut(&mut j), tid).await;
+
+    // The harshest option (sentence 6 = 120 %) is the video's 18 minutes.
+    send(&server, &mut j, cs::CSJuryVerdictPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_u8(6);
+    })
+    .await;
+    trials.update_tick(&server, util::now_ms() + 1).await;
+    let f = trial_frames(&mut d.client);
+    assert_eq!(
+        find(&f, sc::SCRulingStatusPacket).last(),
+        Some(&body(&SCRulingStatusPacket {
+            count: 1,
+            total: 1,
+            sentence_type: sentence_result::GUILTY5,
+            sentence_time: 18 * 60_000,
+        }))
+    );
+    let c = d.p.data();
+    assert_eq!((c.crime_point, c.infamy_point), (0, 76));
+    assert_eq!(
+        c.unit
+            .buffs
+            .effect_from_buff_id(buff::PRISONER_NUIAN)
+            .unwrap()
+            .duration,
+        18 * 60_000
+    );
+}
+
+/// Refusing the trial (the `Guilty` button) applies the amount the Request Trial dialog shows,
+/// `trial.jail_time` (ui_text 2666: "a $2 minute sentence will be automatically enforced");
+/// it is not an extra fixed penalty. The video's defendant would have served 15 minutes.
+#[tokio::test]
+async fn refusing_the_trial_applies_the_displayed_base_sentence() {
+    let server = justice_server();
+    let trials = &server.systems.social.trials;
+    let mut d = player(&server, 1, "Crook", |c| {
+        c.crime_point = 76;
+        c.infamy_point = 76;
+    });
+    let tid = trials.arrest_criminal(&server, &d.p, None).expect("trial");
+    let f = trial_frames(&mut d.client);
+    assert_eq!(
+        find(&f, sc::SCAskImprisonOrTrialPacket),
+        vec![body(&SCAskImprisonOrTrialPacket {
+            crime_value: 76,
+            jail_minutes: 15
+        })]
+    );
+    send(&server, &mut d, cs::CSReplyImprisonOrTrialPacket, |s| {
+        s.write_bool(false);
+    })
+    .await;
+    let f = trial_frames(&mut d.client);
+    assert_eq!(&f[0].1[..9], state_bytes(tid, trial_step::PLEAD_GUILTY, 0));
+    let c = d.p.data();
+    assert_eq!((c.crime_point, c.infamy_point), (0, 76));
+    assert_eq!(
+        c.unit
+            .buffs
+            .effect_from_buff_id(buff::PRISONER_NUIAN)
+            .unwrap()
+            .duration,
+        15 * 60_000
+    );
+}
+
 #[tokio::test]
 async fn plead_guilty_path() {
     let server = justice_server();
@@ -866,12 +1011,12 @@ async fn plead_guilty_path() {
     let tid = trials.arrest_criminal(&server, &d.p, None).expect("trial");
     let f = trial_frames(&mut d.client);
     assert_eq!(f[0].0, sc::SCCharacterResurrectedPacket);
-    // Theft of an offline victim: 8 minutes.
+    // 55 crime points / 5 = 11 minutes (the refusal dialog and the packet show this base).
     assert_eq!(
         find(&f, sc::SCAskImprisonOrTrialPacket),
         vec![body(&SCAskImprisonOrTrialPacket {
             crime_value: 55,
-            jail_minutes: 8
+            jail_minutes: 11
         })]
     );
     assert_eq!(d.p.data().arrest_count, 0);
@@ -908,7 +1053,7 @@ async fn plead_guilty_path() {
                 .effect_from_buff_id(buff::PRISONER_NUIAN)
                 .unwrap()
                 .duration,
-            8 * 60_000
+            11 * 60_000
         );
     }
     trials.update_tick(&server, util::now_ms()).await;
@@ -995,7 +1140,7 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
     let server = justice_server();
     let trials = &server.systems.social.trials;
     trials.initialize_doodads(&[("justice.1.seat.1".into(), seat(0x900, 400.0))]);
-    let mut d = player(&server, 1, "Crook", |c| c.crime_point = 50);
+    let mut d = player(&server, 1, "Crook", |c| c.crime_point = 4);
     let tid = trials.arrest_criminal(&server, &d.p, None).unwrap();
     trials.reply_imprison_or_trial(&server, &d.p, true, util::now_ms());
     // Nobody queued: the summons wait is skipped in the same tick.
@@ -1025,7 +1170,7 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
     );
     assert_eq!(f[0].1, body(&SCTrialCanceledPacket { trial_id: tid }));
     assert_eq!(&f[1].1[..9], state_bytes(tid, trial_step::END_TRIAL, 0));
-    // No evidence: 0 minutes -> the 10 s minimum.
+    // 4 crime points / 5 = 0 minutes -> the 10 s minimum.
     assert_eq!(
         d.p.data()
             .unit
@@ -1372,7 +1517,7 @@ async fn invalid_spoofed_and_repeated_votes_cannot_change_the_verdict() {
             .effect_from_buff_id(buff::PRISONER_NUIAN)
             .unwrap()
             .duration,
-        20 * 60_000
+        10 * 60_000
     );
     for op in [cs::CSReplyImprisonOrTrialPacket, cs::CSCancelTrialPacket] {
         send(&server, &mut d, op, |s| {
@@ -1390,7 +1535,7 @@ async fn invalid_spoofed_and_repeated_votes_cannot_change_the_verdict() {
 
 #[tokio::test]
 async fn all_six_jury_choices_apply_the_expected_sentence() {
-    for (sentence, minutes) in [(1, 0), (2, 4), (3, 10), (4, 16), (5, 20), (6, 24)] {
+    for (sentence, minutes) in [(1, 0), (2, 2), (3, 5), (4, 8), (5, 10), (6, 12)] {
         let (server, mut d, mut jury, tid) = summoned_trial(1).await;
         open_verdict(&server, &mut d, &mut jury, tid).await;
         send(&server, &mut jury[0], cs::CSJuryVerdictPacket, |s| {
@@ -1466,7 +1611,7 @@ async fn the_most_common_jury_sentence_wins() {
             .get_trial(tid)
             .unwrap()
             .jail_time,
-        20
+        10
     );
 }
 
@@ -1503,7 +1648,7 @@ async fn disconnecting_defendant_closes_the_case_and_enforces_the_saved_sentence
     d.p.data().is_online = false;
     super::session::on_online_changed(&server, &d.p, false);
     assert!(server.systems.social.trials.get_trial(tid).is_none());
-    assert_eq!(d.p.data().offline_guilty_time, 20);
+    assert_eq!(d.p.data().offline_guilty_time, 10);
     assert_eq!(jury[0].p.data().unit.transform.x, 102.0);
     assert!(jury[0].p.data().main_world_position.is_none());
     assert_eq!(jury[0].p.data().jury_point, 1);
@@ -1521,7 +1666,7 @@ async fn disconnecting_defendant_closes_the_case_and_enforces_the_saved_sentence
             .effect_from_buff_id(buff::PRISONER_NUIAN)
             .unwrap()
             .duration,
-        20 * 60_000
+        10 * 60_000
     );
     trial::handle_player_login(&server, &d.p);
     assert_eq!(d.p.data().guilty_count, 1);
@@ -1679,7 +1824,7 @@ async fn undecided_jury_times_out_to_the_default_sentence() {
             .effect_from_buff_id(buff::PRISONER_NUIAN)
             .unwrap()
             .duration,
-        10 * 60_000
+        5 * 60_000
     );
 }
 
@@ -1713,7 +1858,7 @@ async fn haranyan_sentences_keep_their_region_including_for_pirates_on_reconnect
             .effect_from_buff_id(buff::PRISONER_HARANYAN)
             .unwrap()
             .duration,
-        20 * 60_000
+        10 * 60_000
     );
     assert!(!d.p.data().unit.buffs.check_buff(buff::PRISONER_NUIAN));
 }
@@ -1834,7 +1979,7 @@ async fn sentence_duration_cannot_overflow_the_prison_buff_or_wire() {
 #[tokio::test]
 async fn even_a_zero_minute_pending_case_survives_disconnect() {
     let server = justice_server();
-    let d = player(&server, 1, "Defendant", |c| c.crime_point = 50);
+    let d = player(&server, 1, "Defendant", |c| c.crime_point = 4);
     server
         .systems
         .social
@@ -2129,7 +2274,7 @@ async fn crime_report_through_hooks() {
         })
     );
     assert_eq!(criminal.p.data().evidence_reported_count, 1);
-    // Jail time recalculated: one murder of a level-10 victim.
+    // Jail time recalculated from the report's 25 crime points: 25 / 5 = 5 minutes.
     assert_eq!(
         server
             .systems
@@ -2138,7 +2283,7 @@ async fn crime_report_through_hooks() {
             .get_trial(tid)
             .unwrap()
             .jail_time,
-        200
+        5
     );
     assert_eq!(hooks.phases.lock().unwrap().clone(), vec![(0x800, 2, 7)]);
     assert_eq!(server.systems.social.crimes.pending_ids().0, vec![e.id]);
