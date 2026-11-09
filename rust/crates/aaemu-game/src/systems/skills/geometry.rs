@@ -341,6 +341,22 @@ impl PosUnit {
     }
 }
 
+/// The `target_alive` / `target_dead` template flags against a unit's hp: a living unit needs
+/// `target_alive`, a dead one `target_dead` (plot target filter and area skills).
+pub(super) fn alive_dead_allows(target_alive: bool, target_dead: bool, hp: i32) -> bool {
+    (target_alive || hp == 0) && (target_dead || hp > 0)
+}
+
+/// Smallest vertical reach of a radius area skill (a person plus ordinary slopes).
+pub const AREA_MIN_VERTICAL_REACH: f32 = 3.0;
+
+/// Conservative vertical limit of a radius area: the larger of the radius, the template's
+/// `target_valid_height` and [`AREA_MIN_VERTICAL_REACH`] (see PORTING.md, "Area skills ignore
+/// height" for why the authored height is not applied strictly).
+pub fn area_vertical_limit(radius: f32, target_valid_height: f32) -> f32 {
+    radius.max(target_valid_height).max(AREA_MIN_VERTICAL_REACH)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -476,10 +476,7 @@ async fn loot_item_failure_sends_error() {
     assert!(!fx.to_next());
     assert_eq!(
         fx.client.drain(),
-        vec![(
-            sc::SCErrorMsgPacket,
-            error_body(error_message::BAG_INVALID_ITEM)
-        )]
+        vec![(sc::SCErrorMsgPacket, error_body(error_message::BAG_FULL))]
     );
     // chance miss: percent -1 never passes, nothing happens
     let t = FuncTemplate::LootItem(DoodadFuncLootItem {
@@ -1155,5 +1152,30 @@ fn cs_coffer_interaction_decode() {
             coffer_obj_id: 0x200,
             opening: true
         }
+    );
+}
+
+/// With room for the item the refusal is not a full bag: the invalid-item error stays.
+#[tokio::test]
+async fn loot_item_failure_with_room_keeps_the_invalid_item_error() {
+    let mut fx = fixture(Rec {
+        space: 10,
+        ..Rec::default()
+    });
+    let t = FuncTemplate::LootItem(DoodadFuncLootItem {
+        id: 1,
+        item_id: 8000,
+        count_min: 2,
+        count_max: 2,
+        percent: 10000,
+        ..Default::default()
+    });
+    fx.run(t, 0, 0);
+    assert_eq!(
+        fx.client.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::BAG_INVALID_ITEM)
+        )]
     );
 }
