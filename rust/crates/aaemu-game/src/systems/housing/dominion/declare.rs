@@ -278,7 +278,8 @@ fn public_farm_near(
 
 /// Whether a doodad template is a farm product: one of its phase funcs is
 /// `DoodadFuncHouseFarm` (the crop / livestock growth phase, 368 rows / 147 templates in the
-/// 1.2 data).
+/// 1.2 data). The same templates are also wild gathering nodes (clover, azalea, mushroom,
+/// rubber tree, ...), so the caller must require a player-planted owner.
 fn template_is_house_farm(server: &GameServer, template_id: u32) -> bool {
     let doodads = &server.game_data.systems.npcs.doodad;
     let Some(template) = doodads.template(template_id) else {
@@ -292,10 +293,14 @@ fn template_is_house_farm(server: &GameServer, template_id: u32) -> bool {
     })
 }
 
-/// 633 farmland: a planted farm doodad lies within `margin` metres of the spot. The doodads
-/// are the common-farm plantings (the ones carrying a `farm_type`) and any template with a
-/// `DoodadFuncHouseFarm` phase func, which covers the crops and livestock of private / public
-/// farms alike (the plot they stand on may be a public farm area or a house garden).
+/// 633 farmland: a player-planted farm doodad lies within `margin` metres of the spot. Only
+/// doodads owned by a character or a house count: the crop / livestock templates are also
+/// the wild gathering nodes (`DoodadFuncHouseFarm`), and those static spawns are not
+/// farmland. The planted ones are the common-farm plantings (carrying a `farm_type`) and the
+/// private house-garden plantings (owner type `HOUSING`).
+///
+/// Only the sectors within `margin` of the spot are scanned, and the distance is checked
+/// before the template lookup.
 fn farm_doodad_near(
     server: &GameServer,
     world: &crate::world::WorldInstance,
@@ -311,21 +316,58 @@ fn farm_doodad_near(
     } else {
         0.0
     };
-    world.all_doodads().into_iter().any(|doodad| {
-        let (template_id, farm_type) = {
-            let d = doodad.data();
-            (d.template_id, d.farm_type)
-        };
-        if farm_type == crate::systems::npcs::public_farm::farm_group_kind::INVALID
-            && !template_is_house_farm(server, template_id)
-        {
-            return false;
+    let region = crate::data::world_templates::REGION_SIZE as f32;
+    let (min_x, max_x) = (
+        ((x - margin) / region).floor() as i32,
+        ((x + margin) / region).floor() as i32,
+    );
+    let (min_y, max_y) = (
+        ((y - margin) / region).floor() as i32,
+        ((y + margin) / region).floor() as i32,
+    );
+    let margin2 = f64::from(margin) * f64::from(margin);
+    for sx in min_x..=max_x {
+        for sy in min_y..=max_y {
+            if !world.template.valid_region(sx, sy) {
+                continue;
+            }
+            for object in world.objects_in_region((sx, sy)) {
+                let crate::world::WorldObject::Doodad(doodad) = object else {
+                    continue;
+                };
+                let (owner_id, owner_type) = {
+                    let d = doodad.data();
+                    (d.owner_id, d.owner_type)
+                };
+                if owner_id == 0
+                    || !matches!(
+                        owner_type,
+                        crate::models::doodad::doodad_owner_type::CHARACTER
+                            | crate::models::doodad::doodad_owner_type::HOUSING
+                    )
+                {
+                    continue;
+                }
+                let position =
+                    world.world_pos_rot(&crate::world::WorldObject::Doodad(doodad.clone()));
+                let dx = f64::from(x) - f64::from(position.x);
+                let dy = f64::from(y) - f64::from(position.y);
+                if dx * dx + dy * dy > margin2 {
+                    continue;
+                }
+                let (template_id, farm_type) = {
+                    let d = doodad.data();
+                    (d.template_id, d.farm_type)
+                };
+                if farm_type != crate::systems::npcs::public_farm::farm_group_kind::INVALID
+                    || template_is_house_farm(server, template_id)
+                {
+                    return true;
+                }
+            }
         }
-        let position = world.world_pos_rot(&crate::world::WorldObject::Doodad(doodad.clone()));
-        let dx = f64::from(x) - f64::from(position.x);
-        let dy = f64::from(y) - f64::from(position.y);
-        dx * dx + dy * dy <= f64::from(margin) * f64::from(margin)
-    })
+    }
+    false
 }
 
 /// 625: a resurrection point lies within `margin` metres (horizontal) of the spot. The

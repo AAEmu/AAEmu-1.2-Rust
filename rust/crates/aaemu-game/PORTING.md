@@ -5126,12 +5126,17 @@ and in NPC wandering / buff remaining times.
     beyond the plot (default **10**, GameMeca "about 10 m"; farm and garden plot house
     designs use the same square, so they are included). Farmland is additionally refused
     with `Housing.SiegeDeclareFarmMargin` metres (default **10**, same source): a public
-    farm area (a `PublicFarmManager._farmZones` sub zone polygon, the data the server
-    already uses for common-farm planting; the margin is ring-sampled, the same INFERRED
-    approximation as 661) and a planted farm doodad (a template with a
-    `DoodadFuncHouseFarm` phase func, the 1.2 data's crop / livestock marker, or a doodad
-    carrying a `farm_type`; the distance is to the doodad's world position). The two
-    margins are server-configurable; `0` refuses only a spot inside the plot / farm area.
+    farm area (a `PublicFarmManager._farmZones` sub zone polygon: 966 farm, 967 ranch,
+    968 nursery, 974 mount stable, 998 farm; the data the server already uses for
+    common-farm planting; the margin is ring-sampled, the same INFERRED approximation as
+    661) and a player-planted farm doodad (owner a character or a house; a template with a
+    `DoodadFuncHouseFarm` phase func, or a doodad carrying a `farm_type`; the distance is to
+    the doodad's world position). "Player-planted" is required: the crop / livestock
+    templates are also the wild gathering nodes (clover 2277, azalea 2276, mushroom 453,
+    rubber tree 369, cotton 1798, pearl clam 3511 and others — 8,702 of the 43,463 static
+    `main_world` doodad spawns would match the template alone). Only the sectors within the
+    margin are scanned. The two margins are server-configurable; `0` refuses only a spot
+    inside the plot / farm area.
   * **661 `SIEGE_CANNOT_DECLARE_NEAR_OTHER_ZONE`** (ui 5159 "too close to another zone",
     INFERRED source text). Data: the authored zone at the spot (`WorldInstance.zone_id_at`
     -> `zones.group_id`) must be the besieged dominion's group; `Housing.SiegeDeclareZoneMargin`
@@ -5147,7 +5152,9 @@ and in NPC wandering / buff remaining times.
     only. `Housing.SiegeDeclareResurrectMargin` metres (default **100**, GameMeca "about
     100 m", horizontal distance to the nearest point) refuses when
     `Housing.SiegeDeclareResurrectCheck` is on (default **true**). An empty respawn table
-    refuses nothing. The previous peace-area reading (zone conflict `Peace` state, default
+    refuses nothing. Only these static respawn portals count: dynamic points (territory
+    statues, the siege camp / HQs and other runtime objects) are not resurrection points
+    for this rule. The previous peace-area reading (zone conflict `Peace` state, default
     off) is removed: the source and the key name name a resurrection point, not a zone
     state.
   * **741 `SIEGE_CANNOT_DECLARE_OBSTACLE`** (ui 5783 "there are obstacles nearby", INFERRED

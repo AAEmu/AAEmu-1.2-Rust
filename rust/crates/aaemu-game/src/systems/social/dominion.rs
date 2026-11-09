@@ -4075,17 +4075,59 @@ mod authority_tests {
         );
     }
 
-    /// Spawns a doodad of `template_id` at `(x, y)` in instance 0.
-    fn add_doodad_at(f: &Fixture, template_id: u32, x: f32, y: f32) -> crate::world::DoodadRef {
+    /// Spawns a doodad of `template_id` at `(x, y)` in instance 0 with `owner_id` /
+    /// `owner_type`.
+    fn add_owned_doodad_at(
+        f: &Fixture,
+        obj_id: u32,
+        template_id: u32,
+        x: f32,
+        y: f32,
+        owner_id: u32,
+        owner_type: u8,
+    ) -> crate::world::DoodadRef {
         let mut d = crate::models::doodad::Doodad::new(template_id);
         d.transform.set_xyz(x, y, 100.0);
         d.transform.zone_id = TEST_ZONE;
+        d.owner_id = owner_id;
+        d.owner_type = owner_type;
         // The fixture's players use fixed obj ids (0x100/0x101) the id manager does not know,
         // so `get_next_id` can hand out 0x100 again and `add_object` would keep the player.
-        let doodad = Entity::new(0xa000 + template_id, d);
+        let doodad = Entity::new(obj_id, d);
         let world = f.server.world.world(0).unwrap();
         world.spawn(&doodad, &f.server.view_ctx());
         doodad
+    }
+
+    /// Spawns a doodad planted by character 1 at `(x, y)` in instance 0.
+    fn add_doodad_at(f: &Fixture, template_id: u32, x: f32, y: f32) -> crate::world::DoodadRef {
+        add_owned_doodad_at(
+            f,
+            0xa000 + template_id,
+            template_id,
+            x,
+            y,
+            1,
+            crate::models::doodad::doodad_owner_type::CHARACTER,
+        )
+    }
+
+    /// Spawns a wild, unowned static node of `template_id` at `(x, y)` in instance 0.
+    fn add_wild_doodad_at(
+        f: &Fixture,
+        template_id: u32,
+        x: f32,
+        y: f32,
+    ) -> crate::world::DoodadRef {
+        add_owned_doodad_at(
+            f,
+            0xb000 + template_id,
+            template_id,
+            x,
+            y,
+            0,
+            crate::models::doodad::doodad_owner_type::SYSTEM,
+        )
     }
 
     /// Marks a square sub zone (id `sub_zone_id`) of the synthetic `main_world` as a public
@@ -4302,6 +4344,31 @@ mod authority_tests {
             codes.contains(&633),
             "15 m farm margin (public farm): {codes:?}"
         );
+        assert!(kept);
+        assert!(!declared(&f));
+    }
+
+    #[tokio::test]
+    async fn camp_placement_ignores_wild_farm_template_nodes() {
+        // Clover (2277), azalea (2276), mushroom (453), rubber tree (369), cotton (1798),
+        // pearl clam (3511) and the other wild gathering nodes share the planted crops'
+        // `DoodadFuncHouseFarm` phase funcs (8,702 of the 43,463 static main_world spawns
+        // would match). An unowned wild node 9 m away is not farmland.
+        const WILD_CLOVER: u32 = 2_277;
+        let mut f = camp_fixture();
+        add_farm_doodad_template(&mut f, WILD_CLOVER);
+        add_wild_doodad_at(&f, WILD_CLOVER, 600.0, 110.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.is_empty(), "wild node 9 m away: {codes:?}");
+        assert!(!kept);
+        assert!(declared(&f));
+
+        // The same template planted by a character 9 m away refuses.
+        let mut f = camp_fixture();
+        add_farm_doodad_template(&mut f, WILD_CLOVER);
+        add_doodad_at(&f, WILD_CLOVER, 600.0, 110.0);
+        let (codes, kept) = cast_camp_errors(&mut f);
+        assert!(codes.contains(&633), "planted node 9 m away: {codes:?}");
         assert!(kept);
         assert!(!declared(&f));
     }

@@ -106,9 +106,11 @@ pub struct HousingConfig {
     /// Distance in metres from farmland that refuses a Siege Camp declaration
     /// (`SIEGE_CANNOT_DECLARE_NEAR_HOUSE` 633). Farmland is a public farm area (a
     /// `PublicFarmManager._farmZones` sub zone, where common-farm doodads may be planted) or
-    /// a planted farm doodad (a template with a `DoodadFuncHouseFarm` phase func, or a doodad
-    /// carrying a `farm_type`). GameMeca 2013-04-22 (grade C) says about 10 m from houses
-    /// (incl. farmland); the default is `10.0`. `Housing.SiegeDeclareFarmMargin`.
+    /// a player-planted farm doodad (owner a character or a house; a template with a
+    /// `DoodadFuncHouseFarm` phase func, or a doodad carrying a `farm_type`). Wild gathering
+    /// nodes of the same templates do not count. GameMeca 2013-04-22 (grade C) says about
+    /// 10 m from houses (incl. farmland); the default is `10.0`.
+    /// `Housing.SiegeDeclareFarmMargin`.
     #[serde(
         rename = "siegedeclarefarmmargin",
         deserialize_with = "crate::config::lenient"
