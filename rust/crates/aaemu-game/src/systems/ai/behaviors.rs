@@ -724,9 +724,9 @@ fn set_weapon_range(
     let mut min_range_check = f64::from(skill.template.min_range);
     let mut max_range_check = skill_range;
     if skill.template.weapon_slot_for_range_id > 0 {
+        // Deviation from the C#: the range comes from the NPC's own weapon. The C# read the
+        // target's (the player's) holdable, so the chase range followed the player's weapon.
         let (mut min_w, mut max_w) = (0.0f32, 3.0f32); // Fist default
-                                                       // Deviation from the C#: the range comes from the NPC's own weapon. The C# read the
-                                                       // target's (the player's) holdable, so the chase range followed the player's weapon.
         if let Some(h) =
             ai_skills::weapon_holdable(c, &c.obj, skill.template.weapon_slot_for_range_id)
         {
