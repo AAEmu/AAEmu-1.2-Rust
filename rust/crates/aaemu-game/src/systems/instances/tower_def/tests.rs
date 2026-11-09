@@ -948,6 +948,68 @@ async fn tower_def_war_event_runs_once_per_war_and_stops_on_peace() {
 /// `/towerdef list` names why a definition is unavailable in the GM's zone group: its
 /// controllers stand in another zone group, or the spawn data has no position for them at all.
 #[tokio::test]
+async fn tower_def_war_event_started_by_a_gm_counts_as_this_wars_run() {
+    let mut server = fixture();
+    let s = Arc::get_mut(&mut server).unwrap();
+    s.config.update(|c| {
+        c.dungeons.tower_defense.enabled = true;
+        c.dungeons
+            .tower_defense
+            .events
+            .push(TowerDefenseEventConfig {
+                id: 12,
+                world_id: 0,
+                zone_group_id: 5,
+                zone_id: TEST_ZONE,
+            });
+    });
+    let conflict = ZoneConflict {
+        zone_group_id: 5,
+        war_tower_def_id: 12,
+        ..Default::default()
+    };
+    Arc::get_mut(&mut s.game_data)
+        .unwrap()
+        .zones
+        .conflicts
+        .push(conflict.clone());
+    server
+        .systems
+        .social
+        .conflicts
+        .init(&[conflict], crate::world::now_ms());
+    initialize(&server).unwrap();
+    server.systems.social.conflicts.set_state(
+        &server,
+        5,
+        crate::data::world_data::conflict_type::WAR,
+    );
+    // A GM already started the event: the war tick adopts it instead of failing to start it.
+    start(&server, KEY, TEST_ZONE).unwrap();
+    tick(&server);
+    assert_eq!(infos(&server, 0).len(), 1);
+    end(&server, KEY).unwrap();
+    tick(&server);
+    assert!(
+        infos(&server, 0).is_empty(),
+        "no second run in the same war"
+    );
+    server.systems.social.conflicts.set_state(
+        &server,
+        5,
+        crate::data::world_data::conflict_type::PEACE,
+    );
+    tick(&server);
+    server.systems.social.conflicts.set_state(
+        &server,
+        5,
+        crate::data::world_data::conflict_type::WAR,
+    );
+    tick(&server);
+    assert_eq!(infos(&server, 0).len(), 1, "the next war starts it again");
+}
+
+#[tokio::test]
 async fn tower_def_preflight_names_where_missing_controllers_stand() {
     let mut server = fixture();
     let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();

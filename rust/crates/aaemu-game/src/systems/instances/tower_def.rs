@@ -1266,6 +1266,27 @@ fn schedule_tick(server: &GameServer) {
     }
     let mut starts = Vec::new();
     let mut stops = Vec::new();
+    // Read the conflict states before taking the `state` lock (one lock at a time).
+    let war_states: HashMap<EventKey, bool> = events
+        .iter()
+        .filter(|c| {
+            server
+                .game_data
+                .zones
+                .conflicts
+                .iter()
+                .any(|z| z.zone_group_id == c.zone_group_id && z.war_tower_def_id == c.id)
+        })
+        .map(|c| {
+            let in_war = server
+                .systems
+                .social
+                .conflicts
+                .get(u32::from(c.zone_group_id))
+                .is_some_and(|s| s.current_state == crate::data::world_data::conflict_type::WAR);
+            (EventKey::from(c), in_war)
+        })
+        .collect();
     {
         let mut state = manager(server)
             .state
@@ -1292,25 +1313,16 @@ fn schedule_tick(server: &GameServer) {
                 // Started by the death of the NPC it names, never by a clock.
                 continue;
             }
-            let war = server
-                .game_data
-                .zones
-                .conflicts
-                .iter()
-                .any(|z| z.zone_group_id == c.zone_group_id && z.war_tower_def_id == c.id);
-            if war {
-                let in_war = server
-                    .systems
-                    .social
-                    .conflicts
-                    .get(u32::from(c.zone_group_id))
-                    .is_some_and(|s| {
-                        s.current_state == crate::data::world_data::conflict_type::WAR
-                    });
-                if in_war && state.war_active.insert(key) {
-                    starts.push((key, c.zone_id));
-                }
-                if !in_war && state.war_active.remove(&key) && state.active.contains_key(&key) {
+            if let Some(&in_war) = war_states.get(&key) {
+                if in_war {
+                    if state.active.contains_key(&key) {
+                        // Already running (e.g. started by a GM): treat it as the war's event.
+                        state.war_active.insert(key);
+                    } else if !state.war_active.contains(&key) {
+                        // Marked only after a successful start, so a failure retries next tick.
+                        starts.push((key, c.zone_id, true));
+                    }
+                } else if state.war_active.remove(&key) && state.active.contains_key(&key) {
                     stops.push(key);
                 }
                 continue;
@@ -1329,7 +1341,7 @@ fn schedule_tick(server: &GameServer) {
                 {
                     state.scheduled_days.insert(key, day);
                     if !state.active.contains_key(&key) {
-                        starts.push((key, c.zone_id));
+                        starts.push((key, c.zone_id, false));
                     }
                 }
             }
@@ -1340,8 +1352,19 @@ fn schedule_tick(server: &GameServer) {
             tracing::error!(%error, "Stopping war event failed");
         }
     }
-    for (key, zone) in starts {
-        if let Err(error) = start(server, key, zone) {
+    for (key, zone, war) in starts {
+        let result = start(server, key, zone);
+        if war {
+            let mut state = manager(server)
+                .state
+                .lock()
+                .expect("tower defense poisoned");
+            // An "already running" failure leaves the event active: that counts as started.
+            if result.is_ok() || state.active.contains_key(&key) {
+                state.war_active.insert(key);
+            }
+        }
+        if let Err(error) = result {
             tracing::error!(%error, "Starting scheduled tower defense failed");
         }
     }
