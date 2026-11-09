@@ -66,6 +66,10 @@ pub struct Doodad {
     pub owner_id: u32,
     pub owner_obj_id: u32,
     pub parent_obj_id: u32,
+    /// Not persisted. The doodad is a server-side child of a house but not furniture (crop,
+    /// dropped backpack): the 1.2 client adds every doodad sent with the house as parent to the
+    /// house's decoration map, so `write` sends it unparented with world coordinates.
+    pub client_unparented: bool,
     /// `DoodadOwnerType` ([`doodad_owner_type`]).
     pub owner_type: u8,
     /// `AttachPointKind`.
@@ -205,6 +209,7 @@ impl Doodad {
             owner_id: 0,
             owner_obj_id: 0,
             parent_obj_id: 0,
+            client_unparented: false,
             owner_type: doodad_owner_type::SYSTEM,
             attach_point: crate::models::unit::attach_point::SYSTEM,
             owner_db_id: 0,
@@ -251,13 +256,19 @@ impl Doodad {
         now_ms: i64,
         s: &mut PacketStream,
     ) {
+        // Deviation from C#: see `client_unparented`.
+        let parent_obj_id = if self.client_unparented {
+            0
+        } else {
+            self.parent_obj_id
+        };
         s.write_bc(obj_id)
             .write_u32(self.template_id)
             .write_bc(self.owner_obj_id)
-            .write_bc(self.parent_obj_id)
+            .write_bc(parent_obj_id)
             .write_u8(self.attach_point);
         // Note: AttachPointKind.System (255) is "> 0" too, as in the C# (`AttachPoint > 0`).
-        let p = if self.attach_point > 0 || self.parent_obj_id > 0 {
+        let p = if self.attach_point > 0 || parent_obj_id > 0 {
             self.transform.local()
         } else {
             *world

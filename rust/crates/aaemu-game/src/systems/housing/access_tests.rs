@@ -1437,3 +1437,68 @@ async fn doodads_sharing_the_house_id_but_not_housing_owned_are_not_counted() {
         Ok(false)
     );
 }
+
+/// `(parent obj id, x, y, z)` of the `Doodad::write` body, as the client reads it.
+fn encoded_parent_and_position(fx: &Fx, d: &DoodadRef) -> (u32, (f32, f32, f32)) {
+    let world = fx.server.world.world(0).unwrap();
+    let body = crate::world::visibility::doodad_body(&world, d, 0);
+    let mut s = aaemu_commons::PacketStream::from_bytes(body);
+    s.read_bc().unwrap(); // obj id
+    s.read_u32().unwrap(); // template id
+    s.read_bc().unwrap(); // owner obj id
+    let parent = s.read_bc().unwrap();
+    s.read_u8().unwrap(); // attach point
+    (parent, s.read_position().unwrap())
+}
+
+#[tokio::test]
+async fn crops_are_sent_unparented_but_furniture_keeps_the_house_parent() {
+    let fx = fixture(false);
+    let world = fx.server.world.world(0).unwrap();
+    fx.house
+        .data()
+        .unit
+        .transform
+        .set_position(100.0, 200.0, 0.0, 0.0, 0.0, 0.0);
+
+    // Furniture: owner HOUSING and a decoration entry for (doodad, item).
+    let chair = recoverable(&fx);
+    chair.data().parent_obj_id = fx.house.obj_id;
+    chair.data().attach_point = crate::models::unit::attach_point::NONE;
+    chair
+        .data()
+        .transform
+        .set_position(3.0, 4.0, 0.5, 0.0, 0.0, 0.0);
+    world.attach_child(&WorldObject::from(&fx.house), &WorldObject::from(&chair));
+    manager::mark_client_parent(&fx.server, &chair);
+    assert!(!chair.data().client_unparented);
+    let (parent, _) = encoded_parent_and_position(&fx, &chair);
+    assert_eq!(parent, fx.house.obj_id);
+
+    // Crop: a house child that is not furniture.
+    let crop = recoverable(&fx);
+    {
+        let mut d = crop.data();
+        d.owner_type = doodad_owner_type::SYSTEM;
+        d.item_template_id = 0;
+        d.parent_obj_id = fx.house.obj_id;
+        d.attach_point = crate::models::unit::attach_point::NONE;
+    }
+    crop.data()
+        .transform
+        .set_position(3.0, 4.0, 0.5, 0.0, 0.0, 0.0);
+    world.attach_child(&WorldObject::from(&fx.house), &WorldObject::from(&crop));
+    manager::mark_client_parent(&fx.server, &crop);
+    assert!(crop.data().client_unparented);
+    let (parent, (x, y, _)) = encoded_parent_and_position(&fx, &crop);
+    assert_eq!(parent, 0);
+    // World coordinates, not the house-local (3, 4).
+    let expected = world.world_pos_rot(&WorldObject::from(&crop));
+    assert!((x - expected.x).abs() < 0.01 && (y - expected.y).abs() < 0.01);
+    assert!(
+        x > 50.0 && y > 150.0,
+        "expected world coordinates, got ({x}, {y})"
+    );
+    // The server-side relationship is untouched.
+    assert_eq!(crop.data().parent_obj_id, fx.house.obj_id);
+}
