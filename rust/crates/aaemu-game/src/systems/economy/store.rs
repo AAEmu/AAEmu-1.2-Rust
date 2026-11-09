@@ -582,6 +582,7 @@ impl CSBuyItemsPacket {
         let mut staged_bag = bag.clone();
         let mut staged_buyback = buyback.clone();
         let mut succeeded = true;
+        let mut bag_full = false;
         for (item_id, count, grade) in items_buy {
             let template = txn.data().template(item_id).expect("preflight template");
             let existing: Vec<_> = staged_bag
@@ -606,6 +607,7 @@ impl CSBuyItemsPacket {
                 )
             {
                 succeeded = false;
+                bag_full = true;
                 break;
             }
         }
@@ -630,6 +632,11 @@ impl CSBuyItemsPacket {
         }
         if !succeeded {
             discard_shop_stage(&mut txn, &staged_bag, &bag, &buyback);
+            // The client checked everything but the free space; a vanished buy-back item
+            // stays silent.
+            if bag_full {
+                inventory::send_error_message_to(&mut txn.out(), &p, error_message::BAG_FULL);
+            }
             return;
         }
         // Everything is staged; only now take the per-character purchase allowance, so a

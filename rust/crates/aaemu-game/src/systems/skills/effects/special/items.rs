@@ -180,6 +180,10 @@ pub fn gain_item(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             "Special effects: GainItem failed to give item {item_id} x{item_count} to character {}",
             p.character_id
         );
+        // Deviation from the C# (log only): a valid item that did not fit tells the client.
+        if server.game_data.items.template(item_id).is_some() {
+            send_error(p, error::BAG_FULL);
+        }
     }
 }
 

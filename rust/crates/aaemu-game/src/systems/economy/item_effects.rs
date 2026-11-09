@@ -1349,6 +1349,10 @@ pub fn gain_item(server: &GameServer, player: &PlayerRef, values: [i32; 4]) {
             "Special effects: GainItem failed to give item {item_id} x{count} to character {}",
             player.character_id
         );
+        // Deviation from the C# (log only): a valid item that did not fit tells the client.
+        if txn.data().template(item_id).is_some() {
+            send_error_message_to(&mut txn.out(), player, error_message::BAG_FULL);
+        }
     }
 }
 

@@ -1815,7 +1815,19 @@ async fn shop_catalog_grades_full_bag_rolls_back() {
     buy_grade(&mut w, STACK, 4, 1, shop_currency_type::HONOR).await;
     assert_eq!(bag.lock().unwrap().items, before);
     assert_eq!(w.pa.data().honor_point, 100);
-    assert!(w.a.drain().is_empty());
+    // The refused purchase tells the client why: the bag is full.
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            err_bytes(
+                super::error_message::BAG_FULL,
+                super::error_message::BAG_FULL,
+                0,
+                true
+            )
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1930,7 +1942,12 @@ async fn shop_checkout_capacity_failure_rolls_back_all_goods_and_buyback() {
         assert!(Inv::of(&w.pa).bag().lock().unwrap().items.is_empty());
         assert_eq!(buyback.lock().unwrap().items, before_back);
         assert_eq!(w.pa.data().money, 1000);
-        assert!(w.a.drain().is_empty());
+        // The capacity failure of the goods is a full bag; a vanished buy-back item is silent.
+        assert_eq!(
+            w.a.drain().len(),
+            usize::from(!with_buyback),
+            "BAG_FULL only for the goods"
+        );
     }
 }
 
