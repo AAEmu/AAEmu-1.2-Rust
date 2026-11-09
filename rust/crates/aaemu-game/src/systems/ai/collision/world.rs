@@ -109,6 +109,8 @@ pub struct CellContent {
     pub vegetation_records: usize,
     /// Records whose model is missing / has no physics.
     pub skipped: usize,
+    /// Voxel meshes (caves) among the instances.
+    pub voxels: usize,
     /// World-space bounding boxes (`m_WSBBox`) of the tall brushes ([`BUILDING_MIN_HEIGHT`]) that
     /// have collision: where a building's shell stands even if its floor has no collision geometry
     /// ([`super::inside_brush_bounds`]).
@@ -122,6 +124,8 @@ pub struct LoadedCell {
     pub entities: Vec<EntIdx>,
     pub brushes: usize,
     pub vegetation: usize,
+    /// Voxel meshes among the brushes.
+    pub voxels: usize,
     pub last_used: Instant,
     /// Keeps the models referenced (cache eviction).
     pub models: Vec<Arc<ModelPhys>>,
@@ -250,7 +254,21 @@ pub fn vegetation_instance(
     }
 }
 
-/// Reads a cell's object files and resolves the models (no world lock held).
+/// What [`prepare_cell_with`] reads of a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellLoad {
+    /// `brush.dat`.
+    pub brushes: bool,
+    /// `vegetation.dat`.
+    pub vegetation: bool,
+    /// The brushes and vegetation of `visareas.dat` (instance halls, portals).
+    pub visareas: bool,
+    /// The voxel meshes (caves) of `visareas.dat` and `object.dat`.
+    pub voxels: bool,
+}
+
+/// Reads a cell's object files and resolves the models (no world lock held). The visareas and
+/// voxel parts follow `with_brushes`.
 pub fn prepare_cell(
     files: &dyn CellFiles,
     models: &ModelCache,
@@ -259,6 +277,112 @@ pub fn prepare_cell(
     cell: (i32, i32),
     with_brushes: bool,
     with_vegetation: bool,
+) -> CellContent {
+    let load = CellLoad {
+        brushes: with_brushes,
+        vegetation: with_vegetation,
+        visareas: with_brushes,
+        voxels: with_brushes,
+    };
+    prepare_cell_with(files, models, world_name, groups, cell, &load)
+}
+
+/// Adds the brush records of one file (`names` = the file's model table).
+fn add_brushes(
+    c: &mut CellContent,
+    models: &ModelCache,
+    names: &[String],
+    list: &[BrushRecord],
+    origin: Vec3,
+) {
+    c.brush_records += list.len();
+    let mut resolved: HashMap<i32, Option<Arc<ModelPhys>>> = HashMap::new();
+    for b in list {
+        let m = resolved
+            .entry(b.statobj)
+            .or_insert_with(|| {
+                names
+                    .get(b.statobj as usize)
+                    .filter(|n| !n.is_empty())
+                    .and_then(|n| models.get(n))
+            })
+            .clone();
+        match m {
+            Some(m) => {
+                if b.bbox[1].z - b.bbox[0].z >= BUILDING_MIN_HEIGHT {
+                    c.brush_bounds
+                        .push([b.bbox[0] + origin, b.bbox[1] + origin]);
+                }
+                c.instances.push(brush_instance(m, origin, b));
+            }
+            None => c.skipped += 1,
+        }
+    }
+}
+
+/// Adds the vegetation records of one file.
+fn add_vegetation(
+    c: &mut CellContent,
+    models: &ModelCache,
+    groups: &HashMap<u16, VegetationGroup>,
+    list: &[cells::VegetationRecord],
+    origin: Vec3,
+) {
+    c.vegetation_records += list.len();
+    let mut resolved: HashMap<u16, Option<Arc<ModelPhys>>> = HashMap::new();
+    for v in list {
+        let m = resolved
+            .entry(v.group)
+            .or_insert_with(|| {
+                groups
+                    .get(&v.group)
+                    .filter(|g| !g.model.is_empty())
+                    .and_then(|g| models.get(&g.model))
+            })
+            .clone();
+        match m {
+            Some(m) if m.collides() => {
+                c.instances.push(vegetation_instance(m, origin, v));
+            }
+            _ => c.skipped += 1,
+        }
+    }
+}
+
+/// Adds voxel meshes (caves): the first compiled CGF block of each record is a static trimesh
+/// placed by the record's matrix.
+fn add_voxels(c: &mut CellContent, list: &[cells::VoxelRecord], origin: Vec3) {
+    for v in list {
+        let model = v
+            .inflate()
+            .and_then(|bytes| super::models::load_model("voxel", &bytes).ok().flatten())
+            .filter(|m| m.collides());
+        let Some(model) = model else {
+            c.skipped += 1;
+            continue;
+        };
+        let rec = BrushRecord {
+            bbox: v.bbox,
+            rnd_flags: 0,
+            rot_scale: v.rot_scale,
+            pos: v.pos,
+            material_id: 0,
+            statobj: -1,
+        };
+        c.voxels += 1;
+        c.instances
+            .push(brush_instance(Arc::new(model), origin, &rec));
+    }
+}
+
+/// [`prepare_cell`] with the parts to read chosen by `load`.
+pub fn prepare_cell_with(
+    files: &dyn CellFiles,
+    models: &ModelCache,
+    world_name: &str,
+    groups: &HashMap<u16, VegetationGroup>,
+    cell: (i32, i32),
+    load: &CellLoad,
 ) -> CellContent {
     let t = Instant::now();
     let mut c = CellContent {
@@ -270,64 +394,49 @@ pub fn prepare_cell(
         cell.0, cell.1
     );
     let origin = Vec3::new(cell.0 as f32 * 1024.0, cell.1 as f32 * 1024.0, 0.0);
-    if with_brushes {
+    if load.brushes {
         let names = files
             .read(&format!("{dir}/statobjs.dat"))
             .map(|d| cells::read_statobjs(&d))
             .unwrap_or_default();
         if let Some(d) = files.read(&format!("{dir}/brush.dat")) {
             match cells::read_brushes(&d) {
-                Ok(list) => {
-                    c.brush_records = list.len();
-                    let mut resolved: HashMap<i32, Option<Arc<ModelPhys>>> = HashMap::new();
-                    for b in &list {
-                        let m = resolved
-                            .entry(b.statobj)
-                            .or_insert_with(|| {
-                                names.get(b.statobj as usize).and_then(|n| models.get(n))
-                            })
-                            .clone();
-                        match m {
-                            Some(m) => {
-                                if b.bbox[1].z - b.bbox[0].z >= BUILDING_MIN_HEIGHT {
-                                    c.brush_bounds
-                                        .push([b.bbox[0] + origin, b.bbox[1] + origin]);
-                                }
-                                c.instances.push(brush_instance(m, origin, b));
-                            }
-                            None => c.skipped += 1,
-                        }
-                    }
-                }
+                Ok(list) => add_brushes(&mut c, models, &names, &list, origin),
                 Err(e) => tracing::warn!("collision: {dir}/brush.dat: {e}"),
             }
         }
     }
-    if with_vegetation {
+    if load.vegetation {
         if let Some(d) = files.read(&format!("{dir}/vegetation.dat")) {
             match cells::read_vegetation(&d) {
-                Ok(list) => {
-                    c.vegetation_records = list.len();
-                    let mut resolved: HashMap<u16, Option<Arc<ModelPhys>>> = HashMap::new();
-                    for v in &list {
-                        let m = resolved
-                            .entry(v.group)
-                            .or_insert_with(|| {
-                                groups
-                                    .get(&v.group)
-                                    .filter(|g| !g.model.is_empty())
-                                    .and_then(|g| models.get(&g.model))
-                            })
-                            .clone();
-                        match m {
-                            Some(m) if m.collides() => {
-                                c.instances.push(vegetation_instance(m, origin, v));
-                            }
-                            _ => c.skipped += 1,
+                Ok(list) => add_vegetation(&mut c, models, groups, &list, origin),
+                Err(e) => tracing::warn!("collision: {dir}/vegetation.dat: {e}"),
+            }
+        }
+    }
+    if load.visareas || load.voxels {
+        if let Some(d) = files.read(&format!("{dir}/visareas.dat")) {
+            match cells::read_visareas(&d) {
+                Ok(f) => {
+                    if load.visareas {
+                        add_brushes(&mut c, models, &f.objects, &f.brushes, origin);
+                        if load.vegetation {
+                            add_vegetation(&mut c, models, groups, &f.vegetation, origin);
                         }
                     }
+                    if load.voxels {
+                        add_voxels(&mut c, &f.voxels, origin);
+                    }
                 }
-                Err(e) => tracing::warn!("collision: {dir}/vegetation.dat: {e}"),
+                Err(e) => tracing::warn!("collision: {dir}/visareas.dat: {e}"),
+            }
+        }
+    }
+    if load.voxels {
+        if let Some(d) = files.read(&format!("{dir}/object.dat")) {
+            match cells::read_object_dat_voxels(&d) {
+                Ok(list) => add_voxels(&mut c, &list, origin),
+                Err(e) => tracing::warn!("collision: {dir}/object.dat: {e}"),
             }
         }
     }
@@ -360,6 +469,7 @@ pub struct WorldStats {
     pub static_entities: usize,
     pub brushes: usize,
     pub vegetation: usize,
+    pub voxels: usize,
     pub object_colliders: usize,
     pub load_micros: u64,
 }
@@ -452,6 +562,7 @@ impl WorldState {
         self.stats.static_entities += entities.len();
         self.stats.brushes += nb;
         self.stats.vegetation += nv;
+        self.stats.voxels += content.voxels;
         self.stats.load_micros += t.elapsed().as_micros() as u64 + content.prepare_micros;
         self.cells.insert(
             content.cell,
@@ -459,6 +570,7 @@ impl WorldState {
                 entities,
                 brushes: nb,
                 vegetation: nv,
+                voxels: content.voxels,
                 last_used: Instant::now(),
                 models,
                 brush_bounds: content.brush_bounds,
@@ -480,6 +592,7 @@ impl WorldState {
         self.stats.static_entities -= c.entities.len();
         self.stats.brushes -= c.brushes;
         self.stats.vegetation -= c.vegetation;
+        self.stats.voxels -= c.voxels;
         self.pending_deletes += c.entities.len();
         true
     }

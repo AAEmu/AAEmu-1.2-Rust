@@ -297,22 +297,22 @@ pub fn load_cell(server: &GameServer, pw: &PhysWorld, cell: (i32, i32)) {
     } else {
         let models = model_cache(server, &files);
         let groups = vegetation_groups(server, &files, &pw.world_name);
-        world::prepare_cell(
-            &files,
-            &models,
-            &pw.world_name,
-            &groups,
-            cell,
-            true,
-            level == GeometryLevel::Full,
-        )
+        let load = world::CellLoad {
+            brushes: true,
+            vegetation: level == GeometryLevel::Full,
+            visareas: server.config.physics.vis_areas,
+            voxels: server.config.physics.voxels,
+        };
+        world::prepare_cell_with(&files, &models, &pw.world_name, &groups, cell, &load)
     };
     tracing::debug!(
-        "collision: instance {} cell {:?}: {} brushes, {} vegetation records, {} instances, {} µs",
+        "collision: instance {} cell {:?}: {} brushes, {} vegetation records, {} voxels, {} skipped, {} instances, {} µs",
         pw.instance_id,
         cell,
         content.brush_records,
         content.vegetation_records,
+        content.voxels,
+        content.skipped,
         content.instances.len(),
         content.prepare_micros
     );
