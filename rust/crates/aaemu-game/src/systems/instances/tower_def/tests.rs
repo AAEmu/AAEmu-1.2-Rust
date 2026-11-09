@@ -159,6 +159,259 @@ fn advance(seconds: u64) {
     spawn_manager::advance_test_clock(Duration::from_secs(seconds));
 }
 
+const HALCYONA_GROUP: u16 = 22;
+
+/// Zone group 22 (Halcyona) with the Golden Plains War (18), its victory follow-ups (19, 20)
+/// and the two Ynystere rift definitions (5, 15), all on the synthetic main world.
+fn halcyona_fixture() -> Arc<GameServer> {
+    let mut data = GameData::empty();
+    data.zones.zones.insert(
+        TEST_ZONE,
+        Zone {
+            id: 77,
+            zone_key: TEST_ZONE,
+            group_id: u32::from(HALCYONA_GROUP),
+            ..Default::default()
+        },
+    );
+    data.zones.conflicts.push(ZoneConflict {
+        zone_group_id: HALCYONA_GROUP,
+        conflict_min: 15,
+        war_min: 80,
+        peace_min: 240,
+        war_tower_def_id: 18,
+        ..Default::default()
+    });
+    for id in [500, 600, 700, 13647, 13661] {
+        data.systems.npcs.npc.templates.insert(
+            id,
+            NpcTemplate {
+                id,
+                ..Default::default()
+            },
+        );
+    }
+    let td = &mut data.systems.instances.tower_defs;
+    td.tower_defs.insert(
+        18,
+        TowerDef {
+            id: 18,
+            target_npc_spawn_id: 10,
+            first_wave_after: 3.0,
+            force_end_time: 100.0,
+            time_of_day_day_interval: 1,
+            progs: vec![1],
+            ..Default::default()
+        },
+    );
+    td.progs.insert(
+        1,
+        TowerDefProg {
+            id: 1,
+            tower_def_id: 18,
+            spawn_targets: vec![TowerDefProgSpawnTarget {
+                id: 1,
+                spawn_target_id: 20,
+                spawn_target_type: "NpcSpawner".into(),
+                despawn_on_next_step: false,
+            }],
+            kill_targets: vec![
+                TowerDefProgKillTarget {
+                    id: 1,
+                    kill_target_id: 13661,
+                    kill_target_type: "Npc".into(),
+                    kill_count: 1,
+                },
+                TowerDefProgKillTarget {
+                    id: 2,
+                    kill_target_id: 13647,
+                    kill_target_type: "Npc".into(),
+                    kill_count: 1,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    for (id, relic) in [(19, 13661), (20, 13647)] {
+        td.tower_defs.insert(
+            id,
+            TowerDef {
+                id,
+                target_npc_spawn_id: 20,
+                force_end_time: 100.0,
+                time_of_day_day_interval: 1,
+                kill_npc_id: relic,
+                kill_npc_count: 1,
+                ..Default::default()
+            },
+        );
+    }
+    for (id, time_of_day) in [(5, 12.0), (15, 0.1)] {
+        td.tower_defs.insert(
+            id,
+            TowerDef {
+                id,
+                target_npc_spawn_id: 20,
+                first_wave_after: 3.0,
+                force_end_time: 100.0,
+                time_of_day,
+                time_of_day_day_interval: 1,
+                ..Default::default()
+            },
+        );
+    }
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![
+            NpcSpawnerTemplate::with_member(10, 500),
+            NpcSpawnerTemplate::with_member(20, 600),
+        ],
+        vec![
+            NpcSpawnerNpc {
+                id: 1,
+                ..NpcSpawnerNpc::with_member(10, 500)
+            },
+            NpcSpawnerNpc {
+                id: 2,
+                ..NpcSpawnerNpc::with_member(20, 600)
+            },
+        ],
+    )
+    .unwrap();
+    let server = Arc::new(test_server_with(data));
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    let world = server.world.world(0).unwrap();
+    let spawns = server.systems.npcs.spawns.get_or_create(&world);
+    for id in [500, 600] {
+        spawns
+            .add_npc_spawner(
+                &server,
+                NpcSpawnerDef {
+                    base: SpawnerBase {
+                        unit_id: id,
+                        position: WorldSpawnPosition {
+                            zone_id: TEST_ZONE,
+                            x: 100.0,
+                            y: 100.0,
+                            z: 100.0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    count: 1,
+                    npc_spawner_ids: Vec::new(),
+                },
+            )
+            .unwrap();
+    }
+    server
+}
+
+fn scheduled_ids(server: &GameServer) -> Vec<u32> {
+    manager(server)
+        .state
+        .lock()
+        .unwrap()
+        .events
+        .iter()
+        .map(|event| event.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn tower_def_default_events_cover_the_1_2_open_world() {
+    let server = halcyona_fixture();
+    let events = default_events(&server);
+    let ids: Vec<u32> = events.iter().map(|event| event.id).collect();
+    assert_eq!(ids, vec![5, 15, 18, 19, 20]);
+    let war = events.iter().find(|event| event.id == 18).unwrap();
+    assert_eq!(war.world_id, 0);
+    assert_eq!(war.zone_group_id, HALCYONA_GROUP);
+    assert_eq!(war.zone_id, TEST_ZONE);
+    for id in [19, 20] {
+        let followup = events.iter().find(|event| event.id == id).unwrap();
+        assert_eq!(followup.zone_group_id, HALCYONA_GROUP);
+        assert_eq!(followup.zone_id, TEST_ZONE);
+    }
+    // The KR 1.2 profile gets the same data-derived schedule.
+    server.config.update(|config| {
+        config.world.profile = crate::config::ServerProfile::Kr12;
+    });
+    assert_eq!(default_events(&server), events);
+}
+
+#[tokio::test]
+async fn tower_def_explicit_events_override_defaults_and_disable_empties_them() {
+    let server = halcyona_fixture();
+    initialize(&server).unwrap();
+    assert_eq!(scheduled_ids(&server), vec![5, 15, 18, 19, 20]);
+    server.config.update(|config| {
+        config.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
+            id: 5,
+            world_id: 0,
+            zone_group_id: HALCYONA_GROUP,
+            zone_id: TEST_ZONE,
+        }];
+    });
+    initialize(&server).unwrap();
+    assert_eq!(scheduled_ids(&server), vec![5]);
+    server
+        .config
+        .update(|config| config.dungeons.tower_defense.enabled = false);
+    initialize(&server).unwrap();
+    assert!(scheduled_ids(&server).is_empty());
+}
+
+#[tokio::test]
+async fn tower_def_default_halcyona_war_starts_and_stops_with_zone_22() {
+    let server = halcyona_fixture();
+    let conflict = server.game_data.zones.conflicts[0].clone();
+    server
+        .systems
+        .social
+        .conflicts
+        .init(std::slice::from_ref(&conflict), crate::world::now_ms());
+    // 06:00 game time: neither rift's time of day is due, so only the war can start.
+    server.time.set(6.0);
+    initialize(&server).unwrap();
+    assert_eq!(scheduled_ids(&server), vec![5, 15, 18, 19, 20]);
+    tick(&server);
+    assert!(infos(&server, 0).is_empty());
+
+    server.systems.social.conflicts.set_state(
+        &server,
+        HALCYONA_GROUP,
+        crate::data::world_data::conflict_type::WAR,
+    );
+    tick(&server);
+    let running = infos(&server, 0);
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].key.tower_def_id, 18);
+    assert_eq!(running[0].key.zone_group_id, HALCYONA_GROUP);
+    assert!(
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .npc_by_template_id(500)
+            .is_some(),
+        "the war controller spawned in the open world"
+    );
+
+    server.systems.social.conflicts.set_state(
+        &server,
+        HALCYONA_GROUP,
+        crate::data::world_data::conflict_type::PEACE,
+    );
+    tick(&server);
+    assert!(infos(&server, 0).is_empty());
+    assert!(server
+        .world
+        .world(0)
+        .unwrap()
+        .npc_by_template_id(500)
+        .is_none());
+}
+
 #[tokio::test]
 async fn tower_def_doodad_waves_clean_only_their_owned_objects() {
     let mut server = fixture();
@@ -572,9 +825,11 @@ async fn tower_def_preflight_and_force_end() {
 }
 
 #[tokio::test]
-async fn tower_def_schedule_handles_midnight_intervals_and_disabled_config() {
+async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() {
     let mut server = fixture();
     server.config.update(|c| {
+        // `Enabled: false` is the switch that turns every event off, defaults included.
+        c.dungeons.tower_defense.enabled = false;
         c.dungeons
             .tower_defense
             .events
@@ -1264,4 +1519,19 @@ async fn real_tower_def_event_readiness() {
         assert!(is_victory_followup(&server, &td.tower_defs[&id]));
     }
     assert!(!is_victory_followup(&server, &td.tower_defs[&18]));
+
+    // The default schedule is the 1.2 open-world one: the war + victory follow-ups, the two
+    // Crimson and two Grimghast rifts, the Hasla Rift and Oblivion Rift / Clockwork Rebellion.
+    // Closed-zone definitions (6 Sungold Fields, 8 Reedwind, 27 Reedwind) and the definitions
+    // without authored positions are not scheduled.
+    let defaults = default_events(&server);
+    let default_ids: Vec<u32> = defaults.iter().map(|event| event.id).collect();
+    assert_eq!(
+        default_ids,
+        vec![3, 5, 12, 13, 15, 18, 19, 20, 28, 29, 31, 32]
+    );
+    for event in &defaults {
+        validate(&server, EventKey::from(event), event.zone_id)
+            .unwrap_or_else(|error| panic!("default event {}: {error}", event.id));
+    }
 }
