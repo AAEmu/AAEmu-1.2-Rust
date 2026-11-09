@@ -810,7 +810,7 @@ impl Marshal for SCSpecialtyGoodsPacket {
 
 #[cfg(test)]
 mod tests {
-    use super::{tick_period, MAX_TICK_MINUTES};
+    use super::{sale_amounts, tick_period, MAX_TICK_MINUTES};
 
     #[test]
     fn tick_period_is_clamped_and_never_panics() {
@@ -820,5 +820,26 @@ mod tests {
         assert_eq!(tick_period(f64::INFINITY), max);
         assert_eq!(tick_period(f64::NAN), max);
         assert_eq!(tick_period(1.0e300), max);
+    }
+
+    /// The 2014-10 NA trade-run videos (grade C,
+    /// `D:/aaemu-audits/video-evidence/trade-runs-2014-10-ayin.md`): the window shows the
+    /// pre-interest price and the mail carries it plus 5 %. Bases and ratios are the ones of the
+    /// real-data sale tests in `craft_store_tests.rs`; this one runs in CI without the data.
+    #[test]
+    fn sale_amounts_match_the_video_footage() {
+        // (base price, ratio, shown, mailed): Kalina 124 %, Robert 111 %, Jasmine / Delara 130 %.
+        for (base, ratio, shown, mailed) in [
+            (34_310, 124, 42_544, 44_672),
+            (34_310, 111, 38_084, 39_988),
+            (39_910, 130, 51_883, 54_477),
+            (10_750, 130, 13_975, 14_674),
+        ] {
+            assert_eq!(
+                sale_amounts(base, ratio, 0),
+                (shown, mailed),
+                "{base} @ {ratio}%"
+            );
+        }
     }
 }

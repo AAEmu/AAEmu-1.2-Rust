@@ -5028,8 +5028,8 @@
       "marshals": true,
       "sent": true,
       "sent_at": [
-        "rust/crates/aaemu-game/src/systems/npcs/specialty/tests.rs:168",
-        "rust/crates/aaemu-game/src/systems/npcs/specialty.rs:806"
+        "rust/crates/aaemu-game/src/systems/economy/specialty/tests.rs:168",
+        "rust/crates/aaemu-game/src/systems/economy/specialty.rs:806"
       ]
     },
     {
@@ -8550,9 +8550,9 @@
       "marshals": true,
       "sent": true,
       "sent_at": [
-        "rust/crates/aaemu-game/src/systems/npcs/specialty/tests.rs:179",
-        "rust/crates/aaemu-game/src/systems/npcs/specialty/tests.rs:401",
-        "rust/crates/aaemu-game/src/systems/npcs/specialty.rs:870"
+        "rust/crates/aaemu-game/src/systems/economy/specialty/tests.rs:179",
+        "rust/crates/aaemu-game/src/systems/economy/specialty/tests.rs:401",
+        "rust/crates/aaemu-game/src/systems/economy/specialty.rs:870"
       ]
     },
     {
