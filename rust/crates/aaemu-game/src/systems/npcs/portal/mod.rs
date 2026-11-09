@@ -988,14 +988,17 @@ pub fn use_portal_with_preference(
     } else {
         player.data().set_disabled_set_position(true);
     }
-    player.send(SCTeleportUnitPacket {
-        reason: packets::teleport_reason::PORTAL,
-        error_message: 0,
-        x: teleport.x,
-        y: teleport.y,
-        z: teleport.z,
-        z2: deg_to_rad(teleport.rot_z),
-    });
+    crate::world::session::send_teleport_unit(
+        player,
+        SCTeleportUnitPacket {
+            reason: packets::teleport_reason::PORTAL,
+            error_message: 0,
+            x: teleport.x,
+            y: teleport.y,
+            z: teleport.z,
+            z2: deg_to_rad(teleport.rot_z),
+        },
+    );
 }
 
 /// `WorldManager.ResendVisibleObjectsToCharacter(character)`: every object of the neighbouring
@@ -1148,7 +1151,7 @@ pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
         return;
     }
     run_navi_func(server, &doodad, player, &func);
-    player.data().set_disabled_set_position(true);
+    session::begin_teleport(player, pos.x, pos.y, pos.z);
     player.send(packets::SCNaviTeleportPacket {
         x: pos.x,
         y: pos.y,
@@ -1261,15 +1264,17 @@ pub fn use_teleport(
             return; // NotEnoughMoney is sent by ChangeMoney
         }
     }
-    player.data().set_disabled_set_position(true);
-    player.send(SCTeleportUnitPacket {
-        reason: crate::systems::skills::packets_special::TELEPORT_REASON_MOVE_TO_LOCATION,
-        error_message: 0,
-        x: dest.x,
-        y: dest.y,
-        z: dest.z,
-        z2: deg_to_rad(dest.z_rot),
-    });
+    crate::world::session::send_teleport_unit(
+        player,
+        SCTeleportUnitPacket {
+            reason: crate::systems::skills::packets_special::TELEPORT_REASON_MOVE_TO_LOCATION,
+            error_message: 0,
+            x: dest.x,
+            y: dest.y,
+            z: dest.z,
+            z2: deg_to_rad(dest.z_rot),
+        },
+    );
 }
 
 #[cfg(test)]

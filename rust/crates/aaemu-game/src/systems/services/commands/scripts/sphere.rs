@@ -444,14 +444,17 @@ pub mod sphere_util {
                     let p = sphere.position.ok_or_else(|| {
                         anyhow::anyhow!("Object reference not set to an instance of an object.")
                     })?;
-                    player.send(SCTeleportUnitPacket {
-                        reason: 0,
-                        error_message: 0,
-                        x: p.x,
-                        y: p.y,
-                        z: p.z,
-                        z2: 0.0,
-                    });
+                    crate::world::session::send_teleport_unit(
+                        &player,
+                        SCTeleportUnitPacket {
+                            reason: 0,
+                            error_message: 0,
+                            x: p.x,
+                            y: p.y,
+                            z: p.z,
+                            z2: 0.0,
+                        },
+                    );
                 }
                 None => ctx
                     .character

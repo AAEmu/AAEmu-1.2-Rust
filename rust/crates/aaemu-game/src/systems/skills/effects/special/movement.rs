@@ -625,15 +625,17 @@ fn move_within_instance(server: &GameServer, p: &PlayerRef, t: &Portal) {
         ..WorldSpawnPosition::default()
     };
     crate::systems::instances::worlds::apply_world_spawn_position(server, p, &wsp, 0);
-    p.data().set_disabled_set_position(true);
-    p.send(SCTeleportUnitPacket {
-        reason: TELEPORT_REASON_MOVE_TO_LOCATION,
-        error_message: 0,
-        x: t.x,
-        y: t.y,
-        z: t.z,
-        z2: yaw,
-    });
+    crate::world::session::send_teleport_unit(
+        p,
+        SCTeleportUnitPacket {
+            reason: TELEPORT_REASON_MOVE_TO_LOCATION,
+            error_message: 0,
+            x: t.x,
+            y: t.y,
+            z: t.z,
+            z2: yaw,
+        },
+    );
     // The transform already moved. Re-file it now so TeleportEnded's repaint uses the
     // arrival neighbourhood and both sets of observers are updated without client movement.
     let instance_id = p.data().unit.transform.instance_id;
@@ -792,29 +794,34 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             ang_z: m.pos.rot_z,
         });
         set_character_transform(server, p, m.instance_id, m.zone_id, m.pos);
-        p.send(SCTeleportUnitPacket {
-            reason: TELEPORT_REASON_MOVE_TO_LOCATION,
-            error_message: 0,
-            x: m.pos.x,
-            y: m.pos.y,
-            z: m.pos.z,
-            z2: m.pos.rot_z,
-        });
+        crate::world::session::send_teleport_unit(
+            p,
+            SCTeleportUnitPacket {
+                reason: TELEPORT_REASON_MOVE_TO_LOCATION,
+                error_message: 0,
+                x: m.pos.x,
+                y: m.pos.y,
+                z: m.pos.z,
+                z2: m.pos.rot_z,
+            },
+        );
         return;
     }
     let Some(t) = trp else {
         log_missing_gate(server, p, v[0]);
         return;
     };
-    p.data().set_disabled_set_position(true);
-    p.send(SCTeleportUnitPacket {
-        reason: TELEPORT_REASON_MOVE_TO_LOCATION,
-        error_message: 0,
-        x: t.x,
-        y: t.y,
-        z: t.z,
-        z2: deg_to_rad(t.yaw),
-    });
+    crate::world::session::send_teleport_unit(
+        p,
+        SCTeleportUnitPacket {
+            reason: TELEPORT_REASON_MOVE_TO_LOCATION,
+            error_message: 0,
+            x: t.x,
+            y: t.y,
+            z: t.z,
+            z2: deg_to_rad(t.yaw),
+        },
+    );
 }
 
 #[cfg(test)]

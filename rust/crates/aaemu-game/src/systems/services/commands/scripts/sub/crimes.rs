@@ -141,14 +141,17 @@ pub(crate) fn jail_court_room(
     }
     crate::systems::dispatch_buff_events(server, &WorldObject::from(target));
     let jail = &court_room.jail;
-    target.send(SCTeleportUnitPacket {
-        reason: 0,
-        error_message: 0,
-        x: jail.x,
-        y: jail.y,
-        z: jail.z,
-        z2: jail.yaw.to_radians(),
-    });
+    crate::world::session::send_teleport_unit(
+        target,
+        SCTeleportUnitPacket {
+            reason: 0,
+            error_message: 0,
+            x: jail.x,
+            y: jail.y,
+            z: jail.z,
+            z2: jail.yaw.to_radians(),
+        },
+    );
 }
 
 /// `WorldSpawnPosition.ToString()`.

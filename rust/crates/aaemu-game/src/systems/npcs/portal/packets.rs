@@ -227,17 +227,13 @@ impl ClientPacket for CSTeleportEndedPacket {
             let Some(me) = conn.active_char.clone() else {
                 return Ok(());
             };
-            // Only a teleport the server started (`DisabledSetPosition`) may move the server
-            // copy: an unprompted report must not rewrite the position, the region or the zone.
-            let pending = me.data().disabled_set_position;
-            me.data().set_disabled_set_position(false);
             tracing::debug!("TeleportEnded, X: {}, Y: {}, Z: {}", self.x, self.y, self.z);
-            if pending {
-                // The client reports where it landed: follow it and re-evaluate the region (and
-                // the zone it may have left) before repainting the arrival neighbourhood.
-                crate::world::session::teleport_ended(server, &me, self.x, self.y, self.z);
+            // `teleport_ended` decides everything: it ignores an acknowledgement when the server
+            // sent no teleport, checks the reported position against the recorded destination and
+            // lifts the lock (`DisabledSetPosition`) itself.
+            if crate::world::session::teleport_ended(server, &me, self.x, self.y, self.z) {
+                super::resend_visible_objects_to_character(server, &me);
             }
-            super::resend_visible_objects_to_character(server, &me);
             Ok(())
         })
     }

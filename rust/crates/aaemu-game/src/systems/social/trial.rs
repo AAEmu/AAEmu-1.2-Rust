@@ -626,15 +626,17 @@ fn teleport(server: &GameServer, p: &PlayerRef, pos: SpawnPosition, reason: u8, 
             ang_z: destination.rot_z,
         });
     }
-    p.data().set_disabled_set_position(true);
-    p.send(SCTeleportUnitPacket {
-        reason,
-        error_message: 0,
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-        z2: destination.rot_z,
-    });
+    crate::world::session::send_teleport_unit(
+        p,
+        SCTeleportUnitPacket {
+            reason,
+            error_message: 0,
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            z2: destination.rot_z,
+        },
+    );
     fx.push(Effect::Teleport(p.clone(), destination));
 }
 
