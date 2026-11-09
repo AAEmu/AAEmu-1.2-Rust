@@ -519,7 +519,7 @@ buff unchanged, absolute-value inference, real-compact loader for the three colu
 | `GimmickManager`, `GimmickGameData`, `GimmickSpawner`, movement handlers | `gimmick/` | done | |
 | `AreaTriggerManager` (+ aoe_shapes, wi_group_wis), `SubZoneManager`, `SphereQuestManager` (world side) | `area_trigger.rs`, `subzone.rs`, `sphere_quest.rs` | done | Quest effects via `QuestsBridge`. Area membership compares entity identity, so reconnecting with a reused object ID leaves the retained old session and enters the new one; this corrects the mirrored C# ID-only comparison and restores active school auras. Unchanged entities and overlapping aura counts are retained. Sub-zone index scan of the pak is slow in debug (~25 s). |
 | `PortalManager` (recall, district return, summoned portals, portal book, teleports) | `portal/` | done | Trial court check (`systems::social`), mates / slaves on instance change (`systems::vehicles`). |
-| `SpecialtyManager`, `PublicFarmManager`, `FishSchoolManager`, `GameScheduleManager` (+ NCrontab subset) | `specialty.rs`, `public_farm.rs`, `fish_school.rs`, `schedule.rs` | done | |
+| `PublicFarmManager`, `FishSchoolManager`, `GameScheduleManager` (+ NCrontab subset) | `public_farm.rs`, `fish_school.rs`, `schedule.rs` | done | `SpecialtyManager` lives in `systems/economy/specialty.rs`; the npcs duplicate was removed (2026-11-09, see the economy specialty note). |
 | `SCScheduledEventStartedPacket` / `SCScheduledEventEndedPacket` (0x1ec / 0x1ed), `Events:ScheduledEvents` | `schedule_events.rs`, `config.rs` (`Events:ScheduledEvents`), `npcs/mod.rs` (start), `world/session.rs` (one call) | added | The C# never sent them (no sender at `a2ab80abd^`; only the opcode names existed). Wire from the 1.2 readers: Started `FUN_397b01f0` -> `FUN_398a7ed0` / `FUN_398a7d80` = `u32 id; 21 x i32; i32 changes; u8 priority; u8 startDate; u8 periodDate; u8 hour; u8 min; i32 periodMin; u8 weekDay; str openMsg` (fixed 102 bytes); Ended `FUN_397b0260` = `u32 id; str closeMsg`; both strings max 0x7f bytes. Handlers `FUN_391e1e10` (`OnScheduledEventStarted`, UI event 0x256) and `FUN_391e1f30` -> `FUN_3930b940` (`OnScheduledEventEnded`, UI event 0x257, only for the stored active id); the client keeps **one** active event id. **INFERRED** trigger and text (no original-server capture): a `game_schedules` window edge using the existing `schedule::check_data`, evaluated every 30 s over the configured allow-list; Started on the opening edge, Ended on the closing edge, Started to a player entering the world while the event is active. The first tick after startup seeds silently, so a restart does not re-announce running events. The `values` / `changes` / priority / date fields are sent as zeros (**INFERRED**: the handler stores them but only the message is displayed; the client constructors set priority 0x100 on their own copies). Texts come from the configuration (the shipped `game_schedules.name` values are Korean). Default off, empty list; unknown ids and duplicates are skipped at startup with a warning (the first duplicate wins), overlength messages are truncated on a UTF-8 boundary. Tests: byte-exact both packets, opening/closing edges to two characters, silent restart seed, late join, disabled/reset. |
 | `TimeManager.OnTimeOfDayChange` (NPC postures, doodad ToD triggers) | `doodad/manager.rs` | done | 10 s poller started by the doodad part (TimeManager has no callback). |
 | Cross-subsystem behaviour | `hooks.rs`, `bridges.rs` | done | `SkillsBridge` (skills), `EconomyBridge` (economy), `QuestsBridge` (quests) in `server.systems.npcs.hooks`; this subsystem implements `NpcSkillHooks`, `NpcEconomyHooks`, `LootNpcHooks`, `TreasureMapSource` (`bridges.rs`). See "Phase 3b wiring". |
@@ -2694,6 +2694,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     clamped to 0..100, the C# behaviour) applies a configured percentage to the pre-interest
     sale price; the bonus, its mail field and the 626/677 notices are implemented, the retail
     numbers are not claimed.
+  - **Video payouts pinned; duplicate npcs sale removed (2026-11-09):** the live sale is this
+    file's `sell_specialty` through `store::CSSellBackpackGoodsPacket`. The second
+    implementation, `systems/npcs/specialty.rs` (never registered, no live caller, used
+    `FeatureSet::default()` and a fixed 0 negotiation bonus), was deleted with its data,
+    manager, timers, packets and `EconomyBridge` sale hooks. The 2014-10 NA trade-run videos
+    (grade C, `D:/aaemu-audits/video-evidence/trade-runs-2014-10-ayin.md`) pin four packs
+    against the real data and the live flow (gated tests
+    `real_compact_db_specialty_payouts_match_the_2014_video` and
+    `real_compact_db_specialty_mail_split_and_delay_match_the_2014_video`): Arcum Iris
+    Lavaspice at Kalina 124 % base 34 310 -> 42 544 shown / 44 672 mailed; Falcorth Snowlion
+    Yarn at Robert 111 % base 34 310 -> 38 084 / 39 988; Tigerspine Grape Jam at Jasmine
+    130 % base 39 910 -> 51 883 / 54 477; Mahadevi Elephant Cookies at Delara 130 % base
+    10 750 -> 13 975 / 14 674 = 1 Gilda Star. The sale window shows the pre-interest amount;
+    the mail carries it +5 % after 22 h (1320 min), and the crafter/seller split is 20/80
+    (Tigerspine: 10 895 / 43 582). The video's 2 c (Arcum) and 1 c (Falcorth) display
+    differences come from the rounded ratio shown ("124 %" for 124.0x).
 * systems::services: authenticated `CSRequestCharBriefPacket` and `CSCharDetailPacket` requests
   return online character profiles through the existing 1.2 outbound formats (the C# inbound
   handlers only logged). Offline, absent and unauthenticated requests receive no reply; offline

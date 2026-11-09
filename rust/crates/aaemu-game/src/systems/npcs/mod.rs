@@ -2,9 +2,11 @@
 //!
 //! C# scope: `Core/Managers/UnitManagers/NpcManager`, `DoodadManager`, `Core/Managers/World/
 //! SpawnManager`, `GimmickManager`, `AreaTriggerManager`, `PortalManager`, `SubZoneManager`,
-//! `FishSchoolManager`, `PublicFarmManager`, `SpecialtyManager`, `SphereQuestManager` (world
-//! side), `Models/Game/NPChar/**` (templates, spawners), `Models/Game/DoodadObj/**` (templates,
+//! `FishSchoolManager`, `PublicFarmManager`, `SphereQuestManager` (world side),
+//! `Models/Game/NPChar/**` (templates, spawners), `Models/Game/DoodadObj/**` (templates,
 //! funcs, phases, spawners, persistence), `Models/Game/World/Interactions`, heightmaps.
+//! `SpecialtyManager` is economy's (`systems/economy/specialty.rs`); the npcs duplicate was
+//! removed.
 //! The NPC AI is a later phase (`Npc::has_ai` / `ai_should_tick` stay the hook).
 //!
 //! Layout (one owner per file, see `CONTRIBUTING-PORT.md`):
@@ -21,7 +23,7 @@
 //! | [`terrain_surface`] | `surface.xml` detail materials -> doodad place kinds |
 //! | [`gimmick`] | `GimmickManager`, `GimmickGameData`, `GimmickSpawner` |
 //! | [`area_trigger`], [`subzone`], [`sphere_quest`] | `AreaTriggerManager`, `SubZoneManager`, `SphereQuestManager` |
-//! | [`portal`], [`specialty`], [`public_farm`], [`fish_school`] | `PortalManager`, `SpecialtyManager`, `PublicFarmManager`, `FishSchoolManager` |
+//! | [`portal`], [`public_farm`], [`fish_school`] | `PortalManager`, `PublicFarmManager`, `FishSchoolManager` |
 
 pub mod area_trigger;
 pub mod bridges;
@@ -44,7 +46,6 @@ pub mod schedule_item_runtime;
 pub mod schedule_item_session;
 pub mod schedule_items;
 pub mod spawn_manager;
-pub mod specialty;
 pub mod sphere_quest;
 pub mod stacked_npcs;
 pub mod subzone;
@@ -77,8 +78,6 @@ pub struct Data {
     pub sphere: sphere_quest::SphereData,
     /// `PortalManager` (open portals, world gates, teleports).
     pub portal: portal::PortalTables,
-    /// `SpecialtyManager`.
-    pub specialty: specialty::SpecialtyData,
     /// `PublicFarmManager` / `CommonFarmGameData`.
     pub public_farm: public_farm::PublicFarmData,
     /// `FishSchoolManager` / `FishDetailsGameData`.
@@ -105,7 +104,6 @@ impl Data {
             subzone: subzone::SubZoneData::load(ctx)?,
             sphere: sphere_quest::SphereData::load(ctx)?,
             portal: portal::PortalTables::load(ctx)?,
-            specialty: specialty::SpecialtyData::load(ctx)?,
             public_farm: public_farm::PublicFarmData::load(ctx)?,
             fish_school: fish_school::FishSchoolData::load(ctx)?,
             schedule: schedule::ScheduleData::load(ctx)?,
@@ -133,8 +131,6 @@ pub struct System {
     pub spheres: sphere_quest::SphereQuestManager,
     /// `PortalManager` (runtime).
     pub portals: portal::PortalManager,
-    /// `SpecialtyManager` (runtime ratios).
-    pub specialty: specialty::SpecialtyManager,
     /// `PublicFarmManager`.
     pub public_farms: public_farm::PublicFarmManager,
     /// `FishSchoolManager`.
@@ -157,7 +153,6 @@ impl System {
         heightmap::start(server).await?;
         area_trigger::start(server).await?;
         portal::start(server).await?;
-        specialty::start(server).await?;
         public_farm::start(server).await?;
         sphere_quest::start(server).await?;
         doodad::start(server).await?;
@@ -203,7 +198,6 @@ pub fn register(reg: &mut PacketRegistry) {
     npc::register(reg);
     doodad::register(reg);
     portal::register(reg);
-    specialty::register(reg);
     public_farm::register(reg);
     subzone::register(reg);
     gimmick::register(reg);

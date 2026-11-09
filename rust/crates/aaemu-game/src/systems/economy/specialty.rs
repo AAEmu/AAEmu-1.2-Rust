@@ -34,6 +34,10 @@ use super::store::{parent_world, world_distance, SpecialtyMail};
 /// `ActabilityType.Commerce`.
 pub const ACTABILITY_COMMERCE: i32 = 31;
 
+/// The trade-pack mail interest (`SellSpecialty`'s `interestRate`; the 1.2 sale window says
+/// "mailed in 22 hours with 5% interest").
+pub const INTEREST_RATE: i32 = 5;
+
 /// 1.2 `SCSpecialtyGoodsPacket` reader `FUN_397aec90`: an `i32` count (it caps the read at 20)
 /// followed by that many records read by `FUN_398a9e30`.
 pub const MAX_SPECIALTY_GOODS: usize = 20;
@@ -176,7 +180,10 @@ impl SpecialtyManager {
         }
     }
 
-    fn add_sold_pack(&self, item_id: u32, zone_group_id: u32) {
+    /// Adds one pack sold (`_soldPackAmountInTick[item][zoneGroup] += 1`); `pub(crate)` so
+    /// the real-data sale tests can bring a pack's ratio to the captured value through the
+    /// real consume tick.
+    pub(crate) fn add_sold_pack(&self, item_id: u32, zone_group_id: u32) {
         *self
             .lock()
             .sold_pack_amount_in_tick
@@ -394,6 +401,21 @@ fn round_f32(v: f32) -> i32 {
     f64::from(v).round_ties_even() as i32
 }
 
+/// The trade-pack sale price before the interest (what the 1.2 client shows from the pack's
+/// ratio) and the amount mailed (that price + the 5 % interest + the negotiation bonus), in
+/// the DB's copper-equivalent units (the caller divides by 10000 for coin-item payments).
+/// The 2014-10 video shows the pre-interest value in the sale window and says the mail
+/// carries it plus 5 % after 22 hours
+/// (`D:/aaemu-audits/video-evidence/trade-runs-2014-10-ayin.md`).
+pub(crate) fn sale_amounts(base_price: i32, price_ratio: i32, bonus: i32) -> (i32, i32) {
+    let no_interest = base_price as f32 * (price_ratio as f32 / 100f32);
+    let interest = no_interest * (INTEREST_RATE as f32 / 100f32);
+    (
+        round_f32(no_interest),
+        round_f32(no_interest + interest + bonus as f32),
+    )
+}
+
 /// `SellSpecialty(player, npcObjId)`: returns the base price.
 pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i32 {
     let labor_cost = labor_cost_for_sale(
@@ -435,17 +457,18 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
         0
     };
     let seller_share = 0.80f32; // 80% default, set this to 1f for packs that don't share profit
-    let interest_rate = 5;
+    let interest_rate = INTEREST_RATE;
 
-    let final_price_no_interest = base_price as f32 * (price_ratio as f32 / 100f32);
-    let interest = final_price_no_interest * (interest_rate as f32 / 100f32);
-    let raw_bonus = negotiation_bonus(server, final_price_no_interest);
-    let final_price = final_price_no_interest + interest + raw_bonus as f32;
+    let raw_bonus = negotiation_bonus(server, base_price as f32 * (price_ratio as f32 / 100f32));
+    let (shown, final_price) = sale_amounts(base_price, price_ratio, raw_bonus);
+    tracing::debug!(
+        "SellSpecialty: base {base_price}, ratio {price_ratio}, shown {shown}, mailed {final_price}"
+    );
 
     let hooks = server.systems.economy.store.hooks();
     let specialty_coin_id = hooks.npc_specialty_coin_id(server, &npc);
     let mut item_type_to_deliver = specialty_coin_id;
-    let mut amount_total = round_f32(final_price);
+    let mut amount_total = final_price;
     let mut amount_seller = amount_total;
     let mut amount_crafter = 0;
     let mut amount_base = base_price;

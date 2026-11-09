@@ -2571,38 +2571,6 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         }
     }
 
-    fn send_specialty_mail(
-        &self,
-        _server: &GameServer,
-        _player: &PlayerRef,
-        _mail: &crate::systems::npcs::specialty::SpecialtyMail,
-        _for_crafter: bool,
-    ) -> bool {
-        // The specialty sale is the economy's (`store::sell_specialty`), which sends its mails
-        // itself; the npcs copy of the flow is not registered.
-        false
-    }
-
-    fn consume_equipment_item(
-        &self,
-        server: &GameServer,
-        player: &PlayerRef,
-        task: u8,
-        template_id: u32,
-        count: i32,
-        preferred_item_id: u64,
-    ) -> i32 {
-        let mut txn = ItemTxn::begin(server);
-        let result = lock(&Inv::of(player).equipment()).consume_item(
-            task,
-            template_id,
-            count,
-            (preferred_item_id != 0).then_some(preferred_item_id),
-            &mut txn.env,
-        );
-        result
-    }
-
     fn is_auto_equip_trade_pack(&self, server: &GameServer, template_id: u32) -> bool {
         inventory::is_auto_equip_trade_pack(&server.game_data.items, template_id)
     }
