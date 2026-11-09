@@ -1704,7 +1704,8 @@ async fn character_death_loses_exp_into_recoverable_exp() {
     use crate::systems::skills::types::KillReason;
     let server = server_with(false);
     let mut a = pc(&server, 1, "Victim", 100.0);
-    let b = pc(&server, 2, "Killer", 102.0);
+    // A PvE death (an ordinary NPC), so the PvE penalty applies under the 1.2 PvP rule.
+    let killer = villager(&server, 0x200, 1_000);
     {
         let mut c = a.p.data();
         c.unit.level = 10;
@@ -1715,7 +1716,7 @@ async fn character_death_loses_exp_into_recoverable_exp() {
     crate::systems::skills::combat::do_die(
         &server,
         &WorldObject::from(&a.p),
-        Some(&WorldObject::from(&b.p)),
+        Some(&WorldObject::from(&killer)),
         KillReason::Damage,
     );
 
@@ -1730,6 +1731,40 @@ async fn character_death_loses_exp_into_recoverable_exp() {
     ] {
         assert!(ops.contains(&op), "missing {op:#x} in {ops:x?}");
     }
+}
+
+/// 1.2 PvP deaths carry no exp loss ("You lost 0 XP" in the Nov 2014 siege video,
+/// `video-evidence/siege-2014-11-30-ollo.md` §2.8, grade C).
+#[tokio::test]
+async fn character_death_by_another_player_loses_no_experience() {
+    use crate::systems::skills::types::KillReason;
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Victim", 100.0);
+    let b = pc(&server, 2, "Killer", 102.0);
+    {
+        let mut c = a.p.data();
+        c.unit.level = 10;
+        c.experience = 95_000; // level 10 + 5 000
+        c.recoverable_exp = 0;
+    }
+    a.client.drain();
+
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&a.p),
+        Some(&WorldObject::from(&b.p)),
+        KillReason::Damage,
+    );
+
+    {
+        let c = a.p.data();
+        assert_eq!(c.experience, 95_000, "PvP death must not lose exp");
+        assert_eq!(c.recoverable_exp, 0, "nothing to recover");
+    }
+    let ops = a.client.drain_ops();
+    assert!(!ops.contains(&sc::SCRecoverableExpPacket), "{ops:x?}");
+    assert!(!ops.contains(&sc::SCExpChangedPacket), "{ops:x?}");
+    assert!(ops.contains(&sc::SCUnitDeathPacket), "{ops:x?}");
 }
 
 #[tokio::test]

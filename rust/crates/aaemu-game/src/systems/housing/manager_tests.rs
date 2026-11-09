@@ -7,7 +7,7 @@
 use super::manager::{self, HousingManager};
 use crate::data::GameData;
 use crate::server::GameServer;
-use crate::test_support::test_server_with;
+use crate::test_support::{test_server_with, test_server_with_config};
 use crate::world::HouseRef;
 
 fn test_housing_data() -> GameData {
@@ -345,7 +345,7 @@ async fn claimed_lodestone_first_hit_snapshot_uses_full_health_until_authority_c
         let row = manager::save_row_for(&server, &house).unwrap();
         let batch = authority.prepare_save();
         assert_eq!(batch.rows[0].state.tower_hp, None);
-        assert_eq!(row.hp, Some(1000)); // None restores the authoritative maximum
+        // None restores the authoritative maximum (the era-profile value in `EuAuroria`).
         assert_eq!(row.hp, Some(house.data().unit.max_hp));
         assert_eq!(house.data().unit.hp, 700);
         assert!(house.data().is_dirty);
@@ -964,16 +964,24 @@ async fn failed_house_creation_releases_allocated_tl_id() {
 
 async fn ensure_temporary_housing_health_column(pool: &sqlx::MySqlPool) {
     // Both callers have just created a connection-local temporary housings table.
-    // This also lets the gate run before the new migration is applied to the private DB.
-    let health = sqlx::query("SHOW COLUMNS FROM housings LIKE 'hp'")
-        .fetch_optional(pool)
-        .await
-        .unwrap();
-    if health.is_none() {
-        sqlx::query("ALTER TABLE housings ADD COLUMN hp INT NULL DEFAULT NULL")
-            .execute(pool)
+    // This also lets the gate run before the new migrations are applied to the private DB.
+    for (column, ddl) in [
+        (
+            "hp",
+            "ALTER TABLE housings ADD COLUMN hp INT NULL DEFAULT NULL",
+        ),
+        (
+            "hp_basis",
+            "ALTER TABLE housings ADD COLUMN hp_basis INT NULL DEFAULT NULL",
+        ),
+    ] {
+        let present = sqlx::query(&format!("SHOW COLUMNS FROM housings LIKE '{column}'"))
+            .fetch_optional(pool)
             .await
             .unwrap();
+        if present.is_none() {
+            sqlx::query(ddl).execute(pool).await.unwrap();
+        }
     }
 }
 
@@ -1318,13 +1326,18 @@ async fn private_mysql_housing_health_rollback_retry_and_restart_preserve_damage
     let mut server = health_housing_server();
     server.db = pool.clone();
     let house = house(&server, 61);
+    // Damage persistence is defined for a finished building; an unfinished one loads at its
+    // construction-step maximum (`loaded_house_hp`).
+    house.data().current_step = -1;
     house.data().unit.hp = 321;
     let mut tx = pool.begin().await.unwrap();
     manager::save(&server, &mut tx).await.unwrap();
     tx.commit().await.unwrap();
     manager::commit_save(&server);
     assert!(!house.data().is_dirty);
-    assert_eq!(super::db::load_rows(&pool).await.unwrap()[0].hp, Some(321));
+    let stored = super::db::load_rows(&pool).await.unwrap();
+    assert_eq!(stored[0].hp, Some(321));
+    assert_eq!(stored[0].hp_basis, Some(1_000), "the saved HP basis");
     house.data().unit.hp = 201;
     manager::mark_hp_changed(&house, 321, 201);
     let mut tx = pool.begin().await.unwrap();
@@ -1380,7 +1393,7 @@ async fn private_mysql_housing_health_rollback_retry_and_restart_preserve_damage
         &legacy[0],
     )
     .unwrap();
-    assert_eq!(loaded.data().unit.hp, 664);
+    assert_eq!(loaded.data().unit.hp, 1_000);
     assert!(loaded.data().is_dirty);
     sqlx::query("DROP TEMPORARY TABLE housings")
         .execute(&pool)
@@ -1765,7 +1778,16 @@ fn construction_hp_server() -> GameServer {
                 ..Default::default()
             });
     }
-    test_server_with(data)
+    // These tests pin the construction-step HP rules against the authored template values;
+    // `Kr12` keeps them (the `EuAuroria` profile would scale the guard-tower template 402).
+    let config = crate::config::AppConfig {
+        world: crate::config::WorldConfig {
+            profile: crate::config::ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    test_server_with_config(data, config)
 }
 
 fn hp_row(template_id: u32, owner: u32, current_step: i32, hp: Option<i32>) -> manager::HouseRow {
@@ -1860,4 +1882,190 @@ async fn real_damage_survives_a_step_change() {
     house.data().unit.hp = 700; // damaged below the step maximum
     manager::add_build_action(&server, &house);
     assert_eq!(house.data().unit.hp, 1075); // 700 + (1125 - 750)
+}
+
+/// The castle structure max HP the Nov 2014 (`EuAuroria`) video shows, next to the `r208022`
+/// template values and the ordinary-house case. `Kr12` keeps the data values; an explicit
+/// `Housing.LodestoneMaxHp` / `Housing.DefenseTowerMaxHp` wins over the profile.
+fn castle_structure_data() -> GameData {
+    let mut data = GameData::empty();
+    for (id, guard_tower_setting_id, hp) in [
+        (139, 1, 1_000_000), // Archeum Lodestone
+        (184, 2, 1_000_000), // ... further lodestones
+        (119, 0, 600_000),   // Nuian Defense Tower
+        (169, 0, 600_000),   // Harani Defense Tower
+        (120, 0, 600_000),   // Nuian Castle Tower (not the video's target)
+        (300, 0, 1_000),     // ordinary house
+    ] {
+        data.systems
+            .housing
+            .add_template(super::data::HousingTemplate {
+                id,
+                guard_tower_setting_id,
+                hp,
+                ..Default::default()
+            });
+    }
+    for id in [
+        manager::BUFF_UNTOUCHABLE,
+        manager::BUFF_REMOVAL_DEBUFF,
+        manager::BUFF_BURNING_HOUSE,
+    ] {
+        data.systems
+            .skills
+            .add_buff(crate::systems::skills::data::BuffTemplate {
+                id,
+                max_stack: 1,
+                system: true,
+                ..Default::default()
+            });
+    }
+    data
+}
+
+fn create_max_hp(server: &GameServer, template_id: u32) -> i32 {
+    let world = server.world.world(0).unwrap();
+    manager::create(server, template_id, 0, &world, 0, 0)
+        .expect("template")
+        .data()
+        .unit
+        .max_hp
+}
+
+#[tokio::test]
+async fn era_profiles_scale_castle_structures_and_leave_ordinary_houses_alone() {
+    use crate::config::{AppConfig, ServerProfile};
+    let server = test_server_with(castle_structure_data());
+    assert_eq!(create_max_hp(&server, 139), 4_100_000);
+    assert_eq!(create_max_hp(&server, 184), 4_100_000);
+    assert_eq!(create_max_hp(&server, 119), 1_500_000);
+    assert_eq!(create_max_hp(&server, 169), 1_500_000);
+    // A castle tower the video does not identify keeps the 1.2 data value.
+    assert_eq!(create_max_hp(&server, 120), 600_000);
+    assert_eq!(create_max_hp(&server, 300), 1_000);
+
+    let kr = AppConfig {
+        world: crate::config::WorldConfig {
+            profile: ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server = test_server_with_config(castle_structure_data(), kr);
+    assert_eq!(create_max_hp(&server, 139), 1_000_000);
+    assert_eq!(create_max_hp(&server, 119), 600_000);
+
+    let mut explicit = AppConfig::default();
+    explicit.housing.lodestone_max_hp = Some(2_000_000);
+    explicit.housing.defense_tower_max_hp = Some(900_000);
+    let server = test_server_with_config(castle_structure_data(), explicit);
+    assert_eq!(create_max_hp(&server, 139), 2_000_000);
+    assert_eq!(create_max_hp(&server, 119), 900_000);
+}
+
+/// Existing rows were saved against the template maximum. When the era profile raises it, a
+/// full tower stays full and a damaged one keeps its fraction (`stored / template_hp * max`).
+#[tokio::test]
+async fn era_scaled_structures_scale_their_persisted_hp_on_load() {
+    use crate::config::{AppConfig, ServerProfile};
+    let server = test_server_with(castle_structure_data());
+    let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(600_000)));
+    assert_eq!(hp, 1_500_000, "a full tower stays full");
+    assert_eq!(house.data().unit.max_hp, 1_500_000);
+    // A damaged tower keeps its fraction: 300,000 / 600,000 = 50 % -> 750,000 / 1,500,000.
+    let (_, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(300_000)));
+    assert_eq!(hp, 750_000);
+    // Old full lodestone rows scale too (1,000,000 -> 4,100,000).
+    let (_, hp) = load_hp(&server, &hp_row(139, 1, -1, Some(1_000_000)));
+    assert_eq!(hp, 4_100_000);
+
+    let kr = AppConfig {
+        world: crate::config::WorldConfig {
+            profile: ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server = test_server_with_config(castle_structure_data(), kr);
+    let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(600_000)));
+    assert_eq!(hp, 600_000, "Kr12 keeps the authored maximum");
+    assert_eq!(house.data().unit.max_hp, 600_000);
+}
+
+/// The saved HP basis makes scaling a one-time conversion: a pre-era damaged tower is scaled on
+/// the first load and saved with the new basis, so the next load keeps it instead of healing it
+/// (the earlier template-only rule scaled 750,000 again to 1,500,000).
+#[tokio::test]
+async fn era_scaled_hp_scales_once_and_survives_save_reload() {
+    let server = test_server_with(castle_structure_data());
+    // A pre-era damaged tower: 300,000 / 600,000 = 50 % -> 750,000.
+    let (house, hp) = load_hp(&server, &hp_row(119, 1, -1, Some(300_000)));
+    assert_eq!(hp, 750_000);
+    let saved = manager::save_row_for(&server, &house).expect("rescaled row is dirty");
+    assert_eq!(saved.hp, Some(750_000));
+    assert_eq!(saved.hp_basis, Some(1_500_000));
+    let (_, hp) = load_hp(&server, &saved);
+    assert_eq!(hp, 750_000, "a reload must not scale again");
+}
+
+/// A Kr12 <-> EuAuroria switch converts the saved HP by the old/new basis factor in both
+/// directions; each save records the maximum the HP is then relative to.
+#[tokio::test]
+async fn switching_era_profiles_converts_the_stored_hp_both_ways() {
+    use crate::config::{AppConfig, ServerProfile};
+    // A tower saved under Kr12: 300,000 of 600,000 (50 %).
+    let mut kr_row = hp_row(119, 1, -1, Some(300_000));
+    kr_row.hp_basis = Some(600_000);
+    let kr = AppConfig {
+        world: crate::config::WorldConfig {
+            profile: ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server_kr = test_server_with_config(castle_structure_data(), kr);
+    let (_, hp) = load_hp(&server_kr, &kr_row);
+    assert_eq!(hp, 300_000, "the authored maximum: no scaling");
+
+    let server_eu = test_server_with_config(castle_structure_data(), AppConfig::default());
+    let (house, hp) = load_hp(&server_eu, &kr_row);
+    assert_eq!(hp, 750_000, "50 % of the EuAuroria maximum");
+    let eu_row = manager::save_row_for(&server_eu, &house).expect("basis changed -> dirty");
+    assert_eq!(eu_row.hp, Some(750_000));
+    assert_eq!(eu_row.hp_basis, Some(1_500_000));
+
+    let (house, hp) = load_hp(&server_kr, &eu_row);
+    assert_eq!(hp, 300_000, "back to 50 % of the Kr12 maximum");
+    let kr_row = manager::save_row_for(&server_kr, &house).expect("basis changed -> dirty");
+    assert_eq!(kr_row.hp, Some(300_000));
+    assert_eq!(kr_row.hp_basis, Some(600_000));
+}
+
+/// The shipped `r208022` `housings.hp` rows the video comparison rests on. The era values are
+/// profile policy, not data, so they are pinned in `config.rs`; this pins the data side and the
+/// value our server derives from it for `Kr12`.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_compact_castle_structure_hp_matches_the_recorded_data_values() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let data_dir = std::path::Path::new(&path).parent().unwrap();
+    let bindings = super::data::load_housing_bindings(data_dir);
+    let d = super::data::HousingData::load_from(&conn, "en_us", bindings).expect("housing data");
+    let hp = |id: u32| d.template(id).expect("template").hp;
+    assert_eq!(hp(139), 1_000_000, "Archeum Lodestone (video: 4,100,000)");
+    assert_eq!(hp(119), 600_000, "Nuian Defense Tower (video: 1,500,000)");
+    assert_eq!(hp(169), 600_000, "Harani Defense Tower");
+    assert_eq!(hp(120), 600_000, "Nuian Castle Tower");
+    for id in [139, 184, 185, 186, 187, 188, 189, 190, 191, 192, 271, 272] {
+        assert_ne!(
+            d.template(id).expect("lodestone").guard_tower_setting_id,
+            0,
+            "lodestone {id}"
+        );
+    }
 }

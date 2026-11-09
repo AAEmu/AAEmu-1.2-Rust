@@ -378,6 +378,34 @@ fn faction_or_null(server: &GameServer, faction_id: u32) -> u32 {
 // Create / CurrentStep / AddBuildAction
 // ---------------------------------------------------------------------------------------------
 
+/// The two castle "Defense Tower" designs of the 1.2 `housings` table: 119 "Nuian Defense Tower"
+/// and its Harani counterpart 169 (`housings.category_id = 2`, `hp = 600000`). The ids are data,
+/// not policy: the era profile only changes their max HP.
+pub const DEFENSE_TOWER_TEMPLATES: [u32; 2] = [119, 169];
+
+/// The effective max HP of a castle structure: the era profile's value when it has one,
+/// otherwise the template's `housings.hp`.
+///
+/// The Archeum Lodestone is the house with a `guard_tower_setting_id` (the 12 `housings` rows
+/// 139 and 184-192, 271, 272). `ServerProfile::lodestone_max_hp` and
+/// `ServerProfile::defense_tower_max_hp` carry the Trion Auroria-era values that are not in the
+/// `r208022` data (`HousingConfig` keys override them). Ordinary houses always keep their
+/// template value.
+pub fn structure_max_hp(server: &GameServer, template: &HousingTemplate) -> i32 {
+    let profile = server.config.world.profile;
+    let era = if template.guard_tower_setting_id != 0 {
+        server.config.housing.effective_lodestone_max_hp(profile)
+    } else if DEFENSE_TOWER_TEMPLATES.contains(&template.id) {
+        server
+            .config
+            .housing
+            .effective_defense_tower_max_hp(profile)
+    } else {
+        None
+    };
+    era.unwrap_or(template.hp)
+}
+
 /// `HousingManager.Create(templateId, factionId, worldInstance, objectId, tlId)`: a new house
 /// with the untouchable buff (not spawned, not registered). `None` for an unknown template.
 pub fn create(
@@ -420,8 +448,9 @@ pub fn create(
     h.all_action = template.all_actions();
     h.build_step_count = template.build_steps.len() as i32;
     h.tax = template.tax_or_zero() as i32;
-    h.unit.max_hp = template.hp;
-    h.unit.hp = template.hp;
+    let max_hp = structure_max_hp(server, template);
+    h.unit.max_hp = max_hp;
+    h.unit.hp = max_hp;
     h.unit.model_id = template.main_model_id;
     // Force public on always public properties on create
     if template.always_public {
@@ -464,15 +493,31 @@ fn construction_step_maxima(max_hp: i32, all_action: i32, step_count: i32) -> Ve
         .collect()
 }
 
+/// Stored HP of an era-scaled structure (a lodestone or a defense tower whose effective maximum
+/// moved from the stored basis to the era value). `basis` is the max HP the row's `hp` was saved
+/// against (`housings.hp_basis`, or the template `housings.hp` for pre-era rows): scale by
+/// effective/basis so a full tower stays full, a damaged one keeps its fraction, and an
+/// already-scaled row (`basis == max_hp`) is left untouched. Leaves non-positive values alone.
+fn scale_loaded_structure_hp(stored: i32, basis: i32, max_hp: i32) -> i32 {
+    if stored <= 0 || basis <= 0 || max_hp <= 0 || basis == max_hp {
+        return stored;
+    }
+    (i64::from(stored) * i64::from(max_hp) / i64::from(basis)).clamp(0, i64::from(max_hp)) as i32
+}
+
 /// HP a house loads with. An unfinished, owned, ordinary house loads at its step maximum
 /// (a dead one stays at 0); a finished house
 /// keeps its stored HP (clamped to the maximum) unless the stored value is exactly a
 /// construction-step maximum of an owned, ordinary house: an older build clamped the HP to the
 /// step maximum on load and never raised it on completion. The flag is set when repaired.
+/// `template_hp` is the authored `housings.hp`: when the effective maximum differs (an
+/// era-scaled structure) the stored value is already proportionally scaled and the old-build
+/// construction-step repair does not apply.
 fn loaded_house_hp(
     h: &crate::models::house::House,
     stored: Option<i32>,
     repairable: bool,
+    template_hp: i32,
 ) -> (i32, bool) {
     if h.current_step != -1 {
         let step_max = crate::systems::ai::collision::objects::house_collision_max_hp(h).max(0);
@@ -486,6 +531,7 @@ fn loaded_house_hp(
     let max_hp = h.unit.max_hp.max(0);
     let hp = stored.unwrap_or(max_hp).clamp(0, max_hp);
     if repairable
+        && h.unit.max_hp == template_hp
         && hp < max_hp
         && construction_step_maxima(h.unit.max_hp, h.all_action, h.build_step_count).contains(&hp)
     {
@@ -1315,6 +1361,10 @@ pub struct HouseRow {
     pub allow_recover: bool,
     /// None is a pre-health-persistence row; restore the authored construction maximum.
     pub hp: Option<i32>,
+    /// The maximum HP `hp` is relative to. `None`/`0` is a pre-era row saved against the
+    /// template `housings.hp`; the loader rescales only when this differs from the effective
+    /// maximum, then the next save writes the new basis.
+    pub hp_basis: Option<i32>,
 }
 
 /// The per-row part of `LoadPlayerHousing`: creates and registers the house (not spawned).
@@ -1359,7 +1409,13 @@ pub fn load_house_row(
         h.allow_recover = r.allow_recover;
         let repairable = h.unit.owner_id != 0
             && template.is_some_and(|t| t.hp > 0 && t.guard_tower_setting_id == 0);
-        let (hp, repaired) = loaded_house_hp(&h, r.hp, repairable);
+        let template_hp = template.map_or(h.unit.max_hp, |t| t.hp);
+        // The basis the saved HP is relative to; NULL/0 is a pre-era row (template value).
+        let basis = r.hp_basis.filter(|b| *b > 0).unwrap_or(template_hp);
+        let stored =
+            r.hp.map(|hp| scale_loaded_structure_hp(hp, basis, h.unit.max_hp));
+        let rescaled = basis != h.unit.max_hp;
+        let (hp, repaired) = loaded_house_hp(&h, stored, repairable, template_hp);
         h.unit.hp = hp;
         if repaired {
             h.is_dirty = true;
@@ -1369,6 +1425,19 @@ pub fn load_house_row(
                 r.template_id,
                 r.hp,
                 hp
+            );
+        }
+        if rescaled {
+            // Persist the era-scaled value, so switching profiles does not rescale it again.
+            h.is_dirty = true;
+            tracing::info!(
+                "House {} (template {}): scaled stored HP {:?} from basis {} to {} for the era maximum {}",
+                r.id,
+                r.template_id,
+                r.hp,
+                basis,
+                hp,
+                h.unit.max_hp
             );
         }
     }
@@ -1779,6 +1848,7 @@ fn row_from_house(h: &House, allow_infrastructure: bool) -> Option<HouseRow> {
         sell_price: h.sell_price,
         allow_recover: h.allow_recover,
         hp: Some(h.unit.hp.max(0)),
+        hp_basis: Some(h.unit.max_hp.max(0)),
     })
 }
 
