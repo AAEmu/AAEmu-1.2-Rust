@@ -2,6 +2,8 @@
 //! `DoodadFuncUse` and the skill-less loot form) must apply the 1.2 client's `FUN_393b3300`
 //! permission switch. See `permission.rs` for the evidence table.
 
+use std::sync::{Arc, Mutex};
+
 use crate::data::world_data::{SystemFaction, Zone};
 use crate::data::GameData;
 use crate::models::doodad::{doodad_owner_type, Doodad};
@@ -9,16 +11,19 @@ use crate::models::house::housing_permission;
 use crate::server::GameServer;
 use crate::systems::housing::data::HousingTemplate;
 use crate::systems::housing::dominion::larceny;
+use crate::systems::housing::dominion::runtime::tower_identity;
 use crate::systems::housing::manager as housing_manager;
 use crate::systems::npcs::doodad::interactions::{self, world_interaction_type as wi};
 use crate::systems::npcs::doodad::phase;
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::{
-    doodad_func_permission as permission, DoodadFunc, DoodadFuncRecoverItem, DoodadFuncUse,
-    DoodadGroups, DoodadTemplate, FuncTemplate,
+    doodad_func_permission as permission, DoodadFunc, DoodadFuncLootPack, DoodadFuncRecoverItem,
+    DoodadFuncUse, DoodadGroups, DoodadTemplate, FuncTemplate,
 };
-use crate::systems::social::expedition::{Expedition, ExpeditionMember};
+use crate::systems::npcs::hooks::{EconomyBridge, SkillsBridge};
+use crate::systems::social::expedition::{Expedition, ExpeditionMember, ExpeditionRolePolicy};
 use crate::systems::social::family::{Family, FamilyMember};
+use crate::systems::social::nation::Nation;
 use crate::systems::social::team::Team;
 use crate::test_support::*;
 use crate::world::{DoodadRef, Entity, HouseRef, PlayerRef, WorldObject};
@@ -33,6 +38,15 @@ const ZONE_FACTION: u32 = 148;
 const OTHER_FACTION: u32 = 149;
 const FAMILY_ID: u32 = 7;
 const EXPEDITION_ID: u32 = 50;
+const OWNER_EXPEDITION: u32 = 60;
+const NATION_ID: u32 = 9000;
+const OTHER_NATION_ID: u32 = 9001;
+const TOWER_TEMPLATE: u32 = 301;
+const ZONE_GROUP: u32 = 25;
+const CHAIN_GROUP: u32 = 230;
+const CHAIN_NEXT_GROUP: u32 = 231;
+const CHAIN_FIRST_PACK: u32 = 1;
+const CHAIN_SECOND_PACK: u32 = 2;
 
 const ANY_GROUP: u32 = 210;
 const OWNER_GROUP: u32 = 201;
@@ -105,6 +119,12 @@ fn game_data() -> GameData {
     data.systems.housing.add_template(HousingTemplate {
         id: HOUSE_TEMPLATE,
         garden_radius: 8.0,
+        hp: 1000,
+        ..Default::default()
+    });
+    data.systems.housing.add_template(HousingTemplate {
+        id: TOWER_TEMPLATE,
+        guard_tower_setting_id: 6,
         hp: 1000,
         ..Default::default()
     });
@@ -193,7 +213,77 @@ fn game_data() -> GameData {
                 skill_id: 0,
             }),
         );
+
+    // A skill-less loot row that advances the phase followed by a second, denied loot row:
+    // the chained iteration must skip the denied row silently.
+    for (group, pack, perm, next) in [
+        (
+            CHAIN_GROUP,
+            CHAIN_FIRST_PACK,
+            permission::ANY,
+            CHAIN_NEXT_GROUP as i32,
+        ),
+        (CHAIN_NEXT_GROUP, CHAIN_SECOND_PACK, permission::OWNER, -1),
+    ] {
+        data.systems.npcs.doodad.funcs_by_groups.insert(
+            group,
+            vec![DoodadFunc {
+                group_id: group,
+                func_id: group,
+                func_type: "DoodadFuncLootPack".into(),
+                next_phase: next,
+                skill_id: 0,
+                perm_id: perm,
+                ..DoodadFunc::default()
+            }],
+        );
+        data.systems
+            .npcs
+            .doodad
+            .func_templates
+            .entry("DoodadFuncLootPack")
+            .or_default()
+            .insert(
+                group,
+                FuncTemplate::LootPack(DoodadFuncLootPack {
+                    id: group,
+                    loot_pack_id: pack,
+                }),
+            );
+    }
     data
+}
+
+/// `EconomyBridge::give_doodad_loot_pack` recorder.
+#[derive(Default)]
+struct LootRec {
+    packs: Mutex<Vec<u32>>,
+}
+
+impl EconomyBridge for LootRec {
+    fn give_doodad_loot_pack(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        loot_pack_id: u32,
+        _skill_id: u32,
+        _task: u8,
+    ) -> Option<bool> {
+        self.packs.lock().unwrap().push(loot_pack_id);
+        Some(true)
+    }
+}
+
+/// `SkillsBridge::cancel_skill` recorder: a refusal refunds the cast, a chained skip must not.
+#[derive(Default)]
+struct CancelRec {
+    cancelled: Mutex<Vec<u32>>,
+}
+
+impl SkillsBridge for CancelRec {
+    fn cancel_skill(&self, _server: &GameServer, player: &PlayerRef) {
+        self.cancelled.lock().unwrap().push(player.character_id);
+    }
 }
 
 struct Fx {
@@ -204,12 +294,19 @@ struct Fx {
     family_mate: PlayerRef,
     guild_mate: PlayerRef,
     same_account: PlayerRef,
+    expedition_member: PlayerRef,
     house: HouseRef,
+    loot: Arc<LootRec>,
+    cancels: Arc<CancelRec>,
 }
 
 impl Fx {
     fn new() -> Self {
         let server = test_server_with(game_data());
+        let loot = Arc::new(LootRec::default());
+        server.systems.npcs.hooks.economy.install(loot.clone());
+        let cancels = Arc::new(CancelRec::default());
+        server.systems.npcs.hooks.skills.install(cancels.clone());
         let mut clients = Vec::new();
         let mut spawn = |id: u32, name: &str, account: u32, faction: u32, obj_id: u32| {
             let client = TestClient::new(&server, id, account);
@@ -226,6 +323,7 @@ impl Fx {
         let family_mate = spawn(3, "Family", 5003, OTHER_FACTION, 0x103);
         let guild_mate = spawn(4, "Guild", 5004, OTHER_FACTION, 0x104);
         let same_account = spawn(5, "Alt", 5001, OTHER_FACTION, 0x105);
+        let expedition_member = spawn(6, "Member", 5006, OTHER_FACTION, 0x106);
 
         owner.data().family = FAMILY_ID;
         family_mate.data().family = FAMILY_ID;
@@ -252,6 +350,9 @@ impl Fx {
 
         owner.data().unit.expedition_id = EXPEDITION_ID;
         guild_mate.data().unit.expedition_id = EXPEDITION_ID;
+        expedition_member.data().unit.expedition_id = EXPEDITION_ID;
+        // Role 0xff is the leader (`FUN_392f8af0` passes it directly); every other role needs
+        // the policy right at policy +0x90, decoded as `siege_master`.
         server.expeditions.add(Expedition {
             faction: SystemFaction {
                 id: EXPEDITION_ID,
@@ -260,11 +361,12 @@ impl Fx {
                 ..Default::default()
             },
             members: [
-                (owner.character_id, "Owner"),
-                (guild_mate.character_id, "Guild"),
+                (owner.character_id, "Owner", 0xff),
+                (guild_mate.character_id, "Guild", 1),
+                (expedition_member.character_id, "Member", 2),
             ]
             .into_iter()
-            .map(|(character_id, name)| ExpeditionMember {
+            .map(|(character_id, name, role)| ExpeditionMember {
                 expedition_id: EXPEDITION_ID,
                 character_id,
                 in_party: false,
@@ -275,18 +377,80 @@ impl Fx {
                 zone_id: TEST_ZONE,
                 id3: 0,
                 abilities: [0; 3],
-                role: 0,
+                role,
                 position: (100.0, 100.0, 100.0),
                 memo: String::new(),
                 transfer_requested_time: 0,
             })
             .collect(),
-            policies: Vec::new(),
+            policies: vec![ExpeditionRolePolicy {
+                expedition_id: EXPEDITION_ID,
+                role: 1,
+                name: "Officer".into(),
+                dominion_declare: false,
+                invite: false,
+                expel: false,
+                promote: false,
+                dismiss: false,
+                chat: true,
+                manager_chat: false,
+                siege_master: true,
+                join_siege: false,
+            }],
             removed_members: Vec::new(),
             is_disbanded: false,
         });
 
+        // A territory owned by OWNER_EXPEDITION, a guild founded in NATION_ID (its `mother`).
+        server.expeditions.add(Expedition {
+            faction: SystemFaction {
+                id: OWNER_EXPEDITION,
+                mother_id: NATION_ID,
+                name: "Territory owner".into(),
+                ..Default::default()
+            },
+            members: Vec::new(),
+            policies: Vec::new(),
+            removed_members: Vec::new(),
+            is_disbanded: false,
+        });
+        for id in [NATION_ID, OTHER_NATION_ID] {
+            server.systems.social.nations.add(Nation {
+                id,
+                expedition_id: 0,
+                owner_character_id: 0,
+                owner_name: String::new(),
+                name: format!("Nation {id}"),
+                created_at: 0,
+                allow_change_name: 0,
+                relations: Vec::new(),
+                offline_members: Vec::new(),
+            });
+        }
+
         let world = server.world.world(0).expect("instance 0");
+        let tower_house =
+            housing_manager::create(&server, TOWER_TEMPLATE, OTHER_FACTION, &world, 0, 0)
+                .expect("tower house");
+        {
+            let mut h = tower_house.data();
+            h.id = 61;
+            h.unit.transform.zone_id = TEST_ZONE;
+            h.unit.transform.set_xyz(140.0, 140.0, 100.0);
+        }
+        let (_, tower) = tower_identity(&server, &tower_house).expect("tower identity");
+        let dominions = &server.systems.housing.dominions;
+        dominions.register_tower(ZONE_GROUP, tower).unwrap();
+        dominions
+            .declare_unowned_with(
+                ZONE_GROUP,
+                tower,
+                OWNER_EXPEDITION,
+                chrono::Utc::now().timestamp(),
+                || true,
+            )
+            .unwrap();
+
         let house = housing_manager::create(&server, HOUSE_TEMPLATE, OTHER_FACTION, &world, 0, 0)
             .expect("house");
         {
@@ -309,7 +473,10 @@ impl Fx {
             family_mate,
             guild_mate,
             same_account,
+            expedition_member,
             house,
+            loot,
+            cancels,
         }
     }
 
@@ -322,6 +489,40 @@ impl Fx {
         d.owner_obj_id = self.owner.obj_id;
         d.transform.zone_id = TEST_ZONE;
         d.transform.set_xyz(101.0, 100.0, 100.0);
+        self.spawn_raw(d)
+    }
+
+    /// A system-owned world doodad (no owning character): `perm 1..` must refuse it.
+    fn world_doodad(&self, group: u32) -> DoodadRef {
+        let mut d = Doodad::new(TEMPLATE);
+        d.func_group_id = group;
+        d.owner_type = doodad_owner_type::SYSTEM;
+        d.transform.zone_id = TEST_ZONE;
+        d.transform.set_xyz(104.0, 100.0, 100.0);
+        self.spawn_raw(d)
+    }
+
+    /// A slave-owned doodad (the summoner is the character owner).
+    fn slave_doodad(&self, group: u32) -> DoodadRef {
+        let mut d = Doodad::new(TEMPLATE);
+        d.func_group_id = group;
+        d.owner_type = doodad_owner_type::SLAVE;
+        d.owner_id = self.owner.character_id;
+        d.owner_obj_id = self.owner.obj_id;
+        d.transform.zone_id = TEST_ZONE;
+        d.transform.set_xyz(105.0, 100.0, 100.0);
+        self.spawn_raw(d)
+    }
+
+    /// A doodad owned by `player` (character), using `group`'s func.
+    fn doodad_owned_by(&self, group: u32, player: &PlayerRef) -> DoodadRef {
+        let mut d = Doodad::new(TEMPLATE);
+        d.func_group_id = group;
+        d.owner_type = doodad_owner_type::CHARACTER;
+        d.owner_id = player.character_id;
+        d.owner_obj_id = player.obj_id;
+        d.transform.zone_id = TEST_ZONE;
+        d.transform.set_xyz(106.0, 100.0, 100.0);
         self.spawn_raw(d)
     }
 
@@ -398,12 +599,34 @@ async fn family_perm_allows_the_owner_and_family_but_not_others() {
 }
 
 #[tokio::test]
-async fn expedition_perm_allows_guild_members_but_not_outsiders() {
+async fn expedition_perm_allows_members_with_the_role_right_but_not_outsiders() {
     let fx = Fx::new();
+    // The owner is the expedition leader and passes directly.
+    let leader = fx.doodad(EXPEDITION_GROUP);
+    allowed(&fx, &leader, &fx.owner, EXPEDITION_GROUP, SKILL);
+    // Role 1 carries the `siege_master` policy right (`FUN_392f8af0`).
     let d1 = fx.doodad(EXPEDITION_GROUP);
     allowed(&fx, &d1, &fx.guild_mate, EXPEDITION_GROUP, SKILL);
     let d2 = fx.doodad(EXPEDITION_GROUP);
     denied(&fx, &d2, &fx.other, EXPEDITION_GROUP, SKILL);
+}
+
+#[tokio::test]
+async fn expedition_perm_has_no_owner_shortcut_and_needs_the_role_right() {
+    let fx = Fx::new();
+    // `expedition_member` owns this doodad but has role 2 without a policy right: case 3 never
+    // compares the owner, so the member is refused.
+    let dossier = fx.doodad_owned_by(EXPEDITION_GROUP, &fx.expedition_member);
+    denied(
+        &fx,
+        &dossier,
+        &fx.expedition_member,
+        EXPEDITION_GROUP,
+        SKILL,
+    );
+    // A role with the right passes even on a doodad owned by the refused member.
+    let dossier = fx.doodad_owned_by(EXPEDITION_GROUP, &fx.expedition_member);
+    allowed(&fx, &dossier, &fx.guild_mate, EXPEDITION_GROUP, SKILL);
 }
 
 #[tokio::test]
@@ -416,16 +639,32 @@ async fn same_account_perm_allows_the_owner_only_through_the_account() {
 }
 
 #[tokio::test]
-async fn nation_perm_requires_the_zone_owner_nation_against_the_owner_too() {
+async fn nation_perm_needs_the_territory_owner_nation_not_the_zone_faction() {
     let fx = Fx::new();
-    // The zone belongs to ZONE_FACTION; the owner's faction is OTHER_FACTION. The client's
-    // case 7 has no owner shortcut, so even the owner is refused.
+    // Zone group 25 is owned by OWNER_EXPEDITION, whose mother is NATION_ID. The zone's static
+    // `faction_id` (148) is irrelevant (every shipped siege-zone row has 0 there).
+    assert_eq!(
+        fx.server
+            .game_data
+            .zones
+            .zone_by_key(TEST_ZONE)
+            .map(|zone| zone.faction_id),
+        Some(ZONE_FACTION)
+    );
+    fx.owner.data().unit.faction_id = NATION_ID;
     let d1 = fx.doodad(NATION_GROUP);
-    denied(&fx, &d1, &fx.owner, NATION_GROUP, SKILL);
-    // A player of the zone's nation passes although the doodad is owned by someone else.
-    fx.owner.data().unit.faction_id = ZONE_FACTION;
+    allowed(&fx, &d1, &fx.owner, NATION_GROUP, SKILL);
+
+    // A player-founded nation that does not own the territory is refused.
+    fx.owner.data().unit.faction_id = OTHER_NATION_ID;
     let d2 = fx.doodad(NATION_GROUP);
-    allowed(&fx, &d2, &fx.owner, NATION_GROUP, SKILL);
+    denied(&fx, &d2, &fx.owner, NATION_GROUP, SKILL);
+
+    // A race / alliance faction is not a player nation (`FUN_392fa6b0`), even inside the
+    // territory: the old `zones.faction_id` rule would have allowed it.
+    fx.owner.data().unit.faction_id = ZONE_FACTION;
+    let d3 = fx.doodad(NATION_GROUP);
+    denied(&fx, &d3, &fx.owner, NATION_GROUP, SKILL);
 }
 
 #[tokio::test]
@@ -469,6 +708,64 @@ async fn team_and_raid_perms_follow_the_team() {
     fx.server.systems.social.teams.insert_team_for_test(raid);
     let d4 = fx.doodad(RAID_GROUP);
     allowed(&fx, &d4, &fx.family_mate, RAID_GROUP, SKILL);
+}
+
+#[tokio::test]
+async fn system_owned_world_doodad_allows_public_rows_and_refuses_owner_rows() {
+    let fx = Fx::new();
+    let public = fx.world_doodad(ANY_GROUP);
+    allowed(&fx, &public, &fx.other, ANY_GROUP, SKILL);
+    let owned = fx.world_doodad(OWNER_GROUP);
+    denied(&fx, &owned, &fx.other, OWNER_GROUP, SKILL);
+    // Even the player who last used it is not the owner: there is no owner at all.
+    let owned = fx.world_doodad(OWNER_GROUP);
+    denied(&fx, &owned, &fx.owner, OWNER_GROUP, SKILL);
+}
+
+#[tokio::test]
+async fn slave_owned_storage_follows_its_perm() {
+    let fx = Fx::new();
+    // The backpack storage box (3446) carries perm 5: owner or raid.
+    let mut raid = Team::new(9, fx.owner.character_id, false);
+    raid.add_member(&fx.owner);
+    raid.add_member(&fx.guild_mate);
+    fx.server.systems.social.teams.insert_team_for_test(raid);
+
+    let own = fx.slave_doodad(RAID_GROUP);
+    allowed(&fx, &own, &fx.owner, RAID_GROUP, SKILL);
+    let mate = fx.slave_doodad(RAID_GROUP);
+    allowed(&fx, &mate, &fx.guild_mate, RAID_GROUP, SKILL);
+    let outsider = fx.slave_doodad(RAID_GROUP);
+    denied(&fx, &outsider, &fx.other, RAID_GROUP, SKILL);
+
+    // The same slave doodad on an owner-only row is refused to the raid member.
+    let own = fx.slave_doodad(OWNER_GROUP);
+    allowed(&fx, &own, &fx.owner, OWNER_GROUP, SKILL);
+    let mate = fx.slave_doodad(OWNER_GROUP);
+    denied(&fx, &mate, &fx.guild_mate, OWNER_GROUP, SKILL);
+}
+
+#[tokio::test]
+async fn chained_loot_skips_a_denied_row_without_refunding_the_earlier_use() {
+    let fx = Fx::new();
+    let doodad = fx.doodad(CHAIN_GROUP);
+    // The first (public) loot row runs, advances to CHAIN_NEXT_GROUP, whose owner-only row is
+    // then skipped: the interaction already happened, so no 232 and no cast refund.
+    fx.use_skill(&doodad, &fx.other, 0);
+    assert_eq!(*fx.loot.packs.lock().unwrap(), vec![CHAIN_FIRST_PACK]);
+    assert_eq!(doodad.data().func_group_id, CHAIN_NEXT_GROUP);
+    assert!(
+        fx.cancels.cancelled.lock().unwrap().is_empty(),
+        "a chained denied row must not cancel/refund the earlier use"
+    );
+
+    // The owner gets both rows.
+    let doodad = fx.doodad(CHAIN_GROUP);
+    fx.use_skill(&doodad, &fx.owner, 0);
+    assert_eq!(
+        *fx.loot.packs.lock().unwrap(),
+        vec![CHAIN_FIRST_PACK, CHAIN_FIRST_PACK, CHAIN_SECOND_PACK]
+    );
 }
 
 #[tokio::test]
