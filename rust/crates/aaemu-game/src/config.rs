@@ -151,6 +151,9 @@ pub struct AppConfig {
     /// `Interaction` (`systems::npcs::config`: NPC interaction reach).
     #[serde(rename = "interaction")]
     pub interaction: crate::systems::npcs::config::InteractionConfig,
+    /// `Ai` (`systems::ai::config`, Rust only: NPC target selection / pull aggro).
+    #[serde(rename = "ai")]
+    pub ai: crate::systems::ai::config::AiConfig,
     /// `HeightMapsEnable` (C# default false; the shipped Config.json sets it to true).
     #[serde(rename = "heightmapsenable", deserialize_with = "lenient")]
     pub heightmaps_enable: bool,
@@ -208,6 +211,7 @@ impl Default for AppConfig {
             social: Default::default(),
             dungeons: Default::default(),
             interaction: Default::default(),
+            ai: Default::default(),
             heightmaps_enable: false,
             physics: Default::default(),
             feature_set: Default::default(),

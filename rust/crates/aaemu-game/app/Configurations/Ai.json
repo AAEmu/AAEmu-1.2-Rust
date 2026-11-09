@@ -1,0 +1,13 @@
+{
+	"Ai": {
+		// Added deviation: an NPC keeps a valid current target until another attacker's threat
+		// exceeds the target's threat times a ratio (taunts are unaffected). The 10.x zone
+		// server switches on any higher threat; false restores that.
+		"PullAggroEnabled": true,
+		// Ratio when the challenger is within PullAggroMeleeRange metres of the NPC.
+		"PullAggroMeleeRatio": 1.10,
+		// Ratio for a challenger farther away.
+		"PullAggroRangedRatio": 1.30,
+		"PullAggroMeleeRange": 4.0
+	}
+}

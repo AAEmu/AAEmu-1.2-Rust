@@ -726,6 +726,17 @@ checks use, so a large NPC is not refused at its edge. Override it in
 }
 ```
 
+## NPC pull aggro (`Configurations/Ai.json`)
+
+An added deviation (Rust only): an NPC that has a valid current target keeps it until another attacker's threat exceeds the current target's threat times a ratio. The 10.x zone server (`NpcAggroTable`, `sub_3931EB70`) has no such threshold and switches on any higher threat. A taunt is unaffected: a taunted challenger pulls at once and a taunted target cannot be pulled by threat.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `PullAggroEnabled` | `true` | `false` restores the original behaviour (switch as soon as someone's threat is higher) |
+| `PullAggroMeleeRatio` | `1.10` | Ratio for a challenger within the melee range of the NPC |
+| `PullAggroRangedRatio` | `1.30` | Ratio for a challenger farther away |
+| `PullAggroMeleeRange` | `4.0` | Metres (model radii subtracted) up to which a challenger counts as melee |
+
 ## Social feature switches (`Configurations/Social.json`)
 
 Rust-only switches for social content whose 1.2 behaviour is not fully

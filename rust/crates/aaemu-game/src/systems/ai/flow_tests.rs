@@ -2182,8 +2182,9 @@ async fn taunt_with_top_aggro_copies_the_current_top_total_once() {
         100,
         "the copied threat persists after the taunt (10x keeps it)"
     );
-    // Equal totals: the stable table order puts the lower obj id (A) first.
-    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+    // Equal totals: pull aggro keeps B (A's total does not exceed B's times the ratio). With
+    // `Ai.PullAggroEnabled` off the stable table order would put the lower obj id (A) first.
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
 }
 
 #[tokio::test]
@@ -3447,4 +3448,116 @@ async fn deleted_npc_closes_the_open_interaction_window() {
         vec![vec![0x00, 0x02, 0x00]]
     );
     assert_eq!(player.data().unit.current_interaction_object, 0);
+}
+
+// --- pull aggro (`Ai.PullAggro*`, added deviation) ---------------------------------------
+
+/// The fixture's players stand 3 m (A, melee), 10 m (B) and 12 m (C) from the NPC; the pull
+/// aggro melee range is the default 4 m.
+async fn pull_fixture(enabled: bool) -> TauntFixture {
+    let f = taunt_fixture();
+    f.server
+        .config
+        .update(|cfg| cfg.ai.pull_aggro_enabled = enabled);
+    settle(&f).await;
+    f
+}
+
+#[tokio::test]
+async fn pull_aggro_melee_challenger_needs_the_melee_ratio() {
+    let f = pull_fixture(true).await;
+    add_threat(&f, &f.player_b, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    add_threat(&f, &f.player_a, 105);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER_OBJ,
+        "105% of the target's threat must not pull"
+    );
+    add_threat(&f, &f.player_a, 10);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        PLAYER_OBJ,
+        "115% from melee range must pull"
+    );
+}
+
+#[tokio::test]
+async fn pull_aggro_ranged_challenger_needs_the_ranged_ratio() {
+    let f = pull_fixture(true).await;
+    add_threat(&f, &f.player_b, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    add_threat(&f, &f.player_c, 125);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER_OBJ,
+        "125% from range must not pull"
+    );
+    add_threat(&f, &f.player_c, 10);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER2_OBJ,
+        "135% from range must pull"
+    );
+}
+
+#[tokio::test]
+async fn pull_aggro_taunted_challenger_pulls_regardless_of_threat() {
+    let f = pull_fixture(true).await;
+    add_threat(&f, &f.player_a, 1000);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    // A stamped current target cannot be pulled by threat.
+    add_threat(&f, &f.player_c, 100_000);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+}
+
+#[tokio::test]
+async fn pull_aggro_dead_current_target_switches_to_the_highest_valid_entry() {
+    let f = pull_fixture(true).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+    add_threat(&f, &f.player_b, 50);
+    add_threat(&f, &f.player_c, 60);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        PLAYER_OBJ,
+        "neither challenger clears the ratio"
+    );
+
+    f.player_a.data().unit.hp = 0;
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER2_OBJ,
+        "a dead current target is replaced by the highest valid entry"
+    );
+}
+
+#[tokio::test]
+async fn pull_aggro_disabled_switches_at_101_percent() {
+    let f = pull_fixture(false).await;
+    add_threat(&f, &f.player_b, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    add_threat(&f, &f.player_c, 101);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER2_OBJ);
 }
