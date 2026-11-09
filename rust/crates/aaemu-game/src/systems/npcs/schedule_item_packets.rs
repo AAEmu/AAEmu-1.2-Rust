@@ -47,7 +47,7 @@ impl ClientPacket for CSTakeScheduleItemPacket {
             let Ok(schedule_id) = i32::try_from(self.schedule_type) else {
                 return Ok(());
             };
-            let outcome = schedule_item_session::take(server, &me, schedule_id);
+            let outcome = schedule_item_session::take(server, &me, schedule_id).await;
             tracing::debug!("TakeScheduleItem {schedule_id}: {outcome:?}");
             Ok(())
         })

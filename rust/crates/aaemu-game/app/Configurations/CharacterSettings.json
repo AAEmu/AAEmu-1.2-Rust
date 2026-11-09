@@ -60,8 +60,8 @@
 	"Loyalty": {
 		"DailyLogin": 5,
 		"Default": 0,
-		"TickAmount": 0,
-		"TickAmountPremium": 0,
-		"TickMinutes": 5
+		"HourlyAmount": 1, // EU 1.2: one Loyalty Token per full HourlyMinutes of play
+		"HourlyMinutes": 60, // per account, in-world only
+		"HourlyDailyMax": 3 // per account per UTC day
 	}
 }

@@ -2,6 +2,7 @@
 //! credits and loyalty ticks for online connections (every minute), the daily login reward and
 //! the offline labor granted on login.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -11,9 +12,10 @@ use futures::future::BoxFuture;
 use super::accounts::{self, TickKind};
 use super::premium;
 use super::tasks::{GameTask, TaskState};
+use crate::db::{AccountDetails, LoyaltyHourState};
 use crate::managers::account::AccountState;
 use crate::server::GameServer;
-use crate::systems::skills::packets_special::{SCBmPointPacket, SCICSCashPointPacket};
+use crate::systems::skills::packets_special::SCICSCashPointPacket;
 use crate::systems::skills::progress::SCCharacterLaborPowerChangedPacket;
 
 /// `MaxLabor`.
@@ -136,12 +138,107 @@ async fn do_add_labor(
     }
 }
 
+/// A sample gap longer than this is not play time: the account was offline or the server was
+/// stopped. The minute tick samples every 60 s, so two minutes leaves room for a late tick while
+/// never crediting a relog or restart gap.
+pub const LOYALTY_SAMPLE_GAP_SECONDS: i64 = 120;
+
+/// Seconds in one UTC day (`loyalty_hour_day` is the unix day number).
+const SECONDS_PER_UTC_DAY: i64 = 86_400;
+
+/// The result of one hourly-Loyalty sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HourlyLoyaltyUpdate {
+    /// The counters to store.
+    pub state: LoyaltyHourState,
+    /// Tokens to grant now (`0` when the interval or the daily maximum is not reached).
+    pub grant: i32,
+}
+
+/// The EU 1.2 hourly Loyalty rule (owner decision 2026-11-09): every full `HourlyMinutes` of
+/// in-world play in the current UTC day grants `HourlyAmount` tokens, at most `HourlyDailyMax`
+/// per account and day. Play time is per account, carries across relogs and is reset by the UTC
+/// day boundary; a gap above [`LOYALTY_SAMPLE_GAP_SECONDS`] is not credited. The rule is
+/// independent of Patron / premium state (no payment input at all).
+pub fn hourly_loyalty_update(
+    current: LoyaltyHourState,
+    now: NaiveDateTime,
+    config: &crate::config::CurrencyValuesConfig,
+) -> HourlyLoyaltyUpdate {
+    let interval_seconds = i64::from(config.hourly_minutes) * 60;
+    if config.hourly_amount <= 0 || config.hourly_daily_max <= 0 || interval_seconds <= 0 {
+        return HourlyLoyaltyUpdate {
+            state: current,
+            grant: 0,
+        };
+    }
+    let day = now.and_utc().timestamp().div_euclid(SECONDS_PER_UTC_DAY) as i32;
+    if current.day != day {
+        // First sample of a new UTC day: yesterday's play time and tokens are gone.
+        return HourlyLoyaltyUpdate {
+            state: LoyaltyHourState {
+                day,
+                seconds: 0,
+                taken: 0,
+                updated: Some(now),
+            },
+            grant: 0,
+        };
+    }
+    let elapsed = current.updated.map_or(0, |last| (now - last).num_seconds());
+    let added = if (0..=LOYALTY_SAMPLE_GAP_SECONDS).contains(&elapsed) {
+        elapsed
+    } else {
+        0
+    };
+    let seconds = current.seconds.max(0).saturating_add(added);
+    let periods = seconds / interval_seconds;
+    let due = periods
+        .saturating_mul(i64::from(config.hourly_amount))
+        .min(i64::from(config.hourly_daily_max)) as i32;
+    let taken = current.taken.max(0);
+    let grant = (due - taken).max(0);
+    HourlyLoyaltyUpdate {
+        state: LoyaltyHourState {
+            day,
+            seconds,
+            taken: taken.saturating_add(grant),
+            updated: Some(now),
+        },
+        grant,
+    }
+}
+
+/// One hourly-Loyalty sample of an in-world account: stores the counters and, when a token is
+/// due, credits it and pushes `SCBmPoint` (0x46) plus the `msg_gain_bmmileage` line to every
+/// online character of the account. A failed grant writes nothing, so the next tick retries.
+async fn tick_hourly_loyalty(server: &GameServer, account_id: u32, details: &AccountDetails) {
+    let current = details.loyalty_hour_state();
+    let update = hourly_loyalty_update(current, now(), &server.config.loyalty);
+    if update.state == current {
+        return;
+    }
+    if update.grant > 0 {
+        if let Some(total) =
+            accounts::credit_hourly_loyalty(server, account_id, update.grant, update.state).await
+        {
+            accounts::notify_loyalty_grant(server, account_id, update.grant, total);
+        }
+    } else {
+        accounts::store_loyalty_hour_state(server, account_id, update.state).await;
+    }
+}
+
 /// `DoTick()`: labor / credits / loyalty for every connection.
 ///
 /// Deviation: connections without an account (not entered yet) are skipped; the C#
 /// `GetAccountDetails(0)` would create an `accounts` row with id 0 for them.
 pub async fn do_tick(server: &GameServer) {
     let config = &server.config;
+    // The hourly Loyalty counters belong to the account, not the connection: an account with a
+    // second connection (refused by `AccountManager.Add`, but possible in fixtures) is sampled
+    // once so the same minute can never be counted twice.
+    let mut loyalty_sampled: HashSet<u32> = HashSet::new();
     for handle in server.connections.all() {
         let account_id = handle.account_id();
         if account_id == 0 {
@@ -180,35 +277,38 @@ pub async fn do_tick(server: &GameServer) {
             }
         }
 
-        // Distribute Loyalty if needed
-        if config.loyalty.tick_minutes > 0
-            && due(details.last_loyalty_tick, config.loyalty.tick_minutes)
-        {
-            accounts::add_loyalty(server, account_id, config.loyalty.get_tick_amount(premium))
-                .await;
-            accounts::update_tick_times(server, account_id, now(), TickKind::Loyalty).await;
-            if let Some(p) = &active_char {
-                let loyalty = accounts::get_account_details(server, account_id)
-                    .await
-                    .loyalty;
-                p.send(SCBmPointPacket {
-                    bm_point: i64::from(loyalty),
-                });
-            }
+        // Hourly Loyalty: in-world play time only, per account (see `hourly_loyalty_update`).
+        if active_char.is_some() && loyalty_sampled.insert(account_id) {
+            tick_hourly_loyalty(server, account_id, &details).await;
         }
     }
 }
 
-/// `DoDailyAccountLogin(accountId)`.
+/// `DoDailyAccountLogin(accountId)`: the once-per-UTC-day credits / loyalty grant.
+///
+/// The grant is claimed atomically on `accounts.last_daily_reward`, so the first login of the
+/// day and the midnight quest reset of an account that is already online cannot both pay: an
+/// account online across 00:00 UTC is paid by the reset, and its next login sees the day as
+/// already claimed.
 pub async fn do_daily_account_login(server: &GameServer, account_id: u32) {
     let config = &server.config;
-    if config.credits.daily_login > 0 {
-        accounts::add_credits(server, account_id, config.credits.daily_login).await;
-    }
+    let today = now().date().and_hms_opt(0, 0, 0).expect("midnight");
+    let Some((_credits, loyalty)) = accounts::claim_daily_reward(
+        server,
+        account_id,
+        today,
+        config.credits.daily_login,
+        config.loyalty.daily_login,
+    )
+    .await
+    else {
+        return;
+    };
     if config.loyalty.daily_login > 0 {
-        accounts::add_loyalty(server, account_id, config.loyalty.daily_login).await;
+        // No character is online on the login path; at the midnight reset this reaches every
+        // online character of the account (stale `bm_point`, research §3).
+        accounts::notify_loyalty_grant(server, account_id, config.loyalty.daily_login, loyalty);
     }
-    accounts::update_divine_clock(server, account_id, 0, 0).await;
 }
 
 /// The number of `LaborOffline` ticks since `last_login` (`(int)Math.Floor(minutes /
@@ -435,6 +535,357 @@ mod tests {
             p.data().labor_power,
             1010,
             "labor regenerated during character selection must reach the loaded cache"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Hourly Loyalty (EU 1.2 owner rule, 2026-11-09)
+    // -----------------------------------------------------------------------------------------
+
+    fn day_key(now: NaiveDateTime) -> i32 {
+        now.and_utc().timestamp().div_euclid(86_400) as i32
+    }
+
+    fn day_at(day_offset: i64, h: u32, m: u32) -> NaiveDateTime {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()
+            + chrono::Duration::days(day_offset);
+        day.and_hms_opt(h, m, 0).unwrap()
+    }
+
+    fn hourly_config(minutes: i32) -> crate::config::CurrencyValuesConfig {
+        crate::config::CurrencyValuesConfig {
+            tick_minutes: 0,
+            hourly_amount: 1,
+            hourly_minutes: minutes,
+            hourly_daily_max: 3,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hourly_loyalty_grants_one_per_full_interval_and_stops_at_the_daily_max() {
+        let config = hourly_config(1);
+        let start = day_at(0, 10, 0);
+        let mut state = LoyaltyHourState {
+            day: day_key(start),
+            seconds: 0,
+            taken: 0,
+            updated: Some(start),
+        };
+        let mut granted = 0;
+        for minute in 1..=4 {
+            let update =
+                hourly_loyalty_update(state, start + chrono::Duration::minutes(minute), &config);
+            state = update.state;
+            granted += update.grant;
+        }
+        assert_eq!(granted, 3, "four samples grant three tokens and stop");
+        assert_eq!(state.taken, 3);
+        assert_eq!(state.seconds, 240, "play time keeps counting past the cap");
+    }
+
+    #[test]
+    fn hourly_loyalty_carries_play_time_across_a_relog_without_crediting_offline_time() {
+        let config = hourly_config(60);
+        let start = day_at(0, 10, 0);
+        // 58 minutes 20 seconds already played today.
+        let state = LoyaltyHourState {
+            day: day_key(start),
+            seconds: 3500,
+            taken: 0,
+            updated: Some(start),
+        };
+        // A normal tick: 60 more seconds, still under the hour.
+        let update = hourly_loyalty_update(state, start + chrono::Duration::minutes(1), &config);
+        assert_eq!(update.grant, 0);
+        assert_eq!(update.state.seconds, 3560);
+
+        // Relog four hours later: the gap is not play time, but the 3560 s persist.
+        let after_relog = start + chrono::Duration::hours(4);
+        let update = hourly_loyalty_update(update.state, after_relog, &config);
+        assert_eq!(update.grant, 0);
+        assert_eq!(update.state.seconds, 3560, "play time survives the relog");
+        assert_eq!(update.state.updated, Some(after_relog));
+
+        // 40 s of the next session complete the hour: one token.
+        let update = hourly_loyalty_update(
+            update.state,
+            after_relog + chrono::Duration::seconds(40),
+            &config,
+        );
+        assert_eq!(update.grant, 1);
+        assert_eq!(update.state.taken, 1);
+    }
+
+    #[test]
+    fn hourly_loyalty_resets_at_the_utc_day_boundary() {
+        let config = hourly_config(1);
+        let before_midnight = day_at(0, 23, 59);
+        let state = LoyaltyHourState {
+            day: day_key(before_midnight),
+            seconds: 59,
+            taken: 2,
+            updated: Some(before_midnight),
+        };
+        let just_after = day_at(1, 0, 0) + chrono::Duration::seconds(30);
+        let update = hourly_loyalty_update(state, just_after, &config);
+        assert_eq!(update.grant, 0, "the boundary sample does not pay");
+        assert_eq!(update.state.day, day_key(just_after));
+        assert_eq!(update.state.seconds, 0);
+        assert_eq!(update.state.taken, 0);
+
+        // The new day starts counting from that sample.
+        let update = hourly_loyalty_update(
+            update.state,
+            just_after + chrono::Duration::minutes(1),
+            &config,
+        );
+        assert_eq!(update.grant, 1);
+    }
+
+    #[test]
+    fn hourly_loyalty_is_off_when_the_interval_or_amount_is_zero() {
+        let start = day_at(0, 10, 0);
+        let state = LoyaltyHourState {
+            day: day_key(start),
+            seconds: 300,
+            taken: 0,
+            updated: Some(start),
+        };
+        for config in [
+            crate::config::CurrencyValuesConfig {
+                hourly_amount: 0,
+                hourly_minutes: 60,
+                hourly_daily_max: 3,
+                ..Default::default()
+            },
+            crate::config::CurrencyValuesConfig {
+                hourly_amount: 1,
+                hourly_minutes: 0,
+                hourly_daily_max: 3,
+                ..Default::default()
+            },
+            crate::config::CurrencyValuesConfig {
+                hourly_amount: 1,
+                hourly_minutes: 60,
+                hourly_daily_max: 0,
+                ..Default::default()
+            },
+        ] {
+            let update = hourly_loyalty_update(state, start + chrono::Duration::hours(2), &config);
+            assert_eq!(update.grant, 0);
+            assert_eq!(update.state, state, "a disabled rule writes nothing");
+        }
+    }
+
+    /// The private MySQL pool the gated tests below use; the `accounts` table is a temporary
+    /// table on the one pooled connection, so the lane database is never touched.
+    async fn private_accounts_pool() -> Option<sqlx::MySqlPool> {
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+        use std::str::FromStr;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return None;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "Only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        sqlx::query(
+            "CREATE TEMPORARY TABLE accounts ( \
+             account_id INT NOT NULL PRIMARY KEY, access_level INT NOT NULL DEFAULT 0, \
+             labor INT NOT NULL DEFAULT 0, credits INT NOT NULL DEFAULT 0, \
+             loyalty INT NOT NULL DEFAULT 0, \
+             last_updated DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00', \
+             last_login DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00', \
+             last_labor_tick DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00', \
+             last_credits_tick DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00', \
+             last_loyalty_tick DATETIME NOT NULL DEFAULT '2026-01-01 00:00:00', \
+             last_daily_reward DATETIME NULL DEFAULT NULL, \
+             loyalty_hour_day INT NOT NULL DEFAULT 0, \
+             loyalty_hour_seconds INT NOT NULL DEFAULT 0, \
+             loyalty_hour_taken INT NOT NULL DEFAULT 0, \
+             loyalty_hour_updated DATETIME NULL DEFAULT NULL, \
+             divine_clock_time INT UNSIGNED NOT NULL DEFAULT 0, \
+             divine_clock_taken INT UNSIGNED NOT NULL DEFAULT 0, \
+             extra_character_slots TINYINT UNSIGNED NOT NULL DEFAULT 0, \
+             pay_method TINYINT NOT NULL DEFAULT 0, pay_location INT NOT NULL DEFAULT 1, \
+             pay_start BIGINT NOT NULL DEFAULT 0, pay_end BIGINT NOT NULL DEFAULT 0, \
+             premium_point INT NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temporary accounts table");
+        Some(pool)
+    }
+
+    fn loyalty_player(server: &GameServer) -> (TestClient, PlayerRef) {
+        let mut client = TestClient::new(server, 1, 1001);
+        let mut c = test_character(1, "Loyal", 500.0, 500.0);
+        c.is_online = true;
+        let p = spawn_player(server, &client, c, 0x100 + 1);
+        client.conn.active_char = Some(p.clone());
+        client.drain();
+        (client, p)
+    }
+
+    fn non_premium(server: &GameServer) {
+        use crate::managers::account::AccountState;
+        use crate::net::connection::{AccountPayment, PaymentMethodType};
+        server.accounts.set_state(
+            1001,
+            AccountState {
+                payment: AccountPayment {
+                    method: PaymentMethodType::None,
+                    location: 1,
+                    start_time: 0,
+                    end_time: 0,
+                },
+                premium_point: 0,
+            },
+        );
+    }
+
+    /// The minute tick credits the hourly token for a **non-premium** account (no Patron rule)
+    /// and stops at `HourlyDailyMax`.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn hourly_loyalty_tick_grants_without_premium_and_stops_at_the_cap() {
+        let Some(pool) = private_accounts_pool().await else {
+            return;
+        };
+        let mut server = test_server();
+        server.db = pool.clone();
+        server.config.update(|c| {
+            c.labor.tick_minutes = 0;
+            c.credits.tick_minutes = 0;
+            c.loyalty.hourly_amount = 1;
+            c.loyalty.hourly_minutes = 1;
+            c.loyalty.hourly_daily_max = 3;
+        });
+        let (mut client, p) = loyalty_player(&server);
+        non_premium(&server);
+        sqlx::query(
+            "INSERT INTO accounts (account_id, loyalty_hour_day, loyalty_hour_seconds, \
+             loyalty_hour_taken, loyalty_hour_updated) \
+             VALUES (1001, ?, 0, 0, UTC_TIMESTAMP() - INTERVAL 60 SECOND)",
+        )
+        .bind(day_key(now()))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for expected in 1..=3 {
+            do_tick(&server).await;
+            let total: i64 = sqlx::query_scalar(
+                "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(total, expected, "grant {expected} of the hourly rule");
+            assert_eq!(p.data().bm_point, expected);
+            sqlx::query(
+                "UPDATE accounts SET loyalty_hour_updated = UTC_TIMESTAMP() - INTERVAL 60 SECOND \
+                 WHERE account_id = 1001",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Fourth full interval: the daily maximum already paid three.
+        do_tick(&server).await;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(total, 3, "three is the daily maximum");
+
+        let frames = client.drain();
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCBmPointPacket)
+                .count(),
+            3,
+            "one SCBmPoint per granted token"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCChatMessagePacket)
+                .count(),
+            3,
+            "one msg_gain_bmmileage line per granted token"
+        );
+        assert!(frames
+            .iter()
+            .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCChatMessagePacket)
+            .any(|(_, body)| String::from_utf8_lossy(body).contains("Loyalty Token")));
+    }
+
+    /// An account online across 00:00 UTC is paid by the midnight reset; its next login that day
+    /// must not pay again (the `last_daily_reward` claim).
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn daily_login_reward_is_granted_once_across_a_midnight() {
+        let Some(pool) = private_accounts_pool().await else {
+            return;
+        };
+        let mut server = test_server();
+        server.db = pool.clone();
+        server.config.update(|c| {
+            c.credits.daily_login = 0;
+            c.loyalty.daily_login = 5;
+        });
+        let (mut client, p) = loyalty_player(&server);
+        sqlx::query(
+            "INSERT INTO accounts (account_id, loyalty, last_daily_reward) \
+             VALUES (1001, 0, UTC_TIMESTAMP() - INTERVAL 1 DAY)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The midnight quest reset of the account that stayed online.
+        do_daily_account_login(&server, 1001).await;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(p.data().bm_point, 5, "the online character is pushed");
+
+        // Its next login on the same UTC day (the reported double grant).
+        do_daily_account_login(&server, 1001).await;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT CAST(loyalty AS SIGNED) FROM accounts WHERE account_id = 1001",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(total, 5, "the daily 5 is paid once per UTC day");
+
+        let frames = client.drain();
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCBmPointPacket)
+                .count(),
+            1,
+            "only the midnight grant reaches the online character"
         );
     }
 }

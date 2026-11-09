@@ -949,6 +949,15 @@ pub struct CurrencyValuesConfig {
     pub tick_amount: i32,
     #[serde(rename = "tickamountpremium", deserialize_with = "lenient")]
     pub tick_amount_premium: i32,
+    /// Loyalty only: tokens per full `hourly_minutes` of in-world play (0 = off).
+    #[serde(rename = "hourlyamount", deserialize_with = "lenient")]
+    pub hourly_amount: i32,
+    /// Loyalty only: minutes of in-world play per hourly grant (0 = off).
+    #[serde(rename = "hourlyminutes", deserialize_with = "lenient")]
+    pub hourly_minutes: i32,
+    /// Loyalty only: most hourly tokens an account may receive in one UTC day (0 = off).
+    #[serde(rename = "hourlydailymax", deserialize_with = "lenient")]
+    pub hourly_daily_max: i32,
 }
 
 impl CurrencyValuesConfig {
@@ -970,6 +979,9 @@ impl Default for CurrencyValuesConfig {
             tick_minutes: 5,
             tick_amount: 0,
             tick_amount_premium: 0,
+            hourly_amount: 0,
+            hourly_minutes: 0,
+            hourly_daily_max: 0,
         }
     }
 }

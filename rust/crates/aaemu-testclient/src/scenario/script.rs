@@ -44,6 +44,13 @@
 //! maillist                          CSListMail (empty) and decode `SCMailList` / `SCMailListEnd`
 //! mailread <isSent 0|1> <mailId>    CSReadMail (client writer `FUN_397ba350`) and decode
 //!                                   `SCMailBody` (`FUN_397af2d0` / `FUN_398a5e60`)
+//! mailtakefirst [mail type]         CSListMail, take the first received mail with attachments
+//!                                   (type filter when given) via CSTakeAttachmentSequentially
+//!                                   and fail unless `SCAttachmentTaken` lists an item
+//! buyics <shop id> <detail> [main] [sub] [receiver]
+//!                                   CSICSBuyGoodPacket (0x11d); fail unless the buy succeeds,
+//!                                   `SCGotMail` is a CHARGED (9) mail and SCCountUnreadMail's
+//!                                   4th counter is 1
 //! aucpost <npc tpl> <item tpl> <start> <buyout> <duration>
 //!                                   walk to the auctioneer NPC, CSAuctionPost (client writer
 //!                                   `FUN_397bae70`) and decode `SCAuctionPosted`
@@ -1580,6 +1587,113 @@ async fn run_lines(
                 ensure!(
                     body_seen,
                     "mailread: no SCMailBodyPacket for mail {mail_id}"
+                );
+            }
+            "mailtakefirst" => {
+                let want_type: Option<u8> = parts.first().and_then(|x| x.parse().ok());
+                game.send_cs(cs::CSListMailPacket, &[]).await?;
+                let got = game
+                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                    .await?;
+                let mut chosen = None;
+                for p in &got {
+                    if p.is_sc(sc::SCMailListPacket) {
+                        let mut s = p.stream();
+                        let is_sent = s.read_bool()?;
+                        let _total = s.read_i32()?;
+                        let h = decode_mail_header(&mut s)?;
+                        if !is_sent
+                            && h.attachments > 0
+                            && want_type.is_none_or(|t| h.mail_type == t)
+                        {
+                            chosen = Some((h.mail_id, h.mail_type, h.attachments));
+                            break;
+                        }
+                    }
+                }
+                let Some((mail_id, mail_type, attachments)) = chosen else {
+                    bail!("mailtakefirst: no received mail with attachments");
+                };
+                println!("    taking mail {mail_id} type {mail_type} attachments {attachments}");
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_i64(mail_id);
+                game.send_cs(cs::CSTakeAttachmentSequentially, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
+                let mut taken = None;
+                for p in &got {
+                    if p.is_sc(sc::SCAttachmentTakenPacket) {
+                        let mut s = p.stream();
+                        let _id = s.read_i64()?;
+                        let _money = s.read_bool()?;
+                        let _aa = s.read_bool()?;
+                        let _sequential = s.read_bool()?;
+                        let _count = s.read_u8()?;
+                        let mut items = 0;
+                        for _ in 0..10 {
+                            let id = s.read_u64()?;
+                            let _slot_type = s.read_u8()?;
+                            let _slot = s.read_u8()?;
+                            if id != 0 {
+                                items += 1;
+                            }
+                        }
+                        ensure!(items > 0, "mailtakefirst: SCAttachmentTaken lists no item");
+                        taken = Some(items);
+                    }
+                }
+                ensure!(taken.is_some(), "mailtakefirst: no SCAttachmentTakenPacket");
+                println!("    took {taken:?} attachment(s) from mail {mail_id}");
+            }
+            "buyics" => {
+                let shop_id: u32 = num(&parts, 0)?;
+                let detail: u8 = num(&parts, 1)?;
+                let main_tab: u8 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let sub_tab: u8 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let receiver = parts.get(4).copied().unwrap_or("");
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u8(1)
+                    .write_u32(shop_id)
+                    .write_u8(main_tab)
+                    .write_u8(sub_tab)
+                    .write_u8(detail)
+                    .write_str(receiver);
+                game.send_cs(cs::CSICSBuyGoodPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let mut bought = None;
+                let mut charged = false;
+                let mut commercial = None;
+                for p in &got {
+                    if p.is_sc(sc::SCICSBuyResultPacket) {
+                        let mut s = p.stream();
+                        bought = Some(s.read_bool()?);
+                    } else if p.is_sc(sc::SCGotMailPacket) {
+                        let mut s = p.stream();
+                        let h = decode_mail_header(&mut s)?;
+                        let (sent, received, mia, commercial_received) =
+                            decode_count_unread(&mut s)?;
+                        println!(
+                            "    SCGotMail type {} unread [{sent}, {received}, {mia},                              {commercial_received}]",
+                            h.mail_type
+                        );
+                        if h.mail_type == 9 {
+                            charged = true;
+                        }
+                        commercial = Some(commercial_received);
+                    }
+                }
+                ensure!(bought == Some(true), "buyics: no successful SCICSBuyResult");
+                ensure!(charged, "buyics: no CHARGED (type 9) mail");
+                ensure!(
+                    commercial == Some(1),
+                    "buyics: SCCountUnreadMail's commercial counter is not 1"
                 );
             }
             "aucpost" => {
