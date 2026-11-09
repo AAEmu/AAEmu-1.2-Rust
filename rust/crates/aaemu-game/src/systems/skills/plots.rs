@@ -32,6 +32,10 @@ use super::types::{CastAction, PlotObject, RelationState, SkillTargetRelation};
 #[path = "plot_aoe_tests.rs"]
 mod aoe_tests;
 
+#[cfg(test)]
+#[path = "plot_cast_tests.rs"]
+mod cast_tests;
+
 /// The mutable part of `PlotState`.
 #[derive(Debug, Default)]
 pub struct PlotStateInner {

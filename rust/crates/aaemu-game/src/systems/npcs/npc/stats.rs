@@ -529,3 +529,7 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stats_real_data_tests.rs"]
+mod real_data_tests;
