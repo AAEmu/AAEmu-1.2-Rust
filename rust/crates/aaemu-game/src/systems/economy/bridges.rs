@@ -1810,14 +1810,7 @@ impl ItemSkillHooks for EconomyForSkills {
         source_slot: u32,
         target_item_id: u64,
         target_slot: u32,
-        armor: Option<bool>,
-        npc_template_id: Option<u32>,
     ) -> bool {
-        let kind = match armor {
-            None => super::renew::EnchantKind::Renew,
-            Some(false) => super::renew::EnchantKind::Weapon,
-            Some(true) => super::renew::EnchantKind::Armor,
-        };
         super::renew::renew_equipment(
             server,
             player,
@@ -1826,7 +1819,22 @@ impl ItemSkillHooks for EconomyForSkills {
             source_slot,
             target_item_id,
             target_slot,
-            kind,
+        )
+    }
+
+    fn physical_enchant(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        item_id: u64,
+        armor: bool,
+        npc_template_id: Option<u32>,
+    ) -> bool {
+        super::renew::physical_enchant(
+            server,
+            player,
+            item_id,
+            armor,
             npc_template_id,
             &mut SharedRandom,
         )

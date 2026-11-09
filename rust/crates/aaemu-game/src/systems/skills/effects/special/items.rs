@@ -350,30 +350,7 @@ pub fn dyeing(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
 /// `RenewEquipment` (57): the source item is the base equipment and the target item the
 /// material (`FUN_397cca90`). Stage 1 only validates and logs the outcome (`IT2-STAGE2`).
 pub fn renew_equipment(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
-    run_renew_effect(server, args, v, "RenewEquipment", None);
-}
-
-/// `PhysicalEnchantWeapon` (20) / `PhysicalEnchantArmor` (21): same pair predicate, plus the
-/// enchanter's `physical_enchant_abilities` row and its `success_ratio` roll. Stage 1 never
-/// changes an item (`IT2-STAGE2`).
-pub fn physical_enchant(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4], armor: bool) {
-    let name = if armor {
-        "PhysicalEnchantArmor"
-    } else {
-        "PhysicalEnchantWeapon"
-    };
-    run_renew_effect(server, args, v, name, Some(armor));
-}
-
-/// Shared body of 20 / 21 / 57: read the two item operands exactly as `FUN_394e92d0` does and
-/// hand them to the economy hook. A wrong operand type is the client's `0xce` toast.
-fn run_renew_effect(
-    server: &GameServer,
-    args: &EffectArgs<'_>,
-    v: [i32; 4],
-    name: &str,
-    armor: Option<bool>,
-) {
+    let name = "RenewEquipment";
     log_values(args, name, v);
     let Some(p) = player_caster(args) else {
         tracing::error!("Special effects: {name} caster is not a Character (InvalidCastException)");
@@ -397,7 +374,6 @@ fn run_renew_effect(
         cancel_skill(args, name);
         return;
     };
-    let npc_template_id = npc_template_of(args);
     if !server.systems.skills.ext.items().renew_equipment(
         server,
         p,
@@ -406,6 +382,40 @@ fn run_renew_effect(
         source_slot,
         target_item_id,
         target_slot,
+    ) {
+        cancel_skill(args, name);
+    }
+}
+
+/// `PhysicalEnchantWeapon` (20) / `PhysicalEnchantArmor` (21): one item enchanted at an NPC
+/// (ui_texts 1428-1463), read from the cast's `SkillCastItemTarget`; the caster is the player
+/// (the skill is a common skill, not an item use). Stage 1 rolls the enchanter's
+/// `physical_enchant_abilities` row and never changes an item (`IT2-STAGE2`).
+pub fn physical_enchant(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4], armor: bool) {
+    let name = if armor {
+        "PhysicalEnchantArmor"
+    } else {
+        "PhysicalEnchantWeapon"
+    };
+    log_values(args, name, v);
+    let Some(p) = player_caster(args) else {
+        tracing::error!("Special effects: {name} caster is not a Character (InvalidCastException)");
+        return;
+    };
+    // The enchanted item is the cast target; unlike renew the caster carries no `SkillItem`.
+    let Some(item_id) = item_target(&args.target_caster) else {
+        tracing::error!(
+            "Special effects: {name} targetObj is not a SkillCastItemTarget (InvalidCastException)"
+        );
+        send_error(p, error::NOT_READY);
+        cancel_skill(args, name);
+        return;
+    };
+    let npc_template_id = npc_template_of(args);
+    if !server.systems.skills.ext.items().physical_enchant(
+        server,
+        p,
+        item_id,
         armor,
         npc_template_id,
     ) {

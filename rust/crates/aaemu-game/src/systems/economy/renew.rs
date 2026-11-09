@@ -14,11 +14,20 @@
 //! * `physical_enchant_abilities(id, npc_id, armor, enchant_level, min_friendship,
 //!   success_ratio)` is loaded by `LoadPhysicalEnchantAbilityDescs` and attached to each NPC
 //!   (`FUN_396ce260`, `npc_id` -> the NPC's list).
+//! * Physical enchant is a **single-item** cast, not a renew pair: skills 10521 / 10522
+//!   (`기본강화-무기` / `기본강화-방어구`) have `target_type_id 9` (Item), and the NPC dialog
+//!   texts (ui_texts 1428-1463) describe one item, money and archium, with a 1x / 2x / 4x
+//!   archium choice. They are ordinary common skills (auto-learn, no learn requirement,
+//!   ability 0), so the client sends a plain `CSStartSkill` (caster = the player,
+//!   target = `SkillCastItemTarget`) - not the renew `SkillItem` + target pair. The renew pair
+//!   predicate is therefore not applied to 20 / 21.
 //!
 //! The 1.2 client and data do not say what a success does to the items (consumption,
-//! transformation, cost); that is stage 2 and needs a capture (`IT2-STAGE2`). Stage 1 therefore
-//! validates, checks the enchanter's row, rolls `success_ratio` and logs the outcome without
-//! mutating any item.
+//! transformation, cost); that is stage 2 and needs a capture (`IT2-STAGE2`). The money /
+//! archium formula, the multiplier effect, the great-success chance and where "enchant
+//! durability" is stored are also capture-blocked (`IT2-COST`). Stage 1 therefore validates,
+//! checks the enchanter's row, rolls `success_ratio` and logs the outcome without mutating any
+//! item.
 
 use std::collections::HashMap;
 
@@ -91,33 +100,12 @@ impl RenewData {
     }
 }
 
-/// Which special effect reached this module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnchantKind {
-    /// `RenewEquipment` (57).
-    Renew,
-    /// `PhysicalEnchantWeapon` (20).
-    Weapon,
-    /// `PhysicalEnchantArmor` (21).
-    Armor,
-}
-
-impl EnchantKind {
-    /// The `physical_enchant_abilities.armor` flag (`None` for Renew, which has no table row).
-    pub fn armor_flag(self) -> Option<bool> {
-        match self {
-            EnchantKind::Renew => None,
-            EnchantKind::Weapon => Some(false),
-            EnchantKind::Armor => Some(true),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            EnchantKind::Renew => "RenewEquipment",
-            EnchantKind::Weapon => "PhysicalEnchantWeapon",
-            EnchantKind::Armor => "PhysicalEnchantArmor",
-        }
+/// The `PhysicalEnchantWeapon` (20) / `PhysicalEnchantArmor` (21) effect name for logs.
+fn physical_enchant_name(armor: bool) -> &'static str {
+    if armor {
+        "PhysicalEnchantArmor"
+    } else {
+        "PhysicalEnchantWeapon"
     }
 }
 
@@ -188,7 +176,7 @@ fn enchanter_template_id(
         .map(|n| n.data().unit.template_id)
 }
 
-/// Stage 1 of `RenewEquipment` / `PhysicalEnchant*`.
+/// Stage 1 of `RenewEquipment` (57).
 ///
 /// `source_slot` / `target_slot` are the bag slot indices the client put in the `SkillItem`
 /// and `SkillCastItemTarget` (the client converts them from its 1-based UI slots). Returns
@@ -202,9 +190,6 @@ pub fn renew_equipment(
     source_slot: u32,
     target_item_id: u64,
     target_slot: u32,
-    kind: EnchantKind,
-    npc_template_id: Option<u32>,
-    rng: &mut dyn LootRng,
 ) -> bool {
     let inv = Inv::of(player);
     let bag = inv.bag();
@@ -219,8 +204,7 @@ pub fn renew_equipment(
     // `FUN_394a95b0`: both 0-based bag indices must be inside the bag (toast 0x14).
     if source_slot >= bag_size.max(0) as u32 || target_slot >= bag_size.max(0) as u32 {
         tracing::warn!(
-            "{}: {} operand slot out of range (source {source_slot}, target {target_slot}, bag {bag_size})",
-            kind.name(),
+            "RenewEquipment: {} operand slot out of range (source {source_slot}, target {target_slot}, bag {bag_size})",
             player.data().unit.name
         );
         reject(player, error_message::MONEY_LOCKED);
@@ -233,16 +217,14 @@ pub fn renew_equipment(
         inv.holder_of_any(source_item_id).is_some() && inv.holder_of_any(target_item_id).is_some();
     if !exists {
         tracing::warn!(
-            "{}: operand item missing (source {source_item_id}, target {target_item_id})",
-            kind.name()
+            "RenewEquipment: operand item missing (source {source_item_id}, target {target_item_id})"
         );
         reject(player, error_message::NOT_ENOUGH_ITEM);
         return false;
     }
     if source.is_none() || target.is_none() {
         tracing::warn!(
-            "{}: operand item is not in the bag (source {source_item_id}, target {target_item_id})",
-            kind.name()
+            "RenewEquipment: operand item is not in the bag (source {source_item_id}, target {target_item_id})"
         );
         reject(player, error_message::NOT_READY);
         return false;
@@ -253,8 +235,7 @@ pub fn renew_equipment(
         || !target_at_slot.is_some_and(|i| i.id == target_item_id)
     {
         tracing::warn!(
-            "{}: operand item missing at its slot (source {source_item_id}, target {target_item_id})",
-            kind.name()
+            "RenewEquipment: operand item missing at its slot (source {source_item_id}, target {target_item_id})"
         );
         reject(player, error_message::NOT_ENOUGH_ITEM);
         return false;
@@ -268,8 +249,7 @@ pub fn renew_equipment(
         data.template(target.template_id),
     ) else {
         tracing::warn!(
-            "{}: operand template missing (source {}, target {})",
-            kind.name(),
+            "RenewEquipment: operand template missing (source {}, target {})",
             source.template_id,
             target.template_id
         );
@@ -280,8 +260,7 @@ pub fn renew_equipment(
     // invalid item.
     if source.template_id != source_template_id {
         tracing::warn!(
-            "{}: source template mismatch ({} != {source_template_id})",
-            kind.name(),
+            "RenewEquipment: source template mismatch ({} != {source_template_id})",
             source.template_id
         );
         reject(player, error_message::NOT_ENOUGH_ITEM);
@@ -290,49 +269,79 @@ pub fn renew_equipment(
     // `FUN_397cca90` (toast 1).
     if !renewable_pair(data, source_template, target_template) {
         tracing::info!(
-            "{}: pair {} / {} is not renewable",
-            kind.name(),
+            "RenewEquipment: pair {} / {} is not renewable",
             source.template_id,
             target.template_id
         );
         reject(player, error_message::INTERNAL_ERROR);
         return false;
     }
-    let Some(armor) = kind.armor_flag() else {
-        // `RenewEquipment` (57): the pair is valid; the result needs a capture.
-        tracing::info!(
-            "renew: outcome pending capture (IT2-STAGE2) kind=renew source={source_item_id}/{} target={target_item_id}/{}",
-            source.template_id,
-            target.template_id
-        );
-        return true;
+    // The pair is valid; the result needs a capture.
+    tracing::info!(
+        "renew: outcome pending capture (IT2-STAGE2) kind=renew source={source_item_id}/{} target={target_item_id}/{}",
+        source.template_id,
+        target.template_id
+    );
+    true
+}
+
+/// Stage 1 of `PhysicalEnchantWeapon` (20) / `PhysicalEnchantArmor` (21).
+///
+/// One item, taken from the cast's `SkillCastItemTarget`: the 1.2 dialog enchants a single
+/// weapon / armor for money and archium (ui_texts 1428-1463), not the renew
+/// base-equipment + material pair. The dialog selects a bag item (`X2Item.IsEnchantable` takes
+/// a bag slot); the item is looked up in the bag by id. Returns whether the cast may continue;
+/// on `false` an `SCErrorMsg` was sent and the skill cancelled.
+///
+/// **HARD RULE: stage 2 (any change to the item: grade, durability, destruction) must not land
+/// until the `IT2-COST` rule (money + archium, the 1x / 2x / 4x multiplier) is settled and
+/// enforced; otherwise it is a free enchant.**
+pub fn physical_enchant(
+    server: &GameServer,
+    player: &PlayerRef,
+    item_id: u64,
+    armor: bool,
+    npc_template_id: Option<u32>,
+    rng: &mut dyn LootRng,
+) -> bool {
+    let name = physical_enchant_name(armor);
+    let inv = Inv::of(player);
+    let Some(item) = inv
+        .bag()
+        .lock()
+        .expect("container poisoned")
+        .get_item_by_id(item_id)
+        .cloned()
+    else {
+        tracing::warn!("{name}: operand item missing from the bag ({item_id})");
+        reject(player, error_message::NOT_ENOUGH_ITEM);
+        return false;
     };
-    // The arm's operand class must match the skill: 20 weapon, 21 armor.
+    let data = &server.game_data.items;
+    let Some(template) = data.template(item.template_id) else {
+        tracing::warn!("{name}: operand template missing ({})", item.template_id);
+        reject(player, error_message::NOT_ENOUGH_ITEM);
+        return false;
+    };
+    // ui_text 1436 `invalid_item_msg`: the dialog enchants weapons (20) or armor (21) only.
     let arm_matches = matches!(
-        (kind, &source_template.kind),
-        (EnchantKind::Weapon, TemplateKind::Weapon(_))
-            | (EnchantKind::Armor, TemplateKind::Armor(_))
+        (armor, &template.kind),
+        (false, TemplateKind::Weapon(_)) | (true, TemplateKind::Armor(_))
     );
     if !arm_matches {
         tracing::info!(
-            "{}: source {} is not the class of this enchant arm",
-            kind.name(),
-            source.template_id
+            "{name}: item {} is not the class of this enchant arm",
+            item.template_id
         );
-        reject(player, error_message::INTERNAL_ERROR);
+        reject(player, error_message::ITEM_CANNOT_USE);
         return false;
     }
     let Some(npc_id) = enchanter_template_id(server, player, npc_template_id) else {
-        tracing::info!(
-            "{}: no enchanter NPC for {} / {}",
-            kind.name(),
-            source.template_id,
-            target.template_id
-        );
+        tracing::info!("{name}: no enchanter NPC for item {item_id}");
         reject(player, error_message::NOT_READY);
         return false;
     };
-    let level = enchant_step(&source) + 1;
+    let level = enchant_step(&item) + 1;
     let Some(ability) = server
         .game_data
         .systems
@@ -340,9 +349,9 @@ pub fn renew_equipment(
         .renew
         .ability(npc_id, armor, level)
     else {
+        // ui_text 1438 `lack_ability_msg`: the NPC's ladder ends above this step.
         tracing::info!(
-            "{}: no physical_enchant_abilities row for npc {npc_id} armor {armor} level {level}",
-            kind.name()
+            "{name}: no physical_enchant_abilities row for npc {npc_id} armor {armor} level {level}"
         );
         reject(player, error_message::NOT_READY);
         return false;
@@ -351,21 +360,25 @@ pub fn renew_equipment(
     // row above 0 can never be met. EVIDENCED data + column, rule INFERRED (`IT2-FRIENDSHIP`).
     if ability.min_friendship > 0 {
         tracing::info!(
-            "{}: npc {npc_id} level {level} needs friendship {} (unobtainable in 1.2)",
-            kind.name(),
+            "{name}: npc {npc_id} level {level} needs friendship {} (unobtainable in 1.2)",
             ability.min_friendship
         );
         reject(player, error_message::NOT_ENOUGH_FRIENDSHIP);
         return false;
     }
+    // ui_texts 1442-1446: the dialog needs money + archium and offers a 1x / 2x / 4x archium
+    // investment. The formula is not in the 1.2 data (`skills.cost` 0, no reagents for 10521 /
+    // 10522), so the money / archium gate stays capture-pending (`IT2-COST`): log only, never
+    // refuse on a guessed cost.
+    tracing::info!(
+        "{name}: money/archium gate capture-pending (IT2-COST) npc={npc_id} level={level} item={item_id}"
+    );
     let roll = rng.next_below(100);
     let success = roll < ability.success_ratio;
     tracing::info!(
-        "{}: outcome pending capture (IT2-STAGE2) npc={npc_id} level={level} ratio={} roll={roll} success={success} source={source_item_id}/{} target={target_item_id}/{}",
-        kind.name(),
+        "{name}: outcome pending capture (IT2-STAGE2) npc={npc_id} level={level} ratio={} roll={roll} success={success} item={item_id}/{}",
         ability.success_ratio,
-        source.template_id,
-        target.template_id
+        item.template_id
     );
     true
 }
