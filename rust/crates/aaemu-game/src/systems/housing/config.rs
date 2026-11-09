@@ -141,6 +141,26 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub siege_declare_obstacle_radius: f32,
+    /// Max HP of the Archeum Lodestone (`housings.guard_tower_setting_id != 0`) over the
+    /// template's `housings.hp`. Missing follows the era profile
+    /// (`ServerProfile::lodestone_max_hp`: `EuAuroria` 4,100,000, the other profiles keep the
+    /// `r208022` 1,000,000). `Housing.LodestoneMaxHp`.
+    #[serde(
+        rename = "lodestonemaxhp",
+        default,
+        deserialize_with = "crate::config::lenient_option"
+    )]
+    pub lodestone_max_hp: Option<i32>,
+    /// Max HP of the Nuian/Harani Defense Tower (`housings` 119 / 169) over the template's
+    /// `housings.hp`. Missing follows the era profile
+    /// (`ServerProfile::defense_tower_max_hp`: `EuAuroria` 1,500,000, the other profiles keep
+    /// the `r208022` 600,000). `Housing.DefenseTowerMaxHp`.
+    #[serde(
+        rename = "defensetowermaxhp",
+        default,
+        deserialize_with = "crate::config::lenient_option"
+    )]
+    pub defense_tower_max_hp: Option<i32>,
 }
 
 fn default_abandoned_house_hits_to_break() -> u32 {
@@ -171,7 +191,27 @@ impl Default for HousingConfig {
             siege_declare_peace_check: false,
             siege_declare_peace_margin: 0.0,
             siege_declare_obstacle_radius: default_siege_declare_obstacle_radius(),
+            lodestone_max_hp: None,
+            defense_tower_max_hp: None,
         }
+    }
+}
+
+impl HousingConfig {
+    /// The Archeum Lodestone max HP: an explicit `Housing.LodestoneMaxHp` wins, otherwise
+    /// the era profile decides, otherwise `None` keeps the template's `housings.hp`.
+    pub fn effective_lodestone_max_hp(&self, profile: crate::config::ServerProfile) -> Option<i32> {
+        self.lodestone_max_hp.or_else(|| profile.lodestone_max_hp())
+    }
+
+    /// The Defense Tower max HP: an explicit `Housing.DefenseTowerMaxHp` wins, otherwise the
+    /// era profile decides, otherwise `None` keeps the template's `housings.hp`.
+    pub fn effective_defense_tower_max_hp(
+        &self,
+        profile: crate::config::ServerProfile,
+    ) -> Option<i32> {
+        self.defense_tower_max_hp
+            .or_else(|| profile.defense_tower_max_hp())
     }
 }
 
@@ -331,5 +371,61 @@ mod tests {
         }))
         .unwrap();
         assert!(config.siege_calendar_enabled());
+    }
+
+    #[test]
+    fn castle_structure_hp_follows_the_profile_and_an_explicit_value_wins() {
+        use crate::config::ServerProfile;
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.lodestone_max_hp, None);
+        assert_eq!(
+            default
+                .housing
+                .effective_lodestone_max_hp(ServerProfile::EuAuroria),
+            Some(4_100_000)
+        );
+        assert_eq!(
+            default
+                .housing
+                .effective_defense_tower_max_hp(ServerProfile::EuAuroria),
+            Some(1_500_000)
+        );
+
+        let kr = crate::config::AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "Kr12" }
+        }))
+        .unwrap();
+        assert_eq!(
+            kr.housing.effective_lodestone_max_hp(ServerProfile::Kr12),
+            None
+        );
+        assert_eq!(
+            kr.housing
+                .effective_defense_tower_max_hp(ServerProfile::Kr12),
+            None
+        );
+
+        for value in [serde_json::json!(3_500_000), serde_json::json!("3500000")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "World": { "Profile": "Kr12" },
+                "Housing": {
+                    "LodestoneMaxHp": value,
+                    "DefenseTowerMaxHp": "1200000"
+                }
+            }))
+            .unwrap();
+            assert_eq!(
+                config
+                    .housing
+                    .effective_lodestone_max_hp(ServerProfile::Kr12),
+                Some(3_500_000)
+            );
+            assert_eq!(
+                config
+                    .housing
+                    .effective_defense_tower_max_hp(ServerProfile::Kr12),
+                Some(1_200_000)
+            );
+        }
     }
 }

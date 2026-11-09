@@ -378,6 +378,34 @@ fn faction_or_null(server: &GameServer, faction_id: u32) -> u32 {
 // Create / CurrentStep / AddBuildAction
 // ---------------------------------------------------------------------------------------------
 
+/// The two castle "Defense Tower" designs of the 1.2 `housings` table: 119 "Nuian Defense Tower"
+/// and its Harani counterpart 169 (`housings.category_id = 2`, `hp = 600000`). The ids are data,
+/// not policy: the era profile only changes their max HP.
+pub const DEFENSE_TOWER_TEMPLATES: [u32; 2] = [119, 169];
+
+/// The effective max HP of a castle structure: the era profile's value when it has one,
+/// otherwise the template's `housings.hp`.
+///
+/// The Archeum Lodestone is the house with a `guard_tower_setting_id` (the 12 `housings` rows
+/// 139 and 184-192, 271, 272). `ServerProfile::lodestone_max_hp` and
+/// `ServerProfile::defense_tower_max_hp` carry the Trion Auroria-era values that are not in the
+/// `r208022` data (`HousingConfig` keys override them). Ordinary houses always keep their
+/// template value.
+pub fn structure_max_hp(server: &GameServer, template: &HousingTemplate) -> i32 {
+    let profile = server.config.world.profile;
+    let era = if template.guard_tower_setting_id != 0 {
+        server.config.housing.effective_lodestone_max_hp(profile)
+    } else if DEFENSE_TOWER_TEMPLATES.contains(&template.id) {
+        server
+            .config
+            .housing
+            .effective_defense_tower_max_hp(profile)
+    } else {
+        None
+    };
+    era.unwrap_or(template.hp)
+}
+
 /// `HousingManager.Create(templateId, factionId, worldInstance, objectId, tlId)`: a new house
 /// with the untouchable buff (not spawned, not registered). `None` for an unknown template.
 pub fn create(
@@ -420,8 +448,9 @@ pub fn create(
     h.all_action = template.all_actions();
     h.build_step_count = template.build_steps.len() as i32;
     h.tax = template.tax_or_zero() as i32;
-    h.unit.max_hp = template.hp;
-    h.unit.hp = template.hp;
+    let max_hp = structure_max_hp(server, template);
+    h.unit.max_hp = max_hp;
+    h.unit.hp = max_hp;
     h.unit.model_id = template.main_model_id;
     // Force public on always public properties on create
     if template.always_public {

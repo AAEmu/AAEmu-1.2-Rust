@@ -7,7 +7,7 @@
 use super::manager::{self, HousingManager};
 use crate::data::GameData;
 use crate::server::GameServer;
-use crate::test_support::test_server_with;
+use crate::test_support::{test_server_with, test_server_with_config};
 use crate::world::HouseRef;
 
 fn test_housing_data() -> GameData {
@@ -345,7 +345,7 @@ async fn claimed_lodestone_first_hit_snapshot_uses_full_health_until_authority_c
         let row = manager::save_row_for(&server, &house).unwrap();
         let batch = authority.prepare_save();
         assert_eq!(batch.rows[0].state.tower_hp, None);
-        assert_eq!(row.hp, Some(1000)); // None restores the authoritative maximum
+        // None restores the authoritative maximum (the era-profile value in `EuAuroria`).
         assert_eq!(row.hp, Some(house.data().unit.max_hp));
         assert_eq!(house.data().unit.hp, 700);
         assert!(house.data().is_dirty);
@@ -1860,4 +1860,112 @@ async fn real_damage_survives_a_step_change() {
     house.data().unit.hp = 700; // damaged below the step maximum
     manager::add_build_action(&server, &house);
     assert_eq!(house.data().unit.hp, 1075); // 700 + (1125 - 750)
+}
+
+/// The castle structure max HP the Nov 2014 (`EuAuroria`) video shows, next to the `r208022`
+/// template values and the ordinary-house case. `Kr12` keeps the data values; an explicit
+/// `Housing.LodestoneMaxHp` / `Housing.DefenseTowerMaxHp` wins over the profile.
+fn castle_structure_data() -> GameData {
+    let mut data = GameData::empty();
+    for (id, guard_tower_setting_id, hp) in [
+        (139, 1, 1_000_000), // Archeum Lodestone
+        (184, 2, 1_000_000), // ... further lodestones
+        (119, 0, 600_000),   // Nuian Defense Tower
+        (169, 0, 600_000),   // Harani Defense Tower
+        (120, 0, 600_000),   // Nuian Castle Tower (not the video's target)
+        (300, 0, 1_000),     // ordinary house
+    ] {
+        data.systems
+            .housing
+            .add_template(super::data::HousingTemplate {
+                id,
+                guard_tower_setting_id,
+                hp,
+                ..Default::default()
+            });
+    }
+    for id in [
+        manager::BUFF_UNTOUCHABLE,
+        manager::BUFF_REMOVAL_DEBUFF,
+        manager::BUFF_BURNING_HOUSE,
+    ] {
+        data.systems
+            .skills
+            .add_buff(crate::systems::skills::data::BuffTemplate {
+                id,
+                max_stack: 1,
+                system: true,
+                ..Default::default()
+            });
+    }
+    data
+}
+
+fn create_max_hp(server: &GameServer, template_id: u32) -> i32 {
+    let world = server.world.world(0).unwrap();
+    manager::create(server, template_id, 0, &world, 0, 0)
+        .expect("template")
+        .data()
+        .unit
+        .max_hp
+}
+
+#[tokio::test]
+async fn era_profiles_scale_castle_structures_and_leave_ordinary_houses_alone() {
+    use crate::config::{AppConfig, ServerProfile};
+    let server = test_server_with(castle_structure_data());
+    assert_eq!(create_max_hp(&server, 139), 4_100_000);
+    assert_eq!(create_max_hp(&server, 184), 4_100_000);
+    assert_eq!(create_max_hp(&server, 119), 1_500_000);
+    assert_eq!(create_max_hp(&server, 169), 1_500_000);
+    // A castle tower the video does not identify keeps the 1.2 data value.
+    assert_eq!(create_max_hp(&server, 120), 600_000);
+    assert_eq!(create_max_hp(&server, 300), 1_000);
+
+    let kr = AppConfig {
+        world: crate::config::WorldConfig {
+            profile: ServerProfile::Kr12,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server = test_server_with_config(castle_structure_data(), kr);
+    assert_eq!(create_max_hp(&server, 139), 1_000_000);
+    assert_eq!(create_max_hp(&server, 119), 600_000);
+
+    let mut explicit = AppConfig::default();
+    explicit.housing.lodestone_max_hp = Some(2_000_000);
+    explicit.housing.defense_tower_max_hp = Some(900_000);
+    let server = test_server_with_config(castle_structure_data(), explicit);
+    assert_eq!(create_max_hp(&server, 139), 2_000_000);
+    assert_eq!(create_max_hp(&server, 119), 900_000);
+}
+
+/// The shipped `r208022` `housings.hp` rows the video comparison rests on. The era values are
+/// profile policy, not data, so they are pinned in `config.rs`; this pins the data side and the
+/// value our server derives from it for `Kr12`.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_compact_castle_structure_hp_matches_the_recorded_data_values() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let data_dir = std::path::Path::new(&path).parent().unwrap();
+    let bindings = super::data::load_housing_bindings(data_dir);
+    let d = super::data::HousingData::load_from(&conn, "en_us", bindings).expect("housing data");
+    let hp = |id: u32| d.template(id).expect("template").hp;
+    assert_eq!(hp(139), 1_000_000, "Archeum Lodestone (video: 4,100,000)");
+    assert_eq!(hp(119), 600_000, "Nuian Defense Tower (video: 1,500,000)");
+    assert_eq!(hp(169), 600_000, "Harani Defense Tower");
+    assert_eq!(hp(120), 600_000, "Nuian Castle Tower");
+    for id in [139, 184, 185, 186, 187, 188, 189, 190, 191, 192, 271, 272] {
+        assert_ne!(
+            d.template(id).expect("lodestone").guard_tower_setting_id,
+            0,
+            "lodestone {id}"
+        );
+    }
 }

@@ -405,11 +405,12 @@ fn do_die_after_claim(
     if let Some(p) = victim.as_player() {
         // Escalating respawn timer — runs BEFORE base.DoDie sends SCUnitDeathPacket
         compute_death_wait_time(server, p, now_ms());
-        // `no_penalty` NPCs (guards, siege cannons, battlefield pets): the 1.2 column the
-        // port never read. The killing blow's attribution is the killer object (a skill / DoT
-        // passes its original caster), so a lethal DoT of such an NPC counts.
-        (lost_exp, durability_loss) =
-            character_death_losses(server, p, !killer_is_no_penalty(server, killer));
+        // Death penalties are PvE-only in 1.2. A kill by a `no_penalty` NPC (guards, siege
+        // cannons, battlefield pets) and a PvP kill (another player, or a mate / slave owned by
+        // one) take no exp and no death durability loss; the killing blow's attribution is the
+        // killer object (a skill / DoT passes its original caster), so a lethal DoT counts.
+        let penalty = !killer_is_no_penalty(server, killer) && !killer_is_player(server, p, killer);
+        (lost_exp, durability_loss) = character_death_losses(server, p, penalty);
         wait = p.data().rez_wait_duration;
     }
     if let Some(n) = victim.as_npc() {
@@ -577,6 +578,18 @@ fn killer_is_no_penalty(server: &GameServer, killer: Option<&WorldObject>) -> bo
         .is_some_and(|t| t.no_penalty)
 }
 
+/// True when the killing object is another player or a unit owned by one (mate / slave, e.g. a
+/// manned siege cannon). 1.2 "death by player" is a PvP death and carries no exp or death
+/// durability loss (see [`character_death_losses`]); a self-inflicted death (`killer` is the
+/// victim, e.g. fall damage) is not PvP and keeps the penalty.
+fn killer_is_player(server: &GameServer, victim: &PlayerRef, killer: Option<&WorldObject>) -> bool {
+    let Some(killer) = killer else {
+        return false;
+    };
+    super::relation::owner_character(server, killer)
+        .is_some_and(|owner| owner.character_id != victim.character_id)
+}
+
 /// The player's zone is a zone group whose dominion siege is running (`SiegeState::active_at`).
 fn player_died_in_active_siege(server: &GameServer, zone_key: u32, now: i64) -> bool {
     let group = server
@@ -677,9 +690,14 @@ pub fn compute_death_wait_time(server: &GameServer, p: &PlayerRef, now: i64) {
 /// the current level, 80 % of it recoverable; a free resurrection offer below
 /// `MinimumExpLossLevel`). Returns `(LastExpLoss, LastDurabilityLoss)`.
 ///
-/// `penalty == false` for a kill by a `no_penalty` NPC: exp and durability are not touched, but
+/// `penalty == false` for a PvE-exempt death: a kill by a `no_penalty` NPC or by a player
+/// (PvP, including that player's mate / slave). Exp and durability are then not touched, but
 /// the stale resurrection offer is still cleared and the free resurrection below the minimum
-/// level is still offered.
+/// level is still offered. 1.2 "death by player" has no negative effects beyond the respawn
+/// timer (fandom Combat "Death by Player"; Ars Technica 2014-09 "If you die in PvP, you lose
+/// 0 XP"; mmogah "no experience or item durability"; the 1.2 patch notes list the exp-loss
+/// exemptions only for PvE sources). The Nov 2014 siege death dialog agrees: "You lost 0 XP"
+/// (`video-evidence/siege-2014-11-30-ollo.md` §2.8, grade C).
 pub(super) fn character_death_losses(
     server: &GameServer,
     p: &PlayerRef,

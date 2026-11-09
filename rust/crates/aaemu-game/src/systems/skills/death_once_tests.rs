@@ -216,3 +216,121 @@ async fn concurrent_lethal_hits_kill_a_player_once() {
         assert_eq!(c.unit.hp, 0, "iteration {iteration}");
     }
 }
+
+/// A death at the hands of another player is PvP: 1.2 takes no exp and no death durability
+/// loss (fandom Combat "Death by Player"; Ars Technica 2014-09 "If you die in PvP, you lose
+/// 0 XP"; the Nov 2014 siege dialog "You lost 0 XP",
+/// `video-evidence/siege-2014-11-30-ollo.md` §2.8, grade C). The same rule covers a mate /
+/// slave of a player (a manned siege cannon). The direct NPC kill above keeps its 50 exp loss.
+#[tokio::test]
+async fn player_kills_lose_no_experience_or_durability() {
+    let server = Arc::new(test_server_with(npc_data()));
+    server.set_self();
+
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut character = test_character(1, "Victim", 100.0, 100.0);
+    character.unit.level = 20;
+    character.unit.hp = 100;
+    character.unit.max_hp = 100;
+    character.unit.mp = 50;
+    character.unit.max_mp = 50;
+    character.experience = 20_500;
+    let victim = spawn_player(&server, &client, character, 0x100);
+    let victim_obj = WorldObject::from(&victim);
+
+    let mut killer_client = TestClient::new(&server, 2, 1002);
+    let mut killer = test_character(2, "Killer", 103.0, 100.0);
+    killer.unit.level = 20;
+    let killer = spawn_player(&server, &killer_client, killer, 0x101);
+    killer_client.conn.active_char = Some(killer.clone());
+    let killer_obj = WorldObject::from(&killer);
+    client.drain();
+
+    for (label, attacker) in [
+        ("player", killer_obj.clone()),
+        ("player-owned slave", {
+            // A cannon / pet kind of unit: its owner is the killer player.
+            let mut slave = crate::models::slave::Slave::new(1, 100);
+            slave.unit.hp = 100;
+            slave.unit.max_hp = 100;
+            slave.summoner_obj_id = killer.obj_id;
+            let slave = crate::world::Entity::new(0x200, slave);
+            server
+                .world
+                .world(0)
+                .expect("world")
+                .spawn(&slave, &server.view_ctx());
+            WorldObject::from(&slave)
+        }),
+    ] {
+        victim.data().unit.hp = 100;
+        victim.data().experience = 20_500;
+        victim.data().recoverable_exp = 0;
+        crate::systems::skills::combat::post_update_current_hp(
+            &server,
+            &victim_obj,
+            Some(&victim_obj),
+            0,
+            100,
+            KillReason::Unknown,
+        );
+        client.drain();
+
+        crate::systems::skills::combat::do_die(
+            &server,
+            &victim_obj,
+            Some(&attacker),
+            KillReason::Damage,
+        );
+
+        let ops = client.drain_ops();
+        assert!(
+            ops.contains(&sc::SCUnitDeathPacket),
+            "{label}: death packet"
+        );
+        assert!(
+            !ops.contains(&sc::SCExpChangedPacket),
+            "{label}: PvP death must not report an exp change: {ops:x?}"
+        );
+        assert!(
+            !ops.contains(&sc::SCRecoverableExpPacket),
+            "{label}: PvP death must not report recoverable exp: {ops:x?}"
+        );
+        let c = victim.data();
+        assert_eq!(c.experience, 20_500, "{label}: no exp lost");
+        assert_eq!(c.recoverable_exp, 0, "{label}: nothing to recover");
+    }
+
+    // A self-inflicted death (fall damage passes the unit as its own attacker) is not PvP and
+    // keeps the ordinary PvE penalty.
+    victim.data().unit.hp = 100;
+    victim.data().experience = 20_500;
+    victim.data().recoverable_exp = 0;
+    crate::systems::skills::combat::post_update_current_hp(
+        &server,
+        &victim_obj,
+        Some(&victim_obj),
+        0,
+        100,
+        KillReason::Unknown,
+    );
+    client.drain();
+    crate::systems::skills::combat::do_die(
+        &server,
+        &victim_obj,
+        Some(&victim_obj),
+        KillReason::Damage,
+    );
+    let ops = client.drain_ops();
+    let c = victim.data();
+    assert_eq!(c.experience, 20_450, "self kill: GetExpLoss(20, 0.05) = 50");
+    assert_eq!(c.recoverable_exp, 40);
+    assert!(
+        ops.contains(&sc::SCExpChangedPacket),
+        "self kill: exp change reported"
+    );
+    assert!(
+        ops.contains(&sc::SCRecoverableExpPacket),
+        "self kill: recoverable exp reported"
+    );
+}
