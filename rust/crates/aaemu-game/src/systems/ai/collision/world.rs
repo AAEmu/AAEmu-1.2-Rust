@@ -265,6 +265,9 @@ pub struct CellLoad {
     pub visareas: bool,
     /// The voxel meshes (caves) of `visareas.dat` and `object.dat`.
     pub voxels: bool,
+    /// The type-2 vegetation records of `object.dat` (not in `vegetation.dat`); needs
+    /// `vegetation`.
+    pub object_vegetation: bool,
 }
 
 /// Reads a cell's object files and resolves the models (no world lock held). The visareas and
@@ -283,6 +286,7 @@ pub fn prepare_cell(
         vegetation: with_vegetation,
         visareas: with_brushes,
         voxels: with_brushes,
+        object_vegetation: with_brushes && with_vegetation,
     };
     prepare_cell_with(files, models, world_name, groups, cell, &load)
 }
@@ -432,10 +436,18 @@ pub fn prepare_cell_with(
             }
         }
     }
-    if load.voxels {
+    let object_veg = load.vegetation && load.object_vegetation;
+    if load.voxels || object_veg {
         if let Some(d) = files.read(&format!("{dir}/object.dat")) {
-            match cells::read_object_dat_voxels(&d) {
-                Ok(list) => add_voxels(&mut c, &list, origin),
+            match cells::read_object_dat(&d) {
+                Ok(f) => {
+                    if load.voxels {
+                        add_voxels(&mut c, &f.voxels, origin);
+                    }
+                    if object_veg {
+                        add_vegetation(&mut c, models, groups, &f.vegetation, origin);
+                    }
+                }
                 Err(e) => tracing::warn!("collision: {dir}/object.dat: {e}"),
             }
         }

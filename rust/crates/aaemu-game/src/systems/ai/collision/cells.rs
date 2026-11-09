@@ -269,7 +269,7 @@ pub fn read_vegetation_groups(xml: &str) -> Vec<VegetationGroup> {
 // visareas.dat / object.dat: the cell octrees (`COctreeNode::LoadCellObject`)
 // ---------------------------------------------------------------------------------------------
 
-/// A failure of the strict octree readers ([`read_visareas`], [`read_object_dat_voxels`]).
+/// A failure of the strict octree readers ([`read_visareas`], [`read_object_dat`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OctreeError {
     #[error("truncated at {0}")]
@@ -547,15 +547,24 @@ impl ObjectSink for VisAreaFile {
     }
 }
 
-/// Only the voxels of an `object.dat`.
-#[derive(Default)]
-struct VoxelSink(Vec<VoxelRecord>);
+/// What [`read_object_dat`] returns of an `object.dat`: its voxel meshes and the type-2
+/// vegetation records (cell-local positions). Its type-1 brushes duplicate `brush.dat` and are
+/// not returned.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObjectDatFile {
+    pub voxels: Vec<VoxelRecord>,
+    pub vegetation: Vec<VegetationRecord>,
+}
 
-impl ObjectSink for VoxelSink {
+impl ObjectSink for ObjectDatFile {
     fn brush(&mut self, _: &[u8]) {}
-    fn vegetation(&mut self, _: &[u8]) {}
+    fn vegetation(&mut self, rec: &[u8]) {
+        if let Some(v) = vegetation_record(rec, Vec3::ZERO) {
+            self.vegetation.push(v);
+        }
+    }
     fn voxel(&mut self, rec: VoxelRecord) {
-        self.0.push(rec);
+        self.voxels.push(rec);
     }
 }
 
@@ -620,20 +629,22 @@ pub fn read_visareas(d: &[u8]) -> Result<VisAreaFile, OctreeError> {
     Ok(out)
 }
 
-/// The voxel objects of a `cells/X_Y/client/object.dat`: the same name tables and octree
-/// grammar as `visareas.dat` (its brushes duplicate `brush.dat` and are not returned). Strict:
-/// the octree must end at the end of the file.
-pub fn read_object_dat_voxels(d: &[u8]) -> Result<Vec<VoxelRecord>, OctreeError> {
+/// The voxel and vegetation objects of a `cells/X_Y/client/object.dat`: the same name tables
+/// and octree grammar as `visareas.dat` (its brushes duplicate `brush.dat` and are not
+/// returned; other record types are walked and skipped). Its vegetation records are not in
+/// `vegetation.dat` (same 64-byte layout, cell-local). Strict: the octree must end at the end
+/// of the file.
+pub fn read_object_dat(d: &[u8]) -> Result<ObjectDatFile, OctreeError> {
     let mut c = Cursor { d, pos: 0 };
     read_name_tables(&mut c)?;
-    let mut sink = VoxelSink::default();
+    let mut sink = ObjectDatFile::default();
     if c.pos < d.len() {
         walk_node(&mut c, &mut sink, 0)?;
     }
     if c.pos != d.len() {
         return Err(OctreeError::Leftover(d.len() - c.pos));
     }
-    Ok(sink.0)
+    Ok(sink)
 }
 
 #[cfg(test)]
@@ -897,14 +908,37 @@ mod tests {
         root.extend_from_slice(&node(&vox));
         let mut d = name_tables("a.cgf");
         d.extend_from_slice(&root);
-        let list = read_object_dat_voxels(&d).expect("parse");
+        let list = read_object_dat(&d).expect("parse").voxels;
         assert_eq!(list.len(), 1);
         assert!(list[0].inflate().is_none());
         d.push(0);
-        assert!(matches!(
-            read_object_dat_voxels(&d),
-            Err(OctreeError::Leftover(1))
-        ));
+        assert!(matches!(read_object_dat(&d), Err(OctreeError::Leftover(1))));
+    }
+
+    #[test]
+    fn object_dat_returns_vegetation_and_skips_brushes() {
+        let mut veg = vec![0u8; 64];
+        for (j, v) in [10.0f32, 20.0, 30.0, 1.5].iter().enumerate() {
+            veg[39 + 4 * j..43 + 4 * j].copy_from_slice(&v.to_le_bytes());
+        }
+        veg[55..57].copy_from_slice(&77u16.to_le_bytes());
+        let mut objs = Vec::new();
+        put_u32(&mut objs, er_type::BRUSH);
+        objs.extend_from_slice(&[0u8; 128]);
+        put_u32(&mut objs, er_type::VEGETATION);
+        objs.extend_from_slice(&veg);
+        put_u32(&mut objs, er_type::VEGETATION);
+        objs.extend_from_slice(&veg);
+        let mut d = name_tables("a.cgf");
+        d.extend_from_slice(&node(&objs));
+        let f = read_object_dat(&d).expect("parse");
+        assert!(f.voxels.is_empty());
+        assert_eq!(f.vegetation.len(), 2);
+        assert_eq!(f.vegetation[0].group, 77);
+        assert_eq!(f.vegetation[0].pos, Vec3::new(10.0, 20.0, 30.0));
+        assert_eq!(f.vegetation[0].scale, 1.5);
+        // a truncated vegetation record is an error, not a silent drop
+        assert!(read_object_dat(&d[..d.len() - 10]).is_err());
     }
 
     #[test]

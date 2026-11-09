@@ -303,6 +303,7 @@ pub fn load_cell(server: &GameServer, pw: &PhysWorld, cell: (i32, i32)) {
             vegetation: level == GeometryLevel::Full,
             visareas: server.config.physics.vis_areas,
             voxels: server.config.physics.voxels,
+            object_vegetation: server.config.physics.object_vegetation,
         };
         world::prepare_cell_with(&files, &models, &pw.world_name, &groups, cell, &load)
     };

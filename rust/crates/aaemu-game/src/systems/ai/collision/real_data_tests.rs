@@ -936,8 +936,8 @@ fn real_visareas_parse_every_file() {
                 }
                 if let Some(d) = e.files.read_file(&format!("{dir}/object.dat")) {
                     files += 1;
-                    match cells::read_object_dat_voxels(&d) {
-                        Ok(list) => voxels += list.len(),
+                    match cells::read_object_dat(&d) {
+                        Ok(f) => voxels += f.voxels.len(),
                         Err(err) => bad.push(format!("{dir}/object.dat: {err}")),
                     }
                 }
@@ -1379,4 +1379,125 @@ async fn real_walk_check_rates() {
         t1.elapsed().as_micros() as f32 / checks.max(1) as f32
     );
     println!("most blocked routes: {:?}", &worst[..worst.len().min(15)]);
+}
+
+/// The type-2 vegetation records of `object.dat` (not in `vegetation.dat`): per world how many
+/// there are, how many resolve to a colliding model, how many duplicate a `vegetation.dat`
+/// instance of the same cell (same group, position rounded to 0.1 m), and what loading them adds
+/// to the collision instances of main_world.
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_object_dat_vegetation -- --ignored --nocapture`
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_object_dat_vegetation_audit() {
+    let Some(e) = env() else { return };
+    let files = Files::Client(e.files.clone());
+    let models = ModelCache::new(Arc::new(files.clone()));
+    let worlds = WorldTemplates::load(&e.files, &app_path()).expect("world templates");
+    let mut total_records = 0usize;
+    for t in worlds.templates() {
+        let xml = e
+            .files
+            .read_file(&format!("game/worlds/{}/vegetation.xml", t.name))
+            .map(|b| crate::data::client_files::decode_text(&b))
+            .unwrap_or_default();
+        let groups: HashMap<u16, cells::VegetationGroup> = cells::read_vegetation_groups(&xml)
+            .into_iter()
+            .map(|g| (g.id, g))
+            .collect();
+        let (mut records, mut colliding, mut dups, mut bad) = (0usize, 0usize, 0usize, 0usize);
+        let (mut base_inst, mut with_inst) = (0usize, 0usize);
+        let full = t.name == "main_world";
+        for cx in 0..t.cell_x {
+            for cy in 0..t.cell_y {
+                let dir = format!("game/worlds/{}/cells/{cx:03}_{cy:03}/client", t.name);
+                let mut load = super::world::CellLoad {
+                    brushes: true,
+                    vegetation: true,
+                    visareas: true,
+                    voxels: true,
+                    object_vegetation: false,
+                };
+                let mut cell_base = 0;
+                if full {
+                    cell_base = super::world::prepare_cell_with(
+                        &files,
+                        &models,
+                        &t.name,
+                        &groups,
+                        (cx, cy),
+                        &load,
+                    )
+                    .instances
+                    .len();
+                    base_inst += cell_base;
+                    with_inst += cell_base;
+                }
+                let Some(d) = e.files.read_file(&format!("{dir}/object.dat")) else {
+                    continue;
+                };
+                let Ok(f) = cells::read_object_dat(&d) else {
+                    bad += 1;
+                    continue;
+                };
+                if f.vegetation.is_empty() {
+                    continue;
+                }
+                let key = |v: &cells::VegetationRecord| {
+                    (
+                        v.group,
+                        (v.pos.x * 10.0).round() as i32,
+                        (v.pos.y * 10.0).round() as i32,
+                        (v.pos.z * 10.0).round() as i32,
+                    )
+                };
+                let existing: std::collections::HashSet<_> = e
+                    .files
+                    .read_file(&format!("{dir}/vegetation.dat"))
+                    .and_then(|b| cells::read_vegetation(&b).ok())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(key)
+                    .collect();
+                for v in &f.vegetation {
+                    records += 1;
+                    if existing.contains(&key(v)) {
+                        dups += 1;
+                    }
+                    let m = groups
+                        .get(&v.group)
+                        .filter(|g| !g.model.is_empty())
+                        .and_then(|g| models.get(&g.model));
+                    if m.is_some_and(|m| m.collides()) {
+                        colliding += 1;
+                    }
+                }
+                if full {
+                    load.object_vegetation = true;
+                    let b = super::world::prepare_cell_with(
+                        &files,
+                        &models,
+                        &t.name,
+                        &groups,
+                        (cx, cy),
+                        &load,
+                    );
+                    with_inst += b.instances.len() - cell_base;
+                }
+            }
+        }
+        total_records += records;
+        println!(
+            "{}: object.dat vegetation {records}, colliding {colliding}, duplicates of vegetation.dat {dups}, unparsable files {bad}",
+            t.name
+        );
+        if full {
+            println!(
+                "main_world: instances {base_inst} -> {with_inst} (+{}, {:.1}%), StaticInstance {} bytes",
+                with_inst - base_inst,
+                (with_inst - base_inst) as f64 * 100.0 / base_inst.max(1) as f64,
+                std::mem::size_of::<super::world::StaticInstance>()
+            );
+        }
+    }
+    assert!(total_records > 0);
 }
