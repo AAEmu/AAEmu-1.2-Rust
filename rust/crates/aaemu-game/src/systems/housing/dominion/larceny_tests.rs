@@ -54,6 +54,10 @@ const LOOT_FUNC: u32 = 901;
 const RECOVER_FUNC: u32 = 902;
 const RECOVER_SKILL: u32 = 11361;
 const SKILL: u32 = 4242;
+const UPROOT_GROUP: u32 = 50;
+const UPROOT_NEXT_GROUP: u32 = 51;
+const UPROOT_FUNC: u32 = 903;
+const UPROOT_SKILL: u32 = crate::systems::housing::dominion::larceny::UPROOT_SKILL_ID;
 
 const DEFENDER_FACTION: u32 = 101;
 const OPPONENT_FACTION: u32 = 102;
@@ -114,6 +118,17 @@ fn use_func(group: u32) -> DoodadFunc {
         func_type: "DoodadFuncUse".into(),
         next_phase: USE_NEXT_GROUP as i32,
         skill_id: SKILL,
+        ..DoodadFunc::default()
+    }
+}
+
+fn uproot_func(group: u32) -> DoodadFunc {
+    DoodadFunc {
+        group_id: group,
+        func_id: UPROOT_FUNC,
+        func_type: "DoodadFuncUse".into(),
+        next_phase: UPROOT_NEXT_GROUP as i32,
+        skill_id: UPROOT_SKILL,
         ..DoodadFunc::default()
     }
 }
@@ -203,6 +218,9 @@ fn game_data() -> GameData {
         .funcs_by_groups
         .insert(USE_GROUP, vec![use_func(USE_GROUP)]);
     doodad
+        .funcs_by_groups
+        .insert(UPROOT_GROUP, vec![uproot_func(UPROOT_GROUP)]);
+    doodad
         .func_templates
         .entry("DoodadFuncUse")
         .or_default()
@@ -210,6 +228,17 @@ fn game_data() -> GameData {
             USE_FUNC,
             FuncTemplate::Use(DoodadFuncUse {
                 id: USE_FUNC,
+                skill_id: 0,
+            }),
+        );
+    doodad
+        .func_templates
+        .entry("DoodadFuncUse")
+        .or_default()
+        .insert(
+            UPROOT_FUNC,
+            FuncTemplate::Use(DoodadFuncUse {
+                id: UPROOT_FUNC,
                 skill_id: 0,
             }),
         );
@@ -411,6 +440,10 @@ impl Harness {
         self.doodad(CROP_TEMPLATE, USE_GROUP)
     }
 
+    fn uproot_crop(&self) -> DoodadRef {
+        self.doodad(CROP_TEMPLATE, UPROOT_GROUP)
+    }
+
     fn herb(&self) -> DoodadRef {
         self.doodad(HERB_TEMPLATE, USE_GROUP)
     }
@@ -457,10 +490,15 @@ impl Harness {
 
     /// `Doodad.Use` through the real phase machine with the harvest skill.
     fn use_path(&self, doodad: &DoodadRef, player: &PlayerRef) {
+        self.use_path_skill(doodad, player, SKILL);
+    }
+
+    /// `Doodad.Use` with an explicit started skill (uproot / water).
+    fn use_path_skill(&self, doodad: &DoodadRef, player: &PlayerRef, skill: u32) {
         let world = self.server.world.world(0).unwrap();
         let ctx = DoodadCtx::new(&self.server, world, doodad.clone());
         let caster = WorldObject::from(player);
-        phase::use_doodad(&ctx, Some(&caster), SKILL, 0);
+        phase::use_doodad(&ctx, Some(&caster), skill, 0);
     }
 
     /// The skill-less `CSLootOpenBag` / `LootPack` path (`Doodad.Use(..., 0)`).
@@ -474,6 +512,10 @@ impl Harness {
 
 fn advanced(doodad: &DoodadRef) -> bool {
     doodad.data().func_group_id == USE_NEXT_GROUP
+}
+
+fn uprooted(doodad: &DoodadRef) -> bool {
+    doodad.data().func_group_id == UPROOT_NEXT_GROUP
 }
 
 #[tokio::test]
@@ -500,6 +542,35 @@ async fn opponent_harvests_a_garden_crop_only_while_the_lodestone_is_held() {
     assert!(
         !advanced(&after),
         "the window closes when the lodestone is retaken"
+    );
+}
+
+#[tokio::test]
+async fn the_window_grants_produce_but_not_the_uproot() {
+    let h = Harness::new(SiegeLarcenyMode::Opponents, false);
+    h.mark_tower_destroyed();
+
+    // The uproot row is perm 0, i.e. public by data; outside a house it would be usable by
+    // anyone. On this house garden the window is the only thing that could grant it, and it
+    // must not ("loot any crops", not pull them out).
+    let crop = h.uproot_crop();
+    h.use_path_skill(&crop, &h.opponent, UPROOT_SKILL);
+    assert!(
+        !uprooted(&crop),
+        "the window must not grant the uproot to an opponent"
+    );
+
+    // The owner's own house permission still allows it.
+    let own = h.uproot_crop();
+    h.use_path_skill(&own, &h.defender, UPROOT_SKILL);
+    assert!(uprooted(&own), "the owner may uproot their own crop");
+
+    // The same opponent still harvests the produce of a normal crop in the window.
+    let produce = h.crop();
+    h.use_path(&produce, &h.opponent);
+    assert!(
+        advanced(&produce),
+        "the window still grants the produce harvest"
     );
 }
 

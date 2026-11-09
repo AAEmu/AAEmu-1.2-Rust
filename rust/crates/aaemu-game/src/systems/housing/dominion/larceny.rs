@@ -26,6 +26,9 @@
 //! * `DoodadFuncRecoverItem` stays behind the normal house permission: the window grants use /
 //!   harvest of produce, not picking up the installation itself (barns, racks, coops, young
 //!   animals and flower beds are recoverable items only for the owner / a permitted player);
+//! * the window never grants the uproot (`skills.id` 13789, `is_removal_skill`): it takes a
+//!   crop to a `DoodadFuncFinal` phase, while the text grants "loot" of the produce only. The
+//!   owner and normally permitted players keep the uproot;
 //! * evidence is suppressed inside the window by default (`Housing.SiegeLarcenyCrime = false`);
 //!   an explicit `true` turns the normal footprint evidence back on.
 //!
@@ -151,14 +154,29 @@ pub fn window_allows_house_doodad(
     }
 }
 
+/// `skills.id` of 뽑아내기 ("uproot"): the `DoodadFuncUse` row that takes a planted crop to its
+/// `DoodadFuncFinal` phase. The window grants the produce ("loot any crops, animals, or trees"),
+/// not removal of the plant, so it never substitutes the house permission for this skill. The
+/// skill is data, not a server convention: 98 `doodad_func_groups` bind it (water 13625 is the
+/// public counterpart) and the one perm-2 row is a QA crop (`doodad_almighties` 901).
+pub const UPROOT_SKILL_ID: u32 = 13789;
+
+/// Whether the started skill removes the doodad (uproot).
+pub fn is_removal_skill(skill_id: u32) -> bool {
+    skill_id == UPROOT_SKILL_ID
+}
+
 /// The shared `Doodad.Use` gate for house-attached doodads. Only the farm groups named by the
 /// larceny text are touched here, so houses, furniture, doors and coffers keep their own
 /// permission checks. A covered doodad is allowed by the normal house permission or by the
-/// window; every other doodad is allowed here and gated by its own func.
+/// window; every other doodad is allowed here and gated by its own func. The window does not
+/// grant the uproot (`started_skill_id`), and the func's own `perm` is still checked by the
+/// caller.
 pub fn house_doodad_use_allowed(
     server: &GameServer,
     doodad: &DoodadRef,
     player: &PlayerRef,
+    started_skill_id: u32,
 ) -> bool {
     let Some(house) = house_of_doodad(server, doodad) else {
         return true;
@@ -167,7 +185,8 @@ pub fn house_doodad_use_allowed(
         return true;
     }
     crate::systems::housing::allowed_to_interact(server, &house, player)
-        || window_allows_house_doodad(server, &house, doodad, player)
+        || (!is_removal_skill(started_skill_id)
+            && window_allows_house_doodad(server, &house, doodad, player))
 }
 
 /// Whether the normal theft evidence must be suppressed for this doodad. `false` (the default

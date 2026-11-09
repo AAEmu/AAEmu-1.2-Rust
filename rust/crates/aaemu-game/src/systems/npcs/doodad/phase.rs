@@ -399,6 +399,31 @@ fn answer_busy_instance_door(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) 
     }
 }
 
+/// Refuses a func whose `doodad_funcs.perm_id` the player does not satisfy. The 1.2 client
+/// filters these rows out before it starts a skill (`FUN_393b3300`, see `permission.rs`), so a
+/// client that sends the skill directly must get the client's permission-denial error. The
+/// running cast is cancelled so its item / labor cost is refunded (the same shape as
+/// [`refuse_blocked_child_doodad`]). Returns true when the caller must stop.
+pub(crate) fn refuse_func_permission(
+    ctx: &DoodadCtx<'_>,
+    player: &PlayerRef,
+    func: &DoodadFunc,
+) -> bool {
+    if super::permission::allows_func(ctx.server, &ctx.world, &ctx.doodad, player, func) {
+        return false;
+    }
+    tracing::debug!(
+        "Use refused: doodad {} func {} perm {} denies {}",
+        ctx.doodad.obj_id,
+        func.func_key,
+        func.perm_id,
+        player.data().unit.name
+    );
+    player.send(error_msg(error_message::INTERACTION_PERMISSION_DENY));
+    funcs::skills_hook(ctx.server).cancel_skill(ctx.server, player);
+    true
+}
+
 /// `Doodad.Use(caster, startedSkillId, funcGroupId)`.
 pub fn use_doodad(
     ctx: &DoodadCtx<'_>,
@@ -441,16 +466,19 @@ pub fn use_doodad(
         return;
     }
 
+    let player = caster.as_player();
+
     // Siege larceny (ui 3334): crops, livestock and trees on private land are usable while the
     // territory's lodestone is held. This is the shared `Doodad.Use` funnel, so the skill-bound
     // `DoodadFuncUse` path and the skill-less `LootItem` / `LootPack` / `Cutdowning` path both
     // pass it. Only the farm groups are gated here; houses, furniture, doors and coffers keep
-    // their own permission checks.
-    if let Some(player) = caster.as_player() {
+    // their own permission checks. The window grants produce only, never the uproot.
+    if let Some(player) = player {
         if !crate::systems::housing::dominion::larceny::house_doodad_use_allowed(
             server,
             &ctx.doodad,
             player,
+            started_skill_id,
         ) {
             player.send(error_msg(error_message::INTERACTION_PERMISSION_DENY));
             return;
@@ -491,6 +519,13 @@ pub fn use_doodad(
                     "DoodadFuncLootItem" | "DoodadFuncLootPack" | "DoodadFuncCutdowning"
                 )
             }) {
+                // The client builds this list with the func's `perm` filter (`FUN_393bd290`);
+                // a direct `CSLootOpenBag` must not run a row the client would have hidden.
+                if let Some(player) = player {
+                    if refuse_func_permission(ctx, player, f) {
+                        return;
+                    }
+                }
                 if do_func(ctx, Some(caster), started_skill_id, Some(f)) {
                     ctx.doodad.data().phase.list_group_id.clear();
                     return;
@@ -512,18 +547,28 @@ pub fn use_doodad(
                     set_func_group_id(server, &ctx.doodad, next);
                 }
             }
-        } else if do_func(
-            ctx,
-            Some(caster),
-            started_skill_id,
-            func_with_skill.as_ref(),
-        ) {
-            // FuncGroupId is the current phase, func.NextPhase or OverridePhase
-            let fg = ctx.doodad.data().func_group_id;
-            if fg != current {
-                do_change_phase(ctx, Some(caster), fg as i32);
+        } else {
+            // `FUN_393b3300` filters a skill interaction by the matched func's `perm` before
+            // the client starts it; a client that sends `CSStartSkill` itself bypasses that,
+            // so the same rule is enforced here, before the func runs or changes the phase.
+            if let (Some(player), Some(func)) = (player, func_with_skill.as_ref()) {
+                if refuse_func_permission(ctx, player, func) {
+                    return;
+                }
             }
-            return;
+            if do_func(
+                ctx,
+                Some(caster),
+                started_skill_id,
+                func_with_skill.as_ref(),
+            ) {
+                // FuncGroupId is the current phase, func.NextPhase or OverridePhase
+                let fg = ctx.doodad.data().func_group_id;
+                if fg != current {
+                    do_change_phase(ctx, Some(caster), fg as i32);
+                }
+                return;
+            }
         }
 
         theft_evidence(ctx, caster, started_skill_id);

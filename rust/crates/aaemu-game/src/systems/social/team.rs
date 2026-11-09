@@ -2005,6 +2005,14 @@ fn refresh_all_team_member_obj_ids(team: &Team) {
     }
 }
 
+#[cfg(test)]
+impl TeamManager {
+    /// Inserts an active team (tests that need membership without the invitation flow).
+    pub(crate) fn insert_team_for_test(&self, team: Team) {
+        self.lock().teams.insert(team.id, team);
+    }
+}
+
 /// `WorldObject` of a player (helpers for other subsystems).
 pub fn as_object(p: &PlayerRef) -> WorldObject {
     WorldObject::from(p)

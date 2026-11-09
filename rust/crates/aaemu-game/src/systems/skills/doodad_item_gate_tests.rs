@@ -367,7 +367,17 @@ fn fixture_with_data(data: GameData) -> Fixture {
     );
     client.conn.active_char = Some(player.clone());
     let instance = server.world.world(0).unwrap();
-    let rack = manager::create(&server, &instance, RACK_OBJ, RACK, None, true).expect("rack");
+    // The real backpack storage box is placed by a player (`CSCreateDoodad`), and its funcs
+    // carry perm 5 (owner or raid): the player must be its character owner, as in the live flow.
+    let rack = manager::create(
+        &server,
+        &instance,
+        RACK_OBJ,
+        RACK,
+        Some(&WorldObject::from(&player)),
+        true,
+    )
+    .expect("rack");
     rack.data().transform.set_xyz(101.0, 100.0, 100.0);
     instance.spawn(&rack, &server.view_ctx());
     client.drain();
