@@ -621,6 +621,14 @@ pub async fn update_remaining_stock_sql(
     }
 }
 
+/// `characters.name` uses a case- and accent-insensitive collation (`SQL/aaemu_game.sql`), so the
+/// SQL `name = ?` can return a different spelling ("Elan" for "Élan"). The online lookup
+/// (`WorldManager::character_by_name`, `world/mod.rs`) compares lowercased names; apply the same
+/// rule to the offline row so a gift cannot go to a different character.
+fn same_character_name(typed: &str, stored: &str) -> bool {
+    typed.to_lowercase() == stored.to_lowercase()
+}
+
 /// The gift receiver's `characters` row (offline gifts). `deleted` is a signed tinyint, so it is
 /// decoded as `i64`; a pending deletion is either `deleted != 0` or `delete_request_time` set
 /// (`CharacterManager.IsCharacterPendingDeletion`).
@@ -637,10 +645,15 @@ pub async fn find_character_by_name_sql(
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else { return Ok(None) };
+    let stored_name: String = row.try_get("name")?;
+    // The collation matched a different spelling: treat it as an unknown name (623).
+    if !same_character_name(name, &stored_name) {
+        return Ok(None);
+    }
     let deleted = db::int(&row, "deleted")? != 0;
     Ok(Some(CharacterRow {
         id: db::int(&row, "id")? as u32,
-        name: row.try_get("name")?,
+        name: stored_name,
         account_id: db::int(&row, "account_id")? as u32,
         deleted,
         delete_requested: deleted || db::is_set(db::dt(&row, "delete_request_time")),
@@ -1016,6 +1029,9 @@ pub async fn resolve_receiver(server: &GameServer, name: &str) -> ReceiverLookup
         .find_character_by_name(server, name)
         .await
     {
+        // Stand-in stores (and a future SQL caller that does not filter) must not accept a
+        // collation match with a different spelling either.
+        Some(row) if !same_character_name(name, &row.name) => ReceiverLookup::NameNotFound,
         Some(row) if row.deleted || row.delete_requested => ReceiverLookup::DeleteRequested,
         Some(row) if row.transfer_requested => ReceiverLookup::TransferRequested,
         Some(row) => ReceiverLookup::Found(BuyTarget {
@@ -1064,6 +1080,20 @@ pub async fn execute_buy_for(
 ) {
     let mgr = manager(server);
     let _purchase = mgr.purchases.lock().await;
+    // The packet handler checked the receiver before the 1 s delay and outside this lock;
+    // re-resolve it now so a deletion or transfer that started in between is refused before
+    // any charge. `resolve_receiver` also re-applies the exact-name rule.
+    let checked = match resolve_receiver(server, &target.name).await {
+        ReceiverLookup::Found(target) => target,
+        refused => {
+            let error = refused
+                .refusal_error()
+                .unwrap_or(error_message::INGAME_SHOP_FIND_CHARACTER_NAME_FAIL);
+            fail(buyer, error, buy_mode, &target.name);
+            return;
+        }
+    };
+    let target = &checked;
     let store = mgr.store();
     let (buyer_name, buyer_id, buyer_account, buyer_level, buyer_money) = {
         let c = buyer.data();

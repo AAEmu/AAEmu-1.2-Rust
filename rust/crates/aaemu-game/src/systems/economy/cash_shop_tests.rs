@@ -151,10 +151,29 @@ impl CashShopDb for MemDb {
             .lock()
             .unwrap()
             .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .find(|c| db_ci_fold(&c.name) == db_ci_fold(name))
             .cloned();
         Box::pin(async move { found })
     }
+}
+
+/// `utf8_general_ci` stand-in for the test store: case- and accent-insensitive, like the real
+/// `characters` collation (`SQL/aaemu_game.sql`), so a query can return another spelling.
+fn db_ci_fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ý' | 'ÿ' => 'y',
+            other => other,
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -1373,6 +1392,70 @@ async fn generic_gift_failure_uses_the_gift_fail_text() {
             ),
             (sc::SCICSBuyResultPacket, result_body(false, "Alice", 0)),
         ]
+    );
+}
+
+#[tokio::test]
+async fn gift_to_accent_different_name_is_refused() {
+    // `characters.name` is accent-insensitive, so the SQL `name = ?` returns "Élan" for a gift to
+    // "Elan"; the receiver must still match the typed name like the online lookup, or the gift
+    // would be charged and mailed to a different character.
+    let mut s = shop();
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+    s.db.characters
+        .lock()
+        .unwrap()
+        .push(offline_character(12, "Élan", 1003, false, false, false));
+    run::<CSICSBuyGoodPacket>(&mut s.w, 0, &buy_good_body("Elan"));
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (
+                sc::SCErrorMsgPacket,
+                error_body(error_message::INGAME_SHOP_FIND_CHARACTER_NAME_FAIL)
+            ),
+            (sc::SCICSBuyResultPacket, result_body(false, "Elan", 0)),
+        ]
+    );
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001], (100, 0));
+    assert!(s.mail.0.lock().unwrap().is_empty());
+    assert!(s.db.sales.lock().unwrap().is_empty());
+    assert_eq!(
+        s.w.server.systems.economy.cash_shop.state().shop_items[&200].remaining,
+        3
+    );
+}
+
+#[tokio::test]
+async fn gift_refused_when_receiver_becomes_delete_pending_before_delivery() {
+    // The packet handler resolves the receiver, then the buy task runs after 1 s. A deletion
+    // request that lands in between must be re-read before any charge or mail.
+    let mut s = shop();
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+    s.db.characters
+        .lock()
+        .unwrap()
+        .push(offline_character(7, "Carol", 1003, false, false, false));
+    run::<CSICSBuyGoodPacket>(&mut s.w, 0, &buy_good_body("Carol"));
+    assert!(s.w.a.drain().is_empty(), "the buy task runs after 1 s");
+    s.db.characters.lock().unwrap()[0].delete_requested = true;
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (
+                sc::SCErrorMsgPacket,
+                error_body(error_message::INGAME_SHOP_CHRACTER_DELETE_REQUESTED)
+            ),
+            (sc::SCICSBuyResultPacket, result_body(false, "Carol", 0)),
+        ]
+    );
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001], (100, 0));
+    assert!(s.mail.0.lock().unwrap().is_empty());
+    assert!(s.db.sales.lock().unwrap().is_empty());
+    assert_eq!(
+        s.w.server.systems.economy.cash_shop.state().shop_items[&200].remaining,
+        3
     );
 }
 
