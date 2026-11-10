@@ -3204,6 +3204,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   ignored real-data test casting the shipped scroll items 32568 / 34018). `core-character#8`
   is closed: every skill-based offer path goes through the one effect handler and the packet
   stays as the 1.2 reader expects (no 10.x `inPlaceRemainCnt` / `reason`).
+* systems::skills (corpse self-casts, 2026-11-09): the C# `Skill.Use` never checked
+  `target_alive`; our `validation::check` does, which refused every `OnDeath` np_skill aimed at
+  the dying NPC itself (`source_dead 't'` + `target_alive 't'`, e.g. Muddy Sarracenia's 11478
+  that summons the quest 817 "Invasive Species" seed doodad 1082). A `source_dead` skill whose
+  target is its own caster is no longer held to `target_alive`; other dead targets still are.
+  Test: `cast_validation_tests::a_corpse_casting_a_source_dead_skill_on_itself_is_not_refused_as_a_dead_target`.
 * systems::skills: `Character.DoDie` is complete (exp / durability loss, escalating respawn timer,
   PvP honor / assists / kill counts, War-zone honor loss, `DropTradePackToFloor`). The PvP
   damage / heal histories are lists of (character id, unix ms) in `skill_char`.

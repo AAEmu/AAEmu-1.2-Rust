@@ -139,6 +139,50 @@ async fn rejected_source_and_target_states_do_not_mutate_cast_resources() {
     }
 }
 
+/// Quest 817 "Invasive Species": Muddy Sarracenia (NPC 5009) casts the `OnDeath` np_skill 11478
+/// (`source_dead 't'`, `source_alive 'f'`, `target_alive 't'`) at its own corpse. The corpse
+/// target is not held to `target_alive`; any other dead target still is.
+#[tokio::test]
+async fn a_corpse_casting_a_source_dead_skill_on_itself_is_not_refused_as_a_dead_target() {
+    let template = SkillTemplate {
+        source_dead: true,
+        source_alive: false,
+        target_alive: true,
+        ..super::tests::skill_template(11478)
+    };
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    player.data().unit.hp = 0;
+    npc.data().unit.hp = 0;
+    let skill = SkillRun::new(Arc::new(template), 1);
+    let me = WorldObject::from(&player);
+    let own = use_skill(
+        &server,
+        &skill,
+        &me,
+        SkillCaster::Unit(player.obj_id),
+        &mut SkillCastTarget::Unit(player.obj_id),
+        Some(SkillObject::None),
+        true,
+    );
+    assert_eq!(own.0, 0, "the corpse's own cast must pass validation");
+    let other = use_skill(
+        &server,
+        &skill,
+        &me,
+        SkillCaster::Unit(player.obj_id),
+        &mut SkillCastTarget::Unit(npc.obj_id),
+        Some(SkillObject::None),
+        true,
+    );
+    assert_eq!(
+        other,
+        (
+            super::unit_reqs::skill_result_for_key("skill_target_died"),
+            0
+        )
+    );
+}
+
 /// 1.2 client `FUN_390b43b0` (`x2game.dll.c:148796`): a water-only target is accepted when
 /// water exists 0.1 m below the point and the terrain floor under it is at least 1 m below
 /// the surface. The client casts these skills at the surface (`FUN_3942b060`,
