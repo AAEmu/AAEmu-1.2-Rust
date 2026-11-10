@@ -78,6 +78,10 @@ pub struct Buff {
     /// the lifecycle steps and refreshes keep the duration at 0 and the fixed tick damage is
     /// not divided over the template duration. Set by the abandoned-house burning buff.
     pub permanent: bool,
+    /// The archery close-range multiplier (`formulas` row 12) of the skill that applied this
+    /// buff, captured at the application distance; its damage ticks use it instead of the
+    /// distance at tick time. Runtime only: a buff restored from the database starts at 1.0.
+    pub range_damage_multiplier: f32,
 }
 
 /// `EffectState`.
@@ -118,6 +122,7 @@ impl Buff {
             task_gen: 0,
             exit_replace: false,
             session_only: false,
+            range_damage_multiplier: 1.0,
             permanent: false,
         }
     }

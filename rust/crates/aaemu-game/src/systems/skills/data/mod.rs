@@ -13,7 +13,7 @@ mod buff_game_data_tests;
 #[cfg(test)]
 mod skill_manager_tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use rusqlite::Connection;
@@ -98,6 +98,10 @@ pub struct Data {
     pub skill_tags: HashMap<u32, Vec<u32>>,
     /// `_taggedSkills`.
     pub tagged_skills: HashMap<u32, Vec<u32>>,
+    /// Skills whose 1.2 `skills.desc` tooltip names the close-range damage penalty of
+    /// `formulas` row 12 (`damage_multiplier_by_range`); built from the en_us text at load
+    /// (see [`load_range_penalty_skills`]).
+    pub range_penalty_skills: HashSet<u32>,
     /// Authored zone-group restrictions and item tag membership.
     pub zone_rules: zone_rules::ZoneRules,
     /// `_skillModifiers` by owner id.
@@ -533,6 +537,7 @@ impl Data {
         d.ability_change_cost = misc::load_content_config(conn, 39)?;
         d.resurrection_waiting_times = load_resurrection_waiting_times(conn)?;
         d.blocked_child_doodads = load_blocked_child_doodads(conn)?;
+        d.range_penalty_skills = load_range_penalty_skills(conn);
         Ok(d)
     }
 
@@ -818,6 +823,79 @@ pub(super) fn load_blocked_child_doodads(
         doodads.sort_unstable();
     }
     Ok(blocked)
+}
+
+/// Skill descriptions whose 1.2 tooltip names the close-range damage penalty of `formulas`
+/// row 12 (`damage_multiplier_by_range`, `if_negative(range - 8, 0.8, 1)` = x0.8 under 8 m).
+///
+/// The 1.2 `damage_effects` table has no flag that scopes the row, but the client tooltips
+/// name the skills: "Damage ... reduced/decreases -20% if [the] target is within 8m"
+/// (Endless Arrows, Charged Bolt, Piercing Shot, Toxic Shot, Venom Arrow, Shoot Arrow, Mark,
+/// Stalker's Mark; `D:/aaemu-audits/gap-audit-2026-11-10/verify-claims-10x.md` 11a). The set
+/// is built from the en_us descriptions at load instead of a hard-coded id list, so a data
+/// change is followed; the count and the ids are logged once.
+pub(super) fn load_range_penalty_skills(conn: &Connection) -> HashSet<u32> {
+    let mut skills = HashSet::new();
+    let sql = "SELECT idx, en_us FROM localized_texts \
+               WHERE tbl_name = 'skills' AND tbl_column_name = 'desc' \
+                 AND en_us LIKE '%20%%' AND en_us LIKE '%within%8m%'";
+    let loaded = for_each_row(conn, sql, [], |r| {
+        let idx = r.i64("idx")?;
+        let normalized = strip_tooltip_markup(&r.string_or("en_us", "")?).to_lowercase();
+        if normalized.contains("20%")
+            && normalized.contains("within 8m")
+            && (normalized.contains("reduc") || normalized.contains("decreas"))
+        {
+            if let Ok(id) = u32::try_from(idx) {
+                skills.insert(id);
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) = loaded {
+        // An older compact without the table / column only narrows the set.
+        tracing::warn!("range penalty skill descriptions not loaded: {e}");
+        return HashSet::new();
+    }
+    let mut ids: Vec<u32> = skills.iter().copied().collect();
+    ids.sort_unstable();
+    if ids.is_empty() {
+        tracing::warn!(
+            "no skill description matches the close-range (-20% within 8 m) damage penalty; the formulas row 12 multiplier is inert"
+        );
+    } else {
+        tracing::info!(
+            count = ids.len(),
+            skills = ?ids,
+            "skills with the close-range (-20% within 8 m) damage penalty"
+        );
+    }
+    skills
+}
+
+/// Removes the 1.2 client tooltip colour markup (`|cAARRGGBB` ... `|r`) so the text can be
+/// matched without depending on the colour codes the data puts around "-20%" and "8m".
+fn strip_tooltip_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('|') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let bytes = after.as_bytes();
+        if let Some(after) = after.strip_prefix('r') {
+            rest = after;
+        } else if bytes.len() >= 9
+            && bytes[0] == b'c'
+            && bytes[1..9].iter().all(u8::is_ascii_hexdigit)
+        {
+            rest = &after[9..];
+        } else {
+            out.push('|');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The 1.2 loader (`395D17B0`) attaches each breaker tag to its `buff_id`, rather than

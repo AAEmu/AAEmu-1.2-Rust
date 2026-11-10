@@ -16,6 +16,7 @@ use super::super::data::effects::{
     RestoreManaEffect,
 };
 use super::super::data::{EffectKind, EffectTemplate, SkillControllerTemplate};
+use super::super::geometry;
 use super::super::geometry::Target;
 use super::super::packets::{
     CompressedGamePackets, SCAiAggroPacket, SCUnitDamagedPacket, SCUnitHealedPacket,
@@ -28,7 +29,7 @@ use super::super::types::{
     HealType, KillReason, RelationState, SkillCaster, SkillHitType,
 };
 use super::super::{broadcast, send_to_players};
-use super::{chance_succeeds, rand_float, rand_int, EffectArgs};
+use super::{chance_succeeds, rand_float, rand_int, EffectArgs, EffectSource};
 
 /// An effect nobody handles yet.
 pub fn unrouted_effect(
@@ -169,6 +170,74 @@ fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &Worl
     .into_iter()
     .collect();
     (formula.evaluate(&params) as f32).max(1.0)
+}
+
+/// `formulas` row 12 `damage_multiplier_by_range`: `if_negative(range - 8, 0.8, 1)`.
+///
+/// Only the archery skills whose 1.2 tooltip names the penalty are scaled
+/// (`Data::range_penalty_skills`, built from the skill descriptions at load; the 1.2
+/// `damage_effects` table has no flag that scopes the row). A direct hit evaluates the row at
+/// the hit's distance; a buff tick uses the value its buff captured when it was applied
+/// (`EffectSource::range_multiplier`) because the tooltip describes the shot, not the tick.
+/// A missing or broken row leaves the hit unchanged (a failed evaluation returns 0).
+fn range_damage_multiplier(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    source: &EffectSource,
+) -> f32 {
+    if let Some(stored) = source.range_multiplier {
+        return stored;
+    }
+    let Some(skill_id) = source
+        .skill()
+        .map(|s| s.template.id)
+        .or(source.source_skill_id)
+    else {
+        return 1.0;
+    };
+    range_multiplier_for_skill(server, caster, trg, skill_id)
+}
+
+/// The row-12 factor of `skill_id` at the caster-target distance. Also used when a buff is
+/// applied, to store the factor its damage ticks will use.
+pub(crate) fn range_multiplier_for_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    skill_id: u32,
+) -> f32 {
+    if !server
+        .game_data
+        .systems
+        .skills
+        .range_penalty_skills
+        .contains(&skill_id)
+    {
+        return 1.0;
+    }
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageMultiplierByRange)
+    else {
+        return 1.0;
+    };
+    // The same measure the server's skill-range check uses (`validation.rs`): 3D, edge to edge,
+    // with both actors' model radii subtracted.
+    let distance = geometry::distance_to(
+        server,
+        &Target::Obj(caster.clone()),
+        &Target::Obj(trg.clone()),
+        true,
+    );
+    let params: HashMap<&str, f64> = [("range", f64::from(distance))].into_iter().collect();
+    let multiplier = formula.evaluate(&params) as f32;
+    if multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    }
 }
 
 /// Damage reflection of a landed hit (`buffs.reflection_*`).
@@ -595,13 +664,15 @@ pub(super) fn damage_with_aoe(
     if caster.as_player().is_some() && trg.as_player().is_some() {
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
     }
-    // Player -> NPC level bonus (formulas row 20), next to the other flat damage multipliers.
-    // Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
-    // the weapon / level damage base. A non-fixed DoT row gets it like a direct hit; heals use
-    // `heal()` and never reach this function (compact `damage_effects` has no `Heal` type, so no
-    // damage-type guard is needed).
+    // Player -> NPC level bonus (formulas row 20) and the archery close-range penalty
+    // (formulas row 12), next to the other flat damage multipliers.
+    // Authored fixed values and percent-of-HP rows keep their exact value; the bonuses scale
+    // only the weapon / level damage base. A non-fixed DoT row gets them like a direct hit;
+    // heals use `heal()` and never reach this function (compact `damage_effects` has no `Heal`
+    // type, so no damage-type guard is needed).
     if !e.use_fixed_damage && !e.use_percent_damage {
         final_damage *= level_damage_multiplier(server, &caster, &trg);
+        final_damage *= range_damage_multiplier(server, &caster, &trg, &args.source);
     }
     let flex_bonus = (flexibility / 100) as f32;
     match hit_type {
@@ -1097,6 +1168,12 @@ pub fn buff_effect(server: &GameServer, e: &BuffEffect, args: &EffectArgs<'_>) {
         now_ms(),
     );
     b.ab_level = ab_level;
+    // A DoT belongs to the shot that applied it: capture the close-range factor now, so its
+    // ticks do not depend on where the target stands when they land.
+    if let (Some(caster), Some(skill)) = (args.caster.as_ref(), args.source.skill()) {
+        b.range_damage_multiplier =
+            range_multiplier_for_skill(server, caster, &target, skill.template.id);
+    }
     buffs::add_buff(server, &target, b, 0, 0);
     let relation = args.caster.as_ref().map_or(RelationState::Neutral, |c| {
         relation_to(server, &Target::Obj(c.clone()), &args.target)
