@@ -5556,6 +5556,29 @@ and in NPC wandering / buff remaining times.
   the_grant_is_client_visible_as_an_item_task}` and the command flow test
   `joining_hands_the_side_seal_and_the_end_of_the_siege_takes_it_back`; the grant and the
   reconcile removal were mutation-checked.
+* systems::housing (siege non-participant eviction, 2026-11-10): while a siege runs, a
+  character inside the siege area that is not on its roster is moved out. Evidence is the
+  owner's flow source (IGN 2014-09-26 "Castles"; Total ArcheAge 2014-11-20, grade C): "only
+  designated participants can enter" the perimeter and "those who do not qualify ... are
+  transported out of the siege perimeter when it begins". The 1.2 client texts contain no
+  separate warning before the removal (checked `ui_texts` for the siege keys), so the forced
+  `SCTeleportUnitPacket` carries the error in its error-message field: 446
+  `SIEGE_NOT_PARTICIPANT` (ui_texts 2505, the id the owner quote calls "Not a siege
+  participant"). Destination: the existing `PortalManager.GetClosestReturnPortal`
+  (`npcs::portal::closest_return_portal`), then the character's saved `main_world_position`,
+  and only when the destination is outside the area; no safe point leaves the character in
+  place with a warning. The sweep runs once a second in the participant tick (never under the
+  housing operation lock), skips dead characters and a character with a teleport already
+  pending. The area is the one of the hostility row. **Policy, capture-pending:** GMs are not
+  exempt (the rule is applied literally), and the exact retail destination/teleport reason
+  (`TeleportReason.MoveToLocation` 14) is chosen from the server's existing forced-teleport
+  paths. Tests:
+  `siege_area_tests::{a_non_participant_inside_the_circle_is_moved_to_the_return_point,
+  a_non_participant_outside_the_circle_or_outside_the_running_siege_is_kept,
+  an_unregistered_defender_expedition_member_is_still_evicted,
+  a_pending_teleport_or_a_dead_character_is_not_moved_again,
+  the_area_rule_matches_the_hostility_gate}`; the participant-keep assertion and the area
+  gate were mutation-checked.
 * systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's
   flow points were checked against the implementation and the 1.2 data. Auction scroll: the
   automatic camp-lot posting (WP-SD1c, `auction_post.rs`) matches "every 3 weeks, starting bid

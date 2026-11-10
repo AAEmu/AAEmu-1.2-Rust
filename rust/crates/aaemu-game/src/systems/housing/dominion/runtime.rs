@@ -1009,9 +1009,11 @@ pub fn start_tick(server: &Arc<GameServer>) {
             if participant_tick == 4 {
                 participant_tick = 0;
                 super::participants::sync_all(&server);
-                // The roster seals must never be taken while the housing operation lock is
-                // held: the reconcile touches item containers.
+                // Roster seals and the non-participant lockdown share the roster snapshot:
+                // both are cheap and must never run while the housing operation lock is held
+                // (they touch item containers and the world).
                 super::seals::reconcile(&server);
+                super::siege_area::evict_non_participants(&server);
             }
             let channels: Vec<_> = server
                 .systems
