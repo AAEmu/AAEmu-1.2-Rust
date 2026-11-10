@@ -1,0 +1,66 @@
+# Family invitation rules and error replies (systems/social/family.rs):
+#   * invite of an unknown name / self / a target that already has a family answers
+#     FAMILY_NO_TARGET / FAMILY_SELF / FAMILY_OTHER_FAMILY;
+#   * a title outside 1-12 letters and the blocked_texts list answers FAMILY_TITLE /
+#     FAMILY_TITLE_BAD;
+#   * a decline answers the inviter FAMILY_REJECT;
+#   * the steward cannot kick itself (FAMILY_KICK_SELF), title itself (FAMILY_OWNER_TITLE) or
+#     hand the family to itself (FAMILY_ALREADY_OWNER).
+#
+# The testclient has no family scenario commands; the packets are sent with `rawcs` and
+# `STR(...)` / `SELFID` / `PEERID` (see aaemu-testclient/src/scenario/script.rs).
+#
+# Bots:
+#   leader  invites, receives the errors, becomes the steward
+#   member  declines once, then accepts the second invitation
+
+suite family-rules
+bot leader
+bot member
+
+[leader]
+waitpeer 120 ${member}
+# No such character (not in the lobby name registry).
+rawcs 01a STR(NoOneHere)STR(Kid)
+expectseen 367 5
+# Yourself.
+rawcs 01a STR(${leader})STR(Kid)
+expectseen 364 5
+# Titles: special characters and a blocked word are refused before any invitation is sent.
+rawcs 01a STR(${member})STR(!!!)
+expectseen 365 5
+rawcs 01a STR(${member})STR(Admin)
+expectseen 366 5
+# The member declines the invitation; the inviter is told.
+rawcs 01a STR(${member})STR(Kid)
+sync invited-decline 2
+expectseen 373 10
+# The second invitation is accepted, creating the family.
+rawcs 01a STR(${member})STR(Kid)
+sync next-invite 2
+sync joined 2
+# The target already has a family (ours).
+rawcs 01a STR(${member})STR(Kid)
+expectseen 368 5
+# A valid title change on the member.
+rawcs 01e PEERID STR(Brother)
+sync titled 2
+# Steward self-actions are refused.
+rawcs 01d SELFID
+expectseen 378 5
+rawcs 01e SELFID STR(Boss)
+expectseen 385 5
+rawcs 01f SELFID
+expectseen 529 5
+
+[member]
+waitpeer 120 ${leader}
+sync invited-decline 2
+# CSFamilyReplyInvitation: invitor character id, join=false, title.
+rawcs 01b PEERID 00 STR(Kid)
+sync next-invite 2
+# Accept the second invitation.
+rawcs 01b PEERID 01 STR(Kid)
+sync joined 2
+expectpkt SCFamilyTitleChangedPacket 10
+sync titled 2
