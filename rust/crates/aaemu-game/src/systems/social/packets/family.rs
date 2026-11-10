@@ -129,9 +129,7 @@ cs_packet!(
     read |s| { Ok(Self {}) }
     handle |self, server, conn| {
         let p = active_char!(conn);
-        if p.data().family > 0 {
-            family::leave_family(server, &p).await;
-        }
+        family::leave_family(server, &p).await;
         tracing::debug!("FamilyLeave");
         Ok(())
     }

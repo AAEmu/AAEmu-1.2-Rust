@@ -333,7 +333,7 @@ impl ChatConfig {
 
 /// The Rust-only `Social` section (`Configurations/Social.json`): feature switches for social
 /// content whose 1.2 behaviour is not fully evidenced yet.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SocialConfig {
     /// Fill the `CSNaviOpenBounty` answer from the bounty ledger instead of the empty list.
@@ -350,6 +350,22 @@ pub struct SocialConfig {
         deserialize_with = "crate::config::lenient_option"
     )]
     pub player_nations: Option<bool>,
+    /// Family member cap (`FAMILY_MAXIMUM`). The 1.2 compact has no family tables or
+    /// `content_configs` keys and the 1.2 `Family.Write` only says `// TODO max length 8`; the
+    /// 10.x server reads `family_max_count` from `content_configs` and its tests use 8, so the
+    /// default here is 8 (`systems::social::family::max_members`).
+    #[serde(rename = "familymaxmembers", deserialize_with = "lenient")]
+    pub family_max_members: usize,
+}
+
+impl Default for SocialConfig {
+    fn default() -> Self {
+        Self {
+            bounty_board: false,
+            player_nations: None,
+            family_max_members: 8,
+        }
+    }
 }
 
 #[cfg(test)]
