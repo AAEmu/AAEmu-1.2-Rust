@@ -653,7 +653,20 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         if in_battle || (!ot.accept_aggro_link && !same_group && !group_link) {
             continue;
         }
-        if npc::distance_to(c.server, &other, &c.obj, false) > ot.aggro_link_help_dist {
+        // Rule-1 batch mates answer out to their own aggression radius as a fallback: the 1.2
+        // `aggro_link_help_dist` is 6 m for 91 of the 101 rule-1 groups (376 member rows:
+        // median 6, max 50, none 0), too short once the batch spreads beyond its 2-3 m
+        // formation offsets. The 10.x link-help scan collects candidates within 50 m
+        // (`sub_39325250(..., 50.0, ...)`, Z:823753) and then applies the per-template
+        // distance, so a group-link mate uses `max(aggro_link_help_dist,
+        // attack_start_range_scale * 10)` (the `check_aggression` scan radius).
+        let help_dist = if group_link {
+            ot.aggro_link_help_dist
+                .max(ot.attack_start_range_scale * 10.0)
+        } else {
+            ot.aggro_link_help_dist
+        };
+        if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
             continue;
         }
         // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the

@@ -980,13 +980,42 @@ impl NpcSpawner {
         self: &Arc<Self>,
         server: &GameServer,
         npc_id: u32,
+        owner_id: u32,
         base: (f32, f32, f32, f32),
         offset: (f32, f32, f32),
     ) -> Option<NpcRef> {
         let _serial = server.systems.npcs.spawns.spawn_lock();
-        let npc = spawn_npc_template(server, npc_id, self, 0, Some(offset), Some(base)).ok()??;
+        let npc =
+            spawn_npc_template(server, npc_id, self, owner_id, Some(offset), Some(base)).ok()??;
         self.add_npc_to_spawned(self.spawner_id, npc.clone());
         Some(npc)
+    }
+
+    /// The spawner gates a group partial respawn must pass before a lost member is recreated
+    /// (the `CanSpawn` checks of the spawner's own update): management, template, a queued
+    /// despawn, the active clone and the time window / event period. The population gate
+    /// allows the batch's whole authored size: groups spawn whole even above
+    /// `max_population` (see `PORTING.md`), and the lost slot is already reserved, so the
+    /// comparison is against `max(target_population, batch_size)`; a second batch filled by
+    /// another clone still refuses it.
+    pub(crate) fn allows_group_partial_respawn(
+        &self,
+        server: &GameServer,
+        batch_size: i64,
+    ) -> bool {
+        if !self.shared.management_enabled()
+            || self.template().is_none()
+            || self.is_despawn_scheduled()
+            || !self.is_optimal_spawner(server)
+            || !self.is_spawning_schedule_enabled(server)
+        {
+            return false;
+        }
+        let target = self.target_population(server).max(batch_size);
+        let used = self.live_population_direct()
+            + self.future_pending_respawn_slots(server)
+            + server.systems.npcs.group_batches.reserved_slots(self);
+        used <= target
     }
 
     /// Reconciles `_scheduledCount` with the pending respawn timers that remain after
@@ -2209,13 +2238,30 @@ fn spawn_npc_template(
         pos.z += dz;
     }
     if !can_fly && !underwater {
-        if let Some(z) = spawn_ground_z(server, &world, pos.x, pos.y, pos.z) {
-            pos.z = z;
-            // An ordinary member keeps the C# behaviour of snapping the shared spawner
-            // position; a group member must not move the whole group onto its own floor.
-            if offset.is_none() {
-                spawner.set_position(pos);
+        match spawn_ground_z(server, &world, pos.x, pos.y, pos.z) {
+            Some(z) => {
+                pos.z = z;
+                // An ordinary member keeps the C# behaviour of snapping the shared spawner
+                // position; a group member must not move the whole group onto its own floor.
+                if offset.is_none() {
+                    spawner.set_position(pos);
+                }
             }
+            // A base override (the group partial respawn) over water / a missing floor must
+            // not float: keep the original group spawn rule at the spawner position plus the
+            // member's formation offset instead.
+            None if base.is_some() => {
+                pos = spawner.position();
+                if let Some((dx, dy, dz)) = offset {
+                    pos.x += dx;
+                    pos.y += dy;
+                    pos.z += dz;
+                }
+                if let Some(z) = spawn_ground_z(server, &world, pos.x, pos.y, pos.z) {
+                    pos.z = z;
+                }
+            }
+            None => {}
         }
     }
     // Rust only (server owner's request 2026-11-08): an ordinary spawn that would land on

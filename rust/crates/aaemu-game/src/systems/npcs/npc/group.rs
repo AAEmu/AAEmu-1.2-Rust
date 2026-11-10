@@ -20,7 +20,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::server::GameServer;
-use crate::systems::skills::controllers::Vec3;
+use crate::systems::ai::framework::BehaviorKind;
+use crate::systems::skills::controllers::{calculate_distance, Vec3};
 use crate::world::{now_ms, NpcRef, WorldObject};
 
 use super::group_data::{NpcGroup, NpcGroupMember};
@@ -171,13 +172,23 @@ struct BatchMember {
     dead: bool,
 }
 
+/// How far the move leader may stray from its spawn point before a lost member is re-anchored
+/// on the spawn/home position instead of the leader's current spot (m).
+pub const GROUP_RESPAWN_HOME_DISTANCE: f32 = 10.0;
+
 #[derive(Debug, Clone)]
 struct Batch {
     world_id: u32,
     group_id: u32,
     aggro_rule_id: i32,
     spawner: Arc<NpcSpawner>,
+    /// The spawner's owner for this batch (`Unit.OwnerId` of the members; a summon / event
+    /// spawner keeps its owner on every member it respawns).
+    owner_id: u32,
     leader_obj_id: u32,
+    /// The move leader's spawn position (its `home_position`), used when the leader is
+    /// returning home or has strayed from it.
+    leader_home: (f32, f32, f32),
     members: Vec<BatchMember>,
     /// 10.x timer: `last_check_ms` and a rolled `(min + rand * (max - min)) * 1000` delay.
     last_check: Instant,
@@ -216,6 +227,16 @@ impl GroupBatches {
         let world_id = spawner
             .parent_world()
             .unwrap_or_else(|| spawned[0].1.data().unit.transform.instance_id);
+        let owner_id = spawned[0].1.data().unit.owner_id;
+        let leader_home = spawned
+            .iter()
+            .find(|(member, _)| member.is_move_leader)
+            .or_else(|| spawned.first())
+            .map(|(_, npc)| {
+                let t = npc.data().unit.transform;
+                (t.x, t.y, t.z)
+            })
+            .unwrap_or((0.0, 0.0, 0.0));
         let members: Vec<BatchMember> = spawned
             .iter()
             .map(|(member, npc)| BatchMember {
@@ -243,7 +264,9 @@ impl GroupBatches {
                 group_id: group.id,
                 aggro_rule_id: group.aggro_rule_id,
                 spawner: spawner.clone(),
+                owner_id,
                 leader_obj_id,
+                leader_home,
                 members,
                 last_check: now,
                 delay: roll_delay(spawner),
@@ -330,6 +353,7 @@ impl GroupBatches {
         for (batch_id, batch) in snapshots {
             let now = crate::systems::npcs::spawn_manager::now();
             let mut all_alive = true;
+            let mut any_alive = false;
             let mut any_in_battle = false;
             let mut leader_alive = false;
             let mut stale = false;
@@ -356,6 +380,7 @@ impl GroupBatches {
                     all_alive = false;
                     continue;
                 }
+                any_alive = true;
                 if member.npc.data().unit.is_in_battle {
                     any_in_battle = true;
                 }
@@ -363,7 +388,9 @@ impl GroupBatches {
                     leader_alive = true;
                 }
             }
-            if stale {
+            // A batch with no living member can never respawn (the last death normally removes
+            // it): drop it so its reserved slots cannot block the spawner's refills forever.
+            if stale || !any_alive {
                 self.lock().remove(&batch_id);
                 continue;
             }
@@ -383,6 +410,15 @@ impl GroupBatches {
             if !leader_alive || lost.is_empty() {
                 continue;
             }
+            // The partial respawn is a spawn: the spawner's own gates (management, time
+            // window / event period, a queued despawn, the active clone and the population
+            // caps) must allow it before a lost member comes back.
+            if !batch
+                .spawner
+                .allows_group_partial_respawn(server, batch.members.len() as i64)
+            {
+                continue;
+            }
             let Some(leader) = batch
                 .members
                 .iter()
@@ -394,13 +430,38 @@ impl GroupBatches {
             let leader_pos =
                 crate::systems::ai::npc::world_pos(server, &WorldObject::from(&leader));
             let leader_yaw = leader.data().unit.transform.rot_z;
+            // A leader that is walking home (`ReturnState`) or has strayed from its spawn
+            // point re-anchors the lost member on the spawn/home position instead of the
+            // leader's temporary spot. `spawn_npc_template` falls back to the spawner's
+            // authored position when the anchor has no ground (water / missing floor).
+            let returning = server
+                .systems
+                .ai
+                .ais
+                .try_inspect(leader.obj_id, |ai| {
+                    ai.current_behavior() == Some(BehaviorKind::ReturnState)
+                })
+                .unwrap_or(false);
+            let home = Vec3::new(
+                batch.leader_home.0,
+                batch.leader_home.1,
+                batch.leader_home.2,
+            );
+            let anchor = if returning
+                || calculate_distance(home, leader_pos, false) > GROUP_RESPAWN_HOME_DISTANCE
+            {
+                home
+            } else {
+                leader_pos
+            };
             let mut members = batch.members.clone();
             for i in lost {
                 let member = &batch.members[i];
                 let Some(npc) = batch.spawner.respawn_group_member(
                     server,
                     member.npc_id,
-                    (leader_pos.x, leader_pos.y, leader_pos.z, leader_yaw),
+                    batch.owner_id,
+                    (anchor.x, anchor.y, anchor.z, leader_yaw),
                     member.offset,
                 ) else {
                     continue;

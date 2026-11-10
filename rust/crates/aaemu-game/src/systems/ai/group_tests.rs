@@ -136,6 +136,7 @@ fn server_with_declining_helpers() -> Arc<GameServer> {
         .expect("fixture template");
     t.accept_aggro_link = false;
     t.aggro_link_special_rule_id = 1;
+    t.aggro_link_help_dist = 6.0;
     let server = Arc::new(test_server_with(data));
     server.set_self();
     crate::systems::skills::bind(&server);
@@ -500,6 +501,48 @@ async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
     assert!(
         has_aggro_on_player(&f.follower2),
         "every near member of the rule-1 batch answers the help call"
+    );
+}
+
+/// Rule-1 batches spread past their 6 m `aggro_link_help_dist` still answer: the group link
+/// falls back to the template's 10 m aggression scan radius (`attack_start_range_scale * 10`).
+#[tokio::test]
+async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance() {
+    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    // The attacked member is at (95, 100); its mate moves 8 m away, beyond the 6 m helper
+    // distance but inside the 10 m aggression radius.
+    f.follower2
+        .data()
+        .unit
+        .transform
+        .set_xyz(103.0, 100.0, 100.0);
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        has_aggro_on_player(&f.follower2),
+        "a spread rule-1 mate answers inside the aggression radius"
+    );
+}
+
+/// Outside the fallback radius the same-batch help still refuses.
+#[tokio::test]
+async fn aggro_rule_1_help_refuses_a_mate_beyond_the_aggression_radius() {
+    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    // 12 m away: beyond both the 6 m helper distance and the 10 m aggression radius.
+    f.follower2
+        .data()
+        .unit
+        .transform
+        .set_xyz(107.0, 100.0, 100.0);
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        !has_aggro_on_player(&f.follower2),
+        "a mate outside the fallback radius does not answer"
     );
 }
 

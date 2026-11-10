@@ -529,6 +529,36 @@ fn respawn_tick(f: &RespawnFixture) {
     spawn_manager_of(&f.server).check_respawns_tick(&f.server);
 }
 
+/// Spawns the group through `NpcSpawnerNpc.Spawn` with `owner_id` (a summon / event spawner
+/// member) so the batch records its owner.
+fn spawn_group_with_owner(owner_id: u32) -> (Arc<GameServer>, Arc<NpcSpawner>, Vec<NpcRef>) {
+    let mut data = GameData::empty();
+    data.systems.npcs.npc_groups = respawn_sea_worm_group();
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![template(9571, Vec::new())],
+        vec![group_member_row(10075, 9571, 50)],
+    )
+    .unwrap();
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    let spawner = make_spawner_with_despawn(
+        template(9571, vec![group_member_row(10075, 9571, 50)]),
+        8564,
+        2,
+    );
+    let spawned = super::spawn_member(
+        &server,
+        &group_member_row(10075, 9571, 50),
+        &spawner,
+        owner_id,
+    )
+    .expect("spawn member")
+    .expect("group members");
+    assert_eq!(spawned.len(), 3);
+    (server, spawner, spawned)
+}
+
 fn kill(server: &GameServer, npc: &NpcRef) {
     {
         let mut d = npc.data();
@@ -757,6 +787,163 @@ async fn enable_respawn_needs_the_move_leader() {
         living(&f).len(),
         3,
         "the emptied group respawns as one batch through the spawner"
+    );
+}
+
+/// The partial respawn is a spawn: a closed spawner time window refuses it until the window
+/// reopens (the due timer then resumes).
+#[tokio::test]
+async fn enable_respawn_respects_the_spawner_window() {
+    let f = spawn_group_for_respawn(true);
+    let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+    respawn_tick(&f);
+    kill(&f.server, &victim);
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+
+    let open = f.spawner.template().expect("template");
+    let mut closed = (*open).clone();
+    closed.start_time = 13.0;
+    closed.end_time = 14.0;
+    f.spawner.set_template(Some(Arc::new(closed)));
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    assert_eq!(
+        living(&f).len(),
+        2,
+        "no respawn while the spawner time window is closed"
+    );
+
+    let mut reopened = (*open).clone();
+    reopened.start_time = 0.0;
+    reopened.end_time = 0.0;
+    f.spawner.set_template(Some(Arc::new(reopened)));
+    respawn_tick(&f);
+    assert_eq!(
+        living(&f).len(),
+        3,
+        "the due respawn resumes when the window reopens"
+    );
+}
+
+/// A batch with no living member can never respawn; the sweep drops it so its reserved slots
+/// cannot block the spawner's refills forever.
+#[tokio::test]
+async fn a_batch_without_a_living_member_is_dropped() {
+    let f = spawn_group_for_respawn(true);
+    let leader = f
+        .members
+        .iter()
+        .find(|n| n.data().npc_group_is_move_leader)
+        .cloned()
+        .expect("move leader");
+    let followers: Vec<NpcRef> = f
+        .members
+        .iter()
+        .filter(|n| !n.data().npc_group_is_move_leader)
+        .cloned()
+        .collect();
+    // The followers die normally and mark their slots; the leader's death bypasses the batch
+    // marking (`npc_group_instance` cleared for its death path only), which is the leak this
+    // defensive sweep exists for: the batch stays behind with no living member.
+    let batch = leader.data().npc_group_instance;
+    // The spawn manager owns the world's respawn/despawn queues: create it before the deaths,
+    // as the game tick would.
+    respawn_tick(&f);
+    for follower in &followers {
+        kill(&f.server, follower);
+    }
+    {
+        let mut d = leader.data();
+        d.npc_group_instance = 0;
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&f.server, &leader);
+    leader.data().npc_group_instance = batch;
+    assert_eq!(
+        f.server
+            .systems
+            .npcs
+            .group_batches
+            .reserved_slots(&f.spawner),
+        2,
+        "the two dead follower slots are still tracked before the sweep"
+    );
+    respawn_tick(&f);
+    assert_eq!(
+        f.server
+            .systems
+            .npcs
+            .group_batches
+            .reserved_slots(&f.spawner),
+        0,
+        "the dead batch no longer reserves spawner slots"
+    );
+}
+
+/// An out-of-place leader re-anchors the lost member on its spawn/home position plus the
+/// formation offset instead of the leader's temporary spot.
+#[tokio::test]
+async fn enable_respawn_reanchors_on_the_leader_home_when_it_strays() {
+    let f = spawn_group_for_respawn(true);
+    let leader = f
+        .members
+        .iter()
+        .find(|n| n.data().npc_group_is_move_leader)
+        .cloned()
+        .expect("move leader");
+    let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+    respawn_tick(&f);
+    // The leader chases something 100 m from its spawn (100, 100, 100).
+    leader.data().unit.transform.set_xyz(200.0, 200.0, 100.0);
+    kill(&f.server, &victim);
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    let respawned = living(&f)
+        .into_iter()
+        .find(|n| n.data().npc_group_formation_offset == (2.0, -3.0, 0.0))
+        .expect("the lost member respawned");
+    let t = respawned.data().unit.transform;
+    assert_eq!(
+        (t.x, t.y, t.z),
+        (102.0, 97.0, 100.0),
+        "the lost member is anchored on the leader's spawn/home, not on the leader at (200, 200)"
+    );
+}
+
+/// A respawned member keeps the batch's `Unit.OwnerId` (summon / event spawner members).
+#[tokio::test]
+async fn enable_respawn_keeps_the_batch_owner() {
+    let (server, spawner, members) = spawn_group_with_owner(77);
+    let victim = members
+        .iter()
+        .find(|n| n.data().npc_group_formation_offset == (2.0, -3.0, 0.0))
+        .cloned()
+        .expect("member");
+    assert_eq!(victim.data().unit.owner_id, 77);
+    spawn_manager_of(&server).check_respawns_tick(&server);
+    kill(&server, &victim);
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    spawn_manager_of(&server).check_respawns_tick(&server);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    spawn_manager_of(&server).check_respawns_tick(&server);
+    let respawned = spawner
+        .spawned_npcs()
+        .values()
+        .flatten()
+        .find(|n| {
+            n.data().npc_group_formation_offset == (2.0, -3.0, 0.0)
+                && !members.iter().any(|m| Arc::ptr_eq(m, n))
+        })
+        .cloned()
+        .expect("the lost member respawned");
+    assert_eq!(
+        respawned.data().unit.owner_id,
+        77,
+        "the respawned member keeps the batch owner"
     );
 }
 

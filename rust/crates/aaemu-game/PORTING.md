@@ -1996,18 +1996,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   with a fresh `min + rand * (max - min)` delay (Z:852490-852500); once eligible, a lost member
   (dead and its corpse removed) is respawned at the move leader's position plus its
   `formation_offset_*` with the same batch id / group / rule / leader / tension and registered in
-  `SpawnedNpcs` again (Z:851350-851555). A dead move leader blocks the respawn (the formation is
-  anchored on it, Z:851444-851452), and the lost slots are reserved against the spawner fill
-  (`check_spawn_count_can_spawn` / `do_spawn_bounded`) until they return, so no second batch
-  spawns beside the survivors. A death that leaves another member alive skips the spawner's own
-  per-NPC respawn (`NpcSpawner::do_despawn`); the last death removes the batch and keeps the
-  ordinary whole-batch spawner respawn. `enable_respawn = 'f'` keeps the previous behaviour (each
+  `SpawnedNpcs` again (Z:851350-851555). When the leader is in `ReturnState` or more than 10 m
+  from its spawn point, the member is anchored on the leader's spawn/home position instead of
+  the leader's temporary spot; a base point over water / without ground falls back to the
+  spawner position plus the offset (the original spawn rule, so the member does not float). The
+  partial respawn passes the spawner's own gates before it creates the member: management, the
+  template, a queued despawn, the active clone, the time window / event period and the
+  population caps. The population comparison allows the batch's whole authored size
+  (`max(target_population, batch_size)`), matching the whole-batch spawn rule that spawns groups
+  above `max_population`; another clone's fill still refuses it. A dead move leader blocks the
+  respawn (the formation is anchored on it, Z:851444-851452), and the lost slots are reserved
+  against the spawner fill (`check_spawn_count_can_spawn` / `do_spawn_bounded`) until they
+  return, so no second batch spawns beside the survivors. A batch with no living member is
+  dropped by the tick (defensive; the last death normally removes it), so it cannot reserve
+  spawner slots forever. A death that leaves another member alive skips the spawner's own per-NPC
+  respawn (`NpcSpawner::do_despawn`); the last death removes the batch and keeps the ordinary
+  whole-batch spawner respawn. A respawned member keeps the batch's `Unit.OwnerId` (a summon /
+  event spawner member stays owned). `enable_respawn = 'f'` keeps the previous behaviour (each
   death schedules the spawner's respawn; the group refills through the spawner once it is
   empty). **Unconfirmed:** the 10.x eligibility test reads the living members' AI "state 2"
   (`sub_393422D0`, vtable slot 128) as "in combat"; the Rust uses `UnitBase::is_in_battle`, as no
   other AI state matches it. Tests:
   `npcs::npc::spawner_group_tests::{enable_respawn_respawns_a_lost_member_into_the_same_batch,
   enable_respawn_waits_while_a_member_fights, enable_respawn_needs_the_move_leader,
+  enable_respawn_respects_the_spawner_window, enable_respawn_reanchors_on_the_leader_home_when_it_strays,
+  enable_respawn_keeps_the_batch_owner, a_batch_without_a_living_member_is_dropped,
   disabled_respawn_keeps_the_spawner_refill}`. Live check (2026-11-10, lane
   `r7-group-rules`): a time window on spawner 3832 made its placement spawn group 45 (rule 2,
   `enable_respawn`); after `/kill` of one `664` follower the other two stayed, and the lost
@@ -2053,8 +2066,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   its own relation test fails (Z:823640-823646 / 823849-823851). Rule 0 (31 groups) does
   neither. The rule-1 group link bypasses the template `accept_aggro_link` / relation gates
   (the 10.x candidate scan still requires `accept_aggro_link`, Z:823774; the 1.2 group rule is
-  capture-pending NPCGROUP-2) but keeps the battle, `aggro_link_help_dist` and enabled sight
-  checks. The rule-2 group search is unscaled (200 m, the authored offsets are at most
+  capture-pending NPCGROUP-2) but keeps the battle and enabled sight checks. Its distance is
+  `max(aggro_link_help_dist, attack_start_range_scale * 10)` for same-batch mates: the 1.2
+  `aggro_link_help_dist` of the rule-1 member templates is 6 m for 91 of the 101 groups (376
+  member rows: median 6, maximum 50, none 0), too short for a batch spread beyond its 2-3 m
+  formation offsets, so the fallback is the template's `check_aggression` scan radius. The 10.x
+  help scan collects candidates within 50 m (`sub_39325250(..., 50.0, ...)`, Z:823753) before
+  applying the per-template distance. The rule-2 group search is unscaled (200 m, the authored offsets are at most
   15 / 20 m) because the existing aggro-link radius is scaled per template (some member templates
   scale it to 2 m) and would miss members; the 1.2/10.x `CollectSharedAggroMembers` has no
   distance or sight gate either.
@@ -2064,8 +2082,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   capture-pending (same reason as the spawn placement above). Tests: `ai::group_tests` (movement
   + tension, ground height, no own roaming, off-formation walk-back, combat return and a moving
   leader, leader death, reused leader id, blocked formation point, idle activity, rule 2
-  mirrors / rule 1 does not mirror but answers the help call / rule 0 does neither, plus the
-  second-fight share; each fails with its rule disabled) and the runtime-membership assertions in
+  mirrors / rule 1 does not mirror but answers the help call (also beyond its 6 m helper distance
+  up to the aggression radius) / rule 0 does neither, plus the second-fight share; each fails
+  with its rule disabled) and the runtime-membership assertions in
   `npcs::npc::spawner_group_tests`.
 
 * systems::ai (2026-11-02, aggro link groups; capture-pending AGGROLINK-1): the 1.2
