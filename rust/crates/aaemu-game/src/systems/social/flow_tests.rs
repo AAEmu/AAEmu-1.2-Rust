@@ -2486,6 +2486,127 @@ async fn family_reply_uses_the_invitation_title() {
 }
 
 #[tokio::test]
+async fn family_reply_without_an_invitation_answers_only_an_accept() {
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    // A decline of an invitation that is not (or no longer) pending needs no reply.
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, false, "Kid"),
+    )
+    .await;
+    assert!(b.frames().is_empty() && a.frames().is_empty());
+    // An accept of one is answered: the inviter is gone from the invited character's view.
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    assert_eq!(b.frames(), vec![error_frame(error::FAMILY_NO_INVITOR)]);
+    assert!(a.frames().is_empty());
+    assert_eq!(b.p.data().family, 0);
+}
+
+#[tokio::test]
+async fn family_reply_after_the_inviter_lost_the_stewardship_tells_only_the_inviter() {
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    // Al and Bob found a family; Al invites Cy and hands the family to Bob before Cy answers.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    let fid = a.p.data().family;
+    assert_ne!(fid, 0);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Cy", "Kid"),
+    )
+    .await;
+    assert_eq!(c.ops(), vec![sc::SCFamilyInvitationPacket]);
+    let mut owner = PacketStream::new();
+    owner.write_u32(2);
+    a.send(&server, cs::CSFamilyChangeOwnerPacket, owner).await;
+    a.ops();
+    b.ops();
+    c.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    // Al is no longer the steward and is told so. Cy gets no reply: "That player has
+    // disconnected." (`FAMILY_NO_INVITOR`) would be wrong, the inviter is online.
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_NOT_OWNER)]);
+    assert!(c.frames().is_empty() && b.frames().is_empty());
+    assert_eq!(c.p.data().family, 0);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .families
+            .family(fid)
+            .unwrap()
+            .members
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn family_creation_failure_answers_family_create() {
+    use crate::managers::id::next_prime;
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    // Every family id is taken (the id manager starts with a `next_prime(100_000)` bit set).
+    let taken: Vec<u32> = (1..=next_prime(100_000) as u32).collect();
+    server.ids.family.initialize_with(&taken);
+    assert!(
+        server.ids.family.get_next_id().is_err(),
+        "the test setup must exhaust the family ids"
+    );
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    // "Failed to create a family." (not "family does not exist"), and no family was left behind.
+    assert_eq!(b.frames(), vec![error_frame(error::FAMILY_CREATE)]);
+    assert!(a.frames().is_empty());
+    assert_eq!((a.p.data().family, b.p.data().family), (0, 0));
+    assert_eq!(server.systems.social.families.count(), 0);
+}
+
+#[tokio::test]
 async fn family_invite_errors_name_the_reason() {
     use crate::systems::social::util::error;
     let server = test_server();

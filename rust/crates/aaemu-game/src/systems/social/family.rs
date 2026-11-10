@@ -554,9 +554,14 @@ pub async fn reply_to_invite(
         tracing::warn!(
             character = %invited.data().unit.name,
             invitor_id,
+            join,
             "FamilyReplyInvitation without a pending invitation"
         );
-        send_error(invited, error::FAMILY_NO_INVITOR);
+        // `FAMILY_NO_INVITOR` ("That player has disconnected.") answers an accept only; a
+        // decline of an invitation that is gone needs no reply.
+        if join {
+            send_error(invited, error::FAMILY_NO_INVITOR);
+        }
         return;
     };
     if !join {
@@ -601,7 +606,7 @@ pub async fn reply_to_invite(
                 Err(e) => {
                     tracing::error!("{e}");
                     drop(st);
-                    send_error(invited, error::FAMILY_NOT_EXIST);
+                    send_error(invited, error::FAMILY_CREATE);
                     return;
                 }
             };
@@ -618,7 +623,7 @@ pub async fn reply_to_invite(
             {
                 tracing::error!("ReplyToInvite: creating family {id} failed");
                 drop(st);
-                send_error(invited, error::FAMILY_ALREADY);
+                send_error(invited, error::FAMILY_CREATE);
                 return;
             }
             let f = &st.families[&id];
@@ -639,10 +644,11 @@ pub async fn reply_to_invite(
                 }
             };
             if !steward {
-                // The inviter lost the stewardship since it invited.
+                // The inviter lost the stewardship since it invited: it is told, the invited
+                // character gets no reply (`FAMILY_NO_INVITOR` says the inviter disconnected,
+                // which is not what happened, and no other text fits).
                 drop(st);
                 send_error(&invitor, error::FAMILY_NOT_OWNER);
-                send_error(invited, error::FAMILY_NO_INVITOR);
                 return;
             }
             if full {
@@ -659,7 +665,7 @@ pub async fn reply_to_invite(
                 Some(&invite_title),
             ) {
                 drop(st);
-                send_error(invited, error::FAMILY_ALREADY);
+                send_error(invited, error::FAMILY_CREATE);
                 return;
             }
             let f = &st.families[&invitor_family];
