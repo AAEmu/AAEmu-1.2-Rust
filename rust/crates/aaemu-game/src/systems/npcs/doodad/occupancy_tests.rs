@@ -477,8 +477,9 @@ async fn second_unit_gather_is_refused_while_the_first_is_casting() {
 }
 
 /// The same unit repeats its own interaction, and once the cast ended (or was cancelled) the
-/// tree is free for the other unit again.
-#[tokio::test]
+/// tree is free for the other unit again. The 5 s casts run on the paused test clock: the cast
+/// timers fire when the test waits, without taking 5 s of wall-clock time each.
+#[tokio::test(start_paused = true)]
 async fn tree_is_free_after_the_cast_finishes_or_is_cancelled() {
     let mut fx = fx();
     let d = fx.doodad(TREE);
@@ -572,6 +573,30 @@ async fn tree_is_free_after_the_occupant_logs_out() {
     crate::systems::skills::skill::interrupt_skills(
         &fx.server,
         &crate::world::WorldObject::from(&fx.p2),
+    );
+}
+
+/// A disconnect and a leave-world release the hold at once, not only when the lazy reaper
+/// finds the occupant gone from the world.
+#[tokio::test]
+async fn disconnect_and_leave_world_release_the_hold_at_once() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+
+    fx.cast(true, TREE_SKILL, &d);
+    assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 1);
+    crate::world::session::on_disconnect(&fx.server, &mut fx.c1.conn).await;
+    assert!(
+        fx.server.systems.npcs.doodads.occupancy.is_empty(),
+        "a disconnect left the hold behind"
+    );
+
+    fx.cast(false, TREE_SKILL, &d);
+    assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 1);
+    crate::world::session::leave_world_task(&fx.server, None, 0, Some(fx.p2.clone())).await;
+    assert!(
+        fx.server.systems.npcs.doodads.occupancy.is_empty(),
+        "leaving the world left the hold behind"
     );
 }
 
@@ -793,25 +818,23 @@ async fn once_one_interaction_alone_is_not_enforced() {
 }
 
 /// A delayed interaction effect keeps the hold after the cast slot was cleared, refuses a new
-/// timed start by another unit, and the occupant's own effect still runs.
-#[tokio::test]
+/// timed start by another unit, and the occupant's own effect still runs. The delays run on the
+/// paused test clock; the entry's dated state is aged past the 2 s accept grace instead of
+/// sleeping through it.
+#[tokio::test(start_paused = true)]
 async fn delayed_effect_keeps_the_hold_and_the_occupant_effect_runs() {
     let mut fx = fx();
     let d = fx.doodad(TREE);
 
     fx.cast(true, TREE_DELAYED, &d);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while fx.p1.data().unit.skill_state.skill_task.is_some()
-        && tokio::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(
-        fx.p1.data().unit.skill_state.skill_task.is_none(),
-        "delayed cast did not clear its slot"
-    );
+    fx.wait_no_cast(&fx.p1, TREE_DELAYED).await;
     // Past the 2 s accept grace, but the effect is still pending: the tree is not free.
-    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    fx.server
+        .systems
+        .npcs
+        .doodads
+        .occupancy
+        .age_entry(d.obj_id, 2_500);
     let frames = fx.cast(false, TREE_SKILL, &d);
     assert_refused(&frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
