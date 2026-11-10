@@ -274,6 +274,31 @@ impl SkillsBridge for SkillsForNpcs {
         });
     }
 
+    fn use_gimmick_collision_skill(
+        &self,
+        server: &GameServer,
+        gimmick: &WorldObject,
+        unit: &WorldObject,
+        skill_id: u32,
+    ) {
+        // `GimmickTemplate.CollisionSkillId` on contact: cast from the gimmick (a unit in the
+        // object model) at the unit it touched. The gimmick is the caster because a
+        // doodad-spawned gimmick has no spawner unit; `SkillCaster::Doodad` matches the
+        // existing gimmick skill path (`Gimmick.DoGimmickSkill`).
+        if server.game_data.systems.skills.skill(skill_id).is_none() {
+            return;
+        }
+        let gimmick_id = gimmick.obj_id();
+        use_skill_with(
+            server,
+            gimmick,
+            SkillCaster::Doodad(gimmick_id),
+            SkillCastTarget::Unit(unit.obj_id()),
+            skill_id,
+            Some(SkillObject::default()),
+        );
+    }
+
     fn use_doodad_func_skill(
         &self,
         server: &GameServer,

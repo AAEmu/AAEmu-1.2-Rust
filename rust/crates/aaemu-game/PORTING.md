@@ -7700,8 +7700,24 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   exchange (0 rows) and buy-fish model rows (prefab strings), `gem_visual_effect_id` (the
   client loads the effect), mate `SpawnEffect` rows (the 4 unreachable rows above), slave
   customizing styles (`slave_customizings` is client-loaded; one customizable slave), radar
-  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`,
-  gimmick collision: capture-pending / design-blocked).
+  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`).
+* **Gimmick collision skills are server-detected contact hits (2026-11-10).** The owner
+  decision of 2026-11-06 (leave them) is reversed: in the 50 ms gimmick tick a gimmick whose
+  template has `collision_skill_id` and whose speed reaches `collision_min_speed` now casts
+  that skill on each living unit it touches (`systems/npcs/gimmick/manager.rs::collision_tick`).
+  The 1.2 client has no gimmick packet (only SC 0x13c-0x141), so the server detects the touch,
+  as retail's zone process did (`ZWGimmickCollided`). The `gimmicks` table has no size / radius
+  column and a gimmick has no actor `model_id`, so the contact radius is the documented 1.5 m
+  constant plus the touched unit's actor radius; a unit is hit at most once per gimmick, and
+  `disappear_by_collision` despawns it after the touches of that tick (22 of the 30 contact
+  templates; the other 8 keep rolling). `disappear_by_collision` and `collision_unit_only` are
+  read from their shipped `'t'`/`'f'` text form (`GetBoolean(fromString: true)`); the C#
+  `GetBoolean` read both as false and never used them. Terrain contact is not simulated (the
+  motion has no gravity / ground), so only unit touches trigger the skill or despawn and
+  `collision_unit_only` changes nothing. The `SpawnGimmickEffect` authored velocity is now
+  applied (all nonzero shipped rows use velocity coordinate type 2, world space); the C#
+  `GimmickSpawner` constructor stored `Velocity*` / `AngVel*` but never applied them, so
+  effect-spawned gimmicks never moved.
 * **`conflict_zones.peace_protected_faction_id` / `peace_tower_def_id` are placeholders.**
   All 16 rows carry faction id 5 and a NULL `peace_tower_def_id`; faction 5 does not exist in
   `system_factions` (ids 1, 2, 3 and 101-179) and neither column is ever read

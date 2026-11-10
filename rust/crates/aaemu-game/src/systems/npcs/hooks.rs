@@ -139,6 +139,18 @@ pub trait SkillsBridge: Send + Sync {
     ) {
     }
 
+    /// `GimmickTemplate.CollisionSkillId`: the gimmick touched `unit`. Retail's zone process
+    /// reported the collision (`ZWGimmickCollided`) and cast the skill from the gimmick; the
+    /// 1.2 client has no packet for it, so the server detects the touch. Default: nothing.
+    fn use_gimmick_collision_skill(
+        &self,
+        _server: &GameServer,
+        _gimmick: &WorldObject,
+        _unit: &WorldObject,
+        _skill_id: u32,
+    ) {
+    }
+
     // ---- doodad funcs / world interactions (`systems::npcs::doodad::{funcs, interactions}`) ----
 
     /// `DoodadFuncFakeUse`: `new Skill(GetSkillTemplate(skillId)).Use(caster, casterObj,

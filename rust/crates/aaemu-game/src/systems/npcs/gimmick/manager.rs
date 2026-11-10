@@ -31,6 +31,16 @@ use crate::world::{self, session, GimmickRef, WorldInstance, WorldObject};
 pub const TICK_DELAY: Duration = Duration::from_millis(50);
 /// The template id that gets `GimmickMovementFloatToSurface` (Recovered Treasure Chest).
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
+/// Contact radius of a gimmick for `GimmickTemplate.CollisionSkillId` hits. The `gimmicks`
+/// table has no size / radius column and a gimmick has no actor `model_id` (`ModelManager`'s
+/// radii are keyed by actor model ids, and `new_gimmick` never sets one), so the model radius
+/// is not available: this is the documented stand-in. The touched unit's own actor radius is
+/// added to it (a large NPC is touched at its edge).
+pub const COLLISION_RADIUS: f32 = 1.5;
+/// Cap of the per-gimmick contact-hit set ([`GimmickState::collision_hits`]). Object ids are
+/// reused and a gimmick lives at most `life_time`; a touch beyond the cap is ignored instead of
+/// growing the set without bound.
+const MAX_COLLISION_HITS: usize = 256;
 
 /// `(uint)(DateTime.UtcNow - DateTime.UtcNow.Date).TotalMilliseconds`.
 pub fn time_of_day_ms(now_ms: i64) -> u32 {
@@ -62,6 +72,9 @@ pub struct GimmickState {
     pub despawned: bool,
     /// `Respawn` (unix ms, 0 = `DateTime.MinValue`).
     pub respawn_ms: i64,
+    /// Units this gimmick has already hit with its `collision_skill_id` (obj ids, at most
+    /// [`MAX_COLLISION_HITS`]). Not a C# member: the C# never implemented contact hits.
+    pub collision_hits: Vec<u32>,
 }
 
 impl GimmickState {
@@ -433,10 +446,23 @@ pub fn spawn_from_effect(
         }
     }
     g.unit.scale = params.scale;
+    // `SpawnGimmickEffect.Velocity*` / `AngVel*`: the C# `GimmickSpawner` constructor stored
+    // them but never applied them, so effect-spawned gimmicks never moved. Every shipped row
+    // with a nonzero velocity uses coordinate type 2 (world), which the doodad spawn path also
+    // applies directly; other types have no nonzero row and stay at rest.
+    if params.velocity_coordinate_id == 2 {
+        g.vel = [params.velocity_x, params.velocity_y, params.velocity_z];
+    }
+    if params.ang_vel_coordinate_id == 2 {
+        g.ang_vel = [params.ang_vel_x, params.ang_vel_y, params.ang_vel_z];
+    }
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
     session::handle_zone_changes(server, changes);
-    add_active_gimmick(server, world.id, gimmick.clone(), spawner, Some(template));
+    let active = add_active_gimmick(server, world.id, gimmick.clone(), spawner, Some(template));
+    if params.velocity_coordinate_id == 2 || params.ang_vel_coordinate_id == 2 {
+        active.state().authored_motion = true;
+    }
     Some(gimmick)
 }
 
@@ -552,6 +578,96 @@ pub fn stop_movement(server: &GameServer, active: &ActiveGimmick) {
     }
 }
 
+/// A contact candidate: a living, visible unit the collision skill may target. Gimmicks,
+/// doodads, houses, shipyards and transfers are props / structures, not contact targets.
+fn contact_unit(world: &WorldInstance, obj: &WorldObject) -> bool {
+    if !matches!(
+        obj,
+        WorldObject::Player(_) | WorldObject::Npc(_) | WorldObject::Slave(_) | WorldObject::Mate(_)
+    ) {
+        return false;
+    }
+    obj.with_unit(|u| {
+        let unit = u.unit();
+        unit.transform.instance_id == world.id && unit.hp > 0 && !unit.invisible
+    })
+    .unwrap_or(false)
+}
+
+/// `GimmickTemplate.CollisionSkillId` contact check. Retail's zone process reported the touch
+/// (`ZWGimmickCollided`, op 42) and the collision skill was cast from the gimmick; the 1.2
+/// client has no gimmick packet (only SC 0x13c-0x141), so the server detects the touch here.
+///
+/// A gimmick only reaches this check when its template has a collision skill and its current
+/// speed is at least `collision_min_speed`. Each unit is hit at most once per gimmick
+/// (`GimmickState::collision_hits`). `disappear_by_collision` despawns it after the touches of
+/// this tick were cast. Returns `true` when the gimmick was despawned.
+fn collision_tick(
+    server: &GameServer,
+    world: &WorldInstance,
+    active: &ActiveGimmick,
+    template: &GimmickTemplate,
+) -> bool {
+    // Never call into the world while the gimmick's data lock is held.
+    let (origin, vel) = {
+        let g = active.gimmick.data();
+        let t = g.unit.transform;
+        ([t.x, t.y, t.z], g.vel)
+    };
+    let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+    if !speed.is_finite() || speed < template.collision_min_speed {
+        return false;
+    }
+    let me = WorldObject::from(&active.gimmick);
+    let mut contacts: Vec<(u32, WorldObject)> = Vec::new();
+    for unit in world.around(&me, |o| o.is_unit().then(|| o.clone())) {
+        if !contact_unit(world, &unit) {
+            continue;
+        }
+        let p = world.world_pos_rot(&unit);
+        let reach = COLLISION_RADIUS
+            + crate::systems::skills::geometry::model_size(
+                server,
+                &crate::systems::skills::geometry::Target::Obj(unit.clone()),
+            );
+        let dx = p.x - origin[0];
+        let dy = p.y - origin[1];
+        let dz = p.z - origin[2];
+        if dx * dx + dy * dy + dz * dz <= reach * reach {
+            contacts.push((unit.obj_id(), unit));
+        }
+    }
+    let mut new_hits: Vec<WorldObject> = Vec::new();
+    {
+        // Check and latch under one lock; no world call while it is held.
+        let mut st = active.state();
+        for (id, unit) in contacts {
+            if st.collision_hits.contains(&id) {
+                continue;
+            }
+            if st.collision_hits.len() >= MAX_COLLISION_HITS {
+                break;
+            }
+            st.collision_hits.push(id);
+            new_hits.push(unit);
+        }
+    }
+    if new_hits.is_empty() {
+        return false;
+    }
+    if let Some(h) = server.systems.npcs.hooks.skills.get() {
+        for unit in &new_hits {
+            h.use_gimmick_collision_skill(server, &me, unit, template.collision_skill_id);
+        }
+    }
+    if template.disappear_by_collision {
+        active.state().despawned = true;
+        despawn(server, active);
+        return true;
+    }
+    false
+}
+
 /// `Gimmick.GimmickTick(delta)`.
 pub fn gimmick_tick(
     server: &GameServer,
@@ -634,7 +750,12 @@ pub fn gimmick_tick(
             do_gimmick_skill(server, world, active, t.skill_id);
         }
     }
-    // TODO (C#): skill on collision (requires a physics engine).
+    // Contact hits (`GimmickTemplate.CollisionSkillId`): after the movement of this tick.
+    if let Some(t) = &active.template {
+        if t.collision_skill_id != 0 && collision_tick(server, world, active, t) {
+            return; // despawned by the collision
+        }
+    }
 
     let time = time_of_day_ms(now_ms);
     let authored_motion = active.state().authored_motion;
@@ -861,6 +982,288 @@ mod tests {
         despawn(&server, &active);
         assert!(world.gimmick(g.obj_id).is_none());
         assert!(server.systems.npcs.gimmicks.find(g.obj_id).is_none());
+    }
+
+    // ----- contact hits (`GimmickTemplate.CollisionSkillId`) -----
+
+    const CONTACT_GIMMICK: u32 = 900;
+    const CONTACT_SKILL: u32 = 900_100;
+
+    /// Game data with one contact gimmick template and the fixed 100-damage skill it fires
+    /// (`AnyUnit` target, no area, `max_range` 0 like the shipped collision skills).
+    fn contact_data(template: GimmickTemplate) -> crate::data::GameData {
+        use crate::systems::skills::data::{EffectKind, EffectTemplate};
+        use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
+        let mut data = crate::data::GameData::empty();
+        let s = &mut data.systems.skills;
+        s.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(damage_effect(1, 100))),
+            900_001,
+        );
+        let mut skill = skill_template(CONTACT_SKILL);
+        skill.target_type = 5; // AnyUnit
+        skill.target_relation = 0; // Any
+        skill.target_area_radius = 0;
+        skill.max_range = 0;
+        skill.effects = vec![skill_effect(900_001, EffectKind::DamageEffect, 1)];
+        s.add_skill(skill);
+        data.systems
+            .npcs
+            .gimmick
+            .templates
+            .insert(template.id, template);
+        data
+    }
+
+    struct ContactFixture {
+        server: GameServer,
+        world: Arc<WorldInstance>,
+        _client: crate::test_support::TestClient,
+        victim: crate::world::PlayerRef,
+    }
+
+    fn contact_fixture(template: GimmickTemplate, victim_at: (f32, f32)) -> ContactFixture {
+        let server = crate::test_support::test_server_with(contact_data(template));
+        // The fixture ids (player 0x100, doodad 0x300) are assigned by hand: take the object
+        // ids below them first so a spawned gimmick never gets the same id.
+        while server.ids.object.get_next_id().expect("object id") < 0x400 {}
+        crate::systems::skills::bridges::install(&server);
+        let world = test_world(&server);
+        let client = crate::test_support::TestClient::new(&server, 1, 1);
+        let mut c = crate::test_support::test_character(1, "Victim", victim_at.0, victim_at.1);
+        c.unit.hp = 500;
+        c.unit.max_hp = 1000;
+        let victim = crate::test_support::spawn_player(&server, &client, c, 0x100);
+        ContactFixture {
+            server,
+            world,
+            _client: client,
+            victim,
+        }
+    }
+
+    fn contact_template(disappear_by_collision: bool) -> GimmickTemplate {
+        GimmickTemplate {
+            id: CONTACT_GIMMICK,
+            collision_skill_id: CONTACT_SKILL,
+            collision_min_speed: 1.0,
+            disappear_by_collision,
+            ..Default::default()
+        }
+    }
+
+    /// A doodad source: a prop at `at`, so it is not itself a contact target.
+    fn doodad_at(server: &GameServer, world: &WorldInstance, at: (f32, f32, f32)) -> WorldObject {
+        let mut d = crate::models::doodad::Doodad::new(1);
+        d.transform.set_xyz(at.0, at.1, at.2);
+        let d = Entity::new(0x300, d);
+        world.spawn(&d, &server.view_ctx());
+        WorldObject::from(&d)
+    }
+
+    fn spawn_contact_gimmick(
+        f: &ContactFixture,
+        source: &WorldObject,
+        velocity: [f32; 3],
+    ) -> (GimmickRef, Arc<ActiveGimmick>) {
+        let g = spawn_from_effect(
+            &f.server,
+            &f.world,
+            &SpawnGimmickParams {
+                gimmick_id: CONTACT_GIMMICK,
+                offset_coordinate_id: 2,
+                scale: 1.0,
+                velocity_coordinate_id: 2,
+                velocity_x: velocity[0],
+                velocity_y: velocity[1],
+                velocity_z: velocity[2],
+                ..Default::default()
+            },
+            source,
+        )
+        .expect("gimmick spawned");
+        let active = f
+            .server
+            .systems
+            .npcs
+            .gimmicks
+            .find(g.obj_id)
+            .expect("active gimmick");
+        (g, active)
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_hits_a_unit_in_its_path_once() {
+        let f = contact_fixture(contact_template(false), (100.0, 100.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (g, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        let dt = Duration::from_millis(50);
+        gimmick_tick(&f.server, &f.world, &active, dt, 1_000);
+        assert_eq!(
+            f.victim.data().unit.hp,
+            400,
+            "the touched unit takes the hit"
+        );
+        assert!((g.data().unit.transform.x - 100.25).abs() < 1e-3);
+        // The same gimmick never hits the same unit again, however long it stays in reach.
+        gimmick_tick(&f.server, &f.world, &active, dt, 1_050);
+        gimmick_tick(&f.server, &f.world, &active, dt, 1_100);
+        assert_eq!(f.victim.data().unit.hp, 400);
+        // `disappear_by_collision = false`: it keeps rolling.
+        assert!(f.world.gimmick(g.obj_id).is_some());
+    }
+
+    /// A second player (its own connection) for the control assertions of the negative tests.
+    fn control_player(
+        f: &ContactFixture,
+        at: (f32, f32),
+    ) -> (crate::test_support::TestClient, crate::world::PlayerRef) {
+        let client = crate::test_support::TestClient::new(&f.server, 2, 2);
+        let mut c = crate::test_support::test_character(2, "Control", at.0, at.1);
+        c.unit.hp = 500;
+        c.unit.max_hp = 1000;
+        let p = crate::test_support::spawn_player(&f.server, &client, c, 0x101);
+        (client, p)
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_does_not_hit_a_unit_outside_its_radius() {
+        let f = contact_fixture(contact_template(false), (105.0, 100.0));
+        let (_control_client, control) = control_player(&f, (100.0, 100.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        // One 50 ms tick moves it to x = 100.25, 4.75 m from the victim (> 1.5 m radius).
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(
+            control.data().unit.hp,
+            400,
+            "the unit at the gimmick is hit"
+        );
+        assert_eq!(f.victim.data().unit.hp, 500);
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_hits_an_npc_when_the_skill_allows_it() {
+        let f = contact_fixture(contact_template(false), (300.0, 300.0));
+        let mut n = crate::models::npc::Npc::new(1);
+        n.unit.name = "Dummy".into();
+        n.unit.hp = 1000;
+        n.unit.max_hp = 1000;
+        n.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let npc = Entity::new(0x300, n);
+        f.world.spawn(&npc, &f.server.view_ctx());
+        let source = WorldObject::from(&npc);
+        let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(npc.data().unit.hp, 900);
+        assert_eq!(f.victim.data().unit.hp, 500);
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_skips_dead_and_invisible_units() {
+        // A dead unit is not a contact target; the living control at the same spot is.
+        let dead = contact_fixture(contact_template(false), (100.0, 100.0));
+        dead.victim.data().unit.hp = 0;
+        let (_control_client, control) = control_player(&dead, (100.0, 100.0));
+        let source = doodad_at(&dead.server, &dead.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&dead, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &dead.server,
+            &dead.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(dead.victim.data().unit.hp, 0);
+        assert_eq!(control.data().unit.hp, 400);
+
+        // A GM-invisible unit is not a contact target either; the control is.
+        let hidden = contact_fixture(contact_template(false), (100.0, 100.0));
+        hidden.victim.data().unit.invisible = true;
+        let (_control_client, control) = control_player(&hidden, (100.0, 100.0));
+        let source = doodad_at(&hidden.server, &hidden.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&hidden, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &hidden.server,
+            &hidden.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(hidden.victim.data().unit.hp, 500);
+        assert_eq!(control.data().unit.hp, 400);
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_despawns_when_the_template_says_so() {
+        let f = contact_fixture(contact_template(true), (100.0, 100.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (g, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(
+            f.victim.data().unit.hp,
+            400,
+            "the hit is cast before the despawn"
+        );
+        assert!(f.world.gimmick(g.obj_id).is_none());
+        assert!(f.server.systems.npcs.gimmicks.find(g.obj_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn elevator_without_a_collision_skill_never_hits() {
+        // The fixture's victim is the living control for the contact gimmick; the rider stands
+        // on the elevator, which has no template and therefore no collision skill.
+        let f = contact_fixture(contact_template(false), (200.0, 200.0));
+        let rider = control_player(&f, (100.0, 200.0));
+        let elevator =
+            spawn_from_spawner(&f.server, &f.world, &elevator_spawner()).expect("spawned");
+        let active = f
+            .server
+            .systems
+            .npcs
+            .gimmicks
+            .find(elevator.obj_id)
+            .unwrap();
+        assert!(active.template.is_none());
+        for i in 0..5 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        assert_eq!(rider.1.data().unit.hp, 500, "the elevator rider is not hit");
+        let source = doodad_at(&f.server, &f.world, (200.0, 200.0, 100.0));
+        let (_, contact) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &contact,
+            Duration::from_millis(50),
+            1_400,
+        );
+        assert_eq!(f.victim.data().unit.hp, 400, "a contact gimmick still hits");
     }
 
     #[tokio::test]
