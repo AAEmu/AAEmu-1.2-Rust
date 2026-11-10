@@ -808,9 +808,9 @@ mod server_flow {
     }
 }
 
-/// A hull collision between two player-owned ships is player-vs-player damage: it follows the
-/// attack gate (Peace / no-PvP instances), while environment damage (`attacker == target`) is
-/// unchanged.
+/// A hull collision between two player-owned ships is blocked only by the protection cases
+/// (Peace / no-PvP instances); friendly and same-faction ships still ram each other elsewhere.
+/// Environment damage (`attacker == target`) is unchanged.
 #[tokio::test]
 async fn player_owned_ship_hull_damage_follows_the_attack_gate() {
     use crate::data::world_data::{
@@ -945,4 +945,24 @@ async fn player_owned_ship_hull_damage_follows_the_attack_gate() {
         },
     );
     assert!(target.data().unit.hp < hp, "floor damage still applies");
+
+    // Same-faction ships in a normal (non-conflict) zone still take ram damage: only the
+    // protection cases are gated.
+    b.data().unit.faction_id = 101;
+    target.data().unit.faction_id = 101;
+    target.data().unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    let hp = target.data().unit.hp;
+    super::apply_hull_damage(
+        &server,
+        &world,
+        HullDamage {
+            target: target.obj_id,
+            attacker: attacker.obj_id,
+            percent: 10,
+        },
+    );
+    assert!(
+        target.data().unit.hp < hp,
+        "same-faction ships still take ram damage in a normal zone"
+    );
 }

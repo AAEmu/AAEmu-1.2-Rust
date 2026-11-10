@@ -158,6 +158,104 @@ fn peace_allows_attack(server: &GameServer, attacker: &PlayerRef, target: &Playe
         && faction_relation(server, a, b) == RelationState::Hostile
 }
 
+/// The rules that protect a target from a **player-controlled** attacker even though the
+/// faction relation is Hostile: Peace, no-PvP instances and the faction-controlled home zones.
+///
+/// Non-damage effects use this instead of the whole [`can_attack`]: a Neutral target (faction 2
+/// interaction NPCs, an NPC caster's trap) keeps the damage-free C# behaviour, while a protected
+/// player is still skipped.
+pub fn protected_from(server: &GameServer, me: &Target, target: &Target) -> bool {
+    let me_owner = me.as_obj().and_then(|o| owner_character(server, o));
+    let target_owner = target.as_obj().and_then(|o| owner_character(server, o));
+    if let (Some(attacker), Some(defender)) = (&me_owner, &target_owner) {
+        if is_peace_zone(server, target) && !peace_allows_attack(server, attacker, defender) {
+            return true;
+        }
+    }
+    if server.config.dungeons.enforce_no_pvp
+        && me_owner.is_some()
+        && target_owner.is_some()
+        && is_no_pvp_zone(server, target)
+    {
+        return true;
+    }
+    home_zone_protected(server, me, target)
+}
+
+/// The faction-controlled home-zone protection of `can_attack`: a zone mother faction protects
+/// its own natives, and a zone-faction player is safe from a non-hostile, non-Retribution
+/// attacker of the same zone.
+fn home_zone_protected(server: &GameServer, me: &Target, target: &Target) -> bool {
+    let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
+    let target_faction = faction_of(target);
+    let zone_key = super::geometry::instance_and_zone(target).1;
+    let zone_faction_raw = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map_or(FACTION_NEUTRAL, |z| z.faction_id);
+    let zone_faction_id = if zone_faction_raw == 0 {
+        FACTION_NEUTRAL
+    } else {
+        zone_faction_raw
+    };
+    let factions = &server.game_data.factions;
+    let zone_faction = factions
+        .get(zone_faction_id)
+        .or_else(|| factions.get(FACTION_NEUTRAL));
+    let target_mother = nation::faction_of_id(server, target_faction).map_or(0, |f| f.1);
+    if me_char.is_some() && target_mother != 0 {
+        if let Some(z) = zone_faction {
+            if target_mother == z.mother_id || target_mother == z.id {
+                return true;
+            }
+        }
+    }
+    if let (Some(me_c), Some(owner)) = (
+        me_char.as_ref(),
+        target.as_obj().and_then(|o| owner_character(server, o)),
+    ) {
+        let (owner_faction, owner_obj) = {
+            let d = owner.data();
+            (d.unit.faction_id, d.obj_id)
+        };
+        let trg_flagged = owner
+            .data()
+            .unit
+            .buffs
+            .check_buff(buff_constants::RETRIBUTION);
+        let owner_mother = nation::faction_of_id(server, owner_faction).map_or(0, |f| f.1);
+        if owner_mother != 0
+            && owner_mother == zone_faction_id
+            && !is_actively_hostile(me_c, owner_obj)
+            && !trg_flagged
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The hull-collision protection between two player-owned ships: Peace and no-PvP only (the
+/// home-zone faction protection is about player attacks on zone natives, not ship collisions).
+pub fn ramming_protected(
+    server: &GameServer,
+    attacker: &WorldObject,
+    target: &WorldObject,
+) -> bool {
+    let (Some(attacker), Some(target_char)) = (
+        owner_character(server, attacker),
+        owner_character(server, target),
+    ) else {
+        return false;
+    };
+    let target_t = Target::Obj(target.clone());
+    if is_peace_zone(server, &target_t) && !peace_allows_attack(server, &attacker, &target_char) {
+        return true;
+    }
+    server.config.dungeons.enforce_no_pvp && is_no_pvp_zone(server, &target_t)
+}
+
 /// `BaseUnit.CanAttack(target)`.
 pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     if let Some(allowed) =
@@ -1567,6 +1665,180 @@ mod tests {
         assert!(
             conflict_b.data().unit.buffs.check_buff(50_003),
             "the hostile dispel does not cure the bad buff"
+        );
+    }
+
+    /// A Neutral NPC target (faction 2) keeps main's behaviour: a non-damage hostile effect
+    /// still lands. Only the player-protection cases are filtered.
+    #[tokio::test]
+    async fn a_neutral_npc_still_takes_a_non_damage_hostile_effect() {
+        use crate::models::npc::Npc;
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+        use crate::world::Entity;
+
+        let mut data = pvp_data();
+        data.factions.add(faction(2, 0)); // FactionsEnum.Neutral
+        let template = add_buff_skill(
+            &mut data,
+            10_010,
+            50_007,
+            2,
+            true,
+            SkillTargetType::Hostile as u8,
+            /* friendly */ false,
+            /* non_friendly */ true,
+        );
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let caster = player_in(&server, &ca, 0x101, 101, crate::test_support::TEST_ZONE, 0);
+        let mut npc = Npc::new(900);
+        npc.unit.faction_id = 2;
+        npc.unit.hp = 5_000;
+        npc.unit.max_hp = 5_000;
+        npc.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let npc = Entity::new(0x401, npc);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        let tn = Target::Obj(WorldObject::from(&npc));
+        let tc = obj_target(&caster);
+        assert_eq!(relation_to(&server, &tc, &tn), RelationState::Neutral);
+        assert!(
+            !can_attack(&server, &tc, &tn),
+            "a neutral NPC is not attackable"
+        );
+        assert!(!protected_from(&server, &tc, &tn));
+
+        let mut target = SkillCastTarget::Unit(npc.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&caster),
+            SkillCaster::Unit(caster.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(
+            npc.data().unit.buffs.check_buff(50_007),
+            "the neutral NPC still receives the hostile effect"
+        );
+    }
+
+    /// A faction-2 NPC caster's trap still lands on a player: an NPC attacker is not subject to
+    /// the player-protection rules.
+    #[tokio::test]
+    async fn a_neutral_npc_casters_trap_still_lands_on_a_player() {
+        use crate::models::npc::Npc;
+        use crate::systems::skills::skill::unit_use_skill;
+        use crate::world::Entity;
+
+        let mut data = pvp_data();
+        data.factions.add(faction(2, 0));
+        let _template = add_buff_skill(
+            &mut data,
+            10_011,
+            50_008,
+            2,
+            true,
+            SkillTargetType::Hostile as u8,
+            /* friendly */ false,
+            /* non_friendly */ true,
+        );
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let player = player_in(&server, &ca, 0x101, 101, crate::test_support::TEST_ZONE, 0);
+        let mut npc = Npc::new(900);
+        npc.unit.faction_id = 2;
+        npc.unit.hp = 5_000;
+        npc.unit.max_hp = 5_000;
+        npc.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let npc = Entity::new(0x401, npc);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        let result = unit_use_skill(
+            &server,
+            &WorldObject::from(&npc),
+            10_011,
+            &WorldObject::from(&player),
+        );
+        assert_eq!(result, 0);
+        assert!(
+            player.data().unit.buffs.check_buff(50_008),
+            "the NPC's trap applies to the player"
+        );
+    }
+
+    /// A hostile skill may carry friendly-only Target effects for its own caster: the area
+    /// target filter keeps the caster even when the caster is protected by Peace.
+    #[tokio::test]
+    async fn a_hostile_skill_keeps_friendly_target_effects_on_its_caster() {
+        use crate::models::npc::Npc;
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+        use crate::world::Entity;
+
+        let mut data = pvp_data();
+        data.factions.add(faction(2, 0));
+        let mut template = (*add_buff_skill(
+            &mut data,
+            10_012,
+            50_009,
+            1,
+            false,
+            SkillTargetType::Hostile as u8,
+            /* friendly */ true,
+            /* non_friendly */ false,
+        ))
+        .clone();
+        template.target_area_radius = 5;
+        template.target_selection = 2; // Target
+        let template = std::sync::Arc::new(template);
+        data.systems.skills.add_skill((*template).clone());
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let caster = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let mut npc = Npc::new(900);
+        npc.unit.faction_id = 2;
+        npc.unit.hp = 5_000;
+        npc.unit.max_hp = 5_000;
+        npc.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let npc = Entity::new(0x401, npc);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        let mut target = SkillCastTarget::Unit(npc.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&caster),
+            SkillCaster::Unit(caster.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(
+            caster.data().unit.buffs.check_buff(50_009),
+            "the friendly-only effect still reaches the caster"
         );
     }
 }

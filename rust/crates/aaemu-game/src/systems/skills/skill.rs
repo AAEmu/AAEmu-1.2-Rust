@@ -25,7 +25,9 @@ use super::packets::{
     CompressedGamePackets, SCCastingStoppedPacket, SCCooldownsPacket, SCSkillCooldownResetPacket,
     SCSkillEndedPacket, SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
 };
-use super::relation::{can_attack, filter_with_relation, owner_character, relation_to};
+use super::relation::{
+    can_attack, filter_with_relation, owner_character, protected_from, relation_to,
+};
 use super::state::{
     AutoAttackSlot, CancelToken, PlotCooldownSnapshot, SkillRef, SkillRun, SkillTaskKind,
     SkillTaskSlot,
@@ -514,10 +516,16 @@ fn initial_target(
             if let Some(t) = &target {
                 let tt = Target::Obj(t.clone());
                 let r = relation_to(server, &caster_t, &tt);
-                // A hostile target must pass the attack gate as well: the relation alone let
-                // stuns, snares and debuffs through in Peace and in no-PvP instances. Neutral
-                // targets keep the C# behaviour.
-                if r != RelationState::Neutral && !can_attack(server, &caster_t, &tt) {
+                // Main's relation check, plus the player-protection cases (Peace, no-PvP,
+                // home zones): a Neutral target keeps the C# behaviour, a protected player is
+                // refused.
+                if r != RelationState::Hostile
+                    && r != RelationState::Neutral
+                    && !can_attack(server, &caster_t, &tt)
+                {
+                    return None;
+                }
+                if protected_from(server, &caster_t, &tt) {
                     return None;
                 }
             }
@@ -2103,13 +2111,17 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
     }
     let mut possible = distinct;
-    // A hostile skill's unit targets must all pass the attack gate: a stun / snare / debuff is
-    // as much an attack as damage (Peace, no-PvP instances, the home-zone protection). Filtering
-    // here also keeps the combat dice and durability rolls below off protected players.
+    // A hostile skill's unit targets drop the protected players (Peace, no-PvP instances, the
+    // home-zone protection) so the combat dice / durability rolls below do not run on them. A
+    // Neutral target keeps main's behaviour, and the caster itself stays so friendly-only Target
+    // effects of a hostile skill still reach it.
     if t.target_type == SkillTargetType::Hostile as i32 {
-        possible.retain(|target| match target.as_obj() {
-            Some(o) if o.is_unit() => can_attack(server, &caster_t, target),
-            _ => true,
+        possible.retain(|target| {
+            target.as_obj().is_none_or(|o| {
+                !o.is_unit()
+                    || o.obj_id() == caster_t.obj_id()
+                    || !protected_from(server, &caster_t, target)
+            })
         });
     }
     if t.target_area_radius > 0 && t.target_area_angle > 0 && t.target_area_angle < 360 {
@@ -2234,14 +2246,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 );
                 continue;
             }
-            // A non-friendly effect on a unit target needs the same permission as a hit: the
-            // relation gate below alone let hostile effects (stun, snare, silence, fear, knock
-            // back, debuff) land on protected players in Peace / no-PvP instances. Friendly
-            // effects are untouched.
+            // A non-friendly effect on a unit target skips a protected player (Peace, no-PvP,
+            // home zones). A Neutral target keeps main's behaviour: the whole `can_attack`
+            // also refused neutral NPCs, which lost interaction / trap / spawner effects.
             if !effect.friendly
                 && effect.non_friendly
                 && target.as_obj().is_some_and(|o| o.is_unit())
-                && !can_attack(server, &caster_t, &target)
+                && protected_from(server, &caster_t, &target)
             {
                 tracing::debug!(
                     skill_id = t.id,
