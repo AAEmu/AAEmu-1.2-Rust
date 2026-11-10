@@ -2788,6 +2788,44 @@ async fn family_action_failures_answer_the_client() {
 }
 
 #[tokio::test]
+async fn family_kick_removes_a_member_whose_character_is_gone() {
+    use crate::systems::social::family::{Family, FamilyMember};
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    let member = |character: Option<PlayerRef>, id: u32, name: &str, role: u8| FamilyMember {
+        character,
+        id,
+        name: name.into(),
+        role,
+        title: "Kid".into(),
+    };
+    // Member 99 is not in the world and has no character row. The test server's pool has no
+    // MySQL behind it, so a `Character.Load` lookup could not find it: a member must not need
+    // that lookup, or it would hold a cap slot forever.
+    server.systems.social.families.insert(Family {
+        id: 11,
+        members: vec![
+            member(Some(a.p.clone()), 1, "Al", 1),
+            member(Some(b.p.clone()), 2, "Bob", 0),
+            member(None, 99, "Ghost", 0),
+        ],
+        removed_members: Vec::new(),
+    });
+    a.p.data().family = 11;
+    b.p.data().family = 11;
+    let mut kick = PacketStream::new();
+    kick.write_u32(99);
+    a.send(&server, cs::CSFamilyKickPacket, kick).await;
+    assert_eq!(a.ops(), vec![sc::SCFamilyMemberRemovedPacket]);
+    assert_eq!(b.ops(), vec![sc::SCFamilyMemberRemovedPacket]);
+    let family = server.systems.social.families.family(11).unwrap();
+    assert_eq!(family.members.len(), 2);
+    assert!(family.member(99).is_none());
+}
+
+#[tokio::test]
 async fn friends_and_blocked_users() {
     let server = test_server();
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);

@@ -852,7 +852,7 @@ pub async fn kick_member(server: &GameServer, kicker: &PlayerRef, kicked_id: u32
         send_error(kicker, error::FAMILY_KICK_SELF);
         return;
     }
-    {
+    let kicked_is_member = {
         let st = server.systems.social.families.lock();
         let Some(f) = st.families.get(&family_id) else {
             tracing::error!("KickMember: no family {family_id}");
@@ -875,9 +875,12 @@ pub async fn kick_member(server: &GameServer, kicker: &PlayerRef, kicked_id: u32
                 return;
             }
         }
-    }
+        f.member(kicked_id).is_some()
+    };
     let online = server.world.character_by_id(kicked_id);
-    if online.is_none() && !character_exists(server, kicked_id).await {
+    // A member needs no `Character.Load` check (and one whose character row is gone must stay
+    // kickable, or it would hold a cap slot forever); only a stranger is looked up.
+    if !kicked_is_member && online.is_none() && !character_exists(server, kicked_id).await {
         send_error(kicker, error::FAMILY_NO_TARGET);
         return;
     }
