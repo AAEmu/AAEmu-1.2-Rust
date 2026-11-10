@@ -10,6 +10,7 @@ pub mod db;
 pub mod declare;
 pub mod fort;
 pub mod headquarters;
+pub mod hostility;
 pub mod larceny;
 pub mod participants;
 pub mod peace;
@@ -17,6 +18,7 @@ pub mod period;
 pub mod reinforce;
 pub mod rights;
 pub mod runtime;
+pub mod siege_area;
 pub mod siege_items;
 pub mod state;
 pub mod tax;
@@ -34,6 +36,8 @@ mod fort_tests;
 mod headquarters_phase_tests;
 #[cfg(test)]
 mod headquarters_tests;
+#[cfg(test)]
+mod hostility_tests;
 #[cfg(test)]
 mod larceny_tests;
 #[cfg(test)]
