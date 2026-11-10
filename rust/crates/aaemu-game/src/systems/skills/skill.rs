@@ -666,6 +666,13 @@ fn use_skill_impl(
         return result;
     }
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
+    // The `once_one_*` interaction target, kept as a handle: `resolved_target` is moved into
+    // `owned_target` below and the gate runs after that.
+    let interaction_doodad = resolved_target
+        .as_ref()
+        .and_then(Target::as_obj)
+        .and_then(WorldObject::as_doodad)
+        .cloned();
     let Some(target) = &resolved_target else {
         if let Some(npc) = caster.as_npc() {
             server
@@ -855,6 +862,17 @@ fn use_skill_impl(
     if dry_run {
         return (skill_result::SUCCESS, 0);
     }
+    // 1.2 `doodad_almighties.once_one_interaction` / `once_one_man`: another unit's interaction
+    // with a doodad that is held is refused before any of this cast's state changes (buff
+    // removal, GCD, mana, reagent, labor). Instant interactions are not blocked by their own
+    // kind and take no occupancy; a timed interaction cast takes it once it is accepted below.
+    if let Some(doodad) = interaction_doodad.as_ref() {
+        if !crate::systems::npcs::doodad::occupancy::permits_interaction(
+            server, doodad, caster, skill,
+        ) {
+            return (skill_result::INVALID_TARGET, 0);
+        }
+    }
     if let Some(task) = active_task {
         if let SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
             stop(server, &task.skill, caster, channel_doodad);
@@ -999,6 +1017,18 @@ fn use_skill_impl(
     let ctm = skill.state().cast_time_multiplier;
     cast_time = (f64::from(cast_time) * f64::from(ctm)).round_ties_even() as i32;
     if cast_time > 0 {
+        // A timed interaction cast holds the doodad for its whole duration (`once_one_*`).
+        // Taking it here, after every fallible check, keeps an abandoned refusal from leaving
+        // an entry behind.
+        if let Some(doodad) = interaction_doodad.as_ref() {
+            if !crate::systems::npcs::doodad::occupancy::begin_cast(server, doodad, caster, skill) {
+                // Another unit took the doodad between the refusal check and here.
+                crate::systems::npcs::doodad::occupancy::send_already_interacting(caster);
+                let tl = std::mem::take(&mut skill.state().tl_id);
+                server.systems.skills.tl_ids.release(tl);
+                return (skill_result::INVALID_TARGET, 0);
+            }
+        }
         // The 1.2 client measures a player's global cooldown from the cast start, so start it
         // now; `cast` would only start it at the cast end, refusing a skill the client already
         // shows as ready. NPC casts keep the cast-end start (their AI pacing relies on it).
@@ -2725,6 +2755,12 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     let tl = std::mem::take(&mut skill.state().tl_id);
     if tl == 0 {
         return;
+    }
+    // The cast (completed, cancelled or interrupted) no longer holds a `once_one_*` doodad.
+    // A seat occupation of the same unit keeps its own bond flag.
+    let target = skill.state().initial_target;
+    if target != 0 {
+        crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster.obj_id());
     }
     if !caster.is_unit() {
         // Not a unit any more: release the id without the unit-side effects.

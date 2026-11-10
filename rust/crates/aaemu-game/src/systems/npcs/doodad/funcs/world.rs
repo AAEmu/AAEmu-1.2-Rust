@@ -83,6 +83,14 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
         return;
     }
     if f.bond_kind_id > bond_kind::BOND_INVALID {
+        // 1.2 `once_one_man`: one unit occupies the chair / bed / instrument at a time. The
+        // interaction start already refused a second unit; this covers a race or a func-driven
+        // use that bypassed the gate.
+        let me = WorldObject::from(player);
+        if !super::super::occupancy::begin_bond(ctx.server, &ctx.doodad, &me) {
+            super::super::occupancy::send_already_interacting(&me);
+            return;
+        }
         let character_id = player.data().id;
         // ask for a free meta number for landing
         let spot = ctx
@@ -91,6 +99,7 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
             .seat
             .load_passenger(character_id, ctx.doodad.obj_id, f.space);
         if spot == -1 {
+            super::super::occupancy::end_bond(ctx.server, ctx.doodad.obj_id, me.obj_id());
             return; // we leave if there is no place
         }
         let bond = BondDoodad {

@@ -441,6 +441,15 @@ pub fn use_doodad(
         return;
     };
 
+    // 1.2 `doodad_almighties.once_one_interaction` / `once_one_man`: while another unit holds
+    // the doodad, its interaction is refused. This is the execution funnel of every path
+    // (skill Interaction effect, `CSLootOpenBag`, harpoon, func-driven skills), so it is the
+    // last line of defense behind the cast-start gate in `skills::skill::use_skill_impl`.
+    if !super::occupancy::permits(server, &ctx.doodad, caster) {
+        super::occupancy::send_already_interacting(caster);
+        return;
+    }
+
     // `blocked_child_doodads` (buff 6064 -> 6560, buff 6245 -> 3446) is a parent-side
     // interaction block, before any func / phase func runs.
     if refuse_blocked_child_doodad(server, &ctx.world, &ctx.doodad, Some(caster)) {
