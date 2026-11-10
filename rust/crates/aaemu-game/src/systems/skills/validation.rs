@@ -414,7 +414,9 @@ pub(super) fn check(
     {
         min_range /= 100.0;
     }
-    if template.weapon_slot_for_range_id > 0 {
+    // A mate (battle pet) wields no weapon: its skills keep their own range instead of the
+    // weaponless 0-3 m fallback.
+    if template.weapon_slot_for_range_id > 0 && caster.as_mate().is_none() {
         let ranges = server
             .systems
             .skills

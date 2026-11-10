@@ -1,0 +1,420 @@
+//! Battle pets: the 1.2 client runs the pet AI (follow, auto target, auto-cast) and sends the
+//! pet's skills as `CSStartSkill` with the mate as a plain `Unit` caster (the pet bar clicks
+//! too). The server casts them as the mate, with the mate's own range / GCD / cooldowns, and
+//! accepts only the mate's base skill, its bar skills and the skills its level allows.
+
+use super::super::data::{MountSkills, NpcMountSkills};
+use super::*;
+use crate::models::npc::Npc;
+use crate::systems::skills::data::effects::{EffectTemplate, HealEffect};
+use crate::systems::skills::data::EffectKind;
+use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+use crate::systems::skills::tests::{damage_effect, skill_effect};
+use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
+use crate::world::{Entity, NpcRef};
+
+const BASIC: u32 = 300_201;
+const BAR_HIT: u32 = 300_202;
+const HIGH_LEVEL: u32 = 300_203;
+const BAR_HEAL: u32 = 300_204;
+const NOT_ON_BAR: u32 = 300_205;
+const TARGET_OBJ: u32 = 0x0200;
+
+fn pet_skill(id: u32, hostile: bool) -> crate::systems::skills::data::SkillTemplate {
+    let mut t = crate::systems::skills::tests::skill_template(id);
+    t.ability_level = 1;
+    if hostile {
+        t.max_range = 25;
+        // The weaponless 0-3 m fallback must not apply to a mate caster.
+        t.weapon_slot_for_range_id = 15;
+        t.effects
+            .push(skill_effect(900_001, EffectKind::DamageEffect, 1));
+    } else {
+        t.target_type = 0; // Self
+        t.target_selection = 1;
+        t.damage_type_id = 0;
+        t.max_range = 30;
+        t.effects
+            .push(skill_effect(900_002, EffectKind::HealEffect, 2));
+    }
+    t
+}
+
+fn pet_data() -> GameData {
+    let mut d = data();
+    d.systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&MATE_NPC)
+        .expect("mate template")
+        .base_skill_id = BASIC as i32;
+    let s = &mut d.systems.skills;
+    s.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(damage_effect(1, 100))),
+        900_001,
+    );
+    s.add_effect(
+        EffectKind::HealEffect,
+        EffectTemplate::Heal(HealEffect {
+            id: 2,
+            use_fixed_heal: true,
+            fixed_min: 150,
+            fixed_max: 150,
+            use_level_heal: false,
+            level_md: 0.0,
+            level_va_start: 0,
+            level_va_end: 0,
+            percent: false,
+            use_charged_buff: false,
+            charged_buff_id: 0,
+            charged_mul: 0.0,
+            slave_applicable: false,
+            ignore_heal_aggro: false,
+            dps_multiplier: 0.0,
+            actability_group_id: 0,
+            actability_step: 0,
+            actability_mul: 0.0,
+            actability_add: 0.0,
+        }),
+        900_002,
+    );
+    s.add_skill(pet_skill(BASIC, true));
+    s.add_skill(pet_skill(BAR_HIT, true));
+    let mut high = pet_skill(HIGH_LEVEL, true);
+    high.ability_level = 30;
+    s.add_skill(high);
+    s.add_skill(pet_skill(BAR_HEAL, false));
+    s.add_skill(pet_skill(NOT_ON_BAR, true));
+    let v = &mut d.systems.vehicles;
+    v.npc_mount_skills.clear();
+    for (i, (row, skill)) in [(31, BAR_HIT), (32, HIGH_LEVEL), (33, BAR_HEAL)]
+        .into_iter()
+        .enumerate()
+    {
+        v.mount_skills.push(MountSkills {
+            id: row,
+            name: "pet".into(),
+            skill_id: skill,
+        });
+        v.npc_mount_skills.push(NpcMountSkills {
+            id: 40 + i as u32,
+            npc_id: MATE_NPC,
+            mount_skill_id: row,
+        });
+    }
+    d
+}
+
+struct Owner {
+    client: TestClient,
+    player: PlayerRef,
+    mate: MateRef,
+}
+
+/// Player `n` at `x` with a summoned (not mounted) level-`level` mate standing at `mate_x`.
+fn owner_with_pet(server: &Arc<GameServer>, n: u32, x: f32, mate_x: f32, level: u8) -> Owner {
+    let mut client = TestClient::new(server, n, n);
+    let (player, item_id) = player_with_item(server, &client, n, PA + n, (x, 100.0), MATE_ITEM);
+    {
+        let mut c = player.data();
+        c.unit.level = 30;
+        c.unit.hp = 5_000;
+        c.unit.max_hp = 5_000;
+    }
+    client.conn.active_char = Some(player.clone());
+    let now = chrono::Utc::now().naive_utc();
+    server.systems.vehicles.mates.character(n, |cm| {
+        cm.mates.push(mates::MateDb {
+            id: 700 + n,
+            item_id,
+            name: "Pet".into(),
+            xp: 0,
+            level: 1,
+            mileage: 0,
+            hp: 10_000,
+            mp: 10_000,
+            owner: n,
+            updated_at: now,
+            created_at: now,
+        });
+    });
+    mates::spawn_mount(server, &player, item_id);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(n)
+        .pop()
+        .expect("the mate spawned");
+    {
+        let mut m = mate.data();
+        m.unit.level = level;
+        m.unit.max_hp = 1_000;
+        m.unit.hp = 500;
+        m.unit.max_mp = 1_000;
+        m.unit.mp = 1_000;
+        m.unit.transform.set_xyz(mate_x, 100.0, 100.0);
+    }
+    client.drain();
+    Owner {
+        client,
+        player,
+        mate,
+    }
+}
+
+fn hostile(server: &Arc<GameServer>, x: f32) -> NpcRef {
+    let mut n = Npc::new(1234);
+    n.unit.name = "Dummy".into();
+    n.unit.level = 5;
+    n.unit.hp = 1_000;
+    n.unit.max_hp = 1_000;
+    n.unit.transform.set_xyz(x, 100.0, 100.0);
+    let npc = Entity::new(TARGET_OBJ, n);
+    server
+        .world
+        .world(0)
+        .expect("world")
+        .spawn(&npc, &server.view_ctx());
+    npc
+}
+
+fn pet_cast(caster: SkillCaster, skill_id: u32, target: SkillCastTarget) -> CSStartSkillPacket {
+    CSStartSkillPacket {
+        skill_id,
+        caster,
+        target,
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+}
+
+async fn settle() {
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(1_500)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Casts and returns the `SCSkillStarted` result (if any) and the frames.
+async fn cast(
+    server: &Arc<GameServer>,
+    o: &mut Owner,
+    p: CSStartSkillPacket,
+) -> (Option<u8>, Vec<(u16, Vec<u8>)>) {
+    let skill = p.skill_id;
+    start_skill(server, &mut o.client.conn, p);
+    settle().await;
+    let frames = o.client.drain();
+    (started_result(&frames, skill), frames)
+}
+
+#[tokio::test(start_paused = true)]
+async fn pet_unit_caster_basic_attack_hits_as_the_mate_when_the_owner_is_out_of_range() {
+    let server = server_with(pet_data());
+    crate::systems::skills::bind(&server);
+    // The owner stands 60 m away, the pet 10 m from the target.
+    let mut o = owner_with_pet(&server, 1, 100.0, 150.0, 5);
+    let npc = hostile(&server, 160.0);
+    let packet = pet_cast(
+        SkillCaster::Unit(o.mate.obj_id),
+        BASIC,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, frames) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, None, "{:x?}", ops(&frames));
+    assert_eq!(npc.data().unit.hp, 900, "the pet's hit landed");
+    assert!(
+        !o.player.data().unit.is_auto_attack,
+        "a pet cast never starts the owner's auto attack"
+    );
+    // The owner's own GCD was not used up by the pet's cast.
+    assert_eq!(o.player.data().unit.skill_last_used_ms, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pet_unit_caster_bar_skill_is_accepted_and_off_bar_skill_is_refused() {
+    let server = server_with(pet_data());
+    crate::systems::skills::bind(&server);
+    let mut o = owner_with_pet(&server, 1, 100.0, 150.0, 5);
+    let npc = hostile(&server, 160.0);
+    let packet = pet_cast(
+        SkillCaster::Unit(o.mate.obj_id),
+        BAR_HIT,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, frames) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, None, "{:x?}", ops(&frames));
+    assert_eq!(npc.data().unit.hp, 900);
+    let packet = pet_cast(
+        SkillCaster::Unit(o.mate.obj_id),
+        NOT_ON_BAR,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, _) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, Some(skill_result::NO_PERM));
+    assert_eq!(npc.data().unit.hp, 900, "the refused skill did nothing");
+}
+
+#[tokio::test(start_paused = true)]
+async fn pet_unit_caster_of_someone_elses_mate_is_refused() {
+    let server = server_with(pet_data());
+    crate::systems::skills::bind(&server);
+    let mut a = owner_with_pet(&server, 1, 100.0, 150.0, 5);
+    let b = owner_with_pet(&server, 2, 120.0, 152.0, 5);
+    let npc = hostile(&server, 160.0);
+    let packet = pet_cast(
+        SkillCaster::Unit(b.mate.obj_id),
+        BASIC,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, _) = cast(&server, &mut a, packet).await;
+    assert_eq!(result, Some(skill_result::NO_PERM));
+    assert_eq!(npc.data().unit.hp, 1_000);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pet_skill_above_the_mate_level_is_refused_for_both_caster_types() {
+    let server = server_with(pet_data());
+    crate::systems::skills::bind(&server);
+    let mut o = owner_with_pet(&server, 1, 100.0, 150.0, 5);
+    let npc = hostile(&server, 160.0);
+    let packet = pet_cast(
+        SkillCaster::Unit(o.mate.obj_id),
+        HIGH_LEVEL,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, _) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, Some(skill_result::NO_PERM));
+    let mount = SkillCaster::Mount {
+        obj_id: o.mate.obj_id,
+        mount_skill_template_id: 32,
+    };
+    let packet = pet_cast(mount, HIGH_LEVEL, SkillCastTarget::Unit(TARGET_OBJ));
+    let (result, _) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, Some(skill_result::NO_PERM));
+    assert_eq!(npc.data().unit.hp, 1_000);
+    // Once the pet reaches the level the same cast goes through.
+    o.mate.data().unit.level = 30;
+    let packet = pet_cast(
+        SkillCaster::Unit(o.mate.obj_id),
+        HIGH_LEVEL,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, frames) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, None, "{:x?}", ops(&frames));
+    assert_eq!(npc.data().unit.hp, 900);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pet_heal_skill_heals_the_pet_for_both_caster_types() {
+    let server = server_with(pet_data());
+    crate::systems::skills::bind(&server);
+    let mut o = owner_with_pet(&server, 1, 100.0, 150.0, 5);
+    let packet = pet_cast(
+        SkillCaster::Unit(o.mate.obj_id),
+        BAR_HEAL,
+        SkillCastTarget::Unit(o.mate.obj_id),
+    );
+    let (result, frames) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, None, "{:x?}", ops(&frames));
+    assert_eq!(o.mate.data().unit.hp, 650, "Unit caster");
+    assert_eq!(
+        o.player.data().unit.hp,
+        5_000,
+        "the owner is not the caster"
+    );
+    let mount = SkillCaster::Mount {
+        obj_id: o.mate.obj_id,
+        mount_skill_template_id: 33,
+    };
+    let packet = pet_cast(mount, BAR_HEAL, SkillCastTarget::Unit(o.mate.obj_id));
+    let (result, frames) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, None, "{:x?}", ops(&frames));
+    assert_eq!(o.mate.data().unit.hp, 800, "Mount caster");
+}
+
+#[tokio::test(start_paused = true)]
+async fn mate_state_values_from_four_up_are_ignored() {
+    let server = server_with(pet_data());
+    let o = owner_with_pet(&server, 1, 100.0, 150.0, 5);
+    let tl = u32::from(o.mate.data().unit.tl_id);
+    mates::change_state_mate(&server, &o.player, tl, 3);
+    assert_eq!(o.mate.data().user_state, 3);
+    mates::change_state_mate(&server, &o.player, tl, 4);
+    mates::change_state_mate(&server, &o.player, tl, 255);
+    assert_eq!(o.mate.data().user_state, 3);
+    mates::change_state_mate(&server, &o.player, tl, 0);
+    assert_eq!(o.mate.data().user_state, 0);
+}
+
+/// The real Brown Wolfhound (npc 10814, base skill 2) with its real skill rows: Health Regen
+/// 17702 (`HealEffect` 290, `target_type` 0, level 25) heals the pet through both caster types,
+/// and the basic attack 2 hits from the mate with the owner far away.
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_wolfhound_health_regen_heals_and_basic_attack_hits() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    const WOLFHOUND: u32 = 10_814;
+    const HEALTH_REGEN: u32 = 17_702;
+    let server = super::mate_dash_skill_tests::real_pet_server(&db, WOLFHOUND);
+    let mut o = owner_with_pet(&server, 1, 100.0, 150.0, 30);
+    let regen_row = server
+        .game_data
+        .systems
+        .vehicles
+        .mount_skill_id_for_skill(HEALTH_REGEN);
+    assert_ne!(regen_row, 0);
+    println!("mate skills {:?}", o.mate.data().skills);
+    let mate_id = o.mate.obj_id;
+    for (what, caster) in [
+        (
+            "Mount",
+            SkillCaster::Mount {
+                obj_id: mate_id,
+                mount_skill_template_id: regen_row,
+            },
+        ),
+        ("Unit", SkillCaster::Unit(mate_id)),
+    ] {
+        o.mate.data().unit.hp = 100;
+        o.mate.data().unit.max_hp = 1_000;
+        // The skill's 18 s cooldown is on the mate: forget the first cast.
+        {
+            let mut m = o.mate.data();
+            m.unit.cooldowns = Default::default();
+            m.unit.skill_last_used_ms = 0;
+            m.unit.global_cooldown_ms = 0;
+        }
+        let packet = pet_cast(caster, HEALTH_REGEN, SkillCastTarget::Unit(mate_id));
+        let (result, frames) = cast(&server, &mut o, packet).await;
+        assert_eq!(result, None, "{what}: {:x?}", ops(&frames));
+        assert!(
+            o.mate.data().unit.hp > 100,
+            "{what}: the pet was healed: {:x?}",
+            ops(&frames)
+        );
+    }
+    let npc = hostile(&server, 160.0);
+    {
+        let mut m = o.mate.data();
+        m.unit.skill_last_used_ms = 0;
+        m.unit.global_cooldown_ms = 0;
+    }
+    let packet = pet_cast(
+        SkillCaster::Unit(mate_id),
+        2,
+        SkillCastTarget::Unit(TARGET_OBJ),
+    );
+    let (result, frames) = cast(&server, &mut o, packet).await;
+    assert_eq!(result, None, "{:x?}", ops(&frames));
+    assert!(npc.data().unit.hp < 1_000, "the pet's basic attack landed");
+}
