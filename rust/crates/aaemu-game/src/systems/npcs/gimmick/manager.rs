@@ -453,14 +453,25 @@ pub fn spawn_from_effect(
     }
     g.unit.scale = params.scale;
     // `SpawnGimmickEffect.Velocity*` / `AngVel*`: the C# `GimmickSpawner` constructor stored
-    // them but never applied them, so effect-spawned gimmicks never moved. Every shipped row
-    // with a nonzero velocity uses coordinate type 2 (world), which the doodad spawn path also
-    // applies directly; other types have no nonzero row and stay at rest.
+    // them but never applied them, so effect-spawned gimmicks never moved. The shipped rows are
+    // authored in the caster's local frame (forward +Y, right +X, up +Z: (0,25,6) and (0,4,0)
+    // are forward / up launches), so rotate them by the caster's world yaw. The doodad spawn
+    // path below overrides both with its world-space values (WZGimmickSetMovement semantics).
+    // Every nonzero shipped row uses coordinate type 2; other types have no nonzero row.
+    let yaw = caster_world.rot_z;
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    let rotate_local = |v: [f32; 3]| {
+        [
+            v[0] * cos_yaw - v[1] * sin_yaw,
+            v[0] * sin_yaw + v[1] * cos_yaw,
+            v[2],
+        ]
+    };
     if params.velocity_coordinate_id == 2 {
-        g.vel = [params.velocity_x, params.velocity_y, params.velocity_z];
+        g.vel = rotate_local([params.velocity_x, params.velocity_y, params.velocity_z]);
     }
     if params.ang_vel_coordinate_id == 2 {
-        g.ang_vel = [params.ang_vel_x, params.ang_vel_y, params.ang_vel_z];
+        g.ang_vel = rotate_local([params.ang_vel_x, params.ang_vel_y, params.ang_vel_z]);
     }
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
@@ -1163,6 +1174,70 @@ mod tests {
         assert_eq!(f.victim.data().unit.hp, 400);
         // `disappear_by_collision = false`: it keeps rolling.
         assert!(f.world.gimmick(g.obj_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn effect_velocity_is_authored_in_the_casters_local_frame() {
+        let f = contact_fixture(contact_template(false), (300.0, 300.0));
+        // A caster facing east: its local +Y (forward) is world +X.
+        let mut d = crate::models::doodad::Doodad::new(1);
+        d.transform.set_xyz(100.0, 100.0, 100.0);
+        d.transform.rot_z = -std::f32::consts::FRAC_PI_2;
+        let source = Entity::new(0x300, d);
+        f.world.spawn(&source, &f.server.view_ctx());
+        let g = spawn_from_effect(
+            &f.server,
+            &f.world,
+            &SpawnGimmickParams {
+                gimmick_id: CONTACT_GIMMICK,
+                offset_coordinate_id: 2,
+                scale: 1.0,
+                velocity_coordinate_id: 2,
+                velocity_x: 0.0,
+                velocity_y: 5.0,
+                velocity_z: 1.0,
+                ang_vel_coordinate_id: 2,
+                ang_vel_x: 1.0,
+                ang_vel_y: 0.0,
+                ang_vel_z: 2.0,
+                ..Default::default()
+            },
+            &WorldObject::from(&source),
+        )
+        .expect("gimmick spawned");
+        {
+            let data = g.data();
+            assert!((data.vel[0] - 5.0).abs() < 1e-4, "vel {:?}", data.vel);
+            assert!(data.vel[1].abs() < 1e-4, "vel {:?}", data.vel);
+            assert!((data.vel[2] - 1.0).abs() < 1e-4, "vel {:?}", data.vel);
+            // Local +X (right) rotates to world -Y.
+            assert!(data.ang_vel[0].abs() < 1e-4, "angVel {:?}", data.ang_vel);
+            assert!(
+                (data.ang_vel[1] + 1.0).abs() < 1e-4,
+                "angVel {:?}",
+                data.ang_vel
+            );
+            assert!(
+                (data.ang_vel[2] - 2.0).abs() < 1e-4,
+                "angVel {:?}",
+                data.ang_vel
+            );
+        }
+        let active = f.server.systems.npcs.gimmicks.find(g.obj_id).unwrap();
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        let t = g.data().unit.transform;
+        assert!(t.x > 100.0, "launched east: x={}", t.x);
+        assert!(
+            (t.y - 100.0).abs() < 1e-4,
+            "no north/south drift: y={}",
+            t.y
+        );
     }
 
     #[tokio::test]
