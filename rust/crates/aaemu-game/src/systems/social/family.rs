@@ -480,9 +480,14 @@ pub async fn save_family_rows(pool: &MySqlPool, f: &Family) -> Result<()> {
 /// `InviteToFamily(inviter, invitedCharacterName, title)`. Note (C#): the family id sent is
 /// always 1.
 pub fn invite_to_family(server: &GameServer, inviter: &PlayerRef, invited_name: &str, title: &str) {
+    // `normalize_name` trims the name for the registry lookup below, so the online lookup trims
+    // it too; otherwise "Bob " would report an online Bob as offline.
+    let invited_name = invited_name.trim();
     let Some(invited) = server.world.character_by_name(invited_name) else {
         // An offline character is still registered in the `NameManager`; a name that is not
         // there belongs to nobody (the same split the lobby uses for a new character name).
+        // An offline character has no loaded block list, so this reply cannot honour a block
+        // (the same limit as `friend::add_friend`); only an online target drops it silently.
         let known = server.names.get_character_id(&normalize_name(invited_name)) != 0;
         send_error(
             inviter,

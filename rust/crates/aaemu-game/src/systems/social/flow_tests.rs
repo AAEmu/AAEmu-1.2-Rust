@@ -2569,6 +2569,24 @@ async fn family_invite_errors_name_the_reason() {
 }
 
 #[tokio::test]
+async fn family_invite_trims_the_typed_name() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    // Surrounding blanks are not part of the name: the online Bob is found, not reported as
+    // offline.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body(" Bob ", "Kid"),
+    )
+    .await;
+    assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
+    assert!(a.ops().is_empty());
+}
+
+#[tokio::test]
 async fn family_action_failures_answer_the_client() {
     use crate::systems::social::util::error;
     let server = test_server();
