@@ -1247,17 +1247,20 @@ impl Expression {
 // Formula models
 // ---------------------------------------------------------------------------------------------
 
-/// Formula ids whose evaluation failure has already been logged at `warn` (see
+/// Formulas (id and text) whose evaluation failure has already been logged at `warn` (see
 /// [`Formula::evaluate`]); guarded by a `Mutex` that a panic must not poison for later callers.
-static EVAL_FAILURE_WARNED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+/// The text is part of the key: every [`Formula::new`] formula has id 0 and the ids of the
+/// `formulas`, `unit_formulas` and `wearable_formulas` tables overlap.
+static EVAL_FAILURE_WARNED: OnceLock<Mutex<HashMap<u32, HashSet<String>>>> = OnceLock::new();
 
-/// `true` the first time a formula id fails to evaluate in this process.
-fn eval_failure_is_first(id: u32) -> bool {
-    let warned = EVAL_FAILURE_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-    warned
+/// `true` the first time a formula (id and text) fails to evaluate in this process.
+fn eval_failure_is_first(id: u32, text_formula: &str) -> bool {
+    let mut warned = EVAL_FAILURE_WARNED
+        .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(id)
+        .unwrap_or_else(PoisonError::into_inner);
+    let texts = warned.entry(id).or_default();
+    !texts.contains(text_formula) && texts.insert(text_formula.to_owned())
 }
 
 /// `Formula`: a database formula plus its compiled expression.
@@ -1320,9 +1323,9 @@ impl Formula {
     }
 
     /// `Formula.Evaluate(parameters)`: on any evaluation error (in practice a variable missing
-    /// from `params`) returns `0`. The first failure of a formula logs the formula, the
-    /// parameters and the error at `warn`; later failures of the same formula log at `debug`, so
-    /// a broken row evaluated on every hit cannot flood the log.
+    /// from `params`) returns `0`. The first failure of a formula (by id and text) logs the
+    /// formula, the parameters and the error at `warn`; later failures of the same formula log at
+    /// `debug`, so a broken row evaluated on every hit cannot flood the log.
     ///
     /// Deviation: the C# would throw `ArgumentNullException` out of `lock (Expression)` for a
     /// formula whose `Prepare()` failed (only possible for `new Formula(text)`, e.g. item
@@ -1333,7 +1336,7 @@ impl Formula {
         S: BuildHasher,
     {
         let Some(expression) = &self.expression else {
-            if eval_failure_is_first(self.id) {
+            if eval_failure_is_first(self.id, &self.text_formula) {
                 tracing::warn!(
                     "Formula {} : {} was never successfully prepared",
                     self.id,
@@ -1351,7 +1354,7 @@ impl Formula {
         match expression.evaluate(params) {
             Ok(value) => value,
             Err(e) => {
-                if eval_failure_is_first(self.id) {
+                if eval_failure_is_first(self.id, &self.text_formula) {
                     let mut sb = String::new();
                     for (key, value) in params {
                         let _ = writeln!(sb, "{}: {}", key.borrow(), value);
@@ -2337,6 +2340,33 @@ mod tests {
             .iter()
             .all(|(level, _)| *level != tracing::Level::WARN));
         assert!(!events.is_empty());
+    }
+
+    /// Every `Formula::new` formula (item and NPC formulas) has id 0, and the ids of the
+    /// `formulas`, `unit_formulas` and `wearable_formulas` tables overlap: the warning is once per
+    /// id and text, so a second broken formula with the same id still warns.
+    #[test]
+    fn evaluate_warns_once_per_formula_text_not_per_id() {
+        let params: HashMap<&str, f64> = HashMap::new();
+        let warnings = |formula: &Formula| {
+            let (value, events) = crate::test_support::capture_events(|| formula.evaluate(&params));
+            assert_eq!(value, 0.0);
+            events
+                .iter()
+                .filter(|(level, _)| *level == tracing::Level::WARN)
+                .count()
+        };
+        let first = Formula::new("1 + warn_key_first_missing");
+        let second = Formula::new("1 + warn_key_second_missing");
+        assert_eq!((first.id, second.id), (0, 0));
+        assert_eq!(warnings(&first), 3, "the first failure warns");
+        assert_eq!(
+            warnings(&second),
+            3,
+            "another formula with the same id warns too"
+        );
+        assert_eq!(warnings(&first), 0, "later failures only log at debug");
+        assert_eq!(warnings(&second), 0, "later failures only log at debug");
     }
 
     #[test]
