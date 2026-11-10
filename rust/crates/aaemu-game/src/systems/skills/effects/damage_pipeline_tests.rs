@@ -1306,10 +1306,12 @@ async fn damage_pipeline_level_bonus_rate_comes_from_the_formula_row() {
         );
     }
 
+    // No row 20 at all. The row must be a level-damage one: a fixed row is exempt from the
+    // bonus anyway and would pass with a hard-coded rate too.
     let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
     player.data().unit.level = 50;
     npc.data().unit.level = 40;
-    let effect = skills::tests::damage_effect(1, 100);
+    let effect = level_damage_effect(1);
     client.drain();
     damage(
         &server,
@@ -1317,7 +1319,11 @@ async fn damage_pipeline_level_bonus_rate_comes_from_the_formula_row() {
         &args((&player).into(), (&npc).into(), 1),
         None,
     );
-    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+    assert_eq!(
+        packet(&mut client, player.obj_id, npc.obj_id).0,
+        100,
+        "a missing row 20 leaves the hit unchanged"
+    );
 }
 
 /// The variables name a player character and an NPC: PvP keeps its own battle-resist path.
