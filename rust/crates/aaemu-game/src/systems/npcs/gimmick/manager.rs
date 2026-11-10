@@ -256,10 +256,11 @@ fn new_gimmick(
     g.gimmick_id = gimmick_id;
     g.model_path = template.map(|t| t.model_path.clone()).unwrap_or_default();
     g.unit.faction_id = 0; // new SystemFaction()
-                           // A gimmick has no level in the data. `Gimmick : Unit` left it 0, and the collision skills'
-                           // effects start at level 1, so a level-0 gimmick caster skipped every effect (verified live
-                           // on skill 18717: "caster level outside the effect's level range"). The lowest level the
-                           // data accepts keeps the level-based damage terms meaningful.
+
+    // A gimmick has no level in the data. `Gimmick : Unit` left it 0, and the collision skills'
+    // effects start at level 1, so a level-0 gimmick caster skipped every effect (verified live
+    // on skill 18717: "caster level outside the effect's level range"). The lowest level the
+    // data accepts keeps the level-based damage terms meaningful.
     g.unit.level = 1;
     Some(g)
 }
