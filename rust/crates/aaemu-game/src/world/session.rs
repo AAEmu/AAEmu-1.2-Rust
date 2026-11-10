@@ -1187,15 +1187,6 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
             if let Some(player) = target.as_player() {
                 // RemoveEffects (BuffRemoveOn.Move on a moving velocity): skills subsystem.
                 crate::systems::skills::on_move_request(server, player, u.vel_x, u.vel_y, u.vel_z);
-                // 1.2 `once_one_man`: moving away ends the occupant's seat / instrument hold.
-                let bond = player.data().bonding;
-                if let Some(bond) = bond {
-                    crate::systems::npcs::doodad::occupancy::end_bond(
-                        server,
-                        bond.owner_obj_id,
-                        player.obj_id,
-                    );
-                }
                 if crate::systems::vehicles::movement::player_riding(server, &me, player)
                     || crate::systems::vehicles::movement::player_bound_to_slave(&world, player)
                 {

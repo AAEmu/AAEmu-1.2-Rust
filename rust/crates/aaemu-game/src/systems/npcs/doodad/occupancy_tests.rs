@@ -13,6 +13,7 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{GradeTemplate, ItemTemplate};
 use crate::data::GameData;
+use crate::models::movement::{MoveKind, MoveType, UnitMove};
 use crate::models::unit::{SkillAttribute, SkillModifier, UnitModifierType};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
@@ -610,6 +611,90 @@ async fn chair_is_refused_while_occupied_and_free_after_unbond() {
             .is_some_and(|b| b.owner_obj_id == d.obj_id),
         "chair not free after unbond: {frames:?}"
     );
+}
+
+/// A seated player's own `CSMoveUnit` must not release the seat hold: the client keeps sending
+/// the position of a character that sits, and a move frees neither the seat (`VehicleSeat`) nor
+/// the character's `bonding`, so the single seat stays refused for everybody else.
+#[tokio::test]
+async fn a_seated_players_idle_moves_keep_the_seat_hold() {
+    let mut fx = fx();
+    let d = fx.doodad(CHAIR);
+
+    let frames = fx.cast(true, CHAIR_SKILL, &d);
+    assert!(
+        fx.p1
+            .data()
+            .bonding
+            .is_some_and(|b| b.owner_obj_id == d.obj_id),
+        "first sit failed: {frames:?}"
+    );
+    assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 1);
+
+    // Zero-velocity moves at the character's own world position.
+    let world = fx.server.world.world(0).unwrap();
+    for _ in 0..3 {
+        let at = world.world_pos_rot(&WorldObject::from(&fx.p1));
+        let idle = MoveType::new(MoveKind::Unit(UnitMove {
+            x: at.x,
+            y: at.y,
+            z: at.z,
+            ..UnitMove::default()
+        }));
+        crate::world::session::move_unit(&fx.server, &mut fx.c1.conn, fx.p1.obj_id, idle).await;
+    }
+    assert!(fx
+        .p1
+        .data()
+        .bonding
+        .is_some_and(|b| b.owner_obj_id == d.obj_id));
+    assert_eq!(
+        fx.server.systems.npcs.doodads.occupancy.len(),
+        1,
+        "an idle move released the seat hold"
+    );
+
+    // The chair is still held: the second unit is told so and does not sit.
+    let frames = fx.cast(false, CHAIR_SKILL, &d);
+    assert_refused(&frames);
+    assert!(fx.p2.data().bonding.is_none());
+    assert_eq!(d.data().seat.seats.get(&d.obj_id), Some(&vec![1]));
+}
+
+/// A seated player who clicks its own seat again finds every place taken (its own included) but
+/// stays seated, so the hold must stay too: the second unit is still told the seat is in use.
+#[tokio::test]
+async fn clicking_the_own_seat_again_keeps_the_seat_hold() {
+    let mut fx = fx();
+    let d = fx.doodad(CHAIR);
+
+    let frames = fx.cast(true, CHAIR_SKILL, &d);
+    assert!(
+        fx.p1
+            .data()
+            .bonding
+            .is_some_and(|b| b.owner_obj_id == d.obj_id),
+        "first sit failed: {frames:?}"
+    );
+
+    fx.p1.data().unit.global_cooldown_ms = 0;
+    let frames = fx.cast(true, CHAIR_SKILL, &d);
+    assert_not_refused(&frames);
+    assert!(fx
+        .p1
+        .data()
+        .bonding
+        .is_some_and(|b| b.owner_obj_id == d.obj_id));
+    assert_eq!(d.data().seat.seats.get(&d.obj_id), Some(&vec![1]));
+    assert_eq!(
+        fx.server.systems.npcs.doodads.occupancy.len(),
+        1,
+        "the click on the own seat released the hold"
+    );
+
+    let frames = fx.cast(false, CHAIR_SKILL, &d);
+    assert_refused(&frames);
+    assert!(fx.p2.data().bonding.is_none());
 }
 
 /// The race of the accepted-but-not-yet-scheduled window: the first acquire has no cast task

@@ -18,10 +18,13 @@
 //!
 //! A second unit's start is refused with the 1.2 error 4 `ALREADY_INTERACTING_SOMEONE_ELSE`
 //! before any cast, labor or item cost. The occupancy is dropped when the cast ends (with its
-//! pending effects), the seat is unbound, the occupant moves / dies / logs out, or the doodad
-//! despawns. [`permits`] also reaps an entry whose occupant is no longer in the doodad's world,
-//! is dead, is no longer in a `Cast` task on this doodad and has no pending effect, so a missed
-//! release cannot block a doodad forever.
+//! pending effects), the seat is unbound, the occupant dies / logs out, or the doodad
+//! despawns. The seat part follows the character's `bonding` (set by the attachment func,
+//! cleared by `unbond_doodad` when the client sends `CSUnbondDoodad`), never the occupant's
+//! movement: a seated client keeps sending its position, and a move frees neither the seat nor
+//! `VehicleSeat`. [`permits`] also reaps an entry whose occupant is no longer in the doodad's
+//! world, is dead, is no longer in a `Cast` task on this doodad and has no pending effect, so a
+//! missed release cannot block a doodad forever.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
