@@ -551,6 +551,17 @@ impl UccManager {
     ) -> Result<()> {
         let (mut ucc, cost) = {
             let mut st = self.state();
+            // `CTEmblemStreamUploadStatus` is `ConfirmDefaultUcc` and belongs to the simple
+            // (default) upload path. A confirm that arrives while a custom upload is still
+            // receiving parts must not charge the reagent and save a Complex UCC with no image
+            // data; the upload's own last part runs this step after `complex_upload_parts` is
+            // cleared, so this only refuses the interleaved (invalid) packet order.
+            if st.complex_upload_parts.contains_key(&conn.id) {
+                return Err(GameError::Protocol(format!(
+                    "UccManager.ConfirmDefaultUcc: stream connection {} has a custom upload in progress",
+                    conn.id
+                )));
+            }
             let Some(queued) = st.upload_queue.remove(&conn.id) else {
                 return Err(GameError::Protocol(format!(
                     "UccManager.ConfirmDefaultUcc: no queued UCC for stream connection {}",

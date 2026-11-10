@@ -1369,6 +1369,55 @@ async fn ucc_custom_upload() {
     );
 }
 
+/// `CTEmblemStreamUploadStatus` (`ConfirmDefaultUcc`) during a custom upload must not charge
+/// the reagent and save an empty Complex UCC: the interleaved packet order is refused and the
+/// in-progress upload is left untouched.
+#[tokio::test]
+async fn ucc_default_confirm_during_a_custom_upload_is_refused() {
+    let (server, mut c, mut g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let start = start_upload_body(PRINTER_OBJ, 5);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+    c.recv(
+        &server,
+        &frame(
+            ct::CT_UPLOAD_EMBLEM_STREAM,
+            &hex("05 00 00 00  03 00 00 00  00 00 00 00  03 00  AA BB CC"),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+
+    let res = c
+        .recv(&server, &frame(ct::CT_EMBLEM_STREAM_UPLOAD_STATUS, &[1]))
+        .await;
+    assert!(res.is_err(), "the confirm is refused");
+    assert!(server.streams.ucc.is_empty(), "no UCC saved");
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        1,
+        "the reagent is not charged"
+    );
+    assert!(game_frames(&mut g).is_empty(), "no item task sent");
+    assert_eq!(
+        server.streams.ucc.parts_len(),
+        1,
+        "upload still in progress"
+    );
+    assert_eq!(server.streams.ucc.queue_len(), 1);
+}
+
 /// The MySQL half of [`ucc_custom_upload`]: with a real database both custom uploads on the
 /// same stream connection save, so the client gets `End` twice and two `uccs` rows exist.
 #[tokio::test]
