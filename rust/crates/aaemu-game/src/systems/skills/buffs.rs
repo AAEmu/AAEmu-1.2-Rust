@@ -1506,6 +1506,7 @@ fn time_to_time_apply(
         let skill_object = SkillObject::None;
         let mut source = EffectSource::from_buff(template.clone());
         source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
+        source.source_skill_id = Some(b.skill_id).filter(|id| *id != 0);
         let args = EffectArgs {
             caster: caster.cloned(),
             caster_caster: buff_skill_caster(b),
@@ -1585,6 +1586,7 @@ pub(crate) fn do_area_tick(
             let skill_object = SkillObject::None;
             let mut source = EffectSource::from_buff(template.clone());
             source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
+            source.source_skill_id = Some(b.skill_id).filter(|id| *id != 0);
             let args = EffectArgs {
                 caster: Some(caster.clone()),
                 caster_caster: buff_skill_caster(b),
@@ -2280,6 +2282,7 @@ fn execute_trigger(
             EffectSource {
                 skill: None,
                 buff: Some(template.clone()),
+                source_skill_id: None,
                 amount,
                 is_trigger: true,
                 buff_permanent: false,
@@ -2295,6 +2298,7 @@ fn execute_trigger(
             EffectSource {
                 skill: buff_skill(server, b),
                 buff: None,
+                source_skill_id: None,
                 amount: 0,
                 is_trigger: false,
                 buff_permanent: false,

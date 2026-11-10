@@ -81,6 +81,15 @@ fn args(caster: WorldObject, target: WorldObject, level: u8) -> EffectArgs<'stat
 }
 
 fn packet(client: &mut TestClient, caster: u32, target: u32) -> (i32, u16, Vec<u8>) {
+    packet_with_skill(client, caster, target, 1)
+}
+
+fn packet_with_skill(
+    client: &mut TestClient,
+    caster: u32,
+    target: u32,
+    cast_skill_id: u32,
+) -> (i32, u16, Vec<u8>) {
     let frames: Vec<_> = client
         .drain()
         .into_iter()
@@ -91,7 +100,7 @@ fn packet(client: &mut TestClient, caster: u32, target: u32) -> (i32, u16, Vec<u
     // Read in native 1.2 sub_397C8760 order; expected data is not encoded locally.
     let mut s = PacketStream::from_bytes(body.clone());
     assert_eq!(s.read_u8().unwrap(), 0);
-    assert_eq!(s.read_u32().unwrap(), 1);
+    assert_eq!(s.read_u32().unwrap(), cast_skill_id);
     assert_eq!(s.read_u16().unwrap(), 0);
     assert_eq!(s.read_u8().unwrap(), if caster == 0x300 { 4 } else { 0 });
     assert_eq!(s.read_bc().unwrap(), caster);
@@ -1025,13 +1034,26 @@ fn apply_tick_buff(
     target: &WorldObject,
     buff_id: u32,
 ) -> u32 {
+    apply_tick_buff_from_skill(server, caster, target, buff_id, None)
+}
+
+/// [`apply_tick_buff`] with the applying skill recorded on the live buff (the real cast path).
+fn apply_tick_buff_from_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &WorldObject,
+    buff_id: u32,
+    skill_id: Option<u32>,
+) -> u32 {
+    let skill = skill_id
+        .map(|id| skills::state::SkillRun::new(Arc::new(skills::tests::skill_template(id)), 1));
     buffs::apply_template(
         server,
         server.game_data.systems.skills.buff(buff_id).unwrap(),
         Some(caster),
         &SkillCaster::Unit(caster.obj_id()),
         target,
-        None,
+        skill.as_deref(),
     );
     target
         .with_base_unit(|b| {
@@ -1462,4 +1484,233 @@ async fn damage_pipeline_level_bonus_does_not_scale_heals() {
     let index = apply_tick_buff(&server, &caster, &target, HEAL_DOT_BUFF);
     client.drain();
     assert_eq!(tick_heal(&server, &target, index), 100);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Archery close-range penalty (`formulas` row 12, `damage_multiplier_by_range`).
+
+const RANGE_PENALTY_ROW: u32 = 12;
+const RANGE_PENALTY_FORMULA: &str = "if_negative(range - 8, 0.8, 1)";
+const ENDLESS_ARROWS: u32 = 14_835;
+const UNLISTED_SKILL: u32 = 90_001;
+
+fn range_penalty_data(skill_id: u32) -> GameData {
+    let mut data = fixture_data();
+    data.formulas
+        .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+    data.systems.skills.range_penalty_skills.insert(skill_id);
+    data
+}
+
+fn args_with_skill(
+    caster: WorldObject,
+    target: WorldObject,
+    level: u8,
+    skill_id: u32,
+) -> EffectArgs<'static> {
+    let skill =
+        skills::state::SkillRun::new(Arc::new(skills::tests::skill_template(skill_id)), level);
+    EffectArgs {
+        caster_caster: if caster.is_unit() {
+            SkillCaster::Unit(caster.obj_id())
+        } else {
+            SkillCaster::Doodad(caster.obj_id())
+        },
+        caster: Some(caster),
+        target_caster: skills::types::SkillCastTarget::Unit(target.obj_id()),
+        target: Target::Obj(target),
+        cast: CastAction::Skill { skill_id, tl_id: 0 },
+        source: EffectSource::from_skill(skill),
+        skill_object: &skills::types::SkillObject::None,
+    }
+}
+
+/// Endless Arrows (skill 14835, "Damage decreases -20% if target is within 8m") is x0.8
+/// under 8 m and x1 from 8 m on; the formula itself makes exactly 8 m neutral
+/// (`if_negative(range - 8, ...)`).
+#[tokio::test]
+async fn damage_pipeline_range_penalty_scales_listed_skills_under_8m() {
+    for (distance, expected) in [(5.0, 80), (8.0, 100), (10.0, 100)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0 + distance, 100.0, 100.0);
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            expected,
+            "distance {distance} m"
+        );
+        assert_eq!(npc.data().unit.hp, 1000 - expected);
+    }
+}
+
+/// The distance is the skill-range measure: 3D, so standing directly above the target at 7 m
+/// is under the threshold and at 9 m is not (a horizontal-only distance would be 0).
+#[tokio::test]
+async fn damage_pipeline_range_penalty_uses_the_3d_distance() {
+    for (height, expected) in [(7.0, 80), (9.0, 100)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + height);
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            expected,
+            "height {height} m"
+        );
+    }
+}
+
+/// Only the tooltip set is scaled: a spell at 5 m and a skill outside the set keep their
+/// damage even with row 12 present.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_skips_spells_and_unlisted_skills() {
+    for (label, skill_id, damage_type) in [
+        ("spell", UNLISTED_SKILL, 2),
+        ("unlisted skill", UNLISTED_SKILL, 1),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        let mut effect = level_damage_effect(1);
+        effect.damage_type = damage_type;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, skill_id),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, skill_id).0,
+            100,
+            "{label} at 5 m must be unchanged"
+        );
+    }
+}
+
+/// The factor is the `formulas` row's text, not a hard-coded 0.8; without the row the hit is
+/// unchanged.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_rate_comes_from_the_formula_row() {
+    for (formula, distance, expected) in [
+        (RANGE_PENALTY_FORMULA, 5.0, 80),
+        ("if_negative(range - 10, 0.5, 1)", 9.0, 50),
+    ] {
+        let mut data = fixture_data();
+        data.formulas.insert_formula(RANGE_PENALTY_ROW, formula);
+        data.systems
+            .skills
+            .range_penalty_skills
+            .insert(ENDLESS_ARROWS);
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0 + distance, 100.0, 100.0);
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            expected,
+            "formula {formula} at {distance} m"
+        );
+    }
+
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+        let mut data = fixture_data();
+        data.systems
+            .skills
+            .range_penalty_skills
+            .insert(ENDLESS_ARROWS);
+        data
+    });
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+        None,
+    );
+    assert_eq!(
+        packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+        100
+    );
+}
+
+/// Authored fixed values and percent-of-HP rows are excluded, as with the level bonus.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_keeps_fixed_and_percent_rows() {
+    for (label, effect) in [
+        ("fixed", skills::tests::damage_effect(1, 100)),
+        ("percent", percent_damage_effect(10)),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            100,
+            "{label} row at 5 m must keep its authored value"
+        );
+    }
+}
+
+/// A buff tick knows the skill that applied the buff (`Buff.skill_id`): a DoT of a listed skill
+/// is scaled per tick, while a buff applied without a skill (or by an unlisted skill) is not.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_applies_to_listed_skill_dot_ticks() {
+    for (label, skill_id, expected) in [
+        ("listed skill", Some(ENDLESS_ARROWS), 80),
+        ("unlisted skill", Some(UNLISTED_SKILL), 100),
+        ("no skill", None, 100),
+    ] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+            let mut data = dot_data(level_damage_effect(DOT_EFFECT), 1_000, 1_000.0);
+            data.formulas
+                .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+            data.systems
+                .skills
+                .range_penalty_skills
+                .insert(ENDLESS_ARROWS);
+            data
+        });
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index = apply_tick_buff_from_skill(&server, &caster, &target, DOT_BUFF, skill_id);
+        client.drain();
+        assert_eq!(tick_damage(&server, &target, index), expected, "{label}");
+    }
 }

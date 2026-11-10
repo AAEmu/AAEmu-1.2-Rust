@@ -16,6 +16,7 @@ use super::super::data::effects::{
     RestoreManaEffect,
 };
 use super::super::data::{EffectKind, EffectTemplate, SkillControllerTemplate};
+use super::super::geometry;
 use super::super::geometry::Target;
 use super::super::packets::{
     CompressedGamePackets, SCAiAggroPacket, SCUnitDamagedPacket, SCUnitHealedPacket,
@@ -28,7 +29,7 @@ use super::super::types::{
     HealType, KillReason, RelationState, SkillCaster, SkillHitType,
 };
 use super::super::{broadcast, send_to_players};
-use super::{chance_succeeds, rand_float, rand_int, EffectArgs};
+use super::{chance_succeeds, rand_float, rand_int, EffectArgs, EffectSource};
 
 /// An effect nobody handles yet.
 pub fn unrouted_effect(
@@ -169,6 +170,60 @@ fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &Worl
     .into_iter()
     .collect();
     (formula.evaluate(&params) as f32).max(1.0)
+}
+
+/// `formulas` row 12 `damage_multiplier_by_range`: `if_negative(range - 8, 0.8, 1)`.
+///
+/// Only the archery skills whose 1.2 tooltip names the penalty are scaled
+/// (`Data::range_penalty_skills`, built from the skill descriptions at load; the 1.2
+/// `damage_effects` table has no flag that scopes the row). `range` is the same measure the
+/// server's skill-range check uses (`validation.rs` -> [`geometry::distance_to`]): 3D,
+/// edge to edge, with both actors' model radii subtracted. A buff tick carries the id of the
+/// skill that applied the buff in `EffectSource::source_skill_id`, so a DoT of one of these
+/// skills is scaled per tick like its direct hit. A missing or broken row leaves the hit
+/// unchanged (a failed evaluation returns 0).
+fn range_damage_multiplier(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    source: &EffectSource,
+) -> f32 {
+    let Some(skill_id) = source
+        .skill()
+        .map(|s| s.template.id)
+        .or(source.source_skill_id)
+    else {
+        return 1.0;
+    };
+    if !server
+        .game_data
+        .systems
+        .skills
+        .range_penalty_skills
+        .contains(&skill_id)
+    {
+        return 1.0;
+    }
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageMultiplierByRange)
+    else {
+        return 1.0;
+    };
+    let distance = geometry::distance_to(
+        server,
+        &Target::Obj(caster.clone()),
+        &Target::Obj(trg.clone()),
+        true,
+    );
+    let params: HashMap<&str, f64> = [("range", f64::from(distance))].into_iter().collect();
+    let multiplier = formula.evaluate(&params) as f32;
+    if multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    }
 }
 
 /// Damage reflection of a landed hit (`buffs.reflection_*`).
@@ -595,13 +650,15 @@ pub(super) fn damage_with_aoe(
     if caster.as_player().is_some() && trg.as_player().is_some() {
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
     }
-    // Player -> NPC level bonus (formulas row 20), next to the other flat damage multipliers.
-    // Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
-    // the weapon / level damage base. A non-fixed DoT row gets it like a direct hit; heals use
-    // `heal()` and never reach this function (compact `damage_effects` has no `Heal` type, so no
-    // damage-type guard is needed).
+    // Player -> NPC level bonus (formulas row 20) and the archery close-range penalty
+    // (formulas row 12), next to the other flat damage multipliers.
+    // Authored fixed values and percent-of-HP rows keep their exact value; the bonuses scale
+    // only the weapon / level damage base. A non-fixed DoT row gets them like a direct hit;
+    // heals use `heal()` and never reach this function (compact `damage_effects` has no `Heal`
+    // type, so no damage-type guard is needed).
     if !e.use_fixed_damage && !e.use_percent_damage {
         final_damage *= level_damage_multiplier(server, &caster, &trg);
+        final_damage *= range_damage_multiplier(server, &caster, &trg, &args.source);
     }
     let flex_bonus = (flexibility / 100) as f32;
     match hit_type {

@@ -7,7 +7,7 @@
 //! are no injected `IAnimationManager` / `IPlotManager`: the animation and plot tables are
 //! fields of `Data` loaded by `Data::load`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::effects::{EffectKind, EffectTemplate, EffectType, HealEffect, SpawnGimmickEffect};
@@ -399,4 +399,59 @@ fn multiple_get_calls_return_consistent_results() {
     let r3 = d.skill(1).expect("3");
     assert_eq!(r2.id, r1.id);
     assert_eq!(r3.id, r2.id);
+}
+
+// ---- Close-range damage penalty skill set (`formulas` row 12) ----
+
+/// The set comes from the en_us tooltips, not from a hard-coded id list: the colour markup the
+/// data puts around "-20%" / "8m" is stripped, and rows that only mention 8 m or 20% for
+/// another reason (a 38 m tentacle, a bonus wording, a skill name) are not members.
+#[test]
+fn range_penalty_skills_are_built_from_the_en_us_tooltip_text() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE localized_texts (tbl_name TEXT, tbl_column_name TEXT, idx INT, en_us TEXT);
+         INSERT INTO localized_texts VALUES
+           ('skills', 'desc', 14835,
+            'Fires arrows. Damage decreases |cFFFF9C27-20%|r if target is within |cFFFF9C278m|r.'),
+           ('skills', 'desc', 19052,
+            'Fires a toxic arrow. Damage is reduced -20% if target is within 8m.'),
+           ('skills', 'desc', 10481,
+            'Poison Damage over time. Damage reduced -20% if target is within 8m.'),
+           ('skills', 'desc', 13328,
+            'Uses a tentacle within 30m - 45m and 38m ahead with a length of 20m.'),
+           ('skills', 'desc', 10029,
+            'Deals 20% damage to enemies within 8m of the target area.'),
+           ('skills', 'desc', 20001,
+            'Deals 20% more damage to targets within 8m.'),
+           ('skills', 'name', 30001,
+            'Damage decreases -20% if target is within 8m.');",
+    )
+    .unwrap();
+    assert_eq!(
+        super::load_range_penalty_skills(&conn),
+        HashSet::from([10481, 14835, 19052])
+    );
+}
+
+/// The real 1.2 compact: exactly the tooltip skills the audit named (`verify-claims-10x.md`
+/// 11a): Endless Arrows (14835-14837, 22961), Shoot Arrow 16064, Charged Bolt (16210, 23544),
+/// Venom Arrow 19052, Piercing Shot (13564, 23545), Toxic Shot 10481, Mark (12139, 20590,
+/// 23548) and 26730 (a description without a `skills` row).
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_range_penalty_skills_are_the_tooltip_skills() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(
+        super::load_range_penalty_skills(&conn),
+        HashSet::from([
+            10481, 12139, 13564, 14835, 14836, 14837, 16064, 16210, 19052, 20590, 22961, 23544,
+            23545, 23548, 26730,
+        ])
+    );
 }
