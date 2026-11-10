@@ -144,6 +144,9 @@ impl CSSwapItemsPacket {
             );
             return;
         }
+        if bank_move_refused(server, &p, &a) {
+            return;
+        }
         let inv = Inv::of(&p);
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
             return;
@@ -206,6 +209,9 @@ impl CSSplitBagItemPacket {
                 0,
                 true,
             );
+            return;
+        }
+        if bank_move_refused(server, &p, &a) {
             return;
         }
         let inv = Inv::of(&p);
@@ -377,6 +383,12 @@ fn bank_request_allowed(server: &GameServer, p: &PlayerRef, what: &str, amount: 
         );
         return false;
     }
+    banker_in_range(server, p, what)
+}
+
+/// The player is interacting with a banker NPC in range (the only way to open the warehouse:
+/// 1.2 has no item or doodad that does).
+fn banker_in_range(server: &GameServer, p: &PlayerRef, what: &str) -> bool {
     let npc = p.data().unit.current_interaction_object;
     if !super::store::near_service_npc(server, p, npc, super::store::SERVICE_RANGE, |i| i.banker) {
         tracing::warn!(
@@ -387,6 +399,13 @@ fn bank_request_allowed(server: &GameServer, p: &PlayerRef, what: &str, amount: 
         return false;
     }
     true
+}
+
+/// A generic move whose source or destination is the warehouse needs the same banker in range
+/// as the money requests (the C# accepted `slot_type = BANK` from anywhere).
+fn bank_move_refused(server: &GameServer, p: &PlayerRef, a: &MoveArgs) -> bool {
+    (a.from_slot_type == slot_type::BANK || a.to_slot_type == slot_type::BANK)
+        && !banker_in_range(server, p, "bank item move")
 }
 
 /// `CSDepositMoneyPacket`.

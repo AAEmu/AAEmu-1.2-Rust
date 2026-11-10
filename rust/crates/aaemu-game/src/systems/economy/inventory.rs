@@ -843,6 +843,26 @@ fn is_two_handed(data: &ItemData, item: Option<&Item>) -> bool {
         .is_some_and(|t| matches!(&t.kind, TemplateKind::Weapon(e) if e.slot_type_id == gear_slot_type::TWO_HANDED))
 }
 
+/// Whether `from` may be merged into the stack `target` (same stackable template, and the same
+/// grade, binding / secure / unpack flags and expiry / timers: the merge keeps the target's
+/// values, so a differing stack would change grade or binding for free). Anything else falls
+/// through to a swap.
+fn stacks_merge(from: &Item, target: &Item, max_count: i32) -> bool {
+    max_count > 1
+        && from.template_id == target.template_id
+        && from.grade == target.grade
+        && from.flags == target.flags
+        && from.expiration_time == target.expiration_time
+        && from.unpack_time == target.unpack_time
+        && from.unsecure_time == target.unsecure_time
+}
+
+/// A slot of a non-equipment container must lie inside its size (`size < 0` = unbounded);
+/// equipment containers range-check in `ItemContainer::can_accept`.
+fn slot_in_range(c: &ItemContainer, slot: u8) -> bool {
+    c.is_equipment() || c.size() < 0 || i32::from(slot) < c.size()
+}
+
 /// `Inventory.SplitOrMoveItemEx`. Source / target items are looked up in the two containers
 /// (the C# `GetItemByItemId` searches every item; an item that is in neither container is
 /// treated as a phantom item here).
@@ -893,6 +913,13 @@ pub fn split_or_move_item_ex(
             };
             // The container locks are held here, so the server-wide lookup is skipped.
             log_phantom_item(txn.server, inv, "ex-decide", from_item_id, &req, false);
+            return false;
+        }
+        if !slot_in_range(&s, from_slot) || !slot_in_range(dref, to_slot) {
+            tracing::warn!(
+                "SplitOrMoveItem - slot out of range: from {from_type}:{from_slot} => {to_type}:{to_slot}, owner {}.",
+                inv.character_id
+            );
             return false;
         }
         let mut action = SwapAction::DoNothing;
@@ -1064,11 +1091,7 @@ pub fn split_or_move_item_ex(
             }
             if let Some(f) = &from_item {
                 let max = data.template(f.template_id).map_or(0, |t| t.max_count);
-                if !equip_empty
-                    && t.template_id == f.template_id
-                    && t.count + count > max
-                    && max > 1
-                {
+                if !equip_empty && stacks_merge(f, t, max) && t.count + count > max {
                     log_move_rejection(
                         txn.server,
                         inv,
@@ -1094,8 +1117,11 @@ pub fn split_or_move_item_ex(
                 None if f.count > count => SwapAction::DoSplit,
                 None if f.count == count => SwapAction::DoMoveAllToEmpty,
                 Some(t)
-                    if t.template_id == f.template_id
-                        && data.template(t.template_id).map_or(0, |x| x.max_count) > 1 =>
+                    if stacks_merge(
+                        f,
+                        t,
+                        data.template(t.template_id).map_or(0, |x| x.max_count),
+                    ) =>
                 {
                     SwapAction::DoMerge
                 }

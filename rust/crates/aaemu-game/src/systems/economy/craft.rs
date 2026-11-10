@@ -384,8 +384,15 @@ fn bench_denial(
         .then_some("the bench is out of the craft skill's range")
 }
 
+/// Largest craft batch the server accepts from the client.
+pub const MAX_CRAFT_BATCH: i32 = 1000;
+
 /// `CharacterCraft.Craft(craft, count, doodadId)`.
 pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32, doodad_id: u32) {
+    // The client's batch size is not validated by the C#: `i32::MIN` underflowed `count -= 1`
+    // and a huge count ran a near-endless batch. The 1.2 client's batch maximum is not known,
+    // so 1..=`MAX_CRAFT_BATCH` is used (a non-positive count was a single craft before too).
+    let count = count.clamp(1, MAX_CRAFT_BATCH);
     let Some(craft) = server.game_data.systems.economy.craft.craft(craft_id) else {
         // C#: CraftManager.GetCraftById throws KeyNotFoundException before Craft() runs and the
         // client is left waiting. Deviation: end the (client side) batch with an error.
