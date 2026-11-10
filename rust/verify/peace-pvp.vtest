@@ -1,0 +1,51 @@
+# Peace-period PvP rule (ui_texts 5195 "you cannot attack other players during a peace period",
+# owner recollection 2026-11-10): in a zone group whose conflict state is Peace (7) a player
+# cannot harm another player, even though their factions are hostile. Setting the group to
+# Conflict (5) restores the attack.
+#
+# Zone group 14 is `e_steppe_belt` (zone keys 136 / 247); both bots teleport near the Steppe
+# Belt Mirage Isle portal at 26244.9, 6397.2, 397.9. The peace assertion is self-checking: if
+# the bots are not in group 14, no rule applies and the victim's HP drops in the Peace window.
+#
+# Bots:
+#   attacker  GM: faction 101 (Nuia), sets the zone state and attacks
+#   victim    GM: faction 109 (Haranya), the hostile target; it checks its own HP
+
+suite peace-pvp
+bot attacker gm
+bot victim gm
+
+[attacker]
+tp 26230 6420 390
+targetself
+gm setfaction 101
+gm pos
+waitpeer 120 ${victim}
+sync pos 2
+gm zonestate PEACE 14
+gm pos
+sync peace 2
+sync before_peace 2
+pump 1
+nattack 2 ${victim}
+sync attacked_peace 2
+gm zonestate CONFLICT 14
+sync conflict 2
+pump 1
+nattack 2 ${victim}
+sync done 2
+
+[victim]
+tp 26235 6425 390
+targetself
+gm setfaction 109
+gm pos
+waitpeer 120 ${attacker}
+sync pos 2
+sync peace 2
+sync before_peace 2
+expectnohpdrop self 8
+sync attacked_peace 2
+sync conflict 2
+expecthpdrop self 20
+sync done 2
