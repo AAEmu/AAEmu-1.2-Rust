@@ -1,0 +1,23 @@
+AAEmu launcher art, generated with the built-in image_gen tool, 2026-11-10.
+Original generated PNGs are retained here; Prepare-Assets.ps1 only resizes and
+encodes them as the smaller embedded JPEG and multi-resolution Windows ICO.
+
+ART PROMPT
+Use case: stylized-concept. Create original restrained fantasy concept art for the
+AAEmu desktop game launcher, landscape banner, 1536x1024. A distant coastal citadel
+and sailing ship silhouette, a luminous understated teal magical arch rising above
+a dark sea at dusk, mist, navy and muted antique-gold palette, cinematic painterly
+illustration with simple readable masses, no characters, no UI, no writing, no
+logos, no watermarks. It will be cropped to a wide 780x190 header; keep the central
+horizontal strip compelling and leave dark negative space on the left for an
+AAEmu wordmark rendered separately by code. Elegant quiet game-launcher artwork,
+not a busy battle scene.
+
+ICON PROMPT
+Use case: logo-brand. Create a clean small Windows application icon for AAEmu,
+original design. Square 1024x1024, a bold simple geometric capital A shaped like a
+fantasy stone gateway, a small understated sail-like triangular cutout, antique
+gold and luminous teal on deep navy rounded square tile. Readable at 32 pixels,
+centered with generous safe padding, polished restrained game launcher brand,
+flat graphic shapes with very subtle depth. No extra lettering, no border
+decoration, no watermark. Opaque background.

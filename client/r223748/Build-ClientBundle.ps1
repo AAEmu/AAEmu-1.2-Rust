@@ -16,11 +16,14 @@ $pakPath = $paths[0].Substring(7)
 $entry = ($listing -join "`n") -split "`n\s*`n" | Where-Object { $_.Contains("Path = $pakPath`n") }
 if ($entry -notmatch '(?m)^Size = 24720175616$' -or $entry -notmatch '(?m)^CRC = 803A3643$') { throw 'Archive game_pak does not match verified r223748.' }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
+$build=Join-Path $OutputDirectory 'launcher-build'
+& (Join-Path $PSScriptRoot 'Launcher\Build-Launcher.ps1') -OutputDirectory $build
 $destination = Join-Path $OutputDirectory 'AAEmu-r223748-client.7z'
 Copy-Item -LiteralPath $ClientArchive -Destination $destination
 $stage = Join-Path $OutputDirectory 'staging'
 $clientRoot = Join-Path $stage (Split-Path -Parent $pakPath)
 New-Item -ItemType Directory -Path (Join-Path $clientRoot 'Launcher') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $build 'AAEmu Launcher.exe') -Destination $clientRoot
 foreach ($name in @('Play.cmd','server.json','README.txt')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $clientRoot }
 foreach ($name in @('Start-Client.ps1','ClientRuntime.cs')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('Launcher\'+$name)) -Destination (Join-Path $clientRoot 'Launcher') }
 if ($DirectXDirectory) {
@@ -40,6 +43,6 @@ try {
 if ($LASTEXITCODE -ne 0) { throw 'Bundle integrity check failed.' }
 $hash = Get-FileHash -LiteralPath $destination -Algorithm SHA256
 ($hash.Hash+'  '+[IO.Path]::GetFileName($destination)) | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256SUMS.txt') -Encoding ASCII
-'Extract AAEmu-r223748-client.7z, then open Play.cmd in the ArcheAge folder. Read README.txt there.' |
+'Extract AAEmu-r223748-client.7z, then open AAEmu Launcher.exe in the ArcheAge folder. Read README.txt there.' |
     Set-Content -LiteralPath (Join-Path $OutputDirectory 'START-HERE.txt') -Encoding UTF8
 Get-Item -LiteralPath $destination | Select-Object FullName,Length

@@ -1,10 +1,24 @@
 ArcheAge 1.2.5.0 r223748 - AAEmu launcher
 
-Extract the complete client bundle and double-click Play.cmd inside ArcheAge.
+Extract the complete client bundle and double-click AAEmu Launcher.exe inside ArcheAge.
 Enter the server's IPv4 address, login port (normally 1237), account and password.
 Select the game server and your character normally. No Steam login is required.
-Edit server.json to change the default address, port and username. Passwords are
-not saved. Requires Windows PowerShell 5.1 and .NET Framework (included in Windows).
+The native launcher automatically saves your IP, port, username, client path and
+launch options. Remember password is enabled by default; its value is encrypted
+with Windows DPAPI for your Windows account. Uncheck it to remove the saved password.
+Settings: %LOCALAPPDATA%\AAEmu\Launcher\r223748\settings.xml.
+Requires 64-bit Windows and .NET Framework 4.5+ (included in Windows 10/11).
+
+Basic options: use the game's display settings, windowed/fullscreen, resolution,
+VSync on/off, mute sound, mute music, and start minimized. Display options update
+only selected keys in Documents\ArcheAge\system.cfg and keep system.cfg.aaemu.bak;
+ArcheAge restores those preferences after reading the command line. Selecting
+Use game setting leaves that preference alone. Audio options use engine CVars.
+The client requires at least 768 pixels in height. The resolution list shows only
+presets accepted by the current display driver.
+
+Play.cmd opens the EXE when present. The older PowerShell launcher remains as
+a fallback for source-only installs; it uses server.json and does not save passwords.
 
 Use the matching feat/client-r223748 Rust server branch, ClientRevision=223748.
 The server administrator must advertise a reachable game/stream address; changing
