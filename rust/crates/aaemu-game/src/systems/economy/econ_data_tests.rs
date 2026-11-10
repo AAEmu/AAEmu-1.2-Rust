@@ -2290,7 +2290,7 @@ async fn func_driven_doodad_loot_needs_the_doodad_in_reach() {
     for (obj, x) in [(0x300u32, 101.0f32), (0x301, 400.0)] {
         let mut d = Doodad::new(1);
         d.transform.set_xyz(x, 100.0, 100.0);
-        world.spawn(&Entity::new(obj, d), &w.server.view_ctx());
+        world.spawn(Entity::new(obj, d), &w.server.view_ctx());
     }
     w.a.drain();
     run::<CSLootOpenBagPacket>(&mut w, 0, open_bag_packet(0x301, false).as_bytes());

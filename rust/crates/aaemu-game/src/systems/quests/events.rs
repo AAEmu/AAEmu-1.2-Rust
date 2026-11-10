@@ -633,6 +633,27 @@ fn report(
 ) {
     let me = WorldObject::from(player.clone());
     let world = server.world.world_of(&me);
+    // A client request (`answer`) names an NPC or doodad it must be near; server-started
+    // reports (`DoodadFuncQuest`) come from an interaction that already passed its own checks.
+    if answer {
+        let (npc_far, doodad_far) = (
+            npc_obj_id > 0 && npc_out_of_quest_reach(server, player, npc_obj_id),
+            npc_obj_id == 0
+                && doodad_obj_id > 0
+                && doodad_out_of_quest_reach(server, player, doodad_obj_id),
+        );
+        if npc_far || doodad_far {
+            player.send(SCQuestContextFailedPacket {
+                quest_id,
+                err: if npc_far {
+                    quest_error::INVALID_NPC_OR_QUEST
+                } else {
+                    quest_error::INVALID_DOODAD
+                },
+            });
+            return;
+        }
+    }
     if npc_obj_id > 0 {
         // Turning in at a NPC?
         let Some(npc) = world.as_ref().and_then(|w| w.npc(npc_obj_id)) else {
@@ -824,6 +845,9 @@ pub fn on_talk_made(
     let Some(npc) = server.world.world_of(&me).and_then(|w| w.npc(npc_obj_id)) else {
         return;
     };
+    if npc_out_of_quest_reach(server, source, npc_obj_id) {
+        return;
+    }
     let npc_id = npc.data().unit.template_id;
     let source_player_id = source.character_id;
     run_or_queue(server, target, move |ctx| {
@@ -1237,6 +1261,69 @@ pub fn on_quest_item_manually_destroyed(
 
 // ----- CharacterQuests entry points used by other subsystems -----
 
+/// Extra metres a quest dialog may be from the NPC on top of the NPC interaction reach: the
+/// 1.2 client keeps its dialog window open while the NPC (or the player) keeps moving, and the
+/// quest packets are sent from that window, not from the first click.
+pub const QUEST_NPC_REACH_SLACK_METERS: f32 = 10.0;
+
+/// Whether the NPC `npc_obj_id` of the player's world is too far for a quest request
+/// (`CSStartQuestContext`, `CSCompleteQuestContext`, `CSQuestTalkMade`): the same reach and
+/// config switch as `CSStartInteraction`, plus [`QUEST_NPC_REACH_SLACK_METERS`]. An NPC that is
+/// not in the world is not judged here (the callers refuse it themselves).
+fn npc_out_of_quest_reach(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) -> bool {
+    if !server.config.interaction.npc_reach_check {
+        return false;
+    }
+    let me = WorldObject::from(player.clone());
+    let Some(npc) = server.world.world_of(&me).and_then(|w| w.npc(npc_obj_id)) else {
+        return false;
+    };
+    use crate::systems::skills::geometry::{distance_to, Target};
+    let reach = crate::systems::npcs::config::NPC_INTERACTION_REACH_METERS
+        + server.config.interaction.npc_reach_tolerance_meters
+        + QUEST_NPC_REACH_SLACK_METERS;
+    let distance = distance_to(
+        server,
+        &Target::Obj(me),
+        &Target::Obj(WorldObject::from(&npc)),
+        true,
+    );
+    // Positive comparison: a NaN distance is out of reach.
+    let within = distance <= reach;
+    let out = !within;
+    if out {
+        tracing::warn!(
+            character = %player.data().unit.name,
+            npc_obj_id,
+            "Quest request refused: the NPC is {distance:.2} m away (reach {reach:.2} m)"
+        );
+    }
+    out
+}
+
+/// Whether the doodad `doodad_obj_id` of the player's world is out of the doodad interaction
+/// reach (`in_func_reach`, no func skill) for a client quest request. An unknown doodad is not
+/// judged here.
+fn doodad_out_of_quest_reach(server: &GameServer, player: &PlayerRef, doodad_obj_id: u32) -> bool {
+    let me = WorldObject::from(player.clone());
+    let Some(doodad) = server
+        .world
+        .world_of(&me)
+        .and_then(|w| w.doodad(doodad_obj_id))
+    else {
+        return false;
+    };
+    let out = !crate::systems::npcs::doodad::packets::in_func_reach(server, player, &doodad, 0);
+    if out {
+        tracing::warn!(
+            character = %player.data().unit.name,
+            doodad_obj_id,
+            "Quest request refused: the doodad is out of reach"
+        );
+    }
+    out
+}
+
 /// `CSStartQuestContextPacket`: the player asked to start `quest_id` at the NPC, doodad or
 /// sphere context (or without one). Only these client requests answer a start-component unit
 /// requirement refusal with `SCQuestUnitReqFailedPacket`; every other starter stays silent.
@@ -1249,8 +1336,14 @@ pub fn start_quest_context(
     sphere_id: u32,
 ) {
     if npc_obj_id > 0 {
+        if npc_out_of_quest_reach(server, player, npc_obj_id) {
+            return;
+        }
         add_quest_from_npc_impl(server, player, quest_id, npc_obj_id, true);
     } else if doodad_obj_id > 0 {
+        if doodad_out_of_quest_reach(server, player, doodad_obj_id) {
+            return;
+        }
         add_quest_from_doodad_impl(server, player, quest_id, doodad_obj_id, true);
     } else if sphere_id > 0 {
         add_quest_from_sphere_impl(server, player, quest_id, sphere_id, true);
