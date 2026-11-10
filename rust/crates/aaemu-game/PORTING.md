@@ -4571,10 +4571,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `X2Auction.CalcDeposit` (`putup.alb` proto 0.5 → `FUN_398a6060`): the base is the buyout when
   set, else the start price; `floor(price * rate + 0.5)`; at least 1; capped. The C# charged the
   fee on the buyout only (a lot without buyout paid nothing) and truncated the fraction, so the
-  server now charges what the client displayed. The retail rate per duration class and the cap
-  were server config, not client constants (`ui_texts` 5389 / 5390 are the mails for a changed
-  `auction_deposit_ratio_diff_body` / `auction_deposit_limit_diff_body`), so the C# values are
-  kept: 1 % per duration step and 1,000,000.
+  server now charges what the client displayed. The rate per duration class and the cap are
+  `content_configs` rows that the client reads itself (id 12 + duration, times 0.001, and id 40;
+  10 / 20 / 30 / 40 and 1,000,000 in every 1.2-era database we have; `ui_texts` 5389 / 5390 are
+  the mails for a changed `auction_deposit_ratio_diff_body` / `auction_deposit_limit_diff_body`).
+  The constants here (the C# values: 1 % per duration step and 1,000,000) equal those rows but
+  are not read from them, so a database with other rows would make the client show another
+  deposit than the server charges.
 * systems::economy (shop purchase limits per account, 2026-11-10): `items.limited_sale_count` /
   `items.one_time_sale` counters are keyed by `characters.account_id` in
   `account_shop_purchases` instead of by character. The 1.2 descriptions of items 30013 / 30014 /
