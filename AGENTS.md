@@ -439,6 +439,12 @@ checks while working, the full `cargo xtask ci` once through `Scripts/lane.sh ch
 
 - Toolchain: stable Rust via rustup.
 - Filter example: `cargo test -p aaemu-game unit_state` (substring of the test path).
+- Build speed (measured, Windows): the crate `aaemu-game` is the critical path of every build. In the
+  edit loop prefer `cargo check -p aaemu-game --lib` (~20 s) and `cargo test -p aaemu-game --lib <filter>`
+  (~50 s) to the filter example above, which builds every target of the package (~4 min). `-p aaemu-game`
+  and `--workspace` are separate dependency variants: the first use of each in a lane costs an extra
+  full build. Numbers, the Windows Defender cost and proposed repository changes:
+  [`Docs/build-performance.md`](Docs/build-performance.md).
 - Unit tests live in `#[cfg(test)]` modules / `*_tests.rs` next to the code; integration tests in each crate's `tests/`.
 - Game flow tests run whole packet flows without MySQL (`test_support::test_server()`, `TestClient`); see `object_flow_tests.rs`, `world_flow_tests.rs`.
 - Tests needing real data are `#[ignore]`d and gated by env vars: `AAEMU_COMPACT_DB=rust/crates/aaemu-game/app/Data/compact.sqlite3 cargo test -p aaemu-game -- --ignored`; MySQL tests by `AAEMU_TEST_MYSQL`. CI does not run them — run them locally when touching that code.
