@@ -2,6 +2,7 @@
 //! `BaseUnit.GetRelationStateTo`, `BaseUnit.CanAttack`, `GetOwnerCharacter`,
 //! `SkillTargetingUtil.FilterWithRelation` / `IsRelationValid`.
 
+use crate::data::world_data::{conflict_type, factions};
 use crate::server::GameServer;
 use crate::systems::social::nation;
 use crate::world::{now_ms, PlayerRef, WorldObject};
@@ -97,12 +98,88 @@ fn is_no_pvp_zone(server: &GameServer, target: &Target) -> bool {
         .is_some_and(|zone| !zone.pvp)
 }
 
+/// The target's zone group is in the `Peace` state of the zone-conflict cycle
+/// (`conflict_zones`, `systems/social/zone_conflict.rs`). The zone is read from the target,
+/// like every other zone rule in [`can_attack`] (`is_no_pvp_zone`, the zone-faction protection
+/// and the C# `BaseUnit.CanAttack`): the region being protected is the target's.
+fn is_peace_zone(server: &GameServer, target: &Target) -> bool {
+    let (_, zone_key) = super::geometry::instance_and_zone(target);
+    let Some(group_id) = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map(|z| z.group_id)
+    else {
+        return false;
+    };
+    server
+        .systems
+        .social
+        .conflicts
+        .get(group_id)
+        .is_some_and(|c| c.current_state == conflict_type::PEACE)
+}
+
+/// Whether the 1.2 Peace rule lets `attacker` harm `target` (both resolved to their characters;
+/// a pet / slave / siege weapon counts as its owner's attack).
+///
+/// The rule comes from `ui_texts` 5195 `state_peace_tooltip` ("you cannot attack other players
+/// during a peace period") and the owner's 2026-11-10 recollection. Its exceptions:
+/// * a pirate on either side (`ui_texts` 5195's "except for pirates"; faction 161 is hostile to
+///   everyone, `set_faction` adds `Contemptuous`, and the arrest rules already treat 161 as the
+///   pirate faction);
+/// * the two characters are duelling each other (`DuelManager.IsInDuelWith`);
+/// * their factions have an explicit hostile diplomacy relation. Only the runtime nation rows
+///   (`NationManager.relation`, written by `CSFactionDeclareHostile`) count: the static
+///   `system_faction_relations` table makes Nuia and Haranya hostile everywhere, and using it
+///   would leave Peace blocking nothing but friendly fire.
+///
+/// Force attack / Retribution never reach this function's callers' shortcuts: the caller checks
+/// this rule before those flags turn a friendly pair attackable.
+fn peace_allows_attack(server: &GameServer, attacker: &PlayerRef, target: &PlayerRef) -> bool {
+    // (a) Pirates are excepted by the zone text; a pirate may also still attack others.
+    if attacker.data().unit.faction_id == factions::PIRATE
+        || target.data().unit.faction_id == factions::PIRATE
+    {
+        return true;
+    }
+    // (b) A duel between exactly these two characters.
+    if server
+        .systems
+        .social
+        .duels
+        .is_in_duel_with(attacker.character_id, target.character_id)
+    {
+        return true;
+    }
+    // (c) A declared hostile diplomacy relation (a runtime nation row).
+    let nations = &server.systems.social.nations;
+    let a = attacker.data().unit.faction_id;
+    let b = target.data().unit.faction_id;
+    (nations.is_nation(a) || nations.is_nation(b))
+        && faction_relation(server, a, b) == RelationState::Hostile
+}
+
 /// `BaseUnit.CanAttack(target)`.
 pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     if let Some(allowed) =
         crate::systems::housing::dominion::runtime::can_attack_tower(server, me, target)
     {
         return allowed;
+    }
+    // Peace period: a player-controlled attacker (player, pet, summon, slave, siege weapon)
+    // cannot harm another player or that player's units. This runs before every shortcut that
+    // would otherwise allow the pair (force attack, Retribution) and before the faction checks,
+    // so it also covers an unknown / null faction. NPC attackers are unchanged (their
+    // `owner_character` is `None`).
+    if let Some(attacker) = me.as_obj().and_then(|o| owner_character(server, o)) {
+        if is_peace_zone(server, target) {
+            if let Some(defender) = target.as_obj().and_then(|o| owner_character(server, o)) {
+                if !peace_allows_attack(server, &attacker, &defender) {
+                    return false;
+                }
+            }
+        }
     }
     let my_faction = faction_of(me);
     let target_faction = faction_of(target);
@@ -438,6 +515,14 @@ mod tests {
     const MIRAGE_GROUP: u32 = 49;
     const NACHASHGAR_ZONE: u32 = 261;
     const NACHASHGAR_GROUP: u32 = 55;
+    /// Open-world zone groups with a `conflict_zones` row (14 = `e_steppe_belt`).
+    const PEACE_ZONE: u32 = 300;
+    const PEACE_GROUP: u32 = 14;
+    const CONFLICT_ZONE: u32 = 301;
+    const CONFLICT_GROUP: u32 = 15;
+    /// The duel team factions of `DuelManager` (`FactionsEnum.RedTeam` / `BlueTeam`).
+    const RED_TEAM: u32 = 159;
+    const BLUE_TEAM: u32 = 160;
 
     fn pvp_data() -> GameData {
         use crate::data::world_data::Zone;
@@ -450,12 +535,19 @@ mod tests {
             faction(109, 149),
             faction(148, 0),
             faction(149, 0),
+            faction(115, 0),
+            faction(RED_TEAM, 0),
+            faction(BLUE_TEAM, 0),
+            faction(factions::PIRATE, 0),
         ] {
             data.factions.add(f);
         }
         for (id, id2, state) in [
             (148, 149, RelationState::Hostile),
-            (101, 109, RelationState::Hostile),
+            (148, 115, RelationState::Hostile),
+            (148, factions::PIRATE, RelationState::Hostile),
+            (149, factions::PIRATE, RelationState::Hostile),
+            (RED_TEAM, BLUE_TEAM, RelationState::Hostile),
         ] {
             data.factions.relations.push(FactionRelation {
                 id,
@@ -468,6 +560,8 @@ mod tests {
             (crate::test_support::TEST_ZONE, 1),
             (MIRAGE_ZONE, MIRAGE_GROUP),
             (NACHASHGAR_ZONE, NACHASHGAR_GROUP),
+            (PEACE_ZONE, PEACE_GROUP),
+            (CONFLICT_ZONE, CONFLICT_GROUP),
         ] {
             data.zones.zones.insert(
                 zone_key,
@@ -705,5 +799,274 @@ mod tests {
             &Target::Obj(WorldObject::from(&a)),
             &Target::Obj(WorldObject::from(&b))
         ));
+    }
+
+    /// The two fixture conflict groups at a fixed state (`PEACE_GROUP` = 14 is Peace,
+    /// `CONFLICT_GROUP` = 15 is Conflict).
+    fn init_conflicts(server: &GameServer) {
+        use crate::data::world_data::ZoneConflict;
+        server.systems.social.conflicts.init(
+            &[
+                ZoneConflict {
+                    zone_group_id: PEACE_GROUP as u16,
+                    current_state: conflict_type::PEACE,
+                    ..ZoneConflict::default()
+                },
+                ZoneConflict {
+                    zone_group_id: CONFLICT_GROUP as u16,
+                    current_state: conflict_type::CONFLICT,
+                    ..ZoneConflict::default()
+                },
+            ],
+            now_ms(),
+        );
+    }
+
+    fn obj_target(p: &PlayerRef) -> Target {
+        Target::Obj(WorldObject::from(p))
+    }
+
+    /// Peace: a player cannot harm a player of another faction; the same pair is attackable in
+    /// Conflict. The relation itself is unchanged (`relation_to` stays Hostile) — only
+    /// `can_attack` is gated, like the no-PvP instance rule.
+    #[tokio::test]
+    async fn peace_blocks_player_attacks_and_conflict_allows_them() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let peace_a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let peace_b = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let conflict_c = player_in(&server, &cc, 0x201, 101, CONFLICT_ZONE, 0);
+        let conflict_d = player_in(&server, &cd, 0x209, 109, CONFLICT_ZONE, 0);
+        let (ta, tb) = (obj_target(&peace_a), obj_target(&peace_b));
+        assert_eq!(relation_to(&server, &ta, &tb), RelationState::Hostile);
+        assert!(!can_attack(&server, &ta, &tb));
+        assert!(!can_attack(&server, &tb, &ta));
+        let (tc, td) = (obj_target(&conflict_c), obj_target(&conflict_d));
+        assert_eq!(relation_to(&server, &tc, &td), RelationState::Hostile);
+        assert!(can_attack(&server, &tc, &td));
+        assert!(can_attack(&server, &td, &tc));
+    }
+
+    /// `ui_texts` 5195 "except for pirates": a pirate target and a pirate attacker keep their
+    /// hostile attacks in Peace; the non-pirate control pair stays refused.
+    #[tokio::test]
+    async fn peace_lets_pirates_attack_and_be_attacked() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let nuian = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let pirate = player_in(&server, &cb, 0x109, factions::PIRATE, PEACE_ZONE, 0);
+        let harani = player_in(&server, &cc, 0x201, 109, PEACE_ZONE, 0);
+        let (tnu, tpir, thar) = (obj_target(&nuian), obj_target(&pirate), obj_target(&harani));
+        assert_eq!(relation_to(&server, &tnu, &tpir), RelationState::Hostile);
+        assert!(
+            can_attack(&server, &tnu, &tpir),
+            "a pirate target is allowed"
+        );
+        assert!(
+            can_attack(&server, &tpir, &tnu),
+            "a pirate attacker is allowed"
+        );
+        assert!(can_attack(&server, &tpir, &thar));
+        assert!(
+            !can_attack(&server, &tnu, &thar),
+            "non-pirates stay refused"
+        );
+    }
+
+    /// Two duellists may keep fighting in Peace (owner recollection 2026-11-10); after the
+    /// duel ends the same pair is refused again.
+    #[tokio::test]
+    async fn peace_allows_a_duel_between_the_two_players() {
+        use crate::systems::social::duel::duel_det_type;
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let b = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let (ta, tb) = (obj_target(&a), obj_target(&b));
+        assert!(!can_attack(&server, &ta, &tb));
+        server
+            .systems
+            .social
+            .duels
+            .duel_request(&server, &a, b.character_id);
+        assert!(server
+            .systems
+            .social
+            .duels
+            .is_in_duel_with(a.character_id, b.character_id));
+        server
+            .systems
+            .social
+            .duels
+            .duel_accepted(&server, &b, a.character_id)
+            .await;
+        assert_eq!(a.data().unit.faction_id, RED_TEAM);
+        assert_eq!(b.data().unit.faction_id, BLUE_TEAM);
+        assert!(can_attack(&server, &ta, &tb));
+        assert!(can_attack(&server, &tb, &ta));
+        server
+            .systems
+            .social
+            .duels
+            .duel_stop(&server, a.character_id, duel_det_type::DRAW, 0)
+            .await;
+        assert!(!server
+            .systems
+            .social
+            .duels
+            .is_in_duel_with(a.character_id, b.character_id));
+        assert!(!can_attack(&server, &ta, &tb), "the peace rule is back");
+    }
+
+    /// Exception (c): a nation's `CSFactionDeclareHostile` relation row lets it fight the
+    /// declared faction in Peace. The static Nuia/Haranya hostility is not a declaration and
+    /// does not except.
+    #[tokio::test]
+    async fn peace_allows_factions_in_a_declared_hostile_diplomacy_relation() {
+        use crate::systems::social::nation::{Nation, NationRelation};
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        server.systems.social.nations.add(Nation {
+            id: 5000,
+            expedition_id: 0,
+            owner_character_id: 0,
+            owner_name: "King".into(),
+            name: "Kingdom".into(),
+            created_at: 1,
+            allow_change_name: 0,
+            relations: vec![NationRelation {
+                other_faction_id: 148,
+                state: RelationState::Hostile as u8,
+                expire_at: 0,
+                next_state: RelationState::Hostile as u8,
+            }],
+            offline_members: Vec::new(),
+        });
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let citizen = player_in(&server, &ca, 0x101, 5000, PEACE_ZONE, 0);
+        let nuian = player_in(&server, &cb, 0x109, 101, PEACE_ZONE, 0);
+        let harani = player_in(&server, &cc, 0x201, 109, PEACE_ZONE, 0);
+        assert_eq!(faction_relation(&server, 5000, 101), RelationState::Hostile);
+        let (tcit, tnu, thar) = (
+            obj_target(&citizen),
+            obj_target(&nuian),
+            obj_target(&harani),
+        );
+        assert!(can_attack(&server, &tcit, &tnu));
+        assert!(can_attack(&server, &tnu, &tcit));
+        // The relation with Haranya was not declared: the static alliance hostility alone does
+        // not except, and neither does the plain alliance pair.
+        assert_eq!(faction_relation(&server, 5000, 109), RelationState::Neutral);
+        assert!(!can_attack(&server, &tcit, &thar));
+        assert!(!can_attack(&server, &tnu, &thar));
+    }
+
+    /// Ctrl+F force attack (bloodlust) makes friendly players attackable, but not in Peace.
+    #[tokio::test]
+    async fn peace_is_not_bypassed_by_force_attack() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let b = player_in(&server, &cb, 0x109, 101, PEACE_ZONE, 0);
+        a.data().unit.force_attack = true;
+        let (ta, tb) = (obj_target(&a), obj_target(&b));
+        assert_eq!(relation_to(&server, &ta, &tb), RelationState::Friendly);
+        assert!(!can_attack(&server, &ta, &tb));
+        // Outside Peace the flag still makes the friendly pair attackable.
+        b.data().unit.transform.zone_id = CONFLICT_ZONE;
+        assert!(can_attack(&server, &ta, &tb));
+    }
+
+    /// An area skill in Peace skips a protected player but still damages the Conflict-zone
+    /// player and the hostile NPC in the same radius.
+    #[tokio::test]
+    async fn peace_aoe_skips_protected_players_and_still_hits_npcs() {
+        use crate::models::npc::Npc;
+        use crate::systems::skills::data::effects::EffectTemplate;
+        use crate::systems::skills::data::EffectKind;
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+        use crate::world::Entity;
+
+        let mut data = pvp_data();
+        let skills = &mut data.systems.skills;
+        skills.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(super::super::tests::damage_effect(1, 600))),
+            900_001,
+        );
+        let mut template = super::super::tests::skill_template(10_001);
+        template.target_area_radius = 5;
+        template.target_selection = 2; // Target
+        template.target_relation = SkillTargetRelation::Hostile as i32;
+        template.effects.push(super::super::tests::skill_effect(
+            900_001,
+            EffectKind::DamageEffect,
+            1,
+        ));
+        let template = std::sync::Arc::new(template);
+        skills.add_skill((*template).clone());
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let caster = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let protected = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let exposed = player_in(&server, &cc, 0x209, 109, CONFLICT_ZONE, 0);
+        let mut npc = Npc::new(900);
+        npc.unit.faction_id = 115;
+        npc.unit.hp = 5_000;
+        npc.unit.max_hp = 5_000;
+        npc.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let npc = Entity::new(0x401, npc);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+
+        let (protected_hp, exposed_hp, npc_hp) = (
+            protected.data().unit.hp,
+            exposed.data().unit.hp,
+            npc.data().unit.hp,
+        );
+        let mut target = SkillCastTarget::Unit(exposed.obj_id);
+        use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&caster),
+            SkillCaster::Unit(caster.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(
+            protected.data().unit.hp,
+            protected_hp,
+            "the Peace-zone player must not be hit by the area"
+        );
+        assert!(
+            exposed.data().unit.hp < exposed_hp,
+            "the Conflict-zone player is hit"
+        );
+        assert!(npc.data().unit.hp < npc_hp, "the NPC is hit");
     }
 }
