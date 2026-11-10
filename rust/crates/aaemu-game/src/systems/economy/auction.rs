@@ -512,13 +512,27 @@ struct PendingAuctionMail {
     sent: bool,
 }
 
-/// `lot.DirectMoney * .01 * ((int)duration + 1)`, capped at `MaxListingFee`.
-pub fn listing_fee(direct_money: i32, duration: u8) -> f64 {
-    let fee = f64::from(direct_money) * 0.01 * f64::from(i32::from(duration) + 1);
-    if fee > f64::from(MAX_LISTING_FEE) {
-        f64::from(MAX_LISTING_FEE)
+/// The lot deposit the 1.2 client shows and the server charges: `price = direct > 0 ? direct :
+/// start`, `fee = floor(price * rate + 0.5)`, at least 1, capped at `MaxListingFee`.
+///
+/// The client computes it in `X2Auction.CalcDeposit` (`putup.alb` proto 0.5) through
+/// `FUN_398a6060` (x2game). Retail's rate per duration class and its cap were server-set
+/// (`ui_texts` 5389/5390 `auction_deposit_ratio_diff_body` / `auction_deposit_limit_diff_body`
+/// are the mails for a changed multiplier / upper limit), so the C# server's values are kept:
+/// 1 % per duration step (`0.01 * (duration + 1)`) and 1,000,000.
+pub fn listing_fee(direct_money: i32, start_money: i32, duration: u8) -> i32 {
+    let price = if direct_money > 0 {
+        direct_money
     } else {
-        fee
+        start_money
+    };
+    let fee = (f64::from(price) * 0.01 * f64::from(i32::from(duration) + 1) + 0.5).floor();
+    if fee < 1.0 {
+        1
+    } else if fee > f64::from(MAX_LISTING_FEE) {
+        MAX_LISTING_FEE
+    } else {
+        fee as i32
     }
 }
 
@@ -934,7 +948,7 @@ impl AuctionManager {
             return;
         }
         let money_after_fee = f64::from(sold_amount) * 0.9;
-        let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+        let recalculated_fee = listing_fee(lot.direct_money, lot.start_money, lot.duration);
         if !lot.is_system_lot() {
             notify_seller(
                 server,
@@ -950,7 +964,7 @@ impl AuctionManager {
                 item: new_item.clone(),
                 seller_id: lot.client_id,
                 buyout_price: sold_amount,
-                listing_fee: recalculated_fee as i32,
+                listing_fee: recalculated_fee,
                 seller_share: money_after_fee as i32,
                 trade_tax_fee: (f64::from(sold_amount) - money_after_fee) as i32,
             });
@@ -960,7 +974,7 @@ impl AuctionManager {
             item: new_item,
             seller_id: lot.client_id,
             buyout_price: sold_amount,
-            listing_fee: recalculated_fee as i32,
+            listing_fee: recalculated_fee,
             buyer_id,
         });
         self.queue_settlement(
@@ -1003,7 +1017,7 @@ impl AuctionManager {
             self.remove_auction_lot(server, lot.id);
             return;
         };
-        let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+        let recalculated_fee = listing_fee(lot.direct_money, lot.start_money, lot.duration);
         self.queue_settlement(
             server,
             PendingSettlement {
@@ -1016,7 +1030,7 @@ impl AuctionManager {
                         item: new_item,
                         seller_id: lot.client_id,
                         buyout_price: lot.direct_money,
-                        listing_fee: recalculated_fee as i32,
+                        listing_fee: recalculated_fee,
                     },
                     sent: false,
                 }],
@@ -1050,7 +1064,7 @@ impl AuctionManager {
             .as_ref()
             .and_then(|i| server.items.item_by_id(i.id));
         if let Some(new_item) = created {
-            let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+            let recalculated_fee = listing_fee(lot.direct_money, lot.start_money, lot.duration);
             let completed = self.queue_settlement(
                 server,
                 PendingSettlement {
@@ -1063,7 +1077,7 @@ impl AuctionManager {
                             item: new_item,
                             seller_id: lot.client_id,
                             buyout_price: lot.direct_money,
-                            listing_fee: recalculated_fee as i32,
+                            listing_fee: recalculated_fee,
                         },
                         sent: false,
                     }],
@@ -1195,7 +1209,7 @@ impl AuctionManager {
             // Bid
             if !lot.bidder_name.is_empty() && lot.bidder_id != 0 {
                 // Send mail to old bidder.
-                let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+                let recalculated_fee = listing_fee(lot.direct_money, lot.start_money, lot.duration);
                 self.queue_refund(
                     server,
                     &lot,
@@ -1203,7 +1217,7 @@ impl AuctionManager {
                         item_template_id: lot.item_template_id(),
                         seller_id: lot.client_id,
                         buyout_price: lot.direct_money,
-                        listing_fee: recalculated_fee as i32,
+                        listing_fee: recalculated_fee,
                         previous_buyer_id: lot.bidder_id,
                         previous_bid: lot.bid_money,
                     },
@@ -1550,13 +1564,13 @@ impl AuctionManager {
             return;
         };
 
-        let auction_fee = listing_fee(lot.direct_money, duration);
+        let auction_fee = listing_fee(lot.direct_money, lot.start_money, duration);
 
         let Some(auction) = Inv::of(player).get(slot_type::AUCTION) else {
             server.ids.auction.release_id(lot.id as u32);
             return;
         };
-        if player.data().money < auction_fee as i64
+        if player.data().money < i64::from(auction_fee)
             || !super::mail::add_or_move_existing_item(
                 &mut txn,
                 &auction,
@@ -1577,7 +1591,7 @@ impl AuctionManager {
             &mut txn.out(),
             player,
             slot_type::INVENTORY,
-            -(auction_fee as i32),
+            -auction_fee,
             task_type::DEPOSIT_MONEY,
         );
         lot.item = auction

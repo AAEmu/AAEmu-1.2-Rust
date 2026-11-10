@@ -4450,6 +4450,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   only. `prepare_save` omits zero counts and `write_prepared` is an upsert without a delete, so
   a released claim that returns a template to zero stays in `account_shop_purchases` and is
   loaded again after a restart (the limit is then one copy too strict). Known, not fixed.
+* systems::economy (auction deposit, 2026-11-10): `listing_fee` now follows the 1.2 client's
+  `X2Auction.CalcDeposit` (`putup.alb` proto 0.5 → `FUN_398a6060`): the base is the buyout when
+  set, else the start price; `floor(price * rate + 0.5)`; at least 1; capped. The C# charged the
+  fee on the buyout only (a lot without buyout paid nothing) and truncated the fraction, so the
+  server now charges what the client displayed. The retail rate per duration class and the cap
+  were server config, not client constants (`ui_texts` 5389 / 5390 are the mails for a changed
+  `auction_deposit_ratio_diff_body` / `auction_deposit_limit_diff_body`), so the C# values are
+  kept: 1 % per duration step and 1,000,000.
 * systems::economy (shop purchase limits per account, 2026-11-10): `items.limited_sale_count` /
   `items.one_time_sale` counters are keyed by `characters.account_id` in
   `account_shop_purchases` instead of by character. The 1.2 descriptions of items 30013 / 30014 /
