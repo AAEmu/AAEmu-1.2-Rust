@@ -88,6 +88,9 @@ pub fn vehicle_move(
     if !controls_slave(character, car) {
         return;
     }
+    if !crate::world::move_guard::guard_vehicle_move(server, world, character, target, v) {
+        return;
+    }
     let (rx, ry, rz) = get_slave_rotation_in_degrees(v.rotation_x, v.rotation_y, v.rotation_z);
     attach_if_needed(server, character, target);
     car.data()
@@ -196,17 +199,7 @@ pub fn is_boarded_on_transfer(world: &WorldInstance, unit: &WorldObject) -> bool
 /// standing flag carries the GC block independently of the movement header: a
 /// controller update can retain that block while clearing the header flag.
 pub fn standing_on(world: &WorldInstance, target: &WorldObject, mt: &MoveType, u: &UnitMove) {
-    let standing = mt.flags.contains(MoveTypeFlags::STANDING_ON_OBJECT)
-        || u.actor_flags
-            .contains(MoveTypeActorFlags::STANDING_ON_OBJECT);
-    let current = target.transform().parent_obj_id;
-    // GcId 1 means the current parent, not a request to detach from it.
-    let parent_id = if u.gc_id == 1 { current } else { u.gc_id };
-    let parent = if standing && parent_id != 0 {
-        world.object(parent_id).filter(|o| !o.same(target))
-    } else {
-        None
-    };
+    let (current, parent) = resolve_support(world, target, mt, u);
     match (current, parent) {
         (c, None) if c != 0 => {
             // No longer standing on object
@@ -219,4 +212,27 @@ pub fn standing_on(world: &WorldInstance, target: &WorldObject, mt: &MoveType, u
         }
         _ => {}
     }
+}
+
+/// The part of [`standing_on`] that changes nothing: the unit's current parent id and the
+/// object the packet claims it stands on (`None` = not standing on anything). `gc_id` is a
+/// client-chosen object id, so callers that care must validate the result (the movement guard).
+pub fn resolve_support(
+    world: &WorldInstance,
+    target: &WorldObject,
+    mt: &MoveType,
+    u: &UnitMove,
+) -> (u32, Option<WorldObject>) {
+    let standing = mt.flags.contains(MoveTypeFlags::STANDING_ON_OBJECT)
+        || u.actor_flags
+            .contains(MoveTypeActorFlags::STANDING_ON_OBJECT);
+    let current = target.transform().parent_obj_id;
+    // GcId 1 means the current parent, not a request to detach from it.
+    let parent_id = if u.gc_id == 1 { current } else { u.gc_id };
+    let parent = if standing && parent_id != 0 {
+        world.object(parent_id).filter(|o| !o.same(target))
+    } else {
+        None
+    };
+    (current, parent)
 }

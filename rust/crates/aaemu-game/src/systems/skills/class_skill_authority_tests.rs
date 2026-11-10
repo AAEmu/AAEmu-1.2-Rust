@@ -156,6 +156,52 @@ async fn unlearned_tree_skill_of_an_active_ability_is_refused_with_invalid_skill
 }
 
 #[tokio::test]
+async fn learned_ability_less_npc_skill_is_refused() {
+    // An ability-less NPC / GM skill that got into the learned list (a forged CSLearnSkill
+    // before the learn check, or a stale row) is not a client cast: it takes the client-source
+    // check like any unlearned skill, and a learned class skill of the same ability level must
+    // not make it a "variant".
+    const NPC_SKILL: u32 = 31099;
+    let mut data = data();
+    data.systems.skills.add_skill(plain_skill(NPC_SKILL));
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut ch = test_character(1, "Caster", 100.0, 100.0);
+    ch.ability1 = ABILITY;
+    ch.skills.skills.push(Skill {
+        id: NPC_SKILL,
+        level: 1,
+    });
+    let p = spawn_player(&server, &client, ch, 0x100);
+    client.conn.active_char = Some(p.clone());
+    client.drain();
+    cast(&server, &mut client, &p, NPC_SKILL).await;
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert_eq!(
+        started_result(&mut client, NPC_SKILL),
+        Some(skill_result::NO_PERM)
+    );
+    assert!(!super::is_variant_of_skill(&server, &p, NPC_SKILL));
+}
+
+#[tokio::test]
+async fn unit_caster_naming_another_unit_is_refused() {
+    let (server, mut client, p) = fixture(true, true, false);
+    let victim = 0x7777;
+    packet(TREE_SKILL, SkillCaster::Unit(victim), victim)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert_eq!(
+        started_result(&mut client, TREE_SKILL),
+        Some(skill_result::NO_PERM)
+    );
+}
+
+#[tokio::test]
 async fn unlearned_sourced_tree_skill_is_refused_with_invalid_skill() {
     // Static tables name this class skill (a quest / doodad condition), but the character never
     // learned it: the 1.2 client refuses it in the action bar.
@@ -502,4 +548,22 @@ fn real_data_skill_sources_do_not_smuggle_class_tree_skills() {
         "the number of ability-tree skills castable without learning changed"
     );
     assert!(class_tree > 0, "no class-tree source was checked");
+}
+
+#[tokio::test]
+async fn repeated_force_attack_request_does_not_broadcast_again() {
+    use crate::systems::skills::handlers::CSSetForceAttackPacket;
+    let (server, mut client, _p) = fixture(true, true, false);
+    for (on, expected) in [(true, 1), (true, 0), (false, 1), (false, 0)] {
+        CSSetForceAttackPacket { on }
+            .handle(&server, &mut client.conn)
+            .await
+            .unwrap();
+        let sent = client
+            .drain_ops()
+            .into_iter()
+            .filter(|op| *op == sc::SCForceAttackSetPacket)
+            .count();
+        assert_eq!(sent, expected, "on={on}");
+    }
 }

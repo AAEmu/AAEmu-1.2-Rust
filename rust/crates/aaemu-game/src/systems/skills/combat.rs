@@ -1845,6 +1845,10 @@ pub fn set_criminal_state(
 
 /// `Unit.SetForceAttack(value)`.
 pub fn set_force_attack(server: &GameServer, unit: &WorldObject, value: bool) {
+    // A repeated request changes nothing: no buff churn and no broadcast.
+    if unit.with_unit(|u| u.unit().force_attack) == Some(value) {
+        return;
+    }
     unit.with_unit(|u| u.unit_mut().force_attack = value);
     if value {
         buffs::add_buff_by_id(server, unit, buff_constants::BLOODLUST, unit, 0);

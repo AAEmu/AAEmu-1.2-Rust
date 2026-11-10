@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -325,6 +325,51 @@ pub struct GameConnection {
     delay: Option<Arc<ReplyDelayConn>>,
     /// Last allowed chat time per chat-spam group (`FUN_393C2540`'s `lastSend` array).
     pub chat_spam_last: [Option<std::time::Instant>; 15],
+    /// Unknown or unreadable packets seen on this connection (Rust addition, log throttling).
+    bad_packets: BadPacketLog,
+    /// `CSSpawnCharacter` / `CSNotifyInGame` already ran for the selected character; a replay is
+    /// ignored (it would subscribe to the time manager again and re-run the join hooks). Reset
+    /// by `select_character`.
+    pub spawn_handled: bool,
+    pub in_game_notified: bool,
+}
+
+/// Unknown or unreadable packets of one connection that are logged at `error` per
+/// [`BAD_PACKET_LOG_WINDOW`]; the rest of the window is logged at `debug` (the real client
+/// legitimately sends some not-yet-ported opcodes).
+pub const BAD_PACKET_ERROR_LOG_LIMIT: u32 = 10;
+/// Length of the fixed window of [`BAD_PACKET_ERROR_LOG_LIMIT`]. A window instead of the
+/// connection lifetime keeps new unported opcodes visible at `error` in a long session.
+pub const BAD_PACKET_LOG_WINDOW: Duration = Duration::from_secs(60);
+
+/// Throttle for the unknown-packet `error` logs of one connection (pure over the caller's clock).
+#[derive(Debug, Default)]
+pub struct BadPacketLog {
+    window_start: Option<Instant>,
+    count: u32,
+}
+
+impl BadPacketLog {
+    /// Counts one bad packet at `now`; `true` while it is still worth an `error` log (the first
+    /// [`BAD_PACKET_ERROR_LOG_LIMIT`] of the current window). Logs one `warn` when the window
+    /// overflows.
+    pub fn note(&mut self, now: Instant, session: u32) -> bool {
+        match self.window_start {
+            Some(start) if now.saturating_duration_since(start) < BAD_PACKET_LOG_WINDOW => {}
+            _ => {
+                self.window_start = Some(now);
+                self.count = 0;
+            }
+        }
+        self.count = self.count.saturating_add(1);
+        if self.count == BAD_PACKET_ERROR_LOG_LIMIT + 1 {
+            tracing::warn!(
+                "session {session}: more than {BAD_PACKET_ERROR_LOG_LIMIT} unknown or unreadable packets in {} s, logging the rest of the window at debug",
+                BAD_PACKET_LOG_WINDOW.as_secs()
+            );
+        }
+        self.count <= BAD_PACKET_ERROR_LOG_LIMIT
+    }
 }
 
 impl std::fmt::Debug for GameConnection {
@@ -378,8 +423,17 @@ impl GameConnection {
             closing: false,
             delay: None,
             chat_spam_last: [None; 15],
+            bad_packets: BadPacketLog::default(),
+            spawn_handled: false,
+            in_game_notified: false,
         };
         (conn, handle)
+    }
+
+    /// Counts one unknown or unreadable packet; `true` while it is still worth an `error` log
+    /// (the first [`BAD_PACKET_ERROR_LOG_LIMIT`] per [`BAD_PACKET_LOG_WINDOW`]).
+    pub fn note_bad_packet(&mut self) -> bool {
+        self.bad_packets.note(Instant::now(), self.id)
     }
 
     /// Attaches `Debug:ReplyDelay` to this connection and every handle made from it.

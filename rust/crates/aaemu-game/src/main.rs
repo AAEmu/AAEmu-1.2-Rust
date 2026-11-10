@@ -100,6 +100,11 @@ async fn run() -> anyhow::Result<()> {
     // BuildConfiguration: JSON files, user secrets, environment, command line.
     let mut config =
         AppConfig::load_with(&app_path, &config_args).context("loading configuration")?;
+    if let Some(warning) =
+        aaemu_commons::secret::weak_secret_warning(&config.secret_key, &config.login_network.host)
+    {
+        tracing::error!("{warning}");
+    }
 
     // Test the MySQL connection ("MySQL connection failed, check your configuration!" is fatal).
     let db = MySqlPoolOptions::new()

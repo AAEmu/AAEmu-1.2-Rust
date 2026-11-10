@@ -64,34 +64,35 @@ stream_packets!(
 /// Decodes and dispatches one frame payload (`[u16 opcode][body]`) for `conn`. An error means
 /// the connection must be shut down (the C# `OnReceive` catch-all). Unknown opcodes are logged
 /// with a capped hex dump and ignored (`HandleUnknownPacket`). **Deviation:** on a connection
-/// that has not completed `CTJoin` they instead log at `warn` and close the connection; the
-/// stream port is public and only a joined client has any business sending anything else
-/// (internet scanners probe it).
+/// that has not completed `CTJoin` only `CTJoin` is dispatched; anything else (unknown or
+/// registered) logs at `warn` and closes the connection. The stream port is public and only a
+/// joined client has any business sending anything else (internet scanners probe it, and the
+/// registered packets serve cells, UCC data and character names).
 pub async fn handle_frame(
     server: &GameServer,
     conn: &mut StreamConnection,
     payload: &[u8],
 ) -> Result<()> {
     let (opcode, body) = decode_frame(payload);
+    if !conn.is_joined() && opcode != CTJoinPacket::OPCODE {
+        tracing::warn!(
+            "Packet 0x{:02x} before CTJoin from {} (session {}), closing: {}",
+            opcode,
+            conn.ip,
+            conn.id,
+            hex_dump(body.unread())
+        );
+        conn.shutdown();
+        return Ok(());
+    }
     if !REGISTERED.iter().any(|&(op, _)| op == opcode) {
         let dump = hex_dump(body.unread());
-        if conn.is_joined() {
-            tracing::warn!(
-                "Unknown packet 0x{:02x} from {}:\n{}",
-                opcode,
-                conn.ip,
-                dump
-            );
-        } else {
-            tracing::warn!(
-                "Unknown packet 0x{:02x} before CTJoin from {} (session {}), closing: {}",
-                opcode,
-                conn.ip,
-                conn.id,
-                dump
-            );
-            conn.shutdown();
-        }
+        tracing::warn!(
+            "Unknown packet 0x{:02x} from {}:\n{}",
+            opcode,
+            conn.ip,
+            dump
+        );
         return Ok(());
     }
     dispatch(server, conn, opcode, body).await.unwrap_or(Ok(()))

@@ -64,6 +64,9 @@ mod deck_standing_tests;
 #[path = "mate_dash_skill_tests.rs"]
 mod mate_dash_skill_tests;
 
+#[path = "move_guard_flow_tests.rs"]
+mod move_guard_flow_tests;
+
 #[path = "pr38_regression_tests.rs"]
 mod pr38_regression_tests;
 
@@ -779,6 +782,8 @@ async fn mount_sus_uses_rider_teleports_and_resets_on_seat_changes() {
         sample(11_000).is_none(),
         "owner fallback reseeds the baseline"
     );
+    // The rider walks up to the mate again (a mount needs the rider in reach).
+    pa.data().unit.transform.set_xyz(35_000.0, 100.0, 100.0);
     mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
     move_to(40_000.0);
     assert!(sample(12_000).is_none(), "remount drops the baseline");
@@ -3594,6 +3599,8 @@ async fn client_motion_and_despawn_cannot_control_other_players_or_slaves() {
     use crate::world::Entity;
 
     let server = server_with(GameData::empty());
+    // Walks across the map in one packet: the movement guard has its own tests.
+    server.config.update(|c| c.world.move_guard_enabled = false);
     let mut a = TestClient::new(&server, 1, 1);
     let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
     a.conn.active_char = Some(pa.clone());
@@ -5874,7 +5881,7 @@ async fn mate_client_packets_require_owner_for_target_and_actual_rider_for_unmou
     let mut a = TestClient::new(&server, 1, 1);
     let mut b = TestClient::new(&server, 2, 2);
     let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
-    let pb = spawn_player(&server, &b, test_character(2, "B", 110.0, 110.0), PB);
+    let pb = spawn_player(&server, &b, test_character(2, "B", 103.0, 102.0), PB);
     a.conn.active_char = Some(pa.clone());
     b.conn.active_char = Some(pb.clone());
     mates::spawn_mount(&server, &pa, item_id);
@@ -9584,4 +9591,56 @@ fn real_slave_unit_modifiers_have_no_linear_level_bonus() {
         )
         .expect("Slave linear level bonus rows");
     assert_eq!(with_bonus, 0);
+}
+
+#[tokio::test]
+async fn hang_and_mount_need_the_target_in_reach() {
+    use super::packets::CSHangPacket;
+    use crate::net::registry::ClientPacket;
+
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    a.conn.active_char = Some(pa.clone());
+    mates::spawn_mount(&server, &pa, item_id);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .unwrap();
+    let tl = u32::from(mate.data().unit.tl_id);
+    let world = server.world.world(0).unwrap();
+    let mut far = crate::models::npc::Npc::new(MATE_NPC);
+    far.unit.transform.set_xyz(900.0, 900.0, 100.0);
+    let anchor = crate::world::Entity::new(0x201, far);
+    world.spawn(&anchor, &server.view_ctx());
+    a.drain();
+    // A hang target across the map is ignored.
+    CSHangPacket {
+        unit_obj_id: PA,
+        target_obj_id: anchor.obj_id,
+    }
+    .handle(&server, &mut a.conn)
+    .await
+    .unwrap();
+    assert_eq!(pa.core().sticky_parent(), 0);
+    // A mate out of reach cannot be mounted; in reach it can, and only one seat is taken.
+    let near = mate.data().unit.transform;
+    mate.data().unit.transform.set_xyz(500.0, 500.0, near.z);
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    assert!(!pa.data().is_riding);
+    mate.data().unit.transform.set_xyz(near.x, near.y, near.z);
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    assert!(pa.data().is_riding);
+    mates::mount_mate(&server, &pa, tl, attach_point::PASSENGER0, 1);
+    assert_eq!(
+        mate.data()
+            .passenger(attach_point::PASSENGER0)
+            .map(|s| s.obj_id),
+        Some(0),
+        "an already seated rider cannot take a second seat"
+    );
 }

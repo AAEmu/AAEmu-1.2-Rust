@@ -1379,6 +1379,11 @@ impl TeamManager {
         if team.owner_id != unit.character_id && !team.is_party {
             return;
         }
+        // Deviation from C#: the sender must belong to the team it names (a party lets any
+        // member mark; the team id alone let any client mark another party's targets).
+        if !team.is_member(unit.character_id) {
+            return;
+        }
         // Enum.IsDefined(OverHeadMark): -2 and 0..=11.
         if (0..=11).contains(&index) && kind <= 2 {
             team.marks[index as usize] = (kind, if kind != 0 { target_id } else { 0 });

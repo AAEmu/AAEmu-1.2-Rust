@@ -1135,3 +1135,125 @@ async fn use_teleport_pays_the_fare_and_teleports_to_the_return_point() {
     assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
     assert!(!me.data().disabled_set_position);
 }
+
+/// A player at (100, 100, 100) with a pending `SCTeleportUnit` to (300, 400, 50).
+fn teleporting_player() -> (GameServer, TestClient, crate::world::PlayerRef) {
+    let server = test_server_with(data());
+    let client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    let mut client = client;
+    client.conn.active_char = Some(me.clone());
+    crate::world::session::send_teleport_unit(
+        &me,
+        SCTeleportUnitPacket {
+            reason: 0,
+            error_message: 0,
+            x: 300.0,
+            y: 400.0,
+            z: 50.0,
+            z2: 0.0,
+        },
+    );
+    client.drain();
+    (server, client, me)
+}
+
+async fn teleport_ended_at(server: &GameServer, client: &mut TestClient, x: f32, y: f32, z: f32) {
+    CSTeleportEndedPacket {
+        x,
+        y,
+        z,
+        ori: [0; 16],
+    }
+    .handle(server, &mut client.conn)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn teleport_ended_without_a_pending_teleport_is_ignored() {
+    let server = test_server_with(data());
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    client.drain();
+
+    // No lock: the report moves nothing.
+    teleport_ended_at(&server, &mut client, 9000.0, 9000.0, 5.0).await;
+    let t = me.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (100.0, 100.0, 100.0));
+    assert!(client.drain().is_empty());
+
+    // A lock set for another reason (an instance load: the character is no longer filed in the
+    // instance it was moved to) is not lifted by the client either.
+    me.data().set_disabled_set_position(true);
+    me.data().unit.transform.instance_id = 7;
+    teleport_ended_at(&server, &mut client, 9000.0, 9000.0, 5.0).await;
+    assert!(me.data().disabled_set_position);
+    let t = me.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (100.0, 100.0, 100.0));
+}
+
+#[tokio::test]
+async fn teleport_ended_far_from_the_destination_lands_on_the_destination() {
+    for (x, y, z) in [
+        (9000.0, 9000.0, 5.0),
+        (300.0, 400.0, f32::NAN),
+        (f32::INFINITY, 400.0, 50.0),
+        (300.0, 400.0, 500.0),
+    ] {
+        let (server, mut client, me) = teleporting_player();
+        assert!(me.data().disabled_set_position);
+        teleport_ended_at(&server, &mut client, x, y, z).await;
+        assert!(!me.data().disabled_set_position);
+        assert_eq!(me.data().pending_teleport, None);
+        let t = me.data().unit.transform;
+        assert_eq!(
+            (t.x, t.y, t.z),
+            (300.0, 400.0, 50.0),
+            "reported {x} {y} {z}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn teleport_ended_near_the_destination_uses_the_client_height() {
+    let (server, mut client, me) = teleporting_player();
+    teleport_ended_at(&server, &mut client, 302.0, 399.0, 62.5).await;
+    assert!(!me.data().disabled_set_position);
+    let t = me.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (302.0, 399.0, 62.5));
+    // A second report moves nothing: the teleport is over.
+    teleport_ended_at(&server, &mut client, 9000.0, 9000.0, 5.0).await;
+    let t = me.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (302.0, 399.0, 62.5));
+}
+
+#[tokio::test]
+async fn teleport_ended_without_a_recorded_destination_keeps_the_server_position() {
+    let server = test_server_with(data());
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    // A lock from a sender that recorded no destination.
+    me.data().set_disabled_set_position(true);
+    teleport_ended_at(&server, &mut client, 9000.0, 9000.0, 5.0).await;
+    assert!(!me.data().disabled_set_position);
+    let t = me.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (100.0, 100.0, 100.0));
+}

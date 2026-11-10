@@ -193,7 +193,7 @@ pub(crate) enum ClientCall {
     OtpPrompt(i32, i32),
     CertPrompt(i32, i32),
     ArsPrompt(String, Duration),
-    WorldCookie(String, u16),
+    WorldCookie(u32, String, u16),
     EnterWorldDenied(u8),
 }
 
@@ -267,8 +267,8 @@ impl LoginClient for RecordingClient {
         self.push(ClientCall::ArsPrompt(session_code.to_string(), timeout))
     }
 
-    fn send_world_cookie(&self, host: &str, port: u16) -> Result<(), PacketError> {
-        self.push(ClientCall::WorldCookie(host.to_string(), port))
+    fn send_world_cookie(&self, cookie: u32, host: &str, port: u16) -> Result<(), PacketError> {
+        self.push(ClientCall::WorldCookie(cookie, host.to_string(), port))
     }
 
     fn send_enter_world_denied(&self, reason: u8) -> Result<(), PacketError> {

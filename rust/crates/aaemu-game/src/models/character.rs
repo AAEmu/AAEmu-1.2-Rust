@@ -213,6 +213,10 @@ pub struct Character {
     /// `SusManager.ResetAnalyze*DeltaMovement` side effect, as a counter the movement analysis
     /// compares against its baseline.
     pub teleport_seq: u32,
+    /// World destination (x, y, z) of the `SCTeleportUnit` the server sent and the client has not
+    /// acknowledged yet (`CSTeleportEnded`); see `world::session::send_teleport_unit`. Cleared
+    /// whenever the lock is lifted.
+    pub pending_teleport: Option<(f32, f32, f32)>,
     pub breath: u32,
     /// `SubZoneId` (last `CSNotifySubZonePacket`, for the Memory Tome recall points).
     pub sub_zone_id: u32,
@@ -283,6 +287,8 @@ impl Character {
         self.disabled_set_position = value;
         if value {
             self.teleport_seq = self.teleport_seq.wrapping_add(1);
+        } else {
+            self.pending_teleport = None;
         }
     }
 
@@ -376,6 +382,7 @@ impl Character {
             finished_loading: false,
             disabled_set_position: false,
             teleport_seq: 0,
+            pending_teleport: None,
             breath: 60_000,
             sub_zone_id: 0,
             // ---- phase 3 / skills ----

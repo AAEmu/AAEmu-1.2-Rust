@@ -355,11 +355,41 @@ async fn initiate_enter_world_success_sends_world_cookie_packet() {
         .await
         .unwrap();
     f.conn
-        .complete_enter_world_request(&f.server.games, TEST_GS_ID, 0);
+        .complete_enter_world_request(&f.server.games, TEST_GS_ID, 0, 0xC0FF_EE01);
     f.await_enter_world_task().await;
 
-    assert_eq!(f.sent.opcodes(), vec![l2c_op::AC_WORLD_COOKIE]);
+    let packets = f.sent.drain();
+    assert_eq!(packets.len(), 1);
+    assert_eq!(
+        crate::test_support::opcode_of(&packets[0]),
+        l2c_op::AC_WORLD_COOKIE
+    );
+    // The client gets the game server's cookie, not the login connection id.
+    assert_eq!(packets[0][2..6], 0xC0FF_EE01u32.to_le_bytes());
+    assert_ne!(f.conn.id().0, 0xC0FF_EE01);
     assert_eq!(f.conn.state(), LoginState::Authenticated);
+}
+
+#[tokio::test]
+async fn world_cookie_falls_back_to_the_connection_id_without_a_game_cookie() {
+    let mut f = fixture();
+    f.authenticate_successfully().await;
+    let _gs = f.create_active_game_server().await;
+
+    f.conn
+        .initiate_enter_world(&f.server, TEST_GS_ID)
+        .await
+        .unwrap();
+    f.conn
+        .complete_enter_world_request(&f.server.games, TEST_GS_ID, 0, 0);
+    f.await_enter_world_task().await;
+
+    let packets = f.sent.drain();
+    assert_eq!(
+        crate::test_support::opcode_of(&packets[0]),
+        l2c_op::AC_WORLD_COOKIE
+    );
+    assert_eq!(packets[0][2..6], f.conn.id().0.to_le_bytes());
 }
 
 #[tokio::test]
@@ -373,7 +403,7 @@ async fn initiate_enter_world_failure_sends_enter_world_denied_packet() {
         .await
         .unwrap();
     f.conn
-        .complete_enter_world_request(&f.server.games, TEST_GS_ID, 1);
+        .complete_enter_world_request(&f.server.games, TEST_GS_ID, 1, 0);
     f.await_enter_world_task().await;
 
     assert_eq!(f.sent.opcodes(), vec![l2c_op::AC_ENTER_WORLD_DENIED]);
@@ -440,7 +470,7 @@ async fn complete_enter_world_gs_id_mismatch_ignored() {
         .unwrap();
     // Complete with a different gsId
     f.conn
-        .complete_enter_world_request(&f.server.games, GameServerId(99), 0);
+        .complete_enter_world_request(&f.server.games, GameServerId(99), 0, 0);
     tokio::task::yield_now().await;
     assert!(f.sent.drain().is_empty());
     assert_eq!(f.conn.state(), LoginState::EnteringWorld);
@@ -1280,6 +1310,7 @@ impl QueueFixture {
                 online,
                 sequence: 0,
                 has_online: true,
+                cookie: 0,
             }),
         )
         .await

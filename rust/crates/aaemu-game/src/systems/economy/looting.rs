@@ -264,6 +264,19 @@ impl LootingContainer {
             && self.creation_time_ms + (MAKE_LOOT_PUBLIC_TIME * 1000.0) as i64 <= now_ms
     }
 
+    /// Loot rights of an NPC corpse: until `make_loot_public` turned the rule into `PUBLIC`,
+    /// only the players recorded at generation (`EligiblePlayers`: the tagger, or the tagging
+    /// team's members in range, or the killer) may open or take it. A container without
+    /// eligible players (no tagger / killer, doodad loot) is open to everyone.
+    fn lacks_loot_rights(&self, character_id: u32) -> bool {
+        self.owner_type == loot_owner_type::NPC
+            && !self.eligible_players.is_empty()
+            && self
+                .team_looting_rule
+                .is_some_and(|r| r.loot_method != looting_rule_method::PUBLIC)
+            && !self.eligible_players.contains(&character_id)
+    }
+
     fn add_eligible(&mut self, id: u32) {
         if !self.eligible_players.contains(&id) {
             self.eligible_players.push(id);
@@ -652,6 +665,14 @@ impl LootManager {
         let mut txn = ItemTxn::begin(server);
         let mut ctx = Ctx::new(&mut txn, rng);
         let mut g = lock(&c);
+        if g.lacks_loot_rights(player.character_id) {
+            let rightful = g.eligible_players.first().copied().unwrap_or(0);
+            ctx.send(
+                player.character_id,
+                SCErrorMsgPacket::new(error_message::NO_PERMISSION_TO_LOOT, rightful, true),
+            );
+            return;
+        }
         if !g.opened_by.contains(&player.character_id) {
             g.opened_by.push(player.character_id);
         }
@@ -946,6 +967,25 @@ fn try_take_loot_locked(
         }
     }
     let rolls_in_progress = entry.player_rolls.len() > 1;
+    // Loot rights: the C# let any player in range take a corpse the tagger / team had the
+    // rights to (a tagger-only corpse is FREE_FOR_ALL). A roll winner or the claimed holder
+    // (`highest == pid`) is always entitled.
+    if highest != pid && g.lacks_loot_rights(pid) {
+        let rightful = g.eligible_players.first().copied().unwrap_or(0);
+        ctx.send(
+            pid,
+            SCErrorMsgPacket::new(error_message::NO_PERMISSION_TO_LOOT, rightful, true),
+        );
+        failed(
+            ctx,
+            g,
+            pid,
+            error_message::NO_PERMISSION_TO_LOOT,
+            idx,
+            template_id,
+        );
+        return false;
+    }
     // Check if it's already claimed by somebody else
     if highest > 0 && highest != pid {
         ctx.send(
@@ -1361,11 +1401,21 @@ impl CSLootOpenBagPacket {
         let object2 = world.object(self.obj2_id);
         let lm = &server.systems.economy.loot;
         let try_func = |target: &Option<WorldObject>| -> bool {
-            let Some(t @ WorldObject::Doodad(_)) = target else {
+            let Some(t @ WorldObject::Doodad(d)) = target else {
                 return false;
             };
             if lm.item_count(t.obj_id()) > 0 {
                 return false;
+            }
+            // A func-driven loot / recover doodad is worked from its interaction reach (the
+            // C# ran it from anywhere in the instance): refuse and stop here when too far.
+            if !crate::systems::npcs::doodad::packets::in_func_reach(server, &player, d, 0) {
+                tracing::warn!(
+                    "CSLootOpenBag refused: doodad {} is out of reach of {}",
+                    d.obj_id,
+                    player.data().unit.name
+                );
+                return true;
             }
             lm.hooks
                 .npcs

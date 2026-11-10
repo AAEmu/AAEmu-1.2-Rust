@@ -203,7 +203,9 @@ sequenceDiagram
 
 `initiate_enter_world` sends `LGPlayerEnter` and spawns a background task that waits for the
 game server's answer with the configured enter-world timeout; it then sends `ACWorldCookie` or
-`ACEnterWorldDenied`. The cookie is the login connection id. `ACWorldCookie` carries the address
+`ACEnterWorldDenied`. The cookie is a random value the game server generated for the entry and
+returned in `GLPlayerEnter` (an old game server sends none; the login connection id is used then,
+with a warning). `ACWorldCookie` carries the address
 from `GameServers[].Host` / `Port`, except that a client connected from the login server's own
 machine gets its own address.
 
@@ -257,9 +259,9 @@ their ports for orchestrators and container health checks.
 ### Stream connections (`src/stream/`)
 
 The client opens a second connection to the stream port (sent in `X2EnterWorldResponse`) and joins
-it with `CTJoin(accountId, cookie)`, where the cookie is its game connection id registered during
-`X2EnterWorld`. The stream carries doodad cell streaming and UCC (crest / emblem) uploads and
-downloads.
+it with `CTJoin(accountId, cookie)`, where the cookie is the random join ticket issued during
+`X2EnterWorld` (`X2EnterWorldResponse.token`). Until `CTJoin` is accepted only `CTJoin` is served.
+The stream carries doodad cell streaming and UCC (crest / emblem) uploads and downloads.
 
 - `listener.rs` is the same reader + writer task pattern; `StreamConnection` (owned by the task)
   holds the doodad request table and the linked game connection, and `StreamConnectionHandle` /
@@ -284,6 +286,18 @@ downloads.
 | --- | --- |
 | Login | `Network.Host` / `Port` (clients), `InternalNetwork.Host` / `Port` (game servers), `GameServers[]` (world list and the address handed to clients), `SecretKey`, `urls` |
 | Game | `Network.Host` / `Port`, `StreamNetwork.Host` / `Port`, `LoginNetwork.Host` / `Port`, `SecretKey`, `Id` / `AdditionalesId`, `Network.NumConnections` (load level) |
+
+The game listener also limits unauthenticated and abusive peers (Rust addition; `0` switches a limit off):
+
+| Key (`Network.`) | Default | Meaning |
+| --- | --- | --- |
+| `PreAuthTimeoutSeconds` | 30 | A connection that has not completed `X2EnterWorld` within this time is closed |
+| `MaxUnauthenticatedPerIp` | 256 | Simultaneous connections per IP that have not completed `X2EnterWorld`; further sockets are dropped at accept |
+| `MaxFramesPerSecond` | 500 | Sustained inbound frames per second of one connection; exceeding it closes the connection |
+| `FrameBurstSeconds` | 5 | Seconds of `MaxFramesPerSecond` a connection may burst above the rate |
+| `EnterWorldFailureLimit` | 5 | Failed `X2EnterWorld` attempts (invalid or foreign cookie) from one IP within the window that block the IP |
+| `EnterWorldFailureWindowSeconds` | 60 | The window the failures are counted in |
+| `EnterWorldBlockSeconds` | 300 | How long a blocked IP's `X2EnterWorld` is refused without checking the cookie |
 
 `SecretKey` must match on both servers. For LAN or remote clients, set `GameServers[].Host` to an
 address the client can reach and bind the game and stream listeners to `*` or that address. See

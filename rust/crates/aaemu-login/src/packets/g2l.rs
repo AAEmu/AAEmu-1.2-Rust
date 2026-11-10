@@ -66,8 +66,12 @@ impl OutgoingPacket for GlRegisterGameServer {
 }
 
 /// `GLPlayerEnterPacket`: result of an `LGPlayerEnterPacket`.
-/// Body: `[u32 connectionId][u8 gsId][u8 result][u32 online][u32 occupancySequence]`
+/// Body: `[u32 connectionId][u8 gsId][u8 result][u32 online][u32 occupancySequence][u32 cookie]`
 /// (result 0 = success).
+///
+/// `cookie` is a second Rust-only extension: the random world cookie the game server generated
+/// for this entry, which the login server relays to the client in `ACWorldCookie`. Absent or 0
+/// (an old game server) makes the login server fall back to the connection id.
 ///
 /// The trailing fields are a Rust-only extension: the game server's current slot occupancy
 /// (accounts in the lobby/world plus pending world cookies) right after the request was handled,
@@ -82,6 +86,7 @@ pub struct GlPlayerEnter {
     pub online: u32,
     pub sequence: u32,
     pub has_online: bool,
+    pub cookie: u32,
 }
 
 impl GlPlayerEnter {
@@ -96,6 +101,11 @@ impl GlPlayerEnter {
         } else {
             0
         };
+        let cookie = if has_online && s.unread().len() >= 4 {
+            s.l_u32()
+        } else {
+            0
+        };
         Self {
             connection_id,
             gs_id,
@@ -103,6 +113,7 @@ impl GlPlayerEnter {
             online,
             sequence,
             has_online,
+            cookie,
         }
     }
 }
@@ -114,7 +125,8 @@ impl OutgoingPacket for GlPlayerEnter {
             .write_u8(self.gs_id.0)
             .write_u8(self.result)
             .write_u32(self.online)
-            .write_u32(self.sequence);
+            .write_u32(self.sequence)
+            .write_u32(self.cookie);
         Ok(())
     }
 }
@@ -478,7 +490,8 @@ mod tests {
                 result: 2,
                 online: 0,
                 sequence: 0,
-                has_online: false
+                has_online: false,
+                cookie: 0
             })
         );
         assert_eq!(
@@ -513,8 +526,29 @@ mod tests {
                 result: 0,
                 online: 10,
                 sequence: 5,
-                has_online: true
+                has_online: true,
+                cookie: 0
             })
+        );
+        // The world cookie extension follows the occupancy fields (and is byte-exact on write).
+        let with_cookie = GlPlayerEnter {
+            connection_id: ConnectionId(9),
+            gs_id: GameServerId(1),
+            result: 0,
+            online: 10,
+            sequence: 5,
+            has_online: true,
+            cookie: 0xDEAD_BEEF,
+        };
+        assert_eq!(
+            decode(hex_bytes("01000900000001000a00000005000000efbeadde")),
+            G2lPacket::PlayerEnter(with_cookie)
+        );
+        let mut body = PacketStream::new();
+        with_cookie.write_body(&mut body).unwrap();
+        assert_eq!(
+            body.into_bytes(),
+            hex_bytes("0900000001000a00000005000000efbeadde")
         );
         assert_eq!(
             decode(hex_bytes("0400020700000006000000")),

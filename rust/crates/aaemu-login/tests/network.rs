@@ -123,7 +123,14 @@ async fn send_raw(c: &mut Conn, opcode: u16, body: impl FnOnce(&mut PacketStream
 }
 
 async fn start_server() -> (Arc<LoginServer>, SocketAddr, SocketAddr, CancellationToken) {
+    start_server_with(serde_json::json!({})).await
+}
+
+async fn start_server_with(
+    security: serde_json::Value,
+) -> (Arc<LoginServer>, SocketAddr, SocketAddr, CancellationToken) {
     let config = AppConfig::from_value(lowercase_keys(serde_json::json!({
+        "Security": security,
         "SecretKey": "test",
         "SkipHostResolve": true,
         "InternalNetwork": { "Host": "127.0.0.1", "Port": 0 },
@@ -295,8 +302,11 @@ async fn reconnect_list_world_and_enter_world() {
             connection_id
         }
     );
+    // The game server's random world cookie, not the login connection id.
+    const GAME_COOKIE: u32 = 0x5EED_C0DE;
+    assert_ne!(GAME_COOKIE, connection_id.0);
     let cookie = l2c::AcWorldCookie::new(
-        connection_id.0,
+        GAME_COOKIE,
         "127.0.0.1".parse().unwrap(),
         true,
         "127.0.0.1",
@@ -313,6 +323,7 @@ async fn reconnect_list_world_and_enter_world() {
             online: 0,
             sequence: 0,
             has_online: true,
+            cookie: GAME_COOKIE,
         },
     )
     .await;
@@ -338,6 +349,7 @@ async fn reconnect_list_world_and_enter_world() {
             online: 0,
             sequence: 0,
             has_online: true,
+            cookie: 0,
         },
     )
     .await;
@@ -646,5 +658,84 @@ async fn wrong_secret_poisons_the_connection_before_a_correct_registration() {
         }
     }
     assert_eq!(errors, 1, "expected exactly one registration error reply");
+    shutdown.cancel();
+}
+
+/// Reads until the server closes the socket (`true`) or `wait` passes (`false`).
+async fn closed_within(c: &mut Conn, wait: Duration) -> bool {
+    match tokio::time::timeout(wait, c.next()).await {
+        Ok(None) | Ok(Some(Err(_))) => true,
+        Ok(Some(Ok(_))) => false,
+        Err(_) => false,
+    }
+}
+
+#[tokio::test]
+async fn an_unauthenticated_connection_is_closed_by_the_pre_auth_timeout() {
+    let (_server, _internal, login_addr, shutdown) =
+        start_server_with(serde_json::json!({ "PreAuthTimeoutSeconds": 1 })).await;
+    let mut idle = Framed::new(TcpStream::connect(login_addr).await.unwrap(), FrameCodec);
+    assert!(!closed_within(&mut idle, Duration::from_millis(300)).await);
+    assert!(closed_within(&mut idle, Duration::from_secs(5)).await);
+
+    // 0 switches the timeout off.
+    shutdown.cancel();
+    let (_server, _internal, login_addr, shutdown) =
+        start_server_with(serde_json::json!({ "PreAuthTimeoutSeconds": 0 })).await;
+    let mut idle = Framed::new(TcpStream::connect(login_addr).await.unwrap(), FrameCodec);
+    assert!(!closed_within(&mut idle, Duration::from_millis(1500)).await);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_authenticated_connection_is_not_closed_by_the_pre_auth_timeout() {
+    let (_server, internal_addr, login_addr, shutdown) =
+        start_server_with(serde_json::json!({ "PreAuthTimeoutSeconds": 1 })).await;
+    let mut gs = Framed::new(TcpStream::connect(internal_addr).await.unwrap(), FrameCodec);
+    send(
+        &mut gs,
+        &GlRegisterGameServer {
+            secret_key: "test".into(),
+            gs_id: GameServerId(1),
+            mirrors: vec![],
+        },
+    )
+    .await;
+    let (op, _) = recv(&mut gs).await;
+    assert_eq!(op, l2g::opcodes::LG_REGISTER_GAME_SERVER);
+    send(
+        &mut gs,
+        &GlPlayerReconnect {
+            gs_id: GameServerId(1),
+            account_id: AccountId(42),
+            token: 778,
+        },
+    )
+    .await;
+    let (op, _) = recv(&mut gs).await;
+    assert_eq!(op, l2g::opcodes::LG_PLAYER_RECONNECT);
+
+    let mut client = Framed::new(TcpStream::connect(login_addr).await.unwrap(), FrameCodec);
+    send_raw(&mut client, 0x00e, |s| {
+        s.write_u32(0)
+            .write_u32(0)
+            .write_u32(42)
+            .write_u8(1)
+            .write_u32(778)
+            .write_u16(0);
+    })
+    .await;
+    let (op, _) = recv(&mut client).await;
+    assert_eq!(op, l2c::opcodes::AC_JOIN_RESPONSE);
+    let (op, _) = recv(&mut client).await;
+    assert_eq!(op, l2c::opcodes::AC_AUTH_RESPONSE);
+    // Well past the 1 s deadline the authenticated connection is still served.
+    assert!(!closed_within(&mut client, Duration::from_millis(2500)).await);
+    send_raw(&mut client, 0x00b, |s| {
+        s.write_u64(0);
+    })
+    .await;
+    let (op, _) = recv(&mut gs).await;
+    assert_eq!(op, l2g::opcodes::LG_REQUEST_INFO);
     shutdown.cancel();
 }

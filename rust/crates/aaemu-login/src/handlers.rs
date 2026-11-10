@@ -141,9 +141,12 @@ pub async fn handle_g2l(
             server
                 .games
                 .note_enter_world_result(p.gs_id, p.connection_id, p.online, p.sequence);
+            if p.result == 0 && p.cookie == 0 {
+                server.games.warn_legacy_cookie(p.gs_id);
+            }
             server
                 .games
-                .route_enter_world_response(p.connection_id, p.gs_id, p.result);
+                .route_enter_world_response(p.connection_id, p.gs_id, p.result, p.cookie);
             server.games.drain_queues(server).await;
             Ok(())
         }

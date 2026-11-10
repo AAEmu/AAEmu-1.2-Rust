@@ -78,6 +78,11 @@ impl ShipyardManager {
     }
 }
 
+/// How far from the builder a shipyard can be placed: the housing builder's reach
+/// (`caster_in_range`: this radius + 30 m), the same rule as every other client-chosen
+/// placement. The client previews the shipyard at the player's feet.
+const SHIPYARD_PLACE_RADIUS: f32 = 20.0;
+
 /// `ShipyardManager.Create(owner, shipyardData)` (`CSCreateShipyardPacket`).
 #[allow(clippy::too_many_arguments)]
 pub fn create(
@@ -98,6 +103,25 @@ pub fn create(
         .shipyard_templates
         .get(&template_id)?
         .clone();
+    // The client-chosen position must be finite and near the builder; refused before the design
+    // item is looked at, so nothing is consumed.
+    if ![x, y, z, z_rot].iter().all(|v| v.is_finite())
+        || !crate::systems::housing::placement::caster_in_range(
+            server,
+            owner,
+            x,
+            y,
+            z,
+            SHIPYARD_PLACE_RADIUS,
+        )
+    {
+        tracing::warn!(
+            "Shipyard {template_id}: placement ({x}, {y}, {z}) refused for character {}              (not finite or too far)",
+            owner.character_id
+        );
+        error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+        return None;
+    }
     // The client names the design item it placed (`designItem`, a bag item object id). The
     // shipyard is built only from that item, and only when it maps to this shipyard; a refused
     // create leaves the item in the bag.

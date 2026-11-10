@@ -499,6 +499,11 @@ pub fn unhang(server: &GameServer, character: &PlayerRef, unit_obj_id: u32, reas
     }
 }
 
+/// How far from the character a `CSHang` target can be (the 5 m doodad interaction distance plus
+/// the 15 m allowance the cast target check adds, and the radius of a large target subtracted by
+/// `distance_to`, rounded up).
+const HANG_REACH: f32 = 30.0;
+
 /// `CSHangPacket.Read`: the unit's sticky parent becomes the target, `SCHungPacket` goes to
 /// the others around the active character and a doodad target is used by the unit.
 pub fn hang(server: &GameServer, character: &PlayerRef, unit_obj_id: u32, target_obj_id: u32) {
@@ -514,6 +519,26 @@ pub fn hang(server: &GameServer, character: &PlayerRef, unit_obj_id: u32, target
         .object(unit_obj_id)
         .filter(|o| !matches!(o, WorldObject::Gimmick(_)));
     let target = world.object(target_obj_id);
+    // The target is client-chosen: it must be within reach of the character, or the hang would
+    // attach the character to (and use) any object of the world from anywhere.
+    if let Some(target) = &target {
+        use crate::systems::skills::geometry::{distance_to, Target};
+        let reach = distance_to(
+            server,
+            &Target::Obj(me.clone()),
+            &Target::Obj(target.clone()),
+            true,
+        );
+        if !reach.is_finite() || reach > HANG_REACH {
+            tracing::warn!(
+                character = %character.data().unit.name,
+                target_obj_id,
+                reach,
+                "Hang target out of reach ignored"
+            );
+            return;
+        }
+    }
     if let (Some(unit), Some(target)) = (&unit, &target) {
         world.set_sticky_parent(unit, Some(target));
     }

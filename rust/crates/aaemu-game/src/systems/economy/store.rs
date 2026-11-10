@@ -785,6 +785,9 @@ impl CSSellItemsPacket {
             return;
         }
         let inv = Inv::of(&p);
+        // The economy operation lock is taken before the stacks are read: a trade finish or
+        // another move cannot shrink one between the snapshot and the payout.
+        let mut txn = ItemTxn::begin(server);
         let mut items: Vec<Item> = Vec::new();
         for e in &self.items {
             let item = match e.slot_type {
@@ -814,7 +817,6 @@ impl CSSellItemsPacket {
 
         let buyback = server.systems.economy.store.buyback(p.character_id);
         let containers = [inv.equipment(), inv.bag()];
-        let mut txn = ItemTxn::begin(server);
         let data = txn.data();
         // Refunds before anything moves: an item with no valid refund is skipped (the C# paid
         // `wrapping` math on missing data), and a payout overflow refuses the whole sale
@@ -1119,9 +1121,30 @@ pub fn expand_expert(server: &GameServer, p: &PlayerRef) {
     }
     let mut txn = ItemTxn::begin(server);
     if expand.life_point > 0 {
-        // C# bug mirrored: the cost is *added* (`ChangeGamePoints(Vocation, LifePoint)`).
-        let mut out = txn.out();
-        inventory::change_game_points(&mut out, p, game_point_kind::VOCATION, expand.life_point);
+        // The C# `ChangeGamePoints(Vocation, LifePoint)` *added* the cost; it is charged here
+        // (the "has enough" check above runs first). The gain bonuses of `ChangeGamePoints`
+        // must not scale a cost, so the points are deducted directly.
+        {
+            let mut c = p.data();
+            if c.vocation_point < expand.life_point {
+                drop(c);
+                inventory::send_error_message(
+                    p,
+                    error_message::NOT_ENOUGH_EXPAND_ITEM_AND_MONEY,
+                    0,
+                    true,
+                );
+                return;
+            }
+            c.vocation_point -= expand.life_point;
+        }
+        txn.out().send(
+            p,
+            SCGamePointChangedPacket {
+                kind: game_point_kind::VOCATION,
+                amount: -expand.life_point,
+            },
+        );
     }
     if expand.item_id != 0 && expand.item_count != 0 {
         inv.bag().lock().expect("container poisoned").consume_item(
@@ -1272,15 +1295,26 @@ pub fn convert_item_look(server: &GameServer, p: &PlayerRef, base_id: u64, look_
     };
 
     let mut txn = ItemTxn::begin(server);
-    // Use powder
-    let used = inv.bag().lock().expect("container poisoned").consume_item(
-        task_type::SKILL_REAGENTS,
-        convert.required_item_id,
-        convert.required_item_count,
-        None,
-        &mut txn.env,
-    );
-    if used <= 0 {
+    // Use powder: the full count must be there before anything is consumed (`consume_item`
+    // takes what is available and returns that total).
+    let enough = convert.required_item_count > 0
+        && inv.check_items(
+            slot_type::INVENTORY,
+            convert.required_item_id,
+            convert.required_item_count,
+        );
+    let used = if enough {
+        inv.bag().lock().expect("container poisoned").consume_item(
+            task_type::SKILL_REAGENTS,
+            convert.required_item_id,
+            convert.required_item_count,
+            None,
+            &mut txn.env,
+        )
+    } else {
+        0
+    };
+    if used < convert.required_item_count || used <= 0 {
         // Not enough powder
         // Probably not the correct error, but the client should have already caught this
         txn.env.fx.send(

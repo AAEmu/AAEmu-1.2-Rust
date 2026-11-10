@@ -31,6 +31,7 @@ use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
 use crate::server::GameServer;
 use crate::systems::skills::packets::SCCooldownsPacket;
+use crate::systems::skills::packets_special::SCTeleportUnitPacket;
 use crate::systems::social::util::{send_chat_failure, ChatFailure};
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
@@ -323,14 +324,50 @@ pub fn resurrect_at(server: &GameServer, p: &PlayerRef, destination: Transform) 
     file_teleport_arrival(server, p);
 }
 
-/// `CSTeleportEndedPacket`: the client reports its landing position after an `SCTeleportUnit`.
-/// The server copy follows it and the region membership is re-evaluated, so a teleport out of a
-/// zone group (open sea) removes that group's buffs even when no movement packet follows.
+/// Horizontal / vertical distance a `CSTeleportEnded` position may differ from the destination
+/// the server sent: the client resolves the ground height itself, so it may land a little off.
+pub const TELEPORT_ACK_HORIZONTAL_TOLERANCE: f32 = 10.0;
+pub const TELEPORT_ACK_VERTICAL_TOLERANCE: f32 = 30.0;
+
+/// Locks the character's position (`DisabledSetPosition`), records the destination and sends the
+/// `SCTeleportUnit`. Every server-forced teleport of a player goes through here, so
+/// [`teleport_ended`] can check the client's acknowledgement against what the server asked for.
+pub fn send_teleport_unit(p: &PlayerRef, packet: SCTeleportUnitPacket) {
+    begin_teleport(p, packet.x, packet.y, packet.z);
+    p.send(packet);
+}
+
+/// The lock + destination half of [`send_teleport_unit`], for teleports the client is told about
+/// by another packet (`SCNaviTeleport`).
+pub fn begin_teleport(p: &PlayerRef, x: f32, y: f32, z: f32) {
+    let mut c = p.data();
+    c.set_disabled_set_position(true);
+    c.pending_teleport = Some((x, y, z));
+}
+
+/// `CSTeleportEndedPacket`: the client acknowledges an `SCTeleportUnit`. The server copy follows
+/// the destination it recorded when it sent the teleport (the client's own coordinates are only
+/// used when they are within tolerance of it, because the client knows the ground height), and
+/// the region membership is re-evaluated, so a teleport out of a zone group (open sea) removes
+/// that group's buffs even when no movement packet follows.
 ///
-/// The reported position is in world coordinates, so a character that stood on another object
-/// (a ship deck, a moving gimmick) is detached first; otherwise the new world position would be
-/// composed with the old parent and land in the parent's region / zone.
-pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
+/// Nothing is applied when no teleport is pending, and the client's coordinates are never taken
+/// when the server recorded no destination. The reported position is in world coordinates, so a
+/// character that stood on another object (a ship deck, a moving gimmick) is detached first;
+/// otherwise the new world position would be composed with the old parent and land in the
+/// parent's region / zone. Returns whether the acknowledgement was accepted.
+pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) -> bool {
+    let (locked, pending) = {
+        let c = p.data();
+        (c.disabled_set_position, c.pending_teleport)
+    };
+    if !locked {
+        tracing::debug!(
+            "Ignoring CSTeleportEnded of '{}': no teleport pending",
+            p.data().unit.name
+        );
+        return false;
+    }
     // Every `SCTeleportUnit` path ends here. Some same-world senders (the same-instance portal
     // branch, the NPC teleporter, dominion headquarters, instant games, GM `/move all` / nudge /
     // test height / spheres) do not call `force_dismount`, so release a transfer seat here too.
@@ -340,12 +377,38 @@ pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32
         crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
     );
     let Some((filed_instance, _, _)) = p.region() else {
-        // An instance load is pending: `instance_loaded` files the arrival.
-        return;
+        // An instance load is pending: `instance_loaded` files the arrival and lifts the lock.
+        return true;
     };
     if filed_instance != p.data().unit.transform.instance_id {
-        return;
+        return true;
     }
+    let (nx, ny, nz) = match pending {
+        Some((dx, dy, dz)) => {
+            let near = x.is_finite()
+                && y.is_finite()
+                && z.is_finite()
+                && (x - dx).hypot(y - dy) <= TELEPORT_ACK_HORIZONTAL_TOLERANCE
+                && (z - dz).abs() <= TELEPORT_ACK_VERTICAL_TOLERANCE;
+            if near {
+                (x, y, z)
+            } else {
+                tracing::debug!(
+                    "CSTeleportEnded of '{}' reports ({x}, {y}, {z}) far from the destination ({dx}, {dy}, {dz}); using the destination",
+                    p.data().unit.name
+                );
+                (dx, dy, dz)
+            }
+        }
+        None => {
+            tracing::warn!(
+                "'{}' acknowledged a teleport without a recorded destination; keeping the server position",
+                p.data().unit.name
+            );
+            let t = p.data().unit.transform;
+            (t.x, t.y, t.z)
+        }
+    };
     let obj = WorldObject::from(p);
     if obj.transform().parent_obj_id != 0 {
         match server.world.world_of(&obj) {
@@ -353,8 +416,15 @@ pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32
             None => p.data().unit.transform.parent_obj_id = 0,
         }
     }
-    p.data().unit.transform.set_xyz(x, y, z);
+    {
+        let mut c = p.data();
+        if pending.is_some() {
+            c.unit.transform.set_xyz(nx, ny, nz);
+        }
+        c.set_disabled_set_position(false);
+    }
     file_teleport_arrival(server, p);
+    true
 }
 
 /// `ChatManager.GetZoneChat(zoneKey)`.
@@ -636,6 +706,8 @@ pub fn select_loaded(
     // character whose wallet still equals it).
     server.save.seed_committed_money(&player);
     conn.active_char = Some(player.clone());
+    conn.spawn_handled = false;
+    conn.in_game_notified = false;
     crate::systems::quests::on_character_selected(server, &player);
     // Mates of every instance despawned, pending vehicle despawn task aborted.
     crate::systems::vehicles::on_character_selected(server, &player);
@@ -902,6 +974,12 @@ pub fn spawn_character(server: &GameServer, conn: &mut GameConnection, visual: V
         conn.shutdown();
         return;
     };
+    // Deviation from the C#: a replayed CSSpawnCharacter would subscribe to the time manager
+    // again; it is ignored until the next character select.
+    if std::mem::replace(&mut conn.spawn_handled, true) {
+        tracing::debug!("session {}: CSSpawnCharacter replay ignored", conn.id);
+        return;
+    }
     conn.state = GameState::World;
     let state = {
         let mut c = player.data();
@@ -963,6 +1041,11 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
         tracing::error!("CSNotifyInGamePacket without an active character");
         return;
     };
+    // Deviation from the C#: a replayed CSNotifyInGame would re-run the join hooks.
+    if std::mem::replace(&mut conn.in_game_notified, true) {
+        tracing::debug!("session {}: CSNotifyInGame replay ignored", conn.id);
+        return;
+    }
     set_online(server, &p, true);
     spawn(server, &p);
     let (zone, race, faction, expedition, name, id) = {
@@ -1083,6 +1166,18 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                 _ => false,
             };
             if !controlled {
+                return;
+            }
+            // The server position is the baseline: a move beyond the unit's speed budget is
+            // refused before it has any side effect. A riding / seat-bound player's own moves
+            // are ignored below, so they are not judged.
+            let ignored = target.as_player().is_some_and(|p| {
+                p.data().is_riding
+                    || crate::systems::vehicles::movement::player_bound_to_slave(&world, p)
+            });
+            if !ignored
+                && !crate::world::move_guard::guard_unit_move(server, &world, &me, &target, &mt, u)
+            {
                 return;
             }
             // Its moving Pets, handle Pet XP for moving

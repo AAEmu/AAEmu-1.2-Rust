@@ -6624,3 +6624,89 @@ async fn supply_jury_point_sends_the_changed_packet() {
         "jury point change packet: {frames:x?}"
     );
 }
+
+#[tokio::test]
+async fn client_quest_requests_name_an_npc_within_reach() {
+    let (server, _) = server_with(|d| {
+        d.add_template(quest(60));
+        d.add_component(component(601, 60, kind::START));
+        d.add_act(601, 601, 601, 0, ActKind::ConAcceptNpc { npc_id: 500 });
+        d.add_component(component(602, 60, kind::READY));
+        d.add_act(
+            602,
+            602,
+            602,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        // Quest 61: auto-started, turned in at NPC 501.
+        d.add_template(quest(61));
+        d.add_component(component(611, 61, kind::START));
+        d.add_act(611, 611, 611, 0, ActKind::ConAutoComplete);
+        d.add_component(component(612, 61, kind::READY));
+        d.add_act(
+            612,
+            612,
+            612,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 501,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    let world = server.world.world(0).unwrap();
+    // The player stands at (100, 100): obj 0x210 is 150 m away, 0x211 about 7 m.
+    for (obj, template, x) in [
+        (0x210u32, 500u32, 250.0f32),
+        (0x211, 500, 105.0),
+        (0x212, 501, 250.0),
+        (0x213, 501, 105.0),
+    ] {
+        let mut n = crate::models::npc::Npc::new(template);
+        n.unit.transform.set_xyz(x, 105.0, 100.0);
+        world.spawn(Entity::new(obj, n), &server.view_ctx());
+    }
+    events::add_quest(&server, &player, 61, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+
+    // Start: the far NPC is refused, the near one (within reach + dialog slack) accepted.
+    events::start_quest_context(&server, &player, 60, 0x210, 0, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(!events::has_quest(&player, 60));
+    events::start_quest_context(&server, &player, 60, 0x211, 0, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(events::has_quest(&player, 60));
+
+    // Report: the far NPC answers INVALID_NPC_OR_QUEST without reaching the quest.
+    client.drain();
+    events::on_report(&server, &player, 61, 0x212, 0, 0);
+    assert_one_failed(
+        &mut client,
+        61,
+        super::packets::quest_error::INVALID_NPC_OR_QUEST,
+    );
+    assert!(events::has_quest(&player, 61));
+    events::on_report(&server, &player, 61, 0x213, 0, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(
+        !events::has_quest(&player, 61),
+        "the near NPC completes the report"
+    );
+
+    // The config switch turns the check off.
+    server
+        .config
+        .update(|c| c.interaction.npc_reach_check = false);
+    events::start_quest_context(&server, &player, 60, 0x210, 0, 0);
+    // (already active: nothing to assert beyond no panic)
+}

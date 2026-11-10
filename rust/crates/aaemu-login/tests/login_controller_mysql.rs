@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use aaemu_login::config::{KoreaAuthOptions, ReconnectOptions, TwoFactorOptions};
+use aaemu_login::config::{KoreaAuthOptions, ReconnectOptions, SecurityOptions, TwoFactorOptions};
 use aaemu_login::controllers::login::LoginController;
 use aaemu_login::models::{AccountId, LoginDeniedReason};
 use aaemu_login::services::password::{Password, PasswordService};
@@ -91,6 +91,7 @@ fn create_controller(pool: &MySqlPool, auto_account: bool) -> LoginController {
         KoreaAuthOptions::default(),
         two_factor,
         ReconnectOptions::default(),
+        &SecurityOptions::default(),
     )
 }
 

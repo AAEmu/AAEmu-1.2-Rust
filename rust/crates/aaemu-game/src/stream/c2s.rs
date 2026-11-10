@@ -11,7 +11,7 @@ use crate::managers::stream::JoinResult;
 use crate::server::GameServer;
 use crate::stream::cells;
 use crate::stream::connection::StreamConnection;
-use crate::stream::models::{Ucc, UccPart, UccType};
+use crate::stream::models::{Ucc, UccPart, UccType, MAX_UCC_UPLOAD_BYTES};
 use crate::stream::opcodes::ct;
 use crate::stream::s2c::{
     TCCharNameQueriedPacket, TCItemUccDataPacket, TCJoinResponsePacket, TCUccCharNamePacket,
@@ -362,10 +362,11 @@ impl CTStartUploadEmblemStreamPacket {
             self.data_size
         );
         let player = active_player(server, conn)?;
-        if self.data_size < 0 {
+        if self.data_size < 0 || self.data_size > MAX_UCC_UPLOAD_BYTES {
             tracing::warn!(
-                "CTStartUploadEmblemStream refused: negative data size {} (stream connection {})",
+                "CTStartUploadEmblemStream refused: data size {} is outside 0..={} (stream connection {})",
                 self.data_size,
+                MAX_UCC_UPLOAD_BYTES,
                 conn.id
             );
             return Ok(());

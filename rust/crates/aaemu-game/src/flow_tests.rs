@@ -126,6 +126,12 @@ fn enter_world_body(account_id: u32, cookie: u32) -> Vec<u8> {
     })
 }
 
+/// The world cookie of a `GLPlayerEnterPacket` the game sent to the login server (header 2 bytes,
+/// then connection id, gs id, result, online, sequence, cookie).
+fn enter_reply_cookie(reply: &[u8]) -> u32 {
+    u32::from_le_bytes(reply[16..20].try_into().unwrap())
+}
+
 /// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, no end date;
 /// owner decision 2026-11-03: the configured default premium is permanent).
 fn account_info_frame() -> Vec<u8> {
@@ -165,12 +171,16 @@ async fn initial_config_uses_configured_restrictions_and_idle_kick_time() {
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
     let server = Arc::new(GameServer::new(config, db, GameData::empty()));
 
-    assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
+    let cookie = server
+        .enter_world
+        .add_account(1000, 4242, false)
+        .cookie()
+        .unwrap();
     let mut c = client(&server, 77);
     server
         .handle_frame(
             &mut c.conn,
-            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 4242)),
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, cookie)),
         )
         .await
         .unwrap();
@@ -202,60 +212,86 @@ async fn lobby_flow_end_to_end() {
     server.login.set(Some(login_tx));
 
     // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0,
-    // online 1: the pending cookie occupies one slot; the two trailing u32 are the Rust queue
-    // occupancy and report sequence).
+    // online 1: the pending cookie occupies one slot; the two following u32 are the Rust queue
+    // occupancy and report sequence, the last one the random world cookie).
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
+    let reply = login_rx.try_recv().unwrap();
     assert_eq!(
-        login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00  01 00 00 00  01 00 00 00")
+        reply[..16],
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  01 00 00 00")[..]
+    );
+    let first_cookie = enter_reply_cookie(&reply);
+    assert_ne!(first_cookie, 0);
+    assert_ne!(
+        first_cookie, 4242,
+        "the cookie is not the login connection id"
     );
     // A second LGPlayerEnter for the same connection id throws in C# (no reply). Here the stale
     // entry (a cookie that was never used) is replaced and answered.
     assert!(crate::login::handle(&server, &hex("01 00  E9 03 00 00  92 10 00 00")).await);
+    let reply = login_rx.try_recv().unwrap();
     assert_eq!(
-        login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00  01 00 00 00  02 00 00 00")
+        reply[..16],
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  02 00 00 00")[..]
     );
+    let second_cookie = enter_reply_cookie(&reply);
     // ... and back to account 1000 for the rest of the flow.
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
+    let reply = login_rx.try_recv().unwrap();
     assert_eq!(
-        login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00  01 00 00 00  03 00 00 00")
+        reply[..16],
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  03 00 00 00")[..]
     );
+    let cookie = enter_reply_cookie(&reply);
     assert!(login_rx.try_recv().is_err());
+    // The replaced entries' cookies no longer work; the connection id never did.
+    for dead in [first_cookie, second_cookie, 4242] {
+        let mut stale = client(&server, 76);
+        server
+            .handle_frame(
+                &mut stale.conn,
+                &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, dead)),
+            )
+            .await
+            .unwrap();
+        assert!(stale.conn.is_closing());
+        assert!(stale.drain().is_empty());
+    }
 
     // ---- X2EnterWorld with the cookie -> X2EnterWorldResponse + ChangeState(0)
     let mut c = client(&server, 77);
     server
         .handle_frame(
             &mut c.conn,
-            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 4242)),
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, cookie)),
         )
         .await
         .unwrap();
     let frames = c.drain();
     assert_eq!(frames.len(), 2);
     let resp = &frames[0];
-    // [dd 01 00 00][00 00] reason=0 gm=0 token=77 port=1250 wf=<now> pubKeySize=0 pubKey=""
+    // [dd 01 00 00][00 00] reason=0 gm=0 token=<stream ticket> port=1250 wf=<now> pubKeySize=0 pubKey=""
     assert_eq!(resp.len(), 6 + 2 + 1 + 4 + 2 + 8 + 2 + 2);
-    assert_eq!(
-        resp[..15],
-        hex("DD 01 00 00  00 00  00 00  00  4D 00 00 00  E2 04")[..]
-    );
+    assert_eq!(resp[..9], hex("DD 01 00 00  00 00  00 00  00")[..]);
+    assert_eq!(resp[13..15], hex("E2 04")[..]);
+    // The token is a random nonzero ticket, not the connection id.
+    let ticket = u32::from_le_bytes(resp[9..13].try_into().unwrap());
+    assert_ne!(ticket, 0);
     let wf = i64::from_le_bytes(resp[15..23].try_into().unwrap());
     assert!((wf - chrono::Utc::now().timestamp()).abs() < 30);
     assert_eq!(resp[23..], hex("00 00  00 00")[..]);
     assert_eq!(frames[1], l2(pp::ChangeStatePacket, &[0, 0, 0, 0]));
     assert_eq!(c.conn.account_id(), 1000);
     assert!(server.accounts.contains(1000));
-    assert_eq!(server.streams.account_for(77), Some(1000));
+    assert_eq!(server.streams.account_for(ticket), Some(1000));
+    assert_eq!(server.streams.ticket_for(77), Some(ticket));
 
     // The cookie is consumed: a second connection with it is refused and shut down.
     let mut c2 = client(&server, 78);
     server
         .handle_frame(
             &mut c2.conn,
-            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 4242)),
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, cookie)),
         )
         .await
         .unwrap();
@@ -538,6 +574,8 @@ async fn dispatch_edge_cases() {
     );
 
     let mut c = client(&server, 1);
+    // Past `X2EnterWorld` (before it only that packet is dispatched).
+    c.conn.set_account_id(1000);
     // Ping -> Pong echoes tm/when/local
     let body = bytes(|s| {
         s.write_i64(11).write_i64(22).write_u32(33);
@@ -623,18 +661,22 @@ async fn dispatch_edge_cases() {
     assert!(c.drain().is_empty());
 
     // Token registered for another account -> shutdown, token kept for its owner.
-    server.enter_world.add_account(7, 8, false);
+    let cookie = server
+        .enter_world
+        .add_account(7, 8, false)
+        .cookie()
+        .unwrap();
     let mut c2 = client(&server, 2);
     server
         .handle_frame(
             &mut c2.conn,
-            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(9, 8)),
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(9, cookie)),
         )
         .await
         .unwrap();
     assert!(c2.conn.is_closing());
     assert_eq!(
-        server.enter_world.login(7, 8),
+        server.enter_world.login(7, cookie),
         crate::managers::LoginDecision::Accepted
     );
 }
@@ -645,13 +687,21 @@ async fn a_second_cookie_for_a_connected_account_is_refused() {
     // Two cookies can be granted before either client reaches the game server: the login server
     // only learns the account is connected from `GLPlayerEnter`, answered when the client sends
     // X2EnterWorld. The second `AccountManager.Add` must not be swallowed.
-    server.enter_world.add_account(1000, 11, false);
-    server.enter_world.add_account(1000, 12, false);
+    let cookie_a = server
+        .enter_world
+        .add_account(1000, 11, false)
+        .cookie()
+        .unwrap();
+    let cookie_b = server
+        .enter_world
+        .add_account(1000, 12, false)
+        .cookie()
+        .unwrap();
     let mut a = client(&server, 1);
     server
         .handle_frame(
             &mut a.conn,
-            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 11)),
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, cookie_a)),
         )
         .await
         .unwrap();
@@ -663,7 +713,7 @@ async fn a_second_cookie_for_a_connected_account_is_refused() {
     server
         .handle_frame(
             &mut b.conn,
-            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 12)),
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, cookie_b)),
         )
         .await
         .unwrap();
@@ -675,7 +725,7 @@ async fn a_second_cookie_for_a_connected_account_is_refused() {
         Some(1),
         "the existing session keeps the account"
     );
-    assert_eq!(server.streams.account_for(2), None);
+    assert_eq!(server.streams.ticket_for(2), None);
 }
 
 #[tokio::test]
@@ -718,7 +768,11 @@ async fn tcp_session_roundtrip() {
     use tokio_util::codec::Framed;
 
     let server = Arc::new(test_server());
-    server.enter_world.add_account(5, 9, false);
+    let cookie = server
+        .enter_world
+        .add_account(5, 9, false)
+        .cookie()
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let srv = server.clone();
@@ -732,7 +786,7 @@ async fn tcp_session_roundtrip() {
         FrameCodec,
     );
     client
-        .send(c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, 9)))
+        .send(c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, cookie)))
         .await
         .unwrap();
 
@@ -756,4 +810,270 @@ async fn tcp_session_roundtrip() {
     }
     assert!(server.connections.is_empty());
     assert!(!server.accounts.contains(5));
+}
+
+/// A connection that has not completed `X2EnterWorld` may only send `X2EnterWorld`: anything else
+/// closes it without running a handler (no reply, no database access).
+#[tokio::test]
+async fn a_packet_before_x2_enter_world_closes_the_connection() {
+    let server = test_server();
+    for frame in [
+        c2s_l1(cs::CSListCharacterPacket, &[0, 0, 0, 0, 0, 0]),
+        c2s_l1(cs::CSLeaveWorldPacket, &[2]),
+        l2(pp::PingPacket, &[0; 20]),
+        l2(pp::FinishStatePacket, &[0, 0, 0, 0]),
+        // An unregistered opcode is not exempt either.
+        c2s_l1(0x7FF, &[]),
+    ] {
+        let mut c = client(&server, 90);
+        server.handle_frame(&mut c.conn, &frame).await.unwrap();
+        assert!(c.conn.is_closing(), "frame {frame:02x?}");
+        assert!(c.drain().is_empty());
+        assert_eq!(c.conn.account_id(), 0);
+    }
+    // An unknown frame level is still a protocol error.
+    let mut c = client(&server, 91);
+    assert!(server
+        .handle_frame(&mut c.conn, &[0xDD, 0x07, 0, 0])
+        .await
+        .is_err());
+}
+
+/// A second `X2EnterWorld` on a connection that already has an account is refused and leaves the
+/// first account's registration alone.
+#[tokio::test]
+async fn a_second_x2_enter_world_is_refused() {
+    let server = test_server();
+    let cookie5 = server
+        .enter_world
+        .add_account(5, 9, false)
+        .cookie()
+        .unwrap();
+    let cookie6 = server
+        .enter_world
+        .add_account(6, 10, false)
+        .cookie()
+        .unwrap();
+    let mut c = client(&server, 92);
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, cookie5)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(c.conn.account_id(), 5);
+    assert!(!c.conn.is_closing());
+    c.drain();
+
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(6, cookie6)),
+        )
+        .await
+        .unwrap();
+    assert!(c.conn.is_closing());
+    assert_eq!(c.conn.account_id(), 5);
+    assert!(server.accounts.contains(5));
+    assert!(!server.accounts.contains(6));
+    assert!(c.drain().is_empty());
+    // The second cookie was never consumed.
+    assert_eq!(
+        server.enter_world.login(6, cookie6),
+        crate::managers::LoginDecision::Accepted
+    );
+}
+
+/// After `Network.EnterWorldFailureLimit` failed attempts an IP is refused without the cookie
+/// being checked, so a correct cookie cannot be reached by guessing.
+#[tokio::test]
+async fn repeated_bad_cookies_block_the_ip() {
+    let server = test_server();
+    let cookie = server
+        .enter_world
+        .add_account(5, 9, false)
+        .cookie()
+        .unwrap();
+    let limit = server.config.network.enter_world_failure_limit;
+    assert_eq!(limit, 5);
+    for i in 0..limit {
+        let mut c = client(&server, 100 + i);
+        server
+            .handle_frame(
+                &mut c.conn,
+                &c2s_l1(
+                    cs::X2EnterWorldPacket,
+                    &enter_world_body(5, cookie.wrapping_add(1 + i)),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(c.conn.is_closing());
+    }
+    let mut c = client(&server, 200);
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, cookie)),
+        )
+        .await
+        .unwrap();
+    assert!(c.conn.is_closing());
+    assert_eq!(c.conn.account_id(), 0);
+    assert!(!server.accounts.contains(5));
+    // The right cookie was not even looked at.
+    assert_eq!(
+        server.enter_world.login(5, cookie),
+        crate::managers::LoginDecision::Accepted
+    );
+}
+
+type LoopbackClient =
+    tokio_util::codec::Framed<tokio::net::TcpStream, aaemu_commons::net::FrameCodec>;
+
+/// Reads frames until the server closes the socket (`true`) or `wait` passes (`false`).
+async fn closed_within(client: &mut LoopbackClient, wait: Duration) -> bool {
+    use futures::StreamExt;
+    tokio::time::timeout(wait, async {
+        while let Some(frame) = client.next().await {
+            if frame.is_err() {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn limited(timeout_ms: Option<u64>, rate: Option<(f64, f64)>) -> crate::net::listener::NetLimits {
+    crate::net::listener::NetLimits {
+        pre_auth_timeout: timeout_ms.map(Duration::from_millis),
+        frame_rate: rate,
+    }
+}
+
+/// Starts `serve_with` on a loopback socket and returns the framed client side.
+async fn serve_loopback(
+    server: &Arc<GameServer>,
+    limits: crate::net::listener::NetLimits,
+) -> LoopbackClient {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = server.clone();
+    tokio::spawn(async move {
+        let (sock, peer) = listener.accept().await.unwrap();
+        crate::net::listener::serve_with(srv, sock, peer, limits, None).await;
+    });
+    tokio_util::codec::Framed::new(
+        tokio::net::TcpStream::connect(addr).await.unwrap(),
+        aaemu_commons::net::FrameCodec,
+    )
+}
+
+#[tokio::test]
+async fn a_connection_that_never_enters_is_closed_after_the_pre_auth_timeout() {
+    let server = Arc::new(test_server());
+    let mut silent = serve_loopback(&server, limited(Some(200), None)).await;
+    assert!(closed_within(&mut silent, Duration::from_secs(10)).await);
+    for _ in 0..50 {
+        if server.connections.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(server.connections.is_empty());
+}
+
+#[tokio::test]
+async fn an_authenticated_connection_is_not_closed_by_the_pre_auth_timeout() {
+    use futures::SinkExt;
+
+    let server = Arc::new(test_server());
+    let cookie = server
+        .enter_world
+        .add_account(5, 9, false)
+        .cookie()
+        .unwrap();
+    let mut client = serve_loopback(&server, limited(Some(200), None)).await;
+    client
+        .send(c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, cookie)))
+        .await
+        .unwrap();
+    assert!(!closed_within(&mut client, Duration::from_millis(700)).await);
+    assert!(server.accounts.contains(5));
+}
+
+#[tokio::test]
+async fn a_connection_over_the_frame_rate_is_closed() {
+    use futures::SinkExt;
+
+    let server = Arc::new(test_server());
+    let cookie = server
+        .enter_world
+        .add_account(5, 9, false)
+        .cookie()
+        .unwrap();
+    // 1 frame/s with a burst of 5: X2EnterWorld plus a few unknown frames pass, a flood does not.
+    let mut client = serve_loopback(&server, limited(None, Some((1.0, 5.0)))).await;
+    client
+        .send(c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(5, cookie)))
+        .await
+        .unwrap();
+    for _ in 0..30 {
+        if client.send(c2s_l1(0x7FF, &[])).await.is_err() {
+            break;
+        }
+    }
+    assert!(closed_within(&mut client, Duration::from_secs(10)).await);
+}
+
+/// Unknown or unreadable packets are logged at `error` only for the first ten of a 60 s window of
+/// a connection; none of them closes it (the real client sends not-yet-ported opcodes).
+#[tokio::test]
+async fn unknown_packets_are_counted_per_connection_and_do_not_close_it() {
+    let server = test_server();
+    let mut c = client(&server, 93);
+    c.conn.set_account_id(1000);
+    for i in 1..=12 {
+        server
+            .handle_frame(&mut c.conn, &c2s_l1(0x7FF, &[]))
+            .await
+            .unwrap();
+        assert!(!c.conn.is_closing(), "packet {i}");
+    }
+    // The 13th is the first one past the limit of ten.
+    assert!(!c.conn.note_bad_packet());
+    let mut fresh = client(&server, 94);
+    assert!(fresh.conn.note_bad_packet());
+}
+
+/// The `error` budget is per 60 s window, not per connection lifetime: a new unported opcode in a
+/// long session still shows up at `error`.
+#[test]
+fn bad_packet_error_logs_use_a_sliding_window() {
+    use crate::net::connection::{BadPacketLog, BAD_PACKET_ERROR_LOG_LIMIT, BAD_PACKET_LOG_WINDOW};
+    let mut log = BadPacketLog::default();
+    let t0 = std::time::Instant::now();
+    for i in 0..BAD_PACKET_ERROR_LOG_LIMIT {
+        assert!(log.note(t0 + Duration::from_millis(u64::from(i)), 1), "{i}");
+    }
+    // The rest of the window is demoted ...
+    for i in 0..50 {
+        assert!(!log.note(t0 + Duration::from_secs(1 + i / 10), 1));
+    }
+    // ... and the next window starts with a fresh budget.
+    let next = t0 + BAD_PACKET_LOG_WINDOW;
+    for i in 0..BAD_PACKET_ERROR_LOG_LIMIT {
+        assert!(
+            log.note(next + Duration::from_millis(u64::from(i)), 1),
+            "{i}"
+        );
+    }
+    assert!(!log.note(next + Duration::from_secs(1), 1));
+    // A quiet connection never overflows.
+    let mut quiet = BadPacketLog::default();
+    for i in 0..100u64 {
+        assert!(quiet.note(t0 + Duration::from_secs(i * 61), 2));
+    }
 }

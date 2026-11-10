@@ -1,6 +1,8 @@
 //! C->G lobby packets (`AAEmu.Game.Core.Packets.C2G`) and their behaviour
 //! (`EnterWorldManager.Login`, `CSListCharacterPacket`, `CSLeaveWorldPacket`).
 
+use std::time::{Duration, Instant};
+
 use aaemu_commons::helpers::unix_time_now;
 use aaemu_commons::PacketStream;
 use futures::future::BoxFuture;
@@ -58,30 +60,69 @@ pub async fn enter_world_login(
     account_id: u32,
     token: u32,
 ) -> Result<()> {
+    // Deviation from the C#: a connection enters the world once. A second `X2EnterWorld` would
+    // rewrite the account id and leave the first account registered for ever.
+    if conn.account_id() != 0 {
+        tracing::warn!(
+            "session {}: X2EnterWorld on a connection that already entered (account {}), IP: {}",
+            conn.id,
+            conn.account_id(),
+            conn.ip
+        );
+        conn.shutdown();
+        return Ok(());
+    }
     if server.is_shutting_down() {
         crate::world::session::refuse_during_shutdown(conn);
         return Ok(());
     }
-    match server.enter_world.login(account_id, token) {
-        LoginDecision::Accepted => {}
+    // Deviation from the C#: an IP that failed the cookie check too often is refused unchecked
+    // (see `Network.EnterWorldFailureLimit`), so (account id, cookie) pairs cannot be guessed.
+    let net = &server.config.network;
+    let throttle = &server.enter_world_throttle;
+    if throttle.is_blocked(conn.ip.ip(), net.enter_world_failure_limit, Instant::now()) {
+        tracing::debug!(
+            "session {}: X2EnterWorld from blocked IP {}, closing",
+            conn.id,
+            conn.ip
+        );
+        conn.shutdown();
+        return Ok(());
+    }
+    let refused = match server.enter_world.login(account_id, token) {
+        LoginDecision::Accepted => None,
         LoginDecision::AccountMismatch { expected } => {
             // TODO (C#): Token did not match the expected account (phishing attempt?)
-            tracing::warn!(
+            Some(format!(
                 "Token does not match expected account, Token: {token}, AccountId: {account_id}, Expected AccountId: {expected}, IP: {}",
                 conn.ip
-            );
-            conn.shutdown();
-            return Ok(());
+            ))
         }
         LoginDecision::InvalidToken => {
             // TODO (C#): Invalid token (hacking attempt?)
-            tracing::warn!(
+            Some(format!(
                 "Invalid token during login attempt, Token: {token}, AccountId: {account_id}, IP: {}",
                 conn.ip
-            );
-            conn.shutdown();
-            return Ok(());
+            ))
         }
+    };
+    if let Some(message) = refused {
+        tracing::warn!("{message}");
+        if throttle.record_failure(
+            conn.ip.ip(),
+            net.enter_world_failure_limit,
+            Duration::from_secs(net.enter_world_failure_window_seconds.into()),
+            Duration::from_secs(net.enter_world_block_seconds.into()),
+            Instant::now(),
+        ) {
+            tracing::warn!(
+                "Too many failed X2EnterWorld attempts from {}, blocked for {} s",
+                conn.ip.ip(),
+                net.enter_world_block_seconds
+            );
+        }
+        conn.shutdown();
+        return Ok(());
     }
 
     conn.set_account_id(account_id);
@@ -105,19 +146,20 @@ pub async fn enter_world_login(
         conn.shutdown();
         return Ok(());
     }
-    if !server.streams.add_token(account_id, conn.id) {
+    // The stream join ticket is random, not the connection id (see `StreamManager`).
+    let Some(stream_ticket) = server.streams.add_token(account_id, conn.id) else {
         // StreamManager.AddToken: Dictionary.Add throws for a connection that already entered.
         return Err(GameError::Protocol(format!(
             "stream token for connection {} already registered",
             conn.id
         )));
-    }
+    };
 
     let gm = false; // connection.GetAttribute("gmFlag") != null — never set in 1.2
     conn.send(&X2EnterWorldResponsePacket {
         reason: 0,
         gm,
-        token: conn.id,
+        token: stream_ticket,
         port: server.config.stream_network.port,
         world_time: unix_time_now(),
     });

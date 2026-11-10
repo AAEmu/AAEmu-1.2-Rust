@@ -46,10 +46,11 @@ impl Marshal for GLRegisterGameServerPacket {
     }
 }
 
-/// `GLPlayerEnterPacket` (0x001). The trailing `online`/`sequence` are a Rust-only extension (the
-/// C# packet ends after `result`): the world's slot occupancy after this request and its
-/// monotonic report order, used by the login server's world queue to release the matching slot
-/// reservation and to discard a stale concurrent report.
+/// `GLPlayerEnterPacket` (0x001). The trailing `online`/`sequence`/`cookie` are a Rust-only
+/// extension (the C# packet ends after `result`): the world's slot occupancy after this request
+/// and its monotonic report order, used by the login server's world queue to release the matching
+/// slot reservation and to discard a stale concurrent report, and the random world cookie the
+/// login server relays to the client in `ACWorldCookie` (0 when the request was refused).
 #[derive(Debug, Clone)]
 pub struct GLPlayerEnterPacket {
     pub connection_id: u32,
@@ -57,6 +58,7 @@ pub struct GLPlayerEnterPacket {
     pub result: u8,
     pub online: u32,
     pub sequence: u32,
+    pub cookie: u32,
 }
 
 impl LoginOutPacket for GLPlayerEnterPacket {
@@ -70,7 +72,8 @@ impl Marshal for GLPlayerEnterPacket {
             .write_u8(self.gs_id)
             .write_u8(self.result)
             .write_u32(self.online)
-            .write_u32(self.sequence);
+            .write_u32(self.sequence)
+            .write_u32(self.cookie);
     }
 }
 
@@ -244,9 +247,12 @@ mod tests {
                 gs_id: 1,
                 result: 0,
                 online: 0x0A0B0C0D,
-                sequence: 0x01020304
+                sequence: 0x01020304,
+                cookie: 0xDEAD_BEEF
             }),
-            vec![1, 0, 4, 3, 2, 1, 1, 0, 0x0D, 0x0C, 0x0B, 0x0A, 4, 3, 2, 1]
+            vec![
+                1, 0, 4, 3, 2, 1, 1, 0, 0x0D, 0x0C, 0x0B, 0x0A, 4, 3, 2, 1, 0xEF, 0xBE, 0xAD, 0xDE
+            ]
         );
         assert_eq!(
             encode(&GLPlayerReconnectPacket {

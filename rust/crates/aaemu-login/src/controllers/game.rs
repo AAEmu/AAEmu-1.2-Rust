@@ -90,6 +90,9 @@ pub struct GameController {
     pre_select_character_period: std::sync::atomic::AtomicBool,
     /// One login queue per configured world (`GameServers[].MaxConcurrent`/`QueueLimit`).
     queues: Mutex<HashMap<GameServerId, WorldQueue>>,
+    /// Worlds whose game server answered without a world cookie (an old binary) and were already
+    /// warned about; cleared when the world registers or unregisters.
+    legacy_cookie_warned: Mutex<std::collections::HashSet<GameServerId>>,
 }
 
 /// The recipient of an LGRequestInfo round-trip. The response has no world id on the wire.
@@ -128,6 +131,7 @@ impl GameController {
             character_requests: DashMap::new(),
             pre_select_character_period: std::sync::atomic::AtomicBool::new(false),
             queues: Mutex::new(HashMap::new()),
+            legacy_cookie_warned: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -232,6 +236,7 @@ impl GameController {
                 return;
             };
             gs.connection = Some(connection.clone());
+            self.legacy_cookie_warned.lock().unwrap().remove(&gs_id);
             gs.mirrors.extend(mirrors.iter().copied());
             connection.set_game_server(gs_id);
             gs.send_packet(&LgRegisterGameServer {
@@ -303,6 +308,7 @@ impl GameController {
             gs.connection = None;
             std::mem::take(&mut gs.mirrors)
         };
+        self.legacy_cookie_warned.lock().unwrap().remove(&gs_id);
         let mut cleared_ids = vec![gs_id];
         for mirror_id in mirrors {
             if let Some(mut server) = self.game_servers.get_mut(&mirror_id) {
@@ -639,12 +645,26 @@ impl GameController {
         });
     }
 
-    /// Routes a `GLPlayerEnterPacket` result to the client connection's session.
+    /// Warns once per game server registration that a successful `GLPlayerEnterPacket` carried
+    /// no world cookie (an old game server): the cookie falls back to the connection id, which
+    /// anyone can guess. Login and game servers must be upgraded together.
+    pub fn warn_legacy_cookie(&self, gs_id: GameServerId) {
+        if self.legacy_cookie_warned.lock().unwrap().insert(gs_id) {
+            tracing::warn!(
+                "Game Server {} sent no world cookie (old game server?): falling back to the guessable connection id; upgrade the login and game servers together",
+                gs_id
+            );
+        }
+    }
+
+    /// Routes a `GLPlayerEnterPacket` result to the client connection's session. `cookie` is the
+    /// game server's world cookie (0 = none sent: the connection id is used).
     pub fn route_enter_world_response(
         &self,
         connection_id: ConnectionId,
         gs_id: GameServerId,
         result: u8,
+        cookie: u32,
     ) {
         let Some(connection) = self.connections.get(connection_id) else {
             tracing::warn!(
@@ -653,7 +673,7 @@ impl GameController {
             );
             return;
         };
-        connection.complete_enter_world_request(self, gs_id, result);
+        connection.complete_enter_world_request(self, gs_id, result, cookie);
     }
 }
 

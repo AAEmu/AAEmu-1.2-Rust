@@ -58,6 +58,56 @@ impl WebApiServer {
     }
 }
 
+/// Largest request body read (Rust addition; the C# reads whatever arrives). The biggest
+/// legitimate request is a mail with attachment items or an auction/command JSON document, a few
+/// KiB at most; 1 MiB leaves ample room.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// What to do with a request's body before the controller runs.
+enum Preflight {
+    /// Answer right away without reading the body (unauthorized).
+    Answer(HttpResponse),
+    /// The route needs no body (public status, or no such route: the dispatcher answers 404).
+    NoBody,
+    /// An authorized request: read the body (up to [`MAX_BODY_BYTES`]).
+    ReadBody,
+}
+
+/// `true` for the only public route: the read-only `GET /status`.
+fn is_public_status(route: &route_mapper::RouteDefinition) -> bool {
+    route.method == Method::Get && route.path == "/status"
+}
+
+fn unauthorized_response() -> HttpResponse {
+    let mut response = json_response(401, &error_model("Unauthorized"));
+    response.set_header("WWW-Authenticate", "Bearer realm=\"AAEmu Web API\"");
+    response
+}
+
+/// Authorizes a request from its URL, method and headers alone, so an unauthenticated peer never
+/// gets its body read.
+fn preflight(
+    server: &WebApiServer,
+    url: &str,
+    method: &str,
+    headers: &axum::http::HeaderMap,
+) -> Preflight {
+    match server.route_mapper.get_route(url, method) {
+        Ok(Some((route, _))) => {
+            let public_status = is_public_status(route);
+            if !(public_status || auth::authorized(server.api_key.as_deref(), headers)) {
+                Preflight::Answer(unauthorized_response())
+            } else if public_status {
+                Preflight::NoBody
+            } else {
+                Preflight::ReadBody
+            }
+        }
+        // Not found (404) or ambiguous (500): `on_received_request` answers, no body is needed.
+        _ => Preflight::NoBody,
+    }
+}
+
 /// `WebApiSession.OnReceivedRequest(request)`: routes the request and returns the response
 /// (`InternalSendResponseAsync` sends it).
 pub async fn on_received_request(server: &WebApiServer, request: HttpRequest) -> HttpResponse {
@@ -72,11 +122,9 @@ pub async fn on_received_request(server: &WebApiServer, request: HttpRequest) ->
         };
         // Check the selected route, not a URL prefix: legacy regexes also match inside
         // query strings and prefixed paths. Only the read-only status handler is public.
-        let public_status = route.method == Method::Get && route.path == "/status";
+        let public_status = is_public_status(route);
         if !(public_status || auth::authorized(server.api_key.as_deref(), &request.headers)) {
-            let mut response = json_response(401, &error_model("Unauthorized"));
-            response.set_header("WWW-Authenticate", "Bearer realm=\"AAEmu Web API\"");
-            return Ok(response);
+            return Ok(unauthorized_response());
         }
         let target = route.target.clone();
         let ctx = ControllerCtx {
@@ -130,11 +178,27 @@ async fn dispatch(
         .uri
         .path_and_query()
         .map_or_else(|| parts.uri.path().to_string(), |p| p.as_str().to_string());
-    let bytes: Bytes = axum::body::to_bytes(body, 64 * 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let method = parts.method.as_str().to_string();
+    // Authorize from the request line and headers before reading any body.
+    let read_body = match preflight(&server, &url, &method, &parts.headers) {
+        Preflight::Answer(response) => return to_axum(response),
+        Preflight::NoBody => false,
+        Preflight::ReadBody => true,
+    };
+    let bytes: Bytes = if read_body {
+        match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let mut response = HttpResponse::new(413);
+                response.set_body("Payload too large");
+                return to_axum(response);
+            }
+        }
+    } else {
+        Bytes::new()
+    };
     let request = HttpRequest {
-        method: parts.method.as_str().to_string(),
+        method,
         url,
         protocol: format!("{:?}", parts.version),
         headers: parts.headers,

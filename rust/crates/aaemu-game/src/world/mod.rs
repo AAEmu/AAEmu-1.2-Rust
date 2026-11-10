@@ -6,6 +6,9 @@
 //! held, object data mutexes may be locked (one at a time) to build packets. Code that holds an
 //! object's data lock must never call into the grid. Full rules: [`object`].
 
+pub mod move_guard;
+#[cfg(test)]
+mod move_guard_tests;
 pub mod object;
 #[cfg(test)]
 mod player_activity_tests;

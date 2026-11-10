@@ -492,14 +492,23 @@ async fn open_bag_without_loot_all_sends_bag_data_and_single_take_works() {
     assert_eq!(f[0].1[0], 3); // three items
     assert_eq!(*f[0].1.last().unwrap(), 0); // lootAll false
 
-    // Bob is not eligible but the rule is free for all
-    let mut s = PacketStream::new();
-    s.write_u16(2)
-        .write_u16(1)
-        .write_bc(NPC_OBJ)
-        .write_u16(0)
-        .write_u16(0);
-    run::<CSLootItemPacket>(&mut w, 1, s.as_bytes());
+    // Bob is not eligible (Alice killed it untagged): his take is refused, Alice's works.
+    let take = |index: u16| {
+        let mut s = PacketStream::new();
+        s.write_u16(index)
+            .write_u16(1)
+            .write_bc(NPC_OBJ)
+            .write_u16(0)
+            .write_u16(0);
+        s
+    };
+    run::<CSLootItemPacket>(&mut w, 1, take(2).as_bytes());
+    assert_eq!(
+        w.b.drain_ops(),
+        vec![sc::SCErrorMsgPacket, sc::SCLootItemFailedPacket]
+    );
+    assert_eq!(w.server.systems.economy.loot.item_count(NPC_OBJ), 3);
+    run::<CSLootItemPacket>(&mut w, 0, take(2).as_bytes());
     let took = SCLootItemTookPacket {
         item_template_id: ITEM_COINS,
         item_index: 2,
@@ -508,7 +517,7 @@ async fn open_bag_without_loot_all_sends_bag_data_and_single_take_works() {
         count: 50,
     };
     assert_eq!(
-        w.b.drain(),
+        w.a.drain(),
         vec![
             (
                 sc::SCItemTaskSuccessPacket,
@@ -2139,4 +2148,153 @@ fn socket_group_allows_requires_the_parent_group() {
     assert!(d.socket_group_allows(23, 3));
     assert!(!d.socket_group_allows(23, 4));
     assert!(!d.socket_group_allows(24, 3));
+}
+
+/// Tagger only (no team): the corpse is FREE_FOR_ALL for the tagger alone.
+struct TaggerOnly(PlayerRef);
+impl LootNpcHooks for TaggerOnly {
+    fn tagging(&self, _: &GameServer, _: &NpcRef) -> NpcTagging {
+        NpcTagging {
+            tag_team: 0,
+            tagger: Some(self.0.clone()),
+        }
+    }
+}
+
+/// The team of [`Tagged`] with a chosen looting rule.
+struct RuleTeam(Vec<PlayerRef>, LootingRule);
+impl LootTeamHooks for RuleTeam {
+    fn active_team(&self, _: &GameServer, id: u32) -> Option<TeamLootInfo> {
+        (id == 5).then(|| TeamLootInfo {
+            team_id: 5,
+            members: self.0.clone(),
+            looting_rule: self.1,
+        })
+    }
+}
+
+fn open_bag_packet(obj: u32, loot_all: bool) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_bc(obj).write_bc(0).write_bool(loot_all);
+    s
+}
+
+#[tokio::test]
+async fn a_tagged_corpse_is_closed_to_others_until_it_turns_public() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let server = w.server.clone();
+    let lm = &server.systems.economy.loot;
+    lm.hooks.npcs.install(Arc::new(TaggerOnly(w.pa.clone())));
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    w.a.drain();
+    w.b.drain();
+    // Bob cannot see the bag, loot it all, or take an item.
+    run::<CSLootOpenBagPacket>(&mut w, 1, open_bag_packet(NPC_OBJ, false).as_bytes());
+    assert_eq!(w.b.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    run::<CSLootOpenBagPacket>(&mut w, 1, open_bag_packet(NPC_OBJ, true).as_bytes());
+    assert_eq!(w.b.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pb, NPC_OBJ, 1, false
+    ));
+    assert_eq!(lm.item_count(NPC_OBJ), 3);
+    assert!(lm.container(NPC_OBJ).lock().unwrap().opened_by.is_empty());
+    // The tagger is unaffected.
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    // After the public timer everybody may take.
+    {
+        let c = lm.container(NPC_OBJ);
+        c.lock().unwrap().creation_time_ms -= 181_000;
+    }
+    LootManager::make_loot_public(&w.server, NPC_OBJ);
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pb, NPC_OBJ, 2, false
+    ));
+}
+
+#[tokio::test]
+async fn team_loot_rights_cover_members_the_master_and_roll_winners() {
+    // Members of the tagging team (free for all) may take; a non-member may not.
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let lm = &w.server.systems.economy.loot;
+    let ffa = LootingRule {
+        loot_method: looting_rule_method::FREE_FOR_ALL,
+        minimum_grade: 0,
+        loot_master: 0,
+        roll_for_bind_on_pickup: true,
+    };
+    lm.hooks
+        .teams
+        .install(Arc::new(RuleTeam(vec![w.pa.clone()], ffa)));
+    lm.hooks.npcs.install(Arc::new(Tagged));
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pb, NPC_OBJ, 1, false
+    ));
+    assert_eq!(lm.item_count(NPC_OBJ), 3);
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+
+    // Loot master: a member's take goes to the master; a non-member is still refused.
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let lm = &w.server.systems.economy.loot;
+    let master = LootingRule {
+        loot_method: looting_rule_method::LOOT_MASTER,
+        loot_master: 1,
+        ..ffa
+    };
+    lm.hooks
+        .teams
+        .install(Arc::new(RuleTeam(vec![w.pa.clone()], master)));
+    lm.hooks.npcs.install(Arc::new(Tagged));
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pb, NPC_OBJ, 1, false
+    ));
+    assert_eq!(lm.item_count(NPC_OBJ), 3);
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 0).unwrap().count, 3);
+}
+
+struct FuncLoot(std::sync::atomic::AtomicUsize);
+impl LootNpcHooks for FuncLoot {
+    fn try_handle_func_driven_loot(&self, _: &GameServer, _: &PlayerRef, _: &WorldObject) -> bool {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+#[tokio::test]
+async fn func_driven_doodad_loot_needs_the_doodad_in_reach() {
+    use crate::models::doodad::Doodad;
+    let mut w = world_with(data());
+    let hook = Arc::new(FuncLoot(std::sync::atomic::AtomicUsize::new(0)));
+    w.server
+        .systems
+        .economy
+        .loot
+        .hooks
+        .npcs
+        .install(hook.clone());
+    let world = w.server.world.world_of(&WorldObject::from(&w.pa)).unwrap();
+    for (obj, x) in [(0x300u32, 101.0f32), (0x301, 400.0)] {
+        let mut d = Doodad::new(1);
+        d.transform.set_xyz(x, 100.0, 100.0);
+        world.spawn(Entity::new(obj, d), &w.server.view_ctx());
+    }
+    w.a.drain();
+    run::<CSLootOpenBagPacket>(&mut w, 0, open_bag_packet(0x301, false).as_bytes());
+    assert_eq!(hook.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    run::<CSLootOpenBagPacket>(&mut w, 0, open_bag_packet(0x300, false).as_bytes());
+    assert_eq!(hook.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

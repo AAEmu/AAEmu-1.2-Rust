@@ -18,6 +18,7 @@ pub mod mysql;
 pub mod net;
 pub mod packet_stream;
 pub mod password;
+pub mod secret;
 pub mod utils;
 
 #[cfg(test)]

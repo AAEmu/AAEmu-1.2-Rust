@@ -231,6 +231,28 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     let mut result;
     let mut value = 0u32;
     let data = &server.game_data;
+    // A unit caster is the sender itself: `initial_target` resolves the caster field to a
+    // unit and uses it as the target of self / party / pet / position skills, and the started /
+    // fired packets echo it, so a forged field would run the skill on (and as) another unit.
+    // Mount casters are checked below (`mount_authority`); item and doodad casters resolve
+    // through their own validation. A mate named as a plain `Unit` caster is the battle pet
+    // cast: it goes on to `cast_as_battle_pet`, which refuses a mate that is not the sender's.
+    if let SkillCaster::Unit(obj_id) | SkillCaster::Unk1(obj_id) = p.caster {
+        let battle_pet = matches!(p.caster, SkillCaster::Unit(_))
+            && super::geometry::world_of(server, &me)
+                .and_then(|w| w.object(obj_id))
+                .is_some_and(|o| o.as_mate().is_some());
+        if obj_id != player.obj_id && !battle_pet {
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                caster = obj_id,
+                "Client cast naming another unit as the caster refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
+    }
     // A skill reached only through an item use must come with that item: the plain unit cast
     // would otherwise run it (and consume nothing) anywhere. The Item caster branch below
     // validates the item's own use skill and consumes the reagent item.
@@ -652,10 +674,17 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             "Client cast of an inactive or unlearned ability skill refused"
         );
         result = denied;
-    } else if player.data().skills.skills.iter().any(|s| s.id == skill_id) {
-        let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
-            return;
-        };
+    } else if let Some(t) = server
+        .game_data
+        .systems
+        .skills
+        .skill(skill_id)
+        .filter(|t| t.ability_id != 0)
+        .filter(|_| player.data().skills.skills.iter().any(|s| s.id == skill_id))
+        .cloned()
+    {
+        // Only class skills run from the learned list; an ability-less skill in it (never
+        // learnable) takes the client-source check below like any other unlearned skill.
         let skill = skill::new_skill_for(server, t, Some(&me));
         let (r, v) = skill::use_skill(
             server,
@@ -906,6 +935,9 @@ fn is_variant_of_skill(
     let Some(t) = data.skill(skill_id) else {
         return false;
     };
+    if t.ability_id == 0 {
+        return false; // ability-less skills have no tree to be a variant in
+    }
     let learned: Vec<u32> = player.data().skills.skills.iter().map(|s| s.id).collect();
     learned.into_iter().any(|id| {
         data.skill(id)

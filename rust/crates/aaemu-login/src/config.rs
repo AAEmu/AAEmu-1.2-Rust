@@ -80,6 +80,10 @@ pub struct AppConfig {
     /// `Reconnect` section: game reconnect token lifetime and per-account cap.
     #[serde(rename = "reconnect", default)]
     pub reconnect: ReconnectOptions,
+    /// `Security` section (Rust only): password failure limits, account creation limit and the
+    /// pre-authentication timeout.
+    #[serde(rename = "security", default)]
+    pub security: SecurityOptions,
     /// `ConnectionStrings` section (`ConnectionStrings:MySqlConnection` overrides `Connections`).
     #[serde(rename = "connectionstrings", default)]
     pub connection_strings: HashMap<String, String>,
@@ -289,6 +293,45 @@ impl Default for TwoFactorOptions {
         Self {
             max_otp_failures: default_max_otp_failures(),
             otp_lockout_minutes: default_otp_lockout_minutes(),
+        }
+    }
+}
+
+/// `SecurityOptions` (Rust only): abuse limits of the public login listener. `0` switches a limit
+/// off.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct SecurityOptions {
+    /// Failed password attempts within `PasswordFailureWindowSeconds` after which further password
+    /// attempts are refused for `PasswordBlockSeconds`. Counted per client IP and, separately,
+    /// per account name.
+    #[serde(rename = "passwordfailurelimit", deserialize_with = "lenient_u32")]
+    pub password_failure_limit: u32,
+    #[serde(
+        rename = "passwordfailurewindowseconds",
+        deserialize_with = "lenient_u32"
+    )]
+    pub password_failure_window_seconds: u32,
+    #[serde(rename = "passwordblockseconds", deserialize_with = "lenient_u32")]
+    pub password_block_seconds: u32,
+    /// New accounts one client IP may create per hour through `AutoAccount`. Loopback addresses
+    /// are exempt.
+    #[serde(rename = "accountcreationsperiphour", deserialize_with = "lenient_u32")]
+    pub account_creations_per_ip_hour: u32,
+    /// A client connection that has not authenticated within this many seconds is closed.
+    /// Authenticated connections (world list, character select) are never timed out by it.
+    #[serde(rename = "preauthtimeoutseconds", deserialize_with = "lenient_u32")]
+    pub pre_auth_timeout_seconds: u32,
+}
+
+impl Default for SecurityOptions {
+    fn default() -> Self {
+        Self {
+            password_failure_limit: 10,
+            password_failure_window_seconds: 300,
+            password_block_seconds: 300,
+            account_creations_per_ip_hour: 5,
+            pre_auth_timeout_seconds: 60,
         }
     }
 }
@@ -521,7 +564,7 @@ pub fn set_path(root: &mut Value, path: &str, value: &str) {
     *node = Value::String(value.to_string());
 }
 
-const TOP_LEVEL_KEYS: [&str; 14] = [
+const TOP_LEVEL_KEYS: [&str; 15] = [
     "secretkey",
     "autoaccount",
     "skiphostresolve",
@@ -534,6 +577,7 @@ const TOP_LEVEL_KEYS: [&str; 14] = [
     "login",
     "twofactor",
     "reconnect",
+    "security",
     "connectionstrings",
     "urls",
 ];
@@ -703,6 +747,40 @@ mod tests {
         assert_eq!(cfg.network.port, 1237);
         assert_eq!(cfg.enter_world_timeout, Duration::from_secs(10));
         assert_eq!(cfg.korea_auth.rounds, 100_000);
+    }
+
+    #[test]
+    fn security_options_default_and_bind() {
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({ "Connections": { "MySQLProvider": { "Port": "3306" } } })),
+        );
+        let cfg = AppConfig::from_value(root.clone()).unwrap();
+        let d = &cfg.security;
+        assert_eq!(d.password_failure_limit, 10);
+        assert_eq!(d.password_failure_window_seconds, 300);
+        assert_eq!(d.password_block_seconds, 300);
+        assert_eq!(d.account_creations_per_ip_hour, 5);
+        assert_eq!(d.pre_auth_timeout_seconds, 60);
+
+        apply_env(
+            &mut root,
+            [
+                (
+                    "Security__PasswordFailureLimit".to_string(),
+                    "0".to_string(),
+                ),
+                (
+                    "Security__PreAuthTimeoutSeconds".to_string(),
+                    "5".to_string(),
+                ),
+            ],
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.security.password_failure_limit, 0);
+        assert_eq!(cfg.security.pre_auth_timeout_seconds, 5);
+        assert_eq!(cfg.security.account_creations_per_ip_hour, 5);
     }
 
     #[test]

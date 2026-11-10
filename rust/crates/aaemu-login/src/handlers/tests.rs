@@ -259,6 +259,7 @@ async fn replaced_connection_cannot_mutate_internal_state() {
             online: 0,
             sequence: 0,
             has_online: true,
+            cookie: 0,
         }),
         G2lPacket::RequestInfo(GlRequestInfo {
             connection_id: crate::models::ConnectionId(1),
@@ -331,6 +332,7 @@ async fn unauthorized_enter_response_cannot_complete_pending_world_entry() {
         online: 0,
         sequence: 0,
         has_online: true,
+        cookie: 0,
     });
     for attacker in [&unregistered, &unrelated] {
         assert!(handle_g2l(&server, attacker, response.clone())

@@ -2169,3 +2169,83 @@ async fn new_character_default_action_bar_uses_authored_slots() {
         assert_eq!(c.slots[slot].action_id, item, "slot {slot}");
     }
 }
+
+/// The creation request is not trusted: the level field is ignored, only the first ability is
+/// kept, and a body item that is not a body part of the race / gender model and slot is replaced
+/// by the template default.
+#[tokio::test]
+async fn new_character_ignores_client_level_abilities_and_foreign_body_items() {
+    use crate::data::items::{BodyPartTemplate, ItemTemplate, TemplateKind};
+    use crate::models::character::Inventory;
+
+    let mut data = creation_data();
+    for (id, model_id, npc_only) in [(3001u32, 0u32, false), (3002, 99, false), (3003, 0, true)] {
+        let mut t = ItemTemplate::plain(id, 1);
+        t.kind = TemplateKind::BodyPart {
+            slot_type_id: 23,
+            model_id,
+        };
+        data.items.templates.insert(id, t);
+        data.items.body_parts.insert(
+            id,
+            BodyPartTemplate {
+                item_id: id,
+                model_id,
+                npc_only,
+                slot_type_id: 23,
+                beauty_shop_only: false,
+            },
+        );
+    }
+    data.items
+        .templates
+        .insert(3004, ItemTemplate::plain(3004, 1));
+    data.characters.templates.get_mut(&17).unwrap().items[0] = 3001;
+    let server = test_server_with(data);
+    let template = server.game_data.characters.template(1, 1).unwrap().clone();
+    let build = |body: u32| {
+        let mut request = creation_request("Forged");
+        request.ability2 = 5;
+        request.ability3 = 6;
+        request.level = 50;
+        request.body_items[0] = body;
+        let mut created_items = Vec::new();
+        super::build_lobby_character(
+            super::BuildInputs {
+                server: &server,
+                name: "Forged",
+                request: &request,
+                template: &template,
+                id: 1,
+                account_id: 1001,
+                connection_id: 1,
+                ip: "127.0.0.1:12345".parse().unwrap(),
+                access_level: 0,
+                level: 1,
+                created: None,
+                labor_power: 0,
+                labor_power_modified: 0,
+                chat_restricted_until: 0,
+                inventory: Inventory::new(1, 50, 50, &server.items, &server.ids.container),
+            },
+            &mut created_items,
+        )
+        .unwrap()
+    };
+    let slot_item = |c: &Character| {
+        c.inventory
+            .equipment()
+            .lock()
+            .unwrap()
+            .get_item_by_slot(19)
+            .map(|i| i.template_id)
+    };
+    let c = build(3001);
+    assert_eq!((c.ability2, c.ability3), (11, 11));
+    assert_eq!(c.unit.level, 1);
+    assert_eq!(slot_item(&c), Some(3001));
+    // Another model's part, an NPC-only part and a non-body item fall back to the default.
+    for bad in [3002, 3003, 3004, 2000] {
+        assert_eq!(slot_item(&build(bad)), Some(3001), "item {bad}");
+    }
+}

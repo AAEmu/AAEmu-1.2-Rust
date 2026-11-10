@@ -5055,3 +5055,79 @@ async fn team_invitation_is_canceled_when_the_inviter_goes_offline() {
         ]
     );
 }
+
+#[tokio::test]
+async fn family_reply_needs_the_invitation_it_names() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    let invite = |name: &str| {
+        let mut s = PacketStream::new();
+        s.write_str(name).write_str("Kid");
+        s
+    };
+    let reply = |invitor: u32| {
+        let mut s = PacketStream::new();
+        s.write_u32(invitor).write_bool(true).write_str("Kid");
+        s
+    };
+    // No invitation was sent: naming Al as the inviter joins nothing.
+    b.send(&server, cs::CSFamilyReplyInvitationPacket, reply(1))
+        .await;
+    assert_eq!((a.p.data().family, b.p.data().family), (0, 0));
+    assert_eq!(server.systems.social.families.count(), 0);
+    // An invitation from Al is not an invitation from Cy.
+    a.send(&server, cs::CSFamilyInviteMemberPacket, invite("Bob"))
+        .await;
+    b.send(&server, cs::CSFamilyReplyInvitationPacket, reply(3))
+        .await;
+    assert_eq!((b.p.data().family, c.p.data().family), (0, 0));
+    // The matching reply works once; it is consumed.
+    b.send(&server, cs::CSFamilyReplyInvitationPacket, reply(1))
+        .await;
+    let fid = a.p.data().family;
+    assert_ne!(fid, 0);
+    assert_eq!(b.p.data().family, fid);
+    b.send(&server, cs::CSFamilyLeavePacket, PacketStream::new())
+        .await;
+    b.send(&server, cs::CSFamilyReplyInvitationPacket, reply(1))
+        .await;
+    assert_eq!(b.p.data().family, 0);
+    // A member that is not the steward cannot invite.
+    a.send(&server, cs::CSFamilyInviteMemberPacket, invite("Bob"))
+        .await;
+    b.send(&server, cs::CSFamilyReplyInvitationPacket, reply(1))
+        .await;
+    // (A two-member family disbands when one leaves, so this is a new family.)
+    let fid = a.p.data().family;
+    assert_ne!(fid, 0);
+    assert_eq!(b.p.data().family, fid);
+    c.ops();
+    b.send(&server, cs::CSFamilyInviteMemberPacket, invite("Cy"))
+        .await;
+    assert!(c.ops().is_empty());
+    c.send(&server, cs::CSFamilyReplyInvitationPacket, reply(2))
+        .await;
+    assert_eq!(c.p.data().family, 0);
+}
+
+#[tokio::test]
+async fn over_head_marker_needs_team_membership() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut d = pc(&server, 4, "Dee", 130.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut d]);
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    a.ops();
+    b.ops();
+    let mut s = PacketStream::new();
+    s.write_u32(team_id)
+        .write_i32(3)
+        .write_u8(2)
+        .write_bc(0x102);
+    d.send(&server, cs::CSSetOverHeadMarkerPacket, s).await;
+    assert!(a.ops().is_empty() && b.ops().is_empty() && d.ops().is_empty());
+}

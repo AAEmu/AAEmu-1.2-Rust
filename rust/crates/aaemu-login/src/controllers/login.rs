@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 use std::sync::LazyLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use dashmap::DashMap;
@@ -10,13 +10,14 @@ use regex::Regex;
 use sqlx::MySqlPool;
 
 use super::game::GameController;
-use crate::config::{KoreaAuthOptions, ReconnectOptions};
+use crate::config::{KoreaAuthOptions, ReconnectOptions, SecurityOptions};
 use crate::models::{
     AccountId, GameServerId, KoreaAuthInfo, LoginDeniedReason, LoginResult, ReconnectFailure,
     ReconnectResult,
 };
 use crate::network::internal::InternalConnection;
 use crate::packets::l2g::LgPlayerReconnect;
+use crate::services::abuse::{CreationLimit, PasswordLimits};
 use crate::services::password::{
     Password, PasswordKind, PasswordService, PasswordVerificationResult,
 };
@@ -70,6 +71,10 @@ pub struct LoginController {
     tokens: DashMap<(GameServerId, u32), ReconnectToken>,
     /// Client IP of the last fully authenticated login, for token binding.
     last_login_ip: DashMap<AccountId, IpAddr>,
+    /// Failed-password limits per client IP and per account name (`Security:PasswordFailure*`).
+    password_limits: PasswordLimits,
+    /// Accounts one IP may create per hour (`Security:AccountCreationsPerIpHour`).
+    creation_limit: CreationLimit,
 }
 
 impl LoginController {
@@ -80,6 +85,7 @@ impl LoginController {
         korea: KoreaAuthOptions,
         two_factor: TwoFactorService,
         reconnect: ReconnectOptions,
+        security: &SecurityOptions,
     ) -> Self {
         Self {
             pool,
@@ -90,6 +96,36 @@ impl LoginController {
             reconnect,
             tokens: DashMap::new(),
             last_login_ip: DashMap::new(),
+            password_limits: PasswordLimits::new(
+                security.password_failure_limit,
+                Duration::from_secs(security.password_failure_window_seconds.into()),
+                Duration::from_secs(security.password_block_seconds.into()),
+            ),
+            creation_limit: CreationLimit::new(
+                security.account_creations_per_ip_hour,
+                Duration::from_secs(3600),
+            ),
+        }
+    }
+
+    /// A refused password attempt, answered exactly like a wrong password.
+    fn bad_password() -> LoginResult {
+        LoginResult::denied(LoginDeniedReason::BAD_ACCOUNT)
+    }
+
+    /// Counts a failed password attempt of `username` from `ip`; warns once per started block.
+    fn record_password_failure(&self, username: &str, ip: IpAddr) {
+        let blocks = self
+            .password_limits
+            .record_failure(ip, username, Instant::now());
+        if blocks.ip {
+            tracing::warn!("Too many failed password attempts from {ip}: blocked");
+        }
+        if blocks.account {
+            tracing::warn!(
+                "Too many failed password attempts for account '{}' (last from {ip}): blocked",
+                log_safe(username)
+            );
         }
     }
 
@@ -122,6 +158,14 @@ impl LoginController {
         password: &Password,
         ip: IpAddr,
     ) -> anyhow::Result<LoginResult> {
+        // A blocked IP or account name is answered like a wrong password without touching the
+        // database (and without any hint that a limit exists).
+        if self
+            .password_limits
+            .is_blocked(ip, username, Instant::now())
+        {
+            return Ok(Self::bad_password());
+        }
         let row: Option<UserRow> = sqlx::query_as(
             "SELECT CAST(id AS UNSIGNED), password, korea_challenge_hash, CAST(banned AS SIGNED), CAST(ban_reason AS SIGNED) \
              FROM users WHERE username = ?",
@@ -134,15 +178,18 @@ impl LoginController {
             if self.auto_account {
                 return self.create_and_login_invalid(username, password, ip).await;
             }
-            return Ok(LoginResult::denied(LoginDeniedReason::BAD_ACCOUNT));
+            self.record_password_failure(username, ip);
+            return Ok(Self::bad_password());
         };
 
         // C#: reader.GetString("password") throws on NULL.
         let stored_password = stored_password.context("users.password is NULL")?;
         let verification = self.verify_password(stored_password, password).await?;
         if verification == PasswordVerificationResult::Failed {
-            return Ok(LoginResult::denied(LoginDeniedReason::BAD_ACCOUNT));
+            self.record_password_failure(username, ip);
+            return Ok(Self::bad_password());
         }
+        self.password_limits.record_success(username);
 
         let account_id = AccountId(id as u32);
         // The account's verified factors are always enforced by the authentication flow. The ban
@@ -298,6 +345,13 @@ impl LoginController {
     ) -> anyhow::Result<LoginResult> {
         if !is_valid_username(username) {
             return Ok(LoginResult::denied(LoginDeniedReason::BAD_ACCOUNT));
+        }
+        if !self.creation_limit.try_acquire(ip, Instant::now()) {
+            tracing::warn!(
+                "Account creation limit reached for {ip}: refusing to create '{}'",
+                log_safe(username)
+            );
+            return Ok(Self::bad_password());
         }
         let password_hash = self.hash_for_storage(password).await?;
         let now = unix_now();
@@ -466,6 +520,58 @@ mod tests {
     const TEST_GS: GameServerId = GameServerId(1);
     const TEST_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     const OTHER_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+
+    fn security_server(security: serde_json::Value) -> Arc<LoginServer> {
+        test_server(
+            test_config(serde_json::json!({ "Security": security })),
+            Arc::new(MockBackend::default()),
+        )
+    }
+
+    /// A blocked IP or account name is answered like a wrong password without a database round
+    /// trip (the test server's pool cannot connect, so reaching it would be an error).
+    #[tokio::test]
+    async fn a_blocked_ip_or_account_is_denied_without_touching_the_database() {
+        let server = security_server(serde_json::json!({ "PasswordFailureLimit": 2 }));
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let other = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
+        let pw = Password::from_plaintext("pw");
+        server.logins.record_password_failure("Alice", ip);
+        server.logins.record_password_failure("alice", other);
+        // The account name is blocked for every IP ...
+        let r = server.logins.login("ALICE", &pw, ip).await.unwrap();
+        assert!(!r.success);
+        assert_eq!(r.denial_reason, LoginDeniedReason::BAD_ACCOUNT);
+        let r = server
+            .logins
+            .login(
+                "alice",
+                &pw,
+                IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 3)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.denial_reason, LoginDeniedReason::BAD_ACCOUNT);
+        // ... and the IP that failed twice is blocked for every name.
+        server.logins.record_password_failure("bob", ip);
+        let r = server.logins.login("carol", &pw, ip).await.unwrap();
+        assert_eq!(r.denial_reason, LoginDeniedReason::BAD_ACCOUNT);
+    }
+
+    #[tokio::test]
+    async fn account_creation_over_the_ip_limit_is_denied_like_a_wrong_password() {
+        let server = security_server(serde_json::json!({ "AccountCreationsPerIpHour": 1 }));
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        // Another creation already used the IP's hourly share.
+        assert!(server.logins.creation_limit.try_acquire(ip, Instant::now()));
+        let r = server
+            .logins
+            .create_and_login_invalid("newbie", &Password::from_plaintext("pw"), ip)
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert_eq!(r.denial_reason, LoginDeniedReason::BAD_ACCOUNT);
+    }
 
     fn reconnect_server(ttl: Duration, cap: i32) -> Arc<LoginServer> {
         // `parse_timespan` reads the fraction as a fraction of a second: .020 = 20 ms.

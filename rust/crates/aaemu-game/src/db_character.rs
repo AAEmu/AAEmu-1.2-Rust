@@ -521,6 +521,8 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
     // Skills (each stored skill is re-learned through AddSkill(skillId), which re-checks the
     // ability tree and the skill points and recomputes the level).
     c.skills = CharacterSkills::default();
+    let mut dropped_skills: Vec<u32> = Vec::new();
+    let mut dropped_buffs: Vec<u32> = Vec::new();
     for r in sqlx::query("SELECT CAST(id AS SIGNED) AS id, CAST(level AS SIGNED) AS level, CAST(`type` AS CHAR) AS type FROM skills WHERE `owner` = ?")
         .bind(id)
         .fetch_all(pool)
@@ -529,12 +531,47 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
         let ty: String = r.try_get("type")?;
         let sid = int(&r, "id")? as u32;
         if ty.eq_ignore_ascii_case("skill") || ty == "1" {
+            if !stored_skill_allowed(server, c, sid) {
+                dropped_skills.push(sid);
+                continue;
+            }
             learn_skill(server, c, sid);
         } else if ty.eq_ignore_ascii_case("buff") || ty == "2" {
+            if data.skills.passive_buff(sid).is_some_and(|t| t.ability_id == 0) {
+                dropped_buffs.push(sid);
+                continue;
+            }
             c.skills.passive_buffs.push(sid);
             apply_passive_buff(server, c, sid, now_ms);
         } else {
             return Err(GameError::Protocol(format!("unknown skill type {ty:?}")));
+        }
+    }
+
+    // Skills and passive buffs no ability tree offers (ability-less NPC / GM / internal rows a
+    // forged CSLearnSkill / CSLearnBuff could store before the learn check existed) are dropped
+    // here and deleted; `save` only upserts, so the rows would otherwise come back every load.
+    for (kind, ids) in [("Skill", &dropped_skills), ("Buff", &dropped_buffs)] {
+        if ids.is_empty() {
+            continue;
+        }
+        tracing::warn!(
+            "Character {} ({}): dropped stored {} ids {:?} on load, they are not learnable class              {}s of the active abilities",
+            c.unit.name,
+            id,
+            kind.to_ascii_lowercase(),
+            ids,
+            kind.to_ascii_lowercase()
+        );
+        let list = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        if let Err(e) = sqlx::query(&format!(
+            "DELETE FROM skills WHERE owner = ? AND `type` = '{kind}' AND id IN({list})"
+        ))
+        .bind(id)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!("Character {id}: could not delete the dropped {kind} rows: {e}");
         }
     }
 
@@ -692,6 +729,20 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
     // and always left them 0).
     c.unread_mail = CountUnreadMail::default();
     Ok(())
+}
+
+/// Whether a stored `skills` row of type Skill could have been learned: a `need_learn` skill of
+/// an active ability, or a server-granted default skill.
+fn stored_skill_allowed(server: &GameServer, c: &Character, skill_id: u32) -> bool {
+    let data = &server.game_data.skills;
+    let Some(t) = data.skill(skill_id) else {
+        return true; // unknown ids keep their existing handling in `learn_skill`
+    };
+    data.is_default_skill(skill_id)
+        || crate::systems::skills::progress::is_learnable_class_skill(
+            t,
+            [c.ability1, c.ability2, c.ability3],
+        )
 }
 
 /// `CharacterSkills.AddSkill(uint skillId)` without the packet (no connection at load time).
@@ -2373,6 +2424,40 @@ mod tests {
         c.unit.level = 55;
         learn_skill(&server, &mut c, 10385);
         assert!(c.skills.skills.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stored_skill_cleanup_keeps_class_and_default_skills_only() {
+        // Load-time filter: an ability-less NPC / GM skill a forged CSLearnSkill stored is
+        // dropped; class skills of an active ability and server-granted defaults stay.
+        let mut data = crate::data::GameData::empty();
+        for (id, ability_id, need_learn) in [
+            (23071, 0, true), // NPC / GM skill
+            (40, 1, true),    // class skill, active ability
+            (41, 2, true),    // class skill, inactive ability
+            (42, 0, false),   // server-granted default
+        ] {
+            data.skills.add_skill(crate::data::skills::SkillTemplate {
+                id,
+                ability_id,
+                need_learn,
+                ..Default::default()
+            });
+        }
+        data.skills
+            .default_skills
+            .push(crate::data::skills::DefaultSkill {
+                skill_id: 42,
+                slot: 0,
+                add_to_slot: false,
+            });
+        let server = crate::test_support::test_server_with(data);
+        let mut c = crate::test_support::test_character(1, "Stored", 100.0, 100.0);
+        c.ability1 = 1;
+        assert!(!stored_skill_allowed(&server, &c, 23071));
+        assert!(stored_skill_allowed(&server, &c, 40));
+        assert!(!stored_skill_allowed(&server, &c, 41));
+        assert!(stored_skill_allowed(&server, &c, 42));
     }
 
     #[tokio::test]

@@ -53,6 +53,8 @@ pub struct EnterWorldResult {
     pub success: bool,
     pub server: Option<GameServer>,
     pub denial_reason: u8,
+    /// The game server's world cookie; 0 = none (the connection id is sent instead).
+    pub cookie: u32,
 }
 
 struct PendingEnterWorld {
@@ -571,6 +573,7 @@ impl LoginConnection {
         games: &GameController,
         gs_id: GameServerId,
         result: u8,
+        cookie: u32,
     ) {
         let mut s = self.session.lock().unwrap();
         if s.state != LoginState::EnteringWorld {
@@ -610,6 +613,7 @@ impl LoginConnection {
                 success,
                 server,
                 denial_reason: result,
+                cookie,
             });
         }
     }
@@ -658,7 +662,11 @@ async fn run_enter_world_background(
         r = tokio::time::timeout(timeout, rx) => match r {
             Ok(Ok(result)) => {
                 let sent = match (&result.success, &result.server) {
-                    (true, Some(gs)) => conn.send_world_cookie(&gs.host, gs.port),
+                    (true, Some(gs)) => {
+                        // An old game server sends no cookie: fall back to the connection id.
+                        let cookie = if result.cookie == 0 { conn.id().0 } else { result.cookie };
+                        conn.send_world_cookie(cookie, &gs.host, gs.port)
+                    }
                     _ => conn.send_enter_world_denied(result.denial_reason),
                 };
                 if let Err(e) = sent {
@@ -749,9 +757,9 @@ impl LoginClient for LoginConnection {
         })
     }
 
-    fn send_world_cookie(&self, host: &str, port: u16) -> Result<(), PacketError> {
+    fn send_world_cookie(&self, cookie: u32, host: &str, port: u16) -> Result<(), PacketError> {
         self.send_packet(&AcWorldCookie::new(
-            self.id().0,
+            cookie,
             self.ip,
             self.is_locally_connected,
             host,
@@ -913,10 +921,31 @@ async fn dispatch_messages(
     reader: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, FrameCodec>,
     shutdown: &CancellationToken,
 ) {
+    // Rust addition: a connection that has not authenticated by the deadline is closed, so idle
+    // sockets cannot pile up. `0` switches it off. Authenticated connections (world list,
+    // character select, queue) are never timed out.
+    let pre_auth_timeout =
+        Duration::from_secs(server.config.security.pre_auth_timeout_seconds.into());
+    let mut pre_auth_pending = !pre_auth_timeout.is_zero();
+    let pre_auth_deadline = tokio::time::sleep(pre_auth_timeout);
+    tokio::pin!(pre_auth_deadline);
     loop {
         let frame = tokio::select! {
             _ = conn.closed.cancelled() => break,
             _ = shutdown.cancelled() => break,
+            () = &mut pre_auth_deadline, if pre_auth_pending => {
+                if matches!(conn.state(), LoginState::Connected | LoginState::Authenticating) {
+                    tracing::debug!(
+                        "LoginConnection {} from {} did not authenticate within {} s, closing",
+                        conn.id(),
+                        conn.ip(),
+                        pre_auth_timeout.as_secs()
+                    );
+                    break;
+                }
+                pre_auth_pending = false;
+                continue;
+            }
             frame = reader.next() => frame,
         };
         let payload = match frame {

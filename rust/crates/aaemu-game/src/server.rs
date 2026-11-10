@@ -11,6 +11,7 @@ use crate::data::GameData;
 use crate::error::{GameError, Result};
 use crate::login::LoginLink;
 use crate::managers::chat::ChatManager;
+use crate::managers::enter_world::EnterWorldThrottle;
 use crate::managers::expedition::ExpeditionManager;
 use crate::managers::friend::FriendManager;
 use crate::managers::id::IdManagers;
@@ -35,6 +36,8 @@ pub struct GameServer {
     /// `Debug:ReplyDelay` (`None` = off), resolved once at startup.
     pub reply_delay: Option<Arc<ReplyDelay>>,
     pub enter_world: EnterWorldManager,
+    /// Per-IP throttle for failed `X2EnterWorld` attempts.
+    pub enter_world_throttle: EnterWorldThrottle,
     pub accounts: AccountManager,
     pub streams: StreamManager,
     pub login: LoginLink,
@@ -119,6 +122,7 @@ impl GameServer {
             connections: ConnectionTable::default(),
             reply_delay,
             enter_world: EnterWorldManager::default(),
+            enter_world_throttle: EnterWorldThrottle::default(),
             accounts: AccountManager::default(),
             streams: StreamManager::default(),
             login: LoginLink::default(),
@@ -224,6 +228,22 @@ impl GameServer {
                 raw.level
             )));
         }
+        // Until `X2EnterWorld` succeeded (the account id is set) the only packet a peer may send
+        // is `X2EnterWorld` itself; every lobby handler assumes an authenticated account.
+        // (Rust addition; the 1.2 client and the headless bots send nothing else first.)
+        if conn.account_id() == 0
+            && !(raw.level == LEVEL_PLAIN && raw.opcode == opcodes::cs::X2EnterWorldPacket)
+        {
+            tracing::debug!(
+                "session {}: packet 0x{:03x}(level {}) before X2EnterWorld from {}, closing",
+                conn.id,
+                raw.opcode,
+                raw.level,
+                conn.ip
+            );
+            conn.shutdown();
+            return Ok(());
+        }
         if tracing::enabled!(
             target: crate::net::FIELDS_TRACE_TARGET,
             tracing::Level::TRACE
@@ -285,14 +305,25 @@ impl GameServer {
                     .map(|n| format!(" ({n}: not ported yet)"))
                     .unwrap_or_default();
                 let dump = aaemu_commons::net::hex_dump(raw.body.unread());
-                tracing::error!(
-                    "Unknown packet 0x{:02x}({}){} from {}:\n{}",
-                    raw.opcode,
-                    raw.level,
-                    known,
-                    conn.ip,
-                    dump
-                );
+                if conn.note_bad_packet() {
+                    tracing::error!(
+                        "Unknown packet 0x{:02x}({}){} from {}:\n{}",
+                        raw.opcode,
+                        raw.level,
+                        known,
+                        conn.ip,
+                        dump
+                    );
+                } else {
+                    tracing::debug!(
+                        "Unknown packet 0x{:02x}({}){} from {}:\n{}",
+                        raw.opcode,
+                        raw.level,
+                        known,
+                        conn.ip,
+                        dump
+                    );
+                }
                 Ok(())
             }
         }

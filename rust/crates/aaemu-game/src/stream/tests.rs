@@ -127,6 +127,15 @@ fn bytes(f: impl FnOnce(&mut PacketStream)) -> Vec<u8> {
     s.into_bytes()
 }
 
+fn join_frame(account_id: u32, ticket: u32) -> Vec<u8> {
+    frame(
+        ct::CT_JOIN,
+        &bytes(|s| {
+            s.write_u32(account_id).write_u32(ticket);
+        }),
+    )
+}
+
 fn enc(p: &dyn StreamServerPacket) -> Vec<u8> {
     encode(p)
 }
@@ -263,7 +272,7 @@ async fn joined(world: Arc<TestWorld>) -> (GameServer, StreamClient, GameClient)
     character.money = 100;
     let p = crate::world::Player::new(character, g.0.handle());
     assert!(server.world.try_add_character(&p));
-    assert!(server.streams.add_token(1000, 77));
+    assert!(server.streams.add_token_with_ticket(1000, 77, 77));
     let mut c = stream_client(&server, 900);
     c.recv(
         &server,
@@ -684,71 +693,60 @@ fn registered_opcodes_match_ct_offsets() {
 #[tokio::test]
 async fn join_with_token_from_enter_world() {
     let server = Arc::new(test_server());
-    // login -> game: LGPlayerEnter(account 1000, connection 4242)
+    // login -> game: LGPlayerEnter(account 1000, connection 4242); the game issues the cookie
+    let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
+    server.login.set(Some(login_tx));
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
-    // X2EnterWorld(account 1000, cookie 4242) on game connection 77 -> StreamManager.AddToken
+    let reply = login_rx.try_recv().unwrap();
+    let cookie = reply[16..20].to_vec();
+    // X2EnterWorld(account 1000, that cookie) on game connection 77 -> StreamManager.AddToken
     let mut g = game_connection(&server, 77);
     let mut x2 = vec![0xDD, 0x01, 0x00, 0x00];
     x2.extend_from_slice(&cs::X2EnterWorldPacket.to_le_bytes());
-    x2.extend(hex(
-        "00 00 00 00  00 00 00 00  E8 03 00 00  92 10 00 00  00 00 00 00  00",
-    ));
+    x2.extend(hex("00 00 00 00  00 00 00 00  E8 03 00 00"));
+    x2.extend(cookie);
+    x2.extend(hex("00 00 00 00  00"));
     x2.extend_from_slice(&[0; 8]);
     server.handle_frame(&mut g.0, &x2).await.unwrap();
-    assert_eq!(server.streams.account_for(77), Some(1000));
+    // The join ticket is random, not the connection id.
+    let ticket = server.streams.ticket_for(77).expect("ticket");
+    assert_ne!(ticket, 0);
+    assert_eq!(server.streams.account_for(ticket), Some(1000));
+    assert_eq!(server.streams.account_for(77), None);
 
-    // Stream join with the game connection id as cookie -> accepted, linked to game conn 77.
+    // Stream join with the ticket -> accepted, linked to game conn 77.
     let mut s = stream_client(&server, 900);
-    s.recv(
-        &server,
-        &frame(ct::CT_JOIN, &hex("E8 03 00 00  4D 00 00 00")),
-    )
-    .await
-    .unwrap();
+    s.recv(&server, &join_frame(1000, ticket)).await.unwrap();
     assert_eq!(s.drain(), vec![hex("01 00 00")]);
     assert_eq!(s.conn.game_connection_id, Some(77));
     assert!(!s.conn.is_closing());
 
-    // The token is not consumed: a second stream connection may join too.
+    // The ticket is not consumed: a second stream connection may join too.
     let mut s2 = stream_client(&server, 901);
-    s2.recv(
-        &server,
-        &frame(ct::CT_JOIN, &hex("E8 03 00 00  4D 00 00 00")),
-    )
-    .await
-    .unwrap();
+    s2.recv(&server, &join_frame(1000, ticket)).await.unwrap();
     assert_eq!(s2.drain(), vec![hex("01 00 00")]);
 
-    // Unknown token -> response 1, connection stays open, not linked.
+    // The game connection id is not a ticket.
     let mut bad = stream_client(&server, 902);
-    bad.recv(
-        &server,
-        &frame(ct::CT_JOIN, &hex("E8 03 00 00  63 00 00 00")),
-    )
-    .await
-    .unwrap();
+    bad.recv(&server, &join_frame(1000, 77)).await.unwrap();
     assert_eq!(bad.drain(), vec![hex("01 00 01")]);
     assert_eq!(bad.conn.game_connection_id, None);
     assert!(!bad.conn.is_closing());
 
-    // Known token, wrong account -> response 1 and the token is removed (C# behaviour), so the
-    // legitimate account can no longer join with it.
-    bad.recv(
-        &server,
-        &frame(ct::CT_JOIN, &hex("05 00 00 00  4D 00 00 00")),
-    )
-    .await
-    .unwrap();
+    // Known ticket, wrong account -> response 1 and the owner's ticket stays usable (the C#
+    // removed the token, which let anyone break another player's stream session).
+    bad.recv(&server, &join_frame(5, ticket)).await.unwrap();
     assert_eq!(bad.drain(), vec![hex("01 00 01")]);
-    assert_eq!(server.streams.account_for(77), None);
+    assert_eq!(server.streams.account_for(ticket), Some(1000));
     let mut s3 = stream_client(&server, 903);
-    s3.recv(
-        &server,
-        &frame(ct::CT_JOIN, &hex("E8 03 00 00  4D 00 00 00")),
-    )
-    .await
-    .unwrap();
-    assert_eq!(s3.drain(), vec![hex("01 00 01")]);
+    s3.recv(&server, &join_frame(1000, ticket)).await.unwrap();
+    assert_eq!(s3.drain(), vec![hex("01 00 00")]);
+
+    // The ticket dies with the game connection.
+    server.streams.remove_token(77);
+    let mut s4 = stream_client(&server, 904);
+    s4.recv(&server, &join_frame(1000, ticket)).await.unwrap();
+    assert_eq!(s4.drain(), vec![hex("01 00 01")]);
 }
 
 #[tokio::test]
@@ -802,7 +800,7 @@ async fn unknown_packet_before_join_closes_the_connection() {
 async fn unknown_packet_after_join_is_ignored() {
     let server = test_server();
     let _g = game_connection(&server, 77);
-    server.streams.add_token(1000, 77);
+    server.streams.add_token_with_ticket(1000, 77, 77);
     let mut s = stream_client(&server, 900);
     s.recv(
         &server,
@@ -831,8 +829,19 @@ async fn unknown_packet_after_join_is_ignored() {
 async fn no_game_connection_or_active_char_is_fatal_for_ucc_requests() {
     let server = test_server();
     server.streams.ucc.insert(custom_ucc(9, 10));
+    // Not joined: only CTJoin is served, anything else closes the connection (the C# threw a
+    // NullReferenceException on connection.GameConnection).
+    let mut s = stream_client(&server, 899);
+    s.recv(&server, &frame(ct::CT_REQUEST_EMBLEM, &9u64.to_le_bytes()))
+        .await
+        .unwrap();
+    assert!(s.conn.is_closing());
+    // Joined to a game connection that has no active character.
+    let _g = game_connection(&server, 78);
+    assert!(server.streams.add_token_with_ticket(1001, 78, 78));
     let mut s = stream_client(&server, 900);
-    // Not joined: connection.GameConnection is null -> NullReferenceException in C#.
+    s.recv(&server, &join_frame(1001, 78)).await.unwrap();
+    assert_eq!(s.drain(), vec![hex("01 00 00")]);
     assert!(s
         .recv(&server, &frame(ct::CT_REQUEST_EMBLEM, &9u64.to_le_bytes()))
         .await
@@ -938,7 +947,11 @@ async fn cell_streaming_in_batches_of_30() {
 #[tokio::test]
 async fn null_world_serves_empty_cells() {
     let server = test_server();
+    let _g = game_connection(&server, 77);
+    server.streams.add_token_with_ticket(1000, 77, 77);
     let mut c = stream_client(&server, 900);
+    c.recv(&server, &join_frame(1000, 77)).await.unwrap();
+    assert_eq!(c.drain(), vec![hex("01 00 00")]);
     c.recv(
         &server,
         &frame(
@@ -1589,7 +1602,7 @@ fn real_stamp_maker_rows_resolve_to_expected_cost() {
 async fn socket_round_trip() {
     let server = Arc::new(test_server());
     let _g = game_connection(&server, 77);
-    server.streams.add_token(1000, 77);
+    server.streams.add_token_with_ticket(1000, 77, 77);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let task = tokio::spawn(super::listener::serve_listener(server.clone(), listener));
@@ -1695,4 +1708,164 @@ async fn socket_closes_connections_that_never_join() {
         assert_eq!(n, 0);
     }
     task.abort();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hardening (Rust addition)
+
+/// Before `CTJoin` only `CTJoin` is served: registered packets close the connection too.
+#[tokio::test]
+async fn registered_packets_before_join_close_the_connection() {
+    let server = test_server();
+    server.streams.ucc.insert(custom_ucc(9, 10));
+    for (opcode, body) in [
+        (
+            ct::CT_REQUEST_CELL,
+            hex("00 00 00 00  02 00 00 00  03 00 00 00"),
+        ),
+        (ct::CT_REQUEST_EMBLEM, 9u64.to_le_bytes().to_vec()),
+        (ct::CT_QUERY_CHAR_NAME, hex("07 00 00 00")),
+        (ct::CT_UCC_COMPLEX_CHECK_VALID, 9u64.to_le_bytes().to_vec()),
+    ] {
+        let mut s = stream_client(&server, 900);
+        s.recv(&server, &frame(opcode, &body)).await.unwrap();
+        assert!(s.conn.is_closing(), "opcode {opcode:#x}");
+        assert!(s.drain().is_empty(), "opcode {opcode:#x}");
+    }
+}
+
+/// A join attempt with the owner's account but a wrong ticket (or the other way round) neither
+/// joins nor invalidates the real ticket.
+#[tokio::test]
+async fn a_foreign_join_leaves_the_owners_ticket_usable() {
+    let server = test_server();
+    let _g = game_connection(&server, 77);
+    let ticket = server.streams.add_token(1000, 77).expect("ticket");
+    let mut attacker = stream_client(&server, 901);
+    for (account, guess) in [(5, ticket), (1000, ticket ^ 1), (1000, 77)] {
+        attacker
+            .recv(&server, &join_frame(account, guess))
+            .await
+            .unwrap();
+        assert_eq!(attacker.drain(), vec![hex("01 00 01")]);
+        assert!(!attacker.conn.is_joined());
+    }
+    let mut owner = stream_client(&server, 902);
+    owner
+        .recv(&server, &join_frame(1000, ticket))
+        .await
+        .unwrap();
+    assert_eq!(owner.drain(), vec![hex("01 00 00")]);
+    assert_eq!(owner.conn.game_connection_id, Some(77));
+}
+
+/// A custom upload declaring more than the cap is refused before anything is queued.
+#[tokio::test]
+async fn an_oversize_custom_upload_is_refused() {
+    let (server, mut c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let start = start_upload_body(PRINTER_OBJ, crate::stream::models::MAX_UCC_UPLOAD_BYTES + 1);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert!(c.drain().is_empty());
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+    // The cap itself is allowed.
+    let start = start_upload_body(PRINTER_OBJ, crate::stream::models::MAX_UCC_UPLOAD_BYTES);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+    assert_eq!(server.streams.ucc.parts_len(), 1);
+}
+
+/// A part that carries the upload past its declared size drops the upload and the connection.
+#[tokio::test]
+async fn a_part_beyond_the_declared_size_drops_the_upload() {
+    let (server, mut c, _g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let start = start_upload_body(PRINTER_OBJ, 5);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+    assert_eq!(server.streams.ucc.parts_len(), 1);
+    let res = c
+        .recv(
+            &server,
+            &frame(
+                ct::CT_UPLOAD_EMBLEM_STREAM,
+                &hex("05 00 00 00  06 00 00 00  00 00 00 00  06 00  01 02 03 04 05 06"),
+            ),
+        )
+        .await;
+    assert!(res.is_err());
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+}
+
+/// Pending upload / download state does not outlive the stream connection.
+#[tokio::test]
+async fn ucc_state_is_dropped_when_the_stream_connection_closes() {
+    use tokio::io::AsyncWriteExt;
+
+    let (server, _c, _g) = joined(Arc::new(TestWorld::default())).await;
+    server.streams.ucc.insert(custom_ucc(9, 10));
+    let server = Arc::new(server);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(super::listener::serve_listener(server.clone(), listener));
+
+    let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut out = bytes(|s| {
+        s.write_u16(10)
+            .write_u16(ct::CT_JOIN)
+            .write_u32(1000)
+            .write_u32(77);
+    });
+    out.extend(bytes(|s| {
+        s.write_u16(10)
+            .write_u16(ct::CT_REQUEST_EMBLEM)
+            .write_u64(9);
+    }));
+    sock.write_all(&out).await.unwrap();
+    for _ in 0..100 {
+        if server.streams.ucc.download_queue_len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(server.streams.ucc.download_queue_len(), 1);
+
+    drop(sock);
+    for _ in 0..100 {
+        if server.streams.ucc.download_queue_len() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(server.streams.ucc.download_queue_len(), 0);
+    task.abort();
+}
+
+/// The live cell requests of one connection are capped; the oldest makes room.
+#[tokio::test]
+async fn live_cell_requests_are_capped_per_connection() {
+    use crate::stream::connection::MAX_LIVE_CELL_REQUESTS;
+
+    let server = test_server();
+    let mut s = stream_client(&server, 900);
+    let first = s.conn.next_request_id(vec![doodad(1)]);
+    let mut last = first;
+    for _ in 0..(MAX_LIVE_CELL_REQUESTS * 3) {
+        last = s.conn.next_request_id(vec![doodad(1)]);
+    }
+    assert_eq!(s.conn.request_count(), MAX_LIVE_CELL_REQUESTS);
+    assert!(s.conn.request(first).is_none());
+    assert!(s.conn.request(last).is_some());
 }

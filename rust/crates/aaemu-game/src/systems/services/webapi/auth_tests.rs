@@ -341,3 +341,72 @@ fn configuration_defaults_and_diagnostics_do_not_expose_the_key() {
     assert!(!format!("{config:?}").contains(TEST_KEY));
     assert!(!format!("{:?}", authenticated(post("/api/mail/send", "{}"))).contains(TEST_KEY));
 }
+
+/// A request body that records whether anyone polled it.
+fn watched_body(len: usize) -> (Body, Arc<std::sync::atomic::AtomicBool>) {
+    let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = polled.clone();
+    let stream = futures::stream::once(async move {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok::<_, std::convert::Infallible>(Bytes::from(vec![b'x'; len]))
+    });
+    (Body::from_stream(stream), polled)
+}
+
+#[tokio::test]
+async fn an_unauthenticated_request_never_has_its_body_read() {
+    let server = Arc::new(test_server());
+    let api = Arc::new(api(&server, Some(TEST_KEY)));
+    for credential in [None, Some("Bearer synthetic-webapi-bad-key")] {
+        let (body, polled) = watched_body(16);
+        let mut builder = Request::builder().method("POST").uri("/api/mail/send");
+        if let Some(credential) = credential {
+            builder = builder.header("authorization", credential);
+        }
+        let response = dispatch(State(api.clone()), builder.body(body).unwrap()).await;
+        assert_eq!(response.status(), 401);
+        assert!(
+            !polled.load(std::sync::atomic::Ordering::SeqCst),
+            "the body of an unauthorized request was read"
+        );
+    }
+    // The public status route needs no body and an unknown route is a 404: neither reads it.
+    let (body, polled) = watched_body(16);
+    let request = Request::builder()
+        .method("GET")
+        .uri("/status")
+        .body(body)
+        .unwrap();
+    assert_eq!(dispatch(State(api.clone()), request).await.status(), 200);
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    let (body, polled) = watched_body(16);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/nowhere")
+        .body(body)
+        .unwrap();
+    assert_eq!(dispatch(State(api.clone()), request).await.status(), 404);
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn an_authenticated_body_is_capped() {
+    let server = Arc::new(test_server());
+    let api = Arc::new(api(&server, Some(TEST_KEY)));
+    let build = |len: usize| {
+        let (body, _) = watched_body(len);
+        Request::builder()
+            .method("POST")
+            .uri("/api/mail/send")
+            .header("authorization", "Bearer synthetic-webapi-test-key")
+            .body(body)
+            .unwrap()
+    };
+    // Over the cap: refused before the controller sees anything.
+    let response = dispatch(State(api.clone()), build(MAX_BODY_BYTES + 1)).await;
+    assert_eq!(response.status(), 413);
+    // Within the cap the request reaches the controller (which rejects the junk JSON itself).
+    let response = dispatch(State(api.clone()), build(1024)).await;
+    assert_ne!(response.status(), 413);
+    assert_ne!(response.status(), 401);
+}

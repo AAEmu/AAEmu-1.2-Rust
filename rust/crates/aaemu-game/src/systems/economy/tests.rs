@@ -1606,6 +1606,8 @@ async fn expand_bag_and_bank() {
 #[tokio::test]
 async fn swap_between_bag_and_bank() {
     let mut w = world();
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
     let pa = w.pa.clone();
     let a = give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
     let b = give(&w, &pa, slot_type::BANK, SINGLE, 1, 4);
@@ -1616,4 +1618,81 @@ async fn swap_between_bag_and_bank() {
     assert_eq!(item_at(&pa, 3, 4).unwrap().slot_type, slot_type::BANK);
     let f = w.a.drain();
     assert_eq!(f.len(), 1);
+}
+
+fn set_item(p: &PlayerRef, st: u8, id: u64, f: impl FnOnce(&mut Item)) {
+    let c = Inv::of(p).get(st).unwrap();
+    let mut c = c.lock().unwrap();
+    f(c.get_item_by_id_mut(id).expect("item"));
+}
+
+#[tokio::test]
+async fn merging_needs_the_same_grade_and_flags() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let a = give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
+    let b = give(&w, &pa, slot_type::INVENTORY, STACK, 2, 1);
+    // A higher-grade / unbound target must not absorb a soulbound or lower-grade stack.
+    set_item(&pa, slot_type::INVENTORY, a, |i| i.grade = 3);
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(b, a, 2, 1, 2, 0).as_bytes());
+    assert_eq!(item_at(&pa, 2, 0).unwrap().id, b);
+    assert_eq!(item_at(&pa, 2, 1).unwrap().id, a);
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 2);
+    assert_eq!(item_at(&pa, 2, 1).unwrap().count, 3);
+    set_item(&pa, slot_type::INVENTORY, a, |i| i.grade = 0);
+    set_item(&pa, slot_type::INVENTORY, b, |i| i.flags = 1);
+    w.a.drain();
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(b, a, 2, 0, 2, 1).as_bytes());
+    assert_eq!(item_at(&pa, 2, 0).unwrap().id, a);
+    assert_eq!(item_at(&pa, 2, 1).unwrap().count, 2);
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 3);
+    // Identical stacks still merge.
+    set_item(&pa, slot_type::INVENTORY, b, |i| i.flags = 0);
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(b, a, 2, 1, 2, 0).as_bytes());
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 5);
+    assert!(item_at(&pa, 2, 1).is_none());
+}
+
+#[tokio::test]
+async fn moves_outside_the_container_size_are_refused() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let a = give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
+    let free = Inv::of(&pa).bag().lock().unwrap().free_slot_count();
+    let size = Inv::of(&pa).bag().lock().unwrap().size();
+    assert!(size > 0 && size < 200);
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(a, 0, 2, 0, 2, 200).as_bytes());
+    let mut s = move_body(a, 0, 2, 0, 2, 200);
+    s.write_i32(1);
+    run::<CSSplitBagItemPacket>(&mut w, 0, s.as_bytes());
+    let bag = Inv::of(&pa).bag();
+    let bag = bag.lock().unwrap();
+    assert_eq!(bag.free_slot_count(), free);
+    assert_eq!(bag.items.len(), 1);
+    assert_eq!(bag.items[0].slot, 0);
+    assert_eq!(bag.items[0].count, 3);
+}
+
+#[tokio::test]
+async fn warehouse_item_moves_need_a_banker_in_range() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let a = give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
+    let b = give(&w, &pa, slot_type::BANK, SINGLE, 1, 4);
+    // Without a banker the swap and the split are refused and nothing moves.
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(a, b, 2, 0, 3, 4).as_bytes());
+    let mut s = move_body(a, 0, 2, 0, 3, 7);
+    s.write_i32(1);
+    run::<CSSplitBagItemPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(item_at(&pa, 2, 0).unwrap().id, a);
+    assert_eq!(item_at(&pa, 3, 4).unwrap().id, b);
+    assert!(item_at(&pa, 3, 7).is_none());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 2);
+    assert!(f.iter().all(|x| x.0 == sc::SCErrorMsgPacket));
+    // With the banker in range the same swap works.
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    pa.data().unit.current_interaction_object = 0x300;
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(a, b, 2, 0, 3, 4).as_bytes());
+    assert_eq!(item_at(&pa, 3, 4).unwrap().id, a);
 }

@@ -1285,14 +1285,17 @@ fn respawn_after_kill(
             true,
         );
     } else {
-        killer.send(SCTeleportUnitPacket {
-            reason: 0,
-            error_message: 0,
-            x: spawn.x,
-            y: spawn.y,
-            z: spawn.z,
-            z2: f32::from(spawn.rotation_z),
-        });
+        crate::world::session::send_teleport_unit(
+            killer,
+            SCTeleportUnitPacket {
+                reason: 0,
+                error_message: 0,
+                x: spawn.x,
+                y: spawn.y,
+                z: spawn.z,
+                z2: f32::from(spawn.rotation_z),
+            },
+        );
     }
     full_points(server, killer);
     crate::systems::skills::buffs::remove_all_effects(server, &kobj);

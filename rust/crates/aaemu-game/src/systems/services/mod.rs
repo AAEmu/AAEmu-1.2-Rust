@@ -113,6 +113,8 @@ pub struct System {
     pub radar: radar::RadarManager,
     /// `SusManager`.
     pub sus: sus::SusManager,
+    /// The server-side movement guard (`world::move_guard`).
+    pub move_guard: crate::world::move_guard::MoveGuard,
     /// Account payment persistence (WP-B); MySQL when nothing is installed.
     pub premium_store: HookSlot<dyn premium::PremiumStore>,
     /// `WebApiService`.
