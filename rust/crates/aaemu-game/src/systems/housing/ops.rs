@@ -602,7 +602,8 @@ pub fn demolish(
     update_house_faction(server, house, FACTION_MONSTROSITY);
     set_for_sale_markers(server, house, false);
     house.data().is_dirty = true;
-    // TODO (C#): better house killing handling
+    // The house is killable; its death runs `remove_dead_house` (`House.OnDeath`), so only
+    // queue the id here.
     manager.mark_removed(id);
     super::dominion::fort::refresh_for_house(server, house);
 }
@@ -723,7 +724,8 @@ pub fn return_house_items_with_payment(
 
     // If returning items because of a new House Owner, then don't include the design
     if new_owner.is_none() {
-        // TODO (C#): proper grades for design / Full-Kit demolition
+        // 1.2 design items are fixed_grade -1 and no 1.2 text names a Full-Kit, so the plain
+        // design return carries every grade there is.
         let design_item_id = data.item_id_by_design(template.id, |id| {
             server.game_data.items.template(id).is_some()
         });
@@ -1458,7 +1460,8 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
     update_house_faction(server, &house, char_faction);
     update_tax_info(server, &house); // send tax due mails etc. if needed ...
 
-    // TODO (C#): broadcast changes
+    // SCHouseSold to the observers, SCMyHouse to the buyer, SCMyHouseRemoved to the previous
+    // owner.
     let name = house.data().unit.name.clone();
     broadcast(
         server,

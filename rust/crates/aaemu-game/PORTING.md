@@ -159,7 +159,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Core/Packets/G2C` | `packets/g2c.rs`, `packets/world.rs` | partial | Lobby packets + every packet sent by the phase-2 paths (≈45, byte-exact tests). `SCLoginCharInfoHouse`, `SCMyHouse`, item tasks, buff packets todo. |
 | `Core/Packets/Proxy` | `packets/proxy.rs` | done | All registered proxy packets (most are inert in C# too). |
 | `Core/Packets/CompressedGamePackets`, `Debug` | – | todo | |
-| `Core/Managers/World/EnterWorldManager` | `managers/enter_world.rs`, `world/session.rs` | done | AddAccount, Login, Leave (all targets), LeaveWorldTask (mates/slaves/coffers/quest timers are no-ops: not ported). |
+| `Core/Managers/World/EnterWorldManager` | `managers/enter_world.rs`, `world/session.rs` | done | AddAccount, Login, Leave (all targets), LeaveWorldTask (unboards transfers and despawns owned mates/slaves in `systems::vehicles::on_leave_world`, closes coffers and wipes the economy per-character state, removes quest timers; all ported). |
 | `Core/Managers/AccountManager` | `managers/account.rs`, `db.rs`, `systems/services/accounts.rs` | done | Add (login time + timed rewards), Remove/Contains/Count, GetAccountDetails, UpdateLoginTime, AddCredits/RemoveCredits/AddLoyalty/UpdateLabor/UpdateTickTimes/UpdateDivineClock/GetDivineClock under the per-account lock, RemoveDeadConnections (30 s tick). See `systems::services`. |
 | `Core/Managers/FeaturesManager`, `Models/Game/Features` | `data/features.rs` | done | |
 | `content_configs` (client `LoadContentConfigValueArray`) | `data/content_configs.rs` | done | All 53 rows by **id** (the client's key) into `GameData.content_configs`; `content_config(id) -> Option<i64>`, the point lookup `load_content_config` stays for the loaders that read one id (re-exported from `systems::skills::data::misc`). Ids 37 (1,000,000 copper per tax certificate) / 57 (28,085 appraisal certificate) now drive the housing sale and tax helpers, with the old constants as fallbacks; ids 38 (1,000) and 39 (200) are loaded but stay UNKNOWN (RE-2, no behaviour). |
@@ -3563,10 +3563,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   debited scroll; before, the scroll was lost. The cast-path tests
   (`grade_enchant_cast_refunds_the_scroll_*`) drive `CSStartSkillPacket` and assert the
   scroll count.
-* systems::economy / skills (renew and physical enchant, 2026-11, stage 1): the C#
-  `RenewEquipment` (57), `PhysicalEnchantWeapon` (20) and `PhysicalEnchantArmor` (21) actions only
-  logged. **Renew** ports the 1.2 client's pair predicate `FUN_397cca90` (`X2RenewItem.Renew` ->
-  `FUN_394e92d0`): armor needs a `base_equipment` source and a non-`base_equipment` target with
+* systems::economy / skills (renew and physical enchant, 2026-11, stage 1): **vestigial in the
+  1.2 DB, no client consumer.** The tables (`physical_enchant_abilities`, 86 rows, 11 NPCs; one
+  `doodad_func_renew_items` row), the skills and the English NPC dialog texts exist, but no 1.2
+  client UI, opcode or skill user consumes them; per the owner, EU 1.2 had regrade only (the
+  working grade-enchant system above). The C# `RenewEquipment` (57),
+  `PhysicalEnchantWeapon` (20) and `PhysicalEnchantArmor` (21) actions only logged. **Renew**
+  ports the 1.2 client's pair predicate `FUN_397cca90` (`X2RenewItem.Renew` -> `FUN_394e92d0`):
+  armor needs a `base_equipment` source and a non-`base_equipment` target with
   the same armor-type record; a weapon needs the same holdable slot type and renew category, with
   the renew category in 1..3. The client's toast ids are sent for the same refusals (20 slot out
   of range, 27 item missing, 206 not a bag item, 1 not a renewable pair).
@@ -7806,7 +7810,7 @@ except the new, still unsent 0x07e definition.
 | special effects 76-78 (ClearProjectile, RetrieveProjectile, AddFxToProjectile) | client-only | 26 / 8 / 7 rows; projectile visuals the client owns. |
 | special effect 19 (SpawnBomb) | retired content (not a gap) | 2 rows (skills 10492 "Install Bomb" / 10503 "Summon Bomb", `value1` npc 376 "Bomb"); npc 376 and buffs 2019 / 3177 ("bomb-dropping robot" / "cleaned robot") look like retired test/event content, and 10.x has no SpawnBomb symbol (`round6-trial-effects-controllers.md` 2, 10.x negative). The `SCBombUpdated` 0xaa reader remains defined (`FUN_397c6a10`, `dll.c:1721438`, `bc bombId`); do not schedule. |
 | special effects 84 / 88 / 89 (ReportBotArrested, ApplyBotTrial, ArrestBot) | wont (owner 2026-11-08) | 84 is fired by `buff_triggers` 3194 on the buff-4894 "Subdued" timeout, not orphaned (correcting `round6-trial-effects-controllers.md` 1.1); 88/89 are the objection / arrest skills of the same bot flow. The owner decided on 2026-11-08 not to implement bot arrest or bot trial, now or in future (`round6-trial-larceny-2.md` 1). `SCBotSuspectArrested` / `SCSuspectGoingBotTrial` stay typed and unsent (`systems/social/packets/trial.rs:319-320`). |
-| special effects 20 / 21 / 57 (PhysicalEnchantWeapon / Armor, RenewEquipment) | done elsewhere | Implemented by `feat/items9` (`systems/skills/effects/special/mod.rs:312-313`, `:338`). |
+| special effects 20 / 21 / 57 (PhysicalEnchantWeapon / Armor, RenewEquipment) | vestigial in the 1.2 DB (owner) | Data, skills and English dialog texts exist, but no 1.2 client UI/opcode/skill user consumes them; EU 1.2 had regrade only (owner). Stage-1 handlers stay (`systems/skills/effects/special/mod.rs:312-313`, `:338`) but only a GM / modified client can reach them. |
 | `CSQuestStartWith` 0x0db | no 1.2 trigger (log-only correct) | Client writer `FUN_397c5450` (`dll.c:1720446`) + `FUN_397be540` (`dll.c:1715866`, `u8 type` tail). Only two send sites: type 2 level-up, `FUN_39378660` (`dll.c:719962`, call at `:720032`), and type 3 NPC emotion, `FUN_39378930` (`dll.c:720132`, call at `:720204`); types 1 / 4 are never sent. The server already starts level-up quests (`systems/quests/events.rs:970`); the single emotion act 20923 points at missing component 15266 (orphan). Reader and log-only handler: `systems/quests/packets.rs:533-595`. |
 | `SCShowQuestArea` 0x1af | debug-only | Reader `FUN_397b7940` (`dll.c:1710613`) = `u32 questType`, `Area{i64,i64,f32}`, `f32 radius`; handler `FUN_391df7b0` (`dll.c:372352`) -> `FUN_393840b0` (`dll.c:731288`) stores `{questType, LOCAL PLAYER position, radius}` and ignores the packet's area; `FUN_393822f0` (`dll.c:729680`) draws each entry as a debug sphere labelled `"stype: %u"` (`dll.c:729703`). Keep defined-only (`systems/quests/ui_packets.rs:15-46`). |
 | `SCQuestAcceptConditional` 0x14a | sent (INFERRED trigger) | Reader `FUN_397b5d80` (`dll.c:1709358`) = `u32 sphereId, u32 questContextId`; handler `FUN_391dbed0` (`dll.c:369454`) -> `FUN_39376690` (`dll.c:718056`) raises event 0xec `START_QUEST_CONTEXT_SPHERE`; the native sender `FUN_393762c0` (`dll.c:717811`) validates NPC/doodad reach and the sphere id, then sends `CSStartQuestContext` 0xd5. The 4 `SphereAcceptQuest` spheres (1040, 1453, 1520, 2236) offer the quests linked in `sphere_accept_quest_quests` (1956 / 4281 / 5730; only 5730 exists as a `quest_contexts` row, 1520 has no link); the 485 automatic `QuestActConAcceptSphere` starters are unchanged. See the quest-packet row above and `systems/quests/spheres.rs::tick_area_spheres`. |
