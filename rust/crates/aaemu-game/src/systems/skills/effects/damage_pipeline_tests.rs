@@ -1752,3 +1752,209 @@ async fn damage_pipeline_range_penalty_dot_uses_the_application_distance() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Height damage multiplier (`formulas` row 11, `damage_multiplier_by_height`).
+
+const HEIGHT_ROW: u32 = 11;
+const HEIGHT_FORMULA: &str = "if_negative(range - 1, 1, 1.05 + (min(range, 100)/100))";
+
+fn height_data() -> GameData {
+    let mut data = fixture_data();
+    data.formulas.insert_formula(HEIGHT_ROW, HEIGHT_FORMULA);
+    data
+}
+
+/// The level-damage row gives a deterministic 100 base; only the effect's own
+/// `adjust_damage_by_height` flag scopes formula row 11.
+fn height_damage_effect(id: u32) -> DamageEffect {
+    let mut effect = level_damage_effect(id);
+    effect.adjust_damage_by_height = true;
+    effect
+}
+
+/// Attacker 10 m above the target: `1.05 + 10/100` = x1.15 (formula row 11). Below 1 m and
+/// below the target the row's `if_negative(range - 1, ...)` keeps x1, for every damage type.
+#[tokio::test]
+async fn damage_pipeline_height_bonus_scales_attacks_from_higher_ground() {
+    for (damage_type, height, expected) in [
+        (1, 10.0, 115),
+        (2, 10.0, 115),
+        (4, 10.0, 115),
+        (1, 0.5, 100),
+        (1, -10.0, 100),
+        (1, 100.0, 205),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(height_data());
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + height);
+        let mut effect = height_damage_effect(1);
+        effect.damage_type = damage_type;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "damage type {damage_type} at {height} m height difference"
+        );
+        assert_eq!(npc.data().unit.hp, 1000 - expected);
+    }
+}
+
+/// The factor is the `formulas` row's text, not a hard-coded 1.05 / 100; without the row the
+/// hit is unchanged (a failed lookup returns x1).
+#[tokio::test]
+async fn damage_pipeline_height_bonus_rate_comes_from_the_formula_row() {
+    for (formula, expected) in [
+        (HEIGHT_FORMULA, 115),
+        ("if_negative(range - 5, 1, 1 + (min(range, 100)/10))", 200),
+    ] {
+        let mut data = fixture_data();
+        data.formulas.insert_formula(HEIGHT_ROW, formula);
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+        player.data().unit.transform.set_xyz(100.0, 100.0, 110.0);
+        let effect = height_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "formula {formula}"
+        );
+    }
+
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    player.data().unit.transform.set_xyz(100.0, 100.0, 110.0);
+    let effect = height_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// The 34 `adjust_damage_by_height = 'f'` rows are the exception: the same higher ground does
+/// not scale a row without the flag.
+#[tokio::test]
+async fn damage_pipeline_height_bonus_honours_the_effect_flag() {
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(height_data());
+    player.data().unit.transform.set_xyz(100.0, 100.0, 110.0);
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// Authored fixed values and percent-of-HP rows are excluded, as with the level bonus and the
+/// archery range penalty.
+#[tokio::test]
+async fn damage_pipeline_height_bonus_keeps_fixed_and_percent_rows() {
+    for (label, mut effect) in [
+        ("fixed", skills::tests::damage_effect(1, 100)),
+        ("percent", percent_damage_effect(10)),
+    ] {
+        effect.adjust_damage_by_height = true;
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(height_data());
+        player.data().unit.transform.set_xyz(100.0, 100.0, 110.0);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            100,
+            "{label} row 10 m above must keep its authored value"
+        );
+    }
+}
+
+/// Every caster kind qualifies (the row names no player / NPC variable): an NPC attacking a
+/// player from 10 m above gets x1.15 like a player would. The NPC `LevelDps` is supplied by the
+/// same hook the NPC subsystem uses, so the base is the deterministic 100.
+struct NpcLevelDps;
+impl skills::ext::NpcSkillHooks for NpcLevelDps {
+    fn npc_attribute(&self, _: &GameServer, _: &Npc, attr: StatKind) -> Option<f64> {
+        (attr == StatKind::LevelDps).then_some(100.0)
+    }
+}
+
+#[tokio::test]
+async fn damage_pipeline_height_bonus_applies_to_npc_casters() {
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(height_data());
+    server
+        .systems
+        .skills
+        .ext
+        .npcs
+        .install(Arc::new(NpcLevelDps));
+    npc.data().unit.transform.set_xyz(100.0, 100.0, 110.0);
+    let effect = height_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&npc).into(), (&player).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, npc.obj_id, player.obj_id).0, 115);
+    assert_eq!(player.data().unit.hp, 1000 - 115);
+}
+
+/// A DoT tick uses the height factor of the moment the buff was applied, like the archery
+/// close-range factor: applying 10 m above ticks at x1.15 after the caster descends, and
+/// applying level then rising does not add the bonus to later ticks.
+#[tokio::test]
+async fn damage_pipeline_height_bonus_dot_uses_the_application_height() {
+    for (apply_height, tick_height, expected) in [(10.0, 0.0, 115), (0.0, 10.0, 100)] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+            let mut data = dot_data(height_damage_effect(DOT_EFFECT), 1_000, 1_000.0);
+            data.formulas.insert_formula(HEIGHT_ROW, HEIGHT_FORMULA);
+            data
+        });
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + apply_height);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index = apply_tick_buff(&server, &caster, &target, DOT_BUFF);
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + tick_height);
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied {apply_height} m above, ticked {tick_height} m above"
+        );
+    }
+}

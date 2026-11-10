@@ -40,6 +40,10 @@ pub struct EffectSource {
     /// skill was evaluated once when the buff was applied, so the tick does not use its own
     /// distance. `None` for direct effects and buff triggers.
     pub range_multiplier: Option<f32>,
+    /// A buff tick's `Buff.height_damage_multiplier` (`formulas` row 11): the attacker's height
+    /// advantage at the moment the buff was applied, frozen like the close-range factor.
+    /// `None` for direct effects and buff triggers.
+    pub height_multiplier: Option<f32>,
     pub amount: i32,
     pub is_trigger: bool,
     /// The live buff instance is endless (duration 0, endless tick count): it has no authored

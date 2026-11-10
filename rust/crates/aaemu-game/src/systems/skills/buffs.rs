@@ -622,6 +622,13 @@ pub fn apply_template(
             skill.template.id,
         );
     }
+    // The height factor is scoped by the damage effect's own flag, not by the skill; capture
+    // it from the application positions for every caster (a DoT tick keeps the application
+    // height, like it keeps the close-range factor above).
+    if let Some(caster) = caster {
+        b.height_damage_multiplier =
+            super::effects::combat::height_multiplier_at_application(server, caster, target);
+    }
     add_buff(server, target, b, 0, 0);
 }
 
@@ -1516,6 +1523,7 @@ fn time_to_time_apply(
         source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
         source.source_skill_id = Some(b.skill_id).filter(|id| *id != 0);
         source.range_multiplier = Some(b.range_damage_multiplier);
+        source.height_multiplier = Some(b.height_damage_multiplier);
         let args = EffectArgs {
             caster: caster.cloned(),
             caster_caster: buff_skill_caster(b),
@@ -1597,6 +1605,7 @@ pub(crate) fn do_area_tick(
             source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
             source.source_skill_id = Some(b.skill_id).filter(|id| *id != 0);
             source.range_multiplier = Some(b.range_damage_multiplier);
+            source.height_multiplier = Some(b.height_damage_multiplier);
             let args = EffectArgs {
                 caster: Some(caster.clone()),
                 caster_caster: buff_skill_caster(b),
@@ -2294,6 +2303,7 @@ fn execute_trigger(
                 buff: Some(template.clone()),
                 source_skill_id: None,
                 range_multiplier: None,
+                height_multiplier: None,
                 amount,
                 is_trigger: true,
                 buff_permanent: false,
@@ -2311,6 +2321,7 @@ fn execute_trigger(
                 buff: None,
                 source_skill_id: None,
                 range_multiplier: None,
+                height_multiplier: None,
                 amount: 0,
                 is_trigger: false,
                 buff_permanent: false,

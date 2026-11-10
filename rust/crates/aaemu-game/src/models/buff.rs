@@ -82,6 +82,10 @@ pub struct Buff {
     /// buff, captured at the application distance; its damage ticks use it instead of the
     /// distance at tick time. Runtime only: a buff restored from the database starts at 1.0.
     pub range_damage_multiplier: f32,
+    /// The height multiplier (`formulas` row 11) at the moment this buff was applied, used by
+    /// its damage ticks whose damage effect sets `adjust_damage_by_height`. Runtime only: a
+    /// buff restored from the database starts at 1.0.
+    pub height_damage_multiplier: f32,
 }
 
 /// `EffectState`.
@@ -123,6 +127,7 @@ impl Buff {
             exit_replace: false,
             session_only: false,
             range_damage_multiplier: 1.0,
+            height_damage_multiplier: 1.0,
             permanent: false,
         }
     }

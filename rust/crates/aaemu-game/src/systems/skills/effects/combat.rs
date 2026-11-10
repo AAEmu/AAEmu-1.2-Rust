@@ -240,6 +240,69 @@ pub(crate) fn range_multiplier_for_skill(
     }
 }
 
+/// `formulas` row 11 `damage_multiplier_by_height`:
+/// `if_negative(range - 1, 1, 1.05 + min(range, 100) / 100)`.
+///
+/// Applies only to damage effects whose `damage_effects.adjust_damage_by_height` is set
+/// (3642 of the 3676 1.2 rows; the 34 `f` rows are the exception). The `range` variable is
+/// the attacker's height above the target in metres: the 10.x evaluator feeds row 11 through
+/// the generic `range` slot (variable index 8, offset 80; `sub_39D3B840` case 11 at
+/// Z:2895483-2895494) and the row's own name says "by height" (`re-10x-open-items.md` A.3). The direction is
+/// **inferred**: the 1.2 client never evaluates the row (no `FormulaManager` accessor for
+/// kinds 2, 3, 11, 12, 20, 21, 24-26; `research-data-rules.md` §1) and the world-side input
+/// is not in any 10.x binary (`verify-claims-10x.md` 11b). A value of 0 or below keeps x1
+/// (the row returns 1 when `range - 1 < 0`), so an attacker at or below the target is never
+/// scaled down. Every caster qualifies (players, NPCs, spells): the row names no
+/// player / NPC variable. A missing or broken row leaves the hit unchanged.
+///
+/// A buff tick uses the factor its buff captured when it was applied
+/// (`EffectSource::height_multiplier`), like the archery range factor: the height advantage
+/// belongs to the moment of the application. A buff restored from the database starts at 1.0.
+fn height_damage_multiplier(
+    server: &GameServer,
+    e: &DamageEffect,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    source: &EffectSource,
+) -> f32 {
+    if !e.adjust_damage_by_height {
+        return 1.0;
+    }
+    if let Some(stored) = source.height_multiplier {
+        return stored;
+    }
+    height_multiplier_at_application(server, caster, trg)
+}
+
+/// The row-11 factor at the caster's current height above the target. Also used when a buff
+/// is applied, to store the factor its damage ticks will use.
+pub(crate) fn height_multiplier_at_application(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+) -> f32 {
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageMultiplierByHeight)
+    else {
+        return 1.0;
+    };
+    // World positions, so a unit on a ship / mount uses the parent's composed position like the
+    // skill-range check does.
+    let caster_z = geometry::world_pos(server, &Target::Obj(caster.clone())).z;
+    let target_z = geometry::world_pos(server, &Target::Obj(trg.clone())).z;
+    let params: HashMap<&str, f64> = [("range", f64::from(caster_z - target_z))]
+        .into_iter()
+        .collect();
+    let multiplier = formula.evaluate(&params) as f32;
+    if multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    }
+}
+
 /// Damage reflection of a landed hit (`buffs.reflection_*`).
 ///
 /// Applied through [`unit_combat::reduce_current_hp`] only: the attacker takes the reflected
@@ -664,8 +727,9 @@ pub(super) fn damage_with_aoe(
     if caster.as_player().is_some() && trg.as_player().is_some() {
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
     }
-    // Player -> NPC level bonus (formulas row 20) and the archery close-range penalty
-    // (formulas row 12), next to the other flat damage multipliers.
+    // Player -> NPC level bonus (formulas row 20), the archery close-range penalty
+    // (formulas row 12) and the height advantage (formulas row 11), next to the other flat
+    // damage multipliers.
     // Authored fixed values and percent-of-HP rows keep their exact value; the bonuses scale
     // only the weapon / level damage base. A non-fixed DoT row gets them like a direct hit;
     // heals use `heal()` and never reach this function (compact `damage_effects` has no `Heal`
@@ -673,6 +737,7 @@ pub(super) fn damage_with_aoe(
     if !e.use_fixed_damage && !e.use_percent_damage {
         final_damage *= level_damage_multiplier(server, &caster, &trg);
         final_damage *= range_damage_multiplier(server, &caster, &trg, &args.source);
+        final_damage *= height_damage_multiplier(server, e, &caster, &trg, &args.source);
     }
     let flex_bonus = (flexibility / 100) as f32;
     match hit_type {
@@ -1173,6 +1238,11 @@ pub fn buff_effect(server: &GameServer, e: &BuffEffect, args: &EffectArgs<'_>) {
     if let (Some(caster), Some(skill)) = (args.caster.as_ref(), args.source.skill()) {
         b.range_damage_multiplier =
             range_multiplier_for_skill(server, caster, &target, skill.template.id);
+    }
+    // The height factor belongs to the application too. It is scoped by the damage effect's own
+    // `adjust_damage_by_height` flag, not by the skill, so it is captured for every caster.
+    if let Some(caster) = args.caster.as_ref() {
+        b.height_damage_multiplier = height_multiplier_at_application(server, caster, &target);
     }
     buffs::add_buff(server, &target, b, 0, 0);
     let relation = args.caster.as_ref().map_or(RelationState::Neutral, |c| {
