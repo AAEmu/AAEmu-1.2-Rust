@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use aaemu_commons::{Marshal, PacketStream};
 use chrono::{Duration, TimeZone, Utc};
 
+use crate::data::features::Feature;
 use crate::data::items::ItemTemplate;
 use crate::models::container::slot_type;
 use crate::models::item::Item;
@@ -146,9 +147,20 @@ fn money(p: &PlayerRef) -> i64 {
 }
 
 fn post_body(item_id: u64, start: i32, buyout: i32, duration: u8) -> Vec<u8> {
+    post_body_with_ids(item_id, start, buyout, duration, 0x200, 0x200)
+}
+
+fn post_body_with_ids(
+    item_id: u64,
+    start: i32,
+    buyout: i32,
+    duration: u8,
+    id: u32,
+    id2: u32,
+) -> Vec<u8> {
     let mut s = PacketStream::new();
-    s.write_bc(0x200)
-        .write_bc(0x200)
+    s.write_bc(id)
+        .write_bc(id2)
         .write_u64(item_id)
         .write_i32(start)
         .write_i32(buyout)
@@ -186,8 +198,12 @@ fn write_client_lot(s: &mut PacketStream, id: u64) {
 }
 
 fn bid_body(lot_id: u64, money: i32) -> Vec<u8> {
+    bid_body_with_ids(lot_id, money, 0x200, 0x200)
+}
+
+fn bid_body_with_ids(lot_id: u64, money: i32, id: u32, id2: u32) -> Vec<u8> {
     let mut s = PacketStream::new();
-    s.write_bc(0x200).write_bc(0x200);
+    s.write_bc(id).write_bc(id2);
     write_client_lot(&mut s, lot_id);
     s.write_u64(lot_id)
         .write_u8(1)
@@ -233,8 +249,12 @@ fn cancel_body(lot_id: u64) -> Vec<u8> {
 }
 
 fn search_body(search: &AuctionSearch) -> Vec<u8> {
+    search_body_with_ids(search, 0x200, 0x200)
+}
+
+fn search_body_with_ids(search: &AuctionSearch, id: u32, id2: u32) -> Vec<u8> {
     let mut s = PacketStream::new();
-    s.write_bc(0x200).write_bc(0x200);
+    s.write_bc(id).write_bc(id2);
     search.write(&mut s);
     s.into_bytes()
 }
@@ -1884,6 +1904,11 @@ async fn outbid_refund_mail_can_be_taken_all_and_deleted() {
 #[tokio::test]
 async fn auction_requires_an_auctioneer_in_range() {
     let (mut w, _log) = auction_world();
+    // With the HUD auction button off, the NPC guard applies as before.
+    w.server
+        .systems
+        .services
+        .set_feature(&w.server, Feature::HudAuctionButton as u8, false);
     let pa = w.pa.clone();
     let item_id = give(&w, &pa, slot_type::INVENTORY, POTION, 1, 0);
     // Wrong NPC id (no such NPC): refused with the auctioneer-too-far error.
@@ -1900,6 +1925,10 @@ async fn auction_requires_an_auctioneer_in_range() {
     let f = w.a.drain();
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+    assert_eq!(
+        i16::from_le_bytes([f[0].1[0], f[0].1[1]]),
+        crate::systems::economy::error_message::AUC_AUCTIONEER_TOO_FAR_AWAY
+    );
     // The real auctioneer works; moved out of range it does not.
     run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
     assert_eq!(w.server.systems.economy.auction.all_lots().len(), 1);
@@ -1909,6 +1938,55 @@ async fn auction_requires_an_auctioneer_in_range() {
     let f = w.a.drain();
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+    assert_eq!(
+        i16::from_le_bytes([f[0].1[0], f[0].1[1]]),
+        crate::systems::economy::error_message::AUC_AUCTIONEER_TOO_FAR_AWAY
+    );
+}
+
+/// The 1.2 client's HUD auction button (`right_button_set.alb` `CreateAuctionToggleBtn` /
+/// `ToggleAuctionWindow`) opens the auction window away from an auctioneer when the
+/// `hudAuctionButton` feature bit (81) is on, and it was usable by everyone (owner,
+/// 2026-11-11). With the bit on, post / search / bid with auctioneer ids 0 and no NPC near are
+/// accepted.
+#[tokio::test]
+async fn hud_auction_button_allows_post_search_and_bid_without_an_auctioneer() {
+    let (mut w, _log) = auction_world();
+    assert!(w
+        .server
+        .systems
+        .services
+        .features(&w.server)
+        .check(Feature::HudAuctionButton));
+    let pa = w.pa.clone();
+    // The auctioneer NPC (0x200) stands at x = 102; Alice is far away from it.
+    pa.data().unit.transform.set_xyz(300.0, 100.0, 100.0);
+    let item_id = give(&w, &pa, slot_type::INVENTORY, POTION, 1, 0);
+    w.a.drain();
+
+    // Post: accepted, listed and answered with SCAuctionPostedPacket.
+    run::<CSAuctionPostPacket>(&mut w, 0, &post_body_with_ids(item_id, 0, 1000, 1, 0, 0));
+    let lots = w.server.systems.economy.auction.all_lots();
+    assert_eq!(lots.len(), 1);
+    let lot = lots[0].clone();
+    let ops: Vec<u16> = w.a.drain().iter().map(|f| f.0).collect();
+    assert!(ops.contains(&sc::SCAuctionPostedPacket), "{ops:?}");
+
+    // Search: answered with the searched list.
+    run::<CSAuctionSearchPacket>(
+        &mut w,
+        1,
+        &search_body_with_ids(&AuctionSearch::default(), 0, 0),
+    );
+    let frames = w.b.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, sc::SCAuctionSearchedPacket);
+
+    // Bid: accepted and debited.
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body_with_ids(lot.id, 10, 0, 0));
+    let ops: Vec<u16> = w.b.drain().iter().map(|f| f.0).collect();
+    assert!(ops.contains(&sc::SCAuctionBidPacket), "{ops:?}");
+    assert_eq!(money(&w.pb), 100_000 - 10);
 }
 
 /// An already expired item cannot be listed: no container timer visits the auction container,
