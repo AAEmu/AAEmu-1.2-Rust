@@ -22,6 +22,8 @@ INSERT INTO `account_shop_purchases` (`account_id`, `item_id`, `purchase_count`)
 SELECT c.`account_id`, p.`item_id`, MAX(p.`purchase_count`)
 FROM `character_shop_purchases` p
 JOIN `characters` c ON c.`id` = p.`character_id`
-GROUP BY c.`account_id`, p.`item_id`;
+GROUP BY c.`account_id`, p.`item_id`
+-- Re-runnable: the updater has no transaction, so a failure after this INSERT re-runs it.
+ON DUPLICATE KEY UPDATE `purchase_count` = GREATEST(`purchase_count`, VALUES(`purchase_count`));
 
 DROP TABLE IF EXISTS `character_shop_purchases`;
