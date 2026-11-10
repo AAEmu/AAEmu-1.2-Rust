@@ -37,6 +37,12 @@ pub mod chat_type {
     pub const FAMILY: i16 = 9;
     pub const RAID_LEADER: i16 = 10;
     pub const JUDGE: i16 = 11;
+    /// `chat_commands` row 14 ("연주", performance) with `chat_type_id` 13. The 1.2 client
+    /// offers it in the chat menu, but its chat display (`chat_msg_event.alb`,
+    /// `GetChatChannelName` / `OnChatMessage`) has no branch for 13 and logs
+    /// "Unknown chat channel", so the server must not broadcast it (see
+    /// `world::session::send_chat_message`).
+    pub const PERFORM: i16 = 13;
     pub const ALLY: i16 = 14;
     pub const USER: i16 = 15;
 }
