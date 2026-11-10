@@ -1,14 +1,19 @@
 //! `NpcSpawnerNpc` `"NpcGroup"` member expansion: the spawner spawns every NPC template of the
 //! group at the spawner position plus its `formation_offset`, not the group id as an NPC.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::data::client_files::ClientFileManager;
 use crate::data::world_templates::WorldSpawnPosition;
 use crate::data::GameData;
 use crate::models::npc::Npc;
 use crate::server::GameServer;
 use crate::systems::npcs::doodad::spawner::{NpcSpawnerDef, SpawnerBase};
+use crate::systems::npcs::heightmap::{
+    HeightmapConfig, HeightmapWorlds, WorldHeightmap, CELL_HMAP_RESOLUTION,
+};
 use crate::systems::npcs::npc::group_data::{NpcGroup, NpcGroupData, NpcGroupMember};
 use crate::systems::npcs::npc::spawner_data::{
     npc_spawner_category, NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate,
@@ -529,6 +534,24 @@ fn respawn_tick(f: &RespawnFixture) {
     spawn_manager_of(&f.server).check_respawns_tick(&f.server);
 }
 
+/// A flat heightmap at `surface` metres for the test zone's cell (0, 0), so the group respawn
+/// ground probe finds a floor at the leader's distant position.
+fn flat_heightmap(surface: f32) -> Arc<HeightmapWorlds> {
+    let t = WorldHeightmap::with_size(0, "main_world", 2, 2, 65535.0 / 4096.0);
+    let value = (f64::from(surface) * (65535.0 / 4096.0)) as u16;
+    let points = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usize;
+    assert!(t.insert_cell_with_holes(0, 0, vec![value; points], &[]));
+    Arc::new(HeightmapWorlds::from_parts(
+        Arc::new(ClientFileManager::new()),
+        vec![t],
+        HashMap::from([(TEST_ZONE, 0)]),
+        HeightmapConfig {
+            heightmaps_enable: true,
+            ..Default::default()
+        },
+    ))
+}
+
 /// Spawns the group through `NpcSpawnerNpc.Spawn` with `owner_id` (a summon / event spawner
 /// member) so the batch records its owner.
 fn spawn_group_with_owner(owner_id: u32) -> (Arc<GameServer>, Arc<NpcSpawner>, Vec<NpcRef>) {
@@ -894,6 +917,11 @@ async fn enable_respawn_reanchors_on_the_leader_home_when_it_strays() {
         .cloned()
         .expect("move leader");
     let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+    f.server
+        .systems
+        .npcs
+        .heightmaps
+        .install(flat_heightmap(100.0));
     respawn_tick(&f);
     // The leader chases something 100 m from its spawn (100, 100, 100).
     leader.data().unit.transform.set_xyz(200.0, 200.0, 100.0);
@@ -907,10 +935,9 @@ async fn enable_respawn_reanchors_on_the_leader_home_when_it_strays() {
         .find(|n| n.data().npc_group_formation_offset == (2.0, -3.0, 0.0))
         .expect("the lost member respawned");
     let t = respawned.data().unit.transform;
-    assert_eq!(
-        (t.x, t.y, t.z),
-        (102.0, 97.0, 100.0),
-        "the lost member is anchored on the leader's spawn/home, not on the leader at (200, 200)"
+    assert!(
+        (t.x - 102.0).abs() < 0.01 && (t.y - 97.0).abs() < 0.01 && (t.z - 100.0).abs() < 0.2,
+        "the lost member is anchored on the leader's spawn/home, not on the leader at (200, 200): {t:?}"
     );
 }
 
