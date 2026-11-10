@@ -235,9 +235,14 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     // unit and uses it as the target of self / party / pet / position skills, and the started /
     // fired packets echo it, so a forged field would run the skill on (and as) another unit.
     // Mount casters are checked below (`mount_authority`); item and doodad casters resolve
-    // through their own validation.
+    // through their own validation. A mate named as a plain `Unit` caster is the battle pet
+    // cast: it goes on to `cast_as_battle_pet`, which refuses a mate that is not the sender's.
     if let SkillCaster::Unit(obj_id) | SkillCaster::Unk1(obj_id) = p.caster {
-        if obj_id != player.obj_id {
+        let battle_pet = matches!(p.caster, SkillCaster::Unit(_))
+            && super::geometry::world_of(server, &me)
+                .and_then(|w| w.object(obj_id))
+                .is_some_and(|o| o.as_mate().is_some());
+        if obj_id != player.obj_id && !battle_pet {
             tracing::warn!(
                 character = %player.data().unit.name,
                 skill_id,
