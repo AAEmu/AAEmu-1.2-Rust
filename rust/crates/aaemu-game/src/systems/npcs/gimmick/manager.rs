@@ -1036,6 +1036,7 @@ mod tests {
 
     const CONTACT_GIMMICK: u32 = 900;
     const CONTACT_SKILL: u32 = 900_100;
+    const TIMER_SKILL: u32 = 900_102;
 
     /// Game data with one contact gimmick template and the fixed 100-damage skill it fires
     /// (`AnyUnit` target, no area, `max_range` 0 like the shipped collision skills).
@@ -1067,6 +1068,32 @@ mod tests {
             .gimmick
             .templates
             .insert(template.id, template);
+        data
+    }
+
+    /// [`contact_data`] plus a position-targeted timer skill (900_102) for the delayed-skill
+    /// path (`GimmickTemplate.skill_id` / `skill_delay`).
+    fn timer_data(template: GimmickTemplate) -> crate::data::GameData {
+        use crate::systems::skills::data::{EffectKind, EffectTemplate};
+        use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
+        let mut data = contact_data(template, 0);
+        let s = &mut data.systems.skills;
+        s.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(damage_effect(2, 100))),
+            900_002,
+        );
+        let mut skill = skill_template(TIMER_SKILL);
+        skill.target_type = 6; // Pos
+        skill.target_selection = 1; // Source
+        skill.target_relation = 0; // Any
+        skill.target_area_radius = 3;
+        skill.max_range = 5;
+        let mut effect = skill_effect(900_002, EffectKind::DamageEffect, 2);
+        effect.start_level = 1;
+        effect.end_level = 99;
+        skill.effects = vec![effect];
+        s.add_skill(skill);
         data
     }
 
@@ -1238,6 +1265,61 @@ mod tests {
             "no north/south drift: y={}",
             t.y
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_gimmick_skill_fires_at_the_moved_position() {
+        // A barrel-bomb style gimmick: a position skill 1 s after spawn, launched 10 m/s
+        // forward. The cast must happen from the gimmick's current position (10 m out), not
+        // from the thrower (the old caster), whose max_range is 5.
+        let template = GimmickTemplate {
+            id: 901,
+            skill_id: TIMER_SKILL,
+            skill_delay: 1_000,
+            ..Default::default()
+        };
+        let server = crate::test_support::test_server_with(timer_data(template));
+        while server.ids.object.get_next_id().expect("object id") < 0x400 {}
+        crate::systems::skills::bridges::install(&server);
+        let world = test_world(&server);
+        let client = crate::test_support::TestClient::new(&server, 1, 1);
+        let mut c = crate::test_support::test_character(1, "Thrower", 100.0, 100.0);
+        c.unit.hp = 500;
+        c.unit.max_hp = 1000;
+        let thrower = crate::test_support::spawn_player(&server, &client, c, 0x100);
+        let mut victim_client = crate::test_support::TestClient::new(&server, 2, 2);
+        let mut v = crate::test_support::test_character(2, "Victim", 100.0, 110.0);
+        v.unit.hp = 500;
+        v.unit.max_hp = 1000;
+        let victim = crate::test_support::spawn_player(&server, &victim_client, v, 0x101);
+        let g = spawn_from_effect(
+            &server,
+            &world,
+            &SpawnGimmickParams {
+                gimmick_id: 901,
+                offset_coordinate_id: 2,
+                scale: 1.0,
+                velocity_coordinate_id: 2,
+                velocity_y: 10.0,
+                ..Default::default()
+            },
+            &WorldObject::from(&thrower),
+        )
+        .expect("gimmick spawned");
+        let active = server.systems.npcs.gimmicks.find(g.obj_id).unwrap();
+        // 20 x 50 ms: the gimmick is at (100, 110) when the 1000 ms delay expires.
+        for i in 0..20 {
+            gimmick_tick(
+                &server,
+                &world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        assert!((g.data().unit.transform.y - 110.0).abs() < 1e-3);
+        assert_eq!(victim.data().unit.hp, 400, "hit at the moved position");
+        assert_eq!(thrower.data().unit.hp, 500, "not hit at the spawn position");
     }
 
     #[tokio::test]

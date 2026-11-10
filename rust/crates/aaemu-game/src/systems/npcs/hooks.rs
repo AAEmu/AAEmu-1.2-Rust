@@ -126,9 +126,10 @@ pub trait SkillsBridge: Send + Sync {
     ) {
     }
 
-    /// `Gimmick.DoGimmickSkill`: schedules `UseSkillTask(new Skill(template), caster
-    /// (= ParentWorld.GetUnit(SpawnerUnitId), may be null), new SkillDoodad(gimmick.ObjId),
-    /// gimmick, SkillCastPositionTarget(pos), new SkillObject())`. Default: nothing.
+    /// `Gimmick.DoGimmickSkill`: casts the skill from the gimmick at its current position
+    /// (`SkillDoodad(gimmick.ObjId)`, `SkillCastPositionTarget(pos)`), so a gimmick that moved
+    /// since spawn still fires. The spawner unit (`caster`) is its owner; the C# used it as the
+    /// cast source, which refused moved gimmicks and doodad-spawned ones. Default: nothing.
     fn use_gimmick_skill(
         &self,
         _server: &GameServer,
