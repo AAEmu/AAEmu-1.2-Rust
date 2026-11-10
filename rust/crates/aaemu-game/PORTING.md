@@ -460,12 +460,15 @@ Decisions from the 2026-11-02 combat-ai analysis (`WP-9`), no behaviour change:
   `OpacityControl` (26 rows) and 76-78 (projectile, 41 rows) are client visuals with no server
   state; they stay log-only. The bot trio 84/88/89, 19 and 57/20/21 belong to their own work
   items.
-* **skills-combat#15 leftovers.** `buff_unit_modifiers` (17 rows) is tooltip linkage data
-  (INFERRED): the rows pair "next skill is improved" buffs (357-362, plus slave buffs
-  6280 -> 6281 and 7647) with skill-tag ids, while the numeric changes live in
-  `skill_modifiers` (3 rows for these owners, already loaded). No server rule; do not
-  implement. `skill_synergy_icons` and `tooltip_skill_effects` are client tooltip data, and
-  `pcbang_buffs` is already handled by `systems/services/premium.rs`.
+* **skills-combat#15 leftovers.** `buff_unit_modifiers` (17 rows) is NOT just tooltip
+  linkage: each row owns one `unit_modifiers` row with `owner_type='BuffUnitModifier'` and
+  `owner_id = buff_unit_modifiers.id` (ids 9-35): conditional bonuses keyed by `tag_id` /
+  `buff_id` (SpellDamageMul +10/+20 for tagged skills, MoveSpeedMul -800 for slave buff 6280
+  with 6281, Melee/Ranged/SpellDamageMul +20 for buff 7647). The server does not load them
+  (every loader filters `owner_type` exactly): a gameplay gap. A future loader must key them
+  through `buff_unit_modifiers.owner_id` and never treat `owner_id` 9-35 as buff ids (buffs
+  11, 15, 26, 31, 34, 35 exist). `skill_synergy_icons` and `tooltip_skill_effects` are client
+  tooltip data, and `pcbang_buffs` is already handled by `systems/services/premium.rs`.
 
 #### Resurrection buffs (WP-2b, 2026-11-05)
 
@@ -7890,3 +7893,10 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
 ## Web API request bodies (Rust only, 2026-11)
 
 - **Deviation (security).** The C# session reads the request body before routing and authorization. The Rust adapter (`webapi::dispatch`) now routes and authorizes from the request line and headers first (`preflight`): an unauthorized request is answered 401 and an unknown route 404 without the body being read, and the public `GET /status` needs no body. An authorized request's body is capped at `MAX_BODY_BYTES` (1 MiB; the largest legitimate request is a mail with attachment items or an auction/command JSON document, a few KiB) and answered 413 beyond it (the previous 64 MiB cap silently dropped an oversize body).
+
+## Skill and passive buff learning (Rust only, 2026-11)
+
+- **Deviation (security).** The C# `CharacterSkills.AddSkill` / `AddBuff` skipped the ability gate for `ability_id == 0` and the ability level is then the character level, so `CSLearnSkill` learned any of the ~14,950 ability-less NPC / boss / GM / item / internal skills (many apply stat-modifier buffs such as skill 23071 -> buff 6541, +50,000,000 damage) and `CSStartSkill` then cast them.
+  - `progress::learn_skill` accepts only a `need_learn` skill of one of the character's active abilities (`is_learnable_class_skill`); `learn_buff` only a passive buff of an active ability (`ability_id != 0`). Default / racial skills are server-granted (action slots + `is_default_skill` cast path), never learned by packet.
+  - `CSStartSkill`: the learned-list branch runs only for class skills (`ability_id != 0`); an ability-less skill in the list takes the `is_client_sourced_skill` check like an unlearned one. `is_variant_of_skill` never matches an ability-less skill.
+  - Load (`db_character::load_character_details`): stored skill rows that are neither a learnable class skill of an active ability nor a default skill, and stored passive buffs with `ability_id == 0`, are dropped, one `warn` per character lists the ids, and the rows are deleted (`save` only upserts). Active buffs (`character_active_buffs`) are not touched.

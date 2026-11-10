@@ -620,10 +620,17 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             "Client cast of an inactive or unlearned ability skill refused"
         );
         result = denied;
-    } else if player.data().skills.skills.iter().any(|s| s.id == skill_id) {
-        let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
-            return;
-        };
+    } else if let Some(t) = server
+        .game_data
+        .systems
+        .skills
+        .skill(skill_id)
+        .filter(|t| t.ability_id != 0)
+        .filter(|_| player.data().skills.skills.iter().any(|s| s.id == skill_id))
+        .cloned()
+    {
+        // Only class skills run from the learned list; an ability-less skill in it (never
+        // learnable) takes the client-source check below like any other unlearned skill.
         let skill = skill::new_skill_for(server, t, Some(&me));
         let (r, v) = skill::use_skill(
             server,
@@ -807,6 +814,9 @@ fn is_variant_of_skill(
     let Some(t) = data.skill(skill_id) else {
         return false;
     };
+    if t.ability_id == 0 {
+        return false; // ability-less skills have no tree to be a variant in
+    }
     let learned: Vec<u32> = player.data().skills.skills.iter().map(|s| s.id).collect();
     learned.into_iter().any(|id| {
         data.skill(id)

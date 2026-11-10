@@ -607,6 +607,19 @@ fn active_abilities(p: &PlayerRef) -> [u8; 3] {
     [c.ability1, c.ability2, c.ability3]
 }
 
+/// Whether a skill can be learned by the player: only a `need_learn` skill of one of the
+/// character's active ability trees. Ability-less skills (NPC, boss, GM, item and internal
+/// ones, `ability_id == 0`) are never learnable; the server grants default skills itself.
+pub fn is_learnable_class_skill(t: &crate::data::skills::SkillTemplate, actives: [u8; 3]) -> bool {
+    t.ability_id != 0 && t.need_learn && actives.contains(&t.ability_id)
+}
+
+/// Whether a passive buff can be learned: only one of an active ability tree (never the
+/// ability-less `ability_id == 0` rows).
+pub fn is_learnable_passive_buff(ability_id: u8, actives: [u8; 3]) -> bool {
+    ability_id != 0 && actives.contains(&ability_id)
+}
+
 /// `CharacterSkills.AddSkill(skillId)` (`CSLearnSkillPacket`).
 pub fn learn_skill(server: &GameServer, p: &PlayerRef, skill_id: u32) {
     let skills = &server.game_data.skills;
@@ -615,7 +628,13 @@ pub fn learn_skill(server: &GameServer, p: &PlayerRef, skill_id: u32) {
         return;
     };
     let actives = active_abilities(p);
-    if t.ability_id > 0 && !actives.contains(&t.ability_id) {
+    if !is_learnable_class_skill(t, actives) {
+        tracing::warn!(
+            character = %p.data().unit.name,
+            skill_id,
+            ability_id = t.ability_id,
+            "CSLearnSkill refused: not a learnable skill of an active ability"
+        );
         return;
     }
     let ab = {
@@ -668,7 +687,13 @@ pub fn learn_buff(server: &GameServer, p: &PlayerRef, buff_id: u32) {
         return;
     };
     let actives = active_abilities(p);
-    if t.ability_id > 0 && !actives.contains(&t.ability_id) {
+    if !is_learnable_passive_buff(t.ability_id, actives) {
+        tracing::warn!(
+            character = %p.data().unit.name,
+            buff_id,
+            ability_id = t.ability_id,
+            "CSLearnBuff refused: not a passive buff of an active ability"
+        );
         return;
     }
     let (level, used_all, used_tree, known) = {
@@ -980,6 +1005,16 @@ mod tests {
     use crate::systems::skills::handlers::CSSwapAbilityPacket;
     use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 
+    fn set_ability_exp(c: &mut crate::models::character::Character, id: u8, exp: i32) {
+        let a = c
+            .abilities
+            .abilities
+            .iter_mut()
+            .find(|a| a.id == id)
+            .expect("ability");
+        a.exp = exp;
+    }
+
     #[tokio::test]
     async fn learn_skill_refuses_a_skill_above_the_ability_level() {
         // The sweep path: `/level 55` then `CSLearnSkillPacket` for the retired ability_level 99
@@ -990,16 +1025,18 @@ mod tests {
         data.experience = crate::test_support::test_experience(10);
         data.skills.add_skill(crate::data::skills::SkillTemplate {
             id: 10385,
-            ability_id: 0,
+            ability_id: 1,
             ability_level: 99,
+            need_learn: true,
             level_step: 3,
             skill_points: 1,
             ..Default::default()
         });
         data.skills.add_skill(crate::data::skills::SkillTemplate {
             id: 5,
-            ability_id: 0,
+            ability_id: 1,
             ability_level: 5,
+            need_learn: true,
             level_step: 3,
             skill_points: 0,
             ..Default::default()
@@ -1007,7 +1044,10 @@ mod tests {
         let server = test_server_with(data);
         let mut client = TestClient::new(&server, 1, 1);
         let mut character = test_character(1, "Learner", 100.0, 100.0);
-        character.unit.level = 10; // GetAbLevel(General) = 10: below 99, above 5
+        character.ability1 = 1;
+        character.unit.level = 10;
+        // Ability 1 at level 5: above the level-5 skill, below the level-99 one.
+        set_ability_exp(&mut character, 1, 5_500);
         let player = spawn_player(&server, &client, character, 0x100);
         client.drain(); // spawn traffic
 
@@ -1016,7 +1056,7 @@ mod tests {
         assert!(client.drain().is_empty());
 
         learn_skill(&server, &player, 5);
-        assert_eq!(player.data().skills.skills, [Skill { id: 5, level: 2 }]);
+        assert_eq!(player.data().skills.skills, [Skill { id: 5, level: 1 }]);
         assert!(client.drain_ops().contains(&sc::SCSkillLearnedPacket));
     }
 
@@ -1400,5 +1440,76 @@ mod tests {
         client.drain();
         add_exp(&server, &player, 1, true);
         assert!(!client.drain_ops().contains(&sc::SCSkillUpgradedPacket));
+    }
+
+    #[tokio::test]
+    async fn learn_skill_refuses_ability_less_and_unlearnable_skills() {
+        // Skill 23071-like: an NPC / GM / internal skill (`ability_id == 0`, `need_learn`, one
+        // skill point) must never be learned by packet; neither a class skill that is not
+        // `need_learn`, nor one of an inactive ability. A real class skill still is.
+        let mut data = GameData::empty();
+        data.experience = crate::test_support::test_experience(10);
+        for (id, ability_id, need_learn) in [
+            (23071, 0, true),
+            (31, 1, false),
+            (32, 2, true),
+            (33, 1, true),
+        ] {
+            data.skills.add_skill(crate::data::skills::SkillTemplate {
+                id,
+                ability_id,
+                ability_level: 1,
+                level_step: 3,
+                skill_points: 1,
+                need_learn,
+                ..Default::default()
+            });
+        }
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Learner", 100.0, 100.0);
+        character.unit.level = 10;
+        character.ability1 = 1;
+        set_ability_exp(&mut character, 1, 5_500);
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.drain();
+        for id in [23071, 31, 32] {
+            learn_skill(&server, &player, id);
+            assert!(player.data().skills.skills.is_empty(), "skill {id}");
+            assert!(client.drain().is_empty(), "skill {id}");
+        }
+        learn_skill(&server, &player, 33);
+        assert_eq!(player.data().skills.skills.len(), 1);
+        assert!(client.drain_ops().contains(&sc::SCSkillLearnedPacket));
+    }
+
+    #[tokio::test]
+    async fn learn_buff_refuses_ability_less_passive_buffs() {
+        let mut data = GameData::empty();
+        data.experience = crate::test_support::test_experience(10);
+        for (id, ability_id) in [(103u32, 0u8), (100, 1)] {
+            data.skills.passive_buffs.insert(
+                id,
+                crate::data::skills::PassiveBuffTemplate {
+                    id,
+                    ability_id,
+                    level: 1,
+                    buff_id: 3057,
+                    req_points: 0,
+                    active: false,
+                },
+            );
+        }
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Learner", 100.0, 100.0);
+        character.unit.level = 10;
+        character.ability1 = 1;
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.drain();
+        learn_buff(&server, &player, 103);
+        assert!(player.data().skills.passive_buffs.is_empty());
+        learn_buff(&server, &player, 100);
+        assert_eq!(player.data().skills.passive_buffs, [100]);
     }
 }
