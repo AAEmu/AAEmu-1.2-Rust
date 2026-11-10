@@ -142,14 +142,24 @@ pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
 /// (excluding special characters)." in both languages, so the server keeps 1..=12.
 pub(crate) const TITLE_MAX_CHARS: usize = 12;
 
+/// The most members the client shows in a family: the 1.2 `x2game.dll` family reader (RVA
+/// 0x8b85b0) clamps the member count it reads to 8 (`min(count, 8)`), so a ninth member would
+/// never reach a client's list. The C# `Family.Write` only carries `// TODO max length 8`.
+pub(crate) const MAX_FAMILY_MEMBERS: usize = 8;
+
 /// The family member cap. The 1.2 compact has no family tables or `content_configs` keys for
 /// them, and the 1.2 `Family.Write` only carries the comment `// TODO max length 8` (it never
 /// enforced it). The 10.x server reads `family_max_count` from `content_configs` and its tests
 /// use 8 for the base family, so the default is 8 and the value is configurable
 /// (`Social:FamilyMaxMembers`, `Configurations/Social.json`). A family starts with two
-/// members, so a configured value below 2 is treated as 2.
+/// members, so a configured value below 2 is treated as 2, and one above the client's limit
+/// ([`MAX_FAMILY_MEMBERS`]) as 8.
 pub fn max_members(server: &GameServer) -> usize {
-    server.config.social.family_max_members.max(2)
+    server
+        .config
+        .social
+        .family_max_members
+        .clamp(2, MAX_FAMILY_MEMBERS)
 }
 
 /// Whether `c` may appear in a family title: a letter (the type 3 row allows no spaces, digits

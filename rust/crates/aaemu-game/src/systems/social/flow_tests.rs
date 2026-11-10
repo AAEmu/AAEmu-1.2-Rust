@@ -2251,6 +2251,66 @@ async fn family_full_refuses_invites_and_accepts() {
 }
 
 #[tokio::test]
+async fn family_member_cap_defaults_to_8_and_never_exceeds_the_client_limit() {
+    use crate::systems::social::family::{max_members, Family, FamilyMember};
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    // The default is the client's limit: its family reader clamps the member count to 8.
+    assert_eq!(max_members(&server), 8);
+    // Below 2 a family could never form; above 8 the client would not list the extra members.
+    for (configured, effective) in [
+        (0, 2),
+        (1, 2),
+        (2, 2),
+        (5, 5),
+        (8, 8),
+        (9, 8),
+        (usize::MAX, 8),
+    ] {
+        server
+            .config
+            .update(|cfg| cfg.social.family_max_members = configured);
+        assert_eq!(max_members(&server), effective, "configured {configured}");
+    }
+    // A family of 8 refuses a ninth member even though the config would allow more.
+    let mut members = vec![FamilyMember {
+        character: Some(a.p.clone()),
+        id: 1,
+        name: "Al".into(),
+        role: 1,
+        title: String::new(),
+    }];
+    members.extend((10..17).map(|id| FamilyMember {
+        character: None,
+        id,
+        name: format!("Member{id}"),
+        role: 0,
+        title: "Kid".into(),
+    }));
+    assert_eq!(members.len(), 8);
+    server.systems.social.families.insert(Family {
+        id: 11,
+        members,
+        removed_members: Vec::new(),
+    });
+    a.p.data().family = 11;
+    server
+        .config
+        .update(|cfg| cfg.social.family_max_members = 100);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_MAXIMUM)]);
+    assert!(b.ops().is_empty());
+}
+
+#[tokio::test]
 async fn family_titles_are_validated_like_the_client() {
     use crate::data::character_templates::BlockedName;
     use crate::systems::social::util::error;
