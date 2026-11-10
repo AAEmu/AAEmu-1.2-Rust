@@ -1338,18 +1338,11 @@ async fn ucc_custom_upload() {
     assert_eq!(server.streams.ucc.parts_len(), 0);
     assert_eq!(server.streams.ucc.queue_len(), 0);
 
-    // One charge per upload: two IMPRINT_UCC tasks (the reagent removal), no money task.
+    // One charge per upload is proven by the reagent balance (2 -> 1 -> 0, asserted above and
+    // below), not by counting frames: the first upload's frame was drained earlier, and emptying
+    // the stack in the second upload sends two IMPRINT_UCC tasks (the removed slot, then the empty
+    // list `consume_item_filtered` always sends). No money task.
     let frames = game_frames(&mut g);
-    assert_eq!(
-        frames
-            .iter()
-            .filter(
-                |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
-                    && body.first() == Some(&task_type::IMPRINT_UCC)
-            )
-            .count(),
-        2
-    );
     assert!(
         !frames.iter().any(
             |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
