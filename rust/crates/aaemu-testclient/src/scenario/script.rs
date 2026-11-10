@@ -51,6 +51,13 @@
 //!                                   CSICSBuyGoodPacket (0x11d); fail unless the buy succeeds,
 //!                                   `SCGotMail` is a CHARGED (9) mail and SCCountUnreadMail's
 //!                                   4th counter is 1
+//! giftics <shop id> <detail> <receiver> [main] [sub]
+//!                                   CSICSBuyGoodPacket (0x11d) as a gift; fail unless
+//!                                   SCICSBuyResult is successful and no SCErrorMsg arrives.
+//!                                   The receiver may be offline (no SCGotMail to the buyer).
+//! unreadmail <sent> <received> <mia> <commercial>
+//!                                   fail unless the last SCCountUnreadMailPacket (sent at
+//!                                   spawn, so it includes offline mail) has these counters
 //! aucpost <npc tpl> <item tpl> <start> <buyout> <duration>
 //!                                   walk to the auctioneer NPC, CSAuctionPost (client writer
 //!                                   `FUN_397bae70`) and decode `SCAuctionPosted`
@@ -1698,6 +1705,56 @@ async fn run_lines(
                     commercial == Some(1),
                     "buyics: SCCountUnreadMail's commercial counter is not 1"
                 );
+            }
+            "giftics" => {
+                let shop_id: u32 = num(&parts, 0)?;
+                let detail: u8 = num(&parts, 1)?;
+                let receiver = *parts
+                    .get(2)
+                    .with_context(|| "giftics: missing receiver name")?;
+                let main_tab: u8 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let sub_tab: u8 = parts.get(4).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u8(1)
+                    .write_u32(shop_id)
+                    .write_u8(main_tab)
+                    .write_u8(sub_tab)
+                    .write_u8(detail)
+                    .write_str(receiver);
+                game.send_cs(cs::CSICSBuyGoodPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let mut bought = None;
+                let mut error = None;
+                for p in &got {
+                    if p.is_sc(sc::SCICSBuyResultPacket) {
+                        bought = Some(p.stream().read_bool()?);
+                    } else if p.is_sc(sc::SCErrorMsgPacket) {
+                        error = Some(p.stream().read_i16()?);
+                    }
+                }
+                ensure!(
+                    bought == Some(true),
+                    "giftics: no successful SCICSBuyResult (SCErrorMsg {error:?})"
+                );
+                ensure!(error.is_none(), "giftics: SCErrorMsg {error:?}");
+            }
+            "unreadmail" => {
+                let want = (
+                    num::<i32>(&parts, 0)?,
+                    num::<i32>(&parts, 1)?,
+                    num::<i32>(&parts, 2)?,
+                    num::<i32>(&parts, 3)?,
+                );
+                let got = game
+                    .state
+                    .count_unread_mail
+                    .context("unreadmail: no SCCountUnreadMailPacket seen")?;
+                ensure!(got == want, "unreadmail: got {got:?}, want {want:?}");
+                println!("    SCCountUnreadMail {got:?}");
             }
             "aucpost" => {
                 let npc_tpl: u32 = num(&parts, 0)?;
