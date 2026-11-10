@@ -803,6 +803,20 @@ fn apply_hull_damage(server: &GameServer, world: &WorldInstance, d: HullDamage) 
         return;
     }
     let attacker = world.unit(d.attacker).unwrap_or_else(|| target.clone());
+    // A hull collision is player-vs-player damage when both ships have a character owner: it
+    // follows the same attack permission as a hit (Peace, no-PvP instances). Environment damage
+    // carries `attacker == target` and is unchanged.
+    if !attacker.same(&target)
+        && crate::systems::skills::relation::owner_character(server, &attacker).is_some()
+        && crate::systems::skills::relation::owner_character(server, &target).is_some()
+        && !crate::systems::skills::relation::can_attack(
+            server,
+            &crate::systems::skills::geometry::Target::Obj(attacker.clone()),
+            &crate::systems::skills::geometry::Target::Obj(target.clone()),
+        )
+    {
+        return;
+    }
     crate::systems::skills::combat::reduce_current_hp(
         server,
         &target,

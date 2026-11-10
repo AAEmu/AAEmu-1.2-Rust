@@ -165,18 +165,19 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     {
         return allowed;
     }
+    // The two character owners are needed by the Peace rule, the own-mount check, the no-PvP
+    // instance rule and the zone-protection branches: resolve each once, defender first, so the
+    // zone-state lookup only runs for a player-controlled pair.
+    let me_owner = me.as_obj().and_then(|o| owner_character(server, o));
+    let target_owner = target.as_obj().and_then(|o| owner_character(server, o));
     // Peace period: a player-controlled attacker (player, pet, summon, slave, siege weapon)
     // cannot harm another player or that player's units. This runs before every shortcut that
     // would otherwise allow the pair (force attack, Retribution) and before the faction checks,
     // so it also covers an unknown / null faction. NPC attackers are unchanged (their
     // `owner_character` is `None`).
-    if let Some(attacker) = me.as_obj().and_then(|o| owner_character(server, o)) {
-        if is_peace_zone(server, target) {
-            if let Some(defender) = target.as_obj().and_then(|o| owner_character(server, o)) {
-                if !peace_allows_attack(server, &attacker, &defender) {
-                    return false;
-                }
-            }
+    if let (Some(attacker), Some(defender)) = (&me_owner, &target_owner) {
+        if is_peace_zone(server, target) && !peace_allows_attack(server, attacker, defender) {
+            return false;
         }
     }
     let my_faction = faction_of(me);
@@ -193,10 +194,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     // Never your own mount / slave (or yourself through one), not even with Ctrl+F force attack
     // or a Retribution flag, which would otherwise make the friendly pair attackable and raise
     // Retribution on the owner (Arc Lightning hitting the caster's own mount).
-    if let (Some(me_owner), Some(target_owner)) = (
-        me.as_obj().and_then(|o| owner_character(server, o)),
-        target.as_obj().and_then(|o| owner_character(server, o)),
-    ) {
+    if let (Some(me_owner), Some(target_owner)) = (&me_owner, &target_owner) {
         if me_owner.obj_id == target_owner.obj_id {
             return false;
         }
@@ -206,16 +204,15 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     // context; `FUN_39837a40` returns that flag and `FUN_39838880` then yields relation
     // kind 2 and returns early). The server rule is inferred from that; `EnforceNoPvp`
     // restores the faction-only decision.
-    if server.config.dungeons.enforce_no_pvp {
-        let me_owner = me.as_obj().and_then(|o| owner_character(server, o));
-        let target_owner = target.as_obj().and_then(|o| owner_character(server, o));
-        if me_owner.is_some() && target_owner.is_some() && is_no_pvp_zone(server, target) {
-            return false;
-        }
+    if server.config.dungeons.enforce_no_pvp
+        && me_owner.is_some()
+        && target_owner.is_some()
+        && is_no_pvp_zone(server, target)
+    {
+        return false;
     }
     let relation = relation_to(server, me, target);
     let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
-    let target_owner = target.as_obj().and_then(|o| owner_character(server, o));
     let zone_key = super::geometry::instance_and_zone(target).1;
     let zone_faction_raw = server
         .game_data
@@ -238,7 +235,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
             }
         }
     }
-    if let (Some(me_c), Some(owner)) = (&me_char, &target_owner) {
+    if let (Some(me_c), Some(owner)) = (&me_char, target_owner) {
         let (owner_faction, owner_id, owner_obj) = {
             let d = owner.data();
             (d.unit.faction_id, d.id, owner.obj_id)
@@ -401,6 +398,7 @@ mod tests {
     use super::*;
     use crate::data::world_data::{factions, FactionRelation, SystemFaction};
     use crate::data::GameData;
+    use crate::systems::skills::types::SkillTargetType;
 
     fn faction(id: u32, mother: u32) -> SystemFaction {
         SystemFaction {
@@ -1161,5 +1159,414 @@ mod tests {
             "the Conflict-zone player is hit"
         );
         assert!(npc.data().unit.hp < npc_hp, "the NPC is hit");
+    }
+
+    /// Adds a buff template plus a one-effect skill that applies it; returns the skill template.
+    #[allow(clippy::too_many_arguments)]
+    fn add_buff_skill(
+        data: &mut GameData,
+        skill_id: u32,
+        buff_id: u32,
+        kind: i32,
+        stun: bool,
+        target_type: u8,
+        friendly: bool,
+        non_friendly: bool,
+    ) -> std::sync::Arc<crate::systems::skills::data::SkillTemplate> {
+        use crate::systems::skills::data::effects::BuffEffect;
+        use crate::systems::skills::data::{BuffTemplate, EffectKind, EffectTemplate};
+        let skills = &mut data.systems.skills;
+        skills.add_buff(BuffTemplate {
+            id: buff_id,
+            kind,
+            duration: 10_000,
+            stack_rule: 1,
+            stun,
+            ..Default::default()
+        });
+        skills.add_effect(
+            EffectKind::BuffEffect,
+            EffectTemplate::Buff(BuffEffect {
+                id: 1,
+                buff_id: Some(buff_id),
+                chance: 100,
+                stack: 0,
+                ab_level: 0,
+            }),
+            900_010,
+        );
+        let mut template = super::super::tests::skill_template(skill_id);
+        template.target_type = i32::from(target_type);
+        let mut effect = super::super::tests::skill_effect(900_010, EffectKind::BuffEffect, 1);
+        effect.always_hit = true;
+        effect.friendly = friendly;
+        effect.non_friendly = non_friendly;
+        template.effects.push(effect);
+        let template = std::sync::Arc::new(template);
+        skills.add_skill((*template).clone());
+        template
+    }
+
+    /// Adds two buffs (good 50_002 / bad 50_003) and a skill with one dispel effect.
+    fn add_dispel_skill(
+        data: &mut GameData,
+        skill_id: u32,
+        friendly: bool,
+        non_friendly: bool,
+        target_type: u8,
+    ) -> std::sync::Arc<crate::systems::skills::data::SkillTemplate> {
+        use crate::systems::skills::data::effects::DispelEffect;
+        use crate::systems::skills::data::{BuffTemplate, EffectKind, EffectTemplate};
+        let skills = &mut data.systems.skills;
+        for (id, kind) in [(50_002u32, 1i32), (50_003u32, 2i32)] {
+            skills.add_buff(BuffTemplate {
+                id,
+                kind,
+                duration: 10_000,
+                stack_rule: 1,
+                ..Default::default()
+            });
+        }
+        skills.add_effect(
+            EffectKind::DispelEffect,
+            EffectTemplate::Dispel(DispelEffect {
+                id: 1,
+                dispel_count: 1,
+                cure_count: 1,
+                buff_tag_id: 0,
+            }),
+            900_011,
+        );
+        let mut template = super::super::tests::skill_template(skill_id);
+        template.target_type = i32::from(target_type);
+        let mut effect = super::super::tests::skill_effect(900_011, EffectKind::DispelEffect, 1);
+        effect.always_hit = true;
+        effect.friendly = friendly;
+        effect.non_friendly = non_friendly;
+        template.effects.push(effect);
+        let template = std::sync::Arc::new(template);
+        skills.add_skill((*template).clone());
+        template
+    }
+
+    /// A stun is an attack: a single-target hostile cast on a protected player is refused
+    /// (Peace and a no-PvP instance), and still lands in Conflict.
+    #[tokio::test]
+    async fn peace_refuses_a_single_target_stun() {
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{
+            skill_result, SkillCastTarget, SkillCaster, SkillObject,
+        };
+
+        let mut data = pvp_data();
+        let template = add_buff_skill(
+            &mut data,
+            10_005,
+            50_001,
+            2,
+            true,
+            SkillTargetType::Hostile as u8,
+            /* friendly */ false,
+            /* non_friendly */ true,
+        );
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let ce = crate::test_support::TestClient::new(&server, 5, 5);
+        let cf = crate::test_support::TestClient::new(&server, 6, 6);
+        let peace_a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let peace_b = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let conflict_a = player_in(&server, &cc, 0x201, 101, CONFLICT_ZONE, 0);
+        let conflict_b = player_in(&server, &cd, 0x209, 109, CONFLICT_ZONE, 0);
+        let mirage_a = player_in(&server, &ce, 0x20A, 101, MIRAGE_ZONE, 100);
+        let mirage_b = player_in(&server, &cf, 0x30B, 109, MIRAGE_ZONE, 100);
+
+        let mut target = SkillCastTarget::Unit(peace_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template.clone(), 1),
+            &WorldObject::from(&peace_a),
+            SkillCaster::Unit(peace_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, skill_result::NO_TARGET);
+        assert!(
+            !peace_b.data().unit.buffs.check_buff(50_001),
+            "the protected player must not be stunned"
+        );
+
+        // A no-PvP instance has the same hole and the same fix.
+        let mut target = SkillCastTarget::Unit(mirage_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template.clone(), 1),
+            &WorldObject::from(&mirage_a),
+            SkillCaster::Unit(mirage_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, skill_result::NO_TARGET);
+        assert!(!mirage_b.data().unit.buffs.check_buff(50_001));
+
+        let mut target = SkillCastTarget::Unit(conflict_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&conflict_a),
+            SkillCaster::Unit(conflict_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(
+            conflict_b.data().unit.buffs.check_buff(50_001),
+            "the Conflict cast still stuns"
+        );
+    }
+
+    /// A non-friendly buff effect on an `AnyUnit` skill (not the Hostile target type) is also
+    /// filtered: the per-effect gate must skip it on a protected player, not only the cast
+    /// validation.
+    #[tokio::test]
+    async fn any_unit_skill_cannot_apply_a_hostile_buff_in_peace() {
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+        let mut data = pvp_data();
+        let template = add_buff_skill(
+            &mut data,
+            10_009,
+            50_006,
+            2,
+            true,
+            SkillTargetType::AnyUnit as u8,
+            /* friendly */ false,
+            /* non_friendly */ true,
+        );
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let peace_a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let peace_b = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let conflict_a = player_in(&server, &cc, 0x201, 101, CONFLICT_ZONE, 0);
+        let conflict_b = player_in(&server, &cd, 0x209, 109, CONFLICT_ZONE, 0);
+
+        let mut target = SkillCastTarget::Unit(peace_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template.clone(), 1),
+            &WorldObject::from(&peace_a),
+            SkillCaster::Unit(peace_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0, "the AnyUnit cast itself is not refused");
+        assert!(
+            !peace_b.data().unit.buffs.check_buff(50_006),
+            "the per-effect gate skips the hostile buff"
+        );
+
+        let mut target = SkillCastTarget::Unit(conflict_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&conflict_a),
+            SkillCaster::Unit(conflict_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(conflict_b.data().unit.buffs.check_buff(50_006));
+    }
+
+    /// An area hostile effect skips the protected player and still lands on the target in
+    /// Conflict; a friendly buff is never filtered.
+    #[tokio::test]
+    async fn peace_skips_an_aoe_stun_but_applies_it_in_conflict() {
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+        let mut data = pvp_data();
+        let template = add_buff_skill(
+            &mut data,
+            10_006,
+            50_004,
+            2,
+            true,
+            SkillTargetType::Hostile as u8,
+            /* friendly */ false,
+            /* non_friendly */ true,
+        );
+        let mut area = (*template).clone();
+        area.target_area_radius = 6;
+        area.target_selection = 2; // Target
+        let area = std::sync::Arc::new(area);
+        data.systems.skills.add_skill((*area).clone());
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let caster = player_in(&server, &ca, 0x101, 101, CONFLICT_ZONE, 0);
+        let protected = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let exposed = player_in(&server, &cc, 0x209, 109, CONFLICT_ZONE, 0);
+        let mut target = SkillCastTarget::Unit(exposed.obj_id);
+        let skill = SkillRun::new(area, 1);
+        let (result, _) = use_skill(
+            &server,
+            &skill,
+            &WorldObject::from(&caster),
+            SkillCaster::Unit(caster.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        // The protected player is dropped before the combat-dice / durability pass.
+        assert!(!skill.state().hit_types.contains_key(&protected.obj_id));
+        assert!(skill.state().hit_types.contains_key(&exposed.obj_id));
+        assert!(
+            exposed.data().unit.buffs.check_buff(50_004),
+            "the Conflict target is stunned by the area"
+        );
+        assert!(
+            !protected.data().unit.buffs.check_buff(50_004),
+            "the Peace target is skipped by the area"
+        );
+
+        // A friendly buff cast on a friendly player in Peace is unchanged.
+        let mut friendly_data = pvp_data();
+        let friendly = add_buff_skill(
+            &mut friendly_data,
+            10_007,
+            50_005,
+            1,
+            false,
+            SkillTargetType::Friendly as u8,
+            /* friendly */ true,
+            /* non_friendly */ false,
+        );
+        crate::test_support::open_client_skills(&mut friendly_data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(friendly_data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let b = player_in(&server, &cb, 0x109, 101, PEACE_ZONE, 0);
+        let mut target = SkillCastTarget::Unit(b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(friendly, 1),
+            &WorldObject::from(&a),
+            SkillCaster::Unit(a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(
+            b.data().unit.buffs.check_buff(50_005),
+            "a friendly buff still lands in Peace"
+        );
+    }
+
+    /// A hostile dispel on a protected player does nothing (it must not cure the target); on an
+    /// attackable target it still purges the good buffs.
+    #[tokio::test]
+    async fn peace_hostile_dispel_does_not_cure() {
+        use crate::systems::skills::buffs;
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+        // Both-true effect (usable on either side) with one dispel and one cure count: this is
+        // the shape whose cure branch used to run on a protected target.
+        let mut data = pvp_data();
+        let template = add_dispel_skill(
+            &mut data,
+            10_008,
+            /* friendly */ true,
+            /* non_friendly */ true,
+            SkillTargetType::AnyUnit as u8,
+        );
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let peace_a = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let peace_b = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let conflict_a = player_in(&server, &cc, 0x201, 101, CONFLICT_ZONE, 0);
+        let conflict_b = player_in(&server, &cd, 0x209, 109, CONFLICT_ZONE, 0);
+        for p in [&peace_b, &conflict_b] {
+            let obj = WorldObject::from(p);
+            buffs::add_buff_by_id(&server, &obj, 50_002, &obj, 0); // good
+            buffs::add_buff_by_id(&server, &obj, 50_003, &obj, 0); // bad
+        }
+
+        let mut target = SkillCastTarget::Unit(peace_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template.clone(), 1),
+            &WorldObject::from(&peace_a),
+            SkillCaster::Unit(peace_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(
+            peace_b.data().unit.buffs.check_buff(50_003),
+            "the protected player keeps the bad buff (no cure)"
+        );
+        assert!(
+            peace_b.data().unit.buffs.check_buff(50_002),
+            "the protected player keeps the good buff (no purge)"
+        );
+
+        let mut target = SkillCastTarget::Unit(conflict_b.obj_id);
+        let (result, _) = use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&conflict_a),
+            SkillCaster::Unit(conflict_a.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert_eq!(result, 0);
+        assert!(
+            !conflict_b.data().unit.buffs.check_buff(50_002),
+            "the hostile dispel still purges the good buff in Conflict"
+        );
+        assert!(
+            conflict_b.data().unit.buffs.check_buff(50_003),
+            "the hostile dispel does not cure the bad buff"
+        );
     }
 }

@@ -514,10 +514,10 @@ fn initial_target(
             if let Some(t) = &target {
                 let tt = Target::Obj(t.clone());
                 let r = relation_to(server, &caster_t, &tt);
-                if r != RelationState::Hostile
-                    && r != RelationState::Neutral
-                    && !can_attack(server, &caster_t, &tt)
-                {
+                // A hostile target must pass the attack gate as well: the relation alone let
+                // stuns, snares and debuffs through in Peace and in no-PvP instances. Neutral
+                // targets keep the C# behaviour.
+                if r != RelationState::Neutral && !can_attack(server, &caster_t, &tt) {
                     return None;
                 }
             }
@@ -2103,6 +2103,15 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
     }
     let mut possible = distinct;
+    // A hostile skill's unit targets must all pass the attack gate: a stun / snare / debuff is
+    // as much an attack as damage (Peace, no-PvP instances, the home-zone protection). Filtering
+    // here also keeps the combat dice and durability rolls below off protected players.
+    if t.target_type == SkillTargetType::Hostile as i32 {
+        possible.retain(|target| match target.as_obj() {
+            Some(o) if o.is_unit() => can_attack(server, &caster_t, target),
+            _ => true,
+        });
+    }
     if t.target_area_radius > 0 && t.target_area_angle > 0 && t.target_area_angle < 360 {
         let origin = world_pos(server, target_self);
         possible.retain(|target| {
@@ -2222,6 +2231,23 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     target = target.obj_id(),
                     ?relation,
                     "Skill effect skipped: the effect is friendly-only"
+                );
+                continue;
+            }
+            // A non-friendly effect on a unit target needs the same permission as a hit: the
+            // relation gate below alone let hostile effects (stun, snare, silence, fear, knock
+            // back, debuff) land on protected players in Peace / no-PvP instances. Friendly
+            // effects are untouched.
+            if !effect.friendly
+                && effect.non_friendly
+                && target.as_obj().is_some_and(|o| o.is_unit())
+                && !can_attack(server, &caster_t, &target)
+            {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the target is protected from hostile effects"
                 );
                 continue;
             }
