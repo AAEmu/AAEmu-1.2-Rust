@@ -772,8 +772,10 @@ per account and can't be traded." (`localized_texts` `items.description` rows wi
 refusal). The counters were per character until 2026-11-10; the update script
 `2026-11-10_aaemu_game_account_shop_purchase_limits.sql` migrates the existing rows with MAX per
 account and item (each row was a character's own count, so the largest keeps every character at
-or below its purchased amount and does not invent purchases; rows of deleted characters have no
-account to attribute and are dropped).
+or below its purchased amount and does not invent purchases; only rows whose character no longer
+has a `characters` row (hard-deleted) have no account to attribute and are dropped: a soft-deleted
+character (`deleted = 1`) still resolves through the join, so its count stays and counts toward
+its account).
 
 Enforcement is one atomic check-and-claim, before the price or the item moves: `CSBuyItemsPacket`
 claims the sum of all lines of one template after the checkout is staged (a refused checkout sends
