@@ -273,6 +273,14 @@ pub struct DuelInfo {
     pub started: bool,
 }
 
+impl DuelInfo {
+    /// Whether `a` and `b` are the two participants (in either role).
+    fn is_between(&self, a: u32, b: u32) -> bool {
+        (self.challenger_id == a && self.challenged_id == b)
+            || (self.challenger_id == b && self.challenged_id == a)
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     /// `_duels` (both participants' character ids).
@@ -349,12 +357,19 @@ impl DuelManager {
         })
     }
 
-    /// Whether characters `a` and `b` are the two sides of the same duel.
+    /// Whether characters `a` and `b` are the two sides of the same duel, **including a pending
+    /// challenge**: [`Self::duel_request`] registers both characters as soon as it is sent.
     pub fn is_in_duel_with(&self, a: u32, b: u32) -> bool {
-        self.duel_of(a).is_some_and(|d| {
-            (d.challenger_id == a && d.challenged_id == b)
-                || (d.challenger_id == b && d.challenged_id == a)
-        })
+        self.duel_of(a).is_some_and(|d| d.is_between(a, b))
+    }
+
+    /// Whether `a` and `b` are the two sides of the same duel that was **accepted** (`started`).
+    /// An unanswered challenge (for which [`Self::is_in_duel_with`] is already true) is no duel
+    /// yet: nothing was agreed, it lives up to [`REQUEST_TIMEOUT`] and can be repeated, so a rule
+    /// that exempts duellists (the Peace-period PvP lockdown) must use this one.
+    pub fn is_dueling_with(&self, a: u32, b: u32) -> bool {
+        self.duel_of(a)
+            .is_some_and(|d| d.started && d.is_between(a, b))
     }
 
     /// `SaveFactions[id]`.

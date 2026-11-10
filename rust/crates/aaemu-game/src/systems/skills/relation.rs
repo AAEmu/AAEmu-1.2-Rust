@@ -131,7 +131,9 @@ fn is_peace_zone(server: &GameServer, target: &Target) -> bool {
 /// ordinary hostile attacks and must not be blocked (see `PORTING.md`).
 ///
 /// The remaining exceptions are the owner's clarification:
-/// * the two characters are duelling each other (`DuelManager.IsInDuelWith`);
+/// * the two characters are duelling each other: an **accepted** duel
+///   (`DuelManager::is_dueling_with`). A pending, unanswered challenge registers both characters
+///   for up to 30 s but agrees nothing, so it must not lift the lockdown;
 /// * their factions have an explicit hostile diplomacy relation. Only the runtime nation rows
 ///   (`NationManager.relation`, written by `CSFactionDeclareHostile`) count: the static
 ///   `system_faction_relations` table makes Nuia and Haranya hostile everywhere, and using it
@@ -140,13 +142,14 @@ fn is_peace_zone(server: &GameServer, target: &Target) -> bool {
 /// Force attack / Retribution never reach this function's callers' shortcuts: the caller checks
 /// this rule before those flags turn a friendly pair attackable.
 fn peace_allows_attack(server: &GameServer, attacker: &PlayerRef, target: &PlayerRef) -> bool {
-    // (a) A duel between exactly these two characters. The duel team factions are hostile, so
-    // this must run before the peace refusal (and it covers the duel's own units too).
+    // (a) An accepted duel between exactly these two characters. The duel team factions are
+    // hostile, so this must run before the peace refusal (and it covers the duel's own units
+    // too).
     if server
         .systems
         .social
         .duels
-        .is_in_duel_with(attacker.character_id, target.character_id)
+        .is_dueling_with(attacker.character_id, target.character_id)
     {
         return true;
     }
@@ -1070,7 +1073,8 @@ mod tests {
     }
 
     /// Two duellists may keep fighting in Peace (owner recollection 2026-11-10); after the
-    /// duel ends the same pair is refused again.
+    /// duel ends the same pair is refused again. Only an **accepted** duel counts: while the
+    /// request is unanswered the lockdown still holds.
     #[tokio::test]
     async fn peace_allows_a_duel_between_the_two_players() {
         use crate::systems::social::duel::duel_det_type;
@@ -1092,12 +1096,27 @@ mod tests {
             .social
             .duels
             .is_in_duel_with(a.character_id, b.character_id));
+        assert!(
+            !server
+                .systems
+                .social
+                .duels
+                .is_dueling_with(a.character_id, b.character_id),
+            "a pending request is no duel"
+        );
+        assert!(!can_attack(&server, &ta, &tb), "the request is unanswered");
+        assert!(!can_attack(&server, &tb, &ta), "the request is unanswered");
         server
             .systems
             .social
             .duels
             .duel_accepted(&server, &b, a.character_id)
             .await;
+        assert!(server
+            .systems
+            .social
+            .duels
+            .is_dueling_with(a.character_id, b.character_id));
         assert_eq!(a.data().unit.faction_id, RED_TEAM);
         assert_eq!(b.data().unit.faction_id, BLUE_TEAM);
         assert!(can_attack(&server, &ta, &tb));
@@ -1159,6 +1178,49 @@ mod tests {
         assert_eq!(faction_relation(&server, 5000, 109), RelationState::Neutral);
         assert!(!can_attack(&server, &tcit, &thar));
         assert!(!can_attack(&server, &tnu, &thar));
+    }
+
+    /// A duel request nobody answered yet is not a duel: for the 30 s the challenge lives, the
+    /// lockdown still holds for a hostile pair and, with Ctrl+F, for a same-faction pair.
+    #[tokio::test]
+    async fn peace_refuses_attacks_while_a_duel_request_is_unanswered() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let nuian = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let harani = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let friend_a = player_in(&server, &cc, 0x102, 101, PEACE_ZONE, 0);
+        let friend_b = player_in(&server, &cd, 0x10A, 101, PEACE_ZONE, 0);
+        let duels = &server.systems.social.duels;
+        duels.duel_request(&server, &nuian, harani.character_id);
+        duels.duel_request(&server, &friend_a, friend_b.character_id);
+        for (x, y) in [(&nuian, &harani), (&friend_a, &friend_b)] {
+            assert!(
+                duels.is_in_duel_with(x.character_id, y.character_id),
+                "the request is registered"
+            );
+            assert!(
+                !duels.is_dueling_with(x.character_id, y.character_id),
+                "but nobody accepted it"
+            );
+        }
+        friend_a.data().unit.force_attack = true;
+        let (tn, th, tfa, tfb) = (
+            obj_target(&nuian),
+            obj_target(&harani),
+            obj_target(&friend_a),
+            obj_target(&friend_b),
+        );
+        assert_eq!(relation_to(&server, &tn, &th), RelationState::Hostile);
+        assert!(!can_attack(&server, &tn, &th));
+        assert!(!can_attack(&server, &th, &tn));
+        assert!(
+            !can_attack(&server, &tfa, &tfb),
+            "Ctrl+F does not turn an unanswered request into a duel"
+        );
     }
 
     /// Ctrl+F force attack (bloodlust) makes friendly players attackable, but not in Peace.
