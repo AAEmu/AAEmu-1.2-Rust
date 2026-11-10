@@ -1333,14 +1333,29 @@ async fn damage_pipeline_level_bonus_only_applies_to_a_player_caster_and_npc_tar
         skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
     player.data().unit.level = 50;
     npc.data().unit.level = 40;
+    // A second, level-10 NPC so an NPC caster can be higher than an NPC target.
+    let mut other = Npc::new(1);
+    other.unit.hp = 1_000;
+    other.unit.max_hp = 1_000;
+    other.unit.level = 10;
+    other.unit.transform.set_xyz(100.0, 110.0, 100.0);
+    let other = Entity::new(0x201, other);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&other, &server.view_ctx());
     let player = WorldObject::from(&player);
     let npc = WorldObject::from(&npc);
+    let other = WorldObject::from(&other);
     assert_eq!(super::level_damage_multiplier(&server, &player, &npc), 1.4);
     assert_eq!(super::level_damage_multiplier(&server, &npc, &player), 1.0);
     assert_eq!(
         super::level_damage_multiplier(&server, &player, &player),
         1.0
     );
+    // Higher-level NPC -> lower-level NPC must be x1 too (only a player caster qualifies).
+    assert_eq!(super::level_damage_multiplier(&server, &npc, &other), 1.0);
 }
 
 /// Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
