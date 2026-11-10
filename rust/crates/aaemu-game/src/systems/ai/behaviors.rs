@@ -1733,11 +1733,10 @@ fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
         c.st(k).following_npc = false;
         return;
     }
-    // 2. A group follower runs `formation_GoToOnPoint` (or waits for its leader) instead of the
-    // hold-position logic (1.2 `hold_position.UpdateHoldPosition`).
-    if super::group::follower_tick(c, delta_ms) {
-        return;
-    }
+    // 2. A group follower's `formation_GoToOnPoint` movement replaces the hold-position walk;
+    // its idle activity (self-skills, follow-default, talk) still runs below (1.2
+    // `hold_position.UpdateHoldPosition`).
+    super::group::follower_tick(c, delta_ms);
     // 3. Try to use idle self-skills (1 s between tries)
     let now = now_ms();
     if now - c.st(k).last_skill_check >= 1000 {
@@ -1800,11 +1799,9 @@ fn idle_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     } else if check_follow_path(c) {
         c.go_to_follow_path();
     } else {
-        // A group follower runs `formation_GoToOnPoint` (or waits for its leader) instead of
-        // its own idle roaming (1.2 `idle.UpdateIdle`).
-        if super::group::follower_tick(c, delta_ms) {
-            return;
-        }
+        // A group follower's movement is the formation follow (1.2 `idle.UpdateIdle`); its idle
+        // activity still runs.
+        super::group::follower_tick(c, delta_ms);
         // Try to follow the nearest NPC, otherwise go to default behavior
         if c.do_follow_default_nearest_npc() {
             return;
@@ -1816,6 +1813,9 @@ fn idle_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
 }
 
 fn return_state_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
+    // Ending a fight (the abuser died, left or was cleared) must let a later fight against the
+    // same object share with the group again.
+    c.npc.data().npc_group_last_share_abuser = 0;
     // A group follower returns to its formation point, not its own spawn (1.2
     // `idle` / `hold_position` re-anchor a member's idle position on the leader).
     super::group::sync_return_to_formation(c);
@@ -1903,6 +1903,9 @@ fn return_state_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !c.st(k).enter {
         return;
     }
+    // The leader may have moved since the fight ended: recompute the formation point from its
+    // current position every tick instead of freezing the spot chosen at ReturnState entry.
+    super::group::sync_return_to_formation(c);
     let mut move_speed = npc::real_movement_speed(&c.obj, f64::from(base_move_speed(c)));
     let move_flags = npc::real_movement_flags(move_speed);
     move_speed *= delta_seconds(delta_ms);
@@ -1966,8 +1969,9 @@ fn roaming_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !check_aggression(c, k) {
         check_alert(c, k);
     }
-    // A transition above (combat / alert) already left this behavior.
-    if c.ai.current_behavior() != Some(k) {
+    // A group follower that already left Roaming (combat / alert) must not move here; ordinary
+    // NPCs keep the original control flow (no early return outside the feature).
+    if crate::systems::npcs::npc::group::is_follower(&c.npc) && c.ai.current_behavior() != Some(k) {
         return;
     }
     // A group follower never roams on its own: it follows its move leader's formation point

@@ -6,11 +6,26 @@
 //! reads it for the 1.2 `formation_GoToOnPoint` follow and the `NpcAggroTable` shared-aggro
 //! rule. `enable_respawn` stays unused (no consumer was found, see `PORTING.md`).
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::server::GameServer;
 use crate::systems::skills::controllers::Vec3;
 use crate::world::{now_ms, NpcRef, WorldObject};
 
 use super::group_data::{NpcGroup, NpcGroupMember};
+
+/// Monotonic spawn-batch id of the next `spawn_npc_group` batch (never the leader's object id:
+/// object ids are reused after a despawn, batch ids are not).
+static NEXT_BATCH_ID: AtomicU32 = AtomicU32::new(1);
+
+fn next_batch_id() -> u32 {
+    loop {
+        let id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
+}
 
 /// `formation_GoToOnPoint`'s tension default when the member row has 0 (1.2
 /// `pipe_manager_x2.lua`: `local tension = 1.0`).
@@ -24,18 +39,13 @@ pub const LEADER_MOVING_TIMEOUT_MS: i64 = 1000;
 /// Attaches the spawned batch's runtime membership to every member `spawn_npc_group` created.
 ///
 /// `spawned` pairs each `npc_group_members` row with the NPC it produced (a missing NPC
-/// template is skipped). The batch id is the move leader's object id, else the first spawned
-/// member's: it is unique per spawn and survives the leader's death (the followers then find no
-/// live leader and fall back to their own idle behaviour).
+/// template is skipped). The batch id is a monotonic counter value, so object-id reuse can never
+/// make a follower mistake an unrelated NPC for its leader.
 pub fn attach_spawned_group(spawned: &[(NpcGroupMember, NpcRef)], group: &NpcGroup) {
-    let Some(instance) = spawned
-        .iter()
-        .find(|(member, _)| member.is_move_leader)
-        .or_else(|| spawned.first())
-        .map(|(_, npc)| npc.obj_id)
-    else {
+    if spawned.is_empty() {
         return;
-    };
+    }
+    let instance = next_batch_id();
     let leader_obj_id = spawned
         .iter()
         .find(|(member, _)| member.is_move_leader)

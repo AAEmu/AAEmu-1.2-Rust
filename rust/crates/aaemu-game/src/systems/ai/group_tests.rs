@@ -3,13 +3,24 @@
 //! behaviour when the leader dies, and `aggro_rule_id != 0` groups share aggro with every living
 //! member of the same spawn.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aaemu_physics::geometry::primitives::BoxPrim;
+use aaemu_physics::geometry::shapes::stream::{save_phys_geometry, PhysGeomHeader};
+use aaemu_physics::geometry::shapes::BoxGeom;
+use aaemu_physics::math::{Quat, Vec3 as PhysicsVec3};
+
+use crate::data::client_files::ClientFileManager;
 use crate::data::GameData;
 use crate::models::movement::GameStanceType;
 use crate::models::npc::Npc;
 use crate::server::GameServer;
+use crate::systems::ai::collision::objects::{apply_doodads, collision_flags, DoodadInfo};
+use crate::systems::npcs::heightmap::{
+    HeightmapConfig, HeightmapWorlds, WorldHeightmap, CELL_HMAP_RESOLUTION,
+};
 use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::npcs::npc::group;
 use crate::systems::npcs::npc::group_data::{NpcGroup, NpcGroupMember};
@@ -17,7 +28,7 @@ use crate::systems::skills::controllers::Vec3;
 use crate::systems::skills::data::BuffTemplate;
 use crate::systems::skills::state::AggroKind;
 use crate::test_support::*;
-use crate::world::{Entity, NpcRef, PlayerRef};
+use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
 use super::data::{ActorModel, GameStance};
 use super::framework::{AiKind, BehaviorKind as B};
@@ -166,7 +177,10 @@ struct Fixture {
 /// Three group members (one move leader + two followers), the follower 5.8 m from its formation
 /// point, a player for region activity, and the IDs the tests need.
 fn fixture(rule: i32, follower_kind: AiKind) -> Fixture {
-    let server = server();
+    fixture_on(server(), rule, follower_kind)
+}
+
+fn fixture_on(server: Arc<GameServer>, rule: i32, follower_kind: AiKind) -> Fixture {
     let client = TestClient::new(&server, 1, 1);
     let mut character = test_character(1, "Observer", 100.0, 100.0);
     character.unit.hp = 1000;
@@ -267,11 +281,11 @@ async fn follower_does_not_roam_on_its_own() {
         Some(B::Roaming),
         "a follower keeps its own idle behavior (here Roaming) so combat transitions stay"
     );
-    // It did not leave its formation point while the leader stood still, not even during the
-    // spawn settlement (an ordinary Roaming NPC would have started roaming there).
+    // It walked to its formation point during the spawn settlement instead of roaming around
+    // its own spawn (a roaming follower could never get closer than the 6 m roam radius allows).
     let start = npc_pos(&f.follower);
     assert!(
-        xy_dist(start, Vec3::new(95.0, 100.0, 100.0)) < 0.05,
+        xy_dist(start, Vec3::new(102.0, 97.0, 100.0)) <= 1.5,
         "the follower waited at its formation point during the spawn settlement: {start:?}"
     );
     for _ in 0..60 {
@@ -398,5 +412,283 @@ async fn a_zero_aggro_rule_does_not_share_aggro() {
     assert!(
         !has_aggro_on_player(&f.leader) && !has_aggro_on_player(&f.follower2),
         "rule 0 groups fight alone"
+    );
+}
+
+// ===========================================================================================
+// Review follow-ups: height source, off-formation walking, moving-leader returns, batch ids,
+// blocked formation points and the follower's idle activity.
+// ===========================================================================================
+
+/// `HeightMaxCoefficient` of the synthetic `main_world` (as in the heightmap tests).
+const COEF: f64 = 65535.0 / 4096.0;
+const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usize;
+
+/// A flat heightmap at `surface` metres for the test zone's cell (0, 0).
+fn heightmaps(surface: f32) -> Arc<HeightmapWorlds> {
+    let t = WorldHeightmap::with_size(0, "main_world", 2, 2, COEF);
+    let value = (f64::from(surface) * COEF) as u16;
+    assert!(t.insert_cell_with_holes(0, 0, vec![value; CELL_POINTS], &[]));
+    Arc::new(HeightmapWorlds::from_parts(
+        Arc::new(ClientFileManager::new()),
+        vec![t],
+        HashMap::from([(TEST_ZONE, 0)]),
+        HeightmapConfig {
+            heightmaps_enable: true,
+            ..Default::default()
+        },
+    ))
+}
+
+/// A 2 × 2 × 2 m static box collider centred at `(x, y, z)` (a wall between follower and point).
+fn add_wall(server: &GameServer, x: f32, y: f32, z: f32) {
+    // Wide in X so the blocked point stays blocked from the whole leader side.
+    let box_g = BoxGeom::new(&BoxPrim::aligned(
+        PhysicsVec3::ZERO,
+        PhysicsVec3::new(4.0, 1.0, 2.0),
+    ));
+    let header = PhysGeomHeader {
+        inertia: PhysicsVec3::splat(1.0),
+        q: Quat::IDENTITY,
+        origin: PhysicsVec3::ZERO,
+        volume: 8.0,
+        unk52: 1,
+        surface_idx: 0,
+    };
+    let mut blob = Vec::new();
+    save_phys_geometry(&header, &box_g, &mut blob);
+    let files = HashMap::from([(
+        "game/objects/test/group_wall.cgf".into(),
+        crate::systems::ai::collision::cgf::tests::synthetic_cgf(&blob),
+    )]);
+    assert!(server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(files))
+        .is_ok());
+    let pw = crate::systems::ai::collision::phys_world(server, 0).expect("physics world");
+    let files = crate::systems::ai::collision::files(server).expect("files");
+    let models = crate::systems::ai::collision::model_cache(server, &files);
+    let wall = DoodadInfo {
+        obj_id: 8,
+        model: "cgf://objects/test/group_wall.cgf".into(),
+        pos: PhysicsVec3::new(x, y, z),
+        q: Quat::IDENTITY,
+        scale: 1.0,
+        flags: collision_flags(false, false, false),
+    };
+    let mut shapes = HashMap::new();
+    assert_eq!(
+        apply_doodads(&pw, &files, &models, &mut shapes, &[wall]),
+        (1, 0)
+    );
+}
+
+/// A HoldPosition follower's formation walk uses the ground height under it, not its spawner's
+/// Z (`ReferenceHeightAi.hold_or_idle` must be false for formation movement).
+#[tokio::test]
+async fn formation_move_uses_the_ground_height_not_the_spawner_height() {
+    let server = server();
+    server.systems.npcs.heightmaps.install(heightmaps(100.0));
+    let f = fixture_on(server, 1, AiKind::HoldPosition);
+    f.follower.data().spawner_z = Some(250.0);
+
+    for _ in 0..220 {
+        f.leader.data().last_move_ms = crate::world::now_ms();
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let pos = npc_pos(&f.follower);
+    assert!(
+        (pos.z - 100.0).abs() < 1.0,
+        "the follower walks on the ground, not at the spawner Z: {pos:?}"
+    );
+    assert!(
+        xy_dist(pos, Vec3::new(102.0, 97.0, 100.0)) <= 1.5,
+        "it still reached its formation point: {pos:?}"
+    );
+}
+
+/// A follower left away from its formation point walks back even while the leader stands still.
+#[tokio::test]
+async fn a_follower_off_its_formation_point_walks_back_while_the_leader_stands_still() {
+    let f = fixture(1, AiKind::HoldPosition);
+    f.follower.data().unit.transform.set_xyz(90.0, 100.0, 100.0);
+
+    for _ in 0..220 {
+        f.leader.data().last_move_ms = 0;
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let pos = npc_pos(&f.follower);
+    assert!(
+        xy_dist(pos, Vec3::new(102.0, 97.0, 100.0)) <= 1.5,
+        "the follower re-forms without waiting for the leader to move: {pos:?}"
+    );
+}
+
+/// A returning follower recomputes the formation point from the leader's current position; it
+/// must not freeze the spot the leader was at when the fight ended.
+#[tokio::test]
+async fn a_returning_follower_tracks_a_moving_leaders_current_position() {
+    let f = fixture(1, AiKind::HoldPosition);
+    f.follower.data().unit.transform.set_xyz(90.0, 100.0, 100.0);
+    post(&f.server, FOLLOWER_OBJ, |c| c.go_to_return());
+    for _ in 0..5 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    f.leader.data().unit.transform.set_xyz(110.0, 100.0, 100.0);
+    for _ in 0..300 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let pos = npc_pos(&f.follower);
+    assert!(
+        xy_dist(pos, Vec3::new(112.0, 97.0, 100.0)) <= 1.5,
+        "it returned to the leader's current formation point: {pos:?}"
+    );
+    assert!(
+        xy_dist(pos, Vec3::new(102.0, 97.0, 100.0)) > 5.0,
+        "it did not return to the leader's old spot: {pos:?}"
+    );
+}
+
+/// Spawn batch ids are monotonic, so an old survivor never follows a new NPC that reuses its
+/// leader's object id.
+#[tokio::test]
+async fn old_survivors_do_not_follow_a_reused_leader_object_id() {
+    let f = fixture(1, AiKind::HoldPosition);
+    let start = npc_pos(&f.follower);
+    crate::systems::npcs::spawn_manager::delete_object(
+        &f.server,
+        &WorldObject::from(&f.leader),
+        None,
+    );
+    let new_leader = spawn_npc(&f.server, LEADER_OBJ, 85.0, 100.0, AiKind::HoldPosition);
+    group::attach_spawned_group(
+        &[(member_row(9, true, 0.0, 0.0, 1.0), new_leader.clone())],
+        &group_row(1),
+    );
+    for _ in 0..25 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        group::move_leader(&f.server, &f.follower).is_none(),
+        "a reused object id must not match the old batch"
+    );
+
+    for _ in 0..40 {
+        new_leader.data().last_move_ms = crate::world::now_ms();
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        xy_dist(npc_pos(&f.follower), start) < 0.05,
+        "the old survivor stays with its own idle behaviour"
+    );
+}
+
+/// A formation point behind a wall is not walked to; the follower moves towards the leader
+/// instead.
+#[tokio::test]
+async fn a_blocked_formation_point_falls_back_to_the_leader_position() {
+    let server = server();
+    server.systems.npcs.heightmaps.install(heightmaps(100.0));
+    // Between the follower (95, 100) and its formation point (102, 97), not on the leader line.
+    add_wall(&server, 98.0, 98.5, 100.0);
+    let blocked = crate::systems::ai::collision::walk::walk_blocked(
+        &server,
+        0,
+        [95.0, 100.0, 100.0],
+        [102.0, 97.0, 100.0],
+    );
+    assert_eq!(
+        blocked,
+        Some(true),
+        "fixture: the formation point is behind a wall"
+    );
+    let f = fixture_on(server, 1, AiKind::HoldPosition);
+
+    for _ in 0..220 {
+        f.leader.data().last_move_ms = crate::world::now_ms();
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let pos = npc_pos(&f.follower);
+    assert!(
+        xy_dist(pos, Vec3::new(100.0, 100.0, 100.0)) <= 3.0,
+        "the follower moved towards the leader when the point was blocked: {pos:?}"
+    );
+    assert!(
+        xy_dist(pos, Vec3::new(102.0, 97.0, 100.0)) > 3.0,
+        "it did not walk through the wall to the formation point: {pos:?}"
+    );
+}
+
+/// A waiting HoldPosition follower still runs its idle activity: `check_for_talk` sees a
+/// player it has not greeted yet and enters Talk (the formation code only takes over movement).
+#[tokio::test]
+async fn a_waiting_hold_position_follower_still_checks_for_talk() {
+    let f = fixture(1, AiKind::HoldPosition);
+    // Let the spawn-time greeting of the first player finish (Talk throttles at 100 ms).
+    for _ in 0..10 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    assert_eq!(behavior(&f.server, FOLLOWER_OBJ), Some(B::HoldPosition));
+
+    // Put the player in front of the follower and forget the greeting: the waiting follower
+    // must still run check_for_talk and record it (the HoldPosition slot's greeted map).
+    f._player.data().unit.transform.set_xyz(104.0, 96.0, 100.0);
+    super::manager::run_now(&f.server, FOLLOWER_OBJ, |c| {
+        c.st(B::HoldPosition).greeted.clear();
+    });
+    for _ in 0..3 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    let greeted = super::manager::run_now(&f.server, FOLLOWER_OBJ, |c| {
+        c.st(B::HoldPosition).greeted.clone()
+    })
+    .expect("follower AI");
+    assert!(
+        greeted.contains_key(&PLAYER_OBJ),
+        "the waiting follower still ran check_for_talk: {greeted:?}"
+    );
+}
+
+/// A fight that ended because the abuser died must not latch the group share: the next fight
+/// against the same object id shares again.
+#[tokio::test]
+async fn a_second_fight_after_the_abuser_died_shares_again() {
+    let f = fixture(1, AiKind::HoldPosition);
+    pull_member(&f, &f.follower).await;
+    assert!(has_aggro_on_player(&f.leader));
+
+    f._player.data().unit.hp = 0;
+    for _ in 0..60 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        if f.leader.data().unit.skill_state.aggro_table.is_empty()
+            && behavior(&f.server, FOLLOWER_OBJ) == Some(B::HoldPosition)
+        {
+            break;
+        }
+    }
+    assert!(
+        f.leader.data().unit.skill_state.aggro_table.is_empty(),
+        "the dead abuser was cleared from the leader"
+    );
+
+    f._player.data().unit.hp = 1000;
+    pull_member(&f, &f.follower).await;
+    assert!(
+        has_aggro_on_player(&f.leader),
+        "the second fight against the same object id shares again"
     );
 }

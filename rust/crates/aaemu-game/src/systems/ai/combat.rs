@@ -36,6 +36,19 @@ pub fn add_unit_aggro(
 /// `Unit.ClearAggroOfUnit(unit)`.
 pub fn clear_aggro_of_unit(server: &GameServer, owner: &WorldObject, unit: &WorldObject) {
     skills_combat::clear_aggro_of_unit(server, owner, unit);
+    clear_group_share_latch_if_aggro_empty(owner);
+}
+
+/// A fight that ends because an abuser died or vanished must let a later fight against the same
+/// object id share with the spawned group again.
+fn clear_group_share_latch_if_aggro_empty(owner: &WorldObject) {
+    let Some(npc) = owner.as_npc() else {
+        return;
+    };
+    let mut d = npc.data();
+    if d.unit.skill_state.aggro_table.is_empty() {
+        d.npc_group_last_share_abuser = 0;
+    }
 }
 
 /// `ClearAggroOfUnit` for an abuser whose object no longer exists (the C# keeps the `Unit`
@@ -69,6 +82,7 @@ pub fn clear_aggro_of_missing(server: &GameServer, owner: &WorldObject, unit_id:
                 .npcs()
                 .npc_aggro_removed(server, n, unit_id);
         }
+        clear_group_share_latch_if_aggro_empty(owner);
     }
 }
 
