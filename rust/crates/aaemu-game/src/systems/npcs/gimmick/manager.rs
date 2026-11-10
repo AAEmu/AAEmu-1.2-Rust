@@ -41,6 +41,13 @@ pub const COLLISION_RADIUS: f32 = 1.5;
 /// reused and a gimmick lives at most `life_time`; a touch beyond the cap is ignored instead of
 /// growing the set without bound.
 const MAX_COLLISION_HITS: usize = 256;
+/// Authored (effect / doodad spawn) motion stops after this time or distance when the template
+/// has no shorter `life_time`: a `life_time = 0` gimmick would otherwise fly forever.
+pub const RUNAWAY_CAP_TIME: Duration = Duration::from_secs(30);
+pub const RUNAWAY_CAP_DISTANCE: f32 = 200.0;
+/// Movement packets for a gimmick that only rotates in place (position unchanged) go out at
+/// this rate instead of every 50 ms tick; the client interpolates between the queued states.
+pub const SPIN_BROADCAST_MS: i64 = 200;
 
 /// `(uint)(DateTime.UtcNow - DateTime.UtcNow.Date).TotalMilliseconds`.
 pub fn time_of_day_ms(now_ms: i64) -> u32 {
@@ -75,6 +82,14 @@ pub struct GimmickState {
     /// Units this gimmick has already hit with its `collision_skill_id` (obj ids, at most
     /// [`MAX_COLLISION_HITS`]). Not a C# member: the C# never implemented contact hits.
     pub collision_hits: Vec<u32>,
+    /// Time spent under authored (spawn-velocity) motion and the distance travelled, for
+    /// [`RUNAWAY_CAP_TIME`] / [`RUNAWAY_CAP_DISTANCE`].
+    pub authored_time: Duration,
+    pub authored_distance: f32,
+    /// Last movement broadcast (unix ms) and whether one was ever sent; a spin-only gimmick is
+    /// rate-limited to [`SPIN_BROADCAST_MS`] and a static one stops broadcasting.
+    pub last_broadcast_ms: i64,
+    pub broadcast_sent: bool,
 }
 
 impl GimmickState {
@@ -772,9 +787,21 @@ pub fn gimmick_tick(
         }
         None => {
             if active.state().authored_motion {
+                let mut st = active.state();
+                let capped = st.authored_time >= RUNAWAY_CAP_TIME
+                    || st.authored_distance >= RUNAWAY_CAP_DISTANCE;
                 let mut g = active.gimmick.data();
-                let vel = g.vel;
+                let mut vel = g.vel;
                 let ang = g.ang_vel;
+                if capped {
+                    // Stop the linear motion; the angular velocity keeps a mine spinning in
+                    // place, which is all a capped gimmick may still do.
+                    vel = [0.0; 3];
+                    g.vel = vel;
+                }
+                let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+                st.authored_time += delta;
+                st.authored_distance += speed * delta_time;
                 let t = &mut g.unit.transform;
                 t.x += vel[0] * delta_time;
                 t.y += vel[1] * delta_time;
@@ -789,6 +816,19 @@ pub fn gimmick_tick(
     // Keep the grid region current: `around`, visibility and the movement broadcast all use it
     // (same update as a moving NPC, `WorldManager.AddVisibleObject`).
     crate::systems::ai::npc::check_moved_position(server, &WorldObject::from(&active.gimmick));
+    // A gimmick that leaves the world grid is gone for the client too; an effect / doodad spawn
+    // has no spawner to bring it back, so drop it instead of ticking a phantom.
+    if active.state().authored_motion {
+        let (x, y) = {
+            let g = active.gimmick.data();
+            (g.unit.transform.x, g.unit.transform.y)
+        };
+        if world.region_by_pos(x, y).is_none() {
+            active.state().despawned = true;
+            despawn(server, active);
+            return;
+        }
+    }
 
     // Handle Delayed Skills
     if let Some(t) = &active.template {
@@ -836,15 +876,27 @@ pub fn gimmick_tick(
             [t.rot_x, t.rot_y, t.rot_z],
         )
     };
-    {
+    let send = {
         let mut st = active.state();
         st.time = time;
-    }
-    world::broadcast(world, &active.gimmick, &packet, false);
-    {
-        let mut st = active.state();
+        let moved = pos != st.last_pos;
+        let turned = rot != st.last_rot;
         st.last_pos = pos;
         st.last_rot = rot;
+        let send = !st.broadcast_sent
+            || moved
+            || (turned && now_ms.saturating_sub(st.last_broadcast_ms) >= SPIN_BROADCAST_MS);
+        if send {
+            st.last_broadcast_ms = now_ms;
+            st.broadcast_sent = true;
+        }
+        send
+    };
+    if send {
+        world::broadcast(world, &active.gimmick, &packet, false);
+    }
+    {
+        let mut st = active.state();
         // MovementHandler?.AfterMove(delta, deltaPosition)
         if active.handler == Some(MovementHandler::Elevator) {
             let vel = active.gimmick.data().vel;
@@ -1104,7 +1156,7 @@ mod tests {
     struct ContactFixture {
         server: GameServer,
         world: Arc<WorldInstance>,
-        _client: crate::test_support::TestClient,
+        client: crate::test_support::TestClient,
         victim: crate::world::PlayerRef,
     }
 
@@ -1131,7 +1183,7 @@ mod tests {
         ContactFixture {
             server,
             world,
-            _client: client,
+            client,
             victim,
         }
     }
@@ -1294,6 +1346,96 @@ mod tests {
             "grid region follows the gimmick"
         );
         assert_eq!(f.world.region_of(&me), Some((1, 1)));
+    }
+
+    #[tokio::test]
+    async fn authored_motion_stops_after_the_travel_cap() {
+        let f = contact_fixture(contact_template(false), (300.0, 300.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (g, active) = spawn_contact_gimmick(&f, &source, [10.0, 0.0, 0.0]);
+        // 25 s at 10 m/s would be 250 m; the 200 m cap stops it at x = 300.
+        for i in 0..500 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        let x = g.data().unit.transform.x;
+        assert!((x - 300.0).abs() < 0.6, "stopped at the 200 m cap: x={x}");
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            40_000,
+        );
+        assert_eq!(g.data().unit.transform.x, x, "no motion after the cap");
+    }
+
+    #[tokio::test]
+    async fn effect_gimmick_out_of_the_world_grid_despawns() {
+        let f = contact_fixture(contact_template(false), (300.0, 300.0));
+        // The synthetic world is 2x2 cells (2048 m): launch it past the east edge.
+        let source = doodad_at(&f.server, &f.world, (2040.0, 100.0, 100.0));
+        let (g, active) = spawn_contact_gimmick(&f, &source, [100.0, 0.0, 0.0]);
+        for i in 0..20 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        assert!(
+            f.world.gimmick(g.obj_id).is_none(),
+            "left the world grid and despawned"
+        );
+    }
+
+    #[tokio::test]
+    async fn spin_only_gimmick_broadcasts_at_a_lower_rate() {
+        let mut f = contact_fixture(contact_template(false), (100.0, 100.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let g = spawn_from_effect(
+            &f.server,
+            &f.world,
+            &SpawnGimmickParams {
+                gimmick_id: CONTACT_GIMMICK,
+                offset_coordinate_id: 2,
+                scale: 1.0,
+                ang_vel_coordinate_id: 2,
+                ang_vel_z: 2.0,
+                ..Default::default()
+            },
+            &source,
+        )
+        .expect("gimmick spawned");
+        let active = f.server.systems.npcs.gimmicks.find(g.obj_id).unwrap();
+        f.client.drain();
+        for i in 0..10 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        let movements = f
+            .client
+            .drain()
+            .into_iter()
+            .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCGimmickMovementPacket)
+            .count();
+        assert!(
+            (2..=4).contains(&movements),
+            "spin broadcast rate: {movements} packets in 500 ms"
+        );
+        assert!(g.data().unit.transform.rot_z > 0.0, "the spin continues");
     }
 
     #[tokio::test]
