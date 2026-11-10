@@ -245,6 +245,18 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
     );
     let obj = WorldObject::from(p);
     let old = p.data().unit.transform;
+    // A server-forced move to another instance is a leave: an item-paid dungeon visit starts its
+    // `indun_zones.restore_item_time` re-entry window (exit doors / disconnect / kicks note it
+    // themselves; this covers resurrection to an open-world return portal and the like).
+    if old.instance_id != destination.instance_id {
+        if let Some(dungeon) = server.systems.instances.dungeon_of_world(old.instance_id) {
+            server.systems.instances.indun.note_entry_item_leave(
+                p.character_id,
+                dungeon.zone_group_id(),
+                dungeon.indun_zone.restore_item_time,
+            );
+        }
+    }
     // The C# `new Transform(character, null, ...)` has no parent.
     if let Some(old_world) = server.world.world_of(&obj) {
         old_world.detach_child(&obj);

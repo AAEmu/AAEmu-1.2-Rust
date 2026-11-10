@@ -593,6 +593,11 @@ fn unsubscribe(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef, event
 
 /// `LeaveDungeonInstance(character)` / `LeaveSystemInstance(character)`.
 fn leave_instance(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef, system: bool) {
+    server.systems.instances.indun.note_entry_item_leave(
+        p.character_id,
+        dungeon.zone_group_id(),
+        dungeon.indun_zone.restore_item_time,
+    );
     if system {
         unsubscribe(
             server,
@@ -721,6 +726,11 @@ pub fn on_disconnect(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef)
         .st()
         .enter_requests
         .retain(|r| r.character_id != p.character_id);
+    server.systems.instances.indun.note_entry_item_leave(
+        p.character_id,
+        dungeon.zone_group_id(),
+        dungeon.indun_zone.restore_item_time,
+    );
     tracing::info!(
         "[Dungeon] instanceId={}, zoneId={} player={} disconnected!",
         dungeon.zone_instance_id.instance_id,

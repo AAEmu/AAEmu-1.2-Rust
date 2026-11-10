@@ -11,7 +11,7 @@ use std::time::Duration;
 use aaemu_commons::PacketStream;
 use sqlx::mysql::MySqlPoolOptions;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ServerProfile};
 use crate::data::skills::{BuffKind, BuffTemplate};
 use crate::data::world_data::{Zone, ZoneData, ZoneGroup};
 use crate::data::world_templates::{
@@ -102,10 +102,20 @@ fn lookup(name: &str, spawn: WorldSpawnPosition) -> WorldSpawnLocation {
 /// A server like `test_support::test_server_with`, with extra world templates / spawn lookups
 /// and a zero party-kick delay.
 fn build_server(
+    data: GameData,
+    templates: Vec<WorldTemplate>,
+    lookups: Vec<WorldSpawnLocation>,
+    app_path: Option<&Path>,
+) -> Arc<GameServer> {
+    build_server_with(data, templates, lookups, app_path, |_| {})
+}
+
+fn build_server_with(
     mut data: GameData,
     mut templates: Vec<WorldTemplate>,
     lookups: Vec<WorldSpawnLocation>,
     app_path: Option<&Path>,
+    adjust: impl FnOnce(&mut AppConfig),
 ) -> Arc<GameServer> {
     let mut config = AppConfig {
         id: 1,
@@ -117,6 +127,7 @@ fn build_server(
     if let Some(p) = app_path {
         config.app_path = p.to_path_buf();
     }
+    adjust(&mut config);
     let db = MySqlPoolOptions::new()
         .acquire_timeout(Duration::from_millis(200))
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
@@ -350,6 +361,13 @@ fn dungeon_server() -> Arc<GameServer> {
 }
 
 fn dungeon_server_with(data: GameData) -> Arc<GameServer> {
+    dungeon_server_with_config(data, |_| {})
+}
+
+fn dungeon_server_with_config(
+    data: GameData,
+    adjust: impl FnOnce(&mut AppConfig),
+) -> Arc<GameServer> {
     let mirage_spawn = WorldSpawnPosition {
         world_id: 2,
         zone_id: MIRAGE_ZONE,
@@ -359,7 +377,7 @@ fn dungeon_server_with(data: GameData) -> Arc<GameServer> {
         yaw: 200.0,
         ..WorldSpawnPosition::default()
     };
-    build_server(
+    build_server_with(
         data,
         vec![
             instance_template(1, "instance_test", DUNGEON_ZONE, DUNGEON_SPAWN),
@@ -370,6 +388,7 @@ fn dungeon_server_with(data: GameData) -> Arc<GameServer> {
             lookup("arche_mall_world", mirage_spawn),
         ],
         None,
+        adjust,
     )
 }
 
@@ -511,15 +530,11 @@ async fn separate_parties_are_isolated_and_leader_reset_creates_fresh_progress()
 
 #[tokio::test]
 async fn same_run_reentry_does_not_charge_another_entry_and_destroy_cancels_loader() {
-    let mut data = dungeon_data();
-    data.systems
-        .instances
-        .indun
-        .zones
-        .get_mut(&DUNGEON_GROUP)
-        .unwrap()
-        .enter_count = 1;
-    let server = dungeon_server_with(data);
+    let data = dungeon_data();
+    let server = dungeon_server_with_config(data, |c| {
+        c.dungeons.entry_limit.enabled = Some(true);
+        c.dungeons.entry_limit.count = 1;
+    });
     let a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
     use_enter_func(&server, &a.p, DUNGEON_ZONE);
     let d = server.systems.instances.all_dungeons()[0].clone();
@@ -2137,20 +2152,16 @@ fn has_load_instance(frames: &[(u16, Vec<u8>)]) -> bool {
     frames.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket)
 }
 
-/// The entry limit (`enter_count` entries within 4 hours) answers with the 1.2 client's
-/// `INSTANCE_VISIT_LIMIT` (453, "you have entered this instance too often") and the exact bytes of
-/// the notification; the refused entry leaves no run and no extra entry behind.
+/// The entry limit (`Dungeons.EntryLimit`: C# 3 entries within 4 hours) answers with the 1.2
+/// client's `INSTANCE_VISIT_LIMIT` (453, "you have entered this instance too often") and the exact
+/// bytes of the notification; the refused entry leaves no run and no extra entry behind.
 #[tokio::test]
 async fn an_entry_over_the_visit_limit_is_answered_with_the_visit_limit_error() {
-    let mut data = dungeon_data();
-    data.systems
-        .instances
-        .indun
-        .zones
-        .get_mut(&DUNGEON_GROUP)
-        .unwrap()
-        .enter_count = 1;
-    let server = dungeon_server_with(data);
+    let data = dungeon_data();
+    let server = dungeon_server_with_config(data, |c| {
+        c.dungeons.entry_limit.enabled = Some(true);
+        c.dungeons.entry_limit.count = 1;
+    });
     let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
     use_enter_func(&server, &a.p, DUNGEON_ZONE);
     let d = server.systems.instances.all_dungeons()[0].clone();
@@ -2178,6 +2189,158 @@ async fn an_entry_over_the_visit_limit_is_answered_with_the_visit_limit_error() 
         server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
         1
     );
+}
+
+/// The owner's EU 1.2 recollection (2026-11-10): 1.2 had no dungeon entry limit (the "5 per
+/// dungeon" cap came later). Under the default `EuAuroria` profile a fourth entry within 4 hours
+/// is admitted; the history still records every entry.
+#[tokio::test]
+async fn eu_auroria_profile_admits_a_fourth_entry_within_four_hours() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    for entry in 1..=4 {
+        use_enter_func(&server, &a.p, DUNGEON_ZONE);
+        assert!(error_frames(&a.frames()).is_empty(), "entry {entry}");
+        let d = server.systems.instances.all_dungeons()[0].clone();
+        await_loader(&d).await;
+        assert_ne!(a.instance(), 0, "entry {entry}");
+        use_exit_func(&server, &a.p);
+        dungeon::destroy_dungeon(&server, &d);
+    }
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        4
+    );
+}
+
+/// The other era profiles keep the C# cap (3 entries per 4 hours).
+#[tokio::test]
+async fn eu_launch_profile_keeps_the_csharp_entry_limit() {
+    let server = dungeon_server_with_config(dungeon_data(), |c| {
+        c.world.profile = ServerProfile::EuLaunch;
+        c.dungeons.entry_limit.count = 1;
+    });
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert!(error_frames(&a.frames()).is_empty());
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    use_exit_func(&server, &a.p);
+    dungeon::destroy_dungeon(&server, &d);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert_eq!(
+        error_frames(&a.frames()),
+        vec![error_frame(worlds::error_message::INSTANCE_VISIT_LIMIT)]
+    );
+    assert!(server.systems.instances.all_dungeons().is_empty());
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        1
+    );
+}
+
+/// `Dungeons.RequireEntryItems = false`: the `indun_zones.item_id` door ticket is never asked
+/// for (no economy hook is installed here, so the default configuration fails closed).
+#[tokio::test]
+async fn require_entry_items_false_needs_no_ticket() {
+    let mut data = dungeon_data();
+    data.systems
+        .instances
+        .indun
+        .zones
+        .get_mut(&DUNGEON_GROUP)
+        .unwrap()
+        .item_id = 123;
+    let server = dungeon_server_with_config(data, |c| {
+        c.dungeons.require_entry_items = false;
+    });
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert!(error_frames(&a.frames()).is_empty());
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_ne!(a.instance(), 0);
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        1
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+fn ticket_dungeon() -> (GameData, std::sync::Arc<DungeonItems>) {
+    let mut data = dungeon_data();
+    {
+        let zone = data
+            .systems
+            .instances
+            .indun
+            .zones
+            .get_mut(&DUNGEON_GROUP)
+            .unwrap();
+        zone.item_id = 123;
+        zone.restore_item_time = 3600;
+    }
+    (data, std::sync::Arc::new(DungeonItems::default()))
+}
+
+/// `indun_zones.restore_item_time` (3600 s on the real Serpentis row): re-entering the same zone
+/// group within the window after leaving a run that consumed the ticket consumes no second ticket.
+#[tokio::test]
+async fn reentry_within_restore_item_time_does_not_consume_another_ticket() {
+    let (data, items) = ticket_dungeon();
+    let server = dungeon_server_with(data);
+    server.systems.npcs.hooks.economy.install(items.clone());
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_eq!(items.charges.load(std::sync::atomic::Ordering::Relaxed), 1);
+    use_exit_func(&server, &a.p);
+    dungeon::destroy_dungeon(&server, &d);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert!(error_frames(&a.frames()).is_empty());
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_ne!(a.instance(), 0);
+    assert_eq!(items.charges.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        2
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+/// After `restore_item_time` has passed, the next entry consumes a ticket again.
+#[tokio::test]
+async fn after_restore_item_time_a_new_ticket_is_consumed() {
+    let (data, items) = ticket_dungeon();
+    let server = dungeon_server_with(data);
+    server.systems.npcs.hooks.economy.install(items.clone());
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    use_exit_func(&server, &a.p);
+    dungeon::destroy_dungeon(&server, &d);
+    server
+        .systems
+        .instances
+        .indun
+        .backdate_entry_item_leave(1, DUNGEON_GROUP, 3601);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert!(error_frames(&a.frames()).is_empty());
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_eq!(items.charges.load(std::sync::atomic::Ordering::Relaxed), 2);
+    dungeon::destroy_dungeon(&server, &d);
 }
 
 /// Every refusal of a dungeon request carries an error for the client: unknown zone, a zone that

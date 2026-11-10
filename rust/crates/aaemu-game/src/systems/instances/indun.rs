@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::config::ServerProfile;
 use crate::data::world_data::Zone;
 use crate::server::GameServer;
 use crate::systems::social::team::Team;
 use crate::world::{PlayerRef, WorldInstance};
 
+use super::config::DungeonsConfig;
 use super::data::IndunZone;
 use super::dungeon::{self, Dungeon};
 use super::packets::SCSystemDungeonChannelPacket;
@@ -25,11 +27,23 @@ pub(super) struct ChannelSelectPending {
     pub index: i32,
 }
 
+/// `indun_zones.restore_item_time` bookkeeping for one character / zone group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryItemRestore {
+    /// The current visit paid an entry item (or reused a restore window) and has not left yet.
+    Inside,
+    /// The item-paid visit ended at `at` (unix ms); re-entering within `window` seconds is free.
+    Left { at: i64, window: u32 },
+}
+
 /// `IndunManager` runtime state (`server.systems.instances.indun`).
 #[derive(Debug, Default)]
 pub struct IndunManager {
     /// `EntryHistory`: character id -> zone group id -> entry times (unix ms).
     entry_history: Mutex<HashMap<u32, HashMap<u32, Vec<i64>>>>,
+    /// `indun_zones.restore_item_time`: (character id, zone group id) -> paid visit state.
+    /// Memory only: a server restart forgets the restore windows.
+    entry_item_restore: Mutex<HashMap<(u32, u32), EntryItemRestore>>,
     /// Serialize selecting/creating a party run and resetting its bindings.
     requests: Mutex<()>,
     charges: Mutex<()>,
@@ -52,11 +66,24 @@ impl IndunManager {
             .charges
             .lock()
             .expect("instance entry charges poisoned");
-        if !self.check_entry_attempt_count(p.character_id, zone.zone_group_id, zone, false) {
+        let dungeons = &server.config.dungeons;
+        let profile = server.config.world.profile;
+        if !self.check_entry_attempt_count(
+            p.character_id,
+            zone.zone_group_id,
+            zone,
+            false,
+            dungeons,
+            profile,
+        ) {
             send_error(p, err::INSTANCE_VISIT_LIMIT, 0);
             return false;
         }
-        if zone.item_id > 0
+        // `Dungeons.RequireEntryItems` = false neither asks for nor consumes the ticket. A
+        // re-entry within `indun_zones.restore_item_time` after leaving a paid visit reuses it.
+        let item_entry = dungeons.require_entry_items && zone.item_id > 0;
+        if item_entry
+            && !self.reuse_entry_item(p.character_id, zone.zone_group_id)
             && !server.systems.npcs.hooks.economy.get().is_some_and(|h| {
                 h.bag_consume_item(
                     server,
@@ -70,17 +97,103 @@ impl IndunManager {
             send_error(p, err::ENTER_INST_REQ_ITEM, zone.item_id);
             return false;
         }
-        self.check_entry_attempt_count(p.character_id, zone.zone_group_id, zone, true)
+        if item_entry {
+            self.mark_entry_item_paid(p.character_id, zone.zone_group_id);
+        }
+        self.check_entry_attempt_count(
+            p.character_id,
+            zone.zone_group_id,
+            zone,
+            true,
+            dungeons,
+            profile,
+        )
+    }
+
+    /// Whether the entry is covered by an `indun_zones.restore_item_time` window: true when the
+    /// character left an item-paid run of the zone group within its restore window; a re-entry
+    /// marks the visit paid again so the next leave restarts the window. A fresh admission never
+    /// happens while the character stands in a paid run (same-run re-entry skips the charge), so
+    /// an `Inside` marker here is a leave whose path missed the note; it grants no free entry.
+    /// Single lock, so the check and the state change cannot interleave with a leave.
+    fn reuse_entry_item(&self, character_id: u32, zone_group_id: u32) -> bool {
+        let mut r = self
+            .entry_item_restore
+            .lock()
+            .expect("entry item restore poisoned");
+        let now = now_ms();
+        r.retain(|_, s| match s {
+            EntryItemRestore::Inside => true,
+            EntryItemRestore::Left { at, window } => now - *at <= i64::from(*window) * 1000,
+        });
+        let key = (character_id, zone_group_id);
+        if matches!(r.get(&key), Some(EntryItemRestore::Left { .. })) {
+            r.insert(key, EntryItemRestore::Inside);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_entry_item_paid(&self, character_id: u32, zone_group_id: u32) {
+        self.entry_item_restore
+            .lock()
+            .expect("entry item restore poisoned")
+            .insert((character_id, zone_group_id), EntryItemRestore::Inside);
+    }
+
+    /// The character leaves (or is removed from, or disconnects out of) a dungeon of
+    /// `zone_group_id`: an item-paid visit starts its `restore_item_time` re-entry window.
+    pub(crate) fn note_entry_item_leave(
+        &self,
+        character_id: u32,
+        zone_group_id: u32,
+        restore_item_time: u32,
+    ) {
+        let mut r = self
+            .entry_item_restore
+            .lock()
+            .expect("entry item restore poisoned");
+        let key = (character_id, zone_group_id);
+        if matches!(r.get(&key), Some(EntryItemRestore::Inside)) {
+            r.insert(
+                key,
+                EntryItemRestore::Left {
+                    at: now_ms(),
+                    window: restore_item_time,
+                },
+            );
+        }
+    }
+
+    /// Test hook: age the recorded leave time of a paid visit by `seconds`.
+    #[cfg(test)]
+    pub(crate) fn backdate_entry_item_leave(
+        &self,
+        character_id: u32,
+        zone_group_id: u32,
+        seconds: i64,
+    ) {
+        let mut r = self
+            .entry_item_restore
+            .lock()
+            .expect("entry item restore poisoned");
+        if let Some(EntryItemRestore::Left { at, .. }) = r.get_mut(&(character_id, zone_group_id)) {
+            *at -= seconds * 1000;
+        }
     }
 
     /// `CheckEntryAttemptCount(characterId, zoneGroupId, indunZone, addAsNewEntry)`: at most
-    /// `EnterCount` entries within the last 4 hours.
+    /// `Dungeons.EntryLimit.Count` entries within `Dungeons.EntryLimit.WindowSeconds` when the
+    /// limit is on. The history is recorded either way (info tick / diagnostics).
     pub fn check_entry_attempt_count(
         &self,
         character_id: u32,
         zone_group_id: u32,
         indun_zone: &IndunZone,
         add_as_new_entry: bool,
+        dungeons: &DungeonsConfig,
+        profile: ServerProfile,
     ) -> bool {
         let mut h = self.entry_history.lock().expect("entry history poisoned");
         let entries = h
@@ -88,16 +201,20 @@ impl IndunManager {
             .or_default()
             .entry(zone_group_id)
             .or_default();
-        // Can customize this to your start of the day to make this daily entry count
-        let threshold = now_ms() - 4 * 3600 * 1000;
+        let window_ms = i64::from(dungeons.entry_limit.window_seconds) * 1000;
+        let threshold = now_ms() - window_ms;
         entries.retain(|t| *t >= threshold);
         let recent = entries.len();
-        if recent as u64 >= u64::from(indun_zone.enter_count) {
-            tracing::warn!(
-                "Requesting instance too many daily entries ({recent} / {}), characterId: {character_id}, zoneGroupId: {zone_group_id}",
-                indun_zone.enter_count
-            );
-            return false;
+        // The loader's `EnterCount` 1000 marks the C# "unlimited" rows (zone group 49 and the
+        // channel dungeons); the configured count replaces the 3 of every other zone group.
+        if dungeons.effective_entry_limit_enabled(profile) && indun_zone.enter_count < 1000 {
+            let limit = u64::from(dungeons.entry_limit.count);
+            if recent as u64 >= limit {
+                tracing::warn!(
+                    "Requesting instance too many daily entries ({recent} / {limit}), characterId: {character_id}, zoneGroupId: {zone_group_id}"
+                );
+                return false;
+            }
         }
         if add_as_new_entry {
             entries.push(now_ms());
