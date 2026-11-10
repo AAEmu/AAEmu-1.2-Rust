@@ -662,6 +662,13 @@ fn collision_tick(
     }
     if let Some(h) = server.systems.npcs.hooks.skills.get() {
         for unit in &new_hits {
+            tracing::debug!(
+                gimmick = me.obj_id(),
+                unit = unit.obj_id(),
+                skill_id = template.collision_skill_id,
+                speed,
+                "Gimmick collision: casting the collision skill"
+            );
             h.use_gimmick_collision_skill(server, &me, unit, template.collision_skill_id);
         }
     }
