@@ -951,3 +951,54 @@ async fn enter_world_reports_mail_that_arrived_offline() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].1, want.into_bytes());
 }
+
+/// A server start leaves the conflict cycle at Tension (owner recollection 2026-11-10: after
+/// maintenance every zone was back at danger stage 1 with 0 kills); the select burst must tell
+/// the client that stage with no transition time.
+#[tokio::test]
+async fn select_sends_the_loaded_tension_state_of_conflict_zones() {
+    use crate::data::world_data::{conflict_type, ZoneData};
+    use crate::opcodes::sc;
+
+    let conn = crate::data::world_data::tests::conflict_fixture();
+    let mut data = GameData::empty();
+    data.zones = ZoneData::load(&conn).unwrap();
+    let server = test_server_with(data);
+    // `Social::System::start` copies the loaded rows and schedules the timers they carry.
+    server
+        .systems
+        .social
+        .conflicts
+        .init(&server.game_data.zones.conflicts, crate::world::now_ms());
+
+    let mut client = TestClient::new(&server, 1, 1007);
+    session::select_loaded(
+        &server,
+        &mut client.conn,
+        test_character(7, "Zone", 100.0, 100.0),
+        SelectDbData::default(),
+    )
+    .expect("select");
+
+    let mut states: Vec<(u16, u8, i64)> = client
+        .drain()
+        .into_iter()
+        .filter(|f| f.0 == sc::SCConflictZoneStatePacket)
+        .map(|f| {
+            let mut s = aaemu_commons::packet_stream::PacketStream::from_bytes(f.1);
+            (
+                s.read_u16().unwrap(),
+                s.read_u8().unwrap(),
+                s.read_i64().unwrap(),
+            )
+        })
+        .collect();
+    states.sort_unstable();
+    assert_eq!(
+        states,
+        [
+            (7, conflict_type::TENSION, 0),
+            (8, conflict_type::TENSION, 0)
+        ]
+    );
+}

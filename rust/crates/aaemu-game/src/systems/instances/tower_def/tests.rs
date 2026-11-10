@@ -1489,7 +1489,7 @@ async fn real_tower_def_event_readiness() {
             },
         );
     }
-    data.zones = crate::data::world_data::ZoneData::load(&conn, 0).unwrap();
+    data.zones = crate::data::world_data::ZoneData::load(&conn).unwrap();
     let mut server = test_server_with(data);
     let worlds = crate::data::world_templates::WorldTemplates::load(&files, app).unwrap();
     // Keep the real zone grid, replacing the test helper's synthetic world.

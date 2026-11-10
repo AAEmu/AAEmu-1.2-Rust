@@ -242,9 +242,10 @@ impl ZoneData {
         self.groups.get(&id)
     }
 
-    /// `ZoneManager.Load`. `now` is the load time used by `SetState(Conflict)` for open conflict
-    /// zones (the state timers themselves are a later phase).
-    pub fn load(conn: &Connection, now: i64) -> rusqlite::Result<Self> {
+    /// `ZoneManager.Load`. Open conflict zones start at `Tension` with no kill count and no
+    /// timer, exactly like the state the cycle returns to after `Peace` (`SetState(Tension)`
+    /// clears `NextStateTime`); closed zones keep the same values.
+    pub fn load(conn: &Connection) -> rusqlite::Result<Self> {
         let mut d = ZoneData::default();
         for_each_row(conn, "SELECT * FROM zones", [], |r| {
             let z = Zone {
@@ -296,17 +297,14 @@ impl ZoneData {
                 war_tower_def_id: r.u32_or("war_tower_def_id", 0)?,
                 // GetBoolean("closed", true)
                 closed: r.is_null("closed")? || r.bool_str("closed")?,
+                // A server start begins the cycle at Tension (owner recollection 2026-11-10:
+                // after maintenance every zone was back at danger stage 1 with 0 kills).
                 current_state: conflict_type::TENSION,
                 ..ZoneConflict::default()
             };
             for i in 0..5 {
                 c.num_kills[i] = r.i32(&format!("num_kills_{i}"))?;
                 c.no_kill_min[i] = r.i32(&format!("no_kill_min_{i}"))?;
-            }
-            if !c.closed {
-                // SetState(Conflict): set for testing in C#, normally it starts at Tension.
-                c.current_state = conflict_type::CONFLICT;
-                c.next_state_time = now + i64::from(c.conflict_min) * 60;
             }
             if d.conflicts.iter().any(|x| x.zone_group_id == gid) {
                 return Err(dup("conflict zone", u32::from(gid)));
@@ -442,5 +440,101 @@ fn pascal_keys(v: serde_json::Value) -> serde_json::Value {
         ),
         Value::Array(a) => Value::Array(a.into_iter().map(pascal_keys).collect()),
         o => o,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// `zones` / `zone_groups` / `conflict_zones` rows: group 7 is open (Tension thresholds
+    /// 2/4/6/8/10, as the combat tests use) and group 8 is closed.
+    pub(crate) fn conflict_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE zones (id INT, name TEXT, zone_key INT, group_id INT, closed TEXT,
+                                 faction_id INT, zone_climate_id INT);
+             CREATE TABLE zone_groups (id INT, name TEXT, target_id INT,
+                                       faction_chat_region_id INT, pirate_desperado TEXT);
+             CREATE TABLE conflict_zones (
+                 zone_group_id INT,
+                 num_kills_0 INT, num_kills_1 INT, num_kills_2 INT, num_kills_3 INT, num_kills_4 INT,
+                 no_kill_min_0 INT, no_kill_min_1 INT, no_kill_min_2 INT, no_kill_min_3 INT, no_kill_min_4 INT,
+                 conflict_min INT, war_min INT, peace_min INT,
+                 peace_protected_faction_id INT, nuia_return_point_id INT,
+                 harihara_return_point_id INT, war_tower_def_id INT, closed TEXT);
+             INSERT INTO zones VALUES (1, 'Open', 100, 7, 0, 0, 0), (2, 'Closed', 101, 8, 1, 0, 0);
+             INSERT INTO zone_groups VALUES (7, 'Open', 0, 0, 0), (8, 'Closed', 0, 0, 0);
+             INSERT INTO conflict_zones VALUES
+                 (7, 2, 4, 6, 8, 10, 30, 30, 30, 30, 30, 5, 80, 120, 0, 0, 0, 18, 0),
+                 (8, 1, 2, 3, 4, 5, 30, 30, 30, 30, 30, 5, 80, 120, 0, 0, 0, 0, 1);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn open_conflict_zones_load_at_tension_and_closed_zones_are_unchanged() {
+        let d = ZoneData::load(&conflict_fixture()).unwrap();
+        let open = d.conflicts.iter().find(|c| c.zone_group_id == 7).unwrap();
+        assert_eq!(
+            (open.current_state, open.kill_count, open.next_state_time),
+            (conflict_type::TENSION, 0, 0)
+        );
+        assert_eq!(open.num_kills, [2, 4, 6, 8, 10]);
+        let closed = d.conflicts.iter().find(|c| c.zone_group_id == 8).unwrap();
+        assert!(closed.closed);
+        assert_eq!(
+            (
+                closed.current_state,
+                closed.kill_count,
+                closed.next_state_time
+            ),
+            (conflict_type::TENSION, 0, 0)
+        );
+    }
+
+    #[test]
+    fn loaded_open_zone_climbs_to_danger_with_num_kills() {
+        use crate::systems::social::zone_conflict::ZoneConflictManager;
+
+        let d = ZoneData::load(&conflict_fixture()).unwrap();
+        let conflicts = ZoneConflictManager::default();
+        // Tension has no NextStateTime, so the load schedules no timer for it.
+        assert!(conflicts.init(&d.conflicts, 1_000_000_000_000).is_empty());
+        // 2 kills are at the Tension threshold, not above it.
+        assert!(conflicts
+            .add_zone_kill_at(7, 2, 1_000_000_000_000)
+            .is_none());
+        let s = conflicts
+            .add_zone_kill_at(7, 1, 1_000_000_000_000)
+            .expect("the third kill reaches Danger");
+        assert_eq!(s.state, conflict_type::DANGER);
+        let c = conflicts.get(7).unwrap();
+        assert_eq!(
+            (c.current_state, c.kill_count, c.next_state_time),
+            (conflict_type::DANGER, 3, 0)
+        );
+    }
+
+    /// The shipped 1.2 data: a fresh load is the start of the cycle for every conflict zone.
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+    fn real_compact_db_conflict_zones_start_at_tension() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let d = ZoneData::load(&conn).unwrap();
+        assert!(!d.conflicts.is_empty());
+        for c in &d.conflicts {
+            assert_eq!(
+                (c.current_state, c.kill_count, c.next_state_time),
+                (conflict_type::TENSION, 0, 0),
+                "zone group {}",
+                c.zone_group_id
+            );
+        }
     }
 }

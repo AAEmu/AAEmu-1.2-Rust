@@ -287,7 +287,7 @@ fn real_data_imported_quest_sign_spheres_load() {
         let mut files = crate::data::client_files::ClientFileManager::new();
         assert!(files.add_source(&pak, std::path::Path::new(".")));
         let data = QuestData::load_from(&conn, &files).expect("quest data");
-        let zones = ZoneData::load(&conn, 0).expect("zones");
+        let zones = ZoneData::load(&conn).expect("zones");
         let worlds = crate::data::world_templates::WorldTemplates::load(&files, &app)
             .expect("world templates");
         let fill = load_sign_sphere_fill(&app, &data, &zones, &worlds);
@@ -344,7 +344,7 @@ fn real_data_fill_spheres_lie_inside_their_zone_rectangle() {
         assert_in_zone(&worlds, &area.world, area.zone, area.xyz.0, area.xyz.1);
     }
 
-    let zones = ZoneData::load(&conn, 0).expect("zones");
+    let zones = ZoneData::load(&conn).expect("zones");
     let fill = load_sign_sphere_fill(&app, &data, &zones, &worlds);
     assert_eq!(fill.len(), 8, "committed imported sign spheres");
     for (world, row) in &fill {

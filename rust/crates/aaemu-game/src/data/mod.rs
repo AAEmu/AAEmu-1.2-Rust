@@ -96,7 +96,7 @@ impl GameData {
         let items = ItemData::load(&conn)?;
         let localization = Localization::load(&conn, language)?;
         let factions = FactionData::load(&conn, &localization)?;
-        let zones = ZoneData::load(&conn, chrono::Utc::now().timestamp())?;
+        let zones = ZoneData::load(&conn)?;
         let skills = SkillData::load(&conn)?;
         let formulas = FormulaManager::load(&conn)?;
 
@@ -194,7 +194,7 @@ mod real_db_tests {
         let items = ItemData::load(&conn).unwrap();
         let loc = Localization::load(&conn, "en_us").unwrap();
         let factions = FactionData::load(&conn, &loc).unwrap();
-        let zones = ZoneData::load(&conn, 0).unwrap();
+        let zones = ZoneData::load(&conn).unwrap();
         let skills = SkillData::load(&conn).unwrap();
         let formulas = FormulaManager::load(&conn).unwrap();
         let app = Path::new(&path).parent().unwrap().parent().unwrap();

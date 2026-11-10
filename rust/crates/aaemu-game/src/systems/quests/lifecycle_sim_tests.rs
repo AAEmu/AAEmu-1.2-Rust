@@ -302,7 +302,7 @@ impl Sim {
         let quests = QuestData::load_from(conn, &files).expect("quest tables load");
         let mut gd = GameData::empty();
         gd.systems.quests = quests;
-        gd.zones = ZoneData::load(conn, 0).expect("zones");
+        gd.zones = ZoneData::load(conn).expect("zones");
         let loc = Localization::load(conn, "en_us").expect("localization");
         gd.factions = FactionData::load(conn, &loc).expect("factions");
         let mut stmt = conn

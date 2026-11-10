@@ -3192,7 +3192,7 @@ async fn real_dungeon_spawns_load_and_leave_returns_to_main_world() {
         language: "en_us",
     };
     let mut data = GameData::empty();
-    data.zones = ZoneData::load(&conn, 0).expect("zones");
+    data.zones = ZoneData::load(&conn).expect("zones");
     data.systems.npcs = crate::systems::npcs::Data::load(&ctx).expect("npcs data");
     data.systems.instances = super::Data::load(&ctx).expect("instances data");
     let spawns_json =

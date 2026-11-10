@@ -131,7 +131,8 @@ impl System {
     pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
         use anyhow::Context;
         install_hooks(server);
-        // ZoneManager.Load: SetState(Conflict) of the open zones schedules their timers.
+        // ZoneManager.Load: copy the loaded conflict states (open zones start at Tension) and
+        // schedule the timers they carry.
         zone_conflict::ZoneConflictManager::start(server);
         // Player nations and their relation overlay.
         server

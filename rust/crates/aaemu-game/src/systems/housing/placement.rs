@@ -810,7 +810,7 @@ mod tests {
         };
         let mut data = GameData::empty();
         data.worlds = WorldTemplates::load(&files, &app).unwrap();
-        data.zones = ZoneData::load(&conn, 0).unwrap();
+        data.zones = ZoneData::load(&conn).unwrap();
         data.systems.housing = HousingData::load(&ctx).unwrap();
         data.systems.npcs.subzone = SubZoneData::load(&ctx).unwrap();
         let main = data
