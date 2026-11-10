@@ -666,6 +666,13 @@ fn use_skill_impl(
         return result;
     }
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
+    // The `once_one_*` interaction target, kept as a handle: `resolved_target` is moved into
+    // `owned_target` below and the gate runs after that.
+    let interaction_doodad = resolved_target
+        .as_ref()
+        .and_then(Target::as_obj)
+        .and_then(WorldObject::as_doodad)
+        .cloned();
     let Some(target) = &resolved_target else {
         if let Some(npc) = caster.as_npc() {
             server
@@ -855,6 +862,17 @@ fn use_skill_impl(
     if dry_run {
         return (skill_result::SUCCESS, 0);
     }
+    // 1.2 `doodad_almighties.once_one_man`: another unit's timed interaction with a held
+    // doodad is refused before any of this cast's side effects (stealth / StartSkill buff
+    // removal, unmount, plot run, GCD, mana, reagent, labor). A held timed cast is acquired
+    // here too, before those side effects; a seat use only checks the seat. Instant non-seat
+    // interactions are never blocked and take no occupancy. The client-facing caller sends the
+    // single in-use message; this path stays silent for the other caster kinds.
+    if let Some(doodad) = interaction_doodad.as_ref() {
+        if !crate::systems::npcs::doodad::occupancy::begin_skill(server, doodad, caster, skill) {
+            return (skill_result::INVALID_TARGET, 0);
+        }
+    }
     if let Some(task) = active_task {
         if let SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
             stop(server, &task.skill, caster, channel_doodad);
@@ -965,6 +983,13 @@ fn use_skill_impl(
                         items.consume_owned_item(server, p, item_id, template_id, 0) != Some(false)
                     });
             if !still_owned {
+                if let Some(doodad) = interaction_doodad.as_ref() {
+                    crate::systems::npcs::doodad::occupancy::end_cast(
+                        server,
+                        doodad.obj_id,
+                        caster,
+                    );
+                }
                 skill.state().cancelled = true;
                 return (skill_result::INVALID_SOURCE, 0);
             }
@@ -991,6 +1016,10 @@ fn use_skill_impl(
         }
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
+            // No cast follows: a plot-only skill never holds a doodad.
+            if let Some(doodad) = interaction_doodad.as_ref() {
+                crate::systems::npcs::doodad::occupancy::end_cast(server, doodad.obj_id, caster);
+            }
             return (skill_result::SUCCESS, 0);
         }
     }
@@ -1688,6 +1717,20 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     if t.effect_speed > 0.0 {
         let d = distance_to(server, &Target::Obj(caster.clone()), &ctx.target, false);
         total_delay += (d / t.effect_speed * 1000.0) as i32;
+    }
+    // The cast slot is already cleared; a delayed interaction effect still owes the doodad's
+    // `once_one_man` funnel, so the hold must survive until `apply_effects` / `end_skill`.
+    if total_delay > 0 {
+        if let Some(doodad) = ctx.target.as_obj().and_then(WorldObject::as_doodad) {
+            if crate::systems::npcs::doodad::occupancy::is_interaction_skill(server, t) {
+                crate::systems::npcs::doodad::occupancy::mark_effects_pending(
+                    server,
+                    doodad,
+                    caster,
+                    i64::from(total_delay),
+                );
+            }
+        }
     }
     let fire_anim_id = fire_anim_for(t, super::plots::weapon_wield_kind(server, caster));
     if fire_anim_id != 0 && t.use_anim_time {
@@ -2725,6 +2768,12 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     let tl = std::mem::take(&mut skill.state().tl_id);
     if tl == 0 {
         return;
+    }
+    // The cast (completed, cancelled or interrupted) no longer holds a `once_one_*` doodad.
+    // A seat occupation of the same unit keeps its own bond flag.
+    let target = skill.state().initial_target;
+    if target != 0 {
+        crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster);
     }
     if !caster.is_unit() {
         // Not a unit any more: release the id without the unit-side effects.

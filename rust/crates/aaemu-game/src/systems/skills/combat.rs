@@ -372,6 +372,8 @@ fn do_die_after_claim(
         npc_hooks.npc_before_death(server, n, killer);
     }
     super::skill::interrupt_skills(server, victim);
+    // A dead unit no longer occupies a `once_one_*` doodad (cast or seat).
+    crate::systems::npcs::doodad::occupancy::release_all_of(server, victim.obj_id());
     set_in_battle(server, victim, false);
     // Events.OnDeath (buff triggers listening to the victim, `Shipyard.OnDeath`)
     buffs::fire_unit_event(server, victim.obj_id(), BuffEventTriggerKind::Death, 0);
