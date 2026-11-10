@@ -105,6 +105,8 @@ pub fn clear_all_aggro_targets_and_check_combat_state(server: &GameServer, npc_o
 
 /// `Npc.ClearAllAggro()` (override): base + clear targets + `CheckIfEmptyAggroToReturn()`.
 pub fn npc_clear_all_aggro(c: &mut AiCtx<'_>) {
+    // A new fight against the same abuser must share again.
+    c.npc.data().npc_group_last_share_abuser = 0;
     skills_combat::clear_all_aggro(c.server, &c.obj);
     let last = c.npc.data().unit.skill_state.aggro_table.len();
     clear_all_aggro_targets_and_check_combat_state(c.server, &c.obj);
