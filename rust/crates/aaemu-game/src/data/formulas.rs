@@ -1670,6 +1670,15 @@ impl FormulaManager {
     pub fn get_formula_by_kind(&self, kind: FormulaKind) -> Option<&Formula> {
         self.get_formula(kind.raw())
     }
+
+    /// Test-only: adds a `formulas` row the way [`FormulaManager::load`] reads it, so tests can
+    /// build data-shaped formula fixtures.
+    #[cfg(test)]
+    pub fn insert_formula(&mut self, id: u32, text_formula: &str) {
+        let mut formula = Formula::unprepared(id, text_formula);
+        assert!(formula.prepare(), "test formula {id} must compile");
+        self.formulas.insert(id, formula);
+    }
 }
 
 /// `SqliteDataReader.GetInt64` (`sqlite3_column_int64` conversions).

@@ -2,6 +2,9 @@
 //! `ManaBurnEffect`, `AggroEffect`, `FlyingStateChangeEffect`, `SkillControllerTemplate.Apply`
 //! and `CombatBuffs.TriggerCombatBuffs`.
 
+use std::collections::HashMap;
+
+use crate::data::formulas::FormulaKind;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
 use crate::world::{now_ms, WorldObject};
@@ -106,6 +109,40 @@ fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f3
         lvl_md - level_modifier * lvl_md + 0.5,
         (level_modifier + 1.0) * lvl_md + 0.5,
     )
+}
+
+/// `formulas` row 20 `damage_bonus_multiplier_by_level`:
+/// `if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.04)`.
+///
+/// The variables name the player character (`pc_level`) and the NPC target (`npc_level`), so the
+/// bonus applies only to a player character hitting an NPC; mates / slaves / summons and NPCs
+/// attacking players keep x1. Row 21 (`damage_penalty_multiplier_by_level`) is the constant 1,
+/// so damage is never lowered. The rate comes from the data row; a missing or broken row keeps
+/// the hit unchanged (evaluate returns 0 on errors). Research: `research-data-rules.md` §1.
+fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &WorldObject) -> f32 {
+    if caster.as_player().is_none() || trg.as_npc().is_none() {
+        return 1.0;
+    }
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageBonusMultiplierByLevel)
+    else {
+        return 1.0;
+    };
+    let (Some(pc_level), Some(npc_level)) = (
+        caster.with_unit(|u| u.unit().level),
+        trg.with_unit(|u| u.unit().level),
+    ) else {
+        return 1.0;
+    };
+    let params: HashMap<&str, f64> = [
+        ("pc_level", f64::from(pc_level)),
+        ("npc_level", f64::from(npc_level)),
+    ]
+    .into_iter()
+    .collect();
+    (formula.evaluate(&params) as f32).max(1.0)
 }
 
 /// Damage reflection of a landed hit (`buffs.reflection_*`).
@@ -531,6 +568,12 @@ pub(super) fn damage_with_aoe(
     let battle_resist = ts[1] as i32;
     if caster.as_player().is_some() && trg.as_player().is_some() {
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
+    }
+    // Player -> NPC level bonus (formulas row 20), next to the other flat damage multipliers.
+    // It is a damage multiplier, so DoT ticks / buff-sourced damage get it too; a `Heal` damage
+    // type is not damage and is skipped (heals use `heal()` and never reach this function).
+    if damage_type != Some(DamageType::Heal) {
+        final_damage *= level_damage_multiplier(server, &caster, &trg);
     }
     let flex_bonus = (flexibility / 100) as f32;
     match hit_type {
