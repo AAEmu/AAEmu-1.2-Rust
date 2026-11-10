@@ -66,10 +66,11 @@
 use std::borrow::Borrow;
 use std::cell::Cell;
 use std::collections::hash_map::{Entry, RandomState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row};
@@ -1246,6 +1247,19 @@ impl Expression {
 // Formula models
 // ---------------------------------------------------------------------------------------------
 
+/// Formula ids whose evaluation failure has already been logged at `warn` (see
+/// [`Formula::evaluate`]); guarded by a `Mutex` that a panic must not poison for later callers.
+static EVAL_FAILURE_WARNED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+/// `true` the first time a formula id fails to evaluate in this process.
+fn eval_failure_is_first(id: u32) -> bool {
+    let warned = EVAL_FAILURE_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    warned
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(id)
+}
+
 /// `Formula`: a database formula plus its compiled expression.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Formula {
@@ -1306,34 +1320,48 @@ impl Formula {
     }
 
     /// `Formula.Evaluate(parameters)`: on any evaluation error (in practice a variable missing
-    /// from `params`) logs the formula, the parameters and the error, and returns `0`.
+    /// from `params`) returns `0`. The first failure of a formula logs the formula, the
+    /// parameters and the error at `warn`; later failures of the same formula log at `debug`, so
+    /// a broken row evaluated on every hit cannot flood the log.
     ///
     /// Deviation: the C# would throw `ArgumentNullException` out of `lock (Expression)` for a
     /// formula whose `Prepare()` failed (only possible for `new Formula(text)`, e.g. item
-    /// templates' `formula_dps`); here that is logged and `0` is returned.
+    /// templates' `formula_dps`); here that is logged once and `0` is returned.
     pub fn evaluate<K, S>(&self, params: &HashMap<K, f64, S>) -> f64
     where
         K: Borrow<str> + Eq + Hash,
         S: BuildHasher,
     {
         let Some(expression) = &self.expression else {
-            tracing::error!(
-                "Formula {} : {} was never successfully prepared",
-                self.id,
-                self.text_formula
-            );
+            if eval_failure_is_first(self.id) {
+                tracing::warn!(
+                    "Formula {} : {} was never successfully prepared",
+                    self.id,
+                    self.text_formula
+                );
+            } else {
+                tracing::debug!(
+                    "Formula {} : {} was never successfully prepared",
+                    self.id,
+                    self.text_formula
+                );
+            }
             return 0.0;
         };
         match expression.evaluate(params) {
             Ok(value) => value,
             Err(e) => {
-                let mut sb = String::new();
-                for (key, value) in params {
-                    let _ = writeln!(sb, "{}: {}", key.borrow(), value);
+                if eval_failure_is_first(self.id) {
+                    let mut sb = String::new();
+                    for (key, value) in params {
+                        let _ = writeln!(sb, "{}: {}", key.borrow(), value);
+                    }
+                    tracing::warn!("Error in formula {}:\n{}", self.id, self.text_formula);
+                    tracing::warn!("Parameters:\n{}", sb);
+                    tracing::warn!("{e}");
+                } else {
+                    tracing::debug!("Formula {} evaluation failed: {e}", self.id);
                 }
-                tracing::error!("Error in formula {}:\n{}", self.id, self.text_formula);
-                tracing::error!("Parameters:\n{}", sb);
-                tracing::error!("{e}");
                 0.0
             }
         }
@@ -1669,6 +1697,15 @@ impl FormulaManager {
     /// `GetFormula((uint)kind)`.
     pub fn get_formula_by_kind(&self, kind: FormulaKind) -> Option<&Formula> {
         self.get_formula(kind.raw())
+    }
+
+    /// Test-only: adds a `formulas` row the way [`FormulaManager::load`] reads it, so tests can
+    /// build data-shaped formula fixtures.
+    #[cfg(test)]
+    pub fn insert_formula(&mut self, id: u32, text_formula: &str) {
+        let mut formula = Formula::unprepared(id, text_formula);
+        assert!(formula.prepare(), "test formula {id} must compile");
+        self.formulas.insert(id, formula);
     }
 }
 
@@ -2273,6 +2310,33 @@ mod tests {
             FormulaManager::load(&conn),
             Err(FormulaLoadError::Sqlite(_))
         ));
+    }
+
+    /// A broken row evaluated every hit must not log at `ERROR`/`WARN` every time: the first
+    /// failure is a single warning and later failures fall to `debug` (the caller clamps the
+    /// `0` result to its neutral value).
+    #[test]
+    fn evaluate_logs_a_failure_once_then_only_at_debug() {
+        let mut formula = Formula::unprepared(987_654_321, "1 + missing_variable");
+        assert!(formula.prepare());
+        let params: HashMap<&str, f64> = HashMap::new();
+        let (value, events) = crate::test_support::capture_events(|| formula.evaluate(&params));
+        assert_eq!(value, 0.0);
+        // The first failure is the formula, its parameters and the error (three messages).
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(level, _)| *level == tracing::Level::WARN)
+                .count(),
+            3,
+            "{events:?}"
+        );
+        let (value, events) = crate::test_support::capture_events(|| formula.evaluate(&params));
+        assert_eq!(value, 0.0);
+        assert!(events
+            .iter()
+            .all(|(level, _)| *level != tracing::Level::WARN));
+        assert!(!events.is_empty());
     }
 
     #[test]

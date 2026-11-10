@@ -2,6 +2,9 @@
 //! `ManaBurnEffect`, `AggroEffect`, `FlyingStateChangeEffect`, `SkillControllerTemplate.Apply`
 //! and `CombatBuffs.TriggerCombatBuffs`.
 
+use std::collections::HashMap;
+
+use crate::data::formulas::FormulaKind;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
 use crate::world::{now_ms, WorldObject};
@@ -106,6 +109,66 @@ fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f3
         lvl_md - level_modifier * lvl_md + 0.5,
         (level_modifier + 1.0) * lvl_md + 0.5,
     )
+}
+
+/// `NpcKindType.SiegeWeapon` (9): battlefield turrets / cannons and their practice copies.
+/// The 22 compact templates (kind 9) sit at levels 20-50; they are destructible structures, not
+/// PvE mobs, so a high-level player must not get the PvE level bonus on them.
+const SIEGE_WEAPON_NPC_KIND: u8 = 9;
+
+/// Compact `system_factions` 170 "허수아비" (scarecrow): the training dummies and their test
+/// variants (8 templates at levels 1-50). Practice targets are structures too.
+const TRAINING_DUMMY_FACTION: u32 = 170;
+
+/// `formulas` row 20 `damage_bonus_multiplier_by_level`:
+/// `if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.04)`.
+///
+/// The variables name the player character (`pc_level`) and the NPC target (`npc_level`), so the
+/// bonus applies only to a player character hitting an NPC; mates / slaves / summons and NPCs
+/// attacking players keep x1. Row 21 (`damage_penalty_multiplier_by_level`) is the constant 1,
+/// so damage is never lowered. The rate comes from the data row; a missing or broken row keeps
+/// the hit unchanged (evaluate returns 0 on errors). Research: `research-data-rules.md` §1.
+fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &WorldObject) -> f32 {
+    if caster.as_player().is_none() {
+        return 1.0;
+    }
+    let Some(npc) = trg.as_npc() else {
+        return 1.0;
+    };
+    let (npc_level, npc_faction, template_id) = {
+        let n = npc.data();
+        (n.unit.level, n.unit.faction_id, n.unit.template_id)
+    };
+    if npc_faction == TRAINING_DUMMY_FACTION {
+        return 1.0;
+    }
+    if server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(template_id)
+        .is_some_and(|t| t.npc_kind_id == SIEGE_WEAPON_NPC_KIND)
+    {
+        return 1.0;
+    }
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageBonusMultiplierByLevel)
+    else {
+        return 1.0;
+    };
+    let Some(pc_level) = caster.with_unit(|u| u.unit().level) else {
+        return 1.0;
+    };
+    let params: HashMap<&str, f64> = [
+        ("pc_level", f64::from(pc_level)),
+        ("npc_level", f64::from(npc_level)),
+    ]
+    .into_iter()
+    .collect();
+    (formula.evaluate(&params) as f32).max(1.0)
 }
 
 /// Damage reflection of a landed hit (`buffs.reflection_*`).
@@ -531,6 +594,14 @@ pub(super) fn damage_with_aoe(
     let battle_resist = ts[1] as i32;
     if caster.as_player().is_some() && trg.as_player().is_some() {
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
+    }
+    // Player -> NPC level bonus (formulas row 20), next to the other flat damage multipliers.
+    // Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
+    // the weapon / level damage base. A non-fixed DoT row gets it like a direct hit; heals use
+    // `heal()` and never reach this function (compact `damage_effects` has no `Heal` type, so no
+    // damage-type guard is needed).
+    if !e.use_fixed_damage && !e.use_percent_damage {
+        final_damage *= level_damage_multiplier(server, &caster, &trg);
     }
     let flex_bonus = (flexibility / 100) as f32;
     match hit_type {

@@ -17,7 +17,7 @@ use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::skills::buffs;
 use crate::systems::skills::data::effects::{DamageEffect, HealEffect};
-use crate::test_support::TestClient;
+use crate::test_support::{spawn_player, test_character, TestClient};
 use crate::world::{Entity, WorldObject};
 
 use super::super::super as skills;
@@ -1158,4 +1158,308 @@ async fn damage_pipeline_fixed_trigger_keeps_its_full_value() {
     client.drain();
     damage(&server, &effect, &args, None);
     assert_eq!(npc.data().unit.hp, 1_000 - 500);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Player -> NPC level damage bonus (`formulas` row 20, research-data-rules.md §1).
+
+const LEVEL_BONUS_ROW: u32 = 20;
+const LEVEL_BONUS_FORMULA: &str =
+    "if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.04)";
+
+fn level_bonus_data(formula: &str) -> GameData {
+    let mut data = fixture_data();
+    data.formulas.insert_formula(LEVEL_BONUS_ROW, formula);
+    data
+}
+
+/// A non-fixed, non-percent row with a deterministic 100 base: level damage (`LevelDps` is the
+/// constant 100 in the fixture) with no variance, so the level bonus is the only variable.
+fn level_damage_effect(id: u32) -> DamageEffect {
+    let mut effect = skills::tests::damage_effect(id, 0);
+    effect.use_fixed_damage = false;
+    effect.use_level_damage = true;
+    effect.level_md = 1.0;
+    effect.level_va_start = 0;
+    effect.level_va_end = 0;
+    effect
+}
+
+/// A percent-of-maximum-HP row (10% of the fixture's 1000 HP = 100), which the level bonus
+/// must leave untouched.
+fn percent_damage_effect(percent: i32) -> DamageEffect {
+    let mut effect = skills::tests::damage_effect(1, 0);
+    effect.use_fixed_damage = false;
+    effect.use_percent_damage = true;
+    effect.percent_min = percent;
+    effect.percent_max = percent;
+    effect
+}
+
+fn level_dot_data() -> GameData {
+    let mut data = level_bonus_data(LEVEL_BONUS_FORMULA);
+    let mut effect = level_damage_effect(DOT_EFFECT);
+    effect.damage_type = 2;
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        skills::data::EffectKind::DamageEffect,
+        skills::data::EffectTemplate::Damage(Box::new(effect)),
+        DOT_EFFECT,
+    );
+    skills.add_buff(skills::data::BuffTemplate {
+        id: DOT_BUFF,
+        duration: 1_000,
+        tick: 1_000.0,
+        tick_effects: vec![skills::data::TickEffect {
+            effect_id: DOT_EFFECT,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+        }],
+        ..Default::default()
+    });
+    data
+}
+
+/// Row 20 (`damage_bonus_multiplier_by_level`): +4% per level for a player at or above the
+/// NPC's level, for every damage type; row 21 is the constant x1 below it (no penalty).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_scales_player_hits_on_lower_level_npcs() {
+    for (player_level, npc_level, damage_type, expected) in [
+        (50, 40, 1, 140),
+        (50, 40, 2, 140),
+        (50, 40, 4, 140),
+        (50, 40, 3, 140),
+        (50, 50, 1, 100),
+        (40, 50, 1, 100),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+        player.data().unit.level = player_level;
+        npc.data().unit.level = npc_level;
+        let mut effect = level_damage_effect(1);
+        effect.damage_type = damage_type;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "player {player_level} vs NPC {npc_level}, damage type {damage_type}"
+        );
+        assert_eq!(npc.data().unit.hp, 1000 - expected);
+    }
+}
+
+/// The rate is the `formulas` row's text, not a hard-coded 0.04; without the row the hit is
+/// unchanged (no hidden fallback).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_rate_comes_from_the_formula_row() {
+    for (formula, expected) in [
+        (LEVEL_BONUS_FORMULA, 140),
+        (
+            "if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.10)",
+            200,
+        ),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(level_bonus_data(formula));
+        player.data().unit.level = 50;
+        npc.data().unit.level = 40;
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "formula {formula}"
+        );
+    }
+
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    let effect = skills::tests::damage_effect(1, 100);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// The variables name a player character and an NPC: PvP keeps its own battle-resist path.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_does_not_apply_to_pvp() {
+    let (server, _client, player, _npc) =
+        skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+    player.data().unit.level = 50;
+    let mut victim_client = TestClient::new(&server, 2, 2);
+    let mut character = test_character(2, "Victim", 100.0, 105.0);
+    character.unit.hp = 1000;
+    character.unit.max_hp = 1000;
+    let victim = spawn_player(&server, &victim_client, character, 0x102);
+    victim.data().unit.level = 10;
+    victim_client.drain();
+    let effect = level_damage_effect(1);
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&victim).into(), 1),
+        None,
+    );
+    assert_eq!(
+        packet(&mut victim_client, player.obj_id, victim.obj_id).0,
+        100
+    );
+    assert_eq!(victim.data().unit.hp, 900);
+}
+
+/// The variables name a player character and an NPC: an NPC caster (even a higher-level one)
+/// and a player target are outside the row, so the multiplier itself is x1.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_only_applies_to_a_player_caster_and_npc_target() {
+    let (server, _client, player, npc) =
+        skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    // A second, level-10 NPC so an NPC caster can be higher than an NPC target.
+    let mut other = Npc::new(1);
+    other.unit.hp = 1_000;
+    other.unit.max_hp = 1_000;
+    other.unit.level = 10;
+    other.unit.transform.set_xyz(100.0, 110.0, 100.0);
+    let other = Entity::new(0x201, other);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&other, &server.view_ctx());
+    let player = WorldObject::from(&player);
+    let npc = WorldObject::from(&npc);
+    let other = WorldObject::from(&other);
+    assert_eq!(super::level_damage_multiplier(&server, &player, &npc), 1.4);
+    assert_eq!(super::level_damage_multiplier(&server, &npc, &player), 1.0);
+    assert_eq!(
+        super::level_damage_multiplier(&server, &player, &player),
+        1.0
+    );
+    // Higher-level NPC -> lower-level NPC must be x1 too (only a player caster qualifies).
+    assert_eq!(super::level_damage_multiplier(&server, &npc, &other), 1.0);
+}
+
+/// Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
+/// the weapon / level damage base (row 4754 "99% of current HP" stays 99%).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_keeps_fixed_and_percent_rows() {
+    for (label, effect, expected) in [
+        ("fixed", skills::tests::damage_effect(1, 100), 100),
+        ("percent", percent_damage_effect(10), 100),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+        player.data().unit.level = 50;
+        npc.data().unit.level = 40;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "{label} row must keep its authored value"
+        );
+    }
+}
+
+/// Siege-weapon NPCs (`NpcKindType.SiegeWeapon`, kind 9: battlefield turrets / cannons and
+/// their practice copies, compact levels 20-50) are destructible structures, not PvE mobs.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_skips_siege_weapon_npcs() {
+    let mut data = level_bonus_data(LEVEL_BONUS_FORMULA);
+    data.systems.npcs.npc.templates.insert(
+        1,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1,
+            npc_kind_id: 9,
+            ..Default::default()
+        },
+    );
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// Training dummies (`system_factions` 170 "scarecrow": 8 templates at levels 1-50) are practice
+/// structures too; a level-1 dummy must not take x2.96 from a level-50 player.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_skips_training_dummies() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+    player.data().unit.level = 50;
+    npc.data().unit.level = 1;
+    npc.data().unit.faction_id = 170;
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// DoT ticks run through `damage_with_aoe` with the buff's caster, so a player's DoT on an NPC
+/// gets the level bonus like a direct hit (the row is a damage multiplier).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_applies_to_buff_tick_damage() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(level_dot_data());
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    let index = apply_tick_buff(&server, &caster, &target, DOT_BUFF);
+    client.drain();
+    assert_eq!(tick_damage(&server, &target, index), 140);
+}
+
+/// Heals are not damage (`combat::heal` never calls `damage_with_aoe`), so they keep their
+/// authored value even with row 20 present and a high-level caster.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_does_not_scale_heals() {
+    let mut data = fixed_heal_dot_data(1_100);
+    data.formulas
+        .insert_formula(LEVEL_BONUS_ROW, LEVEL_BONUS_FORMULA);
+    let (server, mut client, player, _npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.level = 50;
+    player.data().unit.hp = 500;
+    let caster = WorldObject::from(&player);
+    let target = caster.clone();
+    let index = apply_tick_buff(&server, &caster, &target, HEAL_DOT_BUFF);
+    client.drain();
+    assert_eq!(tick_heal(&server, &target, index), 100);
 }
