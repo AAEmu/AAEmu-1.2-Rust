@@ -187,6 +187,21 @@ async fn learned_ability_less_npc_skill_is_refused() {
 }
 
 #[tokio::test]
+async fn unit_caster_naming_another_unit_is_refused() {
+    let (server, mut client, p) = fixture(true, true, false);
+    let victim = 0x7777;
+    packet(TREE_SKILL, SkillCaster::Unit(victim), victim)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert_eq!(
+        started_result(&mut client, TREE_SKILL),
+        Some(skill_result::NO_PERM)
+    );
+}
+
+#[tokio::test]
 async fn unlearned_sourced_tree_skill_is_refused_with_invalid_skill() {
     // Static tables name this class skill (a quest / doodad condition), but the character never
     // learned it: the 1.2 client refuses it in the action bar.

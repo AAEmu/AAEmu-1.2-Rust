@@ -231,6 +231,23 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     let mut result;
     let mut value = 0u32;
     let data = &server.game_data;
+    // A unit caster is the sender itself: `initial_target` resolves the caster field to a
+    // unit and uses it as the target of self / party / pet / position skills, and the started /
+    // fired packets echo it, so a forged field would run the skill on (and as) another unit.
+    // Mount casters are checked below (`mount_authority`); item and doodad casters resolve
+    // through their own validation.
+    if let SkillCaster::Unit(obj_id) | SkillCaster::Unk1(obj_id) = p.caster {
+        if obj_id != player.obj_id {
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                caster = obj_id,
+                "Client cast naming another unit as the caster refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
+    }
     // A skill reached only through an item use must come with that item: the plain unit cast
     // would otherwise run it (and consume nothing) anywhere. The Item caster branch below
     // validates the item's own use skill and consumes the reagent item.
