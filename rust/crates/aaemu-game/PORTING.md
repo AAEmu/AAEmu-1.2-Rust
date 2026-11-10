@@ -2008,7 +2008,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   other AI state matches it. Tests:
   `npcs::npc::spawner_group_tests::{enable_respawn_respawns_a_lost_member_into_the_same_batch,
   enable_respawn_waits_while_a_member_fights, enable_respawn_needs_the_move_leader,
-  disabled_respawn_keeps_the_spawner_refill}`.
+  disabled_respawn_keeps_the_spawner_refill}`. Live check (2026-11-10, lane
+  `r7-group-rules`): a time window on spawner 3832 made its placement spawn group 45 (rule 2,
+  `enable_respawn`); after `/kill` of one `664` follower the other two stayed, and the lost
+  member came back at the leader's formation point with the same batch (new object id, template
+  664) after the corpse despawn plus the 10 s template delay.
 
 * systems::ai (2026-11-10, NPC group formations and shared aggro; capture-pending NPCGROUP-1):
   the spawner attaches a monotonic batch id (a process counter, never an object id: ids are
