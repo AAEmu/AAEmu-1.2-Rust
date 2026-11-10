@@ -768,13 +768,19 @@ async fn save_or_finish_disband(server: &GameServer, family_id: u32, disbanded: 
 /// `LeaveFamily(character)`.
 pub async fn leave_family(server: &GameServer, p: &PlayerRef) {
     let family_id = p.data().family;
+    if family_id == 0 {
+        // The client can send CSFamilyLeave from a character that is not in a family; that is
+        // an expected reply, not an inconsistent server state.
+        tracing::debug!("LeaveFamily: {} has no family", p.character_id);
+        send_error(p, error::FAMILY_NOT_EXIST);
+        return;
+    }
     let disband = {
         let mut st = server.systems.social.families.lock();
-        let missing = family_id == 0
-            || st
-                .families
-                .get(&family_id)
-                .is_none_or(|f| f.member(p.character_id).is_none());
+        let missing = st
+            .families
+            .get(&family_id)
+            .is_none_or(|f| f.member(p.character_id).is_none());
         if missing {
             tracing::error!("LeaveFamily: {} has no family {family_id}", p.character_id);
             drop(st);
