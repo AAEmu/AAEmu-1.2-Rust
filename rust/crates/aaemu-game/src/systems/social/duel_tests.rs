@@ -1043,8 +1043,8 @@ async fn challenge_validation_errors() {
         .await
         .unwrap();
     assert_eq!(err_ids(&f.a.drain()), vec![util::error::ALREADY_IN_DUEL]);
-    // ... the target (busy with the pending challenge) is "other already in duel" for a third
-    // character.
+    // ... the target (busy with the pending challenge, not yet duelling) is "other busy" for a
+    // third character.
     let mut c = TestClient::new(&f.server, 3, 3);
     let pc = spawn_player(
         &f.server,
@@ -1059,15 +1059,162 @@ async fn challenge_validation_errors() {
         .handle_frame(&mut c.conn, &challenge(2))
         .await
         .unwrap();
-    assert_eq!(
-        err_ids(&c.drain()),
-        vec![util::error::OTHER_ALREADY_IN_DUEL]
-    );
+    assert_eq!(err_ids(&c.drain()), vec![util::error::DUEL_OTHER_BUSY]);
     // The first challenge is untouched and still answerable.
     assert!(find(&f.b.drain(), sc::SCDuelChallengedPacket).is_empty());
     assert!(f.duels().is_in_duel_with(1, 2) && f.duels().len() == 2);
     f.answer(0).await;
     assert!(f.duels().duel_of(1).unwrap().started);
+}
+
+/// A minimal instant game for the location rule: `create_game` only needs a battlefield whose
+/// zone key resolves to a world template (the fixture's `main_world` holds [`TEST_ZONE`]) and a
+/// rule set with two different corps factions.
+fn instant_game(server: &GameServer) -> Arc<crate::systems::instances::instant_game::InstantGame> {
+    use crate::systems::instances::data::{Battlefield, GameRuleSet};
+    let battlefield = Battlefield {
+        id: 7,
+        zone_key: TEST_ZONE,
+        spawns: None,
+        rule_set: Some(GameRuleSet {
+            id: 1,
+            corps_size: 1,
+            corps1_faction_id: FACTION_RED_TEAM,
+            corps2_faction_id: FACTION_BLUE_TEAM,
+            ..GameRuleSet::default()
+        }),
+    };
+    crate::systems::instances::instant_game::create_game(server, &battlefield)
+        .expect("instant game")
+}
+
+/// A challenge for a character in another world instance is refused: the two cannot see each
+/// other, and the flag / distance checks assume one instance.
+#[tokio::test]
+async fn challenge_refused_in_another_world_instance() {
+    let mut f = Fixture::new(true);
+    f.pb.data().unit.transform.instance_id = 1;
+    f.challenge().await;
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert!(f.b.drain().is_empty() && f.duels().is_empty());
+}
+
+/// Exactly [`DUEL_REQUEST_RANGE`] is allowed; a metre more is `target_too_far`.
+#[tokio::test]
+async fn challenge_range_is_the_duel_surrender_distance() {
+    let mut f = Fixture::new(true);
+    f.pb.data().unit.transform.x = 1000.0 + DUEL_REQUEST_RANGE;
+    f.challenge().await;
+    assert!(f.a.drain().is_empty());
+    assert!(f.duels().is_in_duel_with(1, 2));
+
+    let mut f = Fixture::new(true);
+    f.pb.data().unit.transform.x = 1000.0 + DUEL_REQUEST_RANGE + 1.0;
+    f.challenge().await;
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::TARGET_TOO_FAR]);
+    assert!(f.b.drain().is_empty() && f.duels().is_empty());
+}
+
+/// Re-checked at the acceptance: the challenged moved beyond the range after the request, so
+/// the challenge is released without starting a duel.
+#[tokio::test]
+async fn accept_rechecks_the_range_and_releases_the_challenge() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.pb.data().unit.transform.x = 1000.0 + DUEL_REQUEST_RANGE + 1.0;
+    f.answer(0).await;
+    assert_eq!(err_ids(&f.b.drain()), vec![util::error::TARGET_TOO_FAR]);
+    assert!(f.a.drain().is_empty(), "no countdown / duel start");
+    assert!(f.duels().is_empty());
+    assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
+}
+
+/// Neither side may challenge from an instant game (the 1.2 client hides the popup entry there
+/// too); the same check refuses the acceptance when the challenged enters one meanwhile.
+#[tokio::test]
+async fn challenge_and_accept_refused_in_an_instant_game() {
+    let mut f = Fixture::new(true);
+    let game = instant_game(&f.server);
+    f.server
+        .systems
+        .instances
+        .instant_games
+        .set_current(&f.pb, Some(game));
+    f.challenge().await;
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::DUEL_BAD_LOCATION]);
+    assert!(f.b.drain().is_empty() && f.duels().is_empty());
+    f.server
+        .systems
+        .instances
+        .instant_games
+        .set_current(&f.pb, None);
+
+    // Accepted while still outside: the challenged joins an instant game before answering.
+    f.challenge().await;
+    f.b.drain();
+    let game = instant_game(&f.server);
+    f.server
+        .systems
+        .instances
+        .instant_games
+        .set_current(&f.pb, Some(game));
+    f.answer(0).await;
+    assert_eq!(err_ids(&f.b.drain()), vec![util::error::DUEL_BAD_LOCATION]);
+    assert!(f.duels().is_empty());
+    assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
+}
+
+/// The challenger's force attack (bloodlust) and the target's have their own 1.2 errors.
+#[tokio::test]
+async fn challenge_refused_during_force_attack() {
+    let mut f = Fixture::new(true);
+    f.pa.data().unit.force_attack = true;
+    f.challenge().await;
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::CANNOT_DUEL_DURING_FORCE_ATTACK]
+    );
+    assert!(f.duels().is_empty());
+
+    f.pa.data().unit.force_attack = false;
+    f.pb.data().unit.force_attack = true;
+    f.challenge().await;
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::CANNOT_DUEL_DURING_FORCE_ATTACK_OTHER]
+    );
+    assert!(f.b.drain().is_empty() && f.duels().is_empty());
+}
+
+/// A target in a started duel is `other_already_in_duel` (the pending-challenge case is
+/// `duel_other_busy`, see [`challenge_validation_errors`]).
+#[tokio::test]
+async fn challenge_refused_when_target_is_already_duelling() {
+    let mut f = Fixture::new(true);
+    f.start().await;
+    let mut c = TestClient::new(&f.server, 3, 3);
+    let pc = spawn_player(
+        &f.server,
+        &c,
+        test_character(3, "Carol", 1020.0, 1000.0),
+        0x102,
+    );
+    pc.data().unit.hp = 1000;
+    c.conn.active_char = Some(pc.clone());
+    c.drain();
+    f.server
+        .handle_frame(
+            &mut c.conn,
+            &encode_raw(1, cs::CSChallengeDuelPacket, &2u32.to_le_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        err_ids(&c.drain()),
+        vec![util::error::OTHER_ALREADY_IN_DUEL]
+    );
+    assert!(f.duels().is_in_duel_with(1, 2));
 }
 
 /// An unanswered challenge expires and releases both players (10.x `DuelRequestExpired`).

@@ -40,6 +40,18 @@ pub const FACTION_BLUE_TEAM: u32 = 160;
 pub const CHECK_DELAY: Duration = Duration::from_millis(1000);
 /// `DistanceForSurrender` (75 m from the flag, 3D).
 pub const DISTANCE_FOR_SURRENDER: f32 = 75.0;
+/// Maximum distance between the challenger and the challenged at `CSChallengeDuelPacket` time
+/// (3D), and again when the challenged accepts.
+///
+/// No 1.2 source has a separate challenge range: the 1.2 C# `DuelManager` (git `a2ab80abd^`)
+/// checked nothing at all, `popup_menu_proc.alb` only asks `X2Unit.CanChallengeTargetToDuel`
+/// (x2game `FUN_3903b2f0`: self / dead / duel-state, no distance), and the 10.x request
+/// validation has no distance check either. The only duel distance the 1.2 code defines is
+/// `DistanceForSurrender` (75 m from the flag), and a challenge farther than that cannot start
+/// a playable duel: the flag spawns halfway between the two and the first 1 s distance check
+/// would end it. Refuse with the client's `TARGET_TOO_FAR` (error 517, `ui_texts`
+/// `TARGET_TOO_FAR`).
+pub const DUEL_REQUEST_RANGE: f32 = DISTANCE_FOR_SURRENDER;
 /// `DuelDurationTime` (5 min).
 pub const DUEL_DURATION: Duration = Duration::from_secs(5 * 60);
 /// `DuelStartTask` delay (3 s).
@@ -363,14 +375,64 @@ impl DuelManager {
         st.duels.remove(&duel.challenged.character_id);
     }
 
+    /// A location where duels are not allowed (`true` = refuse). The 1.2 client only offers
+    /// `popup_menu_proc.alb`'s "challenge to duel" entry outside an instant game
+    /// (`X2BattleField:IsInInstantGame()`), and the 10.x `DuelRequest` returns
+    /// `duel_bad_location` there as well (`x2game-dev_dedicate.dll.c` `sub_39104BF0` ->
+    /// `sub_397731F0`). The 1.2 `indun_zones` table has no `duel` column (the 10.x content adds
+    /// one), so dungeons are not separately refused here.
+    fn no_duel_location(server: &GameServer, p: &PlayerRef) -> bool {
+        server.systems.instances.instant_games.current(p).is_some()
+    }
+
+    /// The environment checks shared by `DuelRequest` and `DuelAccepted` (the challenged may
+    /// have moved between the two packets). `None` = allowed. Copied out of each character's
+    /// lock before the world lookups.
+    fn duel_environment_error(
+        server: &GameServer,
+        challenger: &PlayerRef,
+        challenged: &PlayerRef,
+    ) -> Option<i16> {
+        let (challenger_instance, challenger_force_attack) = {
+            let c = challenger.data();
+            (c.unit.transform.instance_id, c.unit.force_attack)
+        };
+        let (challenged_instance, challenged_force_attack) = {
+            let c = challenged.data();
+            (c.unit.transform.instance_id, c.unit.force_attack)
+        };
+        // Somebody in another world instance cannot be reached (and is not visible).
+        if challenger_instance != challenged_instance {
+            return Some(util::error::BAD_DUEL_TARGET);
+        }
+        if Self::no_duel_location(server, challenger) || Self::no_duel_location(server, challenged)
+        {
+            return Some(util::error::DUEL_BAD_LOCATION);
+        }
+        if challenger_force_attack {
+            return Some(util::error::CANNOT_DUEL_DURING_FORCE_ATTACK);
+        }
+        if challenged_force_attack {
+            return Some(util::error::CANNOT_DUEL_DURING_FORCE_ATTACK_OTHER);
+        }
+        let a = util::world_position(server, challenger);
+        let b = util::world_position(server, challenged);
+        if util::distance(a, b, true) > DUEL_REQUEST_RANGE {
+            return Some(util::error::TARGET_TOO_FAR);
+        }
+        None
+    }
+
     /// `DuelRequest(challenger, challengedId)` with the validation of the 10.x `DuelManager`
-    /// (`DuelManager.cs:96-136`): self -> `bad_duel_self`, unknown / offline target ->
-    /// `bad_duel_target`, challenger already registered -> `already_in_duel`, target already
-    /// registered (a duel or a pending challenge) -> `other_already_in_duel`. Deviations (no
-    /// oracle): a dead target is `bad_duel_target`; neither C# has a distance / location rule, so
-    /// `duel_bad_location`, `duel_other_busy` and `target_too_far` are never sent. The 1.2 C#
-    /// threw a NullReferenceException for an unknown target and checked nothing else; an
-    /// unanswered challenge expires after [`REQUEST_TIMEOUT`] as in 10.x.
+    /// (`DuelManager.cs:96-136`) plus the checks the 10.x request makes and the 1.2 client's
+    /// error texts provide: self -> `bad_duel_self`, unknown / offline / dead target ->
+    /// `bad_duel_target`, another world instance -> `bad_duel_target`, instant game (either
+    /// side) -> `duel_bad_location`, force attack -> `cannot_duel_during_force_attack(_other)`,
+    /// farther than [`DUEL_REQUEST_RANGE`] -> `target_too_far`, challenger already registered ->
+    /// `already_in_duel`, target in a started duel -> `other_already_in_duel`, target busy with
+    /// a pending challenge -> `duel_other_busy`. The 1.2 C# threw a NullReferenceException for
+    /// an unknown target and checked nothing else; an unanswered challenge expires after
+    /// [`REQUEST_TIMEOUT`] as in 10.x.
     pub fn duel_request(&self, server: &GameServer, challenger: &PlayerRef, challenged_id: u32) {
         if challenged_id == challenger.character_id {
             send_error(challenger, util::error::BAD_DUEL_SELF);
@@ -394,16 +456,30 @@ impl DuelManager {
         if crate::systems::social::friend::is_blocked_by(&challenged, challenger.character_id) {
             return;
         }
+        if let Some(error) = Self::duel_environment_error(server, challenger, &challenged) {
+            tracing::warn!(
+                "DuelRequest: challenger={}:{}, challenged={challenged_id}:{} refused, error={error}",
+                challenger.character_id,
+                challenger.obj_id,
+                challenged.obj_id
+            );
+            send_error(challenger, error);
+            return;
+        }
         let duel = Arc::new(Duel::new(challenger.clone(), challenged.clone()));
         {
             // One critical section: check and register, so two challenges cannot both pass.
             let mut st = self.st();
             let error = if st.duels.contains_key(&challenger.character_id) {
                 Some(util::error::ALREADY_IN_DUEL)
-            } else if st.duels.contains_key(&challenged.character_id) {
-                Some(util::error::OTHER_ALREADY_IN_DUEL)
             } else {
-                None
+                st.duels.get(&challenged.character_id).map(|duel| {
+                    if duel.state().started {
+                        util::error::OTHER_ALREADY_IN_DUEL
+                    } else {
+                        util::error::DUEL_OTHER_BUSY
+                    }
+                })
             };
             if let Some(e) = error {
                 drop(st);
@@ -482,6 +558,22 @@ impl DuelManager {
             if duel.claim_release() {
                 tracing::warn!("DuelAccepted: challenger {challenger_id} is dead");
                 send_error(challenged, util::error::BAD_DUEL_TARGET);
+                self.duel_clean_up(challenger_id);
+            }
+            return;
+        }
+        // The challenged may have moved, entered an instant game or turned on force attack (and
+        // the challenger likewise) since the request: run the same checks again before the flag
+        // spawns.
+        if let Some(error) =
+            Self::duel_environment_error(server, &duel.challenger, &duel.challenged)
+        {
+            if duel.claim_release() {
+                tracing::warn!(
+                    "DuelAccepted: challenger {challenger_id} -> {} refused, error={error}",
+                    duel.challenged.character_id
+                );
+                send_error(challenged, error);
                 self.duel_clean_up(challenger_id);
             }
             return;
