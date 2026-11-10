@@ -5541,9 +5541,12 @@ and in NPC wandering / buff remaining times.
   transition (`tick_once`); a character that already holds the item (the defence
   reinforcement skill 16975 grants the same defence seal) gets no duplicate and stays
   untracked. Removal: `seals::reconcile` in the 1-second participant tick takes one seal back
-  once the character is no longer on the active siege's matching roster; an offline character
-  keeps the item for its authored lifetime (the backstop), and the runtime grant set is
-  deliberately not persisted (after a restart the lifetime is the only cleanup). Grant uses
+  once the siege record is finished (an end or a cancel) or the character left its roster
+  entry; a warmup / still-scheduled record keeps it (the first live run caught the earlier
+  active-only check taking the seal back a second after the join, and the fix has its own
+  test); an offline character keeps the item for its authored lifetime (the backstop), and
+  the runtime grant set is deliberately not persisted (after a restart the lifetime is the
+  only cleanup). Grant uses
   item task 42 (`SkillEffectGainItem`, the existing verified ticket-grant task in
   `skills/effects/special/items.rs`); the removal uses the ordinary consume path. The retail
   grant/removal trigger and packet are UNKNOWN (no 1.2 capture); this is the owner's
