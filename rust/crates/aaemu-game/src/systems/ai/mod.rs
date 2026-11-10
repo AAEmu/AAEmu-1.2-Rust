@@ -35,6 +35,7 @@ pub mod data;
 pub mod framework;
 pub mod geodata;
 pub mod gimmick;
+pub mod group;
 pub mod hooks;
 pub mod interaction;
 pub mod lua;
@@ -51,6 +52,8 @@ pub mod skills;
 
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod group_tests;
 #[cfg(test)]
 mod real_data_tests;
 
