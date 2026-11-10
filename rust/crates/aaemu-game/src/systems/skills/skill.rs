@@ -2760,7 +2760,7 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     // A seat occupation of the same unit keeps its own bond flag.
     let target = skill.state().initial_target;
     if target != 0 {
-        crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster.obj_id());
+        crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster);
     }
     if !caster.is_unit() {
         // Not a unit any more: release the id without the unit-side effects.

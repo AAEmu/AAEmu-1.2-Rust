@@ -159,16 +159,33 @@ pub fn begin_bond(server: &GameServer, doodad: &DoodadRef, unit: &WorldObject) -
 }
 
 /// Releases the cast part of the occupancy (the seat part stays while the unit is bonded).
-pub fn end_cast(server: &GameServer, doodad_obj_id: u32, unit_obj_id: u32) {
+///
+/// A `DoodadFuncUse` starts the doodad's own skill cast, which can begin before the cast that
+/// ran the func ends (`DoodadFuncUse` -> scheduled `UseSkill`). The unit is then still in a
+/// `Cast` task on the same doodad, so the hold stays for that cast. The unit check runs before
+/// the map lock: `entry_is_live` takes the map first, and the two orders must not cross.
+pub fn end_cast(server: &GameServer, doodad_obj_id: u32, caster: &WorldObject) {
+    let still_casting = caster
+        .with_unit(|u| {
+            u.unit()
+                .skill_state
+                .skill_task
+                .as_ref()
+                .is_some_and(|task| {
+                    task.kind == SkillTaskKind::Cast
+                        && task.skill.state().initial_target == doodad_obj_id
+                })
+        })
+        .unwrap_or(false);
     let map = manager(server);
     if map.is_empty() {
         return;
     }
     let mut entries = map.lock();
     let remove = match entries.get_mut(&doodad_obj_id) {
-        Some(entry) if entry.occupant_obj_id == unit_obj_id => {
-            entry.casting = false;
-            !entry.bonded
+        Some(entry) if entry.occupant_obj_id == caster.obj_id() => {
+            entry.casting = still_casting;
+            !entry.casting && !entry.bonded
         }
         _ => false,
     };
