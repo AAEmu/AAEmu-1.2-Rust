@@ -529,8 +529,12 @@ async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
 #[tokio::test]
 async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance() {
     let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
-    // The attacked member is at (95, 100); its mate moves 8 m away, beyond the 6 m helper
-    // distance but inside the 10 m aggression radius.
+    // The settle loop may already have walked the follower towards its formation point; pin it
+    // to its spawn so the distances below do not depend on how far it got. `distance_to`
+    // subtracts both 0.5 m model radii.
+    f.follower.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
+    // The mate moves 8 m - 1 m = 7 m away from the attacked member: beyond the 6 m helper
+    // distance, inside the 10 m aggression radius.
     f.follower2
         .data()
         .unit
@@ -550,7 +554,10 @@ async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance
 #[tokio::test]
 async fn aggro_rule_1_help_refuses_a_mate_beyond_the_aggression_radius() {
     let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
-    // 12 m away: beyond both the 6 m helper distance and the 10 m aggression radius.
+    // Pinned to its spawn like in the test above (`distance_to` subtracts both 0.5 m radii).
+    f.follower.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
+    // 12 m - 1 m = 11 m away: beyond both the 6 m helper distance and the 10 m aggression
+    // radius.
     f.follower2
         .data()
         .unit
