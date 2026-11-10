@@ -3,6 +3,10 @@
 		// Fill CSNaviOpenBounty with the wanted-player board instead of the empty list.
 		// Default false: a filled board broke the 1.2 client Lua in the C# server and the
 		// real-client check is still pending (PORTING.md, BOUNTY-board).
-		"BountyBoard": false
+		"BountyBoard": false,
+		// Family member cap (FAMILY_MAXIMUM). The 1.2 compact has no family tables or
+		// content_config keys and the 1.2 Family.Write only carries "TODO max length 8";
+		// the 10.x server reads family_max_count from content_configs and its tests use 8.
+		"FamilyMaxMembers": 8
 	}
 }

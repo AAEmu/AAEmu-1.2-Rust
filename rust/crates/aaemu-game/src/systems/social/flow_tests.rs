@@ -829,10 +829,23 @@ async fn family_changes_reject_foreign_members_and_save_authorized_snapshots() {
     let mut title = PacketStream::new();
     title.write_u32(3).write_str("Forged");
     a.send(&server, cs::CSFamilyChangeTitlePacket, title).await;
+    // The target is in another family: the C# `_familyMembers[memberId]` lookup was unchecked.
+    assert_eq!(
+        a.frames(),
+        vec![error_frame(
+            crate::systems::social::util::error::FAMILY_OTHER_FAMILY
+        )]
+    );
     let mut owner = PacketStream::new();
     owner.write_u32(3);
     a.send(&server, cs::CSFamilyChangeOwnerPacket, owner).await;
-    assert!(a.ops().is_empty() && b.ops().is_empty() && c.ops().is_empty());
+    assert_eq!(
+        a.frames(),
+        vec![error_frame(
+            crate::systems::social::util::error::FAMILY_OTHER_FAMILY
+        )]
+    );
+    assert!(b.ops().is_empty() && c.ops().is_empty());
     let own = server.systems.social.families.family(11).unwrap();
     let foreign = server.systems.social.families.family(22).unwrap();
     assert_eq!(own.member(1).unwrap().role, 1);
@@ -2147,6 +2160,342 @@ async fn family_create_join_leave_disband() {
     );
     assert_eq!((a.p.data().family, b.p.data().family), (0, 0));
     assert!(server.systems.social.families.family(fid).is_none());
+}
+
+fn family_invite_body(name: &str, title: &str) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_str(name).write_str(title);
+    s
+}
+
+fn family_reply_body(invitor: u32, join: bool, title: &str) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_u32(invitor).write_bool(join).write_str(title);
+    s
+}
+
+#[tokio::test]
+async fn family_full_refuses_invites_and_accepts() {
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    let fid = a.p.data().family;
+    assert_ne!(fid, 0);
+    assert_eq!(b.p.data().family, fid);
+    a.ops();
+    b.ops();
+    c.ops();
+
+    // Two members is the configured cap: the invite itself is refused.
+    server
+        .config
+        .update(|cfg| cfg.social.family_max_members = 2);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Cy", "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_MAXIMUM)]);
+    assert!(c.ops().is_empty());
+
+    // Room opens, the invitation goes out; the family fills before the reply arrives.
+    server
+        .config
+        .update(|cfg| cfg.social.family_max_members = 3);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Cy", "Kid"),
+    )
+    .await;
+    assert_eq!(c.ops(), vec![sc::SCFamilyInvitationPacket]);
+    server
+        .config
+        .update(|cfg| cfg.social.family_max_members = 2);
+    c.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    assert_eq!(c.frames(), vec![error_frame(error::FAMILY_MAXIMUM)]);
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_MAXIMUM)]);
+    assert_eq!(c.p.data().family, 0);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .families
+            .family(fid)
+            .unwrap()
+            .members
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn family_titles_are_validated_like_the_client() {
+    use crate::data::character_templates::BlockedName;
+    use crate::systems::social::util::error;
+    use crate::test_support::test_server_with;
+    let mut data = crate::data::GameData::empty();
+    data.characters.blocked_names = vec![BlockedName {
+        text: "badword".into(),
+        partial_match: true,
+    }];
+    let server = test_server_with(data);
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    for (title, code) in [
+        ("", error::FAMILY_TITLE),
+        (" ", error::FAMILY_TITLE),
+        ("AAAAAAAAAAAAA", error::FAMILY_TITLE),
+        ("!!!", error::FAMILY_TITLE),
+        ("badword kid", error::FAMILY_TITLE_BAD),
+    ] {
+        a.send(
+            &server,
+            cs::CSFamilyInviteMemberPacket,
+            family_invite_body("Bob", title),
+        )
+        .await;
+        assert_eq!(a.frames(), vec![error_frame(code)], "title {title:?}");
+        assert!(b.ops().is_empty(), "title {title:?} reached the client");
+    }
+    // A title inside the rule still invites, and a bad title cannot replace it later.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Eldest Son"),
+    )
+    .await;
+    assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Eldest Son"),
+    )
+    .await;
+    let fid = a.p.data().family;
+    assert_ne!(fid, 0);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .families
+            .family(fid)
+            .unwrap()
+            .member(2)
+            .unwrap()
+            .title,
+        "Eldest Son"
+    );
+    a.ops();
+    b.ops();
+    for (title, code) in [
+        ("", error::FAMILY_TITLE),
+        ("AAAAAAAAAAAAA", error::FAMILY_TITLE),
+        ("badword", error::FAMILY_TITLE_BAD),
+    ] {
+        let mut body = PacketStream::new();
+        body.write_u32(2).write_str(title);
+        a.send(&server, cs::CSFamilyChangeTitlePacket, body).await;
+        assert_eq!(a.frames(), vec![error_frame(code)], "title {title:?}");
+        assert!(b.ops().is_empty(), "title {title:?} reached the client");
+    }
+    assert_eq!(
+        server
+            .systems
+            .social
+            .families
+            .family(fid)
+            .unwrap()
+            .member(2)
+            .unwrap()
+            .title,
+        "Eldest Son"
+    );
+}
+
+#[tokio::test]
+async fn family_invite_errors_name_the_reason() {
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Nobody", "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_NO_TARGET)]);
+    // A registered but offline character is not in the world (the lobby name manager knows it).
+    server.names.add_character(99, "Offline", 1099);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Offline", "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_INVITE_OFFLINE)]);
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Al", "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_SELF)]);
+
+    // A family: the target already belongs to one, and a plain member cannot invite.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    b.ops();
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    a.ops();
+    b.ops();
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_OTHER_FAMILY)]);
+    b.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Cy", "Kid"),
+    )
+    .await;
+    assert_eq!(b.frames(), vec![error_frame(error::FAMILY_NOT_OWNER)]);
+    assert!(c.ops().is_empty());
+
+    // A decline ends the invitation and tells the inviter.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Cy", "Kid"),
+    )
+    .await;
+    assert_eq!(c.ops(), vec![sc::SCFamilyInvitationPacket]);
+    c.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, false, "Kid"),
+    )
+    .await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_REJECT)]);
+    assert!(c.ops().is_empty());
+    assert_eq!(c.p.data().family, 0);
+}
+
+#[tokio::test]
+async fn family_action_failures_answer_the_client() {
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    // Every action without a family answers `FAMILY_NOT_EXIST`.
+    c.send(&server, cs::CSFamilyLeavePacket, PacketStream::new())
+        .await;
+    assert_eq!(c.frames(), vec![error_frame(error::FAMILY_NOT_EXIST)]);
+    let mut kick = PacketStream::new();
+    kick.write_u32(1);
+    c.send(&server, cs::CSFamilyKickPacket, kick).await;
+    assert_eq!(c.frames(), vec![error_frame(error::FAMILY_NOT_EXIST)]);
+    let mut title = PacketStream::new();
+    title.write_u32(1).write_str("Kid");
+    c.send(&server, cs::CSFamilyChangeTitlePacket, title).await;
+    assert_eq!(c.frames(), vec![error_frame(error::FAMILY_NOT_EXIST)]);
+    let mut owner = PacketStream::new();
+    owner.write_u32(1);
+    c.send(&server, cs::CSFamilyChangeOwnerPacket, owner).await;
+    assert_eq!(c.frames(), vec![error_frame(error::FAMILY_NOT_EXIST)]);
+
+    // A two-member family: only the steward may kick, title or hand over the family.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    b.ops();
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Kid"),
+    )
+    .await;
+    a.ops();
+    b.ops();
+    let mut kick = PacketStream::new();
+    kick.write_u32(1);
+    b.send(&server, cs::CSFamilyKickPacket, kick).await;
+    assert_eq!(b.frames(), vec![error_frame(error::FAMILY_NOT_OWNER)]);
+    let mut title = PacketStream::new();
+    title.write_u32(1).write_str("Kid");
+    b.send(&server, cs::CSFamilyChangeTitlePacket, title).await;
+    assert_eq!(b.frames(), vec![error_frame(error::FAMILY_NOT_OWNER)]);
+    let mut owner = PacketStream::new();
+    owner.write_u32(1);
+    b.send(&server, cs::CSFamilyChangeOwnerPacket, owner).await;
+    assert_eq!(b.frames(), vec![error_frame(error::FAMILY_NOT_OWNER)]);
+
+    let mut kick = PacketStream::new();
+    kick.write_u32(1);
+    a.send(&server, cs::CSFamilyKickPacket, kick).await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_KICK_SELF)]);
+    let mut title = PacketStream::new();
+    title.write_u32(1).write_str("Boss");
+    a.send(&server, cs::CSFamilyChangeTitlePacket, title).await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_OWNER_TITLE)]);
+    let mut owner = PacketStream::new();
+    owner.write_u32(1);
+    a.send(&server, cs::CSFamilyChangeOwnerPacket, owner).await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_ALREADY_OWNER)]);
+    let mut title = PacketStream::new();
+    title.write_u32(999).write_str("Kid");
+    a.send(&server, cs::CSFamilyChangeTitlePacket, title).await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_NO_TARGET)]);
+    let mut owner = PacketStream::new();
+    owner.write_u32(999);
+    a.send(&server, cs::CSFamilyChangeOwnerPacket, owner).await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_NO_TARGET)]);
+    let mut kick = PacketStream::new();
+    kick.write_u32(999);
+    a.send(&server, cs::CSFamilyKickPacket, kick).await;
+    assert_eq!(a.frames(), vec![error_frame(error::FAMILY_NO_TARGET)]);
 }
 
 #[tokio::test]

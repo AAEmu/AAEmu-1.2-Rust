@@ -11,9 +11,11 @@ use sqlx::Row;
 
 use crate::db::int;
 use crate::error::Result;
+use crate::managers::name::normalize_name;
 use crate::net::packet::ServerPacket;
 use crate::server::GameServer;
 use crate::systems::social::packets::family::*;
+use crate::systems::social::util::{error, send_error};
 use crate::world::PlayerRef;
 
 /// `FamilyMember`.
@@ -127,6 +129,50 @@ struct State {
 /// How long a family invitation can be answered (same as the guild / party invitations).
 pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
 
+/// The 1.2 client's family-title rule (`ui_texts` 2324): 1 to 12 characters, no special
+/// characters. The client applies it with `XlIsValidName(.., VNT_FAMILY_TITLE)`; the server
+/// applies it to `CSFamilyInviteMember` / `CSFamilyReplyInvitation` / `CSFamilyChangeTitle`.
+pub(crate) const TITLE_MAX_CHARS: usize = 12;
+
+/// The family member cap. The 1.2 compact has no family tables or `content_configs` keys for
+/// them, and the 1.2 `Family.Write` only carries the comment `// TODO max length 8` (it never
+/// enforced it). The 10.x server reads `family_max_count` from `content_configs` and its tests
+/// use 8 for the base family, so the default is 8 and the value is configurable
+/// (`Social:FamilyMaxMembers`, `Configurations/Social.json`). A family starts with two
+/// members, so a configured value below 2 is treated as 2.
+pub fn max_members(server: &GameServer) -> usize {
+    server.config.social.family_max_members.max(2)
+}
+
+/// The client's title refusal (`FAMILY_TITLE` / `FAMILY_TITLE_BAD`), or `None` when `title` is
+/// acceptable. `FAMILY_TITLE_BAD` reuses the `blocked_texts.check_name` list of the lobby,
+/// character names and guild names.
+fn validate_title(server: &GameServer, title: &str) -> Option<i16> {
+    let count = title.chars().count();
+    if count == 0
+        || count > TITLE_MAX_CHARS
+        || title.chars().all(|c| c == ' ')
+        || title.chars().any(|c| !(c.is_alphanumeric() || c == ' '))
+    {
+        return Some(error::FAMILY_TITLE);
+    }
+    let folded = title.to_lowercase();
+    let blocked = server
+        .game_data
+        .characters
+        .blocked_names
+        .iter()
+        .any(|rule| {
+            let text = rule.text.to_lowercase();
+            if rule.partial_match {
+                folded.contains(&text)
+            } else {
+                folded == text
+            }
+        });
+    blocked.then_some(error::FAMILY_TITLE_BAD)
+}
+
 /// `FamilyManager`.
 #[derive(Debug, Default)]
 pub struct FamilyManager {
@@ -190,17 +236,35 @@ impl FamilyManager {
         }
     }
 
-    /// Whether `character_id` may invite: not in a family, or the steward (role 1) of its own,
-    /// the same rule as kicking and titling.
-    fn may_invite(&self, character_id: u32) -> bool {
+    /// Whether `inviter` may invite `invited`, under one lock: the target must not be in a
+    /// family (`FAMILY_OTHER_FAMILY`), and the inviter must either have no family or be its
+    /// steward (role 1, the rule of kicking and titling) with room left (`FAMILY_MAXIMUM`).
+    /// Returns the `ErrorMessageType` of the refusal.
+    fn check_invite(
+        &self,
+        inviter: u32,
+        invited: u32,
+        max_members: usize,
+    ) -> std::result::Result<(), i16> {
         let st = self.lock();
-        match st.family_members.get(&character_id) {
-            None => true,
-            Some(fid) => st
-                .families
-                .get(fid)
-                .and_then(|f| f.member(character_id))
-                .is_some_and(|m| m.role == 1),
+        if st.family_members.contains_key(&invited) {
+            return Err(error::FAMILY_OTHER_FAMILY);
+        }
+        let Some(family_id) = st.family_members.get(&inviter).copied() else {
+            return Ok(());
+        };
+        let Some(family) = st.families.get(&family_id) else {
+            return Err(error::FAMILY_NOT_EXIST);
+        };
+        match family.member(inviter) {
+            Some(m) if m.role == 1 => {
+                if family.members.len() >= max_members {
+                    Err(error::FAMILY_MAXIMUM)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(error::FAMILY_NOT_OWNER),
         }
     }
 
@@ -385,29 +449,42 @@ pub async fn save_family_rows(pool: &MySqlPool, f: &Family) -> Result<()> {
 /// always 1.
 pub fn invite_to_family(server: &GameServer, inviter: &PlayerRef, invited_name: &str, title: &str) {
     let Some(invited) = server.world.character_by_name(invited_name) else {
+        // An offline character is still registered in the `NameManager`; a name that is not
+        // there belongs to nobody (the same split the lobby uses for a new character name).
+        let known = server.names.get_character_id(&normalize_name(invited_name)) != 0;
+        send_error(
+            inviter,
+            if known {
+                error::FAMILY_INVITE_OFFLINE
+            } else {
+                error::FAMILY_NO_TARGET
+            },
+        );
         return;
     };
+    if invited.character_id == inviter.character_id {
+        send_error(inviter, error::FAMILY_SELF);
+        return;
+    }
     // Silently drop the invitation when the inviter is blocked (capture-pending, case
     // `BLOCK-LIST-1`).
     if crate::systems::social::friend::is_blocked_by(&invited, inviter.character_id) {
         return;
     }
-    if invited.data().family != 0 {
+    let fm = &server.systems.social.families;
+    if let Err(code) = fm.check_invite(
+        inviter.character_id,
+        invited.character_id,
+        max_members(server),
+    ) {
+        send_error(inviter, code);
         return;
     }
-    if !server
-        .systems
-        .social
-        .families
-        .may_invite(inviter.character_id)
-    {
-        tracing::debug!(
-            "InviteToFamily: {} is not the steward of its family",
-            inviter.character_id
-        );
+    if let Some(code) = validate_title(server, title) {
+        send_error(inviter, code);
         return;
     }
-    server.systems.social.families.record_invitation(
+    fm.record_invitation(
         invited.character_id,
         inviter.character_id,
         crate::world::now_ms(),
@@ -436,65 +513,113 @@ pub async fn reply_to_invite(
         tracing::warn!(
             character = %invited.data().unit.name,
             invitor_id,
-            "FamilyReplyInvitation without a pending invitation ignored"
+            "FamilyReplyInvitation without a pending invitation"
         );
+        send_error(invited, error::FAMILY_NO_INVITOR);
         return;
     }
-    if !join || invited.data().family != 0 {
+    if !join {
+        // The invited character declined: the inviter sees why the invitation ended.
+        if let Some(invitor) = server.world.character_by_id(invitor_id) {
+            send_error(&invitor, error::FAMILY_REJECT);
+        }
+        return;
+    }
+    if fm.family_of_character(invited.character_id) != 0 {
+        send_error(invited, error::FAMILY_HAS_FAMILY);
         return;
     }
     let Some(invitor) = server.world.character_by_id(invitor_id) else {
+        send_error(invited, error::FAMILY_NO_INVITOR);
         return;
     };
-    if !fm.may_invite(invitor_id) {
-        return; // the inviter lost the stewardship since it invited
+    if let Some(code) = validate_title(server, title) {
+        send_error(invited, code);
+        return;
     }
-    let invitor_family = invitor.data().family;
-    let saved = if invitor_family == 0 {
-        // CreateFamily(invitor, invitedChar, title)
-        let id = match server.ids.family.get_next_id() {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("{e}");
+    let cap = max_members(server);
+    let saved = {
+        let mut st = fm.lock();
+        // The invited character may have joined another family since the invitation; the check
+        // and the add run under the one family lock, so a family cannot fill or change between.
+        if st.family_members.contains_key(&invited.character_id) {
+            drop(st);
+            send_error(invited, error::FAMILY_HAS_FAMILY);
+            return;
+        }
+        let invitor_family = st.family_members.get(&invitor_id).copied().unwrap_or(0);
+        if invitor_family == 0 {
+            // CreateFamily(invitor, invitedChar, title)
+            let id = match server.ids.family.get_next_id() {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("{e}");
+                    drop(st);
+                    send_error(invited, error::FAMILY_NOT_EXIST);
+                    return;
+                }
+            };
+            st.families.insert(
+                id,
+                Family {
+                    id,
+                    members: Vec::new(),
+                    removed_members: Vec::new(),
+                },
+            );
+            if !add_family_member(server, &mut st, id, &invitor, None)
+                || !add_family_member(server, &mut st, id, invited, Some(title))
+            {
+                tracing::error!("ReplyToInvite: creating family {id} failed");
+                drop(st);
+                send_error(invited, error::FAMILY_ALREADY);
                 return;
             }
-        };
-        let mut st = fm.lock();
-        st.families.insert(
-            id,
-            Family {
-                id,
-                members: Vec::new(),
-                removed_members: Vec::new(),
-            },
-        );
-        if !add_family_member(server, &mut st, id, &invitor, None)
-            || !add_family_member(server, &mut st, id, invited, Some(title))
-        {
-            return;
+            let f = &st.families[&id];
+            f.send_packet(&SCFamilyCreatedPacket { family: f.info() }, 0);
+            id
+        } else {
+            let (steward, full) = match st.families.get(&invitor_family) {
+                Some(f) => (
+                    f.member(invitor_id).is_some_and(|m| m.role == 1),
+                    f.members.len() >= cap,
+                ),
+                None => {
+                    // C#: `_families[invitor.Family]` throws.
+                    tracing::error!("ReplyToInvite: no family {invitor_family}");
+                    drop(st);
+                    send_error(invited, error::FAMILY_NOT_EXIST);
+                    return;
+                }
+            };
+            if !steward {
+                // The inviter lost the stewardship since it invited.
+                drop(st);
+                send_error(&invitor, error::FAMILY_NOT_OWNER);
+                send_error(invited, error::FAMILY_NO_INVITOR);
+                return;
+            }
+            if full {
+                drop(st);
+                send_error(invited, error::FAMILY_MAXIMUM);
+                send_error(&invitor, error::FAMILY_MAXIMUM);
+                return;
+            }
+            if !add_family_member(server, &mut st, invitor_family, invited, Some(title)) {
+                drop(st);
+                send_error(invited, error::FAMILY_ALREADY);
+                return;
+            }
+            let f = &st.families[&invitor_family];
+            f.send_packet(
+                &SCFamilyMemberAddedPacket {
+                    family: f.info(),
+                    added_index: f.members.len() as i32 - 1,
+                },
+                0,
+            );
+            invitor_family
         }
-        let f = &st.families[&id];
-        f.send_packet(&SCFamilyCreatedPacket { family: f.info() }, 0);
-        id
-    } else {
-        let mut st = fm.lock();
-        if !st.families.contains_key(&invitor_family) {
-            // C#: `_families[invitor.Family]` throws.
-            tracing::error!("ReplyToInvite: no family {invitor_family}");
-            return;
-        }
-        if !add_family_member(server, &mut st, invitor_family, invited, Some(title)) {
-            return;
-        }
-        let f = &st.families[&invitor_family];
-        f.send_packet(
-            &SCFamilyMemberAddedPacket {
-                family: f.info(),
-                added_index: f.members.len() as i32 - 1,
-            },
-            0,
-        );
-        invitor_family
     };
     save_family(server, saved).await;
 }
@@ -601,18 +726,18 @@ pub async fn leave_family(server: &GameServer, p: &PlayerRef) {
     let family_id = p.data().family;
     let disband = {
         let mut st = server.systems.social.families.lock();
-        let Some(f) = st.families.get_mut(&family_id) else {
-            tracing::error!("LeaveFamily: no family {family_id}");
-            return;
-        };
-        if f.member(p.character_id).is_none() {
-            // C#: RemoveMember(null) throws.
-            tracing::error!(
-                "LeaveFamily: {} is not in family {family_id}",
-                p.character_id
-            );
+        let missing = family_id == 0
+            || st
+                .families
+                .get(&family_id)
+                .is_none_or(|f| f.member(p.character_id).is_none());
+        if missing {
+            tracing::error!("LeaveFamily: {} has no family {family_id}", p.character_id);
+            drop(st);
+            send_error(p, error::FAMILY_NOT_EXIST);
             return;
         }
+        let f = st.families.get_mut(&family_id).expect("checked");
         p.data().family = 0;
         f.remove_member(p.character_id);
         st.family_members.remove(&p.character_id);
@@ -656,35 +781,61 @@ async fn character_exists(server: &GameServer, id: u32) -> bool {
 pub async fn kick_member(server: &GameServer, kicker: &PlayerRef, kicked_id: u32) {
     let family_id = kicker.data().family;
     if family_id == 0 {
+        send_error(kicker, error::FAMILY_NOT_EXIST);
+        return;
+    }
+    if kicked_id == kicker.character_id {
+        send_error(kicker, error::FAMILY_KICK_SELF);
         return;
     }
     {
         let st = server.systems.social.families.lock();
         let Some(f) = st.families.get(&family_id) else {
             tracing::error!("KickMember: no family {family_id}");
+            drop(st);
+            send_error(kicker, error::FAMILY_NOT_EXIST);
             return;
         };
         match f.member(kicker.character_id) {
             Some(m) if m.role == 1 => {}
-            Some(_) => return, // Only the steward can kick
+            Some(_) => {
+                // Only the steward can kick
+                drop(st);
+                send_error(kicker, error::FAMILY_NOT_OWNER);
+                return;
+            }
             None => {
                 tracing::error!("KickMember: kicker {} not in family", kicker.character_id);
+                drop(st);
+                send_error(kicker, error::FAMILY_NOT_EXIST);
                 return;
             }
         }
     }
     let online = server.world.character_by_id(kicked_id);
     if online.is_none() && !character_exists(server, kicked_id).await {
+        send_error(kicker, error::FAMILY_NO_TARGET);
         return;
     }
     let disband = {
         let mut st = server.systems.social.families.lock();
         let Some(f) = st.families.get_mut(&family_id) else {
+            drop(st);
+            send_error(kicker, error::FAMILY_NOT_EXIST);
             return;
         };
+        // The `character_exists` await above released the lock: re-check the kicker's role
+        // under the same lock as the removal.
+        if !f.member(kicker.character_id).is_some_and(|m| m.role == 1) {
+            drop(st);
+            send_error(kicker, error::FAMILY_NOT_OWNER);
+            return;
+        }
         if f.member(kicked_id).is_none() {
             // C#: RemoveMember(null) throws.
             tracing::error!("KickMember: {kicked_id} is not in family {family_id}");
+            drop(st);
+            send_error(kicker, error::FAMILY_NO_TARGET);
             return;
         }
         if let Some(k) = &online {
@@ -739,27 +890,50 @@ fn update_title(
 ) -> Option<u32> {
     let family_id = owner.data().family;
     if family_id == 0 {
+        send_error(owner, error::FAMILY_NOT_EXIST);
         return None;
     }
     let mut st = server.systems.social.families.lock();
     let Some(f) = st.families.get(&family_id) else {
         tracing::error!("ChangeTitle: no family {family_id}");
+        drop(st);
+        send_error(owner, error::FAMILY_NOT_EXIST);
         return None;
     };
     match f.member(owner.character_id) {
         Some(m) if m.role == 1 => {}
-        Some(_) => return None,
-        None => {
-            tracing::error!("ChangeTitle: {} not in family", owner.character_id);
+        Some(_) => {
+            drop(st);
+            send_error(owner, error::FAMILY_NOT_OWNER);
             return None;
         }
+        None => {
+            tracing::error!("ChangeTitle: {} not in family", owner.character_id);
+            drop(st);
+            send_error(owner, error::FAMILY_NOT_EXIST);
+            return None;
+        }
+    }
+    if member_id == owner.character_id {
+        drop(st);
+        send_error(owner, error::FAMILY_OWNER_TITLE);
+        return None;
     }
     // The target must belong to the steward's own family.
     let Some(&mf) = st.family_members.get(&member_id) else {
         tracing::error!("ChangeTitle: unknown member {member_id}");
+        drop(st);
+        send_error(owner, error::FAMILY_NO_TARGET);
         return None;
     };
     if mf != family_id {
+        drop(st);
+        send_error(owner, error::FAMILY_OTHER_FAMILY);
+        return None;
+    }
+    if let Some(code) = validate_title(server, new_title) {
+        drop(st);
+        send_error(owner, code);
         return None;
     }
     if let Some(m) = st
@@ -793,31 +967,46 @@ pub async fn change_owner_and_save(server: &GameServer, previous: &PlayerRef, me
 }
 
 fn update_owner(server: &GameServer, previous: &PlayerRef, member_id: u32) -> Option<u32> {
-    if member_id == previous.character_id {
-        return None;
-    }
     let family_id = previous.data().family;
     if family_id == 0 {
+        send_error(previous, error::FAMILY_NOT_EXIST);
         return None;
     }
     let mut st = server.systems.social.families.lock();
     let Some(f) = st.families.get(&family_id) else {
         tracing::error!("ChangeOwner: no family {family_id}");
+        drop(st);
+        send_error(previous, error::FAMILY_NOT_EXIST);
         return None;
     };
     match f.member(previous.character_id) {
         Some(m) if m.role == 1 => {}
-        Some(_) => return None,
+        Some(_) => {
+            drop(st);
+            send_error(previous, error::FAMILY_NOT_OWNER);
+            return None;
+        }
         None => {
             tracing::error!("ChangeOwner: {} not in family", previous.character_id);
+            drop(st);
+            send_error(previous, error::FAMILY_NOT_EXIST);
             return None;
         }
     }
+    if member_id == previous.character_id {
+        drop(st);
+        send_error(previous, error::FAMILY_ALREADY_OWNER);
+        return None;
+    }
     let Some(&mf) = st.family_members.get(&member_id) else {
         tracing::error!("ChangeOwner: unknown member {member_id}");
+        drop(st);
+        send_error(previous, error::FAMILY_NO_TARGET);
         return None;
     };
     if mf != family_id {
+        drop(st);
+        send_error(previous, error::FAMILY_OTHER_FAMILY);
         return None;
     }
     if let Some(m) = st
