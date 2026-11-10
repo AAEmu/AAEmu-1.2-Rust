@@ -450,6 +450,10 @@ pub fn spawn_from_effect(
     g.entity_guid = 0;
     g.spawner_unit_id = caster.obj_id();
     g.grasper_unit_id = 0;
+    // `Gimmick : Unit` defaulted to a null faction, so every relation check treated the gimmick
+    // as hostile to everyone. A collision skill belongs to the side that spawned it: copy the
+    // caster's faction (the doodad spawn path overrides it with the authored `faction_id`).
+    g.unit.faction_id = caster.with_base_unit(|b| b.faction_id());
     match params.offset_coordinate_id {
         0 | 1 | 3 => {}
         2 => {
@@ -1117,6 +1121,7 @@ mod tests {
         let mut effect = skill_effect(900_001, EffectKind::DamageEffect, 1);
         effect.start_level = 1;
         effect.end_level = 99;
+        effect.non_friendly = true; // the shipped collision effects are hostile-only
         skill.effects = vec![effect];
         s.add_skill(skill);
         data.systems
@@ -1346,6 +1351,65 @@ mod tests {
             "grid region follows the gimmick"
         );
         assert_eq!(f.world.region_of(&me), Some((1, 1)));
+    }
+
+    #[tokio::test]
+    async fn effect_gimmick_faction_comes_from_the_caster() {
+        // A player-thrown bomb belongs to the player's side: the hostile-only collision effect
+        // hits the hostile NPC and leaves the friendly caster alone.
+        use crate::data::world_data::{FactionRelation, SystemFaction};
+        use crate::systems::skills::types::RelationState;
+        let faction = |id: u32, mother: u32| SystemFaction {
+            id,
+            mother_id: mother,
+            ..SystemFaction::default()
+        };
+        let mut data = contact_data(contact_template(false), 5);
+        for f in [faction(101, 148), faction(115, 0), faction(148, 0)] {
+            data.factions.add(f);
+        }
+        data.factions.relations.push(FactionRelation {
+            id: 148,
+            id2: 115,
+            state: RelationState::Hostile as u8,
+            exp_time: 0,
+        });
+        let server = crate::test_support::test_server_with(data);
+        while server.ids.object.get_next_id().expect("object id") < 0x400 {}
+        crate::systems::skills::bridges::install(&server);
+        let world = test_world(&server);
+        let caster_client = crate::test_support::TestClient::new(&server, 2, 2);
+        let mut c = crate::test_support::test_character(2, "Caster", 100.0, 100.0);
+        c.unit.hp = 500;
+        c.unit.max_hp = 1000;
+        let caster = crate::test_support::spawn_player(&server, &caster_client, c, 0x102);
+        let mut n = crate::models::npc::Npc::new(1);
+        n.unit.name = "Hostile".into();
+        n.unit.hp = 1000;
+        n.unit.max_hp = 1000;
+        n.unit.faction_id = 115;
+        n.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let npc = Entity::new(0x300, n);
+        world.spawn(&npc, &server.view_ctx());
+        let g = spawn_from_effect(
+            &server,
+            &world,
+            &SpawnGimmickParams {
+                gimmick_id: CONTACT_GIMMICK,
+                offset_coordinate_id: 2,
+                scale: 1.0,
+                velocity_coordinate_id: 2,
+                velocity_x: 5.0,
+                ..Default::default()
+            },
+            &WorldObject::from(&caster),
+        )
+        .expect("gimmick spawned");
+        assert_eq!(g.data().unit.faction_id, 101, "copied from the caster");
+        let active = server.systems.npcs.gimmicks.find(g.obj_id).unwrap();
+        gimmick_tick(&server, &world, &active, Duration::from_millis(50), 1_000);
+        assert_eq!(npc.data().unit.hp, 900, "the hostile NPC is hit");
+        assert_eq!(caster.data().unit.hp, 500, "the friendly caster is not");
     }
 
     #[tokio::test]
