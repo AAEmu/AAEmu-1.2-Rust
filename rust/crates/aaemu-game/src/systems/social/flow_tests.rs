@@ -2264,11 +2264,16 @@ async fn family_titles_are_validated_like_the_client() {
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);
     let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
     settle(&mut [&mut a, &mut b]);
+    // `XlIsValidName` (ko VNT_FAMILY_TITLE): 1-12 characters, no leading '.', no leading or
+    // trailing whitespace. The ui_texts "no special characters" text is not what the validator
+    // does, so punctuation and mixed scripts pass (tested below).
     for (title, code) in [
         ("", error::FAMILY_TITLE),
         (" ", error::FAMILY_TITLE),
+        (".Name", error::FAMILY_TITLE),
+        ("Name ", error::FAMILY_TITLE),
+        ("\tName", error::FAMILY_TITLE),
         ("AAAAAAAAAAAAA", error::FAMILY_TITLE),
-        ("!!!", error::FAMILY_TITLE),
         ("badword kid", error::FAMILY_TITLE_BAD),
     ] {
         a.send(
@@ -2280,18 +2285,18 @@ async fn family_titles_are_validated_like_the_client() {
         assert_eq!(a.frames(), vec![error_frame(code)], "title {title:?}");
         assert!(b.ops().is_empty(), "title {title:?} reached the client");
     }
-    // A title inside the rule still invites, and a bad title cannot replace it later.
+    // Punctuation, an interior doubled space and a 12-character title pass.
     a.send(
         &server,
         cs::CSFamilyInviteMemberPacket,
-        family_invite_body("Bob", "Eldest Son"),
+        family_invite_body("Bob", "A  B!"),
     )
     .await;
     assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
     b.send(
         &server,
         cs::CSFamilyReplyInvitationPacket,
-        family_reply_body(1, true, "Eldest Son"),
+        family_reply_body(1, true, "A  B!"),
     )
     .await;
     let fid = a.p.data().family;
@@ -2306,12 +2311,16 @@ async fn family_titles_are_validated_like_the_client() {
             .member(2)
             .unwrap()
             .title,
-        "Eldest Son"
+        "A  B!"
     );
     a.ops();
     b.ops();
     for (title, code) in [
         ("", error::FAMILY_TITLE),
+        (" Name", error::FAMILY_TITLE),
+        (".Name", error::FAMILY_TITLE),
+        ("Name ", error::FAMILY_TITLE),
+        ("\tName", error::FAMILY_TITLE),
         ("AAAAAAAAAAAAA", error::FAMILY_TITLE),
         ("badword", error::FAMILY_TITLE_BAD),
     ] {
@@ -2321,6 +2330,10 @@ async fn family_titles_are_validated_like_the_client() {
         assert_eq!(a.frames(), vec![error_frame(code)], "title {title:?}");
         assert!(b.ops().is_empty(), "title {title:?} reached the client");
     }
+    let mut body = PacketStream::new();
+    body.write_u32(2).write_str("Big  Bro!");
+    a.send(&server, cs::CSFamilyChangeTitlePacket, body).await;
+    assert_eq!(b.ops(), vec![sc::SCFamilyTitleChangedPacket]);
     assert_eq!(
         server
             .systems
@@ -2331,7 +2344,71 @@ async fn family_titles_are_validated_like_the_client() {
             .member(2)
             .unwrap()
             .title,
-        "Eldest Son"
+        "Big  Bro!"
+    );
+}
+
+#[tokio::test]
+async fn family_reply_uses_the_invitation_title() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    // The invitation was validated with "Kid"; the empty reply title is invalid on its own but
+    // must not consume or kill the invitation.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Bob", "Kid"),
+    )
+    .await;
+    b.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, ""),
+    )
+    .await;
+    let fid = a.p.data().family;
+    assert_ne!(fid, 0);
+    assert_eq!(b.p.data().family, fid);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .families
+            .family(fid)
+            .unwrap()
+            .member(2)
+            .unwrap()
+            .title,
+        "Kid"
+    );
+    // The same for a different (valid) reply title on the existing-family path.
+    a.send(
+        &server,
+        cs::CSFamilyInviteMemberPacket,
+        family_invite_body("Cy", "Son"),
+    )
+    .await;
+    c.send(
+        &server,
+        cs::CSFamilyReplyInvitationPacket,
+        family_reply_body(1, true, "Wrong"),
+    )
+    .await;
+    assert_eq!(c.p.data().family, fid);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .families
+            .family(fid)
+            .unwrap()
+            .member(3)
+            .unwrap()
+            .title,
+        "Son"
     );
 }
 

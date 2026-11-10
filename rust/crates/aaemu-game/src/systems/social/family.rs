@@ -129,9 +129,13 @@ struct State {
 /// How long a family invitation can be answered (same as the guild / party invitations).
 pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
 
-/// The 1.2 client's family-title rule (`ui_texts` 2324): 1 to 12 characters, no special
-/// characters. The client applies it with `XlIsValidName(.., VNT_FAMILY_TITLE)`; the server
-/// applies it to `CSFamilyInviteMember` / `CSFamilyReplyInvitation` / `CSFamilyChangeTitle`.
+/// `VNT_FAMILY_TITLE` (type 5) in the 1.2 `xlcommon.dll` `NamePolicyInfo` table for the Korean
+/// locale (0): local / English minimum 1, maximum 12, `is_allow_space`, `is_allow_mix_case` and
+/// `is_allow_special_letter`, `limit_space_cnt` 0. `XlIsValidName` -> `FUN_33008f80` rejects a
+/// leading `.`, a leading or trailing whitespace (`XlIsSpace`: space, tab, CR, LF, VT, FF) and
+/// the length bounds; every other character and script passes (punctuation included, because
+/// `is_allow_special_letter` is set), and interior or doubled spaces pass (`limit_space_cnt` 0).
+/// The `ui_texts` 2324 text says "no special characters", which the validator does not enforce.
 pub(crate) const TITLE_MAX_CHARS: usize = 12;
 
 /// The family member cap. The 1.2 compact has no family tables or `content_configs` keys for
@@ -144,15 +148,23 @@ pub fn max_members(server: &GameServer) -> usize {
     server.config.social.family_max_members.max(2)
 }
 
+/// The client's `XlIsSpace` set (space, tab, CR, LF, VT, FF).
+fn title_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n' | '\u{0b}' | '\u{0c}')
+}
+
 /// The client's title refusal (`FAMILY_TITLE` / `FAMILY_TITLE_BAD`), or `None` when `title` is
 /// acceptable. `FAMILY_TITLE_BAD` reuses the `blocked_texts.check_name` list of the lobby,
-/// character names and guild names.
+/// character names and guild names; that list is a server rule, not part of `XlIsValidName`.
 fn validate_title(server: &GameServer, title: &str) -> Option<i16> {
     let count = title.chars().count();
+    let first = title.chars().next();
+    let last = title.chars().last();
     if count == 0
         || count > TITLE_MAX_CHARS
-        || title.chars().all(|c| c == ' ')
-        || title.chars().any(|c| !(c.is_alphanumeric() || c == ' '))
+        || first == Some('.')
+        || first.is_some_and(title_space)
+        || last.is_some_and(title_space)
     {
         return Some(error::FAMILY_TITLE);
     }
@@ -173,14 +185,24 @@ fn validate_title(server: &GameServer, title: &str) -> Option<i16> {
     blocked.then_some(error::FAMILY_TITLE_BAD)
 }
 
+/// One pending family invitation: the inviter, the title it was sent with (validated at invite
+/// time) and when it expires.
+#[derive(Debug, Clone)]
+struct FamilyInvitation {
+    inviter: u32,
+    title: String,
+    sent_at: i64,
+}
+
 /// `FamilyManager`.
 #[derive(Debug, Default)]
 pub struct FamilyManager {
     state: Mutex<State>,
-    /// Pending family invitations by invited character id: (inviter id, sent at ms). Deviation
-    /// from the C# manager, which kept none and let any client join the family of any online
-    /// character by naming it as the inviter (see PORTING.md).
-    invitations: Mutex<HashMap<u32, (u32, i64)>>,
+    /// Pending family invitations by invited character id. Deviation from the C# manager, which
+    /// kept none and let any client join the family of any online character by naming it as the
+    /// inviter (see PORTING.md). The title is stored with the invitation so a reply cannot
+    /// change it or invalidate an invitation that was valid when it was sent.
+    invitations: Mutex<HashMap<u32, FamilyInvitation>>,
 }
 
 /// The `family_members` rows of one family (`Family.Load`).
@@ -209,31 +231,38 @@ impl FamilyManager {
         self.state.lock().expect("families poisoned")
     }
 
-    /// Records that `inviter` invited `invited` (replacing an older invitation of that
-    /// character) and drops the expired ones, so the map stays bounded by the online players.
-    fn record_invitation(&self, invited: u32, inviter: u32, now_ms: i64) {
+    /// Records that `inviter` invited `invited` with `title` (replacing an older invitation of
+    /// that character) and drops the expired ones, so the map stays bounded by the online
+    /// players.
+    fn record_invitation(&self, invited: u32, inviter: u32, title: &str, now_ms: i64) {
         let mut inv = self
             .invitations
             .lock()
             .expect("family invitations poisoned");
-        inv.retain(|_, (_, at)| *at + INVITATION_TIMEOUT_MS >= now_ms);
-        inv.insert(invited, (inviter, now_ms));
+        inv.retain(|_, i| i.sent_at + INVITATION_TIMEOUT_MS >= now_ms);
+        inv.insert(
+            invited,
+            FamilyInvitation {
+                inviter,
+                title: title.to_string(),
+                sent_at: now_ms,
+            },
+        );
     }
 
     /// Consumes the pending invitation of `invited` when it names `inviter` and has not
-    /// expired. Any reply (accept or decline) ends the invitation.
-    fn take_invitation(&self, invited: u32, inviter: u32, now_ms: i64) -> bool {
+    /// expired, returning the title stored when the invitation was sent. Any reply (accept or
+    /// decline) ends the invitation; the reply packet's own title is not used.
+    fn take_invitation(&self, invited: u32, inviter: u32, now_ms: i64) -> Option<String> {
         let mut inv = self
             .invitations
             .lock()
             .expect("family invitations poisoned");
-        match inv.get(&invited) {
-            Some(&(from, at)) if from == inviter => {
-                inv.remove(&invited);
-                at + INVITATION_TIMEOUT_MS >= now_ms
-            }
-            _ => false,
+        if inv.get(&invited)?.inviter != inviter {
+            return None;
         }
+        let stored = inv.remove(&invited)?;
+        (stored.sent_at + INVITATION_TIMEOUT_MS >= now_ms).then_some(stored.title)
     }
 
     /// Whether `inviter` may invite `invited`, under one lock: the target must not be in a
@@ -487,6 +516,7 @@ pub fn invite_to_family(server: &GameServer, inviter: &PlayerRef, invited_name: 
     fm.record_invitation(
         invited.character_id,
         inviter.character_id,
+        title,
         crate::world::now_ms(),
     );
     let inviter_name = inviter.data().unit.name.clone();
@@ -504,12 +534,15 @@ pub async fn reply_to_invite(
     invitor_id: u32,
     invited: &PlayerRef,
     join: bool,
-    title: &str,
+    reply_title: &str,
 ) {
     // The reply must answer an invitation that `invitor_id` sent this character; the id in the
-    // packet alone proves nothing.
+    // packet alone proves nothing. The title stored with the invitation is the one validated at
+    // invite time, so the reply cannot change it or invalidate an accepted invitation.
     let fm = &server.systems.social.families;
-    if !fm.take_invitation(invited.character_id, invitor_id, crate::world::now_ms()) {
+    let Some(invite_title) =
+        fm.take_invitation(invited.character_id, invitor_id, crate::world::now_ms())
+    else {
         tracing::warn!(
             character = %invited.data().unit.name,
             invitor_id,
@@ -517,7 +550,7 @@ pub async fn reply_to_invite(
         );
         send_error(invited, error::FAMILY_NO_INVITOR);
         return;
-    }
+    };
     if !join {
         // The invited character declined: the inviter sees why the invitation ended.
         if let Some(invitor) = server.world.character_by_id(invitor_id) {
@@ -533,9 +566,14 @@ pub async fn reply_to_invite(
         send_error(invited, error::FAMILY_NO_INVITOR);
         return;
     };
-    if let Some(code) = validate_title(server, title) {
-        send_error(invited, code);
-        return;
+    if reply_title != invite_title {
+        tracing::debug!(
+            character = %invited.data().unit.name,
+            invitor_id,
+            reply_title = %reply_title,
+            invite_title = %invite_title,
+            "FamilyReplyInvitation title differs from the invitation; using the invitation title"
+        );
     }
     let cap = max_members(server);
     let saved = {
@@ -568,7 +606,7 @@ pub async fn reply_to_invite(
                 },
             );
             if !add_family_member(server, &mut st, id, &invitor, None)
-                || !add_family_member(server, &mut st, id, invited, Some(title))
+                || !add_family_member(server, &mut st, id, invited, Some(&invite_title))
             {
                 tracing::error!("ReplyToInvite: creating family {id} failed");
                 drop(st);
@@ -605,7 +643,13 @@ pub async fn reply_to_invite(
                 send_error(&invitor, error::FAMILY_MAXIMUM);
                 return;
             }
-            if !add_family_member(server, &mut st, invitor_family, invited, Some(title)) {
+            if !add_family_member(
+                server,
+                &mut st,
+                invitor_family,
+                invited,
+                Some(&invite_title),
+            ) {
                 drop(st);
                 send_error(invited, error::FAMILY_ALREADY);
                 return;

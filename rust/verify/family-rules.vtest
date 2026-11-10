@@ -26,8 +26,9 @@ expectseen 367 5
 # Yourself.
 rawcs 01a STR(${leader})STR(Kid)
 expectseen 364 5
-# Titles: special characters and a blocked word are refused before any invitation is sent.
-rawcs 01a STR(${member})STR(!!!)
+# Titles: a leading '.' and a blocked word are refused before any invitation is sent.
+# (`XlIsValidName` allows punctuation, so `!!!` is not an error.)
+rawcs 01a STR(${member})STR(.Name)
 expectseen 365 5
 rawcs 01a STR(${member})STR(Admin)
 expectseen 366 5
