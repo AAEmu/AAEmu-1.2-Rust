@@ -124,10 +124,17 @@ struct State {
     family_members: HashMap<u32, u32>,
 }
 
+/// How long a family invitation can be answered (same as the guild / party invitations).
+pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
+
 /// `FamilyManager`.
 #[derive(Debug, Default)]
 pub struct FamilyManager {
     state: Mutex<State>,
+    /// Pending family invitations by invited character id: (inviter id, sent at ms). Deviation
+    /// from the C# manager, which kept none and let any client join the family of any online
+    /// character by naming it as the inviter (see PORTING.md).
+    invitations: Mutex<HashMap<u32, (u32, i64)>>,
 }
 
 /// The `family_members` rows of one family (`Family.Load`).
@@ -154,6 +161,47 @@ async fn load_members(pool: &MySqlPool, family_id: u32) -> Result<Vec<FamilyMemb
 impl FamilyManager {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("families poisoned")
+    }
+
+    /// Records that `inviter` invited `invited` (replacing an older invitation of that
+    /// character) and drops the expired ones, so the map stays bounded by the online players.
+    fn record_invitation(&self, invited: u32, inviter: u32, now_ms: i64) {
+        let mut inv = self
+            .invitations
+            .lock()
+            .expect("family invitations poisoned");
+        inv.retain(|_, (_, at)| *at + INVITATION_TIMEOUT_MS >= now_ms);
+        inv.insert(invited, (inviter, now_ms));
+    }
+
+    /// Consumes the pending invitation of `invited` when it names `inviter` and has not
+    /// expired. Any reply (accept or decline) ends the invitation.
+    fn take_invitation(&self, invited: u32, inviter: u32, now_ms: i64) -> bool {
+        let mut inv = self
+            .invitations
+            .lock()
+            .expect("family invitations poisoned");
+        match inv.get(&invited) {
+            Some(&(from, at)) if from == inviter => {
+                inv.remove(&invited);
+                at + INVITATION_TIMEOUT_MS >= now_ms
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `character_id` may invite: not in a family, or the steward (role 1) of its own,
+    /// the same rule as kicking and titling.
+    fn may_invite(&self, character_id: u32) -> bool {
+        let st = self.lock();
+        match st.family_members.get(&character_id) {
+            None => true,
+            Some(fid) => st
+                .families
+                .get(fid)
+                .and_then(|f| f.member(character_id))
+                .is_some_and(|m| m.role == 1),
+        }
     }
 
     /// `Load()`: one family per distinct non-zero `characters.family`. Note (C#): a character
@@ -252,7 +300,8 @@ fn family_chat(server: &GameServer, id: u32) -> crate::managers::chat::ChannelRe
 
 /// `AddFamilyMember(family, character, title)`: the first member is the steward (role 1, empty
 /// title). Returns `false` when the character is already registered in a family (C#:
-/// `_familyMembers.Add` throws after the member was appended to the family list).
+/// `_familyMembers.Add` throws after the member was appended to the family list; here the check
+/// comes first, so a refused member never lingers in the list).
 fn add_family_member(
     server: &GameServer,
     st: &mut State,
@@ -260,6 +309,14 @@ fn add_family_member(
     p: &PlayerRef,
     title: Option<&str>,
 ) -> bool {
+    if st.family_members.contains_key(&p.character_id) {
+        tracing::error!(
+            "AddFamilyMember: {} is already a member of family {}",
+            p.character_id,
+            st.family_members[&p.character_id]
+        );
+        return false;
+    }
     let name = p.data().unit.name.clone();
     let family = st.families.get_mut(&family_id).expect("family");
     let is_owner = family.members.is_empty();
@@ -271,14 +328,6 @@ fn add_family_member(
         role: u8::from(is_owner),
         title: title.to_string(),
     });
-    if st.family_members.contains_key(&p.character_id) {
-        tracing::error!(
-            "AddFamilyMember: {} is already a member of family {}",
-            p.character_id,
-            st.family_members[&p.character_id]
-        );
-        return false;
-    }
     st.family_members.insert(p.character_id, family_id);
     p.data().family = family_id;
     family_chat(server, family_id).join(p);
@@ -346,6 +395,23 @@ pub fn invite_to_family(server: &GameServer, inviter: &PlayerRef, invited_name: 
     if invited.data().family != 0 {
         return;
     }
+    if !server
+        .systems
+        .social
+        .families
+        .may_invite(inviter.character_id)
+    {
+        tracing::debug!(
+            "InviteToFamily: {} is not the steward of its family",
+            inviter.character_id
+        );
+        return;
+    }
+    server.systems.social.families.record_invitation(
+        invited.character_id,
+        inviter.character_id,
+        crate::world::now_ms(),
+    );
     let inviter_name = inviter.data().unit.name.clone();
     invited.send(SCFamilyInvitationPacket {
         invitor_id: inviter.character_id,
@@ -363,14 +429,27 @@ pub async fn reply_to_invite(
     join: bool,
     title: &str,
 ) {
-    if !join {
+    // The reply must answer an invitation that `invitor_id` sent this character; the id in the
+    // packet alone proves nothing.
+    let fm = &server.systems.social.families;
+    if !fm.take_invitation(invited.character_id, invitor_id, crate::world::now_ms()) {
+        tracing::warn!(
+            character = %invited.data().unit.name,
+            invitor_id,
+            "FamilyReplyInvitation without a pending invitation ignored"
+        );
+        return;
+    }
+    if !join || invited.data().family != 0 {
         return;
     }
     let Some(invitor) = server.world.character_by_id(invitor_id) else {
         return;
     };
+    if !fm.may_invite(invitor_id) {
+        return; // the inviter lost the stewardship since it invited
+    }
     let invitor_family = invitor.data().family;
-    let fm = &server.systems.social.families;
     let saved = if invitor_family == 0 {
         // CreateFamily(invitor, invitedChar, title)
         let id = match server.ids.family.get_next_id() {

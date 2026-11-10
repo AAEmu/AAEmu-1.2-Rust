@@ -549,3 +549,21 @@ fn real_data_skill_sources_do_not_smuggle_class_tree_skills() {
     );
     assert!(class_tree > 0, "no class-tree source was checked");
 }
+
+#[tokio::test]
+async fn repeated_force_attack_request_does_not_broadcast_again() {
+    use crate::systems::skills::handlers::CSSetForceAttackPacket;
+    let (server, mut client, _p) = fixture(true, true, false);
+    for (on, expected) in [(true, 1), (true, 0), (false, 1), (false, 0)] {
+        CSSetForceAttackPacket { on }
+            .handle(&server, &mut client.conn)
+            .await
+            .unwrap();
+        let sent = client
+            .drain_ops()
+            .into_iter()
+            .filter(|op| *op == sc::SCForceAttackSetPacket)
+            .count();
+        assert_eq!(sent, expected, "on={on}");
+    }
+}
