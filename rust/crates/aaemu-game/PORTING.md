@@ -1991,22 +1991,32 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   on the other members' tables (`npc group: member joined the fight`).
 
 * systems::ai (2026-11-10, NPC group formations and shared aggro; capture-pending NPCGROUP-1):
-  the spawner attaches a batch id (the move leader's object id, else the first spawned member),
-  `is_move_leader`, the member's `formation_offset_*` / `formation_tension` (0 -> 1.0) and the
-  group's `aggro_rule_id` to every NPC it spawns (`npc/group.rs`). **Formation follow:** a
+  the spawner attaches a monotonic batch id (a process counter, never an object id: ids are
+  reused after despawns), `is_move_leader`, the member's `formation_offset_*` /
+  `formation_tension` (0 -> 1.0) and the group's `aggro_rule_id` to every NPC it spawns
+  (`npc/group.rs`). A leader farther than 60 m ends the follow (the follower uses its own idle
+  behaviour); a leader id reused by a new NPC cannot match the old batch. **Formation follow:** a
   follower in `Idle` / `Roaming` / `HoldPosition` runs the 1.2 `formation_GoToOnPoint` rule
   (`D:/aa-re/zone/ai/lua12/.../behaviors/x2/common/{idle,roaming,hold_position}.lua`,
   `goalpipes/pipe_manager_x2.lua:52-64`): while the group's move leader moves (`AI.IsMoving`) it
   walks to the leader position plus its `formation_offset_*` and stops within
-  `formation_tension`; while the leader stands still it waits, and it never runs its own
-  roaming / out-of-idle-area logic. The 10.x spawn function (`x2game-dev_dedicate` Z:855660-855780)
+  `formation_tension`; while the leader stands still it waits, unless it was left farther than
+  the tension plus 0.5 m (then it walks back), and it never runs its own roaming /
+  out-of-idle-area logic. The formation walk is a ground walk even for a HoldPosition / Idle
+  NPC (the height comes from the collision / heightmap ground, not the spawner Z), and a
+  formation point whose straight walk is blocked by a wall is replaced by the leader's position
+  (or the follower stays when that is blocked too). The 10.x spawn function
+  (`x2game-dev_dedicate` Z:855660-855780)
   takes `formationTension` from the member index and registers the first member whose flag byte
   has `is_move_leader`'s bit 2 as the leader (`vtable +816`), so the flag, not `is_leader`, is
   the movement leader (5 shipped members differ; group 187 has no move-leader member and adds
-  no leader). After combat (`ReturnState`) a follower returns to its formation point when the
-  leader is alive; a dead / despawned leader (or a reused object id) drops the follow and the
-  NPC uses its own idle behaviour. The follower keeps its real `HoldPosition` / `Roaming`
-  behavior (only combat transitions live there; the shared settled `Idle` behavior has none).
+  no leader). After combat (`ReturnState`) a follower returns to its formation point recomputed
+  from the leader's current position every tick (not the spot it had when the fight ended); a
+  dead / despawned leader (or a reused object id) drops the follow and the NPC uses its own idle
+  behaviour. The follower keeps its real `HoldPosition` / `Roaming` behavior (only combat
+  transitions live there; the shared settled `Idle` behavior has none) and its idle activity
+  (InIdle self-skills, follow-default, `check_for_talk`) while it waits: the formation code only
+  takes over movement. Ordinary NPCs keep the unchanged control flow.
   Leader movement is read from a `last_move_ms` stamp set by `MoveTowards` and cleared by
   `StopMovement` / an arrival (1 s freshness), so followers check it at the AI tick rate without
   a second movement state. **Shared aggro:** `npc_groups.aggro_rule_id != 0` makes
@@ -2017,11 +2027,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   is unscaled (200 m, the authored offsets are at most 15 / 20 m) because the existing
   aggro-link radius is scaled per template (some member templates scale it to 2 m) and would
   miss members; the 1.2/10.x `CollectSharedAggroMembers` has no distance or sight gate either.
-  The offsets are used on the world axes; rotating them by the leader's yaw is capture-pending
-  (same reason as the spawn placement above). Tests: `ai::group_tests` (movement + tension, no
-  own roaming, combat return, leader death, rule 1 shares / rule 0 does not; each fails with
-  the rule disabled) and the runtime-membership assertions in
-  `npcs::npc::spawner_group_tests`.
+  The share latch is cleared whenever the fight ends (the abuser died / vanished and the table
+  became empty, or `ReturnState` was entered), so a later fight against the same object id
+  shares again. The offsets are used on the world axes; rotating them by the leader's yaw is
+  capture-pending (same reason as the spawn placement above). Tests: `ai::group_tests` (movement
+  + tension, ground height, no own roaming, off-formation walk-back, combat return and a moving
+  leader, leader death, reused leader id, blocked formation point, idle activity, and rule 1
+  shares / rule 0 does not plus the second-fight share; each fails with its rule disabled) and
+  the runtime-membership assertions in `npcs::npc::spawner_group_tests`.
 
 * systems::ai (2026-11-02, aggro link groups; capture-pending AGGROLINK-1): the 1.2
   `aggro_links` (130 groups, Korean comments "they help each other") / `npc_aggro_links`

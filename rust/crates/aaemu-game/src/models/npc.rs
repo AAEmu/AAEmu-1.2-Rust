@@ -73,9 +73,8 @@ pub struct Npc {
     pub interactable: bool,
     // ---- phase 6 / npc groups ----
     /// Runtime identity of the spawner `NpcGroup` batch this NPC was spawned in
-    /// (`0` = not a `npcs/npc/group.rs` member). It is the obj id of the batch's
-    /// `is_move_leader` member (or of its first spawned member when the one shipped group
-    /// without a move-leader flag is spawned), so the members of one spawn match.
+    /// (`0` = not a `npcs/npc/group.rs` member): a monotonic batch id, so object-id reuse can
+    /// never relink a follower to an unrelated NPC.
     pub npc_group_instance: u32,
     /// `npc_groups.id` (`0` = no group).
     pub npc_group_id: u32,

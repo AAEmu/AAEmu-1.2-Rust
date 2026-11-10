@@ -13,11 +13,11 @@
 //! The membership itself is attached at spawn by `npcs::npc::group::attach_spawned_group`.
 
 use crate::systems::npcs::npc::group;
-use crate::systems::skills::controllers::calculate_distance;
+use crate::systems::skills::controllers::{calculate_distance, Vec3};
 use crate::systems::skills::state::AggroKind;
 use crate::world::{NpcRef, WorldObject};
 
-use super::behaviors;
+use super::collision::walk;
 use super::combat::add_unit_aggro;
 use super::framework::{AiCtx, BehaviorKind};
 use super::npc;
@@ -26,6 +26,14 @@ use super::npc;
 /// 15 / 20 m; the aggro-link search radius is scaled by the member template and some group
 /// templates scale the 200 m help radius down to 2 m, so it cannot find the group.
 const GROUP_SHARE_RADIUS: f32 = 200.0;
+
+/// A formation follower farther than this from its leader (m) is out of its encounter: it stops
+/// following and uses its own idle behaviour (e.g. an old batch whose leader id was reused).
+pub const MAX_FOLLOW_DISTANCE: f32 = 60.0;
+
+/// Slack (m) over `formation_tension` within which a follower waiting for a standing leader does
+/// not walk (it only re-forms when it was actually left behind).
+const FORMATION_SETTLE_MARGIN: f32 = 0.5;
 
 fn delta_seconds(delta_ms: i64) -> f64 {
     (delta_ms.rem_euclid(1000)) as f64 / 1000.0
@@ -37,6 +45,56 @@ fn stop_formation_move(c: &mut AiCtx<'_>) {
     if c.npc.data().npc_group_formation_moving {
         npc::stop_movement(c.server, &c.npc);
         c.npc.data().npc_group_formation_moving = false;
+    }
+}
+
+/// The live move leader and its world position, when `c`'s follower may still follow it (same
+/// batch, alive, within [`MAX_FOLLOW_DISTANCE`]).
+fn follow_target(c: &AiCtx<'_>) -> Option<(NpcRef, Vec3)> {
+    let leader = group::move_leader(c.server, &c.npc)?;
+    let leader_pos = npc::world_pos(c.server, &WorldObject::from(&leader));
+    let my_pos = npc::world_pos(c.server, &c.obj);
+    if calculate_distance(my_pos, leader_pos, false) > MAX_FOLLOW_DISTANCE {
+        return None;
+    }
+    Some((leader, leader_pos))
+}
+
+/// Whether the NPC ignores static walls when it moves (flyers and underwater creatures).
+fn moves_freely(c: &AiCtx<'_>) -> bool {
+    let n = c.npc.data();
+    n.can_fly
+        || c.server
+            .game_data
+            .systems
+            .ai
+            .ai
+            .actor_model(n.unit.model_id)
+            .is_some_and(|m| m.underwater_creature)
+}
+
+/// The formation point, unless the straight walk to it is blocked by a wall: then the leader's
+/// own position (the formation is built around it), or stay when even that is blocked.
+fn walkable_formation_target(c: &AiCtx<'_>, leader_pos: Vec3, point: Vec3) -> Vec3 {
+    if moves_freely(c) {
+        return point;
+    }
+    let from = npc::world_pos(c.server, &c.obj);
+    let instance = c.obj.transform().instance_id;
+    let blocked = |to: Vec3| {
+        walk::walk_blocked(
+            c.server,
+            instance,
+            [from.x, from.y, from.z],
+            [to.x, to.y, to.z],
+        )
+    };
+    if blocked(point) == Some(true) && blocked(leader_pos) != Some(true) {
+        leader_pos
+    } else if blocked(point) == Some(true) {
+        from
+    } else {
+        point
     }
 }
 
@@ -58,19 +116,21 @@ pub fn follower_tick(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
         c.go_to_default_behavior();
         return true;
     }
-    let Some(leader) = group::move_leader(c.server, &c.npc) else {
+    let Some((leader, leader_pos)) = follow_target(c) else {
         stop_formation_move(c);
         return false;
     };
-    // While the leader stands still the follower waits (1.2 `AI.IsMoving(leader.id, 0)`).
-    if !group::leader_is_moving(&leader) {
-        stop_formation_move(c);
-        return true;
-    }
-    let target = group::formation_point(c.server, &c.npc, &leader);
+    let point = group::formation_point(c.server, &c.npc, &leader);
+    let target = walkable_formation_target(c, leader_pos, point);
     let pos = npc::world_pos(c.server, &c.obj);
     let tension = c.npc.data().npc_group_formation_tension;
-    if calculate_distance(pos, target, false) <= tension {
+    // A standing leader is waited for, unless the follower was left behind (then it re-forms).
+    let tolerance = if group::leader_is_moving(&leader) {
+        tension
+    } else {
+        tension + FORMATION_SETTLE_MARGIN
+    };
+    if calculate_distance(pos, target, false) <= tolerance {
         stop_formation_move(c);
         return true;
     }
@@ -80,7 +140,19 @@ pub fn follower_tick(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
     );
     let flags = npc::real_movement_flags(speed);
     speed *= delta_seconds(delta_ms);
-    behaviors::npc_move_towards(c, target, speed as f32, flags, tension);
+    // A formation walk is a ground walk even for a HoldPosition / Idle NPC: the spawner Z is
+    // not the floor under the formation point.
+    npc::move_towards(
+        c.server,
+        &c.npc,
+        Some(npc::MoveAi {
+            hold_or_idle: false,
+        }),
+        target,
+        speed as f32,
+        flags,
+        tolerance,
+    );
     c.npc.data().npc_group_formation_moving = true;
     true
 }
@@ -89,10 +161,11 @@ pub fn follower_tick(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
 /// behaviors re-anchor a group member's idle position on the leader). Called from
 /// `ReturnState.Enter`; a dead / missing leader leaves the normal idle position in place.
 pub fn sync_return_to_formation(c: &mut AiCtx<'_>) {
-    let Some(leader) = group::move_leader(c.server, &c.npc) else {
+    let Some((leader, leader_pos)) = follow_target(c) else {
         return;
     };
-    c.ai.idle_position = group::formation_point(c.server, &c.npc, &leader);
+    let point = group::formation_point(c.server, &c.npc, &leader);
+    c.ai.idle_position = walkable_formation_target(c, leader_pos, point);
 }
 
 /// `NpcAggroTable::CollectSharedAggroMembers`: with a non-zero `aggro_rule_id`, every living
