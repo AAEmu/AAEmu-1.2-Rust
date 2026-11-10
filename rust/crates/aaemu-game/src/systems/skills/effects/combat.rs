@@ -176,18 +176,19 @@ fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &Worl
 ///
 /// Only the archery skills whose 1.2 tooltip names the penalty are scaled
 /// (`Data::range_penalty_skills`, built from the skill descriptions at load; the 1.2
-/// `damage_effects` table has no flag that scopes the row). `range` is the same measure the
-/// server's skill-range check uses (`validation.rs` -> [`geometry::distance_to`]): 3D,
-/// edge to edge, with both actors' model radii subtracted. A buff tick carries the id of the
-/// skill that applied the buff in `EffectSource::source_skill_id`, so a DoT of one of these
-/// skills is scaled per tick like its direct hit. A missing or broken row leaves the hit
-/// unchanged (a failed evaluation returns 0).
+/// `damage_effects` table has no flag that scopes the row). A direct hit evaluates the row at
+/// the hit's distance; a buff tick uses the value its buff captured when it was applied
+/// (`EffectSource::range_multiplier`) because the tooltip describes the shot, not the tick.
+/// A missing or broken row leaves the hit unchanged (a failed evaluation returns 0).
 fn range_damage_multiplier(
     server: &GameServer,
     caster: &WorldObject,
     trg: &WorldObject,
     source: &EffectSource,
 ) -> f32 {
+    if let Some(stored) = source.range_multiplier {
+        return stored;
+    }
     let Some(skill_id) = source
         .skill()
         .map(|s| s.template.id)
@@ -195,6 +196,17 @@ fn range_damage_multiplier(
     else {
         return 1.0;
     };
+    range_multiplier_for_skill(server, caster, trg, skill_id)
+}
+
+/// The row-12 factor of `skill_id` at the caster-target distance. Also used when a buff is
+/// applied, to store the factor its damage ticks will use.
+pub(crate) fn range_multiplier_for_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    skill_id: u32,
+) -> f32 {
     if !server
         .game_data
         .systems
@@ -211,6 +223,8 @@ fn range_damage_multiplier(
     else {
         return 1.0;
     };
+    // The same measure the server's skill-range check uses (`validation.rs`): 3D, edge to edge,
+    // with both actors' model radii subtracted.
     let distance = geometry::distance_to(
         server,
         &Target::Obj(caster.clone()),
@@ -1154,6 +1168,12 @@ pub fn buff_effect(server: &GameServer, e: &BuffEffect, args: &EffectArgs<'_>) {
         now_ms(),
     );
     b.ab_level = ab_level;
+    // A DoT belongs to the shot that applied it: capture the close-range factor now, so its
+    // ticks do not depend on where the target stands when they land.
+    if let (Some(caster), Some(skill)) = (args.caster.as_ref(), args.source.skill()) {
+        b.range_damage_multiplier =
+            range_multiplier_for_skill(server, caster, &target, skill.template.id);
+    }
     buffs::add_buff(server, &target, b, 0, 0);
     let relation = args.caster.as_ref().map_or(RelationState::Neutral, |c| {
         relation_to(server, &Target::Obj(c.clone()), &args.target)

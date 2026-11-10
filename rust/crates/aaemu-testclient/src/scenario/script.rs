@@ -1120,21 +1120,25 @@ async fn run_lines(
                 clock += 1500;
                 // Optional 3rd argument: cast from that many metres away (on the side the bot
                 // came from) instead of 1 m next to the NPC, like `icast`'s distance argument.
-                let at = match parts.get(2).and_then(|d| d.parse::<f32>().ok()) {
+                match parts.get(2).and_then(|d| d.parse::<f32>().ok()) {
                     Some(d) => {
                         let me = game.state.self_pos;
                         let (dx, dy) = (me.0 - npc.pos.0, me.1 - npc.pos.1);
                         let len = dx.hypot(dy).max(0.001);
-                        (
+                        let at = (
                             npc.pos.0 + dx / len * d,
                             npc.pos.1 + dy / len * d,
                             npc.pos.2,
-                        )
+                        );
+                        // Face the NPC: a skill's damage effects can require the target in
+                        // front (unchanged for the default 1 m form).
+                        game.move_to_facing(at, npc.pos, clock).await?;
                     }
-                    None => (npc.pos.0 + 1.0, npc.pos.1, npc.pos.2),
-                };
-                // Face the NPC: a skill's damage effects can require the target in front.
-                game.move_to_facing(at, npc.pos, clock).await?;
+                    None => {
+                        game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                            .await?
+                    }
+                }
                 game.change_target(npc.obj_id).await?;
                 game.start_skill(skill, npc.obj_id).await?;
                 last_npc = npc.obj_id;

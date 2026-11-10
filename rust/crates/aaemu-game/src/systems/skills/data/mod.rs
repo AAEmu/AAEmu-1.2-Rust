@@ -859,11 +859,17 @@ pub(super) fn load_range_penalty_skills(conn: &Connection) -> HashSet<u32> {
     }
     let mut ids: Vec<u32> = skills.iter().copied().collect();
     ids.sort_unstable();
-    tracing::info!(
-        count = ids.len(),
-        skills = ?ids,
-        "skills with the close-range (-20% within 8 m) damage penalty"
-    );
+    if ids.is_empty() {
+        tracing::warn!(
+            "no skill description matches the close-range (-20% within 8 m) damage penalty; the formulas row 12 multiplier is inert"
+        );
+    } else {
+        tracing::info!(
+            count = ids.len(),
+            skills = ?ids,
+            "skills with the close-range (-20% within 8 m) damage penalty"
+        );
+    }
     skills
 }
 

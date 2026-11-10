@@ -1581,13 +1581,14 @@ async fn damage_pipeline_range_penalty_uses_the_3d_distance() {
     }
 }
 
-/// Only the tooltip set is scaled: a spell at 5 m and a skill outside the set keep their
-/// damage even with row 12 present.
+/// The penalty is a property of the skill, not of its damage type: a listed skill is scaled
+/// even when its damage is magic, while an unlisted skill keeps its damage at any type.
 #[tokio::test]
-async fn damage_pipeline_range_penalty_skips_spells_and_unlisted_skills() {
-    for (label, skill_id, damage_type) in [
-        ("spell", UNLISTED_SKILL, 2),
-        ("unlisted skill", UNLISTED_SKILL, 1),
+async fn damage_pipeline_range_penalty_is_per_skill_not_damage_type() {
+    for (label, skill_id, damage_type, expected) in [
+        ("listed skill with magic damage", ENDLESS_ARROWS, 2, 80),
+        ("unlisted skill with melee damage", UNLISTED_SKILL, 1, 100),
+        ("unlisted skill with magic damage", UNLISTED_SKILL, 2, 100),
     ] {
         let (server, mut client, player, npc) =
             skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
@@ -1602,8 +1603,8 @@ async fn damage_pipeline_range_penalty_skips_spells_and_unlisted_skills() {
         );
         assert_eq!(
             packet_with_skill(&mut client, player.obj_id, npc.obj_id, skill_id).0,
-            100,
-            "{label} at 5 m must be unchanged"
+            expected,
+            "{label} at 5 m"
         );
     }
 }
@@ -1712,5 +1713,42 @@ async fn damage_pipeline_range_penalty_applies_to_listed_skill_dot_ticks() {
         let index = apply_tick_buff_from_skill(&server, &caster, &target, DOT_BUFF, skill_id);
         client.drain();
         assert_eq!(tick_damage(&server, &target, index), expected, "{label}");
+    }
+}
+
+/// The multiplier is captured when the DoT buff is applied (the tooltip describes the shot):
+/// applying at 20 m and moving into melee leaves the ticks at x1, while applying at 5 m and
+/// moving away keeps them at x0.8.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_dot_uses_the_application_distance() {
+    for (apply_distance, tick_distance, expected) in [(20.0, 2.0, 100), (5.0, 20.0, 80)] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+            let mut data = dot_data(level_damage_effect(DOT_EFFECT), 1_000, 1_000.0);
+            data.formulas
+                .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+            data.systems
+                .skills
+                .range_penalty_skills
+                .insert(ENDLESS_ARROWS);
+            data
+        });
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + apply_distance, 100.0);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index =
+            apply_tick_buff_from_skill(&server, &caster, &target, DOT_BUFF, Some(ENDLESS_ARROWS));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + tick_distance, 100.0);
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied at {apply_distance} m, ticked at {tick_distance} m"
+        );
     }
 }
