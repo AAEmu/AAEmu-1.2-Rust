@@ -17,10 +17,11 @@ STATUS (live producers)
            (zone-conflict honor only), k20, k21 (via level-up refresh), k22, k23, k25, k27, k28,
            k29 (genuine acquisitions only), k30, k32, k33, k34, k35, k36, k37, k38, k39, k40,
            k41, k43, k44, k45, k46, k47, k48, k50, k51 (plain FAIL only), k42, k52-k55 (join
-           events + entry), k9 (runtime), k14 (money change facade).
+           events + entry), k9 (runtime), k14 (money change facade), k26 KILL_SLAVE (siege
+           catapult, Q5), k49 MY_DISHONORABLE_POINT (pardon exit, Q2), k57-60 siege results
+           (outcome rosters, Q1).
   PARTIAL: k18 (quest/other point sources only at entry/level-up refresh).
-  REMAINING (not wired, deliberately): k26 KILL_SLAVE (Q5), k49 MY_DISHONORABLE_POINT (Q2),
-           k57-60 siege results (Q1), siege honor of k19.
+  REMAINING (not wired, deliberately): siege honor of k19.
 
 Scope: the 55 char_records kinds referenced by achievement_objectives in
 rust/crates/aaemu-game/app/Data/compact.sqlite3 (kinds 1-8, 13, 15, 24, 31, 56 exist in the
@@ -106,9 +107,11 @@ k25 KILL_NPC        v1=npc template id, v2=party-member level cap
                     npcs/npc/death.rs::before_death (L101) which calls the
                     NpcHooks::on_npc_killed hook per eligible player (L144/170/190); implement in
                     quests/bridges.rs::on_npc_killed (L253) or a new hook. No object lock.
-k26 KILL_SLAVE      v1=slaves.id (2 = siege catapult), v2=1 (single authored row, meaning
-                    unresolved), count; +1 when a player destroys that slave
-                    vehicles/mod.rs::on_do_die (L348) -> vehicles/slaves.rs::do_die.
+k26 KILL_SLAVE      v1=slaves.id (2 = siege catapult), v2=1 (single authored row; read as
+                    the opposing side, INFERRED, Q5), count; +1 when a player destroys that
+                    slave during an active siege while on the other roster side
+                    vehicles/mod.rs::on_do_die -> vehicles/slaves.rs::do_die ->
+                    credit_siege_catapult_kill.
 k29 GET_ITEM_TYPE   v1=items.id, v2=grade id or -1 (ANY). All 216 rows are -1 in 1.2.
                     count; +count of acquired items matching template (+grade if v2>=0)
                     economy/fx.rs::flush ItemFx::Acquired -> report_achievement
@@ -209,11 +212,11 @@ k48 GET_FACTION     v1=system_factions.id (161 해적/pirate), v2=0; flag (repor
                     faction_id = FACTION_PIRATE at infamy >= 3000. Takes &mut Character under the
                     character lock -> return a bounded `became_pirate` bool and report after the
                     caller drops the lock (callers: crime.rs::set_infamy_point L223, load path).
-k49 MY_DISHONORABLE_POINT v1/v2=0; flag (report 1 on LEAVING the outlaw faction) - inferred
-                    trial.rs::result_is_not_guilty (L988, infamy<=0 && faction==PIRATE ->
-                    restore original faction via Effect::SetFaction; also the dishonor-quest
-                    path). See Q2: the literal "current infamy" reading conflicts with the only
-                    authored objective (참회자 = leave the outlaw faction).
+k49 MY_DISHONORABLE_POINT v1/v2=0; flag; report an absolute 1 on LEAVING the outlaw faction
+                    (INFERRED; see Q2) social/faction.rs::apply_crime_faction_change (pardon
+                    path: infamy <= 0 && faction == PIRATE -> restore the template faction,
+                    set_faction_persistent). The literal "current infamy" reading conflicts
+                    with the only authored objective (참회자 = leave the outlaw faction).
 k50 ENCHANT_ITEM    v1=resulting item_grades.id (5 영웅 .. 11 신화), v2=0, count
                     +1 per successful enchant producing grade v1
                     economy/item_effects.rs::grade_enchant (L335); result from roll_regrade
@@ -224,14 +227,16 @@ k51 ENCHANT_FAILURE v1/v2=0, count; +1 per failed enchant
 k57-60 SIEGE win-attack / win-defence / lose-attack / lose-defence
                     v1=siege_zones.zone_group_id (33/34/43/44 = the four castles), v2=0, count
                     +1 per siege outcome to the participants of the winning/losing side.
-                    UNIMPLEMENTED producer; the state does exist:
+                    Implemented in housing/dominion/credit.rs::credit_siege_outcome: one
+                    credit pass per finished siege, guarded by mark_outcome_credited; the
+                    roster at outcome time is credited per side, online through the facade and
+                    offline through its character_records row (read by the entry snapshot).
+                    Cancelled credits nobody. The state comes from
                     housing/dominion/state.rs::complete_engraving (L966) -> AttackerCaptured,
                     tick (L1026) -> DefenderHeld on period end, cancel_siege -> Cancelled.
                     Consumers are dominion/runtime.rs::complete_effect (L385) and start_tick
-                    (L701); neither credits characters. Participants are tracked per character
-                    (dominion/participants.rs, SiegeSide Attacker/Defender) so a producer can
-                    enumerate the roster at outcome time; offline participants are an open
-                    question. Do NOT fabricate a win/lose credit before this is decided.
+                    (L701). Participants are tracked per character (dominion/participants.rs,
+                    SiegeSide Attacker/Defender).
 
 === LOCK / INTEGRATION RULES ===
 * achievement_manager.rs::report_values (L102), increment_matching (L144), initial_snapshot
@@ -286,24 +291,25 @@ W5 (progression/housing/siege): systems/skills/progress.rs + skills/skill.rs +
 W6 (entry path): world/session.rs + db_character load/save touchpoints (initial_snapshot +
    list push). No producer files.
 Overlaps: every worker only edits its own files above; the W0 facade is the single integration
-point and must be frozen before W1-W6 start. W7 (not listed) would be the siege producer
-(dominion files) once Q1 is decided - keep it out until then.
+point and must be frozen before W1-W6 start. W7 (siege producer, dominion files) is
+housing/dominion/credit.rs (Q1).
+
+=== RESOLVED (implemented) ===
+Q1 siege k57-60: housing/dominion/credit.rs::credit_siege_outcome credits the roster at
+   outcome time, once per siege id; online players go through the facade, offline ones through
+   their character_records row.
+Q2 k49 MY_DISHONORABLE_POINT: implemented as recommended - the pardon path reports an absolute
+   1 at the faction exit (social/faction.rs::apply_crime_faction_change), not "current infamy".
+Q5 k26 KILL_SLAVE v2=1: implemented as the opposing side (INFERRED: the killer and the catapult
+   owner must both be on the siege roster, on different sides).
 
 === UNRESOLVED / UNPROVEN (do not fabricate) ===
-Q1 siege k57-60: no per-character credit consumer exists; outcome state + participant roster do.
-Q2 k49 MY_DISHONORABLE_POINT: kind name says "current dishonor/infamy", the only achievement
-   (참회자, complete_num 0, 1 objective) says "leave the outlaw faction via dishonor-reduction
-   quests". Under the high-water store a "current infamy" report completes the achievement on
-   the first infamy point, contradicting the text. Recommended: report a success flag at the
-   faction exit; needs a product decision (and the dishonor-quest path, quest_act_supply_crime_
-   points, appears to have no act handler yet).
 Q3 k28 quest repeats: the entry back-credit can only prove UNIQUE completions (completed
    bitset, no per-run count), while achievements like 831-833 ask for 100 repeats of quests
    2941-2943. Live quest completion should +1 per run; initial back-credit stays 1. Same
    asymmetry applies to k27 category counts.
 Q4 k51 ENCHANT_FAILURE membership: FAIL is certain; DOWNGRADE and BREAK are not proven to be
    "failure" for the record; k50 credits only SUCCESS/GREAT_SUCCESS (resulting grade) by text.
-Q5 k26 KILL_SLAVE v2=1 has a single authored row; no evidence what 1 means (side? count?).
 Q6 k33 GET_LOOTPACK for NPC loot packs: the authored record is a doodad loot pack (6217 is in
    doodad_func_loot_packs and loots); decide whether NPC loot packs also credit.
 Q7 k29/k34 double credit: an item looted is both Acquired (k29) and a loot roll (k34). The

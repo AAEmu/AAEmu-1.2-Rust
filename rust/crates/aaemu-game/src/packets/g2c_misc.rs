@@ -392,7 +392,7 @@ impl SCCharDetailPacket {
         s.write_u32(character.id)
             .write_str(&character.unit.name)
             .write_u8(character.race)
-            .write_i32(character.unit.hp.wrapping_mul(100)) // TODO: precise health ?
+            .write_i32(character.unit.hp.wrapping_mul(100)) // Hp x100, as the C# writes it (display only)
             .write_u8(character.unit.level)
             .write_u8(character.ability1)
             .write_u8(character.ability2)
@@ -401,7 +401,7 @@ impl SCCharDetailPacket {
             .write_i64(convert_long(character.unit.transform.y))
             .write_f32(character.unit.transform.z)
             .write_u32(character.unit.transform.zone_id)
-            .write_i64(character.leave_time); // TODO: lastWorldLeaveTime
+            .write_i64(character.leave_time); // last world leave (Unix seconds, like Write(DateTime))
         for item in character.inventory.equipment_slots() {
             match item {
                 None => {

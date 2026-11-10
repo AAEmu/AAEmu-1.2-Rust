@@ -258,6 +258,10 @@ impl FamilyManager {
     }
 
     /// Updates a member's cached name (character rename); returns the family id (0 = none).
+    ///
+    /// The other rename path, the pre-select lobby edit (`managers::character::edit`), only
+    /// reaches a character that never entered the world (its row has no play/leave time), so
+    /// it cannot be a family member; the GM `/rename` path calls this.
     pub fn rename_member(&self, character_id: u32, new_name: &str) -> u32 {
         let mut st = self.lock();
         let Some(family_id) = st.family_members.get(&character_id).copied() else {
