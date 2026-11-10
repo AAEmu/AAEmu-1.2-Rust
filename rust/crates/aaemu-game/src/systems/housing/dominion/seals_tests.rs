@@ -29,6 +29,10 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_at(true)
+}
+
+fn fixture_at(active: bool) -> Fixture {
     let mut data = GameData::empty();
     data.zones.zones.insert(
         TEST_ZONE,
@@ -89,11 +93,16 @@ fn fixture() -> Fixture {
         .dominions
         .declare_unowned_with(GROUP, identity, DEFENDER_EXPEDITION, now - 1000, || true)
         .unwrap();
+    let (starts_at, ends_at) = if active {
+        (now - 10, now + 3600)
+    } else {
+        (now + 600, now + 3600)
+    };
     server
         .systems
         .housing
         .dominions
-        .schedule_siege(GROUP, ATTACKER_EXPEDITION, now - 10, now + 3600, now - 20)
+        .schedule_siege(GROUP, ATTACKER_EXPEDITION, starts_at, ends_at, now - 20)
         .unwrap();
     attacker_client.drain();
     defender_client.drain();
@@ -191,6 +200,26 @@ async fn the_seal_is_taken_back_after_the_siege_ends_or_the_member_leaves() {
         .housing
         .dominions
         .unregister_participant(GROUP, 1)
+        .unwrap();
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0);
+}
+
+#[tokio::test]
+async fn a_scheduled_roster_keeps_the_seal_until_the_siege_ends() {
+    let f = fixture_at(false);
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    grant_for_participant(&f.server, &state(&f), 1, SiegeSide::Attacker);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+    // The record exists (scheduled; the calendar warmup has the same shape) but the siege
+    // has not ended: the seal must not be taken back.
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+    f.server
+        .systems
+        .housing
+        .dominions
+        .cancel_siege(GROUP, chrono::Utc::now().timestamp())
         .unwrap();
     reconcile(&f.server);
     assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0);

@@ -154,12 +154,14 @@ fn take_one(server: &GameServer, player: &PlayerRef, template_id: u32) {
 /// the participant tick; the item's own 240-minute lifetime covers offline characters and
 /// restarts. A tracked character that is offline while the siege still runs keeps the record.
 pub fn reconcile(server: &GameServer) {
-    let now = chrono::Utc::now().timestamp();
     for ((zone_group_id, character_id), side) in server.systems.housing.siege_seals.tracked() {
         let state = server.systems.housing.dominions.get(zone_group_id);
+        // A roster entry keeps its seal through the whole record, including the warmup (and a
+        // GM-scheduled start still in the future); only the end of the siege (or leaving the
+        // roster / a side change) ends the entitlement.
         let still_participating = state.as_ref().is_some_and(|state| {
             state.siege.as_ref().is_some_and(|siege| {
-                siege.active_at(now)
+                siege.status != SiegeStatus::Finished
                     && siege
                         .participants
                         .get(&character_id)
