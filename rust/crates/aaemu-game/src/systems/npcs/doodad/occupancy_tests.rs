@@ -26,9 +26,7 @@ use crate::systems::skills::data::effects::EffectTemplate;
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
 use crate::systems::skills::state::{SkillRef, SkillRun};
-use crate::systems::skills::types::{
-    skill_result, SkillCastTarget, SkillCaster, SkillObject, SkillTargetType,
-};
+use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillTargetType};
 use crate::test_support::*;
 use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
@@ -410,26 +408,16 @@ fn body(p: &dyn Marshal) -> Vec<u8> {
     s.into_bytes()
 }
 
-/// The refusal sends the in-use `SCErrorMsg` and the `SCSkillStarted` failure the client needs
-/// to stop a pending cast (the item gate's `NEED_REAGENT`, so only one text is shown).
-fn assert_refused(player_obj: u32, skill: u32, doodad_obj: u32, frames: &[(u16, Vec<u8>)]) {
+/// The refusal sends the in-use `SCErrorMsg` and nothing else. In particular no `SCSkillStarted`
+/// failure follows: its NEED_REAGENT result would show a second, nonsensical "Not enough ."
+/// next to "Target in-use by someone else.".
+fn assert_refused(frames: &[(u16, Vec<u8>)]) {
     let expected =
         crate::packets::world::SCErrorMsgPacket::new(ALREADY_INTERACTING_SOMEONE_ELSE, 0, true);
-    assert!(
-        frames.contains(&(sc::SCErrorMsgPacket, body(&expected))),
-        "no ALREADY_INTERACTING_SOMEONE_ELSE in {frames:?}"
-    );
-    let mut started = crate::systems::skills::packets::SCSkillStartedPacket::new(
-        skill,
-        0,
-        SkillCaster::Unit(player_obj),
-        SkillCastTarget::Doodad(doodad_obj),
-        SkillObject::None,
-    );
-    started.set_skill_result(skill_result::NEED_REAGENT);
-    assert!(
-        frames.contains(&(sc::SCSkillStartedPacket, body(&started))),
-        "no NEED_REAGENT SCSkillStarted in {frames:?}"
+    assert_eq!(
+        frames,
+        [(sc::SCErrorMsgPacket, body(&expected))],
+        "expected only ALREADY_INTERACTING_SOMEONE_ELSE"
     );
 }
 
@@ -456,7 +444,7 @@ async fn second_unit_gather_is_refused_while_the_first_is_casting() {
     );
 
     let frames = fx.cast(false, TREE_SKILL, &d);
-    assert_refused(fx.p2.obj_id, TREE_SKILL, d.obj_id, &frames);
+    assert_refused(&frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
     assert_eq!(fx.p2.data().labor_power, LABOR_BASE as i16);
     assert_eq!(fx.count(&fx.p2, ORE), 0);
@@ -607,7 +595,7 @@ async fn chair_is_refused_while_occupied_and_free_after_unbond() {
     );
 
     let frames = fx.cast(false, CHAIR_SKILL, &d);
-    assert_refused(fx.p2.obj_id, CHAIR_SKILL, d.obj_id, &frames);
+    assert_refused(&frames);
     assert!(fx.p2.data().bonding.is_none());
     assert_eq!(d.data().seat.seats.get(&d.obj_id), Some(&vec![1]));
 
@@ -692,7 +680,7 @@ async fn delayed_effect_keeps_the_hold_and_the_occupant_effect_runs() {
     // Past the 2 s accept grace, but the effect is still pending: the tree is not free.
     tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
     let frames = fx.cast(false, TREE_SKILL, &d);
-    assert_refused(fx.p2.obj_id, TREE_SKILL, d.obj_id, &frames);
+    assert_refused(&frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
