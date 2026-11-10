@@ -191,6 +191,17 @@ impl NationRelation {
             exp_time: self.expire_at,
         }
     }
+
+    /// A hostile row that a king declared (`CSFactionDeclareHostile`, [`declare_hostile`]), as
+    /// opposed to one a new nation merely inherited. A declaration sets the hostile `next_state`
+    /// marker, and it survives the end of the declaration window (`expire_relations`, NATION-17:
+    /// `expire_at` is reset to 0, so the window itself is not the test). The faction-166 template
+    /// rows every new nation copies (`template_relations`) are hostile too but keep
+    /// `next_state` 0 (the same marker `send_due_treaty_mails` relies on).
+    pub fn is_declared_hostile(&self) -> bool {
+        self.state == faction::relation_state::HOSTILE
+            && self.next_state == faction::relation_state::HOSTILE
+    }
 }
 
 /// A player nation (`nations` row plus its relation overlay).
@@ -631,6 +642,11 @@ impl NationManager {
     /// The stored relation between `a` and `b` when either side is a nation (the rows are
     /// mirrored for lookups, the client list stays directional).
     pub fn relation(&self, a: u32, b: u32) -> Option<u8> {
+        self.row_between(a, b).map(|r| r.state)
+    }
+
+    /// The stored row behind [`Self::relation`].
+    pub fn row_between(&self, a: u32, b: u32) -> Option<NationRelation> {
         let nations = self.read();
         if nations.is_empty() {
             return None;
@@ -641,14 +657,14 @@ impl NationManager {
                     .relations
                     .iter()
                     .find(|r| r.other_faction_id == b)
-                    .map(|r| r.state);
+                    .copied();
             }
             if nation.id == b {
                 return nation
                     .relations
                     .iter()
                     .find(|r| r.other_faction_id == a)
-                    .map(|r| r.state);
+                    .copied();
             }
         }
         None
@@ -1046,10 +1062,9 @@ pub fn faction_exists(server: &GameServer, id: u32) -> bool {
     server.game_data.factions.get(id).is_some() || server.systems.social.nations.is_nation(id)
 }
 
-/// The relation between `a` and `b`, preferring a nation's runtime rows over the static table.
-/// Both loaded forms of the static table are consulted (the social manager's map and the raw
-/// `FactionData` rows), because fixtures and loaders fill one or the other.
-pub fn relation_between(server: &GameServer, a: u32, b: u32) -> Option<u8> {
+/// The nation row that decides the relation between `a` and `b`, when a nation's runtime row
+/// does (the first part of [`relation_between`], which returns this row's state).
+fn nation_row_between(server: &GameServer, a: u32, b: u32) -> Option<NationRelation> {
     let nations = &server.systems.social.nations;
     // `diplomacy_link_id` mirroring comes first, before the nation's stored row: the
     // faction-166 template stores explicit HOSTILE rows for the guard / front factions
@@ -1058,20 +1073,43 @@ pub fn relation_between(server: &GameServer, a: u32, b: u32) -> Option<u8> {
     // (INFERRED; NATION-16).
     if let Some(other) = server.game_data.factions.get(b) {
         if nations.is_nation(a) && other.diplomacy_link_id != 0 {
-            if let Some(state) = nations.relation(a, other.diplomacy_link_id) {
-                return Some(state);
+            if let Some(row) = nations.row_between(a, other.diplomacy_link_id) {
+                return Some(row);
             }
         }
     }
     if let Some(other) = server.game_data.factions.get(a) {
         if nations.is_nation(b) && other.diplomacy_link_id != 0 {
-            if let Some(state) = nations.relation(b, other.diplomacy_link_id) {
-                return Some(state);
+            if let Some(row) = nations.row_between(b, other.diplomacy_link_id) {
+                return Some(row);
             }
         }
     }
-    if let Some(state) = nations.relation(a, b) {
-        return Some(state);
+    nations.row_between(a, b)
+}
+
+/// Whether two characters' faction ids (`a`, `b`) are in a hostile relation that a nation
+/// **declared**: the nation row that decides it (`nation_row_between`, the one
+/// [`relation_between`] uses) is hostile and carries the declared marker
+/// ([`NationRelation::is_declared_hostile`]). Hostility that only comes from
+/// the static `system_faction_relations` or from the faction-166 template rows a new nation
+/// copies does not count. A faction with a mother (an alliance member, a guild) stands for its
+/// mother, exactly as in the relation lookup (`faction::relation_state_live`), so Nuia's member
+/// faction 101 is matched through the Nuia Alliance 148 the rows are keyed by.
+pub fn declared_hostile(server: &GameServer, a: u32, b: u32) -> bool {
+    let side = |id: u32| match faction_of_id(server, id) {
+        Some((_, mother)) if mother != 0 => mother,
+        _ => id,
+    };
+    nation_row_between(server, side(a), side(b)).is_some_and(|row| row.is_declared_hostile())
+}
+
+/// The relation between `a` and `b`, preferring a nation's runtime rows over the static table.
+/// Both loaded forms of the static table are consulted (the social manager's map and the raw
+/// `FactionData` rows), because fixtures and loaders fill one or the other.
+pub fn relation_between(server: &GameServer, a: u32, b: u32) -> Option<u8> {
+    if let Some(row) = nation_row_between(server, a, b) {
+        return Some(row.state);
     }
     if let Some(state) = server.game_data.systems.social.relations.get(a, b) {
         return Some(state);
