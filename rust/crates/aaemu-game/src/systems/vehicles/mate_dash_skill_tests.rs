@@ -231,6 +231,11 @@ async fn a_mate_bar_skill_with_a_walk_flagged_rider_skill_fires_after_the_rider_
 
 /// The real skill, vehicle, npc, item and formula rows a Stormdarter mate cast needs.
 fn dash_server(db: &str) -> Arc<GameServer> {
+    real_pet_server(db, STORMDARTER)
+}
+
+/// [`dash_server`] with the summon item spawning `npc_id`.
+pub(super) fn real_pet_server(db: &str, npc_id: u32) -> Arc<GameServer> {
     let conn =
         rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("compact db");
@@ -277,9 +282,7 @@ fn dash_server(db: &str) -> Arc<GameServer> {
     data.items.templates.insert(
         MATE_ITEM,
         ItemTemplate {
-            kind: TemplateKind::SummonMate {
-                npc_id: STORMDARTER,
-            },
+            kind: TemplateKind::SummonMate { npc_id },
             ..ItemTemplate::plain(MATE_ITEM, 1)
         },
     );

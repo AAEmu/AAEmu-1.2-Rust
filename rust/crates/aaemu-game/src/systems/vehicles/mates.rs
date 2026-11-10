@@ -240,6 +240,11 @@ pub fn is_max_level(server: &GameServer, mate: &Mate) -> bool {
 
 /// `ChangeStateMate(connection, tlId, newState)` (no packet in 1.2).
 pub fn change_state_mate(server: &GameServer, owner: &PlayerRef, tl_id: u32, new_state: u8) {
+    // The 1.2 client sends 0 idle / 1 passive / 2 protective / 3 aggressive and caps below 4.
+    if new_state >= 4 {
+        tracing::debug!(tl_id, new_state, "ChangeStateMate: unknown state ignored");
+        return;
+    }
     let owner_id = owner.data().id;
     for m in manager_of(server, owner).get_active_mates(owner_id) {
         let mut d = m.data();
