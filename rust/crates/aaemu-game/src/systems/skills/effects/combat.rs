@@ -111,6 +111,15 @@ fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f3
     )
 }
 
+/// `NpcKindType.SiegeWeapon` (9): battlefield turrets / cannons and their practice copies.
+/// The 22 compact templates (kind 9) sit at levels 20-50; they are destructible structures, not
+/// PvE mobs, so a high-level player must not get the PvE level bonus on them.
+const SIEGE_WEAPON_NPC_KIND: u8 = 9;
+
+/// Compact `system_factions` 170 "허수아비" (scarecrow): the training dummies and their test
+/// variants (8 templates at levels 1-50). Practice targets are structures too.
+const TRAINING_DUMMY_FACTION: u32 = 170;
+
 /// `formulas` row 20 `damage_bonus_multiplier_by_level`:
 /// `if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.04)`.
 ///
@@ -120,7 +129,27 @@ fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f3
 /// so damage is never lowered. The rate comes from the data row; a missing or broken row keeps
 /// the hit unchanged (evaluate returns 0 on errors). Research: `research-data-rules.md` §1.
 fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &WorldObject) -> f32 {
-    if caster.as_player().is_none() || trg.as_npc().is_none() {
+    if caster.as_player().is_none() {
+        return 1.0;
+    }
+    let Some(npc) = trg.as_npc() else {
+        return 1.0;
+    };
+    let (npc_level, npc_faction, template_id) = {
+        let n = npc.data();
+        (n.unit.level, n.unit.faction_id, n.unit.template_id)
+    };
+    if npc_faction == TRAINING_DUMMY_FACTION {
+        return 1.0;
+    }
+    if server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(template_id)
+        .is_some_and(|t| t.npc_kind_id == SIEGE_WEAPON_NPC_KIND)
+    {
         return 1.0;
     }
     let Some(formula) = server
@@ -130,10 +159,7 @@ fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &Worl
     else {
         return 1.0;
     };
-    let (Some(pc_level), Some(npc_level)) = (
-        caster.with_unit(|u| u.unit().level),
-        trg.with_unit(|u| u.unit().level),
-    ) else {
+    let Some(pc_level) = caster.with_unit(|u| u.unit().level) else {
         return 1.0;
     };
     let params: HashMap<&str, f64> = [
@@ -570,9 +596,11 @@ pub(super) fn damage_with_aoe(
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
     }
     // Player -> NPC level bonus (formulas row 20), next to the other flat damage multipliers.
-    // It is a damage multiplier, so DoT ticks / buff-sourced damage get it too; a `Heal` damage
-    // type is not damage and is skipped (heals use `heal()` and never reach this function).
-    if damage_type != Some(DamageType::Heal) {
+    // Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
+    // the weapon / level damage base. A non-fixed DoT row gets it like a direct hit; heals use
+    // `heal()` and never reach this function (compact `damage_effects` has no `Heal` type, so no
+    // damage-type guard is needed).
+    if !e.use_fixed_damage && !e.use_percent_damage {
         final_damage *= level_damage_multiplier(server, &caster, &trg);
     }
     let flex_bonus = (flexibility / 100) as f32;
