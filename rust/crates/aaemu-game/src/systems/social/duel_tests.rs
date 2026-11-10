@@ -1125,17 +1125,46 @@ async fn accept_rechecks_the_range_and_releases_the_challenge() {
     f.pb.data().unit.transform.x = 1000.0 + DUEL_REQUEST_RANGE + 1.0;
     f.answer(0).await;
     assert_eq!(err_ids(&f.b.drain()), vec![util::error::TARGET_TOO_FAR]);
-    assert!(f.a.drain().is_empty(), "no countdown / duel start");
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::TARGET_REJECTED_DUEL],
+        "the challenger is told the challenge did not start"
+    );
     assert!(f.duels().is_empty());
     assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
 }
 
-/// Neither side may challenge from an instant game (the 1.2 client hides the popup entry there
-/// too); the same check refuses the acceptance when the challenged enters one meanwhile.
+/// `InstantGameManager.current` is set on the invite, but only a player **inside** the game's
+/// world is in a no-duel location; an invited player still in the open world may duel.
+#[tokio::test]
+async fn invited_but_outside_an_instant_game_can_duel() {
+    let mut f = Fixture::new(true);
+    let game = instant_game(&f.server);
+    let outside = game.world_id + 1;
+    for p in [&f.pa, &f.pb] {
+        p.data().unit.transform.instance_id = outside;
+    }
+    f.server
+        .systems
+        .instances
+        .instant_games
+        .set_current(&f.pb, Some(game));
+    f.challenge().await;
+    assert!(f.a.drain().is_empty());
+    assert!(f.duels().is_in_duel_with(1, 2));
+}
+
+/// Neither side may challenge from inside an instant game's world (the 1.2 client hides the
+/// popup entry there too); the same check refuses the acceptance when the challenged enters one
+/// meanwhile.
 #[tokio::test]
 async fn challenge_and_accept_refused_in_an_instant_game() {
     let mut f = Fixture::new(true);
     let game = instant_game(&f.server);
+    let inside = game.world_id;
+    for p in [&f.pa, &f.pb] {
+        p.data().unit.transform.instance_id = inside;
+    }
     f.server
         .systems
         .instances
@@ -1144,16 +1173,23 @@ async fn challenge_and_accept_refused_in_an_instant_game() {
     f.challenge().await;
     assert_eq!(err_ids(&f.a.drain()), vec![util::error::DUEL_BAD_LOCATION]);
     assert!(f.b.drain().is_empty() && f.duels().is_empty());
+
+    // Back outside: the request is accepted, then the challenged enters the game world before
+    // answering.
+    for p in [&f.pa, &f.pb] {
+        p.data().unit.transform.instance_id = 0;
+    }
     f.server
         .systems
         .instances
         .instant_games
         .set_current(&f.pb, None);
-
-    // Accepted while still outside: the challenged joins an instant game before answering.
     f.challenge().await;
     f.b.drain();
     let game = instant_game(&f.server);
+    for p in [&f.pa, &f.pb] {
+        p.data().unit.transform.instance_id = game.world_id;
+    }
     f.server
         .systems
         .instances
@@ -1161,6 +1197,10 @@ async fn challenge_and_accept_refused_in_an_instant_game() {
         .set_current(&f.pb, Some(game));
     f.answer(0).await;
     assert_eq!(err_ids(&f.b.drain()), vec![util::error::DUEL_BAD_LOCATION]);
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::TARGET_REJECTED_DUEL]
+    );
     assert!(f.duels().is_empty());
     assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
 }
@@ -1185,6 +1225,43 @@ async fn challenge_refused_during_force_attack() {
         vec![util::error::CANNOT_DUEL_DURING_FORCE_ATTACK_OTHER]
     );
     assert!(f.b.drain().is_empty() && f.duels().is_empty());
+}
+
+/// The acceptance answers the challenged player, so the side-specific force-attack errors are
+/// mirrored (558 = the accepting player is on force attack, 559 = the challenger is).
+#[tokio::test]
+async fn accept_refusal_mirrors_the_force_attack_errors() {
+    // The challenger turns force attack on after the request: the challenged is told "other".
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.pa.data().unit.force_attack = true;
+    f.answer(0).await;
+    assert_eq!(
+        err_ids(&f.b.drain()),
+        vec![util::error::CANNOT_DUEL_DURING_FORCE_ATTACK_OTHER]
+    );
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::TARGET_REJECTED_DUEL]
+    );
+    assert!(f.duels().is_empty());
+
+    // The challenged turns it on and still accepts: they get the "you" error.
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.pb.data().unit.force_attack = true;
+    f.answer(0).await;
+    assert_eq!(
+        err_ids(&f.b.drain()),
+        vec![util::error::CANNOT_DUEL_DURING_FORCE_ATTACK]
+    );
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::TARGET_REJECTED_DUEL]
+    );
+    assert!(f.duels().is_empty());
 }
 
 /// A target in a started duel is `other_already_in_duel` (the pending-challenge case is
@@ -1326,8 +1403,30 @@ async fn accept_with_a_dead_challenger_is_refused() {
     f.pa.data().unit.hp = 0;
     f.answer(0).await;
     assert_eq!(err_ids(&f.b.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::TARGET_REJECTED_DUEL]
+    );
     assert!(f.duels().is_empty());
     assert_eq!(f.pa.data().unit.faction_id, 101);
     assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
+}
+
+/// A challenged player who died between the request and the answer cannot duel either; the
+/// challenge is released and the challenger is told.
+#[tokio::test]
+async fn accept_with_a_dead_challenged_is_refused() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.pb.data().unit.hp = 0;
+    f.answer(0).await;
+    assert_eq!(err_ids(&f.b.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert_eq!(
+        err_ids(&f.a.drain()),
+        vec![util::error::TARGET_REJECTED_DUEL]
+    );
+    assert!(f.duels().is_empty());
     assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
 }

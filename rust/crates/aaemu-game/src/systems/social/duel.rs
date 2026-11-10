@@ -379,10 +379,19 @@ impl DuelManager {
     /// `popup_menu_proc.alb`'s "challenge to duel" entry outside an instant game
     /// (`X2BattleField:IsInInstantGame()`), and the 10.x `DuelRequest` returns
     /// `duel_bad_location` there as well (`x2game-dev_dedicate.dll.c` `sub_39104BF0` ->
-    /// `sub_397731F0`). The 1.2 `indun_zones` table has no `duel` column (the 10.x content adds
-    /// one), so dungeons are not separately refused here.
+    /// `sub_397731F0`). `InstantGameManager.current` is set on the **invite**
+    /// (`instant_game.rs` `add_player` -> `set_current`), so it alone would refuse a player who
+    /// is only invited and still in the open world; require the player to be inside the game's
+    /// own world instance. The 1.2 `indun_zones` table has no `duel` column (the 10.x content
+    /// adds one), so dungeons are not separately refused here.
     fn no_duel_location(server: &GameServer, p: &PlayerRef) -> bool {
-        server.systems.instances.instant_games.current(p).is_some()
+        let instance_id = p.data().unit.transform.instance_id;
+        server
+            .systems
+            .instances
+            .instant_games
+            .current(p)
+            .is_some_and(|game| game.world_id == instance_id)
     }
 
     /// The environment checks shared by `DuelRequest` and `DuelAccepted` (the challenged may
@@ -421,6 +430,33 @@ impl DuelManager {
             return Some(util::error::TARGET_TOO_FAR);
         }
         None
+    }
+
+    /// [`Self::duel_environment_error`] is written from the challenger's point of view (the
+    /// recipient of the request error). The acceptance answers the challenged player instead,
+    /// so the side-specific force-attack pair swaps: the accepting player's own state is the
+    /// "you" error (558) and the challenger's is the "other" one (559).
+    fn environment_error_for_challenged(error: i16) -> i16 {
+        match error {
+            util::error::CANNOT_DUEL_DURING_FORCE_ATTACK => {
+                util::error::CANNOT_DUEL_DURING_FORCE_ATTACK_OTHER
+            }
+            util::error::CANNOT_DUEL_DURING_FORCE_ATTACK_OTHER => {
+                util::error::CANNOT_DUEL_DURING_FORCE_ATTACK
+            }
+            other => other,
+        }
+    }
+
+    /// Tells both clients that a pending challenge will not start, like
+    /// `DuelRequestExpired`: the challenger gets `target_rejected_duel` and the challenged
+    /// player's popup closes (`SCInvitationCanceled`, kind 5 = `SCDuelRequested`, popup type
+    /// 9).
+    fn reject_pending_challenge(&self, duel: &DuelRef) {
+        send_error(&duel.challenger, util::error::TARGET_REJECTED_DUEL);
+        duel.challenged.send(SCInvitationCanceledPacket {
+            kind: invitation_canceled_kind::DUEL,
+        });
     }
 
     /// `DuelRequest(challenger, challengedId)` with the validation of the 10.x `DuelManager`
@@ -519,13 +555,7 @@ impl DuelManager {
             return;
         }
         tracing::info!("DuelRequestExpired: challenger={challenger_id} went unanswered");
-        send_error(&duel.challenger, util::error::TARGET_REJECTED_DUEL);
-        // The challenged player's popup closes (kind 5 = `SCDuelRequested`, popup type 9).
-        // `duel_request` refuses a second challenge while this one is registered, so no other
-        // duel invitation of the same popup type can be pending for the challenged player.
-        duel.challenged.send(SCInvitationCanceledPacket {
-            kind: invitation_canceled_kind::DUEL,
-        });
+        self.reject_pending_challenge(duel);
         self.duel_clean_up(challenger_id);
     }
 
@@ -558,22 +588,39 @@ impl DuelManager {
             if duel.claim_release() {
                 tracing::warn!("DuelAccepted: challenger {challenger_id} is dead");
                 send_error(challenged, util::error::BAD_DUEL_TARGET);
+                self.reject_pending_challenge(&duel);
+                self.duel_clean_up(challenger_id);
+            }
+            return;
+        }
+        // The accepting player may have died between the request and the answer.
+        if duel.challenged.data().unit.is_dead() {
+            if duel.claim_release() {
+                tracing::warn!(
+                    "DuelAccepted: challenged {} is dead",
+                    duel.challenged.character_id
+                );
+                send_error(challenged, util::error::BAD_DUEL_TARGET);
+                self.reject_pending_challenge(&duel);
                 self.duel_clean_up(challenger_id);
             }
             return;
         }
         // The challenged may have moved, entered an instant game or turned on force attack (and
         // the challenger likewise) since the request: run the same checks again before the flag
-        // spawns.
+        // spawns. The error is mirrored for the challenged recipient (558 / 559 swap) and the
+        // challenger is told the challenge did not start.
         if let Some(error) =
             Self::duel_environment_error(server, &duel.challenger, &duel.challenged)
         {
             if duel.claim_release() {
+                let error = Self::environment_error_for_challenged(error);
                 tracing::warn!(
                     "DuelAccepted: challenger {challenger_id} -> {} refused, error={error}",
                     duel.challenged.character_id
                 );
                 send_error(challenged, error);
+                self.reject_pending_challenge(&duel);
                 self.duel_clean_up(challenger_id);
             }
             return;
