@@ -41,17 +41,20 @@ pub const CHECK_DELAY: Duration = Duration::from_millis(1000);
 /// `DistanceForSurrender` (75 m from the flag, 3D).
 pub const DISTANCE_FOR_SURRENDER: f32 = 75.0;
 /// Maximum distance between the challenger and the challenged at `CSChallengeDuelPacket` time
-/// (3D), and again when the challenged accepts.
+/// (3D), and again when the challenged accepts: twice [`DISTANCE_FOR_SURRENDER`] (150 m).
 ///
-/// No 1.2 source has a separate challenge range: the 1.2 C# `DuelManager` (git `a2ab80abd^`)
-/// checked nothing at all, `popup_menu_proc.alb` only asks `X2Unit.CanChallengeTargetToDuel`
-/// (x2game `FUN_3903b2f0`: self / dead / duel-state, no distance), and the 10.x request
-/// validation has no distance check either. The only duel distance the 1.2 code defines is
-/// `DistanceForSurrender` (75 m from the flag), and a challenge farther than that cannot start
-/// a playable duel: the flag spawns halfway between the two and the first 1 s distance check
-/// would end it. Refuse with the client's `TARGET_TOO_FAR` (error 517, `ui_texts`
-/// `TARGET_TOO_FAR`).
-pub const DUEL_REQUEST_RANGE: f32 = DISTANCE_FOR_SURRENDER;
+/// **Inferred (no 1.2 server evidence):** no 1.2 source has a challenge range. The 1.2 C#
+/// `DuelManager` (git `a2ab80abd^`) checked nothing at all, `popup_menu_proc.alb` only asks
+/// `X2Unit.CanChallengeTargetToDuel` (x2game `FUN_3903b2f0`: self / dead / duel-state, no
+/// distance), and the 10.x request validation has no distance check either. The value comes from
+/// the flag geometry alone: the flag spawns at the midpoint of the pair (`duel_accepted`), so each
+/// duelist is half of their distance from it, and the surrender radius is
+/// [`DISTANCE_FOR_SURRENDER`] (75 m from the flag), so a pair 150 m or more apart starts out
+/// already at the surrender radius. Nothing ends such a duel by distance (`duel_start` discards
+/// the first distance check and `duel_distance_check` schedules no further one once it reports a
+/// side too far, as in the C#): it would only end with the HP result or the end timer. Refuse
+/// with the client's `TARGET_TOO_FAR` (error 517, `ui_texts` `TARGET_TOO_FAR`).
+pub const DUEL_REQUEST_RANGE: f32 = 2.0 * DISTANCE_FOR_SURRENDER;
 /// `DuelDurationTime` (5 min).
 pub const DUEL_DURATION: Duration = Duration::from_secs(5 * 60);
 /// `DuelStartTask` delay (3 s).
