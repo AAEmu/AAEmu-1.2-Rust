@@ -1929,6 +1929,19 @@ async fn auction_requires_an_auctioneer_in_range() {
         i16::from_le_bytes([f[0].1[0], f[0].1[1]]),
         crate::systems::economy::error_message::AUC_AUCTIONEER_TOO_FAR_AWAY
     );
+    // A remote request (ids 0/0, no interaction object) is refused the same way.
+    run::<CSAuctionSearchPacket>(
+        &mut w,
+        0,
+        &search_body_with_ids(&AuctionSearch::default(), 0, 0),
+    );
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+    assert_eq!(
+        i16::from_le_bytes([f[0].1[0], f[0].1[1]]),
+        crate::systems::economy::error_message::AUC_AUCTIONEER_TOO_FAR_AWAY
+    );
     // The real auctioneer works; moved out of range it does not.
     run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
     assert_eq!(w.server.systems.economy.auction.all_lots().len(), 1);
