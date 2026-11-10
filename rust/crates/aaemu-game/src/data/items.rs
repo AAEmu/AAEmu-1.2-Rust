@@ -855,7 +855,7 @@ impl ItemTemplate {
         }
     }
 
-    /// The per-character purchase limit of `items.one_time_sale` / `items.limited_sale_count`
+    /// The per-account purchase limit of `items.one_time_sale` / `items.limited_sale_count`
     /// (`None` = unlimited). A one-time sale is a limit of one; when both columns are set the
     /// smaller limit wins.
     pub fn purchase_limit(&self) -> Option<i32> {

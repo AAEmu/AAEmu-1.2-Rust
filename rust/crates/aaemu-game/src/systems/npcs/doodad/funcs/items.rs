@@ -431,7 +431,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         send_error(player, err::NOT_ENOUGH_ITEM);
         return false;
     }
-    // Per-character purchase allowance (`items.limited_sale_count` / `items.one_time_sale`).
+    // Per-account purchase allowance (`items.limited_sale_count` / `items.one_time_sale`).
     // Reserved before the coin is spent; given back below when the purchase still fails.
     if !eco.try_claim_shop_purchase(server, player, f.item_id, f.count) {
         send_error(player, err::STORE_ONE_TIME_SALE);

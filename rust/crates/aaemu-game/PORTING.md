@@ -749,18 +749,27 @@ one and sends exactly the expired packet plus the leave broadcast),
 `mate_equipment_expiry_skips_the_packet_for_an_unspawned_mate` and
 `mate_equipment_timers_skip_an_offline_owner`.
 
-#### Limited-sale purchase limits (2026-11-03)
+#### Limited-sale purchase limits (2026-11-03, per account since 2026-11-10)
 
-`items.limited_sale_count` and `items.one_time_sale` are now read and enforced as per-character
-purchase limits (`systems/economy/shop_limits.rs`, table `character_shop_purchases`). The 1.2
+`items.limited_sale_count` and `items.one_time_sale` are now read and enforced as **per-account**
+purchase limits (`systems/economy/shop_limits.rs`, table `account_shop_purchases`). The 1.2
 client loads both columns with the item template (`SELECT ... limited_sale_count ... one_time_sale
 ... FROM items`) but never reads them: the NPC store UI has no remaining-count field, and the only
 sale-limit error in its table is `store_one_time_sale` (752, `0x2f0`). Its GM command list on the
 same build carries `limited_sale_add` / `limited_sale_reset` / `one_time_sale_add` /
-`one_time_sale_reset`, so the counters are per character and reset by an administrator. The reset
-period itself is not available for 1.2 (capture-pending **SHOP-1**): the implementation keeps the
-counter per character, never resets it, and does not share it with the account or the server.
+`one_time_sale_reset`, so the counters are reset by an administrator. The reset period itself is
+not available for 1.2 (capture-pending **SHOP-1**): the implementation never resets it.
 `one_time_sale` is a limit of one and the smaller column wins when both are set.
+
+The account scope comes from the 1.2 item descriptions: the Solar / Lunar Scarecrow Farm designs
+(items 30013 / 30014) and the Solar Scarecrow Farm Chest (30560) say "Can be purchased only once
+per account and can't be traded." (`localized_texts` `items.description` rows with `idx` 30013 /
+30014 / 30560; the same text is in the client's `ui_texts` 5826 `STORE_ONE_TIME_SALE` for the
+refusal). The counters were per character until 2026-11-10; the update script
+`2026-11-10_aaemu_game_account_shop_purchase_limits.sql` migrates the existing rows with MAX per
+account and item (each row was a character's own count, so the largest keeps every character at
+or below its purchased amount and does not invent purchases; rows of deleted characters have no
+account to attribute and are dropped).
 
 Enforcement is one atomic check-and-claim, before the price or the item moves: `CSBuyItemsPacket`
 claims the sum of all lines of one template after the checkout is staged (a refused checkout sends
@@ -4439,8 +4448,17 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   failure), but a process exit cannot run that release. Known, not fixed.
 * systems::economy (shop limits, 2026-11-03): `ShopLimits::release` changes the in-memory count
   only. `prepare_save` omits zero counts and `write_prepared` is an upsert without a delete, so
-  a released claim that returns a template to zero stays in `character_shop_purchases` and is
+  a released claim that returns a template to zero stays in `account_shop_purchases` and is
   loaded again after a restart (the limit is then one copy too strict). Known, not fixed.
+* systems::economy (shop purchase limits per account, 2026-11-10): `items.limited_sale_count` /
+  `items.one_time_sale` counters are keyed by `characters.account_id` in
+  `account_shop_purchases` instead of by character. The 1.2 descriptions of items 30013 / 30014 /
+  30560 say "Can be purchased only once per account and can't be traded."
+  (`localized_texts` `items.description` `idx` 30013 / 30014 / 30560). The C# did not implement
+  the limits; the Rust port's per-character key was an assumption. Both purchase entry paths
+  (`CSBuyItemsPacket` and `DoodadFuncPurchase`) use the account. The migration keeps the MAX
+  per-character count per account and item, so an existing buyer stays at or above their old
+  count and cannot lose a purchase.
 * systems::economy (lunagem socketing, 2026-11-03): the 1.2 socket rules read their minimum
   item level from `content_configs` id 0xf8 (248) in the client; the server still uses the
   constant 20 from `content_configs` id 62 (`ITEM_SOCKET_MIN_ITEM_LEVEL`). The 1.2 compact row
