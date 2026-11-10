@@ -759,12 +759,14 @@ impl NpcSpawner {
     /// as soon as a single player is near. The corrected check keeps the authored baseline
     /// ([`Self::target_population`]) and guards `Update` with the authoritative availability:
     /// the living NPCs of the whole shared map plus the slots still reserved by future respawn
-    /// deadlines must stay below the target.
+    /// deadlines and by `enable_respawn` batches' partial respawns must stay below the target.
     fn check_spawn_count_can_spawn(&self, server: &GameServer) -> bool {
         if self.template().is_none() {
             return false;
         }
-        self.live_population_direct() + self.future_pending_respawn_slots(server)
+        self.live_population_direct()
+            + self.future_pending_respawn_slots(server)
+            + server.systems.npcs.group_batches.reserved_slots(self)
             < self.target_population(server)
     }
 
@@ -969,6 +971,24 @@ impl NpcSpawner {
             .and_then(|l| l.into_iter().find(|n| !n.data().unit.is_dead()))
     }
 
+    /// `NpcGroupSupporter::RespawnLostGroupMembers` step: recreates one lost member of an
+    /// `enable_respawn` batch at the move leader's position plus the member's formation offset
+    /// and registers it in `SpawnedNpcs` like a normal fill. The dead slot was reserved by the
+    /// group timer, not by a respawn deadline, so no `_scheduledCount` credit is consumed. The
+    /// caller re-attaches the batch membership fields and holds the spawn lock.
+    pub(crate) fn respawn_group_member(
+        self: &Arc<Self>,
+        server: &GameServer,
+        npc_id: u32,
+        base: (f32, f32, f32, f32),
+        offset: (f32, f32, f32),
+    ) -> Option<NpcRef> {
+        let _serial = server.systems.npcs.spawns.spawn_lock();
+        let npc = spawn_npc_template(server, npc_id, self, 0, Some(offset), Some(base)).ok()??;
+        self.add_npc_to_spawned(self.spawner_id, npc.clone());
+        Some(npc)
+    }
+
     /// Reconciles `_scheduledCount` with the pending respawn timers that remain after
     /// [`Self::force_spawn`] cancelled the obsolete ones; never below zero.
     pub fn reconcile_scheduled_count(&self, remaining: i64) {
@@ -1094,7 +1114,15 @@ impl NpcSpawner {
         };
         let respawn_time = self.respawn_time();
         let now = spawn_manager::now();
-        if respawn_time > 0
+        // `npc_groups.enable_respawn = 't'`: a dead member whose batch still has a living
+        // member is respawned by the group's partial timer (`RespawnLostGroupMembers`), not by
+        // a whole-batch spawner refill. The group reserves its dead slots in
+        // `check_spawn_count_can_spawn`, so the spawner does not fill them in the meantime.
+        // The last death of the batch keeps the normal spawner respawn below.
+        let partial_group_respawn =
+            npc.data().unit.is_dead() && server.systems.npcs.group_batches.on_member_died(npc);
+        if !partial_group_respawn
+            && respawn_time > 0
             && i64::from(self.are_other_npcs_in_spawn_zone().1) + i64::from(self.scheduled_count())
                 < i64::from(t.max_population)
         {
@@ -1286,8 +1314,10 @@ impl NpcSpawner {
         // Direct read: the cached other-population count may still be a stale zero after
         // another clone spawned, despawned or died.
         let live = self.live_population_direct();
-        // Respawn slots with their own future deadline are reserved for their own refill.
-        let reserved = self.future_pending_respawn_slots(server);
+        // Respawn slots with their own future deadline are reserved for their own refill;
+        // a lost member of an `enable_respawn` batch is reserved for the group timer instead.
+        let reserved = self.future_pending_respawn_slots(server)
+            + server.systems.npcs.group_batches.reserved_slots(self);
         let mut remaining = (target - live - reserved).min(budget);
         if remaining <= 0 {
             return 0;
@@ -2017,7 +2047,7 @@ fn spawn_npc_group(
             member.formation_offset_y,
             member.formation_offset_z,
         );
-        match spawn_npc_template(server, member.npc_id, spawner, owner_id, Some(offset))? {
+        match spawn_npc_template(server, member.npc_id, spawner, owner_id, Some(offset), None)? {
             Some(npc) => spawned.push((member.clone(), npc)),
             // A missing member template is skipped like a missing ordinary member; the rest of
             // the group still spawns.
@@ -2031,8 +2061,9 @@ fn spawn_npc_group(
         }
     }
     // Runtime membership: move leader, formation offsets / tension and `aggro_rule_id` for
-    // `systems::ai::group` (the 1.2 formation follow and shared aggro).
-    group::attach_spawned_group(&spawned, group);
+    // `systems::ai::group` (the 1.2 formation follow and shared aggro), plus the partial
+    // respawn state of an `enable_respawn` batch.
+    group::attach_spawned_group(server, &spawned, group, Some(spawner));
     let npcs: Vec<NpcRef> = spawned.into_iter().map(|(_, npc)| npc).collect();
     Ok((!npcs.is_empty()).then_some(npcs))
 }
@@ -2116,17 +2147,25 @@ fn spawn_npc(
     spawner: &Arc<NpcSpawner>,
     owner_id: u32,
 ) -> Result<Option<Vec<NpcRef>>, String> {
-    Ok(spawn_npc_template(server, nsn.member_id, spawner, owner_id, None)?.map(|npc| vec![npc]))
+    Ok(
+        spawn_npc_template(server, nsn.member_id, spawner, owner_id, None, None)?
+            .map(|npc| vec![npc]),
+    )
 }
 
 /// `NpcSpawnerNpc.SpawnNpc` for one concrete NPC template, at the spawner position plus
 /// `offset` (an `npc_group_members.formation_offset_*`, or `None` for an ordinary member).
+///
+/// `base` overrides `(x, y, z, yaw)` of the spawner position: the group partial respawn creates
+/// a lost member at the move leader's current position (`RespawnLostGroupMembers`,
+/// `sub_39341EF0`, Z:851444-851452).
 fn spawn_npc_template(
     server: &GameServer,
     template_id: u32,
     spawner: &Arc<NpcSpawner>,
     owner_id: u32,
     offset: Option<(f32, f32, f32)>,
+    base: Option<(f32, f32, f32, f32)>,
 ) -> Result<Option<NpcRef>, String> {
     let Some(npc) = backend::npc_create(server, 0, template_id) else {
         tracing::warn!(
@@ -2156,6 +2195,12 @@ fn spawn_npc_template(
         .actor_model(model_id)
         .is_some_and(|m| m.underwater_creature);
     let mut pos = spawner.position();
+    if let Some((x, y, z, yaw)) = base {
+        pos.x = x;
+        pos.y = y;
+        pos.z = z;
+        pos.yaw = yaw;
+    }
     if let Some((dx, dy, dz)) = offset {
         // Formation offsets are authored in the spawner's local frame; applied as world-axis
         // deltas because yaw rotation is capture-pending (see `spawn_npc_group`).

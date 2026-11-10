@@ -6,9 +6,10 @@
 //!   stops within `formation_tension`; while the leader stands still it waits. After combat it
 //!   returns to that formation point (the leader's yaw is not applied to the offsets: rotating
 //!   them is capture-pending, see `PORTING.md`).
-//! * shared aggro: `npc_groups.aggro_rule_id != 0` makes every living member of the same spawned
-//!   group join a fight another member started (10.x
-//!   `NpcAggroTable::CollectSharedAggroMembers`; what distinguishes rule 1 from 2 is unknown).
+//! * shared aggro: `npc_groups.aggro_rule_id == 2` (`aggro_share`) mirrors the aggro table to
+//!   every living member of the same spawned group (10.x
+//!   `NpcAggroTable::CollectSharedAggroMembers`); rule 1 (`aggro_link`) does not mirror it but
+//!   its members answer the attacked member's link-help call (`update_aggro_help`).
 //!
 //! The membership itself is attached at spawn by `npcs::npc::group::attach_spawned_group`.
 
@@ -168,9 +169,15 @@ pub fn sync_return_to_formation(c: &mut AiCtx<'_>) {
     c.ai.idle_position = walkable_formation_target(c, leader_pos, point);
 }
 
-/// `NpcAggroTable::CollectSharedAggroMembers`: with a non-zero `aggro_rule_id`, every living
-/// member of the same spawned group gets `abuser` on its aggro table and is told about the new
-/// target. Reuses the aggro-link help path's `AddUnitAggro` + `OnAggroTargetChanged`.
+/// `NpcAggroTable::CollectSharedAggroMembers`: with `aggro_rule_id == 2` (`aggro_share`),
+/// every living member of the same spawned group gets `abuser` on its aggro table and is told
+/// about the new target. Reuses the aggro-link help path's `AddUnitAggro` +
+/// `OnAggroTargetChanged`.
+///
+/// Rule 1 (`aggro_link`) does not mirror the table; its members answer the helper's normal
+/// aggro-link help call instead (`update_aggro_help`). Rule 0 does neither. The 10.x spawn only
+/// passes the group instance to the aggro table for rule 2 (Z:855825-855826) and rule 1 is
+/// handled in the link-help scan (Z:823640-823646 / 823849-823851).
 pub fn share_aggro_with_group(c: &mut AiCtx<'_>, abuser: &WorldObject) {
     let (instance, rule, last_shared) = {
         let d = c.npc.data();
@@ -180,10 +187,9 @@ pub fn share_aggro_with_group(c: &mut AiCtx<'_>, abuser: &WorldObject) {
             d.npc_group_last_share_abuser,
         )
     };
-    // Rule 0 groups do not share; rules 1 and 2 both do (difference unknown). Running the
-    // member scan again for the same abuser on every combat tick is not needed: the members
-    // already joined (cleared with the aggro table).
-    if instance == 0 || rule == 0 || last_shared == abuser.obj_id() {
+    // Only rule 2 mirrors. Running the member scan again for the same abuser on every combat
+    // tick is not needed: the members already joined (cleared with the aggro table).
+    if instance == 0 || rule != 2 || last_shared == abuser.obj_id() {
         return;
     }
     c.npc.data().npc_group_last_share_abuser = abuser.obj_id();

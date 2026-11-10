@@ -2,6 +2,7 @@
 //! group at the spawner position plus its `formation_offset`, not the group id as an NPC.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::data::world_templates::WorldSpawnPosition;
 use crate::data::GameData;
@@ -12,6 +13,7 @@ use crate::systems::npcs::npc::group_data::{NpcGroup, NpcGroupData, NpcGroupMemb
 use crate::systems::npcs::npc::spawner_data::{
     npc_spawner_category, NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate,
 };
+use crate::systems::npcs::spawn_manager;
 use crate::systems::npcs::spawn_manager::backend::TestBackend;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{DoodadRef, Entity, NpcRef, WorldInstance, WorldObject};
@@ -122,6 +124,14 @@ fn template(id: u32, npcs: Vec<NpcSpawnerNpc>) -> NpcSpawnerTemplate {
 }
 
 fn make_spawner(template: NpcSpawnerTemplate, unit_id: u32) -> Arc<NpcSpawner> {
+    make_spawner_with_despawn(template, unit_id, 20)
+}
+
+fn make_spawner_with_despawn(
+    template: NpcSpawnerTemplate,
+    unit_id: u32,
+    despawn_time: i32,
+) -> Arc<NpcSpawner> {
     let spawner_id = template.id;
     let spawnable_npcs = template.npcs.clone();
     Arc::new(NpcSpawner::new(
@@ -132,7 +142,7 @@ fn make_spawner(template: NpcSpawnerTemplate, unit_id: u32) -> Arc<NpcSpawner> {
             follow_path: String::new(),
             follow_npc: 0,
             respawn_time: 10,
-            despawn_time: 20,
+            despawn_time,
             special_link: String::new(),
             count: 1,
             npc_spawner_ids: vec![spawner_id],
@@ -144,15 +154,22 @@ fn make_spawner(template: NpcSpawnerTemplate, unit_id: u32) -> Arc<NpcSpawner> {
     ))
 }
 
+fn sea_worm_members() -> Vec<NpcGroupMember> {
+    vec![
+        member(191, 50, 8564, 0.0, 0.0, 0.0),
+        member(192, 50, 8566, 2.0, -3.0, 0.0),
+        member(193, 50, 8566, -2.0, -3.0, 0.0),
+    ]
+}
+
 fn sea_worm_group() -> NpcGroupData {
-    NpcGroupData::from_parts(
-        vec![group(50)],
-        vec![
-            member(191, 50, 8564, 0.0, 0.0, 0.0),
-            member(192, 50, 8566, 2.0, -3.0, 0.0),
-            member(193, 50, 8566, -2.0, -3.0, 0.0),
-        ],
-    )
+    NpcGroupData::from_parts(vec![group(50)], sea_worm_members())
+}
+
+fn respawn_sea_worm_group() -> NpcGroupData {
+    let mut g = group(50);
+    g.enable_respawn = true;
+    NpcGroupData::from_parts(vec![g], sea_worm_members())
 }
 
 /// The real data shape: spawner 9571 (`max_population` 1) has one `NpcGroup` member row (group
@@ -448,4 +465,339 @@ async fn summon_effect_does_not_rewrite_a_group_template() {
         "the group row is intact: {:?}",
         stored.npcs
     );
+}
+
+// ===========================================================================================
+// `npc_groups.enable_respawn`: the 10.x `NpcGroupSupporter` partial respawn
+// (`sub_39343460` / `sub_393422D0` / `sub_39341EF0`, Z:852468 / 851557 / 851350).
+// ===========================================================================================
+
+struct RespawnFixture {
+    server: Arc<GameServer>,
+    spawner: Arc<NpcSpawner>,
+    _client: TestClient,
+    _player: crate::world::PlayerRef,
+    members: Vec<NpcRef>,
+}
+
+/// Spawns the three-member group 50 through a spawner at (100, 100, 100) with a 2 s corpse
+/// despawn and the template's 10 s spawn delay (the group respawn timer).
+fn spawn_group_for_respawn(enable_respawn: bool) -> RespawnFixture {
+    let mut data = GameData::empty();
+    data.systems.npcs.npc_groups = if enable_respawn {
+        respawn_sea_worm_group()
+    } else {
+        sea_worm_group()
+    };
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![template(9571, Vec::new())],
+        vec![group_member_row(10075, 9571, 50)],
+    )
+    .unwrap();
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    let spawner = make_spawner_with_despawn(
+        template(9571, vec![group_member_row(10075, 9571, 50)]),
+        8564,
+        2,
+    );
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(&server, &client, test_character(1, "P", 100.0, 100.0), 5000);
+    spawner.update(&server);
+    let members = spawner
+        .spawned_npcs()
+        .get(&spawner.spawner_id)
+        .cloned()
+        .expect("the group spawned");
+    assert_eq!(members.len(), 3);
+    RespawnFixture {
+        server,
+        spawner,
+        _client: client,
+        _player: player,
+        members,
+    }
+}
+
+fn spawn_manager_of(server: &GameServer) -> Arc<spawn_manager::SpawnManager> {
+    let world = server.world.world(0).expect("world");
+    server.systems.npcs.spawns.get_or_create(&world)
+}
+
+fn respawn_tick(f: &RespawnFixture) {
+    spawn_manager_of(&f.server).check_respawns_tick(&f.server);
+}
+
+fn kill(server: &GameServer, npc: &NpcRef) {
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(server, npc);
+}
+
+fn living(f: &RespawnFixture) -> Vec<NpcRef> {
+    f.spawner
+        .spawned_npcs()
+        .values()
+        .flatten()
+        .filter(|n| !n.data().unit.is_dead())
+        .cloned()
+        .collect()
+}
+
+fn member_with_offset(f: &RespawnFixture, offset: (f32, f32, f32)) -> NpcRef {
+    f.members
+        .iter()
+        .find(|n| n.data().npc_group_formation_offset == offset)
+        .cloned()
+        .expect("member with the formation offset")
+}
+
+/// `enable_respawn = 't'`: a dead member is respawned alone after the spawner's respawn delay,
+/// at the leader position plus its formation offset, and keeps the batch identity; the
+/// spawner's own whole-batch respawn is not scheduled for it.
+#[tokio::test]
+async fn enable_respawn_respawns_a_lost_member_into_the_same_batch() {
+    let f = spawn_group_for_respawn(true);
+    let manager = spawn_manager_of(&f.server);
+    let leader = f
+        .members
+        .iter()
+        .find(|n| n.data().npc_group_is_move_leader)
+        .cloned()
+        .expect("move leader");
+    let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+    let batch = leader.data().npc_group_instance;
+    assert_ne!(batch, 0);
+
+    // Settle the timer while the whole batch is alive (10.x restarts it every ineligible tick).
+    respawn_tick(&f);
+    kill(&f.server, &victim);
+    assert!(
+        manager.pending_respawns().is_empty(),
+        "the group owns the lost slot, not a spawner respawn deadline"
+    );
+    assert_eq!(
+        f.server
+            .systems
+            .npcs
+            .group_batches
+            .reserved_slots(&f.spawner),
+        1,
+        "the lost slot is reserved against the spawner refill"
+    );
+
+    // The corpse is still there at 1 s: nothing respawns.
+    spawn_manager::advance_test_clock(Duration::from_secs(1));
+    respawn_tick(&f);
+    assert_eq!(
+        living(&f).len(),
+        2,
+        "no respawn while the corpse is present"
+    );
+
+    // At 3 s the corpse is gone but the 10 s delay has not elapsed.
+    spawn_manager::advance_test_clock(Duration::from_secs(2));
+    respawn_tick(&f);
+    assert_eq!(living(&f).len(), 2, "no respawn before the spawner delay");
+
+    // At 10 s after the last ineligible tick the lost member comes back.
+    spawn_manager::advance_test_clock(Duration::from_secs(7));
+    respawn_tick(&f);
+    let alive = living(&f);
+    assert_eq!(alive.len(), 3, "the lost member respawned");
+    let respawned = alive
+        .iter()
+        .find(|n| {
+            n.obj_id != leader.obj_id && n.data().npc_group_formation_offset == (2.0, -3.0, 0.0)
+        })
+        .expect("the respawned member keeps its formation offset");
+    assert!(
+        !Arc::ptr_eq(respawned, &victim),
+        "a fresh NPC replaced the lost member (object ids are reusable)"
+    );
+    {
+        let d = respawned.data();
+        assert_eq!(d.npc_group_instance, batch, "same batch id");
+        assert!(!d.npc_group_is_move_leader);
+        assert_eq!(d.npc_group_leader_obj_id, leader.obj_id);
+        assert_eq!(d.npc_group_formation_offset, (2.0, -3.0, 0.0));
+        assert_eq!(d.npc_group_formation_tension, 1.0);
+    }
+    let t = respawned.data().unit.transform;
+    assert_eq!(
+        (t.x, t.y, t.z),
+        (102.0, 97.0, 100.0),
+        "leader position plus the formation offset"
+    );
+    assert!(
+        f.spawner
+            .spawned_npcs()
+            .get(&f.spawner.spawner_id)
+            .is_some_and(|l| l.iter().any(|n| Arc::ptr_eq(n, respawned))),
+        "the respawned member is registered on its spawner again"
+    );
+    assert_eq!(
+        f.server
+            .systems
+            .npcs
+            .group_batches
+            .reserved_slots(&f.spawner),
+        0,
+        "the slot is no longer reserved"
+    );
+}
+
+/// The 10.x eligibility gate: while any living member of the batch is in combat, nothing is
+/// respawned and the delay restarts once the fight ends.
+#[tokio::test]
+async fn enable_respawn_waits_while_a_member_fights() {
+    let f = spawn_group_for_respawn(true);
+    let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+    let fighter = f
+        .members
+        .iter()
+        .find(|n| !n.data().npc_group_is_move_leader && n.obj_id != victim.obj_id)
+        .cloned()
+        .expect("another living member");
+
+    respawn_tick(&f);
+    kill(&f.server, &victim);
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+
+    fighter.data().unit.is_in_battle = true;
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    assert_eq!(
+        living(&f).len(),
+        2,
+        "no member respawns while the batch is fighting"
+    );
+
+    fighter.data().unit.is_in_battle = false;
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(9));
+    respawn_tick(&f);
+    assert_eq!(living(&f).len(), 2, "the delay restarted after combat");
+    spawn_manager::advance_test_clock(Duration::from_secs(1));
+    respawn_tick(&f);
+    assert_eq!(
+        living(&f).len(),
+        3,
+        "the member respawns after the new delay"
+    );
+}
+
+/// `RespawnLostGroupMembers` is anchored on the move leader: a dead leader blocks the partial
+/// respawn, and the last death of the batch returns to the spawner's whole-batch respawn.
+#[tokio::test]
+async fn enable_respawn_needs_the_move_leader() {
+    let f = spawn_group_for_respawn(true);
+    let manager = spawn_manager_of(&f.server);
+    let leader = f
+        .members
+        .iter()
+        .find(|n| n.data().npc_group_is_move_leader)
+        .cloned()
+        .expect("move leader");
+    let followers: Vec<NpcRef> = f
+        .members
+        .iter()
+        .filter(|n| !n.data().npc_group_is_move_leader)
+        .cloned()
+        .collect();
+
+    respawn_tick(&f);
+    kill(&f.server, &leader);
+    assert!(
+        manager.pending_respawns().is_empty(),
+        "the two living followers still own the leader's lost slot"
+    );
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    assert_eq!(
+        living(&f).len(),
+        2,
+        "without the move leader the lost member is not respawned"
+    );
+
+    kill(&f.server, &followers[0]);
+    assert!(
+        manager.pending_respawns().is_empty(),
+        "one follower still lives"
+    );
+    kill(&f.server, &followers[1]);
+    assert_eq!(
+        manager.pending_respawns().len(),
+        1,
+        "the last death schedules the spawner's whole-batch respawn"
+    );
+    assert_eq!(
+        f.server
+            .systems
+            .npcs
+            .group_batches
+            .reserved_slots(&f.spawner),
+        0,
+        "the batch is gone"
+    );
+
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    f.spawner.update(&f.server);
+    assert_eq!(
+        living(&f).len(),
+        3,
+        "the emptied group respawns as one batch through the spawner"
+    );
+}
+
+/// `enable_respawn = 'f'`: unchanged - the death keeps the ordinary spawner respawn deadline,
+/// no batch is tracked and the group only refills through the spawner once it is empty.
+#[tokio::test]
+async fn disabled_respawn_keeps_the_spawner_refill() {
+    let f = spawn_group_for_respawn(false);
+    let manager = spawn_manager_of(&f.server);
+    let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+
+    respawn_tick(&f);
+    kill(&f.server, &victim);
+    assert_eq!(
+        manager.pending_respawns().len(),
+        1,
+        "a disabled group keeps the per-NPC spawner respawn"
+    );
+    assert_eq!(
+        f.server
+            .systems
+            .npcs
+            .group_batches
+            .reserved_slots(&f.spawner),
+        0,
+        "no partial-respawn batch is tracked"
+    );
+
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    assert_eq!(living(&f).len(), 2, "no partial respawn with the flag off");
+
+    for npc in f.members.iter().filter(|n| n.obj_id != victim.obj_id) {
+        kill(&f.server, npc);
+    }
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    respawn_tick(&f);
+    f.spawner.update(&f.server);
+    assert_eq!(living(&f).len(), 3, "the emptied batch respawns as before");
 }
