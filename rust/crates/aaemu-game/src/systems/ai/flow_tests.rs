@@ -3561,3 +3561,66 @@ async fn pull_aggro_disabled_switches_at_101_percent() {
     tick_all(&f.server, 100);
     assert_eq!(f.npc.data().unit.current_target, TAUNTER2_OBJ);
 }
+
+/// Home (non-conflict) zone rule: a faction guard aggroes a hostile pirate in range. The
+/// relation comes from `system_faction_relations` (161 pirate / 167 Nuia guard, both hostile),
+/// so the same `can_attack` gate the AI uses accepts the pair.
+#[tokio::test]
+async fn a_guard_aggroes_a_pirate_in_a_home_zone() {
+    use crate::data::world_data::{FactionRelation, SystemFaction};
+    use crate::systems::skills::geometry::Target;
+
+    let mut d = data();
+    for (id, mother) in [(114, 0), (161, 114), (167, 0)] {
+        d.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    // The live 1.2 rows that make a Nuia guard hostile to pirates: the guard faction against
+    // the outlaw root (161's mother) and against 161 itself.
+    for (id, id2) in [(114, 167), (161, 167)] {
+        d.factions.relations.push(FactionRelation {
+            id,
+            id2,
+            state: 1, // RelationState::Hostile
+            exp_time: 0,
+        });
+    }
+    let server = server_with_data(d);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Pirate", 105.0, 100.0);
+    c.unit.faction_id = 161;
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let pirate = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let guard = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    guard.data().unit.faction_id = 167;
+    guard.data().unit.transform.rot_z = FACE_PLUS_X;
+    assert!(
+        crate::systems::skills::relation::can_attack(
+            &server,
+            &Target::Obj(WorldObject::from(&guard)),
+            &Target::Obj(WorldObject::from(&pirate)),
+        ),
+        "the guard's faction is hostile to the pirate"
+    );
+    assert!(
+        aggros(&server, 60).await,
+        "the guard never aggroed the pirate"
+    );
+    assert!(guard
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&PLAYER_OBJ));
+}

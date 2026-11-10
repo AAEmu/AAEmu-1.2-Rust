@@ -1205,11 +1205,15 @@ pub fn dispel(server: &GameServer, e: &DispelEffect, args: &EffectArgs<'_>) {
         );
         return;
     };
+    let relation = relation_to(server, &caster, &args.target);
     let attackable = can_attack(server, &caster, &args.target);
     if e.dispel_count > 0 && attackable {
         buffs::remove_buffs_by_kind(server, &target, 1, e.dispel_count, e.buff_tag_id);
     }
-    if e.cure_count > 0 && !can_attack(server, &caster, &args.target) {
+    // A cure is a friendly action. A hostile dispel on a target that merely fails the attack
+    // gate (Peace, no-PvP instance, zone protection) must do nothing: without the relation
+    // check the `cure_count` branch removed the protected player's bad buffs for the attacker.
+    if e.cure_count > 0 && !attackable && relation != RelationState::Hostile {
         buffs::remove_buffs_by_kind(server, &target, 2, e.cure_count, e.buff_tag_id);
     }
 }

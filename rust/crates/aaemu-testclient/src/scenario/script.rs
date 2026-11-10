@@ -119,6 +119,9 @@
 //! expectbuffremoved <buff> [self|peer|player:NAME] [secs]
 //!                                   fail unless SCBuffRemoved for a previously announced
 //!                                   SCBuffCreated of that buff / owner arrives
+//! expecthpdrop <self|peer|player:NAME> [secs]  fail unless that unit's HP falls below its
+//!                                   value at the command start (the last SCUnitPointsPacket)
+//! expectnohpdrop <self|peer|player:NAME> [secs]  fail if that unit's HP falls in the window
 //! expectlog <regex> [secs]          fail unless a new game-log line matches (AAEMU_VERIFY_GAME_LOG)
 //! expectdb "<sql>" <value> [secs]   fail unless the SQL's value equals `value`
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
@@ -794,6 +797,41 @@ async fn expect_buff_removed(
         }
         game.recv_within(left.min(Duration::from_millis(250)))
             .await?;
+    }
+}
+
+/// `expecthpdrop` / `expectnohpdrop`: watch the unit's last `SCUnitPointsPacket` HP against
+/// the value seen when the command starts.
+async fn expect_hp_drop(
+    game: &mut GameClient,
+    spec: Option<&str>,
+    secs: u64,
+    want_drop: bool,
+) -> anyhow::Result<()> {
+    let target = buff_target(game, spec)?;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let baseline = game.state.unit_points.get(&target).map(|p| p.0);
+    anyhow::ensure!(
+        baseline.is_some(),
+        "no SCUnitPointsPacket for unit {target} yet (hp unknown)"
+    );
+    loop {
+        let hp = game.state.unit_points.get(&target).map(|p| p.0);
+        let dropped = matches!((baseline, hp), (Some(b), Some(n)) if n < b);
+        if want_drop && dropped {
+            println!("    hp of {target}: {baseline:?} -> {hp:?}");
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            if want_drop {
+                bail!("no HP drop for unit {target} within {secs} s (hp {hp:?})");
+            }
+            println!("    no HP drop on {target} in {secs} s");
+            return Ok(());
+        }
+        let wait = left.min(Duration::from_millis(250));
+        game.recv_within(wait).await?;
     }
 }
 
@@ -2158,6 +2196,11 @@ async fn run_lines(
                 let buff: u32 = num(&parts, 0)?;
                 let secs: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(10);
                 expect_buff_removed(game, buff, parts.get(1).copied(), secs).await?;
+            }
+            "expecthpdrop" | "expectnohpdrop" => {
+                let spec = parts.first().copied();
+                let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(10);
+                expect_hp_drop(game, spec, secs, cmd == "expecthpdrop").await?;
             }
             "expectlog" => {
                 let args = split_quoted(rest)?;

@@ -25,7 +25,9 @@ use super::packets::{
     CompressedGamePackets, SCCastingStoppedPacket, SCCooldownsPacket, SCSkillCooldownResetPacket,
     SCSkillEndedPacket, SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
 };
-use super::relation::{can_attack, filter_with_relation, owner_character, relation_to};
+use super::relation::{
+    can_attack, filter_with_relation, owner_character, protected_from, relation_to,
+};
 use super::state::{
     AutoAttackSlot, CancelToken, PlotCooldownSnapshot, SkillRef, SkillRun, SkillTaskKind,
     SkillTaskSlot,
@@ -514,10 +516,16 @@ fn initial_target(
             if let Some(t) = &target {
                 let tt = Target::Obj(t.clone());
                 let r = relation_to(server, &caster_t, &tt);
+                // Main's relation check, plus the player-protection cases (Peace, no-PvP,
+                // home zones): a Neutral target keeps the C# behaviour, a protected player is
+                // refused.
                 if r != RelationState::Hostile
                     && r != RelationState::Neutral
                     && !can_attack(server, &caster_t, &tt)
                 {
+                    return None;
+                }
+                if protected_from(server, &caster_t, &tt) {
                     return None;
                 }
             }
@@ -2146,6 +2154,19 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
     }
     let mut possible = distinct;
+    // A hostile skill's unit targets drop the protected players (Peace, no-PvP instances, the
+    // home-zone protection) so the combat dice / durability rolls below do not run on them. A
+    // Neutral target keeps main's behaviour, and the caster itself stays so friendly-only Target
+    // effects of a hostile skill still reach it.
+    if t.target_type == SkillTargetType::Hostile as i32 {
+        possible.retain(|target| {
+            target.as_obj().is_none_or(|o| {
+                !o.is_unit()
+                    || o.obj_id() == caster_t.obj_id()
+                    || !protected_from(server, &caster_t, target)
+            })
+        });
+    }
     if t.target_area_radius > 0 && t.target_area_angle > 0 && t.target_area_angle < 360 {
         let origin = world_pos(server, target_self);
         possible.retain(|target| {
@@ -2265,6 +2286,22 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     target = target.obj_id(),
                     ?relation,
                     "Skill effect skipped: the effect is friendly-only"
+                );
+                continue;
+            }
+            // A non-friendly effect on a unit target skips a protected player (Peace, no-PvP,
+            // home zones). A Neutral target keeps main's behaviour: the whole `can_attack`
+            // also refused neutral NPCs, which lost interaction / trap / spawner effects.
+            if !effect.friendly
+                && effect.non_friendly
+                && target.as_obj().is_some_and(|o| o.is_unit())
+                && protected_from(server, &caster_t, &target)
+            {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the target is protected from hostile effects"
                 );
                 continue;
             }
