@@ -786,6 +786,10 @@ pub fn gimmick_tick(
         }
     }
 
+    // Keep the grid region current: `around`, visibility and the movement broadcast all use it
+    // (same update as a moving NPC, `WorldManager.AddVisibleObject`).
+    crate::systems::ai::npc::check_moved_position(server, &WorldObject::from(&active.gimmick));
+
     // Handle Delayed Skills
     if let Some(t) = &active.template {
         let started = active.state().skill_started;
@@ -1265,6 +1269,31 @@ mod tests {
             "no north/south drift: y={}",
             t.y
         );
+    }
+
+    #[tokio::test]
+    async fn moving_gimmick_updates_its_world_region() {
+        let f = contact_fixture(contact_template(false), (300.0, 300.0));
+        let source = doodad_at(&f.server, &f.world, (63.5, 100.0, 100.0));
+        let (g, active) = spawn_contact_gimmick(&f, &source, [10.0, 0.0, 0.0]);
+        let me = WorldObject::from(&g);
+        assert_eq!(me.region(), Some((0, 0, 1)));
+        // 1 s at 10 m/s crosses the 64 m sector boundary.
+        for i in 0..20 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        assert_eq!(
+            me.region(),
+            Some((0, 1, 1)),
+            "grid region follows the gimmick"
+        );
+        assert_eq!(f.world.region_of(&me), Some((1, 1)));
     }
 
     #[tokio::test]
