@@ -120,8 +120,12 @@
 //!                                   fail unless SCBuffRemoved for a previously announced
 //!                                   SCBuffCreated of that buff / owner arrives
 //! expecthpdrop <self|peer|player:NAME> [secs]  fail unless that unit's HP falls below its
-//!                                   value at the command start (the last SCUnitPointsPacket)
+//!                                   value at the command start (the last SCUnitPointsPacket;
+//!                                   fails as "hp unknown" without one, so `gm heal` it first:
+//!                                   the server sends none at spawn). Regeneration can refill
+//!                                   a small hit before the next packet and mask it
 //! expectnohpdrop <self|peer|player:NAME> [secs]  fail if that unit's HP falls in the window
+//!                                   (same baseline and the same regeneration caveat)
 //! expectlog <regex> [secs]          fail unless a new game-log line matches (AAEMU_VERIFY_GAME_LOG)
 //! expectdb "<sql>" <value> [secs]   fail unless the SQL's value equals `value`
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
@@ -801,7 +805,11 @@ async fn expect_buff_removed(
 }
 
 /// `expecthpdrop` / `expectnohpdrop`: watch the unit's last `SCUnitPointsPacket` HP against
-/// the value seen when the command starts.
+/// the value seen when the command starts. `expectnohpdrop` fails as soon as the HP falls inside
+/// the window; `expecthpdrop` fails when it does not. The server sends no `SCUnitPointsPacket`
+/// at spawn, so a unit whose HP was never updated is "unknown": run a `gm heal` on it first.
+/// Natural regeneration can refill a hit before the next packet, so a very small hit may go
+/// unseen.
 async fn expect_hp_drop(
     game: &mut GameClient,
     spec: Option<&str>,
@@ -818,6 +826,9 @@ async fn expect_hp_drop(
     loop {
         let hp = game.state.unit_points.get(&target).map(|p| p.0);
         let dropped = matches!((baseline, hp), (Some(b), Some(n)) if n < b);
+        if !want_drop && dropped {
+            bail!("hp of {target} fell {baseline:?} -> {hp:?} (expected no HP drop)");
+        }
         if want_drop && dropped {
             println!("    hp of {target}: {baseline:?} -> {hp:?}");
             return Ok(());
@@ -3130,5 +3141,66 @@ mod tests {
             vec![(2, 5000), (7, 60000)]
         );
         assert_eq!(s.remaining(), 0);
+    }
+
+    /// Runs `expect_hp_drop` on our own unit (obj 42) over an in-memory transport. `known_hp` is
+    /// the HP the client already knows (as after a `gm heal`); the server then sends one
+    /// `SCUnitPointsPacket` per entry of `server_hp`. A window of 0 s judges the state as it is,
+    /// a longer one gives the packets time to arrive (the command returns as soon as it can).
+    async fn hp_command(
+        want_drop: bool,
+        secs: u64,
+        known_hp: Option<i32>,
+        server_hp: &[i32],
+    ) -> anyhow::Result<()> {
+        use aaemu_commons::net::FrameCodec;
+        use aaemu_game::net::packet::encode;
+        use aaemu_game::packets::world::SCUnitPointsPacket;
+        use futures::SinkExt;
+        use tokio_util::codec::FramedWrite;
+
+        let (io, peer) = tokio::io::duplex(64 * 1024);
+        let mut game = crate::game::GameClient::from_io(io, crate::record::Recorder::new(false));
+        game.state.self_obj = 42;
+        if let Some(hp) = known_hp {
+            game.state.unit_points.insert(42, (hp, 500));
+        }
+        let mut server = FramedWrite::new(peer, FrameCodec);
+        for &hp in server_hp {
+            let packet = SCUnitPointsPacket {
+                obj_id: 42,
+                hp,
+                mp: 500,
+            };
+            server.send(encode(&packet)).await?;
+        }
+        super::expect_hp_drop(&mut game, Some("self"), secs, want_drop).await
+    }
+
+    #[tokio::test]
+    async fn expecthpdrop_passes_when_the_hp_falls() {
+        hp_command(true, 5, Some(1000), &[900]).await.unwrap();
+    }
+
+    /// `expectnohpdrop` used to print "no HP drop" and succeed whatever the HP did.
+    #[tokio::test]
+    async fn expectnohpdrop_fails_when_the_hp_falls() {
+        let err = hp_command(false, 5, Some(1000), &[900]).await.unwrap_err();
+        assert!(err.to_string().contains("fell"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_hp_commands_judge_an_unchanged_hp() {
+        hp_command(false, 0, Some(1000), &[]).await.unwrap();
+        let err = hp_command(true, 0, Some(1000), &[]).await.unwrap_err();
+        assert!(err.to_string().contains("no HP drop"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_hp_commands_need_a_known_baseline() {
+        for want_drop in [false, true] {
+            let err = hp_command(want_drop, 0, None, &[]).await.unwrap_err();
+            assert!(err.to_string().contains("hp unknown"), "{err}");
+        }
     }
 }

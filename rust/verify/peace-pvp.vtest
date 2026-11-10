@@ -7,6 +7,9 @@
 # Belt Mirage Isle portal at 26244.9, 6397.2, 397.9. The peace assertion is self-checking: if
 # the bots are not in group 14, no rule applies and the victim's HP drops in the Peace window.
 #
+# The victim `gm heal`s itself (it targets itself) before the attacker starts: expecthpdrop /
+# expectnohpdrop compare against the last SCUnitPointsPacket, and the server sends none at spawn.
+#
 # Bots:
 #   attacker  GM: faction 101 (Nuia), sets the zone state and attacks
 #   victim    GM: faction 109 (Haranya), the hostile target; it checks its own HP
@@ -43,6 +46,7 @@ gm pos
 waitpeer 120 ${attacker}
 sync pos 2
 sync peace 2
+gm heal
 sync before_peace 2
 expectnohpdrop self 8
 sync attacked_peace 2
