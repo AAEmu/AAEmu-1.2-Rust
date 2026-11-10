@@ -1527,9 +1527,8 @@ pub async fn execute_buy_for(
                     });
                 }
             }
-            if let Some(p) = &target.player {
-                send_error(p, buy_fail_error(is_gift));
-            }
+            // The buyer paid and is the one who is told; an offline receiver has nobody to tell.
+            send_error(buyer, buy_fail_error(is_gift));
             continue;
         }
 
