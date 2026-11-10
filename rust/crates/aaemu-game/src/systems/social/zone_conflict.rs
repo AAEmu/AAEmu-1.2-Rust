@@ -2,10 +2,13 @@
 //! `SetState`, `ForceNextState`, `CheckTimer`, `SetTimerTask`, `SendSwitchZoneState`) and
 //! `Models/Tasks/Zones/ZoneStateChangeTask`.
 //!
-//! `ZoneManager.Load` (`data::world_data::ZoneData::load`) leaves every conflict zone at its
-//! start state (Tension, no kill count, no timer); [`ZoneConflictManager::start`] copies them
-//! here and schedules the timers of the zones that have a `NextStateTime` (the C# `SetState` ->
-//! `SendSwitchZoneState` -> `SetTimerTask` at load; the broadcast reaches nobody at that point).
+//! `ZoneManager.Load` (`data::world_data::ZoneData::load`) leaves every open zone **with a kill
+//! counter** at its start state (Tension, no kill count, no timer) and every open zone
+//! **without** one in Conflict with a `conflict_min` timer (it could never leave Tension: kills
+//! are ignored, Tension has no timer and Peace returns to Conflict); [`ZoneConflictManager::start`]
+//! copies them here and schedules the timers of the zones that have a `NextStateTime` (the C#
+//! `SetState` -> `SendSwitchZoneState` -> `SetTimerTask` at load; the broadcast reaches nobody at
+//! that point).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
