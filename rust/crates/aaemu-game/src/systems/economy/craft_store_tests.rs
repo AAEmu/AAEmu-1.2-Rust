@@ -3105,7 +3105,7 @@ fn real_specialty_data(path: &str) -> GameData {
     };
     let mut data = GameData::empty();
     data.items = crate::data::ItemData::load(&conn).unwrap();
-    data.zones = crate::data::ZoneData::load(&conn, 0).unwrap();
+    data.zones = crate::data::ZoneData::load(&conn).unwrap();
     data.systems.economy.store =
         crate::systems::economy::store_data::StoreData::load(&ctx).unwrap();
     data.systems.npcs.npc = crate::systems::npcs::npc::data::NpcData::load(&ctx).unwrap();
