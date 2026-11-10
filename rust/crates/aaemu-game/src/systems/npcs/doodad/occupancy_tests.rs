@@ -501,6 +501,31 @@ async fn tree_is_free_after_the_cast_finishes_or_is_cancelled() {
     );
 }
 
+/// Only a use that took the hold visits the occupancy map when it ends: its run carries the
+/// flag while the cast runs, and `end_skill` releases the hold and clears the flag.
+#[tokio::test(start_paused = true)]
+async fn a_held_cast_carries_the_release_flag_until_it_ends() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+
+    fx.cast(true, TREE_SKILL, &d);
+    let holds = |p: &PlayerRef| {
+        p.data()
+            .unit
+            .skill_state
+            .skill_task
+            .as_ref()
+            .map(|task| task.skill.state().holds_doodad)
+    };
+    assert_eq!(holds(&fx.p1), Some(true));
+    assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 1);
+    fx.wait_no_cast(&fx.p1, TREE_SKILL).await;
+    assert!(
+        fx.server.systems.npcs.doodads.occupancy.is_empty(),
+        "the finished cast kept the hold"
+    );
+}
+
 /// A logout (the character leaves the world) must not leave the tree locked: the stale entry
 /// is dropped by the safety check even when no release path ran.
 #[tokio::test]

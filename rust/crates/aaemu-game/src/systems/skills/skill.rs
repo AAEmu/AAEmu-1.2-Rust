@@ -2807,9 +2807,16 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
         return;
     }
     // The cast (completed, cancelled or interrupted) no longer holds a `once_one_*` doodad.
-    // A seat occupation of the same unit keeps its own bond flag.
-    let target = skill.state().initial_target;
-    if target != 0 {
+    // A seat occupation of the same unit keeps its own bond flag. Only a use that took the hold
+    // visits the occupancy map: every other skill ends here, combat skills included.
+    let (target, holds_doodad) = {
+        let mut state = skill.state();
+        (
+            state.initial_target,
+            std::mem::take(&mut state.holds_doodad),
+        )
+    };
+    if holds_doodad && target != 0 {
         crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster);
     }
     if !caster.is_unit() {

@@ -65,6 +65,10 @@ pub struct SkillRunState {
     /// A player's timed cast already started the global cooldown when it was accepted (the 1.2
     /// client counts it from the cast start), so `skill::cast` must not restart it at cast end.
     pub gcd_started: bool,
+    /// This use took a `once_one_man` doodad hold when it was accepted
+    /// (`npcs::doodad::occupancy::begin_skill`), so `end_skill` releases it and the delayed
+    /// effect marks it pending. Every other skill never touches the occupancy map.
+    pub holds_doodad: bool,
     /// The caster's cooldown state from just before a `plot_only` skill committed its GCD and
     /// cooldown at acceptance; restored when the plot is cancelled during its casting phase.
     pub plot_cooldown_snapshot: Option<PlotCooldownSnapshot>,

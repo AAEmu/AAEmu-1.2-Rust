@@ -233,6 +233,11 @@ pub fn refuses_start(
 
 /// Takes the hold of a skill start ([`StartHold::Cast`]); instant non-seat starts take none
 /// and are always allowed while the doodad is free. `false` = another unit holds it.
+///
+/// A taken hold is recorded in the run ([`SkillRunState::holds_doodad`]), so `end_skill` only
+/// visits the occupancy map for the skills that took one.
+///
+/// [`SkillRunState::holds_doodad`]: crate::systems::skills::state::SkillRunState::holds_doodad
 pub fn begin_skill(
     server: &GameServer,
     doodad: &DoodadRef,
@@ -242,13 +247,24 @@ pub fn begin_skill(
     match start_hold(server, doodad, caster, skill) {
         StartHold::None => true,
         StartHold::Seat => permits(server, doodad, caster),
-        StartHold::Cast => begin(server, doodad, caster, false),
+        StartHold::Cast => {
+            let taken = begin(server, doodad, caster, false);
+            if taken {
+                skill.state().holds_doodad = true;
+            }
+            taken
+        }
     }
 }
 
 /// Whether a *new timed* interaction of `skill_id` by `unit` must be refused at the execution
 /// funnel. Loot / fake use / purchase / skill hits and every instant interaction pass; the
 /// occupant's own pending effect also passes.
+///
+/// Every skill-bound `Doodad.Use` comes through here, so the cheap checks run first (the
+/// template flag, the matched func, then whether another unit holds the doodad at all); the
+/// classification of the skill, which builds a `SkillRun` and its effective cast time, only runs
+/// when the unit would actually be refused.
 pub fn refuses_new_timed(
     server: &GameServer,
     doodad: &DoodadRef,
@@ -261,16 +277,16 @@ pub fn refuses_new_timed(
     let Some(template) = server.game_data.systems.skills.skill(skill_id).cloned() else {
         return false;
     };
+    if !holds_for_skill(server, doodad, &template) || permits(server, doodad, unit) {
+        return false;
+    }
     if !is_interaction_skill(server, &template) {
         return false;
     }
     // The same timed predicate as `start_hold`: the effective cast time with the caster's real
     // skill level, stat and skill modifiers, so a cast reduced to 0 is instant in both places.
     let run = crate::systems::skills::skill::new_skill_for(server, template, Some(unit));
-    if crate::systems::skills::skill::cast_time_ms(server, &run, unit) <= 0 {
-        return false;
-    }
-    holds_for_skill(server, doodad, &run.template) && !permits(server, doodad, unit)
+    crate::systems::skills::skill::cast_time_ms(server, &run, unit) > 0
 }
 
 /// Whether `unit` may start an interaction with `doodad` now. Stale entries are dropped first.
@@ -304,7 +320,11 @@ pub fn begin_cast(
     if !holds_for_skill(server, doodad, &skill.template) {
         return true;
     }
-    begin(server, doodad, unit, false)
+    let taken = begin(server, doodad, unit, false);
+    if taken {
+        skill.state().holds_doodad = true;
+    }
+    taken
 }
 
 /// Takes / merges the seat occupation (`DoodadFuncAttachment`). Multi-seat attachments
