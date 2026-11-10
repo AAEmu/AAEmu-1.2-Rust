@@ -705,12 +705,16 @@ fn collision_tick(
                 break;
             }
         }
-        for id in contacts.iter().map(|(id, _)| *id).chain(covered) {
-            if st.collision_hits.len() >= MAX_COLLISION_HITS {
-                break;
-            }
-            if !st.collision_hits.contains(&id) {
-                st.collision_hits.push(id);
+        // Only a firing latches units: a unit merely inside the skill's area while nothing
+        // fires was not hit and must still trigger a firing when it later touches.
+        if fire_with.is_some() {
+            for id in contacts.iter().map(|(id, _)| *id).chain(covered) {
+                if st.collision_hits.len() >= MAX_COLLISION_HITS {
+                    break;
+                }
+                if !st.collision_hits.contains(&id) {
+                    st.collision_hits.push(id);
+                }
             }
         }
     }
@@ -1555,6 +1559,32 @@ mod tests {
         assert!((g.data().unit.transform.y - 110.0).abs() < 1e-3);
         assert_eq!(victim.data().unit.hp, 400, "hit at the moved position");
         assert_eq!(thrower.data().unit.hp, 500, "not hit at the spawn position");
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_does_not_latch_a_unit_merely_inside_the_area() {
+        // A unit inside the skill's area but outside the contact radius is not hit and must
+        // still trigger the firing when it later touches (only a firing latches units).
+        let f = contact_fixture_with_area(contact_template(false), (104.0, 100.0), 5);
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(f.victim.data().unit.hp, 500, "not hit at 4 m");
+        f.victim.data().unit.transform.set_xyz(100.5, 100.0, 100.0);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_050,
+        );
+        assert_eq!(f.victim.data().unit.hp, 400, "hit on touch");
     }
 
     #[tokio::test]

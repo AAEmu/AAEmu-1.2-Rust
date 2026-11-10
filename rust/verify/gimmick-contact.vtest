@@ -1,0 +1,28 @@
+# Gimmick contact hits: two bots touch the Cutting Wind powder keg (gimmick 56) together.
+#
+# The keg is spawned by keg1's GM command from keg1's own player faction, so both bots are
+# friendly to it and take no damage; the collision skill (18717, r20) still has to fire. The
+# game log must run with aaemu_game::systems::npcs::gimmick=debug (Scripts/verify.sh appends
+# its own filters to RUST_LOG). Exactly one "Gimmick collision: casting" line is expected for
+# the two bots: one explosion per touch, and the second bot is either in the same tick or
+# inside the previous firing's area latch.
+suite gimmick-contact
+bot keg1 gm
+bot keg2 gm
+
+[keg1]
+waitpeer 120 ${keg2}
+gopeer ${keg2}
+sync together 2
+gm gimmick spawn 56
+pump 1
+moverel 0 2 0
+expectlog "Gimmick collision: casting the collision skill" 10
+pump 3
+
+[keg2]
+waitpeer 120 ${keg1}
+sync together 2
+pump 1
+moverel 0 2 0
+pump 4
