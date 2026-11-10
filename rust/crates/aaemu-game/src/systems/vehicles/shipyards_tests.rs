@@ -762,3 +762,31 @@ async fn real_use_skill_14879_requires_and_consumes_its_reagents() {
         );
     }
 }
+
+#[tokio::test]
+async fn shipyard_placement_must_be_finite_and_near_the_builder() {
+    let server = shipyard_test_server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Owner", 100.0, 100.0),
+        0x00F0_1001,
+    );
+    client.conn.active_char = Some(player.clone());
+    give_design_item(&server, &player, DESIGN_10, 18124);
+    client.drain();
+    for (x, y, z, rot) in [
+        (f32::NAN, 120.0, 100.0, 0.5),
+        (120.0, f32::INFINITY, 100.0, 0.5),
+        (120.0, 120.0, 100.0, f32::NAN),
+        (5_000.0, 5_000.0, 100.0, 0.5),
+    ] {
+        assert!(
+            super::create(&server, &player, SHIPYARD_10, x, y, z, rot, DESIGN_10, 0).is_none(),
+            "({x}, {y}, {z}, {rot})"
+        );
+    }
+    assert!(server.systems.vehicles.shipyards.all().is_empty());
+    assert!(design_item_still_owned(&server, &player, DESIGN_10));
+}

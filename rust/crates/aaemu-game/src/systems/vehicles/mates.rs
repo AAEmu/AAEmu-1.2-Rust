@@ -320,6 +320,11 @@ pub(super) fn reset_rider_transform(transform: &mut Transform) {
     transform.set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
+/// How far from a mate a character can take a seat on it, measured like the slave bind reach
+/// (`bind_slave_by_tl`: 4 m) with a little room for a mate that is still walking up to its
+/// owner.
+const MOUNT_REACH: f32 = 6.0;
+
 /// `MountMate(connection, tlId, attachPoint, reason)`.
 pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point: u8, reason: u8) {
     // A transfer passenger must leave the carriage first; the mount would otherwise replace
@@ -333,9 +338,39 @@ pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point:
         super::bind_error(character, error_message::SLAVE_UNBIND_FIRST);
         return;
     }
-    let Some(mate) = manager_of(server, character).get_active_mate_by_tl_id(tl_id) else {
+    let manager = manager_of(server, character);
+    let Some(mate) = manager.get_active_mate_by_tl_id(tl_id) else {
         return;
     };
+    // The tl id is client-chosen: the mount must be within reach (otherwise this is a teleport
+    // to any active mate), and a character that already sits on a mate or a slave cannot take a
+    // second seat.
+    {
+        use crate::systems::skills::geometry::{distance_to, Target};
+        let reach = distance_to(
+            server,
+            &Target::Obj(WorldObject::from(character)),
+            &Target::Obj(WorldObject::from(&mate)),
+            true,
+        );
+        if !(reach <= MOUNT_REACH) {
+            tracing::warn!(
+                "MountMate: character {} is {reach:.1} m from mate {}; refusing",
+                character.obj_id,
+                mate.obj_id
+            );
+            return;
+        }
+    }
+    let on_slave = world_of(server, &WorldObject::from(character))
+        .is_some_and(|w| super::slaves::get_is_mounted(&w, character.obj_id).is_some());
+    if on_slave || manager.get_is_mounted(character.obj_id).is_some() {
+        tracing::debug!(
+            "MountMate: character {} is already seated; refusing mount {tl_id}",
+            character.obj_id
+        );
+        return;
+    }
     let (seat, owner_obj, mate_name) = {
         let d = mate.data();
         (
