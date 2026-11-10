@@ -81,7 +81,7 @@ fn install_crest_printers(doodad: &mut DoodadData) {
         .insert(22729, vec![func(22729, 19145, 4)]);
 }
 
-fn test_server() -> GameServer {
+fn test_config() -> AppConfig {
     let mut config = AppConfig {
         id: 1,
         ..AppConfig::default()
@@ -90,9 +90,19 @@ fn test_server() -> GameServer {
     config.network.num_connections = 10;
     config.connections.mysql_provider.host = "127.0.0.1".into();
     config.connections.mysql_provider.port = 1; // nothing listens here
+    config
+}
+
+fn test_server() -> GameServer {
+    let config = test_config();
     let db = MySqlPoolOptions::new()
         .acquire_timeout(Duration::from_millis(300))
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
+    test_server_with_db(config, db)
+}
+
+/// [`test_server`] with a caller-built pool (the MySQL-gated two-upload test).
+fn test_server_with_db(config: AppConfig, db: sqlx::mysql::MySqlPool) -> GameServer {
     let mut data = GameData::empty();
     // `ConfirmDefaultUcc` creates a Crest Ink (the C# hack-fix template).
     data.items.templates.insert(
@@ -264,7 +274,14 @@ fn appearance() -> Vec<u8> {
 
 /// Server with a joined stream connection (id 900) bound to game connection 77.
 async fn joined(world: Arc<TestWorld>) -> (GameServer, StreamClient, GameClient) {
-    let server = test_server();
+    joined_with(test_server(), world).await
+}
+
+/// [`joined`] on a caller-built server (the MySQL-gated upload test).
+async fn joined_with(
+    server: GameServer,
+    world: Arc<TestWorld>,
+) -> (GameServer, StreamClient, GameClient) {
     server.streams.set_world(world);
     let g = game_connection(&server, 77);
     // The ActiveChar of game connection 77 (character 555, as `TestWorld::active_character`).
@@ -320,9 +337,20 @@ fn printer_1470() -> StreamDoodad {
 /// [`joined`] plus a synthetic world instance 0 with the live doodad `p` (at 2 m from the
 /// player). The stream fake answers `doodad()` from the same snapshot.
 async fn joined_printer(p: StreamDoodad) -> (GameServer, StreamClient, GameClient) {
-    let (server, c, g) = joined(Arc::new(TestWorld {
-        doodads: vec![p.clone()],
-    }))
+    joined_printer_with(test_server(), p).await
+}
+
+/// [`joined_printer`] on a caller-built server (the MySQL-gated upload test).
+async fn joined_printer_with(
+    server: GameServer,
+    p: StreamDoodad,
+) -> (GameServer, StreamClient, GameClient) {
+    let (server, c, g) = joined_with(
+        server,
+        Arc::new(TestWorld {
+            doodads: vec![p.clone()],
+        }),
+    )
     .await;
     server.world.create_world_instance(
         Arc::new(crate::data::world_templates::WorldTemplate::synthetic(
@@ -1187,7 +1215,7 @@ async fn ucc_custom_upload() {
     let (server, mut c, mut g) = joined_printer(printer_3038()).await;
     let p = server.world.character_by_connection(77).unwrap();
     p.data().money = 50_000;
-    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 2);
     let start = start_upload_body(PRINTER_OBJ, 5);
     c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
         .await
@@ -1240,8 +1268,234 @@ async fn ucc_custom_upload() {
         ),
         "no money task on a custom upload"
     );
-    // The save failed before the Crest Ink went to the bag, the reagent is gone and the money
-    // is untouched.
+    // The save failed before the Crest Ink went to the bag, one reagent was spent (one is left
+    // for the second upload) and the money is untouched.
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        1
+    );
+    assert!(
+        bag_items(&p)
+            .iter()
+            .all(|i| i.template_id == ITEM_CREST_BRAINSTORM),
+        "no Crest Ink in the bag before the save succeeds"
+    );
+
+    // The upload finished: the per-connection upload state is gone, so a **second** custom
+    // upload on the same stream connection starts instead of throwing (the C# never cleared
+    // `_complexUploadParts` and closed the connection here).
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        1,
+        "one reagent left for the second upload"
+    );
+
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+    c.recv(
+        &server,
+        &frame(
+            ct::CT_UPLOAD_EMBLEM_STREAM,
+            &hex("05 00 00 00  03 00 00 00  00 00 00 00  03 00  11 22 33"),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+    // The second upload also completes and reaches its own ConfirmDefaultUcc / save step.
+    let res = c
+        .recv(
+            &server,
+            &frame(
+                ct::CT_UPLOAD_EMBLEM_STREAM,
+                &hex("05 00 00 00  02 00 00 00  01 00 00 00  02 00  44 55"),
+            ),
+        )
+        .await;
+    assert!(res.is_err());
+    assert_eq!(c.drain(), vec![hex("0A 00  02  00 00 00 00")]);
+    let stored = server
+        .streams
+        .ucc
+        .get_ucc(2)
+        .expect("second custom UCC registered");
+    assert_eq!(stored.ty, UccType::Complex);
+    assert_eq!(stored.uploader_id, 555);
+    assert_eq!(stored.data, vec![0x11, 0x22, 0x33, 0x44, 0x55]);
+    assert_eq!(server.streams.ucc.parts_len(), 0);
+    assert_eq!(server.streams.ucc.queue_len(), 0);
+
+    // One charge per upload: two IMPRINT_UCC tasks (the reagent removal), no money task.
+    let frames = game_frames(&mut g);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(
+                |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
+                    && body.first() == Some(&task_type::IMPRINT_UCC)
+            )
+            .count(),
+        2
+    );
+    assert!(
+        !frames.iter().any(
+            |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
+                && body.first() == Some(&task_type::DEPOSIT_MONEY)
+        ),
+        "no money task on a custom upload"
+    );
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        0,
+        "one reagent per upload"
+    );
+}
+
+/// `CTEmblemStreamUploadStatus` (`ConfirmDefaultUcc`) during a custom upload must not charge
+/// the reagent and save an empty Complex UCC: the interleaved packet order is refused and the
+/// in-progress upload is left untouched.
+#[tokio::test]
+async fn ucc_default_confirm_during_a_custom_upload_is_refused() {
+    let (server, mut c, mut g) = joined_printer(printer_3038()).await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
+    let start = start_upload_body(PRINTER_OBJ, 5);
+    c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+        .await
+        .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+    c.recv(
+        &server,
+        &frame(
+            ct::CT_UPLOAD_EMBLEM_STREAM,
+            &hex("05 00 00 00  03 00 00 00  00 00 00 00  03 00  AA BB CC"),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+
+    let res = c
+        .recv(&server, &frame(ct::CT_EMBLEM_STREAM_UPLOAD_STATUS, &[1]))
+        .await;
+    assert!(res.is_err(), "the confirm is refused");
+    assert!(server.streams.ucc.is_empty(), "no UCC saved");
+    assert_eq!(p.data().money, 50_000);
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_BRAINSTORM,
+            -1
+        ),
+        1,
+        "the reagent is not charged"
+    );
+    assert!(game_frames(&mut g).is_empty(), "no item task sent");
+    assert_eq!(
+        server.streams.ucc.parts_len(),
+        1,
+        "upload still in progress"
+    );
+    assert_eq!(server.streams.ucc.queue_len(), 1);
+}
+
+/// The MySQL half of [`ucc_custom_upload`]: with a real database both custom uploads on the
+/// same stream connection save, so the client gets `End` twice and two `uccs` rows exist.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses a temporary uccs table"]
+async fn ucc_two_custom_uploads_on_one_connection_are_saved() {
+    use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("private MySQL");
+    let (_, definition): (String, String) = sqlx::query_as("SHOW CREATE TABLE `uccs`")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&temporary_shadow_definition(&definition))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (server, mut c, mut g) = joined_printer_with(
+        test_server_with_db(test_config(), pool.clone()),
+        printer_3038(),
+    )
+    .await;
+    let p = server.world.character_by_connection(77).unwrap();
+    p.data().money = 50_000;
+    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 2);
+    let start = start_upload_body(PRINTER_OBJ, 5);
+    for (first, last) in [
+        (
+            "05 00 00 00  03 00 00 00  00 00 00 00  03 00  AA BB CC",
+            "05 00 00 00  02 00 00 00  01 00 00 00  02 00  DD EE",
+        ),
+        (
+            "05 00 00 00  03 00 00 00  00 00 00 00  03 00  11 22 33",
+            "05 00 00 00  02 00 00 00  01 00 00 00  02 00  44 55",
+        ),
+    ] {
+        c.recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
+            .await
+            .expect("start upload");
+        assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+        c.recv(&server, &frame(ct::CT_UPLOAD_EMBLEM_STREAM, &hex(first)))
+            .await
+            .expect("first part");
+        assert_eq!(c.drain(), vec![hex("0A 00  00 00 00 00 00")]);
+        c.recv(&server, &frame(ct::CT_UPLOAD_EMBLEM_STREAM, &hex(last)))
+            .await
+            .expect("last part saves");
+        assert_eq!(c.drain(), vec![hex("0A 00  02  00 00 00 00")]);
+    }
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT CAST(id AS SIGNED), CAST(uploader_id AS SIGNED) FROM uccs ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0], (1, 555));
+    assert_eq!(rows[1], (2, 555));
+    assert_eq!(
+        server.streams.ucc.get_ucc(2).expect("second UCC").data,
+        vec![0x11, 0x22, 0x33, 0x44, 0x55]
+    );
+    // Two saved uploads: one reagent and one Crest Ink each, no money.
     assert_eq!(p.data().money, 50_000);
     assert_eq!(
         crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
@@ -1251,17 +1505,35 @@ async fn ucc_custom_upload() {
         ),
         0
     );
-    assert!(bag_items(&p).is_empty());
-
-    // C# never clears _complexUploadParts: a second custom upload on the same stream
-    // connection throws. The pre-checks need money and the reagent again so the packet reaches
-    // the queue.
-    p.data().money = 50_000;
-    give_item(&server, &p, ITEM_CREST_BRAINSTORM, 1);
-    assert!(c
-        .recv(&server, &frame(ct::CT_START_UPLOAD_EMBLEM_STREAM, &start))
-        .await
-        .is_err());
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&p).items_count_in_unlocked(
+            crate::models::container::slot_type::INVENTORY,
+            ITEM_CREST_INK,
+            -1
+        ),
+        2,
+        "one Crest Ink gained per upload"
+    );
+    let frames = game_frames(&mut g);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(
+                |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
+                    && body.first() == Some(&task_type::GAIN_ITEM_WITH_UCC)
+            )
+            .count(),
+        2,
+        "one Crest Ink item task per upload"
+    );
+    assert!(
+        !frames.iter().any(
+            |(op, body)| *op == crate::opcodes::sc::SCItemTaskSuccessPacket
+                && body.first() == Some(&task_type::DEPOSIT_MONEY)
+        ),
+        "no money task on a custom upload"
+    );
+    pool.close().await;
 }
 
 /// The frames a game connection received, as (opcode, body) (level-1 frames only).
