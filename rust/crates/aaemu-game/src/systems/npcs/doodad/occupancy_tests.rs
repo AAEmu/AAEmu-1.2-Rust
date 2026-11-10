@@ -56,7 +56,7 @@ const HIT_SKILL: u32 = 7405;
 const USE_EFFECT: u32 = 940_001;
 const INTERACTION_MS: i32 = 5000;
 const DELAYED_MS: i32 = 400;
-const EFFECT_DELAY_MS: i32 = 1500;
+const EFFECT_DELAY_MS: i32 = 4_000;
 
 const ORE: u32 = 8022;
 const LABOR_BASE: i32 = 100;
@@ -672,13 +672,13 @@ async fn delayed_effect_keeps_the_hold_and_the_occupant_effect_runs() {
         fx.p1.data().unit.skill_state.skill_task.is_none(),
         "delayed cast did not clear its slot"
     );
-
-    // The effect is still pending: the tree is not free.
+    // Past the 2 s accept grace, but the effect is still pending: the tree is not free.
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
     let frames = fx.cast(false, TREE_SKILL, &d);
     assert_refused(&frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
     while fx.count(&fx.p1, ORE) == 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
