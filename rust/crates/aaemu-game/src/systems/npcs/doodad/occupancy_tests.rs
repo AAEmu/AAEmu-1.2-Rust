@@ -24,6 +24,7 @@ use crate::systems::npcs::doodad::data::DoodadData;
 use crate::systems::npcs::doodad::manager;
 use crate::systems::npcs::doodad::templates::*;
 use crate::systems::skills::data::effects::EffectTemplate;
+use crate::systems::skills::data::misc::Anim;
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
 use crate::systems::skills::state::{SkillRef, SkillRun};
@@ -52,13 +53,16 @@ const HIT_NEXT: u32 = 4071;
 
 const TREE_SKILL: u32 = 7401;
 const TREE_DELAYED: u32 = 7404;
+const TREE_ANIMATED: u32 = 7406;
 const CHAIR_SKILL: u32 = 7402;
 const INSTANT_SKILL: u32 = 7403;
 const HIT_SKILL: u32 = 7405;
 const USE_EFFECT: u32 = 940_001;
+const FIRE_ANIM: u32 = 940_002;
 const INTERACTION_MS: i32 = 5000;
 const DELAYED_MS: i32 = 400;
 const EFFECT_DELAY_MS: i32 = 4_000;
+const FIRE_ANIM_MS: i32 = 3_000;
 
 const ORE: u32 = 8022;
 const LABOR_BASE: i32 = 100;
@@ -192,6 +196,23 @@ fn game_data() -> GameData {
     delayed.consume_labor_power = 0;
     delayed.effect_delay = EFFECT_DELAY_MS;
     s.add_skill(delayed);
+    // The same gather whose effect waits only for its fire animation: no effect delay, so the
+    // animation time is the whole delay.
+    let mut animated = tree.clone();
+    animated.id = TREE_ANIMATED;
+    animated.casting_time = DELAYED_MS;
+    animated.consume_labor_power = 0;
+    animated.fire_anim_id = FIRE_ANIM;
+    animated.use_anim_time = true;
+    s.add_skill(animated);
+    s.anims.anims.insert(
+        FIRE_ANIM,
+        Anim {
+            id: FIRE_ANIM,
+            combat_sync_time: FIRE_ANIM_MS,
+            ..Anim::default()
+        },
+    );
     // Instant seat / instrument use (casting_time 0, like the real 15857 / 20847 sit skills).
     let mut chair = crate::systems::skills::tests::skill_template(CHAIR_SKILL);
     chair.target_type = SkillTargetType::Doodad as i32;
@@ -233,6 +254,8 @@ fn game_data() -> GameData {
         .skill(TREE_START, TREE_SKILL)
         .func(TREE_START, use_func(5), TREE_LOOT as i32)
         .skill(TREE_START, TREE_DELAYED)
+        .func(TREE_START, use_func(12), TREE_LOOT as i32)
+        .skill(TREE_START, TREE_ANIMATED)
         .func(TREE_LOOT, loot(2), TREE_START as i32)
         // The same shape with once_one_interaction only: NOT enforced.
         .template(SOLO, &[(SOLO_START, 1), (SOLO_LOOT, 2)], true, false)
@@ -802,6 +825,103 @@ async fn delayed_effect_keeps_the_hold_and_the_occupant_effect_runs() {
         1,
         "the occupant's delayed effect was refused"
     );
+}
+
+/// The fire animation's time is part of the delay the hold has to cover: with no other delay,
+/// the effect still waits for the animation after the cast slot was cleared, and another unit
+/// must not take the doodad meanwhile.
+#[tokio::test(start_paused = true)]
+async fn the_animation_delay_is_part_of_the_pending_hold() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+
+    fx.cast(true, TREE_ANIMATED, &d);
+    fx.wait_no_cast(&fx.p1, TREE_ANIMATED).await;
+    assert_eq!(fx.count(&fx.p1, ORE), 0, "the effect must still be pending");
+    // Past the 2 s accept grace, the hold is the pending effect's alone.
+    fx.server
+        .systems
+        .npcs
+        .doodads
+        .occupancy
+        .age_entry(d.obj_id, 2_500);
+    let frames = fx.cast(false, TREE_SKILL, &d);
+    assert_refused(&frames);
+    assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
+    while fx.count(&fx.p1, ORE) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        fx.count(&fx.p1, ORE),
+        1,
+        "the occupant's effect was refused after its animation delay"
+    );
+}
+
+/// The whole flow of a lost hold: another unit took the doodad while the occupant's cast was
+/// running, so the occupant's effect is refused at the funnel, and it does not pay labor for
+/// an interaction that never ran.
+#[tokio::test(start_paused = true)]
+async fn an_occupant_refused_at_the_funnel_pays_no_labor() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+
+    fx.cast(true, TREE_SKILL, &d);
+    assert!(fx.p1.data().unit.skill_state.skill_task.is_some());
+    // The second unit now holds the doodad (the entry of the first one is gone).
+    super::occupancy::forget(&fx.server, d.obj_id);
+    let skill = fx.run_skill(TREE_SKILL);
+    assert!(super::occupancy::begin_cast(
+        &fx.server,
+        &d,
+        &WorldObject::from(&fx.p2),
+        &skill
+    ));
+
+    fx.c1.drain();
+    fx.wait_no_cast(&fx.p1, TREE_SKILL).await;
+    let expected =
+        crate::packets::world::SCErrorMsgPacket::new(ALREADY_INTERACTING_SOMEONE_ELSE, 0, true);
+    let frames = fx.c1.drain();
+    assert!(
+        frames.contains(&(sc::SCErrorMsgPacket, body(&expected))),
+        "the occupant was not told: {frames:?}"
+    );
+    assert_eq!(
+        fx.p1.data().labor_power,
+        LABOR_BASE as i16,
+        "labor was paid for a refused interaction"
+    );
+    assert_eq!(fx.count(&fx.p1, ORE), 0);
+    assert_eq!(d.data().func_group_id, TREE_START);
+}
+
+/// The execution funnel refuses a NEW timed interaction of a unit that does not hold the
+/// doodad: the unit is told, nothing runs, and its cast is cancelled (like a permission refusal)
+/// so the labor / item cost is refunded.
+#[tokio::test]
+async fn the_funnel_refusal_cancels_the_refused_cast() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+    let w1 = WorldObject::from(&fx.p1);
+    let w2 = WorldObject::from(&fx.p2);
+    let skill = fx.run_skill(TREE_SKILL);
+
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w1, &skill));
+    fx.c2.drain();
+    assert!(!fx.p2.data().skill_char.skill_cancelled);
+    let ctx = fx.ctx(&d);
+    super::phase::use_doodad(&ctx, Some(&w2), TREE_SKILL, 0);
+    drop(ctx);
+    assert_refused(&fx.c2.drain());
+    assert!(
+        fx.p2.data().skill_char.skill_cancelled,
+        "the refused cast was not cancelled"
+    );
+    assert_eq!(fx.count(&fx.p2, ORE), 0);
+    assert_eq!(d.data().func_group_id, TREE_START);
 }
 
 /// A skill-less loot interaction (the direct `Doodad.Use` / `CSLootOpenBag` shape) runs while

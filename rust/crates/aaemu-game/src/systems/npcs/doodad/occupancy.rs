@@ -340,8 +340,11 @@ pub fn begin_bond(server: &GameServer, doodad: &DoodadRef, unit: &WorldObject, s
     begin(server, doodad, unit, true)
 }
 
-/// Marks that this cast's interaction effect is still pending after the cast slot was cleared
-/// (`Skill.ScheduleEffects` with a delay), so the hold survives until `end_skill`.
+/// Marks that this cast's interaction effect is still to run after the cast slot was cleared
+/// (`Skill.ScheduleEffects`), so the hold survives until `end_skill`. `delay_ms` is the whole
+/// delay of the effect (animation time included); an instant effect is marked too, because
+/// `cast` clears the slot before the effect runs and `end_skill` releases the hold, and
+/// another unit must not take the doodad in that window.
 pub fn mark_effects_pending(
     server: &GameServer,
     doodad: &DoodadRef,
