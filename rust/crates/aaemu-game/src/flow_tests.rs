@@ -1028,8 +1028,8 @@ async fn a_connection_over_the_frame_rate_is_closed() {
     assert!(closed_within(&mut client, Duration::from_secs(10)).await);
 }
 
-/// Unknown or unreadable packets are logged at `error` only for the first ten of a connection;
-/// none of them closes it (the real client sends not-yet-ported opcodes).
+/// Unknown or unreadable packets are logged at `error` only for the first ten of a 60 s window of
+/// a connection; none of them closes it (the real client sends not-yet-ported opcodes).
 #[tokio::test]
 async fn unknown_packets_are_counted_per_connection_and_do_not_close_it() {
     let server = test_server();
@@ -1046,4 +1046,34 @@ async fn unknown_packets_are_counted_per_connection_and_do_not_close_it() {
     assert!(!c.conn.note_bad_packet());
     let mut fresh = client(&server, 94);
     assert!(fresh.conn.note_bad_packet());
+}
+
+/// The `error` budget is per 60 s window, not per connection lifetime: a new unported opcode in a
+/// long session still shows up at `error`.
+#[test]
+fn bad_packet_error_logs_use_a_sliding_window() {
+    use crate::net::connection::{BadPacketLog, BAD_PACKET_ERROR_LOG_LIMIT, BAD_PACKET_LOG_WINDOW};
+    let mut log = BadPacketLog::default();
+    let t0 = std::time::Instant::now();
+    for i in 0..BAD_PACKET_ERROR_LOG_LIMIT {
+        assert!(log.note(t0 + Duration::from_millis(u64::from(i)), 1), "{i}");
+    }
+    // The rest of the window is demoted ...
+    for i in 0..50 {
+        assert!(!log.note(t0 + Duration::from_secs(1 + i / 10), 1));
+    }
+    // ... and the next window starts with a fresh budget.
+    let next = t0 + BAD_PACKET_LOG_WINDOW;
+    for i in 0..BAD_PACKET_ERROR_LOG_LIMIT {
+        assert!(
+            log.note(next + Duration::from_millis(u64::from(i)), 1),
+            "{i}"
+        );
+    }
+    assert!(!log.note(next + Duration::from_secs(1), 1));
+    // A quiet connection never overflows.
+    let mut quiet = BadPacketLog::default();
+    for i in 0..100u64 {
+        assert!(quiet.note(t0 + Duration::from_secs(i * 61), 2));
+    }
 }
