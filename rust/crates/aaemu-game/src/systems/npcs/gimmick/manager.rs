@@ -1522,7 +1522,7 @@ mod tests {
         c.unit.hp = 500;
         c.unit.max_hp = 1000;
         let thrower = crate::test_support::spawn_player(&server, &client, c, 0x100);
-        let mut victim_client = crate::test_support::TestClient::new(&server, 2, 2);
+        let victim_client = crate::test_support::TestClient::new(&server, 2, 2);
         let mut v = crate::test_support::test_character(2, "Victim", 100.0, 110.0);
         v.unit.hp = 500;
         v.unit.max_hp = 1000;
