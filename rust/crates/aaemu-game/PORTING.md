@@ -2032,10 +2032,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   empty). **Unconfirmed:** the 10.x eligibility test reads the living members' AI "state 2"
   (`sub_393422D0`, vtable slot 128) as "in combat"; the Rust uses `UnitBase::is_in_battle`, as no
   other AI state matches it. Tests:
-  `npcs::npc::spawner_group_tests::{enable_respawn_respawns_a_lost_member_into_the_same_batch,
+  `npcs::npc::spawner::spawner_group_tests::{enable_respawn_respawns_a_lost_member_into_the_same_batch,
   enable_respawn_waits_while_a_member_fights, enable_respawn_needs_the_move_leader,
   enable_respawn_respects_the_spawner_window, enable_respawn_reanchors_on_the_leader_home_when_it_strays,
-  enable_respawn_keeps_the_batch_owner, a_batch_without_a_living_member_is_dropped,
+  enable_respawn_keeps_the_batch_owner, enable_respawn_survives_an_absurd_spawn_delay,
+  a_batch_without_a_living_member_is_dropped,
   disabled_respawn_keeps_the_spawner_refill}`. Live check (2026-11-10, lane
   `r7-group-rules`): a time window on spawner 3832 made its placement spawn group 45 (rule 2,
   `enable_respawn`); after `/kill` of one `664` follower the other two stayed, and the lost

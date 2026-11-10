@@ -197,12 +197,15 @@ struct Batch {
 
 /// The 10.x delay: the spawner's authored `spawn_delay_min/max` re-rolled as
 /// `min + rand * (max - min)` (`sub_39343460`, Z:852490-852500).
+///
+/// A NaN rolls as 0; an infinite or out-of-range value from the data saturates to "never"
+/// (like the spawner's own `as i32` respawn time) instead of panicking in the conversion.
 fn roll_delay(spawner: &NpcSpawner) -> Duration {
     let Some(t) = spawner.template() else {
         return Duration::ZERO;
     };
     let secs = random_float(t.spawn_delay_min, t.spawn_delay_max).max(0.0);
-    Duration::from_secs_f64(f64::from(secs))
+    Duration::try_from_secs_f64(f64::from(secs)).unwrap_or(Duration::MAX)
 }
 
 impl GroupBatches {
