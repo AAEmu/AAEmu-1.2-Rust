@@ -307,6 +307,8 @@ pub async fn run_loader(
             if p.data().is_online {
                 add_player(server, dungeon, p);
             } else {
+                // The loader never delivered this paid admission: keep the ticket usable.
+                release_entry_ticket(server, dungeon, p);
                 dungeon
                     .st()
                     .enter_requests
@@ -358,20 +360,19 @@ pub fn queue_player(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) 
         send_error(p, err::CANNOT_USE_PORTAL_IN_TRIAL, 0);
         return false;
     }
-    let fresh = !dungeon.st().admitted_players.contains(&p.character_id);
-    if fresh
-        && !server
-            .systems
-            .instances
-            .indun
-            .charge_entry(server, p, &dungeon.indun_zone)
+    // The `fresh` check, the charge and the admission mark share the charge lock: two
+    // simultaneous requests cannot both pass the check and charge twice.
+    if !server
+        .systems
+        .instances
+        .indun
+        .charge_fresh_entry(server, dungeon, p, &dungeon.indun_zone)
     {
         return false;
     }
     let finished = {
         let mut st = dungeon.st();
         st.players_with_access.insert(p.character_id);
-        st.admitted_players.insert(p.character_id);
         st.enter_requests.push(p.clone());
         st.finished_loading
     };
@@ -383,6 +384,16 @@ pub fn queue_player(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) 
         });
     }
     true
+}
+
+/// The admission did not complete after the ticket was charged (run destroyed, loader aborted,
+/// party binding lost): start the restore window so the retry does not need a second ticket.
+fn release_entry_ticket(server: &GameServer, dungeon: &Dungeon, p: &PlayerRef) {
+    server.systems.instances.indun.release_failed_entry(
+        p.character_id,
+        dungeon.zone_group_id(),
+        dungeon.indun_zone.restore_item_time,
+    );
 }
 
 /// The world's character table already lists this character when it asks to enter (C#
@@ -455,6 +466,14 @@ pub fn add_player(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) {
 
 fn add_player_inner(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) {
     if !dungeon.has_access(p.character_id) || !dungeon.is_queued(p) {
+        // The request was withdrawn / destroyed before the admission ran: a charged ticket
+        // must not be lost. A character really inside keeps its visit state.
+        if !dungeon
+            .world(server)
+            .is_some_and(|w| worlds::has_character(&w, p.character_id))
+        {
+            release_entry_ticket(server, dungeon, p);
+        }
         return;
     }
     if !sync_party_access(server, dungeon, p) {
@@ -463,6 +482,12 @@ fn add_player_inner(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) 
             .retain(|r| r.character_id != p.character_id);
         st.players_with_access.remove(&p.character_id);
         drop(st);
+        if !dungeon
+            .world(server)
+            .is_some_and(|w| worlds::has_character(&w, p.character_id))
+        {
+            release_entry_ticket(server, dungeon, p);
+        }
         send_error(p, err::INSTANCE_LEAVE_PARTY, 0);
         return;
     }
@@ -476,6 +501,7 @@ fn add_player_inner(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) 
     let Some(world) = dungeon.world(server) else {
         // C#: World.HasCharacter on a destroyed dungeon (NullReferenceException).
         tracing::error!("[Dungeon] AddPlayer on a destroyed dungeon");
+        release_entry_ticket(server, dungeon, p);
         return;
     };
     // `character.ParentWorld` (the world the character comes from)
@@ -981,6 +1007,11 @@ fn destroy_dungeon_inner(server: &GameServer, dungeon: &Arc<Dungeon>) -> bool {
     };
     for p in world.all_characters() {
         leave_instance(server, dungeon, &p, dungeon.is_system);
+    }
+    // Queued players never arrived: their charged ticket starts its restore window instead of
+    // staying marked as an in-progress visit.
+    for p in dungeon.st().enter_requests.clone() {
+        release_entry_ticket(server, dungeon, &p);
     }
     unregister_indun_events(server, dungeon, world.id);
     {

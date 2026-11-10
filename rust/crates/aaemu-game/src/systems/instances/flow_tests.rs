@@ -2343,6 +2343,67 @@ async fn after_restore_item_time_a_new_ticket_is_consumed() {
     dungeon::destroy_dungeon(&server, &d);
 }
 
+/// One ticket covers one paid run and exactly one free return: the third run within the window
+/// charges again (a reused free return must not restart the window).
+#[tokio::test]
+async fn one_ticket_covers_at_most_one_free_return() {
+    let (data, items) = ticket_dungeon();
+    let server = dungeon_server_with(data);
+    server.systems.npcs.hooks.economy.install(items.clone());
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    for run in 1..=2 {
+        use_enter_func(&server, &a.p, DUNGEON_ZONE);
+        assert!(error_frames(&a.frames()).is_empty(), "run {run}");
+        let d = server.systems.instances.all_dungeons()[0].clone();
+        await_loader(&d).await;
+        use_exit_func(&server, &a.p);
+        dungeon::destroy_dungeon(&server, &d);
+        assert_eq!(
+            items.charges.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "run {run}"
+        );
+    }
+    // Run 3 is still inside restore_item_time, but the ticket's free return was used.
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert!(error_frames(&a.frames()).is_empty());
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_ne!(a.instance(), 0);
+    assert_eq!(items.charges.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        3
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+/// A run destroyed while the player is still queued (the loader never delivers them) must not
+/// swallow the ticket: the retry within the restore window is free.
+#[tokio::test]
+async fn a_run_destroyed_before_arrival_does_not_swallow_the_ticket() {
+    let (data, items) = ticket_dungeon();
+    let server = dungeon_server_with(data);
+    server.systems.npcs.hooks.economy.install(items.clone());
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert_eq!(items.charges.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    // The loader sleeps 100 ms before it runs; destroy the run before it arrives.
+    dungeon::destroy_dungeon(&server, &d);
+    assert_eq!(a.instance(), 0);
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert!(error_frames(&a.frames()).is_empty());
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_ne!(a.instance(), 0);
+    assert_eq!(items.charges.load(std::sync::atomic::Ordering::Relaxed), 1);
+    dungeon::destroy_dungeon(&server, &d);
+}
+
 /// Every refusal of a dungeon request carries an error for the client: unknown zone, a zone that
 /// is no dungeon, a dungeon without zone keys (the server cannot build it), a dungeon that needs a
 /// party, and a full party run.

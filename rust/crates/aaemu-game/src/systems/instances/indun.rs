@@ -30,9 +30,12 @@ pub(super) struct ChannelSelectPending {
 /// `indun_zones.restore_item_time` bookkeeping for one character / zone group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryItemRestore {
-    /// The current visit paid an entry item (or reused a restore window) and has not left yet.
+    /// The current visit paid an entry item and has not left yet.
     Inside,
-    /// The item-paid visit ended at `at` (unix ms); re-entering within `window` seconds is free.
+    /// The current visit is the one free return a paid visit allows; leaving it consumes the
+    /// ticket's grace (no new `Left`), so the next run charges again.
+    Reused,
+    /// The item-paid visit ended at `at` (unix ms); one re-entry within `window` seconds is free.
     Left { at: i64, window: u32 },
 }
 
@@ -56,9 +59,12 @@ fn now_ms() -> i64 {
 }
 
 impl IndunManager {
-    pub(super) fn charge_entry(
+    /// `fresh` admission check + charge + admission mark under the same lock, so two concurrent
+    /// requests cannot both pass the check and charge the ticket twice.
+    pub(super) fn charge_fresh_entry(
         &self,
         server: &GameServer,
+        dungeon: &Dungeon,
         p: &PlayerRef,
         zone: &IndunZone,
     ) -> bool {
@@ -66,6 +72,17 @@ impl IndunManager {
             .charges
             .lock()
             .expect("instance entry charges poisoned");
+        if dungeon.st().admitted_players.contains(&p.character_id) {
+            return true;
+        }
+        if !self.charge_entry_locked(server, p, zone) {
+            return false;
+        }
+        dungeon.st().admitted_players.insert(p.character_id);
+        true
+    }
+
+    fn charge_entry_locked(&self, server: &GameServer, p: &PlayerRef, zone: &IndunZone) -> bool {
         let dungeons = &server.config.dungeons;
         let profile = server.config.world.profile;
         if !self.check_entry_attempt_count(
@@ -80,11 +97,11 @@ impl IndunManager {
             return false;
         }
         // `Dungeons.RequireEntryItems` = false neither asks for nor consumes the ticket. A
-        // re-entry within `indun_zones.restore_item_time` after leaving a paid visit reuses it.
+        // re-entry within `indun_zones.restore_item_time` after leaving a paid visit reuses it
+        // (`reuse_entry_item` marks the visit `Reused`; only a real consumption marks it paid).
         let item_entry = dungeons.require_entry_items && zone.item_id > 0;
-        if item_entry
-            && !self.reuse_entry_item(p.character_id, zone.zone_group_id)
-            && !server.systems.npcs.hooks.economy.get().is_some_and(|h| {
+        if item_entry && !self.reuse_entry_item(p.character_id, zone.zone_group_id) {
+            if !server.systems.npcs.hooks.economy.get().is_some_and(|h| {
                 h.bag_consume_item(
                     server,
                     p,
@@ -92,12 +109,10 @@ impl IndunManager {
                     zone.item_id,
                     1,
                 ) == 1
-            })
-        {
-            send_error(p, err::ENTER_INST_REQ_ITEM, zone.item_id);
-            return false;
-        }
-        if item_entry {
+            }) {
+                send_error(p, err::ENTER_INST_REQ_ITEM, zone.item_id);
+                return false;
+            }
             self.mark_entry_item_paid(p.character_id, zone.zone_group_id);
         }
         self.check_entry_attempt_count(
@@ -111,11 +126,12 @@ impl IndunManager {
     }
 
     /// Whether the entry is covered by an `indun_zones.restore_item_time` window: true when the
-    /// character left an item-paid run of the zone group within its restore window; a re-entry
-    /// marks the visit paid again so the next leave restarts the window. A fresh admission never
-    /// happens while the character stands in a paid run (same-run re-entry skips the charge), so
-    /// an `Inside` marker here is a leave whose path missed the note; it grants no free entry.
-    /// Single lock, so the check and the state change cannot interleave with a leave.
+    /// character left an item-paid run of the zone group within its restore window. The ticket
+    /// covers exactly one free return: the reuse marks a terminal [`EntryItemRestore::Reused`],
+    /// which `note_entry_item_leave` clears instead of opening a new window. A fresh admission
+    /// never happens while the character stands in a paid run (same-run re-entry skips the
+    /// charge), so `Inside` / `Reused` here are leaves whose path missed the note; they grant no
+    /// free entry. Single lock, so the check and the state change cannot interleave with a leave.
     fn reuse_entry_item(&self, character_id: u32, zone_group_id: u32) -> bool {
         let mut r = self
             .entry_item_restore
@@ -123,12 +139,12 @@ impl IndunManager {
             .expect("entry item restore poisoned");
         let now = now_ms();
         r.retain(|_, s| match s {
-            EntryItemRestore::Inside => true,
+            EntryItemRestore::Inside | EntryItemRestore::Reused => true,
             EntryItemRestore::Left { at, window } => now - *at <= i64::from(*window) * 1000,
         });
         let key = (character_id, zone_group_id);
         if matches!(r.get(&key), Some(EntryItemRestore::Left { .. })) {
-            r.insert(key, EntryItemRestore::Inside);
+            r.insert(key, EntryItemRestore::Reused);
             true
         } else {
             false
@@ -143,7 +159,8 @@ impl IndunManager {
     }
 
     /// The character leaves (or is removed from, or disconnects out of) a dungeon of
-    /// `zone_group_id`: an item-paid visit starts its `restore_item_time` re-entry window.
+    /// `zone_group_id`: an item-paid visit starts its `restore_item_time` re-entry window; the
+    /// ticket's one free return ends here (no new window).
     pub(crate) fn note_entry_item_leave(
         &self,
         character_id: u32,
@@ -155,7 +172,41 @@ impl IndunManager {
             .lock()
             .expect("entry item restore poisoned");
         let key = (character_id, zone_group_id);
-        if matches!(r.get(&key), Some(EntryItemRestore::Inside)) {
+        match r.get(&key) {
+            Some(EntryItemRestore::Inside) => {
+                r.insert(
+                    key,
+                    EntryItemRestore::Left {
+                        at: now_ms(),
+                        window: restore_item_time,
+                    },
+                );
+            }
+            Some(EntryItemRestore::Reused) => {
+                r.remove(&key);
+            }
+            _ => {}
+        }
+    }
+
+    /// The admission did not complete after the ticket was charged (run destroyed / load aborted
+    /// before arrival, party binding lost, no spawn): start the restore window so the retry does
+    /// not need a second ticket. A free return that never arrived keeps its free return.
+    pub(super) fn release_failed_entry(
+        &self,
+        character_id: u32,
+        zone_group_id: u32,
+        restore_item_time: u32,
+    ) {
+        let mut r = self
+            .entry_item_restore
+            .lock()
+            .expect("entry item restore poisoned");
+        let key = (character_id, zone_group_id);
+        if matches!(
+            r.get(&key),
+            Some(EntryItemRestore::Inside | EntryItemRestore::Reused)
+        ) {
             r.insert(
                 key,
                 EntryItemRestore::Left {
