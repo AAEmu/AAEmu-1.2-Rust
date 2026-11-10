@@ -2,7 +2,7 @@
 //! `BaseUnit.GetRelationStateTo`, `BaseUnit.CanAttack`, `GetOwnerCharacter`,
 //! `SkillTargetingUtil.FilterWithRelation` / `IsRelationValid`.
 
-use crate::data::world_data::{conflict_type, factions};
+use crate::data::world_data::conflict_type;
 use crate::server::GameServer;
 use crate::systems::social::nation;
 use crate::world::{now_ms, PlayerRef, WorldObject};
@@ -120,14 +120,17 @@ fn is_peace_zone(server: &GameServer, target: &Target) -> bool {
         .is_some_and(|c| c.current_state == conflict_type::PEACE)
 }
 
-/// Whether the 1.2 Peace rule lets `attacker` harm `target` (both resolved to their characters;
-/// a pet / slave / siege weapon counts as its owner's attack).
+/// Whether the cycling-zone Peace rule lets `attacker` harm `target` (both resolved to their
+/// characters; a pet / slave / siege weapon counts as its owner's attack).
 ///
-/// The rule comes from `ui_texts` 5195 `state_peace_tooltip` ("you cannot attack other players
-/// during a peace period") and the owner's 2026-11-10 recollection. Its exceptions:
-/// * a pirate on either side (`ui_texts` 5195's "except for pirates"; faction 161 is hostile to
-///   everyone, `set_faction` adds `Contemptuous`, and the arrest rules already treat 161 as the
-///   pirate faction);
+/// The rule is the owner's 2026-11-10 recollection of EU 1.2 and covers only the cycling
+/// conflict zones (`conflict_zones`): a zone in the Peace state is an absolute PvP lockdown and
+/// pirates are fully protected too (a pirate cannot be attacked and cannot attack). The
+/// "except for pirates" of `ui_texts` 5195 `state_peace_tooltip` is about the permanently safe
+/// faction-controlled home zones, which have no conflict cycle at all; pirate attacks there are
+/// ordinary hostile attacks and must not be blocked (see `PORTING.md`).
+///
+/// The remaining exceptions are the owner's clarification:
 /// * the two characters are duelling each other (`DuelManager.IsInDuelWith`);
 /// * their factions have an explicit hostile diplomacy relation. Only the runtime nation rows
 ///   (`NationManager.relation`, written by `CSFactionDeclareHostile`) count: the static
@@ -137,13 +140,8 @@ fn is_peace_zone(server: &GameServer, target: &Target) -> bool {
 /// Force attack / Retribution never reach this function's callers' shortcuts: the caller checks
 /// this rule before those flags turn a friendly pair attackable.
 fn peace_allows_attack(server: &GameServer, attacker: &PlayerRef, target: &PlayerRef) -> bool {
-    // (a) Pirates are excepted by the zone text; a pirate may also still attack others.
-    if attacker.data().unit.faction_id == factions::PIRATE
-        || target.data().unit.faction_id == factions::PIRATE
-    {
-        return true;
-    }
-    // (b) A duel between exactly these two characters.
+    // (a) A duel between exactly these two characters. The duel team factions are hostile, so
+    // this must run before the peace refusal (and it covers the duel's own units too).
     if server
         .systems
         .social
@@ -152,7 +150,7 @@ fn peace_allows_attack(server: &GameServer, attacker: &PlayerRef, target: &Playe
     {
         return true;
     }
-    // (c) A declared hostile diplomacy relation (a runtime nation row).
+    // (b) A declared hostile diplomacy relation (a runtime nation row).
     let nations = &server.systems.social.nations;
     let a = attacker.data().unit.faction_id;
     let b = target.data().unit.faction_id;
@@ -401,7 +399,7 @@ pub fn is_relation_valid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::world_data::{FactionRelation, SystemFaction};
+    use crate::data::world_data::{factions, FactionRelation, SystemFaction};
     use crate::data::GameData;
 
     fn faction(id: u32, mother: u32) -> SystemFaction {
@@ -851,10 +849,11 @@ mod tests {
         assert!(can_attack(&server, &td, &tc));
     }
 
-    /// `ui_texts` 5195 "except for pirates": a pirate target and a pirate attacker keep their
-    /// hostile attacks in Peace; the non-pirate control pair stays refused.
+    /// A cycling zone in Peace is an absolute PvP lockdown: pirates are protected like every
+    /// other player, and a pirate cannot attack players either. In Conflict the same pairs are
+    /// attackable again (the relation stays Hostile).
     #[tokio::test]
-    async fn peace_lets_pirates_attack_and_be_attacked() {
+    async fn peace_refuses_pirates_attacking_and_being_attacked() {
         let server = crate::test_support::test_server_with(pvp_data());
         init_conflicts(&server);
         let ca = crate::test_support::TestClient::new(&server, 1, 1);
@@ -866,18 +865,112 @@ mod tests {
         let (tnu, tpir, thar) = (obj_target(&nuian), obj_target(&pirate), obj_target(&harani));
         assert_eq!(relation_to(&server, &tnu, &tpir), RelationState::Hostile);
         assert!(
-            can_attack(&server, &tnu, &tpir),
-            "a pirate target is allowed"
+            !can_attack(&server, &tnu, &tpir),
+            "a pirate target is protected in Peace"
         );
         assert!(
-            can_attack(&server, &tpir, &tnu),
-            "a pirate attacker is allowed"
+            !can_attack(&server, &tpir, &tnu),
+            "a pirate attacker is refused in Peace"
         );
-        assert!(can_attack(&server, &tpir, &thar));
         assert!(
-            !can_attack(&server, &tnu, &thar),
-            "non-pirates stay refused"
+            !can_attack(&server, &tpir, &thar),
+            "a pirate cannot attack any player in Peace"
         );
+
+        // Conflict: the same pairs are ordinary hostile attacks.
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let ce = crate::test_support::TestClient::new(&server, 5, 5);
+        let conflict_nuian = player_in(&server, &cd, 0x20A, 101, CONFLICT_ZONE, 0);
+        let conflict_pirate = player_in(&server, &ce, 0x30B, factions::PIRATE, CONFLICT_ZONE, 0);
+        let (tnu2, tpir2) = (obj_target(&conflict_nuian), obj_target(&conflict_pirate));
+        assert!(can_attack(&server, &tnu2, &tpir2));
+        assert!(can_attack(&server, &tpir2, &tnu2));
+    }
+
+    /// The permanently safe faction-controlled home zones have no conflict cycle: a player
+    /// attacks a pirate there as an ordinary hostile target, with no crime state.
+    #[tokio::test]
+    async fn home_zone_players_attack_pirates_without_crime() {
+        use crate::systems::skills::data::effects::EffectTemplate;
+        use crate::systems::skills::data::EffectKind;
+        use crate::systems::skills::skill::use_skill;
+        use crate::systems::skills::state::SkillRun;
+        use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+        let mut data = pvp_data();
+        let skills = &mut data.systems.skills;
+        skills.add_buff(crate::systems::skills::data::BuffTemplate {
+            id: 2_167, // BuffConstants.Retribution
+            kind: 2,
+            duration: 60_000,
+            stack_rule: 1,
+            ..Default::default()
+        });
+        let mut effect = super::super::tests::damage_effect(1, 600);
+        effect.check_crime = true;
+        skills.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(effect)),
+            900_001,
+        );
+        let mut template = super::super::tests::skill_template(10_004);
+        template.effects.push(super::super::tests::skill_effect(
+            900_001,
+            EffectKind::DamageEffect,
+            1,
+        ));
+        let template = std::sync::Arc::new(template);
+        skills.add_skill((*template).clone());
+        crate::test_support::open_client_skills(&mut data);
+        let server = std::sync::Arc::new(crate::test_support::test_server_with(data));
+        super::super::bind(&server);
+        // No conflict state is initialised for the home zone (group 1): Peace never applies.
+        assert!(!server
+            .systems
+            .social
+            .conflicts
+            .get(1)
+            .is_some_and(|c| c.current_state == conflict_type::PEACE));
+
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let attacker = player_in(&server, &ca, 0x101, 101, crate::test_support::TEST_ZONE, 0);
+        let pirate = player_in(
+            &server,
+            &cb,
+            0x109,
+            factions::PIRATE,
+            crate::test_support::TEST_ZONE,
+            0,
+        );
+        let (ta, tp) = (obj_target(&attacker), obj_target(&pirate));
+        assert_eq!(relation_to(&server, &ta, &tp), RelationState::Hostile);
+        assert!(
+            can_attack(&server, &ta, &tp),
+            "a pirate is attackable in a home zone"
+        );
+
+        let hp = pirate.data().unit.hp;
+        let mut target = SkillCastTarget::Unit(pirate.obj_id);
+        use_skill(
+            &server,
+            &SkillRun::new(template, 1),
+            &WorldObject::from(&attacker),
+            SkillCaster::Unit(attacker.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        );
+        assert!(pirate.data().unit.hp < hp, "the attack lands");
+        assert!(
+            !attacker.data().unit.buffs.check_buff(2_167),
+            "attacking a pirate raises no Retribution"
+        );
+        assert!(
+            attacker.data().skill_char.assaulted_by.is_empty(),
+            "attacking a pirate creates no crime evidence/assault record"
+        );
+        assert_eq!(attacker.data().crime_point, 0);
     }
 
     /// Two duellists may keep fighting in Peace (owner recollection 2026-11-10); after the
