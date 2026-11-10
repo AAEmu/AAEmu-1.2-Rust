@@ -1981,11 +1981,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   rule). `is_leader` is still loaded only; `enable_respawn = 't'` (42 of the 141 groups used by
   spawners) now drives the partial respawn described below. The runtime rules for
   `is_move_leader` / `formation_tension` / `aggro_rule_id` are in the `systems::ai` entry below.
-  Live check (2026-11-10): the 21 `main_world` placements whose `UnitId` is a group id (32, 42,
-  44, 45, 79, 80) still select the AUTOCREATED ordinary sibling in `SelectSpawnerId` (the group
-  template is not optimal), so they spawn the colliding NPC template (group 32 placements
-  spawned NPC 32 porters) and no group batch; this is a pre-existing spawner selection issue,
-  not changed by the formation/aggro work. Giving the lane's throwaway `compact.sqlite3` copy a
+  Live check (2026-11-10): the 21 `main_world` placements whose `UnitId` equals a group id
+  (32, 42, 44, 45, 79, 80) are real NPC placements, not group placements: the spawn JSON has no
+  type field, and these ids are the NPC templates placed there (32 Porter, 42/44 the Reedwind
+  Summoner's Raid towers, 45 Dragon Summoner, 79/80 the quest givers Irene and Angela Royster).
+  `SelectSpawnerId` correctly picks their AUTOCREATED NPC spawner, as the C# does (the group
+  spawners 9027/9129/9151/3832/10981/4670 are category 0 with no window or schedule). Do not
+  infer a group from a colliding id; a real group placement would need an explicit marker. To see
+  a group batch, giving the lane's throwaway `compact.sqlite3` copy a
   time window on spawner 9027 made the placement spawn the group (NPCs 8116/8117): the followers
   tracked the roaming leader at their world-axis offsets, and pulling one member put the abuser
   on the other members' tables (`npc group: member joined the fight`).
