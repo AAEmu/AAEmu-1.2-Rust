@@ -353,7 +353,7 @@ pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point:
             &Target::Obj(WorldObject::from(&mate)),
             true,
         );
-        if !(reach <= MOUNT_REACH) {
+        if !reach.is_finite() || reach > MOUNT_REACH {
             tracing::warn!(
                 "MountMate: character {} is {reach:.1} m from mate {}; refusing",
                 character.obj_id,

@@ -529,7 +529,7 @@ pub fn hang(server: &GameServer, character: &PlayerRef, unit_obj_id: u32, target
             &Target::Obj(target.clone()),
             true,
         );
-        if !(reach <= HANG_REACH) {
+        if !reach.is_finite() || reach > HANG_REACH {
             tracing::warn!(
                 character = %character.data().unit.name,
                 target_obj_id,
