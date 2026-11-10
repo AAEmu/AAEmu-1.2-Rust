@@ -2264,18 +2264,33 @@ async fn family_titles_are_validated_like_the_client() {
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);
     let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
     settle(&mut [&mut a, &mut b]);
-    // `XlIsValidName` (ko VNT_FAMILY_TITLE): 1-12 characters, no leading '.', no leading or
-    // trailing whitespace. The ui_texts "no special characters" text is not what the validator
-    // does, so punctuation and mixed scripts pass (tested below).
-    for (title, code) in [
+    // `VNT_FAMILY_TITLE` is `NamePolicy` type 3 (type 5 is `VNT_PORTAL`, the permissive row):
+    // 1-12 letters, so no spaces, digits or punctuation (the retail ui_texts 2324 reads "Enter 1
+    // to 12 characters for the title (excluding special characters)."). A character outside the
+    // BMP cannot be stored in the utf8mb3 `family_members.title`, so it is refused as well, even
+    // a letter: the three math letters below are only 6 UTF-16 units.
+    let refused = [
         ("", error::FAMILY_TITLE),
         (" ", error::FAMILY_TITLE),
         (".Name", error::FAMILY_TITLE),
+        (" Name", error::FAMILY_TITLE),
         ("Name ", error::FAMILY_TITLE),
         ("\tName", error::FAMILY_TITLE),
+        ("Big Bro", error::FAMILY_TITLE),
+        ("A  B!", error::FAMILY_TITLE),
+        ("Big Bro 99!", error::FAMILY_TITLE),
+        ("Kid99", error::FAMILY_TITLE),
+        ("Kid!", error::FAMILY_TITLE),
+        ("Kid-Kid", error::FAMILY_TITLE),
+        ("Kid\u{1F600}", error::FAMILY_TITLE),
+        ("\u{1D400}\u{1D401}\u{1D402}", error::FAMILY_TITLE),
         ("AAAAAAAAAAAAA", error::FAMILY_TITLE),
-        ("badword kid", error::FAMILY_TITLE_BAD),
-    ] {
+        // The word list applies to a well-formed title only.
+        ("badword", error::FAMILY_TITLE_BAD),
+        ("xBadWordx", error::FAMILY_TITLE_BAD),
+        ("badword kid", error::FAMILY_TITLE),
+    ];
+    for (title, code) in refused {
         a.send(
             &server,
             cs::CSFamilyInviteMemberPacket,
@@ -2285,23 +2300,23 @@ async fn family_titles_are_validated_like_the_client() {
         assert_eq!(a.frames(), vec![error_frame(code)], "title {title:?}");
         assert!(b.ops().is_empty(), "title {title:?} reached the client");
     }
-    // Punctuation, an interior doubled space and a 12-character title pass.
+    // A 12-letter title passes (and is stored as sent).
     a.send(
         &server,
         cs::CSFamilyInviteMemberPacket,
-        family_invite_body("Bob", "A  B!"),
+        family_invite_body("Bob", "ABCDEFGHIJKL"),
     )
     .await;
     assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
     b.send(
         &server,
         cs::CSFamilyReplyInvitationPacket,
-        family_reply_body(1, true, "A  B!"),
+        family_reply_body(1, true, "ABCDEFGHIJKL"),
     )
     .await;
     let fid = a.p.data().family;
     assert_ne!(fid, 0);
-    assert_eq!(
+    let title_of_bob = || {
         server
             .systems
             .social
@@ -2310,42 +2325,40 @@ async fn family_titles_are_validated_like_the_client() {
             .unwrap()
             .member(2)
             .unwrap()
-            .title,
-        "A  B!"
-    );
+            .title
+            .clone()
+    };
+    assert_eq!(title_of_bob(), "ABCDEFGHIJKL");
     a.ops();
     b.ops();
-    for (title, code) in [
-        ("", error::FAMILY_TITLE),
-        (" Name", error::FAMILY_TITLE),
-        (".Name", error::FAMILY_TITLE),
-        ("Name ", error::FAMILY_TITLE),
-        ("\tName", error::FAMILY_TITLE),
-        ("AAAAAAAAAAAAA", error::FAMILY_TITLE),
-        ("badword", error::FAMILY_TITLE_BAD),
-    ] {
+    // The same rule applies to a title change by the steward.
+    for (title, code) in refused {
         let mut body = PacketStream::new();
         body.write_u32(2).write_str(title);
         a.send(&server, cs::CSFamilyChangeTitlePacket, body).await;
         assert_eq!(a.frames(), vec![error_frame(code)], "title {title:?}");
         assert!(b.ops().is_empty(), "title {title:?} reached the client");
+        assert_eq!(title_of_bob(), "ABCDEFGHIJKL", "title {title:?} was stored");
     }
-    let mut body = PacketStream::new();
-    body.write_u32(2).write_str("Big  Bro!");
-    a.send(&server, cs::CSFamilyChangeTitlePacket, body).await;
-    assert_eq!(b.ops(), vec![sc::SCFamilyTitleChangedPacket]);
-    assert_eq!(
-        server
-            .systems
-            .social
-            .families
-            .family(fid)
-            .unwrap()
-            .member(2)
-            .unwrap()
-            .title,
-        "Big  Bro!"
-    );
+    // One letter, mixed case and letters of other scripts (all in the BMP) pass.
+    for title in [
+        "A",
+        "Bro",
+        "bRo",
+        "\u{411}\u{440}\u{430}\u{442}",
+        "\u{B3D9}\u{C0DD}",
+    ] {
+        let mut body = PacketStream::new();
+        body.write_u32(2).write_str(title);
+        a.send(&server, cs::CSFamilyChangeTitlePacket, body).await;
+        assert_eq!(
+            b.ops(),
+            vec![sc::SCFamilyTitleChangedPacket],
+            "title {title:?}"
+        );
+        a.ops();
+        assert_eq!(title_of_bob(), title);
+    }
 }
 
 #[tokio::test]

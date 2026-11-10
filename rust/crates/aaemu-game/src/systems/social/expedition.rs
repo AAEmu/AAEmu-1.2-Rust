@@ -704,9 +704,10 @@ pub fn valid_sponsors(alliance: u32) -> &'static [u32] {
     }
 }
 
-/// Whether a guild name is on the character-name block list (`blocked_texts.check_name`, the
-/// same rule the lobby applies: case-insensitive, whole string or partial match).
-fn name_is_blocked(server: &GameServer, name: &str) -> bool {
+/// Whether a guild name (or a family title) is on the character-name block list
+/// (`blocked_texts.check_name`, the same rule the lobby applies: case-insensitive, whole string
+/// or partial match).
+pub(crate) fn name_is_blocked(server: &GameServer, name: &str) -> bool {
     let folded = name.to_lowercase();
     server
         .game_data

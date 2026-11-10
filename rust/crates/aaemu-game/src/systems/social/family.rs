@@ -129,13 +129,17 @@ struct State {
 /// How long a family invitation can be answered (same as the guild / party invitations).
 pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
 
-/// `VNT_FAMILY_TITLE` (type 5) in the 1.2 `xlcommon.dll` `NamePolicyInfo` table for the Korean
-/// locale (0): local / English minimum 1, maximum 12, `is_allow_space`, `is_allow_mix_case` and
-/// `is_allow_special_letter`, `limit_space_cnt` 0. `XlIsValidName` -> `FUN_33008f80` rejects a
-/// leading `.`, a leading or trailing whitespace (`XlIsSpace`: space, tab, CR, LF, VT, FF) and
-/// the length bounds; every other character and script passes (punctuation included, because
-/// `is_allow_special_letter` is set), and interior or doubled spaces pass (`limit_space_cnt` 0).
-/// The `ui_texts` 2324 text says "no special characters", which the validator does not enforce.
+/// The longest family title, in UTF-16 units (the client counts `wchar_t`); the shortest is 1.
+///
+/// The title rule is the client's `VNT_FAMILY_TITLE`, `NamePolicy` type 3: the 1.2 `x2game.dll`
+/// registers `VNT_CHAR` 0, `VNT_SUMMONS` 1, `VNT_FACTION` 2, `VNT_FAMILY_TITLE` 3,
+/// `VNT_CHAT_TAB` 4 and `VNT_PORTAL` 5 (type 5, the permissive row that allows spaces and
+/// punctuation, belongs to portals). Its row in the 1.2 `xlcommon.dll` `NamePolicyInfo` table
+/// (RVA 0x5db78, 24-byte rows indexed by type + 6 * locale) is minimum 1 / maximum 12 for the
+/// Korean locale 0 (2 / 26 for locale 2, `en_us`) with only the mixed-case flag (0x4): neither
+/// the space flag (0x1) nor the any-non-letter flag (0x10) is set, so a title is letters only.
+/// The retail `ui_texts` 2324 (`FAMILY_TITLE`) reads "Enter 1 to 12 characters for the title
+/// (excluding special characters)." in both languages, so the server keeps 1..=12.
 pub(crate) const TITLE_MAX_CHARS: usize = 12;
 
 /// The family member cap. The 1.2 compact has no family tables or `content_configs` keys for
@@ -148,41 +152,26 @@ pub fn max_members(server: &GameServer) -> usize {
     server.config.social.family_max_members.max(2)
 }
 
-/// The client's `XlIsSpace` set (space, tab, CR, LF, VT, FF).
-fn title_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\r' | '\n' | '\u{0b}' | '\u{0c}')
+/// Whether `c` may appear in a family title: a letter (the type 3 row allows no spaces, digits
+/// or punctuation) that the `family_members.title` column (`varchar(45)`, utf8mb3) can store.
+/// A character outside the BMP (4 UTF-8 bytes: an emoji, CJK extension B, ...) would make the
+/// `REPLACE INTO` fail and roll back the whole family's `save_family_rows` transaction.
+fn title_char_allowed(c: char) -> bool {
+    c.is_alphabetic() && c.len_utf8() <= 3
 }
 
 /// The client's title refusal (`FAMILY_TITLE` / `FAMILY_TITLE_BAD`), or `None` when `title` is
-/// acceptable. `FAMILY_TITLE_BAD` reuses the `blocked_texts.check_name` list of the lobby,
-/// character names and guild names; that list is a server rule, not part of `XlIsValidName`.
+/// acceptable: 1 to [`TITLE_MAX_CHARS`] letters (see there). `FAMILY_TITLE_BAD` reuses the
+/// `blocked_texts.check_name` list of the lobby, character names and guild names; that list is a
+/// server rule, not part of the client's name policy.
 fn validate_title(server: &GameServer, title: &str) -> Option<i16> {
-    let count = title.chars().count();
-    let first = title.chars().next();
-    let last = title.chars().last();
-    if count == 0
-        || count > TITLE_MAX_CHARS
-        || first == Some('.')
-        || first.is_some_and(title_space)
-        || last.is_some_and(title_space)
+    if !(1..=TITLE_MAX_CHARS).contains(&title.encode_utf16().count())
+        || !title.chars().all(title_char_allowed)
     {
         return Some(error::FAMILY_TITLE);
     }
-    let folded = title.to_lowercase();
-    let blocked = server
-        .game_data
-        .characters
-        .blocked_names
-        .iter()
-        .any(|rule| {
-            let text = rule.text.to_lowercase();
-            if rule.partial_match {
-                folded.contains(&text)
-            } else {
-                folded == text
-            }
-        });
-    blocked.then_some(error::FAMILY_TITLE_BAD)
+    crate::systems::social::expedition::name_is_blocked(server, title)
+        .then_some(error::FAMILY_TITLE_BAD)
 }
 
 /// One pending family invitation: the inviter, the title it was sent with (validated at invite
