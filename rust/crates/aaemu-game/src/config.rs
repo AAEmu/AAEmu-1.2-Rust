@@ -46,6 +46,9 @@ pub trait ConfigEnum: Sized {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    /// Wire protocol revision. Internal game data stays on the r208022 schema.
+    #[serde(rename = "clientrevision", deserialize_with = "lenient")]
+    pub client_revision: u32,
     #[serde(rename = "id", deserialize_with = "lenient")]
     pub id: u8,
     #[serde(rename = "additionalesid", deserialize_with = "lenient_vec")]
@@ -171,6 +174,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            client_revision: 208022,
             id: 0,
             additionales_id: Vec::new(),
             secret_key: String::new(),

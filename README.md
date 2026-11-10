@@ -6,6 +6,11 @@
 **AAEmu 1.2 (Rust)** is an open source server emulator for **ArcheAge 1.2** (client `r208022`),
 written in Rust.
 
+**This branch targets the newer r223748 (1.2.5.0) client.** Its game configuration
+enables native r223748 wire compatibility. See [r223748 setup and launcher](Docs/r223748.md)
+for remote-IP configuration, the portable launcher, and the local client bundle builder.
+The server's game database remains the r208022 server dataset.
+
 It is a spin-off of [AAEmu](https://github.com/AAEmu/AAEmu), which is written in C# and covers
 many client versions. Here the login server, game server and tools were ported to Rust for the 1.2
 client only. The C# code is no longer in the tree, but it remains in the git history.

@@ -132,6 +132,16 @@ async fn pre_auth_wait(deadline: Option<tokio::time::Instant>) {
 
 /// Binds `Network.Host:Port` (`"*"` = any) and serves connections until the task is dropped.
 pub async fn run(server: Arc<GameServer>) -> std::io::Result<()> {
+    if !matches!(server.config.client_revision, 208022 | 223748) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ClientRevision must be 208022 or 223748",
+        ));
+    }
+    tracing::info!(
+        revision = server.config.client_revision,
+        "Client wire protocol"
+    );
     let cfg = &server.config.network;
     let host = if cfg.host == "*" {
         "0.0.0.0"
@@ -187,9 +197,10 @@ pub async fn serve_with(
     let handle = conn.handle();
     // The writer sees the strict latch so a frame that raced the selected one cannot overtake it.
     let delay = conn.reply_delay_state();
+    let revision = server.config.client_revision;
     let mut writer = tokio::spawn(write_frames(
         id,
-        FramedWrite::new(wr, FrameCodec),
+        crate::net::r223748::RevisionSink::new(FramedWrite::new(wr, FrameCodec), revision),
         out_rx,
         cmd_tx,
         delay,
@@ -227,7 +238,19 @@ pub async fn serve_with(
                             break;
                         }
                     }
-                    if let Err(e) = server.handle_frame(&mut conn, &payload).await {
+                    let adapted;
+                    let payload = if revision == 223748 {
+                        adapted = match crate::net::r223748::translate(&payload, true) {
+                            Ok(Some(frame)) => frame,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                tracing::warn!("session {id}: invalid r223748 frame: {e}");
+                                break;
+                            }
+                        };
+                        adapted.as_slice()
+                    } else { &payload[..] };
+                    if let Err(e) = server.handle_frame(&mut conn, payload).await {
                         // GameProtocolHandler.OnReceive catch-all: connection.Shutdown()
                         tracing::error!("session {id}: {e}");
                         break;

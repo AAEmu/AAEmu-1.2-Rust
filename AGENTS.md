@@ -119,6 +119,12 @@ The servers were ported from C# (.NET). The C# projects (`AAEmu.*`, `Tools/`) ha
 
 Target client: **ArcheAge 1.2** (`r208022`).
 
+Branch `feat/client-r223748` additionally targets **r223748 (1.2.5.0)** through
+`net::r223748` at the socket boundary, selected by `ClientRevision`. The shipped
+configuration selects 223748; internal packet definitions and server data retain
+the r208022 schema. See `Docs/r223748.md`. Keep proprietary client/runtime binaries
+out of git; the complete client bundle is a local artifact.
+
 Human docs live under `Docs/wiki/` (synced to GitHub wiki). Prefer those over inventing setup steps.
 
 ## Getting the stack running (players and contributors)
