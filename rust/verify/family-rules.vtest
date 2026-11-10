@@ -43,12 +43,12 @@ sync joined 2
 rawcs 01a STR(${member})STR(Kid)
 expectseen 368 5
 # A valid title change on the member.
-rawcs 01e PEERID STR(Brother)
+rawcs 01e PEERIDSTR(Brother)
 sync titled 2
 # Steward self-actions are refused.
 rawcs 01d SELFID
 expectseen 378 5
-rawcs 01e SELFID STR(Boss)
+rawcs 01e SELFIDSTR(Boss)
 expectseen 385 5
 rawcs 01f SELFID
 expectseen 529 5
@@ -57,10 +57,10 @@ expectseen 529 5
 waitpeer 120 ${leader}
 sync invited-decline 2
 # CSFamilyReplyInvitation: invitor character id, join=false, title.
-rawcs 01b PEERID 00 STR(Kid)
+rawcs 01b PEERID00STR(Kid)
 sync next-invite 2
 # Accept the second invitation.
-rawcs 01b PEERID 01 STR(Kid)
+rawcs 01b PEERID01STR(Kid)
 sync joined 2
 expectpkt SCFamilyTitleChangedPacket 10
 sync titled 2
