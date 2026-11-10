@@ -65,6 +65,8 @@ pub struct System {
     pub headquarters: dominion::headquarters::Headquarters,
     /// The weekly siege calendar clock and last announced periods (WP-S1).
     pub calendar: dominion::runtime::CalendarRuntime,
+    /// Runtime-only record of the participant seals this server handed out.
+    pub siege_seals: dominion::seals::SealRuntime,
     /// Items / money / mail (installed by the economy subsystem).
     pub hooks: hooks::HousingHookSlot,
 }

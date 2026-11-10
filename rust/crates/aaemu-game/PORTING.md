@@ -5529,6 +5529,33 @@ and in NPC wandering / buff remaining times.
   peace_and_no_pvp_protections_still_refuse_the_siege_attack,
   a_non_participant_is_not_made_hostile_by_the_siege}`; the first two were mutation-checked
   against the removed call site.
+* systems::housing (siege participant seals, 2026-11-10): an accepted roster entry is handed
+  the side's seal item from `siege_zones` (`defense_ticket_id` / `offense_ticket_id`; items
+  21313-21320 / 28170-28173, category 120, not sellable, `price`/`honor_price` 0, 240-minute
+  absolute lifetime) and loses it when the siege ends or the entry leaves. The flow source is
+  the same period source as the hostility row (IGN 2014-09-26 "Castles" and Total ArcheAge
+  2014-11-20, grade C): the game "selects from the eligible participants for Attackers and
+  Defenders up to the allotted limits"; the 1.2 client has no siege-participation CS
+  (`siege.md` 0), so the roster acceptance is the selection point. Grant: both roster-join
+  paths (`/joinsiege` and `/dominion register`) and a sweep at the Scheduled -> Active
+  transition (`tick_once`); a character that already holds the item (the defence
+  reinforcement skill 16975 grants the same defence seal) gets no duplicate and stays
+  untracked. Removal: `seals::reconcile` in the 1-second participant tick takes one seal back
+  once the character is no longer on the active siege's matching roster; an offline character
+  keeps the item for its authored lifetime (the backstop), and the runtime grant set is
+  deliberately not persisted (after a restart the lifetime is the only cleanup). Grant uses
+  item task 42 (`SkillEffectGainItem`, the existing verified ticket-grant task in
+  `skills/effects/special/items.rs`); the removal uses the ordinary consume path. The retail
+  grant/removal trigger and packet are UNKNOWN (no 1.2 capture); this is the owner's
+  participant-list rule. Tests:
+  `seals_tests::{a_selected_participant_receives_the_side_seal_once,
+  the_roster_sweep_hands_the_seal_to_every_online_member,
+  the_seal_is_taken_back_after_the_siege_ends_or_the_member_leaves,
+  an_already_held_reinforcement_seal_is_not_duplicated_or_revoked,
+  an_offline_member_keeps_the_item_for_its_authored_lifetime_backstop,
+  the_grant_is_client_visible_as_an_item_task}` and the command flow test
+  `joining_hands_the_side_seal_and_the_end_of_the_siege_takes_it_back`; the grant and the
+  reconcile removal were mutation-checked.
 * systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's
   flow points were checked against the implementation and the 1.2 data. Auction scroll: the
   automatic camp-lot posting (WP-SD1c, `auction_post.rs`) matches "every 3 weeks, starting bid

@@ -18,6 +18,7 @@ pub mod period;
 pub mod reinforce;
 pub mod rights;
 pub mod runtime;
+pub mod seals;
 pub mod siege_area;
 pub mod siege_items;
 pub mod state;
@@ -46,6 +47,8 @@ mod participants_tests;
 mod rights_tests;
 #[cfg(test)]
 mod save_tests;
+#[cfg(test)]
+mod seals_tests;
 #[cfg(test)]
 mod tax_tests;
 #[cfg(test)]
