@@ -61,12 +61,39 @@ pub struct Npc {
     pub ai_hold_or_idle: bool,
     /// `Spawner?.Position.Z` (`None` without a spawner), kept for `GetReferenceHeight`.
     pub spawner_z: Option<f32>,
+    /// Unix ms of the last `MoveTowards` step (`0` = not moving). The NPC group formation
+    /// code reads it to tell a moving move leader from a standing one (1.2
+    /// `AI.IsMoving(leader.id, 0)`); `StopMovement` and arriving clear it.
+    pub last_move_ms: i64,
     // ---- phase 5 / ai interaction ----
     /// Whether the client offers this NPC's interaction (cursor / talk marker). `false` while
     /// the NPC runs an `ai_command_sets` row whose `can_interact` is `'f'`; the AI publishes the
     /// change with `SCNpcInteractionStatusChanged` and the visibility code repeats it to players
     /// that enter sight later (INFERRED, see `PORTING.md` WP-5b).
     pub interactable: bool,
+    // ---- phase 6 / npc groups ----
+    /// Runtime identity of the spawner `NpcGroup` batch this NPC was spawned in
+    /// (`0` = not a `npcs/npc/group.rs` member): a monotonic batch id, so object-id reuse can
+    /// never relink a follower to an unrelated NPC.
+    pub npc_group_instance: u32,
+    /// `npc_groups.id` (`0` = no group).
+    pub npc_group_id: u32,
+    /// `npc_groups.aggro_rule_id` copied at spawn: `0` = no group aggro sharing (the 1 vs 2
+    /// difference is unknown; both share).
+    pub npc_group_aggro_rule_id: i32,
+    /// `npc_group_members.is_move_leader`: this NPC moves the formation.
+    pub npc_group_is_move_leader: bool,
+    /// Obj id of the batch's move leader (`0` = none).
+    pub npc_group_leader_obj_id: u32,
+    /// `npc_group_members.formation_offset_*` (world-axis deltas; see `PORTING.md`).
+    pub npc_group_formation_offset: (f32, f32, f32),
+    /// `npc_group_members.formation_tension` (0 is treated as 1.0).
+    pub npc_group_formation_tension: f32,
+    /// The follower's formation move is running (used to stop it exactly once).
+    pub npc_group_formation_moving: bool,
+    /// The abuser last shared with the group (avoids a 200 m member scan on every combat tick;
+    /// cleared when the NPC's aggro table is cleared).
+    pub npc_group_last_share_abuser: u32,
 }
 
 impl Npc {
@@ -94,7 +121,17 @@ impl Npc {
             current_alertness: MoveTypeAlertness::IDLE,
             ai_hold_or_idle: false,
             spawner_z: None,
+            last_move_ms: 0,
             interactable: true,
+            npc_group_instance: 0,
+            npc_group_id: 0,
+            npc_group_aggro_rule_id: 0,
+            npc_group_is_move_leader: false,
+            npc_group_leader_obj_id: 0,
+            npc_group_formation_offset: (0.0, 0.0, 0.0),
+            npc_group_formation_tension: 0.0,
+            npc_group_formation_moving: false,
+            npc_group_last_share_abuser: 0,
         }
     }
 

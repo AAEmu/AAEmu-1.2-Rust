@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::time::Instant;
 
+use super::group;
+use super::group_data;
 use super::residency::ResidentNpcTemplates;
 use super::spawner_data::{npc_spawner_category, NpcSpawnerNpc, NpcSpawnerTemplate};
 use crate::data::world_templates::WorldSpawnPosition;
@@ -2008,7 +2010,7 @@ fn spawn_npc_group(
         // Fail before creating anything: a partial group must not be spawned unregistered.
         return Err(format!("spawner {} has no parent world", spawner.id));
     }
-    let mut npcs = Vec::with_capacity(members.len());
+    let mut spawned: Vec<(group_data::NpcGroupMember, NpcRef)> = Vec::with_capacity(members.len());
     for member in members {
         let offset = (
             member.formation_offset_x,
@@ -2016,7 +2018,7 @@ fn spawn_npc_group(
             member.formation_offset_z,
         );
         match spawn_npc_template(server, member.npc_id, spawner, owner_id, Some(offset))? {
-            Some(npc) => npcs.push(npc),
+            Some(npc) => spawned.push((member.clone(), npc)),
             // A missing member template is skipped like a missing ordinary member; the rest of
             // the group still spawns.
             None => tracing::warn!(
@@ -2028,6 +2030,10 @@ fn spawn_npc_group(
             ),
         }
     }
+    // Runtime membership: move leader, formation offsets / tension and `aggro_rule_id` for
+    // `systems::ai::group` (the 1.2 formation follow and shared aggro).
+    group::attach_spawned_group(&spawned, group);
+    let npcs: Vec<NpcRef> = spawned.into_iter().map(|(_, npc)| npc).collect();
     Ok((!npcs.is_empty()).then_some(npcs))
 }
 

@@ -215,6 +215,43 @@ async fn npc_group_member_spawns_every_member_at_its_offset() {
         ],
         "each member stands at the spawner position plus its formation offset"
     );
+
+    // Runtime membership (`systems::ai::group`): the batch id, the move leader and each
+    // member's own offsets / tension.
+    let leader = spawned
+        .iter()
+        .find(|n| n.data().unit.template_id == 8564)
+        .expect("leader");
+    let instance = leader.data().npc_group_instance;
+    assert_ne!(instance, 0, "a spawned batch has a monotonic id");
+    assert_ne!(
+        instance, leader.obj_id,
+        "the batch id is not the leader's reused object id"
+    );
+    {
+        let d = leader.data();
+        assert_eq!(d.npc_group_instance, instance);
+        assert_eq!(d.npc_group_id, 50);
+        assert_eq!(d.npc_group_aggro_rule_id, 1);
+        assert!(d.npc_group_is_move_leader);
+        assert_eq!(d.npc_group_leader_obj_id, leader.obj_id);
+        assert_eq!(d.npc_group_formation_tension, 1.0);
+    }
+    for npc in spawned.iter().filter(|n| n.obj_id != leader.obj_id) {
+        let d = npc.data();
+        assert_eq!(d.npc_group_instance, instance);
+        assert_eq!(d.npc_group_id, 50);
+        assert_eq!(d.npc_group_aggro_rule_id, 1);
+        assert!(!d.npc_group_is_move_leader);
+        assert_eq!(d.npc_group_leader_obj_id, leader.obj_id);
+        assert_eq!(d.npc_group_formation_tension, 1.0);
+    }
+    let offsets: Vec<(f32, f32, f32)> = spawned
+        .iter()
+        .filter(|n| n.obj_id != leader.obj_id)
+        .map(|n| n.data().npc_group_formation_offset)
+        .collect();
+    assert_eq!(offsets, vec![(2.0, -3.0, 0.0), (-2.0, -3.0, 0.0)]);
 }
 
 #[tokio::test]
