@@ -9,7 +9,7 @@
 //! `is_leader` is loaded only; the runtime membership (`is_move_leader`, the formation offsets /
 //! tension and `aggro_rule_id`) is attached to the spawned NPCs by `npc/group.rs` and read by
 //! `systems::ai::group` (1.2 `formation_GoToOnPoint` / `NpcAggroTable::CollectSharedAggroMembers`).
-//! `enable_respawn` stays unused (no consumer was found); see `PORTING.md`.
+//! `enable_respawn` drives the partial respawn of `npc/group.rs`; see `PORTING.md`.
 
 use std::collections::{HashMap, HashSet};
 

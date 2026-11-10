@@ -606,18 +606,26 @@ fn report_npc_without_ai(obj_id: u32) -> bool {
 
 /// `Behavior.UpdateAggroHelp(abuser, radius)`.
 pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
-    // `npc_groups.aggro_rule_id != 0`: every living member of the same spawned group joins
-    // (10.x `NpcAggroTable::CollectSharedAggroMembers`).
+    // `npc_groups.aggro_rule_id == 2` mirrors the aggro table; rule 1 members answer the help
+    // call through the group-link path below (10.x `NpcAggroTable::CollectSharedAggroMembers`
+    // and the link-help group-instance bypass).
     super::group::share_aggro_with_group(c, abuser);
     let t = template_scalars(c);
-    let my_template_id = c.npc.data().unit.template_id;
+    let (my_template_id, my_group_instance, my_group_rule, my_faction) = {
+        let d = c.npc.data();
+        (
+            d.unit.template_id,
+            d.npc_group_instance,
+            d.npc_group_aggro_rule_id,
+            d.unit.faction_id,
+        )
+    };
     let link_data = &c.server.game_data.systems.npcs.npc.aggro_links;
     let npcs: Vec<WorldObject> =
         npc::around(c.server, &c.obj, t.attack_start_range_scale * radius, false)
             .into_iter()
             .filter(|o| o.as_npc().is_some())
             .collect();
-    let my_faction = c.npc.data().unit.faction_id;
     for other in npcs {
         let Some(other_npc) = other.as_npc().cloned() else {
             continue;
@@ -625,19 +633,40 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         let Some(ot) = npc::template(c.server, &other_npc) else {
             continue;
         };
-        let (in_battle, faction) = {
+        let (in_battle, faction, other_group_instance) = {
             let d = other_npc.data();
-            (d.unit.is_in_battle, d.unit.faction_id)
+            (d.unit.is_in_battle, d.unit.faction_id, d.npc_group_instance)
         };
+        // 10.x link help with `npc_groups.aggro_rule_id == 1` (Z:823640-823646 /
+        // 823849-823851): a candidate of the same spawned batch is accepted even when its own
+        // template relation test fails, so the group mates answer the help call together. The
+        // batch's rule 2 members are already on the table (mirrored above); rule 0 neither
+        // mirrors nor answers by group.
+        let group_link = my_group_instance != 0
+            && my_group_rule == 1
+            && other_group_instance == my_group_instance;
         // 1.2 data: the members of an `aggro_links` group help each other even when their own
         // template (`accept_aggro_link`, `aggression` / `aggro_link_special_rule_id`) would
         // decline. No consumer was found in the 10.x decompile, so this rule is data-inferred
         // (capture-pending AGGROLINK-1). Non-members keep the template rules exactly.
         let same_group = link_data.share_group(my_template_id, ot.id);
-        if in_battle || (!ot.accept_aggro_link && !same_group) {
+        if in_battle || (!ot.accept_aggro_link && !same_group && !group_link) {
             continue;
         }
-        if npc::distance_to(c.server, &other, &c.obj, false) > ot.aggro_link_help_dist {
+        // Rule-1 batch mates answer out to their own aggression radius as a fallback: the 1.2
+        // `aggro_link_help_dist` is 6 m for 91 of the 101 rule-1 groups (376 member rows:
+        // median 6, max 50, none 0), too short once the batch spreads beyond its 2-3 m
+        // formation offsets. The 10.x link-help scan collects candidates within 50 m
+        // (`sub_39325250(..., 50.0, ...)`, Z:823753) and then applies the per-template
+        // distance, so a group-link mate uses `max(aggro_link_help_dist,
+        // attack_start_range_scale * 10)` (the `check_aggression` scan radius).
+        let help_dist = if group_link {
+            ot.aggro_link_help_dist
+                .max(ot.attack_start_range_scale * 10.0)
+        } else {
+            ot.aggro_link_help_dist
+        };
+        if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
             continue;
         }
         // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
@@ -669,7 +698,11 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // Link path (AGGROLINK-1): the sight check applies only when the helper enables it.
         let link_helps = same_group
             && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
-        if !template_helps && !link_helps {
+        // Rule-1 group mates always answer the help call (the relation test above is bypassed);
+        // the helper's own sight check still applies, as in the 10.x candidate scan.
+        let group_link_helps = group_link
+            && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
+        if !template_helps && !link_helps && !group_link_helps {
             continue;
         }
         // npc.Ai.Owner.AddUnitAggro(...) + npc.Ai.OnAggroTargetChanged(): an NPC without an
@@ -691,7 +724,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             .aggro_table
             .contains_key(&abuser.obj_id());
         add_unit_aggro(c.server, &other, AggroKind::Damage, abuser, 1);
-        if link_helps && !template_helps && !was_engaged {
+        if (link_helps || group_link_helps) && !template_helps && !was_engaged {
             let engaged = other_npc
                 .data()
                 .unit
@@ -703,6 +736,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
                     helper = other_npc.obj_id,
                     leader = c.npc.obj_id,
                     abuser = abuser.obj_id(),
+                    group_link = group_link_helps,
                     "aggro link: group member joined the fight"
                 );
             }

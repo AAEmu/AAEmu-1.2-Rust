@@ -602,6 +602,10 @@ pub fn delete(server: &GameServer, world: &crate::world::WorldInstance, npc: &Np
     if let Some(s) = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id) {
         s.reconcile_deleted_npc(server, npc);
     }
+    // An `enable_respawn` group batch ends when a living member is removed (spawner despawn,
+    // distance reclaim, GM delete); a dead member's corpse removal keeps its slot for the
+    // 10.x partial respawn (`npcs/npc/group.rs`).
+    server.systems.npcs.group_batches.on_member_removed(npc);
     world.delete(npc);
 }
 

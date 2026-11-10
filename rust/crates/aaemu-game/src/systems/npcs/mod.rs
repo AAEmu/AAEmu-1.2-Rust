@@ -121,6 +121,9 @@ pub struct System {
     pub doodads: doodad::manager::DoodadManager,
     /// `WorldInstance.SpawnManager` for every instance.
     pub spawns: spawn_manager::SpawnManagers,
+    /// Runtime batches of `npc_groups.enable_respawn = 't'` (the 10.x `NpcGroupSupporter`
+    /// partial respawn).
+    pub group_batches: npc::group::GroupBatches,
     /// `WorldCell` heightmaps (lazy, per world template).
     pub heightmaps: heightmap::Heightmaps,
     /// `WorldInstance.GimmickManager` for every instance.

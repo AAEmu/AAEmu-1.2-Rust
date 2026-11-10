@@ -1,7 +1,7 @@
 //! NPC group rules on the AI side: a follower walks to the move leader's formation point and
 //! waits while the leader stands still, never roams on its own, falls back to its own idle
-//! behaviour when the leader dies, and `aggro_rule_id != 0` groups share aggro with every living
-//! member of the same spawn.
+//! behaviour when the leader dies, rule 2 shares the aggro table with every living member of the
+//! same spawn, and rule 1 members answer the group's link-help call instead.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ use crate::test_support::*;
 use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
 use super::data::{ActorModel, GameStance};
-use super::framework::{AiKind, BehaviorKind as B};
+use super::framework::{AiCtx, AiKind, BehaviorKind as B, NpcAi};
 use super::manager::{post, tick_all};
 
 const PLAYER_OBJ: u32 = 0x100;
@@ -81,6 +81,7 @@ fn data() -> GameData {
             // Passive: the group rules must work without the NPCs noticing the player by
             // themselves.
             aggression: false,
+            attack_start_range_scale: 1.0,
             sight_range_scale: 0.0,
             ai_file_id: 13, // Roaming
             accept_aggro_link: true,
@@ -119,6 +120,38 @@ fn server() -> Arc<GameServer> {
     crate::systems::skills::bind(&server);
     super::hooks::install(&server);
     server
+}
+
+/// [`server`] whose group template declines the template-driven help path: the helper would not
+/// answer through `accept_aggro_link` / `aggro_link_special_rule_id` (rule 1 needs a matching
+/// faction) at all, so only the rule-1 group link can make it join.
+fn server_with_declining_helpers() -> Arc<GameServer> {
+    let mut data = data();
+    let t = data
+        .systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&NPC_TEMPLATE)
+        .expect("fixture template");
+    t.accept_aggro_link = false;
+    t.aggro_link_special_rule_id = 1;
+    t.aggro_link_help_dist = 6.0;
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    super::hooks::install(&server);
+    server
+}
+
+/// An `AiCtx` for `npc` without starting its managed AI (direct behavior calls in tests).
+fn ctx<'a>(server: &'a GameServer, npc: &NpcRef, ai: &'a mut NpcAi) -> AiCtx<'a> {
+    AiCtx {
+        server,
+        npc: npc.clone(),
+        obj: WorldObject::from(npc),
+        ai,
+    }
 }
 
 /// Creates an NPC with an AI and spawns it like `NpcSpawnerNpc.Spawn` (home position, Spawning).
@@ -195,7 +228,7 @@ fn fixture_on(server: Arc<GameServer>, rule: i32, follower_kind: AiKind) -> Fixt
         (member_row(2, false, 2.0, -3.0, 1.0), follower.clone()),
         (member_row(3, false, 3.0, 3.0, 1.0), follower2.clone()),
     ];
-    group::attach_spawned_group(&rows, &group_row(rule));
+    group::attach_spawned_group(&server, &rows, &group_row(rule), None);
 
     // Settle Spawning -> RunCommandSet -> Idle.
     for _ in 0..25 {
@@ -384,10 +417,11 @@ fn has_aggro_on_player(npc: &NpcRef) -> bool {
         .contains_key(&PLAYER_OBJ)
 }
 
-/// `aggro_rule_id != 0`: pulling one member puts the attacker on every living member's table.
+/// `aggro_rule_id == 2` (`aggro_share`): pulling one member puts the attacker on every living
+/// member's table (10.x `NpcAggroTable::CollectSharedAggroMembers`).
 #[tokio::test]
-async fn a_non_zero_aggro_rule_shares_aggro_with_the_whole_spawned_group() {
-    let f = fixture(1, AiKind::HoldPosition);
+async fn aggro_rule_2_shares_aggro_with_the_whole_spawned_group() {
+    let f = fixture(2, AiKind::HoldPosition);
     pull_member(&f, &f.follower).await;
     assert!(
         has_aggro_on_player(&f.follower),
@@ -395,15 +429,15 @@ async fn a_non_zero_aggro_rule_shares_aggro_with_the_whole_spawned_group() {
     );
     assert!(
         has_aggro_on_player(&f.leader),
-        "the move leader joins the fight (rule 1)"
+        "the move leader joins the fight (rule 2)"
     );
     assert!(
         has_aggro_on_player(&f.follower2),
-        "every living group member joins the fight (rule 1)"
+        "every living group member joins the fight (rule 2)"
     );
 }
 
-/// `aggro_rule_id == 0`: no sharing.
+/// `aggro_rule_id == 0`: neither mirrors the table nor answers the help call by group.
 #[tokio::test]
 async fn a_zero_aggro_rule_does_not_share_aggro() {
     let f = fixture(0, AiKind::HoldPosition);
@@ -412,6 +446,103 @@ async fn a_zero_aggro_rule_does_not_share_aggro() {
     assert!(
         !has_aggro_on_player(&f.leader) && !has_aggro_on_player(&f.follower2),
         "rule 0 groups fight alone"
+    );
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        !has_aggro_on_player(&f.leader) && !has_aggro_on_player(&f.follower2),
+        "rule 0 members do not answer the help call by group either"
+    );
+}
+
+/// `aggro_rule_id == 1` (`aggro_link`): the attacker is NOT mirrored to the other members'
+/// tables (10.x only sets the group instance on the aggro table for rule 2, Z:855825-855826).
+#[tokio::test]
+async fn aggro_rule_1_does_not_mirror_the_aggro_table() {
+    let f = fixture(1, AiKind::HoldPosition);
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    crate::systems::skills::combat::add_unit_aggro(
+        &f.server,
+        &WorldObject::from(&f.follower),
+        AggroKind::Damage,
+        &player,
+        10,
+    );
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::group::share_aggro_with_group(&mut c, &player);
+    assert!(
+        has_aggro_on_player(&f.follower),
+        "the pulled member keeps its own aggro"
+    );
+    assert!(
+        !has_aggro_on_player(&f.leader) && !has_aggro_on_player(&f.follower2),
+        "rule 1 does not copy the aggro table to the other members"
+    );
+}
+
+/// `aggro_rule_id == 1` (`aggro_link`): the group mates answer the attacked member's help call
+/// even when their own template declines (`accept_aggro_link` false, non-matching relation), as
+/// in the 10.x link-help scan's same-group-instance accept branch (Z:823640-823646 /
+/// 823849-823851).
+#[tokio::test]
+async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
+    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        has_aggro_on_player(&f.leader),
+        "the move leader answers the group help call"
+    );
+    assert!(
+        has_aggro_on_player(&f.follower2),
+        "every near member of the rule-1 batch answers the help call"
+    );
+}
+
+/// Rule-1 batches spread past their 6 m `aggro_link_help_dist` still answer: the group link
+/// falls back to the template's 10 m aggression scan radius (`attack_start_range_scale * 10`).
+#[tokio::test]
+async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance() {
+    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    // The attacked member is at (95, 100); its mate moves 8 m away, beyond the 6 m helper
+    // distance but inside the 10 m aggression radius.
+    f.follower2
+        .data()
+        .unit
+        .transform
+        .set_xyz(103.0, 100.0, 100.0);
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        has_aggro_on_player(&f.follower2),
+        "a spread rule-1 mate answers inside the aggression radius"
+    );
+}
+
+/// Outside the fallback radius the same-batch help still refuses.
+#[tokio::test]
+async fn aggro_rule_1_help_refuses_a_mate_beyond_the_aggression_radius() {
+    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    // 12 m away: beyond both the 6 m helper distance and the 10 m aggression radius.
+    f.follower2
+        .data()
+        .unit
+        .transform
+        .set_xyz(107.0, 100.0, 100.0);
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        !has_aggro_on_player(&f.follower2),
+        "a mate outside the fallback radius does not answer"
     );
 }
 
@@ -570,8 +701,10 @@ async fn old_survivors_do_not_follow_a_reused_leader_object_id() {
     );
     let new_leader = spawn_npc(&f.server, LEADER_OBJ, 85.0, 100.0, AiKind::HoldPosition);
     group::attach_spawned_group(
+        &f.server,
         &[(member_row(9, true, 0.0, 0.0, 1.0), new_leader.clone())],
         &group_row(1),
+        None,
     );
     for _ in 0..25 {
         tick_all(&f.server, 100);
@@ -666,7 +799,7 @@ async fn a_waiting_hold_position_follower_still_checks_for_talk() {
 /// against the same object id shares again.
 #[tokio::test]
 async fn a_second_fight_after_the_abuser_died_shares_again() {
-    let f = fixture(1, AiKind::HoldPosition);
+    let f = fixture(2, AiKind::HoldPosition);
     pull_member(&f, &f.follower).await;
     assert!(has_aggro_on_player(&f.leader));
 

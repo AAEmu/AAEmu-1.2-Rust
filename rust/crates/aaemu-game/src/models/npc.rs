@@ -78,8 +78,8 @@ pub struct Npc {
     pub npc_group_instance: u32,
     /// `npc_groups.id` (`0` = no group).
     pub npc_group_id: u32,
-    /// `npc_groups.aggro_rule_id` copied at spawn: `0` = no group aggro sharing (the 1 vs 2
-    /// difference is unknown; both share).
+    /// `npc_groups.aggro_rule_id` copied at spawn: `0` = neither, `1` = `aggro_link` (members
+    /// answer the link-help call), `2` = `aggro_share` (the aggro table is mirrored).
     pub npc_group_aggro_rule_id: i32,
     /// `npc_group_members.is_move_leader`: this NPC moves the formation.
     pub npc_group_is_move_leader: bool,
