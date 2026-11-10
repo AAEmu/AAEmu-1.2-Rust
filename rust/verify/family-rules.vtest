@@ -52,6 +52,9 @@ rawcs 01e SELFIDSTR(Boss)
 expectseen 385 5
 rawcs 01f SELFID
 expectseen 529 5
+# Leave the suite's state clean for a rerun: kicking the only other member disbands.
+rawcs 01d PEERID
+sync cleaned 2
 
 [member]
 waitpeer 120 ${leader}
@@ -64,3 +67,5 @@ rawcs 01b PEERID01STR(Kid)
 sync joined 2
 expectpkt SCFamilyTitleChangedPacket 10
 sync titled 2
+# Stay in the world until the leader disbands the family for the next run.
+sync cleaned 2
