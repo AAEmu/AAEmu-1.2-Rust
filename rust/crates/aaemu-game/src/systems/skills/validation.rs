@@ -364,7 +364,18 @@ pub(super) fn check(
             return fail("skill_blank_minded");
         }
     }
-    if let Some(target_hp) = target.as_obj().and_then(|o| o.with_unit(|u| u.unit().hp)) {
+    // A skill cast from a corpse (`source_dead`, e.g. an `OnDeath` np_skill such as Muddy
+    // Sarracenia's seed plot 11478) is aimed at the dying caster itself; its `target_alive`
+    // flag describes the plot's later targets, so the corpse target is not held to it.
+    let corpse_self_cast = template.source_dead
+        && target
+            .as_obj()
+            .is_some_and(|o| o.obj_id() == caster.obj_id());
+    if let Some(target_hp) = target
+        .as_obj()
+        .filter(|_| !corpse_self_cast)
+        .and_then(|o| o.with_unit(|u| u.unit().hp))
+    {
         if target_hp <= 0 && template.target_alive && !template.target_dead {
             return fail("skill_target_died");
         }
@@ -414,7 +425,9 @@ pub(super) fn check(
     {
         min_range /= 100.0;
     }
-    if template.weapon_slot_for_range_id > 0 {
+    // A mate (battle pet) wields no weapon: its skills keep their own range instead of the
+    // weaponless 0-3 m fallback.
+    if template.weapon_slot_for_range_id > 0 && caster.as_mate().is_none() {
         let ranges = server
             .systems
             .skills

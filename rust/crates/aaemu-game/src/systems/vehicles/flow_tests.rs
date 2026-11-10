@@ -52,6 +52,9 @@ const PA: u32 = 0x00F0_0001;
 const DESIGN_ITEM: u64 = 0x0000_0000_0000_9100;
 const PB: u32 = 0x00F0_0002;
 
+#[path = "battle_pet_tests.rs"]
+mod battle_pet_tests;
+
 #[path = "cinema_mate_tests.rs"]
 mod cinema_mate_tests;
 
