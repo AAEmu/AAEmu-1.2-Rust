@@ -34,6 +34,7 @@ struct MemDb {
     accounts: Mutex<HashMap<u32, (i32, i32)>>,
     sales: Mutex<Vec<AuditIcsSale>>,
     stock: Mutex<Vec<(u32, i32)>>,
+    characters: Mutex<Vec<CharacterRow>>,
     fail_debits: Mutex<bool>,
     fail_stock_updates: Mutex<bool>,
 }
@@ -138,6 +139,21 @@ impl CashShopDb for MemDb {
         }
         self.stock.lock().unwrap().push((shop_item_id, remaining));
         Box::pin(async { true })
+    }
+
+    fn find_character_by_name<'a>(
+        &'a self,
+        _server: &'a GameServer,
+        name: &'a str,
+    ) -> BoxFuture<'a, Option<CharacterRow>> {
+        let found = self
+            .characters
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .cloned();
+        Box::pin(async move { found })
     }
 }
 
@@ -1181,6 +1197,182 @@ async fn buy_packet_handler() {
     assert_eq!(
         s.w.a.drain(),
         vec![(sc::SCICSCashPointPacket, 90i32.to_le_bytes().to_vec())]
+    );
+}
+
+fn offline_character(
+    id: u32,
+    name: &str,
+    account_id: u32,
+    deleted: bool,
+    delete_requested: bool,
+    transfer_requested: bool,
+) -> CharacterRow {
+    CharacterRow {
+        id,
+        name: name.into(),
+        account_id,
+        deleted,
+        delete_requested,
+        transfer_requested,
+    }
+}
+
+/// One `CSICSBuyGoodPacket` entry for shop 200 / SKU 2000 (1 x STACK + bonus for 40 credits).
+fn buy_good_body(receiver: &str) -> Vec<u8> {
+    let mut b = PacketStream::new();
+    b.write_u8(1)
+        .write_u32(200)
+        .write_u8(1)
+        .write_u8(1)
+        .write_u8(0)
+        .write_str(receiver);
+    b.into_bytes()
+}
+
+#[tokio::test]
+async fn gift_to_offline_character_delivers_a_charged_mail() {
+    let mut s = shop();
+    // The real mail hook, as in production; names are loaded for offline characters at startup.
+    crate::systems::economy::wiring::install(&s.w.server);
+    s.w.server.names.add_character(7, "Carol", 1003);
+    s.db.characters
+        .lock()
+        .unwrap()
+        .push(offline_character(7, "Carol", 1003, false, false, false));
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+
+    run::<CSICSBuyGoodPacket>(&mut s.w, 0, &buy_good_body("Carol"));
+    assert!(s.w.a.drain().is_empty(), "the buy task runs after 1 s");
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    let f = s.w.a.drain();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCErrorMsgPacket),
+        "an offline gift must not fail: {f:?}"
+    );
+    assert_eq!(f.last().unwrap().1, result_body(true, "Carol", 0));
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001], (60, 0));
+    // Type 9 (CHARGED) marketplace mail addressed by id and name, so it is delivered on the
+    // receiver's next login; no items are left in the buyer's containers.
+    let st = s.w.server.systems.economy.mail.state();
+    assert_eq!(st.all.len(), 1);
+    let (_, mail) = st.all.iter().next().unwrap();
+    assert_eq!(
+        mail.mail_type,
+        crate::systems::economy::mail::mail_type::CHARGED
+    );
+    assert_eq!(
+        (mail.header.receiver_id, mail.receiver_name.as_str()),
+        (7, "Carol")
+    );
+    assert_eq!(mail.body.attachments.len(), 2);
+    drop(st);
+    let unread = crate::systems::economy::mail::count_unread_mail_for(&s.w.server, 7);
+    assert_eq!(unread.commercial_received, 1);
+}
+
+#[tokio::test]
+async fn gift_refusals_send_the_12_messages_and_charge_nothing() {
+    let cases = [
+        (
+            "Nobody",
+            None,
+            error_message::INGAME_SHOP_FIND_CHARACTER_NAME_FAIL,
+        ),
+        (
+            "Gone",
+            Some(offline_character(8, "Gone", 1003, true, false, false)),
+            error_message::INGAME_SHOP_CHRACTER_DELETE_REQUESTED,
+        ),
+        (
+            "Deleting",
+            Some(offline_character(9, "Deleting", 1003, false, true, false)),
+            error_message::INGAME_SHOP_CHRACTER_DELETE_REQUESTED,
+        ),
+        (
+            "Moving",
+            Some(offline_character(10, "Moving", 1003, false, false, true)),
+            error_message::INGAME_SHOP_CHRACTER_TRANSFER_REQUESTED,
+        ),
+        (
+            "Alt",
+            Some(offline_character(11, "Alt", 1001, false, false, false)),
+            error_message::INGAME_SHOP_FIND_CHARACTER_SAME_ACCOUNT,
+        ),
+        // The buyer's own (online) name in gift mode is the same-account refusal.
+        (
+            "Alice",
+            None,
+            error_message::INGAME_SHOP_FIND_CHARACTER_SAME_ACCOUNT,
+        ),
+    ];
+    for (receiver, row, error) in cases {
+        let mut s = shop();
+        s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+        if let Some(row) = row {
+            s.db.characters.lock().unwrap().push(row);
+        }
+        run::<CSICSBuyGoodPacket>(&mut s.w, 0, &buy_good_body(receiver));
+        assert_eq!(
+            s.w.a.drain(),
+            vec![
+                (sc::SCErrorMsgPacket, error_body(error)),
+                (sc::SCICSBuyResultPacket, result_body(false, receiver, 0)),
+            ],
+            "receiver {receiver}"
+        );
+        assert_eq!(
+            s.db.accounts.lock().unwrap()[&1001],
+            (100, 0),
+            "receiver {receiver} was charged"
+        );
+        assert!(s.mail.0.lock().unwrap().is_empty(), "receiver {receiver}");
+        assert_eq!(
+            s.w.server.systems.economy.cash_shop.state().shop_items[&200].remaining,
+            3,
+            "receiver {receiver} changed the stock"
+        );
+        assert!(s.db.sales.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn generic_gift_failure_uses_the_gift_fail_text() {
+    // The client's error -> result-reason map (`FUN_39040000`) has no gift-specific bucket, so
+    // 594 (`INGAME_SHOP_BUY_GIFT_FAIL`) falls through to the generic failure result; it differs
+    // from 590 only in the message text the buyer sees.
+    let mut s = shop();
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+    let (pa, pb) = (s.w.pa.clone(), s.w.pb.clone());
+    let mut bad = cart(&shop_state(), &[(200, 0)])[0].clone();
+    bad.item_id = 999_999;
+    execute_buy(&s.w.server, 1, &pa, &pb, &[bad]).await;
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (
+                sc::SCErrorMsgPacket,
+                error_body(error_message::INGAME_SHOP_BUY_GIFT_FAIL)
+            ),
+            (sc::SCICSBuyResultPacket, result_body(false, "Bob", 0)),
+        ]
+    );
+    // A self purchase keeps the normal failure text.
+    let mut s = shop();
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+    let pa = s.w.pa.clone();
+    let mut bad = cart(&shop_state(), &[(200, 0)])[0].clone();
+    bad.item_id = 999_999;
+    execute_buy(&s.w.server, 1, &pa, &pa, &[bad]).await;
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (
+                sc::SCErrorMsgPacket,
+                error_body(error_message::INGAME_SHOP_BUY_FAIL)
+            ),
+            (sc::SCICSBuyResultPacket, result_body(false, "Alice", 0)),
+        ]
     );
 }
 

@@ -225,6 +225,57 @@ pub struct CommercialMailRequest {
     pub purchased_item_title: String,
 }
 
+/// A gift receiver resolved before the 1 s buy task runs. The online world only knows connected
+/// characters, so an offline receiver comes from the `characters` row; the mail is then delivered
+/// by `CommercialMail` (type 9, `CHARGED`) and counted on the receiver's next login.
+#[derive(Debug, Clone)]
+pub struct BuyTarget {
+    pub id: u32,
+    pub name: String,
+    pub account_id: u32,
+    /// `Some` while the receiver is connected.
+    pub player: Option<PlayerRef>,
+}
+
+/// A `characters` row for a receiver that is not online (`characters.name` is matched with the
+/// table's case-insensitive collation, like `WorldManager::character_by_name`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterRow {
+    pub id: u32,
+    pub name: String,
+    pub account_id: u32,
+    pub deleted: bool,
+    pub delete_requested: bool,
+    pub transfer_requested: bool,
+}
+
+/// The outcome of looking a gift receiver up by name.
+#[derive(Debug, Clone)]
+pub enum ReceiverLookup {
+    Found(BuyTarget),
+    /// No `characters` row and nobody online with that name.
+    NameNotFound,
+    /// The row is deleted or its deletion is pending (`delete_request_time` set).
+    DeleteRequested,
+    /// The row is waiting for a server transfer (`transfer_request_time` set).
+    TransferRequested,
+}
+
+impl ReceiverLookup {
+    /// The 1.2 `SCErrorMsg` id the client maps to the matching gift-refusal text. 623 is
+    /// `INGAME_SHOP_FIND_CHARACTER_NAME_FAIL`, 790 `INGAME_SHOP_CHRACTER_DELETE_REQUESTED`,
+    /// 791 `INGAME_SHOP_CHRACTER_TRANSFER_REQUESTED` (`x2game` error -> BFR reason map,
+    /// `FUN_39040000`, and `ui_texts` keys of the same names).
+    pub fn refusal_error(&self) -> Option<i16> {
+        match self {
+            Self::Found(_) => None,
+            Self::NameNotFound => Some(error_message::INGAME_SHOP_FIND_CHARACTER_NAME_FAIL),
+            Self::DeleteRequested => Some(error_message::INGAME_SHOP_CHRACTER_DELETE_REQUESTED),
+            Self::TransferRequested => Some(error_message::INGAME_SHOP_CHRACTER_TRANSFER_REQUESTED),
+        }
+    }
+}
+
 /// Cash shop deliveries (implemented by the mail port: `CommercialMail`).
 pub trait CashShopMailHooks: Send + Sync {
     /// Builds, finalizes (moves the items to the receiver's mail attachments when online) and
@@ -287,6 +338,14 @@ pub trait CashShopDb: Send + Sync {
         shop_item_id: u32,
         remaining: i32,
     ) -> BoxFuture<'a, bool>;
+    /// `SELECT ... FROM characters WHERE name = ?`: the row of a gift receiver that is not
+    /// online (`WorldManager::GetCharacter` only sees online characters; the C# therefore
+    /// refused every offline gift).
+    fn find_character_by_name<'a>(
+        &'a self,
+        server: &'a GameServer,
+        name: &'a str,
+    ) -> BoxFuture<'a, Option<CharacterRow>>;
 }
 
 /// The C# MySQL implementation of [`CashShopDb`].
@@ -359,6 +418,24 @@ impl CashShopDb for MySqlCashShopDb {
             shop_item_id,
             remaining,
         ))
+    }
+
+    fn find_character_by_name<'a>(
+        &'a self,
+        server: &'a GameServer,
+        name: &'a str,
+    ) -> BoxFuture<'a, Option<CharacterRow>> {
+        Box::pin(async move {
+            match find_character_by_name_sql(&server.db, name).await {
+                Ok(row) => row,
+                Err(e) => {
+                    // The C# lookup cannot fail here (online only); refusing the gift is safer
+                    // than delivering it to an unresolved character.
+                    tracing::error!("Cash shop receiver lookup for {name:?} failed: {e}");
+                    None
+                }
+            }
+        })
     }
 }
 
@@ -542,6 +619,33 @@ pub async fn update_remaining_stock_sql(
             false
         }
     }
+}
+
+/// The gift receiver's `characters` row (offline gifts). `deleted` is a signed tinyint, so it is
+/// decoded as `i64`; a pending deletion is either `deleted != 0` or `delete_request_time` set
+/// (`CharacterManager.IsCharacterPendingDeletion`).
+pub async fn find_character_by_name_sql(
+    pool: &MySqlPool,
+    name: &str,
+) -> Result<Option<CharacterRow>> {
+    let row = sqlx::query(
+        "SELECT CAST(id AS SIGNED) AS id, name, CAST(account_id AS SIGNED) AS account_id, \
+         CAST(deleted AS SIGNED) AS deleted, delete_request_time, transfer_request_time \
+         FROM characters WHERE name = ? ORDER BY deleted ASC, id ASC LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let deleted = db::int(&row, "deleted")? != 0;
+    Ok(Some(CharacterRow {
+        id: db::int(&row, "id")? as u32,
+        name: row.try_get("name")?,
+        account_id: db::int(&row, "account_id")? as u32,
+        deleted,
+        delete_requested: deleted || db::is_set(db::dt(&row, "delete_request_time")),
+        transfer_requested: db::is_set(db::dt(&row, "transfer_request_time")),
+    }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -862,6 +966,17 @@ fn send_error(p: &PlayerRef, error: i16) {
     inventory::send_error_message(p, error, 0, true);
 }
 
+/// The generic checkout failure text: `INGAME_SHOP_BUY_GIFT_FAIL` (594) for a gift,
+/// `INGAME_SHOP_BUY_FAIL` (590) otherwise. Both ids are in the client's error -> BFR reason map
+/// (`FUN_39040000`), so the result window shows its own failure text.
+fn buy_fail_error(is_gift: bool) -> i16 {
+    if is_gift {
+        error_message::INGAME_SHOP_BUY_GIFT_FAIL
+    } else {
+        error_message::INGAME_SHOP_BUY_FAIL
+    }
+}
+
 fn fail(buyer: &PlayerRef, error: i16, buy_mode: u8, target_name: &str) {
     send_error(buyer, error);
     buyer.send(SCICSBuyResultPacket {
@@ -872,17 +987,79 @@ fn fail(buyer: &PlayerRef, error: i16, buy_mode: u8, target_name: &str) {
     });
 }
 
+/// Resolve a gift receiver by name: the online world first (`WorldManager.character_by_name`),
+/// else the `characters` table. Same-account receivers are checked by the caller (the buyer's
+/// own account is the first case of that rule).
+pub async fn resolve_receiver(server: &GameServer, name: &str) -> ReceiverLookup {
+    if let Some(player) = server.world.character_by_name(name) {
+        let (id, name, account_id, transfer_requested) = {
+            let c = player.data();
+            (
+                c.id,
+                c.unit.name.clone(),
+                c.account_id,
+                c.transfer_request_time != 0,
+            )
+        };
+        if transfer_requested {
+            return ReceiverLookup::TransferRequested;
+        }
+        return ReceiverLookup::Found(BuyTarget {
+            id,
+            name,
+            account_id,
+            player: Some(player),
+        });
+    }
+    match manager(server)
+        .store()
+        .find_character_by_name(server, name)
+        .await
+    {
+        Some(row) if row.deleted || row.delete_requested => ReceiverLookup::DeleteRequested,
+        Some(row) if row.transfer_requested => ReceiverLookup::TransferRequested,
+        Some(row) => ReceiverLookup::Found(BuyTarget {
+            id: row.id,
+            name: row.name,
+            account_id: row.account_id,
+            player: None,
+        }),
+        None => ReceiverLookup::NameNotFound,
+    }
+}
+
 /// `DateTime.UtcNow`.
 fn utc_now() -> NaiveDateTime {
     Utc::now().naive_utc()
 }
 
-/// `CashShopBuyTask.Execute()`.
+/// `CashShopBuyTask.Execute()` for an online receiver (the C# signature).
 pub async fn execute_buy(
     server: &GameServer,
     buy_mode: u8,
     buyer: &PlayerRef,
     target: &PlayerRef,
+    cart: &[IcsSku],
+) {
+    let (id, name, account_id) = {
+        let c = target.data();
+        (c.id, c.unit.name.clone(), c.account_id)
+    };
+    let target = BuyTarget {
+        id,
+        name,
+        account_id,
+        player: Some(target.clone()),
+    };
+    execute_buy_for(server, buy_mode, buyer, &target, cart).await;
+}
+
+/// `CashShopBuyTask.Execute()` with the resolved receiver (online or offline).
+pub async fn execute_buy_for(
+    server: &GameServer,
+    buy_mode: u8,
+    buyer: &PlayerRef,
+    target: &BuyTarget,
     cart: &[IcsSku],
 ) {
     let mgr = manager(server);
@@ -898,18 +1075,12 @@ pub async fn execute_buy(
             c.money,
         )
     };
-    let (target_name, target_id, target_account) = {
-        let c = target.data();
-        (c.unit.name.clone(), c.id, c.account_id)
-    };
+    let (target_name, target_id, target_account) =
+        (target.name.clone(), target.id, target.account_id);
+    let is_gift = target_id != buyer_id;
 
     if mgr.mail.get().is_none() {
-        fail(
-            buyer,
-            error_message::INGAME_SHOP_BUY_FAIL,
-            buy_mode,
-            &target_name,
-        );
+        fail(buyer, buy_fail_error(is_gift), buy_mode, &target_name);
         return;
     }
     // ---- check_costs
@@ -937,34 +1108,19 @@ pub async fn execute_buy(
                 && sku.bonus_item_count > 0
                 && server.game_data.items.template(sku.bonus_item_id).is_none())
         {
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL,
-                buy_mode,
-                &target_name,
-            );
+            fail(buyer, buy_fail_error(is_gift), buy_mode, &target_name);
             return;
         }
         let Some(c) = costs.get_mut(usize::from(sku.currency)) else {
             // C#: IndexOutOfRangeException ends the task.
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL,
-                buy_mode,
-                &target_name,
-            );
+            fail(buyer, buy_fail_error(is_gift), buy_mode, &target_name);
             return;
         };
         let Some(total) = c
             .checked_add(sku.effective_price())
             .filter(|v| *v <= i32::MAX as u32)
         else {
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL,
-                buy_mode,
-                &target_name,
-            );
+            fail(buyer, buy_fail_error(is_gift), buy_mode, &target_name);
             return;
         };
         *c = total;
@@ -973,12 +1129,7 @@ pub async fn execute_buy(
             .checked_add(sku.item_count)
             .filter(|v| *v <= i32::MAX as u32)
         else {
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL,
-                buy_mode,
-                &target_name,
-            );
+            fail(buyer, buy_fail_error(is_gift), buy_mode, &target_name);
             return;
         };
         *quantity = total;
@@ -1020,12 +1171,7 @@ pub async fn execute_buy(
     for sku in cart {
         let shop_item = mgr.state().shop_items.get(&sku.shop_id).cloned();
         let Some(shop_item) = shop_item else {
-            fail(
-                buyer,
-                error_message::INGAME_SHOP_BUY_FAIL,
-                buy_mode,
-                &target_name,
-            ); // generic error
+            fail(buyer, buy_fail_error(is_gift), buy_mode, &target_name); // generic error
             return;
         };
         // Check Event Date
@@ -1217,7 +1363,7 @@ pub async fn execute_buy(
             for item in &items {
                 server.ids.item.release_id(item.id as u32);
             }
-            send_error(buyer, error_message::INGAME_SHOP_BUY_FAIL);
+            send_error(buyer, buy_fail_error(is_gift));
             continue;
         }
 
@@ -1263,7 +1409,7 @@ pub async fn execute_buy(
                         for item in &items {
                             server.ids.item.release_id(item.id as u32);
                         }
-                        send_error(buyer, error_message::INGAME_SHOP_BUY_FAIL);
+                        send_error(buyer, buy_fail_error(is_gift));
                         continue;
                     }
                     // The debit went through and the reduced count is persisted: tell the buyer's
@@ -1303,7 +1449,7 @@ pub async fn execute_buy(
             receiver_name: target_name.clone(),
             sender_name: buyer_name.clone(),
             items,
-            is_gift: target_id != buyer_id,
+            is_gift,
             is_refund: false,
             purchased_item_title: use_name.clone(),
         };
@@ -1351,7 +1497,9 @@ pub async fn execute_buy(
                     });
                 }
             }
-            send_error(target, error_message::INGAME_SHOP_BUY_FAIL);
+            if let Some(p) = &target.player {
+                send_error(p, buy_fail_error(is_gift));
+            }
             continue;
         }
 
@@ -1834,12 +1982,13 @@ impl CSICSBuyGoodPacket {
         })
     }
 
-    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+    async fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(this_char) = active(conn) else {
             return;
         };
         let buy_mode = 1u8; // No idea what this means
         let name = this_char.data().unit.name.clone();
+        let buyer_account = this_char.data().account_id;
         let mut buy_list = Vec::new();
         {
             let st = manager(server).state();
@@ -1862,46 +2011,83 @@ impl CSICSBuyGoodPacket {
                 buy_list.push(sku.clone());
             }
         }
+        // The receiver is an empty name (buy for self) or a name resolved from the online world
+        // first and the `characters` table second, so an offline character still gets the gift.
         let target = if self.receiver_name.is_empty() {
-            Some(this_char.clone())
+            let (id, name, account_id) = {
+                let c = this_char.data();
+                (c.id, c.unit.name.clone(), c.account_id)
+            };
+            ReceiverLookup::Found(BuyTarget {
+                id,
+                name,
+                account_id,
+                player: Some(this_char.clone()),
+            })
         } else {
-            server.world.character_by_name(&self.receiver_name)
+            resolve_receiver(server, &self.receiver_name).await
         };
-        let Some(target) = target else {
-            send_error(
-                &this_char,
-                error_message::INGAME_SHOP_FIND_CHARACTER_NAME_FAIL,
-            );
-            this_char.send(SCICSBuyResultPacket {
-                success: false,
-                buy_mode,
-                receiver_name: self.receiver_name,
-                charge_aa_point: 0,
-            });
-            return;
-        };
-        if buy_list.is_empty() {
-            send_error(&this_char, error_message::BUY_CART_EMPTY);
-            this_char.send(SCICSBuyResultPacket {
-                success: false,
-                buy_mode,
-                receiver_name: self.receiver_name,
-                charge_aa_point: 0,
-            });
-            return;
+        match target {
+            ReceiverLookup::Found(target) => {
+                // The 1.2 text `INGAME_SHOP_FIND_CHARACTER_SAME_ACCOUNT` (779) says "you cannot
+                // gift your own character"; it covers an alt on the buyer's account and typing
+                // one's own name in gift mode.
+                if !self.receiver_name.is_empty() && target.account_id == buyer_account {
+                    fail(
+                        &this_char,
+                        error_message::INGAME_SHOP_FIND_CHARACTER_SAME_ACCOUNT,
+                        buy_mode,
+                        &self.receiver_name,
+                    );
+                    return;
+                }
+                if buy_list.is_empty() {
+                    fail(
+                        &this_char,
+                        error_message::BUY_CART_EMPTY,
+                        buy_mode,
+                        &self.receiver_name,
+                    );
+                    return;
+                }
+                // Create task for the transaction (TaskManager.Schedule(..., 1 second))
+                let Some(server) = server.self_arc() else {
+                    tracing::error!("CSICSBuyGoodPacket: server handle not registered");
+                    return;
+                };
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    execute_buy_for(&server, buy_mode, &this_char, &target, &buy_list).await;
+                });
+            }
+            refused => {
+                let error = refused
+                    .refusal_error()
+                    .unwrap_or(error_message::INGAME_SHOP_FIND_CHARACTER_NAME_FAIL);
+                fail(&this_char, error, buy_mode, &self.receiver_name);
+            }
         }
-        // Create task for the transaction (TaskManager.Schedule(..., 1 second))
-        let Some(server) = server.self_arc() else {
-            tracing::error!("CSICSBuyGoodPacket: server handle not registered");
-            return;
-        };
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            execute_buy(&server, buy_mode, &this_char, &target, &buy_list).await;
-        });
     }
 }
-sync_client_packet!(CSICSBuyGoodPacket);
+
+impl ClientPacket for CSICSBuyGoodPacket {
+    const NAME: &'static str = "CSICSBuyGoodPacket";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
+        Self::read_body(s)
+    }
+
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.run(server, conn).await;
+            Ok(())
+        })
+    }
+}
 
 /// `CSICSMoneyRequestPacket` (empty body).
 #[derive(Debug, Clone, PartialEq, Eq)]
