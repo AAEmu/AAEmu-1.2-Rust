@@ -122,10 +122,11 @@ fn server() -> Arc<GameServer> {
     server
 }
 
-/// [`server`] whose group template declines the template-driven help path: the helper would not
-/// answer through `accept_aggro_link` / `aggro_link_special_rule_id` (rule 1 needs a matching
-/// faction) at all, so only the rule-1 group link can make it join.
-fn server_with_declining_helpers() -> Arc<GameServer> {
+/// [`server`] whose group template declines the template-driven help path (not aggressive, and a
+/// faction rule whose sight check is off), so only the rule-1 group link can make a mate join.
+/// `accept_aggro_link` is the template's own flag: the group link replaces the relation test but
+/// still honours it.
+fn server_with_link_only_helpers(accept_aggro_link: bool) -> Arc<GameServer> {
     let mut data = data();
     let t = data
         .systems
@@ -134,7 +135,7 @@ fn server_with_declining_helpers() -> Arc<GameServer> {
         .templates
         .get_mut(&NPC_TEMPLATE)
         .expect("fixture template");
-    t.accept_aggro_link = false;
+    t.accept_aggro_link = accept_aggro_link;
     t.aggro_link_special_rule_id = 1;
     t.aggro_link_help_dist = 6.0;
     let server = Arc::new(test_server_with(data));
@@ -504,12 +505,12 @@ async fn aggro_rule_1_does_not_mirror_the_aggro_table() {
 }
 
 /// `aggro_rule_id == 1` (`aggro_link`): the group mates answer the attacked member's help call
-/// even when their own template declines (`accept_aggro_link` false, non-matching relation), as
-/// in the 10.x link-help scan's same-group-instance accept branch (Z:823640-823646 /
-/// 823849-823851).
+/// even when their own template's relation test declines (not aggressive, a faction rule with
+/// the sight check off), as in the 10.x link-help scan's same-group-instance accept branch
+/// (Z:823640-823646 / 823849-823851). The control of the test below.
 #[tokio::test]
-async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
-    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+async fn aggro_rule_1_members_answer_the_help_call_despite_a_failing_relation_test() {
+    let f = fixture_on(server_with_link_only_helpers(true), 1, AiKind::HoldPosition);
     let player = f.server.world.object(PLAYER_OBJ).expect("player");
     let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
     let mut c = ctx(&f.server, &f.follower, &mut ai);
@@ -524,11 +525,32 @@ async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
     );
 }
 
+/// The group link replaces only the relation test: a rule-1 mate whose template declines aggro
+/// links (`accept_aggro_link` false: 43 of the 376 rule-1 member rows of the 1.2 data) keeps
+/// declining, as the 10.x scan still requires `accept_aggro_link` (Z:823774). Same geometry as
+/// the test above, only the template flag differs.
+#[tokio::test]
+async fn aggro_rule_1_does_not_override_a_template_that_declines_aggro_links() {
+    let f = fixture_on(
+        server_with_link_only_helpers(false),
+        1,
+        AiKind::HoldPosition,
+    );
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        !has_aggro_on_player(&f.leader) && !has_aggro_on_player(&f.follower2),
+        "a mate that declines aggro links does not answer the group help call"
+    );
+}
+
 /// Rule-1 batches spread past their 6 m `aggro_link_help_dist` still answer: the group link
 /// falls back to the template's 10 m aggression scan radius (`attack_start_range_scale * 10`).
 #[tokio::test]
 async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance() {
-    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    let f = fixture_on(server_with_link_only_helpers(true), 1, AiKind::HoldPosition);
     // The settle loop may already have walked the follower towards its formation point; pin it
     // to its spawn so the distances below do not depend on how far it got. `distance_to`
     // subtracts both 0.5 m model radii.
@@ -553,7 +575,7 @@ async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance
 /// Outside the fallback radius the same-batch help still refuses.
 #[tokio::test]
 async fn aggro_rule_1_help_refuses_a_mate_beyond_the_aggression_radius() {
-    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+    let f = fixture_on(server_with_link_only_helpers(true), 1, AiKind::HoldPosition);
     // Pinned to its spawn like in the test above (`distance_to` subtracts both 0.5 m radii).
     f.follower.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
     // 12 m - 1 m = 11 m away: beyond both the 6 m helper distance and the 10 m aggression

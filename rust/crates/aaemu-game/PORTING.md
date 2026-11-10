@@ -2079,15 +2079,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`aggro_link`, 101 groups) does not mirror: its members answer the attacked member's normal
   link-help call, because the 10.x scan accepts a candidate of the same group instance even when
   its own relation test fails (Z:823640-823646 / 823849-823851). Rule 0 (31 groups) does
-  neither. The rule-1 group link bypasses the template `accept_aggro_link` / relation gates
-  (the 10.x candidate scan still requires `accept_aggro_link`, Z:823774; the 1.2 group rule is
-  capture-pending NPCGROUP-2) but keeps the battle and enabled sight checks. Its distance is
+  neither. The rule-1 group link replaces only the template's relation test (`aggression` /
+  `aggro_link_special_rule_id`); it does not bypass `accept_aggro_link` (the 10.x candidate scan
+  still requires it, Z:823774), so the 43 of the 376 rule-1 member rows (16 of the 101 groups,
+  10 of them made only of such members) whose template declines aggro links keep declining, and
+  the battle and enabled sight checks stay. **Inferred (no 1.2 server evidence):** that the 1.2
+  zone server applies this group rule at all (the evidence is the 10.x decompile only;
+  capture-pending NPCGROUP-2). Its distance is
   `max(aggro_link_help_dist, attack_start_range_scale * 10)` for same-batch mates: the 1.2
   `aggro_link_help_dist` of the rule-1 member templates is 6 m for 91 of the 101 groups (376
   member rows: median 6, maximum 50, none 0), too short for a batch spread beyond its 2-3 m
-  formation offsets, so the fallback is the template's `check_aggression` scan radius. The 10.x
-  help scan collects candidates within 50 m (`sub_39325250(..., 50.0, ...)`, Z:823753) before
-  applying the per-template distance. The rule-2 group search is unscaled (200 m, the authored offsets are at most
+  formation offsets, so the fallback is the template's `check_aggression` scan radius
+  (**Inferred (no 1.2 server evidence):** the fallback is a Rust choice from that data). The
+  10.x help scan collects candidates within 50 m (`sub_39325250(..., 50.0, ...)`, Z:823753)
+  before applying the per-template distance. The rule-2 group search is unscaled (200 m, the authored offsets are at most
   15 / 20 m) because the existing aggro-link radius is scaled per template (some member templates
   scale it to 2 m) and would miss members; the 1.2/10.x `CollectSharedAggroMembers` has no
   distance or sight gate either.
@@ -2098,8 +2103,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   + tension, ground height, no own roaming, off-formation walk-back, combat return and a moving
   leader, leader death, reused leader id, blocked formation point, idle activity, rule 2
   mirrors / rule 1 does not mirror but answers the help call (also beyond its 6 m helper distance
-  up to the aggression radius) / rule 0 does neither, plus the second-fight share; each fails
-  with its rule disabled) and the runtime-membership assertions in
+  up to the aggression radius, but not for a template that declines aggro links) / rule 0 does
+  neither, plus the second-fight share; each fails with its rule disabled) and the
+  runtime-membership assertions in
   `npcs::npc::spawner_group_tests`.
 
 * systems::ai (2026-11-02, aggro link groups; capture-pending AGGROLINK-1): the 1.2
