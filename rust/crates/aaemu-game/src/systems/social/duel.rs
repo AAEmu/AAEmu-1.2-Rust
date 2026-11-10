@@ -468,10 +468,11 @@ impl DuelManager {
     /// `bad_duel_target`, another world instance -> `bad_duel_target`, instant game (either
     /// side) -> `duel_bad_location`, force attack -> `cannot_duel_during_force_attack(_other)`,
     /// farther than [`DUEL_REQUEST_RANGE`] -> `target_too_far`, challenger already registered ->
-    /// `already_in_duel`, target in a started duel -> `other_already_in_duel`, target busy with
-    /// a pending challenge -> `duel_other_busy`. The 1.2 C# threw a NullReferenceException for
-    /// an unknown target and checked nothing else; an unanswered challenge expires after
-    /// [`REQUEST_TIMEOUT`] as in 10.x.
+    /// `already_in_duel`, target registered (a started duel or a pending challenge) ->
+    /// `other_already_in_duel`. `duel_other_busy` (515) is in the client's error table but no
+    /// rule that sends it is evidenced (the 10.x registry rule is 505 / 506), so it is never
+    /// sent. The 1.2 C# threw a NullReferenceException for an unknown target and checked nothing
+    /// else; an unanswered challenge expires after [`REQUEST_TIMEOUT`] as in 10.x.
     pub fn duel_request(&self, server: &GameServer, challenger: &PlayerRef, challenged_id: u32) {
         if challenged_id == challenger.character_id {
             send_error(challenger, util::error::BAD_DUEL_SELF);
@@ -511,14 +512,10 @@ impl DuelManager {
             let mut st = self.st();
             let error = if st.duels.contains_key(&challenger.character_id) {
                 Some(util::error::ALREADY_IN_DUEL)
+            } else if st.duels.contains_key(&challenged.character_id) {
+                Some(util::error::OTHER_ALREADY_IN_DUEL)
             } else {
-                st.duels.get(&challenged.character_id).map(|duel| {
-                    if duel.state().started {
-                        util::error::OTHER_ALREADY_IN_DUEL
-                    } else {
-                        util::error::DUEL_OTHER_BUSY
-                    }
-                })
+                None
             };
             if let Some(e) = error {
                 drop(st);

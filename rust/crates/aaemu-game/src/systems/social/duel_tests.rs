@@ -1043,8 +1043,8 @@ async fn challenge_validation_errors() {
         .await
         .unwrap();
     assert_eq!(err_ids(&f.a.drain()), vec![util::error::ALREADY_IN_DUEL]);
-    // ... the target (busy with the pending challenge, not yet duelling) is "other busy" for a
-    // third character.
+    // ... the target (registered with the pending challenge, not yet duelling) is "other already
+    // in duel" for a third character, as for a started duel (515 `duel_other_busy` is not sent).
     let mut c = TestClient::new(&f.server, 3, 3);
     let pc = spawn_player(
         &f.server,
@@ -1059,7 +1059,10 @@ async fn challenge_validation_errors() {
         .handle_frame(&mut c.conn, &challenge(2))
         .await
         .unwrap();
-    assert_eq!(err_ids(&c.drain()), vec![util::error::DUEL_OTHER_BUSY]);
+    assert_eq!(
+        err_ids(&c.drain()),
+        vec![util::error::OTHER_ALREADY_IN_DUEL]
+    );
     // The first challenge is untouched and still answerable.
     assert!(find(&f.b.drain(), sc::SCDuelChallengedPacket).is_empty());
     assert!(f.duels().is_in_duel_with(1, 2) && f.duels().len() == 2);
@@ -1313,8 +1316,8 @@ async fn accept_refusal_mirrors_the_force_attack_errors() {
     assert!(f.duels().is_empty());
 }
 
-/// A target in a started duel is `other_already_in_duel` (the pending-challenge case is
-/// `duel_other_busy`, see [`challenge_validation_errors`]).
+/// A target in a started duel is `other_already_in_duel`, like one with a pending challenge
+/// (see [`challenge_validation_errors`]).
 #[tokio::test]
 async fn challenge_refused_when_target_is_already_duelling() {
     let mut f = Fixture::new(true);
