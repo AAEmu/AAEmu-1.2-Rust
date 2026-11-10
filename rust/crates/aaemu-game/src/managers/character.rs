@@ -347,6 +347,20 @@ struct BuildInputs<'a> {
     inventory: Inventory,
 }
 
+/// Whether the client-chosen body item `item` (`CSCreateCharacter.body_items[slot]`) is a body
+/// part of the chosen race / gender model for that slot (`item_body_parts.slot_type_id - 23`)
+/// that is not NPC-only; any other item id would be created for free.
+fn body_item_allowed(
+    server: &GameServer,
+    template: &crate::data::character_templates::CharacterTemplate,
+    slot: usize,
+    item: u32,
+) -> bool {
+    server.game_data.items.body_part(item).is_some_and(|b| {
+        b.model_id == template.model_id && b.slot_type_id == 23 + slot as u32 && !b.npc_only
+    })
+}
+
 /// Builds a lobby character exactly as `CharacterManager.Create` does: position/faction from the
 /// race/gender template, the ability's starting gear, the body items, the supplies, the
 /// actabilities and the starting skills, with the gear buffs applied.
@@ -402,9 +416,11 @@ fn build_lobby_character(
     let now = Utc::now().timestamp();
     c.created = created.unwrap_or(now);
     c.updated = now;
+    // A new (or lobby-edited) character starts with its first ability only; the second and
+    // third are earned in play, whatever the client sent.
     c.ability1 = request.ability1;
-    c.ability2 = request.ability2;
-    c.ability3 = request.ability3;
+    c.ability2 = ability::NONE;
+    c.ability3 = ability::NONE;
     c.return_district_id = template.return_district_id;
     c.resurrection_district_id = template.resurrection_district_id;
 
@@ -428,6 +444,16 @@ fn build_lobby_character(
     };
     equip_pack(server, &inv, &items.items, &mut gear, created_items);
     for (i, &body) in request.body_items.iter().enumerate() {
+        let body = if body != 0 && !body_item_allowed(server, template, i, body) {
+            tracing::warn!(
+                "Character {name}: body item {body} is not a creation body part of slot {i} for                  race {} gender {}; using the template default",
+                request.race,
+                request.gender
+            );
+            0
+        } else {
+            body
+        };
         let item = if body == 0 && template.items[i] > 0 {
             template.items[i]
         } else {
@@ -623,7 +649,8 @@ pub async fn create(
             connection_id: conn.id,
             ip: conn.ip,
             access_level,
-            level: req.level,
+            // The client's level field is ignored: every new character starts at level 1.
+            level: 1,
             created: None,
             labor_power: account.labor,
             labor_power_modified: crate::db::unix(account.last_updated),
