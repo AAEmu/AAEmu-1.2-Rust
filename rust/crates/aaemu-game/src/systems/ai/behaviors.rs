@@ -13,6 +13,8 @@ use rand::Rng;
 
 use crate::models::movement::{GameStanceType, MoveTypeAlertness};
 use crate::packets::world::SCUnitPointsPacket;
+use crate::server::GameServer;
+use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::npcs::npc::packets::{
     SCAggroTargetChangedPacket, SCNpcChatMessagePacket, SCUnitModelPostureChangedPacket,
 };
@@ -604,6 +606,165 @@ fn report_npc_without_ai(obj_id: u32) -> bool {
     reported.insert(obj_id)
 }
 
+/// 10.x candidate scan radius of the aggro-link help (`sub_39325250(..., 50.0, ...)`,
+/// Z:823753). The guard help of a player / mate / slave victim scans the same radius around the
+/// victim; the candidate's own `aggro_link_help_dist` (or its sight check) still applies.
+const GUARD_HELP_SCAN_RADIUS: f32 = 50.0;
+
+/// The `aggro_link_special_rule_id` switch of the 10.x help scan (Z:823790-823816) against the
+/// victim: 1 = same faction, 2 = friendly, 3 = neutral, 4 = everyone.
+fn guard_rule_helps(
+    server: &GameServer,
+    helper: &WorldObject,
+    victim: &WorldObject,
+    helper_faction: u32,
+    victim_faction: u32,
+    template: &NpcTemplate,
+) -> bool {
+    use crate::systems::skills::types::RelationState as R;
+    match template.aggro_link_special_rule_id {
+        1 => helper_faction == victim_faction,
+        2 => {
+            crate::systems::skills::relation::relation_to(
+                server,
+                &crate::systems::skills::geometry::Target::Obj(helper.clone()),
+                &crate::systems::skills::geometry::Target::Obj(victim.clone()),
+            ) == R::Friendly
+        }
+        3 => {
+            crate::systems::skills::relation::relation_to(
+                server,
+                &crate::systems::skills::geometry::Target::Obj(helper.clone()),
+                &crate::systems::skills::geometry::Target::Obj(victim.clone()),
+            ) == R::Neutral
+        }
+        4 => true,
+        _ => false,
+    }
+}
+
+/// The guard branch of the 10.x aggro-link help (Z:823880-823909) on top of the rule switch:
+/// a `aggro_link_special_guard` answers a victim whose faction has `system_factions.guard_help`,
+/// never a duel between the victim and the attacker (`sub_39322ED0`), never an NPC attacker when
+/// its template carries `aggro_link_special_ignore_npc_attacker` (0x40, so guards ignore monster
+/// attackers), never another `aggro_link_special_guard` (0x20), and only an attacker the guard
+/// may attack (`CanAttack`). The 10.x flag bits of the NPC template: 0x2 `accept_aggro_link`,
+/// 0x10 `aggro_link_sight_check`, 0x20 `aggro_link_special_guard`,
+/// 0x40 `aggro_link_special_ignore_npc_attacker` (inferred from the loader column order,
+/// Z:2426767). The 10.x `guard_npc_no_help_zone` relation reason has no 1.2 zone column.
+fn guard_may_help(
+    server: &GameServer,
+    victim: &WorldObject,
+    abuser: &WorldObject,
+    helper: &WorldObject,
+    template: &NpcTemplate,
+    victim_faction: u32,
+) -> bool {
+    if !server
+        .game_data
+        .factions
+        .get(victim_faction)
+        .is_some_and(|f| f.guard_help)
+    {
+        return false;
+    }
+    if let Some(abuser_npc) = abuser.as_npc() {
+        if template.aggro_link_special_ignore_npc_attacker {
+            return false;
+        }
+        if npc::template(server, abuser_npc).is_some_and(|t| t.aggro_link_special_guard) {
+            return false;
+        }
+    }
+    if let (Some(v), Some(a)) = (victim.as_player(), abuser.as_player()) {
+        if server
+            .systems
+            .social
+            .duels
+            .is_in_duel_with(v.character_id, a.character_id)
+        {
+            return false;
+        }
+    }
+    can_attack(server, helper, abuser)
+}
+
+/// 10.x aggro-link guard help for a victim without an NPC AI (player, mate, slave): the damage
+/// path calls it when a unit is attacked, so special guards within
+/// [`GUARD_HELP_SCAN_RADIUS`] of the victim join the fight against `abuser` (Z:823528-823950).
+/// NPC victims run the same guard branch through their own AI's [`update_aggro_help`].
+pub fn update_guard_help(server: &GameServer, victim: &WorldObject, abuser: &WorldObject) {
+    if victim.same(abuser) || !abuser.is_unit() {
+        return;
+    }
+    let Some(victim_faction) = victim.with_unit(|u| u.unit().faction_id) else {
+        return;
+    };
+    // `system_factions.guard_help` is a property of the victim's faction; skip the scan when it
+    // is off (monster factions, ...), so the cost is only paid near a protected victim.
+    if !server
+        .game_data
+        .factions
+        .get(victim_faction)
+        .is_some_and(|f| f.guard_help)
+    {
+        return;
+    }
+    let candidates: Vec<WorldObject> = npc::around(server, victim, GUARD_HELP_SCAN_RADIUS, false)
+        .into_iter()
+        .filter(|o| o.as_npc().is_some())
+        .collect();
+    for other in candidates {
+        let Some(other_npc) = other.as_npc().cloned() else {
+            continue;
+        };
+        let Some(ot) = npc::template(server, &other_npc) else {
+            continue;
+        };
+        if !ot.aggro_link_special_guard || !ot.accept_aggro_link {
+            continue;
+        }
+        if other.same(victim) || other.same(abuser) {
+            continue;
+        }
+        let (in_battle, helper_faction) = {
+            let d = other_npc.data();
+            (d.unit.is_in_battle, d.unit.faction_id)
+        };
+        if in_battle {
+            continue;
+        }
+        let distance = npc::distance_to(server, &other, victim, false);
+        if distance > GUARD_HELP_SCAN_RADIUS {
+            continue;
+        }
+        // 10.x: with `aggro_link_sight_check` the guard must see the victim and the per-template
+        // help distance does not gate it; without it, `aggro_link_help_dist` does (Z:823780-790).
+        let in_range = if ot.aggro_link_sight_check {
+            npc::can_see_target(server, &other, victim)
+        } else {
+            distance <= ot.aggro_link_help_dist
+        };
+        if !in_range
+            || !guard_rule_helps(server, &other, victim, helper_faction, victim_faction, ot)
+            || !guard_may_help(server, victim, abuser, &other, ot, victim_faction)
+        {
+            continue;
+        }
+        if !super::manager::has_ai(server, other_npc.obj_id) {
+            continue;
+        }
+        add_unit_aggro(server, &other, AggroKind::Damage, abuser, 1);
+        super::manager::post(server, other_npc.obj_id, |o| o.on_aggro_target_changed());
+        tracing::debug!(
+            guard = other_npc.obj_id,
+            victim = victim.obj_id(),
+            abuser = abuser.obj_id(),
+            "guard help: joined the fight"
+        );
+    }
+}
+
 /// `Behavior.UpdateAggroHelp(abuser, radius)`.
 pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
     // `npc_groups.aggro_rule_id == 2` mirrors the aggro table; rule 1 members answer the help
@@ -666,7 +827,21 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         } else {
             ot.aggro_link_help_dist
         };
-        if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
+        let distance = npc::distance_to(c.server, &other, &c.obj, false);
+        // 10.x candidate range gate (Z:823780-823790): with `aggro_link_sight_check` the sight
+        // check replaces the per-template distance; without it the distance applies. A special
+        // guard is additionally bounded by the 50 m scan around the victim (Z:823753).
+        let in_range = if ot.aggro_link_special_guard {
+            distance <= GUARD_HELP_SCAN_RADIUS
+                && (if ot.aggro_link_sight_check {
+                    npc::can_see_target(c.server, &other, &c.obj)
+                } else {
+                    distance <= help_dist
+                })
+        } else {
+            distance <= help_dist
+        };
+        if !in_range {
             continue;
         }
         // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
@@ -702,7 +877,17 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // the helper's own sight check still applies, as in the 10.x candidate scan.
         let group_link_helps = group_link
             && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
-        if !template_helps && !link_helps && !group_link_helps {
+        // 10.x guard branch (Z:823880-823909): a `aggro_link_special_guard` additionally needs
+        // the victim's faction `guard_help` and the attacker attackable; a failing guard check
+        // overrides the generic acceptance (`v45 = 0`, Z:823870-823910). This reachable path is
+        // the NPC victim's; player victims use [`update_guard_help`].
+        let guard_helps = ot.aggro_link_special_guard
+            && guard_rule_helps(c.server, &other, &c.obj, faction, my_faction, ot)
+            && guard_may_help(c.server, &c.obj, abuser, &other, ot, my_faction);
+        if ot.aggro_link_special_guard && !guard_helps {
+            continue;
+        }
+        if !template_helps && !link_helps && !group_link_helps && !guard_helps {
             continue;
         }
         // npc.Ai.Owner.AddUnitAggro(...) + npc.Ai.OnAggroTargetChanged(): an NPC without an
@@ -3594,6 +3779,315 @@ mod tests {
         assert!(
             has_aggro(&with_sight),
             "a non-member with the sight check on still helps through rule 4"
+        );
+    }
+
+    // ---- `aggro_link_special_guard` city-guard help -------------------------------------------
+
+    const GUARD_FACTION: u32 = 162;
+    const NATION_FACTION: u32 = 101;
+    const PIRATE_FACTION: u32 = 161;
+    const MONSTER_FACTION: u32 = 115;
+    const GUARD_TEMPLATE: u32 = 7400;
+    const PLAIN_TEMPLATE: u32 = 7401;
+    const MONSTER_TEMPLATE: u32 = 7402;
+
+    /// Guard fixture: `nation_guard_help` is the `system_factions.guard_help` switch of the
+    /// victim's faction; the guard faction is hostile to the pirate and monster factions (as in
+    /// the shipped `system_faction_relations`, 162 vs 161 / 115 = hostile). The guard template
+    /// mirrors the city guards (faction 162, rule 4 everyone, sight check, 6 m help distance,
+    /// `ignore_npc_attacker`).
+    fn guard_data(nation_guard_help: bool) -> crate::data::GameData {
+        use crate::data::world_data::{FactionRelation, SystemFaction};
+        let mut data = crate::data::GameData::empty();
+        for (id, guard_help) in [
+            (NATION_FACTION, nation_guard_help),
+            (GUARD_FACTION, true),
+            (PIRATE_FACTION, true),
+            (MONSTER_FACTION, false),
+        ] {
+            data.factions.add(SystemFaction {
+                id,
+                guard_help,
+                ..SystemFaction::default()
+            });
+        }
+        for (a, b) in [
+            (GUARD_FACTION, PIRATE_FACTION),
+            (GUARD_FACTION, MONSTER_FACTION),
+            (PIRATE_FACTION, NATION_FACTION),
+            (MONSTER_FACTION, NATION_FACTION),
+        ] {
+            data.factions.relations.push(FactionRelation {
+                id: a,
+                id2: b,
+                state: crate::systems::skills::types::RelationState::Hostile as u8,
+                exp_time: 0,
+            });
+        }
+        data.systems.npcs.npc.templates.insert(
+            GUARD_TEMPLATE,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                id: GUARD_TEMPLATE,
+                faction_id: GUARD_FACTION,
+                aggression: true,
+                accept_aggro_link: true,
+                aggro_link_special_guard: true,
+                aggro_link_special_ignore_npc_attacker: true,
+                aggro_link_special_rule_id: 4,
+                aggro_link_sight_check: true,
+                aggro_link_help_dist: 6.0,
+                attack_start_range_scale: 1.0,
+                ..Default::default()
+            },
+        );
+        // The same shape without `aggro_link_special_guard` (the control NPC).
+        data.systems.npcs.npc.templates.insert(
+            PLAIN_TEMPLATE,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                id: PLAIN_TEMPLATE,
+                faction_id: GUARD_FACTION,
+                aggression: true,
+                accept_aggro_link: true,
+                aggro_link_special_rule_id: 4,
+                aggro_link_sight_check: true,
+                aggro_link_help_dist: 6.0,
+                attack_start_range_scale: 1.0,
+                ..Default::default()
+            },
+        );
+        data.systems.npcs.npc.templates.insert(
+            MONSTER_TEMPLATE,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                id: MONSTER_TEMPLATE,
+                faction_id: MONSTER_FACTION,
+                aggression: true,
+                attack_start_range_scale: 1.0,
+                ..Default::default()
+            },
+        );
+        data
+    }
+
+    /// Applies one fixed 10-damage `DamageEffect` from `caster` to `target` (the real damage
+    /// pipeline, which is what triggers the guard help).
+    fn apply_hit(server: &GameServer, caster: &WorldObject, target: &WorldObject) {
+        use crate::systems::skills::effects::{EffectArgs, EffectSource};
+        use crate::systems::skills::geometry::Target;
+        use crate::systems::skills::types::{
+            CastAction, SkillCastTarget, SkillCaster, SkillObject,
+        };
+        let args = EffectArgs {
+            caster: Some(caster.clone()),
+            caster_caster: SkillCaster::Unit(caster.obj_id()),
+            target: Target::Obj(target.clone()),
+            target_caster: SkillCastTarget::Unit(target.obj_id()),
+            cast: CastAction::Skill {
+                skill_id: 1,
+                tl_id: 0,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+        let effect = crate::systems::skills::tests::damage_effect(1, 10);
+        crate::systems::skills::effects::combat::damage(server, &effect, &args, None);
+    }
+
+    fn guard_fixture(
+        nation_guard_help: bool,
+    ) -> (
+        Arc<GameServer>,
+        crate::world::PlayerRef,
+        crate::world::PlayerRef,
+        crate::world::NpcRef,
+    ) {
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+
+        let server = Arc::new(test_server_with(guard_data(nation_guard_help)));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let victim_client = TestClient::new(&server, 1, 1001);
+        let attacker_client = TestClient::new(&server, 2, 1002);
+        let mut victim_char = test_character(1, "Victim", 100.0, 100.0);
+        victim_char.unit.hp = 1000;
+        victim_char.unit.max_hp = 1000;
+        victim_char.unit.faction_id = NATION_FACTION;
+        let victim = spawn_player(&server, &victim_client, victim_char, 0x401);
+        let mut attacker_char = test_character(2, "Attacker", 102.0, 100.0);
+        attacker_char.unit.hp = 1000;
+        attacker_char.unit.max_hp = 1000;
+        attacker_char.unit.faction_id = PIRATE_FACTION;
+        let attacker = spawn_player(&server, &attacker_client, attacker_char, 0x402);
+        let guard = spawn_link_npc(&server, 0x403, GUARD_TEMPLATE, 103.0);
+        guard.data().unit.faction_id = GUARD_FACTION;
+        (server, victim, attacker, guard)
+    }
+
+    fn has_aggro_on(npc: &crate::world::NpcRef, obj_id: u32) -> bool {
+        npc.data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&obj_id)
+    }
+
+    /// A piracy attack on a protected-faction player near a city guard pulls the guard onto the
+    /// attacker (10.x `sub_39321C80`, Z:823528-823950). Driven through the damage effect.
+    #[tokio::test]
+    async fn a_special_guard_helps_a_player_attacked_by_a_pirate() {
+        let (server, victim, attacker, guard) = guard_fixture(true);
+        apply_hit(
+            &server,
+            &WorldObject::from(&attacker),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            has_aggro_on(&guard, attacker.obj_id),
+            "the guard must join the fight against the pirate attacker"
+        );
+        assert!(
+            !has_aggro_on(&guard, victim.obj_id),
+            "the guard must not aggro the victim it protects"
+        );
+    }
+
+    /// `aggro_link_special_ignore_npc_attacker` (0x40): a monster attacking a player does not
+    /// pull the city guard, which keeps attacking monsters it sees on its own (unchanged).
+    #[tokio::test]
+    async fn an_ignoring_guard_is_not_pulled_by_a_monster_attacking_a_player() {
+        use crate::models::npc::Npc;
+        use crate::world::Entity;
+        let (server, victim, _attacker, guard) = guard_fixture(true);
+        let mut mob = Npc::new(MONSTER_TEMPLATE);
+        mob.unit.transform.set_xyz(102.0, 100.0, 100.0);
+        mob.unit.faction_id = MONSTER_FACTION;
+        let mob = Entity::new(0x404, mob);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&mob, &server.view_ctx());
+        apply_hit(
+            &server,
+            &WorldObject::from(&mob),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            !has_aggro_on(&guard, mob.obj_id),
+            "a guard with ignore_npc_attacker must ignore a monster attacker"
+        );
+    }
+
+    /// A duel between the victim and the attacker is not helped (10.x `sub_39322ED0`,
+    /// Z:823876).
+    #[tokio::test]
+    async fn a_duel_does_not_pull_the_guard() {
+        let (server, victim, attacker, guard) = guard_fixture(true);
+        server
+            .systems
+            .social
+            .duels
+            .duel_request(&server, &attacker, victim.character_id);
+        assert!(
+            server
+                .systems
+                .social
+                .duels
+                .is_in_duel_with(attacker.character_id, victim.character_id),
+            "fixture: the duel request must register both sides"
+        );
+        apply_hit(
+            &server,
+            &WorldObject::from(&attacker),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            !has_aggro_on(&guard, attacker.obj_id),
+            "a duel must not pull the city guard"
+        );
+    }
+
+    /// The victim's `system_factions.guard_help` is the switch (10.x Z:823905-823909).
+    #[tokio::test]
+    async fn a_faction_without_guard_help_does_not_pull_the_guard() {
+        let (server, victim, attacker, guard) = guard_fixture(false);
+        apply_hit(
+            &server,
+            &WorldObject::from(&attacker),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            !has_aggro_on(&guard, attacker.obj_id),
+            "a victim faction with guard_help=false must not pull the guard"
+        );
+    }
+
+    /// Only `aggro_link_special_guard` templates answer the player-victim scan; a plain NPC in
+    /// the same spot stays out of the fight (the control for the four tests above).
+    #[tokio::test]
+    async fn a_non_special_npc_is_not_pulled_by_the_guard_scan() {
+        let (server, victim, attacker, _guard) = guard_fixture(true);
+        let plain = spawn_link_npc(&server, 0x405, PLAIN_TEMPLATE, 103.0);
+        plain.data().unit.faction_id = GUARD_FACTION;
+        apply_hit(
+            &server,
+            &WorldObject::from(&attacker),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            !has_aggro_on(&plain, attacker.obj_id),
+            "a template without aggro_link_special_guard must not join"
+        );
+    }
+
+    /// The NPC victim's own AI path applies the same guard gate: a monster attacking a guarded
+    /// NPC does not pull the ignore-npc-attacker guard through `update_aggro_help` either.
+    #[tokio::test]
+    async fn an_ignoring_guard_does_not_help_an_npc_victim_against_a_monster() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::models::npc::Npc;
+        use crate::test_support::{test_server_with, TestClient};
+        use crate::world::Entity;
+
+        let server = Arc::new(test_server_with(guard_data(true)));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let _client = TestClient::new(&server, 1, 1001);
+
+        let mut victim = Npc::new(PLAIN_TEMPLATE);
+        victim.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        victim.unit.faction_id = NATION_FACTION;
+        let victim = Entity::new(0x406, victim);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&victim, &server.view_ctx());
+        let guard = spawn_link_npc(&server, 0x407, GUARD_TEMPLATE, 103.0);
+        guard.data().unit.faction_id = GUARD_FACTION;
+        let mut mob = Npc::new(MONSTER_TEMPLATE);
+        mob.unit.transform.set_xyz(101.0, 100.0, 100.0);
+        mob.unit.faction_id = MONSTER_FACTION;
+        let mob = Entity::new(0x408, mob);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&mob, &server.view_ctx());
+
+        let abuser = WorldObject::from(&mob);
+        let mut ai = NpcAi::new(AiKind::AlmightyNpc, &victim);
+        let mut context = AiCtx {
+            server: &server,
+            npc: victim.clone(),
+            obj: WorldObject::from(&victim),
+            ai: &mut ai,
+        };
+        update_aggro_help(&mut context, &abuser, 200.0);
+
+        assert!(
+            !has_aggro_on(&guard, mob.obj_id),
+            "the ignore-npc-attacker guard must not answer a monster's attack on an NPC"
         );
     }
 
