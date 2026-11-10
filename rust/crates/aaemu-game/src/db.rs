@@ -731,3 +731,80 @@ pub async fn load_login_characters(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test-server accounts get their starting Credits/Loyalty from the `Credits.Default` /
+    /// `Loyalty.Default` configuration (the shipped values are 0). The game creates the account
+    /// row on first login, so the grant happens exactly once per account; a later login reads
+    /// the stored values and never adds them again. Gated by `AAEMU_TEST_MYSQL` and using a
+    /// connection-local temporary `accounts` table, so no persisted data is touched.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses a connection-local accounts table"]
+    async fn private_mysql_first_login_grants_starting_credits_once() {
+        use std::str::FromStr;
+
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "Only private MySQL3317 is allowed"
+        );
+        assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TEMPORARY TABLE accounts ( \
+                 account_id INT NOT NULL PRIMARY KEY, \
+                 access_level INT NOT NULL DEFAULT 0, \
+                 labor SMALLINT NOT NULL DEFAULT 0, \
+                 credits INT NOT NULL DEFAULT 0, \
+                 loyalty INT NOT NULL DEFAULT 0, \
+                 last_updated DATETIME NULL, last_login DATETIME NULL, \
+                 last_labor_tick DATETIME NULL, last_credits_tick DATETIME NULL, \
+                 last_loyalty_tick DATETIME NULL, last_daily_reward DATETIME NULL, \
+                 loyalty_hour_day INT NOT NULL DEFAULT 0, \
+                 loyalty_hour_seconds INT NOT NULL DEFAULT 0, \
+                 loyalty_hour_taken INT NOT NULL DEFAULT 0, \
+                 loyalty_hour_updated DATETIME NULL, \
+                 pay_method INT NOT NULL DEFAULT 0, pay_location INT NOT NULL DEFAULT 0, \
+                 pay_start BIGINT NOT NULL DEFAULT 0, pay_end BIGINT NOT NULL DEFAULT 0, \
+                 premium_point INT NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.credits.default = 1_000_000;
+        config.loyalty.default = 5_000;
+
+        // First login: the insert runs and stores the configured starting values. The C# return
+        // value of this call keeps the all-zero defaults, so read the row back.
+        let first = try_get_account_details(&pool, &config, 4242).await.unwrap();
+        assert_eq!(first.credits, 0);
+        let (credits, loyalty): (i32, i32) =
+            sqlx::query_as("SELECT credits, loyalty FROM accounts WHERE account_id = 4242")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((credits, loyalty), (1_000_000, 5_000));
+
+        // Later logins must not grant them again.
+        for _ in 0..2 {
+            let again = try_get_account_details(&pool, &config, 4242).await.unwrap();
+            assert_eq!(again.credits, 1_000_000);
+            assert_eq!(again.loyalty, 5_000);
+        }
+    }
+}
