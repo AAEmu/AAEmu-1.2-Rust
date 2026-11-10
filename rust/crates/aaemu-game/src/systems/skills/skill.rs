@@ -1724,7 +1724,10 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         if let Some(doodad) = ctx.target.as_obj().and_then(WorldObject::as_doodad) {
             if crate::systems::npcs::doodad::occupancy::is_interaction_skill(server, t) {
                 crate::systems::npcs::doodad::occupancy::mark_effects_pending(
-                    server, doodad, caster,
+                    server,
+                    doodad,
+                    caster,
+                    i64::from(total_delay),
                 );
             }
         }

@@ -42,6 +42,11 @@ const MAX_OCCUPANCIES: usize = 4096;
 /// the window.
 const START_GRACE_MS: i64 = 2_000;
 
+/// A pending interaction effect keeps the hold at most this long after `mark_effects_pending`
+/// (the skill's own delay + the grace, capped). If the `ApplySkillTask` never runs (its timeline
+/// id changed), the entry must expire instead of holding the doodad while the occupant lives.
+pub(crate) const PENDING_HOLD_MAX_MS: i64 = 30_000;
+
 /// Func kinds that never make a `once_one_man` doodad single-user: instance exits, respawn-bind
 /// records, buff / feast tables, counters, recovery, and the instant interaction kinds (loot,
 /// fake use, purchase, skill hits).
@@ -68,8 +73,8 @@ pub struct Occupancy {
     /// The occupant sits / lies on the doodad (`DoodadFuncAttachment` bond).
     pub bonded: bool,
     /// The cast slot is already cleared but the interaction effect is still delayed
-    /// (`Skill.ScheduleEffects` with a delay).
-    pub effects_pending: bool,
+    /// (`Skill.ScheduleEffects` with a delay); the hold expires at this unix ms (0 = none).
+    pub pending_until_ms: i64,
     /// Unix ms the entry was last taken / refreshed.
     pub since_ms: i64,
 }
@@ -92,6 +97,17 @@ impl Occupancies {
 
     pub fn is_empty(&self) -> bool {
         self.lock().is_empty()
+    }
+
+    /// Test-only: age an entry's dated state by `ms` (the grace / pending-cap paths).
+    #[cfg(test)]
+    pub fn age_entry(&self, doodad_obj_id: u32, ms: i64) {
+        if let Some(entry) = self.lock().get_mut(&doodad_obj_id) {
+            entry.since_ms -= ms;
+            if entry.pending_until_ms > 0 {
+                entry.pending_until_ms -= ms;
+            }
+        }
     }
 }
 
@@ -239,13 +255,19 @@ pub fn refuses_new_timed(
     if skill_id == 0 {
         return false;
     }
-    let Some(skill) = server.game_data.systems.skills.skill(skill_id) else {
+    let Some(template) = server.game_data.systems.skills.skill(skill_id).cloned() else {
         return false;
     };
-    if !is_interaction_skill(server, skill) || skill.casting_time <= 0 {
+    if !is_interaction_skill(server, &template) {
         return false;
     }
-    holds_for_skill(server, doodad, skill) && !permits(server, doodad, unit)
+    // The same timed predicate as `start_hold`: the effective cast time with the caster's real
+    // skill level, stat and skill modifiers, so a cast reduced to 0 is instant in both places.
+    let run = crate::systems::skills::skill::new_skill_for(server, template, Some(unit));
+    if crate::systems::skills::skill::cast_time_ms(server, &run, unit) <= 0 {
+        return false;
+    }
+    holds_for_skill(server, doodad, &run.template) && !permits(server, doodad, unit)
 }
 
 /// Whether `unit` may start an interaction with `doodad` now. Stale entries are dropped first.
@@ -297,16 +319,26 @@ pub fn begin_bond(server: &GameServer, doodad: &DoodadRef, unit: &WorldObject, s
 
 /// Marks that this cast's interaction effect is still pending after the cast slot was cleared
 /// (`Skill.ScheduleEffects` with a delay), so the hold survives until `end_skill`.
-pub fn mark_effects_pending(server: &GameServer, doodad: &DoodadRef, caster: &WorldObject) {
+pub fn mark_effects_pending(
+    server: &GameServer,
+    doodad: &DoodadRef,
+    caster: &WorldObject,
+    delay_ms: i64,
+) {
     let map = manager(server);
     if map.is_empty() {
         return;
     }
+    let now = now_ms();
     let mut entries = map.lock();
     if let Some(entry) = entries.get_mut(&doodad.obj_id) {
         if entry.occupant_obj_id == caster.obj_id() {
             entry.casting = true;
-            entry.effects_pending = true;
+            entry.since_ms = now;
+            entry.pending_until_ms = now
+                + delay_ms
+                    .saturating_add(START_GRACE_MS)
+                    .min(PENDING_HOLD_MAX_MS);
         }
     }
 }
@@ -339,7 +371,7 @@ pub fn end_cast(server: &GameServer, doodad_obj_id: u32, caster: &WorldObject) {
     let remove = match entries.get_mut(&doodad_obj_id) {
         Some(entry) if entry.occupant_obj_id == caster.obj_id() => {
             entry.casting = still_casting;
-            entry.effects_pending = false;
+            entry.pending_until_ms = 0;
             !entry.casting && !entry.bonded
         }
         _ => false,
@@ -456,10 +488,11 @@ fn entry_holds(server: &GameServer, doodad_obj_id: u32, entry: &Occupancy) -> bo
     if !alive {
         return false;
     }
-    if entry.effects_pending {
+    let now = now_ms();
+    if entry.pending_until_ms > now {
         return true;
     }
-    if now_ms() - entry.since_ms < START_GRACE_MS {
+    if now - entry.since_ms < START_GRACE_MS {
         return true;
     }
     let casting = entry.casting

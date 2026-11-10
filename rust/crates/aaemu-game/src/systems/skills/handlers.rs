@@ -290,8 +290,11 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         return;
     }
     // 1.2 `doodad_almighties.once_one_man`: another unit's timed interaction with a held
-    // doodad (or a held single seat) is refused before any cast work. Only the in-use
-    // `SCErrorMsg` is sent; no `SCSkillStarted` result follows, so the client shows one text.
+    // doodad (or a held single seat) is refused before any cast work. Like the item gate below,
+    // send the in-use `SCErrorMsg` and the `SCSkillStarted` failure (the client only stops a
+    // pending cast on a non-zero result); NEED_REAGENT is the item-gate's code, so the client
+    // shows the in-use text, not a second, different one. The classification uses the caster's
+    // real skill level, not rank 1.
     if let (SkillCastTarget::Doodad(obj_id), Some(skill)) =
         (target, data.systems.skills.skill(skill_id))
     {
@@ -299,7 +302,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             .and_then(|world| world.object(obj_id))
             .and_then(|object| object.as_doodad().cloned())
         {
-            let run = crate::systems::skills::state::SkillRun::new(skill.clone(), 1);
+            let run = super::skill::new_skill_for(server, skill.clone(), Some(&me));
             if crate::systems::npcs::doodad::occupancy::refuses_start(server, &doodad, &me, &run) {
                 tracing::debug!(
                     character = %player.data().unit.name,
@@ -308,6 +311,15 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
                     "Client doodad skill refused: another unit is using it"
                 );
                 crate::systems::npcs::doodad::occupancy::send_already_interacting(&me);
+                send_cast_failed(
+                    &player,
+                    skill_id,
+                    p.caster,
+                    target,
+                    p.skill_object,
+                    skill_result::NEED_REAGENT,
+                    0,
+                );
                 return;
             }
         }

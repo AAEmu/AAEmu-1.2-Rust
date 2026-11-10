@@ -13,6 +13,7 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{GradeTemplate, ItemTemplate};
 use crate::data::GameData;
+use crate::models::unit::{SkillAttribute, SkillModifier, UnitModifierType};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -24,8 +25,10 @@ use crate::systems::npcs::doodad::templates::*;
 use crate::systems::skills::data::effects::EffectTemplate;
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
-use crate::systems::skills::state::SkillRun;
-use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillTargetType};
+use crate::systems::skills::state::{SkillRef, SkillRun};
+use crate::systems::skills::types::{
+    skill_result, SkillCastTarget, SkillCaster, SkillObject, SkillTargetType,
+};
 use crate::test_support::*;
 use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
@@ -375,7 +378,7 @@ impl Fx {
         Inv::of(player).items_count(item, -1)
     }
 
-    fn run_skill(&self, skill_id: u32) -> crate::systems::skills::state::SkillRef {
+    fn run_skill(&self, skill_id: u32) -> SkillRef {
         let template = self
             .server
             .game_data
@@ -407,12 +410,26 @@ fn body(p: &dyn Marshal) -> Vec<u8> {
     s.into_bytes()
 }
 
-fn assert_refused(frames: &[(u16, Vec<u8>)]) {
+/// The refusal sends the in-use `SCErrorMsg` and the `SCSkillStarted` failure the client needs
+/// to stop a pending cast (the item gate's `NEED_REAGENT`, so only one text is shown).
+fn assert_refused(player_obj: u32, skill: u32, doodad_obj: u32, frames: &[(u16, Vec<u8>)]) {
     let expected =
         crate::packets::world::SCErrorMsgPacket::new(ALREADY_INTERACTING_SOMEONE_ELSE, 0, true);
     assert!(
         frames.contains(&(sc::SCErrorMsgPacket, body(&expected))),
         "no ALREADY_INTERACTING_SOMEONE_ELSE in {frames:?}"
+    );
+    let mut started = crate::systems::skills::packets::SCSkillStartedPacket::new(
+        skill,
+        0,
+        SkillCaster::Unit(player_obj),
+        SkillCastTarget::Doodad(doodad_obj),
+        SkillObject::None,
+    );
+    started.set_skill_result(skill_result::NEED_REAGENT);
+    assert!(
+        frames.contains(&(sc::SCSkillStartedPacket, body(&started))),
+        "no NEED_REAGENT SCSkillStarted in {frames:?}"
     );
 }
 
@@ -439,7 +456,7 @@ async fn second_unit_gather_is_refused_while_the_first_is_casting() {
     );
 
     let frames = fx.cast(false, TREE_SKILL, &d);
-    assert_refused(&frames);
+    assert_refused(fx.p2.obj_id, TREE_SKILL, d.obj_id, &frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
     assert_eq!(fx.p2.data().labor_power, LABOR_BASE as i16);
     assert_eq!(fx.count(&fx.p2, ORE), 0);
@@ -590,7 +607,7 @@ async fn chair_is_refused_while_occupied_and_free_after_unbond() {
     );
 
     let frames = fx.cast(false, CHAIR_SKILL, &d);
-    assert_refused(&frames);
+    assert_refused(fx.p2.obj_id, CHAIR_SKILL, d.obj_id, &frames);
     assert!(fx.p2.data().bonding.is_none());
     assert_eq!(d.data().seat.seats.get(&d.obj_id), Some(&vec![1]));
 
@@ -675,7 +692,7 @@ async fn delayed_effect_keeps_the_hold_and_the_occupant_effect_runs() {
     // Past the 2 s accept grace, but the effect is still pending: the tree is not free.
     tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
     let frames = fx.cast(false, TREE_SKILL, &d);
-    assert_refused(&frames);
+    assert_refused(fx.p2.obj_id, TREE_SKILL, d.obj_id, &frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
@@ -727,4 +744,63 @@ async fn skill_hit_runs_during_another_units_hold() {
     let frames = fx.c2.drain();
     assert_not_refused(&frames);
     assert_eq!(d.data().func_group_id, HIT_NEXT);
+}
+
+/// The pending-effect hold is capped: if the `ApplySkillTask` never runs (its timeline id
+/// changed), the entry expires instead of holding the doodad while the occupant lives.
+#[tokio::test]
+async fn a_pending_effect_expires_when_its_effect_never_runs() {
+    let fx = fx();
+    let d = fx.doodad(TREE);
+    let w1 = WorldObject::from(&fx.p1);
+    let w2 = WorldObject::from(&fx.p2);
+    let skill = fx.run_skill(TREE_SKILL);
+
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w1, &skill));
+    super::occupancy::mark_effects_pending(&fx.server, &d, &w1, 1_500);
+    assert!(!super::occupancy::permits(&fx.server, &d, &w2));
+
+    // The effect never applies: after the cap the doodad is free again.
+    fx.server
+        .systems
+        .npcs
+        .doodads
+        .occupancy
+        .age_entry(d.obj_id, super::occupancy::PENDING_HOLD_MAX_MS + 1);
+    assert!(super::occupancy::permits(&fx.server, &d, &w2));
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w2, &skill));
+}
+
+/// The funnel's timed predicate uses the effective cast time (caster stats / modifiers), the
+/// same as the start gate: a cast reduced to 0 is instant in both places.
+#[tokio::test]
+async fn a_cast_reduced_to_zero_passes_the_funnel() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+    for p in [&fx.p1, &fx.p2] {
+        p.data()
+            .unit
+            .skill_modifiers
+            .add_modifiers(&[SkillModifier {
+                id: 1,
+                owner_id: 0,
+                tag_id: 0,
+                skill_attribute: SkillAttribute::CastTime,
+                unit_modifier_type: UnitModifierType::Value,
+                value: -10_000,
+                skill_id: TREE_SKILL,
+                synergy: false,
+            }]);
+    }
+    let w1 = WorldObject::from(&fx.p1);
+    let w2 = WorldObject::from(&fx.p2);
+    let skill = fx.run_skill(TREE_SKILL);
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w1, &skill));
+
+    fx.c2.drain();
+    let ctx = fx.ctx(&d);
+    super::phase::use_doodad(&ctx, Some(&w2), TREE_SKILL, 0);
+    drop(ctx);
+    assert_not_refused(&fx.c2.drain());
+    assert_eq!(fx.count(&fx.p2, ORE), 1);
 }
