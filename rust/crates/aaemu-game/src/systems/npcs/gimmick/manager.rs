@@ -604,10 +604,12 @@ fn contact_unit(world: &WorldInstance, obj: &WorldObject) -> bool {
 /// (`ZWGimmickCollided`, op 42) and the collision skill was cast from the gimmick; the 1.2
 /// client has no gimmick packet (only SC 0x13c-0x141), so the server detects the touch here.
 ///
-/// A gimmick only reaches this check when its template has a collision skill and its current
-/// speed is at least `collision_min_speed`. Each unit is hit at most once per gimmick
-/// (`GimmickState::collision_hits`). `disappear_by_collision` despawns it after the touches of
-/// this tick were cast. Returns `true` when the gimmick was despawned.
+/// One touch fires one skill, never one per touched unit: most collision skills are area skills
+/// (18717 r20, 14649 r30, ...) and firing them once per unit multiplied the explosion. The
+/// firing latches every unit it covers (the skill's area radius around the gimmick plus every
+/// touched unit), so a unit already hit by a firing never triggers another one. A
+/// `disappear_by_collision` gimmick fires once in total and despawns. Returns `true` when the
+/// gimmick was despawned.
 fn collision_tick(
     server: &GameServer,
     world: &WorldInstance,
@@ -624,54 +626,76 @@ fn collision_tick(
     if !speed.is_finite() || speed < template.collision_min_speed {
         return false;
     }
+    let skill = server
+        .game_data
+        .systems
+        .skills
+        .skill(template.collision_skill_id)
+        .cloned();
+    let area = skill
+        .as_ref()
+        .map_or(0.0, |t| t.target_area_radius.max(0) as f32);
     let me = WorldObject::from(&active.gimmick);
     let mut contacts: Vec<(u32, WorldObject)> = Vec::new();
+    let mut covered: Vec<u32> = Vec::new();
     for unit in world.around(&me, |o| o.is_unit().then(|| o.clone())) {
         if !contact_unit(world, &unit) {
             continue;
         }
         let p = world.world_pos_rot(&unit);
-        let reach = COLLISION_RADIUS
-            + crate::systems::skills::geometry::model_size(
-                server,
-                &crate::systems::skills::geometry::Target::Obj(unit.clone()),
-            );
+        let model = crate::systems::skills::geometry::model_size(
+            server,
+            &crate::systems::skills::geometry::Target::Obj(unit.clone()),
+        );
         let dx = p.x - origin[0];
         let dy = p.y - origin[1];
         let dz = p.z - origin[2];
-        if dx * dx + dy * dy + dz * dz <= reach * reach {
-            contacts.push((unit.obj_id(), unit));
+        let distance_sq = dx * dx + dy * dy + dz * dz;
+        let reach = COLLISION_RADIUS + model;
+        if distance_sq <= reach * reach {
+            contacts.push((unit.obj_id(), unit.clone()));
+        }
+        if area > 0.0 {
+            // The skill centers its area on the first touched unit (AnyUnit target) or on the
+            // gimmick (position target); include the contact radius so either center's area is
+            // covered by the latch.
+            let cover = area + COLLISION_RADIUS + model;
+            if distance_sq <= cover * cover {
+                covered.push(unit.obj_id());
+            }
         }
     }
-    let mut new_hits: Vec<WorldObject> = Vec::new();
+    let mut fire_with: Option<WorldObject> = None;
     {
         // Check and latch under one lock; no world call while it is held.
         let mut st = active.state();
-        for (id, unit) in contacts {
-            if st.collision_hits.contains(&id) {
-                continue;
+        for (id, unit) in &contacts {
+            if !st.collision_hits.contains(id) {
+                fire_with = Some(unit.clone());
+                break;
             }
+        }
+        for id in contacts.iter().map(|(id, _)| *id).chain(covered) {
             if st.collision_hits.len() >= MAX_COLLISION_HITS {
                 break;
             }
-            st.collision_hits.push(id);
-            new_hits.push(unit);
+            if !st.collision_hits.contains(&id) {
+                st.collision_hits.push(id);
+            }
         }
     }
-    if new_hits.is_empty() {
+    let Some(unit) = fire_with else {
         return false;
-    }
+    };
     if let Some(h) = server.systems.npcs.hooks.skills.get() {
-        for unit in &new_hits {
-            tracing::debug!(
-                gimmick = me.obj_id(),
-                unit = unit.obj_id(),
-                skill_id = template.collision_skill_id,
-                speed,
-                "Gimmick collision: casting the collision skill"
-            );
-            h.use_gimmick_collision_skill(server, &me, unit, template.collision_skill_id);
-        }
+        tracing::debug!(
+            gimmick = me.obj_id(),
+            unit = unit.obj_id(),
+            skill_id = template.collision_skill_id,
+            speed,
+            "Gimmick collision: casting the collision skill"
+        );
+        h.use_gimmick_collision_skill(server, &me, &unit, template.collision_skill_id);
     }
     if template.disappear_by_collision {
         active.state().despawned = true;
@@ -1004,7 +1028,7 @@ mod tests {
 
     /// Game data with one contact gimmick template and the fixed 100-damage skill it fires
     /// (`AnyUnit` target, no area, `max_range` 0 like the shipped collision skills).
-    fn contact_data(template: GimmickTemplate) -> crate::data::GameData {
+    fn contact_data(template: GimmickTemplate, area_radius: i32) -> crate::data::GameData {
         use crate::systems::skills::data::{EffectKind, EffectTemplate};
         use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
         let mut data = crate::data::GameData::empty();
@@ -1017,7 +1041,8 @@ mod tests {
         let mut skill = skill_template(CONTACT_SKILL);
         skill.target_type = 5; // AnyUnit
         skill.target_relation = 0; // Any
-        skill.target_area_radius = 0;
+        skill.target_selection = 1; // Source: the area is centered on the first touched unit
+        skill.target_area_radius = area_radius;
         skill.max_range = 0;
         // The shipped collision skills' effects start at level 1; a level-0 gimmick caster
         // would skip them all.
@@ -1042,7 +1067,15 @@ mod tests {
     }
 
     fn contact_fixture(template: GimmickTemplate, victim_at: (f32, f32)) -> ContactFixture {
-        let server = crate::test_support::test_server_with(contact_data(template));
+        contact_fixture_with_area(template, victim_at, 0)
+    }
+
+    fn contact_fixture_with_area(
+        template: GimmickTemplate,
+        victim_at: (f32, f32),
+        area_radius: i32,
+    ) -> ContactFixture {
+        let server = crate::test_support::test_server_with(contact_data(template, area_radius));
         // The fixture ids (player 0x100, doodad 0x300) are assigned by hand: take the object
         // ids below them first so a spawned gimmick never gets the same id.
         while server.ids.object.get_next_id().expect("object id") < 0x400 {}
@@ -1132,23 +1165,54 @@ mod tests {
         assert!(f.world.gimmick(g.obj_id).is_some());
     }
 
-    /// A second player (its own connection) for the control assertions of the negative tests.
+    #[tokio::test]
+    async fn contact_gimmick_fires_one_area_cast_for_many_touching_units() {
+        // Five units touch in one tick. The area skill (r5) must fire once, not once per unit:
+        // each unit takes 100 damage, not 500.
+        let f = contact_fixture_with_area(contact_template(false), (100.0, 100.0), 5);
+        let mut clients = Vec::new();
+        let mut units = vec![f.victim.clone()];
+        for id in 2..=5 {
+            let (client, p) = control_player(&f, id, (100.0, 100.0));
+            clients.push(client);
+            units.push(p);
+        }
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        for (i, unit) in units.iter().enumerate() {
+            assert_eq!(
+                unit.data().unit.hp,
+                400,
+                "unit {i} must take exactly one area hit"
+            );
+        }
+    }
+
+    /// Another player (its own connection) for the multi-unit and control assertions.
     fn control_player(
         f: &ContactFixture,
+        id: u32,
         at: (f32, f32),
     ) -> (crate::test_support::TestClient, crate::world::PlayerRef) {
-        let client = crate::test_support::TestClient::new(&f.server, 2, 2);
-        let mut c = crate::test_support::test_character(2, "Control", at.0, at.1);
+        let client = crate::test_support::TestClient::new(&f.server, id, id);
+        let mut c = crate::test_support::test_character(id, &format!("Control{id}"), at.0, at.1);
         c.unit.hp = 500;
         c.unit.max_hp = 1000;
-        let p = crate::test_support::spawn_player(&f.server, &client, c, 0x101);
+        let p = crate::test_support::spawn_player(&f.server, &client, c, 0x100 + id);
         (client, p)
     }
 
     #[tokio::test]
     async fn contact_gimmick_does_not_hit_a_unit_outside_its_radius() {
         let f = contact_fixture(contact_template(false), (105.0, 100.0));
-        let (_control_client, control) = control_player(&f, (100.0, 100.0));
+        let (_control_client, control) = control_player(&f, 2, (100.0, 100.0));
         let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
         let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
         // One 50 ms tick moves it to x = 100.25, 4.75 m from the victim (> 1.5 m radius).
@@ -1195,7 +1259,7 @@ mod tests {
         // A dead unit is not a contact target; the living control at the same spot is.
         let dead = contact_fixture(contact_template(false), (100.0, 100.0));
         dead.victim.data().unit.hp = 0;
-        let (_control_client, control) = control_player(&dead, (100.0, 100.0));
+        let (_control_client, control) = control_player(&dead, 2, (100.0, 100.0));
         let source = doodad_at(&dead.server, &dead.world, (100.0, 100.0, 100.0));
         let (_, active) = spawn_contact_gimmick(&dead, &source, [5.0, 0.0, 0.0]);
         gimmick_tick(
@@ -1211,7 +1275,7 @@ mod tests {
         // A GM-invisible unit is not a contact target either; the control is.
         let hidden = contact_fixture(contact_template(false), (100.0, 100.0));
         hidden.victim.data().unit.invisible = true;
-        let (_control_client, control) = control_player(&hidden, (100.0, 100.0));
+        let (_control_client, control) = control_player(&hidden, 2, (100.0, 100.0));
         let source = doodad_at(&hidden.server, &hidden.world, (100.0, 100.0, 100.0));
         let (_, active) = spawn_contact_gimmick(&hidden, &source, [5.0, 0.0, 0.0]);
         gimmick_tick(
@@ -1251,7 +1315,7 @@ mod tests {
         // The fixture's victim is the living control for the contact gimmick; the rider stands
         // on the elevator, which has no template and therefore no collision skill.
         let f = contact_fixture(contact_template(false), (200.0, 200.0));
-        let rider = control_player(&f, (100.0, 200.0));
+        let rider = control_player(&f, 2, (100.0, 200.0));
         let elevator =
             spawn_from_spawner(&f.server, &f.world, &elevator_spawner()).expect("spawned");
         let active = f
