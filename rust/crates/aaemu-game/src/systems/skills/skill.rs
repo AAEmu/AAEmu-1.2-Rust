@@ -862,14 +862,14 @@ fn use_skill_impl(
     if dry_run {
         return (skill_result::SUCCESS, 0);
     }
-    // 1.2 `doodad_almighties.once_one_interaction` / `once_one_man`: another unit's interaction
-    // with a doodad that is held is refused before any of this cast's state changes (buff
-    // removal, GCD, mana, reagent, labor). Instant interactions are not blocked by their own
-    // kind and take no occupancy; a timed interaction cast takes it once it is accepted below.
+    // 1.2 `doodad_almighties.once_one_man`: another unit's timed interaction with a held
+    // doodad is refused before any of this cast's side effects (stealth / StartSkill buff
+    // removal, unmount, plot run, GCD, mana, reagent, labor). A held timed cast is acquired
+    // here too, before those side effects; a seat use only checks the seat. Instant non-seat
+    // interactions are never blocked and take no occupancy. The client-facing caller sends the
+    // single in-use message; this path stays silent for the other caster kinds.
     if let Some(doodad) = interaction_doodad.as_ref() {
-        if !crate::systems::npcs::doodad::occupancy::permits_interaction(
-            server, doodad, caster, skill,
-        ) {
+        if !crate::systems::npcs::doodad::occupancy::begin_skill(server, doodad, caster, skill) {
             return (skill_result::INVALID_TARGET, 0);
         }
     }
@@ -983,6 +983,13 @@ fn use_skill_impl(
                         items.consume_owned_item(server, p, item_id, template_id, 0) != Some(false)
                     });
             if !still_owned {
+                if let Some(doodad) = interaction_doodad.as_ref() {
+                    crate::systems::npcs::doodad::occupancy::end_cast(
+                        server,
+                        doodad.obj_id,
+                        caster,
+                    );
+                }
                 skill.state().cancelled = true;
                 return (skill_result::INVALID_SOURCE, 0);
             }
@@ -1009,6 +1016,10 @@ fn use_skill_impl(
         }
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
+            // No cast follows: a plot-only skill never holds a doodad.
+            if let Some(doodad) = interaction_doodad.as_ref() {
+                crate::systems::npcs::doodad::occupancy::end_cast(server, doodad.obj_id, caster);
+            }
             return (skill_result::SUCCESS, 0);
         }
     }
@@ -1017,18 +1028,6 @@ fn use_skill_impl(
     let ctm = skill.state().cast_time_multiplier;
     cast_time = (f64::from(cast_time) * f64::from(ctm)).round_ties_even() as i32;
     if cast_time > 0 {
-        // A timed interaction cast holds the doodad for its whole duration (`once_one_*`).
-        // Taking it here, after every fallible check, keeps an abandoned refusal from leaving
-        // an entry behind.
-        if let Some(doodad) = interaction_doodad.as_ref() {
-            if !crate::systems::npcs::doodad::occupancy::begin_cast(server, doodad, caster, skill) {
-                // Another unit took the doodad between the refusal check and here.
-                crate::systems::npcs::doodad::occupancy::send_already_interacting(caster);
-                let tl = std::mem::take(&mut skill.state().tl_id);
-                server.systems.skills.tl_ids.release(tl);
-                return (skill_result::INVALID_TARGET, 0);
-            }
-        }
         // The 1.2 client measures a player's global cooldown from the cast start, so start it
         // now; `cast` would only start it at the cast end, refusing a skill the client already
         // shows as ready. NPC casts keep the cast-end start (their AI pacing relies on it).
@@ -1718,6 +1717,17 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     if t.effect_speed > 0.0 {
         let d = distance_to(server, &Target::Obj(caster.clone()), &ctx.target, false);
         total_delay += (d / t.effect_speed * 1000.0) as i32;
+    }
+    // The cast slot is already cleared; a delayed interaction effect still owes the doodad's
+    // `once_one_man` funnel, so the hold must survive until `apply_effects` / `end_skill`.
+    if total_delay > 0 {
+        if let Some(doodad) = ctx.target.as_obj().and_then(WorldObject::as_doodad) {
+            if crate::systems::npcs::doodad::occupancy::is_interaction_skill(server, t) {
+                crate::systems::npcs::doodad::occupancy::mark_effects_pending(
+                    server, doodad, caster,
+                );
+            }
+        }
     }
     let fire_anim_id = fire_anim_for(t, super::plots::weapon_wield_kind(server, caster));
     if fire_anim_id != 0 && t.use_anim_time {

@@ -83,11 +83,12 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
         return;
     }
     if f.bond_kind_id > bond_kind::BOND_INVALID {
-        // 1.2 `once_one_man`: one unit occupies the chair / bed / instrument at a time. The
-        // interaction start already refused a second unit; this covers a race or a func-driven
-        // use that bypassed the gate.
+        // 1.2 `once_one_man`: one unit occupies a single seat / instrument at a time. A
+        // multi-seat attachment (`space > 1`) takes no occupancy: its `load_passenger`
+        // capacity decides. The interaction start already refused a second unit; this covers
+        // a race or a func-driven use that bypassed the gate.
         let me = WorldObject::from(player);
-        if !super::super::occupancy::begin_bond(ctx.server, &ctx.doodad, &me) {
+        if !super::super::occupancy::begin_bond(ctx.server, &ctx.doodad, &me, f.space) {
             super::super::occupancy::send_already_interacting(&me);
             return;
         }

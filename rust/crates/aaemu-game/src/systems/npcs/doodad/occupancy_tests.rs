@@ -1,11 +1,13 @@
-//! The 1.2 single-user rule of `doodad_almighties.once_one_interaction` / `once_one_man`
-//! (`super::occupancy`): a second unit's interaction with a doodad another unit is gathering
-//! from or sitting on is refused with `ALREADY_INTERACTING_SOMEONE_ELSE` (error 4), and every
-//! exit releases the doodad.
+//! The 1.2 single-user rule of `doodad_almighties.once_one_man` (`super::occupancy`): a second
+//! unit's timed interaction with a doodad another unit is gathering from (or a held single seat
+//! another unit occupies) is refused with `ALREADY_INTERACTING_SOMEONE_ELSE` (error 4), and
+//! every exit releases the doodad. `once_one_interaction` alone is not enforced; multi-seat
+//! attachments and the instant / loot / skill-hit kinds are never held nor refused.
 //!
 //! The flows drive the real `CSStartSkill` handler; the fixtures mirror the real data shape
-//! (a tree: timed `DoodadFuncUse` gather chain `once_one_interaction` + `once_one_man`; a chair:
-//! `DoodadFuncAttachment` with both flags; an instant `Use` doodad with `once_one_interaction`).
+//! (a tree: timed `DoodadFuncUse` gather chain, both columns set; a chair: `DoodadFuncAttachment`
+//! space 1; a 2-seat carriage chair; an instant plain `Use` doodad; a loot chest and a SkillHit
+//! doodad held by another unit).
 
 use aaemu_commons::{Marshal, PacketStream};
 
@@ -22,23 +24,39 @@ use crate::systems::npcs::doodad::templates::*;
 use crate::systems::skills::data::effects::EffectTemplate;
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+use crate::systems::skills::state::SkillRun;
 use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillTargetType};
 use crate::test_support::*;
-use crate::world::{DoodadRef, PlayerRef};
+use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
 const TREE: u32 = 401;
 const TREE_START: u32 = 4010;
 const TREE_LOOT: u32 = 4011;
+const SOLO: u32 = 404;
+const SOLO_START: u32 = 4040;
+const SOLO_LOOT: u32 = 4041;
 const CHAIR: u32 = 402;
 const CHAIR_GROUP: u32 = 4020;
+const CHAIR2: u32 = 405;
+const CHAIR2_GROUP: u32 = 4050;
 const INSTANT: u32 = 403;
 const INSTANT_GROUP: u32 = 4030;
+const CHEST: u32 = 406;
+const CHEST_START: u32 = 4060;
+const CHEST_DONE: u32 = 4061;
+const HIT: u32 = 407;
+const HIT_START: u32 = 4070;
+const HIT_NEXT: u32 = 4071;
 
 const TREE_SKILL: u32 = 7401;
+const TREE_DELAYED: u32 = 7404;
 const CHAIR_SKILL: u32 = 7402;
 const INSTANT_SKILL: u32 = 7403;
+const HIT_SKILL: u32 = 7405;
 const USE_EFFECT: u32 = 940_001;
 const INTERACTION_MS: i32 = 5000;
+const DELAYED_MS: i32 = 400;
+const EFFECT_DELAY_MS: i32 = 1500;
 
 const ORE: u32 = 8022;
 const LABOR_BASE: i32 = 100;
@@ -50,10 +68,16 @@ struct DoodadBuilder {
 }
 
 impl DoodadBuilder {
-    fn template(mut self, id: u32, groups: &[(u32, u32)], once_one_man: bool) -> Self {
+    fn template(
+        mut self,
+        id: u32,
+        groups: &[(u32, u32)],
+        once_one_interaction: bool,
+        once_one_man: bool,
+    ) -> Self {
         let mut t = DoodadTemplate {
             id,
-            once_one_interaction: true,
+            once_one_interaction,
             once_one_man,
             ..DoodadTemplate::default()
         };
@@ -110,6 +134,21 @@ impl DoodadBuilder {
     }
 }
 
+fn use_func(id: u32) -> FuncTemplate {
+    FuncTemplate::Use(DoodadFuncUse { id, skill_id: 0 })
+}
+
+fn loot(id: u32) -> FuncTemplate {
+    FuncTemplate::LootItem(DoodadFuncLootItem {
+        id,
+        item_id: ORE,
+        count_min: 1,
+        count_max: 1,
+        percent: 10_000,
+        ..DoodadFuncLootItem::default()
+    })
+}
+
 fn game_data() -> GameData {
     let mut d = GameData::empty();
     d.items.grades.insert(
@@ -143,7 +182,14 @@ fn game_data() -> GameData {
             EffectKind::InteractionEffect,
             USE_EFFECT,
         ));
-    s.add_skill(tree);
+    s.add_skill(tree.clone());
+    // The same gather, but its interaction effect fires after the cast slot was cleared.
+    let mut delayed = tree.clone();
+    delayed.id = TREE_DELAYED;
+    delayed.casting_time = DELAYED_MS;
+    delayed.consume_labor_power = 0;
+    delayed.effect_delay = EFFECT_DELAY_MS;
+    s.add_skill(delayed);
     // Instant seat / instrument use (casting_time 0, like the real 15857 / 20847 sit skills).
     let mut chair = crate::systems::skills::tests::skill_template(CHAIR_SKILL);
     chair.target_type = SkillTargetType::Doodad as i32;
@@ -155,7 +201,7 @@ fn game_data() -> GameData {
             USE_EFFECT,
         ));
     s.add_skill(chair);
-    // Instant interaction with no seat: must neither be blocked nor occupy.
+    // Instant plain Use: never blocked, never held.
     let mut instant = crate::systems::skills::tests::skill_template(INSTANT_SKILL);
     instant.target_type = SkillTargetType::Doodad as i32;
     instant
@@ -166,35 +212,33 @@ fn game_data() -> GameData {
             USE_EFFECT,
         ));
     s.add_skill(instant);
+    // SkillHit by an AoE: never refused by the single-user rule.
+    let mut hit = crate::systems::skills::tests::skill_template(HIT_SKILL);
+    hit.target_type = SkillTargetType::Doodad as i32;
+    hit.effects
+        .push(crate::systems::skills::tests::skill_effect(
+            USE_EFFECT,
+            EffectKind::InteractionEffect,
+            USE_EFFECT,
+        ));
+    s.add_skill(hit);
 
     d.systems.npcs.doodad = DoodadBuilder::default()
         // Apple / sequoia tree: a timed gather cast, phase -> loot -> back. 1.2 trees carry
-        // both flags.
-        .template(
-            TREE,
-            &[(TREE_START, 1), (TREE_LOOT, 2)],
-            true, // once_one_man
-        )
-        .func(
-            TREE_START,
-            FuncTemplate::Use(DoodadFuncUse { id: 1, skill_id: 0 }),
-            TREE_LOOT as i32,
-        )
+        // both columns; only once_one_man is enforced.
+        .template(TREE, &[(TREE_START, 1), (TREE_LOOT, 2)], true, true)
+        .func(TREE_START, use_func(1), TREE_LOOT as i32)
         .skill(TREE_START, TREE_SKILL)
-        .func(
-            TREE_LOOT,
-            FuncTemplate::LootItem(DoodadFuncLootItem {
-                id: 2,
-                item_id: ORE,
-                count_min: 1,
-                count_max: 1,
-                percent: 10_000,
-                ..DoodadFuncLootItem::default()
-            }),
-            TREE_START as i32,
-        )
+        .func(TREE_START, use_func(5), TREE_LOOT as i32)
+        .skill(TREE_START, TREE_DELAYED)
+        .func(TREE_LOOT, loot(2), TREE_START as i32)
+        // The same shape with once_one_interaction only: NOT enforced.
+        .template(SOLO, &[(SOLO_START, 1), (SOLO_LOOT, 2)], true, false)
+        .func(SOLO_START, use_func(10), SOLO_LOOT as i32)
+        .skill(SOLO_START, TREE_SKILL)
+        .func(SOLO_LOOT, loot(11), SOLO_START as i32)
         // Soft chair / piano: an instant use whose `DoodadFuncAttachment` bonds the sitter.
-        .template(CHAIR, &[(CHAIR_GROUP, 1)], true)
+        .template(CHAIR, &[(CHAIR_GROUP, 1)], true, true)
         .func(
             CHAIR_GROUP,
             FuncTemplate::Attachment(DoodadFuncAttachment {
@@ -206,14 +250,41 @@ fn game_data() -> GameData {
             0,
         )
         .skill(CHAIR_GROUP, CHAIR_SKILL)
-        // An instant interaction (mailbox-like): never blocked by its own kind, no occupancy.
-        .template(INSTANT, &[(INSTANT_GROUP, 1)], false)
+        // Carriage chair: two places; the seat capacity decides, no occupancy.
+        .template(CHAIR2, &[(CHAIR2_GROUP, 1)], true, true)
         .func(
-            INSTANT_GROUP,
-            FuncTemplate::Use(DoodadFuncUse { id: 4, skill_id: 0 }),
+            CHAIR2_GROUP,
+            FuncTemplate::Attachment(DoodadFuncAttachment {
+                id: 4,
+                attach_point_id: 2,
+                space: 2,
+                bond_kind_id: bond_kind::BOND_CHAIR_DOUBLE,
+            }),
             0,
         )
+        .skill(CHAIR2_GROUP, CHAIR_SKILL)
+        // An instant plain Use doodad with once_one_man: never blocked, never held.
+        .template(INSTANT, &[(INSTANT_GROUP, 1)], true, true)
+        .func(INSTANT_GROUP, use_func(6), 0)
         .skill(INSTANT_GROUP, INSTANT_SKILL)
+        // A loot chest (skill-less LootItem) whose start group also has a holdable timed use.
+        .template(CHEST, &[(CHEST_START, 1), (CHEST_DONE, 2)], true, true)
+        .func(CHEST_START, use_func(7), CHEST_DONE as i32)
+        .skill(CHEST_START, TREE_SKILL)
+        .func(CHEST_START, loot(8), CHEST_DONE as i32)
+        // A SkillHit doodad (an AoE must still run its SkillHit func).
+        .template(HIT, &[(HIT_START, 1), (HIT_NEXT, 2)], true, true)
+        .func(HIT_START, use_func(9), HIT_NEXT as i32)
+        .skill(HIT_START, TREE_SKILL)
+        .func(
+            HIT_START,
+            FuncTemplate::SkillHit(DoodadFuncSkillHit {
+                id: 10,
+                skill_id: HIT_SKILL,
+            }),
+            HIT_NEXT as i32,
+        )
+        .skill(HIT_START, HIT_SKILL)
         .data;
     d
 }
@@ -277,6 +348,10 @@ impl Fx {
         d
     }
 
+    fn ctx(&self, d: &DoodadRef) -> super::runtime::DoodadCtx<'_> {
+        super::runtime::DoodadCtx::new(&self.server, self.server.world.world(0).unwrap(), d.clone())
+    }
+
     fn cast(&mut self, first: bool, skill: u32, d: &DoodadRef) -> Vec<(u16, Vec<u8>)> {
         let (client, player) = if first {
             (&mut self.c1, &self.p1)
@@ -298,6 +373,18 @@ impl Fx {
 
     fn count(&self, player: &PlayerRef, item: u32) -> i32 {
         Inv::of(player).items_count(item, -1)
+    }
+
+    fn run_skill(&self, skill_id: u32) -> crate::systems::skills::state::SkillRef {
+        let template = self
+            .server
+            .game_data
+            .systems
+            .skills
+            .skill(skill_id)
+            .expect("fixture skill")
+            .clone();
+        SkillRun::new(template, 1)
     }
 
     async fn wait_no_cast(&self, player: &PlayerRef, skill: u32) {
@@ -329,6 +416,15 @@ fn assert_refused(frames: &[(u16, Vec<u8>)]) {
     );
 }
 
+fn assert_not_refused(frames: &[(u16, Vec<u8>)]) {
+    let expected =
+        crate::packets::world::SCErrorMsgPacket::new(ALREADY_INTERACTING_SOMEONE_ELSE, 0, true);
+    assert!(
+        !frames.contains(&(sc::SCErrorMsgPacket, body(&expected))),
+        "unexpected ALREADY_INTERACTING_SOMEONE_ELSE in {frames:?}"
+    );
+}
+
 /// A second unit's gather cast on a tree the first unit is gathering from is refused before
 /// any cost: no cast task, no labor, no loot, no phase change. The first unit's cast continues.
 #[tokio::test]
@@ -336,21 +432,18 @@ async fn second_unit_gather_is_refused_while_the_first_is_casting() {
     let mut fx = fx();
     let d = fx.doodad(TREE);
 
-    // The first player starts the 5 s gather cast; the interaction holds the tree.
     let frames = fx.cast(true, TREE_SKILL, &d);
     assert!(
         fx.p1.data().unit.skill_state.skill_task.is_some(),
         "{frames:?}"
     );
 
-    // The second player's cast is refused with the 1.2 error and changes nothing.
     let frames = fx.cast(false, TREE_SKILL, &d);
     assert_refused(&frames);
     assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
     assert_eq!(fx.p2.data().labor_power, LABOR_BASE as i16);
     assert_eq!(fx.count(&fx.p2, ORE), 0);
     assert_eq!(d.data().func_group_id, TREE_START);
-    // The first player's cast was not disturbed.
     assert!(fx.p1.data().unit.skill_state.skill_task.is_some());
 }
 
@@ -361,7 +454,6 @@ async fn tree_is_free_after_the_cast_finishes_or_is_cancelled() {
     let mut fx = fx();
     let d = fx.doodad(TREE);
 
-    // Finish: the first player gathers, then repeats its own interaction.
     fx.cast(true, TREE_SKILL, &d);
     fx.wait_no_cast(&fx.p1, TREE_SKILL).await;
     assert_eq!(fx.count(&fx.p1, ORE), 1);
@@ -374,7 +466,6 @@ async fn tree_is_free_after_the_cast_finishes_or_is_cancelled() {
     );
     fx.wait_no_cast(&fx.p1, TREE_SKILL).await;
 
-    // The other unit may now gather too.
     fx.p2.data().unit.global_cooldown_ms = 0;
     let frames = fx.cast(false, TREE_SKILL, &d);
     assert!(
@@ -384,7 +475,6 @@ async fn tree_is_free_after_the_cast_finishes_or_is_cancelled() {
     fx.wait_no_cast(&fx.p2, TREE_SKILL).await;
     assert_eq!(fx.count(&fx.p2, ORE), 1);
 
-    // Cancelled: a cancelled cast releases the tree as well.
     fx.p1.data().unit.global_cooldown_ms = 0;
     fx.cast(true, TREE_SKILL, &d);
     assert!(fx.p1.data().unit.skill_state.skill_task.is_some());
@@ -415,7 +505,6 @@ async fn tree_is_free_after_the_occupant_logs_out() {
     fx.cast(true, TREE_SKILL, &d);
     assert!(fx.p1.data().unit.skill_state.skill_task.is_some());
 
-    // What the logout does to the world after its departure save.
     let world = fx.server.world.world(0).unwrap();
     world.delete(crate::world::WorldObject::from(&fx.p1));
     fx.server.world.try_remove_character(fx.p1.obj_id);
@@ -433,20 +522,18 @@ async fn tree_is_free_after_the_occupant_logs_out() {
 }
 
 /// Instant interactions are never blocked by their own kind and take no occupancy: two units
-/// use the same `once_one_interaction` doodad one after the other.
+/// use the same `once_one_man` doodad one after the other.
 #[tokio::test]
 async fn instant_interactions_do_not_occupy_and_are_never_blocked() {
     let mut fx = fx();
     let d = fx.doodad(INSTANT);
-    let expected =
-        crate::packets::world::SCErrorMsgPacket::new(ALREADY_INTERACTING_SOMEONE_ELSE, 0, true);
 
     let frames = fx.cast(true, INSTANT_SKILL, &d);
     assert!(
         fx.p1.data().unit.skill_state.skill_task.is_none(),
         "{frames:?}"
     );
-    assert!(!frames.contains(&(sc::SCErrorMsgPacket, body(&expected))));
+    assert_not_refused(&frames);
     assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 0);
 
     let frames = fx.cast(false, INSTANT_SKILL, &d);
@@ -454,12 +541,40 @@ async fn instant_interactions_do_not_occupy_and_are_never_blocked() {
         fx.p2.data().unit.skill_state.skill_task.is_none(),
         "{frames:?}"
     );
-    assert!(!frames.contains(&(sc::SCErrorMsgPacket, body(&expected))));
+    assert_not_refused(&frames);
     assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 0);
 }
 
-/// `once_one_man`: while the first unit sits on the chair, a second unit's sit is refused; once
-/// the first unbinds, the chair is free again.
+/// `once_one_man` holds a single seat; a `space > 1` attachment is never held (the passenger
+/// capacity decides): two units sit on the same 2-place carriage chair.
+#[tokio::test]
+async fn multi_seat_attachment_is_never_held() {
+    let mut fx = fx();
+    let d = fx.doodad(CHAIR2);
+
+    let frames = fx.cast(true, CHAIR_SKILL, &d);
+    assert!(
+        fx.p1
+            .data()
+            .bonding
+            .is_some_and(|b| b.owner_obj_id == d.obj_id),
+        "first sit failed: {frames:?}"
+    );
+    let frames = fx.cast(false, CHAIR_SKILL, &d);
+    assert!(
+        fx.p2
+            .data()
+            .bonding
+            .is_some_and(|b| b.owner_obj_id == d.obj_id),
+        "second sit refused on a 2-place seat: {frames:?}"
+    );
+    assert_not_refused(&frames);
+    assert_eq!(d.data().seat.seats.get(&d.obj_id), Some(&vec![1, 2]));
+    assert_eq!(fx.server.systems.npcs.doodads.occupancy.len(), 0);
+}
+
+/// `once_one_man` holds the single seat of a chair: a second unit's sit is refused; once the
+/// first unbinds, the chair is free again.
 #[tokio::test]
 async fn chair_is_refused_while_occupied_and_free_after_unbond() {
     let mut fx = fx();
@@ -490,4 +605,126 @@ async fn chair_is_refused_while_occupied_and_free_after_unbond() {
             .is_some_and(|b| b.owner_obj_id == d.obj_id),
         "chair not free after unbond: {frames:?}"
     );
+}
+
+/// The race of the accepted-but-not-yet-scheduled window: the first acquire has no cast task
+/// yet, a second begin must not drop it, and the first keeps its hold.
+#[tokio::test]
+async fn a_fresh_hold_is_not_dropped_by_a_second_begin() {
+    let fx = fx();
+    let d = fx.doodad(TREE);
+    let w1 = WorldObject::from(&fx.p1);
+    let w2 = WorldObject::from(&fx.p2);
+    let skill = fx.run_skill(TREE_SKILL);
+
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w1, &skill));
+    // The cast task is set only after the accept; simulate the window with no task at all.
+    assert!(fx.p1.data().unit.skill_state.skill_task.is_none());
+    assert!(!super::occupancy::begin_cast(&fx.server, &d, &w2, &skill));
+    assert!(!super::occupancy::permits(&fx.server, &d, &w2));
+    assert!(super::occupancy::permits(&fx.server, &d, &w1));
+
+    super::occupancy::end_cast(&fx.server, d.obj_id, &w1);
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w2, &skill));
+}
+
+/// `once_one_interaction` alone is loaded but not enforced: two units may gather the same
+/// flagged tree while the first cast runs.
+#[tokio::test]
+async fn once_one_interaction_alone_is_not_enforced() {
+    let mut fx = fx();
+    let d = fx.doodad(SOLO);
+
+    let frames = fx.cast(true, TREE_SKILL, &d);
+    assert!(
+        fx.p1.data().unit.skill_state.skill_task.is_some(),
+        "{frames:?}"
+    );
+    let frames = fx.cast(false, TREE_SKILL, &d);
+    assert!(
+        fx.p2.data().unit.skill_state.skill_task.is_some(),
+        "once_one_interaction alone refused the second unit: {frames:?}"
+    );
+    assert_not_refused(&frames);
+    for p in [&fx.p1, &fx.p2] {
+        crate::systems::skills::skill::interrupt_skills(
+            &fx.server,
+            &crate::world::WorldObject::from(p),
+        );
+    }
+}
+
+/// A delayed interaction effect keeps the hold after the cast slot was cleared, refuses a new
+/// timed start by another unit, and the occupant's own effect still runs.
+#[tokio::test]
+async fn delayed_effect_keeps_the_hold_and_the_occupant_effect_runs() {
+    let mut fx = fx();
+    let d = fx.doodad(TREE);
+
+    fx.cast(true, TREE_DELAYED, &d);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fx.p1.data().unit.skill_state.skill_task.is_some()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        fx.p1.data().unit.skill_state.skill_task.is_none(),
+        "delayed cast did not clear its slot"
+    );
+
+    // The effect is still pending: the tree is not free.
+    let frames = fx.cast(false, TREE_SKILL, &d);
+    assert_refused(&frames);
+    assert!(fx.p2.data().unit.skill_state.skill_task.is_none());
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fx.count(&fx.p1, ORE) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        fx.count(&fx.p1, ORE),
+        1,
+        "the occupant's delayed effect was refused"
+    );
+}
+
+/// A skill-less loot interaction (the direct `Doodad.Use` / `CSLootOpenBag` shape) runs while
+/// another unit holds the doodad.
+#[tokio::test]
+async fn loot_runs_during_another_units_hold() {
+    let mut fx = fx();
+    let d = fx.doodad(CHEST);
+    let w1 = WorldObject::from(&fx.p1);
+    let w2 = WorldObject::from(&fx.p2);
+    let skill = fx.run_skill(TREE_SKILL);
+
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w1, &skill));
+    fx.c2.drain();
+    let ctx = fx.ctx(&d);
+    super::phase::use_doodad(&ctx, Some(&w2), 0, 0);
+    drop(ctx);
+    let frames = fx.c2.drain();
+    assert_not_refused(&frames);
+    assert_eq!(fx.count(&fx.p2, ORE), 1);
+    assert_eq!(d.data().func_group_id, CHEST_DONE);
+}
+
+/// A skill hit (an AoE on a `DoodadFuncSkillHit` doodad) still runs while another unit holds it.
+#[tokio::test]
+async fn skill_hit_runs_during_another_units_hold() {
+    let mut fx = fx();
+    let d = fx.doodad(HIT);
+    let w1 = WorldObject::from(&fx.p1);
+    let w2 = WorldObject::from(&fx.p2);
+    let skill = fx.run_skill(TREE_SKILL);
+
+    assert!(super::occupancy::begin_cast(&fx.server, &d, &w1, &skill));
+    fx.c2.drain();
+    let ctx = fx.ctx(&d);
+    super::phase::on_skill_hit(&ctx, Some(&w2), HIT_SKILL);
+    drop(ctx);
+    let frames = fx.c2.drain();
+    assert_not_refused(&frames);
+    assert_eq!(d.data().func_group_id, HIT_NEXT);
 }

@@ -431,6 +431,19 @@ pub fn use_doodad(
     started_skill_id: u32,
     func_group_id: i32,
 ) {
+    use_doodad_with_gate(ctx, caster, started_skill_id, func_group_id, true)
+}
+
+/// [`use_doodad`] with the `once_one_man` funnel gate. `gate_new_timed` is false for
+/// `OnSkillHit`: an AoE hit on a `DoodadFuncSkillHit` doodad must still run (the 1.2 rule only
+/// refuses a new timed use / gather start by another unit).
+fn use_doodad_with_gate(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    started_skill_id: u32,
+    func_group_id: i32,
+    gate_new_timed: bool,
+) {
     let Some(_operation) = Operation::enter(&ctx.doodad) else {
         answer_busy_instance_door(ctx, caster);
         return;
@@ -441,11 +454,13 @@ pub fn use_doodad(
         return;
     };
 
-    // 1.2 `doodad_almighties.once_one_interaction` / `once_one_man`: while another unit holds
-    // the doodad, its interaction is refused. This is the execution funnel of every path
-    // (skill Interaction effect, `CSLootOpenBag`, harpoon, func-driven skills), so it is the
-    // last line of defense behind the cast-start gate in `skills::skill::use_skill_impl`.
-    if !super::occupancy::permits(server, &ctx.doodad, caster) {
+    // 1.2 `doodad_almighties.once_one_man`: only a NEW timed interaction of another unit is
+    // refused here. Loot / fake use / purchase, direct skill-less interacts (`CSLootOpenBag`,
+    // harpoon) and `OnSkillHit` must still run while a unit holds the doodad; the occupant's
+    // own pending / delayed effect also passes. The cast-start gate refuses the common case.
+    if gate_new_timed
+        && super::occupancy::refuses_new_timed(server, &ctx.doodad, caster, started_skill_id)
+    {
         super::occupancy::send_already_interacting(caster);
         return;
     }
@@ -923,7 +938,7 @@ pub fn on_skill_hit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, skill_id:
         .filter(|f| f.func_type == "DoodadFuncSkillHit")
         .count();
     for _ in 0..n {
-        use_doodad(ctx, caster, skill_id, 0);
+        use_doodad_with_gate(ctx, caster, skill_id, 0, false);
     }
 }
 
