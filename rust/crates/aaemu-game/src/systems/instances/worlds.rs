@@ -410,6 +410,12 @@ pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transf
 /// packet. This mirrors the later C# fix (`ef0d41982`, `Transform.FinalizeTransform()` in
 /// `CSInstanceLoadedPacket`); unlike that fix's `ResendVisibleObjectsToCharacter` repaint, an
 /// arrival that is already filed in the target region sends nothing, so nothing is duplicated.
+///
+/// The exception is a zone load *within* the instance the character is already filed in (a
+/// main-world `Return` gate, recall or resurrection point next to the caster): the client still
+/// emptied its world, but the region diff of `add_visible_object` only sends the regions that are
+/// new to the character, so the objects of the shared neighbourhood stayed invisible until a
+/// relog. That load gets the full repaint (own mates first, as after a cut scene).
 pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     let packet = {
         let mut c = p.data();
@@ -419,14 +425,22 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     crate::systems::dispatch_buff_events(server, &WorldObject::from(p));
     p.send(packet);
     p.send(SCDetailedTimeOfDayPacket { time: 12.0 });
+    // A load the server sent locks the position; a repeated `CSInstanceLoaded` finds it unlocked.
+    let load_pending = p.data().disabled_set_position;
     p.data().set_disabled_set_position(false);
     let instance_id = p.data().unit.transform.instance_id;
     if let Some(world) = server.world.world(instance_id) {
+        let reloaded_in_place =
+            load_pending && p.region().is_some_and(|(filed, _, _)| filed == world.id);
         // The C# `FinalizeTransform()` after `DisabledSetPosition = false`.
         let obj = WorldObject::from(p);
         server.world.leave_other_instance(&obj, world.id);
         let changes = world.add_visible_object(&obj, &server.view_ctx());
         session::handle_zone_changes(server, changes);
+        if reloaded_in_place {
+            crate::systems::vehicles::mates::resend_owner_mates_spawned(server, p);
+            crate::systems::npcs::portal::resend_visible_objects_to_character(server, p);
+        }
         // The arrival's `SCUnitState` exchange is done: resend the bounty totals of the wanted
         // characters now in sight, and this character's total to its viewers (WP-SL3a).
         crate::systems::social::bounty::on_character_entered(server, p);

@@ -3292,6 +3292,108 @@ async fn real_data_quest_fill_spawns_on_terrain() {
             p.z
         );
     }
+
+    // The NPC quest fill (`npc_spawns_quest_fill.json`): every entry is a loaded spawner of its
+    // template at its authored position, in an open zone, within 2 m of the 1.2 height.
+    let npc_text = std::fs::read_to_string(world_path.join("npc_spawns_quest_fill.json"))
+        .expect("npc quest fill spawn file");
+    let npc_defs = crate::systems::npcs::doodad::spawner::parse_list(
+        &npc_text,
+        crate::systems::npcs::doodad::spawner::NpcSpawnerDef::from_json,
+    )
+    .expect("parse npc quest fill spawn file");
+    assert!(!npc_defs.is_empty(), "the npc quest fill file is empty");
+    let loaded: Vec<_> = m.get_all_spawners().into_values().flatten().collect();
+    for def in &npc_defs {
+        let unit_id = def.base.unit_id;
+        let p = def.base.position;
+        assert!(
+            loaded.iter().any(|s| {
+                let q = s.position();
+                s.unit_id == unit_id
+                    && (q.x - p.x).abs() < 0.01
+                    && (q.y - p.y).abs() < 0.01
+                    && (q.z - p.z).abs() < 0.01
+            }),
+            "quest fill npc {unit_id} has no loaded spawner at {p:?}"
+        );
+        let zone = worlds.get_zone_id(Some(main), p.x, p.y);
+        let closed: String = conn
+            .query_row(
+                "SELECT closed FROM zones WHERE zone_key = ?1",
+                [zone],
+                |r| r.get(0),
+            )
+            .expect("zone row");
+        assert_eq!(
+            closed, "f",
+            "quest fill npc {unit_id} is in closed zone {zone}"
+        );
+        let height = heights.get_height(zone, p.x, p.y, p.z);
+        let offset = p.z - height;
+        assert!(
+            offset.abs() <= 2.0,
+            "quest fill npc {unit_id} at Z {} is {offset:.3} m from the 1.2 height {height}",
+            p.z,
+        );
+        println!(
+            "quest fill npc {unit_id}: zone {zone} (open), Z {} vs height {height:.5}",
+            p.z
+        );
+    }
+}
+
+/// The kill / loot quests whose only authored spawn point held one NPC per template (tester
+/// reports for Ynystere). The point's area spawner never runs: `select_spawner_id` takes the
+/// single (max 1) spawner of the template, so `npc_spawns_quest_fill.json` tops each quest area
+/// up to its area spawner's authored `min_population` with extra points 8-34 m around the
+/// original one (at least 8 m apart), at the 1.2 terrain height where the terrain and the
+/// navmesh agree within 1 m and stay within 2 m of the original point's Z:
+/// - quest 2950 "Peacocking Around" (16 x Blue Crane 8013), spawner 5407 "Ynystere / River of
+///   Longing / riverside" (min 7) around (21254.254, 12700.617);
+/// - quest 4197 "A Change in the Herd" (8 x Buffalo Intestines, 100 % from Tainted Buffalo
+///   10721), spawner 5446 "Ynystere / Beech Forest / Tainted Buffalo" (min 9) around
+///   (21602.145, 11873.117);
+/// - quest 4207 "Clean Up the Stragglers" (8 x Bloodhand Assassin 8017 / Priest 8018 on the
+///   Waveroar Ruins coast), spawner 5449 "Ynystere / Requiem Cape / Bloodhand stragglers"
+///   (min 7) around (19930.887, 12591.275).
+#[test]
+fn quest_fill_npcs_reach_the_area_spawner_minimum() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app/Data/Worlds/main_world");
+    let mut defs = Vec::new();
+    for file in [
+        "npc_spawns.json",
+        "npc_spawns_10x.json",
+        "npc_spawns_quest_fill.json",
+    ] {
+        let Ok(text) = std::fs::read_to_string(dir.join(file)) else {
+            return;
+        };
+        defs.extend(parse_list(&text, NpcSpawnerDef::from_json).expect(file));
+    }
+    let near = |units: &[u32], x: f32, y: f32| {
+        defs.iter()
+            .filter(|d| units.contains(&d.base.unit_id))
+            .filter(|d| (d.base.position.x - x).hypot(d.base.position.y - y) <= 40.0)
+            .count()
+    };
+    assert_eq!(
+        near(&[8013], 21254.254, 12700.617),
+        7,
+        "Blue Cranes (quest 2950)"
+    );
+    assert_eq!(
+        near(&[10721], 21602.145, 11873.117),
+        9,
+        "Tainted Buffalo (quest 4197)"
+    );
+    assert_eq!(
+        near(&[8017, 8018], 19930.887, 12591.275),
+        7,
+        "Bloodhand stragglers (quest 4207)"
+    );
 }
 
 /// The authored Mistfiend (NPC 4227) cave placements of the shipped `main_world` files with the

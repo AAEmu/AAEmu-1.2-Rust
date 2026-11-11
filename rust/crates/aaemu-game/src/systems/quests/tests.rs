@@ -1914,6 +1914,45 @@ fn db_sphere(
     }
 }
 
+/// The `AreaSphere` requirement (skill 15204, quest 2273 "March of Respect"): sphere 1152 links
+/// to quest 2907 (`sphere_quests` 660), which has no client sign sphere at Prince Reander's
+/// Monument, so only the sphere's own `sphere_area_fill.json` area can pass it. A position
+/// outside the area, and a sphere that is not a `SphereQuest`, still fail.
+#[test]
+fn requirement_sphere_falls_back_to_the_shipped_area() {
+    use super::data::DbSphereQuest;
+    use super::spheres::SphereQuestManager;
+
+    let mut d = QuestData::default();
+    d.spheres
+        .insert(1152, db_sphere(1152, "SphereQuest", 660, true, ""));
+    d.spheres
+        .insert(9001, db_sphere(9001, "SphereTeleport", 1, true, ""));
+    d.sphere_quests.insert(
+        660,
+        DbSphereQuest {
+            id: 660,
+            quest_id: 2907,
+            quest_trigger_id: 1,
+        },
+    );
+    d.finish();
+    let spheres = SphereQuestManager::default();
+    spheres.set_areas(vec![
+        area_sphere(1152, 22214.95, 13107.97, 248.995, 6.0),
+        area_sphere(9001, 100.0, 100.0, 100.0, 6.0),
+    ]);
+
+    let altar = (22215.4, 13107.1, 251.0);
+    assert!(spheres
+        .is_inside_area_sphere(&d, 1152, 1, altar, 0)
+        .is_none());
+    assert!(spheres.inside_requirement_sphere(&d, 1152, 1, altar));
+    assert!(!spheres.inside_requirement_sphere(&d, 1152, 1, (22230.0, 13107.1, 251.0)));
+    assert!(!spheres.inside_requirement_sphere(&d, 9001, 1, (100.0, 100.0, 100.0)));
+    assert!(!spheres.inside_requirement_sphere(&d, 7777, 1, altar));
+}
+
 fn area_server(
     spheres: Vec<DbSphere>,
     areas: Vec<SphereArea>,

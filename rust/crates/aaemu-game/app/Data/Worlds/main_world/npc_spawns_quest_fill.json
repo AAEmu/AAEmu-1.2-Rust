@@ -1,0 +1,192 @@
+[
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21608.573,
+      "Y": 11880.777,
+      "Z": 139.072,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21617.180,
+      "Y": 11878.589,
+      "Z": 139.207,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21604.923,
+      "Y": 11888.874,
+      "Z": 138.134,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21596.673,
+      "Y": 11888.152,
+      "Z": 138.069,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21616.286,
+      "Y": 11889.970,
+      "Z": 138.246,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21623.811,
+      "Y": 11869.297,
+      "Z": 139.223,
+      "Yaw": -10.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21618.998,
+      "Y": 11858.976,
+      "Z": 140.627,
+      "Yaw": -40.0
+    }
+  },
+  {
+    "UnitId": 10721,
+    "Title": "Tainted Buffalo",
+    "Position": {
+      "X": 21613.774,
+      "Y": 11841.167,
+      "Z": 139.552,
+      "Yaw": -70.0
+    }
+  },
+  {
+    "UnitId": 8013,
+    "Title": "Blue Crane",
+    "Position": {
+      "X": 21258.074,
+      "Y": 12722.283,
+      "Z": 189.250,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 8013,
+    "Title": "Blue Crane",
+    "Position": {
+      "X": 21271.107,
+      "Y": 12686.476,
+      "Z": 188.837,
+      "Yaw": -40.0
+    }
+  },
+  {
+    "UnitId": 8013,
+    "Title": "Blue Crane",
+    "Position": {
+      "X": 21226.679,
+      "Y": 12705.479,
+      "Z": 186.930,
+      "Yaw": 170.0
+    }
+  },
+  {
+    "UnitId": 8013,
+    "Title": "Blue Crane",
+    "Position": {
+      "X": 21242.625,
+      "Y": 12732.567,
+      "Z": 189.501,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 8013,
+    "Title": "Blue Crane",
+    "Position": {
+      "X": 21232.399,
+      "Y": 12674.571,
+      "Z": 186.887,
+      "Yaw": -130.0
+    }
+  },
+  {
+    "UnitId": 8013,
+    "Title": "Blue Crane",
+    "Position": {
+      "X": 21265.883,
+      "Y": 12668.667,
+      "Z": 187.867,
+      "Yaw": -70.0
+    }
+  },
+  {
+    "UnitId": 8017,
+    "Title": "Bloodhand Assassin",
+    "Position": {
+      "X": 19951.560,
+      "Y": 12598.799,
+      "Z": 108.973,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 8018,
+    "Title": "Bloodhand Priest",
+    "Position": {
+      "X": 19927.067,
+      "Y": 12569.609,
+      "Z": 107.679,
+      "Yaw": -100.0
+    }
+  },
+  {
+    "UnitId": 8017,
+    "Title": "Bloodhand Assassin",
+    "Position": {
+      "X": 19947.740,
+      "Y": 12577.134,
+      "Z": 107.564,
+      "Yaw": -40.0
+    }
+  },
+  {
+    "UnitId": 8018,
+    "Title": "Bloodhand Priest",
+    "Position": {
+      "X": 19964.370,
+      "Y": 12585.371,
+      "Z": 108.009,
+      "Yaw": -10.0
+    }
+  },
+  {
+    "UnitId": 8017,
+    "Title": "Bloodhand Assassin",
+    "Position": {
+      "X": 19942.516,
+      "Y": 12559.325,
+      "Z": 107.591,
+      "Yaw": -70.0
+    }
+  }
+]

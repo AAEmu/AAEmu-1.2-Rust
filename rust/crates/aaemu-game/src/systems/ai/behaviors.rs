@@ -641,7 +641,12 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // special-rule branch requires `aggro_link_sight_check` to be enabled AND the abuser
         // visible; a template with sight check off never helps through rules 1..4.
         let template_helps = if ot.aggression && ot.aggro_link_special_rule_id == 0 {
-            true
+            // Deviation from the C# (which helped unconditionally here): a helper of another
+            // faction joins only a fight it could start itself. The system-neutral Gossiper
+            // Banshees (faction 2) of the Requiem Cape fort stood among faction-115 Bloodhands,
+            // took their attackers into the aggro table, could not attack them and stayed in
+            // combat until the player relogged. Same-faction packs still help each other.
+            faction == my_faction || can_attack(c.server, &other, abuser)
         } else {
             if !(ot.aggro_link_sight_check && npc::can_see_target(c.server, &other, abuser)) {
                 false
@@ -3443,6 +3448,112 @@ mod tests {
         assert!(
             table.contains_key(&player_b.obj_id),
             "the helper must help its group 501 member"
+        );
+    }
+
+    /// Rule 0 (aggressive, no special rule) help needs a reason to fight: the helper shares the
+    /// attacked NPC's faction or can attack the abuser itself. A system-neutral (faction 2)
+    /// Gossiper Banshee next to a hostile faction-115 mob must not take the mob's attacker into
+    /// its aggro table (it cannot attack a player, so it stayed in combat); a faction-115 helper
+    /// still joins, and the banshee still helps a neutral NPC of its own faction.
+    #[tokio::test]
+    async fn rule_zero_help_needs_the_same_faction_or_a_hostile_abuser() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::world_data::{FactionRelation, SystemFaction};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::systems::skills::types::RelationState;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const LEADER: u32 = 0x360;
+        const BANSHEE: u32 = 0x361;
+        const KOBOLD: u32 = 0x362;
+        const NEUTRAL_LEADER: u32 = 0x363;
+        const ABUSER: u32 = 0x364;
+
+        let mut data = GameData::empty();
+        for (id, mother_id) in [(2, 0), (109, 149), (115, 0), (149, 0)] {
+            data.factions.add(SystemFaction {
+                id,
+                mother_id,
+                ..SystemFaction::default()
+            });
+        }
+        data.factions.relations.push(FactionRelation {
+            id: 149,
+            id2: 115,
+            state: RelationState::Hostile as u8,
+            exp_time: 0,
+        });
+        for id in [7400, 7401, 7402] {
+            data.systems
+                .npcs
+                .npc
+                .templates
+                .insert(id, link_only_template(id, true, true, 30.0));
+        }
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Tank", 98.0, 100.0),
+            ABUSER,
+        );
+        player.data().unit.faction_id = 109;
+
+        let spawn_leader = |obj_id: u32, faction: u32| {
+            let mut leader = Npc::new(7400);
+            leader.unit.transform.set_xyz(100.0, 100.0, 100.0);
+            leader.unit.faction_id = faction;
+            let leader = Entity::new(obj_id, leader);
+            server
+                .world
+                .world(0)
+                .unwrap()
+                .spawn(&leader, &server.view_ctx());
+            leader
+        };
+        let leader = spawn_leader(LEADER, 115);
+        let banshee = spawn_link_npc(&server, BANSHEE, 7401, 105.0);
+        banshee.data().unit.faction_id = 2;
+        let kobold = spawn_link_npc(&server, KOBOLD, 7402, 110.0);
+        kobold.data().unit.faction_id = 115;
+
+        let abuser = WorldObject::from(&player);
+        let help = |leader: &crate::world::NpcRef| {
+            let mut ai = NpcAi::new(AiKind::AlmightyNpc, leader);
+            let mut context = AiCtx {
+                server: &server,
+                npc: leader.clone(),
+                obj: WorldObject::from(leader),
+                ai: &mut ai,
+            };
+            update_aggro_help(&mut context, &abuser, 200.0);
+        };
+        let has_aggro = |npc: &crate::world::NpcRef| {
+            npc.data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id)
+        };
+
+        help(&leader);
+        assert!(
+            !has_aggro(&banshee),
+            "a neutral helper of another faction must not join a fight it cannot start"
+        );
+        assert!(has_aggro(&kobold), "a same-faction helper still joins");
+
+        let neutral_leader = spawn_leader(NEUTRAL_LEADER, 2);
+        help(&neutral_leader);
+        assert!(
+            has_aggro(&banshee),
+            "a neutral helper still helps a neutral NPC of its own faction"
         );
     }
 
