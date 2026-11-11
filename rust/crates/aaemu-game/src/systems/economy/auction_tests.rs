@@ -2003,11 +2003,16 @@ async fn hud_auction_button_allows_post_search_and_bid_without_an_auctioneer() {
 }
 
 /// The Fellowship Plaza's "Auctioneer/Warehouse" doodad opens the auction house too: with the
-/// auctioneer NPC out of range, a listing is refused until the player stands at the doodad.
+/// HUD auction button off and the auctioneer NPC out of range, a listing is refused until the
+/// player stands at the doodad.
 #[tokio::test]
 async fn auction_works_at_an_auction_doodad() {
     use crate::systems::economy::tests::{spawn_service_doodad, SERVICE_DOODAD_GROUP};
     let (mut w, _log) = auction_world();
+    w.server
+        .systems
+        .services
+        .set_feature(&w.server, Feature::HudAuctionButton as u8, false);
     let pa = w.pa.clone();
     let item_id = give(&w, &pa, slot_type::INVENTORY, POTION, 1, 0);
     let world = w.server.world.world(0).unwrap();
