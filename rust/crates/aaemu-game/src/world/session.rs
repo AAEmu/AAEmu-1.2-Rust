@@ -1510,6 +1510,18 @@ pub async fn send_chat_message(
                 language_type,
             );
         }
+        chat_type::PERFORM => {
+            // `chat_commands` row 14 ("연주") lets the 1.2 client send type 13, but the client's
+            // chat display (`chat_msg_event.alb` proto 20, `GetChatChannelName`) has no branch
+            // for it: it logs "Unknown chat channel: 13" and shows nothing. Broadcasting it
+            // would therefore have no visible recipient, so refuse it explicitly instead of
+            // silently dropping it.
+            tracing::warn!(
+                "Refusing chat type {} (performance) from {}: the 1.2 client has no display                  channel for type 13",
+                chat,
+                sender.name
+            );
+        }
         other => tracing::warn!("Unsupported chat type {other} from {}", sender.name),
     }
 }

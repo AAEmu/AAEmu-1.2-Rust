@@ -108,6 +108,37 @@ fn chat(t: i16, msg: &str) -> PacketStream {
     s
 }
 
+/// Captures the formatted WARN lines written while the guard is alive (current thread).
+#[derive(Clone, Default)]
+struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn warn_capture() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    (capture, tracing::subscriber::set_default(subscriber))
+}
+
 fn whisper(target: &str, msg: &str) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_i16(chat_type::WHISPER)
@@ -686,6 +717,77 @@ async fn faction_and_zone_chat_identity_and_membership() {
         assert_eq!(b.frames(), vec![(sc::SCChatMessagePacket, want.clone())]);
         assert_eq!(c.frames(), vec![(sc::SCChatMessagePacket, want)]);
     }
+}
+
+/// The 1.2 `chat_commands` menu (row 7/8/9: "외침" 1, "거래" 2, "파티찾기" 3) sends Shout,
+/// Trade and LFG to the zone-group channel; a player in another zone group hears none of them.
+/// Row 14 ("연주", `chat_type_id` 13) is sendable but has no client display branch
+/// (`chat_msg_event.alb` proto 20 logs "Unknown chat channel"), so the server refuses it.
+#[tokio::test]
+async fn trade_and_group_find_reach_only_their_zone_group_and_performance_is_refused() {
+    use crate::data::world_data::{Zone, ZoneGroup};
+    use crate::data::GameData;
+    use crate::test_support::test_server_with;
+    let mut data = GameData::empty();
+    for (id, name) in [(1, "Group One"), (2, "Group Two")] {
+        data.zones.groups.insert(
+            id,
+            ZoneGroup {
+                id,
+                name: name.into(),
+                ..Default::default()
+            },
+        );
+    }
+    for (key, group) in [(1000, 1), (2000, 2)] {
+        data.zones.zones.insert(
+            key,
+            Zone {
+                id: key,
+                name: format!("Zone {key}"),
+                zone_key: key,
+                group_id: group,
+                ..Default::default()
+            },
+        );
+    }
+    let server = test_server_with(data);
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    for (p, zone) in [(&a.p, 1000u32), (&b.p, 1000), (&c.p, 2000)] {
+        p.data().unit.transform.zone_id = zone;
+        crate::world::session::on_zone_change(&server, p, 0, zone);
+    }
+    settle(&mut [&mut a, &mut b, &mut c]);
+    for (t, identity, msg) in [
+        (chat_type::SHOUT, [1, 0, 1, 0, 0, 0, 0, 0], "shout"),
+        (chat_type::TRADE, [2, 0, 1, 0, 0, 0, 0, 0], "trade"),
+        (chat_type::GROUP_FIND, [3, 0, 1, 0, 0, 0, 0, 0], "lfg"),
+    ] {
+        a.send(&server, cs::CSSendChatMessagePacket, chat(t, msg))
+            .await;
+        let want = chat_body(identity, a.p.obj_id, a.p.character_id, 101, "Al", msg);
+        assert_eq!(a.frames(), vec![(sc::SCChatMessagePacket, want.clone())]);
+        assert_eq!(b.frames(), vec![(sc::SCChatMessagePacket, want)]);
+        assert!(c.frames().is_empty());
+    }
+    // Performance chat (13) is refused with a warning: nobody receives it, not even the sender.
+    let (capture, guard) = warn_capture();
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::PERFORM, "perform"),
+    )
+    .await;
+    drop(guard);
+    assert!(a.frames().is_empty() && b.frames().is_empty() && c.frames().is_empty());
+    let log = capture.0.lock().unwrap();
+    let log = String::from_utf8_lossy(&log);
+    assert!(
+        log.lines().any(|l| l.contains("Refusing chat type 13")),
+        "expected an explicit performance-chat refusal, got: {log}"
+    );
 }
 
 /// A forms a party with B (invite + accept). Returns the team id.
