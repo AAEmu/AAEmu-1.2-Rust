@@ -57,6 +57,36 @@ pub struct DungeonLoadConfig {
     pub id: u32,
 }
 
+/// `Dungeons.EntryLimit` (Rust only): the C# `CheckEntryAttemptCount` cap, 3 entries within
+/// 4 hours. `Enabled` missing follows the era profile (`World.Profile`: off for `EuAuroria`,
+/// on for `EuLaunch` / `Kr12`). `Count` may replace the C# 3 for every zone group except the
+/// data's "unlimited" rows (`EnterCount` 1000: zone group 49 and the channel dungeons).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct EntryLimitConfig {
+    #[serde(
+        rename = "enabled",
+        default,
+        deserialize_with = "crate::config::lenient_option"
+    )]
+    pub enabled: Option<bool>,
+    #[serde(rename = "count", deserialize_with = "lenient")]
+    pub count: u32,
+    /// The C# 4 hour window.
+    #[serde(rename = "windowseconds", deserialize_with = "lenient")]
+    pub window_seconds: u32,
+}
+
+impl Default for EntryLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            count: 3,
+            window_seconds: 4 * 3600,
+        }
+    }
+}
+
 /// `DungeonsConfig`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -93,6 +123,14 @@ pub struct DungeonsConfig {
     /// before the instance's Temple Priestess. Inferred destination, see `PORTING.md`.
     #[serde(rename = "nograveyardusereturnportal", deserialize_with = "lenient")]
     pub no_graveyard_use_return_portal: bool,
+    /// `EntryLimit` (Rust only): the C# visit cap, see [`EntryLimitConfig`].
+    #[serde(rename = "entrylimit")]
+    pub entry_limit: EntryLimitConfig,
+    /// `RequireEntryItems` (Rust-only, default `true`): entering a dungeon consumes the
+    /// `indun_zones.item_id` ticket. `false` neither requires nor consumes it, for servers whose
+    /// era / data should not gate dungeons by item (1.2-era owner recollection, 2026-11-10).
+    #[serde(rename = "requireentryitems", deserialize_with = "lenient")]
+    pub require_entry_items: bool,
 }
 
 impl Default for DungeonsConfig {
@@ -105,13 +143,25 @@ impl Default for DungeonsConfig {
             kick_on_battlefield_faction_change: true,
             enforce_no_pvp: true,
             no_graveyard_use_return_portal: true,
+            entry_limit: EntryLimitConfig::default(),
+            require_entry_items: true,
         }
+    }
+}
+
+impl DungeonsConfig {
+    /// Whether the C# entry cap applies: `Dungeons.EntryLimit.Enabled` wins, otherwise the era
+    /// profile decides (`World.Profile`).
+    pub fn effective_entry_limit_enabled(&self, profile: crate::config::ServerProfile) -> bool {
+        self.entry_limit
+            .enabled
+            .unwrap_or_else(|| profile.dungeon_entry_limit())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, ServerProfile};
 
     #[test]
     fn dungeons_section_binds() {
@@ -147,6 +197,56 @@ mod tests {
         assert!(d.dungeons.enforce_no_pvp);
         assert!(d.dungeons.no_graveyard_use_return_portal);
         assert_eq!(d.world.max_instances, 32);
+    }
+
+    #[test]
+    fn entry_limit_and_entry_items_bind_and_follow_the_profile() {
+        let d = AppConfig::default();
+        assert_eq!(d.dungeons.entry_limit.count, 3);
+        assert_eq!(d.dungeons.entry_limit.window_seconds, 4 * 3600);
+        assert!(d.dungeons.entry_limit.enabled.is_none());
+        assert!(d.dungeons.require_entry_items);
+        assert!(!d
+            .dungeons
+            .effective_entry_limit_enabled(ServerProfile::EuAuroria));
+        assert!(d
+            .dungeons
+            .effective_entry_limit_enabled(ServerProfile::EuLaunch));
+        assert!(d
+            .dungeons
+            .effective_entry_limit_enabled(ServerProfile::Kr12));
+
+        let c = AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "EuLaunch" },
+            "Dungeons": {
+                "EntryLimit": { "Enabled": false, "Count": "5", "WindowSeconds": 7200 },
+                "RequireEntryItems": "false"
+            }
+        }))
+        .unwrap();
+        assert!(!c
+            .dungeons
+            .effective_entry_limit_enabled(ServerProfile::EuLaunch));
+        assert_eq!(c.dungeons.entry_limit.count, 5);
+        assert_eq!(c.dungeons.entry_limit.window_seconds, 7200);
+        assert!(!c.dungeons.require_entry_items);
+
+        // An explicit `Enabled` wins in both directions.
+        let c = AppConfig::from_value(serde_json::json!({
+            "Dungeons": { "EntryLimit": { "Enabled": true } }
+        }))
+        .unwrap();
+        assert!(c
+            .dungeons
+            .effective_entry_limit_enabled(ServerProfile::EuAuroria));
+        let c = AppConfig::from_value(serde_json::json!({
+            "World": { "Profile": "Kr12" },
+            "Dungeons": { "EntryLimit": { "Enabled": false } }
+        }))
+        .unwrap();
+        assert!(!c
+            .dungeons
+            .effective_entry_limit_enabled(ServerProfile::Kr12));
     }
 
     #[test]

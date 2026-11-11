@@ -303,6 +303,11 @@ fn leave_instance_membership(server: &GameServer, player: &PlayerRef, instance: 
     use crate::systems::instances::events::CharEvent;
     let events = &server.systems.instances.events.characters;
     if let Some(dungeon) = server.systems.instances.dungeon_of_world(instance) {
+        server.systems.instances.indun.note_entry_item_leave(
+            player.character_id,
+            dungeon.zone_group_id(),
+            dungeon.indun_zone.restore_item_time,
+        );
         {
             let mut state = dungeon.st();
             state
