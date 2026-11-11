@@ -1,6 +1,9 @@
-//! Siege hostility wiring: the rule runs through the real `skills::relation::can_attack`,
-//! the real authority and a live lodestone. Each assertion was mutation-checked (removing the
-//! `siege_can_attack` call makes the inside-circle assertions fail).
+//! Siege hostility wiring: the rule runs through the real `skills::relation::relation_to` /
+//! `can_attack`, the real authority, a live lodestone and the real skill effect path
+//! (`skill::use_skill`). The relation tests fail when the rule is removed from `relation_to`;
+//! the skill flow tests fail when it only guards `can_attack`.
+
+use std::sync::Arc;
 
 use super::hostility::{classify, Party, SiegeRelation};
 use super::runtime;
@@ -12,8 +15,14 @@ use crate::models::house::House;
 use crate::server::GameServer;
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
 use crate::systems::instances::data::IndunZone;
+use crate::systems::skills::data::effects::EffectTemplate;
+use crate::systems::skills::data::{BuffTemplate, EffectKind, SkillTemplate};
 use crate::systems::skills::geometry::Target;
-use crate::systems::skills::relation::can_attack;
+use crate::systems::skills::relation::{can_attack, relation_to};
+use crate::systems::skills::skill::use_skill;
+use crate::systems::skills::state::SkillRun;
+use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
+use crate::systems::skills::types::{RelationState, SkillCastTarget, SkillCaster, SkillObject};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{Entity, PlayerRef, WorldObject};
 
@@ -26,9 +35,13 @@ const INSIDE_X: f32 = 100.0;
 const INSIDE_Y: f32 = 100.0;
 const OUTSIDE_X: f32 = 600.0;
 const OUTSIDE_Y: f32 = 100.0;
+const RETRIBUTION: u32 = 2_167;
+const DAMAGE_SKILL: u32 = 10_001;
+const DAMAGE_EFFECT: u32 = 900_001;
 
 struct Fixture {
-    server: GameServer,
+    server: Arc<GameServer>,
+    skill: Arc<SkillTemplate>,
     attacker: PlayerRef,
     defender: PlayerRef,
     same_party: PlayerRef,
@@ -37,6 +50,28 @@ struct Fixture {
 
 fn fixture(active: bool, no_pvp: bool) -> Fixture {
     let mut data = GameData::empty();
+    // A damage skill like the real ones: a hostile-only effect that checks the crime rule.
+    data.systems.skills.add_buff(BuffTemplate {
+        id: RETRIBUTION,
+        kind: 2,
+        duration: 60_000,
+        stack_rule: 1,
+        ..Default::default()
+    });
+    let mut effect = damage_effect(1, 600);
+    effect.check_crime = true;
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(effect)),
+        DAMAGE_EFFECT,
+    );
+    let mut skill = skill_template(DAMAGE_SKILL);
+    let mut skill_damage = skill_effect(DAMAGE_EFFECT, EffectKind::DamageEffect, 1);
+    skill_damage.non_friendly = true;
+    skill.effects.push(skill_damage);
+    let skill = Arc::new(skill);
+    data.systems.skills.add_skill((*skill).clone());
+    crate::test_support::open_client_skills(&mut data);
     data.zones.zones.insert(
         TEST_ZONE,
         Zone {
@@ -57,7 +92,7 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
     data.factions.relations.push(FactionRelation {
         id: 101,
         id2: 109,
-        state: crate::systems::skills::types::RelationState::Hostile as u8,
+        state: RelationState::Hostile as u8,
         exp_time: 0,
     });
     data.systems.housing.add_template(HousingTemplate {
@@ -84,8 +119,8 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
             },
         );
     }
-    let server = test_server_with(data);
-    crate::systems::skills::install_hooks(&server);
+    let server = Arc::new(test_server_with(data));
+    crate::systems::skills::bind(&server);
     let mut attacker_client = TestClient::new(&server, 1, 1001);
     let mut defender_client = TestClient::new(&server, 2, 1002);
     let mut same_party_client = TestClient::new(&server, 3, 1003);
@@ -93,6 +128,10 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
     let make_player = |id, name, expedition, faction, x, y, client: &TestClient| {
         let mut c = test_character(id, name, x, y);
         c.unit.faction_id = faction;
+        c.unit.hp = 5_000;
+        c.unit.max_hp = 5_000;
+        c.unit.mp = 1_000;
+        c.unit.max_mp = 1_000;
         c.is_online = true;
         let player = spawn_player(&server, client, c, 0x100 + id);
         if expedition != 0 {
@@ -182,6 +221,7 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
     drop(outsider_client);
     Fixture {
         server,
+        skill,
         attacker,
         defender,
         same_party,
@@ -474,4 +514,152 @@ async fn an_ex_member_with_a_roster_entry_is_not_made_hostile() {
         &target(&f.defender),
         &target(&f.attacker)
     ));
+}
+
+#[tokio::test]
+async fn the_siege_parties_set_the_relation_state_for_every_reader() {
+    let f = fixture(true, false);
+    let (a, d, s, o) = (
+        target(&f.attacker),
+        target(&f.defender),
+        target(&f.same_party),
+        target(&f.outsider),
+    );
+    // Same faction, opposite sides: Hostile although the faction relation says Friendly.
+    assert_eq!(relation_to(&f.server, &a, &d), RelationState::Hostile);
+    assert_eq!(relation_to(&f.server, &d, &a), RelationState::Hostile);
+    // One party of two hostile factions: Friendly.
+    assert_eq!(relation_to(&f.server, &a, &s), RelationState::Friendly);
+    // Not a participant: the faction relation (the same faction, friendly) is unchanged.
+    assert_eq!(relation_to(&f.server, &a, &o), RelationState::Friendly);
+    // Outside the circle the faction relation decides again.
+    move_to(&f, &f.defender, OUTSIDE_X, OUTSIDE_Y);
+    assert_eq!(relation_to(&f.server, &a, &d), RelationState::Friendly);
+    // A warmup record changes nothing.
+    let warmup = fixture(false, false);
+    assert_eq!(
+        relation_to(
+            &warmup.server,
+            &target(&warmup.attacker),
+            &target(&warmup.defender)
+        ),
+        RelationState::Friendly
+    );
+}
+
+fn cast(f: &Fixture, caster: &PlayerRef, victim: &PlayerRef) {
+    use_skill(
+        &f.server,
+        &SkillRun::new(f.skill.clone(), 1),
+        &WorldObject::from(caster),
+        SkillCaster::Unit(caster.obj_id),
+        &mut SkillCastTarget::Unit(victim.obj_id),
+        Some(SkillObject::None),
+        true,
+    );
+}
+
+/// No Retribution buff, no assault record, no crime points: the attacker was not flagged.
+fn unflagged(player: &PlayerRef) -> bool {
+    let c = player.data();
+    !c.unit.buffs.check_buff(RETRIBUTION)
+        && c.skill_char.assaulted_by.is_empty()
+        && c.crime_point == 0
+}
+
+#[tokio::test]
+async fn siege_enemies_of_one_faction_damage_each_other_with_a_skill_and_commit_no_crime() {
+    // The effect path reads the faction relation of the pair: two guilds of one nation are
+    // Friendly there, so a hostile-only damage effect used to be skipped without Ctrl+F, and
+    // with Ctrl+F the hit flagged the attacker as a criminal.
+    let f = fixture(true, false);
+    let hp = f.defender.data().unit.hp;
+    cast(&f, &f.attacker, &f.defender);
+    assert!(
+        f.defender.data().unit.hp < hp,
+        "the damage effect lands on a siege enemy without force attack"
+    );
+    assert!(
+        unflagged(&f.attacker),
+        "an enemy is no friendly-fire victim"
+    );
+
+    let f = fixture(true, false);
+    f.attacker.data().unit.force_attack = true;
+    let hp = f.defender.data().unit.hp;
+    cast(&f, &f.attacker, &f.defender);
+    assert!(f.defender.data().unit.hp < hp);
+    assert!(
+        unflagged(&f.attacker),
+        "Ctrl+F makes no criminal of the attacker"
+    );
+}
+
+#[tokio::test]
+async fn a_siege_kill_counts_as_a_pvp_kill() {
+    // `Character.DoDie` withholds the PvP bookkeeping from a kill of a Friendly relation.
+    let f = fixture(true, false);
+    f.defender.data().unit.hp = 100;
+    cast(&f, &f.attacker, &f.defender);
+    assert_eq!(f.defender.data().unit.hp, 0, "the defender died");
+    assert_eq!(f.attacker.data().hostile_faction_kills, 1);
+    assert!(f.defender.data().died_in_pvp);
+}
+
+#[tokio::test]
+async fn a_party_member_is_not_hurt_by_a_party_member_even_of_a_hostile_faction() {
+    let f = fixture(true, false);
+    let hp = f.same_party.data().unit.hp;
+    cast(&f, &f.attacker, &f.same_party);
+    assert_eq!(f.same_party.data().unit.hp, hp);
+    // Outside the circle the hostile factions hurt each other again.
+    let f = fixture(true, false);
+    for player in [&f.attacker, &f.same_party] {
+        move_to(&f, player, OUTSIDE_X, OUTSIDE_Y);
+    }
+    let hp = f.same_party.data().unit.hp;
+    cast(&f, &f.attacker, &f.same_party);
+    assert!(f.same_party.data().unit.hp < hp);
+}
+
+#[tokio::test]
+async fn skills_between_one_faction_stay_harmless_outside_the_circle_and_before_the_siege() {
+    // Both stand outside the circle, in reach of each other: the faction relation decides.
+    let f = fixture(true, false);
+    for player in [&f.attacker, &f.defender] {
+        move_to(&f, player, OUTSIDE_X, OUTSIDE_Y);
+    }
+    let hp = f.defender.data().unit.hp;
+    cast(&f, &f.attacker, &f.defender);
+    assert_eq!(f.defender.data().unit.hp, hp, "outside the siege circle");
+
+    let warmup = fixture(false, false);
+    let hp = warmup.defender.data().unit.hp;
+    cast(&warmup, &warmup.attacker, &warmup.defender);
+    assert_eq!(
+        warmup.defender.data().unit.hp,
+        hp,
+        "the siege is not running"
+    );
+}
+
+#[tokio::test]
+async fn peace_and_no_pvp_still_refuse_the_siege_skill() {
+    let f = fixture(true, false);
+    f.server.systems.social.conflicts.init(
+        &[ZoneConflict {
+            zone_group_id: GROUP as u16,
+            current_state: conflict_type::PEACE,
+            ..ZoneConflict::default()
+        }],
+        crate::world::now_ms(),
+    );
+    let hp = f.defender.data().unit.hp;
+    cast(&f, &f.attacker, &f.defender);
+    assert_eq!(f.defender.data().unit.hp, hp, "Peace is a lockdown");
+
+    let f = fixture(true, true);
+    let hp = f.defender.data().unit.hp;
+    cast(&f, &f.attacker, &f.defender);
+    assert_eq!(f.defender.data().unit.hp, hp, "no-PvP instance");
 }

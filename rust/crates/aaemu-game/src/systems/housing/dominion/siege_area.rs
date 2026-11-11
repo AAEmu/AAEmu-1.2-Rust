@@ -126,6 +126,14 @@ impl SiegeAreaCache {
             .copied()
     }
 
+    /// No unfinished siege has an area: the hostility rule cannot apply anywhere.
+    pub fn is_empty(&self) -> bool {
+        self.areas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     /// The side of a participant of `area`'s siege, or `None` for anybody else. The snapshot of
     /// the last sweep says who qualified; the character's live `current_expedition` must still
     /// be that side's expedition, so a member who just left is no participant at once.
