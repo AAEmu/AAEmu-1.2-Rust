@@ -2098,3 +2098,80 @@ async fn consuming_an_equipped_source_item_runs_the_equip_leave_path() {
         "nearby players see the equipped slot empty"
     );
 }
+
+/// A default skill (Recall, Kick, ...) is never an item's use skill: a forged `Item` caster on
+/// one must not reach the plain default-skill branch, where the item-use rules (no level-scaled
+/// mana for ability-less item skills) would apply to it without the character owning any item.
+#[tokio::test]
+async fn a_default_skill_with_a_forged_item_caster_is_refused() {
+    use super::types::{caster_type, skill_result, SkillCastTarget, SkillCaster, SkillObject};
+    use crate::data::items::ItemTemplate;
+
+    const DEFAULT_SKILL: u32 = 20_006;
+    const JUNK_ITEM: u32 = 6_003;
+    let mut data = mate_cast_data();
+    data.items
+        .templates
+        .insert(JUNK_ITEM, ItemTemplate::plain(JUNK_ITEM, 10));
+    let mut skill = super::tests::skill_template(DEFAULT_SKILL);
+    skill.target_type = 0;
+    skill.damage_type_id = 0;
+    skill.effects.push(super::tests::skill_effect(
+        900_001,
+        super::data::EffectKind::HealEffect,
+        1,
+    ));
+    data.systems.skills.add_skill(skill);
+    data.skills = loaded_skill_sources(&format!(
+        "INSERT INTO skills (id, show, ability_id, ability_level, level_step, skill_points, \
+             auto_learn, need_learn) VALUES ({DEFAULT_SKILL}, 't', 0, 1, 0, 0, 'f', 'f');
+         INSERT INTO default_skills (skill_id, slot_index, add_to_slot) \
+             VALUES ({DEFAULT_SKILL}, 0, 'f');"
+    ));
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    super::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let a = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Caster", 100.0, 100.0),
+        0x100,
+    );
+    client.conn.active_char = Some(a.clone());
+    {
+        let mut c = a.data();
+        c.unit.hp = 500;
+        c.unit.max_hp = 1000;
+        c.unit.mp = 100;
+    }
+    // The forged item caster names an item the character really owns, with its real template
+    // (any junk item passes the "item is still in the bag" re-check of the effect step), whose
+    // use skill is not this one.
+    give_test_item(&server, &a, 0x7009, JUNK_ITEM, 1);
+    let packet = super::handlers::CSStartSkillPacket {
+        skill_id: DEFAULT_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: a.obj_id,
+            item_id: 0x7009,
+            item_template_id: JUNK_ITEM,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Unit(a.obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    };
+    super::handlers::start_skill(&server, &mut client.conn, packet);
+    assert_eq!(a.data().unit.hp, 500, "the forged item cast must not run");
+    assert_ne!(
+        item_started_result(&mut client, DEFAULT_SKILL),
+        Some(skill_result::SUCCESS)
+    );
+    // The same skill as a plain unit cast runs (the fixture is a real default skill).
+    let mut packet = cast_packet_as(caster_type::UNIT, a.obj_id, a.obj_id);
+    packet.skill_id = DEFAULT_SKILL;
+    super::handlers::start_skill(&server, &mut client.conn, packet);
+    assert_eq!(a.data().unit.hp, 650, "the plain cast heals");
+}

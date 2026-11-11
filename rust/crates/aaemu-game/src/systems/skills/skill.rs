@@ -208,16 +208,42 @@ pub fn mana_level_scale(server: &GameServer, level: i32) -> f64 {
         .evaluate(&std::collections::HashMap::from([("level_dps", level_dps)]))
 }
 
+/// Whether a cast has no `mana_level_md` (`LevelMana`) term: an ability-less skill
+/// (`ability_id == 0`) used from an item (`SkillCaster::Item`).
+///
+/// Retail charged no scaled mana for item uses (owner play-test 2026-11-11: socketing a
+/// lunagem, opening "Open" boxes, mount/pet summons); the 1.2 data gives those item skills
+/// `mana_cost` 0 with `mana_level_md` 1.0, so only the level term can charge them. The fixed
+/// `mana_cost` (a few quest capture/plant item skills have one) still applies. The 1.2 client
+/// evaluator (`FUN_398a01b0` kind 0) has no item branch and its tooltip path (`FUN_3941e750`)
+/// computes `L` from the character level for ability-0 skills, so the client alone cannot
+/// decide the charge; retail behaviour is the source (see PORTING.md). The C# charged
+/// `LevelMana(0)` (~6) and the rank port `a5a9efa05` the character level (~50): both were
+/// regressions for item uses.
+pub fn skips_level_mana(t: &SkillTemplate, source: &SkillCaster) -> bool {
+    t.ability_id == 0 && matches!(source, SkillCaster::Item { .. })
+}
+
 /// `Skill.ManaCost(caster)`: `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`, then
-/// the caster's skill modifiers (`FUN_398a01b0` kind 0, then `FUN_3989f900`).
+/// the caster's skill modifiers (`FUN_398a01b0` kind 0, then `FUN_3989f900`). An item use of
+/// an ability-less skill keeps only the fixed `mana_cost` ([`skips_level_mana`]).
 ///
 /// The original r208022 client truncates the final value, not rounds it: 68/68 tooltip
 /// readings reproduce exactly, 32 of them with a fractional mana part >= 0.5 (see PORTING.md).
-pub fn mana_cost(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
+pub fn mana_cost(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    source: &SkillCaster,
+) -> i32 {
     let t = &skill.template;
-    let (level, inc) = level_and_inc(server, skill, caster);
-    let base = mana_level_scale(server, level);
-    let cost2 = f64::from(t.mana_cost) + f64::from(t.mana_level_md) * (1.0 + inc) * base;
+    let cost2 = if skips_level_mana(t, source) {
+        f64::from(t.mana_cost)
+    } else {
+        let (level, inc) = level_and_inc(server, skill, caster);
+        let base = mana_level_scale(server, level);
+        f64::from(t.mana_cost) + f64::from(t.mana_level_md) * (1.0 + inc) * base
+    };
     let tags = server.game_data.systems.skills.skill_tags(t.id).to_vec();
     caster
         .with_unit(|u| {
@@ -815,7 +841,7 @@ fn use_skill_impl(
             _ => {}
         }
     }
-    if let Err(result) = super::validation::check_resources(server, skill, caster) {
+    if let Err(result) = super::validation::check_resources(server, skill, caster, &caster_caster) {
         tracing::debug!(
             skill_id = skill.id,
             result = ?result,
@@ -1222,7 +1248,9 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 Ok(())
             }
         })
-        .and_then(|()| super::validation::check_resources(server, skill, caster))
+        .and_then(|()| {
+            super::validation::check_resources(server, skill, caster, &ctx.caster_caster)
+        })
         .and_then(|()| {
             super::validation::check_build_materials(server, skill, caster, &ctx.target)
         });
@@ -1317,7 +1345,7 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             *slot = None;
         }
     });
-    consume_mana(server, skill, caster);
+    consume_mana(server, skill, caster, &ctx.caster_caster);
     start_skill_cooldown(server, skill, caster, now);
     if t.channeling_time > 0 {
         start_channeling(server, skill, ctx);
@@ -1652,6 +1680,17 @@ pub fn end_channeling(
             .ext
             .npcs()
             .delete_doodad(server, channel_doodad);
+    }
+    // The 1.2 client also refreshes `LastCast` when a channel ends (`FUN_39397ff0` @ 0x39397ff0,
+    // DEC 748451: `channeling_time > 0` and not `keep_mana_regen`), on top of the cast start.
+    // The window is `LastCast + 5 s` (`X2::Unit::UpdateManaRegen`, `FUN_390b63f0`), so it covers
+    // the first 5 s of a longer channel and the 5 s after the channel's end.
+    if t.channeling_time > 0 && !t.keep_mana_regen {
+        if let Some(p) = caster.as_player() {
+            let mut c = p.data();
+            c.skill_char.last_cast_ms = now_ms();
+            c.skill_char.is_in_post_cast = true;
+        }
     }
     end_skill(server, skill, caster);
     if !skill.cancelled() {
@@ -3022,12 +3061,30 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
 }
 
 /// `Skill.ConsumeMana(caster)`.
-pub fn consume_mana(server: &GameServer, skill: &SkillRun, caster: &WorldObject) {
+///
+/// The post-cast (persistent-mana-regen) window mirrors the 1.2 client rather than the C#:
+/// `OnSkillFired` (`FUN_3939b010` @ 0x3939b010, DEC 750714) sets the client's `LastCast` only
+/// when the skill has a `timing_id` (`+0x1bc`) and does not keep mana regen (`+0xdd`,
+/// `keep_mana_regen`); `X2::Unit::UpdateManaRegen` (`FUN_390b63f0` @ 0x390b63f0, DEC 150487)
+/// then uses `persistent_mana_regen` (attribute 68) until `LastCast + 5000`. The item-use
+/// skills (regrade scrolls: 22520 weapon / 22522 armor regrade, and 2283 `keep_mana_regen`
+/// rows in `compact.sqlite3`) keep mana regen, so the client never stalls it for them. The C#
+/// `Skill.ConsumeMana` set `IsInPostCast` for every cast, which kept a regrading character on
+/// the persistent rate forever; see PORTING.md.
+pub fn consume_mana(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    source: &SkillCaster,
+) {
     if !caster.is_unit() {
         return;
     }
-    let cost = mana_cost(server, skill, caster);
+    let cost = mana_cost(server, skill, caster, source);
     unit_combat::reduce_current_mp(server, caster, cost);
+    if skill.template.timing_id == 0 || skill.template.keep_mana_regen {
+        return;
+    }
     if let Some(p) = caster.as_player() {
         let mut c = p.data();
         c.skill_char.last_cast_ms = now_ms();

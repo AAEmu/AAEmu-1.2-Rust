@@ -556,7 +556,12 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     {
         result = skill_result::SUCCESS;
     } else if !data.skills.is_item_only_skill(skill_id)
-        && (is_default || (is_common && !p.caster.is_item()))
+        && (is_default || is_common)
+        // An item caster is client input: a default or common skill with one takes the item
+        // branch below, which only accepts an owned item whose own use skill this is. Otherwise
+        // a forged `SkillCaster::Item` on a default skill (Recall, Kick) would pass the item-use
+        // rules (no level-scaled mana for ability-less item skills) without owning any item.
+        && !p.caster.is_item()
     {
         let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
