@@ -17,9 +17,11 @@
 //! back. That is race-free because a removal queues its own leave effects after its state
 //! change: either the verify sees the removal and undoes the join, or the removal's leave runs
 //! after the join. The party chat join is verified against the character's party number, so a
-//! member moved to another party meanwhile does not keep the stale join; a leave's `InParty =
-//! false` is settled to the character's current membership ([`settle_in_party`]), so the cleanup
-//! of an older team does not clear the flag of a team that accepted the character first.
+//! member moved to another party meanwhile does not keep the stale join; a chat leave is verified
+//! the same way ([`verify_chat`]), so a member that was invited back before the cleanup ran keeps
+//! the memberships of its newer join; a leave's `InParty = false` is settled to the character's
+//! current membership ([`settle_in_party`]), so the cleanup of an older team does not clear the
+//! flag of a team that accepted the character first.
 //! Residual: the packets. The `SCJoinedTeam` of a deferred join is a snapshot
 //! of the team at its state change, so the broadcast of a concurrent member change can reach
 //! the new member before it (its client shows a ghost / missing member until it logs in
@@ -555,18 +557,67 @@ fn still_member(server: &GameServer, team_id: u32, p: &PlayerRef) -> bool {
     teams.is_member_now(team_id, p.character_id)
 }
 
-/// Joins `p` to `channel` (a chat channel of `team_id`) and takes the join back when `p` is not
-/// a member of the team any more ("apply, then verify", see the module header).
-fn join_chat_verified(
+/// Which chat group of a team a channel is: the raid channel (`None`, the whole team) or the
+/// chat of party `n` (`Some(n)`).
+type ChatGroup = Option<u32>;
+
+/// Makes the chat membership of `p` agree with the team state after a chat effect was applied
+/// ("apply, then verify", see the module header). `applied` is what the effect left (`true` =
+/// joined): when the team state says the opposite by now, the opposite is written, up to three
+/// passes. That takes back a join that outlived its member (kicked, moved to another party) and
+/// restores what a leave that outlived a newer join of the same member removed (it was invited
+/// back before the cleanup ran).
+fn verify_chat(
+    server: &GameServer,
+    team_id: u32,
+    group: ChatGroup,
+    channel: &crate::managers::chat::ChannelRef,
+    p: &PlayerRef,
+    mut applied: bool,
+) {
+    let teams = &server.systems.social.teams;
+    for _ in 0..3 {
+        #[cfg(test)]
+        interleave(
+            teams,
+            Interleave::JoinApplied {
+                team_id,
+                character_id: p.character_id,
+            },
+        );
+        let member = teams.chat_group_now(team_id, p.character_id, group);
+        if member == applied {
+            return;
+        }
+        if member {
+            channel.join(p);
+        } else {
+            channel.leave(p);
+        }
+        applied = member;
+    }
+}
+
+/// Joins `p` to the raid `channel` of `team_id` and verifies it against the team state.
+fn join_raid_chat_verified(
     server: &GameServer,
     team_id: u32,
     channel: &crate::managers::chat::ChannelRef,
     p: &PlayerRef,
 ) {
     channel.join(p);
-    if !still_member(server, team_id, p) {
-        channel.leave(p);
-    }
+    verify_chat(server, team_id, None, channel, p, true);
+}
+
+/// Removes `p` from the raid `channel` of `team_id` and verifies it against the team state.
+fn leave_raid_chat_verified(
+    server: &GameServer,
+    team_id: u32,
+    channel: &crate::managers::chat::ChannelRef,
+    p: &PlayerRef,
+) {
+    channel.leave(p);
+    verify_chat(server, team_id, None, channel, p, false);
 }
 
 /// [`set_in_party`] for a character that joined `team_id`: a `true` is taken back when the
@@ -601,10 +652,10 @@ fn settle_in_party(server: &GameServer, p: &PlayerRef) {
     }
 }
 
-/// Joins `p` to party chat `party_number` of `team_id` and takes the join back when `p` is not in
-/// that party any more ("apply, then verify", see the module header): the member may have left
-/// the team or been moved to another party since the state change this join belongs to, and the
-/// leave of its old channel already ran, so a stale join would keep it in two party chats.
+/// Joins `p` to party chat `party_number` of `team_id` and verifies it against the team state:
+/// the member may have left the team or been moved to another party since the state change this
+/// join belongs to, and the leave of its old channel already ran, so a stale join would keep it
+/// in two party chats.
 fn join_party_chat_verified(
     server: &GameServer,
     team_id: u32,
@@ -614,18 +665,22 @@ fn join_party_chat_verified(
 ) {
     let channel = party_channel(server, team_id, party_number, owner_id);
     channel.join(p);
-    let teams = &server.systems.social.teams;
-    #[cfg(test)]
-    interleave(
-        teams,
-        Interleave::JoinApplied {
-            team_id,
-            character_id: p.character_id,
-        },
-    );
-    if teams.party_number_now(team_id, p.character_id) != Some(party_number) {
-        channel.leave(p);
-    }
+    verify_chat(server, team_id, Some(party_number), &channel, p, true);
+}
+
+/// Removes `p` from party chat `party_number` of `team_id` and verifies it against the team
+/// state: a member that was invited back (to the same party) before this cleanup ran keeps the
+/// membership its newer join restored.
+fn leave_party_chat_verified(
+    server: &GameServer,
+    team_id: u32,
+    owner_id: u32,
+    party_number: u32,
+    p: &PlayerRef,
+) {
+    let channel = party_channel(server, team_id, party_number, owner_id);
+    channel.leave(p);
+    verify_chat(server, team_id, Some(party_number), &channel, p, false);
 }
 
 /// [`raid_chat`] from the ids a caller captured under the team lock (no `Team` borrow).
@@ -768,6 +823,16 @@ impl TeamManager {
             .get(&team_id)
             .filter(|t| t.is_member(character_id))
             .map(|t| t.party_number_of(character_id))
+    }
+
+    /// Whether `character_id` belongs to chat group `group` of team `team_id` right now: the
+    /// raid channel (`None`) is the whole team, the chat of party `n` its members of party `n`.
+    /// What a deferred chat join or leave is verified against.
+    pub fn chat_group_now(&self, team_id: u32, character_id: u32, group: Option<u32>) -> bool {
+        match group {
+            None => self.is_member_now(team_id, character_id),
+            Some(n) => self.party_number_now(team_id, character_id) == Some(n),
+        }
     }
 
     /// Number of active teams.
@@ -1263,7 +1328,12 @@ impl TeamManager {
                         // Deviation (C#: the new member never joined the party / raid chat, so
                         // it could talk into the channel but not hear it until its next login).
                         if !team.is_party {
-                            join_chat_verified(server, team.id, &raid_chat(server, &team), &target);
+                            join_raid_chat_verified(
+                                server,
+                                team.id,
+                                &raid_chat(server, &team),
+                                &target,
+                            );
                         }
                         let party_number = team.party_number_of(target.character_id);
                         join_party_chat_verified(
@@ -1379,8 +1449,8 @@ impl TeamManager {
                 0,
             );
             if !team.is_party {
-                join_chat_verified(server, team.id, &raid_chat(server, &team), &owner);
-                join_chat_verified(server, team.id, &raid_chat(server, &team), &target);
+                join_raid_chat_verified(server, team.id, &raid_chat(server, &team), &owner);
+                join_raid_chat_verified(server, team.id, &raid_chat(server, &team), &target);
             }
             for p in [&owner, &target] {
                 let party_number = team.party_number_of(p.character_id);
@@ -1427,7 +1497,7 @@ impl TeamManager {
             0,
         );
         if !team.is_party {
-            join_chat_verified(server, team.id, &raid_chat(server, &team), &p);
+            join_raid_chat_verified(server, team.id, &raid_chat(server, &team), &p);
         }
         let party_number = team.party_number_of(p.character_id);
         join_party_chat_verified(server, team.id, team.owner_id, party_number, &p);
@@ -1532,9 +1602,10 @@ impl TeamManager {
                 let party_number = team.party_number_of(target_id);
                 deferred.push(move |server| {
                     if !owners.2 {
-                        raid_channel(server, owners.0, owners.1).leave(&c);
+                        let raid = raid_channel(server, owners.0, owners.1);
+                        leave_raid_chat_verified(server, owners.0, &raid, &c);
                     }
-                    party_channel(server, owners.0, party_number, owners.1).leave(&c);
+                    leave_party_chat_verified(server, owners.0, owners.1, party_number, &c);
                 });
             }
         }
@@ -1619,9 +1690,10 @@ impl TeamManager {
                 cleared.push(c.character_id);
                 deferred.push(move |server| {
                     if !owners.2 {
-                        raid_channel(server, owners.0, owners.1).leave(&c);
+                        let raid = raid_channel(server, owners.0, owners.1);
+                        leave_raid_chat_verified(server, owners.0, &raid, &c);
                     }
-                    party_channel(server, owners.0, party_number, owners.1).leave(&c);
+                    leave_party_chat_verified(server, owners.0, owners.1, party_number, &c);
                     if online {
                         c.send(SCLeavedTeamPacket {
                             team_id,
@@ -1683,7 +1755,7 @@ impl TeamManager {
         drop(st);
         team.broadcast(&SCTeamBecameRaidTeamPacket { team_id: team.id }, 0);
         for m in team.members.iter().flatten() {
-            join_chat_verified(server, team.id, &raid_chat(server, &team), &m.character);
+            join_raid_chat_verified(server, team.id, &raid_chat(server, &team), &m.character);
         }
         refresh_all_team_member_obj_ids(&team);
         // TODO (C#): Handle raids in dungeons
@@ -1876,7 +1948,7 @@ impl TeamManager {
         drop(st);
         for (id, party_number) in old_party {
             if let Some(t) = server.world.character_by_id(id) {
-                party_channel(server, owners.0, party_number, owners.1).leave(&t);
+                leave_party_chat_verified(server, owners.0, owners.1, party_number, &t);
             }
         }
         if moved {
@@ -2071,7 +2143,7 @@ impl TeamManager {
         }
         refresh_team_member_obj_ids(&team, &unit, true);
         if !team.is_party {
-            join_chat_verified(server, team.id, &raid_chat(server, &team), &unit);
+            join_raid_chat_verified(server, team.id, &raid_chat(server, &team), &unit);
         }
         let party_number = team.party_number_of(unit.character_id);
         join_party_chat_verified(server, team.id, team.owner_id, party_number, &unit);
@@ -3253,6 +3325,24 @@ mod interleave_tests {
         assert!(!channel.contains(&p[1]), "the move join is taken back");
     }
 
+    /// A `MoveTeamMember` that moves nobody (a slot out of range) used to take its two characters
+    /// out of their party chat anyway; the verify of the leave puts them back.
+    #[tokio::test]
+    async fn a_move_that_moves_nobody_keeps_the_party_chat() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        let channel = party_zero(&server, team_id);
+        assert!(channel.contains(&p[0]) && channel.contains(&p[1]));
+        teams.move_team_member(&server, &p[0], team_id, 1, 2, 0, 200);
+        assert!(
+            channel.contains(&p[0]) && channel.contains(&p[1]),
+            "nobody moved, nobody left the party chat"
+        );
+    }
+
     /// A pending invitation of `inviter` for `target` (what `invite_locked` inserts).
     fn invitation(inviter: &PlayerRef, target: &PlayerRef) -> Invitation {
         Invitation {
@@ -3467,6 +3557,48 @@ mod interleave_tests {
         assert!(moved.get());
         assert!(teams.is_member_now(900, 3) && !teams.is_member_now(team_a, 3));
         assert!(p[2].data().in_party, "a member of team 900 stays in party");
+    }
+
+    /// A kick's chat leaves run after its guard is dropped, so the member can be invited back
+    /// first (another marked raid member invites it and it accepts). The cleanup must not remove
+    /// the chat memberships that newer join restored.
+    #[tokio::test]
+    async fn a_kick_cleanup_keeps_the_chat_a_member_regained_meanwhile() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        teams.convert_to_raid(&server, &p[0], team_id);
+        let raid = raid_channel(&server, team_id, 1);
+        let party = party_zero(&server, team_id);
+        assert!(raid.contains(&p[1]) && party.contains(&p[1]));
+        // The newer join: P2 is a member again (the freed slot, so the same party) and its join
+        // effects ran before the kick's effects start.
+        let landed = Rc::new(Cell::new(false));
+        let seen = landed.clone();
+        let (rejoined, raid_now, party_now) = (p[1].clone(), raid.clone(), party.clone());
+        let _installed = install(move |teams, at| {
+            if at != Interleave::EffectsStart || seen.replace(true) {
+                return;
+            }
+            let slot = teams
+                .lock()
+                .teams
+                .get_mut(&team_id)
+                .expect("team")
+                .add_member(&rejoined);
+            assert!(slot.is_some(), "the kicked member's slot is free");
+            raid_now.join(&rejoined);
+            party_now.join(&rejoined);
+        });
+        teams.ask_risky_team(&server, &p[0], team_id, 2, risky_action::KICK);
+        assert!(landed.get(), "the rejoin landed before the kick's effects");
+        assert!(teams.is_member_now(team_id, 2));
+        assert!(
+            raid.contains(&p[1]) && party.contains(&p[1]),
+            "the old cleanup keeps the memberships of the newer join"
+        );
     }
 
     /// `settle_in_party` reads the membership again after its write: a team that took the
