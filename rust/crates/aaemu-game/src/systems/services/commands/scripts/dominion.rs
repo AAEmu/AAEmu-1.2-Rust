@@ -224,20 +224,6 @@ fn participation(
             );
             crate::systems::social::dominion::broadcast_snapshot(server, &state, false);
             crate::systems::housing::dominion::participants::sync_player(server, &player);
-            if join {
-                if let Some(participant) = state
-                    .siege
-                    .as_ref()
-                    .and_then(|siege| siege.participants.get(&player.character_id))
-                {
-                    crate::systems::housing::dominion::seals::grant_for_participant(
-                        server,
-                        &state,
-                        player.character_id,
-                        participant.side,
-                    );
-                }
-            }
             CommandManager::send_normal_text(
                 command,
                 out,
@@ -601,23 +587,7 @@ impl Command for Dominion {
                     crate::systems::housing::dominion::ParticipantCap::NATIVE,
                     |state| reinforce::participant_cap(state, side),
                 );
-                let registered = manager
-                    .register_participant_with_cap(zone, character, expedition, side, now, cap);
-                if let Ok(state) = &registered {
-                    if let Some(participant) = state
-                        .siege
-                        .as_ref()
-                        .and_then(|siege| siege.participants.get(&character))
-                    {
-                        crate::systems::housing::dominion::seals::grant_for_participant(
-                            server,
-                            state,
-                            character,
-                            participant.side,
-                        );
-                    }
-                }
-                registered
+                manager.register_participant_with_cap(zone, character, expedition, side, now, cap)
             }
             "unregister" => {
                 let Some(name) = args.get(2) else {
@@ -916,26 +886,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn joining_hands_the_side_seal_and_the_end_of_the_siege_takes_it_back() {
+    async fn the_seal_sweep_hands_the_seal_after_a_join_and_takes_it_back() {
+        use crate::systems::housing::dominion::seals::{reconcile, seal_count};
         let f = fixture();
         harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
-        assert_eq!(
-            crate::systems::housing::dominion::seals::seal_count(&f.attacker.p, OFFENSE_SEAL),
-            1
-        );
         harness::run_at(&f.server, &f.defender.p, "joinsiege 25", 0).await;
-        assert_eq!(
-            crate::systems::housing::dominion::seals::seal_count(&f.defender.p, DEFENSE_SEAL),
-            1
-        );
-        // Leaving the roster ends the entitlement; the participant tick's reconcile runs the
-        // same call.
+        // The command runs under the economy operation scope and the housing operation lock,
+        // so it hands nothing itself: the sweep (`seals::reconcile`) is the only writer.
+        assert_eq!(seal_count(&f.attacker.p, OFFENSE_SEAL), 0);
+        assert_eq!(seal_count(&f.defender.p, DEFENSE_SEAL), 0);
+        reconcile(&f.server);
+        assert_eq!(seal_count(&f.attacker.p, OFFENSE_SEAL), 1);
+        assert_eq!(seal_count(&f.defender.p, DEFENSE_SEAL), 1);
+        // Leaving the roster ends the entitlement; the next sweep takes the seal back.
         harness::run_at(&f.server, &f.attacker.p, "leavesiege 25", 0).await;
-        crate::systems::housing::dominion::seals::reconcile(&f.server);
-        assert_eq!(
-            crate::systems::housing::dominion::seals::seal_count(&f.attacker.p, OFFENSE_SEAL),
-            0
-        );
+        reconcile(&f.server);
+        assert_eq!(seal_count(&f.attacker.p, OFFENSE_SEAL), 0);
         // The end of the siege takes the defender's seal back.
         f.server
             .systems
@@ -943,11 +909,8 @@ mod tests {
             .dominions
             .cancel_siege(ZONE, chrono::Utc::now().timestamp())
             .unwrap();
-        crate::systems::housing::dominion::seals::reconcile(&f.server);
-        assert_eq!(
-            crate::systems::housing::dominion::seals::seal_count(&f.defender.p, DEFENSE_SEAL),
-            0
-        );
+        reconcile(&f.server);
+        assert_eq!(seal_count(&f.defender.p, DEFENSE_SEAL), 0);
     }
 
     #[tokio::test]

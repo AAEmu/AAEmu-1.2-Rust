@@ -921,7 +921,7 @@ impl CalendarRuntime {
 /// weekly calendar phases use the GM test clock when one is set. The caller serializes it with
 /// the housing operations (the spawned loop or a test).
 pub fn tick_once(server: &GameServer) {
-    let (finished, started) = {
+    let finished = {
         let _items = server.systems.economy.operation_scope();
         // Documented order inside the scope (`economy/operation_scope.rs`):
         // auction -> housing -> authority. `auction_post::tick` receives this guard.
@@ -935,7 +935,6 @@ pub fn tick_once(server: &GameServer) {
         let real_now = chrono::Utc::now().timestamp();
         let calendar_now = server.systems.housing.calendar.now();
         let mut finished = Vec::new();
-        let mut started = Vec::new();
         for state in server
             .systems
             .housing
@@ -954,12 +953,6 @@ pub fn tick_once(server: &GameServer) {
                 .is_some_and(|siege| siege.status == SiegeStatus::Finished)
             {
                 finished.push(state);
-            } else if state
-                .siege
-                .as_ref()
-                .is_some_and(|siege| siege.status == SiegeStatus::Active)
-            {
-                started.push(state);
             }
         }
         // Defender reinforcement waves (WP-S4): start(siege) + the authored `bdm`, announced
@@ -984,18 +977,25 @@ pub fn tick_once(server: &GameServer) {
         // Non-PvP windows use the real clock (unlike the calendar test clock): the client's
         // cached end and the server's authored `start + minutes*60` are wall-clock deadlines.
         crate::systems::social::dominion_notifications::expire_non_pvp(server, real_now);
-        (finished, started)
+        finished
     };
     // The kinds 57-60 credit reports outside the economy operation scope, so an online
     // participant's record is written immediately instead of waiting for a packet flush.
     for state in &finished {
         super::credit::credit_siege_outcome(server, state);
     }
-    // A roster frozen before the start gets its seals now; later registrations are handed
-    // theirs by the join path, and `seals::reconcile` takes them back after the siege.
-    for state in &started {
-        super::seals::grant_roster(server, state);
-    }
+}
+
+/// The once-a-second participant sweep: the participant buffs, the siege-area snapshot, the
+/// participant seals and the eviction of non-participants. The order matters: the snapshot is
+/// rebuilt before the eviction (and the hostility rule) read it. It touches item containers and
+/// the world, so it must never run while the economy operation scope or the housing operation
+/// lock is held; the spawned loop of [`start_tick`] is the only production caller.
+pub fn participant_sweep(server: &GameServer) {
+    super::participants::sync_all(server);
+    super::siege_area::refresh(server);
+    super::seals::reconcile(server);
+    super::siege_area::evict_non_participants(server);
 }
 
 pub fn start_tick(server: &Arc<GameServer>) {
@@ -1008,12 +1008,7 @@ pub fn start_tick(server: &Arc<GameServer>) {
             participant_tick += 1;
             if participant_tick == 4 {
                 participant_tick = 0;
-                super::participants::sync_all(&server);
-                // Roster seals and the non-participant lockdown share the roster snapshot:
-                // both are cheap and must never run while the housing operation lock is held
-                // (they touch item containers and the world).
-                super::seals::reconcile(&server);
-                super::siege_area::evict_non_participants(&server);
+                participant_sweep(&server);
             }
             let channels: Vec<_> = server
                 .systems
