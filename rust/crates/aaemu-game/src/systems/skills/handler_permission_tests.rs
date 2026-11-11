@@ -2105,9 +2105,14 @@ async fn consuming_an_equipped_source_item_runs_the_equip_leave_path() {
 #[tokio::test]
 async fn a_default_skill_with_a_forged_item_caster_is_refused() {
     use super::types::{caster_type, skill_result, SkillCastTarget, SkillCaster, SkillObject};
+    use crate::data::items::ItemTemplate;
 
     const DEFAULT_SKILL: u32 = 20_006;
+    const JUNK_ITEM: u32 = 6_003;
     let mut data = mate_cast_data();
+    data.items
+        .templates
+        .insert(JUNK_ITEM, ItemTemplate::plain(JUNK_ITEM, 10));
     let mut skill = super::tests::skill_template(DEFAULT_SKILL);
     skill.target_type = 0;
     skill.damage_type_id = 0;
@@ -2141,13 +2146,16 @@ async fn a_default_skill_with_a_forged_item_caster_is_refused() {
         c.unit.max_hp = 1000;
         c.unit.mp = 100;
     }
-    // The forged item caster names an item the character does not own.
+    // The forged item caster names an item the character really owns, with its real template
+    // (any junk item passes the "item is still in the bag" re-check of the effect step), whose
+    // use skill is not this one.
+    give_test_item(&server, &a, 0x7009, JUNK_ITEM, 1);
     let packet = super::handlers::CSStartSkillPacket {
         skill_id: DEFAULT_SKILL,
         caster: SkillCaster::Item {
             obj_id: a.obj_id,
             item_id: 0x7009,
-            item_template_id: 0,
+            item_template_id: JUNK_ITEM,
             type1: 0,
             type2: 0,
         },
