@@ -2,6 +2,11 @@
 //! the Derelict Bridge doodad (5058) when a player crosses the sphere area, which advances the
 //! bridge to its broken phase (13147 -> 13148). The area comes from `sphere_area_fill.json`;
 //! the sphere id, skill and the `DoodadFuncAreaTrigger` marker are the shipped data rows.
+//!
+//! The fixtures select by `doodad_family_id` 0 (the area / skill-range rule the original
+//! tests cover) or by a family id (the level design's `FamilyId`, which ignores the area and
+//! range: spheres 1836-1847 reach the stalactites hanging above their centres and sphere 1552
+//! reaches the bridge by family 50000 once its spawn row carries it).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,13 +34,23 @@ const SKILL: u32 = 11284;
 const BRIDGE_TEMPLATE: u32 = 5058;
 const BRIDGE_PHASE: u32 = 13147;
 const BROKEN_PHASE: u32 = 13148;
+/// The shipped `sphere_doodad_interacts` family of sphere 1552 (the bridge).
+const BRIDGE_FAMILY: u32 = 50000;
+const STALACTITE_FAMILY: u32 = 50011;
 
 fn data() -> GameData {
     data_with_range(4)
 }
 
-/// The shipped rows with skill 11284's `max_range` replaced by `max_range` (4 m in the data).
+/// The shipped rows with skill 11284's `max_range` replaced by `max_range` (4 m in the data)
+/// and the sphere's family selector left at 0 (the area / skill-range rule).
 fn data_with_range(max_range: i32) -> GameData {
+    data_with_family(0, max_range)
+}
+
+/// [`data_with_range`] with the shipped `sphere_doodad_interacts.doodad_family_id` set to
+/// `family` (0 = the area / skill-range rule).
+fn data_with_family(family: u32, max_range: i32) -> GameData {
     let mut data = GameData::empty();
     data.systems.quests.spheres.insert(
         SPHERE,
@@ -52,7 +67,7 @@ fn data_with_range(max_range: i32) -> GameData {
         SphereDoodadInteracts {
             id: DETAIL,
             skill_id: SKILL,
-            doodad_family_id: 50000,
+            doodad_family_id: family,
         },
     );
     data.systems.skills.skills.insert(
@@ -126,8 +141,16 @@ fn bridge(server: &crate::GameServer) -> DoodadRef {
 
 /// The bridge doodad standing at `(x, 100, 100)`.
 fn bridge_at(server: &crate::GameServer, x: f32) -> DoodadRef {
-    let doodad = Entity::new(0x200, Doodad::new(BRIDGE_TEMPLATE));
+    // The shipped level placement's `FamilyId`; the family-less selection ignores it.
+    doodad_at(server, 0x200, x, BRIDGE_FAMILY)
+}
+
+/// A doodad of the bridge template / start phase (`DoodadFuncAreaTrigger` -> broken) with the
+/// given level-design `FamilyId`.
+fn doodad_at(server: &crate::GameServer, obj_id: u32, x: f32, family_id: u32) -> DoodadRef {
+    let doodad = Entity::new(obj_id, Doodad::new(BRIDGE_TEMPLATE));
     doodad.data().func_group_id = BRIDGE_PHASE;
+    doodad.data().family_id = family_id;
     doodad.data().transform.set_xyz(x, 100.0, 100.0);
     let world = server.world.world(0).unwrap();
     world.spawn(&doodad, &server.view_ctx());
@@ -406,6 +429,100 @@ async fn a_bridge_inside_the_area_but_out_of_the_skill_range_stands() {
     assert_eq!(bridge.data().func_group_id, BRIDGE_PHASE);
 }
 
+/// A non-zero `doodad_family_id` selects every doodad of the instance whose `FamilyId` equals
+/// it, regardless of the sphere area and the skill's range: the Sharpwind stalactites (families
+/// 50011-50022) hang 13-16 m above their sphere centres, outside both.
+#[tokio::test]
+async fn a_family_sphere_reaches_a_doodad_far_outside_the_area_and_range() {
+    let server = test_server_with(data_with_family(BRIDGE_FAMILY, 4));
+    server.systems.quests.spheres.set_areas(vec![SphereArea {
+        world: "main_world".into(),
+        zone: TEST_ZONE,
+        sphere_id: SPHERE,
+        xyz: (100.0, 100.0, 100.0),
+        radius: 5.0,
+    }]);
+    let client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 100.0, 100.0),
+        0x100,
+    );
+    // 70 m away: outside the 5 m area and the 4 m skill range.
+    let bridge = bridge_at(&server, 170.0);
+    server.systems.quests.spheres.tick_at(&server, 0);
+    assert_eq!(
+        bridge.data().func_group_id,
+        BROKEN_PHASE,
+        "the family selector ignores the area and the skill range"
+    );
+}
+
+/// The family selector is exact: of two reacting doodads inside the same area and range, only
+/// the one whose `FamilyId` matches is advanced.
+#[tokio::test]
+async fn a_family_sphere_selects_only_doodads_of_its_family() {
+    let server = test_server_with(data_with_family(STALACTITE_FAMILY, 4));
+    server.systems.quests.spheres.set_areas(vec![SphereArea {
+        world: "main_world".into(),
+        zone: TEST_ZONE,
+        sphere_id: SPHERE,
+        xyz: (100.0, 100.0, 100.0),
+        radius: 5.0,
+    }]);
+    let client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 100.0, 100.0),
+        0x100,
+    );
+    let bridge = bridge_at(&server, 100.0);
+    let stalactite = doodad_at(&server, 0x202, 101.0, STALACTITE_FAMILY);
+    server.systems.quests.spheres.tick_at(&server, 0);
+    assert_eq!(
+        stalactite.data().func_group_id,
+        BROKEN_PHASE,
+        "the doodad of the selected family is advanced"
+    );
+    assert_eq!(
+        bridge.data().func_group_id,
+        BRIDGE_PHASE,
+        "family {} does not select the bridge (family {BRIDGE_FAMILY}), even inside the area and \
+         the skill range",
+        STALACTITE_FAMILY
+    );
+}
+
+/// Family 0 keeps the old area + skill-range selection: the same distant doodad is left alone
+/// (the family tests above prove the two paths differ).
+#[tokio::test]
+async fn a_family_less_sphere_keeps_the_area_and_range_selection() {
+    let server = test_server_with(data_with_range(100));
+    server.systems.quests.spheres.set_areas(vec![SphereArea {
+        world: "main_world".into(),
+        zone: TEST_ZONE,
+        sphere_id: SPHERE,
+        xyz: (100.0, 100.0, 100.0),
+        radius: 5.0,
+    }]);
+    let client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 100.0, 100.0),
+        0x100,
+    );
+    let bridge = bridge_at(&server, 170.0);
+    server.systems.quests.spheres.tick_at(&server, 0);
+    assert_eq!(
+        bridge.data().func_group_id,
+        BRIDGE_PHASE,
+        "family 0 still requires the doodad to lie inside the sphere area"
+    );
+}
+
 /// A doodad busy on another thread (or already deleted) is skipped instead of being advanced
 /// without the phase reservation every other phase driver takes.
 #[tokio::test]
@@ -447,21 +564,23 @@ async fn a_bridge_reserved_by_another_thread_is_not_advanced() {
 }
 
 /// Every (sphere, doodad template) pair the generic `SphereDoodadInteract` dispatch can fire for
-/// with the shipped data: the doodads of the shipped `doodad_spawns*.json` files that lie inside
-/// a shipped `sphere_area_fill.json` area of a `SphereDoodadInteract` sphere (skill set) and
-/// whose start phase holds an enter `DoodadFuncAreaTrigger` row with a next phase. The skill
-/// range around the entering player narrows it further at run time. Answer (r208022): the
-/// Sharpwind bridge (sphere 1552, doodad 5058), the 12 open-world quarry rock piles (sphere
-/// 1446, doodad 2803) and the one open-world Unstable Floor (sphere 429 "floor that collapses on
-/// entry", doodad 1495); a new pair is a new content effect that `PORTING.md` ("Sharpwind
-/// opening chain") has to list.
+/// with the shipped data. A `sphere_doodad_interacts.doodad_family_id` other than 0 selects all
+/// doodads of the world whose spawn row carries that `FamilyId`, anywhere in the instance; family
+/// 0 keeps the area rule: the doodads of the shipped `doodad_spawns*.json` files that lie inside
+/// a shipped `sphere_area_fill.json` area of the sphere (the skill range narrows it further at
+/// run time). The doodad's start phase must hold an enter `DoodadFuncAreaTrigger` row with a
+/// next phase either way. With the r208022 data and the placement data of this checkout the
+/// answer is empty: the Sharpwind stalactites (5364/5365, families 50011-50022) and the bridge
+/// (5058, family 50000) need their `FamilyId` spawn rows, which are the data lane's placements.
+/// A new pair is a new content effect that `PORTING.md` ("Sharpwind opening chain") has to
+/// list.
 ///
 /// `AAEMU_COMPACT_DB` must name a COPY of the r208022 `compact.sqlite3` (never the client
 /// install): `cargo test -p aaemu-game --lib real_data_sphere_doodad_interact -- --ignored
 /// --nocapture`.
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB (a copy of the r208022 compact.sqlite3)"]
-fn real_data_sphere_doodad_interact_reaches_the_bridge_and_the_quarry_piles() {
+fn real_data_sphere_doodad_interact_selection_matches_the_shipped_placements() {
     let Some(path) = std::env::var("AAEMU_COMPACT_DB").ok() else {
         return;
     };
@@ -470,11 +589,12 @@ fn real_data_sphere_doodad_interact_reaches_the_bridge_and_the_quarry_piles() {
             .expect("compact db");
     let doodads = DoodadData::load_from(&conn).expect("doodad tables");
 
-    // sphere id -> authored skill id of every `SphereDoodadInteract` sphere (0 = no dispatch).
-    let mut skill_of_sphere: HashMap<u32, u32> = HashMap::new();
+    // sphere id -> (authored skill id, doodad family) of every `SphereDoodadInteract` sphere
+    // (skill 0 = no dispatch).
+    let mut select_of_sphere: HashMap<u32, (u32, u32)> = HashMap::new();
     let mut stmt = conn
         .prepare(
-            "SELECT s.id, d.skill_id FROM spheres s \
+            "SELECT s.id, d.skill_id, d.doodad_family_id FROM spheres s \
              JOIN sphere_doodad_interacts d ON d.id = s.sphere_detail_id \
              WHERE s.sphere_detail_type = 'SphereDoodadInteract'",
         )
@@ -484,19 +604,20 @@ fn real_data_sphere_doodad_interact_reaches_the_bridge_and_the_quarry_piles() {
             Ok((
                 r.get::<_, u32>(0)?,
                 r.get::<_, Option<u32>>(1)?.unwrap_or(0),
+                r.get::<_, Option<u32>>(2)?.unwrap_or(0),
             ))
         })
         .expect("rows");
     for row in rows {
-        let (sphere, skill) = row.expect("row");
-        skill_of_sphere.insert(sphere, skill);
+        let (sphere, skill, family) = row.expect("row");
+        select_of_sphere.insert(sphere, (skill, family));
     }
-    assert!(!skill_of_sphere.is_empty());
+    assert!(!select_of_sphere.is_empty());
 
     let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
-    let areas: Vec<SphereArea> = load_sphere_areas(&app, |id| skill_of_sphere.contains_key(&id))
+    let areas: Vec<SphereArea> = load_sphere_areas(&app, |id| select_of_sphere.contains_key(&id))
         .into_iter()
-        .filter(|a| skill_of_sphere[&a.sphere_id] != 0)
+        .filter(|a| select_of_sphere[&a.sphere_id].0 != 0)
         .collect();
     assert!(!areas.is_empty(), "the shipped areas of the doodad spheres");
 
@@ -538,11 +659,23 @@ fn real_data_sphere_doodad_interact_reaches_the_bridge_and_the_quarry_piles() {
                 if !fires {
                     continue;
                 }
-                for area in areas
-                    .iter()
-                    .filter(|a| a.world == world && a.contains((p.x, p.y, p.z)))
-                {
-                    reached.insert((area.sphere_id, id, key));
+                for (sphere, (_, family)) in &select_of_sphere {
+                    // Only a sphere with an area in this world can dispatch here.
+                    let in_world: Vec<&SphereArea> = areas
+                        .iter()
+                        .filter(|a| a.world == world && a.sphere_id == *sphere)
+                        .collect();
+                    if in_world.is_empty() {
+                        continue;
+                    }
+                    let selected = if *family != 0 {
+                        def.family_id == *family
+                    } else {
+                        in_world.iter().any(|a| a.contains((p.x, p.y, p.z)))
+                    };
+                    if selected {
+                        reached.insert((*sphere, id, key));
+                    }
                 }
             }
         }
@@ -551,10 +684,11 @@ fn real_data_sphere_doodad_interact_reaches_the_bridge_and_the_quarry_piles() {
     for (sphere, id, _) in &reached {
         *counts.entry((*sphere, *id)).or_default() += 1;
     }
-    println!("(sphere, doodad template) -> placements inside an area: {counts:?}");
+    println!("(sphere, doodad template) -> selected placements: {counts:?}");
     assert_eq!(
         counts,
-        BTreeMap::from([((429, 1495), 1), ((1446, 2803), 12), ((1552, 5058), 1)]),
-        "the doodads the SphereDoodadInteract dispatch reaches changed: update PORTING.md"
+        BTreeMap::new(),
+        "the doodads the SphereDoodadInteract dispatch selects changed (a new placement with a \
+         FamilyId, or the selection rule): update this expectation and PORTING.md"
     );
 }
