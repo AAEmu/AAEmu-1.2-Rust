@@ -298,7 +298,7 @@ async fn guild_member_places_for_current_lord_without_taxes_and_foreign_guild_ca
     assert_eq!(wall.data().current_step, -1);
     let template = f.server.game_data.systems.housing.template(121).unwrap();
     assert_eq!(
-        placement::validate_house(&f.server, &f.attacker, template, 130.0, 100.0, 100.0),
+        placement::validate_house(&f.server, &f.attacker, template, 130.0, 100.0, 100.0, 0.0),
         Err(err::HOUSE_CANNOT_LOCATE_NEAR_OTHERS_GUARD_HOUSE)
     );
     assert!(!ops::set_for_sale(

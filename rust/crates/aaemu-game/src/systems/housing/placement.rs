@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use super::data::{HousingData, HousingTemplate};
 use crate::data::GameData;
 use crate::server::GameServer;
+use crate::systems::ai::collision;
 use crate::systems::ai::collision::world::{ObjKind, Owner};
 use crate::systems::economy::error_message as err;
 use crate::systems::npcs::subzone::{self, Area};
@@ -23,8 +24,9 @@ const UNIT_OVERLAP_MASK: u32 = 0x1f;
 /// than the ghost in the shipped data). Capture-pending HOUSE-1: the exact 1.2 radius source.
 const PLACEMENT_RANGE_MARGIN: f32 = 30.0;
 /// A house/decoration Z is refused only when it is clearly impossible: 100 m above or below
-/// the heightmap. The client's own vertical rules sample the ghost model box (`FUN_39332180`)
-/// and are not reproducible without render-model bounds; capture-pending HOUSE-2.
+/// the heightmap. This is a server-only anti-cheat guard, not a 1.2 client rule (the client's
+/// builder has no ±100 m test and never emits 115). The client's own vertical rule is the
+/// footprint terrain spread (`FUN_39332180`), see [`validate_ground_slope`].
 const MAX_GROUND_HEIGHT_DELTA: f32 = 100.0;
 
 /// `FUN_39897070`: categories that require a matching housing-area group/category.
@@ -269,9 +271,9 @@ pub fn validate_placement_range(
     }
 }
 
-/// The client places the house on the terrain under the ghost; a forged packet may send any
-/// Z. Refuse only a clearly impossible height (100 m above/below the heightmap), so sea
-/// farms and the client's own auto-Z always pass. Capture-pending HOUSE-2.
+/// The server-only anti-cheat guard: a forged Z far from the terrain is refused as an invalid
+/// area. The 1.2 client's housing builder has no such test (and never emits 115), so 116 is
+/// reserved for the client's slope rule below.
 fn validate_ground_height(
     server: &GameServer,
     world: &WorldInstance,
@@ -288,10 +290,37 @@ fn validate_ground_height(
     let Ok(ground) = maps.world_height(world.template.id, x, y) else {
         return Ok(());
     };
-    if z > ground + MAX_GROUND_HEIGHT_DELTA {
-        return Err(err::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_HIGH);
+    if z > ground + MAX_GROUND_HEIGHT_DELTA || z < ground - MAX_GROUND_HEIGHT_DELTA {
+        return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
-    if z < ground - MAX_GROUND_HEIGHT_DELTA {
+    Ok(())
+}
+
+/// `FUN_39332180` (`FUN_39326c10` on the ghost house OBB): the same footprint terrain spread as
+/// the doodad seed builder. More than 6 m (`max - min`, strict) refuses with 116, the client's
+/// `HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW` whose text is "You can't construct a building on a
+/// steep slope.". The client samples the render OBB; the server substitutes the design model's
+/// collision bounds and skips the rule when it has none. The client's z snap to the minimum
+/// sample is not mirrored.
+fn validate_ground_slope(
+    server: &GameServer,
+    world: &WorldInstance,
+    template: &HousingTemplate,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+) -> Result<(), i16> {
+    let Some(bounds) = collision::objects::house_model_bounds(server, template.main_model_id, 1)
+    else {
+        return Ok(());
+    };
+    let Some((min, max)) =
+        collision::placement::footprint_terrain_spread(server, world.id, (x, y, z), yaw, &bounds)
+    else {
+        return Ok(());
+    };
+    if max - min > collision::placement::MAX_FOOTPRINT_SPREAD {
         return Err(err::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW);
     }
     Ok(())
@@ -430,8 +459,9 @@ pub fn validate_house(
     x: f32,
     y: f32,
     z: f32,
+    yaw: f32,
 ) -> Result<(), i16> {
-    if ![x, y, z].into_iter().all(f32::is_finite) {
+    if ![x, y, z, yaw].into_iter().all(f32::is_finite) {
         return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
     validate_placement_range(server, player, x, y, z, template.garden_radius)?;
@@ -447,6 +477,7 @@ pub fn validate_house(
         return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
     validate_ground_height(server, &world, x, y, z)?;
+    validate_ground_slope(server, &world, template, x, y, z, yaw)?;
     let data = &server.game_data.systems.housing;
     let fort = super::dominion::fort::placement_owner(server, player, template, x, y)?;
     if fort.is_none() {
@@ -618,17 +649,17 @@ mod tests {
         let client = TestClient::new(&server, 1, 1001);
         let player = spawn_player(&server, &client, test_character(1, "Owner", 500., 500.), 10);
         assert_eq!(
-            validate_house(&server, &player, &template, 500., 500., 100.),
+            validate_house(&server, &player, &template, 500., 500., 100., 0.0),
             Ok(())
         );
         player.data().unit.transform.set_xyz(50., 50., 100.);
         assert_eq!(
-            validate_house(&server, &player, &template, 50., 50., 100.),
+            validate_house(&server, &player, &template, 50., 50., 100., 0.0),
             Err(err::HOUSE_CANNOT_LOACATE_INVALID_CATEGORY_AREA)
         );
         player.data().unit.transform.set_xyz(2500., 500., 100.);
         assert_eq!(
-            validate_house(&server, &player, &template, 2500., 500., 100.),
+            validate_house(&server, &player, &template, 2500., 500., 100., 0.0),
             Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA)
         );
         player.data().unit.transform.set_xyz(500., 500., 100.);
@@ -639,12 +670,12 @@ mod tests {
         let house = Entity::new(20, h);
         assert!(server.systems.housing.manager.insert(&house));
         assert_eq!(
-            validate_house(&server, &player, &template, 500., 500., 100.),
+            validate_house(&server, &player, &template, 500., 500., 100., 0.0),
             Err(err::HOUSE_CANNOT_LOCATE_OVERLAP_HOUSE)
         );
         house.data().unit.transform.instance_id = 1;
         assert_eq!(
-            validate_house(&server, &player, &template, 500., 500., 100.),
+            validate_house(&server, &player, &template, 500., 500., 100., 0.0),
             Ok(())
         );
     }
@@ -773,7 +804,7 @@ mod tests {
             assert!(server.systems.housing.manager.insert(&house));
         }
         assert_eq!(
-            validate_house(&server, &player, &template, 500., 500., 100.),
+            validate_house(&server, &player, &template, 500., 500., 100., 0.0),
             Err(err::HOUSE_CANNOT_CONSTRUCT_IN_AREA_BY_MAX_CONSTRUCT_COUNT)
         );
     }

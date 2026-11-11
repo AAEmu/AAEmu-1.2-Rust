@@ -19,6 +19,7 @@ use crate::data::world_templates::{WorldTemplate, WorldTemplates};
 use crate::data::GameData;
 use crate::opcodes::sc;
 use crate::server::GameServer;
+use crate::systems::ai::collision::flow_tests::box_cgf;
 use crate::systems::ai::collision::terrain::tests::Plane;
 use crate::systems::ai::collision::world::CellContent;
 use crate::systems::npcs::heightmap::{
@@ -142,6 +143,13 @@ fn data() -> GameData {
                 points: AREA_338.to_vec(),
             }],
         );
+    // The design's `main_model_id` as the render-OBB proxy (`FUN_393a73a0`); only loaded when
+    // a test installs the collision files below.
+    data.systems
+        .ai
+        .collision
+        .prefab_models
+        .insert(1083, vec!["cgf://objects/test/box.cgf".into()]);
     for id in [
         manager::BUFF_UNTOUCHABLE,
         manager::BUFF_REMOVAL_DEBUFF,
@@ -562,7 +570,9 @@ async fn a_house_z_far_above_or_below_the_terrain_is_refused() {
     high.z = 200.0;
     assert_eq!(
         build_error_for(&mut f, high),
-        Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_HIGH)
+        // 115 is never sent: the 1.2 client's builder emits no such error (research C2), so the
+        // server-only anti-cheat guard answers with the generic invalid-area code.
+        Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_INVALID_AREA)
     );
     f.player
         .data()
@@ -573,8 +583,77 @@ async fn a_house_z_far_above_or_below_the_terrain_is_refused() {
     low.z = -200.0;
     assert_eq!(
         build_error_for(&mut f, low),
+        // 116 means "steep slope" in the client, never "too low".
+        Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_INVALID_AREA)
+    );
+}
+
+/// The synthetic 2 x 2 x 2 m CGF as design 171's `main_model_id` collision model (the render-OBB
+/// proxy) and a terrain plane `z = a + b·x` wide enough for the area-338 spot.
+fn install_ground(server: &GameServer, a: f32, b: f32) {
+    let mut files = HashMap::new();
+    files.insert("game/objects/test/box.cgf".to_string(), box_cgf());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(files))
+        .ok();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Plane {
+            a,
+            b,
+            c: 0.0,
+            n: 16384,
+        }))
+        .ok();
+}
+
+#[tokio::test]
+async fn a_house_on_a_steep_slope_is_refused_with_116() {
+    // `z = 100 + 3.5·x` across the box's 2 m footprint: the corners differ by exactly 7 m.
+    let mut f = fixture(data());
+    install_ground(&f.server, 100.0, 3.5);
+    assert_eq!(
+        build_error(&mut f, ACCEPTED.0, ACCEPTED.1),
         Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW)
     );
+}
+
+#[tokio::test]
+async fn a_house_on_flat_ground_with_a_model_is_accepted() {
+    let mut f = fixture(data());
+    install_ground(&f.server, 100.0, 0.0);
+    ops::build(&f.server, &f.player, 1001, &packet(ACCEPTED.0, ACCEPTED.1));
+    assert_eq!(
+        f.server.systems.housing.manager.count(),
+        1,
+        "flat ground is accepted"
+    );
+    assert!(errors(&mut f.client).is_empty());
+}
+
+#[tokio::test]
+async fn a_house_without_model_bounds_skips_the_slope_rule() {
+    // No `prefab_models` row: the design has no collision bounds to sample, so the check is
+    // skipped instead of refusing a slope the server cannot measure.
+    let mut f = fixture(data());
+    Arc::get_mut(&mut f.server.game_data)
+        .unwrap()
+        .systems
+        .ai
+        .collision
+        .prefab_models
+        .remove(&1083);
+    install_ground(&f.server, 100.0, 3.5);
+    ops::build(&f.server, &f.player, 1001, &packet(ACCEPTED.0, ACCEPTED.1));
+    assert_eq!(f.server.systems.housing.manager.count(), 1);
+    assert!(errors(&mut f.client).is_empty());
 }
 
 fn place_seller_house(f: &mut Fixture) -> crate::world::HouseRef {

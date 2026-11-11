@@ -35,6 +35,8 @@ pub mod error_message {
     pub const DOODAD_SIM_AREA: i16 = 276;
     pub const DOODAD_SIM_TOO_CLOSE_TO_OTHER_DOODAD: i16 = 277;
     pub const DOODAD_SIM_TOO_CLOSE_TO_OTHER_UNIT: i16 = 278;
+    /// `DOODAD_SIM_LOW_TERRAIN`: the seed footprint's terrain spread exceeds 6 m.
+    pub const DOODAD_SIM_LOW_TERRAIN: i16 = 279;
     /// The 1.2 territory-statue placement refusal (`locate_invalid_dominion_area`), same value
     /// as `systems::economy::error_message::LOCATE_INVALID_DOMINION_AREA`.
     pub const LOCATE_INVALID_DOMINION_AREA: i16 = 749;
