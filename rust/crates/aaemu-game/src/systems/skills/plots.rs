@@ -441,19 +441,26 @@ fn flush_execution_queue(
     apply_test_flush_stall(tree, q);
     let data = &server.game_data.systems.skills;
     let mut packets = super::packets::CompressedGamePackets::new();
+    let mut executed: Vec<(usize, PlotTargetInfo, bool)> = Vec::new();
     while let Some((node, ti, condition)) = q.pop_front() {
         if condition {
             if let Some(p) = node_execute_packet(server, tree, node, state, &ti) {
                 packets.add(&p);
             }
         }
-        // The authored `plot_next_events.delay` counts from the moment the parent event
-        // reaches the client, which is this flush (it broadcasts `packets` right below), not
-        // the earlier moment the tree dequeued it. Basing the children on the dequeue time let
-        // a deferred flush (the 15 ms between passes, a busy runtime) eat into the delay the
-        // client observes: Tiger Strike's leap (plot 17 event 118, 400 ms) could arrive together
-        // with, or after, the damage event (121). The C# has the same dequeue-time base.
-        let sent_at = now_ms();
+        executed.push((node, ti, condition));
+    }
+    // The authored `plot_next_events.delay` counts from the moment the parent event reaches the
+    // client, which is this broadcast, not the earlier moment the tree dequeued it. Basing the
+    // children on the dequeue time let a deferred flush (the 15 ms between passes, a busy
+    // runtime) eat into the delay the client observes: Tiger Strike's leap (plot 17 event 118,
+    // 400 ms) could arrive together with, or after, the damage event (121). The C# has the same
+    // dequeue-time base.
+    let sent_at = now_ms();
+    if !packets.is_empty() {
+        broadcast(server, state.caster(), &packets, true);
+    }
+    for (node, ti, condition) in executed {
         for &child in &tree.nodes[node].children {
             let Some(next) = data.plots.parent_next_event(tree, child) else {
                 continue;
@@ -472,9 +479,6 @@ fn flush_execution_queue(
                 }
             }
         }
-    }
-    if !packets.is_empty() {
-        broadcast(server, state.caster(), &packets, true);
     }
 }
 
