@@ -379,6 +379,13 @@ pub(crate) fn receive(
                 let last = d.phase.pending_output.or(d.phase.logic_output);
                 if last == Some(output) {
                     None
+                } else if d.phase.logic_output == Some(output) {
+                    // The inputs returned to the value that was already emitted while a different
+                    // one was pending: cancel that output (its task no longer matches) instead of
+                    // emitting the same value again, which would run the downstream triggers twice.
+                    d.phase.pending_output = None;
+                    d.phase.pending_output_generation = super::tasks::next_generation();
+                    None
                 } else {
                     let generation = super::tasks::next_generation();
                     d.phase.pending_output = Some(output);

@@ -4826,7 +4826,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   delays are implemented for all eight authored enum values (1 s .. 30 min); the old code
   refused anything but 1 s and emitted immediately. (3) the per-doodad, per-entry `pulsed` flag
   replaces the C# `PulseTriggered`, which lived on the shared func list (one doodad's trigger
-  suppressed every instance of the template).
+  suppressed every instance of the template). (4) a `DoodadFuncLogic` result that returns to the
+  value it already emitted before its delay ends is cancelled instead of emitted a second time
+  (the downstream `PulseTrigger` rows would run twice); a pending result that differs from the
+  emitted one still emits after its delay, replaced ones never do. **Inferred (no 1.2 server
+  evidence):** this inertial output rule.
   **INFERRED:** the five stream positions and the three switch/gate/lake positions are the
   10.x editor placements, not a 1.2 server DB export (no such export exists here); the level
   file positions are confirmed by the five pre-existing stream rows. Tests:

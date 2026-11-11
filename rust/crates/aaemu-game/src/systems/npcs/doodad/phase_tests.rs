@@ -1037,6 +1037,84 @@ async fn subscribe_replays_only_the_emitted_logic_value() {
     assert_eq!(group(&receiver), 21, "subscribe replays nothing again");
 }
 
+/// A gate that already emitted false, whose inputs flip to true and back to false inside the 1 s
+/// delay, has nothing left to say: the pending true is cancelled and the false is not emitted a
+/// second time. The receiver counts the false signals it gets (each `PulseTrigger(false)` moves
+/// it one group on), so a repeated false would show as a second step.
+#[tokio::test]
+async fn a_pending_logic_output_that_returns_to_the_emitted_value_is_cancelled() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Logic(DoodadFuncLogic {
+                id: 1,
+                operation_id: 3,
+                delay_id: 1,
+            }),
+        )
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2), (22, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 3,
+                flag: false,
+                next_phase: 21,
+            }),
+        )
+        .phase_func(
+            21,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 4,
+                flag: false,
+                next_phase: 22,
+            }),
+        )
+        .template(102, &[(30, 1)]);
+    let f = fx(b);
+    let source = place(&f, 100, 101.0);
+    let receiver = place(&f, 101, 102.0);
+    receiver.data().family_id = 500;
+    let driver = place(&f, 102, 103.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), driver);
+
+    logic::receive(&ctx, &source, None, false, true);
+    f.advance(1_000);
+    assert_eq!(source.data().phase.logic_output, Some(false));
+    assert_eq!(group(&receiver), 21, "the first false is delivered");
+
+    logic::receive(&ctx, &source, None, true, true);
+    assert_eq!(source.data().phase.pending_output, Some(true));
+    f.advance(200);
+    let generation = source.data().phase.pending_output_generation;
+    logic::receive(&ctx, &source, None, false, true);
+    assert_eq!(
+        source.data().phase.pending_output,
+        None,
+        "the inputs returned to the emitted value: nothing is pending"
+    );
+    assert_ne!(
+        source.data().phase.pending_output_generation,
+        generation,
+        "the cancelled output's task no longer matches"
+    );
+
+    f.advance(2_000);
+    assert_eq!(source.data().phase.logic_output, Some(false));
+    assert_eq!(
+        group(&receiver),
+        21,
+        "neither the cancelled true nor a repeated false reaches the receiver"
+    );
+}
+
 #[tokio::test]
 async fn use_then_timer_returns_to_start_phase() {
     let b = Builder::default()
