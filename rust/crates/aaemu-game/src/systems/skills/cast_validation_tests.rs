@@ -1196,6 +1196,21 @@ async fn obstacle_checks_reject_a_physical_wall_before_any_cast_mutation() {
     assert_eq!(player.data().unit.mp, 100);
     assert_eq!(player.data().unit.skill_last_used_ms, 0);
     assert_eq!(skill.tl_id(), 0);
+    // A gimmick source casts no ray (its touch is its range): the same wall does not refuse a
+    // gimmick standing where the player stands.
+    let mut gimmick = crate::models::gimmick::Gimmick::new(900);
+    gimmick.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let gimmick = Entity::new(0x301, gimmick);
+    assert!(
+        super::validation::check(
+            &server,
+            &skill,
+            &WorldObject::from(&gimmick),
+            &Target::Obj(WorldObject::from(&npc))
+        )
+        .is_ok(),
+        "a gimmick casts no obstacle ray"
+    );
     // Disabling the configured check retains the explicit template behavior.
     let skill = SkillRun::new(Arc::new(super::tests::skill_template(2)), 1);
     assert_eq!(cast(&server, &skill, &player, &npc).0, 0);
@@ -2118,4 +2133,57 @@ async fn npc_timed_cast_still_starts_its_gcd_at_cast_end() {
         gcd >= started + 100 + 1000,
         "NPC GCD starts at the cast end, not {gcd} (cast started at {started})"
     );
+}
+
+/// The gimmick source exemptions of `validation::check` (a gimmick has no health, and the touch
+/// is its range) do not apply to other casters: a player out of range and a dead NPC are still
+/// refused by the very skills a gimmick may cast. (The obstacle ray is covered by
+/// `obstacle_checks_reject_a_physical_wall_before_any_cast_mutation`.)
+#[tokio::test]
+async fn gimmick_source_exemptions_do_not_apply_to_players_and_npcs() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    // 50 m from the player and from the gimmick below.
+    npc.data().unit.transform.set_xyz(100.0, 150.0, 100.0);
+    let target = Target::Obj(WorldObject::from(&npc));
+    let mut gimmick = crate::models::gimmick::Gimmick::new(900);
+    gimmick.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let gimmick = WorldObject::from(&Entity::new(0x301, gimmick));
+    let check = |skill: &SkillRun, caster: &WorldObject| {
+        super::validation::check(&server, skill, caster, &target)
+    };
+
+    // Range: a 5 m skill against a target 50 m away.
+    let short = SkillRun::new(
+        Arc::new(SkillTemplate {
+            max_range: 5,
+            ..super::tests::skill_template(1)
+        }),
+        1,
+    );
+    assert_eq!(
+        check(&short, &WorldObject::from(&player)).unwrap_err().0,
+        super::unit_reqs::skill_result_for_key("skill_too_far_range")
+    );
+    assert!(check(&short, &gimmick).is_ok(), "the touch is the range");
+
+    // Source life: a skill that needs a living source, cast by a dead one.
+    let alive = SkillRun::new(
+        Arc::new(SkillTemplate {
+            source_alive: true,
+            max_range: 100,
+            ..super::tests::skill_template(2)
+        }),
+        1,
+    );
+    let mut dead = Npc::new(1);
+    dead.unit.hp = 0;
+    dead.unit.max_hp = 1000;
+    dead.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let dead = WorldObject::from(&Entity::new(0x302, dead));
+    assert_eq!(
+        check(&alive, &dead).unwrap_err().0,
+        super::unit_reqs::skill_result_for_key("skill_source_died")
+    );
+    assert!(check(&alive, &gimmick).is_ok(), "a gimmick has no health");
+    assert!(check(&alive, &WorldObject::from(&player)).is_ok());
 }

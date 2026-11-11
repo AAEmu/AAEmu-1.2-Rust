@@ -5,7 +5,7 @@
 use crate::data::world_data::conflict_type;
 use crate::server::GameServer;
 use crate::systems::social::nation;
-use crate::world::{now_ms, PlayerRef, WorldObject};
+use crate::world::{now_ms, GimmickRef, PlayerRef, WorldObject};
 
 use super::geometry::Target;
 use super::types::{buff_constants, RelationState, SkillTargetRelation};
@@ -51,10 +51,39 @@ pub fn relation_to(server: &GameServer, a: &Target, b: &Target) -> RelationState
     }
 }
 
-/// `GetOwnerCharacter()`: the character itself, the owner of a mate / slave, else `None`.
+/// How many spawner links [`gimmick_owner`] follows. A gimmick can be spawned by another gimmick
+/// (a bomb whose own skill spawns fragments) and object ids are reused as soon as they are
+/// released, so two live gimmicks can name each other: the chain is bounded, not trusted.
+const GIMMICK_OWNER_HOPS: usize = 4;
+
+/// The character a gimmick acts for: the owner of the unit that spawned it
+/// (`Gimmick.SpawnerUnitId`, set from the caster by `SpawnGimmickEffect`), resolved like a mate /
+/// slave owner. `None` when the spawner is gone or is a doodad / NPC with no owning character.
+fn gimmick_owner(server: &GameServer, gimmick: &GimmickRef) -> Option<PlayerRef> {
+    let mut spawner = gimmick.data().spawner_unit_id;
+    for _ in 0..GIMMICK_OWNER_HOPS {
+        if spawner == 0 {
+            return None;
+        }
+        match server.world.object(spawner)? {
+            WorldObject::Gimmick(g) => spawner = g.data().spawner_unit_id,
+            other => return owner_character(server, &other),
+        }
+    }
+    None
+}
+
+/// `GetOwnerCharacter()`: the character itself, the owner of a mate / slave, the owner of the unit
+/// that spawned a gimmick, else `None`.
+///
+/// **Inferred (no 1.2 server evidence):** the gimmick arm. The 1.2 C# cast a gimmick's skill from
+/// its spawner unit, so every rule keyed on the character applied to it; the gimmick is now the
+/// cast source (its skills need a gimmick source, see `skills/validation.rs`), and this mapping
+/// keeps those rules (Peace, no-PvP, siege hostility, tagging, crime evidence) on the thrower.
 pub fn owner_character(server: &GameServer, o: &WorldObject) -> Option<PlayerRef> {
     match o {
         WorldObject::Player(p) => Some(p.clone()),
+        WorldObject::Gimmick(g) => gimmick_owner(server, g),
         WorldObject::Mate(m) => {
             let owner = m.data().owner_obj_id;
             (owner > 0)
@@ -68,13 +97,64 @@ pub fn owner_character(server: &GameServer, o: &WorldObject) -> Option<PlayerRef
                 (d.summoner_obj_id, d.owner_obj_id)
             };
             let id = if summoner != 0 { summoner } else { owner };
-            (id > 0)
-                .then(|| server.world.object(id))
-                .flatten()
+            if id == 0 {
+                return world_slave_driver(server, s);
+            }
+            server
+                .world
+                .object(id)
                 .and_then(|o| owner_character(server, &o))
         }
         _ => None,
     }
+}
+
+/// The character a hit or kill by `unit` is credited to (tagging, kill experience, loot, quest
+/// events, PvP honor): the player itself, or for a gimmick the character it acts for. A mate or
+/// slave keeps its own credit rules, so this is not [`owner_character`]. The death packet and
+/// every other broadcast keep naming the unit that really dealt the blow.
+pub fn credited_player(server: &GameServer, unit: &WorldObject) -> Option<PlayerRef> {
+    match unit {
+        WorldObject::Player(p) => Some(p.clone()),
+        WorldObject::Gimmick(g) => gimmick_owner(server, g),
+        _ => None,
+    }
+}
+
+/// The character in the gunner / driver seat of a slave nobody owns: a world cannon placed by a
+/// `slave_spawns` entry, such as the Bloodhand Base Cannon (slave 57, faction 2 "Neutral") on
+/// the Marooned Isle rampart that "Rout the Bloodhands" (2325) sends players to. Such a slave
+/// acts for that character (its faction, owner and kill credit); `None` for a summoned or owned
+/// slave. Inferred (no 1.2 server evidence): the C# had no owner for these slaves, so a manned
+/// world cannon stayed Neutral and could damage nothing.
+pub fn world_slave_driver(
+    server: &GameServer,
+    slave: &crate::world::SlaveRef,
+) -> Option<PlayerRef> {
+    let driver = {
+        let d = slave.data();
+        if d.summoner_obj_id != 0 || d.owner_obj_id != 0 {
+            return None;
+        }
+        d.attached_characters
+            .iter()
+            .find(|(point, _)| *point == crate::models::unit::attach_point::DRIVER)
+            .map(|(_, id)| *id)
+    }?;
+    server.world.character_by_obj_id(driver)
+}
+
+/// The faction `me` attacks with: a manned world slave fights with its gunner's faction
+/// ([`world_slave_driver`]); every other unit with its own.
+fn acting_faction(server: &GameServer, me: &Target) -> u32 {
+    if let Some(driver) = me
+        .as_obj()
+        .and_then(WorldObject::as_slave)
+        .and_then(|s| world_slave_driver(server, s))
+    {
+        return driver.data().unit.faction_id;
+    }
+    faction_of(me)
 }
 
 /// `Character.IsActivelyHostile(target)`.
@@ -298,7 +378,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
             return false;
         }
     }
-    let my_faction = faction_of(me);
+    let my_faction = acting_faction(server, me);
     let target_faction = faction_of(target);
     let factions = &server.game_data.factions;
     if !nation::faction_exists(server, my_faction)
@@ -329,11 +409,16 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     {
         return false;
     }
-    // The siege rule lives in `relation_to` (inside a running siege's area the two parties are
+    // The siege rule of `relation_to` (inside a running siege's area the two parties are
     // Hostile, a party is Friendly to itself): it comes after the Peace / no-PvP / own-mount
     // refusals above, so it never weakens those protections, and the faction / zone logic below
-    // reads the same relation as every skill path.
-    let relation = relation_to(server, me, target);
+    // reads the same relation as every skill path. Outside a siege the faction relation uses
+    // the attacker's acting faction (a manned world cannon fights with its gunner's).
+    let relation = match crate::systems::housing::dominion::hostility::relation(server, me, target)
+    {
+        Some(siege) => siege.relation_state(),
+        None => faction_relation(server, my_faction, target_faction),
+    };
     let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
     let zone_key = super::geometry::instance_and_zone(target).1;
     let zone_faction_raw = server
@@ -627,6 +712,95 @@ mod tests {
         assert_eq!(faction_relation(&server, 109, 1), RelationState::Friendly);
         assert_eq!(faction_relation(&server, 109, 115), RelationState::Hostile);
         assert_eq!(faction_relation(&server, 109, 101), RelationState::Hostile);
+    }
+
+    /// A world cannon nobody owns (the Bloodhand Base Cannon, slave 57, faction 2 "Neutral")
+    /// fights for the player in its gunner seat: unmanned it can attack nothing; manned by a
+    /// West Ishvara player (109) it can attack the Monstrosity Bloodhand Pillagers (115), it is
+    /// that player's unit (`owner_character`), and its damage tags the gunner, so the kill
+    /// credits the gunner's quest. A summoned slave keeps its summoner as its owner.
+    #[tokio::test]
+    async fn a_manned_world_cannon_fights_for_its_gunner() {
+        use crate::models::npc::Npc;
+        use crate::models::slave::Slave;
+        use crate::models::unit::attach_point;
+        use crate::test_support::{spawn_player, test_character, TestClient};
+        use crate::world::Entity;
+
+        let mut data = GameData::empty();
+        for f in [
+            faction(2, 0),
+            faction(109, 149),
+            faction(115, 0),
+            faction(149, 0),
+        ] {
+            data.factions.add(f);
+        }
+        data.factions.relations.push(FactionRelation {
+            id: 149,
+            id2: 115,
+            state: RelationState::Hostile as u8,
+            exp_time: 0,
+        });
+        let server = crate::test_support::test_server_with(data);
+        let client = TestClient::new(&server, 1, 1001);
+        let mut gunner = test_character(1, "Gunner", 100.0, 100.0);
+        gunner.unit.faction_id = 109;
+        let player = spawn_player(&server, &client, gunner, 0x100);
+        let world = server.world.world(0).unwrap();
+        let mut n = Npc::new(8014);
+        n.unit.faction_id = 115;
+        n.unit.hp = 100;
+        n.unit.max_hp = 100;
+        n.unit.transform.set_xyz(140.0, 100.0, 100.0);
+        let pillager = Entity::new(0x200, n);
+        world.spawn(&pillager, &server.view_ctx());
+        let mut s = Slave::new(0, 57);
+        s.unit.faction_id = 2;
+        s.unit.hp = 100;
+        s.unit.transform.set_xyz(101.0, 100.0, 100.0);
+        let cannon = Entity::new(0x300, s);
+        world.spawn(&cannon, &server.view_ctx());
+        let cannon_obj = WorldObject::from(&cannon);
+        let cannon_t = Target::Obj(cannon_obj.clone());
+        let pillager_obj = WorldObject::from(&pillager);
+        let pillager_t = Target::Obj(pillager_obj.clone());
+
+        assert!(
+            !can_attack(&server, &cannon_t, &pillager_t),
+            "unmanned: Neutral"
+        );
+        assert!(owner_character(&server, &cannon_obj).is_none());
+
+        cannon
+            .data()
+            .attached_characters
+            .push((attach_point::DRIVER, player.obj_id));
+        assert!(can_attack(&server, &cannon_t, &pillager_t));
+        assert_eq!(
+            owner_character(&server, &cannon_obj).map(|p| p.obj_id),
+            Some(player.obj_id)
+        );
+        crate::systems::skills::combat::add_damage_aggro(
+            &server,
+            &pillager_obj,
+            &cannon_obj,
+            10,
+            10,
+        );
+        assert_eq!(
+            pillager.data().unit.skill_state.tagging.tagger,
+            player.obj_id,
+            "the cannon's damage tags its gunner"
+        );
+
+        // A summoned slave is its summoner's unit, whoever sits in the seat.
+        cannon.data().summoner_obj_id = 0x999;
+        assert!(world_slave_driver(&server, &cannon).is_none());
+        assert!(
+            !can_attack(&server, &cannon_t, &pillager_t),
+            "own faction again"
+        );
     }
 
     const MIRAGE_ZONE: u32 = 260;
@@ -967,6 +1141,146 @@ mod tests {
         assert_eq!(relation_to(&server, &tc, &td), RelationState::Hostile);
         assert!(can_attack(&server, &tc, &td));
         assert!(can_attack(&server, &td, &tc));
+    }
+
+    /// A gimmick (a thrown bomb) spawned by `spawner_obj_id` on `faction_id`'s side, registered in
+    /// the world so a gimmick spawned by a gimmick can be resolved through it.
+    fn gimmick_of(
+        server: &GameServer,
+        obj_id: u32,
+        spawner_obj_id: u32,
+        faction_id: u32,
+    ) -> crate::world::GimmickRef {
+        let mut g = crate::models::gimmick::Gimmick::new(900);
+        g.spawner_unit_id = spawner_obj_id;
+        g.unit.faction_id = faction_id;
+        g.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let g = crate::world::Entity::new(obj_id, g);
+        let world = server
+            .world
+            .worlds()
+            .into_iter()
+            .next()
+            .expect("a world instance");
+        world.spawn(&g, &server.view_ctx());
+        g
+    }
+
+    /// A gimmick acts for the character that spawned it, so the Peace lockdown covers a bomb a
+    /// player threw. Without the owner it would be an ownerless attacker decided by the static
+    /// faction relation alone (Nuia against Haranya: hostile). In Conflict the same pair is
+    /// attackable, and a gimmick whose spawner is gone falls back to the faction decision.
+    #[tokio::test]
+    async fn peace_refuses_a_gimmick_thrown_by_a_player() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let thrower = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let victim = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let bomb = gimmick_of(&server, 0x301, thrower.obj_id, 101);
+        let (tbomb, tvictim) = (Target::Obj(WorldObject::from(&bomb)), obj_target(&victim));
+        assert_eq!(
+            relation_to(&server, &tbomb, &tvictim),
+            RelationState::Hostile
+        );
+        assert!(
+            !can_attack(&server, &tbomb, &tvictim),
+            "Peace: a thrown bomb cannot hurt another player"
+        );
+        assert!(
+            protected_from(&server, &tbomb, &tvictim),
+            "Peace also protects the victim from the bomb's non-damage effects"
+        );
+
+        // Conflict: the same pair is an ordinary hostile attack.
+        let conflict_thrower = player_in(&server, &cc, 0x201, 101, CONFLICT_ZONE, 0);
+        let conflict_victim = player_in(&server, &cd, 0x209, 109, CONFLICT_ZONE, 0);
+        let conflict_bomb = gimmick_of(&server, 0x302, conflict_thrower.obj_id, 101);
+        let (tbomb, tvictim) = (
+            Target::Obj(WorldObject::from(&conflict_bomb)),
+            obj_target(&conflict_victim),
+        );
+        assert!(can_attack(&server, &tbomb, &tvictim));
+        assert!(!protected_from(&server, &tbomb, &tvictim));
+
+        // As for a mate or slave, never the character it acts for, whatever the faction relation
+        // says (the own-unit rule of `can_attack`): a gimmick of the hostile side 109 still
+        // cannot hurt its own thrower (side 101).
+        let turncoat = gimmick_of(&server, 0x304, conflict_thrower.obj_id, 109);
+        assert!(!can_attack(
+            &server,
+            &Target::Obj(WorldObject::from(&turncoat)),
+            &obj_target(&conflict_thrower)
+        ));
+
+        // No owning character (the spawner is gone): the faction decision alone, as before.
+        let orphan = gimmick_of(&server, 0x303, 0x7777, 101);
+        assert!(can_attack(
+            &server,
+            &Target::Obj(WorldObject::from(&orphan)),
+            &obj_target(&victim)
+        ));
+    }
+
+    /// `owner_character` / `credited_player` for gimmicks: the character behind the spawner
+    /// (also through a gimmick that spawned a gimmick), nobody for a doodad spawner, a missing
+    /// spawner or a chain that loops (object ids are reused), and a mate / slave keeps its own
+    /// credit rules.
+    #[tokio::test]
+    async fn a_gimmick_resolves_to_the_character_that_spawned_it() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let thrower = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let owner_of = |o: &WorldObject| owner_character(&server, o).map(|p| p.obj_id);
+        let credit_of = |o: &WorldObject| credited_player(&server, o).map(|p| p.obj_id);
+
+        let bomb = gimmick_of(&server, 0x301, thrower.obj_id, 101);
+        assert_eq!(owner_of(&WorldObject::from(&bomb)), Some(thrower.obj_id));
+        assert_eq!(credit_of(&WorldObject::from(&bomb)), Some(thrower.obj_id));
+        // A bomb whose own skill spawned a fragment.
+        let fragment = gimmick_of(&server, 0x302, bomb.obj_id, 101);
+        assert_eq!(
+            owner_of(&WorldObject::from(&fragment)),
+            Some(thrower.obj_id)
+        );
+        assert_eq!(
+            credit_of(&WorldObject::from(&fragment)),
+            Some(thrower.obj_id)
+        );
+
+        // A doodad spawner is no character.
+        let doodad = crate::world::Entity::new(0x303, crate::models::doodad::Doodad::new(1));
+        server
+            .world
+            .worlds()
+            .into_iter()
+            .next()
+            .expect("a world instance")
+            .spawn(&doodad, &server.view_ctx());
+        let from_doodad = gimmick_of(&server, 0x304, 0x303, 0);
+        assert_eq!(owner_of(&WorldObject::from(&from_doodad)), None);
+        assert_eq!(credit_of(&WorldObject::from(&from_doodad)), None);
+        // No spawner at all, and a spawner that is gone.
+        let none = gimmick_of(&server, 0x305, 0, 0);
+        let gone = gimmick_of(&server, 0x306, 0x7777, 101);
+        assert_eq!(owner_of(&WorldObject::from(&none)), None);
+        assert_eq!(owner_of(&WorldObject::from(&gone)), None);
+        // Two gimmicks that name each other (a reused object id): bounded, no owner.
+        let a = gimmick_of(&server, 0x307, 0x308, 101);
+        let b = gimmick_of(&server, 0x308, 0x307, 101);
+        assert_eq!(owner_of(&WorldObject::from(&a)), None);
+        assert_eq!(owner_of(&WorldObject::from(&b)), None);
+
+        // The player credits itself; an NPC credits nobody.
+        assert_eq!(
+            credit_of(&WorldObject::from(&thrower)),
+            Some(thrower.obj_id)
+        );
+        let npc = crate::world::Entity::new(0x309, crate::models::npc::Npc::new(1));
+        assert_eq!(credit_of(&WorldObject::from(&npc)), None);
     }
 
     /// A cycling zone in Peace is an absolute PvP lockdown: pirates are protected like every

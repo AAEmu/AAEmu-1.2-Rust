@@ -1760,17 +1760,21 @@ blobs, 1.0 GB heap of which about 600 MB are the heightmap cells, 8 s; 1.0 µs p
   5 routes, mostly flying / golem routes) cross a wall. Tested by `ai::behaviors::walk_tests`
   and (gated) `collision::real_data_tests::{real_roam_path_block_rates, real_walk_check_rates}`.
 * **Alert / phase grounding (2026-11-11)**: `BaseCombatBehavior.CheckPipeName()` grounded
-  `phase_dragon_ground` / phase 1 owners on `GeoData.GetHeight`, the navigation mesh. The 1.2
-  navmesh is a walking-surface graph above the terrain (measured navmesh minus raw heightmap:
-  2.8 m at the Dewstone Nui statue, 4.9 m south of Vedisa, 4.5-5.7 m at the Cloaked Forest
-  flesh-golem camp), so `AlertBehavior.Enter` lifted every ground walker by that much and its
-  `StopMovement` broadcast the lifted Z (live golem 731 at the statue alternated 114.3 / 117.2 m
-  at the same spot). **Deviation:** a ground walker (not `moves_freely`) now uses the same floor
+  `phase_dragon_ground` / phase 1 owners on `GeoData.GetHeight`, the navigation mesh. The
+  navmesh height can lie several metres above or below the ground (measured navmesh minus raw
+  heightmap: 2.8 m at the Dewstone Nui statue, 4.9 m south of Vedisa, 4.5-5.7 m at the Cloaked
+  Forest flesh-golem camp; below the ground elsewhere, see the geodata deviations above), so
+  `AlertBehavior.Enter` lifted (or sank) every re-alerting ground walker by that much (the first
+  Enter only arms the pipe, so it is the NPC's second alert on) and its `StopMovement`
+  broadcast that Z (live golem 731 at the statue alternated 114.3 / 117.2 m at the same spot).
+  **Inferred (no 1.2 server evidence):** the cause (the navmesh as a walking-surface graph
+  above the terrain); the fix does not depend on it. **Deviation:** a ground walker (not `moves_freely`) now uses the same floor
   as its movement steps, `ai::npc::reference_height_in` (collision floor first, then the bounded
   navmesh / heightmap fallback); flying and swimming NPCs keep the C# navigation height. Chase,
   return, roaming, path following and group formation already went through
   `reference_height_in`, and spawns use `spawn_ground_z` (collision floor / raw heightmap), so
-  the alert pipe was the only movement path that read the navmesh directly. Tested by
+  the alert pipe was the only movement path of NPCs with an AI that read the navmesh directly.
+  Tested by
   `ai::npc::npc_height_tests::{alert_grounds_a_walker_on_the_collision_floor_not_the_navmesh,
   alert_keeps_a_walker_on_the_structure_floor_it_stands_on,
   alert_keeps_a_flying_npc_on_the_navigation_height}`.
@@ -6361,8 +6365,10 @@ See Docs/wiki/Quest-Audit.md and Docs/wiki/Mail-Audit.md.
 | `NpcSpawner.SelectSpawnerId` for NORMAL multi-member spawners | `systems/npcs/npc/spawner.rs` (`select_spawner_id`) | matches the C# | Not changed. A JSON entry clones every game-data spawner that has its unit as a member and (memberwise clone) shares one `NpcSpawnerIds` list, so with more than one spawner only an AUTOCREATED unscheduled one or a scheduled one is ever selected: a unit that has no JSON entry of its own and is only a sibling of a NORMAL group spawner (Vicious/Silent Treant 3105/3106, Goblin Fighter 527, ...) never spawns. The 13 audit findings of this kind are all `ConAcceptNpcKill` starters, which `starter_accepts` evaluates as an OR over the component's acts, and in every one of the 7 quests other listed NPCs spawn, so no quest is blocked; the data would need real positions for these units (the 10.x editor has no placement of those group spawners). |
 | Kill / loot quest NPCs whose only placement holds one NPC (tester reports, Ynystere, 2026-11-10) | `app/Data/Worlds/main_world/npc_spawns_quest_fill.json`; tests `npcs::spawn_tests::quest_fill_npcs_reach_the_area_spawner_minimum`, `real_data_quest_fill_spawns_on_terrain` | data | The same selection keeps the NORMAL area spawner of a JSON entry idle when an AUTOCREATED single spawner (max 1) shares it, so one point = one NPC. Honouring the area spawners globally is not an option: 7,492 of the 27,033 main_world entries (783 templates) have such a sibling with `min_population` > 1, which would stack ~52,000 NPCs on their single points. Three quest areas had one point: quest 2950 "Peacocking Around" (16 x Blue Crane 8013; area spawner 5407 "Ynystere / River of Longing / riverside", min 7), quest 4197 "A Change in the Herd" (8 x Buffalo Intestines, 100 % from Tainted Buffalo 10721; 5446 "Ynystere / Beech Forest / Tainted Buffalo", min 9) and quest 4207 "Clean Up the Stragglers" (8 x Bloodhand Assassin 8017 / Priest 8018 on the Waveroar Ruins coast; 5449 "Ynystere / Requiem Cape / Bloodhand stragglers", min 7; one 8017 and one 8018 on one point). The 1.2 client `npc_map/e_ynystere.dat` has exactly the same single points, so there is no placement source: the fill adds 6 cranes, 8 buffalo and 3 + 2 Bloodhands (each area reaches its `min_population`), sampled on rings 10-34 m around the original point (farthest-first, at least 8 m apart) where the 1.2 heightmap and navmesh agree within 1 m and stay within 2 m of the original Z, at the heightmap height; yaw faces away from the original point. No other NPC spawns within 45 m except one Ynystere Brown Bear (8039) by the cranes. Second batch (Silent Forest): daily quest 3909 "Slay the Sarracenia" (8 x Thrashing Sarracenia 8606, respawn 92 s) had one point at (23840.617, 12134.021, 304.05); its area spawner 11504 "Ancient Forest / Sarracenia" has min 6, so 5 points 10-34 m around it were added. The navmesh there sits ~5 m above the terrain everywhere (the original point included; no water, collision finds only the terrain), so these points use the live NPC spawn snap instead: `spawn_ground_z` lands within 0.5 m of the terrain height, which is within 2 m of the original Z. Every fill entry is checked against that snap by `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground`. |
 | Hunt quests across the world with one to three mobs where their area spawners call for more (tester reports, 2026-11-11) | `app/Data/Worlds/main_world/npc_spawns_quest_fill.json`; tests `npcs::spawn_tests::quest_fill_reported_areas_reach_the_area_spawner_minimum`, `quest_fill_npcs_reach_the_area_spawner_minimum`, `real_data_quest_fill_spawns_on_terrain`, `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground` | data | The 2026-11-11 kill-quest spawn audit (`D:/aaemu-audits/tester-reports-2026-11-11/kill_quest_spawn_audit.json`, 1,110 hunt acts) found 118 acts that require >=4 kills but whose best 250 m cluster of spawn points holds <=3, plus the open spawn-data items of the tester report (Schima Rogue 4210, Poacher 2514/9201, Mahadevi Seabug 2510 / Tropical Turtle 2509, Death Shroud 2906, Fire Elemental Explorer 2952, Earth Elemental Seeker 2914, Ghostly Soldier 9924, Armored Crayfish 2911, Saffron Thief 2942, Crazed Disciple 5090). For each area spawner (category 0) with one of those NPCs as a member, the fill takes the densest 250 m cluster of its member points and tops the area up to the spawner's `min_population` (capped by its `maxPopulation`), distributing the extra points over the member templates that already have points there: 8-34 m rings around those points, at least 8 m apart, Z from the live spawn snap (`spawn_ground_z`, iterated to its fixed point), only in open 1.2 zones. 43 areas, 303 points: 3867 (+4), 3868 (+13), 3933 (+1), 4081 (+5), 4083 (+7), 4086 (+10), 4092 (+1), 4109 (+7), 4114 (+2), 4116 (+5), 4125 (+8), 4128 (+13), 4130 (+8), 4131 (+16), 4138 (+11), 4173 (+8), 4182 (+7), 4183 (+17), 4185 (+10), 4238 (+1), 4454 (+17), 4511 (+17), 4512 (+4), 4784 (+3), 4785 (+13), 4789 (+5), 4793 (+6), 4795 (+5), 4956 (+1), 5255 (+8), 5341 (+7), 5448 (+1), 5585 (+1), 7933 (+3), 8778 (+9), 9704 (+9), 11439 (+5), 11868 (+9), 11869 (+6), 11896 (+8), 11898 (+5), 12323 (+4), 12328 (+3). Left alone: 29 areas already at `min_population` (the authored mix can be below the act count: the Pavitra's Fall site 12814 holds its 15 points of which 3 are Death Shrouds, so quest 943's 8 kills wait on the 75 s respawn; the Poacher 5588 camp has 4 >= min 4; the Wild Fangs Poacher 12808 camp's 5 points already exceed its max 3), NPCs with no area spawner (unique / named / event / scripted: Dahuta Priestess Efina 614, High Priests 11959-12010, Chief Kirukaru 1281, Guard Captain Hespheros 1581, Zurchira 1251, Grave Keeper Mistfiend 1587, ...), closed zones 154 (Airain Rock: 988, 2101, 2103, 2104, 1027), 275 (Sungold Fields: 6587, 6588, 6592, 6593), 301 (Diamond Shores: 6201) and zone 287 (Sunbite Wilds 1947) which is absent from compact, the inactive Nightmare spawners 14127/14128 (quests 5143/5144), and the 258 hunt acts with no spawn points at all (dungeon / instance / event content). The fill targets `min_population`, not the act count. Live on the lane stack (before -> after): Schima Rogue 2 -> 11, Saffron Thief 1 -> 12, Crazed Disciple 1 -> 9, Armored Crayfish 1 -> 14, Ghostly Soldier 1 -> 9, Fire Elemental Explorer 2 -> 5, Earth Elemental Seeker 8 -> 24, seabugs/turtles 6 -> 7; the Death Shroud count at the Pavitra's Fall site is unchanged (3 of its authored 15). **Inferred (no 1.2 server evidence):** the 303 positions: no 1.2 file holds the area geometry (the json and the client `npc_map` hold one point per area spawner), so the points are rings around the authored points; only the spawner counts (`min_population`, `maxPopulation`, member lists) are 1.2 data, member `weight`s are ignored (the extra points are split evenly over the member templates), and the audit file named above is a local artefact of the tester reports, not part of this repository. |
+| Reported Haranya hunt areas that still bottleneck with several players at the spawner minimum (owner follow-up, 2026-11-11: Mahadevi, Solis, Falcorth) | `app/Data/Worlds/main_world/npc_spawns_quest_fill.json` (+59 points); tests `npcs::spawn_tests::quest_fill_reported_hunts_hold_a_quests_kills`, `quest_fill_points_keep_eight_metres_from_each_other_and_the_authored_points` (46 areas), `quest_fill_reported_areas_reach_the_area_spawner_minimum` (7933 / 5585 caps), `real_data_quest_fill_spawns_on_terrain`, `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground` | data (owner-requested deviation) | The owner asked for more mobs than the authored spawner counts ("it might be the classic experience but anyway these mobs seem likely to cause bottlenecks"). Each reported hunt area now holds `clamp(kills, 8, 15)` of its NPC, the kills being the largest count of that NPC's hunt acts (15 for NPCs that only count toward a 26-30 kill group hunt): Poacher 2514 4 -> 15 (quests 861 / 2703 need 8 / 15), Wild Fangs Poacher 9201 5 -> 15 (3307: 20), Mahadevi Seabug 2510 3 -> 8 (2711 / 2902: 5), Tropical Turtle 2509 4 -> 8 (2901: 8 horns), Death Shroud 2906 3 -> 8 and Headless Knight 2907 4 -> 8 (943: 8 each), Fire Elemental Explorer 2952 5 -> 15 (3862: 15), Ghostly Soldier 9924 9 -> 15 (group 3866: 30), Armored Crayfish 2911 14 -> 15 (group 3861: 30), Saffron Thief 2942 12 -> 15 (947 / 2776: 12 / 24); Schima Rogue 4210 (11 distinct for 5) and Earth Elemental Seeker 2914 (24 for group 2774) already held enough. The client `npc_map` holds exactly the authored points (one per spawner), so there is no further 1.2 placement data: the new points are 9-34 m rings around the NPC's own points, at least 8.5 m from every NPC point, in the anchor's zone, within 6 m of its height, above the sea (Z >= 100.5) and on the live spawn snap (`spawn_ground_z`, iterated to its fixed point). Two filled areas now exceed their `maxPopulation` on purpose (7933: 15 > 9, 5585: 16 > 12). Respawn times are unchanged. The "Earth Elemental Seeker quest marker off by a few 100 m" item is the client's own marker: the server's Seekers stand on the client's 8 `npc_map` points and the rings around them. |
 | Ynystere NPCs standing on structures with a terrain spawn Z (2026-11-10) | `app/Data/Worlds/main_world/npc_spawns.json` (28 Z values); tests `ai::collision::real_data_tests::structure_npcs_keep_the_client_floor_height`, `real_client_floor_fixes_stand_on_a_collision_floor` | data | Tester report: Rose Estate Rafflesias (8043) clip inside the manor floor. Their X / Y match the 1.2 client `npc_map/e_ynystere.dat` records (16-byte records: u32 template id, f32 world X / Y / Z) exactly, but the spawn Z was the terrain under the manor (268.7-269.4) while the records put four on the ground floor (271.5-272.7) and two on the upper floor (281.4-281.5), where the 1.2 collision has floors. 104 of the 987 matched Ynystere spawns differ from their record by more than 2 m; 28 were corrected to the record's Z, each above the terrain and within 1 m of a collision floor (`spawn_ground_z` lands on it): Rose Estate Manor (6 x 8043, Kirk 1441, Elizabeth 1458), Brimblaze Tower on Marooned Isle (Kimrei 1467 on the top at 175.925, was 113.0 at the tower base; 5 x Bloodhand Watcher 8015 on the rampart at 126.3-128.9), the Finnea Harbor docks (5 x Stitched Boatman's Corpse 8779, quest kills, were under the sea surface), Mansion Watchman 13070 x 3, Sentry 8243, Yorun 10758, Silleno 1474, Ruby Miner 1419, Caernord Citizen 1423, Brave Ynystere Soldier 1415. Left alone: flying / swimming NPCs without a floor at the record height (Pale Razorbeak 8019, White Shark 8022), records under the terrain (two 8015, 13062, 8033), and the marker stack at (20272, 12268) whose record heights step by 2 m (8051-8055, 12723, 12991-12994). Silent Forest is the next row; the other zones' `npc_map` files were not audited. |
 | Silent Forest NPCs standing on structures with a terrain spawn Z (2026-11-10) | `app/Data/Worlds/main_world/npc_spawns.json` (11 Z values); `SILENT_FOREST_FLOOR_FIXES` in `ai::collision::real_data_tests`, same tests | data | Same rule with `npc_map/e_ancient_forest.dat` (764 records, 809 matched spawns, 107 more than 2 m off, 11 kept). Tester report: in the westmost tomb of the Ancient Necropolis the quest giver Ancient Ghost (3266) stood 10 m under the tomb floor (340.255 -> 350.366, the floor is inside a building brush) and four Cursed Swordsmen (7496) 2.7 m under it (-> 342.75 / 342.775). Also corrected: Warlock Erik 3123 (352.36 -> 373.848) and Avidin 8604 (320.50 -> 342.266) of the Cloaked Forest flesh-golem camp, Cursed Warlock 7498, Sylvia 3141, Yuria 3311, Carmelia's Soul 3335. |
+| Bloodhand Base Cannons missing from the Marooned Isle rampart ("Rout the Bloodhands" 2325, tester report, 2026-11-11) | `app/Data/Worlds/main_world/slave_spawns.json` (2 x slave 57); `skills/relation.rs` (`world_slave_driver`, `acting_faction`, `owner_character`), `skills/combat.rs` (`add_tagger`); tests `skills::relation::tests::a_manned_world_cannon_fights_for_its_gunner`, gated `ai::collision::real_data_tests::real_bloodhand_cannons_stand_on_the_rampart_in_range_of_the_docks` | data + deviation | **Inferred positions:** no 1.2 or 10.x data places slave 57 (every public AAEmu tree, its forks and the 10.x repo ship the same five `slave_spawns.json` rows; the client has no slave map). The quest text puts the cannons "up top of these old rampart walls" above the Bloodhand Pillagers (8014) on the docks: the two cannons stand on the wall walk (collision floor 126.076, terrain 115.6 below) between the Bloodhand Watchers (8015), at (19759, 11755) and (19784, 11742), facing the Pillagers' centre (19810, 11789) (yaw -0.994 / -0.511 rad); every Pillager is 36-77 m away, inside skill 15134's 10-130 m. **Deviation (C# gap):** a slave nobody owns (no summoner, no owner) acts for the character in its driver / gunner seat: `owner_character` returns that character, `can_attack` uses its faction (slave 57 is faction 2 "Neutral", so a manned cannon could damage nothing), and a slave's damage tags its gunner, else its owner (`add_tagger`; the C# tagged only a mate's owner, so no cannon kill credited a quest). NPCs still see the cannon as Neutral, so they do not attack it. Kills of 8014 by other means still count (the objective is a plain `QuestActObjMonsterHunt`). |
 
 
 ### Area sphere geometry import (November 5, 2026)
@@ -8178,8 +8184,118 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   exchange (0 rows) and buy-fish model rows (prefab strings), `gem_visual_effect_id` (the
   client loads the effect), mate `SpawnEffect` rows (the 4 unreachable rows above), slave
   customizing styles (`slave_customizings` is client-loaded; one customizable slave), radar
-  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`,
-  gimmick collision: capture-pending / design-blocked).
+  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`).
+* **Gimmick collision skills are server-detected contact hits (2026-11-10).** The owner
+  decision of 2026-11-06 (leave them) is reversed: stated by the PR author; not verifiable from
+  the repo. In the 50 ms gimmick tick a gimmick whose template has `collision_skill_id` and
+  whose own speed reaches `collision_min_speed` fires that skill
+  (`systems/npcs/gimmick/manager.rs::collision_tick`). The 1.2 client has no gimmick packet
+  (only SC 0x13c-0x141), so the server detects the touch. Retail's zone process has a
+  `ZWGimmickCollided` packet (op 42): the evidence is its RTTI name in the 10.x dev DLL plus
+  `rust/docs/physics/ZONE-PHYSICS-USAGE.md:264-266` ("relVel >= per-gimmick minimum, 3000 ms
+  immunity"), not a decompile.
+  **Inferred (no 1.2 server evidence):** that retail cast the collision skill from the gimmick;
+  the contact radius, the 1.5 m constant plus the touched unit's actor radius (the `gimmicks`
+  table has no size / radius column and a gimmick has no actor `model_id`), which also ignores
+  the authored `scale` (0.3-20: gimmick 5 spawns at scale 15, gimmicks 6 and 7 at 20); the gate
+  on the gimmick's *own* speed (retail's rule is on a relative velocity, so the static mines 7,
+  36 and 77, `collision_min_speed` 1 / 5 / 5, never fire on touch); and the permanent per-unit
+  latch below (retail: a 3000 ms immunity).
+  One touch fires one skill, not one per touched unit: the collision skills are area skills
+  (18717 r20, 14649 r30, ...), so a tick casts once (from the first newly touched unit;
+  position-targeted skills center on the gimmick) and latches the units the firing reached: the
+  touched units and the units inside the skill's area around the cast's real centre (the unit
+  that fired it for a unit-targeted skill such as AnyUnit, the gimmick for a position or self
+  skill; the same radius rule as the cast: area plus the centre's model size, the target's model
+  size, the vertical limit), so a unit already hit by a firing never triggers another, while a
+  unit the cast did not reach keeps its first hit. The latch is the gimmick's collision immunity
+  (who may fire it), not a damage immunity: the area of a later firing, started by a unit
+  outside the earlier one, hits every unit inside it, a latched one included, so a rolling
+  gimmick (the 8 templates that do not despawn on contact) can hit a unit that stays in reach
+  more than once.
+  **Inferred (no 1.2 server evidence):** retail's 3000 ms immunity is a rule of the collision;
+  whether the area effects of another touch skipped a unit in immunity is unknown (test
+  `a_latched_unit_inside_a_later_firings_area_is_hit_by_it_again`).
+  A gimmick whose velocity changes (a stop at a travel cap, an elevator at the end of its run)
+  broadcasts that change even though its position no longer moves. A
+  `disappear_by_collision` gimmick fires once in total and
+  despawns (22 of the 30 contact templates; the other 8 keep rolling). Only an accepted cast
+  latches and despawns: a refused cast (no resources, a target rule) latches nothing and removes
+  nothing, and the next unlatched contact or tick tries again. A gimmick whose collision skill
+  row does not exist is skipped (r208022 has no skill 14768, 18424, 23476 or 24080, which
+  gimmicks 36 and 77, 51, 75 and 78 name), and a gimmick with no player in its neighbourhood is
+  not scanned. The latch holds at most 256 units and a touch beyond it is ignored.
+  **Inferred (no 1.2 server evidence):** the 256 cap is a Rust-only bound.
+  `disappear_by_collision` and `collision_unit_only` are read from their shipped `'t'`/`'f'`
+  text form (`GetBoolean(fromString: true)`); the C# `GetBoolean` read both as false and never
+  used them. Terrain contact is not simulated (the motion has no gravity / ground), so only
+  unit touches trigger the skill or despawn and `collision_unit_only` changes nothing.
+  **Owner.** A gimmick-cast hit counts as the character that spawned the gimmick:
+  `skills::relation::owner_character` resolves a gimmick through `spawner_unit_id` like a mate or
+  slave (a doodad, NPC or missing spawner has no owner; the chain is bounded to four links
+  because object ids are reused), so the Peace lockdown, the no-PvP instance rule, the siege
+  hostility rule and crime evidence apply to a thrown bomb, and `credited_player` gives the
+  thrower the tagging, kill experience, loot, quest events and PvP kill credit of a hit or kill
+  by the gimmick (a mate / slave keeps its own credit rules). As for a mate or slave, a gimmick
+  never damages the character it acts for (the own-unit rule of `can_attack`). The gimmick stays
+  the cast source (skill 13210 needs a dead source) and the origin of every packet, and a
+  gimmick caster has no skill cooldown or global cooldown (a rolling gimmick hits every unit it
+  touches).
+  A gimmick goes with its thrower: `owner_character` finds the owner through the live spawner
+  unit, so a gimmick that outlived its thrower would be ownerless and skip Peace, no-PvP and the
+  siege rule, and a disconnect would lift the protection of the player a bomb is about to reach.
+  The gimmick therefore records the character it acts for when it spawns
+  (`GimmickState.owner_character_id`, 0 for a spawner, doodad or NPC gimmick) and the tick
+  removes it as soon as that character has left the world (`character_by_id`). Residual: a
+  contact that fires in the tick a character leaves, between the check and the cast, still runs
+  ownerless; and a gimmick whose parent gimmick is gone (the link `owner_character` follows) is
+  ownerless although its thrower is online. No r208022 gimmick skill spawns a gimmick (checked:
+  none of the 30 collision and 40 delayed skills has a `SpawnGimmickEffect`), so the second
+  case has no shipped trigger.
+  **Inferred (no 1.2 server evidence):** this attribution (the 1.2 C# cast the delayed skill
+  from the spawner unit) and the removal with the thrower (a gone spawner could not cast it).
+  Not covered: the home-zone protection reads the casting *player*
+  itself, so it still skips a gimmick hit; the PvP assist history, weapon durability and the NPC
+  AI's reaction to a gimmick hit still name the gimmick.
+  **Level and damage.** A gimmick has no level in the data and is created at level 1 (the effect
+  rows start at level 1, so a level-0 gimmick skipped every effect).
+  **Inferred (no 1.2 server evidence):** level 1. A gimmick has no stats either (`stats()`
+  evaluates it through `base_unit_stat`, which returns 0 for `LevelDps`), so the six
+  level-scaled damage rows of the collision skills (`use_level_damage`, not `use_fixed_damage`:
+  518, 542, 743, 858, 1334, 1686 of skills 11931, 12006, 12518, 12944, 14102, 14873) and the
+  timer row 756 (skill 12572) evaluate to 0 and land the 1 HP minimum; only fixed-damage rows
+  deal their authored value.
+  **Inferred (no 1.2 server evidence):** retail's value for those rows is unknown. The test
+  `a_level_scaled_damage_row_lands_the_one_hp_minimum_from_a_gimmick` pins today's behaviour.
+  **Motion.** The C# `GimmickSpawner` constructor stored `Velocity*` / `AngVel*` of a
+  `SpawnGimmickEffect` but never applied them, so effect-spawned gimmicks never moved. They are
+  applied now at spawn, only for coordinate type 2: all 65 nonzero linear-velocity rows use it,
+  but 8 of the 32 nonzero angular-velocity rows (ids 105, 140, 141, 142, 159, 181, 182, 183:
+  gimmicks 39, 50, 57, 76) use coordinate 0 or 1 and are ignored.
+  **Inferred (no 1.2 server evidence):** the frame. The rows look authored in the caster's local
+  frame (forward +Y, up +Z) and are rotated by the caster's yaw, while the offset of the same
+  coordinate type 2 is the C# `AddDistance` translation on the world axes (not rotated), so a
+  caster that does not face +Y sees the gimmick appear on the world axes and travel along its
+  facing. The linear velocity is applied only to a kinematic gimmick (`mass <= 0`): 19 of the 30
+  contact gimmicks are dynamic (`mass > 0`, gravity 9.8: 6, 8, 11, 15, 20, 21, 30, 31, 38, 40,
+  42, 45, 46, 50, 52, 55, 64, 66, 76, among them the siege and event shells 40, 45, 46, 64, 66)
+  and would fly a straight line until the 200 m cap and explode in mid air, because there is no
+  gravity or ground model. They stay where they spawn (their angular velocity still applies), so
+  all 19, which have a `collision_min_speed` above 0, never fire on touch until such a model
+  exists. Authored motion stops after 30 s or 200 m and an effect / doodad gimmick that leaves
+  the world grid despawns; a stationary gimmick sends no movement packets and a spin-only one is
+  limited to 5 Hz.
+  **Inferred (no 1.2 server evidence):** the 30 s / 200 m bounds are Rust-only, and so is the
+  5 Hz rate with the assumption that the client queues and interpolates `SCGimmickMovement`
+  (nothing of the client was checked; the repo's physics doc says retail synced gimmick state
+  every `sg_sync_period` 100 ms, `ZONE-PHYSICS-USAGE.md:264`).
+  **Faction.** The gimmick's faction is copied from the casting unit at spawn (the doodad spawn
+  path keeps its authored `faction_id`), so friendly / hostile collision effects land on the
+  right side.
+  **Inferred (no 1.2 server evidence):** the faction copy.
+  Delayed skills (`skill_id` / `skill_delay`) and `Gimmick.StopMovement` cast from the gimmick
+  at its current position with the gimmick as source; the C# used the spawner unit, which
+  refused moved gimmicks by the range check and never fired for doodad-spawned ones.
 * **`conflict_zones.peace_protected_faction_id` / `peace_tower_def_id` are placeholders.**
   All 16 rows carry faction id 5 and a NULL `peace_tower_def_id`; faction 5 does not exist in
   `system_factions` (ids 1, 2, 3 and 101-179) and neither column is ever read
@@ -8441,6 +8557,19 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
     `!keep_mana_regen`; the plot `ManaCost` effect no longer starts it; `StopManaRegen` (type
     52) still does, and `skill::end_channeling` refreshes `LastCast` because the client starts a
     channel's window when the channel ends.
+- **Open point (byte reading of the r208022 dump, not decoded end to end).** `FUN_390b63f0`
+  gates the normal-rate segment on two fields (`[esi+0x3ACC]`, `[esi+0x3AD4]`) that
+  `OnSkillFired` writes only for a skill with `channeling_time > 0` (the second one is that
+  skill's `keep_mana_regen`). Read that way, the client suppresses the normal rate for the whole
+  duration of a channeling skill without `keep_mana_regen`, not only for the 5 s after
+  `LastCast`. The server window is `LastCast + 5 s`, refreshed at the start and at the end of the
+  channel, so on a channel longer than 5 s (r208022: 6 class skills, e.g. Twilight 10721 at
+  60 s, Protective Wings 10714 at 18 s, plus 82 ability-0 skills) it regenerates at the normal
+  rate mid-channel while the client predicts the persistent rate only. This is not a
+  regression (the C# window also ended 5 s after the start) and what clears `+0x3ACC` was not
+  traced, so it is recorded rather than changed. Fix if it is confirmed: `combat_tick` keeps
+  `is_in_post_cast` while the player's active skill task is the channel of a skill without
+  `keep_mana_regen`.
 - **Deviation from the C#.** `Unit.ReduceCurrentMp` broadcast `SCUnitPointsPacket` even when
   `Mp` did not change. The 1.2 client predicts its own regen between packets
   (`FUN_390b63f0`), so the zero-change packet of every 0-mana item use (and of a mana burn or

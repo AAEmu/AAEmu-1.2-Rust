@@ -1350,7 +1350,10 @@ fn check_pipe_name(c: &mut AiCtx<'_>, k: BehaviorKind) {
         (s.pipe_name.clone(), s.phase_type)
     };
     if pipe == "phase_dragon_ground" || phase == 1 {
-        // try to find Z first in GeoData, and then in HeightMaps, if not found, leave Z as it is
+        // Ground walkers take the floor their movement steps use (collision floor, then the
+        // bounded navmesh / heightmap fallback, else their current Z). Flyers and swimmers keep
+        // the C# navigation height: `geo_data_height` (navmesh, else heightmap), which answers
+        // 0.0 when there is no geodata at all.
         let pos = owner_pos(c);
         let z = if moves_freely(c) {
             super::geodata::geo_data_height(c.server, &c.obj, pos)

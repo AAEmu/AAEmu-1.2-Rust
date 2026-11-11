@@ -412,10 +412,18 @@ impl AreaTrigger {
     /// the reused object id is compared by identity; units that cannot leave without player
     /// activity (NPCs) keep the C# fast path.
     pub fn tracks_player_in_world(&self, server: &GameServer) -> bool {
-        self.state()
+        // The world lookup runs after the trigger state guard is released (no call into the
+        // world under a lock).
+        let tracked: Vec<u32> = self
+            .state()
             .units
             .iter()
-            .any(|u| u.as_player().is_some() && server.world.object(u.obj_id()).is_some())
+            .filter(|u| u.as_player().is_some())
+            .map(|u| u.obj_id())
+            .collect();
+        tracked
+            .into_iter()
+            .any(|obj_id| server.world.object(obj_id).is_some())
     }
 
     /// `UpdateUnits()`.
