@@ -4706,9 +4706,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   keep the respawn rules of their un-authored rows. A frozen placement schedules no respawn
   (`do_despawn`, `despawn_with_respawn`), is not refilled (`do_spawn` / the activation tick, the
   `enable_respawn` group partial timer) and is never distance-reclaimed (`reclaim_cold_npcs`:
-  nothing would refill its surviving members, the room would stay empty for the run). A fresh
-  dungeon creates new spawners, so the next run is repopulated; scripted `do_event_spawn` still
-  works. Owner evidence (cloud server): the killed Sharpwind slimes kept respawning.
+  nothing would refill its surviving members, the room would stay empty for the run). Known
+  limit: the freeze is per placement, not per slot, so a placement whose initial fill is still
+  partial (the activation pass creates at most its per-pass budget of NPCs, `do_spawn_bounded`)
+  and loses a member first stays at that population for the run; the members not yet created
+  never come. A fresh dungeon creates new spawners, so the next run is repopulated; scripted
+  `do_event_spawn` still works. Owner evidence (cloud server): the killed Sharpwind slimes kept
+  respawning.
   Deviation from the C# (which respawned them). Tests:
   `npcs::spawn_tests::{save_indun_spawner_does_not_respawn_a_dead_member,
   save_indun_spawner_still_respawns_outside_a_dungeon,
