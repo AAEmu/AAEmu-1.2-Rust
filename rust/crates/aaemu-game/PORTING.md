@@ -6813,7 +6813,11 @@ is the closest text.
   the leave runs after the join). **Residual:** the `SCJoinedTeam` of a deferred join is a
   snapshot, so the broadcast of a concurrent member change can reach the new member before it (a
   ghost / missing member until relog), and the dungeon `OnTeamJoin` event is not taken back.
-  `CSMoveTeamMember` broadcasts `SCTeamMemberMoved` before the two members leave their old and
+  `ChatManager::clean_up_channels` (run after a disband) can also remove a still-empty party /
+  raid channel between a joiner's channel lookup and its `join`, two calls the team mutex used
+  to serialise: the joiner then sits in an orphan channel until its next login (a tiny window;
+  a `strong_count` check in the clean-up would close it, left alone because the chat manager is
+  shared). `CSMoveTeamMember` broadcasts `SCTeamMemberMoved` before the two members leave their old and
   join their new party chat (the C# left, moved, broadcast, then joined), and only members are
   joined (a client-named non-member used to be joined to the chat of party 1). `family.rs` has
   the opposite shape (its mutex is held while it writes member characters); the review of PR #104
