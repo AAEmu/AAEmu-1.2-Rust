@@ -867,3 +867,119 @@ async fn area_skill_ignores_targets_far_above_the_centre() {
         "a slope within the radius still hits"
     );
 }
+
+/// A running auto attack stops dealing damage when the target's zone enters Peace, and keeps
+/// its tick chain (no panic, no damage).
+#[tokio::test]
+async fn auto_attack_stops_dealing_damage_when_the_zone_enters_peace() {
+    use crate::data::world_data::{
+        conflict_type, FactionRelation, SystemFaction, Zone, ZoneConflict,
+    };
+    use skills::data::effects::EffectTemplate;
+
+    const ZONE: u32 = 300;
+    const GROUP: u32 = 14;
+
+    let mut data = data();
+    for (id, mother) in [(101, 148), (109, 149), (148, 0), (149, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    data.factions.relations.push(FactionRelation {
+        id: 148,
+        id2: 149,
+        state: 1, // RelationState::Hostile
+        exp_time: 0,
+    });
+    data.zones.zones.insert(
+        ZONE,
+        Zone {
+            id: ZONE,
+            name: "peace".into(),
+            zone_key: ZONE,
+            group_id: GROUP,
+            ..Default::default()
+        },
+    );
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(skills::tests::damage_effect(1, 600))),
+        900_001,
+    );
+    let mut template = skills::tests::skill_template(10_003);
+    template.effects.push(skills::tests::skill_effect(
+        900_001,
+        EffectKind::DamageEffect,
+        1,
+    ));
+    let template = Arc::new(template);
+    skills.add_skill((*template).clone());
+    crate::test_support::open_client_skills(&mut data);
+    let server = Arc::new(crate::test_support::test_server_with(data));
+    skills::bind(&server);
+    server.systems.social.conflicts.init(
+        &[ZoneConflict {
+            zone_group_id: GROUP as u16,
+            current_state: conflict_type::CONFLICT,
+            ..Default::default()
+        }],
+        crate::world::now_ms(),
+    );
+    let ca = TestClient::new(&server, 1, 1);
+    let cb = TestClient::new(&server, 2, 2);
+    let a = crate::test_support::spawn_player(
+        &server,
+        &ca,
+        crate::test_support::test_character(1, "A", 100.0, 100.0),
+        0x101,
+    );
+    let b = crate::test_support::spawn_player(
+        &server,
+        &cb,
+        crate::test_support::test_character(2, "B", 100.0, 100.0),
+        0x109,
+    );
+    {
+        let mut d = a.data();
+        d.unit.faction_id = 101;
+        d.unit.hp = 5_000;
+        d.unit.max_hp = 5_000;
+        d.unit.transform.zone_id = ZONE;
+        d.unit.transform.instance_id = 0;
+    }
+    {
+        let mut d = b.data();
+        d.unit.faction_id = 109;
+        d.unit.hp = 5_000;
+        d.unit.max_hp = 5_000;
+        d.unit.transform.zone_id = ZONE;
+        d.unit.transform.instance_id = 0;
+    }
+    let skill = SkillRun::new(template, 1);
+    let cancel = CancelToken::new();
+    {
+        let mut c = a.data();
+        c.unit.current_target = b.obj_id;
+        c.unit.skill_state.auto_attack = Some(AutoAttackSlot {
+            skill: skill.clone(),
+            cancel: cancel.clone(),
+        });
+    }
+    let before = b.data().unit.hp;
+    assert!(super::auto_attack_tick(&server, &a, &skill, &cancel).is_some());
+    assert!(b.data().unit.hp < before, "the Conflict tick lands");
+
+    server.systems.social.conflicts.set_state_at(
+        GROUP as u16,
+        conflict_type::PEACE,
+        crate::world::now_ms(),
+    );
+    a.data().unit.global_cooldown_ms = 0;
+    let hp = b.data().unit.hp;
+    assert!(super::auto_attack_tick(&server, &a, &skill, &cancel).is_some());
+    assert_eq!(b.data().unit.hp, hp, "the tick must not damage in Peace");
+}

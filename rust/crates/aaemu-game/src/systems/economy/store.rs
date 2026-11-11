@@ -450,7 +450,7 @@ impl CSBuyItemsPacket {
         let mut vocation_badges = 0i32;
         let mut items_buy = Vec::new();
         let mut purchase_used = false;
-        // The per-character purchase allowance is per item template: lines of the same item
+        // The per-account purchase allowance is per item template: lines of the same item
         // (whatever grade or currency) add up to one claim.
         let mut claims: HashMap<u32, ShopClaim> = HashMap::new();
         for e in &self.buy {
@@ -639,7 +639,7 @@ impl CSBuyItemsPacket {
             }
             return;
         }
-        // Everything is staged; only now take the per-character purchase allowance, so a
+        // Everything is staged; only now take the per-account purchase allowance, so a
         // refused or failed checkout never has to give a claim back. The economy operation
         // lock held by the transaction keeps the check and the commit one operation.
         let mut claims: Vec<ShopClaim> = claims.into_values().collect();
@@ -648,7 +648,7 @@ impl CSBuyItemsPacket {
             .systems
             .economy
             .shop_limits
-            .try_claim(p.character_id, &claims)
+            .try_claim(character.account_id, &claims)
         {
             discard_shop_stage(&mut txn, &staged_bag, &bag, &buyback);
             inventory::send_error_message_to(

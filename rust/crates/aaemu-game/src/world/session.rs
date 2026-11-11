@@ -1575,6 +1575,8 @@ pub async fn leave_world_task(
             c.set_disabled_set_position(true);
         }
         set_online(server, p, false);
+        // A leaving unit no longer holds a `once_one_*` doodad (cast or seat).
+        crate::systems::npcs::doodad::occupancy::release_all_of(server, p.obj_id);
         p.data().leave_time = Utc::now().timestamp();
         crate::systems::quests::on_leave_world(server, p.character_id);
         // Despawn and unmount everybody from owned Mates / Slaves
@@ -1741,6 +1743,8 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
         return;
     };
     zone_access::cancel(&p);
+    // A disconnected unit no longer holds a `once_one_*` doodad (cast or seat).
+    crate::systems::npcs::doodad::occupancy::release_all_of(server, p.obj_id);
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
     crate::systems::housing::dominion::participants::clear_player(server, &p);
     // WP-B: the premium grade buffs are session state, not saved buffs.
@@ -1813,6 +1817,7 @@ pub fn force_release_connection(server: &GameServer, connection_id: u32) {
             continue;
         }
         zone_access::cancel(&p);
+        crate::systems::npcs::doodad::occupancy::release_all_of(server, p.obj_id);
         // Drop the server-wide entry first: if the grid removal below panics on a poisoned
         // instance lock, the character must still not be lookable up by id / obj id.
         server.world.try_remove_character(p.obj_id);

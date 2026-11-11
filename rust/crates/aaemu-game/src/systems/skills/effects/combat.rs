@@ -2,6 +2,9 @@
 //! `ManaBurnEffect`, `AggroEffect`, `FlyingStateChangeEffect`, `SkillControllerTemplate.Apply`
 //! and `CombatBuffs.TriggerCombatBuffs`.
 
+use std::collections::HashMap;
+
+use crate::data::formulas::FormulaKind;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
 use crate::world::{now_ms, WorldObject};
@@ -13,6 +16,7 @@ use super::super::data::effects::{
     RestoreManaEffect,
 };
 use super::super::data::{EffectKind, EffectTemplate, SkillControllerTemplate};
+use super::super::geometry;
 use super::super::geometry::Target;
 use super::super::packets::{
     CompressedGamePackets, SCAiAggroPacket, SCUnitDamagedPacket, SCUnitHealedPacket,
@@ -25,7 +29,7 @@ use super::super::types::{
     HealType, KillReason, RelationState, SkillCaster, SkillHitType,
 };
 use super::super::{broadcast, send_to_players};
-use super::{chance_succeeds, rand_float, rand_int, EffectArgs};
+use super::{chance_succeeds, rand_float, rand_int, EffectArgs, EffectSource};
 
 /// An effect nobody handles yet.
 pub fn unrouted_effect(
@@ -106,6 +110,130 @@ fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f3
         lvl_md - level_modifier * lvl_md + 0.5,
         (level_modifier + 1.0) * lvl_md + 0.5,
     )
+}
+
+/// `NpcKindType.SiegeWeapon` (9): battlefield turrets / cannons and their practice copies.
+/// The 22 compact templates (kind 9) sit at levels 20-50; they are destructible structures, not
+/// PvE mobs, so a high-level player must not get the PvE level bonus on them.
+const SIEGE_WEAPON_NPC_KIND: u8 = 9;
+
+/// Compact `system_factions` 170 "허수아비" (scarecrow): the training dummies and their test
+/// variants (8 templates at levels 1-50). Practice targets are structures too.
+const TRAINING_DUMMY_FACTION: u32 = 170;
+
+/// `formulas` row 20 `damage_bonus_multiplier_by_level`:
+/// `if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.04)`.
+///
+/// The variables name the player character (`pc_level`) and the NPC target (`npc_level`), so the
+/// bonus applies only to a player character hitting an NPC; mates / slaves / summons and NPCs
+/// attacking players keep x1. Row 21 (`damage_penalty_multiplier_by_level`) is the constant 1,
+/// so damage is never lowered. The rate comes from the data row; a missing or broken row keeps
+/// the hit unchanged (evaluate returns 0 on errors). Research: `research-data-rules.md` §1.
+fn level_damage_multiplier(server: &GameServer, caster: &WorldObject, trg: &WorldObject) -> f32 {
+    if caster.as_player().is_none() {
+        return 1.0;
+    }
+    let Some(npc) = trg.as_npc() else {
+        return 1.0;
+    };
+    let (npc_level, npc_faction, template_id) = {
+        let n = npc.data();
+        (n.unit.level, n.unit.faction_id, n.unit.template_id)
+    };
+    if npc_faction == TRAINING_DUMMY_FACTION {
+        return 1.0;
+    }
+    if server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(template_id)
+        .is_some_and(|t| t.npc_kind_id == SIEGE_WEAPON_NPC_KIND)
+    {
+        return 1.0;
+    }
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageBonusMultiplierByLevel)
+    else {
+        return 1.0;
+    };
+    let Some(pc_level) = caster.with_unit(|u| u.unit().level) else {
+        return 1.0;
+    };
+    let params: HashMap<&str, f64> = [
+        ("pc_level", f64::from(pc_level)),
+        ("npc_level", f64::from(npc_level)),
+    ]
+    .into_iter()
+    .collect();
+    (formula.evaluate(&params) as f32).max(1.0)
+}
+
+/// `formulas` row 12 `damage_multiplier_by_range`: `if_negative(range - 8, 0.8, 1)`.
+///
+/// Only the archery skills whose 1.2 tooltip names the penalty are scaled
+/// (`Data::range_penalty_skills`, built from the skill descriptions at load; the 1.2
+/// `damage_effects` table has no flag that scopes the row). A direct hit evaluates the row at
+/// the hit's distance; a buff tick uses the value its buff captured when it was applied
+/// (`EffectSource::range_multiplier`) because the tooltip describes the shot, not the tick.
+/// A missing or broken row leaves the hit unchanged (a failed evaluation returns 0).
+fn range_damage_multiplier(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    source: &EffectSource,
+) -> f32 {
+    if let Some(stored) = source.range_multiplier {
+        return stored;
+    }
+    let Some(skill_id) = source.skill().map(|s| s.template.id) else {
+        return 1.0;
+    };
+    range_multiplier_for_skill(server, caster, trg, skill_id)
+}
+
+/// The row-12 factor of `skill_id` at the caster-target distance. Also used when a buff is
+/// applied, to store the factor its damage ticks will use.
+pub(crate) fn range_multiplier_for_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    trg: &WorldObject,
+    skill_id: u32,
+) -> f32 {
+    if !server
+        .game_data
+        .systems
+        .skills
+        .range_penalty_skills
+        .contains(&skill_id)
+    {
+        return 1.0;
+    }
+    let Some(formula) = server
+        .game_data
+        .formulas
+        .get_formula_by_kind(FormulaKind::DamageMultiplierByRange)
+    else {
+        return 1.0;
+    };
+    // The same measure the server's skill-range check uses (`validation.rs`): 3D, edge to edge,
+    // with both actors' model radii subtracted.
+    let distance = geometry::distance_to(
+        server,
+        &Target::Obj(caster.clone()),
+        &Target::Obj(trg.clone()),
+        true,
+    );
+    let params: HashMap<&str, f64> = [("range", f64::from(distance))].into_iter().collect();
+    let multiplier = formula.evaluate(&params) as f32;
+    if multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    }
 }
 
 /// Damage reflection of a landed hit (`buffs.reflection_*`).
@@ -531,6 +659,16 @@ pub(super) fn damage_with_aoe(
     let battle_resist = ts[1] as i32;
     if caster.as_player().is_some() && trg.as_player().is_some() {
         final_damage *= 1.0 - battle_resist as f32 / (8000.0 + battle_resist as f32);
+    }
+    // Player -> NPC level bonus (formulas row 20) and the archery close-range penalty
+    // (formulas row 12), next to the other flat damage multipliers.
+    // Authored fixed values and percent-of-HP rows keep their exact value; the bonuses scale
+    // only the weapon / level damage base. A non-fixed DoT row gets them like a direct hit;
+    // heals use `heal()` and never reach this function (compact `damage_effects` has no `Heal`
+    // type, so no damage-type guard is needed).
+    if !e.use_fixed_damage && !e.use_percent_damage {
+        final_damage *= level_damage_multiplier(server, &caster, &trg);
+        final_damage *= range_damage_multiplier(server, &caster, &trg, &args.source);
     }
     let flex_bonus = (flexibility / 100) as f32;
     match hit_type {
@@ -1026,6 +1164,12 @@ pub fn buff_effect(server: &GameServer, e: &BuffEffect, args: &EffectArgs<'_>) {
         now_ms(),
     );
     b.ab_level = ab_level;
+    // A DoT belongs to the shot that applied it: capture the close-range factor now, so its
+    // ticks do not depend on where the target stands when they land.
+    if let (Some(caster), Some(skill)) = (args.caster.as_ref(), args.source.skill()) {
+        b.range_damage_multiplier =
+            range_multiplier_for_skill(server, caster, &target, skill.template.id);
+    }
     buffs::add_buff(server, &target, b, 0, 0);
     let relation = args.caster.as_ref().map_or(RelationState::Neutral, |c| {
         relation_to(server, &Target::Obj(c.clone()), &args.target)
@@ -1057,11 +1201,15 @@ pub fn dispel(server: &GameServer, e: &DispelEffect, args: &EffectArgs<'_>) {
         );
         return;
     };
+    let relation = relation_to(server, &caster, &args.target);
     let attackable = can_attack(server, &caster, &args.target);
     if e.dispel_count > 0 && attackable {
         buffs::remove_buffs_by_kind(server, &target, 1, e.dispel_count, e.buff_tag_id);
     }
-    if e.cure_count > 0 && !can_attack(server, &caster, &args.target) {
+    // A cure is a friendly action. A hostile dispel on a target that merely fails the attack
+    // gate (Peace, no-PvP instance, zone protection) must do nothing: without the relation
+    // check the `cure_count` branch removed the protected player's bad buffs for the attacker.
+    if e.cure_count > 0 && !attackable && relation != RelationState::Hostile {
         buffs::remove_buffs_by_kind(server, &target, 2, e.cure_count, e.buff_tag_id);
     }
 }

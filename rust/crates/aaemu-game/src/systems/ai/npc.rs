@@ -507,6 +507,8 @@ pub fn move_towards(
         .is_some_and(|m| m.underwater_creature);
     let target_dist = calculate_distance(pos, other, can_fly || underwater);
     if target_dist <= range_tolerance {
+        // Arrived: an NPC group follower reads this as "the leader stopped".
+        npc.data().last_move_ms = 0;
         return true;
     }
     let travel_dist = target_dist.min(distance);
@@ -572,6 +574,7 @@ pub fn move_towards(
     let mut mt = MoveType::new(MoveKind::Unit(um));
     mt.flags = in_combat_flag(&obj, MoveTypeFlags::MOVING);
     mt.time = ms_of_day();
+    npc.data().last_move_ms = now_ms();
     check_moved_position(server, &obj);
     send_move(server, &obj, mt);
     false
@@ -759,6 +762,7 @@ pub fn stop_movement(server: &GameServer, npc: &NpcRef) {
     let mut mt = MoveType::new(MoveKind::Unit(um));
     mt.flags = in_combat_flag(&obj, MoveTypeFlags::STOPPING);
     mt.time = ms_of_day();
+    npc.data().last_move_ms = 0;
     send_move(server, &obj, mt);
 }
 

@@ -289,6 +289,33 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
         return;
     }
+    // 1.2 `doodad_almighties.once_one_man`: another unit's timed interaction with a held
+    // doodad (or a held single seat) is refused before any cast work, with the in-use
+    // `SCErrorMsg` only. No `SCSkillStarted` failure follows: NEED_REAGENT (the item gate's
+    // code) reads "Not enough $1." (`ui_texts` 1751) and would show a second, nonsensical text
+    // for item 0, and no other result has a text that fits. How the client resets a cast it
+    // already started locally is not captured (`DOODAD-ONEUSER-1`). The classification uses the
+    // caster's real skill level, not rank 1.
+    if let (SkillCastTarget::Doodad(obj_id), Some(skill)) =
+        (target, data.systems.skills.skill(skill_id))
+    {
+        if let Some(doodad) = super::geometry::world_of(server, &me)
+            .and_then(|world| world.object(obj_id))
+            .and_then(|object| object.as_doodad().cloned())
+        {
+            let run = super::skill::new_skill_for(server, skill.clone(), Some(&me));
+            if crate::systems::npcs::doodad::occupancy::refuses_start(server, &doodad, &me, &run) {
+                tracing::debug!(
+                    character = %player.data().unit.name,
+                    skill_id,
+                    doodad = obj_id,
+                    "Client doodad skill refused: another unit is using it"
+                );
+                crate::systems::npcs::doodad::occupancy::send_already_interacting(&me);
+                return;
+            }
+        }
+    }
     // 1.2 doodad-use skills: the func's item requirement must be met before the cast starts.
     // The client has no pre-check for these (`link_equip_slot_id` -1) and only stops the cast
     // when `SCSkillStarted` carries a non-zero result; it plays the bar and animation otherwise.

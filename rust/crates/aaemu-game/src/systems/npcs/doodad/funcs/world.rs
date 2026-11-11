@@ -83,14 +83,37 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
         return;
     }
     if f.bond_kind_id > bond_kind::BOND_INVALID {
+        // 1.2 `once_one_man`: one unit occupies a single seat / instrument at a time. A
+        // multi-seat attachment (`space > 1`) takes no occupancy: its `load_passenger`
+        // capacity decides. The interaction start already refused a second unit; this covers
+        // a race or a func-driven use that bypassed the gate.
+        let me = WorldObject::from(player);
+        if !super::super::occupancy::begin_bond(ctx.server, &ctx.doodad, &me, f.space) {
+            super::super::occupancy::send_already_interacting(&me);
+            return;
+        }
         let character_id = player.data().id;
         // ask for a free meta number for landing
-        let spot = ctx
-            .doodad
-            .data()
-            .seat
-            .load_passenger(character_id, ctx.doodad.obj_id, f.space);
+        let (spot, seated_here) = {
+            let mut doodad = ctx.doodad.data();
+            // A unit that already sits here and clicks its own seat again finds every place
+            // taken, its own included.
+            let seated_here = doodad
+                .seat
+                .seats
+                .get(&ctx.doodad.obj_id)
+                .is_some_and(|spots| spots.contains(&character_id));
+            let spot = doodad
+                .seat
+                .load_passenger(character_id, ctx.doodad.obj_id, f.space);
+            (spot, seated_here)
+        };
         if spot == -1 {
+            // A newcomer gives back the hold it just took; the occupant keeps its own, it is
+            // still seated.
+            if !seated_here {
+                super::super::occupancy::end_bond(ctx.server, ctx.doodad.obj_id, me.obj_id());
+            }
             return; // we leave if there is no place
         }
         let bond = BondDoodad {

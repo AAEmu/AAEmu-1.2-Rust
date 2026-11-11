@@ -6,8 +6,10 @@
 //! Here the NPC spawner expands an `"NpcGroup"` member row into the group's member NPCs (see
 //! `npc::spawner::spawn_npc_group`); the group row itself is not a spawnable unit.
 //!
-//! `aggro_rule_id`, `is_leader` / `is_move_leader`, `formation_tension` and `enable_respawn` are
-//! loaded for completeness but not applied yet; see `PORTING.md` (capture-pending).
+//! `is_leader` is loaded only; the runtime membership (`is_move_leader`, the formation offsets /
+//! tension and `aggro_rule_id`) is attached to the spawned NPCs by `npc/group.rs` and read by
+//! `systems::ai::group` (1.2 `formation_GoToOnPoint` / `NpcAggroTable::CollectSharedAggroMembers`).
+//! `enable_respawn` drives the partial respawn of `npc/group.rs`; see `PORTING.md`.
 
 use std::collections::{HashMap, HashSet};
 

@@ -29,12 +29,20 @@ const PURCHASE_FUNC_KEY: u32 = 1;
 const PURCHASE_TEMPLATE: u32 = 600;
 
 fn world_with_data(data: GameData) -> World {
+    world_with_data_for_accounts(data, 1001, 1002)
+}
+
+fn world_with_data_for_accounts(data: GameData, account_a: u32, account_b: u32) -> World {
     let server = Arc::new(test_server_with(data));
     server.set_self();
-    let mut a = TestClient::new(&server, 1, 1001);
-    let mut b = TestClient::new(&server, 2, 1002);
-    let pa = spawn_player(&server, &a, test_character(1, "Alice", 100.0, 100.0), 0x100);
-    let pb = spawn_player(&server, &b, test_character(2, "Bob", 101.0, 100.0), 0x101);
+    let mut a = TestClient::new(&server, 1, account_a);
+    let mut b = TestClient::new(&server, 2, account_b);
+    let mut ca = test_character(1, "Alice", 100.0, 100.0);
+    ca.account_id = account_a;
+    let mut cb = test_character(2, "Bob", 101.0, 100.0);
+    cb.account_id = account_b;
+    let pa = spawn_player(&server, &a, ca, 0x100);
+    let pb = spawn_player(&server, &b, cb, 0x101);
     a.conn.active_char = Some(pa.clone());
     b.conn.active_char = Some(pb.clone());
     a.drain();
@@ -61,6 +69,15 @@ fn spawn_npc(w: &mut World, obj_id: u32, template: u32, x: f32) -> NpcRef {
 
 /// A merchant pack 7 NPC that sells `STACK` at grade 0, with the real NPC catalog bridge.
 fn merchant_world(limited_sale_count: i32, one_time_sale: bool) -> World {
+    merchant_world_with_accounts(limited_sale_count, one_time_sale, 1001, 1002)
+}
+
+fn merchant_world_with_accounts(
+    limited_sale_count: i32,
+    one_time_sale: bool,
+    account_a: u32,
+    account_b: u32,
+) -> World {
     let mut d = test_data();
     d.systems.economy.store.refund_multipliers.insert(0, 100);
     let t = d.items.templates.get_mut(&STACK).unwrap();
@@ -81,7 +98,7 @@ fn merchant_world(limited_sale_count: i32, one_time_sale: bool) -> World {
             ..Default::default()
         },
     );
-    let mut w = world_with_data(d);
+    let mut w = world_with_data_for_accounts(d, account_a, account_b);
     crate::systems::npcs::bridges::install_economy(&w.server);
     spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
     w.pa.data().money = 1000;
@@ -134,12 +151,12 @@ fn error_code(w: &mut World, which: u8) -> Option<i16> {
     })
 }
 
-fn purchased(w: &World, character_id: u32) -> i32 {
+fn purchased(w: &World, account_id: u32) -> i32 {
     w.server
         .systems
         .economy
         .shop_limits
-        .purchased(character_id, STACK)
+        .purchased(account_id, STACK)
 }
 
 #[tokio::test]
@@ -149,20 +166,36 @@ async fn limited_sale_count_refuses_the_purchase_that_would_cross_it() {
     run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 2);
     assert_eq!(w.pa.data().money, 980);
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
     assert_eq!(error_code(&mut w, 0), None);
 
     run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 2);
     assert_eq!(w.pa.data().money, 980);
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
     assert_eq!(error_code(&mut w, 0), Some(752));
 
-    // The other character has its own allowance.
+    // The other account has its own allowance.
     run::<CSBuyItemsPacket>(&mut w, 1, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
     assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 1);
-    assert_eq!(purchased(&w, 2), 1);
+    assert_eq!(purchased(&w, 1002), 1);
     assert!(error_code(&mut w, 1).is_none());
+}
+
+#[tokio::test]
+async fn a_second_character_of_the_same_account_cannot_exceed_the_limit() {
+    let mut w = merchant_world_with_accounts(1, false, 1001, 1001);
+    run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(purchased(&w, 1001), 1);
+    assert_eq!(error_code(&mut w, 0), None);
+
+    // Bob is on the same account: the account's allowance is already spent.
+    run::<CSBuyItemsPacket>(&mut w, 1, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
+    assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 0);
+    assert_eq!(w.pb.data().money, 1000);
+    assert_eq!(purchased(&w, 1001), 1);
+    assert_eq!(error_code(&mut w, 1), Some(752));
 }
 
 #[tokio::test]
@@ -170,7 +203,7 @@ async fn a_single_packet_cannot_cross_the_limit_with_several_lines() {
     let mut w = merchant_world(3, false);
     run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 2)], &[]));
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 2);
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
 
     // Two lines of the same template add up to one claim.
     run::<CSBuyItemsPacket>(
@@ -180,7 +213,7 @@ async fn a_single_packet_cannot_cross_the_limit_with_several_lines() {
     );
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 2);
     assert_eq!(w.pa.data().money, 980);
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
     assert_eq!(error_code(&mut w, 0), Some(752));
 }
 
@@ -195,7 +228,7 @@ async fn one_time_sale_allows_exactly_one_purchase() {
     run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
     assert_eq!(w.pa.data().money, 990);
-    assert_eq!(purchased(&w, 1), 1);
+    assert_eq!(purchased(&w, 1001), 1);
     assert_eq!(error_code(&mut w, 0), Some(752));
 }
 
@@ -209,7 +242,7 @@ async fn giving_the_item_is_not_a_purchase_and_selling_back_does_not_reset() {
     // GM give / loot / quest grants do not pass the purchase path.
     give(&w, &w.pa, slot_type::INVENTORY, STACK, 1, 5);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 3);
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
 
     // Sell one back and buy it back: the allowance is still spent.
     let sold =
@@ -230,7 +263,7 @@ async fn giving_the_item_is_not_a_purchase_and_selling_back_does_not_reset() {
         0,
         &sell_body(MERCHANT_NPC, &[(sold.0, sold.1, sold.2)]),
     );
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
     assert_eq!(
         w.server
             .systems
@@ -255,13 +288,13 @@ async fn giving_the_item_is_not_a_purchase_and_selling_back_does_not_reset() {
         .items[0]
         .slot;
     run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[], &[buyback_slot]));
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 3);
     assert_eq!(error_code(&mut w, 0), None);
 
     // A new purchase is still refused: the buy-back did not give the allowance back.
     run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 1)], &[]));
-    assert_eq!(purchased(&w, 1), 2);
+    assert_eq!(purchased(&w, 1001), 2);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 3);
     assert_eq!(error_code(&mut w, 0), Some(752));
 }
@@ -373,10 +406,14 @@ fn spawn_doodad_at(w: &mut World, group_id: u32, x: f32) -> DoodadRef {
 }
 
 fn buy_coin(w: &mut World) -> i16 {
+    buy_coin_as(w, 0)
+}
+
+fn buy_coin_as(w: &mut World, which: u8) -> i16 {
     let mut s = PacketStream::new();
     s.write_bc(DOODAD_OBJ).write_u32(PURCHASE_FUNC_KEY);
-    run::<CSBuyCoinItemPacket>(w, 0, s.as_bytes());
-    error_code(w, 0).unwrap_or(0)
+    run::<CSBuyCoinItemPacket>(w, which, s.as_bytes());
+    error_code(w, which).unwrap_or(0)
 }
 
 fn buy_doodad(w: &mut World, unk_id: u32, item_id: u32, count: i32) -> i16 {
@@ -400,7 +437,7 @@ fn buy_doodad_at_grade(w: &mut World, unk_id: u32, item_id: u32, grade: u8, coun
 }
 
 #[tokio::test]
-async fn doodad_purchase_uses_the_same_per_character_limit() {
+async fn doodad_purchase_uses_the_same_per_account_limit() {
     let mut w = purchase_doodad_world(1, 5);
     let doodad = spawn_doodad(&mut w);
     let _ = doodad;
@@ -410,12 +447,32 @@ async fn doodad_purchase_uses_the_same_per_character_limit() {
     assert_eq!(buy_coin(&mut w), 0);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
     assert_eq!(coins(&w), 5);
-    assert_eq!(purchased(&w, 1), 1);
+    assert_eq!(purchased(&w, 1001), 1);
 
     assert_eq!(buy_coin(&mut w), 752);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
     assert_eq!(coins(&w), 5);
-    assert_eq!(purchased(&w, 1), 1);
+    assert_eq!(purchased(&w, 1001), 1);
+}
+
+#[tokio::test]
+async fn doodad_purchase_shares_the_limit_between_characters_of_one_account() {
+    let mut w = purchase_doodad_world(1, 5);
+    let account = w.pa.data().account_id;
+    w.pb.data().account_id = account;
+    let _d = spawn_doodad(&mut w);
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    give(&w, &w.pb, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(purchased(&w, 1001), 1);
+
+    // Bob is on the same account and is refused (the coin path goes through the economy bridge).
+    assert_eq!(buy_coin_as(&mut w, 1), 752);
+    assert_eq!(Inv::of(&w.pb).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pb).items_count(PURCHASE_COIN, -1), 10);
+    assert_eq!(purchased(&w, 1001), 1);
 }
 
 #[tokio::test]
@@ -426,12 +483,12 @@ async fn a_failed_doodad_purchase_gives_the_claim_back() {
     // No coin: the claim is taken and must be released when the consumption fails. The 1.2
     // client's own dialog answers `not_enough_coin` (0x1e3 = 483) for this case.
     assert_eq!(buy_coin(&mut w), 483);
-    assert_eq!(purchased(&w, 1), 0);
+    assert_eq!(purchased(&w, 1001), 0);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
 
     give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 5, 0);
     assert_eq!(buy_coin(&mut w), 0);
-    assert_eq!(purchased(&w, 1), 1);
+    assert_eq!(purchased(&w, 1001), 1);
 }
 
 #[test]
@@ -626,7 +683,7 @@ async fn a_failed_grant_after_the_coin_was_taken_gives_the_coin_back() {
     assert_eq!(buy_coin(&mut w), 315);
     assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_BACKPACK, -1), 0);
     assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 10);
-    assert_eq!(purchased(&w, 1), 0);
+    assert_eq!(purchased(&w, 1001), 0);
 }
 
 #[test]
@@ -729,7 +786,7 @@ async fn private_mysql_shop_purchase_counts_survive_save_and_reload() {
         .connect_with(options)
         .await
         .unwrap();
-    let (_, ddl): (String, String) = sqlx::query_as("SHOW CREATE TABLE `character_shop_purchases`")
+    let (_, ddl): (String, String) = sqlx::query_as("SHOW CREATE TABLE `account_shop_purchases`")
         .fetch_one(&pool)
         .await
         .unwrap();

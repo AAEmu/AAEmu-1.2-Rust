@@ -279,15 +279,17 @@ impl UccManager {
         ucc.save_data_in_db = true;
         {
             let mut st = self.state();
-            if st.upload_queue.contains_key(&conn.id) {
+            // One *in-progress* upload per stream connection: the parts entry is removed when
+            // the upload completes (`upload_part`) or is confirmed/aborted, so a second custom
+            // upload later on the same connection is accepted (the C# never removed it and
+            // therefore closed the connection on the second one). A refused start leaves no
+            // queue entry (the C# inserted into `_uploadQueue` first and left it behind).
+            if st.upload_queue.contains_key(&conn.id)
+                || st.complex_upload_parts.contains_key(&conn.id)
+            {
                 return Err(duplicate_key("UccManager.StartUpload", conn.id));
             }
             st.upload_queue.insert(conn.id, QueuedUcc { ucc, cost });
-            // C# bug: ConfirmDefaultUcc never removes this entry, so a second custom upload on
-            // the same stream connection throws here (after queueing the UCC above).
-            if st.complex_upload_parts.contains_key(&conn.id) {
-                return Err(duplicate_key("UccManager.StartUpload", conn.id));
-            }
             st.complex_upload_parts
                 .insert(conn.id, UccUploadHandle::new(expected_size));
         }
@@ -320,8 +322,13 @@ impl UccManager {
                 )));
             }
             if handle.upload_complete() {
-                // FinalizeUpload writes into the UCC that StartUpload queued.
+                // FinalizeUpload writes into the UCC that StartUpload queued, then the
+                // per-connection upload entry is done. The C# left it in
+                // `_complexUploadParts`, which made a second custom upload on the same stream
+                // connection throw; clearing it here keeps only a *concurrent* upload refused
+                // (`start_upload` still rejects a start while parts are arriving).
                 let data = handle.finalize();
+                st.complex_upload_parts.remove(&conn.id);
                 if let Some(queued) = st.upload_queue.get_mut(&conn.id) {
                     queued.ucc.data = data;
                 }
@@ -544,12 +551,26 @@ impl UccManager {
     ) -> Result<()> {
         let (mut ucc, cost) = {
             let mut st = self.state();
+            // `CTEmblemStreamUploadStatus` is `ConfirmDefaultUcc` and belongs to the simple
+            // (default) upload path. A confirm that arrives while a custom upload is still
+            // receiving parts must not charge the reagent and save a Complex UCC with no image
+            // data; the upload's own last part runs this step after `complex_upload_parts` is
+            // cleared, so this only refuses the interleaved (invalid) packet order.
+            if st.complex_upload_parts.contains_key(&conn.id) {
+                return Err(GameError::Protocol(format!(
+                    "UccManager.ConfirmDefaultUcc: stream connection {} has a custom upload in progress",
+                    conn.id
+                )));
+            }
             let Some(queued) = st.upload_queue.remove(&conn.id) else {
                 return Err(GameError::Protocol(format!(
                     "UccManager.ConfirmDefaultUcc: no queued UCC for stream connection {}",
                     conn.id
                 )));
             };
+            // The upload is over (saved or aborted): release the per-connection parts entry,
+            // so the next custom upload on this stream connection can start.
+            st.complex_upload_parts.remove(&conn.id);
             (queued.ucc, queued.cost)
         };
 

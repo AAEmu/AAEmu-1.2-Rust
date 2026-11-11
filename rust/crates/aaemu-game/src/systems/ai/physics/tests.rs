@@ -807,3 +807,162 @@ mod server_flow {
         assert!((t.z - ocean).abs() < 2.0, "floats: {} vs {ocean}", t.z);
     }
 }
+
+/// A hull collision between two player-owned ships is blocked only by the protection cases
+/// (Peace / no-PvP instances); friendly and same-faction ships still ram each other elsewhere.
+/// Environment damage (`attacker == target`) is unchanged.
+#[tokio::test]
+async fn player_owned_ship_hull_damage_follows_the_attack_gate() {
+    use crate::data::world_data::{
+        conflict_type, FactionRelation, SystemFaction, Zone, ZoneConflict,
+    };
+    use crate::models::slave::Slave;
+    use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+    use crate::world::Entity;
+
+    use super::contacts::HullDamage;
+
+    const PEACE_ZONE: u32 = 300;
+    const CONFLICT_ZONE: u32 = 301;
+
+    let mut data = crate::data::GameData::empty();
+    for (id, mother) in [(101, 148), (109, 149), (148, 0), (149, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    data.factions.relations.push(FactionRelation {
+        id: 148,
+        id2: 149,
+        state: 1, // RelationState::Hostile
+        exp_time: 0,
+    });
+    for (zone_key, group_id) in [(PEACE_ZONE, 14), (CONFLICT_ZONE, 15)] {
+        data.zones.zones.insert(
+            zone_key,
+            Zone {
+                id: zone_key,
+                name: format!("zone_{zone_key}"),
+                zone_key,
+                group_id,
+                ..Zone::default()
+            },
+        );
+    }
+    let server = std::sync::Arc::new(test_server_with(data));
+    crate::systems::skills::bind(&server);
+    server.systems.social.conflicts.init(
+        &[
+            ZoneConflict {
+                zone_group_id: 14,
+                current_state: conflict_type::PEACE,
+                ..ZoneConflict::default()
+            },
+            ZoneConflict {
+                zone_group_id: 15,
+                current_state: conflict_type::CONFLICT,
+                ..ZoneConflict::default()
+            },
+        ],
+        crate::world::now_ms(),
+    );
+    let ca = TestClient::new(&server, 1, 1);
+    let cb = TestClient::new(&server, 2, 2);
+    let a = spawn_player(&server, &ca, test_character(1, "A", 100.0, 100.0), 0x101);
+    let b = spawn_player(&server, &cb, test_character(2, "B", 110.0, 100.0), 0x109);
+    {
+        let mut d = a.data();
+        d.unit.faction_id = 101;
+    }
+    {
+        let mut d = b.data();
+        d.unit.faction_id = 109;
+    }
+    let world = server.world.world(0).expect("instance 0");
+    let mut target = Slave::new(0x201, 68);
+    target.summoner_obj_id = b.obj_id;
+    target.unit.faction_id = 109;
+    target.unit.hp = 10_000;
+    target.unit.max_hp = 10_000;
+    target.unit.transform.zone_id = PEACE_ZONE;
+    let target = Entity::new(0x201, target);
+    world.spawn(&target, &server.view_ctx());
+    let mut attacker = Slave::new(0x202, 68);
+    attacker.summoner_obj_id = a.obj_id;
+    attacker.unit.faction_id = 101;
+    attacker.unit.hp = 10_000;
+    attacker.unit.max_hp = 10_000;
+    attacker.unit.transform.zone_id = PEACE_ZONE;
+    let attacker = Entity::new(0x202, attacker);
+    world.spawn(&attacker, &server.view_ctx());
+
+    // `WorldInstance::spawn` resolves the zone from the world template; the fixtures use the
+    // synthetic main world, so set the test zones afterwards like the skills fixtures do.
+    target.data().unit.transform.zone_id = PEACE_ZONE;
+    attacker.data().unit.transform.zone_id = PEACE_ZONE;
+    let hp = target.data().unit.hp;
+    super::apply_hull_damage(
+        &server,
+        &world,
+        HullDamage {
+            target: target.obj_id,
+            attacker: attacker.obj_id,
+            percent: 10,
+        },
+    );
+    assert_eq!(
+        target.data().unit.hp,
+        hp,
+        "two player-owned ships deal no hull damage in Peace"
+    );
+
+    target.data().unit.transform.zone_id = CONFLICT_ZONE;
+    super::apply_hull_damage(
+        &server,
+        &world,
+        HullDamage {
+            target: target.obj_id,
+            attacker: attacker.obj_id,
+            percent: 10,
+        },
+    );
+    assert!(
+        target.data().unit.hp < hp,
+        "the same collision damages in Conflict"
+    );
+
+    // Environment / floor damage has `attacker == target` and stays unchanged.
+    let hp = target.data().unit.hp;
+    super::apply_hull_damage(
+        &server,
+        &world,
+        HullDamage {
+            target: target.obj_id,
+            attacker: 0,
+            percent: 10,
+        },
+    );
+    assert!(target.data().unit.hp < hp, "floor damage still applies");
+
+    // Same-faction ships in a normal (non-conflict) zone still take ram damage: only the
+    // protection cases are gated.
+    b.data().unit.faction_id = 101;
+    target.data().unit.faction_id = 101;
+    target.data().unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    let hp = target.data().unit.hp;
+    super::apply_hull_damage(
+        &server,
+        &world,
+        HullDamage {
+            target: target.obj_id,
+            attacker: attacker.obj_id,
+            percent: 10,
+        },
+    );
+    assert!(
+        target.data().unit.hp < hp,
+        "same-faction ships still take ram damage in a normal zone"
+    );
+}

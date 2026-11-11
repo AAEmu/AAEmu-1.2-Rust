@@ -614,6 +614,14 @@ pub fn apply_template(
         now_ms(),
     );
     b.ab_level = ab_level;
+    if let (Some(caster), Some(skill)) = (caster, source_skill) {
+        b.range_damage_multiplier = super::effects::combat::range_multiplier_for_skill(
+            server,
+            caster,
+            target,
+            skill.template.id,
+        );
+    }
     add_buff(server, target, b, 0, 0);
 }
 
@@ -1506,6 +1514,7 @@ fn time_to_time_apply(
         let skill_object = SkillObject::None;
         let mut source = EffectSource::from_buff(template.clone());
         source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
+        source.range_multiplier = Some(b.range_damage_multiplier);
         let args = EffectArgs {
             caster: caster.cloned(),
             caster_caster: buff_skill_caster(b),
@@ -1585,6 +1594,7 @@ pub(crate) fn do_area_tick(
             let skill_object = SkillObject::None;
             let mut source = EffectSource::from_buff(template.clone());
             source.buff_permanent = b.permanent || (b.duration == 0 && b.count == -1);
+            source.range_multiplier = Some(b.range_damage_multiplier);
             let args = EffectArgs {
                 caster: Some(caster.clone()),
                 caster_caster: buff_skill_caster(b),
@@ -2280,6 +2290,7 @@ fn execute_trigger(
             EffectSource {
                 skill: None,
                 buff: Some(template.clone()),
+                range_multiplier: None,
                 amount,
                 is_trigger: true,
                 buff_permanent: false,
@@ -2295,6 +2306,7 @@ fn execute_trigger(
             EffectSource {
                 skill: buff_skill(server, b),
                 buff: None,
+                range_multiplier: None,
                 amount: 0,
                 is_trigger: false,
                 buff_permanent: false,

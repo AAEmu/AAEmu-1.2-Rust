@@ -78,6 +78,11 @@ pub struct Buff {
     /// the lifecycle steps and refreshes keep the duration at 0 and the fixed tick damage is
     /// not divided over the template duration. Set by the abandoned-house burning buff.
     pub permanent: bool,
+    /// The archery close-range multiplier (`formulas` row 12) of the skill that applied this
+    /// buff, captured at the application distance; its damage ticks use it instead of the
+    /// distance at tick time. A refresh by a new application replaces it (the archery DoTs stack
+    /// by refresh). Runtime only: a buff restored from the database starts at 1.0.
+    pub range_damage_multiplier: f32,
 }
 
 /// `EffectState`.
@@ -118,6 +123,7 @@ impl Buff {
             task_gen: 0,
             exit_replace: false,
             session_only: false,
+            range_damage_multiplier: 1.0,
             permanent: false,
         }
     }
@@ -419,7 +425,8 @@ impl Buffs {
         match last {
             // `last.OverwriteWith(buff)`: charge, ab level, caster and skill caster are taken
             // over, the timer restarts (Extend adds the remaining time), everything else (index,
-            // skill, template, passive flag) stays.
+            // skill, template, passive flag) stays. The Rust-only close-range factor belongs to
+            // the latest application, like the caster.
             Some(i) => {
                 let e = &mut self.effects[i];
                 let previous_caster_obj_id = e.caster_obj_id;
@@ -431,6 +438,7 @@ impl Buffs {
                 e.skill_caster = buff.skill_caster;
                 e.skill_caster_bytes = buff.skill_caster_bytes;
                 e.session_only |= buff.session_only;
+                e.range_damage_multiplier = buff.range_damage_multiplier;
                 e.start_time_ms = now_ms;
                 e.duration = if e.permanent {
                     0
@@ -556,6 +564,30 @@ mod tests {
             if s.index == 2 && r.start_time_ms == 500)
         );
         assert!(!b.has_events());
+    }
+
+    /// A refresh by a new application takes over its close-range factor, in both directions: the
+    /// DoT's ticks belong to the latest shot (the archery DoTs stack by refresh).
+    #[test]
+    fn a_refresh_takes_the_new_applications_range_factor() {
+        let mut t = BuffTemplate::simple(196, BuffKind::Bad);
+        t.duration = 14_000;
+        t.stack_rule = stack_rule::REFRESH;
+        for (first, second) in [(0.8, 1.0), (1.0, 0.8)] {
+            let mut buffs = Buffs::default();
+            let mut shot = Buff::new(t.clone(), SkillCaster::default(), None, 0);
+            shot.range_damage_multiplier = first;
+            buffs.add_buff(shot, 0, 0, 0);
+            let mut again = Buff::new(t.clone(), SkillCaster::default(), None, 500);
+            again.range_damage_multiplier = second;
+            buffs.add_buff(again, 0, 0, 500);
+            assert_eq!(buffs.effects.len(), 1, "refreshed, not stacked");
+            assert!(
+                (buffs.effects[0].range_damage_multiplier - second).abs() < 1e-6,
+                "first shot x{first}, second shot x{second}: ticks use x{}",
+                buffs.effects[0].range_damage_multiplier
+            );
+        }
     }
 
     #[test]

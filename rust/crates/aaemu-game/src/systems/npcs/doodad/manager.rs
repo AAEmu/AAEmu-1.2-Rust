@@ -56,6 +56,8 @@ pub struct DoodadManager {
     phase_ratio_queue: Mutex<VecDeque<i32>>,
     /// Last territory siege period observed per zone group (WP-S3 `SiegePeriod` watcher).
     pub siege_phase: super::siege_phase::Watcher,
+    /// `once_one_interaction` / `once_one_man` occupants by doodad object id.
+    pub occupancy: super::occupancy::Occupancies,
 }
 
 impl Default for DoodadManager {
@@ -68,6 +70,7 @@ impl Default for DoodadManager {
             forced_phase_ratio: Mutex::new(None),
             phase_ratio_queue: Mutex::new(VecDeque::new()),
             siege_phase: super::siege_phase::Watcher::default(),
+            occupancy: super::occupancy::Occupancies::default(),
         }
     }
 }
@@ -251,6 +254,8 @@ pub fn delete(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRe
         d.phase.deleted = true;
         d.phase.func_task = 0; // deviation: cancel the FuncTask (see the module docs)
     }
+    // The object id may be reused by a respawned doodad: drop any `once_one_*` occupant.
+    super::occupancy::forget(server, doodad.obj_id);
     server
         .systems
         .npcs
@@ -858,6 +863,8 @@ pub fn unbond_doodad(
     {
         return;
     }
+    // 1.2 `once_one_man`: the seat is free again for another unit.
+    super::occupancy::end_bond(server, doodad_obj_id, player.obj_id);
     let pobj = WorldObject::from(player);
     let world = server.world.world_of(&pobj);
     if let Some(doodad) = world.as_ref().and_then(|w| w.doodad(doodad_obj_id)) {

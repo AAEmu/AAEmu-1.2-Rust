@@ -51,6 +51,13 @@
 //!                                   CSICSBuyGoodPacket (0x11d); fail unless the buy succeeds,
 //!                                   `SCGotMail` is a CHARGED (9) mail and SCCountUnreadMail's
 //!                                   4th counter is 1
+//! giftics <shop id> <detail> <receiver> [main] [sub]
+//!                                   CSICSBuyGoodPacket (0x11d) as a gift; fail unless
+//!                                   SCICSBuyResult is successful and no SCErrorMsg arrives.
+//!                                   The receiver may be offline (no SCGotMail to the buyer).
+//! unreadmail <sent> <received> <mia> <commercial>
+//!                                   fail unless the last SCCountUnreadMailPacket (sent at
+//!                                   spawn, so it includes offline mail) has these counters
 //! aucpost <npc tpl> <item tpl> <start> <buyout> <duration>
 //!                                   walk to the auctioneer NPC, CSAuctionPost (client writer
 //!                                   `FUN_397bae70`) and decode `SCAuctionPosted`
@@ -66,8 +73,10 @@
 //!                                    item); fails unless the expected error (and no result) or
 //!                                    an `SCGradeEnchantResult` arrives.
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
-//!                                    in the body hex)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` = 3-byte object
+//!                                    ids, `SELFID` / `PEERID` = u32 character ids,
+//!                                    `GUILD` = u32 guild id, `ITEM(<template>)` = stack id,
+//!                                    `STR(<text>)` = a length-prefixed string)
 //! rawcsend <opcode hex> <body hex>   send it without draining (the caller asserts the reply)
 //! rawcswait <opcode hex> <body hex> <PacketName> [secs]
 //!                                    send it and fail unless that packet answers (default 5 s)
@@ -110,6 +119,13 @@
 //! expectbuffremoved <buff> [self|peer|player:NAME] [secs]
 //!                                   fail unless SCBuffRemoved for a previously announced
 //!                                   SCBuffCreated of that buff / owner arrives
+//! expecthpdrop <self|peer|player:NAME> [secs]  fail unless that unit's HP falls below its
+//!                                   value at the command start (the last SCUnitPointsPacket;
+//!                                   fails as "hp unknown" without one, so `gm heal` it first:
+//!                                   the server sends none at spawn). Regeneration can refill
+//!                                   a small hit before the next packet and mask it
+//! expectnohpdrop <self|peer|player:NAME> [secs]  fail if that unit's HP falls in the window
+//!                                   (same baseline and the same regeneration caveat)
 //! expectlog <regex> [secs]          fail unless a new game-log line matches (AAEMU_VERIFY_GAME_LOG)
 //! expectdb "<sql>" <value> [secs]   fail unless the SQL's value equals `value`
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
@@ -788,6 +804,48 @@ async fn expect_buff_removed(
     }
 }
 
+/// `expecthpdrop` / `expectnohpdrop`: watch the unit's last `SCUnitPointsPacket` HP against
+/// the value seen when the command starts. `expectnohpdrop` fails as soon as the HP falls inside
+/// the window; `expecthpdrop` fails when it does not. The server sends no `SCUnitPointsPacket`
+/// at spawn, so a unit whose HP was never updated is "unknown": run a `gm heal` on it first.
+/// Natural regeneration can refill a hit before the next packet, so a very small hit may go
+/// unseen.
+async fn expect_hp_drop(
+    game: &mut GameClient,
+    spec: Option<&str>,
+    secs: u64,
+    want_drop: bool,
+) -> anyhow::Result<()> {
+    let target = buff_target(game, spec)?;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let baseline = game.state.unit_points.get(&target).map(|p| p.0);
+    anyhow::ensure!(
+        baseline.is_some(),
+        "no SCUnitPointsPacket for unit {target} yet (hp unknown)"
+    );
+    loop {
+        let hp = game.state.unit_points.get(&target).map(|p| p.0);
+        let dropped = matches!((baseline, hp), (Some(b), Some(n)) if n < b);
+        if !want_drop && dropped {
+            bail!("hp of {target} fell {baseline:?} -> {hp:?} (expected no HP drop)");
+        }
+        if want_drop && dropped {
+            println!("    hp of {target}: {baseline:?} -> {hp:?}");
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            if want_drop {
+                bail!("no HP drop for unit {target} within {secs} s (hp {hp:?})");
+            }
+            println!("    no HP drop on {target} in {secs} s");
+            return Ok(());
+        }
+        let wait = left.min(Duration::from_millis(250));
+        game.recv_within(wait).await?;
+    }
+}
+
 /// `/move` to `(x, y, z)`, acknowledge it and wait for the area around the new position.
 async fn teleport_to(
     game: &mut GameClient,
@@ -1118,8 +1176,27 @@ async fn run_lines(
                 let tpl: u32 = num(&parts, 1)?;
                 let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
                 clock += 1500;
-                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
-                    .await?;
+                // Optional 3rd argument: cast from that many metres away (on the side the bot
+                // came from) instead of 1 m next to the NPC, like `icast`'s distance argument.
+                match parts.get(2).and_then(|d| d.parse::<f32>().ok()) {
+                    Some(d) => {
+                        let me = game.state.self_pos;
+                        let (dx, dy) = (me.0 - npc.pos.0, me.1 - npc.pos.1);
+                        let len = dx.hypot(dy).max(0.001);
+                        let at = (
+                            npc.pos.0 + dx / len * d,
+                            npc.pos.1 + dy / len * d,
+                            npc.pos.2,
+                        );
+                        // Face the NPC: a skill's damage effects can require the target in
+                        // front (unchanged for the default 1 m form).
+                        game.move_to_facing(at, npc.pos, clock).await?;
+                    }
+                    None => {
+                        game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                            .await?
+                    }
+                }
                 game.change_target(npc.obj_id).await?;
                 game.start_skill(skill, npc.obj_id).await?;
                 last_npc = npc.obj_id;
@@ -1697,6 +1774,56 @@ async fn run_lines(
                     "buyics: SCCountUnreadMail's commercial counter is not 1"
                 );
             }
+            "giftics" => {
+                let shop_id: u32 = num(&parts, 0)?;
+                let detail: u8 = num(&parts, 1)?;
+                let receiver = *parts
+                    .get(2)
+                    .with_context(|| "giftics: missing receiver name")?;
+                let main_tab: u8 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let sub_tab: u8 = parts.get(4).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u8(1)
+                    .write_u32(shop_id)
+                    .write_u8(main_tab)
+                    .write_u8(sub_tab)
+                    .write_u8(detail)
+                    .write_str(receiver);
+                game.send_cs(cs::CSICSBuyGoodPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let mut bought = None;
+                let mut error = None;
+                for p in &got {
+                    if p.is_sc(sc::SCICSBuyResultPacket) {
+                        bought = Some(p.stream().read_bool()?);
+                    } else if p.is_sc(sc::SCErrorMsgPacket) {
+                        error = Some(p.stream().read_i16()?);
+                    }
+                }
+                ensure!(
+                    bought == Some(true),
+                    "giftics: no successful SCICSBuyResult (SCErrorMsg {error:?})"
+                );
+                ensure!(error.is_none(), "giftics: SCErrorMsg {error:?}");
+            }
+            "unreadmail" => {
+                let want = (
+                    num::<i32>(&parts, 0)?,
+                    num::<i32>(&parts, 1)?,
+                    num::<i32>(&parts, 2)?,
+                    num::<i32>(&parts, 3)?,
+                );
+                let got = game
+                    .state
+                    .count_unread_mail
+                    .context("unreadmail: no SCCountUnreadMailPacket seen")?;
+                ensure!(got == want, "unreadmail: got {got:?}, want {want:?}");
+                println!("    SCCountUnreadMail {got:?}");
+            }
             "aucpost" => {
                 let npc_tpl: u32 = num(&parts, 0)?;
                 let item_tpl: u32 = num(&parts, 1)?;
@@ -2081,6 +2208,11 @@ async fn run_lines(
                 let secs: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(10);
                 expect_buff_removed(game, buff, parts.get(1).copied(), secs).await?;
             }
+            "expecthpdrop" | "expectnohpdrop" => {
+                let spec = parts.first().copied();
+                let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(10);
+                expect_hp_drop(game, spec, secs, cmd == "expecthpdrop").await?;
+            }
             "expectlog" => {
                 let args = split_quoted(rest)?;
                 let pattern = args.first().context("expectlog <regex> [secs]")?;
@@ -2281,14 +2413,17 @@ async fn run_lines(
                     )
                 };
                 let raw = parts.get(1).copied().unwrap_or("");
-                let peer_bc = if raw.contains("PEER") {
-                    bc(peer(game, None)
-                        .context("PEER needs another player in sight")?
-                        .obj_id)
+                let peer_unit = if raw.contains("PEER") {
+                    Some(peer(game, None).context("PEER / PEERID need another player in sight")?)
                 } else {
-                    String::new()
+                    None
                 };
-                // `GUILD` is the bot's guild id as a little-endian u32.
+                let le32 = |id: u32| id.to_le_bytes().map(|b| format!("{b:02x}")).concat();
+                let peer_bc = peer_unit.as_ref().map(|u| bc(u.obj_id)).unwrap_or_default();
+                let peer_id = peer_unit.as_ref().map(|u| le32(u.id)).unwrap_or_default();
+                // `GUILD` is the bot's guild id as a little-endian u32; `SELFID` / `PEERID` are
+                // character ids (`CSFamilyReplyInvitation` and the other u32 character-id
+                // packets), while `SELF` / `PEER` stay the 3-byte `bc` object ids.
                 let mut hex = raw
                     .replace(
                         "GUILD",
@@ -2299,8 +2434,26 @@ async fn run_lines(
                             .map(|b| format!("{b:02x}"))
                             .concat(),
                     )
+                    .replace("PEERID", &peer_id)
+                    .replace("SELFID", &le32(game.state.selected_char))
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
+                // `STR(<text>)` expands to a `PacketStream` string (u16 length + UTF-8 bytes).
+                while let Some(start) = hex.find("STR(") {
+                    let rest = &hex[start + 4..];
+                    let end = rest.find(')').context("STR( needs a closing )")?;
+                    let text = &rest[..end];
+                    anyhow::ensure!(
+                        text.len() <= usize::from(u16::MAX),
+                        "STR() text is longer than a packet string"
+                    );
+                    let bytes = text.as_bytes();
+                    let mut enc = format!("{:02x}{:02x}", bytes.len() & 0xff, bytes.len() >> 8);
+                    for byte in bytes {
+                        enc.push_str(&format!("{byte:02x}"));
+                    }
+                    hex.replace_range(start..start + 4 + end + 1, &enc);
+                }
                 // `ITEM(<template>)` expands to the stack id remembered by
                 // `item <template>`, little-endian, so a packet can carry the real item
                 // instance id.
@@ -2988,5 +3141,66 @@ mod tests {
             vec![(2, 5000), (7, 60000)]
         );
         assert_eq!(s.remaining(), 0);
+    }
+
+    /// Runs `expect_hp_drop` on our own unit (obj 42) over an in-memory transport. `known_hp` is
+    /// the HP the client already knows (as after a `gm heal`); the server then sends one
+    /// `SCUnitPointsPacket` per entry of `server_hp`. A window of 0 s judges the state as it is,
+    /// a longer one gives the packets time to arrive (the command returns as soon as it can).
+    async fn hp_command(
+        want_drop: bool,
+        secs: u64,
+        known_hp: Option<i32>,
+        server_hp: &[i32],
+    ) -> anyhow::Result<()> {
+        use aaemu_commons::net::FrameCodec;
+        use aaemu_game::net::packet::encode;
+        use aaemu_game::packets::world::SCUnitPointsPacket;
+        use futures::SinkExt;
+        use tokio_util::codec::FramedWrite;
+
+        let (io, peer) = tokio::io::duplex(64 * 1024);
+        let mut game = crate::game::GameClient::from_io(io, crate::record::Recorder::new(false));
+        game.state.self_obj = 42;
+        if let Some(hp) = known_hp {
+            game.state.unit_points.insert(42, (hp, 500));
+        }
+        let mut server = FramedWrite::new(peer, FrameCodec);
+        for &hp in server_hp {
+            let packet = SCUnitPointsPacket {
+                obj_id: 42,
+                hp,
+                mp: 500,
+            };
+            server.send(encode(&packet)).await?;
+        }
+        super::expect_hp_drop(&mut game, Some("self"), secs, want_drop).await
+    }
+
+    #[tokio::test]
+    async fn expecthpdrop_passes_when_the_hp_falls() {
+        hp_command(true, 5, Some(1000), &[900]).await.unwrap();
+    }
+
+    /// `expectnohpdrop` used to print "no HP drop" and succeed whatever the HP did.
+    #[tokio::test]
+    async fn expectnohpdrop_fails_when_the_hp_falls() {
+        let err = hp_command(false, 5, Some(1000), &[900]).await.unwrap_err();
+        assert!(err.to_string().contains("fell"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_hp_commands_judge_an_unchanged_hp() {
+        hp_command(false, 0, Some(1000), &[]).await.unwrap();
+        let err = hp_command(true, 0, Some(1000), &[]).await.unwrap_err();
+        assert!(err.to_string().contains("no HP drop"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_hp_commands_need_a_known_baseline() {
+        for want_drop in [false, true] {
+            let err = hp_command(want_drop, 0, None, &[]).await.unwrap_err();
+            assert!(err.to_string().contains("hp unknown"), "{err}");
+        }
     }
 }

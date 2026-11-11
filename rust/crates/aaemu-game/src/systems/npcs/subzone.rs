@@ -213,7 +213,7 @@ impl SubZoneData {
                 return Ok(Self::default());
             }
         };
-        let zones = ZoneData::load(ctx.conn, 0)?;
+        let zones = ZoneData::load(ctx.conn)?;
         Self::load_from(ctx.files, &worlds, &zones).map_err(crate::data::GameDataError::File)
     }
 
@@ -572,7 +572,7 @@ mod real_data_tests {
         };
         let mut data = GameData::empty();
         data.worlds = WorldTemplates::load(&files, &app).unwrap();
-        data.zones = ZoneData::load(&conn, 0).unwrap();
+        data.zones = ZoneData::load(&conn).unwrap();
         data.systems.housing = crate::systems::housing::Data::load(&ctx).unwrap();
         data.systems.npcs.subzone = SubZoneData::load(&ctx).unwrap();
         let main = data
@@ -628,7 +628,7 @@ mod real_data_tests {
         let worlds = WorldTemplates::load(&files, &app).unwrap();
         let main_id = worlds.get_world_template_by_name("main_world").unwrap().id;
         let mut data = GameData::empty();
-        data.zones = ZoneData::load(&conn, 0).unwrap();
+        data.zones = ZoneData::load(&conn).unwrap();
         data.worlds = worlds;
         data.systems.npcs.subzone = d;
         let main = data.worlds.get_world_template_by_id(main_id).unwrap();

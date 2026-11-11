@@ -106,8 +106,8 @@ pub fn tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
         B::Despawning | B::DoNothing | B::Dummy => {}
         B::FollowPath => follow_path_tick(c, k, delta_ms),
         B::FollowUnit => follow_unit_tick(c, k, delta_ms),
-        B::HoldPosition => hold_position_tick(c, k),
-        B::Idle => idle_tick(c, k),
+        B::HoldPosition => hold_position_tick(c, k, delta_ms),
+        B::Idle => idle_tick(c, k, delta_ms),
         B::ReturnState => return_state_tick(c, k, delta_ms),
         B::Roaming => roaming_tick(c, k, delta_ms),
         B::RunCommandSet => run_command_set_tick(c, delta_ms),
@@ -606,15 +606,26 @@ fn report_npc_without_ai(obj_id: u32) -> bool {
 
 /// `Behavior.UpdateAggroHelp(abuser, radius)`.
 pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
+    // `npc_groups.aggro_rule_id == 2` mirrors the aggro table; rule 1 members answer the help
+    // call through the group-link path below (10.x `NpcAggroTable::CollectSharedAggroMembers`
+    // and the link-help group-instance relation bypass).
+    super::group::share_aggro_with_group(c, abuser);
     let t = template_scalars(c);
-    let my_template_id = c.npc.data().unit.template_id;
+    let (my_template_id, my_group_instance, my_group_rule, my_faction) = {
+        let d = c.npc.data();
+        (
+            d.unit.template_id,
+            d.npc_group_instance,
+            d.npc_group_aggro_rule_id,
+            d.unit.faction_id,
+        )
+    };
     let link_data = &c.server.game_data.systems.npcs.npc.aggro_links;
     let npcs: Vec<WorldObject> =
         npc::around(c.server, &c.obj, t.attack_start_range_scale * radius, false)
             .into_iter()
             .filter(|o| o.as_npc().is_some())
             .collect();
-    let my_faction = c.npc.data().unit.faction_id;
     for other in npcs {
         let Some(other_npc) = other.as_npc().cloned() else {
             continue;
@@ -622,10 +633,21 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         let Some(ot) = npc::template(c.server, &other_npc) else {
             continue;
         };
-        let (in_battle, faction) = {
+        let (in_battle, faction, other_group_instance) = {
             let d = other_npc.data();
-            (d.unit.is_in_battle, d.unit.faction_id)
+            (d.unit.is_in_battle, d.unit.faction_id, d.npc_group_instance)
         };
+        // 10.x link help with `npc_groups.aggro_rule_id == 1` (Z:823640-823646 /
+        // 823849-823851): a candidate of the same spawned batch is accepted even when its own
+        // template relation test fails, so the group mates answer the help call together. The
+        // scan still requires the candidate's `accept_aggro_link` (Z:823774), so a template that
+        // declines aggro links keeps declining (43 of the 376 rule-1 member rows). The batch's
+        // rule 2 members are already on the table (mirrored above); rule 0 neither mirrors nor
+        // answers by group.
+        let group_link = my_group_instance != 0
+            && my_group_rule == 1
+            && other_group_instance == my_group_instance
+            && ot.accept_aggro_link;
         // 1.2 data: the members of an `aggro_links` group help each other even when their own
         // template (`accept_aggro_link`, `aggression` / `aggro_link_special_rule_id`) would
         // decline. No consumer was found in the 10.x decompile, so this rule is data-inferred
@@ -634,7 +656,20 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         if in_battle || (!ot.accept_aggro_link && !same_group) {
             continue;
         }
-        if npc::distance_to(c.server, &other, &c.obj, false) > ot.aggro_link_help_dist {
+        // Rule-1 batch mates answer out to their own aggression radius as a fallback: the 1.2
+        // `aggro_link_help_dist` is 6 m for 91 of the 101 rule-1 groups (376 member rows:
+        // median 6, max 50, none 0), too short once the batch spreads beyond its 2-3 m
+        // formation offsets. The 10.x link-help scan collects candidates within 50 m
+        // (`sub_39325250(..., 50.0, ...)`, Z:823753) and then applies the per-template
+        // distance, so a group-link mate uses `max(aggro_link_help_dist,
+        // attack_start_range_scale * 10)` (the `check_aggression` scan radius).
+        let help_dist = if group_link {
+            ot.aggro_link_help_dist
+                .max(ot.attack_start_range_scale * 10.0)
+        } else {
+            ot.aggro_link_help_dist
+        };
+        if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
             continue;
         }
         // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
@@ -671,7 +706,12 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // Link path (AGGROLINK-1): the sight check applies only when the helper enables it.
         let link_helps = same_group
             && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
-        if !template_helps && !link_helps {
+        // Rule-1 group mates that accept aggro links answer the help call (the relation test
+        // above is bypassed); the helper's own sight check still applies, as in the 10.x
+        // candidate scan.
+        let group_link_helps = group_link
+            && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
+        if !template_helps && !link_helps && !group_link_helps {
             continue;
         }
         // npc.Ai.Owner.AddUnitAggro(...) + npc.Ai.OnAggroTargetChanged(): an NPC without an
@@ -693,7 +733,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             .aggro_table
             .contains_key(&abuser.obj_id());
         add_unit_aggro(c.server, &other, AggroKind::Damage, abuser, 1);
-        if link_helps && !template_helps && !was_engaged {
+        if (link_helps || group_link_helps) && !template_helps && !was_engaged {
             let engaged = other_npc
                 .data()
                 .unit
@@ -705,6 +745,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
                     helper = other_npc.obj_id,
                     leader = c.npc.obj_id,
                     abuser = abuser.obj_id(),
+                    group_link = group_link_helps,
                     "aggro link: group member joined the fight"
                 );
             }
@@ -1718,7 +1759,7 @@ fn hold_position_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     s.initialized = true;
 }
 
-fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
+fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !c.st(k).initialized {
         tracing::warn!(
             "HoldPositionBehavior.Tick called before initialization for unit {}",
@@ -1738,7 +1779,11 @@ fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
         c.st(k).following_npc = false;
         return;
     }
-    // 2. Try to use idle self-skills (1 s between tries)
+    // 2. A group follower's `formation_GoToOnPoint` movement replaces the hold-position walk;
+    // its idle activity (self-skills, follow-default, talk) still runs below (1.2
+    // `hold_position.UpdateHoldPosition`).
+    super::group::follower_tick(c, delta_ms);
+    // 3. Try to use idle self-skills (1 s between tries)
     let now = now_ms();
     if now - c.st(k).last_skill_check >= 1000 {
         c.st(k).last_skill_check = now;
@@ -1748,11 +1793,11 @@ fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
             pick_skill_and_use_it(c, k, SkillUseConditionKind::InIdle, &me, dist);
         }
     }
-    // 3. Optional follow default NPC
+    // 4. Optional follow default NPC
     if !c.st(k).following_npc && c.do_follow_default_nearest_npc() {
         c.st(k).following_npc = true;
     }
-    // 4. Talk has low priority
+    // 5. Talk has low priority
     check_for_talk(c, k);
 }
 
@@ -1775,7 +1820,7 @@ fn idle_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     c.st(k).initialized = true;
 }
 
-fn idle_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
+fn idle_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !c.st(k).initialized {
         tracing::warn!(
             "IdleBehavior.Tick called before initialization for unit {}",
@@ -1800,6 +1845,9 @@ fn idle_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
     } else if check_follow_path(c) {
         c.go_to_follow_path();
     } else {
+        // A group follower's movement is the formation follow (1.2 `idle.UpdateIdle`); its idle
+        // activity still runs.
+        super::group::follower_tick(c, delta_ms);
         // Try to follow the nearest NPC, otherwise go to default behavior
         if c.do_follow_default_nearest_npc() {
             return;
@@ -1811,6 +1859,12 @@ fn idle_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
 }
 
 fn return_state_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
+    // Ending a fight (the abuser died, left or was cleared) must let a later fight against the
+    // same object share with the group again.
+    c.npc.data().npc_group_last_share_abuser = 0;
+    // A group follower returns to its formation point, not its own spawn (1.2
+    // `idle` / `hold_position` re-anchor a member's idle position on the leader).
+    super::group::sync_return_to_formation(c);
     if !c.npc.data().unit.skill_state.aggro_table.is_empty() {
         combat::npc_clear_all_aggro(c);
     }
@@ -1901,6 +1955,9 @@ fn return_state_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !c.st(k).enter {
         return;
     }
+    // The leader may have moved since the fight ended: recompute the formation point from its
+    // current position every tick instead of freezing the spot chosen at ReturnState entry.
+    super::group::sync_return_to_formation(c);
     let mut move_speed = npc::real_movement_speed(&c.obj, f64::from(base_move_speed(c)));
     let move_flags = npc::real_movement_flags(move_speed);
     move_speed *= delta_seconds(delta_ms);
@@ -1963,6 +2020,16 @@ fn roaming_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     }
     if !check_aggression(c, k) {
         check_alert(c, k);
+    }
+    // A group follower that already left Roaming (combat / alert) must not move here; ordinary
+    // NPCs keep the original control flow (no early return outside the feature).
+    if crate::systems::npcs::npc::group::is_follower(&c.npc) && c.ai.current_behavior() != Some(k) {
+        return;
+    }
+    // A group follower never roams on its own: it follows its move leader's formation point
+    // (1.2 `roaming.UpdateRoaming`).
+    if super::group::follower_tick(c, delta_ms) {
+        return;
     }
     let zero = |v: Vec3| v.x == 0.0 && v.y == 0.0 && v.z == 0.0;
     if zero(c.st(k).roam_target) && now_ms() > c.st(k).next_roaming {

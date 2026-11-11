@@ -12,6 +12,7 @@ pub mod item_gate;
 pub mod logic;
 pub mod manager;
 pub mod natural;
+pub mod occupancy;
 pub mod packets;
 pub mod permission;
 pub mod phase;
@@ -71,6 +72,10 @@ pub async fn save(
 #[cfg(test)]
 #[path = "gather_tests.rs"]
 mod gather_tests;
+
+#[cfg(test)]
+#[path = "occupancy_tests.rs"]
+mod occupancy_tests;
 
 #[cfg(test)]
 #[path = "permission_tests.rs"]

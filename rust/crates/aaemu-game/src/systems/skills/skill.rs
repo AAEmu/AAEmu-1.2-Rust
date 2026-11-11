@@ -25,7 +25,9 @@ use super::packets::{
     CompressedGamePackets, SCCastingStoppedPacket, SCCooldownsPacket, SCSkillCooldownResetPacket,
     SCSkillEndedPacket, SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
 };
-use super::relation::{can_attack, filter_with_relation, owner_character, relation_to};
+use super::relation::{
+    can_attack, filter_with_relation, owner_character, protected_from, relation_to,
+};
 use super::state::{
     AutoAttackSlot, CancelToken, PlotCooldownSnapshot, SkillRef, SkillRun, SkillTaskKind,
     SkillTaskSlot,
@@ -514,10 +516,16 @@ fn initial_target(
             if let Some(t) = &target {
                 let tt = Target::Obj(t.clone());
                 let r = relation_to(server, &caster_t, &tt);
+                // Main's relation check, plus the player-protection cases (Peace, no-PvP,
+                // home zones): a Neutral target keeps the C# behaviour, a protected player is
+                // refused.
                 if r != RelationState::Hostile
                     && r != RelationState::Neutral
                     && !can_attack(server, &caster_t, &tt)
                 {
+                    return None;
+                }
+                if protected_from(server, &caster_t, &tt) {
                     return None;
                 }
             }
@@ -666,6 +674,13 @@ fn use_skill_impl(
         return result;
     }
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
+    // The `once_one_*` interaction target, kept as a handle: `resolved_target` is moved into
+    // `owned_target` below and the gate runs after that.
+    let interaction_doodad = resolved_target
+        .as_ref()
+        .and_then(Target::as_obj)
+        .and_then(WorldObject::as_doodad)
+        .cloned();
     let Some(target) = &resolved_target else {
         if let Some(npc) = caster.as_npc() {
             server
@@ -855,6 +870,17 @@ fn use_skill_impl(
     if dry_run {
         return (skill_result::SUCCESS, 0);
     }
+    // 1.2 `doodad_almighties.once_one_man`: another unit's timed interaction with a held
+    // doodad is refused before any of this cast's side effects (stealth / StartSkill buff
+    // removal, unmount, plot run, GCD, mana, reagent, labor). A held timed cast is acquired
+    // here too, before those side effects; a seat use only checks the seat. Instant non-seat
+    // interactions are never blocked and take no occupancy. The client-facing caller sends the
+    // single in-use message; this path stays silent for the other caster kinds.
+    if let Some(doodad) = interaction_doodad.as_ref() {
+        if !crate::systems::npcs::doodad::occupancy::begin_skill(server, doodad, caster, skill) {
+            return (skill_result::INVALID_TARGET, 0);
+        }
+    }
     if let Some(task) = active_task {
         if let SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
             stop(server, &task.skill, caster, channel_doodad);
@@ -965,6 +991,13 @@ fn use_skill_impl(
                         items.consume_owned_item(server, p, item_id, template_id, 0) != Some(false)
                     });
             if !still_owned {
+                if let Some(doodad) = interaction_doodad.as_ref() {
+                    crate::systems::npcs::doodad::occupancy::end_cast(
+                        server,
+                        doodad.obj_id,
+                        caster,
+                    );
+                }
                 skill.state().cancelled = true;
                 return (skill_result::INVALID_SOURCE, 0);
             }
@@ -991,6 +1024,10 @@ fn use_skill_impl(
         }
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
+            // No cast follows: a plot-only skill never holds a doodad.
+            if let Some(doodad) = interaction_doodad.as_ref() {
+                crate::systems::npcs::doodad::occupancy::end_cast(server, doodad.obj_id, caster);
+            }
             return (skill_result::SUCCESS, 0);
         }
     }
@@ -1696,6 +1733,20 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             total_delay += (anim.combat_sync_time as f32 * (mul / 100.0)) as i32;
         }
     }
+    // The cast slot is already cleared, and the interaction effect of a skill that holds a
+    // `once_one_man` doodad still owes the doodad's funnel (after the whole delay, the
+    // animation time included, or at once): the hold must survive until `apply_effects` /
+    // `end_skill`, so another unit cannot take the doodad in between.
+    if skill.state().holds_doodad {
+        if let Some(doodad) = ctx.target.as_obj().and_then(WorldObject::as_doodad) {
+            crate::systems::npcs::doodad::occupancy::mark_effects_pending(
+                server,
+                doodad,
+                caster,
+                i64::from(total_delay),
+            );
+        }
+    }
     let weapon_anim = weapon_attack_anim_id(server, skill, caster);
     let mut fired = SCSkillFiredPacket {
         id: skill.id,
@@ -2103,6 +2154,19 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
     }
     let mut possible = distinct;
+    // A hostile skill's unit targets drop the protected players (Peace, no-PvP instances, the
+    // home-zone protection) so the combat dice / durability rolls below do not run on them. A
+    // Neutral target keeps main's behaviour, and the caster itself stays so friendly-only Target
+    // effects of a hostile skill still reach it.
+    if t.target_type == SkillTargetType::Hostile as i32 {
+        possible.retain(|target| {
+            target.as_obj().is_none_or(|o| {
+                !o.is_unit()
+                    || o.obj_id() == caster_t.obj_id()
+                    || !protected_from(server, &caster_t, target)
+            })
+        });
+    }
     if t.target_area_radius > 0 && t.target_area_angle > 0 && t.target_area_angle < 360 {
         let origin = world_pos(server, target_self);
         possible.retain(|target| {
@@ -2222,6 +2286,22 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     target = target.obj_id(),
                     ?relation,
                     "Skill effect skipped: the effect is friendly-only"
+                );
+                continue;
+            }
+            // A non-friendly effect on a unit target skips a protected player (Peace, no-PvP,
+            // home zones). A Neutral target keeps main's behaviour: the whole `can_attack`
+            // also refused neutral NPCs, which lost interaction / trap / spawner effects.
+            if !effect.friendly
+                && effect.non_friendly
+                && target.as_obj().is_some_and(|o| o.is_unit())
+                && protected_from(server, &caster_t, &target)
+            {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the target is protected from hostile effects"
                 );
                 continue;
             }
@@ -2725,6 +2805,19 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     let tl = std::mem::take(&mut skill.state().tl_id);
     if tl == 0 {
         return;
+    }
+    // The cast (completed, cancelled or interrupted) no longer holds a `once_one_*` doodad.
+    // A seat occupation of the same unit keeps its own bond flag. Only a use that took the hold
+    // visits the occupancy map: every other skill ends here, combat skills included.
+    let (target, holds_doodad) = {
+        let mut state = skill.state();
+        (
+            state.initial_target,
+            std::mem::take(&mut state.holds_doodad),
+        )
+    };
+    if holds_doodad && target != 0 {
+        crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster);
     }
     if !caster.is_unit() {
         // Not a unit any more: release the id without the unit-side effects.

@@ -2343,6 +2343,13 @@ impl SpawnManager {
             Self::remove_entry(&self.despawns, &e);
         }
 
+        // `NpcGroupSupporter` timer: lost members of an `enable_respawn` batch (10.x
+        // `sub_39343460`). Runs under the same spawn lock as the respawn deadlines above.
+        server
+            .systems
+            .npcs
+            .group_batches
+            .check_respawns(server, self.world.id);
         drop(_serial);
         if let Some(h) = server.systems.npcs.hooks.economy.get() {
             h.make_loot_public_tick(server, self.world.id);

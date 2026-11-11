@@ -247,9 +247,20 @@ fn lot_bytes(lot: &AuctionLot) -> Vec<u8> {
 
 /// Posts `template` from Alice's bag slot `slot`; returns (item id, lot).
 fn post(w: &mut World, template: u32, slot: i32, buyout: i32, duration: u8) -> (u64, AuctionLot) {
+    post_with_start(w, template, slot, 0, buyout, duration)
+}
+
+fn post_with_start(
+    w: &mut World,
+    template: u32,
+    slot: i32,
+    start: i32,
+    buyout: i32,
+    duration: u8,
+) -> (u64, AuctionLot) {
     let pa = w.pa.clone();
     let item_id = give(w, &pa, slot_type::INVENTORY, template, 1, slot);
-    run::<CSAuctionPostPacket>(w, 0, &post_body(item_id, 0, buyout, duration));
+    run::<CSAuctionPostPacket>(w, 0, &post_body(item_id, start, buyout, duration));
     let lot = w
         .server
         .systems
@@ -578,6 +589,36 @@ async fn post_moves_item_charges_fee_and_sends_lot() {
     run::<CSAuctionPostPacket>(&mut w, 0, &post_body(id, 0, 1000, 9));
     assert_eq!(w.server.systems.economy.auction.all_lots().len(), before);
     assert!(Inv::of(&w.pa).item_at(slot_type::INVENTORY, 2).is_some());
+}
+
+#[tokio::test]
+async fn post_without_buyout_charges_the_deposit_from_the_start_price() {
+    let (mut w, _log) = auction_world();
+    // No buyout: the client shows and the server charges the deposit on the start price.
+    // fee = floor(500 * .01 * (0 + 1) + .5) = 5
+    let (item_id, lot) = post_with_start(&mut w, SWORD, 0, 500, 0, 0);
+    assert_eq!((lot.start_money, lot.direct_money), (500, 0));
+    assert_eq!(money(&w.pa), 100_000 - 5);
+    assert!(Inv::of(&w.pa).item_at(slot_type::INVENTORY, 0).is_none());
+
+    let frames = w.a.drain();
+    let ops: Vec<u16> = frames.iter().map(|f| f.0).collect();
+    assert_eq!(
+        ops,
+        vec![
+            sc::SCItemTaskSuccessPacket,
+            sc::SCItemTaskSuccessPacket,
+            sc::SCItemTaskSuccessPacket,
+            sc::SCAuctionPostedPacket
+        ]
+    );
+    assert_eq!(
+        frames[2].1,
+        task_body(task_type::DEPOSIT_MONEY, vec![ItemTask::MoneyChange(-5)])
+    );
+    assert_eq!(frames[3].1, lot_bytes(&lot));
+    assert_eq!(w.server.systems.economy.auction.lot(lot.id).unwrap(), lot);
+    assert_eq!(lot.item.as_ref().unwrap().id, item_id);
 }
 
 #[tokio::test]
@@ -1443,11 +1484,18 @@ async fn empty_bid_list_sends_page_zero() {
 }
 
 #[test]
-fn listing_fee_matches_csharp_double_math() {
-    assert_eq!(listing_fee(1000, 0) as i32, 10);
-    assert_eq!(listing_fee(1000, 3) as i32, 40);
-    assert_eq!(listing_fee(333, 2) as i32, 9); // 9.99 -> 9
-    assert_eq!(listing_fee(i32::MAX, 3) as i32, MAX_LISTING_FEE);
+fn listing_fee_matches_the_client_deposit_formula() {
+    // floor(price * rate + 0.5); the buyout wins when set, else the start price.
+    assert_eq!(listing_fee(1000, 0, 0), 10);
+    assert_eq!(listing_fee(1000, 0, 3), 40);
+    assert_eq!(listing_fee(0, 1000, 0), 10);
+    assert_eq!(listing_fee(333, 0, 2), 10); // 9.99 -> floor(10.49) = 10
+    assert_eq!(listing_fee(1000, 5, 0), 10); // buyout base wins over the start price
+                                             // At least 1, even for a free / tiny lot (the client returns 1 when the deposit is 0).
+    assert_eq!(listing_fee(0, 0, 0), 1);
+    assert_eq!(listing_fee(0, 1, 0), 1); // floor(0.51) = 0 -> 1
+    assert_eq!(listing_fee(1, 0, 0), 1);
+    assert_eq!(listing_fee(i32::MAX, 0, 3), MAX_LISTING_FEE);
     // (int)(soldAmount * .9) / (int)(soldAmount - soldAmount * .9)
     let sold = 333;
     let after = f64::from(sold) * 0.9;

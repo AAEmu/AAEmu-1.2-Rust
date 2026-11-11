@@ -2528,7 +2528,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
             .systems
             .economy
             .shop_limits
-            .try_claim(player.character_id, &[claim])
+            .try_claim(player.data().account_id, &[claim])
     }
 
     fn release_shop_purchase(
@@ -2550,7 +2550,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
             .systems
             .economy
             .shop_limits
-            .release(player.character_id, &[claim]);
+            .release(player.data().account_id, &[claim]);
     }
 
     fn npc_has_loot_items(&self, server: &GameServer, npc: &NpcRef) -> bool {

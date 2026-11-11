@@ -128,8 +128,10 @@ if ! mysql_up; then
   "$REPO/Scripts/live-stack.sh" stop
 fi
 if "${MYSQL[@]}" -N -e "SHOW DATABASES LIKE '$DB_GAME'" | grep -q .; then
-  # A rerun starts from clean guild state for these accounts (the restart clears teams; this
-  # clears the persisted guild rows). Touches only the suite's own characters.
+  # A rerun starts from clean guild and family state for these accounts (the restart clears
+  # teams; this clears the persisted guild rows and the bots' family membership, which would
+  # otherwise make the second run's inviter / target checks answer FAMILY_* instead of the
+  # path under test). Touches only the suite's own characters.
   names=$(printf "'%s'," "${accounts[@]}")
   names=${names%,}
   "${MYSQL[@]}" "$DB_GAME" -e "
@@ -141,6 +143,11 @@ if "${MYSQL[@]}" -N -e "SHOW DATABASES LIKE '$DB_GAME'" | grep -q .; then
     DELETE FROM expedition_members WHERE character_id IN
       (SELECT id FROM characters WHERE name IN ($names));
     UPDATE characters SET expedition_id=0 WHERE name IN ($names);
+    -- Family membership the family-rules suite created (the family is derived from
+    -- characters.family, so both rows / fields must go).
+    DELETE FROM family_members WHERE character_id IN
+      (SELECT id FROM characters WHERE name IN ($names));
+    UPDATE characters SET family=0 WHERE name IN ($names);
     -- Nations the suites founded (nation-* suites declare one with the GM command) and the
     -- factions the bots took (GM setfaction): back to the Nuian race faction, or a stale
     -- nation name blocks the next run's guild create and a stale Haranya faction makes the

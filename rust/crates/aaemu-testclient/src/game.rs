@@ -590,6 +590,9 @@ pub struct GameState {
     pub characters: Vec<CharInfo>,
     pub char_list_done: bool,
     pub selected_char: u32,
+    /// Last `SCCountUnreadMailPacket` (`0x116`): (sent, received, mia, commercial). Sent at spawn
+    /// and includes mail that arrived while the character was offline.
+    pub count_unread_mail: Option<(i32, i32, i32, i32)>,
     pub self_obj: u32,
     /// The guild (`expedition`) id from our last `SCUnitExpeditionChangedPacket` (0 = none).
     pub self_expedition: u32,
@@ -691,6 +694,9 @@ impl GameState {
                 Some(entry) => *entry = character,
                 None => st.characters.push(character),
             }
+        } else if p.is_sc(sc::SCCountUnreadMailPacket) {
+            st.count_unread_mail =
+                Some((s.read_i32()?, s.read_i32()?, s.read_i32()?, s.read_i32()?));
         } else if p.is_sc(sc::SCBuffCreatedPacket) {
             use aaemu_game::systems::skills::types::SkillCaster;
             let kind = s.read_u8()?;

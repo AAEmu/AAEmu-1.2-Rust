@@ -803,6 +803,14 @@ fn apply_hull_damage(server: &GameServer, world: &WorldInstance, d: HullDamage) 
         return;
     }
     let attacker = world.unit(d.attacker).unwrap_or_else(|| target.clone());
+    // Only the protection cases block a hull collision between two player-owned ships: Peace
+    // and no-PvP instances. Friendly / same-owner ships still ram each other elsewhere, as on
+    // main. Environment damage carries `attacker == target` and is unchanged.
+    if !attacker.same(&target)
+        && crate::systems::skills::relation::ramming_protected(server, &attacker, &target)
+    {
+        return;
+    }
     crate::systems::skills::combat::reduce_current_hp(
         server,
         &target,

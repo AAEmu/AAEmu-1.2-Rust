@@ -16,8 +16,8 @@ use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType}
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::skills::buffs;
-use crate::systems::skills::data::effects::{DamageEffect, HealEffect};
-use crate::test_support::TestClient;
+use crate::systems::skills::data::effects::{BuffEffect, DamageEffect, HealEffect};
+use crate::test_support::{spawn_player, test_character, TestClient};
 use crate::world::{Entity, WorldObject};
 
 use super::super::super as skills;
@@ -81,6 +81,15 @@ fn args(caster: WorldObject, target: WorldObject, level: u8) -> EffectArgs<'stat
 }
 
 fn packet(client: &mut TestClient, caster: u32, target: u32) -> (i32, u16, Vec<u8>) {
+    packet_with_skill(client, caster, target, 1)
+}
+
+fn packet_with_skill(
+    client: &mut TestClient,
+    caster: u32,
+    target: u32,
+    cast_skill_id: u32,
+) -> (i32, u16, Vec<u8>) {
     let frames: Vec<_> = client
         .drain()
         .into_iter()
@@ -91,7 +100,7 @@ fn packet(client: &mut TestClient, caster: u32, target: u32) -> (i32, u16, Vec<u
     // Read in native 1.2 sub_397C8760 order; expected data is not encoded locally.
     let mut s = PacketStream::from_bytes(body.clone());
     assert_eq!(s.read_u8().unwrap(), 0);
-    assert_eq!(s.read_u32().unwrap(), 1);
+    assert_eq!(s.read_u32().unwrap(), cast_skill_id);
     assert_eq!(s.read_u16().unwrap(), 0);
     assert_eq!(s.read_u8().unwrap(), if caster == 0x300 { 4 } else { 0 });
     assert_eq!(s.read_bc().unwrap(), caster);
@@ -937,6 +946,16 @@ const HEAL_DOT_BUFF: u32 = 9_102;
 const HEAL_DOT_EFFECT: u32 = 9_103;
 
 fn dot_data(effect: DamageEffect, duration: i32, tick: f64) -> GameData {
+    dot_data_with_stack_rule(effect, duration, tick, 0)
+}
+
+/// [`dot_data`] whose DoT buff has the given `stack_rule` (1 = refresh).
+fn dot_data_with_stack_rule(
+    effect: DamageEffect,
+    duration: i32,
+    tick: f64,
+    stack_rule: u32,
+) -> GameData {
     let mut data = fixture_data();
     let skills = &mut data.systems.skills;
     skills.add_effect(
@@ -948,6 +967,7 @@ fn dot_data(effect: DamageEffect, duration: i32, tick: f64) -> GameData {
         id: DOT_BUFF,
         duration,
         tick,
+        stack_rule,
         tick_effects: vec![skills::data::TickEffect {
             effect_id: DOT_EFFECT,
             target_buff_tag_id: 0,
@@ -1025,13 +1045,26 @@ fn apply_tick_buff(
     target: &WorldObject,
     buff_id: u32,
 ) -> u32 {
+    apply_tick_buff_from_skill(server, caster, target, buff_id, None)
+}
+
+/// [`apply_tick_buff`] with the applying skill recorded on the live buff (the real cast path).
+fn apply_tick_buff_from_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &WorldObject,
+    buff_id: u32,
+    skill_id: Option<u32>,
+) -> u32 {
+    let skill = skill_id
+        .map(|id| skills::state::SkillRun::new(Arc::new(skills::tests::skill_template(id)), 1));
     buffs::apply_template(
         server,
         server.game_data.systems.skills.buff(buff_id).unwrap(),
         Some(caster),
         &SkillCaster::Unit(caster.obj_id()),
         target,
-        None,
+        skill.as_deref(),
     );
     target
         .with_base_unit(|b| {
@@ -1158,4 +1191,694 @@ async fn damage_pipeline_fixed_trigger_keeps_its_full_value() {
     client.drain();
     damage(&server, &effect, &args, None);
     assert_eq!(npc.data().unit.hp, 1_000 - 500);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Player -> NPC level damage bonus (`formulas` row 20, research-data-rules.md §1).
+
+const LEVEL_BONUS_ROW: u32 = 20;
+const LEVEL_BONUS_FORMULA: &str =
+    "if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.04)";
+
+fn level_bonus_data(formula: &str) -> GameData {
+    let mut data = fixture_data();
+    data.formulas.insert_formula(LEVEL_BONUS_ROW, formula);
+    data
+}
+
+/// A non-fixed, non-percent row with a deterministic 100 base: level damage (`LevelDps` is the
+/// constant 100 in the fixture) with no variance, so the level bonus is the only variable.
+fn level_damage_effect(id: u32) -> DamageEffect {
+    let mut effect = skills::tests::damage_effect(id, 0);
+    effect.use_fixed_damage = false;
+    effect.use_level_damage = true;
+    effect.level_md = 1.0;
+    effect.level_va_start = 0;
+    effect.level_va_end = 0;
+    effect
+}
+
+/// A percent-of-maximum-HP row (10% of the fixture's 1000 HP = 100), which the level bonus
+/// must leave untouched.
+fn percent_damage_effect(percent: i32) -> DamageEffect {
+    let mut effect = skills::tests::damage_effect(1, 0);
+    effect.use_fixed_damage = false;
+    effect.use_percent_damage = true;
+    effect.percent_min = percent;
+    effect.percent_max = percent;
+    effect
+}
+
+fn level_dot_data() -> GameData {
+    let mut data = level_bonus_data(LEVEL_BONUS_FORMULA);
+    let mut effect = level_damage_effect(DOT_EFFECT);
+    effect.damage_type = 2;
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        skills::data::EffectKind::DamageEffect,
+        skills::data::EffectTemplate::Damage(Box::new(effect)),
+        DOT_EFFECT,
+    );
+    skills.add_buff(skills::data::BuffTemplate {
+        id: DOT_BUFF,
+        duration: 1_000,
+        tick: 1_000.0,
+        tick_effects: vec![skills::data::TickEffect {
+            effect_id: DOT_EFFECT,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+        }],
+        ..Default::default()
+    });
+    data
+}
+
+/// Row 20 (`damage_bonus_multiplier_by_level`): +4% per level for a player at or above the
+/// NPC's level, for every damage type; row 21 is the constant x1 below it (no penalty).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_scales_player_hits_on_lower_level_npcs() {
+    for (player_level, npc_level, damage_type, expected) in [
+        (50, 40, 1, 140),
+        (50, 40, 2, 140),
+        (50, 40, 4, 140),
+        (50, 40, 3, 140),
+        (50, 50, 1, 100),
+        (40, 50, 1, 100),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+        player.data().unit.level = player_level;
+        npc.data().unit.level = npc_level;
+        let mut effect = level_damage_effect(1);
+        effect.damage_type = damage_type;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "player {player_level} vs NPC {npc_level}, damage type {damage_type}"
+        );
+        assert_eq!(npc.data().unit.hp, 1000 - expected);
+    }
+}
+
+/// The rate is the `formulas` row's text, not a hard-coded 0.04; without the row the hit is
+/// unchanged (no hidden fallback).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_rate_comes_from_the_formula_row() {
+    for (formula, expected) in [
+        (LEVEL_BONUS_FORMULA, 140),
+        (
+            "if_negative(pc_level - npc_level, 1, 1 + (pc_level - npc_level) * 0.10)",
+            200,
+        ),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(level_bonus_data(formula));
+        player.data().unit.level = 50;
+        npc.data().unit.level = 40;
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "formula {formula}"
+        );
+    }
+
+    // No row 20 at all. The row must be a level-damage one: a fixed row is exempt from the
+    // bonus anyway and would pass with a hard-coded rate too.
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(
+        packet(&mut client, player.obj_id, npc.obj_id).0,
+        100,
+        "a missing row 20 leaves the hit unchanged"
+    );
+}
+
+/// The variables name a player character and an NPC: PvP keeps its own battle-resist path.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_does_not_apply_to_pvp() {
+    let (server, _client, player, _npc) =
+        skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+    player.data().unit.level = 50;
+    let mut victim_client = TestClient::new(&server, 2, 2);
+    let mut character = test_character(2, "Victim", 100.0, 105.0);
+    character.unit.hp = 1000;
+    character.unit.max_hp = 1000;
+    let victim = spawn_player(&server, &victim_client, character, 0x102);
+    victim.data().unit.level = 10;
+    victim_client.drain();
+    let effect = level_damage_effect(1);
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&victim).into(), 1),
+        None,
+    );
+    assert_eq!(
+        packet(&mut victim_client, player.obj_id, victim.obj_id).0,
+        100
+    );
+    assert_eq!(victim.data().unit.hp, 900);
+}
+
+/// The variables name a player character and an NPC: an NPC caster (even a higher-level one)
+/// and a player target are outside the row, so the multiplier itself is x1.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_only_applies_to_a_player_caster_and_npc_target() {
+    let (server, _client, player, npc) =
+        skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    // A second, level-10 NPC so an NPC caster can be higher than an NPC target.
+    let mut other = Npc::new(1);
+    other.unit.hp = 1_000;
+    other.unit.max_hp = 1_000;
+    other.unit.level = 10;
+    other.unit.transform.set_xyz(100.0, 110.0, 100.0);
+    let other = Entity::new(0x201, other);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&other, &server.view_ctx());
+    let player = WorldObject::from(&player);
+    let npc = WorldObject::from(&npc);
+    let other = WorldObject::from(&other);
+    assert_eq!(super::level_damage_multiplier(&server, &player, &npc), 1.4);
+    assert_eq!(super::level_damage_multiplier(&server, &npc, &player), 1.0);
+    assert_eq!(
+        super::level_damage_multiplier(&server, &player, &player),
+        1.0
+    );
+    // Higher-level NPC -> lower-level NPC must be x1 too (only a player caster qualifies).
+    assert_eq!(super::level_damage_multiplier(&server, &npc, &other), 1.0);
+}
+
+/// Authored fixed values and percent-of-HP rows keep their exact value; the bonus scales only
+/// the weapon / level damage base (row 4754 "99% of current HP" stays 99%).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_keeps_fixed_and_percent_rows() {
+    for (label, effect, expected) in [
+        ("fixed", skills::tests::damage_effect(1, 100), 100),
+        ("percent", percent_damage_effect(10), 100),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+        player.data().unit.level = 50;
+        npc.data().unit.level = 40;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args((&player).into(), (&npc).into(), 1),
+            None,
+        );
+        assert_eq!(
+            packet(&mut client, player.obj_id, npc.obj_id).0,
+            expected,
+            "{label} row must keep its authored value"
+        );
+    }
+}
+
+/// Siege-weapon NPCs (`NpcKindType.SiegeWeapon`, kind 9: battlefield turrets / cannons and
+/// their practice copies, compact levels 20-50) are destructible structures, not PvE mobs.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_skips_siege_weapon_npcs() {
+    let mut data = level_bonus_data(LEVEL_BONUS_FORMULA);
+    data.systems.npcs.npc.templates.insert(
+        1,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1,
+            npc_kind_id: 9,
+            ..Default::default()
+        },
+    );
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// Training dummies (`system_factions` 170 "scarecrow": 8 templates at levels 1-50) are practice
+/// structures too; a level-1 dummy must not take x2.96 from a level-50 player.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_skips_training_dummies() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(level_bonus_data(LEVEL_BONUS_FORMULA));
+    player.data().unit.level = 50;
+    npc.data().unit.level = 1;
+    npc.data().unit.faction_id = 170;
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args((&player).into(), (&npc).into(), 1),
+        None,
+    );
+    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+}
+
+/// DoT ticks run through `damage_with_aoe` with the buff's caster, so a player's DoT on an NPC
+/// gets the level bonus like a direct hit (the row is a damage multiplier).
+#[tokio::test]
+async fn damage_pipeline_level_bonus_applies_to_buff_tick_damage() {
+    let (server, mut client, player, npc) =
+        skills::cast_validation_tests::fixture(level_dot_data());
+    player.data().unit.level = 50;
+    npc.data().unit.level = 40;
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    let index = apply_tick_buff(&server, &caster, &target, DOT_BUFF);
+    client.drain();
+    assert_eq!(tick_damage(&server, &target, index), 140);
+}
+
+/// Heals are not damage (`combat::heal` never calls `damage_with_aoe`), so they keep their
+/// authored value even with row 20 present and a high-level caster.
+#[tokio::test]
+async fn damage_pipeline_level_bonus_does_not_scale_heals() {
+    let mut data = fixed_heal_dot_data(1_100);
+    data.formulas
+        .insert_formula(LEVEL_BONUS_ROW, LEVEL_BONUS_FORMULA);
+    let (server, mut client, player, _npc) = skills::cast_validation_tests::fixture(data);
+    player.data().unit.level = 50;
+    player.data().unit.hp = 500;
+    let caster = WorldObject::from(&player);
+    let target = caster.clone();
+    let index = apply_tick_buff(&server, &caster, &target, HEAL_DOT_BUFF);
+    client.drain();
+    assert_eq!(tick_heal(&server, &target, index), 100);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Archery close-range penalty (`formulas` row 12, `damage_multiplier_by_range`).
+
+const RANGE_PENALTY_ROW: u32 = 12;
+const RANGE_PENALTY_FORMULA: &str = "if_negative(range - 8, 0.8, 1)";
+const ENDLESS_ARROWS: u32 = 14_835;
+const UNLISTED_SKILL: u32 = 90_001;
+
+fn range_penalty_data(skill_id: u32) -> GameData {
+    let mut data = fixture_data();
+    data.formulas
+        .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+    data.systems.skills.range_penalty_skills.insert(skill_id);
+    data
+}
+
+fn args_with_skill(
+    caster: WorldObject,
+    target: WorldObject,
+    level: u8,
+    skill_id: u32,
+) -> EffectArgs<'static> {
+    let skill =
+        skills::state::SkillRun::new(Arc::new(skills::tests::skill_template(skill_id)), level);
+    EffectArgs {
+        caster_caster: if caster.is_unit() {
+            SkillCaster::Unit(caster.obj_id())
+        } else {
+            SkillCaster::Doodad(caster.obj_id())
+        },
+        caster: Some(caster),
+        target_caster: skills::types::SkillCastTarget::Unit(target.obj_id()),
+        target: Target::Obj(target),
+        cast: CastAction::Skill { skill_id, tl_id: 0 },
+        source: EffectSource::from_skill(skill),
+        skill_object: &skills::types::SkillObject::None,
+    }
+}
+
+/// Endless Arrows (skill 14835, "Damage decreases -20% if target is within 8m") is x0.8
+/// under 8 m and x1 from 8 m on; the formula itself makes exactly 8 m neutral
+/// (`if_negative(range - 8, ...)`).
+#[tokio::test]
+async fn damage_pipeline_range_penalty_scales_listed_skills_under_8m() {
+    for (distance, expected) in [(5.0, 80), (8.0, 100), (10.0, 100)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0 + distance, 100.0, 100.0);
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            expected,
+            "distance {distance} m"
+        );
+        assert_eq!(npc.data().unit.hp, 1000 - expected);
+    }
+}
+
+/// The distance is the skill-range measure: 3D, so standing directly above the target at 7 m
+/// is under the threshold and at 9 m is not (a horizontal-only distance would be 0).
+#[tokio::test]
+async fn damage_pipeline_range_penalty_uses_the_3d_distance() {
+    for (height, expected) in [(7.0, 80), (9.0, 100)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + height);
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            expected,
+            "height {height} m"
+        );
+    }
+}
+
+/// The penalty is a property of the skill, not of its damage type: a listed skill is scaled
+/// even when its damage is magic, while an unlisted skill keeps its damage at any type.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_is_per_skill_not_damage_type() {
+    for (label, skill_id, damage_type, expected) in [
+        ("listed skill with magic damage", ENDLESS_ARROWS, 2, 80),
+        ("unlisted skill with melee damage", UNLISTED_SKILL, 1, 100),
+        ("unlisted skill with magic damage", UNLISTED_SKILL, 2, 100),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        let mut effect = level_damage_effect(1);
+        effect.damage_type = damage_type;
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, skill_id),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, skill_id).0,
+            expected,
+            "{label} at 5 m"
+        );
+    }
+}
+
+/// The factor is the `formulas` row's text, not a hard-coded 0.8; without the row the hit is
+/// unchanged.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_rate_comes_from_the_formula_row() {
+    for (formula, distance, expected) in [
+        (RANGE_PENALTY_FORMULA, 5.0, 80),
+        ("if_negative(range - 10, 0.5, 1)", 9.0, 50),
+    ] {
+        let mut data = fixture_data();
+        data.formulas.insert_formula(RANGE_PENALTY_ROW, formula);
+        data.systems
+            .skills
+            .range_penalty_skills
+            .insert(ENDLESS_ARROWS);
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0 + distance, 100.0, 100.0);
+        let effect = level_damage_effect(1);
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            expected,
+            "formula {formula} at {distance} m"
+        );
+    }
+
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+        let mut data = fixture_data();
+        data.systems
+            .skills
+            .range_penalty_skills
+            .insert(ENDLESS_ARROWS);
+        data
+    });
+    let effect = level_damage_effect(1);
+    client.drain();
+    damage(
+        &server,
+        &effect,
+        &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+        None,
+    );
+    assert_eq!(
+        packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+        100
+    );
+}
+
+/// Authored fixed values and percent-of-HP rows are excluded, as with the level bonus.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_keeps_fixed_and_percent_rows() {
+    for (label, effect) in [
+        ("fixed", skills::tests::damage_effect(1, 100)),
+        ("percent", percent_damage_effect(10)),
+    ] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_penalty_data(ENDLESS_ARROWS));
+        client.drain();
+        damage(
+            &server,
+            &effect,
+            &args_with_skill((&player).into(), (&npc).into(), 1, ENDLESS_ARROWS),
+            None,
+        );
+        assert_eq!(
+            packet_with_skill(&mut client, player.obj_id, npc.obj_id, ENDLESS_ARROWS).0,
+            100,
+            "{label} row at 5 m must keep its authored value"
+        );
+    }
+}
+
+/// A buff tick knows the skill that applied the buff (`Buff.skill_id`): a DoT of a listed skill
+/// is scaled per tick, while a buff applied without a skill (or by an unlisted skill) is not.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_applies_to_listed_skill_dot_ticks() {
+    for (label, skill_id, expected) in [
+        ("listed skill", Some(ENDLESS_ARROWS), 80),
+        ("unlisted skill", Some(UNLISTED_SKILL), 100),
+        ("no skill", None, 100),
+    ] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+            let mut data = dot_data(level_damage_effect(DOT_EFFECT), 1_000, 1_000.0);
+            data.formulas
+                .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+            data.systems
+                .skills
+                .range_penalty_skills
+                .insert(ENDLESS_ARROWS);
+            data
+        });
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index = apply_tick_buff_from_skill(&server, &caster, &target, DOT_BUFF, skill_id);
+        client.drain();
+        assert_eq!(tick_damage(&server, &target, index), expected, "{label}");
+    }
+}
+
+/// The multiplier is captured when the DoT buff is applied (the tooltip describes the shot):
+/// applying at 20 m and moving into melee leaves the ticks at x1, while applying at 5 m and
+/// moving away keeps them at x0.8.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_dot_uses_the_application_distance() {
+    for (apply_distance, tick_distance, expected) in [(20.0, 2.0, 100), (5.0, 20.0, 80)] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture({
+            let mut data = dot_data(level_damage_effect(DOT_EFFECT), 1_000, 1_000.0);
+            data.formulas
+                .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+            data.systems
+                .skills
+                .range_penalty_skills
+                .insert(ENDLESS_ARROWS);
+            data
+        });
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + apply_distance, 100.0);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index =
+            apply_tick_buff_from_skill(&server, &caster, &target, DOT_BUFF, Some(ENDLESS_ARROWS));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + tick_distance, 100.0);
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied at {apply_distance} m, ticked at {tick_distance} m"
+        );
+    }
+}
+
+/// A DoT of the listed archery skill whose buff has the given `stack_rule`.
+fn range_dot_data(stack_rule: u32) -> GameData {
+    let mut data =
+        dot_data_with_stack_rule(level_damage_effect(DOT_EFFECT), 1_000, 1_000.0, stack_rule);
+    data.formulas
+        .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+    data.systems
+        .skills
+        .range_penalty_skills
+        .insert(ENDLESS_ARROWS);
+    data
+}
+
+/// The real archery DoT path: the skill's `BuffEffect` (`combat::buff_effect`) applies the DoT
+/// buff and captures the skill's close-range factor at the application distance. Applying a
+/// refreshing buff again overwrites the live one. Returns the buff index.
+fn apply_buff_effect_from_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &WorldObject,
+    buff_id: u32,
+    skill_id: u32,
+) -> u32 {
+    buff_effect(
+        server,
+        &BuffEffect {
+            id: 1,
+            buff_id: Some(buff_id),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        },
+        &args_with_skill(caster.clone(), target.clone(), 1, skill_id),
+    );
+    target
+        .with_base_unit(|b| {
+            b.buffs()
+                .effects
+                .iter()
+                .find(|e| e.template.id == buff_id && !e.is_ended())
+                .map(|e| e.index)
+        })
+        .expect("buff applied")
+}
+
+/// The archery DoTs (Toxic Shot's poison, Piercing Shot's bleed) reach their buff through the
+/// skill's `BuffEffect`, which captures the factor when the DoT is applied: a shot at 20 m that
+/// is followed by melee keeps ticking at x1, a shot at 5 m that is followed by a retreat keeps
+/// ticking at x0.8. (`damage_pipeline_range_penalty_dot_uses_the_application_distance` covers
+/// `buffs::apply_template`, whose callers are channeling and toggle buffs.)
+#[tokio::test]
+async fn damage_pipeline_range_penalty_buff_effect_captures_the_application_distance() {
+    for (apply_distance, tick_distance, expected) in [(20.0, 2.0, 100), (5.0, 20.0, 80)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_dot_data(0));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + apply_distance, 100.0);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, ENDLESS_ARROWS);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + tick_distance, 100.0);
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied at {apply_distance} m, ticked at {tick_distance} m"
+        );
+    }
+}
+
+/// The archery DoTs (buffs 196, 242, 514-517 and 2810) stack by refresh: a second shot refreshes
+/// the DoT, and its ticks use the second shot's factor, not the first one's, in both directions.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_refreshed_dot_uses_the_latest_shot() {
+    for (first, second, expected) in [(5.0, 20.0, 100), (20.0, 5.0, 80)] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(
+            range_dot_data(crate::data::skills::stack_rule::REFRESH),
+        );
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + first, 100.0);
+        let index =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, ENDLESS_ARROWS);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + second, 100.0);
+        let refreshed =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, ENDLESS_ARROWS);
+        assert_eq!(refreshed, index, "the second shot refreshed the same buff");
+        assert_eq!(
+            target.with_base_unit(|b| b.buffs().buff_count_by_id(DOT_BUFF)),
+            1,
+            "refreshed, not stacked"
+        );
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "shots at {first} m, then {second} m"
+        );
+    }
 }
