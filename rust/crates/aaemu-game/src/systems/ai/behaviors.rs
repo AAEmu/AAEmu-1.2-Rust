@@ -611,6 +611,38 @@ fn report_npc_without_ai(obj_id: u32) -> bool {
 /// victim; the candidate's own `aggro_link_help_dist` (or its sight check) still applies.
 const GUARD_HELP_SCAN_RADIUS: f32 = 50.0;
 
+/// The player-victim guard scan runs at most once per second per `(victim, abuser)` pair:
+/// DoT ticks and multi-hit skills would otherwise repeat the 50 m query for the same fight.
+const GUARD_HELP_SCAN_INTERVAL_MS: i64 = 1_000;
+
+/// Upper bound of the per-pair scan stamps; old entries are pruned at the cap.
+const GUARD_HELP_SCAN_MAX_ENTRIES: usize = 4_096;
+
+/// Rate limit of the player-victim guard scan (`server.systems.ai.guard_help_scans`): true when
+/// this `(victim, abuser)` pair may scan now, and records the scan otherwise.
+fn guard_help_scan_due(server: &GameServer, victim: u32, abuser: u32) -> bool {
+    let now = now_ms();
+    let mut scans = server
+        .systems
+        .ai
+        .guard_help_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if scans.len() >= GUARD_HELP_SCAN_MAX_ENTRIES {
+        scans.retain(|_, at| now - *at < GUARD_HELP_SCAN_INTERVAL_MS);
+        if scans.len() >= GUARD_HELP_SCAN_MAX_ENTRIES {
+            scans.clear();
+        }
+    }
+    match scans.get(&(victim, abuser)) {
+        Some(at) if now - *at < GUARD_HELP_SCAN_INTERVAL_MS => false,
+        _ => {
+            scans.insert((victim, abuser), now);
+            true
+        }
+    }
+}
+
 /// The `aggro_link_special_rule_id` switch of the 10.x help scan (Z:823790-823816) against the
 /// victim: 1 = same faction, 2 = friendly, 3 = neutral, 4 = everyone.
 fn guard_rule_helps(
@@ -676,7 +708,13 @@ fn guard_may_help(
             return false;
         }
     }
-    if let (Some(v), Some(a)) = (victim.as_player(), abuser.as_player()) {
+    // A duel is not helped, including when the attacker or the victim is the duellist's pet or
+    // slave (the 10.x check compares the units' relations, and `owner_character` resolves a
+    // mate / slave to its owner).
+    if let (Some(v), Some(a)) = (
+        crate::systems::skills::relation::owner_character(server, victim),
+        crate::systems::skills::relation::owner_character(server, abuser),
+    ) {
         if server
             .systems
             .social
@@ -692,7 +730,8 @@ fn guard_may_help(
 /// 10.x aggro-link guard help for a victim without an NPC AI (player, mate, slave): the damage
 /// path calls it when a unit is attacked, so special guards within
 /// [`GUARD_HELP_SCAN_RADIUS`] of the victim join the fight against `abuser` (Z:823528-823950).
-/// NPC victims run the same guard branch through their own AI's [`update_aggro_help`].
+/// NPC victims keep the C# `UpdateAggroHelp` path (`update_aggro_help`) unchanged, so guards
+/// still answer a fellow guard / group NPC attacked by a monster.
 pub fn update_guard_help(server: &GameServer, victim: &WorldObject, abuser: &WorldObject) {
     if victim.same(abuser) || !abuser.is_unit() {
         return;
@@ -708,6 +747,23 @@ pub fn update_guard_help(server: &GameServer, victim: &WorldObject, abuser: &Wor
         .get(victim_faction)
         .is_some_and(|f| f.guard_help)
     {
+        return;
+    }
+    // An NPC attacker can only pull guards whose template does not carry the 0x40
+    // `aggro_link_special_ignore_npc_attacker` flag; when no loaded guard template lacks it,
+    // the scan is pointless (cheap data-level check before the 50 m query).
+    if abuser.as_npc().is_some()
+        && !server
+            .game_data
+            .systems
+            .npcs
+            .npc
+            .special_guards_allow_npc_attacker
+    {
+        return;
+    }
+    // DoT ticks and repeated hits of the same fight reuse the first scan for one second.
+    if !guard_help_scan_due(server, victim.obj_id(), abuser.obj_id()) {
         return;
     }
     let candidates: Vec<WorldObject> = npc::around(server, victim, GUARD_HELP_SCAN_RADIUS, false)
@@ -827,21 +883,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         } else {
             ot.aggro_link_help_dist
         };
-        let distance = npc::distance_to(c.server, &other, &c.obj, false);
-        // 10.x candidate range gate (Z:823780-823790): with `aggro_link_sight_check` the sight
-        // check replaces the per-template distance; without it the distance applies. A special
-        // guard is additionally bounded by the 50 m scan around the victim (Z:823753).
-        let in_range = if ot.aggro_link_special_guard {
-            distance <= GUARD_HELP_SCAN_RADIUS
-                && (if ot.aggro_link_sight_check {
-                    npc::can_see_target(c.server, &other, &c.obj)
-                } else {
-                    distance <= help_dist
-                })
-        } else {
-            distance <= help_dist
-        };
-        if !in_range {
+        if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
             continue;
         }
         // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
@@ -877,17 +919,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // the helper's own sight check still applies, as in the 10.x candidate scan.
         let group_link_helps = group_link
             && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
-        // 10.x guard branch (Z:823880-823909): a `aggro_link_special_guard` additionally needs
-        // the victim's faction `guard_help` and the attacker attackable; a failing guard check
-        // overrides the generic acceptance (`v45 = 0`, Z:823870-823910). This reachable path is
-        // the NPC victim's; player victims use [`update_guard_help`].
-        let guard_helps = ot.aggro_link_special_guard
-            && guard_rule_helps(c.server, &other, &c.obj, faction, my_faction, ot)
-            && guard_may_help(c.server, &c.obj, abuser, &other, ot, my_faction);
-        if ot.aggro_link_special_guard && !guard_helps {
-            continue;
-        }
-        if !template_helps && !link_helps && !group_link_helps && !guard_helps {
+        if !template_helps && !link_helps && !group_link_helps {
             continue;
         }
         // npc.Ai.Owner.AddUnitAggro(...) + npc.Ai.OnAggroTargetChanged(): an NPC without an
@@ -3856,6 +3888,9 @@ mod tests {
                 ..Default::default()
             },
         );
+        // The shipped data has special guards without the 0x40 flag (38 of 107), so an NPC
+        // attacker can pull some of them; keep the cheap data-level skip out of these tests.
+        data.systems.npcs.npc.special_guards_allow_npc_attacker = true;
         data.systems.npcs.npc.templates.insert(
             MONSTER_TEMPLATE,
             crate::systems::npcs::npc::data::NpcTemplate {
@@ -4040,10 +4075,10 @@ mod tests {
         );
     }
 
-    /// The NPC victim's own AI path applies the same guard gate: a monster attacking a guarded
-    /// NPC does not pull the ignore-npc-attacker guard through `update_aggro_help` either.
+    /// NPC victims keep the existing C# help path: a guard attacked by a monster still pulls a
+    /// nearby fellow guard (the player-victim guard gate must not override it).
     #[tokio::test]
-    async fn an_ignoring_guard_does_not_help_an_npc_victim_against_a_monster() {
+    async fn a_guard_attacked_by_a_monster_pulls_a_nearby_fellow_guard() {
         use super::super::framework::{AiKind, NpcAi};
         use crate::models::npc::Npc;
         use crate::test_support::{test_server_with, TestClient};
@@ -4054,17 +4089,17 @@ mod tests {
         crate::systems::skills::bind(&server);
         let _client = TestClient::new(&server, 1, 1001);
 
-        let mut victim = Npc::new(PLAIN_TEMPLATE);
+        let mut victim = Npc::new(GUARD_TEMPLATE);
         victim.unit.transform.set_xyz(100.0, 100.0, 100.0);
-        victim.unit.faction_id = NATION_FACTION;
+        victim.unit.faction_id = GUARD_FACTION;
         let victim = Entity::new(0x406, victim);
         server
             .world
             .world(0)
             .unwrap()
             .spawn(&victim, &server.view_ctx());
-        let guard = spawn_link_npc(&server, 0x407, GUARD_TEMPLATE, 103.0);
-        guard.data().unit.faction_id = GUARD_FACTION;
+        let fellow = spawn_link_npc(&server, 0x407, GUARD_TEMPLATE, 103.0);
+        fellow.data().unit.faction_id = GUARD_FACTION;
         let mut mob = Npc::new(MONSTER_TEMPLATE);
         mob.unit.transform.set_xyz(101.0, 100.0, 100.0);
         mob.unit.faction_id = MONSTER_FACTION;
@@ -4086,8 +4121,77 @@ mod tests {
         update_aggro_help(&mut context, &abuser, 200.0);
 
         assert!(
-            !has_aggro_on(&guard, mob.obj_id),
-            "the ignore-npc-attacker guard must not answer a monster's attack on an NPC"
+            has_aggro_on(&fellow, mob.obj_id),
+            "a fellow guard must still answer a guard attacked by a monster"
+        );
+    }
+
+    /// The player-victim scan is rate-limited per `(victim, abuser)` pair: a second hit within
+    /// the interval does not rescan, an expired stamp lets the next hit pick up a newly arrived
+    /// guard.
+    #[tokio::test]
+    async fn guard_help_scans_are_rate_limited_per_pair() {
+        let (server, victim, attacker, guard) = guard_fixture(true);
+        let abuser = WorldObject::from(&attacker);
+        let target = WorldObject::from(&victim);
+        apply_hit(&server, &abuser, &target);
+        assert!(has_aggro_on(&guard, attacker.obj_id), "first scan helps");
+
+        // A guard spawned after the first scan is not reached by an immediate second hit.
+        let late = spawn_link_npc(&server, 0x409, GUARD_TEMPLATE, 104.0);
+        late.data().unit.faction_id = GUARD_FACTION;
+        apply_hit(&server, &abuser, &target);
+        assert!(
+            !has_aggro_on(&late, attacker.obj_id),
+            "a second hit within one second must not rescan"
+        );
+
+        // Expire the pair's stamp (what one second of fighting does) and hit again.
+        server.systems.ai.guard_help_scans.lock().unwrap().insert(
+            (victim.obj_id, attacker.obj_id),
+            crate::world::now_ms() - GUARD_HELP_SCAN_INTERVAL_MS,
+        );
+        apply_hit(&server, &abuser, &target);
+        assert!(
+            has_aggro_on(&late, attacker.obj_id),
+            "an expired stamp must allow the next scan to help the late guard"
+        );
+    }
+
+    /// The duel exception resolves pets / slaves to their owner: a duellist's mate attacking
+    /// the other duellist must not pull the guard.
+    #[tokio::test]
+    async fn a_duellists_pet_attacker_does_not_pull_the_guard() {
+        use crate::models::mate::Mate;
+        use crate::world::Entity;
+
+        let (server, victim, attacker, guard) = guard_fixture(true);
+        server
+            .systems
+            .social
+            .duels
+            .duel_request(&server, &attacker, victim.character_id);
+        let mut mate = Mate::new(0x409, 1);
+        mate.owner_obj_id = attacker.obj_id;
+        mate.unit.faction_id = PIRATE_FACTION;
+        mate.unit.hp = 1000;
+        mate.unit.max_hp = 1000;
+        mate.unit.transform.set_xyz(102.0, 100.0, 100.0);
+        let mate = Entity::new(0x40a, mate);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&mate, &server.view_ctx());
+
+        apply_hit(
+            &server,
+            &WorldObject::from(&mate),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            !has_aggro_on(&guard, mate.obj_id),
+            "the duel pair's pet attacker must not pull the guard"
         );
     }
 

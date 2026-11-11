@@ -105,6 +105,9 @@ pub struct System {
     paths_folder: Mutex<Option<PathBuf>>,
     /// Route file names already reported as missing (see [`System::first_missing_path`]).
     missing_paths: Mutex<std::collections::HashSet<String>>,
+    /// Last player-victim guard-help scan per `(victim, abuser)` object-id pair, unix ms
+    /// (see `behaviors::update_guard_help`).
+    pub guard_help_scans: Mutex<std::collections::HashMap<(u32, u32), i64>>,
 }
 
 impl System {

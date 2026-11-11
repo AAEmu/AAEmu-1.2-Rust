@@ -730,8 +730,9 @@ pub(super) fn damage_with_aoe(
     // 10.x aggro-link guard help (Z:823528-823950) runs on the victim's hostile-aggro event.
     // An NPC victim reaches it from its own AI (`update_aggro_help`); players, mates and slaves
     // have no victim AI, so the damage applies it here (the caller-side gate re-checks
-    // `system_factions.guard_help` before scanning around the victim).
-    if trg.as_npc().is_none() {
+    // `system_factions.guard_help` before scanning around the victim). Misses, immunity and
+    // other no-damage paths returned above, and a zero hit never pulls a guard.
+    if trg.as_npc().is_none() && value > 0 {
         crate::systems::ai::behaviors::update_guard_help(server, &trg, &caster);
     }
     buffs::fire_unit_event(server, caster.obj_id(), BuffEventTriggerKind::Attack, 0);
