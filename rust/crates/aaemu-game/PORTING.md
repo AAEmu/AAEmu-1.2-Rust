@@ -7931,34 +7931,89 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   customizing styles (`slave_customizings` is client-loaded; one customizable slave), radar
   shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`).
 * **Gimmick collision skills are server-detected contact hits (2026-11-10).** The owner
-  decision of 2026-11-06 (leave them) is reversed: in the 50 ms gimmick tick a gimmick whose
-  template has `collision_skill_id` and whose speed reaches `collision_min_speed` fires that
-  skill (`systems/npcs/gimmick/manager.rs::collision_tick`). The 1.2 client has no gimmick
-  packet (only SC 0x13c-0x141), so the server detects the touch, as retail's zone process did
-  (`ZWGimmickCollided`). One touch fires one skill, not one per touched unit: the collision
-  skills are area skills (18717 r20, 14649 r30, ...), so a tick casts once (from the first
-  newly touched unit; position-targeted skills center on the gimmick) and latches every unit
-  the firing covers (the skill's area radius around the gimmick plus every touched unit) so a
-  unit already hit by a firing never triggers another. A `disappear_by_collision` gimmick fires
-  once in total and despawns (22 of the 30 contact templates; the other 8 keep rolling). The
-  `gimmicks` table has no size / radius column and a gimmick has no actor `model_id`, so the
-  contact radius is the documented 1.5 m constant plus the touched unit's actor radius.
+  decision of 2026-11-06 (leave them) is reversed: stated by the PR author; not verifiable from
+  the repo. In the 50 ms gimmick tick a gimmick whose template has `collision_skill_id` and
+  whose own speed reaches `collision_min_speed` fires that skill
+  (`systems/npcs/gimmick/manager.rs::collision_tick`). The 1.2 client has no gimmick packet
+  (only SC 0x13c-0x141), so the server detects the touch. Retail's zone process has a
+  `ZWGimmickCollided` packet (op 42): the evidence is its RTTI name in the 10.x dev DLL plus
+  `rust/docs/physics/ZONE-PHYSICS-USAGE.md:264-266` ("relVel >= per-gimmick minimum, 3000 ms
+  immunity"), not a decompile.
+  **Inferred (no 1.2 server evidence):** that retail cast the collision skill from the gimmick;
+  the contact radius, the 1.5 m constant plus the touched unit's actor radius (the `gimmicks`
+  table has no size / radius column and a gimmick has no actor `model_id`), which also ignores
+  the authored `scale` (0.3-20: gimmick 5 spawns at scale 15, gimmicks 6 and 7 at 20); the gate
+  on the gimmick's *own* speed (retail's rule is on a relative velocity, so the static mines 7,
+  36 and 77, `collision_min_speed` 1 / 5 / 5, never fire on touch); and the permanent per-unit
+  latch below (retail: a 3000 ms immunity).
+  One touch fires one skill, not one per touched unit: the collision skills are area skills
+  (18717 r20, 14649 r30, ...), so a tick casts once (from the first newly touched unit;
+  position-targeted skills center on the gimmick) and latches every unit the firing covers (the
+  skill's area radius around the gimmick plus every touched unit) so a unit already hit by a
+  firing never triggers another. A `disappear_by_collision` gimmick fires once in total and
+  despawns (22 of the 30 contact templates; the other 8 keep rolling). Only an accepted cast
+  latches and despawns: a refused cast (no resources, a target rule) latches nothing and removes
+  nothing, and the next unlatched contact or tick tries again. A gimmick whose collision skill
+  row does not exist is skipped (r208022 has no skill 14768, 18424, 23476 or 24080, which
+  gimmicks 36 and 77, 51, 75 and 78 name), and a gimmick with no player in its neighbourhood is
+  not scanned. The latch holds at most 256 units and a touch beyond it is ignored.
+  **Inferred (no 1.2 server evidence):** the 256 cap is a Rust-only bound.
   `disappear_by_collision` and `collision_unit_only` are read from their shipped `'t'`/`'f'`
   text form (`GetBoolean(fromString: true)`); the C# `GetBoolean` read both as false and never
   used them. Terrain contact is not simulated (the motion has no gravity / ground), so only
   unit touches trigger the skill or despawn and `collision_unit_only` changes nothing.
-  `SpawnGimmickEffect` velocity / angular velocity are authored in the caster's local frame
-  (forward +Y, up +Z) and are rotated by the caster's yaw at spawn; all nonzero shipped rows
-  use coordinate type 2. Authored motion stops after 30 s or 200 m and an effect/doodad gimmick
-  that leaves the world grid despawns; a stationary gimmick sends no movement packets and a
-  spin-only one is limited to 5 Hz (the client queues and interpolates `SCGimmickMovement`).
-  The gimmick's faction is copied from the casting unit at spawn (the doodad spawn path keeps
-  its authored `faction_id`), so friendly/hostile collision effects land on the right side.
+  **Owner.** A gimmick-cast hit counts as the character that spawned the gimmick:
+  `skills::relation::owner_character` resolves a gimmick through `spawner_unit_id` like a mate or
+  slave (a doodad, NPC or missing spawner has no owner; the chain is bounded to four links
+  because object ids are reused), so the Peace lockdown, the no-PvP instance rule, the siege
+  hostility rule and crime evidence apply to a thrown bomb, and `credited_player` gives the
+  thrower the tagging, kill experience, loot, quest events and PvP kill credit of a hit or kill
+  by the gimmick (a mate / slave keeps its own credit rules). The gimmick stays the cast source
+  (skill 13210 needs a dead source) and the origin of every packet, and a gimmick caster has no
+  skill cooldown or global cooldown (a rolling gimmick hits every unit it touches).
+  **Inferred (no 1.2 server evidence):** this attribution (the 1.2 C# cast the delayed skill
+  from the spawner unit). Not covered: the home-zone protection reads the casting *player*
+  itself, so it still skips a gimmick hit; the PvP assist history, weapon durability and the NPC
+  AI's reaction to a gimmick hit still name the gimmick.
+  **Level and damage.** A gimmick has no level in the data and is created at level 1 (the effect
+  rows start at level 1, so a level-0 gimmick skipped every effect).
+  **Inferred (no 1.2 server evidence):** level 1. A gimmick has no stats either (`stats()`
+  evaluates it through `base_unit_stat`, which returns 0 for `LevelDps`), so the six
+  level-scaled damage rows of the collision skills (`use_level_damage`, not `use_fixed_damage`:
+  518, 542, 743, 858, 1334, 1686 of skills 11931, 12006, 12518, 12944, 14102, 14873) and the
+  timer row 756 (skill 12572) evaluate to 0 and land the 1 HP minimum; only fixed-damage rows
+  deal their authored value.
+  **Inferred (no 1.2 server evidence):** retail's value for those rows is unknown. The test
+  `a_level_scaled_damage_row_lands_the_one_hp_minimum_from_a_gimmick` pins today's behaviour.
+  **Motion.** The C# `GimmickSpawner` constructor stored `Velocity*` / `AngVel*` of a
+  `SpawnGimmickEffect` but never applied them, so effect-spawned gimmicks never moved. They are
+  applied now at spawn, only for coordinate type 2: all 65 nonzero linear-velocity rows use it,
+  but 8 of the 32 nonzero angular-velocity rows (ids 105, 140, 141, 142, 159, 181, 182, 183:
+  gimmicks 39, 50, 57, 76) use coordinate 0 or 1 and are ignored.
+  **Inferred (no 1.2 server evidence):** the frame. The rows look authored in the caster's local
+  frame (forward +Y, up +Z) and are rotated by the caster's yaw, while the offset of the same
+  coordinate type 2 is the C# `AddDistance` translation on the world axes (not rotated), so a
+  caster that does not face +Y sees the gimmick appear on the world axes and travel along its
+  facing. The linear velocity is applied only to a kinematic gimmick (`mass <= 0`): 19 of the 30
+  contact gimmicks are dynamic (`mass > 0`, gravity 9.8: 6, 8, 11, 15, 20, 21, 30, 31, 38, 40,
+  42, 45, 46, 50, 52, 55, 64, 66, 76, among them the siege and event shells 40, 45, 46, 64, 66)
+  and would fly a straight line until the 200 m cap and explode in mid air, because there is no
+  gravity or ground model. They stay where they spawn (their angular velocity still applies), so
+  all 19, which have a `collision_min_speed` above 0, never fire on touch until such a model
+  exists. Authored motion stops after 30 s or 200 m and an effect / doodad gimmick that leaves
+  the world grid despawns; a stationary gimmick sends no movement packets and a spin-only one is
+  limited to 5 Hz.
+  **Inferred (no 1.2 server evidence):** the 30 s / 200 m bounds are Rust-only, and so is the
+  5 Hz rate with the assumption that the client queues and interpolates `SCGimmickMovement`
+  (nothing of the client was checked; the repo's physics doc says retail synced gimmick state
+  every `sg_sync_period` 100 ms, `ZONE-PHYSICS-USAGE.md:264`).
+  **Faction.** The gimmick's faction is copied from the casting unit at spawn (the doodad spawn
+  path keeps its authored `faction_id`), so friendly / hostile collision effects land on the
+  right side.
+  **Inferred (no 1.2 server evidence):** the faction copy.
   Delayed skills (`skill_id` / `skill_delay`) and `Gimmick.StopMovement` cast from the gimmick
   at its current position with the gimmick as source; the C# used the spawner unit, which
-  refused moved gimmicks by the range check and never fired for doodad-spawned ones. The C#
-  `GimmickSpawner` constructor stored `Velocity*` / `AngVel*` but never applied them, so
-  effect-spawned gimmicks never moved.
+  refused moved gimmicks by the range check and never fired for doodad-spawned ones.
 * **`conflict_zones.peace_protected_faction_id` / `peace_tower_def_id` are placeholders.**
   All 16 rows carry faction id 5 and a NULL `peace_tower_def_id`; faction 5 does not exist in
   `system_factions` (ids 1, 2, 3 and 101-179) and neither column is ever read
