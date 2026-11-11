@@ -866,7 +866,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband; the direct `CSLeaveTeam` / `CSKickTeamMember` / `CSDismissTeam` packets run the same actions), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
+| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband; the direct `CSLeaveTeam` / `CSKickTeamMember` / `CSDismissTeam` packets run the same actions), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / UpdateAtLogin / UpdatePosition, the party removal of `Character.SetFaction` (`MemberRemoveFromTeam(p, p, Leave)`: `member_remove_for_faction_change`), 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), `GetNextLootWinner`. Not ported (nothing calls them; loot uses `GetNextLootWinner`): the general `MemberRemoveFromTeam(unit, source, type)` and `GetNextEligibleLooter`. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Guild rename (GM-granted right, see "Guild rename" below), the sponsor id and the report / leader-only checks: see "Guild functions (2026-11-05)". |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (a non-member target is looked up in `characters`; a family member is kicked without that lookup), title, steward, login / logout, disband, save, offline leave for character deletion. The C# family actions returned silently on every failure; they now send the 1.2 `FAMILY_*` `ErrorMessageType` (mapping inferred from the `ui_texts` 2321-2335 / 2341 / 2374 / 4141 strings, since no retail server reply was captured): invite no target / offline / self / target already in a family / not steward / full / title / blocked word; reply: accept with a missing or expired invitation or an inviter that went offline (`FAMILY_NO_INVITOR`, "That player has disconnected."), decline (`FAMILY_REJECT` to the inviter), already in a family, inviter no longer steward (`FAMILY_NOT_OWNER` to the inviter), full, family creation failed (`FAMILY_CREATE`, "Failed to create a family."); leave, kick (self, no family, not steward, unknown target) and title / steward changes (no family, not steward, unknown or foreign target, steward's own title, already steward, title rule). Member cap `Social:FamilyMaxMembers`, default 8 and enforced on invite **and** accept under the family lock: the 1.2 compact has no family tables and no `content_configs` keys, and the 1.2 `Family.Write` only carries `// TODO max length 8`; 8 is also the 10.x `family_max_count` base, and the 1.2 client's family reader (`x2game.dll` RVA 0x8b85b0) clamps the member count it reads to 8, so the configured value is clamped to 2..=8. Titles follow the client's `VNT_FAMILY_TITLE` name policy, `NamePolicy` type 3 (`x2game.dll` registers `VNT_CHAR` 0, `VNT_SUMMONS` 1, `VNT_FACTION` 2, `VNT_FAMILY_TITLE` 3, `VNT_CHAT_TAB` 4, `VNT_PORTAL` 5; the `xlcommon.dll` `NamePolicyInfo` table at RVA 0x5db78 has 24-byte rows indexed by type + 6 * locale, and the type 3 row is 1..12 for ko with only the mixed-case flag, no space and no non-letter flag): 1 to 12 letters, no spaces, digits or punctuation (`FAMILY_TITLE`), as the retail `ui_texts` 2324 says ("Enter 1 to 12 characters for the title (excluding special characters)."). The length counts UTF-16 units, and a character outside the BMP is refused too, because `family_members.title` is `varchar(45)` utf8mb3 and one such character would make the `REPLACE INTO` fail and roll back the whole family's save. Type 5, the permissive row (spaces, punctuation), is `VNT_PORTAL`. The word list is `blocked_texts.check_name` (`FAMILY_TITLE_BAD`, a server rule). **Inferred (no 1.2 server evidence):** a decline with no pending invitation gets no reply, and after the inviter lost the stewardship only the inviter is told (no `FAMILY_*` text fits the invited side). The invite title is validated and stored with the invitation; the reply uses it, and a differing reply title is only logged at debug. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`, and the client's failure feedback for every refused add / remove / block / unblock (WP-SL2, see the deviation). The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
@@ -6922,6 +6922,41 @@ is the closest text.
   a party) and its party chat channel. `AskRiskyTeam` made the *acting unit* leave the channels,
   so the kicker lost its party chat while the kicked member kept hearing it; the member that
   leaves / is kicked leaves them now (before it is removed, the slot names its party).
+- **Team manager lock discipline (PR #104, 2026-11-11).** A party accept (team mutex, then the
+  inviter's character lock) and the achievement refresh (character lock, then the team mutex)
+  froze the server, so `TeamManager.state` is a leaf lock (`CONTRIBUTING-PORT.md`, rule 5). The C#
+  ran everything under one lock; here `TeamMember.online` is the manager's copy of
+  `Character.IsOnline` (kept by `add_member`, `UpdateAtLogin`, `SetOffline`, like
+  `ExpeditionMember.is_online`) so it decides and broadcasts without a character lock, and the
+  packet bodies that read a `Character`, chat joins / leaves, `InParty` and the dungeon
+  `OnTeamJoin` / `OnTeamLeave` run after the guard (same order inside one call). A `Team` copy
+  carries the online flags of the moment it was taken: the dungeon's retained team after a
+  disband counts the flags of its last refresh, where the C# object reference saw live ones
+  (`leave_dungeon_tick` destroys an orphaned dungeon first, so only the all-offline destroy after
+  a disband can notice). Operations are atomic but their effects are not ordered against a second
+  operation on the same character, so each deferred chat join and `InParty = true` is verified
+  with `TeamManager::is_member_now` after it was applied and taken back for a character that left
+  meanwhile (a removal queues its own leave after its state change: either the verify sees it or
+  the leave runs after the join). A party chat join is verified against the member's party
+  number too (`party_number_now`: a member moved to another party meanwhile does not keep the
+  stale join), a chat leave is verified the same way (a member invited back before the kick's
+  cleanup ran keeps the memberships of its newer join; a `CSMoveTeamMember` that did not move
+  anybody no longer drops its two characters from their party chat), and a leave's
+  `InParty = false` is settled to the character's current membership (`settle_in_party`,
+  `is_in_any_team`), so the cleanup of an older team does not clear the flag of a team that
+  accepted the character first. **Residual:** the `SCJoinedTeam` of a deferred join is a
+  snapshot, so the broadcast of a concurrent member change can reach the new member before it (a
+  ghost / missing member until relog), and the dungeon `OnTeamJoin` event is not taken back.
+  `ChatManager::clean_up_channels` (run after a disband) can also remove a still-empty party /
+  raid channel between a joiner's channel lookup and its `join`, two calls the team mutex used
+  to serialise: the joiner then sits in an orphan channel until its next login (a tiny window;
+  a `strong_count` check in the clean-up would close it, left alone because the chat manager is
+  shared). `CSMoveTeamMember` broadcasts `SCTeamMemberMoved` before the two members leave their old and
+  join their new party chat (the C# left, moved, broadcast, then joined), and only members are
+  joined (a client-named non-member used to be joined to the chat of party 1). `family.rs` has
+  the opposite shape (its mutex is held while it writes member characters); the review of PR #104
+  found no path that takes the family mutex under a character lock, so it is dormant: do not
+  copy it.
 - **One team at a time.** Accepting an invitation while in a team is refused with `TEAM_JOIN_ALONE`
   (the invitee) and `TEAM_INVITEE_IN_TEAM` / `TEAM_INVITEE_MEMBER` (the inviter); the invitation
   itself is refused up front for such targets. The team of an invitation is the inviter's own

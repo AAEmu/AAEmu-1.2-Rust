@@ -44,6 +44,7 @@ use super::packets::misc::{
 };
 use crate::models::character::Character;
 use crate::server::GameServer;
+use crate::systems::social::team::Team;
 use crate::world::PlayerRef;
 
 /// Achievements per `SCAchievementsPacket`. The 1.2 client does not accept a longer list in one
@@ -227,12 +228,19 @@ impl<'a> AchievementContent<'a> {
         player: &PlayerRef,
         now: DateTime<Utc>,
     ) -> InitialSnapshot {
+        // Snapshot the team before either lock: `back_credit_values` must not call into the
+        // TeamManager while the character lock is held.
+        let team = server
+            .systems
+            .social
+            .teams
+            .active_team_by_unit(player.character_id);
         let (records, refresh, touched) = {
             let _economy = server.systems.economy.ops_lock();
             let mut c = player.data();
 
             let mut moved = BTreeMap::new();
-            for (record_id, value) in back_credit_values(server, &c, self.data) {
+            for (record_id, value) in back_credit_values(server, &c, team.as_ref(), self.data) {
                 if c.achievement_state.report_record_value(record_id, value) {
                     moved.insert(record_id, c.achievement_state.record_value(record_id));
                 }
@@ -353,19 +361,15 @@ fn send_list_chunks(player: &PlayerRef, list: &[AchievementInfo]) -> usize {
 pub fn back_credit_values(
     server: &GameServer,
     character: &Character,
+    team: Option<&Team>,
     data: &AchievementGameData,
 ) -> Vec<(u32, i64)> {
     // The party / raid distinction comes from the team itself: a raid converted from a party
-    // keeps `in_party`, so the flag alone would call a raider a party member.
-    let team = server
-        .systems
-        .social
-        .teams
-        .active_team_by_unit(character.id);
-    let in_party = team
-        .as_ref()
-        .map_or(character.in_party, |team| team.is_party);
-    let in_raid = team.as_ref().is_some_and(|team| !team.is_party);
+    // keeps `in_party`, so the flag alone would call a raider a party member. The caller takes
+    // the team snapshot **before** it locks the character: the TeamManager lock must never be
+    // taken under a character lock (that order deadlocked the server, see team.rs locking).
+    let in_party = team.map_or(character.in_party, |team| team.is_party);
+    let in_raid = team.is_some_and(|team| !team.is_party);
 
     // The completed bitset is enumerated once: each set bit is one unique quest id, so a
     // repeatable quest counts once however often it was run (the table has no per-run count, and

@@ -161,6 +161,13 @@ world.delete(&npc);                                     // GameObject.Delete (Hi
    lookups) while holding an object's data lock. `let hp = npc.data().unit.hp;` then act.
 4. Packets that need the object's state are built while holding its lock and sent after
    (sending never blocks).
+5. A manager's state mutex (`TeamManager`, ...) is a **leaf**: while its guard is held, never take
+   an object's data lock and never call another manager; collect the character work (packet
+   bodies, chat joins, `InParty`, instance events) and run it after the guard is dropped. Calling
+   a manager's read APIs while holding a data lock is fine, that is the order the leaf rule makes
+   safe. (Rules 1-4 alone let a party accept, which held the team mutex and waited for a
+   character lock, and the achievement refresh, which held the character lock and waited for the
+   team mutex, freeze the server together; see the `team.rs` header.)
 
 ### Buffs, effects, stats (skills subsystem foundation)
 
