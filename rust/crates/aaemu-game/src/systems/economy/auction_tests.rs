@@ -76,7 +76,7 @@ fn flaky_world() -> (World, Arc<FlakyMailLog>) {
 }
 
 fn auction_world() -> (World, Arc<MailLog>) {
-    let mut d = test_data();
+    let mut d = crate::systems::economy::tests::with_service_doodad_funcs(test_data());
     d.items.templates.insert(
         SWORD,
         ItemTemplate {
@@ -2000,6 +2000,40 @@ async fn hud_auction_button_allows_post_search_and_bid_without_an_auctioneer() {
     let ops: Vec<u16> = w.b.drain().iter().map(|f| f.0).collect();
     assert!(ops.contains(&sc::SCAuctionBidPacket), "{ops:?}");
     assert_eq!(money(&w.pb), 100_000 - 10);
+}
+
+/// The Fellowship Plaza's "Auctioneer/Warehouse" doodad opens the auction house too: with the
+/// HUD auction button off and the auctioneer NPC out of range, a listing is refused until the
+/// player stands at the doodad.
+#[tokio::test]
+async fn auction_works_at_an_auction_doodad() {
+    use crate::systems::economy::tests::{spawn_service_doodad, SERVICE_DOODAD_GROUP};
+    let (mut w, _log) = auction_world();
+    w.server
+        .systems
+        .services
+        .set_feature(&w.server, Feature::HudAuctionButton as u8, false);
+    let pa = w.pa.clone();
+    let item_id = give(&w, &pa, slot_type::INVENTORY, POTION, 1, 0);
+    let world = w.server.world.world(0).unwrap();
+    world
+        .npc(0x200)
+        .unwrap()
+        .data()
+        .unit
+        .transform
+        .set_xyz(300.0, 100.0, 100.0);
+    w.a.drain();
+    run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
+    assert!(w.server.systems.economy.auction.all_lots().is_empty());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+
+    spawn_service_doodad(&mut w, 0x501, SERVICE_DOODAD_GROUP, 103.0);
+    pa.data().unit.current_interaction_object = 0x501;
+    run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
+    assert_eq!(w.server.systems.economy.auction.all_lots().len(), 1);
 }
 
 /// An already expired item cannot be listed: no container timer visits the auction container,

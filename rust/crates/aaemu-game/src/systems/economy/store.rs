@@ -227,6 +227,95 @@ pub fn near_service_npc(
         && world_distance(&world, &WorldObject::from(player), &WorldObject::from(&npc)) <= range
 }
 
+/// The window services an NPC flag or a doodad UI func opens, for [`near_service`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Service {
+    /// The warehouse: `npcs.banker`, `DoodadFuncBankUi` ("Use Warehouse", 13238).
+    Bank,
+    /// The auction house: `npcs.auctioneer`, `DoodadFuncAuctionUi` ("Use Auctioneer", 12083).
+    Auction,
+}
+
+impl Service {
+    fn offered_by_npc(self, info: &super::hooks::NpcShopInfo) -> bool {
+        match self {
+            Self::Bank => info.banker,
+            Self::Auction => info.auctioneer,
+        }
+    }
+
+    /// The `doodad_funcs.actual_func_type` that opens the service. Matched by name: the C#
+    /// loads no template rows for these funcs (`doodad_func_bank_uis` / `_auction_uis` hold
+    /// only ids), so `func_template` finds none.
+    fn func_type(self) -> &'static str {
+        match self {
+            Self::Bank => "DoodadFuncBankUi",
+            Self::Auction => "DoodadFuncAuctionUi",
+        }
+    }
+}
+
+/// Whether `player` may use `service` here: `obj_id` (the interaction object or a packet's
+/// NPC id) is a banker / auctioneer NPC within [`SERVICE_RANGE`], or a doodad that opens the
+/// service is within [`SERVICE_RANGE`] of the player. The 1.2 data has two such doodads, each
+/// with both funcs: the Fellowship Plaza's built-in "Auctioneer/Warehouse" (7983, housing 278)
+/// and doodad 6669 placed by item 28026. The client opens their windows itself after the
+/// "Use Warehouse" / "Use Auctioneer" cast, so the bank and auction requests that follow name
+/// no NPC (the doodad is no unit, so `CSInteractNPC` cannot make it the interaction object):
+/// a service doodad around the player is accepted instead.
+pub fn near_service(
+    server: &GameServer,
+    player: &PlayerRef,
+    obj_id: u32,
+    service: Service,
+) -> bool {
+    if near_service_npc(server, player, obj_id, SERVICE_RANGE, |i| {
+        service.offered_by_npc(i)
+    }) {
+        return true;
+    }
+    let Some(world) = parent_world(server, player) else {
+        return false;
+    };
+    let me = WorldObject::from(player);
+    if let Some(d) = world.doodad(obj_id) {
+        if service_doodad_in_range(server, &world, &me, &d, service) {
+            return true;
+        }
+    }
+    world
+        .around(&me, |o| o.as_doodad().cloned())
+        .iter()
+        .any(|d| service_doodad_in_range(server, &world, &me, d, service))
+}
+
+/// `doodad`'s current func group opens `service` and its edge (`placement::radius`) is within
+/// [`SERVICE_RANGE`] of `me`.
+fn service_doodad_in_range(
+    server: &GameServer,
+    world: &WorldInstance,
+    me: &WorldObject,
+    doodad: &DoodadRef,
+    service: Service,
+) -> bool {
+    let data = &server.game_data.systems.npcs.doodad;
+    let (group, template_id) = {
+        let d = doodad.data();
+        (d.func_group_id, d.template_id)
+    };
+    let opens = data
+        .funcs_for_group(group)
+        .iter()
+        .any(|f| f.func_type == service.func_type());
+    if !opens {
+        return false;
+    }
+    let radius = data
+        .template(template_id)
+        .map_or(0.0, crate::systems::npcs::doodad::placement::radius);
+    world_distance(world, me, &WorldObject::from(doodad)) - radius <= SERVICE_RANGE
+}
+
 /// `npc.Template.Merchant` / `MerchantPackId` through the NPC hooks (unknown = not a merchant).
 fn shop_info(server: &GameServer, npc: &NpcRef) -> super::hooks::NpcShopInfo {
     server

@@ -1696,3 +1696,92 @@ async fn warehouse_item_moves_need_a_banker_in_range() {
     run::<CSSwapItemsPacket>(&mut w, 0, move_body(a, b, 2, 0, 3, 4).as_bytes());
     assert_eq!(item_at(&pa, 3, 4).unwrap().id, a);
 }
+
+/// The func group of the service doodad tests: both window funcs, like the Fellowship Plaza's
+/// "Auctioneer/Warehouse" (doodad 7983, group 22065: `DoodadFuncAuctionUi` 2 on skill 12083,
+/// `DoodadFuncBankUi` 2 on skill 13238).
+pub const SERVICE_DOODAD_GROUP: u32 = 77;
+
+/// `data` plus the [`SERVICE_DOODAD_GROUP`] funcs. Like the real data, no func templates: the
+/// loader reads no rows for these two func types.
+pub fn with_service_doodad_funcs(mut data: GameData) -> GameData {
+    use crate::systems::npcs::doodad::templates::DoodadFunc;
+    let group = SERVICE_DOODAD_GROUP;
+    let func = |key: u32, func_type: &str, skill_id: u32| DoodadFunc {
+        group_id: group,
+        func_id: 2,
+        func_key: key,
+        func_type: func_type.into(),
+        next_phase: -1,
+        sound_id: 0,
+        skill_id,
+        perm_id: 0,
+        count: 0,
+    };
+    data.systems.npcs.doodad.funcs_by_groups.insert(
+        group,
+        vec![
+            func(18333, "DoodadFuncAuctionUi", 12083),
+            func(18334, "DoodadFuncBankUi", 13238),
+        ],
+    );
+    data
+}
+
+/// Spawns a doodad of func group `group` at `x` (players stand at 100).
+pub fn spawn_service_doodad(w: &mut World, obj_id: u32, group: u32, x: f32) {
+    let mut d = crate::models::doodad::Doodad::new(7983);
+    d.func_group_id = group;
+    d.transform.set_xyz(x, 100.0, 100.0);
+    let d = crate::world::Entity::new(obj_id, d);
+    w.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&d, &w.server.view_ctx());
+    w.a.drain();
+    w.b.drain();
+}
+
+/// The Fellowship Plaza's "Auctioneer/Warehouse" opens the warehouse without a banker NPC:
+/// deposits and warehouse moves are accepted next to it (with or without the doodad as the
+/// interaction object) and refused once the player walks away. A doodad without the bank func
+/// does not count.
+#[tokio::test]
+async fn the_warehouse_works_at_a_warehouse_doodad() {
+    let mut w = world_with(with_service_doodad_funcs(test_data()));
+    let pa = w.pa.clone();
+    pa.data().money = 500;
+    let mut body = PacketStream::new();
+    body.write_i32(50).write_i32(0);
+    let fifty = body.into_bytes();
+
+    spawn_service_doodad(&mut w, 0x500, 999, 101.0);
+    run::<CSDepositMoneyPacket>(&mut w, 0, &fifty);
+    assert_eq!(pa.data().money, 500, "a plain doodad is no warehouse");
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+
+    spawn_service_doodad(&mut w, 0x501, SERVICE_DOODAD_GROUP, 104.0);
+    run::<CSDepositMoneyPacket>(&mut w, 0, &fifty);
+    assert_eq!(
+        pa.data().money,
+        450,
+        "no interaction object: the doodad around counts"
+    );
+    pa.data().unit.current_interaction_object = 0x501;
+    let a = give(&w, &pa, slot_type::INVENTORY, STACK, 3, 0);
+    let b = give(&w, &pa, slot_type::BANK, SINGLE, 1, 4);
+    run::<CSSwapItemsPacket>(&mut w, 0, move_body(a, b, 2, 0, 3, 4).as_bytes());
+    assert_eq!(item_at(&pa, 3, 4).unwrap().id, a);
+    w.a.drain();
+
+    // 9 m away from the doodad: refused again.
+    pa.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
+    run::<CSDepositMoneyPacket>(&mut w, 0, &fifty);
+    assert_eq!(pa.data().money, 450);
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+}
