@@ -708,9 +708,11 @@ fn guard_may_help(
             return false;
         }
     }
-    // A duel is not helped, including when the attacker or the victim is the duellist's pet or
-    // slave (the 10.x check compares the units' relations, and `owner_character` resolves a
-    // mate / slave to its owner).
+    // An accepted duel is not helped, including when the attacker or the victim is the
+    // duellist's pet or slave (the 10.x check compares the units' relations, and
+    // `owner_character` resolves a mate / slave to its owner). `is_dueling_with`, not
+    // `is_in_duel_with`: an unanswered challenge (it lives up to 30 s) is no duel yet, so a
+    // hostile player cannot silence the guards by sending a duel request before the attack.
     if let (Some(v), Some(a)) = (
         crate::systems::skills::relation::owner_character(server, victim),
         crate::systems::skills::relation::owner_character(server, abuser),
@@ -719,7 +721,7 @@ fn guard_may_help(
             .systems
             .social
             .duels
-            .is_in_duel_with(v.character_id, a.character_id)
+            .is_dueling_with(v.character_id, a.character_id)
         {
             return false;
         }
@@ -780,7 +782,7 @@ pub fn update_guard_help(server: &GameServer, victim: &WorldObject, abuser: &Wor
         if !ot.aggro_link_special_guard || !ot.accept_aggro_link {
             continue;
         }
-        if other.same(victim) || other.same(abuser) {
+        if other.same(victim) || other.same(abuser) || npc::is_dead(&other) {
             continue;
         }
         let (in_battle, helper_faction) = {
@@ -3956,11 +3958,16 @@ mod tests {
     fn guard_data(nation_guard_help: bool) -> crate::data::GameData {
         use crate::data::world_data::{FactionRelation, SystemFaction};
         let mut data = crate::data::GameData::empty();
+        use crate::systems::social::duel::{FACTION_BLUE_TEAM, FACTION_RED_TEAM};
         for (id, guard_help) in [
             (NATION_FACTION, nation_guard_help),
             (GUARD_FACTION, true),
             (PIRATE_FACTION, true),
             (MONSTER_FACTION, false),
+            // The temporary team factions of an accepted duel (the shipped rows have guard_help
+            // on for both).
+            (FACTION_RED_TEAM, true),
+            (FACTION_BLUE_TEAM, true),
         ] {
             data.factions.add(SystemFaction {
                 id,
@@ -3973,6 +3980,11 @@ mod tests {
             (GUARD_FACTION, MONSTER_FACTION),
             (PIRATE_FACTION, NATION_FACTION),
             (MONSTER_FACTION, NATION_FACTION),
+            // The guard is hostile to both duel teams here (the shipped data has no row for them),
+            // so only the duel check can keep it out of a duel, not the faction relation.
+            (GUARD_FACTION, FACTION_RED_TEAM),
+            (GUARD_FACTION, FACTION_BLUE_TEAM),
+            (FACTION_RED_TEAM, FACTION_BLUE_TEAM),
         ] {
             data.factions.relations.push(FactionRelation {
                 id: a,
@@ -4012,7 +4024,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        // The shipped data has special guards without the 0x40 flag (38 of 107), so an NPC
+        // The shipped data has special guards without the 0x40 flag (45 of 107), so an NPC
         // attacker can pull some of them; keep the cheap data-level skip out of these tests.
         data.systems.npcs.npc.special_guards_allow_npc_attacker = true;
         data.systems.npcs.npc.templates.insert(
@@ -4079,6 +4091,9 @@ mod tests {
         let attacker = spawn_player(&server, &attacker_client, attacker_char, 0x402);
         let guard = spawn_link_npc(&server, 0x403, GUARD_TEMPLATE, 103.0);
         guard.data().unit.faction_id = GUARD_FACTION;
+        // A dead guard is skipped by the scan, so the fixture guards need HP.
+        guard.data().unit.hp = 1000;
+        guard.data().unit.max_hp = 1000;
         (server, victim, attacker, guard)
     }
 
@@ -4137,23 +4152,33 @@ mod tests {
         );
     }
 
+    /// `challenger` asks `challenged` for a duel and the challenged accepts: the pair is then a
+    /// started duel and both carry the temporary Red / Blue team factions.
+    async fn start_duel(
+        server: &GameServer,
+        challenger: &crate::world::PlayerRef,
+        challenged: &crate::world::PlayerRef,
+    ) {
+        let duels = &server.systems.social.duels;
+        duels.duel_request(server, challenger, challenged.character_id);
+        duels
+            .duel_accepted(server, challenged, challenger.character_id)
+            .await;
+    }
+
     /// A duel between the victim and the attacker is not helped (10.x `sub_39322ED0`,
     /// Z:823876).
     #[tokio::test]
-    async fn a_duel_does_not_pull_the_guard() {
+    async fn an_accepted_duel_does_not_pull_the_guard() {
         let (server, victim, attacker, guard) = guard_fixture(true);
-        server
-            .systems
-            .social
-            .duels
-            .duel_request(&server, &attacker, victim.character_id);
+        start_duel(&server, &attacker, &victim).await;
         assert!(
             server
                 .systems
                 .social
                 .duels
-                .is_in_duel_with(attacker.character_id, victim.character_id),
-            "fixture: the duel request must register both sides"
+                .is_dueling_with(attacker.character_id, victim.character_id),
+            "fixture: the duel must be accepted"
         );
         apply_hit(
             &server,
@@ -4163,6 +4188,33 @@ mod tests {
         assert!(
             !has_aggro_on(&guard, attacker.obj_id),
             "a duel must not pull the city guard"
+        );
+    }
+
+    /// A duel request nobody answered is no duel (it lives up to 30 s, so it would otherwise
+    /// let a pirate silence the guards by challenging the victim first).
+    #[tokio::test]
+    async fn a_pending_duel_request_does_not_keep_the_guard_out() {
+        let (server, victim, attacker, guard) = guard_fixture(true);
+        server
+            .systems
+            .social
+            .duels
+            .duel_request(&server, &attacker, victim.character_id);
+        let duels = &server.systems.social.duels;
+        assert!(
+            duels.is_in_duel_with(attacker.character_id, victim.character_id)
+                && !duels.is_dueling_with(attacker.character_id, victim.character_id),
+            "fixture: the request is registered but unanswered"
+        );
+        apply_hit(
+            &server,
+            &WorldObject::from(&attacker),
+            &WorldObject::from(&victim),
+        );
+        assert!(
+            has_aggro_on(&guard, attacker.obj_id),
+            "an unanswered duel request must not stop the guard from helping"
         );
     }
 
@@ -4261,9 +4313,17 @@ mod tests {
         apply_hit(&server, &abuser, &target);
         assert!(has_aggro_on(&guard, attacker.obj_id), "first scan helps");
 
-        // A guard spawned after the first scan is not reached by an immediate second hit.
+        // A guard spawned after the first scan is not reached by an immediate second hit. The
+        // pair's stamp is moved into the future so "within the interval" does not depend on how
+        // long the test takes on a loaded CI runner.
         let late = spawn_link_npc(&server, 0x409, GUARD_TEMPLATE, 104.0);
         late.data().unit.faction_id = GUARD_FACTION;
+        late.data().unit.hp = 1000;
+        late.data().unit.max_hp = 1000;
+        server.systems.ai.guard_help_scans.lock().unwrap().insert(
+            (victim.obj_id, attacker.obj_id),
+            crate::world::now_ms() + 60_000,
+        );
         apply_hit(&server, &abuser, &target);
         assert!(
             !has_aggro_on(&late, attacker.obj_id),
@@ -4290,14 +4350,11 @@ mod tests {
         use crate::world::Entity;
 
         let (server, victim, attacker, guard) = guard_fixture(true);
-        server
-            .systems
-            .social
-            .duels
-            .duel_request(&server, &attacker, victim.character_id);
+        start_duel(&server, &attacker, &victim).await;
         let mut mate = Mate::new(0x409, 1);
         mate.owner_obj_id = attacker.obj_id;
-        mate.unit.faction_id = PIRATE_FACTION;
+        // A duellist's pet takes the owner's temporary team faction.
+        mate.unit.faction_id = crate::systems::social::duel::FACTION_RED_TEAM;
         mate.unit.hp = 1000;
         mate.unit.max_hp = 1000;
         mate.unit.transform.set_xyz(102.0, 100.0, 100.0);

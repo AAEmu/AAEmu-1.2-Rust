@@ -29,7 +29,7 @@ targetself
 gm setfaction 161
 waitpeer 120 ${victim}
 gopeer ${victim}
-walkrel 3 0 0
+moverel 3 0 0
 sync pos 2
 sync ready 2
 nattack 2 ${victim}
