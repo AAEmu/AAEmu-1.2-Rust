@@ -62,10 +62,11 @@ pub struct NpcSpawnerShared {
     player_in_radius_cache: Mutex<HashMap<(u32, u32), (bool, u64)>>,
     /// `_npcsInZoneCache` (count, areNpcsInZone); invalidated on membership changes.
     npcs_in_zone_cache: Mutex<HashMap<u32, (i32, bool, Instant)>>,
-    /// `npc_spawners.save_indun`: one of this placement's NPCs died, so the placement's
-    /// population is fixed for the instance run (no respawn, no periodic refill). A fresh
-    /// dungeon creates new spawners, which start unfrozen. The C# loaded the column but
-    /// never read it.
+    /// One of this placement's NPCs died where the run keeps its dead (authored
+    /// `npc_spawners.save_indun`, or a spawn-file placement in a per-run dungeon), so the
+    /// placement's population is fixed for the run (no respawn, no periodic refill). A fresh
+    /// run creates new spawners, which start unfrozen. The C# loaded `save_indun` but never
+    /// read it.
     saved_death: AtomicBool,
 }
 
@@ -73,12 +74,12 @@ impl NpcSpawnerShared {
     pub fn set_management_group(&self, group: u32) {
         self.management_group.store(group, Ordering::Relaxed);
     }
-    /// Whether a member of this placement has died under `save_indun`.
+    /// Whether a member of this placement died under the one-run freeze.
     pub fn saved_death(&self) -> bool {
         self.saved_death.load(Ordering::Relaxed)
     }
 
-    /// Freezes the placement after a `save_indun` member died.
+    /// Freezes the placement after a member died where the run keeps its dead.
     pub fn set_saved_death(&self) {
         self.saved_death.store(true, Ordering::Relaxed);
     }
@@ -161,6 +162,10 @@ pub struct NpcSpawner {
     pub npc_spawner_ids: Vec<u32>,
     shared: Arc<NpcSpawnerShared>,
     state: Mutex<State>,
+    /// `true` for a spawner created by a spawn-file placement (`SpawnManager::NpcSpawners`);
+    /// event / tower / summon spawners keep `false`. Set once when the placement is created, so
+    /// the one-run death freeze is a flag read instead of a scan over every spawner.
+    placement: AtomicBool,
 }
 
 /// `TimeSpan.FromHours(hours)` ticks (100 ns).
@@ -269,7 +274,18 @@ impl NpcSpawner {
                 is_despawn_scheduled: false,
                 respawn_denied: false,
             }),
+            placement: AtomicBool::new(false),
         }
+    }
+
+    /// Marks a spawner created by a spawn-file placement (`SpawnManager::AddNpcSpawner`).
+    pub fn mark_placement(&self) {
+        self.placement.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether this spawner is a spawn-file placement (see [`Self::mark_placement`]).
+    pub fn is_placement(&self) -> bool {
+        self.placement.load(Ordering::Relaxed)
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -311,21 +327,24 @@ impl NpcSpawner {
         self.st().respawn_time = v;
     }
 
-    /// Whether a `save_indun` member of this placement has died (the placement stays dead).
+    /// Whether a member of this placement died under the one-run freeze.
     pub fn saved_death(&self) -> bool {
         self.shared.saved_death()
     }
 
-    /// Whether a dead member must stay dead for the instance run: the authored
-    /// `npc_spawners.save_indun`, or any spawn-file placement inside a non-default instance
-    /// (1.2 instance runs are one run long, so their trash and bosses never respawn). A scripted
-    /// event / tower / summon spawner is not a placement and keeps its own respawn rules.
-    fn freezes_instance_state(&self, manager: &spawn_manager::SpawnManager) -> bool {
-        self.template().is_some_and(|t| t.save_indun)
-            || (self
-                .parent_world()
-                .is_some_and(|id| id != crate::models::character::DEFAULT_INSTANCE_ID)
-                && manager.is_placement_spawner(self))
+    /// Whether a dead spawn-file placement must stay dead for its run: a per-run dungeon
+    /// (`Dungeon::is_system = false`, not the client-driven prologue) keeps its trash and
+    /// bosses dead for the run. System / persistent instances (Mirage Isle, the Library wings,
+    /// battlefields) and ordinary event / tower / summon spawners keep their respawn rules.
+    fn instance_placement_freezes(&self, server: &GameServer) -> bool {
+        self.is_placement()
+            && self.parent_world().is_some_and(|id| {
+                server
+                    .systems
+                    .instances
+                    .dungeon_of_world(id)
+                    .is_some_and(|d| !d.is_system && !d.indun_zone.client_driven)
+            })
     }
 
     pub fn parent_world(&self) -> Option<u32> {
@@ -1175,11 +1194,12 @@ impl NpcSpawner {
         };
         let respawn_time = self.respawn_time();
         let now = spawn_manager::now();
-        // Authored `npc_spawners.save_indun` or any spawn-file placement in an instance:
-        // 1.2 instances are one run long and the dead stay dead until the run is recreated.
-        // The placement is frozen so neither the respawn deadline nor the periodic refill
+        // Authored `npc_spawners.save_indun`, or a spawn-file placement in a per-run dungeon:
+        // a 1.2 run is one run long and the dead stay dead until the run is recreated. The
+        // placement is frozen so neither the respawn deadline nor the periodic refill
         // (`do_spawn` / the activation tick) brings the member back.
-        let freezes = npc.data().unit.is_dead() && self.freezes_instance_state(&manager);
+        let freezes =
+            npc.data().unit.is_dead() && (t.save_indun || self.instance_placement_freezes(server));
         if freezes {
             self.shared.set_saved_death();
         }
@@ -1294,9 +1314,8 @@ impl NpcSpawner {
         let manager = spawn_manager::manager_of(server, &obj, self.parent_world());
         spawn_manager::delete_object(server, &obj, self.parent_world());
         let respawn_time = self.respawn_time();
-        let freezes = manager
-            .as_ref()
-            .is_some_and(|m| self.freezes_instance_state(m));
+        let freezes = self.template().is_some_and(|t| t.save_indun)
+            || self.instance_placement_freezes(server);
         if freezes {
             self.shared.set_saved_death();
         }

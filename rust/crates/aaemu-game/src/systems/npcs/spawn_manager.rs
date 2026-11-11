@@ -1184,6 +1184,7 @@ impl SpawnManager {
                     init(inner.next_id, id, vec![id], Some(template.clone())),
                     new_shared(),
                 );
+                spawner.mark_placement();
                 spawner.initialize_spawnable_npcs(Some(template.as_ref()));
                 spawners.push(Arc::new(spawner));
                 inner.next_id += 1;
@@ -1197,6 +1198,7 @@ impl SpawnManager {
                         init(inner.next_id, id, game_data_ids.clone(), template.clone()),
                         shared.clone(),
                     );
+                    spawner.mark_placement();
                     spawner.initialize_spawnable_npcs(template.as_deref());
                     spawners.push(Arc::new(spawner));
                     inner.next_id += 1;
@@ -2380,18 +2382,6 @@ impl SpawnManager {
     /// `GetAllSpawners()` (a copy).
     pub fn get_all_spawners(&self) -> BTreeMap<u32, Vec<Arc<NpcSpawner>>> {
         self.inner().npc_spawners.clone()
-    }
-
-    /// Whether `spawner` is one of this instance's spawn-file placements (`NpcSpawners`), as
-    /// opposed to an event / tower defense / summon spawner (which keeps its own respawn
-    /// rules). Used by the one-run instance freeze on death (`npc::spawner`).
-    pub fn is_placement_spawner(&self, spawner: &NpcSpawner) -> bool {
-        let inner = self.inner();
-        inner
-            .npc_spawners
-            .values()
-            .flatten()
-            .any(|s| std::ptr::eq(s.as_ref(), spawner))
     }
 
     /// A doodad management group uses explicit authored membership, not spawner template IDs.
