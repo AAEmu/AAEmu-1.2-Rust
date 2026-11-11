@@ -129,7 +129,7 @@ impl Command for Spawn {
                 position.roll = 0.0;
 
                 let npc_spawner = add_runtime_npc_spawner(server, &world, unit_id, position)?;
-                npc_spawner.spawn_all(server, false);
+                spawn_runtime_npc_spawner(server, &npc_spawner);
             }
             "doodad" => {
                 if !server.game_data.systems.npcs.doodad.exist(unit_id) {
@@ -176,7 +176,11 @@ impl Command for Spawn {
                 let spawner = new_doodad_spawner(world.id, unit_id, position);
                 spawner.spawn_for_character(server, 0, 0, character.obj_id);
             }
-            _ => {}
+            other => CommandManager::send_error_text(
+                self,
+                out,
+                &format!("Unknown object type {other} (npc, doodad or remove)"),
+            ),
         }
         Ok(())
     }
@@ -194,6 +198,46 @@ impl Command for Spawn {
 mod tests {
     use super::super::harness;
     use super::super::util::objects_test_support as ts;
+
+    /// A template-less spawner (the command-side copy of an NPC that has authored spawners)
+    /// must not log the misleading "template is null" warning/error: the manager's clone
+    /// spawns it on the tick.
+    #[tokio::test]
+    async fn runtime_spawner_without_a_template_does_not_log_an_error() {
+        use crate::data::world_templates::WorldSpawnPosition;
+        use crate::systems::npcs::npc::spawner::{
+            NpcSpawner, NpcSpawnerInit, NpcSpawnerShared,
+        };
+        let server = ts::server();
+        let spawner = std::sync::Arc::new(NpcSpawner::new(
+            NpcSpawnerInit {
+                id: 0,
+                spawner_id: 0,
+                unit_id: ts::NPC,
+                follow_path: String::new(),
+                follow_npc: 0,
+                respawn_time: 15,
+                despawn_time: 20,
+                special_link: String::new(),
+                count: 1,
+                npc_spawner_ids: Vec::new(),
+                parent_world: Some(0),
+                template: None,
+                spawnable_npcs: Vec::new(),
+            },
+            NpcSpawnerShared::new(WorldSpawnPosition::default()),
+        ));
+        let (_, events) =
+            crate::test_support::capture_events(|| {
+                super::spawn_runtime_npc_spawner(&server, &spawner)
+            });
+        assert!(
+            !events
+                .iter()
+                .any(|(level, _)| *level == tracing::Level::WARN || *level == tracing::Level::ERROR),
+            "{events:?}"
+        );
+    }
 
     #[tokio::test]
     async fn spawn_doodad_npc_and_remove() {
@@ -250,6 +294,14 @@ mod tests {
         );
         assert!(world.doodad(d.obj_id).is_none());
 
+        let (_, out) = harness::run(&server, &gm.p, "spawn nothing 7000").await;
+        assert_eq!(
+            out,
+            [harness::error(
+                "spawn",
+                "Unknown object type nothing (npc, doodad or remove)"
+            )]
+        );
         let (_, out) = harness::run(&server, &gm.p, "spawn npc 99999").await;
         assert_eq!(out, [harness::error("spawn", "NPC 99999 don't exist|r")]);
         let (_, out) = harness::run(&server, &gm.p, "spawn doodad 99999").await;
