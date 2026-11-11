@@ -325,10 +325,7 @@ mod tests {
         );
 
         harness::run(&server, &gm.p, "kit STARTER").await;
-        assert_eq!(
-            gm.chat(),
-            ["[Items] added 2 items to Gm's inventory"]
-        );
+        assert_eq!(gm.chat(), ["[Items] added 2 items to Gm's inventory"]);
         let inv = Inv::of(&gm.p);
         assert_eq!(inv.items_count_in(slot_type::INVENTORY, 1000, -1), 5);
         assert_eq!(inv.items_count_in(slot_type::INVENTORY, 2000, -1), 1);

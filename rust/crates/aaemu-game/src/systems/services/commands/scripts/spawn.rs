@@ -205,9 +205,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_spawner_without_a_template_does_not_log_an_error() {
         use crate::data::world_templates::WorldSpawnPosition;
-        use crate::systems::npcs::npc::spawner::{
-            NpcSpawner, NpcSpawnerInit, NpcSpawnerShared,
-        };
+        use crate::systems::npcs::npc::spawner::{NpcSpawner, NpcSpawnerInit, NpcSpawnerShared};
         let server = ts::server();
         let spawner = std::sync::Arc::new(NpcSpawner::new(
             NpcSpawnerInit {
