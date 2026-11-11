@@ -2019,6 +2019,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   same-faction packs (neutral ones included) and hostile neighbours help as before. Rules 1..4
   and the `aggro_links` group path are unchanged. Test:
   `ai::behaviors::tests::rule_zero_help_needs_the_same_faction_or_a_hostile_abuser`.
+* systems::ai (2026-11-10, leash past the absolute return distance; **deviation**): the C#
+  `BaseCombatBehavior.ShouldReturn` returned only while the NPC was within
+  `absolute_return_distance` of its idle position ("if it's greater, then we need a teleport to
+  the spawn point", never written). Tester report: the Sealstone Guardian (8945, HoldPosition,
+  return 50 m = absolute 50 m) "fails to return and can be pulled far away"; any NPC dragged
+  past its absolute distance (default 200 m) kept chasing. `should_return` now returns past
+  `return_distance` in every case, and `return_state_enter` teleports an NPC that is past the
+  absolute distance straight to its idle position (`on_completed_return`), as that C# note
+  intended. Test: `ai::flow_tests::npc_pulled_past_the_absolute_return_distance_goes_home`.
 
 * systems::ai (2026-11-05, WP-5a FollowUnit / WP-5b `ai_command_sets.can_interact`): these are
   the first consumers of two C#-era data paths. Evidence: the 1.2 `ai_commands.cmd_id = 1` rows

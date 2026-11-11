@@ -792,32 +792,35 @@ fn can_use_skill(c: &mut AiCtx<'_>, k: BehaviorKind) -> bool {
 }
 
 /// `BaseCombatBehavior.ShouldReturn`.
+///
+/// Deviation: the C# returned only while the NPC was within `absolute_return_distance` of its
+/// idle position ("if it's greater, then we need a teleport to the spawn point", never written),
+/// so a mob pulled past it never returned and could be dragged anywhere (the Sealstone Guardian
+/// 8945 has return 50 m = absolute 50 m: no leash at all). Past `return_distance` it now always
+/// returns; [`return_state_enter`] teleports it home when it is past the absolute distance.
 fn should_return(c: &AiCtx<'_>) -> bool {
     // Never trigger return while a SkillController is actively driving the NPC.
     if npc::skill_controller_running(&c.obj) {
         return false;
     }
-    let t = template_scalars(c);
-    let mut return_distance = 50.0f32;
-    let mut absolute_return_distance = 200.0f32;
-    if t.return_distance > 0.0 {
-        return_distance = t.return_distance;
-    }
-    if t.absolute_return_distance > 0.0 {
-        absolute_return_distance = t.absolute_return_distance;
-    }
+    let (return_distance, _) = return_distances(c);
     let Some(target) = current_target(c) else {
         return true; // no target, returning
     };
     let me = owner_pos(c);
     let distance_to_target = calculate_distance(me, npc::world_pos(c.server, &target), true);
     let distance_to_idle = calculate_distance(me, c.ai.idle_position, true);
-    let mut res = distance_to_target > return_distance || distance_to_idle > return_distance;
-    if res {
-        // if it's greater, then we need a teleport to the spawn point
-        res = distance_to_idle <= absolute_return_distance;
-    }
-    res
+    distance_to_target > return_distance || distance_to_idle > return_distance
+}
+
+/// The template's `(return_distance, absolute_return_distance)`, defaulting to 50 m / 200 m.
+fn return_distances(c: &AiCtx<'_>) -> (f32, f32) {
+    let t = template_scalars(c);
+    let positive_or = |v: f32, default: f32| if v > 0.0 { v } else { default };
+    (
+        positive_or(t.return_distance, 50.0),
+        positive_or(t.absolute_return_distance, 200.0),
+    )
 }
 
 fn geo_data_mode(c: &AiCtx<'_>) -> bool {
@@ -1848,10 +1851,16 @@ fn return_state_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
             },
         );
     }
-    if c.ai
-        .param
-        .as_ref()
-        .is_some_and(|p| p.always_teleport_on_return)
+    // Past `absolute_return_distance` the NPC is teleported to its idle position (the C#
+    // `ShouldReturn` note "we need a teleport to the spawn point"; see `should_return`).
+    let (_, absolute_return_distance) = return_distances(c);
+    let beyond_absolute =
+        calculate_distance(owner_pos(c), c.ai.idle_position, true) > absolute_return_distance;
+    if beyond_absolute
+        || c.ai
+            .param
+            .as_ref()
+            .is_some_and(|p| p.always_teleport_on_return)
     {
         on_completed_return(c);
         return;
