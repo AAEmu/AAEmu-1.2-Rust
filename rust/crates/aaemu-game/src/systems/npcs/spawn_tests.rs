@@ -3294,7 +3294,10 @@ async fn real_data_quest_fill_spawns_on_terrain() {
     }
 
     // The NPC quest fill (`npc_spawns_quest_fill.json`): every entry is a loaded spawner of its
-    // template at its authored position, in an open zone, within 2 m of the 1.2 height.
+    // template at its authored position, in an open zone. Its height is checked against the
+    // live NPC spawn snap (`spawn_ground_z`, collision) by
+    // `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground`: NPCs do not
+    // take the navmesh height, which sits ~5 m above the terrain at the Sarracenia bog.
     let npc_text = std::fs::read_to_string(world_path.join("npc_spawns_quest_fill.json"))
         .expect("npc quest fill spawn file");
     let npc_defs = crate::systems::npcs::doodad::spawner::parse_list(
@@ -3329,17 +3332,7 @@ async fn real_data_quest_fill_spawns_on_terrain() {
             closed, "f",
             "quest fill npc {unit_id} is in closed zone {zone}"
         );
-        let height = heights.get_height(zone, p.x, p.y, p.z);
-        let offset = p.z - height;
-        assert!(
-            offset.abs() <= 2.0,
-            "quest fill npc {unit_id} at Z {} is {offset:.3} m from the 1.2 height {height}",
-            p.z,
-        );
-        println!(
-            "quest fill npc {unit_id}: zone {zone} (open), Z {} vs height {height:.5}",
-            p.z
-        );
+        println!("quest fill npc {unit_id}: zone {zone} (open)");
     }
 }
 
@@ -3347,8 +3340,9 @@ async fn real_data_quest_fill_spawns_on_terrain() {
 /// reports for Ynystere). The point's area spawner never runs: `select_spawner_id` takes the
 /// single (max 1) spawner of the template, so `npc_spawns_quest_fill.json` tops each quest area
 /// up to its area spawner's authored `min_population` with extra points 8-34 m around the
-/// original one (at least 8 m apart), at the 1.2 terrain height where the terrain and the
-/// navmesh agree within 1 m and stay within 2 m of the original point's Z:
+/// original one (at least 8 m apart), at the 1.2 terrain height within 2 m of the original
+/// point's Z where the live spawn snap lands on that terrain (Ynystere: also where the navmesh
+/// agrees within 1 m):
 /// - quest 2950 "Peacocking Around" (16 x Blue Crane 8013), spawner 5407 "Ynystere / River of
 ///   Longing / riverside" (min 7) around (21254.254, 12700.617);
 /// - quest 4197 "A Change in the Herd" (8 x Buffalo Intestines, 100 % from Tainted Buffalo
@@ -3356,7 +3350,9 @@ async fn real_data_quest_fill_spawns_on_terrain() {
 ///   (21602.145, 11873.117);
 /// - quest 4207 "Clean Up the Stragglers" (8 x Bloodhand Assassin 8017 / Priest 8018 on the
 ///   Waveroar Ruins coast), spawner 5449 "Ynystere / Requiem Cape / Bloodhand stragglers"
-///   (min 7) around (19930.887, 12591.275).
+///   (min 7) around (19930.887, 12591.275);
+/// - daily quest 3909 "Slay the Sarracenia" (8 x Thrashing Sarracenia 8606, Silent Forest),
+///   spawner 11504 "Ancient Forest / Sarracenia" (min 6) around (23840.617, 12134.021).
 #[test]
 fn quest_fill_npcs_reach_the_area_spawner_minimum() {
     use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
@@ -3383,6 +3379,11 @@ fn quest_fill_npcs_reach_the_area_spawner_minimum() {
         near(&[8013], 21254.254, 12700.617),
         7,
         "Blue Cranes (quest 2950)"
+    );
+    assert_eq!(
+        near(&[8606], 23840.617, 12134.021),
+        6,
+        "Thrashing Sarracenia (quest 3909)"
     );
     assert_eq!(
         near(&[10721], 21602.145, 11873.117),

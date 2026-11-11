@@ -871,6 +871,17 @@ impl ClientPacket for CSCompletedCinemaPacket {
                 resend
             );
             if resend {
+                // A rider leaves the cut scene on foot (Rust addition). Re-attaching it to the
+                // re-created mate left the 1.2 client unable to move or dismount (tester report:
+                // quest 1352 "Another One Down", cinema 147 `zq_09_helmire`, accepted from
+                // Pederson while mounted) while the server still ignored the rider's own moves;
+                // only a desummon recovered. The detach names only the rider, which the wipe
+                // keeps, and the repaint below then shows the mate without a passenger.
+                crate::systems::vehicles::force_dismount(
+                    server,
+                    &p,
+                    crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+                );
                 // The cut-scene wipe also clears the client's own-mate records; the mates
                 // re-created below need theirs first (a rider attached to a mate without a
                 // record crashes the client).

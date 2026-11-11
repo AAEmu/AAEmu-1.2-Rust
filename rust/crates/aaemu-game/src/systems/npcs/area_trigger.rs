@@ -476,12 +476,18 @@ impl AreaTrigger {
         self.release(server, released);
     }
 
-    /// `ApplyEffects()`.
+    /// `ApplyEffects()`. A trigger without an inside buff applies the effects stored under key
+    /// 0 (the beneficial buffs of an effect-only `DoodadFuncClout`; the C# applied nothing).
     fn apply_effects(&self, server: &GameServer) {
-        let (Some(buff_id), Some(caster)) = (self.inside_buff_id, &self.caster) else {
+        let Some(caster) = &self.caster else {
             return;
         };
-        let Some(effects) = self.effects_per_buff.get(&buff_id) else {
+        let buff_id = self.inside_buff_id.unwrap_or(0);
+        let Some(effects) = self
+            .effects_per_buff
+            .get(&buff_id)
+            .filter(|e| !e.is_empty())
+        else {
             return;
         };
         let units = self.state().units.clone();
@@ -961,6 +967,93 @@ mod tests {
         for npc in &npcs {
             assert_eq!(npc.data().unit.trigger_count(631), 0);
         }
+    }
+
+    /// An effect-only `DoodadFuncClout` (Lake Bubbles 4336: clout 997, no buff, effect 17315 =
+    /// BuffEffect of Air Bubble 3036) keeps only its Good buffs, and its trigger applies them
+    /// to a player inside on its tick; a Bad buff of the same clout is not applied.
+    #[tokio::test]
+    async fn effect_only_clout_applies_its_good_buffs() {
+        use crate::data::skills::{BuffKind, BuffTemplate as DataBuff};
+        use crate::systems::skills::data::effects::BuffEffect;
+        use crate::systems::skills::data::{BuffTemplate, EffectKind, EffectTemplate};
+        use crate::test_support::{spawn_player, test_character, TestClient};
+
+        let mut data = crate::data::GameData::empty();
+        for (buff, kind, effect, type_id) in [
+            (3036u32, BuffKind::Good, 9001u32, 17315u32),
+            (4963, BuffKind::Bad, 9002, 17400),
+        ] {
+            data.systems.skills.add_buff(BuffTemplate {
+                id: buff,
+                kind: if kind == BuffKind::Good { 1 } else { 2 },
+                stack_rule: 1,
+                duration: 5_000,
+                ..Default::default()
+            });
+            data.skills.buffs.insert(buff, DataBuff::simple(buff, kind));
+            data.systems.skills.add_effect(
+                EffectKind::BuffEffect,
+                EffectTemplate::Buff(BuffEffect {
+                    id: effect,
+                    buff_id: Some(buff),
+                    chance: 100,
+                    stack: 1,
+                    ab_level: 0,
+                }),
+                type_id,
+            );
+        }
+        let server = Arc::new(crate::test_support::test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let effects = crate::systems::npcs::doodad::phase_funcs::good_buff_effects(
+            &server,
+            &[17315, 17400, 99999],
+        );
+        assert_eq!(effects, vec![17315]);
+
+        let world = server.world.world(0).unwrap();
+        let client = TestClient::new(&server, 91, 1091);
+        let diver = spawn_player(
+            &server,
+            &client,
+            test_character(91, "Diver", 105.0, 100.0),
+            0x910,
+        );
+        let bubbles = Entity::new(server.ids.object.get_next_id().unwrap(), Doodad::new(4336));
+        {
+            let mut d = bubbles.data();
+            d.transform.set_position(100.0, 100.0, 100.0, 0.0, 0.0, 0.0);
+            d.transform.instance_id = world.id;
+        }
+        world.spawn(&bubbles, &server.view_ctx());
+        let trigger = Arc::new(AreaTrigger {
+            shape: Some(AreaShape {
+                id: 633,
+                kind: AREA_SHAPE_SPHERE,
+                value1: 10.0,
+                value2: 0.0,
+                value3: 0.0,
+            }),
+            owner: Some(bubbles.clone()),
+            caster: Some(WorldObject::from(&bubbles)),
+            target_relation: skill_target_relation::ANY,
+            inside_buff_id: None,
+            effects_per_buff: HashMap::from([(0, effects)]),
+            tick_rate: 1000,
+            ..Default::default()
+        });
+        trigger.tick(&server);
+        assert_eq!(trigger.unit_ids(), vec![diver.obj_id]);
+        assert!(
+            diver.data().unit.buffs.check_buff(3036),
+            "Air Bubble applied"
+        );
+        assert!(
+            !diver.data().unit.buffs.check_buff(4963),
+            "Bad buff filtered out"
+        );
     }
 
     fn school_aura_server() -> Arc<GameServer> {

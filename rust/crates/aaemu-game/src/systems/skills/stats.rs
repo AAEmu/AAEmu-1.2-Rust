@@ -747,6 +747,21 @@ pub fn stat(server: &GameServer, obj: &WorldObject, kind: StatKind) -> f64 {
     stats(server, obj, &[kind])[0]
 }
 
+/// The `(hp, mp)` an NPC keeps when its maximums change to `new_max_hp` / `new_max_mp`: `Some`
+/// only when it is alive, out of combat, at full HP and the maximum HP rises (MP follows when it
+/// was full too). See [`refresh_cached_stats`].
+fn full_npc_top_up(u: &UnitBase, new_max_hp: i32, new_max_mp: i32) -> Option<(i32, i32)> {
+    if u.is_in_battle || u.hp <= 0 || u.hp != u.max_hp || new_max_hp <= u.max_hp {
+        return None;
+    }
+    let mp = if u.mp == u.max_mp && new_max_mp > u.max_mp {
+        new_max_mp
+    } else {
+        u.mp
+    };
+    Some((new_max_hp, mp))
+}
+
 /// Recomputes the cached `MaxHp` / `MaxMp` (and the other cached getter values shared code
 /// reads: regen, cast time and global cooldown multipliers) of a unit after its bonuses
 /// changed. HP / MP are not clamped (the C# getters never clamp either).
@@ -778,8 +793,20 @@ pub fn refresh_cached_stats(server: &GameServer, obj: &WorldObject) {
     if obj.as_player().is_none() && obj.as_npc().is_none() && !vehicle {
         return; // base units: the cached fields are the getters themselves
     }
+    // Rust addition: an NPC at full HP / MP outside combat stays full when its maximum rises.
+    // The Enraged Treant (3140) is created at full HP, then its OnSpawn skill 13279 applies
+    // buff 1384 (+40 % MaxHealth), which left it at 100 / 140 (71 %) until it was pulled and
+    // returned home. Combat buffs and maximum drops are unchanged (HP is never clamped here).
+    let npc = obj.as_npc().is_some();
+    let mut topped_up = None;
     obj.with_unit(|u| {
         let u = u.unit_mut();
+        if npc {
+            topped_up = full_npc_top_up(u, v[0] as i32, v[1] as i32);
+            if let Some((hp, mp)) = topped_up {
+                (u.hp, u.mp) = (hp, mp);
+            }
+        }
         u.max_hp = v[0] as i32;
         u.max_mp = v[1] as i32;
         u.hp_regen = v[2] as i32;
@@ -789,6 +816,18 @@ pub fn refresh_cached_stats(server: &GameServer, obj: &WorldObject) {
         u.global_cooldown_mul = v[6] as f32;
         u.cast_time_mul = v[7] as f32;
     });
+    if let Some((hp, mp)) = topped_up {
+        super::broadcast(
+            server,
+            obj,
+            &crate::packets::world::SCUnitPointsPacket {
+                obj_id: obj.obj_id(),
+                hp,
+                mp,
+            },
+            false,
+        );
+    }
 }
 /// The `Bonuses[GearBonusesIndex]` list of `UpdateGearBonuses`: the unit modifiers of the
 /// equipped, non-destroyed items, their gems and rune.
@@ -1069,6 +1108,33 @@ mod vehicle_gear_tests {
         // Gems and the rune add up.
         sword.details.gem_ids[0] = RUNE;
         assert_eq!(values(&sword), vec![500, 7, 7]);
+    }
+
+    /// The Enraged Treant (3140) spawns at full HP, then its OnSpawn buff 1384 adds 40 % max HP:
+    /// a full, idle NPC follows the new maximum (MP too when it was full); a hurt, a fighting or
+    /// a dead NPC, and a falling maximum, keep their points.
+    #[test]
+    fn a_full_idle_npc_follows_a_rising_maximum() {
+        let unit = |hp: i32, mp: i32, in_battle: bool| crate::models::unit::UnitBase {
+            hp,
+            max_hp: 100,
+            mp,
+            max_mp: 50,
+            is_in_battle: in_battle,
+            ..crate::models::unit::UnitBase::default()
+        };
+        assert_eq!(
+            full_npc_top_up(&unit(100, 50, false), 140, 70),
+            Some((140, 70))
+        );
+        assert_eq!(
+            full_npc_top_up(&unit(100, 20, false), 140, 70),
+            Some((140, 20))
+        );
+        assert_eq!(full_npc_top_up(&unit(90, 50, false), 140, 70), None);
+        assert_eq!(full_npc_top_up(&unit(100, 50, true), 140, 70), None);
+        assert_eq!(full_npc_top_up(&unit(100, 50, false), 80, 70), None);
+        assert_eq!(full_npc_top_up(&unit(0, 50, false), 140, 70), None);
     }
 
     /// `Mate.UpdateGearBonuses`: on summon (null, null) and on an equipment change through the

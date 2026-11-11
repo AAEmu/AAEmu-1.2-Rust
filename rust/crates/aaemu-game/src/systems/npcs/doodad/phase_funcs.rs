@@ -468,6 +468,28 @@ fn use_respawn(ctx: &DoodadCtx<'_>, player: &crate::world::PlayerRef) {
 }
 
 /// `DoodadFuncClout.Use`.
+/// The effect ids of `effects` that are a `BuffEffect` of a Good (`buffs.kind_id` 1) buff.
+pub(crate) fn good_buff_effects(server: &crate::server::GameServer, effects: &[u32]) -> Vec<u32> {
+    use crate::data::skills::BuffKind;
+    use crate::systems::skills::data::EffectTemplate;
+    let skills = &server.game_data.systems.skills;
+    effects
+        .iter()
+        .copied()
+        .filter(|&id| match skills.effect_by_type_id(id) {
+            Some((_, EffectTemplate::Buff(b))) => b.buff_id.is_some_and(|buff| {
+                server
+                    .game_data
+                    .skills
+                    .buffs
+                    .get(&buff)
+                    .is_some_and(|t| t.kind == BuffKind::Good)
+            }),
+            _ => false,
+        })
+        .collect()
+}
+
 fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncClout) {
     tracing::trace!(
         "DoodadFuncClout : Duration {}, Tick {}, BuffId {}, NextPhase {}, AoeShapeId {}",
@@ -525,7 +547,15 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     trigger.func_group_id = func_group_id;
     trigger.target_relation = f.target_relation;
     trigger.inside_buff_id = inside_buff_id;
-    trigger.effects_per_buff = HashMap::from([(f.buff_id, f.effects.clone())]);
+    trigger.effects_per_buff = match inside_buff_id {
+        Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
+        // Deviation: a clout without an inside buff (401 of the 447 clouts with effects) never
+        // applied its effects in the C# (`ApplyEffects` needs `InsideBuffTemplate`). Its
+        // beneficial buffs now reach the units inside (key 0, see `AreaTrigger::apply_effects`):
+        // Lake Bubbles (4336) gives Air Bubble 3036 at the Soundless Lake sealstone. Its damage,
+        // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
+        None => HashMap::from([(0, good_buff_effects(server, &f.effects))]),
+    };
     trigger.tick_rate = f.tick;
     let trigger = Arc::new(trigger);
     area_trigger::add_area_trigger(server, trigger.clone());
