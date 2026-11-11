@@ -638,9 +638,6 @@ impl AreaTriggerManager {
             // A tracked player is released on the next tick even when no player is near the
             // owner any more (teleport / respawn / instance change); see
             // `tracks_player_in_world`.
-            // A tracked player is released on the next tick even when no player is near the
-            // owner any more (teleport / respawn / instance change); see
-            // `tracks_player_in_world`.
             if active || trigger.tracks_player_in_world(server) {
                 trigger.tick(server);
             }
