@@ -612,6 +612,14 @@ impl ServerProfile {
         !matches!(self, Self::EuLaunch)
     }
 
+    /// The C# dungeon entry cap (`IndunManager.CheckEntryAttemptCount`: 3 entries per 4 hours).
+    /// The owner's EU 1.2 recollection (2026-11-10) is that 1.2 had no entry limit (the
+    /// "5 per dungeon" cap came later), so `EuAuroria` leaves it off; the other profiles keep
+    /// the C# default. `Dungeons.EntryLimit.Enabled` overrides this when set.
+    pub fn dungeon_entry_limit(self) -> bool {
+        !matches!(self, Self::EuAuroria)
+    }
+
     /// The Archeum Lodestone max HP of the era, over the `r208022` `housings.hp` value
     /// (1,000,000); `None` keeps the template value.
     ///

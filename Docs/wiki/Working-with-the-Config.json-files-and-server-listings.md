@@ -701,6 +701,35 @@ default to `true` and can be turned off to restore the old faction-only behaviou
   The destination is inferred; the client evidence is only which revive window it
   shows.
 
+## Dungeon entry rules
+
+Two settings in `Configurations/Dungeons.json` (or `Config.Local.json`) control the entry rules
+of dungeons that need an entry item:
+
+```json
+{
+  "Dungeons": {
+    "EntryLimit": { "Enabled": null, "Count": 3, "WindowSeconds": 14400 },
+    "RequireEntryItems": true
+  }
+}
+```
+
+- `EntryLimit.Enabled`: whether the old AAEmu visit cap applies (`Count` fresh entries within
+  `WindowSeconds`). Leave it out (or `null`) and the era profile `World.Profile` decides: off
+  for the default `EuAuroria`, on for `EuLaunch` and `Kr12`. `true` or `false` overrides the
+  profile. `Count` (default 3) replaces the 3 for every zone group except the data's
+  "unlimited" rows (zone group 49 and the channel dungeons); `WindowSeconds` (default 14400,
+  four hours) is the window. The entry history is recorded even while the cap is off and is
+  kept in memory only (it resets when the server restarts).
+- `RequireEntryItems` (default `true`): `false` neither requires nor consumes the
+  `indun_zones.item_id` entry item of any dungeon.
+- Not configurable: five dungeon zone groups have a one-hour `restore_item_time` in the 1.2
+  data, so after leaving a run that consumed an entry item one new run of the same zone group
+  within an hour is free (once per ticket). It applies on every profile; only
+  `RequireEntryItems: false` removes the ticket cost altogether. The owner's recollection is
+  the only evidence for these rules (see `PORTING.md`, "Inferred").
+
 ## Logging
 
 Logging is not configured in `Config.json`. Both servers log to stdout; the
