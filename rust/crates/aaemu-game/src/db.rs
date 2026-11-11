@@ -841,6 +841,16 @@ mod tests {
     }
 
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// The MySQL error number of a database error (`1213` deadlock, `1205` lock wait timeout).
+    fn mysql_error_number(error: &sqlx::Error) -> Option<u16> {
+        let sqlx::Error::Database(db) = error else {
+            return None;
+        };
+        db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .map(|mysql| mysql.number())
+    }
 
     #[tokio::test]
     async fn retry_repeats_a_deadlocked_statement_until_it_succeeds() {
@@ -908,6 +918,11 @@ mod tests {
     /// and blocks on row 5, and when the save asks for row 3 InnoDB detects the cycle and rolls
     /// back the smaller statement (the tracking one). The retry rewrites it after the save
     /// commits, so no row loses its update.
+    ///
+    /// The test waits until the tracking statement is actually in InnoDB's `LOCK WAIT` state
+    /// before the save takes row 3, so a tracking statement that starts late cannot finish
+    /// before the deadlock window. It also records every tracking attempt and asserts that the
+    /// first one was rolled back with error 1213 and that the retry ran.
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; creates and drops a scratch table"]
     async fn private_mysql_retry_recovers_a_divine_clock_deadlock() {
@@ -928,6 +943,13 @@ mod tests {
         assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
         let pool = MySqlPoolOptions::new()
             .max_connections(2)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        // A third connection observes `performance_schema.data_lock_waits` while the save and
+        // the tracking statement hold the two pool connections.
+        let monitor = MySqlPoolOptions::new()
+            .max_connections(1)
             .connect_with(options)
             .await
             .unwrap();
@@ -966,19 +988,70 @@ mod tests {
             sqlx::query(&sql).execute(&mut *save).await.unwrap();
         }
 
-        // The tracking statement: blocks on row 5 after locking rows 1-4.
+        // The tracking statement: blocks on row 5 after locking rows 1-4. Every attempt and
+        // every deadlock (error 1213) it hits is recorded so the retry path is asserted.
         let sql = format!(
             "UPDATE `{table}` SET divine_clock_time = \
              LEAST(CAST(divine_clock_time AS UNSIGNED) + 1, 4294967295) WHERE id IN (1,2,3,4,5)"
         );
-        let retry_pool = pool.clone();
-        let tracking = tokio::spawn(async move {
-            retry_transaction(ADD_DIVINE_CLOCK_ATTEMPTS, || {
-                sqlx::query(&sql).execute(&retry_pool)
-            })
-            .await
+        let attempts = Arc::new(AtomicU32::new(0));
+        let deadlocks = Arc::new(AtomicU32::new(0));
+        let first_error = Arc::new(AtomicU32::new(0));
+        let tracking = tokio::spawn({
+            let retry_pool = pool.clone();
+            let attempts = Arc::clone(&attempts);
+            let deadlocks = Arc::clone(&deadlocks);
+            let first_error = Arc::clone(&first_error);
+            async move {
+                retry_transaction(ADD_DIVINE_CLOCK_ATTEMPTS, move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    let retry_pool = retry_pool.clone();
+                    let sql = sql.clone();
+                    let deadlocks = Arc::clone(&deadlocks);
+                    let first_error = Arc::clone(&first_error);
+                    async move {
+                        let result = sqlx::query(&sql).execute(&retry_pool).await;
+                        if let Err(error) = &result {
+                            let number = mysql_error_number(error);
+                            if number == Some(1213) {
+                                deadlocks.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if attempt == 1 {
+                                first_error.store(u32::from(number.unwrap_or(0)), Ordering::SeqCst);
+                            }
+                        }
+                        result
+                    }
+                })
+                .await
+            }
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Wait until the tracking statement really is blocked on row 5. A fixed sleep could let
+        // it start after the save took row 3, in which case the tracking succeeds on its first
+        // attempt and the test would no longer prove the deadlock recovery. A row lock wait is
+        // visible in `performance_schema.data_lock_waits` (InnoDB can keep `innodb_trx.trx_state`
+        // at RUNNING while the statement waits).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting: Option<String> = sqlx::query_scalar(
+                "SELECT t.PROCESSLIST_INFO FROM performance_schema.data_lock_waits w \
+                 JOIN performance_schema.threads t ON t.THREAD_ID = w.REQUESTING_THREAD_ID \
+                 WHERE t.PROCESSLIST_INFO LIKE ? LIMIT 1",
+            )
+            .bind(format!("%{table}%"))
+            .fetch_optional(&monitor)
+            .await
+            .unwrap();
+            if waiting.is_some() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the tracking statement never reached LOCK WAIT on row 5"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         // The save asks for row 3, held by the tracking statement: deadlock. InnoDB rolls back
         // the smaller statement (the tracking one); the save update and its commit succeed.
@@ -994,6 +1067,21 @@ mod tests {
             .await
             .unwrap()
             .expect("the retried tracking write succeeds");
+        assert_eq!(
+            first_error.load(Ordering::SeqCst),
+            1213,
+            "the first tracking attempt must be rolled back by the deadlock"
+        );
+        assert_eq!(
+            deadlocks.load(Ordering::SeqCst),
+            1,
+            "the tracking statement must hit exactly one deadlock"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "the tracking statement must be retried exactly once"
+        );
 
         let rows: Vec<(i64, i64)> = sqlx::query_as(&format!(
             "SELECT CAST(save_step AS SIGNED), CAST(divine_clock_time AS SIGNED) \
