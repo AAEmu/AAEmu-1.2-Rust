@@ -8264,6 +8264,19 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
     `!keep_mana_regen`; the plot `ManaCost` effect no longer starts it; `StopManaRegen` (type
     52) still does, and `skill::end_channeling` refreshes `LastCast` because the client starts a
     channel's window when the channel ends.
+- **Open point (byte reading of the r208022 dump, not decoded end to end).** `FUN_390b63f0`
+  gates the normal-rate segment on two fields (`[esi+0x3ACC]`, `[esi+0x3AD4]`) that
+  `OnSkillFired` writes only for a skill with `channeling_time > 0` (the second one is that
+  skill's `keep_mana_regen`). Read that way, the client suppresses the normal rate for the whole
+  duration of a channeling skill without `keep_mana_regen`, not only for the 5 s after
+  `LastCast`. The server window is `LastCast + 5 s`, refreshed at the start and at the end of the
+  channel, so on a channel longer than 5 s (r208022: 6 class skills, e.g. Twilight 10721 at
+  60 s, Protective Wings 10714 at 18 s, plus 82 ability-0 skills) it regenerates at the normal
+  rate mid-channel while the client predicts the persistent rate only. This is not a
+  regression (the C# window also ended 5 s after the start) and what clears `+0x3ACC` was not
+  traced, so it is recorded rather than changed. Fix if it is confirmed: `combat_tick` keeps
+  `is_in_post_cast` while the player's active skill task is the channel of a skill without
+  `keep_mana_regen`.
 - **Deviation from the C#.** `Unit.ReduceCurrentMp` broadcast `SCUnitPointsPacket` even when
   `Mp` did not change. The 1.2 client predicts its own regen between packets
   (`FUN_390b63f0`), so the zero-change packet of every 0-mana item use (and of a mana burn or
