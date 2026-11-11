@@ -152,7 +152,7 @@ impl<T> Default for Table<T> {
 
 impl<T> Table<T> {
     /// `Dictionary.Add`: `false` for a duplicate key (C# throws).
-    fn add(&mut self, id: u32, row: T) -> bool {
+    pub(crate) fn add(&mut self, id: u32, row: T) -> bool {
         if self.index.contains_key(&id) {
             return false;
         }

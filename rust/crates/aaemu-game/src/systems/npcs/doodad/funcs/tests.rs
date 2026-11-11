@@ -244,6 +244,37 @@ async fn to_next_phase_funcs_and_stubs() {
     }
 }
 
+/// `DoodadFuncAreaTrigger` (Sharpwind's Derelict Bridge phase 1): a player-triggered enter row
+/// advances to the authored next phase; leave rows and rows without a next phase stay.
+#[tokio::test]
+async fn area_trigger_func_advances_the_bridge_phase_for_a_player() {
+    let fx = fixture(Rec::default());
+    let enter = FuncTemplate::AreaTrigger(DoodadFuncAreaTrigger {
+        id: 73,
+        npc_id: 0,
+        is_enter: true,
+    });
+    fx.doodad.data().phase.to_next_phase = false;
+    fx.run(enter.clone(), 0, 13148);
+    assert!(
+        fx.to_next(),
+        "the bridge must advance to the broken rail phase"
+    );
+
+    fx.doodad.data().phase.to_next_phase = false;
+    fx.run(enter, 0, -1);
+    assert!(!fx.to_next(), "no authored next phase: stay");
+
+    let leave = FuncTemplate::AreaTrigger(DoodadFuncAreaTrigger {
+        id: 73,
+        npc_id: 0,
+        is_enter: false,
+    });
+    fx.doodad.data().phase.to_next_phase = false;
+    fx.run(leave, 0, 13148);
+    assert!(!fx.to_next(), "a leave row is not an enter trigger");
+}
+
 #[tokio::test]
 async fn gather_funcs_advance_only_a_player_with_an_authored_next_phase() {
     use crate::models::npc::Npc;

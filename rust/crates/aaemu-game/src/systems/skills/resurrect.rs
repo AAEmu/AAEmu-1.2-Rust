@@ -92,6 +92,31 @@ fn dungeon_zone_of(
         .dungeon_zone(group_id)
 }
 
+/// The instance's arrival point for `zone_key`: the zone's `world_spawns.json` position, which
+/// is exactly what `Dungeon.MoveCharacterToDungeon` / `MoveCharacterToSystemInstance` teleports
+/// the party to (`worlds::zone_spawn_position`).
+///
+/// The `has_graveyard = true` revival ("Revive at the entrance") must send the player back to
+/// that point, not to the Temple Priestess statue: the 1.2 client selects the entrance revival
+/// itself (`X2Player.IsInIndunWithGraveyard`), and the statue stands beside the arrival pool
+/// (Sharpwind's Priestess of Nui at 718.7 / 329.9 / 168.3 is 20 m from the pool's green
+/// arrival portal).
+fn instance_arrival_point(
+    server: &GameServer,
+    instance_id: u32,
+    world_id: u32,
+    zone_key: u32,
+) -> Option<crate::data::world_templates::WorldSpawnPosition> {
+    let world = server.world.world(instance_id);
+    let template = match world.as_deref() {
+        Some(w) => &w.template,
+        None => server.game_data.worlds.get_world_template_by_id(world_id)?,
+    };
+    let sp = crate::systems::instances::worlds::zone_spawn_position(server, template, zone_key)?;
+    // A zone without a `world_spawns.json` row keeps the default (0, 0, 0); never use it.
+    (sp.x != 0.0 || sp.y != 0.0).then_some(sp)
+}
+
 /// The respawn point of `CSResurrectCharacterPacket` (`new Portal()` = X 0 when none).
 fn respawn_portal(server: &GameServer, p: &PlayerRef) -> RespawnPoint {
     let (instance_id, world_id, zone_key, faction_id) = {
@@ -107,6 +132,43 @@ fn respawn_portal(server: &GameServer, p: &PlayerRef) -> RespawnPoint {
         };
     }
     if instance_id != DEFAULT_INSTANCE_ID {
+        // `indun_zones.has_graveyard = true`: the 1.2 client offers "Revive at the entrance"
+        // (`X2Player.IsInIndunWithGraveyard`, `FUN_39495b20` = record+1 != 0). The entrance is
+        // the instance's arrival point, the same position the enter-dungeon teleport uses
+        // (`worlds::zone_spawn_position`), never the Temple Priestess statue.
+        if dungeon_zone_of(server, zone_key).is_some_and(|z| z.has_graveyard) {
+            if let Some(sp) = instance_arrival_point(server, instance_id, world_id, zone_key) {
+                let yaw = sp.yaw.to_radians();
+                return RespawnPoint {
+                    portal: Portal {
+                        world_id,
+                        zone_id: if sp.zone_id != 0 {
+                            sp.zone_id
+                        } else {
+                            zone_key
+                        },
+                        x: sp.x,
+                        y: sp.y,
+                        z: sp.z,
+                        z_rot: yaw,
+                        yaw,
+                        ..Portal::default()
+                    },
+                    instance_id,
+                };
+            }
+            // A zone without a `world_spawns.json` row (every shipped dungeon zone has one, and
+            // `Dungeon::move_character` refuses an entry without it, so only a GM teleport gets
+            // here): keep the old behaviour - the instance's Temple Priestess below, else in
+            // place.
+            tracing::warn!(
+                "No arrival point for {} ({}) in instance {} (has_graveyard = true); \
+                 trying the Temple Priestess",
+                p.data().unit.name,
+                p.character_id,
+                instance_id
+            );
+        }
         // `indun_zones.has_graveyard = false`: the 1.2 client shows the ordinary "Revive"
         // window instead of "Revive at the entrance" (`X2Player.IsInIndunWithGraveyard`,
         // `FUN_39495b20` = record+1 != 0), so the ordinary shrine destination comes first.
@@ -425,20 +487,33 @@ fn apply_revival_debuffs(server: &GameServer, p: &PlayerRef, in_place: bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use sqlx::mysql::MySqlPoolOptions;
+
     use super::*;
+    use crate::config::AppConfig;
     use crate::data::world_data::Zone;
+    use crate::data::world_templates::{
+        WorldSpawnLocation, WorldSpawnPosition, WorldTemplate, WorldTemplates,
+    };
     use crate::data::GameData;
+    use crate::models::npc::Npc;
     use crate::models::transform::Transform;
     use crate::systems::instances::data::IndunZone;
     use crate::systems::npcs::portal::PortalTables;
     use crate::test_support::{
         spawn_player, test_character, test_server_with, TestClient, TEST_ZONE,
     };
+    use crate::world::Entity;
 
     const MIRAGE_ZONE: u32 = 260;
     const MIRAGE_GROUP: u32 = 49;
     const GRAVEYARD_ZONE: u32 = 261;
     const GRAVEYARD_GROUP: u32 = 55;
+    /// The template id of the synthetic graveyard instance in these tests.
+    const GRAVEYARD_WORLD_ID: u32 = 100;
 
     fn data() -> GameData {
         let mut d = GameData::empty();
@@ -502,11 +577,69 @@ mod tests {
         let p = spawn_player(server, &client, c, 0x101);
         {
             let mut d = p.data();
-            d.unit.transform.instance_id = 100;
-            d.unit.transform.world_id = 1;
+            d.unit.transform.instance_id = GRAVEYARD_WORLD_ID;
+            d.unit.transform.world_id = GRAVEYARD_WORLD_ID;
             d.unit.transform.zone_id = zone_key;
         }
         (client, p)
+    }
+
+    /// A server whose graveyard instance template carries `spawn` as its zone 261 arrival point
+    /// (`world_spawns.json`), like the shipped instance rows. `test_server_with` replaces the
+    /// world catalog, so the templates are installed on the `GameData` before `GameServer::new`.
+    fn server_with_arrival_point(spawn: Option<WorldSpawnPosition>) -> GameServer {
+        let mut d = data();
+        let main = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
+        let mut instance = WorldTemplate::synthetic(
+            GRAVEYARD_WORLD_ID,
+            "instance_graveyard",
+            2,
+            2,
+            GRAVEYARD_ZONE,
+        );
+        let mut lookups = Vec::new();
+        if let Some(spawn) = spawn {
+            instance
+                .xml_world
+                .zones
+                .get_mut(&GRAVEYARD_ZONE)
+                .expect("zone")
+                .spawn_position = spawn;
+            lookups.push(WorldSpawnLocation {
+                name: Some(instance.name.clone()),
+                spawn_position: Some(spawn),
+            });
+        }
+        d.worlds =
+            WorldTemplates::from_templates(vec![main, instance], lookups).expect("test worlds");
+        let mut config = AppConfig::default();
+        config.connections.mysql_provider.host = "127.0.0.1".into();
+        config.connections.mysql_provider.port = 1; // nothing listens here
+        let db = MySqlPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy_with(config.connections.mysql_provider.connect_options());
+        GameServer::new(config, db, d)
+    }
+
+    /// Creates the graveyard instance and stands a Temple Priestess (template 502) at `(x, y, z)`
+    /// in it.
+    fn spawn_priestess(server: &GameServer, (x, y, z): (f32, f32, f32)) {
+        let template = server
+            .game_data
+            .worlds
+            .get_world_template_by_id(GRAVEYARD_WORLD_ID)
+            .expect("graveyard world template")
+            .clone();
+        let world = server
+            .world
+            .create_world_instance(Arc::new(template), GRAVEYARD_WORLD_ID);
+        let npc = Entity::new(0x300, Npc::new(TEMPLE_PRIESTESS_TEMPLATE_ID));
+        {
+            let mut d = npc.data();
+            d.unit.transform.set_xyz(x, y, z);
+            d.unit.transform.zone_id = GRAVEYARD_ZONE;
+        }
+        world.spawn(&npc, &server.view_ctx());
     }
 
     #[tokio::test]
@@ -521,13 +654,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graveyard_instance_keeps_the_priestess_only_behaviour() {
-        let server = test_server_with(data());
+    async fn graveyard_instance_resurrects_at_the_zone_arrival_point() {
+        let spawn = WorldSpawnPosition {
+            world_id: GRAVEYARD_WORLD_ID,
+            zone_id: GRAVEYARD_ZONE,
+            x: 739.4,
+            y: 326.7,
+            z: 166.2,
+            yaw: -89.3565,
+            ..WorldSpawnPosition::default()
+        };
+        let server = server_with_arrival_point(Some(spawn));
+        // The instance's Temple Priestess stands elsewhere (Sharpwind's statue is 21 m from the
+        // arrival pool): the entrance revival must not use her.
+        spawn_priestess(&server, (10.0, 10.0, 100.0));
         let (_client, p) = dead_player_in(&server, GRAVEYARD_ZONE);
         let r = respawn_portal(&server, &p);
-        // `has_graveyard = true` does not consult the open-world return portal; with no Temple
-        // Priestess in the instance the in-place portal stays, exactly as before the change.
-        assert_eq!(r.instance_id, 100);
+        // "Revive at the entrance" (`has_graveyard = true`) is the instance's arrival point,
+        // the same position the enter-dungeon teleport uses - not the Temple Priestess.
+        assert_eq!(r.instance_id, GRAVEYARD_WORLD_ID);
+        assert_eq!((r.portal.x, r.portal.y, r.portal.z), (739.4, 326.7, 166.2));
+        assert_eq!(r.portal.zone_id, GRAVEYARD_ZONE);
+        assert!((r.portal.z_rot - (-89.3565f32).to_radians()).abs() < 1e-6);
+    }
+
+    /// A graveyard zone without a `world_spawns.json` row (only a GM teleport gets there) keeps
+    /// the old Temple Priestess destination before it revives in place.
+    #[tokio::test]
+    async fn graveyard_instance_without_an_arrival_point_falls_back_to_the_temple_priestess() {
+        let server = server_with_arrival_point(None);
+        spawn_priestess(&server, (40.0, 50.0, 100.0));
+        let (_client, p) = dead_player_in(&server, GRAVEYARD_ZONE);
+        let r = respawn_portal(&server, &p);
+        assert_eq!(r.instance_id, GRAVEYARD_WORLD_ID);
+        // The statue's position plus the 1-2 m offset of the old lookup.
+        assert!((41.0..=42.0).contains(&r.portal.x), "x {}", r.portal.x);
+        assert!((51.0..=52.0).contains(&r.portal.y), "y {}", r.portal.y);
+        assert_eq!(r.portal.z, 100.0);
+        assert_eq!(r.portal.zone_id, GRAVEYARD_ZONE);
+    }
+
+    #[tokio::test]
+    async fn graveyard_instance_without_an_arrival_point_or_priestess_revives_in_place() {
+        let server = server_with_arrival_point(None);
+        let (_client, p) = dead_player_in(&server, GRAVEYARD_ZONE);
+        let r = respawn_portal(&server, &p);
+        // Neither a spawn row nor a statue: the in-place portal.
+        assert_eq!(r.instance_id, GRAVEYARD_WORLD_ID);
         assert_eq!(r.portal.x, 0.0);
     }
 
