@@ -6937,7 +6937,11 @@ is the closest text.
   operation on the same character, so each deferred chat join and `InParty = true` is verified
   with `TeamManager::is_member_now` after it was applied and taken back for a character that left
   meanwhile (a removal queues its own leave after its state change: either the verify sees it or
-  the leave runs after the join). **Residual:** the `SCJoinedTeam` of a deferred join is a
+  the leave runs after the join). A party chat join is verified against the member's party
+  number too (`party_number_now`: a member moved to another party meanwhile does not keep the
+  stale join), and a leave's `InParty = false` is settled to the character's current membership
+  (`settle_in_party`, `is_in_any_team`), so the cleanup of an older team does not clear the flag
+  of a team that accepted the character first. **Residual:** the `SCJoinedTeam` of a deferred join is a
   snapshot, so the broadcast of a concurrent member change can reach the new member before it (a
   ghost / missing member until relog), and the dungeon `OnTeamJoin` event is not taken back.
   `ChatManager::clean_up_channels` (run after a disband) can also remove a still-empty party /
