@@ -1311,7 +1311,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `SphereQuestManager`, `SphereQuest*`, `SphereGameData` (spheres, sphere_quests, `IsInsideAreaSphere`, `GetSphereIdFromQuest`) | `spheres.rs`, `data.rs` | done | `quest_sign_sphere.g` of `main_world`; one manager per server (500 ms tick). Other `sphere_*` tables not loaded (unused by quests). |
 | `AreaSphere` unit requirement (kind 35) of skills and quest components | `spheres.rs` (`inside_requirement_sphere`), `bridges.rs`, `engine.rs` (`EnvView`) | added | The C# `IsInsideAreaSphere` only tests the client sign spheres of the sphere's `sphere_quests` quest. 147 skill rows use kind 35; when that quest has no sign sphere at the requirement's place the skill can never be used. Tester report: quest 2273 "March of Respect" could not place its Ritual Offering Bundle (item 18638, skill 15204, `or_unit_reqs`: sphere 1152 OR doodad 3339 within `value2` / 1000 = 0.001 m): sphere 1152 ("Q2273...") links to quest 2907 (`sphere_quests` 660), which has no sign sphere at Prince Reander's Monument. The requirement now also passes inside the sphere's own `sphere_area_fill.json` area (1152: radius 6 m around the altar), for `SphereQuest` spheres only; the areas are not world-filtered (the callers have a position only; sphere ids are unique). Abandoning the quest destroying the bundle is the data (supply act 1822: `destroy_when_drop`). Test: `quests::tests::requirement_sphere_falls_back_to_the_shipped_area`. |
 | Imported quest sign spheres (`quest_sign_sphere_fill.json`) | `spheres.rs` (`load_sign_sphere_fill`), `mod.rs` (start), `app/Data/Worlds/*/quest_sign_sphere_fill.json`; converter `rust/tools/quest_sign_sphere_import/` | added | The 19 quests of `Docs/wiki/Quest-Audit.md` whose objective sphere has no 1.2 client sign sphere (1012, 1024, 1033, 1039, 1372, 1392, 1398, 1400, 1650, 1897, 5272, 5439, 5716, 5898, 5979, 6039, 6050, 6213, 6216). One offline converter reads the 10.x `world_server/quest_area_sphere.g` (`stype` = `spheres.id`) and the 10.x client `client/quest_sign_sphere.g` (`qtype` / `ctype`), both zone-local in the source, and writes **8 spheres in 7 quests** in world coordinates (`source_zone_origin * 1024 + local`, z as is; the loader uses fill rows as world and adds no origin): 1650 (main_world 142), 5716 (main_world 186), 5979 (instance_training_camp 198, two areas), 6039 / 6050 (instance_prologue 300), 6213 (main_world 144), 6216 (main_world 158). The other 12 quests are dropped with a reason: 1012 / 1024 / 1033 / 1039 because the 10.x `spheres` row was reused for another quest (`sphere_mapping_mismatch`; e.g. 10.x sphere 945 -> quest 5804 while 1.2 uses it for 1033), 1400 because its 10.x component id differs (7021/36416 vs the 1.2 7020), and 1372 / 1392 / 1398 / 1897 / 5272 / 5439 / 5898 because their sphere ids have no block in the 10.x files at all. 5716's second block is dropped because it lies in zone 159 while the quest is authored in zone 186; 6039 / 6050's second files are dropped because zone 348 does not exist in 1.2. Guards: the 10.x and 1.2 `spheres` / `sphere_quests` rows must name the same detail and quest, the 1.2 component must have a `QuestActObjSphere` / `QuestActCheckSphere` act for the same `sphere_id`, the zone must belong to the named 1.2 world and be open (`zones.closed = 'f'`), a 1.2 client sphere for the same (quest, component) is never overridden, and a 1.2 `mission_mission0.xml` `AreaSphere` with the same `value1` within 1.5 m must agree on the radius. The loader repeats the runtime guards, loads the file after the client spheres and rejects duplicates; the quest sphere triggers compare the sphere's `world_id` with the player's world (a main_world area no longer fires inside an instance). The 10.x client sign sphere file contributed no kept entry (its only matching old quests are in zones closed in 1.2), and the 10 contexts without components are untouched. Location note: the active manager/loader is `systems/quests/spheres.rs`; the world-side copy `systems/npcs/sphere_quest.rs` is not started (`start` is a no-op), so the fill is wired into the active path. |
-| Imported area spheres (`SCAreaChatBubble` 0x153, `SCAreaTeamMessage` 0x155, `SphereDoodadInteract`) | `spheres.rs` (`SphereArea`, `load_sphere_areas`, `tick_area_spheres`, `dispatch_doodad_interact`), `packets.rs` | added / INFERRED | Enter / leave of a `sphere_area_fill.json` area in the same 500 ms tick as the quest spheres (run first, the quest sphere code is unchanged): a `SphereBubble` row sends `SCAreaChatBubble(enter, player unit, sphere_detail_id)` and any row with a non-blank `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player; leave only when `enter_or_leave` is set. **INFERRED trigger and audience** (CAP-UI-7 / CAP-UI-6): the 1.2 client has the readers and handlers (`FUN_397b6330` / `FUN_391dc340`, `FUN_397b63b0` / `FUN_391dc460`) but no captured sender; `is_personal_msg` is true for all 67 shipped `team_msg` rows and the Rust sends to the player only (the non-personal audience is UNKNOWN). `SphereDoodadInteract` runs the enter `DoodadFuncAreaTrigger` row of the doodads inside the area / skill range (Sharpwind's Derelict Bridge; CAP-DOODAD-1). `SphereSkill` / `SphereSound` / `SphereBuff` areas load but have no effect (a separate content decision). A missing JSON file is an empty table; ids are re-guarded against the loaded `spheres` table. |
+| Imported area spheres (`SCAreaChatBubble` 0x153, `SCAreaTeamMessage` 0x155, `SphereDoodadInteract`) | `spheres.rs` (`SphereArea`, `load_sphere_areas`, `tick_area_spheres`, `dispatch_doodad_interact`), `packets.rs` | added / INFERRED | Enter / leave of a `sphere_area_fill.json` area in the same 500 ms tick as the quest spheres (run first, the quest sphere code is unchanged): a `SphereBubble` row sends `SCAreaChatBubble(enter, player unit, sphere_detail_id)` and any row with a non-blank `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player; leave only when `enter_or_leave` is set. **INFERRED trigger and audience** (CAP-UI-7 / CAP-UI-6): the 1.2 client has the readers and handlers (`FUN_397b6330` / `FUN_391dc340`, `FUN_397b63b0` / `FUN_391dc460`) but no captured sender; `is_personal_msg` is true for all 67 shipped `team_msg` rows and the Rust sends to the player only (the non-personal audience is UNKNOWN). `SphereDoodadInteract` runs the enter `DoodadFuncAreaTrigger` row of the doodads inside the area / skill range once the sphere's own `unit_reqs` pass (Sharpwind's Derelict Bridge, the 12 open-world quarry rock piles of doodad 2803 in sphere 1446's areas and the open-world Unstable Floor 1495 in sphere 429's; capture-pending CAP-DOODAD-1, see "Sharpwind opening chain"). `SphereSkill` / `SphereSound` / `SphereBuff` areas load but have no effect (a separate content decision). A missing JSON file is an empty table; ids are re-guarded against the loaded `spheres` table. |
 | `QuestActObjZoneKill.OnZoneKill` level window | `systems/quests/acts.rs` (`level_in_range`) | deviation | **Deviation:** a level bound of 0 is "unset". The 1.2 data has `lv_min_npc` / `lv_max_npc` = 0 / 0 on 103 of the 110 NPC-kill acts (`lv_min` / `lv_max` are the questor's window and differ from the NPC bounds on the 7 acts that set both), and the C# rejected every real victim against the raw 0..0 range, so those quests could never complete. The player-kill window uses the same rule. |
 | `QuestActObjZoneKill` team share | `systems/quests/acts.rs`, `events.rs` (`run_deferred`) | deviation | **Deviation:** only the original killer shares the kill (the `ObjTalk` / `ObjInteraction` guard). The C# re-delegated `OnZoneKill` from every receiver ("to avoid loops") and bounced between members holding the same quest without end. NPC deaths raise the event for each eligible party member, who all share it again, so in the C# a member counted the kill once directly and once per sharing member. **Deviation:** each member now counts a kill once per act. `Npc.DoDie` (`npcs/npc/death.rs`) notes the victim in the `direct_kill_credits` of everyone it hands a direct event (eligible players, the fallback killer, Tag Share contributors) before the first event is raised, and a team-shared `ObjZoneKill` ignores a victim in that list and counts a shared victim once per (quest, act) (`CharacterSkillState::claim_shared_kill_credit`, 30 s memory because object ids are reused). Team members out of range, who get no direct event, still receive the share (once). |
 | `QuestActObjZoneKill` PvP kills | `systems/skills/combat.rs` (`raise_pvp_zone_kill`, from `character_death_tail`) | deviation | **Deviation:** the C# only raised `OnZoneKill` from `Npc.DoDie` (`DoOnMonsterHuntEvents`), so the 16 `count_player_kill > 0` acts (e.g. quests 5982-5991) never progressed. A player killed by another player's hand (hostile relation, the same branch that awards PvP honor) now raises `ZoneKill` (zone group of the victim, killer and victim as `KillUnit`s) for the killer only; `team_share` acts hand it to the killer's team through the usual `TeamEvent`. Friendly-fire kills and mate / slave kills raise nothing. |
@@ -3482,15 +3482,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     config_off_keeps_the_priestess_behaviour_for_no_graveyard_instances}`.
   * `has_graveyard = 't'` (every ordinary dungeon): **deviation from the C#**, which teleported
     the corpse to the first Temple Priestess (template 502) plus a random 1-2 m offset and put
-    the character inside the statue. The 1.2 "Revive at the entrance" returns the character to
-    the instance's **arrival point** - the same `world_spawns.json` zone spawn the
-    enter-dungeon teleport uses (`worlds::zone_spawn_position`, no NPC lookup). No spawn row
-    falls back to an in-place revive with a warning, never to an NPC. Owner evidence (cloud
-    server, main `7b25bb833`): after release the character stood at the Priestess of Nui
-    (718.7 / 329.9 / 168.3), clipped into her model, while a retail 1.2 video shows the party
-    landing in the pool under the green portal with the priestess at its edge. Tests:
+    the character inside the statue. The 1.2 client offers "Revive at the entrance" for these
+    zones (ui_texts 3843 / 3844, "Always respawn at entrance"), and the Rust returns the
+    character to the instance's **arrival point** - the same `world_spawns.json` zone spawn the
+    enter-dungeon teleport uses (`worlds::zone_spawn_position`, no NPC lookup, no random
+    offset). **Inferred (no 1.2 server evidence):** that the entrance of that revival is the
+    `world_spawns.json` zone spawn; the ui_texts prove that an entrance revival exists, not
+    where the 1.2 server put the character. A zone without a spawn row (every shipped dungeon
+    zone has one and the enter teleport refuses an instance without it, so only a GM teleport
+    gets there) keeps the old destination (a warning is logged): the instance's Temple
+    Priestess, else an in-place revive. Owner evidence (cloud server, main `7b25bb833`): after
+    release the character stood at the Priestess of Nui (718.7 / 329.9 / 168.3), clipped into
+    her model; the owner recalls the retail 1.2 party landing in the pool under the green
+    portal with the priestess at its edge (owner recollection, not captured). Tests:
     `resurrect::tests::{graveyard_instance_resurrects_at_the_zone_arrival_point,
-    graveyard_instance_without_an_arrival_point_revives_in_place}`.
+    graveyard_instance_without_an_arrival_point_falls_back_to_the_temple_priestess,
+    graveyard_instance_without_an_arrival_point_or_priestess_revives_in_place}`.
   * Sharpwind Mines' `world_spawns.json` row was moved from the end-of-run exit
     (796.3 / 325.386 / 249.54; doodad 5723 at 804.1 / 327.7 / 248.1) to the start pool's green
     portal (739.4 / 326.7 / 166.2; the other doodad 5723, inside the pond sound area
@@ -4665,44 +4672,85 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::npcs (instance trash respawn / `save_indun`, 2026-11-11): the C# loaded
   `npc_spawners.save_indun` and never read it, so every dead dungeon NPC came back on its
   `SpawnDelayMin/Max` (10 s on the Sharpwind rows) and the periodic refill also replaced it.
-  In 1.2 a run's trash stays dead. A death now freezes the whole placement for its run's
-  lifetime when the row is `save_indun = 't'` (366 authored dungeon spawners, e.g.
-  "11361: 칼바람폐광 슬라임" / spawner 12593) **or** when the spawner is a spawn-file placement
-  (`NpcSpawner::is_placement`, set by `SpawnManager::AddNpcSpawner`; not an event / tower /
-  summon spawner) inside a **per-run dungeon**: a live `Dungeon` with `is_system = false` and
-  `indun_zone.client_driven = false`. That covers the `save_indun = 'f'` rows such as the
-  Blackbeard assassin 11572 and named bosses, which a live check showed respawning 10 s after
-  death in a run. System / persistent instances (Mirage Isle, the Library wings, channels),
-  the client-driven prologue, battlefields (no `Dungeon`) and housing keep their respawn
-  rules - their `parent_world` only matters through the live `Dungeon` lookup
-  (`server.systems.instances.dungeon_of_world`), not the instance id alone.
-  `do_despawn` schedules no respawn, `despawn_with_respawn` and the `enable_respawn` group
-  partial timer are refused, and `do_spawn` / the activation tick do not refill
-  (`NpcSpawnerShared::saved_death`). A fresh dungeon creates new spawners, so the next run is
-  repopulated; scripted `do_event_spawn` still works. Owner evidence (cloud server): the
-  killed Sharpwind slimes kept respawning; a retail 1.2 video shows a fixed group around the
-  geysers that stays dead. Deviation from the C# (which respawned them). Tests:
+  A death now freezes the whole placement for its run's lifetime
+  (`NpcSpawnerShared::saved_death`), but only inside a live `Dungeon`
+  (`server.systems.instances.dungeon_of_world`, the run: the open world, plain instances,
+  battlefields and housing have none) and only for a death or the claimed scripted removal of
+  `KillNpcWithoutCorpse` (a living NPC that finishes a scripted walk and is removed keeps its
+  respawn), in two cases:
+  * the row is authored `save_indun = 't'` ("save in dungeon"; the AAEmu CN `npc_spawners` has
+    366 `'t'` spawners, e.g. "11361: 칼바람폐광 슬라임" / spawner 12593; 133 of them are placed
+    by no shipped spawn file and 3 by open-world `main_world` entries, where the column has no
+    meaning and is ignored): in any dungeon, system or not;
+  * **Inferred (no 1.2 server evidence):** the spawner is a spawn-file placement
+    (`NpcSpawner::is_placement`, set by `SpawnManager::AddNpcSpawner`; not an event / tower /
+    summon spawner) inside a **per-run dungeon**: a live `Dungeon` with `is_system = false` and
+    `indun_zone.client_driven = false`. This extends the one-run rule to the `save_indun = 'f'`
+    rows such as the Blackbeard assassin 11572 and the named bosses. The reading rests on one
+    live observation of the Rust server (the assassin respawning 10 s after its death in a
+    run) and the owner's recollection of retail 1.2 (a fixed group around the geysers that
+    stays dead; owner recollection, not captured), plus the fact that bosses carry the same
+    default 10 s delay as the trash (the column cannot mean "respawns during the run" for
+    them). The rule overrides an authored non-default delay where one exists: Giant Fire
+    Elemental 9810 (625 s, Sal's Temple; Bloodhand Watcher 3086 has a 60 s row, but that
+    spawner is `activation_state = 'f'`).
+
+  System / persistent dungeons (Mirage Isle, the Library wings) and the client-driven prologue
+  keep the respawn rules of their un-authored rows. A frozen placement schedules no respawn
+  (`do_despawn`, `despawn_with_respawn`), is not refilled (`do_spawn` / the activation tick, the
+  `enable_respawn` group partial timer) and is never distance-reclaimed (`reclaim_cold_npcs`:
+  nothing would refill its surviving members, the room would stay empty for the run). A fresh
+  dungeon creates new spawners, so the next run is repopulated; scripted `do_event_spawn` still
+  works. Owner evidence (cloud server): the killed Sharpwind slimes kept respawning.
+  Deviation from the C# (which respawned them). Tests:
   `npcs::spawn_tests::{save_indun_spawner_does_not_respawn_a_dead_member,
+  save_indun_spawner_still_respawns_outside_a_dungeon,
   instance_placement_without_save_indun_stays_dead,
   system_instance_placement_still_respawns,
-  client_driven_instance_placement_still_respawns}`.
+  client_driven_instance_placement_still_respawns,
+  scripted_walk_removal_in_a_dungeon_keeps_the_respawn,
+  claimed_scripted_removal_in_a_dungeon_freezes_the_placement,
+  claimed_scripted_removal_of_a_save_indun_npc_outside_a_dungeon_respawns,
+  frozen_placement_survivors_are_not_reclaimed_when_the_players_leave}`.
 * systems::quests / systems::npcs (Sharpwind opening chain, 2026-11-11): the C#
   `DoodadFuncAreaTrigger.Use` only logged, and the sphere tick only handled bubbles /
   team messages / accept-quest, so the Derelict Bridge never gave way. The 10.x
   `DoodadAreaTriggerRuntime` shows the mechanism: the zone sends area edges (kind 21 =
   `SphereDoodadInteract`, `value1` = `spheres.id`) and the world runs the doodad's
   `DoodadFuncAreaTrigger` row and changes the phase. Rust now does the same from
-  `sphere_area_fill.json`: on entering a `SphereDoodadInteract` area it runs the enter row of
-  each doodad inside the area and within the authored skill's `max_range` (skill 11284 has
-  4 m), then `DoChangePhase`. Sharpwind sphere 1552 ("bridge collapse area", r 5 at the
+  `sphere_area_fill.json`: when a player enters a `SphereDoodadInteract` area (only characters
+  produce area edges) and meets the sphere's own `unit_reqs` (`can_trigger_sphere`, like the
+  `SphereAcceptQuest` offers), it runs the enter row of each doodad of the player's region
+  neighbourhood that lies inside the area and within the authored skill's `max_range` (skill
+  11284 has 4 m; the largest of the 105 shipped rows is 30 m) under the doodad's phase
+  reservation, then `DoChangePhase`. Sharpwind sphere 1552 ("bridge collapse area", r 5 at the
   bridge) contains only doodad 5058, whose row 11162 (`next_phase` 13148) swaps the rail
-  model for `rail_a_broken`. **INFERRED / capture-pending CAP-DOODAD-1:** the shipped
-  `sphere_doodad_interacts.doodad_family_id` (50000) cannot be resolved because the 1.2
-  compact `doodad_families` table is empty; the skill range and the sphere area bound the
-  candidates instead (a guess only if several doodads share the area). Tests:
+  model for `rail_a_broken`. **Inferred (no 1.2 server evidence) / capture-pending
+  CAP-DOODAD-1:** the shipped `sphere_doodad_interacts.doodad_family_id` (50000) cannot be
+  resolved because the 1.2 compact `doodad_families` table is empty; the skill range and the
+  sphere area bound the candidates instead (a guess only if several doodads share the area).
+  The dispatch is generic, so besides the bridge (sphere 1552, doodad 5058) it also reaches
+  two kinds of open-world (`main_world`) doodads: the **12 quarry rock piles** (doodad 2803
+  "Arcum Iris Quarry Rock Pile") inside the five areas of sphere 1446 (skill 2, `max_range`
+  25: every pile within 25 m of the entering player), and the single **Unstable Floor**
+  (doodad 1495 at 14146.3 / 14966.2 / 144.3, zone 142) inside the areas of sphere 429 ("floor
+  that collapses on entry", skill 10134, `max_range` 10). Their enter rows (`doodad_funcs`
+  5424 and 10916) advance the start phase (6231 / 2336) to a phase whose phase func is a
+  `DoodadFuncFinal` (6232 / 2337), so the doodad crumbles away and respawns. This is accepted
+  as the intended data behaviour (the authored sphere, skill and func rows say so; probably
+  cosmetic); the other shipped `SphereDoodadInteract` areas find no doodad with an enter row
+  today (Sharpwind's stalactite doodads 5364 / 5365 / 5420 are placed by no spawn file). The
+  affected (sphere, doodad) pairs are listed by the `#[ignore]`d real-data test below (r208022
+  data: (429, 1495) x 1, (1446, 2803) x 12, (1552, 5058) x 1). Tests:
   `doodad::funcs::tests::area_trigger_func_advances_the_bridge_phase_for_a_player`,
   `quests::sphere_doodad_tests::{crossing_the_bridge_sphere_advances_the_bridge_to_its_broken_phase,
-  a_player_outside_the_sphere_does_not_collapse_the_bridge}`. The geyser water level itself is
+  a_player_outside_the_sphere_does_not_collapse_the_bridge,
+  a_sphere_whose_requirements_the_player_misses_does_not_collapse_the_bridge,
+  a_bridge_in_a_neighbouring_region_is_reached_inside_the_skill_range,
+  a_bridge_inside_the_area_but_out_of_the_skill_range_stands,
+  a_bridge_reserved_by_another_thread_is_not_advanced}`; real data (`AAEMU_COMPACT_DB` = a copy
+  of the r208022 `compact.sqlite3`): `cargo test -p aaemu-game --lib
+  real_data_sphere_doodad_interact -- --ignored --nocapture`. The geyser water level itself is
   a client-side phase model (`water_switch1` -> `water_switch2`); the authored logic network
   around it references doodads 5068 / 5071 / 5073 that no shipped spawn file places, so the
   "water rises" transition remains a data gap (see the run report), not a code stub.
