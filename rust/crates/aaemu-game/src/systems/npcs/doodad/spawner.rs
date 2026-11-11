@@ -136,6 +136,9 @@ pub struct DoodadSpawnerDef {
     pub count: u32,
     /// `RelatedIds` (`null` when absent).
     pub related_ids: Option<Vec<u32>>,
+    /// `FamilyId` (the level editor's `Family_Id`; 0 when absent). The C# JSON model never
+    /// carried it; the placement data does (Sharpwind 50001-50008).
+    pub family_id: u32,
     pub respawn_doodad_template_id: u32,
 }
 
@@ -150,6 +153,7 @@ impl DoodadSpawnerDef {
             scale: json::f32_or(obj, "Scale", 1.0)?,
             count: json::u32_or(obj, "Count", 1)?,
             related_ids,
+            family_id: json::u32_or(obj, "FamilyId", 0)?,
             respawn_doodad_template_id: json::u32_or(obj, "RespawnDoodadTemplateId", 0)?,
         })
     }
@@ -240,6 +244,8 @@ pub struct DoodadSpawner {
     pub special_link: String,
     /// `RelatedIds` (for `DoodadFuncPulse`).
     pub related_ids: Option<Vec<u32>>,
+    /// Level-design logic family id of this placement (0 = none).
+    pub family_id: u32,
     state: Mutex<State>,
 }
 
@@ -355,6 +361,7 @@ impl DoodadSpawner {
                 scale: self.scale(),
                 count: 1,
                 related_ids: self.related_ids.clone(),
+                family_id: self.family_id,
                 respawn_doodad_template_id: 0,
             },
             Some(world_id),
@@ -419,6 +426,7 @@ impl DoodadSpawner {
             despawn_time: def.base.despawn_time,
             special_link: def.base.special_link,
             related_ids: def.related_ids,
+            family_id: def.family_id,
             state: Mutex::new(State {
                 parent_world,
                 respawn_time: def.base.respawn_time,
@@ -563,6 +571,7 @@ impl DoodadSpawner {
             .set_doodad_spawner(doodad.obj_id, self.clone());
         let mut d = doodad.data();
         d.spawner_id = self.id;
+        d.family_id = self.family_id;
         // Transform.ApplyWorldSpawnPosition(Position)
         let p = self.position;
         d.transform.zone_id = p.zone_id;

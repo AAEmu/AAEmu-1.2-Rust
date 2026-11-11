@@ -1,10 +1,37 @@
-//! Logic links and family pulses. The target compact labels operations 1..4 AND/NAND/OR/XOR,
-//! 5 NOT (template 1706), and 6..7 NOR/XNOR (template 1572). PulseTrigger.flag is the expected
-//! input value; its next_phase is the authored transition on that input.
+//! Logic links and family pulses.
+//!
+//! The authored network is addressed by the level-design **family id** of each doodad (the
+//! 1.2 client level editor's `doodad.xml` `Family_Id`, loaded into `Doodad::family_id` from the
+//! spawn row's `FamilyId`). The two function tables read as follows (Sharpwind Mines is the
+//! complete example, all ids matched against the editor placements):
+//!
+//! * `DoodadFuncLogicFamilyProvider { family_id }` — when this doodad emits, the doodads whose
+//!   `family_id` equals `family_id` receive the signal (output route).
+//! * `DoodadFuncLogicFamilySubscriber { family_id }` — this doodad's `DoodadFuncLogic` accepts
+//!   signals only from the doodad whose `family_id` equals `family_id` (input route); each
+//!   subscribed family is one input, a family that never signalled counts as `false`.
+//! * `DoodadFuncLogic { operation_id, delay_id }` — combines the accepted inputs
+//!   (`enum_doodad_logic_operations`: 1 AND, 2 NAND, 3 OR, 4 XOR, 5/6 NOT/NOR, 7 XNOR) and emits
+//!   the result after `enum_doodad_logic_delays` (1 = 1 s, 2 = 5 s, 3 = 10 s, 4 = 30 s, 5 =
+//!   1 min, 6 = 5 min, 7 = 10 min, 8 = 30 min).
+//! * `DoodadFuncPulse { flag }` — emits `flag` on a character-caused phase entry (the C# ran it
+//!   only with a caster), to the provider families and to the spawner's `RelatedIds`.
+//! * `DoodadFuncPulseTrigger { flag, next_phase }` — a received signal equal to `flag` advances
+//!   the phase.
+//!
+//! Sharpwind (`instance_cuttingwind_deadmine`, zone 262; editor families 50001-50008):
+//! switches 5064 (50002) and 5068 (50003) provide 50005, the family of gate 5070, whose AND over
+//! its subscribers 50002/50003 emits to 50006 (gate 5071) and 50007 (streams 5072); gate 5071
+//! ANDs switch 5069 (50004) with gate 5070 (50005) and emits to 50001 (lake 5063 → water rises)
+//! and 50008 (streams 5073).
+//!
+//! Client-created wires (`DoodadFuncLogic` link packets) still connect two live handles
+//! directly and bypass the family filter.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{phase, runtime::DoodadCtx, templates::FuncTemplate};
 use crate::models::doodad::doodad_owner_type;
@@ -39,6 +66,44 @@ fn families(ctx: &DoodadCtx<'_>, doodad: &DoodadRef, provider: bool) -> HashSet<
             },
         )
         .collect()
+}
+
+/// One doodad's owner domain (never holds two object locks at once).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Domain {
+    zone: u32,
+    owner: u32,
+    owner_type: u8,
+}
+
+impl Domain {
+    fn of(d: &DoodadRef) -> Self {
+        let d = d.data();
+        Self {
+            zone: d.transform.zone_id,
+            owner: d.owner_id,
+            owner_type: d.owner_type,
+        }
+    }
+
+    fn matches(self, other: Self) -> bool {
+        self == other && (self.owner_type == doodad_owner_type::SYSTEM || self.owner != 0)
+    }
+}
+
+/// The delay of a `DoodadFuncLogic` (`enum_doodad_logic_delays`); 0 = unknown descriptor.
+fn logic_delay_ms(delay_id: u32) -> Option<u64> {
+    Some(match delay_id {
+        1 => 1_000,
+        2 => 5_000,
+        3 => 10_000,
+        4 => 30_000,
+        5 => 60_000,
+        6 => 300_000,
+        7 => 600_000,
+        8 => 1_800_000,
+        _ => return None,
+    })
 }
 
 /// Client-created wires require both objects to belong to the caller, in the same world and
@@ -92,7 +157,13 @@ pub fn link(server: &GameServer, player: &PlayerRef, provider_id: u32, subscribe
         .insert(subscriber_id, identity(&subscriber));
     let output = provider.data().phase.logic_output;
     if let Some(value) = output {
-        receive(&ctx, &subscriber, Some(&WorldObject::from(player)), value);
+        receive(
+            &ctx,
+            &subscriber,
+            Some(&WorldObject::from(player)),
+            value,
+            true,
+        );
     }
     true
 }
@@ -123,6 +194,8 @@ pub fn clear_links(ctx: &DoodadCtx<'_>) {
     d.phase.logic_output = None;
 }
 
+/// Emit `value` to every route of the doodad: explicit wires, the `family_id`s named by its
+/// `DoodadFuncLogicFamilyProvider` rows, and the spawner's `RelatedIds` templates.
 pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
     let root = PULSE_PATH.with(|path| {
         let mut path = path.borrow_mut();
@@ -132,33 +205,34 @@ pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
     });
     let _scope = PulseScope(root);
     ctx.doodad.data().phase.logic_output = Some(value);
-    let (links, owner, owner_type, zone) = {
-        let d = ctx.doodad.data();
-        (
-            d.phase.logic_links.clone(),
-            d.owner_id,
-            d.owner_type,
-            d.transform.zone_id,
-        )
-    };
+    let links = ctx.doodad.data().phase.logic_links.clone();
     let mut targets = Vec::new();
+    let mut seen = HashSet::new();
     for (id, handle) in links {
         if let Some(target) = ctx.world.doodad(id).filter(|d| identity(d) == handle) {
-            targets.push(target);
+            if seen.insert(identity(&target)) {
+                targets.push((target, true));
+            }
         }
     }
     let provided = families(ctx, &ctx.doodad, true);
     if !provided.is_empty() {
+        let domain = Domain::of(&ctx.doodad);
         for target in ctx.world.all_doodads() {
-            let same_domain = {
+            if Arc::ptr_eq(&target, &ctx.doodad) {
+                continue;
+            }
+            let (family, deleted) = {
                 let d = target.data();
-                d.transform.zone_id == zone
-                    && d.owner_id == owner
-                    && d.owner_type == owner_type
-                    && (owner_type == doodad_owner_type::SYSTEM || owner != 0)
+                (d.family_id, d.phase.deleted)
             };
-            if same_domain && !provided.is_disjoint(&families(ctx, &target, false)) {
-                targets.push(target);
+            if family != 0
+                && !deleted
+                && provided.contains(&family)
+                && domain.matches(Domain::of(&target))
+                && seen.insert(identity(&target))
+            {
+                targets.push((target, false));
             }
         }
     }
@@ -170,21 +244,25 @@ pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
         .doodad_spawner_of(ctx.doodad.obj_id)
     {
         if let Some(related) = &spawner.related_ids {
-            targets.extend(
-                ctx.world
-                    .around(&ctx.obj(), |o| o.as_doodad().cloned())
-                    .into_iter()
-                    .filter(|d| related.contains(&d.data().template_id)),
-            );
+            for target in ctx
+                .world
+                .around(&ctx.obj(), |o| o.as_doodad().cloned())
+                .into_iter()
+                .filter(|d| related.contains(&d.data().template_id))
+            {
+                if seen.insert(identity(&target)) {
+                    targets.push((target, false));
+                }
+            }
         }
     }
-    for target in targets {
+    for (target, via_link) in targets {
         let fresh = PULSE_PATH.with(|path| {
             let mut path = path.borrow_mut();
             path.len() < 256 && path.insert(identity(&target))
         });
         if fresh {
-            receive(ctx, &target, caster, value);
+            receive(ctx, &target, caster, value, via_link);
         }
     }
 }
@@ -208,47 +286,83 @@ fn evaluate(operation: u32, inputs: impl Iterator<Item = bool>) -> Option<bool> 
     })
 }
 
+/// Deliver one signal from `source` to `target`.
+///
+/// With `via_link` the client wire connects the two handles and the family filter is skipped;
+/// otherwise a target with `DoodadFuncLogicFamilySubscriber` rows only accepts the source whose
+/// `family_id` it subscribes to. `DoodadFuncLogic` targets evaluate their inputs and emit after
+/// the authored delay; other targets run a matching `DoodadFuncPulseTrigger`.
 pub(crate) fn receive(
     source: &DoodadCtx<'_>,
     target: &DoodadRef,
     caster: Option<&WorldObject>,
     value: bool,
+    via_link: bool,
 ) {
     let Some(_operation) = phase::Operation::enter(target) else {
         if !target.data().phase.deleted {
-            super::tasks::schedule_pulse(source, target, caster, value);
+            super::tasks::schedule_pulse(source, target, caster, value, via_link);
         }
         return;
     };
     let ctx = DoodadCtx::new(source.server, source.world.clone(), target.clone());
-    target
-        .data()
-        .phase
-        .logic_inputs
-        .insert(identity(&source.doodad), value);
     let group = target.data().func_group_id;
     let funcs = ctx.data().phase_funcs(group);
-    if let Some(f) = funcs.iter().find_map(|pf| {
+    let subscribed = families(&ctx, target, false);
+    let key = if !via_link && !subscribed.is_empty() {
+        let family = source.doodad.data().family_id;
+        if family == 0 || !subscribed.contains(&family) {
+            return;
+        }
+        family as usize
+    } else {
+        identity(&source.doodad)
+    };
+    target.data().phase.logic_inputs.insert(key, value);
+
+    let logic = funcs.iter().find_map(|pf| {
         match ctx.data().phase_func_template(pf.func_id, &pf.func_type) {
-            Some(FuncTemplate::Logic(f)) => Some(f),
+            Some(FuncTemplate::Logic(f)) => Some(f.clone()),
             _ => None,
         }
-    }) {
-        if f.delay_id != 1 {
+    });
+    if let Some(f) = logic {
+        let Some(delay) = logic_delay_ms(f.delay_id) else {
             tracing::warn!(
                 doodad = target.obj_id,
                 delay = f.delay_id,
-                "Unsupported logic delay descriptor; refusing to substitute immediate behavior"
+                "Unsupported DoodadFuncLogic delay descriptor; refusing to substitute immediate behavior"
             );
             return;
-        }
+        };
         let output = {
             let d = target.data();
-            evaluate(f.operation_id, d.phase.logic_inputs.values().copied())
+            if !via_link && !subscribed.is_empty() {
+                let mut families: Vec<u32> = subscribed.into_iter().collect();
+                families.sort_unstable();
+                evaluate(
+                    f.operation_id,
+                    families.into_iter().map(|family| {
+                        d.phase
+                            .logic_inputs
+                            .get(&(family as usize))
+                            .copied()
+                            .unwrap_or(false)
+                    }),
+                )
+            } else {
+                evaluate(f.operation_id, d.phase.logic_inputs.values().copied())
+            }
         };
         if let Some(output) = output {
             if target.data().phase.logic_output != Some(output) {
-                emit(&ctx, caster, output);
+                target.data().phase.logic_output = Some(output);
+                super::tasks::schedule_logic_emit(
+                    &ctx,
+                    caster,
+                    output,
+                    Duration::from_millis(delay),
+                );
             }
         }
         return;
@@ -265,33 +379,29 @@ pub(crate) fn receive(
     }
 }
 
-/// A subscriber adopts already loaded family providers, independently of spawn file order.
+/// A subscriber adopts already active sources, independently of spawn file order: every doodad
+/// whose `family_id` is `family` and that has an output replays it into this doodad.
 pub fn subscribe(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, family: u32) -> bool {
     let group = ctx.doodad.data().func_group_id;
-    let (owner, owner_type, zone) = {
-        let d = ctx.doodad.data();
-        (d.owner_id, d.owner_type, d.transform.zone_id)
-    };
+    let domain = Domain::of(&ctx.doodad);
     for provider in ctx.world.all_doodads() {
         if Arc::ptr_eq(&provider, &ctx.doodad) {
             continue;
         }
-        let output = {
+        let (provider_family, output, deleted) = {
             let d = provider.data();
-            if d.owner_id == owner && d.owner_type == owner_type && d.transform.zone_id == zone {
-                d.phase.logic_output
-            } else {
-                None
-            }
+            (d.family_id, d.phase.logic_output, d.phase.deleted)
         };
-        if let Some(output) = output {
-            if families(ctx, &provider, true).contains(&family) {
-                let source = DoodadCtx::new(ctx.server, ctx.world.clone(), provider);
-                receive(&source, &ctx.doodad, caster, output);
-                if ctx.doodad.data().func_group_id != group {
-                    return true;
-                }
-            }
+        if deleted || provider_family != family || !domain.matches(Domain::of(&provider)) {
+            continue;
+        }
+        let Some(output) = output else {
+            continue;
+        };
+        let source = DoodadCtx::new(ctx.server, ctx.world.clone(), provider);
+        receive(&source, &ctx.doodad, caster, output, false);
+        if ctx.doodad.data().func_group_id != group {
+            return true;
         }
     }
     false
@@ -316,5 +426,19 @@ mod tests {
             assert_eq!(evaluate(op, [false, false].into_iter()), Some(neither));
         }
         assert_eq!(evaluate(99, [true].into_iter()), None);
+    }
+
+    #[test]
+    fn logic_delays_match_the_authored_enum() {
+        assert_eq!(logic_delay_ms(1), Some(1_000));
+        assert_eq!(logic_delay_ms(2), Some(5_000));
+        assert_eq!(logic_delay_ms(3), Some(10_000));
+        assert_eq!(logic_delay_ms(4), Some(30_000));
+        assert_eq!(logic_delay_ms(5), Some(60_000));
+        assert_eq!(logic_delay_ms(6), Some(300_000));
+        assert_eq!(logic_delay_ms(7), Some(600_000));
+        assert_eq!(logic_delay_ms(8), Some(1_800_000));
+        assert_eq!(logic_delay_ms(0), None);
+        assert_eq!(logic_delay_ms(9), None);
     }
 }

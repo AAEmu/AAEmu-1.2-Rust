@@ -52,7 +52,14 @@ pub enum FuncTaskKind {
     /// `InitDoodad()` resolved at the cast.
     Spawn,
     /// A family/link signal deferred while the target is processing an interaction.
-    Pulse { source: DoodadRef, value: bool },
+    Pulse {
+        source: DoodadRef,
+        value: bool,
+        /// The signal came from a client-created wire (bypasses the family filter).
+        via_link: bool,
+    },
+    /// The delayed output of a `DoodadFuncLogic` (`enum_doodad_logic_delays`).
+    Logic { value: bool },
 }
 
 /// One scheduled doodad task.
@@ -562,9 +569,21 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
             phase::init_doodad_for(&ctx, caster);
             super::manager::spawn(server, &ctx.world, &ctx.doodad);
         }
-        FuncTaskKind::Pulse { source, value } => {
+        FuncTaskKind::Pulse {
+            source,
+            value,
+            via_link,
+        } => {
             let source_ctx = DoodadCtx::new(server, ctx.world.clone(), source);
-            super::logic::receive(&source_ctx, &ctx.doodad, caster, value);
+            super::logic::receive(&source_ctx, &ctx.doodad, caster, value, via_link);
+        }
+        FuncTaskKind::Logic { value } => {
+            // Only the latest scheduled output wins: a later input that flips the result before
+            // the delay elapsed overwrote `logic_output` and this task is stale.
+            if ctx.doodad.data().phase.logic_output != Some(value) {
+                return;
+            }
+            super::logic::emit(&ctx, caster, value);
         }
     }
 }
@@ -574,6 +593,7 @@ pub(crate) fn schedule_pulse(
     target: &DoodadRef,
     caster: Option<&WorldObject>,
     value: bool,
+    via_link: bool,
 ) {
     schedule(
         ctx.server,
@@ -586,8 +606,30 @@ pub(crate) fn schedule_pulse(
             kind: FuncTaskKind::Pulse {
                 source: ctx.doodad.clone(),
                 value,
+                via_link,
             },
         },
         Duration::from_millis(10),
+    );
+}
+
+/// Deferred `DoodadFuncLogic` output (`enum_doodad_logic_delays`).
+pub(crate) fn schedule_logic_emit(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    value: bool,
+    delay: Duration,
+) {
+    schedule(
+        ctx.server,
+        DoodadTask {
+            world: Some(Arc::downgrade(&ctx.world)),
+            doodad: ctx.doodad.clone(),
+            holder: ctx.doodad.clone(),
+            caster: caster.cloned(),
+            generation: 0,
+            kind: FuncTaskKind::Logic { value },
+        },
+        delay,
     );
 }

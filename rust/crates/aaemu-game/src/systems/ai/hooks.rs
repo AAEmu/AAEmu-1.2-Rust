@@ -261,6 +261,7 @@ pub fn spawn_spyglass(
         scale: 1.0,
         count: 1,
         related_ids: None,
+        family_id: 0,
         respawn_doodad_template_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(t.instance_id)));
@@ -523,6 +524,7 @@ impl crate::systems::services::commands::sub::AStarHooks for AiAStarHooks {
             scale: 1.0,
             count: 1,
             related_ids: None,
+            family_id: 0,
             respawn_doodad_template_id: 0,
         };
         let spawner = Arc::new(DoodadSpawner::new(def, Some(t.instance_id)));

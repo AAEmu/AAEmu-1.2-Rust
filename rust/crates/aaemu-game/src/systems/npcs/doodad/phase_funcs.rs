@@ -286,13 +286,34 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             None => false, // caster is not a player, allow execution as we can't check
         },
         FuncTemplate::Pulse(f) => {
+            // C# `DoodadFuncPulse.Use`: `if (caster is not null)`. A world spawn runs its entry
+            // phase with no caster, so the initial `Pulse(flag = false)` rows only take effect
+            // when a player causes the phase.
+            if caster.is_none() {
+                return false;
+            }
             super::logic::emit(ctx, caster, f.flag);
             false
         }
-        // These describe routing/operations; a trigger runs only on a received signal.
-        FuncTemplate::PulseTrigger(_)
-        | FuncTemplate::Logic(_)
-        | FuncTemplate::LogicFamilyProvider(_) => false,
+        // C# `DoodadFuncPulseTrigger.Use`: fires on the phase entry of a *character*-caused
+        // change (`if (caster is not Character) return true;`), and `DoodadFuncPulse` re-arms the
+        // row by re-entering the phase. The 1.2 Sharpwind switches use this to reach their
+        // `DoodadFuncFinal` after the use pulse (its rows run after the group's Pulse 287 and
+        // provider 444, see `phase::do_phase_funcs`). A pulse received from another doodad is
+        // handled by `logic::receive`.
+        FuncTemplate::PulseTrigger(f) => {
+            if DoodadCtx::as_player(caster).is_none() || !f.flag || f.next_phase <= 0 {
+                return false;
+            }
+            let mut d = ctx.doodad.data();
+            if !d.phase.pulse_triggered.insert(f.id) {
+                return false;
+            }
+            d.phase.override_phase = f.next_phase;
+            true
+        }
+        // These describe routing/operations; the logic runs on a received signal.
+        FuncTemplate::Logic(_) | FuncTemplate::LogicFamilyProvider(_) => false,
         FuncTemplate::LogicFamilySubscriber(f) => super::logic::subscribe(ctx, caster, f.family_id),
         // PrefabDoodadModel::PlayFlowGraph is client-owned; the phase and visibility packets
         // already cause the 1.2 client to execute these events from its own compact data.
@@ -461,6 +482,7 @@ fn use_respawn(ctx: &DoodadCtx<'_>, player: &crate::world::PlayerRef) {
         scale: 1.0,
         count: 1,
         related_ids: None,
+        family_id: 0,
         respawn_doodad_template_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(ctx.world.id)));
