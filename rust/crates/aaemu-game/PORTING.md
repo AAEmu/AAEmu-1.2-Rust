@@ -2972,11 +2972,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   through, so the client's 5 keeps its 538/539 text. Death, a server-forced teleport (portal,
   GM move, instance/world load or resurrection displacement, same zone group included) and
   movement out of range now end the trade for both players; a plain zone-group crossing on foot
-  keeps it. Hooks only cancel when a trade exists. Tests:
+  keeps it. The teleport cancel runs when the teleport is **issued**, at both load chokes:
+  `world::session::teleport_character` (instance/world loads, resurrection, trial), the
+  zone-access return transport (its own hook) and `world::session::begin_teleport` (every
+  `SCTeleportUnit` sender —
+  same-instance portal, NPC teleporter, dominion headquarters / siege area, instant game,
+  GM `/move` / nudge / sphere / jail, move-guard correction, deck standers, skill displacements
+  — and `SCNaviTeleport`), so neither a same-zone teleport nor a client that never answers
+  `CSTeleportEnded` can leave the trade open. The server also runs the client's own
+  `UpdateTradeChecks` (`FUN_394fd9a0`) every 1000 ms (`trade::check_running_trades`, started by
+  `trade::start_checks`): a missing partner / another instance cancels with 1, `>= 5` m with 2.
+  That covers players carried by a vehicle or mate and seat-bound players whose own movement
+  packets `world::session::move_unit` ignores (Greptile findings on PR #106). Hooks only cancel
+  when a trade exists; a second hook call after `teleport_character` is a no-op. Tests:
   `moving_out_of_range_cancels_with_the_client_checks_reason`,
   `a_death_cancels_a_running_trade_for_both_players`,
   `crossing_a_zone_group_border_keeps_a_running_trade`,
   `a_same_group_teleport_cancels_a_running_trade_at_once`,
+  `a_same_instance_portal_ends_a_running_trade_when_it_is_issued`,
+  `navi_teleport_ends_a_running_trade_when_it_is_issued`,
+  `a_vehicle_carried_passenger_ends_the_trade_with_the_periodic_check`,
+  `the_periodic_check_cancels_a_trade_whose_partner_disappeared`,
   `lifecycle_hooks_without_a_trade_send_no_cancel_packet`.
 * systems::social: **Trade / LFG / performance chat (2026-11-10).** `chat_commands` menu rows 8
   ("거래", type 2) and 9 ("파티찾기", type 3) already route to the sender's zone-group channel,

@@ -348,14 +348,21 @@ pub const TELEPORT_ACK_VERTICAL_TOLERANCE: f32 = 30.0;
 /// Locks the character's position (`DisabledSetPosition`), records the destination and sends the
 /// `SCTeleportUnit`. Every server-forced teleport of a player goes through here, so
 /// [`teleport_ended`] can check the client's acknowledgement against what the server asked for.
-pub fn send_teleport_unit(p: &PlayerRef, packet: SCTeleportUnitPacket) {
-    begin_teleport(p, packet.x, packet.y, packet.z);
+pub fn send_teleport_unit(server: &GameServer, p: &PlayerRef, packet: SCTeleportUnitPacket) {
+    begin_teleport(server, p, packet.x, packet.y, packet.z);
     p.send(packet);
 }
 
 /// The lock + destination half of [`send_teleport_unit`], for teleports the client is told about
 /// by another packet (`SCNaviTeleport`).
-pub fn begin_teleport(p: &PlayerRef, x: f32, y: f32, z: f32) {
+pub fn begin_teleport(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
+    // The 1.2 client clears its trade UI on a loading teleport and sends no `CSCancelTrade` for
+    // a same-zone one. End the trade when the teleport is issued, not when its acknowledgement
+    // arrives: a same-instance portal / navi sign / GM move reaches the client without
+    // [`teleport_character`], and a client that never reports the arrival (or is carried by a
+    // vehicle) must not keep both players marked as trading. A second hook call for a load
+    // that also goes through [`teleport_character`] is a no-op once the trade is gone.
+    crate::systems::economy::trade::on_player_teleported(server, p);
     let mut c = p.data();
     c.set_disabled_set_position(true);
     c.pending_teleport = Some((x, y, z));

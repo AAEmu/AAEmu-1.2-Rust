@@ -142,6 +142,7 @@ pub(crate) fn jail_court_room(
     crate::systems::dispatch_buff_events(server, &WorldObject::from(target));
     let jail = &court_room.jail;
     crate::world::session::send_teleport_unit(
+        server,
         target,
         SCTeleportUnitPacket {
             reason: 0,

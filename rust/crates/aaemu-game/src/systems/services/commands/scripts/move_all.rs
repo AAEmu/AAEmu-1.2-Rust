@@ -30,7 +30,15 @@ impl Command for MoveAll {
         for other_char in server.world.all_characters() {
             if is_other(&other_char, &character) {
                 let me = world_pos(server, &WorldObject::from(&character));
-                teleport_player(&other_char, TELEPORT_REASON_GM, me.x, me.y, me.z + 1.0, 0.0);
+                teleport_player(
+                    server,
+                    &other_char,
+                    TELEPORT_REASON_GM,
+                    me.x,
+                    me.y,
+                    me.z + 1.0,
+                    0.0,
+                );
             }
         }
         Ok(())

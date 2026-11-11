@@ -512,6 +512,62 @@ pub fn on_player_moved(server: &GameServer, player: &PlayerRef) {
     }
 }
 
+/// The server half of the 1.2 client's `X2::GameClient::UpdateTradeChecks`
+/// (`x2game.dll` `FUN_394fd9a0`, every 1000 ms): a running trade ends when a partner object is
+/// gone or the players are at least 5 m apart. The per-move hook ([`on_player_moved`]) cannot
+/// see every displacement — a passenger carried by a vehicle / mate, a seat-bound player whose
+/// own movement packets `world::session::move_unit` ignores, a push / teleport that changes no
+/// parent transform of their own — so this check runs on its own timer like the client's.
+///
+/// The trade table is snapshotted under its lock and released before any world lookup or
+/// packet is made; each cancel is re-checked against the exact trade id, so a trade that ended
+/// (or a new one) between the snapshot and the cancel is not touched.
+pub fn check_running_trades(server: &GameServer) {
+    let trades = manager(server).trades();
+    for t in trades {
+        let Some(owner) = character(server, t.owner_obj_id) else {
+            cancel_trade(server, t.target_obj_id, cancel_reason::PARTNER_GONE, t.id);
+            continue;
+        };
+        let Some(target) = character(server, t.target_obj_id) else {
+            cancel_trade(server, t.owner_obj_id, cancel_reason::PARTNER_GONE, t.id);
+            continue;
+        };
+        let owner_instance = owner.data().unit.transform.instance_id;
+        let target_instance = target.data().unit.transform.instance_id;
+        if owner_instance != target_instance {
+            // Different instances have unrelated coordinate spaces; the partner is not reachable.
+            cancel_trade(server, t.owner_obj_id, cancel_reason::PARTNER_GONE, t.id);
+            continue;
+        }
+        let distance = crate::systems::skills::geometry::distance_to(
+            server,
+            &crate::systems::skills::geometry::Target::Obj(crate::world::WorldObject::from(
+                owner.clone(),
+            )),
+            &crate::systems::skills::geometry::Target::Obj(crate::world::WorldObject::from(target)),
+            true,
+        );
+        if distance >= TRADE_RANGE_M {
+            cancel_trade(server, t.owner_obj_id, cancel_reason::TOO_FAR, t.id);
+        }
+    }
+}
+
+/// Starts the trade checks: the 1 s `UpdateTradeChecks` tick on the blocking pool, like the
+/// other world-state ticks (it takes the world's region-grid locks).
+pub fn start_checks(server: &Arc<GameServer>) {
+    let weak = Arc::downgrade(server);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_millis(1000));
+        loop {
+            iv.tick().await;
+            let Some(server) = weak.upgrade() else { break };
+            crate::systems::run_blocking(&server, check_running_trades).await;
+        }
+    });
+}
+
 /// A dying player's trade ends (`DoDie`); the client shows "Trade canceled." for the generic
 /// reason. The client suppresses its own copy while it is loading, so the other player still
 /// gets the packet.

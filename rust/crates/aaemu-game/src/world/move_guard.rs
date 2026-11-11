@@ -366,7 +366,7 @@ pub fn guard_unit_move(
             // Take the owner off the mount and put it at the mate's server position.
             crate::systems::vehicles::force_dismount(server, me, attach_reason::PREFAB_CHANGED);
         }
-        teleport_back(me, &world.world_pos_rot(target));
+        teleport_back(server, me, &world.world_pos_rot(target));
         server
             .systems
             .services
@@ -407,7 +407,7 @@ pub fn guard_vehicle_move(
         // The move is dropped; the driver is taken off the vehicle and put next to it (the
         // vehicle itself is not rebroadcast: there is no packet for it outside a movement).
         crate::systems::vehicles::force_dismount(server, driver, attach_reason::PREFAB_CHANGED);
-        teleport_back(driver, &before);
+        teleport_back(server, driver, &before);
         server
             .systems
             .services
@@ -418,8 +418,9 @@ pub fn guard_vehicle_move(
     false
 }
 
-fn teleport_back(me: &PlayerRef, at: &PositionAndRotation) {
+fn teleport_back(server: &GameServer, me: &PlayerRef, at: &PositionAndRotation) {
     crate::world::session::send_teleport_unit(
+        server,
         me,
         SCTeleportUnitPacket {
             reason: 0,

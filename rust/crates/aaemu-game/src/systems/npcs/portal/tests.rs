@@ -1149,6 +1149,7 @@ fn teleporting_player() -> (GameServer, TestClient, crate::world::PlayerRef) {
     let mut client = client;
     client.conn.active_char = Some(me.clone());
     crate::world::session::send_teleport_unit(
+        &server,
         &me,
         SCTeleportUnitPacket {
             reason: 0,
@@ -1256,4 +1257,66 @@ async fn teleport_ended_without_a_recorded_destination_keeps_the_server_position
     assert!(!me.data().disabled_set_position);
     let t = me.data().unit.transform;
     assert_eq!((t.x, t.y, t.z), (100.0, 100.0, 100.0));
+}
+
+#[tokio::test]
+async fn navi_teleport_ends_a_running_trade_when_it_is_issued() {
+    // `SCNaviTeleport` is a same-instance client load like `SCTeleportUnit`: the client clears
+    // its trade UI and sends no `CSCancelTrade`, and `world::session::teleport_character` is
+    // not involved, so `begin_teleport` itself must end the trade (Greptile finding on #106).
+    use crate::systems::economy::trade::{CSCanStartTradePacket, CSStartTradePacket};
+    let server = test_server_with(navi_data());
+    server.systems.npcs.doodads.tasks.set_manual(true);
+    let mut client = TestClient::new(&server, 1, 1);
+    let mut alice = test_character(1, "Alice", 139.0, 149.0);
+    alice.unit.hp = 100;
+    let me = spawn_player(&server, &client, alice, 0x10);
+    client.conn.active_char = Some(me.clone());
+    let mut bob_client = TestClient::new(&server, 2, 2);
+    let mut bob = test_character(2, "Bob", 139.0, 150.0);
+    bob.unit.hp = 100;
+    let you = spawn_player(&server, &bob_client, bob, 0x11);
+    bob_client.conn.active_char = Some(you.clone());
+    let sign = spawn_navi(&server, 0x600, 1034, (140.0, 150.0, 60.0));
+    client.drain();
+    bob_client.drain();
+    CSCanStartTradePacket { obj_id: you.obj_id }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    CSStartTradePacket { obj_id: me.obj_id }
+        .handle(&server, &mut bob_client.conn)
+        .await
+        .unwrap();
+    client.drain();
+    bob_client.drain();
+    assert_eq!(server.systems.economy.trade.trades().len(), 1);
+
+    send_bc(&server, &mut client, cs::CSNaviTeleportPacket, sign.obj_id).await;
+    let frames = client.drain();
+    assert!(
+        frames.iter().any(|(op, _)| *op == sc::SCNaviTeleportPacket),
+        "the navi teleport itself is unchanged: {frames:?}"
+    );
+    let cancels = |frames: &[(u16, Vec<u8>)]| {
+        frames
+            .iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut reason = aaemu_commons::PacketStream::new();
+    reason.write_i32(0).write_bool(true);
+    assert_eq!(
+        cancels(&frames),
+        vec![(sc::SCTradeCanceledPacket, reason.into_bytes())]
+    );
+    let mut reason = aaemu_commons::PacketStream::new();
+    reason.write_i32(0).write_bool(false);
+    assert_eq!(
+        cancels(&bob_client.drain()),
+        vec![(sc::SCTradeCanceledPacket, reason.into_bytes())]
+    );
+    assert!(server.systems.economy.trade.trades().is_empty());
+    assert!(me.data().disabled_set_position);
 }

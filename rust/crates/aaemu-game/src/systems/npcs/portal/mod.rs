@@ -1004,6 +1004,7 @@ pub fn use_portal_with_preference(
         player.data().set_disabled_set_position(true);
     }
     crate::world::session::send_teleport_unit(
+        server,
         player,
         SCTeleportUnitPacket {
             reason: packets::teleport_reason::PORTAL,
@@ -1166,7 +1167,7 @@ pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
         return;
     }
     run_navi_func(server, &doodad, player, &func);
-    session::begin_teleport(player, pos.x, pos.y, pos.z);
+    session::begin_teleport(server, player, pos.x, pos.y, pos.z);
     player.send(packets::SCNaviTeleportPacket {
         x: pos.x,
         y: pos.y,
@@ -1280,6 +1281,7 @@ pub fn use_teleport(
         }
     }
     crate::world::session::send_teleport_unit(
+        server,
         player,
         SCTeleportUnitPacket {
             reason: crate::systems::skills::packets_special::TELEPORT_REASON_MOVE_TO_LOCATION,

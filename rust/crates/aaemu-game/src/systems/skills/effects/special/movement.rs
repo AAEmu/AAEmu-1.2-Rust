@@ -626,6 +626,7 @@ fn move_within_instance(server: &GameServer, p: &PlayerRef, t: &Portal) {
     };
     crate::systems::instances::worlds::apply_world_spawn_position(server, p, &wsp, 0);
     crate::world::session::send_teleport_unit(
+        server,
         p,
         SCTeleportUnitPacket {
             reason: TELEPORT_REASON_MOVE_TO_LOCATION,
@@ -795,6 +796,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         });
         set_character_transform(server, p, m.instance_id, m.zone_id, m.pos);
         crate::world::session::send_teleport_unit(
+            server,
             p,
             SCTeleportUnitPacket {
                 reason: TELEPORT_REASON_MOVE_TO_LOCATION,
@@ -812,6 +814,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         return;
     };
     crate::world::session::send_teleport_unit(
+        server,
         p,
         SCTeleportUnitPacket {
             reason: TELEPORT_REASON_MOVE_TO_LOCATION,

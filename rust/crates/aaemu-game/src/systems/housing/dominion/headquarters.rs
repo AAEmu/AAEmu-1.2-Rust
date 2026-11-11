@@ -693,6 +693,7 @@ pub(super) fn teleport_effect_inner(server: &GameServer, args: &EffectArgs<'_>) 
     // Same-instance portal semantics: the client acknowledges through the existing teleport
     // load/movement path, which updates server position/visibility and clears this flag.
     crate::world::session::send_teleport_unit(
+        server,
         player,
         SCTeleportUnitPacket {
             reason,

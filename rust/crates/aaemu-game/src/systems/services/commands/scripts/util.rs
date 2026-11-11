@@ -475,8 +475,17 @@ pub fn world_spawn_position_string(p: &crate::data::world_templates::WorldSpawnP
 
 /// `target.DisabledSetPosition = true; target.SendPacket(new SCTeleportUnitPacket(reason, 0, x,
 /// y, z, z2))`.
-pub fn teleport_player(target: &PlayerRef, reason: u8, x: f32, y: f32, z: f32, z2: f32) {
+pub fn teleport_player(
+    server: &GameServer,
+    target: &PlayerRef,
+    reason: u8,
+    x: f32,
+    y: f32,
+    z: f32,
+    z2: f32,
+) {
     crate::world::session::send_teleport_unit(
+        server,
         target,
         crate::systems::skills::packets_special::SCTeleportUnitPacket {
             reason,
