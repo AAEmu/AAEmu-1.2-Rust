@@ -417,6 +417,13 @@ pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transf
 /// new to the character, so the objects of the shared neighbourhood stayed invisible until a
 /// relog. That load gets the full repaint (own mates first, as after a cut scene).
 pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
+    // The load emptied the client's world, so the far quest-map markers are gone with the rest;
+    // the arrival below repaints only the ordinary neighbourhood.
+    server
+        .systems
+        .quests
+        .quest_map
+        .client_world_reset(p.character_id);
     let packet = {
         let mut c = p.data();
         crate::world::unit_state::unit_state(&mut c, &server.game_data, crate::world::now_ms())

@@ -141,6 +141,36 @@ impl State {
             .remove(&character_id);
     }
 
+    /// The client emptied its world (cut-scene end, `SCLoadInstance`, teleport ended) or refused
+    /// our unit states while a cut scene played: nothing streamed through this option is on its
+    /// screen any more, although the tracked set still claims it is. Forgets the character's
+    /// streamed set without sending anything and makes the next tick stream it again.
+    ///
+    /// Call it only where no manager lock / spawn `operation_scope` is held (the packet handlers
+    /// of those events): it waits for the refresh in flight, whose commit would otherwise write
+    /// the old set back, so it takes [`State::refreshing`] before [`State::players`].
+    pub fn client_world_reset(&self, character_id: u32) {
+        let tracked = self
+            .players
+            .lock()
+            .expect("quest map state poisoned")
+            .contains_key(&character_id);
+        if !tracked {
+            // The default range streams nothing: no wait on the refresh token for everyone else.
+            return;
+        }
+        let _serial = self.refreshing.lock().expect("quest map state poisoned");
+        if let Some(ps) = self
+            .players
+            .lock()
+            .expect("quest map state poisoned")
+            .get_mut(&character_id)
+        {
+            ps.extra.clear();
+            ps.last_refresh = overdue(spawn_manager::now());
+        }
+    }
+
     /// Obj ids of the extra marker NPCs currently streamed by any tracked player. The spawn
     /// activation sweep keeps their placements warm instead of reclaiming and rebuilding them
     /// every retention period.
@@ -1011,6 +1041,76 @@ mod tests {
 
         // ... and runs once the interval has passed.
         spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+    }
+
+    /// A player with one far giver streamed at 300 m, the client in sync with the server.
+    async fn streamed_giver_fixture() -> (Arc<GameServer>, TestClient, PlayerRef) {
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        set_range(&server, &player, Range::Meters300);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+        (server, client, player)
+    }
+
+    /// A cut-scene end (and a teleport end, an in-place zone load) empties the client's world,
+    /// while the server repaints only the ordinary neighbourhood. The tracked set must not keep
+    /// claiming the far marker is on the client: every later refresh skipped it before.
+    #[tokio::test]
+    async fn a_cut_scene_end_streams_the_far_markers_again() {
+        let (server, mut client, player) = streamed_giver_fixture().await;
+
+        crate::systems::npcs::portal::resend_visible_objects_to_character(&server, &player);
+        let repaint = client.drain();
+        assert!(
+            !repaint.iter().any(|f| f.0 == sc::SCUnitStatePacket),
+            "the giver 250 m away is not part of the ordinary repaint: {repaint:?}"
+        );
+
+        // The next tick streams the marker again ...
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+        // ... and tracks it again: a later refresh has nothing to do.
+        spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+        tick(&server);
+        assert!(client.drain().is_empty());
+        assert_eq!(server.systems.quests.quest_map.streamed_npc_ids().len(), 1);
+    }
+
+    /// `CSInstanceLoaded` (a recall, a Return gate, a resurrection point, another instance):
+    /// the load emptied the client's world, so the far markers are streamed again as well.
+    #[tokio::test]
+    async fn a_zone_load_streams_the_far_markers_again() {
+        let (server, mut client, player) = streamed_giver_fixture().await;
+
+        crate::systems::instances::worlds::instance_loaded(&server, &player);
+        let load = client.drain();
+        assert_eq!(
+            load.iter().filter(|f| f.0 == sc::SCUnitStatePacket).count(),
+            1,
+            "only the character's own state, not the giver 250 m away: {load:?}"
+        );
+
         tick(&server);
         assert_eq!(
             client.drain_ops(),

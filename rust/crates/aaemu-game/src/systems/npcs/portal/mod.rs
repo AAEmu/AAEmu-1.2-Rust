@@ -1019,7 +1019,16 @@ pub fn use_portal_with_preference(
 /// `WorldManager.ResendVisibleObjectsToCharacter(character)`: every object of the neighbouring
 /// regions is shown again (`AddVisibleObject(character)`); doodads are batched into
 /// `SCDoodadsCreatedPacket`s.
+///
+/// Every caller is a client world wipe (cut-scene end, teleport ended, in-place zone load), which
+/// also drops the far quest-map markers; this repaint covers only the neighbourhood, so the
+/// quest-map range option is told to stream its markers again.
 pub fn resend_visible_objects_to_character(server: &GameServer, player: &PlayerRef) {
+    server
+        .systems
+        .quests
+        .quest_map
+        .client_world_reset(player.character_id);
     let instance_id = player.data().unit.transform.instance_id;
     let Some(world) = server.world.world(instance_id) else {
         return;
