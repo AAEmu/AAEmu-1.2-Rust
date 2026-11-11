@@ -1335,6 +1335,15 @@ fn repath_reason(
 }
 
 /// `BaseCombatBehavior.CheckPipeName()`.
+///
+/// `phase_dragon_ground` / phase 1 grounds the owner. The C# used `GeoData.GetHeight` (the
+/// navigation mesh) for every NPC; the 1.2 navmesh is a walking-surface graph that lies above
+/// the terrain (measured navmesh minus raw heightmap: 2.8 m at the Dewstone Nui statue, 4.9 m
+/// south of Vedisa, 4.5-5.7 m at the Cloaked Forest flesh-golem camp), so grounding a walker
+/// on it hovered it: `AlertBehavior.Enter` runs this and then `StopMovement`, which broadcasts
+/// the lifted Z. A ground walker therefore uses the same floor as its movement steps
+/// (`reference_height_in`: collision floor, then the navmesh / heightmap fallback); flying and
+/// swimming NPCs keep the authored navigation height.
 fn check_pipe_name(c: &mut AiCtx<'_>, k: BehaviorKind) {
     let (pipe, phase) = {
         let s = c.st(k);
@@ -1343,7 +1352,32 @@ fn check_pipe_name(c: &mut AiCtx<'_>, k: BehaviorKind) {
     if pipe == "phase_dragon_ground" || phase == 1 {
         // try to find Z first in GeoData, and then in HeightMaps, if not found, leave Z as it is
         let pos = owner_pos(c);
-        let z = super::geodata::geo_data_height(c.server, &c.obj, pos);
+        let z = if moves_freely(c) {
+            super::geodata::geo_data_height(c.server, &c.obj, pos)
+        } else {
+            let (instance_id, zone_id, spawner_z) = {
+                let n = c.npc.data();
+                (
+                    n.unit.transform.instance_id,
+                    n.unit.transform.zone_id,
+                    n.spawner_z,
+                )
+            };
+            npc::reference_height_in(
+                c.server,
+                instance_id,
+                Some(crate::systems::npcs::heightmap::ReferenceHeightAi {
+                    can_fly: false,
+                    hold_or_idle: false,
+                    spawner_z,
+                    world_z: pos.z,
+                }),
+                pos.x,
+                pos.y,
+                pos.z,
+                zone_id,
+            )
+        };
         c.obj.with_transform(|t| t.set_height(z));
     } else if pipe == "phase_dragon_fly_hovering" || phase == 2 {
         c.obj.with_transform(|t| t.z += 15.0);
