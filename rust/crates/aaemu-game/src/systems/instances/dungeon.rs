@@ -1010,7 +1010,9 @@ fn destroy_dungeon_inner(server: &GameServer, dungeon: &Arc<Dungeon>) -> bool {
     }
     // Queued players never arrived: their charged ticket starts its restore window instead of
     // staying marked as an in-progress visit.
-    for p in dungeon.st().enter_requests.clone() {
+    // The guard of `st()` would live for the whole loop if it were the iterator expression.
+    let queued = dungeon.st().enter_requests.clone();
+    for p in queued {
         release_entry_ticket(server, dungeon, &p);
     }
     unregister_indun_events(server, dungeon, world.id);
