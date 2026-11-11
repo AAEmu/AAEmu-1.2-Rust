@@ -649,23 +649,82 @@ pub async fn update_divine_clock(
     }
 }
 
+/// MySQL error numbers that roll the failed statement (or transaction) back, so re-running it
+/// is safe: `1213` `ER_LOCK_DEADLOCK` and `1205` `ER_LOCK_WAIT_TIMEOUT`.
+pub(crate) fn is_retryable_transaction_error(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db) = error else {
+        return false;
+    };
+    if let Some(mysql) = db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
+        return matches!(mysql.number(), 1213 | 1205);
+    }
+    // Test doubles and non-MySQL drivers carry the number or the deadlock SQLSTATE as `code`.
+    db.code()
+        .is_some_and(|code| matches!(&*code, "1213" | "1205" | "40001"))
+}
+
+/// Runs `op` again while MySQL rolls it back with a deadlock / lock wait timeout, up to
+/// `max_attempts` calls in total. Both errors roll the whole statement back, so `op` merely
+/// repeats the same write; a short pause lets the other transaction finish.
+async fn retry_transaction<T, F, Fut>(max_attempts: u32, mut op: F) -> sqlx::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = sqlx::Result<T>>,
+{
+    let mut attempt = 1;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < max_attempts && is_retryable_transaction_error(&error) => {
+                tracing::warn!(
+                    "Database write rolled back ({error}); retrying ({attempt}/{max_attempts})"
+                );
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Attempts per `add_divine_clock_time` statement: the periodic save holds `accounts` rows for
+/// up to a few seconds, so two quick retries are enough to outlast it.
+const ADD_DIVINE_CLOCK_ATTEMPTS: u32 = 3;
+
 /// Adds `delta` seconds to the divine clock of every account in `account_ids` with one atomic
 /// statement. `divine_clock_time` is `INT UNSIGNED`: the sum saturates at `u32::MAX` instead of
 /// wrapping like the C# `uint` (a strict-mode overflow would otherwise fail the whole batch).
+///
+/// The ids are written in ascending order because InnoDB locks the rows of
+/// `WHERE account_id IN (...)` in primary-key order. The periodic save flushes one
+/// `accounts.labor` row per character (ordered by account id in `SaveManager`); a save and this
+/// 5 s online-tracking statement that take the rows in opposite orders deadlock (MySQL 1213),
+/// which rolled these clock updates back on the cloud bot server. A deadlock whose victim is
+/// this statement is retried, so the sample is not lost.
 pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta: u32) {
     if account_ids.is_empty() || delta == 0 {
         return;
     }
-    let marks = vec!["?"; account_ids.len()].join(",");
+    let mut ids = account_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let marks = vec!["?"; ids.len()].join(",");
     let sql = format!(
         "UPDATE accounts SET divine_clock_time = LEAST(CAST(divine_clock_time AS UNSIGNED) + ?, 4294967295) WHERE account_id IN ({marks})"
     );
-    let mut q = sqlx::query(&sql).bind(u64::from(delta));
-    for id in account_ids {
-        q = q.bind(*id);
-    }
-    if let Err(e) = q.execute(pool).await {
-        tracing::error!("{e}");
+    let result = retry_transaction(ADD_DIVINE_CLOCK_ATTEMPTS, || {
+        let mut q = sqlx::query(&sql).bind(u64::from(delta));
+        for id in &ids {
+            q = q.bind(*id);
+        }
+        q.execute(pool)
+    })
+    .await;
+    if let Err(e) = result {
+        tracing::error!(
+            "add_divine_clock_time({} account(s), delta {delta}): {e}",
+            ids.len()
+        );
     }
 }
 
@@ -730,4 +789,235 @@ pub async fn load_login_characters(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestDatabaseError(&'static str);
+
+    impl std::fmt::Display for TestDatabaseError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "test database error {}", self.0)
+        }
+    }
+
+    impl std::error::Error for TestDatabaseError {}
+
+    impl sqlx::error::DatabaseError for TestDatabaseError {
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(self.0.into())
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            None
+        }
+
+        fn message(&self) -> &str {
+            "test database error"
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn database_error(code: &'static str) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(TestDatabaseError(code)))
+    }
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test]
+    async fn retry_repeats_a_deadlocked_statement_until_it_succeeds() {
+        let attempts = AtomicU32::new(0);
+        let result = retry_transaction(3, || {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if attempt < 3 {
+                    Err(database_error("1213"))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_repeats_a_lock_wait_timeout() {
+        let attempts = AtomicU32::new(0);
+        let result = retry_transaction(3, || {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if attempt < 2 {
+                    Err(database_error("1205"))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_after_the_attempt_bound() {
+        let attempts = AtomicU32::new(0);
+        let result: sqlx::Result<()> = retry_transaction(3, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(database_error("1213")) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_repeat_other_database_errors() {
+        let attempts = AtomicU32::new(0);
+        let result: sqlx::Result<()> = retry_transaction(3, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(database_error("1062")) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Reproduces the save / online-tracking lock-order deadlock on the private MySQL: the
+    /// "save" transaction locks row 5 (an account row of a character it saves) and a block of
+    /// other rows, the retrying "tracking" statement then takes `id IN (1..=5)` in index order
+    /// and blocks on row 5, and when the save asks for row 3 InnoDB detects the cycle and rolls
+    /// back the smaller statement (the tracking one). The retry rewrites it after the save
+    /// commits, so no row loses its update.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; creates and drops a scratch table"]
+    async fn private_mysql_retry_recovers_a_divine_clock_deadlock() {
+        use std::str::FromStr;
+        use std::time::Duration;
+
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "Only private MySQL3317 is allowed"
+        );
+        assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+        let pool = MySqlPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let table = format!(
+            "divine_clock_deadlock_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!(
+            "CREATE TABLE `{table}` (id INT NOT NULL PRIMARY KEY, \
+             save_step INT NOT NULL DEFAULT 0, divine_clock_time INT UNSIGNED NOT NULL DEFAULT 0) \
+             ENGINE=InnoDB"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO `{table}` (id) \
+             WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 120) \
+             SELECT n FROM s"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The save, in the character order the snapshot had before the fix: row 5 first, then
+        // the rest of its rows.
+        let mut save = pool.begin().await.unwrap();
+        for sql in [
+            format!("UPDATE `{table}` SET save_step = save_step + 1 WHERE id = 5"),
+            format!("UPDATE `{table}` SET save_step = save_step + 1 WHERE id BETWEEN 101 AND 120"),
+        ] {
+            sqlx::query(&sql).execute(&mut *save).await.unwrap();
+        }
+
+        // The tracking statement: blocks on row 5 after locking rows 1-4.
+        let sql = format!(
+            "UPDATE `{table}` SET divine_clock_time = \
+             LEAST(CAST(divine_clock_time AS UNSIGNED) + 1, 4294967295) WHERE id IN (1,2,3,4,5)"
+        );
+        let retry_pool = pool.clone();
+        let tracking = tokio::spawn(async move {
+            retry_transaction(ADD_DIVINE_CLOCK_ATTEMPTS, || {
+                sqlx::query(&sql).execute(&retry_pool)
+            })
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // The save asks for row 3, held by the tracking statement: deadlock. InnoDB rolls back
+        // the smaller statement (the tracking one); the save update and its commit succeed.
+        sqlx::query(&format!(
+            "UPDATE `{table}` SET save_step = save_step + 1 WHERE id = 3"
+        ))
+        .execute(&mut *save)
+        .await
+        .unwrap();
+        save.commit().await.unwrap();
+
+        tracking
+            .await
+            .unwrap()
+            .expect("the retried tracking write succeeds");
+
+        let rows: Vec<(i64, i64)> = sqlx::query_as(&format!(
+            "SELECT CAST(save_step AS SIGNED), CAST(divine_clock_time AS SIGNED) \
+             FROM `{table}` WHERE id <= 5 ORDER BY id"
+        ))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [(0, 1), (0, 1), (1, 1), (0, 1), (1, 1)],
+            "the save steps and the retried clock update all survive"
+        );
+        let high: i64 = sqlx::query_scalar(&format!(
+            "SELECT CAST(SUM(save_step) AS SIGNED) FROM `{table}` WHERE id BETWEEN 101 AND 120"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(high, 20);
+
+        sqlx::query(&format!("DROP TABLE `{table}`"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

@@ -85,6 +85,7 @@ pub(crate) fn capture_financial_snapshot_for(
             players.push(player.clone());
         }
     }
+    order_snapshot_players(&mut players);
     FinancialSnapshot {
         houses,
         dominions,
@@ -117,6 +118,21 @@ pub(crate) fn capture_financial_snapshot_for(
             })
             .collect(),
     }
+}
+
+/// Orders the snapshot's characters by `(account_id, character_id)`.
+///
+/// `save_character` flushes `labor_power_unsaved` into `accounts.labor`, so a save transaction
+/// takes the `accounts` row locks of its characters in this order. The 5 s online tracking
+/// writes `accounts.divine_clock_time` for a chunk with `WHERE account_id IN (...)`, which
+/// InnoDB locks in primary-key order. Two different orders deadlock (MySQL 1213; the tracking
+/// statement was rolled back three times during the 7 h cloud bot run of 2026-11-11), so both
+/// writers acquire the account rows ascending.
+fn order_snapshot_players(players: &mut [PlayerRef]) {
+    players.sort_by_cached_key(|p| {
+        let c = p.data();
+        (c.account_id, c.id)
+    });
 }
 
 /// The world position of a character attached to a parent (ship, mate, transfer): its
@@ -280,6 +296,32 @@ mod tests {
         s.save.seed_committed_money(&b);
         let snapshot = capture_financial_snapshot(&s);
         assert_eq!(captured_ids(&snapshot), vec![1, 2]);
+    }
+
+    /// `save_character` updates `accounts.labor`, so the snapshot must take the `accounts` rows
+    /// in ascending account order: the 5 s online tracking updates `accounts.divine_clock_time`
+    /// with one `WHERE account_id IN (...)` statement, which InnoDB locks in primary-key order.
+    /// Two orders deadlocked on the cloud bot server (MySQL 1213). The departing player is
+    /// appended after the (single, so deterministically ordered) world character, which the
+    /// snapshot has to reorder.
+    #[tokio::test]
+    async fn autosave_snapshot_orders_account_rows_ascending() {
+        let s = test_server();
+        let client = TestClient::new(&s, 1, 1);
+        let online = spawn_player(&s, &client, test_character(10, "Online", 1.0, 1.0), 0x100);
+        online.data().account_id = 20;
+        let departing = spawn_player(&s, &client, test_character(11, "Leaving", 2.0, 2.0), 0x101);
+        departing.data().account_id = 10;
+        s.world.try_remove_character(departing.obj_id);
+        s.save.remember_departing(&departing);
+
+        let snapshot = capture_financial_snapshot(&s);
+        let order: Vec<(u32, u32)> = snapshot
+            .characters
+            .iter()
+            .map(|(_, c)| (c.account_id, c.id))
+            .collect();
+        assert_eq!(order, [(10, 11), (20, 10)]);
     }
 }
 
