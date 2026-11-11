@@ -10,10 +10,10 @@
 //! * `DoodadFuncLogicFamilySubscriber { family_id }` — this doodad's `DoodadFuncLogic` accepts
 //!   signals only from the doodad whose `family_id` equals `family_id` (input route); each
 //!   subscribed family is one input, a family that never signalled counts as `false`.
-//! * `DoodadFuncLogic { operation_id, delay_id }` — combines the accepted inputs
-//!   (`enum_doodad_logic_operations`: 1 AND, 2 NAND, 3 OR, 4 XOR, 5/6 NOT/NOR, 7 XNOR) and emits
-//!   the result after `enum_doodad_logic_delays` (1 = 1 s, 2 = 5 s, 3 = 10 s, 4 = 30 s, 5 =
-//!   1 min, 6 = 5 min, 7 = 10 min, 8 = 30 min).
+//! * `DoodadFuncLogic { operation_id, delay_id }` — combines the accepted inputs (operations
+//!   1 AND, 2 NAND, 3 OR, 4 XOR, 5/6 NOT/NOR, 7 XNOR, as the QA gate templates 1754-1773 are
+//!   named) and emits the result after the delay of `delay_id` (1 s / 5 s / 10 s for ids 1 / 2 /
+//!   3, evidenced by the same QA names; ids 4..8 are inferred, see [`logic_delay_ms`]).
 //! * `DoodadFuncPulse { flag }` — emits `flag` when a phase is entered with a caster (the C# ran
 //!   it only with a caster), to the provider families and to the spawner's `RelatedIds`.
 //! * `DoodadFuncPulseTrigger { flag, next_phase }` — a received signal equal to `flag` advances
@@ -93,12 +93,19 @@ impl Domain {
     }
 }
 
-/// The delay of a `DoodadFuncLogic` (`enum_doodad_logic_delays`); 0 = unknown descriptor.
+/// The delay of a `DoodadFuncLogic` (`delay_id`); `None` = unknown descriptor.
+///
+/// Ids 1 / 2 / 3 = 1 s / 5 s / 10 s are the only ones in shipped rows (74 `doodad_func_logics`
+/// rows: 61 / 6 / 7) and are evidenced by the QA gate template names 1754-1773 ("(1초)",
+/// "(5초)", "(10초)"). **Inferred (no 1.2 server evidence):** ids 4..8 = 30 s, 1 min, 5 min,
+/// 10 min, 30 min; no shipped row uses them and no `enum_doodad_logic_delays` table exists in the
+/// r208022, r223748, AAEmu CN or MailRU r243378 compact DB.
 fn logic_delay_ms(delay_id: u32) -> Option<u64> {
     Some(match delay_id {
         1 => 1_000,
         2 => 5_000,
         3 => 10_000,
+        // Inferred (no 1.2 server evidence), see above.
         4 => 30_000,
         5 => 60_000,
         6 => 300_000,
@@ -466,8 +473,9 @@ mod tests {
         assert_eq!(evaluate(99, [true].into_iter()), None);
     }
 
+    /// Ids 1..3 follow the QA gate template names; 4..8 are the inferred table (no evidence).
     #[test]
-    fn logic_delays_match_the_authored_enum() {
+    fn logic_delay_table_follows_the_qa_names_and_the_inferred_ids() {
         assert_eq!(logic_delay_ms(1), Some(1_000));
         assert_eq!(logic_delay_ms(2), Some(5_000));
         assert_eq!(logic_delay_ms(3), Some(10_000));

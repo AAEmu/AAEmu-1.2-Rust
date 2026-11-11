@@ -362,12 +362,19 @@ the position and counters before enabling saves, and initializes phases after
 spawning. Harvesting and recovery test line of sight above the ground anchor and
 exclude the target's own collider; intervening walls still block interaction.
 
-Logic families route true and false pulses within the same instance, zone and
-ownership domain. Client-created wires require owned nearby doodads. Immediate
-logic gates, family subscribers and pulse transitions run on the server; delayed
-logic descriptors 2 and 3 remain unsupported. The placed 1.2 logic templates use
-descriptor 1. Prefab flow graphs run on the client from phase and visibility packets.
-Doodad gimmick functions create the authored gimmick with its offsets and motion.
+Logic families route true and false pulses by the level-design family id of each
+placement (`Doodad::family_id`, the `FamilyId` of its spawn row) within the same
+instance, zone and ownership domain: a provider row names the receiving family and a
+subscriber row names the family a logic gate accepts. A placement without a `FamilyId`
+takes no part in family routing, so the template-level Nachashgar pairs of rooms 4, 6
+and 7 are inert (both Nachashgar zones are closed in the 1.2 client data). The spawner's
+`RelatedIds` and client-created wires, which require owned nearby doodads, address their
+target directly. Logic gates and family subscribers run on the server. A gate emits
+after its authored delay (descriptors 1, 2 and 3 are 1 s, 5 s and 10 s, evidenced by the
+shipped data; 4 to 8 are inferred), and a pulse trigger fires on a received signal or on
+the pulse its own group sent. Prefab flow graphs run on the client from phase and
+visibility packets. Doodad gimmick functions create the authored gimmick with its offsets
+and motion.
 
 `DoodadFuncSpawnMgmt` uses an explicit `SpawnGroupId` on NPC spawn entries, scoped
 by its authored zone key. This group is separate from `NpcSpawnerIds`. Tagged
