@@ -136,12 +136,12 @@ impl QuestSkillHooks for QuestsForSkills {
         value2: u32,
         pos: (f32, f32, f32),
     ) -> bool {
-        server
-            .systems
-            .quests
-            .spheres
-            .is_inside_area_sphere(&server.game_data.systems.quests, sphere_id, value2, pos, 0)
-            .is_some()
+        server.systems.quests.spheres.inside_requirement_sphere(
+            &server.game_data.systems.quests,
+            sphere_id,
+            value2,
+            pos,
+        )
     }
 
     fn apply_effect(

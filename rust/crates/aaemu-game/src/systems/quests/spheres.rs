@@ -581,6 +581,40 @@ impl SphereQuestManager {
         None
     }
 
+    /// The `AreaSphere` unit requirement (kind 35) of skills and quest components:
+    /// [`Self::is_inside_area_sphere`] (the client sign spheres of the sphere's quest, as in the
+    /// C#), or else the requirement sphere's own shipped `sphere_area_fill.json` area.
+    ///
+    /// Rust addition: the C# only knew the sign spheres, so a requirement whose sphere has no sign
+    /// sphere of its `sphere_quests` quest never passed. Quest 2273 "March of Respect" places its
+    /// offering with skill 15204, which needs sphere 1152 at Prince Reander's Monument; the 1.2
+    /// data links 1152 to quest 2907 (`sphere_quests` 660), which has no sign sphere there, while
+    /// the area fill has 1152 (radius 6 m) around the altar. The areas carry no world filter
+    /// here (the requirement callers have only a position); sphere ids are unique, so a match
+    /// needs the caster at that sphere's coordinates.
+    pub fn inside_requirement_sphere(
+        &self,
+        data: &QuestData,
+        sphere_id: u32,
+        value2: u32,
+        pos: (f32, f32, f32),
+    ) -> bool {
+        if self
+            .is_inside_area_sphere(data, sphere_id, value2, pos, 0)
+            .is_some()
+        {
+            return true;
+        }
+        data.spheres
+            .get(&sphere_id)
+            .is_some_and(|db| db.sphere_detail_type == "SphereQuest")
+            && self.areas.get().is_some_and(|areas| {
+                areas
+                    .iter()
+                    .any(|a| a.sphere_id == sphere_id && a.contains(pos))
+            })
+    }
+
     /// `AddSphereQuestTriggers(owner, quest, componentId, npcTemplateId)`: queued for the next
     /// tick. Returns the number of triggers.
     pub fn add_triggers(

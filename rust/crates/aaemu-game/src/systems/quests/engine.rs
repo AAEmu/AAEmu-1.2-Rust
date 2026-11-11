@@ -2930,14 +2930,12 @@ impl ReqEnv for EnvView<'_> {
             .systems
             .quests
             .spheres
-            .is_inside_area_sphere(
+            .inside_requirement_sphere(
                 &self.server.game_data.systems.quests,
                 sphere_id,
                 value2,
                 pos,
-                0,
             )
-            .is_some()
     }
 }
 

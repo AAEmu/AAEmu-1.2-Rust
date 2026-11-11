@@ -1520,3 +1520,98 @@ fn real_object_dat_vegetation_audit() {
     }
     assert!(total_records > 0);
 }
+
+/// Ynystere NPCs that stand on a structure (Rose Estate Manor floors, Brimblaze Tower on
+/// Marooned Isle, the Finnea Harbor docks, mansion walls) but whose `npc_spawns.json` Z had been
+/// dropped onto the terrain under it, so they spawned inside the floor or under water (tester
+/// report: "Rose Estate Rafflesia clipping inside the building floor"). Each row is
+/// `(unit id, X, Y, Z)` with X / Y equal to a 1.2 client `npc_map/e_ynystere.dat` record of
+/// the same NPC and Z that record's height, kept only where the 1.2 collision has a floor within
+/// 1 m of it (`real_ynystere_floor_fixes_stand_on_a_collision_floor`) and it is above the
+/// terrain. The other 76 Ynystere records more than 2 m off the spawn Z were left alone: flying
+/// or swimming NPCs without a floor there, points under the terrain, and a stacked marker site
+/// whose heights step by 2 m.
+const YNYSTERE_FLOOR_FIXES: [(u32, f32, f32, f32); 28] = [
+    (1415, 19934.4, 12351.43, 126.281),
+    (1419, 21733.3, 12565.5, 225.902),
+    (1423, 20828.93, 13186.52, 105.703),
+    (1441, 21971.24, 13088.98, 283.021),
+    (1458, 21963.35, 13105.03, 283.306),
+    (1467, 19727.66, 11769.462, 175.925),
+    (1474, 20302.47, 12974.6, 147.769),
+    (8015, 19774.31, 11751.003, 128.903),
+    (8015, 19728.73, 11756.884, 126.414),
+    (8015, 19797.41, 11738.576, 128.321),
+    (8015, 19729.22, 11772.153, 126.414),
+    (8015, 19757.47, 11760.059, 126.336),
+    (8043, 21971.85, 13058.12, 281.448),
+    (8043, 21967.59, 13067.439, 271.794),
+    (8043, 21975.9, 13035.78, 271.513),
+    (8043, 21983.33, 13049.47, 281.526),
+    (8043, 21985.82, 13042.92, 272.681),
+    (8043, 21976.87, 13050.38, 271.794),
+    (8243, 20864.81, 13391.21, 106.183),
+    (8779, 19824.02, 12763.67, 102.233),
+    (8779, 19812.72, 12770.14, 102.53),
+    (8779, 19843.81, 12751.38, 101.951),
+    (8779, 19833.8, 12811.5, 110.963),
+    (8779, 19854.92, 12796.39, 110.929),
+    (10758, 20802.23, 13338.65, 147.154),
+    (13070, 20902.43, 13346.811, 123.84),
+    (13070, 20901.55, 13374.66, 124.378),
+    (13070, 20900.83, 13316.93, 124.138),
+];
+
+/// The spawn file carries the client floor height of every [`YNYSTERE_FLOOR_FIXES`] row.
+#[test]
+fn ynystere_structure_npcs_keep_the_client_floor_height() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
+    let Ok(text) =
+        std::fs::read_to_string(app_path().join("Data/Worlds/main_world/npc_spawns.json"))
+    else {
+        return;
+    };
+    let defs = parse_list(&text, NpcSpawnerDef::from_json).expect("npc_spawns.json");
+    for (uid, x, y, z) in YNYSTERE_FLOOR_FIXES {
+        let found: Vec<f32> = defs
+            .iter()
+            .filter(|d| d.base.unit_id == uid)
+            .filter(|d| {
+                (d.base.position.x - x).abs() < 0.01 && (d.base.position.y - y).abs() < 0.01
+            })
+            .map(|d| d.base.position.z)
+            .collect();
+        assert_eq!(found.len(), 1, "npc {uid} at ({x}, {y}): {found:?}");
+        assert!(
+            (found[0] - z).abs() < 0.001,
+            "npc {uid} at ({x}, {y}) has Z {}, the client floor is {z}",
+            found[0]
+        );
+    }
+}
+
+/// Every [`YNYSTERE_FLOOR_FIXES`] spawn lands on a 1.2 collision floor within 1 m of its Z
+/// (the live `spawn_ground_z` path, GeoDataMode on), so it neither sinks back onto the terrain
+/// under the structure nor floats.
+/// `AAEMU_GAME_PAK=C:/AA1.2/game_pak cargo test -p aaemu-game real_ynystere_floor_fixes -- --ignored`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_ynystere_floor_fixes_stand_on_a_collision_floor() {
+    let Some(e) = env_with(true) else { return };
+    let server = real_server_with(&e, true);
+    let world = server.world.world(0).expect("main world");
+    for (uid, x, y, z) in YNYSTERE_FLOOR_FIXES {
+        let terrain = super::terrain_height(&server, 0, x, y).expect("terrain");
+        let spawn = crate::systems::npcs::npc::spawner::spawn_ground_z(&server, &world, x, y, z)
+            .expect("a floor under the spawn");
+        println!("npc {uid} ({x}, {y}, {z}): spawns at {spawn}, terrain {terrain}");
+        assert!(
+            (spawn - z).abs() <= 1.0,
+            "npc {uid} at ({x}, {y}, {z}) spawns at {spawn}"
+        );
+        assert!(
+            z >= terrain - 0.5,
+            "npc {uid} at ({x}, {y}, {z}) is under the terrain {terrain}"
+        );
+    }
+}
