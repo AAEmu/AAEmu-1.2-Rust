@@ -1327,6 +1327,9 @@ fn doodad_out_of_quest_reach(server: &GameServer, player: &PlayerRef, doodad_obj
 /// `CSStartQuestContextPacket`: the player asked to start `quest_id` at the NPC, doodad or
 /// sphere context (or without one). Only these client requests answer a start-component unit
 /// requirement refusal with `SCQuestUnitReqFailedPacket`; every other starter stays silent.
+/// A client request refused by the reach check is answered with `SCQuestContextFailedPacket`
+/// (the same refusal the client asked for as a turn-in gets), so its quest window is not left
+/// waiting for an answer that never comes.
 pub fn start_quest_context(
     server: &GameServer,
     player: &PlayerRef,
@@ -1337,11 +1340,19 @@ pub fn start_quest_context(
 ) {
     if npc_obj_id > 0 {
         if npc_out_of_quest_reach(server, player, npc_obj_id) {
+            player.send(SCQuestContextFailedPacket {
+                quest_id,
+                err: quest_error::INVALID_NPC_OR_QUEST,
+            });
             return;
         }
         add_quest_from_npc_impl(server, player, quest_id, npc_obj_id, true);
     } else if doodad_obj_id > 0 {
         if doodad_out_of_quest_reach(server, player, doodad_obj_id) {
+            player.send(SCQuestContextFailedPacket {
+                quest_id,
+                err: quest_error::INVALID_DOODAD,
+            });
             return;
         }
         add_quest_from_doodad_impl(server, player, quest_id, doodad_obj_id, true);

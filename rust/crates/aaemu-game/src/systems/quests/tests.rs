@@ -6698,6 +6698,43 @@ async fn client_quest_requests_name_an_npc_within_reach() {
                 alias_id: 0,
             },
         );
+        // Quest 62: started from a doodad; quest 63 (reach check off) from the far NPC.
+        for id in [62, 63] {
+            d.add_template(quest(id));
+            d.add_component(component(id * 10 + 1, id, kind::START));
+        }
+        d.add_act(
+            621,
+            621,
+            621,
+            0,
+            ActKind::ConAcceptDoodad { doodad_id: 700 },
+        );
+        d.add_component(component(622, 62, kind::READY));
+        d.add_act(
+            622,
+            622,
+            622,
+            0,
+            ActKind::ConReportDoodad {
+                doodad_id: 700,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_act(631, 631, 631, 0, ActKind::ConAcceptNpc { npc_id: 500 });
+        d.add_component(component(632, 63, kind::READY));
+        d.add_act(
+            632,
+            632,
+            632,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
     });
     let mut client = TestClient::new(&server, 1, 1001);
     let player = spawn_player(&server, &client, character(), 0x100);
@@ -6714,20 +6751,41 @@ async fn client_quest_requests_name_an_npc_within_reach() {
         n.unit.transform.set_xyz(x, 105.0, 100.0);
         world.spawn(Entity::new(obj, n), &server.view_ctx());
     }
+    for (obj, x) in [(0x220u32, 250.0f32), (0x221, 105.0)] {
+        let mut d = crate::models::doodad::Doodad::new(700);
+        d.transform.set_xyz(x, 105.0, 100.0);
+        world.spawn(Entity::new(obj, d), &server.view_ctx());
+    }
     events::add_quest(&server, &player, 61, false);
     server.systems.quests.run_queued_evaluations(&server);
     client.drain();
 
-    // Start: the far NPC is refused, the near one (within reach + dialog slack) accepted.
+    // Start: the far NPC is refused and answered, so the client's quest window is not left
+    // waiting; the near one (within reach + dialog slack) is accepted.
     events::start_quest_context(&server, &player, 60, 0x210, 0, 0);
     server.systems.quests.run_queued_evaluations(&server);
     assert!(!events::has_quest(&player, 60));
+    assert_one_failed(
+        &mut client,
+        60,
+        super::packets::quest_error::INVALID_NPC_OR_QUEST,
+    );
     events::start_quest_context(&server, &player, 60, 0x211, 0, 0);
     server.systems.quests.run_queued_evaluations(&server);
     assert!(events::has_quest(&player, 60));
+    client.drain();
+
+    // The same for a doodad start (INVALID_DOODAD) and its near doodad.
+    events::start_quest_context(&server, &player, 62, 0, 0x220, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(!events::has_quest(&player, 62));
+    assert_one_failed(&mut client, 62, super::packets::quest_error::INVALID_DOODAD);
+    events::start_quest_context(&server, &player, 62, 0, 0x221, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(events::has_quest(&player, 62));
+    client.drain();
 
     // Report: the far NPC answers INVALID_NPC_OR_QUEST without reaching the quest.
-    client.drain();
     events::on_report(&server, &player, 61, 0x212, 0, 0);
     assert_one_failed(
         &mut client,
@@ -6742,10 +6800,15 @@ async fn client_quest_requests_name_an_npc_within_reach() {
         "the near NPC completes the report"
     );
 
-    // The config switch turns the check off.
+    // The config switch turns the check off: the far start goes through, unanswered.
     server
         .config
         .update(|c| c.interaction.npc_reach_check = false);
-    events::start_quest_context(&server, &player, 60, 0x210, 0, 0);
-    // (already active: nothing to assert beyond no panic)
+    events::start_quest_context(&server, &player, 63, 0x210, 0, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(events::has_quest(&player, 63));
+    assert!(!client
+        .drain()
+        .iter()
+        .any(|(op, _)| *op == sc::SCQuestContextFailedPacket));
 }
