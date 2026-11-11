@@ -4997,6 +4997,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   doodad.g`); the 1.2 templates and start groups are from `compact.sqlite3`. Tests:
   `npcs::sharpwind_doodad_tests::sharpwind_scripted_doodad_spawn_placements` and (gated by
   `AAEMU_COMPACT_DB`) `real_compact_db_sharpwind_scripted_doodad_spawn_templates`.
+* systems::npcs (start-active spawners / Sharpwind NPC spawn data, 2026-11-11): a plain
+  `npc_spawns.json` row (no `NpcSpawnerIds`) expands into **every** game-data spawner that lists
+  the NPC as a member (`SpawnManager::AddNpcSpawner` / `get_spawner_ids`), and neither the C#
+  nor the Rust read `npc_spawners.activation_state`. So the event-only Sharpwind spawners and
+  the cutscene actors were created at instance start: Nerta 11362/12146 and Okape 12188 existed
+  from t=0 (their OnSpawn skills fired with nobody there), the slimes 11361 and the researchers
+  12153/12155 stood in the instance, and Alistair 12108/12109 spawned twice (the regular
+  spawners 13382-13386 plus the cutscene actors 13387/13388 at the same place). **Deviation
+  from the C#:** a plain row now skips a game-data spawner whose `activation_state = 'f'`
+  (inactive at start; its activating skill / quest / indun event names the spawner id itself)
+  and a category-0 (`NORMAL`) spawner whose name or comment carries the level editor's `연출`
+  ("staging") marker (cutscene actors; `spawn_manager::spawner_starts_active`). Event rows
+  (`NpcSpawnerIds`) still register their spawner for the effect, and nothing else changes. The
+  rule is data-backed (`activation_state`, the spawner names/comments and the event rows that
+  activate them); that retail also starts these spawners inactive is **Inferred** (no 1.2
+  server capture). The gated real-data test counts every skipped expansion per world:
+  `main_world` 552 (247 plain rows whose only spawners are event spawners), `instance_library`
+  323 (143), `instance_hadir_farm` 102 (1), Sharpwind 9 (0: the Alistair and trigger cutscene
+  actors; every Sharpwind plain row keeps a start-active spawner), the other instances 0-5.
+  **Sharpwind data (`npc_spawns.json`):** removed the plain rows of 11362 x2 (Nerta boss),
+  11361 x16 (slimes), 12188 (Okape), 12146 (cutscene Nerta), 12153 x4 / 12155 (researchers,
+  now spawned by the trigger spheres) and the 3 stray 11106 rows at (199.8, 180.4, ...);
+  added the 7 invisible "Spawn Slave" trigger NPCs 12113-12119 and the 32 level-placement event
+  rows (`NpcSpawnerIds` = the level's `spawnerId`, e.g. Vera's death effect 24094 -> 94694 for
+  the boss Nerta). **Inferred (10.x level, 1.2 templates):** the added placement positions
+  (`npc_spawners.g` `spawnerId`/`spawnerType` of zone 262). Tests (new module
+  `npcs::sharpwind_spawn_tests`): `plain_rows_skip_event_only_and_cutscene_spawners` (CI) and
+  (gated by `AAEMU_COMPACT_DB`)
+  `real_data_sharpwind_instance_creation_spawns_the_authored_npcs`,
+  `real_data_sharpwind_vera_effect_spawns_one_nerta`,
+  `real_data_start_active_rule_counts_per_world`.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body

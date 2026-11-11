@@ -51,7 +51,9 @@ use crate::systems::npcs::npc::residency::ResidentNpcTemplates;
 use crate::systems::npcs::npc::spawner::{
     npc_is_resident, NpcSpawner, NpcSpawnerInit, NpcSpawnerShared,
 };
-use crate::systems::npcs::npc::spawner_data::{NpcSpawnerNpc, NpcSpawnerTemplate};
+use crate::systems::npcs::npc::spawner_data::{
+    npc_spawner_category, NpcSpawnerNpc, NpcSpawnerTemplate,
+};
 use crate::world::{DoodadRef, Entity, NpcRef, ObjectKind, WorldInstance, WorldObject};
 
 /// `s_fakeSpawnerId` start value.
@@ -851,6 +853,9 @@ pub struct LoadStats {
     /// Generated ("fake") spawner templates (the generated spawner is stored too, unlike the C#).
     pub npc_fake_spawners: usize,
     pub npc_event_spawners: usize,
+    /// Plain rows that would have expanded into an event-only (`npc_spawners.activation_state =
+    /// 'f'`) or cutscene-only spawner and no longer do (see [`spawner_starts_active`]).
+    pub npc_event_only_spawners_skipped: usize,
     pub tower_def_spawners: usize,
     pub doodad_files: usize,
     pub doodad_entries: usize,
@@ -1023,6 +1028,36 @@ fn read_spawn_file(world: &WorldInstance, path: &Path) -> Option<String> {
             None
         }
     }
+}
+
+/// Outcome of one `AddNpcSpawner` entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AddedSpawners {
+    /// Spawner clones stored in `NpcSpawners`.
+    added: usize,
+    /// Game-data spawners a plain row would have expanded into but that only exist through an
+    /// activating effect / cutscene (see [`spawner_starts_active`]).
+    skipped: usize,
+}
+
+/// Whether a plain (no `NpcSpawnerIds`) spawn-file row may create this game-data spawner when a
+/// world or dungeon instance starts.
+///
+/// `npc_spawners.activation_state = 'f'` marks spawners that are inactive at start: they appear
+/// only through their activating skill / quest / indun event, whose effect row names the
+/// spawner id itself. A category-0 (`NORMAL`) spawner marked `연출` ("staging/cutscene") in its
+/// name or comment (e.g. `instance_cuttingwind_deadmine_alistair0` / `연출용 알리스테어0`) is a
+/// cutscene actor: it is placed for a scripted scene and stands in its acting pose, not for
+/// world spawning. Both kinds are skipped when a plain row expands into every spawner that
+/// lists its NPC template; an event row (`NpcSpawnerIds`) still registers the spawner for the
+/// effect that activates it.
+pub(crate) fn spawner_starts_active(template: &NpcSpawnerTemplate) -> bool {
+    if !template.activation_state {
+        return false;
+    }
+    let cutscene = template.npc_spawner_category_id == npc_spawner_category::NORMAL
+        && (template.name.contains("연출") || template.comment.contains("연출"));
+    !cutscene
 }
 
 impl SpawnManager {
@@ -1207,7 +1242,7 @@ impl SpawnManager {
         server: &GameServer,
         def: NpcSpawnerDef,
     ) -> Result<usize, String> {
-        self.add_npc_spawner_with(server, def, true)
+        Ok(self.add_npc_spawner_with(server, def, true)?.added)
     }
 
     /// [`Self::add_npc_spawner`]; `hold_group_members` keeps the entries of tower defense group
@@ -1217,7 +1252,7 @@ impl SpawnManager {
         server: &GameServer,
         def: NpcSpawnerDef,
         hold_group_members: bool,
-    ) -> Result<usize, String> {
+    ) -> Result<AddedSpawners, String> {
         let data = &server.game_data.systems.npcs.npc_spawners;
         let spawns = &server.systems.npcs.spawns;
         let mut inner = self.inner();
@@ -1286,7 +1321,7 @@ impl SpawnManager {
                     .or_default()
                     .push(Arc::new(spawner));
             }
-            return Ok(0);
+            return Ok(AddedSpawners::default());
         }
         if hold_group_members
             && ids.is_empty()
@@ -1301,12 +1336,13 @@ impl SpawnManager {
             // The shipped JSON lists the members of an event's NPC group one entry each at the
             // group's spawn site. Only the tower defense runtime may spawn them.
             inner.tower_group_entries.push(def.clone());
-            return Ok(0);
+            return Ok(AddedSpawners::default());
         }
         if ids.is_empty() {
             let game_data_ids = data.get_spawner_ids(b.unit_id).unwrap_or_default();
             let mut spawners = Vec::new();
             let mut added = 0;
+            let mut skipped = 0;
             if game_data_ids.is_empty() {
                 // No pre-defined spawner: generate one from template 1 ("Test Warrior").
                 tracing::trace!("SpawnerIds for Npc={} doesn't exist", b.unit_id);
@@ -1354,6 +1390,14 @@ impl SpawnManager {
                 let shared = new_shared();
                 for &id in &game_data_ids {
                     let template = data.get_npc_spawner_template(id);
+                    if template
+                        .as_deref()
+                        .is_some_and(|t| !spawner_starts_active(t))
+                    {
+                        // Event-only / cutscene spawner: a plain row must not pre-spawn it.
+                        skipped += 1;
+                        continue;
+                    }
                     let spawner = NpcSpawner::new(
                         init(inner.next_id, id, game_data_ids.clone(), template.clone()),
                         shared.clone(),
@@ -1365,10 +1409,12 @@ impl SpawnManager {
                     added += 1;
                 }
             }
-            let key = inner.next_id;
-            inner.npc_spawners.entry(key).or_insert(spawners);
-            self.invalidate_activation_index();
-            Ok(added)
+            if !spawners.is_empty() {
+                let key = inner.next_id;
+                inner.npc_spawners.entry(key).or_insert(spawners);
+                self.invalidate_activation_index();
+            }
+            Ok(AddedSpawners { added, skipped })
         } else {
             // NPC spawns for events.
             let last = *ids.last().expect("non-empty");
@@ -1383,7 +1429,7 @@ impl SpawnManager {
                 .entry(key)
                 .or_insert_with(|| vec![Arc::new(spawner)]);
             inner.next_id += 1;
-            Ok(0)
+            Ok(AddedSpawners::default())
         }
     }
 
@@ -1570,7 +1616,9 @@ impl SpawnManager {
                 self.fix_position(&mut def.base.position, true);
                 let event = !def.npc_spawner_ids.is_empty() && def.npc_spawner_ids != [0];
                 let fake_before = server.systems.npcs.spawns.peek_fake_spawner_id();
-                let added = self.add_npc_spawner(server, def)?;
+                let result = self.add_npc_spawner_with(server, def, true)?;
+                stats.npc_event_only_spawners_skipped += result.skipped;
+                let added = result.added;
                 if event {
                     stats.npc_event_spawners += 1;
                 } else if server.systems.npcs.spawns.peek_fake_spawner_id() != fake_before {
@@ -2692,7 +2740,7 @@ impl SpawnManager {
         for (def, used) in entries.into_iter().zip(used) {
             if !used {
                 // Not part of any complete group: an ordinary spawn after all.
-                let added = self.add_npc_spawner_with(server, def, false)?;
+                let added = self.add_npc_spawner_with(server, def, false)?.added;
                 if added > 0 {
                     stats.npc_entries_with_spawners += 1;
                     stats.npc_spawners += added;

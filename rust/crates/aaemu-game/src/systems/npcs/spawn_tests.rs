@@ -24,7 +24,8 @@ use crate::systems::npcs::npc::spawner_data::{
     npc_spawner_category, NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate,
 };
 use crate::systems::npcs::spawn_manager::{
-    self, backend::TestBackend, SpawnManager, TemplateExists, FIRST_FAKE_SPAWNER_ID,
+    self, backend::TestBackend, spawner_starts_active, SpawnManager, TemplateExists,
+    FIRST_FAKE_SPAWNER_ID,
 };
 use crate::systems::quests::model::kind;
 use crate::systems::quests::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
@@ -3650,6 +3651,7 @@ async fn real_data_main_world_spawn_files() {
     );
     let server = Arc::new(test_server_with(data));
     let m = manager(&server);
+    let sd = &server.game_data.systems.npcs.npc_spawners;
     let npc = |id: u32| npcs.contains(&id);
     let doodad = |id: u32| doodads.contains(&id);
     let transfer = |id: u32| transfers.contains(&id);
@@ -3744,13 +3746,18 @@ async fn real_data_main_world_spawn_files() {
             event += 1;
             continue;
         }
-        let static_ids = {
-            let mut stmt = conn
-                .prepare_cached("SELECT COUNT(*) FROM npc_spawner_npcs WHERE member_id = ?1")
-                .unwrap();
-            stmt.query_row([unit], |r| r.get::<_, i64>(0)).unwrap() as usize
-        };
-        let n = if static_ids > 0 {
+        // Start-active game-data spawners only: a plain row skips event-only / cutscene rows
+        // (`spawn_manager::spawner_starts_active`). A missing template still creates a
+        // placement, exactly like the loader.
+        let game_data_ids = sd.get_spawner_ids(unit).unwrap_or_default();
+        let static_ids = game_data_ids
+            .iter()
+            .filter(|id| {
+                sd.get_npc_spawner_template(**id)
+                    .is_none_or(|t| spawner_starts_active(&t))
+            })
+            .count();
+        let n = if !game_data_ids.is_empty() {
             static_ids
         } else {
             // Every placement keeps a spawner now: the first generates the template, later

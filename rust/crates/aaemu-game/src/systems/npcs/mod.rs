@@ -219,6 +219,8 @@ mod schedule_item_session_tests;
 #[cfg(test)]
 mod sharpwind_doodad_tests;
 #[cfg(test)]
+mod sharpwind_spawn_tests;
+#[cfg(test)]
 mod spawn_tests;
 
 /// Installs the NPC subsystem's implementations of the other subsystems' hooks (no I/O; also
