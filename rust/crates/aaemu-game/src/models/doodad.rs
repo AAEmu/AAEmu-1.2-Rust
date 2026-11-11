@@ -84,9 +84,10 @@ pub struct Doodad {
     pub puzzle_group: i32,
     /// `Spawner?.Id` (0 = none).
     pub spawner_id: u32,
-    /// Level-design logic family id of this placement (the 1.2 client level editor's
-    /// `doodad.xml` `Family_Id`, e.g. Sharpwind's 50001-50008; 0 = none). `DoodadFuncPulse` /
-    /// `DoodadFuncLogic` address other doodads by it (see `systems::npcs::doodad::logic`).
+    /// Level-design logic family id of this placement (the `Family_Id` of the 10.x client level
+    /// editor's `doodad.xml`, `ArcheAge Returns` r575; not in r208022 / r223748; e.g.
+    /// Sharpwind's 50001-50008; 0 = none). `DoodadFuncPulse` / `DoodadFuncLogic` address other
+    /// doodads by it (see `systems::npcs::doodad::logic`).
     pub family_id: u32,
     /// `(world id, spawn key)` of a world-spawned doodad whose growth state is persisted in
     /// `doodad_spawn_states` (`systems::npcs::doodad::natural`); `None` = not tracked.

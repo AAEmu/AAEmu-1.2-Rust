@@ -785,9 +785,9 @@ async fn sharpwind_switches_raise_the_lake_through_the_family_network() {
     assert_eq!(group(&lake), 13159, "the raised water2 phase is reached");
 }
 
-/// Greptile PR #108 finding 1: with 1 s delays, outputs at 0 ms (true), 200 ms (false) and
-/// 400 ms (true) must emit once, at 1400 ms, with the final value; the replaced outputs cannot
-/// fire at their own (earlier) due times.
+/// With 1 s delays, outputs at 0 ms (true), 200 ms (false) and 400 ms (true) must emit once, at
+/// 1400 ms, with the final value; the replaced outputs cannot fire at their own (earlier) due
+/// times.
 #[tokio::test]
 async fn replaced_logic_output_emits_once_with_the_last_value() {
     let b = Builder::default()
@@ -894,8 +894,8 @@ async fn replaced_logic_output_emits_once_with_the_last_value() {
     );
 }
 
-/// Greptile PR #108 finding 2: a wire linked while a result is still pending receives nothing
-/// until the delayed emit; on the emit it receives the value once.
+/// A wire linked while a result is still pending receives nothing until the delayed emit; on
+/// the emit it receives the value once.
 #[tokio::test]
 async fn a_wire_linked_during_the_logic_delay_receives_nothing_until_the_emit() {
     let b = Builder::default()
@@ -966,8 +966,8 @@ async fn a_wire_linked_during_the_logic_delay_receives_nothing_until_the_emit() 
     assert_eq!(group(&subscriber), 21, "the delayed emit reaches the wire");
 }
 
-/// Greptile PR #108 finding 2: `subscribe` replays only the last emitted value, never a result
-/// that is still waiting for its delay.
+/// `subscribe` replays only the last emitted value, never a result that is still waiting for
+/// its delay.
 #[tokio::test]
 async fn subscribe_replays_only_the_emitted_logic_value() {
     let b = Builder::default()
@@ -3773,9 +3773,10 @@ mod natural_flow {
     }
 }
 
-/// The shipped `compact.sqlite3` rows the Sharpwind chain depends on: the switch's table order
-/// (Pulse before its PulseTrigger, the 2026-11-11 loader deviation), the gate family wiring, the
-/// lake's 5 s + 22 s water-volume sequence and the water volume's 22 m / 22 s.
+/// The shipped `compact.sqlite3` rows the Sharpwind chain depends on: the switch's rows in the
+/// loader's `actual_func_id` order (PulseTrigger 274, Pulse 287, provider 444; the executor runs
+/// the trigger last, see `phase::do_phase_funcs`), the gate family wiring, the lake's 5 s + 22 s
+/// water-volume sequence and the water volume's 22 m / 22 s.
 #[tokio::test]
 #[ignore]
 async fn real_compact_db_sharpwind_water_network_rows() {
@@ -3790,8 +3791,8 @@ async fn real_compact_db_sharpwind_water_network_rows() {
         assert!(data.template(id).is_some(), "missing template {id}");
     }
 
-    // Switch 5064: start group 13160 (false pulse + provider), used group 13161 in *table* order
-    // (Pulse 287, provider 444 -> 50005, PulseTrigger 274 -> final 13163).
+    // Switch 5064: start group 13160 (false pulse + provider), used group 13161 in the loader's
+    // `actual_func_id` order (PulseTrigger 274 -> final 13163, Pulse 287, provider 444 -> 50005).
     let start: Vec<(u32, &str)> = data
         .phase_funcs(13160)
         .iter()

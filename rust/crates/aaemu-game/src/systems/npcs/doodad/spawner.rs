@@ -136,8 +136,9 @@ pub struct DoodadSpawnerDef {
     pub count: u32,
     /// `RelatedIds` (`null` when absent).
     pub related_ids: Option<Vec<u32>>,
-    /// `FamilyId` (the level editor's `Family_Id`; 0 when absent). The C# JSON model never
-    /// carried it; the placement data does (Sharpwind 50001-50008).
+    /// `FamilyId` (the `Family_Id` of the 10.x client level editor's `doodad.xml`, r575; 0 when
+    /// absent). The C# JSON model never carried it; the placement data does (Sharpwind
+    /// 50001-50008).
     pub family_id: u32,
     pub respawn_doodad_template_id: u32,
 }

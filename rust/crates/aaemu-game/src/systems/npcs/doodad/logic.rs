@@ -1,9 +1,17 @@
 //! Logic links and family pulses.
 //!
-//! The authored network is addressed by the level-design **family id** of each doodad (the
-//! 1.2 client level editor's `doodad.xml` `Family_Id`, loaded into `Doodad::family_id` from the
-//! spawn row's `FamilyId`). The two function tables read as follows (Sharpwind Mines is the
-//! complete example, all ids matched against the editor placements):
+//! The authored network is addressed by the level-design **family id** of each doodad: the
+//! `Family_Id` of the 10.x client level editor's `doodad.xml` (`ArcheAge Returns 10.0.2.13 r575`,
+//! `.../instance_cuttingwind_deadmine/cells/000_000/editor/02_01/doodad.xml`, 6437 B, MD5
+//! 74CFA418149294B9A36E4675CC119299; the file is in neither r208022 nor r223748, only its pak
+//! catalogue entry is on hand), loaded into `Doodad::family_id` from the spawn row's `FamilyId`.
+//! The level is the same as 1.2 (identical heightmap / object / brush / entities / navmesh MD5
+//! between r223748 and r575; the 1.2 prefab lake polygon contains all 11 water placements; five
+//! old server rows stood at the stream positions). The two function tables read as follows
+//! (Sharpwind Mines is the complete example, all ids matched against the editor placements;
+//! **Inferred (no 1.2 server evidence):** that every other chain reads them the same way - only
+//! Sharpwind's graph closes with exactly one carrier per id, and the template-level reading `main`
+//! used, provider family == subscriber family, is incoherent for it):
 //!
 //! * `DoodadFuncLogicFamilyProvider { family_id }` — when this doodad emits, the doodads whose
 //!   `family_id` equals `family_id` receive the signal (output route).
@@ -13,7 +21,7 @@
 //! * `DoodadFuncLogic { operation_id, delay_id }` — combines the accepted inputs (operations
 //!   1 AND, 2 NAND, 3 OR, 4 XOR, 5/6 NOT/NOR, 7 XNOR, as the QA gate templates 1754-1773 are
 //!   named) and emits the result after the delay of `delay_id` (1 s / 5 s / 10 s for ids 1 / 2 /
-//!   3, evidenced by the same QA names; ids 4..8 are inferred, see [`logic_delay_ms`]).
+//!   3, evidenced by the same QA names; ids 4..8 are inferred, see `logic_delay_ms`).
 //! * `DoodadFuncPulse { flag }` — emits `flag` when a phase is entered with a caster (the C# ran
 //!   it only with a caster), to the provider families and to the spawner's `RelatedIds`.
 //! * `DoodadFuncPulseTrigger { flag, next_phase }` — a received signal equal to `flag` advances
@@ -212,7 +220,7 @@ pub fn clear_links(ctx: &DoodadCtx<'_>) {
 ///
 /// Client wires and the spawner's `RelatedIds` are *explicit* routes: someone authored them for
 /// exactly this source/target pair, so they skip the subscriber-family source filter of
-/// [`receive`]. Only the family-routed signals go through that filter.
+/// `receive`. Only the family-routed signals go through that filter.
 pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
     let root = PULSE_PATH.with(|path| {
         let mut path = path.borrow_mut();

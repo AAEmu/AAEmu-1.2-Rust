@@ -4779,23 +4779,35 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   real_data_sphere_doodad_interact -- --ignored --nocapture`.
 * systems::npcs (Sharpwind "water rises" geyser network, 2026-11-11): the missing placements and
   the logic network are now in place, so clearing the Blocked Geysers raises the lake.
-  **Placements (data):** the 1.2 client level editor data (10.x client pak
-  `game/worlds/instance_cuttingwind_deadmine/cells/000_000/editor/02_01/doodad.xml`, subcell
-  origin +256 m; the level is the same as 1.2 - the five stream rows match the old server rows
-  to <0.6 m and the z values match) places `5064`/`5068`/`5069` "Blocked Geyser" switches at
-  (678.33, 338.67, 143.87) / (672.68, 317.62, 143.79) / (691.12, 317.28, 143.60), invisible
-  water gates `5070`/`5071` at (681.18, 342.82, 143.99) / (684.98, 341.37, 144.03), water
-  streams `5072` x3 / `5073` x2 at (687.91, 333.87, 143.96) / (692.93, 326.99, 143.71) /
+  **Placements (data):** the 10.x client level editor `doodad.xml` (`ArcheAge Returns 10.0.2.13
+  r575`, `game/worlds/instance_cuttingwind_deadmine/cells/000_000/editor/02_01/doodad.xml`,
+  6437 B, MD5 74CFA418149294B9A36E4675CC119299, subcell origin +256 m; it is in neither r208022
+  nor r223748 and only its pak catalogue entry is on this machine, so the coordinates and family
+  ids below could not be re-read from the file) places `5064`/`5068`/`5069` "Blocked Geyser"
+  switches at (678.33, 338.67, 143.87) / (672.68, 317.62, 143.79) / (691.12, 317.28, 143.60),
+  invisible water gates `5070`/`5071` at (681.18, 342.82, 143.99) / (684.98, 341.37, 144.03),
+  water streams `5072` x3 / `5073` x2 at (687.91, 333.87, 143.96) / (692.93, 326.99, 143.71) /
   (684.83, 314.11, 143.86) / (670.13, 330.63, 143.99) / (697.69, 319.18, 143.85), and the lake
-  `5063` at (650.86, 292.16, 143.28), each with the editor `Family_Id` (50001-50008). The old
-  `doodad_spawns.json` had five `5064` rows at exactly the five *stream* positions (the AAEmu
-  hand-add of 2023, commit `853fa8543`); they are now the authored `5072`/`5073` templates, and
-  the three switches, the two gates and the lake are added. **Network:** the editor family id is
+  `5063` at (650.86, 292.16, 143.28), each with the editor `Family_Id` (50001-50008). The level
+  is the same as 1.2: the heightmap, object, brush, entities and navmesh files of the instance
+  have identical size and MD5 in the r223748 pak and the 10.x r575 pak (r208022 has the same
+  sizes; pak catalogue comparison), the 1.2 prefab `cuttingwind.water1` lake polygon contains
+  all 11 water placements, and five old server rows already stood at the stream positions. The
+  old `doodad_spawns.json` had five `5064` rows (the AAEmu hand-add of 2023, commit
+  `853fa8543`, with the wrong template) with the same yaws 0.03-0.71 m from the five stream
+  positions (row 1, (697.2, 319.7), is 0.71 m from (697.69, 319.18); the others are 0.03 / 0.17
+  / 0.27 / 0.15 m, z within 0.16 m): they show that five doodads stood there, not what the
+  editor file contains. **All five old rows change template, 5064 -> 5072 / 5073** (the
+  authored positions replace them), and the three switches, the two gates and the lake are
+  added. **Network:** the editor family id is
   the doodad's identity (`Doodad::family_id`, spawn row `FamilyId`; the C# JSON model never had
   it). A `DoodadFuncLogicFamilyProvider { family_id }` row names the **receiver** families of
   the doodad's signal; a `DoodadFuncLogicFamilySubscriber { family_id }` row names the **source**
   families its `DoodadFuncLogic` accepts (each subscribed family is one input, missing = false).
-  Thus 5064 (50002) and 5068 (50003) feed gate 5070 (50005), whose AND (delay 1 = 1 s) emits to
+  **Inferred (no 1.2 server evidence):** that every other chain reads the two tables this way;
+  only Sharpwind's graph closes (every id 50001-50008 has exactly one carrier, provider labels
+  are receiver ids, subscriber labels are sender ids), and the template-level reading `main` used
+  (provider family == subscriber family) is incoherent for it. Thus 5064 (50002) and 5068 (50003) feed gate 5070 (50005), whose AND (delay 1 = 1 s) emits to
   50006 (gate 5071) and 50007 (5072); gate 5071 ANDs 5069 (50004) with gate 5070 (50005) and
   emits to 50001 (lake 5063) and 50008 (5073). A signal from the spawner's `RelatedIds` is an
   explicit authored route like a client wire and bypasses that subscriber source filter (the
@@ -4851,14 +4863,32 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (the downstream `PulseTrigger` rows would run twice); a pending result that differs from the
   emitted one still emits after its delay, replaced ones never do. **Inferred (no 1.2 server
   evidence):** this inertial output rule.
-  **INFERRED:** the five stream positions and the three switch/gate/lake positions are the
-  10.x editor placements, not a 1.2 server DB export (no such export exists here); the level
-  file positions are confirmed by the five pre-existing stream rows. Tests:
-  `doodad::phase::tests::{sharpwind_switches_raise_the_lake_through_the_family_network,
+  **Inferred (no 1.2 server evidence):** the five stream positions and the three
+  switch/gate/lake positions are the 10.x editor placements, not a 1.2 server DB export (no
+  such export exists here); the five pre-existing stream rows only show that five doodads stood
+  at those positions. Tests: `doodad::phase::tests::{
+  sharpwind_switches_raise_the_lake_through_the_family_network,
   family_pulses_route_by_the_level_design_family_and_owner_scope,
-  pulse_triggers_require_matching_signal_and_do_not_affect_other_objects}`,
+  spawner_related_ids_reach_a_subscribed_target_without_family_ids,
+  no_family_id_on_the_placement_means_no_family_routing,
+  a_spawner_gives_its_family_id_to_the_doodad_it_spawns,
+  pulse_triggers_require_matching_signal_and_do_not_affect_other_objects,
+  a_toggle_pair_follows_its_signals_when_the_chain_carries_a_player_caster,
+  a_false_pulse_does_not_fire_the_true_trigger_of_its_own_group,
+  a_true_pulse_fires_the_true_trigger_of_its_own_group,
+  sal_temple_ice_trap_stays_off_after_the_ice_machines_false_pulse,
+  a_pulse_without_a_caster_emits_nothing,
+  replaced_logic_output_emits_once_with_the_last_value,
+  a_pending_logic_output_that_returns_to_the_emitted_value_is_cancelled,
+  a_wire_linked_during_the_logic_delay_receives_nothing_until_the_emit,
+  subscribe_replays_only_the_emitted_logic_value,
+  deleted_doodads_take_no_part_in_family_routing,
+  clear_links_cancels_a_pending_logic_output}`,
+  `doodad::logic::tests::{authored_logic_operations_cover_true_false_and_mixed_inputs,
+  logic_delay_table_follows_the_qa_names_and_the_inferred_ids}`,
   `npcs::spawn_tests::real_data_sharpwind_water_network_placements` and (gated by
-  `AAEMU_COMPACT_DB`) `doodad::phase::tests::real_compact_db_sharpwind_water_network_rows`.
+  `AAEMU_COMPACT_DB`) `doodad::phase::tests::{real_compact_db_sharpwind_water_network_rows,
+  real_compact_db_related_ids_signal_opens_the_howling_abyss_2_gate}`.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body

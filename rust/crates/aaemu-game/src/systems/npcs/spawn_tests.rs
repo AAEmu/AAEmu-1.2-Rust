@@ -4472,11 +4472,14 @@ fn real_data_old_memoria_lake_trees_for_low_on_lumber() {
     assert_eq!(lake, expected);
 }
 
-/// The Sharpwind Mines water network (`instance_cuttingwind_deadmine`, zone 262) as the 1.2
-/// client level editor authored it (`cells/000_000/editor/02_01/doodad.xml`, subcell `02_01` at
-/// +256 m): the three "Blocked Geyser" switches, the two invisible water gates, the five water
-/// streams (whose positions the old file carried as five extra 5064 rows), the lake volume and
-/// the family ids that wire them to the `doodad_func_logic_family_*` rows.
+/// The Sharpwind Mines water network (`instance_cuttingwind_deadmine`, zone 262) as the 10.x
+/// client level editor authored it (`ArcheAge Returns 10.0.2.13 r575`,
+/// `cells/000_000/editor/02_01/doodad.xml`, 6437 B, MD5 74CFA418149294B9A36E4675CC119299,
+/// subcell `02_01` at +256 m; the file is in neither r208022 nor r223748, so these values could
+/// not be re-read from it): the three "Blocked Geyser" switches, the two invisible water gates,
+/// the five water streams (the old file carried them as five 5064 rows 0.03-0.71 m away,
+/// hand-added in 2023 with the wrong template), the lake volume and the family ids that wire
+/// them to the `doodad_func_logic_family_*` rows.
 #[test]
 fn real_data_sharpwind_water_network_placements() {
     use crate::systems::npcs::doodad::spawner::{parse_list, DoodadSpawnerDef};
