@@ -23,7 +23,7 @@ pub mod visibility;
 mod world_manager_tests;
 pub mod zone_conflicts;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -66,6 +66,10 @@ pub struct ViewCtx<'a> {
     pub now_ms: i64,
 }
 
+/// Cap of [`Player::region_removed_npcs`]: a movement burst must not grow the log forever
+/// (players without a quest-map range never drain it).
+const REGION_REMOVED_NPC_LOG: usize = 4096;
+
 /// A player character in the world (`Connection.ActiveChar`).
 #[derive(Debug)]
 pub struct Player {
@@ -78,6 +82,10 @@ pub struct Player {
     pub(crate) core: ObjectCore,
     /// `Character.Subscribers` (time-of-day subscriptions).
     subscriptions: Mutex<Vec<u64>>,
+    /// Obj ids of NPCs whose unit removal the region visibility path sent to this client since
+    /// the quest-map range sync last drained them. The region path appends while it holds the
+    /// grid (grid -> this lock); nothing takes this lock and then the grid or an object's data.
+    region_removed_npcs: Mutex<VecDeque<u32>>,
 }
 
 pub type PlayerRef = Arc<Player>;
@@ -93,11 +101,35 @@ impl Player {
             data: Mutex::new(character),
             core: ObjectCore::default(),
             subscriptions: Mutex::new(Vec::new()),
+            region_removed_npcs: Mutex::new(VecDeque::new()),
         })
     }
 
     pub fn data(&self) -> MutexGuard<'_, Character> {
         self.data.lock().expect("character poisoned")
+    }
+
+    /// Records that this client was sent the unit removal of NPC `obj_id` by the region
+    /// visibility path (it moved out of the unit's neighbourhood). The quest-map range sync
+    /// consumes these so it never assumes a marker it streamed is still on the client.
+    pub fn note_region_removed_npc(&self, obj_id: u32) {
+        let mut log = self
+            .region_removed_npcs
+            .lock()
+            .expect("region removals poisoned");
+        if log.len() >= REGION_REMOVED_NPC_LOG {
+            log.pop_front();
+        }
+        log.push_back(obj_id);
+    }
+
+    /// Drains [`Self::note_region_removed_npc`].
+    pub fn take_region_removed_npcs(&self) -> Vec<u32> {
+        self.region_removed_npcs
+            .lock()
+            .expect("region removals poisoned")
+            .drain(..)
+            .collect()
     }
 
     /// `Character.SendPacket`.
@@ -594,6 +626,9 @@ impl WorldInstance {
                     .collect();
                 for o in &others {
                     if let WorldObject::Npc(n) = o {
+                        // The batch below removes this unit from the client; a system that
+                        // streamed it outside the region grid must learn that it is gone.
+                        me.note_region_removed_npc(o.obj_id());
                         let mut d = n.data();
                         if d.has_ai {
                             d.ai_should_tick = false;

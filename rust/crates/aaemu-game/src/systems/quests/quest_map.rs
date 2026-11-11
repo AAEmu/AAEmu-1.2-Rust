@@ -16,6 +16,18 @@
 //! The range is not persisted server-side: the client stores the option value and the injected
 //! driver sends `/questmap <m|0>` after entering the world and when the option is saved.
 //!
+//! What is streamed: the [`MAX_EXTRA_NPCS`] nearest candidates (a nearer one replaces the
+//! farthest streamed one, `select_extras`), chosen among the nearest `MAX_EXTRA_NPCS` +
+//! `SPARE_PLACEMENTS` placements outside the player's own neighbourhood. The tracked set
+//! (`PlayerState::extra`) is what the server believes the client has, and the client loses
+//! units behind its back, so it is corrected from three sides: the region visibility path logs
+//! every NPC unit it removes from this client (`Player::note_region_removed_npc`) and each refresh
+//! applies that log first and runs at once when it is not empty; [`State::client_world_reset`]
+//! forgets the whole set when the client emptied its world (cut-scene end, `SCLoadInstance`,
+//! teleport ended); and an NPC that retires between a refresh's packets and its commit, when its
+//! retirement hook had nothing to remove yet, is looked at again once it is tracked
+//! (`is_live_marker`).
+//!
 //! Locking: `State::players` is the leaf (`CONTRIBUTING-PORT.md` rule 5): it is taken only to
 //! snapshot or commit and never held across a world, spawner or packet call.
 //! `State::refreshing` is not a state mutex but an outer serialisation token (the pattern of
@@ -121,7 +133,8 @@ impl Range {
 #[derive(Debug)]
 struct PlayerState {
     range: Range,
-    /// NPCs streamed only because of this option (never naturally visible).
+    /// NPCs streamed only because of this option (never naturally visible) and believed to be
+    /// on the client; the module doc says how it is kept in step with the client.
     extra: HashMap<u32, NpcRef>,
     last_refresh: Instant,
     last_pos: (f32, f32),
@@ -415,11 +428,22 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
 /// and to commit, never across a world call (2026-11-11 lock cycle).
 fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
     let state = &server.systems.quests.quest_map;
+    // The region visibility path takes units off this client on its own: a streamed NPC whose
+    // ordinary neighbourhood the player entered and left again between two refreshes was removed
+    // by that path, although `extra` still lists it and the diff below would never send it
+    // again. The path logs those removals per player; apply them to the tracked set before the
+    // snapshot, and refresh now, so a marker that is still wanted is streamed again. Drained with
+    // only `refreshing` held (the log is a leaf: the region path takes it with the grid held and
+    // nothing is taken while it is held) and before `players` is.
+    let region_removed = player.take_region_removed_npcs();
     let (range, last_refresh, last_pos, extra) = {
-        let players = state.players.lock().expect("quest map state poisoned");
-        let Some(ps) = players.get(&player.character_id) else {
+        let mut players = state.players.lock().expect("quest map state poisoned");
+        let Some(ps) = players.get_mut(&player.character_id) else {
             return 0;
         };
+        for id in &region_removed {
+            ps.extra.remove(id);
+        }
         (ps.range, ps.last_refresh, ps.last_pos, ps.extra.clone())
     };
     #[cfg(test)]
@@ -435,7 +459,8 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
     let world_object = WorldObject::from(player);
     let pos = world.world_pos_rot(&world_object);
     let forced = now.saturating_duration_since(last_refresh) >= REFRESH_INTERVAL
-        || (pos.x - last_pos.0).powi(2) + (pos.y - last_pos.1).powi(2) > MOVE_EPSILON_SQ;
+        || (pos.x - last_pos.0).powi(2) + (pos.y - last_pos.1).powi(2) > MOVE_EPSILON_SQ
+        || !region_removed.is_empty();
     if !forced && !range.is_default() {
         return 0;
     }
@@ -863,6 +888,10 @@ mod tests {
     }
 
     fn npc_def(unit_id: u32, x: f32, y: f32) -> NpcSpawnerDef {
+        npc_def_count(unit_id, x, y, 1)
+    }
+
+    fn npc_def_count(unit_id: u32, x: f32, y: f32, count: u32) -> NpcSpawnerDef {
         let base = SpawnerBase {
             unit_id,
             position: crate::data::world_templates::WorldSpawnPosition {
@@ -875,17 +904,29 @@ mod tests {
         };
         NpcSpawnerDef {
             base,
-            count: 1,
+            count,
             npc_spawner_ids: Vec::new(),
         }
     }
 
     fn server() -> Arc<GameServer> {
+        server_with_population(1)
+    }
+
+    /// A server whose placements keep `population` NPCs each (the cap counts NPCs, the placement
+    /// limit counts placements).
+    fn server_with_population(population: u32) -> Arc<GameServer> {
         let mut gd = data();
         gd.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
             vec![
-                spawner_template(GIVER_SPAWNER),
-                spawner_template(OTHER_SPAWNER),
+                NpcSpawnerTemplate {
+                    max_population: population,
+                    ..spawner_template(GIVER_SPAWNER)
+                },
+                NpcSpawnerTemplate {
+                    max_population: population,
+                    ..spawner_template(OTHER_SPAWNER)
+                },
             ],
             vec![
                 spawner_member(100, GIVER_SPAWNER, QUEST_NPC),
@@ -1312,6 +1353,71 @@ mod tests {
         );
     }
 
+    /// The region path takes a unit off the client when the player leaves its neighbourhood, and
+    /// the tracked set never hears of it: a player who walked up to a streamed giver and back
+    /// between two refreshes has lost the marker although it is still tracked. The path logs the
+    /// removal; the next tick applies the log and streams the marker again. The player is back
+    /// where the last refresh saw it and the clock is paused, so only the log makes it refresh.
+    #[tokio::test(start_paused = true)]
+    async fn a_region_removal_of_a_streamed_marker_streams_it_again() {
+        let (server, mut client, player) = streamed_giver_fixture().await;
+        let world = server.world.world(0).expect("main_world");
+        let giver = npc_at(&world, 1000.0, 1250.0);
+
+        // Walk into the giver's neighbourhood (the region path streams it) and out again.
+        player.data().unit.transform.set_xyz(1000.0, 1250.0, 100.0);
+        world.add_visible_object(&player, &server.view_ctx());
+        client.drain();
+        player.data().unit.transform.set_xyz(1000.0, 1000.0, 100.0);
+        world.add_visible_object(&player, &server.view_ctx());
+        let frames = client.drain();
+        assert!(
+            frames.contains(&ids_packet(&[giver.obj_id])),
+            "the region path removed the marker: {frames:?}"
+        );
+
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
+            "the logged removal is applied and the marker is streamed again"
+        );
+        assert_eq!(
+            server.systems.quests.quest_map.streamed_npc_ids(),
+            HashSet::from([giver.obj_id])
+        );
+    }
+
+    /// The other way the region path removes a streamed marker behind the tracked set's back: the
+    /// NPC itself wanders through the player's neighbourhood (the path streams it) and out again,
+    /// a single-unit removal instead of the batch of the test above.
+    #[tokio::test(start_paused = true)]
+    async fn a_marker_that_wanders_through_the_neighbourhood_is_streamed_again() {
+        let (server, mut client, _player) = streamed_giver_fixture().await;
+        let world = server.world.world(0).expect("main_world");
+        let giver = npc_at(&world, 1000.0, 1250.0);
+        let ctx = server.view_ctx();
+
+        // 100 m from the player (inside the ordinary window), then back 250 m away.
+        giver.data().unit.transform.set_xyz(1000.0, 1100.0, 100.0);
+        world.add_visible_object(WorldObject::Npc(giver.clone()), &ctx);
+        client.drain();
+        giver.data().unit.transform.set_xyz(1000.0, 1250.0, 100.0);
+        world.add_visible_object(WorldObject::Npc(giver.clone()), &ctx);
+        let frames = client.drain();
+        assert!(
+            frames.contains(&ids_packet(&[giver.obj_id])),
+            "the region path removed the marker: {frames:?}"
+        );
+
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
+            "the logged removal is applied and the marker is streamed again"
+        );
+    }
+
     #[test]
     fn select_extras_keeps_the_nearest_and_displaces_the_farthest() {
         // The cap is full of far extras: a nearer candidate displaces the farthest one.
@@ -1452,6 +1558,106 @@ mod tests {
         );
     }
 
+    /// The real cap and placements of two NPCs each (the cap counts NPCs, the placement limit
+    /// placements): after travelling, the streamed set is exactly the nearest `MAX_EXTRA_NPCS`
+    /// NPCs of the old and the new groups, the far markers are replaced by the nearer ones.
+    #[tokio::test]
+    async fn unlimited_keeps_the_nearest_markers_after_travel() {
+        let server = server_with_population(2);
+        let m = manager(&server);
+        // 128 old placements of two givers each around y = 1250 (250 m from the start).
+        for col in 0..16 {
+            for row in 0..8 {
+                m.add_npc_spawner(
+                    &server,
+                    npc_def_count(
+                        QUEST_NPC,
+                        900.0 + col as f32 * 7.0,
+                        1230.0 + row as f32 * 5.0,
+                        2,
+                    ),
+                )
+                .expect("old placement");
+            }
+        }
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        // Fill the set with the old group: 32 creations per refresh, 8 refreshes.
+        set_range(&server, &player, Range::Unlimited);
+        for _ in 0..7 {
+            spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+            tick(&server);
+        }
+        client.drain();
+        assert_eq!(
+            server.systems.quests.quest_map.streamed_npc_ids().len(),
+            MAX_EXTRA_NPCS
+        );
+
+        // Travel 500 m north; 40 closer placements of two givers each appear.
+        player.data().unit.transform.set_xyz(1000.0, 1500.0, 100.0);
+        let world = server.world.world(0).expect("main_world");
+        world.add_visible_object(&player, &server.view_ctx());
+        client.drain();
+        for col in 0..8 {
+            for row in 0..5 {
+                m.add_npc_spawner(
+                    &server,
+                    npc_def_count(
+                        QUEST_NPC,
+                        960.0 + col as f32 * 10.0,
+                        1695.0 + row as f32 * 5.0,
+                        2,
+                    ),
+                )
+                .expect("near placement");
+            }
+        }
+        for _ in 0..3 {
+            spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+            tick(&server);
+        }
+        client.drain();
+
+        // The client's set is exactly the nearest 256 markers of both groups.
+        let (_, prx, pry) = player.region().expect("player region");
+        let natural: HashSet<(i32, i32)> = world.neighbors((prx, pry)).into_iter().collect();
+        let pos = world.world_pos_rot(&WorldObject::from(&player));
+        let mut candidates: Vec<(f32, u32)> = world
+            .all_npcs()
+            .into_iter()
+            .filter(|n| {
+                n.data().unit.template_id == QUEST_NPC
+                    && !n.data().unit.is_dead()
+                    && n.is_visible()
+                    && !world
+                        .region_of(&WorldObject::Npc(n.clone()))
+                        .is_some_and(|r| natural.contains(&r))
+            })
+            .map(|n| {
+                let p = world.world_pos_rot(&WorldObject::Npc(n.clone()));
+                ((p.x - pos.x).powi(2) + (p.y - pos.y).powi(2), n.obj_id)
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let expected: HashSet<u32> = candidates
+            .into_iter()
+            .take(MAX_EXTRA_NPCS)
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(
+            server.systems.quests.quest_map.streamed_npc_ids(),
+            expected,
+            "the nearest markers replace the far ones"
+        );
+    }
+
     /// The player's own neighbourhood is no marker source: its placements are neither prepared
     /// for the option nor do they use up the placement limit (cap + spare) the far ones need.
     #[tokio::test]
@@ -1501,11 +1707,13 @@ mod tests {
         );
     }
 
-    /// An NPC that is deleted after the refresh sent it but before the refresh recorded it is
-    /// not tracked yet, so the deletion hook finds nothing to remove. The refresh itself must
-    /// notice it once the NPC is tracked, or the far player keeps a ghost marker.
-    #[tokio::test]
-    async fn an_npc_retired_before_the_commit_is_removed_from_the_far_player() {
+    /// Streams the giver at (1000, 1250) to a fresh far player while `retire` runs between the
+    /// refresh's add of it and its commit: nothing is tracked yet, so the retirement hook finds
+    /// nothing to remove. The refresh itself must notice the retired NPC once it is tracked, or
+    /// the far player keeps a ghost marker.
+    async fn assert_retired_before_the_commit_is_removed(
+        retire: impl FnOnce(&GameServer, &NpcRef) + Send + 'static,
+    ) {
         let server = server();
         let m = manager(&server);
         m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
@@ -1524,14 +1732,8 @@ mod tests {
         server.systems.quests.quest_map.before_next_commit(move || {
             let world = hook_server.world.world(0).expect("main_world");
             let npc = npc_at(&world, 1000.0, 1250.0);
-            let spawner = hook_server
-                .systems
-                .npcs
-                .spawns
-                .npc_spawner_of(npc.obj_id)
-                .expect("spawner link");
             hook_retired.store(npc.obj_id, Ordering::SeqCst);
-            spawner.despawn(&hook_server, &npc);
+            retire(&hook_server, &npc);
         });
         set_range(&server, &player, Range::Meters300);
 
@@ -1553,6 +1755,32 @@ mod tests {
             .quest_map
             .streamed_npc_ids()
             .is_empty());
+    }
+
+    /// The NPC is deleted in that window.
+    #[tokio::test]
+    async fn an_npc_retired_before_the_commit_is_removed_from_the_far_player() {
+        assert_retired_before_the_commit_is_removed(|server, npc| {
+            let spawner = server
+                .systems
+                .npcs
+                .spawns
+                .npc_spawner_of(npc.obj_id)
+                .expect("spawner link");
+            spawner.despawn(server, npc);
+        })
+        .await;
+    }
+
+    /// The NPC dies in that window: the lethal hit sets its hit points, then the death hook runs
+    /// (and finds nothing tracked). The corpse stays in the world, so only the dead unit tells.
+    #[tokio::test]
+    async fn an_npc_that_dies_before_the_commit_is_removed_from_the_far_player() {
+        assert_retired_before_the_commit_is_removed(|server, npc| {
+            npc.data().unit.hp = 0;
+            crate::systems::npcs::spawn_manager::on_npc_died(server, npc);
+        })
+        .await;
     }
 
     /// The driver re-sends the stored range on every world entry and options-window init, and any
