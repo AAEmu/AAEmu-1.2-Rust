@@ -115,10 +115,19 @@ struct PlayerState {
 
 /// Test-only knobs of [`State`].
 #[cfg(test)]
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct TestSeams {
     /// Replaces [`MAX_EXTRA_NPCS`] while it is not 0.
     cap: std::sync::atomic::AtomicUsize,
+    /// Runs once right before a refresh commits: what happens between its adds and its commit.
+    before_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for TestSeams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestSeams").finish_non_exhaustive()
+    }
 }
 
 /// Per-character quest-map range state (`server.systems.quests.quest_map`).
@@ -152,6 +161,12 @@ impl State {
         self.seams
             .cap
             .store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Runs `hook` once, right before the next refresh commits (tests).
+    #[cfg(test)]
+    fn before_next_commit(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.seams.before_commit.lock().expect("test seam poisoned") = Some(Box::new(hook));
     }
 
     pub fn range_of(&self, character_id: u32) -> Range {
@@ -436,7 +451,9 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
         }
         let np = world.world_pos_rot(&obj);
         let d2 = (np.x - pos.x).powi(2) + (np.y - pos.y).powi(2);
-        if d2 > radius2 || !npc.is_visible() {
+        // A corpse is no marker (its retirement hook normally removes it; this is the backstop).
+        let is_dead = npc.data().unit.is_dead();
+        if d2 > radius2 || is_dead || !npc.is_visible() {
             removals.push(npc);
             dead.push(*id);
         } else {
@@ -486,6 +503,20 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
         }
     }
 
+    #[cfg(test)]
+    {
+        state.assert_unlocked();
+        let hook = state
+            .seams
+            .before_commit
+            .lock()
+            .expect("test seam poisoned")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     // Commit briefly. `refreshing` keeps range changes out, so only a `forget` (leave-world)
     // can have removed the entry; a changed set is merged by Arc identity.
     let committed = {
@@ -513,7 +544,16 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
             _ => false,
         }
     };
-    if !committed {
+    if committed {
+        // An NPC that died or was deleted between its add above and this commit was not tracked
+        // yet when its retirement hook ran, so the hook sent nothing: look again now that it is
+        // tracked (`forget_npc` then finds the entry and removes the unit from the client).
+        for (id, npc) in &added {
+            if !is_live_marker(&world, *id, npc) {
+                state.forget_npc(server, npc);
+            }
+        }
+    } else {
         // The player left the world or changed range while this refresh ran: nothing may stay
         // streamed without being tracked, it would never be removed.
         for (_, npc) in added {
@@ -521,6 +561,19 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
         }
     }
     set.spent
+}
+
+/// Whether `npc` is still the live, visible NPC of its id: a marker the client may keep.
+fn is_live_marker(world: &WorldInstance, id: u32, npc: &NpcRef) -> bool {
+    let same = world
+        .object(id)
+        .and_then(|o| o.as_npc().cloned())
+        .is_some_and(|current| Arc::ptr_eq(&current, npc));
+    if !same {
+        return false;
+    }
+    let is_dead = npc.data().unit.is_dead();
+    !is_dead && npc.is_visible()
 }
 
 /// Which marker NPCs a player streams: the `cap` nearest of the extras that stay valid (`kept`)
@@ -627,6 +680,7 @@ fn collect_from_spawners(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
     use aaemu_commons::PacketStream;
@@ -1381,5 +1435,87 @@ mod tests {
             prepared.iter().all(|&x| x >= 500),
             "no placement of the player's own neighbourhood is prepared: {prepared:?}"
         );
+    }
+
+    /// An NPC that is deleted after the refresh sent it but before the refresh recorded it is
+    /// not tracked yet, so the deletion hook finds nothing to remove. The refresh itself must
+    /// notice it once the NPC is tracked, or the far player keeps a ghost marker.
+    #[tokio::test]
+    async fn an_npc_retired_before_the_commit_is_removed_from_the_far_player() {
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+
+        let retired = Arc::new(AtomicU32::new(0));
+        let (hook_server, hook_retired) = (server.clone(), retired.clone());
+        server.systems.quests.quest_map.before_next_commit(move || {
+            let world = hook_server.world.world(0).expect("main_world");
+            let npc = npc_at(&world, 1000.0, 1250.0);
+            let spawner = hook_server
+                .systems
+                .npcs
+                .spawns
+                .npc_spawner_of(npc.obj_id)
+                .expect("spawner link");
+            hook_retired.store(npc.obj_id, Ordering::SeqCst);
+            spawner.despawn(&hook_server, &npc);
+        });
+        set_range(&server, &player, Range::Meters300);
+
+        let obj_id = retired.load(Ordering::SeqCst);
+        assert_ne!(obj_id, 0, "the hook ran between the add and the commit");
+        let frames = client.drain();
+        assert_eq!(
+            frames.iter().map(|f| f.0).collect::<Vec<_>>(),
+            vec![
+                sc::SCUnitStatePacket,
+                sc::SCUnitPointsPacket,
+                sc::SCUnitsRemovedPacket
+            ]
+        );
+        assert_eq!(frames[2], ids_packet(&[obj_id]));
+        assert!(server
+            .systems
+            .quests
+            .quest_map
+            .streamed_npc_ids()
+            .is_empty());
+    }
+
+    /// The death hook normally removes a dying extra; if it is missed the NPC stays as a corpse
+    /// (it is not deleted), and the next refresh must still drop it.
+    #[tokio::test]
+    async fn a_dead_extra_npc_is_dropped_by_the_next_refresh() {
+        let (server, mut client, _player) = streamed_giver_fixture().await;
+        let world = server.world.world(0).expect("main_world");
+        let giver = npc_at(&world, 1000.0, 1250.0);
+        // A death whose hook never ran: only the hit points say so.
+        giver.data().unit.hp = 0;
+
+        spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+        tick(&server);
+        // The corpse is removed first (the placement may refill itself in the same refresh,
+        // which streams its new NPC after that).
+        let frames = client.drain();
+        assert_eq!(
+            frames.first(),
+            Some(&ids_packet(&[giver.obj_id])),
+            "{frames:?}"
+        );
+        assert!(!server
+            .systems
+            .quests
+            .quest_map
+            .streamed_npc_ids()
+            .contains(&giver.obj_id));
     }
 }
