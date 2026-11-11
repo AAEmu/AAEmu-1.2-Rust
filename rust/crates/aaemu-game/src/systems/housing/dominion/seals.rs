@@ -177,7 +177,7 @@ fn still_entitled(
 }
 
 /// (Re)grant missing seals and remove ended ones. Runs once a second from the participant
-/// tick, after the siege-area snapshot was rebuilt.
+/// sweep (`runtime::participant_sweep`); it reads the authority, not the siege-area snapshot.
 pub fn reconcile(server: &GameServer) {
     // (a) Every online participant of an unfinished siege holds its side's seal; `holds` keeps
     // the repeated sweep idempotent. "Participant" is `participants::participant_side`: a roster
