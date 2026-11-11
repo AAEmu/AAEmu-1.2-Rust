@@ -1760,17 +1760,21 @@ blobs, 1.0 GB heap of which about 600 MB are the heightmap cells, 8 s; 1.0 µs p
   5 routes, mostly flying / golem routes) cross a wall. Tested by `ai::behaviors::walk_tests`
   and (gated) `collision::real_data_tests::{real_roam_path_block_rates, real_walk_check_rates}`.
 * **Alert / phase grounding (2026-11-11)**: `BaseCombatBehavior.CheckPipeName()` grounded
-  `phase_dragon_ground` / phase 1 owners on `GeoData.GetHeight`, the navigation mesh. The 1.2
-  navmesh is a walking-surface graph above the terrain (measured navmesh minus raw heightmap:
-  2.8 m at the Dewstone Nui statue, 4.9 m south of Vedisa, 4.5-5.7 m at the Cloaked Forest
-  flesh-golem camp), so `AlertBehavior.Enter` lifted every ground walker by that much and its
-  `StopMovement` broadcast the lifted Z (live golem 731 at the statue alternated 114.3 / 117.2 m
-  at the same spot). **Deviation:** a ground walker (not `moves_freely`) now uses the same floor
+  `phase_dragon_ground` / phase 1 owners on `GeoData.GetHeight`, the navigation mesh. The
+  navmesh height can lie several metres above or below the ground (measured navmesh minus raw
+  heightmap: 2.8 m at the Dewstone Nui statue, 4.9 m south of Vedisa, 4.5-5.7 m at the Cloaked
+  Forest flesh-golem camp; below the ground elsewhere, see the geodata deviations above), so
+  `AlertBehavior.Enter` lifted (or sank) every re-alerting ground walker by that much (the first
+  Enter only arms the pipe, so it is the NPC's second alert on) and its `StopMovement`
+  broadcast that Z (live golem 731 at the statue alternated 114.3 / 117.2 m at the same spot).
+  **Inferred (no 1.2 server evidence):** the cause (the navmesh as a walking-surface graph
+  above the terrain); the fix does not depend on it. **Deviation:** a ground walker (not `moves_freely`) now uses the same floor
   as its movement steps, `ai::npc::reference_height_in` (collision floor first, then the bounded
   navmesh / heightmap fallback); flying and swimming NPCs keep the C# navigation height. Chase,
   return, roaming, path following and group formation already went through
   `reference_height_in`, and spawns use `spawn_ground_z` (collision floor / raw heightmap), so
-  the alert pipe was the only movement path that read the navmesh directly. Tested by
+  the alert pipe was the only movement path of NPCs with an AI that read the navmesh directly.
+  Tested by
   `ai::npc::npc_height_tests::{alert_grounds_a_walker_on_the_collision_floor_not_the_navmesh,
   alert_keeps_a_walker_on_the_structure_floor_it_stands_on,
   alert_keeps_a_flying_npc_on_the_navigation_height}`.
@@ -8418,6 +8422,19 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
     `!keep_mana_regen`; the plot `ManaCost` effect no longer starts it; `StopManaRegen` (type
     52) still does, and `skill::end_channeling` refreshes `LastCast` because the client starts a
     channel's window when the channel ends.
+- **Open point (byte reading of the r208022 dump, not decoded end to end).** `FUN_390b63f0`
+  gates the normal-rate segment on two fields (`[esi+0x3ACC]`, `[esi+0x3AD4]`) that
+  `OnSkillFired` writes only for a skill with `channeling_time > 0` (the second one is that
+  skill's `keep_mana_regen`). Read that way, the client suppresses the normal rate for the whole
+  duration of a channeling skill without `keep_mana_regen`, not only for the 5 s after
+  `LastCast`. The server window is `LastCast + 5 s`, refreshed at the start and at the end of the
+  channel, so on a channel longer than 5 s (r208022: 6 class skills, e.g. Twilight 10721 at
+  60 s, Protective Wings 10714 at 18 s, plus 82 ability-0 skills) it regenerates at the normal
+  rate mid-channel while the client predicts the persistent rate only. This is not a
+  regression (the C# window also ended 5 s after the start) and what clears `+0x3ACC` was not
+  traced, so it is recorded rather than changed. Fix if it is confirmed: `combat_tick` keeps
+  `is_in_post_cast` while the player's active skill task is the channel of a skill without
+  `keep_mana_regen`.
 - **Deviation from the C#.** `Unit.ReduceCurrentMp` broadcast `SCUnitPointsPacket` even when
   `Mp` did not change. The 1.2 client predicts its own regen between packets
   (`FUN_390b63f0`), so the zero-change packet of every 0-mana item use (and of a mana burn or
