@@ -6,6 +6,11 @@
 # The bot must be a GM (access level 100): Scripts/verify.sh provisions the `gm` bot accounts.
 # Commands that need an object id created at run time (doodad phases, item expiry, ...) are
 # covered with an invalid id here and with unit tests in the command modules.
+#
+# standalone: this suite changes server-global state (exprate, motd, time, snow, the cash shop,
+# zone states, a nation, dominions / sieges and finally `despawnall`) and takes several minutes
+# (about 310 commands), so Scripts/verify.sh skips it unless it is selected with --only. It
+# asserts nothing: a wedged server shows up as empty replies, so a human reads the output.
 suite GM command audit
 bot gm gm
 

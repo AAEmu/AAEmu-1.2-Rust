@@ -150,6 +150,9 @@ pub fn split_command_string(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
     let mut p = 0;
+    // Index of the closing quote of the last quoted argument pushed: a whitespace-only match
+    // is the gap between two quoted arguments only when it starts right after that quote.
+    let mut last_close: Option<usize> = None;
     while p <= chars.len() {
         // Alternative 1: preceded by '"', a run of non-quotes followed by '"'.
         if p > 0 && chars[p - 1] == '"' {
@@ -159,12 +162,18 @@ pub fn split_command_string(s: &str) -> Vec<String> {
             }
             if k < chars.len() {
                 let gap: String = chars[p..k].iter().collect();
-                if !gap.is_empty() && gap.chars().all(char::is_whitespace) {
-                    // Whitespace-only "quoted" match between two quoted arguments.
+                if !gap.is_empty()
+                    && gap.chars().all(char::is_whitespace)
+                    && last_close == Some(p - 1)
+                {
+                    // Whitespace-only "quoted" match between two quoted arguments: it starts
+                    // right after the closing quote of the previous one. A whitespace argument
+                    // the user quoted on purpose (`x " " y`) follows an opening quote and stays.
                     p = k;
                     continue;
                 }
                 out.push(gap);
+                last_close = Some(k);
                 p = if k == p { p + 1 } else { k };
                 continue;
             }

@@ -22,13 +22,16 @@ Commands check your account's access level:
 | 100 | administrator | everything else (`/item`, `/gold`, `/level`, `/world`, `/dominion`, `/mail`, `/scripts`, …) |
 
 On a fresh server the first account/character gets level 100
-(`Characters.Account.AccessLevelFirstAccount` / `AccessLevelFirstCharacter` in
+(`Account.AccessLevelFirstAccount` / `Account.AccessLevelFirstCharacter` in
 `Configurations/CharacterSettings.json`). For test servers you can also set
-`Characters.Account.AccessLevelDefault` to `100` there and restart the game server, or grant it
-once in the game database (never on a shared/production database):
+`Account.AccessLevelDefault` to `100` there (it applies to characters created afterwards) and
+restart the game server, or grant it once in the game database (never on a shared/production
+database). The account must have logged in to the game once so that its `accounts` row exists;
+login names live in the login database:
 
 ```sql
-UPDATE accounts SET access_level = 100 WHERE name = '<login name>';
+UPDATE aaemu_game.accounts SET access_level = 100
+ WHERE account_id = (SELECT id FROM aaemu_login.users WHERE username = '<login name>');
 ```
 
 Commands not listed in `Configurations/AccessLevels.json` default to level 100, so a missing
@@ -41,7 +44,7 @@ entry makes a command admin-only rather than public.
 | `/item add <player name\|target\|self> <template id> [amount=1] [grade=0]` | Adds an item (amount 1-1000, grade 0-11). It is silent on success; open the bag to check. | `/item add self 23633 10` (10 Gilda Stars) |
 | `/item expire <item id> [minutes=0.5]` | Makes a bag item expire in `minutes` (or in 30 seconds). | `/item expire 16777226 60` |
 | `/item unwrap <item id> [minutes=-1]` | Removes the unwrap delay, or sets it to `minutes`. | `/item unwrap 16777226` |
-| `/gold <add\|set\|remove> <player name\|target\|self> <gold> [silver] [copper]` | Changes money. `set` currently adds like `add` (original behaviour); use `remove` with a negative amount to reduce. | `/gold add self 10 50 0` |
+| `/gold <add\|set\|remove> <player name\|target\|self> <gold> [silver] [copper]` | Changes money. `set` currently adds like `add` (original behaviour); `remove` subtracts the given amount. | `/gold add self 10 50 0` |
 | `/labor (target) <amount> [vocationSkillId]` | Adds (or with a negative amount removes) labor. | `/labor 1000` |
 | `/xp (target) <xp>` | Adds experience. | `/xp 15000` |
 | `/vocation (target) <points>` | Adds vocation (badge) points. | `/vocation 100` |
@@ -258,8 +261,10 @@ spaces. Without trailing numbers it sends only the letter.
   `/vocation`, `/buff`, `/damage`, `/kill`, `/resetcd`, `/snow`, `/reloadauction`, …) send no
   chat reply; check the bag, stats, buff bar or server log instead. Error messages are shown in
   red.
-- **Numbers are validated.** Invalid numbers, out-of-range levels, unknown templates and
-  missing characters answer with red text; an unknown command does nothing.
+- **Most invalid input answers with red text** (unknown templates, missing characters,
+  out-of-range levels, item amounts and grades); an unknown command does nothing. A few
+  commands stay silent on an invalid number, as in the original: `/labor`, `/xp`, `/vocation`,
+  `/nudge`, `/damage`, `/quest add` and `/useskill` ignore the call or treat the number as 0.
 - **Object ids are not template ids.** `/position`, `/npc info`, `/findobject` and every spawn
   reply print the object id. `/item expire` needs an item id from the inventory.
 - **Two quoted arguments are fine.** `/mail admin Bob "Title" "Body" 100` and other quoted
@@ -279,8 +284,16 @@ Scripts/verify.sh --only gm-commands
 ```
 
 It logs in with a GM bot, runs every command with a normal and an invalid call, prints the
-replies and the server log carries the error lines. See [Live Verification
-Suites](Verification) for the lane setup.
+replies and the server log carries the error lines. It is an audit for a human to read, not an
+assertion suite (a wedged server shows up as empty replies), and it changes server-global state
+(exprate, motd, time, snow, the cash shop, zone states, a nation, dominions and sieges, and at the
+end `despawnall`) and takes several minutes. That is why `Scripts/verify.sh` skips it in the
+default run: select it with `--only gm-commands` on a throw-away lane stack. See [Live
+Verification Suites](Verification) for the lane setup.
+
+This guide does not cover every registered command yet: `/quest`, `/ics` (`/ingamecashshop`),
+`/sphere`, `/register_portal`, `/packet` and `/settradepackmaildelay` have no entry; `/help` in
+game lists everything your access level may run.
 
 ## Related
 

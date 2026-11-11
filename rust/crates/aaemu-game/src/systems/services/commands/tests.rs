@@ -555,6 +555,29 @@ fn split_command_string_splits_words_and_quoted_text() {
     assert!(split_command_string("").is_empty());
 }
 
+/// Only the whitespace between a closing and an opening quote is dropped; a whitespace
+/// argument the user quoted on purpose is kept (the first version of the fix dropped it too).
+#[test]
+fn split_command_string_keeps_a_deliberate_quoted_whitespace_argument() {
+    assert_eq!(split_command_string("x \" \" y"), ["x", " ", "y"]);
+    assert_eq!(split_command_string("x \"   \" y"), ["x", "   ", "y"]);
+    assert_eq!(
+        split_command_string("mail admin Bob \"Title\" \" \" 100"),
+        ["mail", "admin", "Bob", "Title", " ", "100"]
+    );
+    // The gap before and after the whitespace argument is still dropped.
+    assert_eq!(split_command_string("\"a\" \" \" \"b\""), ["a", " ", "b"]);
+}
+
+/// Other shapes around adjacent quoted arguments: empty arguments, a tab as the gap and an
+/// unbalanced quote.
+#[test]
+fn split_command_string_handles_empty_tab_gap_and_unbalanced_quotes() {
+    assert_eq!(split_command_string("\"\" \"\""), ["", ""]);
+    assert_eq!(split_command_string("\"a\"\t\"b\""), ["a", "b"]);
+    assert_eq!(split_command_string("\"a\" \"b"), ["a", "b"]);
+}
+
 /// A plain `ICommand` for the manager tests.
 struct EchoCommand {
     fail: bool,
