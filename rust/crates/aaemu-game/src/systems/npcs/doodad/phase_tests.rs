@@ -1115,6 +1115,237 @@ async fn a_pending_logic_output_that_returns_to_the_emitted_value_is_cancelled()
     );
 }
 
+/// The spawn row's `FamilyId` reaches the doodad: `DoodadSpawner::new` keeps it, `spawn` copies
+/// it to `Doodad::family_id` and the event copy of the spawner keeps it; a row without one
+/// spawns a doodad of family 0.
+#[tokio::test]
+async fn a_spawner_gives_its_family_id_to_the_doodad_it_spawns() {
+    let f = fx(Builder::default().template(100, &[(10, 1)]));
+    let spawner = new_spawner_with(100, 600, None, 50_002);
+    assert_eq!(spawner.family_id, 50_002);
+    let doodad = spawner.spawn(&f.server, 0).expect("the spawner spawns");
+    assert_eq!(doodad.data().family_id, 50_002);
+    assert_eq!(
+        spawner.event_copy(0).family_id,
+        50_002,
+        "the event copy keeps the placement's family"
+    );
+    let plain = new_spawner(100, 601).spawn(&f.server, 0).expect("spawns");
+    assert_eq!(plain.data().family_id, 0);
+}
+
+/// `DoodadFuncPulse` runs only with a caster (C# `if (caster is not null)`): a world spawn enters
+/// its start group without one, so a spawn-time `Pulse(false)` reaches no receiver (this one's
+/// trigger waits for false) and leaves the source's output untouched; the same group entered
+/// with a character does pulse.
+#[tokio::test]
+async fn a_pulse_without_a_caster_emits_nothing() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Pulse(DoodadFuncPulse { id: 1, flag: false }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 2,
+                flag: false,
+                next_phase: 21,
+            }),
+        );
+    let mut f = fx(b);
+    let receiver = f.doodad(101);
+    let source = new_spawner_with(100, 600, Some(vec![101]), 0)
+        .spawn(&f.server, 0)
+        .expect("the source spawns");
+    assert_eq!(
+        group(&receiver),
+        20,
+        "a spawn-time Pulse(false) pulses nothing"
+    );
+    assert_eq!(source.data().phase.logic_output, None);
+    assert_eq!(source.data().phase.pulsed, None);
+
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), source.clone());
+    do_change_phase(&ctx, Some(&f.caster()), 10);
+    assert_eq!(source.data().phase.logic_output, Some(false));
+    assert_eq!(group(&receiver), 21, "with a caster the same group pulses");
+}
+
+/// A deleted doodad takes no part in the family network: `subscribe` does not replay the output
+/// of a deleted provider (a late subscriber stays put) and `emit` does not reach a deleted family
+/// target. `receive` refuses a deleted target as well, so the `emit` half pins the outcome rather
+/// than its own filter.
+#[tokio::test]
+async fn deleted_doodads_take_no_part_in_family_routing() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 1,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::LogicFamilySubscriber(DoodadFuncLogicFamilySubscriber {
+                id: 2,
+                family_id: 7,
+            }),
+        )
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 3,
+                flag: true,
+                next_phase: 21,
+            }),
+        );
+    let f = fx(b);
+    let source = place(&f, 100, 101.0);
+    source.data().family_id = 7;
+    let live = place(&f, 101, 102.0);
+    let gone = place(&f, 101, 103.0);
+    live.data().family_id = 500;
+    gone.data().family_id = 500;
+    gone.data().phase.deleted = true;
+
+    logic::emit(
+        &DoodadCtx::new(&f.server, f.world.clone(), source.clone()),
+        None,
+        true,
+    );
+    assert_eq!(group(&live), 21);
+    assert_eq!(group(&gone), 20, "a deleted target receives nothing");
+
+    let adopter = place(&f, 101, 104.0);
+    assert_eq!(
+        group(&adopter),
+        21,
+        "a late subscriber adopts the live source's output"
+    );
+    source.data().phase.deleted = true;
+    let late = place(&f, 101, 105.0);
+    assert_eq!(
+        group(&late),
+        20,
+        "the output of a deleted provider is not replayed"
+    );
+}
+
+/// `clear_links` (a deleted doodad, a cleanup) drops a pending `DoodadFuncLogic` output: it is
+/// cleared and the generation moves on, so the scheduled task cannot emit afterwards.
+#[tokio::test]
+async fn clear_links_cancels_a_pending_logic_output() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Logic(DoodadFuncLogic {
+                id: 1,
+                operation_id: 3,
+                delay_id: 1,
+            }),
+        )
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 3,
+                flag: true,
+                next_phase: 21,
+            }),
+        )
+        .template(102, &[(30, 1)]);
+    let f = fx(b);
+    let source = place(&f, 100, 101.0);
+    let receiver = place(&f, 101, 102.0);
+    receiver.data().family_id = 500;
+    let driver = place(&f, 102, 103.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), driver);
+
+    logic::receive(&ctx, &source, None, true, true);
+    let generation = source.data().phase.pending_output_generation;
+    assert_eq!(source.data().phase.pending_output, Some(true));
+    logic::clear_links(&DoodadCtx::new(&f.server, f.world.clone(), source.clone()));
+    assert_eq!(source.data().phase.pending_output, None);
+    assert_ne!(
+        source.data().phase.pending_output_generation,
+        generation,
+        "the scheduled output's task no longer matches"
+    );
+    f.advance(2_000);
+    assert_eq!(source.data().phase.logic_output, None);
+    assert_eq!(group(&receiver), 20, "the cleared output never emits");
+}
+
+/// Family routing needs the `FamilyId` of the placement rows: a provider family names the
+/// receiver *family*, not a template, so a source whose group provides 500 and a target whose
+/// group subscribes to 500 do not meet while both placements carry no `FamilyId` (the shipped
+/// Nachashgar rooms 4 / 6 / 7 pairs such as 6643 -> 6646 are of this kind: main matched them by
+/// template, the logic network does not).
+#[tokio::test]
+async fn no_family_id_on_the_placement_means_no_family_routing() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 1,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::LogicFamilySubscriber(DoodadFuncLogicFamilySubscriber {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 3,
+                flag: true,
+                next_phase: 21,
+            }),
+        );
+    let f = fx(b);
+    let source = place(&f, 100, 101.0);
+    let target = place(&f, 101, 102.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), source.clone());
+    logic::emit(&ctx, Some(&f.caster()), true);
+    assert_eq!(
+        group(&target),
+        20,
+        "the provider and subscriber rows alone do not route"
+    );
+
+    // An identified source does not make a template match either: the target is addressed by
+    // its own placement's family.
+    source.data().family_id = 500;
+    logic::emit(&ctx, Some(&f.caster()), true);
+    assert_eq!(group(&target), 20, "the target's placement has no family");
+
+    // With the family ids on both placements (500 names the receiver, the subscribed 500 the
+    // source) the same rows connect.
+    target.data().family_id = 500;
+    logic::emit(&ctx, Some(&f.caster()), true);
+    assert_eq!(group(&target), 21);
+}
+
 #[tokio::test]
 async fn use_then_timer_returns_to_start_phase() {
     let b = Builder::default()
