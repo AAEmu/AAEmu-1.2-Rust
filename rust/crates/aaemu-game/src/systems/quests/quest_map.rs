@@ -385,6 +385,14 @@ pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range
 
 /// One quest-map tick: refresh every player that selected a wider range, drop stale state.
 pub fn tick(server: &GameServer) {
+    tick_with_budget(server, SPAWN_BUDGET_PER_TICK);
+}
+
+/// [`tick`] with the NPC creation budget of the tick given (tests spend it up front). The budget
+/// only limits how many NPCs are created: every tracked player is refreshed either way, because
+/// removals and re-adds of NPCs that already exist need none, and a refresh with a spent budget
+/// creates nothing.
+fn tick_with_budget(server: &GameServer, creation_budget: i64) {
     let state = &server.systems.quests.quest_map;
     state.prune_range_changes(spawn_manager::now());
     if state.tracked_count() == 0 {
@@ -397,7 +405,7 @@ pub fn tick(server: &GameServer) {
         .iter()
         .map(|p| p.character_id)
         .collect();
-    let mut budget = SPAWN_BUDGET_PER_TICK;
+    let mut budget = creation_budget;
     let tracked: Vec<PlayerRef> = {
         let mut players = state.players.lock().expect("quest map state poisoned");
         players.retain(|id, _| present.contains(id));
@@ -408,11 +416,8 @@ pub fn tick(server: &GameServer) {
             .collect()
     };
     for player in tracked {
-        let spent = refresh_player(server, &player, budget);
+        let spent = refresh_player(server, &player, budget.max(0));
         budget -= spent;
-        if budget <= 0 {
-            break;
-        }
     }
 }
 
@@ -1281,6 +1286,62 @@ mod tests {
             client.drain_ops(),
             vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
         );
+    }
+
+    /// A tick whose creation budget is spent still refreshes every tracked player: removals of
+    /// markers that left the range need no new NPC, and the spent budget creates none.
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_creation_budget_still_refreshes_every_tracked_player() {
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut clients = Vec::new();
+        let mut players = Vec::new();
+        for (i, x) in [(1u32, 1000.0f32), (2, 1010.0)] {
+            let mut client = TestClient::new(&server, i, 1000 + i);
+            let player = spawn_player(
+                &server,
+                &client,
+                test_character(i, &format!("Quester{i}"), x, 1000.0),
+                5000 + i,
+            );
+            client.drain();
+            set_range(&server, &player, Range::Meters300);
+            assert_eq!(
+                client.drain_ops(),
+                vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+            );
+            clients.push(client);
+            players.push(player);
+        }
+        // (The first client also saw the second character spawn next to it.)
+        for client in &mut clients {
+            client.drain();
+        }
+        // Both walk 400 m west: the giver is out of their range now.
+        for player in &players {
+            let t = player.data().unit.transform;
+            player.data().unit.transform.set_xyz(t.x - 400.0, t.y, t.z);
+        }
+        spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+
+        // The creation budget of the tick is spent before the first player: the old tick refreshed
+        // one player and stopped, so the other kept the far marker.
+        tick_with_budget(&server, 0);
+        for client in &mut clients {
+            assert_eq!(
+                client.drain_ops(),
+                vec![sc::SCUnitsRemovedPacket],
+                "every player loses the giver that left its range"
+            );
+        }
+        assert!(server
+            .systems
+            .quests
+            .quest_map
+            .streamed_npc_ids()
+            .is_empty());
     }
 
     /// A player with one far giver streamed at 300 m, the client in sync with the server.
