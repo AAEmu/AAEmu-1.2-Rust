@@ -68,13 +68,52 @@ pub fn owner_character(server: &GameServer, o: &WorldObject) -> Option<PlayerRef
                 (d.summoner_obj_id, d.owner_obj_id)
             };
             let id = if summoner != 0 { summoner } else { owner };
-            (id > 0)
-                .then(|| server.world.object(id))
-                .flatten()
+            if id == 0 {
+                return world_slave_driver(server, s);
+            }
+            server
+                .world
+                .object(id)
                 .and_then(|o| owner_character(server, &o))
         }
         _ => None,
     }
+}
+
+/// The character in the gunner / driver seat of a slave nobody owns: a world cannon placed by a
+/// `slave_spawns` entry, such as the Bloodhand Base Cannon (slave 57, faction 2 "Neutral") on
+/// the Marooned Isle rampart that "Rout the Bloodhands" (2325) sends players to. Such a slave
+/// acts for that character (its faction, owner and kill credit); `None` for a summoned or owned
+/// slave. Inferred (no 1.2 server evidence): the C# had no owner for these slaves, so a manned
+/// world cannon stayed Neutral and could damage nothing.
+pub fn world_slave_driver(
+    server: &GameServer,
+    slave: &crate::world::SlaveRef,
+) -> Option<PlayerRef> {
+    let driver = {
+        let d = slave.data();
+        if d.summoner_obj_id != 0 || d.owner_obj_id != 0 {
+            return None;
+        }
+        d.attached_characters
+            .iter()
+            .find(|(point, _)| *point == crate::models::unit::attach_point::DRIVER)
+            .map(|(_, id)| *id)
+    }?;
+    server.world.character_by_obj_id(driver)
+}
+
+/// The faction `me` attacks with: a manned world slave fights with its gunner's faction
+/// ([`world_slave_driver`]); every other unit with its own.
+fn acting_faction(server: &GameServer, me: &Target) -> u32 {
+    if let Some(driver) = me
+        .as_obj()
+        .and_then(WorldObject::as_slave)
+        .and_then(|s| world_slave_driver(server, s))
+    {
+        return driver.data().unit.faction_id;
+    }
+    faction_of(me)
 }
 
 /// `Character.IsActivelyHostile(target)`.
@@ -298,7 +337,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
             return false;
         }
     }
-    let my_faction = faction_of(me);
+    let my_faction = acting_faction(server, me);
     let target_faction = faction_of(target);
     let factions = &server.game_data.factions;
     if !nation::faction_exists(server, my_faction)
@@ -329,11 +368,16 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     {
         return false;
     }
-    // The siege rule lives in `relation_to` (inside a running siege's area the two parties are
+    // The siege rule of `relation_to` (inside a running siege's area the two parties are
     // Hostile, a party is Friendly to itself): it comes after the Peace / no-PvP / own-mount
     // refusals above, so it never weakens those protections, and the faction / zone logic below
-    // reads the same relation as every skill path.
-    let relation = relation_to(server, me, target);
+    // reads the same relation as every skill path. Outside a siege the faction relation uses
+    // the attacker's acting faction (a manned world cannon fights with its gunner's).
+    let relation = match crate::systems::housing::dominion::hostility::relation(server, me, target)
+    {
+        Some(siege) => siege.relation_state(),
+        None => faction_relation(server, my_faction, target_faction),
+    };
     let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
     let zone_key = super::geometry::instance_and_zone(target).1;
     let zone_faction_raw = server
@@ -627,6 +671,95 @@ mod tests {
         assert_eq!(faction_relation(&server, 109, 1), RelationState::Friendly);
         assert_eq!(faction_relation(&server, 109, 115), RelationState::Hostile);
         assert_eq!(faction_relation(&server, 109, 101), RelationState::Hostile);
+    }
+
+    /// A world cannon nobody owns (the Bloodhand Base Cannon, slave 57, faction 2 "Neutral")
+    /// fights for the player in its gunner seat: unmanned it can attack nothing; manned by a
+    /// West Ishvara player (109) it can attack the Monstrosity Bloodhand Pillagers (115), it is
+    /// that player's unit (`owner_character`), and its damage tags the gunner, so the kill
+    /// credits the gunner's quest. A summoned slave keeps its summoner as its owner.
+    #[tokio::test]
+    async fn a_manned_world_cannon_fights_for_its_gunner() {
+        use crate::models::npc::Npc;
+        use crate::models::slave::Slave;
+        use crate::models::unit::attach_point;
+        use crate::test_support::{spawn_player, test_character, TestClient};
+        use crate::world::Entity;
+
+        let mut data = GameData::empty();
+        for f in [
+            faction(2, 0),
+            faction(109, 149),
+            faction(115, 0),
+            faction(149, 0),
+        ] {
+            data.factions.add(f);
+        }
+        data.factions.relations.push(FactionRelation {
+            id: 149,
+            id2: 115,
+            state: RelationState::Hostile as u8,
+            exp_time: 0,
+        });
+        let server = crate::test_support::test_server_with(data);
+        let client = TestClient::new(&server, 1, 1001);
+        let mut gunner = test_character(1, "Gunner", 100.0, 100.0);
+        gunner.unit.faction_id = 109;
+        let player = spawn_player(&server, &client, gunner, 0x100);
+        let world = server.world.world(0).unwrap();
+        let mut n = Npc::new(8014);
+        n.unit.faction_id = 115;
+        n.unit.hp = 100;
+        n.unit.max_hp = 100;
+        n.unit.transform.set_xyz(140.0, 100.0, 100.0);
+        let pillager = Entity::new(0x200, n);
+        world.spawn(&pillager, &server.view_ctx());
+        let mut s = Slave::new(0, 57);
+        s.unit.faction_id = 2;
+        s.unit.hp = 100;
+        s.unit.transform.set_xyz(101.0, 100.0, 100.0);
+        let cannon = Entity::new(0x300, s);
+        world.spawn(&cannon, &server.view_ctx());
+        let cannon_obj = WorldObject::from(&cannon);
+        let cannon_t = Target::Obj(cannon_obj.clone());
+        let pillager_obj = WorldObject::from(&pillager);
+        let pillager_t = Target::Obj(pillager_obj.clone());
+
+        assert!(
+            !can_attack(&server, &cannon_t, &pillager_t),
+            "unmanned: Neutral"
+        );
+        assert!(owner_character(&server, &cannon_obj).is_none());
+
+        cannon
+            .data()
+            .attached_characters
+            .push((attach_point::DRIVER, player.obj_id));
+        assert!(can_attack(&server, &cannon_t, &pillager_t));
+        assert_eq!(
+            owner_character(&server, &cannon_obj).map(|p| p.obj_id),
+            Some(player.obj_id)
+        );
+        crate::systems::skills::combat::add_damage_aggro(
+            &server,
+            &pillager_obj,
+            &cannon_obj,
+            10,
+            10,
+        );
+        assert_eq!(
+            pillager.data().unit.skill_state.tagging.tagger,
+            player.obj_id,
+            "the cannon's damage tags its gunner"
+        );
+
+        // A summoned slave is its summoner's unit, whoever sits in the seat.
+        cannon.data().summoner_obj_id = 0x999;
+        assert!(world_slave_driver(&server, &cannon).is_none());
+        assert!(
+            !can_attack(&server, &cannon_t, &pillager_t),
+            "own faction again"
+        );
     }
 
     const MIRAGE_ZONE: u32 = 260;
