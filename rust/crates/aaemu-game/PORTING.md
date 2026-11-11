@@ -6264,7 +6264,9 @@ Which rank applies (`FUN_3941e750`):
   replaced it with the character level (~50 at level 55); this row restores the retail 0 while
   the fixed `mana_cost` of the 17 item skills that carry one is still charged. The plot
   `ManaCost` rule reaches one item row (capture net 22590, effect 0/600), which now charges
-  its `value1` only.
+  its `value1` only. Live (`aaemu-testclient` scenario `socket`, GM `/level 50`): the valid
+  lunagem cast still runs `consume_mana` (a second `SCUnitPoints` right after the cast) but
+  the character's MP stays at 2974; the old formula would have taken 72.
 * A non-character caster (an NPC) keeps the effective level the old `Skill.ManaCost` used as
   its `LevelMana` argument, the unit level or `ab_level_override`, whatever the `level_step`;
   `T` is derived from that level. This keeps the former NPC cost (e.g. skill 23693 at NPC
