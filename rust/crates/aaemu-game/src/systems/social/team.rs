@@ -3,9 +3,12 @@
 //! ping changes, raid conversion, member moves, offline / reconnect handling and the 500 ms
 //! remote-member sync with its delta cache and the zombie-team disband.
 //!
-//! Locking: the manager's state mutex is taken first; while holding it the code locks at most
-//! one player's data at a time (snapshots) and sends packets (non-blocking). Nothing calls into
-//! the manager while holding a player's data lock.
+//! Locking: the manager's state mutex is never held across an object data lock or a call into
+//! another manager. Work that needs character data (packet bodies, chat channels, `InParty`,
+//! instance events) is collected while the state is mutated and run after the guard is dropped.
+//! Membership online state is kept on [`TeamMember`] (like `ExpeditionMember`), so the manager
+//! can decide and broadcast without reading a `Character`. Nothing calls into the manager while
+//! holding a player's data lock.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -107,6 +110,10 @@ impl LootingRule {
 pub struct TeamMember {
     /// `Character` (the object of the last session; replaced on reconnect by `ChangeStatus`).
     pub character: PlayerRef,
+    /// The member's `Character.IsOnline` as last reported to the manager by
+    /// `UpdateAtLogin` / `SetOffline` (a joining member is online). Kept here so the manager can
+    /// decide and broadcast without taking a character data lock.
+    pub online: bool,
     pub role: u8,
     pub has_gone_round_robin: bool,
 }
@@ -164,11 +171,7 @@ impl Team {
 
     /// `MembersOnlineCount`.
     pub fn members_online_count(&self) -> usize {
-        self.members
-            .iter()
-            .flatten()
-            .filter(|m| m.character.data().is_online)
-            .count()
+        self.members.iter().flatten().filter(|m| m.online).count()
     }
 
     /// `IsMember(id)`.
@@ -184,7 +187,7 @@ impl Team {
         self.members
             .iter()
             .flatten()
-            .find(|m| m.character.character_id != self.owner_id && m.character.data().is_online)
+            .find(|m| m.character.character_id != self.owner_id && m.online)
             .map_or(0, |m| m.character.character_id)
     }
 
@@ -208,6 +211,8 @@ impl Team {
         let i = self.members.iter().position(Option::is_none)?;
         self.members[i] = Some(TeamMember {
             character: p.clone(),
+            // A slot is only ever filled from a live invitation / login / GM session.
+            online: true,
             role: member_role::UNDECIDED,
             has_gone_round_robin: false,
         });
@@ -235,7 +240,8 @@ impl Team {
         true
     }
 
-    /// `ChangeStatus(unit)`: points the member at the character's current object.
+    /// `ChangeStatus(unit)`: points the member at the character's current object. The caller
+    /// updates [`TeamMember::online`] with the login / logout it is handling.
     pub fn change_status(&mut self, p: &PlayerRef) -> Option<usize> {
         let i = self.index_of(p.character_id)?;
         if let Some(m) = self.members[i].as_mut() {
@@ -276,7 +282,7 @@ impl Team {
         self.members
             .iter()
             .flatten()
-            .filter(|m| m.character.data().is_online)
+            .filter(|m| m.online)
             .map(|m| m.character.clone())
             .collect()
     }
@@ -285,7 +291,7 @@ impl Team {
     pub fn broadcast(&self, packet: &dyn crate::net::packet::ServerPacket, exclude: u32) {
         let mut out = crate::net::connection::Fanout::new(packet);
         for m in self.members.iter().flatten() {
-            if m.character.character_id == exclude || !m.character.data().is_online {
+            if m.character.character_id == exclude || !m.online {
                 continue;
             }
             out.send(&m.character.conn);
@@ -396,7 +402,7 @@ pub fn team_info(team: &Team) -> TeamInfo {
             .members
             .iter()
             .map(|m| match m {
-                Some(m) => (m.character.character_id, m.character.data().is_online),
+                Some(m) => (m.character.character_id, m.online),
                 None => (0, false),
             })
             .collect(),
@@ -452,21 +458,62 @@ pub fn party_chat(
     team: &Team,
     character_id: u32,
 ) -> crate::managers::chat::ChannelRef {
-    let name = owner_name(server, team.owner_id);
-    server.chat.party_chat(
+    party_channel(
+        server,
         team.id,
         team.party_number_of(character_id),
-        name.as_deref(),
-        &server.ids.chat,
+        team.owner_id,
     )
+}
+
+/// [`party_chat`] from the ids a caller captured under the team lock (no `Team` borrow).
+pub fn party_channel(
+    server: &GameServer,
+    team_id: u32,
+    party_number: u32,
+    owner_id: u32,
+) -> crate::managers::chat::ChannelRef {
+    let name = owner_name(server, owner_id);
+    server
+        .chat
+        .party_chat(team_id, party_number, name.as_deref(), &server.ids.chat)
 }
 
 /// `ChatManager.GetRaidChat(team)`.
 pub fn raid_chat(server: &GameServer, team: &Team) -> crate::managers::chat::ChannelRef {
-    let name = owner_name(server, team.owner_id);
+    raid_channel(server, team.id, team.owner_id)
+}
+
+/// [`raid_chat`] from the ids a caller captured under the team lock (no `Team` borrow).
+pub fn raid_channel(
+    server: &GameServer,
+    team_id: u32,
+    owner_id: u32,
+) -> crate::managers::chat::ChannelRef {
+    let name = owner_name(server, owner_id);
     server
         .chat
-        .raid_chat(team.id, name.as_deref(), &server.ids.chat)
+        .raid_chat(team_id, name.as_deref(), &server.ids.chat)
+}
+
+/// External work collected while the manager's state is mutated and run after its guard is
+/// dropped: packet bodies ([`member_info`]), chat channels, `InParty` and instance events all
+/// read character data or another manager and must not run under the team lock.
+type DeferredFn = Box<dyn FnOnce(&GameServer)>;
+
+#[derive(Default)]
+struct Deferred(Vec<DeferredFn>);
+
+impl Deferred {
+    fn push(&mut self, f: impl FnOnce(&GameServer) + 'static) {
+        self.0.push(Box::new(f));
+    }
+
+    fn run(self, server: &GameServer) {
+        for f in self.0 {
+            f(server);
+        }
+    }
 }
 
 /// `TeamManager`.
@@ -601,15 +648,31 @@ impl TeamManager {
             return;
         }
         let me = util::world_position(server, owner);
-        let around: Vec<PlayerRef> = world
+        let owner_name = owner.data().unit.name.clone();
+        // Everything that reads character data is resolved before the manager lock: the manager
+        // never takes an object data lock while it holds its own mutex.
+        let around: Vec<(PlayerRef, bool, bool, bool, bool)> = world
             .players_around(owner)
             .into_iter()
-            .filter(|p| {
-                let pos = util::world_position(server, p);
+            .filter_map(|p| {
+                let pos = util::world_position(server, &p);
                 let (dx, dy) = (pos.0 - me.0, pos.1 - me.1);
                 // The area loop never targets the inviter itself, and `Region.GetList`
                 // compares the squared x/y distance with `< sqrad`.
-                p.character_id != owner.character_id && dx * dx + dy * dy < 100.0 * 100.0
+                if p.character_id == owner.character_id || dx * dx + dy * dy >= 100.0 * 100.0 {
+                    return None;
+                }
+                let rel = faction::player_relation(server, owner, &p);
+                let in_party = p.data().in_party;
+                let blocked = friend::is_blocked_by(&p, owner.character_id);
+                let acceptable = matches!(rel, relation_state::FRIENDLY | relation_state::NEUTRAL);
+                Some((
+                    p,
+                    in_party,
+                    blocked,
+                    acceptable,
+                    rel == relation_state::HOSTILE,
+                ))
             })
             .collect();
         let now = util::now_ms();
@@ -653,22 +716,23 @@ impl TeamManager {
         st.area_invite_until
             .insert(owner.character_id, now + AREA_INVITE_COOLDOWN_MS);
         let mut invited = 0u32;
-        for c in around {
-            let (in_party, in_team, rel) = {
-                let rel = faction::player_relation(server, owner, &c);
-                (
-                    c.data().in_party,
-                    Self::team_id_by_unit(&st, c.character_id).is_some(),
-                    rel,
-                )
-            };
-            if in_party
-                || in_team
-                || !matches!(rel, relation_state::FRIENDLY | relation_state::NEUTRAL)
-            {
+        for (c, in_party, blocked, acceptable, hostile) in around {
+            if in_party || !acceptable || Self::team_id_by_unit(&st, c.character_id).is_some() {
                 continue;
             }
-            if self.invite_locked(server, &mut st, owner, "", team, invite_is_party, &c, true) {
+            if self.invite_locked(
+                server,
+                &mut st,
+                owner,
+                "",
+                &owner_name,
+                team,
+                invite_is_party,
+                &c,
+                blocked,
+                hostile,
+                true,
+            ) {
                 invited += 1;
             }
         }
@@ -712,6 +776,9 @@ impl TeamManager {
                 }
             },
         };
+        let owner_name = owner.data().unit.name.clone();
+        let blocked = friend::is_blocked_by(&target, owner.character_id);
+        let hostile = faction::player_relation(server, owner, &target) == relation_state::HOSTILE;
         let mut st = self.lock();
         let mut canceled = prune_expired_invitations(&mut st, util::now_ms());
         // The invitation belongs to the inviter's current team; the client-sent team id is
@@ -732,9 +799,12 @@ impl TeamManager {
             &mut st,
             owner,
             target_name,
+            &owner_name,
             team,
             team.map_or(is_party, |t| t.1),
             &target,
+            blocked,
+            hostile,
             false,
         );
         // The target may be the same character whose expired invitation was pruned above; a
@@ -752,19 +822,22 @@ impl TeamManager {
     #[allow(clippy::too_many_arguments)]
     fn invite_locked(
         &self,
-        server: &GameServer,
+        _server: &GameServer,
         st: &mut State,
         owner: &PlayerRef,
         target_name: &str,
+        owner_name: &str,
         team: Option<(u32, bool, u32, bool, bool)>,
         is_party: bool,
         target: &PlayerRef,
+        blocked: bool,
+        hostile: bool,
         is_area: bool,
     ) -> bool {
         // A blocked inviter gets no invitation (named and area invites both end here). The
         // 1.2 client has no "target blocked you" error, so the owner gets no reply
         // (capture-pending, case `BLOCK-LIST-1`).
-        if friend::is_blocked_by(target, owner.character_id) {
+        if blocked {
             return false;
         }
         // The C# `TEAM_YOURSELF` answer; the area loop excludes the inviter itself.
@@ -773,7 +846,7 @@ impl TeamManager {
             return false;
         }
         // Only hostile players cannot be invited.
-        if faction::player_relation(server, owner, target) == relation_state::HOSTILE {
+        if hostile {
             send_error(owner, error::TEAM_INVITE_REFUSED);
             return false;
         }
@@ -839,19 +912,18 @@ impl TeamManager {
                 team_id: inv_team_id,
             },
         );
-        let owner_name = owner.data().unit.name.clone();
         if is_area {
             target.send(SCAskToJoinTeamAreaPacket {
                 team_id: inv_team_id,
                 sender_id: owner.character_id,
-                sender_name: owner_name,
+                sender_name: owner_name.to_string(),
                 is_party: inv_team_is_party,
             });
         } else {
             target.send(SCAskToJoinTeamPacket {
                 team_id: inv_team_id,
                 sender_id: owner.character_id,
-                sender_name: owner_name,
+                sender_name: owner_name.to_string(),
                 is_party: inv_team_is_party,
             });
         }
@@ -876,9 +948,20 @@ impl TeamManager {
         _char_name: &str,
         _is_area: bool,
     ) {
+        let target_name = target.data().unit.name.clone();
+        // The inviter's online flag is read between two state-lock sections: the manager must
+        // not take a character data lock while it holds its mutex. The invitation itself is
+        // re-read and revalidated under the second lock, so only the flag is a snapshot.
+        let inviter = self
+            .lock()
+            .invitations
+            .get(&target.character_id)
+            .map(|inv| inv.owner.clone());
+        let owner_online = inviter.as_ref().is_some_and(|p| p.data().is_online);
         let mut st = self.lock();
         let Some(inv) = st.invitations.get(&target.character_id).cloned() else {
             // Cancelled (the inviter left, or nobody answered for a minute) or never sent.
+            drop(st);
             if !is_reject {
                 send_error(target, error::TEAM_JOIN);
             }
@@ -892,9 +975,8 @@ impl TeamManager {
             return;
         }
         if is_reject || inv.expired(util::now_ms()) {
-            let name = inv.target.data().unit.name.clone();
             inv.owner.send(SCRejectedTeamPacket {
-                name,
+                name: target_name,
                 party: inv.is_party,
             });
             if !is_reject {
@@ -922,7 +1004,7 @@ impl TeamManager {
         }
         // The inviter must still be online and (when the invitation named a team) still in
         // that same team with the rights to invite.
-        if !inv.owner.data().is_online {
+        if !owner_online {
             send_error(target, error::TEAM_INVITOR_OFFLINE);
             st.invitations.remove(&target.character_id);
             return;
@@ -943,12 +1025,15 @@ impl TeamManager {
                 return;
             }
         }
+        // Everything below is state-only; the packets, chat channels, `InParty` flags and
+        // instance events run after the guard is dropped.
+        let mut deferred = Deferred::default();
         // An area invitation is answered like a named one; the invitation carries the team.
         match owner_team {
             None => {
                 // `inv.team_id == 0` here: the inviter had no team when the invitation was
                 // issued and still has none.
-                self.create_new_team(server, &mut st, &inv);
+                self.create_new_team(server, &mut st, &inv, &mut deferred);
             }
             Some(team_id) => {
                 let team = st.teams.get_mut(&team_id).expect("team");
@@ -959,34 +1044,39 @@ impl TeamManager {
                     return;
                 }
                 if let Some((slot, party)) = team.add_member(target) {
-                    let team = st.teams.get(&team_id).expect("team");
-                    target.send(joined_team_packet(server, team));
-                    set_in_party(server, target, true);
-                    target.send(SCTeamPingPosPacket {
-                        has_ping: true,
-                        position: team.ping_position,
-                        ins_id: 0,
+                    let team = st.teams.get(&team_id).expect("team").clone();
+                    let target = target.clone();
+                    deferred.push(move |server| {
+                        target.send(joined_team_packet(server, &team));
+                        set_in_party(server, &target, true);
+                        target.send(SCTeamPingPosPacket {
+                            has_ping: true,
+                            position: team.ping_position,
+                            ins_id: 0,
+                        });
+                        let member = team.members[slot].as_ref().expect("added");
+                        team.broadcast(
+                            &SCTeamMemberJoinedPacket {
+                                team_id: team.id,
+                                member: member_info(server, member),
+                                party: party as i32,
+                            },
+                            target.character_id,
+                        );
+                        // Deviation (C#: the new member never joined the party / raid chat, so
+                        // it could talk into the channel but not hear it until its next login).
+                        if !team.is_party {
+                            raid_chat(server, &team).join(&target);
+                        }
+                        party_chat(server, &team, target.character_id).join(&target);
+                        refresh_team_member_obj_ids(&team, &target, false);
                     });
-                    let member = team.members[slot].as_ref().expect("added");
-                    team.broadcast(
-                        &SCTeamMemberJoinedPacket {
-                            team_id: team.id,
-                            member: member_info(server, member),
-                            party: party as i32,
-                        },
-                        target.character_id,
-                    );
-                    // Deviation (C#: the new member never joined the party / raid chat, so it
-                    // could talk into the channel but not hear it until its next login).
-                    if !team.is_party {
-                        raid_chat(server, team).join(target);
-                    }
-                    party_chat(server, team, target.character_id).join(target);
-                    refresh_team_member_obj_ids(team, target, false);
                 }
             }
         }
         st.invitations.remove(&inv.target.character_id);
+        drop(st);
+        deferred.run(server);
     }
 
     /// Drops the invitations nobody answered within [`INVITATION_TIMEOUT_MS`] (the 500 ms tick
@@ -1037,7 +1127,13 @@ impl TeamManager {
     }
 
     /// `CreateNewTeam(activeInvitation)` (the caller checked both members under the same lock).
-    fn create_new_team(&self, server: &GameServer, st: &mut State, inv: &Invitation) {
+    fn create_new_team(
+        &self,
+        server: &GameServer,
+        st: &mut State,
+        inv: &Invitation,
+        deferred: &mut Deferred,
+    ) {
         if Self::team_id_by_unit(st, inv.owner.character_id).is_some()
             || Self::team_id_by_unit(st, inv.target.character_id).is_some()
         {
@@ -1061,34 +1157,39 @@ impl TeamManager {
             return;
         }
         st.teams.insert(id, team);
-        let team = &st.teams[&id];
-        inv.owner.send(joined_team_packet(server, team));
-        set_in_party(server, &inv.owner, true);
-        inv.target.send(joined_team_packet(server, team));
-        set_in_party(server, &inv.target, true);
-        let ping = inv.owner.data().local_ping_position;
-        team.broadcast(
-            &SCTeamPingPosPacket {
-                has_ping: true,
-                position: ping,
-                ins_id: 0,
-            },
-            0,
-        );
-        if !team.is_party {
-            raid_chat(server, team).join(&inv.owner);
-            raid_chat(server, team).join(&inv.target);
-        }
-        party_chat(server, team, inv.owner.character_id).join(&inv.owner);
-        party_chat(server, team, inv.target.character_id).join(&inv.target);
-        // Trigger events (systems::instances dungeons).
-        crate::systems::instances::events::on_team_join(server, &inv.owner, team);
-        crate::systems::instances::events::on_team_join(server, &inv.target, team);
-        refresh_team_member_obj_ids(team, &inv.target, false);
+        let team = st.teams[&id].clone();
+        let owner = inv.owner.clone();
+        let target = inv.target.clone();
+        deferred.push(move |server| {
+            owner.send(joined_team_packet(server, &team));
+            set_in_party(server, &owner, true);
+            target.send(joined_team_packet(server, &team));
+            set_in_party(server, &target, true);
+            let ping = owner.data().local_ping_position;
+            team.broadcast(
+                &SCTeamPingPosPacket {
+                    has_ping: true,
+                    position: ping,
+                    ins_id: 0,
+                },
+                0,
+            );
+            if !team.is_party {
+                raid_chat(server, &team).join(&owner);
+                raid_chat(server, &team).join(&target);
+            }
+            party_chat(server, &team, owner.character_id).join(&owner);
+            party_chat(server, &team, target.character_id).join(&target);
+            // Trigger events (systems::instances dungeons).
+            crate::systems::instances::events::on_team_join(server, &owner, &team);
+            crate::systems::instances::events::on_team_join(server, &target, &team);
+            refresh_team_member_obj_ids(&team, &target, false);
+        });
     }
 
     /// `CreateSoloTeam(character, asParty)` (GM command `soloparty`).
     pub fn create_solo_team(&self, server: &GameServer, p: &PlayerRef, as_party: bool) {
+        let ping = p.data().local_ping_position;
         let mut st = self.lock();
         if Self::team_id_by_unit(&st, p.character_id).is_some() {
             send_error(p, error::TEAM_JOIN_ALONE);
@@ -1106,10 +1207,11 @@ impl TeamManager {
             return;
         }
         st.teams.insert(id, team);
-        let team = &st.teams[&id];
-        p.send(joined_team_packet(server, team));
-        set_in_party(server, p, as_party);
-        let ping = p.data().local_ping_position;
+        let team = st.teams[&id].clone();
+        let p = p.clone();
+        drop(st);
+        p.send(joined_team_packet(server, &team));
+        set_in_party(server, &p, as_party);
         team.broadcast(
             &SCTeamPingPosPacket {
                 has_ping: true,
@@ -1119,11 +1221,11 @@ impl TeamManager {
             0,
         );
         if !team.is_party {
-            raid_chat(server, team).join(p);
+            raid_chat(server, &team).join(&p);
         }
-        party_chat(server, team, p.character_id).join(p);
+        party_chat(server, &team, p.character_id).join(&p);
         // Trigger events (systems::instances dungeons).
-        crate::systems::instances::events::on_team_join(server, p, team);
+        crate::systems::instances::events::on_team_join(server, &p, &team);
     }
 
     /// `AskRiskyTeam(unit, teamId, targetId, riskyAction)`: leave, kick or dismiss.
@@ -1139,9 +1241,21 @@ impl TeamManager {
         risky_action: u8,
     ) {
         let mut st = self.lock();
-        self.ask_risky_team_locked(server, &mut st, unit, team_id, target_id, risky_action);
+        let mut deferred = Deferred::default();
+        self.ask_risky_team_locked(
+            server,
+            &mut st,
+            unit,
+            team_id,
+            target_id,
+            risky_action,
+            &mut deferred,
+        );
+        drop(st);
+        deferred.run(server);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ask_risky_team_locked(
         &self,
         server: &GameServer,
@@ -1150,8 +1264,18 @@ impl TeamManager {
         team_id: u32,
         target_id: u32,
         risky_action: u8,
+        deferred: &mut Deferred,
     ) {
-        self.ask_risky_team_locked_from(server, st, unit, team_id, target_id, risky_action, false);
+        self.ask_risky_team_locked_from(
+            server,
+            st,
+            unit,
+            team_id,
+            target_id,
+            risky_action,
+            false,
+            deferred,
+        );
     }
 
     /// [`ask_risky_team_locked`](Self::ask_risky_team_locked) with the server-forced variant:
@@ -1160,13 +1284,14 @@ impl TeamManager {
     #[allow(clippy::too_many_arguments)]
     fn ask_risky_team_locked_from(
         &self,
-        server: &GameServer,
+        _server: &GameServer,
         st: &mut State,
         unit: &PlayerRef,
         team_id: u32,
         target_id: u32,
         risky_action: u8,
         server_forced: bool,
+        deferred: &mut Deferred,
     ) {
         let Some(team) = (team_id != 0).then(|| st.teams.get_mut(&team_id)).flatten() else {
             return;
@@ -1196,10 +1321,14 @@ impl TeamManager {
                 .find(|m| m.character.character_id == target_id)
                 .map(|m| m.character.clone());
             if let Some(c) = leaving {
-                if !team.is_party {
-                    raid_chat(server, team).leave(&c);
-                }
-                party_chat(server, team, target_id).leave(&c);
+                let owners = (team.id, team.owner_id, team.is_party);
+                let party_number = team.party_number_of(target_id);
+                deferred.push(move |server| {
+                    if !owners.2 {
+                        raid_channel(server, owners.0, owners.1).leave(&c);
+                    }
+                    party_channel(server, owners.0, party_number, owners.1).leave(&c);
+                });
             }
         }
 
@@ -1231,16 +1360,19 @@ impl TeamManager {
                 },
                 0,
             );
-            if let Some(target) = server.world.character_by_id(target_id) {
-                set_in_party(server, &target, false);
-                target.send(SCLeavedTeamPacket {
-                    team_id,
-                    kicked: risky_action == risky_action::KICK,
-                    dismissed: false,
-                });
-                // Events.OnTeamLeave (systems::instances dungeons).
-                crate::systems::instances::events::on_team_leave(server, &target, team_id);
-            }
+            let kicked = risky_action == risky_action::KICK;
+            deferred.push(move |server| {
+                if let Some(target) = server.world.character_by_id(target_id) {
+                    set_in_party(server, &target, false);
+                    target.send(SCLeavedTeamPacket {
+                        team_id,
+                        kicked,
+                        dismissed: false,
+                    });
+                    // Events.OnTeamLeave (systems::instances dungeons).
+                    crate::systems::instances::events::on_team_leave(server, &target, team_id);
+                }
+            });
             cleared.push(target_id);
         }
         if team.is_party && team.members_count() <= 1 {
@@ -1263,28 +1395,37 @@ impl TeamManager {
         let mut remove = false;
         if is_auto_disband || risky_action == risky_action::DISMISS {
             team.broadcast(&SCTeamDismissedPacket { team_id }, 0);
-            let members: Vec<PlayerRef> = team
+            let members: Vec<(PlayerRef, bool, u32)> = team
                 .members
                 .iter()
                 .flatten()
-                .map(|m| m.character.clone())
+                .map(|m| {
+                    (
+                        m.character.clone(),
+                        m.online,
+                        team.party_number_of(m.character.character_id),
+                    )
+                })
                 .collect();
-            for c in members {
-                if !team.is_party {
-                    raid_chat(server, team).leave(&c);
-                }
-                party_chat(server, team, c.character_id).leave(&c);
-                if c.data().is_online {
-                    c.send(SCLeavedTeamPacket {
-                        team_id,
-                        kicked: false,
-                        dismissed: true,
-                    });
-                    set_in_party(server, &c, false);
-                    // trigger event (systems::instances dungeons)
-                    crate::systems::instances::events::on_team_leave(server, &c, team_id);
-                }
+            let owners = (team.id, team.owner_id, team.is_party);
+            for (c, online, party_number) in members {
                 cleared.push(c.character_id);
+                deferred.push(move |server| {
+                    if !owners.2 {
+                        raid_channel(server, owners.0, owners.1).leave(&c);
+                    }
+                    party_channel(server, owners.0, party_number, owners.1).leave(&c);
+                    if online {
+                        c.send(SCLeavedTeamPacket {
+                            team_id,
+                            kicked: false,
+                            dismissed: true,
+                        });
+                        set_in_party(server, &c, false);
+                        // trigger event (systems::instances dungeons)
+                        crate::systems::instances::events::on_team_leave(server, &c, team_id);
+                    }
+                });
             }
             remove = true;
         }
@@ -1295,7 +1436,9 @@ impl TeamManager {
             st.teams.remove(&team_id);
         }
         // TODO (C#): Add this to a timer or trigger instead of calling on a party/raid disband.
-        server.chat.clean_up_channels(&server.ids.chat);
+        deferred.push(|server| {
+            server.chat.clean_up_channels(&server.ids.chat);
+        });
     }
 
     /// `MakeTeamOwner(unit, teamId, memberId)`.
@@ -1329,11 +1472,13 @@ impl TeamManager {
             return;
         }
         team.is_party = false;
+        let team = team.clone();
+        drop(st);
         team.broadcast(&SCTeamBecameRaidTeamPacket { team_id: team.id }, 0);
         for m in team.members.iter().flatten() {
-            raid_chat(server, team).join(&m.character);
+            raid_chat(server, &team).join(&m.character);
         }
-        refresh_all_team_member_obj_ids(team);
+        refresh_all_team_member_obj_ids(&team);
         // TODO (C#): Handle raids in dungeons
     }
 
@@ -1499,12 +1644,17 @@ impl TeamManager {
         if team.owner_id != owner.character_id {
             return;
         }
-        let t1 = server.world.character_by_id(target_id);
-        let t2 = server.world.character_by_id(target2_id);
-        for t in [&t1, &t2].into_iter().flatten() {
-            party_chat(server, team, t.character_id).leave(t);
-        }
-        if team.move_member(from, to) {
+        let owners = (team.id, team.owner_id, team.is_party);
+        let old_party = [
+            (target_id, team.party_number_of(target_id)),
+            (target2_id, team.party_number_of(target2_id)),
+        ];
+        let moved = team.move_member(from, to);
+        let new_party = [
+            (target_id, team.party_number_of(target_id)),
+            (target2_id, team.party_number_of(target2_id)),
+        ];
+        if moved {
             team.broadcast(
                 &SCTeamMemberMovedPacket {
                     team_id,
@@ -1515,26 +1665,44 @@ impl TeamManager {
                 },
                 0,
             );
-            for t in [&t1, &t2].into_iter().flatten() {
-                party_chat(server, team, t.character_id).join(t);
+        }
+        drop(st);
+        for (id, party_number) in old_party {
+            if let Some(t) = server.world.character_by_id(id) {
+                party_channel(server, owners.0, party_number, owners.1).leave(&t);
+            }
+        }
+        if moved {
+            for (id, party_number) in new_party {
+                if let Some(t) = server.world.character_by_id(id) {
+                    party_channel(server, owners.0, party_number, owners.1).join(&t);
+                }
             }
         }
     }
 
     /// `SetOffline(unit)` (from the `Character.IsOnline` setter, after the flag is cleared).
     pub fn set_offline(&self, server: &GameServer, unit: &PlayerRef) {
+        let mut deferred = Deferred::default();
         let mut st = self.lock();
         // Deviation: a party invitation does not outlive the session of the inviter or invitee.
         Self::drop_invitations(&mut st, unit.character_id);
         // Its area-invite cooldown dies with the session too.
         st.area_invite_until.remove(&unit.character_id);
         let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
+            drop(st);
+            deferred.run(server);
             return;
         };
         let team = st.teams.get_mut(&team_id).expect("team");
         let Some(slot) = team.change_status(unit) else {
+            drop(st);
+            deferred.run(server);
             return;
         };
+        if let Some(m) = team.members[slot].as_mut() {
+            m.online = false;
+        }
         if team.owner_id == unit.character_id {
             let new_owner = team.new_owner();
             if new_owner != 0 {
@@ -1548,32 +1716,49 @@ impl TeamManager {
                 );
             }
         }
-        let member = team.members[slot].as_ref().expect("member");
-        team.broadcast(
-            &SCTeamMemberDisconnectedPacket {
-                team_id,
-                id: unit.character_id,
-                member: member_info(server, member),
-            },
-            0,
-        );
-        for m in team.members.iter().flatten() {
-            let c = &m.character;
-            if c.character_id == unit.character_id || !c.data().is_online {
-                continue;
-            }
-            if are_in_render_distance(c, unit) {
-                continue;
-            }
-            c.send(SCUnitsRemovedPacket {
-                ids: vec![unit.obj_id],
-            });
-        }
+        let member = team.members[slot].as_ref().expect("member").clone();
+        let others: Vec<PlayerRef> = team
+            .members
+            .iter()
+            .flatten()
+            .filter(|m| {
+                m.character.character_id != unit.character_id
+                    && m.online
+                    && !are_in_render_distance(&m.character, unit)
+            })
+            .map(|m| m.character.clone())
+            .collect();
         let all_offline = team.members_online_count() == 0;
         if all_offline {
             team.all_offline_since_ms = Some(util::now_ms());
         }
+        let recipients: Vec<PlayerRef> = team
+            .members
+            .iter()
+            .flatten()
+            .filter(|m| m.character.character_id != unit.character_id && m.online)
+            .map(|m| m.character.clone())
+            .collect();
+        let unit_id = unit.character_id;
+        let unit_obj = unit.obj_id;
+        deferred.push(move |server| {
+            send_to_players(
+                &recipients,
+                &SCTeamMemberDisconnectedPacket {
+                    team_id,
+                    id: unit_id,
+                    member: member_info(server, &member),
+                },
+            );
+            for c in others {
+                c.send(SCUnitsRemovedPacket {
+                    ids: vec![unit_obj],
+                });
+            }
+        });
         clear_sync_state(&mut st, unit.character_id);
+        drop(st);
+        deferred.run(server);
     }
 
     /// `Character.SetFaction`'s party removal (`MemberRemoveFromTeam(this, this, Leave)`, as the
@@ -1582,8 +1767,11 @@ impl TeamManager {
     /// runs `UpdateAtLogin` (which would otherwise re-join the new pirate), and an ordinary
     /// member could never satisfy the owner check of the client kick path.
     pub fn member_remove_for_faction_change(&self, server: &GameServer, unit: &PlayerRef) {
+        let mut deferred = Deferred::default();
         let mut st = self.lock();
         let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
+            drop(st);
+            deferred.run(server);
             return;
         };
         self.ask_risky_team_locked_from(
@@ -1594,7 +1782,10 @@ impl TeamManager {
             unit.character_id,
             risky_action::LEAVE,
             true,
+            &mut deferred,
         );
+        drop(st);
+        deferred.run(server);
     }
 
     /// `MemberRemoveFromTeam(unit, source, leaveType)`.
@@ -1605,8 +1796,11 @@ impl TeamManager {
         source: &PlayerRef,
         leave_type: u8,
     ) {
+        let mut deferred = Deferred::default();
         let mut st = self.lock();
         let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
+            drop(st);
+            deferred.run(server);
             return;
         };
         let team = st.teams.get_mut(&team_id).expect("team");
@@ -1621,10 +1815,15 @@ impl TeamManager {
             return;
         }
         let team = &st.teams[&team_id];
-        if !team.is_party {
-            raid_chat(server, team).leave(unit);
-        }
-        party_chat(server, team, unit.character_id).leave(unit);
+        let owners = (team.id, team.owner_id, team.is_party);
+        let party_number = team.party_number_of(unit.character_id);
+        let leaving = unit.clone();
+        deferred.push(move |server| {
+            if !owners.2 {
+                raid_channel(server, owners.0, owners.1).leave(&leaving);
+            }
+            party_channel(server, owners.0, party_number, owners.1).leave(&leaving);
+        });
         self.ask_risky_team_locked(
             server,
             &mut st,
@@ -1632,7 +1831,10 @@ impl TeamManager {
             team_id,
             unit.character_id,
             leave_type,
+            &mut deferred,
         );
+        drop(st);
+        deferred.run(server);
     }
 
     /// `UpdatePosition(id)` (from `Character.SetPosition` when `InParty`).
@@ -1645,12 +1847,20 @@ impl TeamManager {
         let Some(i) = team.index_of(id) else {
             return;
         };
-        let member = team.members[i].as_ref().expect("member");
-        team.broadcast(
+        let member = team.members[i].as_ref().expect("member").clone();
+        let recipients: Vec<PlayerRef> = team
+            .members
+            .iter()
+            .flatten()
+            .filter(|m| m.character.character_id != id && m.online)
+            .map(|m| m.character.clone())
+            .collect();
+        drop(st);
+        send_to_players(
+            &recipients,
             &SCTeamRemoteMembersExPacket {
-                members: vec![member_info(server, member)],
+                members: vec![member_info(server, &member)],
             },
-            id,
         );
     }
 
@@ -1663,10 +1873,16 @@ impl TeamManager {
         let team = st.teams.get_mut(&team_id).expect("team");
         // Cancel the zombie-team disband timer.
         team.all_offline_since_ms = None;
-        team.change_status(unit);
-        let team = &st.teams[&team_id];
-        unit.send(joined_team_packet(server, team));
-        set_in_party(server, unit, true);
+        if let Some(slot) = team.change_status(unit) {
+            if let Some(m) = team.members[slot].as_mut() {
+                m.online = true;
+            }
+        }
+        let team = st.teams[&team_id].clone();
+        let unit = unit.clone();
+        drop(st);
+        unit.send(joined_team_packet(server, &team));
+        set_in_party(server, &unit, true);
         let others: Vec<TeamMemberInfo> = team
             .members
             .iter()
@@ -1695,17 +1911,18 @@ impl TeamManager {
                 unit.character_id,
             );
         }
-        refresh_team_member_obj_ids(team, unit, true);
+        refresh_team_member_obj_ids(&team, &unit, true);
         if !team.is_party {
-            raid_chat(server, team).join(unit);
+            raid_chat(server, &team).join(&unit);
         }
-        party_chat(server, team, unit.character_id).join(unit);
+        party_chat(server, &team, unit.character_id).join(&unit);
     }
 
     /// `UpdateAllTeams` (the 500 ms tick): zombie-team disband, then the remote-member sync
     /// for every out-of-render-distance pair of online members (delta-cached, forced every
     /// 5 s), coalesced per recipient.
     pub fn update_all_teams(&self, server: &GameServer, now_ms: i64) {
+        let mut deferred = Deferred::default();
         let mut st = self.lock();
         // Pending invitations expire after 60 s; the 500 ms tick sweeps them so a target that
         // never answers cannot hold its slot (and the map stays bounded).
@@ -1714,79 +1931,124 @@ impl TeamManager {
         if st.teams.is_empty() {
             drop(st);
             send_invitation_canceled(canceled);
+            deferred.run(server);
             return;
         }
         let ids: Vec<u32> = st.teams.keys().copied().collect();
         let mut disbanded = false;
+        let mut sync_teams: Vec<(u32, Vec<TeamMember>)> = Vec::new();
         for id in ids {
             let since = st.teams[&id].all_offline_since_ms;
             if since.is_some_and(|s| now_ms - s >= OFFLINE_TEAM_DISBAND_GRACE_MS) {
-                disbanded |= Self::disband_offline_team(server, &mut st, id);
+                disbanded |= Self::disband_offline_team(&mut st, id, &mut deferred);
                 continue;
             }
-            let online: Vec<TeamMember> = st.teams[&id]
+            let team = &st.teams[&id];
+            let members: Vec<TeamMember> = team
                 .members
                 .iter()
                 .flatten()
-                .filter(|m| m.character.data().is_online)
+                .filter(|m| m.online)
                 .cloned()
                 .collect();
-            if online.len() <= 1 {
+            if members.len() <= 1 {
                 continue;
             }
-            let infos: Vec<TeamMemberInfo> =
-                online.iter().map(|m| member_info(server, m)).collect();
-            // (recipient index, sources) in first-seen order.
-            let mut per_recipient: Vec<(usize, Vec<usize>)> = Vec::new();
-            let mut add = |r: usize, s: usize| match per_recipient.iter_mut().find(|(x, _)| *x == r)
-            {
-                Some((_, v)) => v.push(s),
-                None => per_recipient.push((r, vec![s])),
-            };
-            for i in 0..online.len() {
-                for j in i + 1..online.len() {
-                    if are_in_render_distance(&online[i].character, &online[j].character) {
-                        continue;
-                    }
-                    if try_claim_snapshot(&mut st, &infos[i], &infos[j], now_ms) {
-                        add(i, j);
-                    }
-                    if try_claim_snapshot(&mut st, &infos[j], &infos[i], now_ms) {
-                        add(j, i);
-                    }
-                }
-            }
-            for (r, sources) in per_recipient {
-                online[r].character.send(SCTeamRemoteMembersExPacket {
-                    members: sources.into_iter().map(|s| infos[s].clone()).collect(),
-                });
-            }
+            sync_teams.push((team.id, members));
         }
         drop(st);
         send_invitation_canceled(canceled);
-        if disbanded {
-            server.chat.clean_up_channels(&server.ids.chat);
+        // Member rows read character data, so they are built after the guard is dropped. The
+        // delta claim then takes a second, short section that revalidates the membership: a
+        // team whose slots moved since the snapshot is left for the next 500 ms tick.
+        let rows_by_team: Vec<(u32, Vec<TeamMemberInfo>)> = sync_teams
+            .iter()
+            .map(|(team_id, members)| {
+                let rows: Vec<TeamMemberInfo> =
+                    members.iter().map(|m| member_info(server, m)).collect();
+                (*team_id, rows)
+            })
+            .collect();
+        let sends: Vec<(PlayerRef, Vec<TeamMemberInfo>)> = {
+            let mut st = self.lock();
+            let mut sends = Vec::new();
+            for (team_id, rows) in &rows_by_team {
+                let Some(team) = st.teams.get(team_id) else {
+                    continue;
+                };
+                let online: Vec<PlayerRef> = team
+                    .members
+                    .iter()
+                    .flatten()
+                    .filter(|m| m.online)
+                    .map(|m| m.character.clone())
+                    .collect();
+                if online.len() != rows.len()
+                    || online
+                        .iter()
+                        .zip(rows)
+                        .any(|(p, row)| p.character_id != row.id)
+                {
+                    continue;
+                }
+                // (recipient index, sources) in first-seen order.
+                let mut per_recipient: Vec<(usize, Vec<usize>)> = Vec::new();
+                let mut add =
+                    |r: usize, s: usize| match per_recipient.iter_mut().find(|(x, _)| *x == r) {
+                        Some((_, v)) => v.push(s),
+                        None => per_recipient.push((r, vec![s])),
+                    };
+                for i in 0..online.len() {
+                    for j in i + 1..online.len() {
+                        if are_in_render_distance(&online[i], &online[j]) {
+                            continue;
+                        }
+                        if try_claim_snapshot(&mut st, &rows[i], &rows[j], now_ms) {
+                            add(i, j);
+                        }
+                        if try_claim_snapshot(&mut st, &rows[j], &rows[i], now_ms) {
+                            add(j, i);
+                        }
+                    }
+                }
+                for (r, sources) in per_recipient {
+                    sends.push((
+                        online[r].clone(),
+                        sources.into_iter().map(|s| rows[s].clone()).collect(),
+                    ));
+                }
+            }
+            sends
+        };
+        for (recipient, members) in sends {
+            recipient.send(SCTeamRemoteMembersExPacket { members });
         }
+        if disbanded {
+            deferred.push(|server| {
+                server.chat.clean_up_channels(&server.ids.chat);
+            });
+        }
+        deferred.run(server);
     }
 
     /// `DisbandOfflineTeam(team)`: returns whether the team was removed.
-    fn disband_offline_team(server: &GameServer, st: &mut State, team_id: u32) -> bool {
+    fn disband_offline_team(st: &mut State, team_id: u32, deferred: &mut Deferred) -> bool {
         let team = st.teams.get_mut(&team_id).expect("team");
         if team.members_online_count() > 0 {
             team.all_offline_since_ms = None;
             return false;
         }
-        let members: Vec<PlayerRef> = team
+        let members: Vec<(u32, PlayerRef)> = team
             .members
             .iter()
             .flatten()
-            .map(|m| m.character.clone())
+            .map(|m| (m.character.character_id, m.character.clone()))
             .collect();
-        for c in &members {
-            set_in_party(server, c, false);
-            clear_sync_state(st, c.character_id);
-        }
         st.teams.remove(&team_id);
+        for (id, c) in members {
+            clear_sync_state(st, id);
+            deferred.push(move |server| set_in_party(server, &c, false));
+        }
         tracing::info!(
             "Disbanded zombie team {team_id} after {} ms of all-offline",
             OFFLINE_TEAM_DISBAND_GRACE_MS
@@ -1849,18 +2111,43 @@ impl TeamManager {
         team_id: u32,
         owner_pos: (f32, f32, f32),
     ) -> Option<PlayerRef> {
-        let mut st = self.lock();
-        let team = st.teams.get_mut(&team_id)?;
-        for m in team.members.iter_mut().flatten() {
-            if m.has_gone_round_robin {
+        // Positions need character data: collect the round-robin candidates first, read the
+        // positions without the team lock, then mark the chosen member under a second section
+        // that revalidates by character id.
+        let candidates: Vec<(PlayerRef, bool)> = {
+            let st = self.lock();
+            st.teams
+                .get(&team_id)?
+                .members
+                .iter()
+                .flatten()
+                .map(|m| (m.character.clone(), m.has_gone_round_robin))
+                .collect()
+        };
+        let mut chosen = None;
+        for (p, gone) in &candidates {
+            if *gone {
                 continue;
             }
-            let pos = util::world_position(server, &m.character);
+            let pos = util::world_position(server, p);
             if util::distance(pos, owner_pos, true) >= 200.0 {
                 continue;
             }
-            m.has_gone_round_robin = true;
-            return Some(m.character.clone());
+            chosen = Some(p.character_id);
+            break;
+        }
+        let mut st = self.lock();
+        let team = st.teams.get_mut(&team_id)?;
+        if let Some(id) = chosen {
+            if let Some(m) = team
+                .members
+                .iter_mut()
+                .flatten()
+                .find(|m| m.character.character_id == id)
+            {
+                m.has_gone_round_robin = true;
+                return Some(m.character.clone());
+            }
         }
         let mut ret: Option<PlayerRef> = None;
         for m in team.members.iter_mut().flatten() {
@@ -1965,11 +2252,20 @@ fn clear_sync_state(st: &mut State, character_id: u32) {
         .retain(|&(r, s), _| r != character_id && s != character_id);
 }
 
+/// Sends `packet` to the online members captured under the state lock, without cloning a
+/// [`Team`] just to broadcast after the guard is dropped.
+fn send_to_players(recipients: &[PlayerRef], packet: &dyn crate::net::packet::ServerPacket) {
+    let mut out = crate::net::connection::Fanout::new(packet);
+    for p in recipients {
+        out.send(&p.conn);
+    }
+}
+
 /// `RefreshTeamMemberObjIds(team, newMember, force)`.
 fn refresh_team_member_obj_ids(team: &Team, new_member: &PlayerRef, force: bool) {
     for m in team.members.iter().flatten() {
         let c = &m.character;
-        if c.character_id == new_member.character_id || !c.data().is_online {
+        if c.character_id == new_member.character_id || !m.online {
             continue;
         }
         if !force && are_in_render_distance(c, new_member) {
@@ -2021,4 +2317,152 @@ impl TeamManager {
 /// `WorldObject` of a player (helpers for other subsystems).
 pub fn as_object(p: &PlayerRef) -> WorldObject {
     WorldObject::from(p)
+}
+
+#[cfg(test)]
+mod deadlock_tests {
+    //! Reproductions of the 2026-11-11 live freeze: the party-accept path held the manager
+    //! state mutex and then took the inviter's character data lock, while the achievement
+    //! refresh held a character data lock and then took the manager mutex. Each scenario runs
+    //! on its own thread so a regression fails the test on a timeout instead of hanging the
+    //! suite (the stuck threads are leaked, like the `astar_deadlock_tests`).
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::systems::social::achievement_hooks;
+    use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+
+    fn spawn_pair(server: &GameServer) -> (TestClient, TestClient, PlayerRef, PlayerRef) {
+        let ca = TestClient::new(server, 1, 1001);
+        let cb = TestClient::new(server, 2, 1002);
+        let a = spawn_player(server, &ca, test_character(1, "Owner", 100.0, 100.0), 0x100);
+        let b = spawn_player(
+            server,
+            &cb,
+            test_character(2, "Target", 101.0, 100.0),
+            0x101,
+        );
+        a.data().is_online = true;
+        b.data().is_online = true;
+        (ca, cb, a, b)
+    }
+
+    /// Party accept + achievement refresh + AoE damage tagging, all at once: the cycle from
+    /// the freeze needs a thread that holds the team lock while the owner's character lock is
+    /// held, and the refresh as the second order.
+    #[test]
+    fn party_accept_refresh_and_aggro_tagging_do_not_deadlock() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // The lazily connected MySQL pool needs a Tokio context even though nothing here
+            // reaches the database.
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            let _guard = rt.enter();
+            let server = test_server();
+            crate::systems::social::install_hooks(&server);
+            let (_ca, _cb, a, b) = spawn_pair(&server);
+            server
+                .systems
+                .social
+                .teams
+                .ask_to_join(&server, &a, "Target", 0, true, None);
+            let teams = &server.systems.social.teams;
+            std::thread::scope(|scope| {
+                let owner_lock = a.data();
+                let accept = scope.spawn(|| {
+                    teams.reply_to_join_team(&server, &b, 0, true, 1, false, "", false);
+                });
+                // Let the accept path reach the manager lock first (the old order took it
+                // before the owner's data lock); the fixed order waits for the data lock
+                // before it ever takes the team lock.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline && teams.state.try_lock().is_ok() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // The achievement refresh used to hold the character lock and then take the
+                // team lock. With the owner lock still held and the accept holding the team
+                // lock, that is the two-thread cycle of the freeze.
+                achievement_hooks::refresh_current(&server, &b, chrono::Utc::now());
+                // AoE damage tagging on the same character takes the team lock through
+                // `team_of`; it must not stay blocked behind the accept.
+                let damaged = WorldObject::from(&b);
+                for _ in 0..50 {
+                    crate::systems::skills::combat::add_damage_aggro(
+                        &server, &damaged, &damaged, 10, 10,
+                    );
+                }
+                drop(owner_lock);
+                accept.join().expect("accept thread");
+            });
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "party accept / achievement refresh / aggro tagging deadlocked"
+        );
+    }
+
+    /// Deterministic order probe for the manager side: while the character lock is held,
+    /// `CreateSoloTeam` must not take the team lock (the old code did, then waited for the
+    /// character lock).
+    #[test]
+    fn create_solo_team_reads_character_data_before_the_team_lock() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let server = test_server();
+        let _c = TestClient::new(&server, 1, 1001);
+        let p = spawn_player(&server, &_c, test_character(1, "Solo", 100.0, 100.0), 0x100);
+        p.data().is_online = true;
+        let teams = &server.systems.social.teams;
+        std::thread::scope(|scope| {
+            let character_lock = p.data();
+            let worker = scope.spawn(|| teams.create_solo_team(&server, &p, true));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                assert!(
+                    teams.state.try_lock().is_ok(),
+                    "CreateSoloTeam took the team lock while the character lock was held"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(character_lock);
+            worker.join().expect("solo team thread");
+        });
+    }
+
+    /// Deterministic order probe for the achievement side: while the team lock is held, the
+    /// refresh must not take the character lock (the old code did, then waited for the team
+    /// lock).
+    #[test]
+    fn achievement_refresh_takes_the_team_before_the_character_lock() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let server = test_server();
+        let _c = TestClient::new(&server, 1, 1001);
+        let p = spawn_player(
+            &server,
+            &_c,
+            test_character(1, "Refresh", 100.0, 100.0),
+            0x100,
+        );
+        p.data().is_online = true;
+        let teams = &server.systems.social.teams;
+        let team_lock = teams.lock();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                achievement_hooks::refresh_current(&server, &p, chrono::Utc::now());
+            });
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                assert!(
+                    p.data.try_lock().is_ok(),
+                    "refresh_current took the character lock while waiting for the team lock"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(team_lock);
+            worker.join().expect("refresh thread");
+        });
+    }
 }

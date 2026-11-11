@@ -308,18 +308,25 @@ pub fn increment_record_ids(server: &GameServer, kind_id: u32, matcher: RecordMa
 /// what watches them, this time as a live report: the client hears the change / completion
 /// packets, and anything completed pays its reward.
 ///
-/// [`back_credit_values`](super::achievement_manager::back_credit_values) is read under the
-/// character lock and released before the report, which takes the report's own locks.
+/// The team snapshot is taken before the character lock, so the report never takes the
+/// TeamManager lock while a character data lock is held (the two orders deadlocked the live
+/// server); the character lock is released before the report, which takes its own locks.
 pub fn refresh_current(
     server: &GameServer,
     player: &PlayerRef,
     now: DateTime<Utc>,
 ) -> AchievementReport {
+    let team = server
+        .systems
+        .social
+        .teams
+        .active_team_by_unit(player.character_id);
     let values = {
         let character = player.data();
         back_credit_values(
             server,
             &character,
+            team.as_ref(),
             &server.game_data.systems.social.achievements,
         )
     };
