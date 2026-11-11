@@ -191,7 +191,7 @@ pub fn take_slow_npcs(top: usize) -> Vec<SlowNpc> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut taken: Vec<SlowNpc> = slow.drain(..).collect();
-    taken.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    taken.sort_unstable_by_key(|s| std::cmp::Reverse(s.0));
     taken.truncate(top);
     taken
 }
