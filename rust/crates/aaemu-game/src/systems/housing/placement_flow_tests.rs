@@ -84,6 +84,13 @@ impl HousingEconomyHooks for TestHooks {
 }
 
 fn data() -> GameData {
+    data_with(false)
+}
+
+/// The farmhouse design with the given `housings.auto_z`. The real design 171 is `auto_z = t`,
+/// but the 1.2 client's footprint slope rule only exists for `auto_z = f` designs, so the slope
+/// tests use `false` explicitly (`data()`).
+fn data_with(auto_z: bool) -> GameData {
     let mut data = GameData::empty();
     data.zones.zones.insert(
         TEST_ZONE,
@@ -99,6 +106,7 @@ fn data() -> GameData {
         name: "Thatched Farmhouse".into(),
         category_id: 18,
         main_model_id: 1083,
+        auto_z,
         hp: 1000,
         garden_radius: 11.0,
         is_sellable: true,
@@ -623,6 +631,22 @@ async fn a_house_on_a_steep_slope_is_refused_with_116() {
         build_error(&mut f, ACCEPTED.0, ACCEPTED.1),
         Some(crate::systems::economy::error_message::HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW)
     );
+}
+
+#[tokio::test]
+async fn an_auto_z_design_is_not_refused_on_the_same_slope() {
+    // The client's OBB slope rule (`FUN_39332180`) only runs for `auto_z = f` designs; every
+    // `auto_z = t` design (the standard houses and farms) takes another routine, so the same
+    // 7 m footprint spread that refuses the design above must be accepted here.
+    let mut f = fixture(data_with(true));
+    install_ground(&f.server, 100.0, 3.5);
+    ops::build(&f.server, &f.player, 1001, &packet(ACCEPTED.0, ACCEPTED.1));
+    assert_eq!(
+        f.server.systems.housing.manager.count(),
+        1,
+        "an auto_z design is not refused by the footprint slope rule"
+    );
+    assert!(errors(&mut f.client).is_empty());
 }
 
 #[tokio::test]

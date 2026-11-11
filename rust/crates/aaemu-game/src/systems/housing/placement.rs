@@ -25,8 +25,9 @@ const UNIT_OVERLAP_MASK: u32 = 0x1f;
 const PLACEMENT_RANGE_MARGIN: f32 = 30.0;
 /// A house/decoration Z is refused only when it is clearly impossible: 100 m above or below
 /// the heightmap. This is a server-only anti-cheat guard, not a 1.2 client rule (the client's
-/// builder has no ±100 m test and never emits 115). The client's own vertical rule is the
-/// footprint terrain spread (`FUN_39332180`), see [`validate_ground_slope`].
+/// builder has no ±100 m test and never emits 115). For designs with `auto_z = false` the
+/// client's own vertical rule is the footprint terrain spread (`FUN_39332180`), see
+/// [`validate_ground_slope`]; `auto_z = true` designs use another routine (`FUN_39337fb0`).
 const MAX_GROUND_HEIGHT_DELTA: f32 = 100.0;
 
 /// `FUN_39897070`: categories that require a matching housing-area group/category.
@@ -296,8 +297,10 @@ fn validate_ground_height(
     Ok(())
 }
 
-/// `FUN_39332180` (`FUN_39326c10` on the ghost house OBB): the same footprint terrain spread as
-/// the doodad seed builder. More than 6 m (`max - min`, strict) refuses with 116, the client's
+/// `FUN_39332180` (`FUN_39326c10` on the ghost house OBB), run by the client only for designs
+/// with `housings.auto_z` false (the others take `FUN_39337fb0`, not mirrored): the same
+/// footprint terrain spread as the doodad seed builder. More than 6 m (`max - min`, strict)
+/// refuses with 116, the client's
 /// `HOUSE_CANNOT_LOCATE_TERRAIN_TOO_LOW` whose text is "You can't construct a building on a
 /// steep slope.". The client samples the render OBB; the server substitutes the design model's
 /// collision bounds and skips the rule when it has none. The client's z snap to the minimum
@@ -311,6 +314,16 @@ fn validate_ground_slope(
     z: f32,
     yaw: f32,
 ) -> Result<(), i16> {
+    // The 1.2 client runs this rule (`FUN_39332180`) only for designs with `housings.auto_z`
+    // false: its two call sites are the `else` arm of `FindHousing(ghost)->auto_z ?
+    // FUN_39337fb0 : FUN_39332180`. Auto-Z designs (178 of 269 rows, 134 of the 136 designs
+    // with a grid footprint: every standard house and farm) use `FUN_39337fb0`, a
+    // minimum-terrain-sample plane test that is not decoded or mirrored yet, so they are not
+    // refused here. A big prefab box would otherwise give an honest client a false 116 on a
+    // moderate slope.
+    if template.auto_z {
+        return Ok(());
+    }
     let Some(bounds) = collision::objects::house_model_bounds(server, template.main_model_id, 1)
     else {
         return Ok(());
