@@ -476,6 +476,57 @@ async fn save_indun_spawner_does_not_respawn_a_dead_member() {
     drop(player);
 }
 
+/// A spawn-file placement inside an instance stays dead even without `save_indun` (e.g.
+/// Sharpwind's Blackbeard assassin 11572, whose only spawner row is `save_indun = 'f'`): a 1.2
+/// instance is one run, so its trash and bosses never respawn. Scripted / event spawners are
+/// not placements and keep their own respawn rules.
+#[tokio::test]
+async fn instance_placement_without_save_indun_stays_dead() {
+    let server = server();
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_id(0)
+        .unwrap()
+        .clone();
+    server.world.create_world_instance(Arc::new(template), 100);
+    let world = server.world.world(100).unwrap();
+    let m = server.systems.npcs.spawns.get_or_create(&world);
+    assert_eq!(
+        m.add_npc_spawner(&server, npc_def(500, 500.0, 500.0)),
+        Ok(1)
+    );
+    let spawner = m
+        .get_all_spawners()
+        .values()
+        .flatten()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(!spawner.template().unwrap().save_indun);
+    spawner.do_spawn(&server);
+    let npc = world.all_npcs().first().cloned().expect("spawned");
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &npc);
+    assert!(
+        m.pending_respawns().is_empty(),
+        "an instance placement must not schedule a respawn"
+    );
+    assert!(spawner.saved_death());
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawner.do_spawn(&server);
+    assert!(
+        !world.all_npcs().iter().any(|n| !n.data().unit.is_dead()),
+        "neither the timer nor a refill may resurrect it"
+    );
+}
+
 #[tokio::test]
 async fn fully_looted_corpse_uses_shortened_deadline_and_respawn_keeps_its_own_timer() {
     use crate::data::items::ITEM_COINS;

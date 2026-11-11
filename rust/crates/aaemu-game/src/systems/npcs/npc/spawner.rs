@@ -77,6 +77,7 @@ impl NpcSpawnerShared {
     pub fn saved_death(&self) -> bool {
         self.saved_death.load(Ordering::Relaxed)
     }
+
     /// Freezes the placement after a `save_indun` member died.
     pub fn set_saved_death(&self) {
         self.saved_death.store(true, Ordering::Relaxed);
@@ -313,6 +314,18 @@ impl NpcSpawner {
     /// Whether a `save_indun` member of this placement has died (the placement stays dead).
     pub fn saved_death(&self) -> bool {
         self.shared.saved_death()
+    }
+
+    /// Whether a dead member must stay dead for the instance run: the authored
+    /// `npc_spawners.save_indun`, or any spawn-file placement inside a non-default instance
+    /// (1.2 instance runs are one run long, so their trash and bosses never respawn). A scripted
+    /// event / tower / summon spawner is not a placement and keeps its own respawn rules.
+    fn freezes_instance_state(&self, manager: &spawn_manager::SpawnManager) -> bool {
+        self.template().is_some_and(|t| t.save_indun)
+            || (self
+                .parent_world()
+                .is_some_and(|id| id != crate::models::character::DEFAULT_INSTANCE_ID)
+                && manager.is_placement_spawner(self))
     }
 
     pub fn parent_world(&self) -> Option<u32> {
@@ -1162,12 +1175,12 @@ impl NpcSpawner {
         };
         let respawn_time = self.respawn_time();
         let now = spawn_manager::now();
-        // `npc_spawners.save_indun = 't'` (every authored dungeon trash / boss spawner):
+        // Authored `npc_spawners.save_indun` or any spawn-file placement in an instance:
         // 1.2 instances are one run long and the dead stay dead until the run is recreated.
         // The placement is frozen so neither the respawn deadline nor the periodic refill
         // (`do_spawn` / the activation tick) brings the member back.
-        let save_indun = t.save_indun && npc.data().unit.is_dead();
-        if save_indun {
+        let freezes = npc.data().unit.is_dead() && self.freezes_instance_state(&manager);
+        if freezes {
             self.shared.set_saved_death();
         }
         // `npc_groups.enable_respawn = 't'`: a dead member whose batch still has a living
@@ -1178,7 +1191,7 @@ impl NpcSpawner {
         let partial_group_respawn =
             npc.data().unit.is_dead() && server.systems.npcs.group_batches.on_member_died(npc);
         if !partial_group_respawn
-            && !save_indun
+            && !freezes
             && respawn_time > 0
             && i64::from(self.are_other_npcs_in_spawn_zone().1) + i64::from(self.scheduled_count())
                 < i64::from(t.max_population)
@@ -1281,13 +1294,14 @@ impl NpcSpawner {
         let manager = spawn_manager::manager_of(server, &obj, self.parent_world());
         spawn_manager::delete_object(server, &obj, self.parent_world());
         let respawn_time = self.respawn_time();
-        let save_indun = self.template().is_some_and(|t| t.save_indun);
-        if save_indun {
+        let freezes = manager
+            .as_ref()
+            .is_some_and(|m| self.freezes_instance_state(m));
+        if freezes {
             self.shared.set_saved_death();
         }
         let max = self.template().map_or(0, |t| i64::from(t.max_population));
-        if !save_indun && respawn_time > 0 && i64::from(self.are_other_npcs_in_spawn_zone().1) < max
-        {
+        if !freezes && respawn_time > 0 && i64::from(self.are_other_npcs_in_spawn_zone().1) < max {
             let at = spawn_manager::add_secs(spawn_manager::now(), f64::from(respawn_time));
             if let Some(m) = manager {
                 m.add_respawn(server, obj, Some(at));

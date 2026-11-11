@@ -4605,15 +4605,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::npcs (instance trash respawn / `save_indun`, 2026-11-11): the C# loaded
   `npc_spawners.save_indun` and never read it, so every dead dungeon NPC came back on its
   `SpawnDelayMin/Max` (10 s on the Sharpwind rows) and the periodic refill also replaced it.
-  In 1.2 a run's trash stays dead: `save_indun = 't'` (all 366 authored dungeon spawners,
-  e.g. "11361: 칼바람폐광 슬라임" / spawner 12593) now freezes its placement for the instance's
-  lifetime - `do_despawn` schedules no respawn, `despawn_with_respawn` and the
-  `enable_respawn` group partial timer are refused, and `do_spawn` / the activation tick do
-  not refill (`NpcSpawnerShared::saved_death`). A fresh dungeon creates new spawners, so the
-  next run is repopulated; scripted `do_event_spawn` still works. Owner evidence (cloud
-  server): the killed Sharpwind slimes kept respawning; a retail 1.2 video shows a fixed group
-  around the geysers that stays dead. Deviation from the C# (which respawned them). Test:
-  `npcs::spawn_tests::save_indun_spawner_does_not_respawn_a_dead_member`.
+  In 1.2 a run's trash stays dead. A death now freezes the whole placement for the instance's
+  lifetime when the row is `save_indun = 't'` (366 authored dungeon spawners, e.g.
+  "11361: 칼바람폐광 슬라임" / spawner 12593) **or** when the spawner is a spawn-file placement
+  (`SpawnManager::NpcSpawners`, so not an event / tower / summon spawner) in a non-default
+  instance - the latter covers the `save_indun = 'f'` rows such as the Blackbeard assassin
+  11572 and named bosses, which a live check showed respawning 10 s after death in an instance.
+  `do_despawn` schedules no respawn, `despawn_with_respawn` and the `enable_respawn` group
+  partial timer are refused, and `do_spawn` / the activation tick do not refill
+  (`NpcSpawnerShared::saved_death`). A fresh dungeon creates new spawners, so the next run is
+  repopulated; scripted `do_event_spawn` still works. Owner evidence (cloud server): the
+  killed Sharpwind slimes kept respawning; a retail 1.2 video shows a fixed group around the
+  geysers that stays dead. Deviation from the C# (which respawned them). Tests:
+  `npcs::spawn_tests::{save_indun_spawner_does_not_respawn_a_dead_member,
+  instance_placement_without_save_indun_stays_dead}`.
 * systems::quests / systems::npcs (Sharpwind opening chain, 2026-11-11): the C#
   `DoodadFuncAreaTrigger.Use` only logged, and the sphere tick only handled bubbles /
   team messages / accept-quest, so the Derelict Bridge never gave way. The 10.x

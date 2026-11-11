@@ -2382,6 +2382,18 @@ impl SpawnManager {
         self.inner().npc_spawners.clone()
     }
 
+    /// Whether `spawner` is one of this instance's spawn-file placements (`NpcSpawners`), as
+    /// opposed to an event / tower defense / summon spawner (which keeps its own respawn
+    /// rules). Used by the one-run instance freeze on death (`npc::spawner`).
+    pub fn is_placement_spawner(&self, spawner: &NpcSpawner) -> bool {
+        let inner = self.inner();
+        inner
+            .npc_spawners
+            .values()
+            .flatten()
+            .any(|s| std::ptr::eq(s.as_ref(), spawner))
+    }
+
     /// A doodad management group uses explicit authored membership, not spawner template IDs.
     pub fn set_management_group(
         &self,
