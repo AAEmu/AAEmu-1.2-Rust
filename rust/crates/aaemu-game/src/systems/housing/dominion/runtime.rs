@@ -986,6 +986,18 @@ pub fn tick_once(server: &GameServer) {
     }
 }
 
+/// The once-a-second participant sweep: the participant buffs, the siege-area snapshot, the
+/// participant seals and the eviction of non-participants. The order matters: the snapshot is
+/// rebuilt before the eviction (and the hostility rule) read it. It touches item containers and
+/// the world, so it must never run while the economy operation scope or the housing operation
+/// lock is held; the spawned loop of [`start_tick`] is the only production caller.
+pub fn participant_sweep(server: &GameServer) {
+    super::participants::sync_all(server);
+    super::siege_area::refresh(server);
+    super::seals::reconcile(server);
+    super::siege_area::evict_non_participants(server);
+}
+
 pub fn start_tick(server: &Arc<GameServer>) {
     let server = server.clone();
     tokio::spawn(async move {
@@ -996,7 +1008,7 @@ pub fn start_tick(server: &Arc<GameServer>) {
             participant_tick += 1;
             if participant_tick == 4 {
                 participant_tick = 0;
-                super::participants::sync_all(&server);
+                participant_sweep(&server);
             }
             let channels: Vec<_> = server
                 .systems

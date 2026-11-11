@@ -102,6 +102,18 @@ pub struct HousingConfig {
     /// `Housing.SiegeShopGate`.
     #[serde(rename = "siegeshopgate", deserialize_with = "crate::config::lenient")]
     pub siege_shop_gate: bool,
+    /// Move every character that is not a participant of a running siege out of its area
+    /// (`dominion::siege_area::evict_non_participants`). The rule is INFERRED from period
+    /// guides only (IGN / Total ArcheAge 2014, grade C); no 1.2 server source or capture shows
+    /// the removal. `true` (default) applies it, `false` leaves every character where it
+    /// stands. GMs (`access_level >= 100`) are never moved. The hostility between the two
+    /// sides and the participant seals are not affected by this switch.
+    /// `Housing.SiegeEvictNonParticipants`.
+    #[serde(
+        rename = "siegeevictnonparticipants",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub siege_evict_non_participants: bool,
     /// Apply the 1.2 client's place-skin terrain material rule to player doodad placements:
     /// the terrain material under the spot must be one of the template's
     /// `doodad_place_skins` kinds, else `DOODAD_SIM_AREA` (276). `false` (default) keeps the
@@ -242,6 +254,7 @@ impl Default for HousingConfig {
             dominion_claim_limit: default_dominion_claim_limit(),
             defense_hq_offset: [0.0; 3],
             siege_shop_gate: false,
+            siege_evict_non_participants: true,
             placement_strict_surface: false,
             abandoned_house_hits_to_break: default_abandoned_house_hits_to_break(),
             siege_declare_house_margin: 10.0,
@@ -337,6 +350,26 @@ mod tests {
             }))
             .unwrap();
             assert!(config.housing.siege_shop_gate);
+        }
+    }
+
+    #[test]
+    fn siege_evict_non_participants_defaults_on_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(default.housing.siege_evict_non_participants);
+        for value in [serde_json::json!(false), serde_json::json!("false")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeEvictNonParticipants": value }
+            }))
+            .unwrap();
+            assert!(!config.housing.siege_evict_non_participants);
+        }
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "SiegeEvictNonParticipants": value }
+            }))
+            .unwrap();
+            assert!(config.housing.siege_evict_non_participants);
         }
     }
 

@@ -1045,6 +1045,34 @@ only, not from a capture of the retail server. Keep the switch off until an orig
 capture shows how the retail shop behaved. The implementation and the open question are
 recorded in `rust/crates/aaemu-game/PORTING.md` (WP-SD4a).
 
+## Siege area: removal of non-participants
+
+While a siege runs, a character that stands inside the siege area (the Archeum Lodestone's
+siege radius, or the attackers' camp circle) without being a participant of the siege is moved
+to the nearest return point outside the area, and the client shows "Not a siege participant".
+The check runs once a second. A participant is a character on the siege roster that still
+belongs to its side's guild; game masters (access level 100 or higher) are never moved. The
+rule is **on** by default. To leave everybody where they stand, add this game-server override
+to `Config.Local.json`:
+
+```json
+{
+  "Housing": {
+    "SiegeEvictNonParticipants": false
+  }
+}
+```
+
+The switch covers the removal only. The hostility between the two siege sides inside the area
+and the participant seals are always on.
+
+**Capture-pending (INFERRED):** the removal comes from 2014 period guides (grade C), not from a
+1.2 server source or a capture of the retail server. In the 1.2 data the castle zones are
+`closed`, so the zone-access rule already removes non-GM characters from them: with the
+unchanged data only GMs can stand in a castle area, and this rule spares them. It matters on a
+server whose castle zones are open. The implementation and the open questions are recorded in
+`rust/crates/aaemu-game/PORTING.md`.
+
 ## Siege calendar and territory claim-window timezone
 
 `Housing.SiegeCalendarTimezone` is the wall-clock offset of the `siege_zones` weekday/hour
