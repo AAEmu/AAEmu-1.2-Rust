@@ -43,5 +43,23 @@
             "Z": 154.5,
             "Yaw": 157.5
         }
+     },
+     {
+        "UnitId": 57, // Bloodhand Base Cannon (Marooned Isle rampart, "Rout the Bloodhands" 2325; placed on the collision floor, inferred position)
+        "Position": {
+            "X": 19759.0,
+            "Y": 11755.0,
+            "Z": 126.076,
+            "Yaw": -0.994
+        }
+     },
+     {
+        "UnitId": 57, // Bloodhand Base Cannon (Marooned Isle rampart, "Rout the Bloodhands" 2325; placed on the collision floor, inferred position)
+        "Position": {
+            "X": 19784.0,
+            "Y": 11742.0,
+            "Z": 126.076,
+            "Yaw": -0.511
+        }
      }
 ]
