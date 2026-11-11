@@ -488,9 +488,16 @@ fn create_player_doodad_with_labor(
     let placement_guard = validate_placement.then(|| world.placement_guard());
     if validate_placement {
         if let Some(template) = server.game_data.systems.npcs.doodad.template(id) {
-            if let Some(refusal) =
-                placement::refusal(server, &world, player, template, item_template_id, pos)
-            {
+            if let Some(refusal) = placement::refusal(
+                server,
+                &world,
+                player,
+                template,
+                item_template_id,
+                pos,
+                z_rot,
+                scale,
+            ) {
                 drop(placement_guard);
                 tracing::warn!(
                     "{char_name}: doodad {id} not placed at {pos:?}: {refusal:?} ({})",
@@ -724,10 +731,17 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         return;
     };
     // The 1.2 seed builder's rules (`FUN_393a8fa0`): area, water, 30 m 3D range, doodads, units,
-    // then the Territory Statue blueprint's dominion gate.
-    if let Some(refusal) =
-        placement::refusal(server, &world, player, template, item.template_id, pos)
-    {
+    // the Territory Statue blueprint's dominion gate, then the footprint terrain spread.
+    if let Some(refusal) = placement::refusal(
+        server,
+        &world,
+        player,
+        template,
+        item.template_id,
+        pos,
+        p.z_rot,
+        p.scale,
+    ) {
         tracing::warn!(
             "CreateDoodad, doodad {} at {pos:?} refused: {refusal:?}",
             p.id
