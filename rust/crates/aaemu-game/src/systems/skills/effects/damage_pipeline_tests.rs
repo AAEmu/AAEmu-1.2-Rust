@@ -2088,3 +2088,86 @@ async fn damage_pipeline_height_bonus_dot_uses_the_application_height() {
         );
     }
 }
+
+/// Any skill id: the height factor is not scoped to a skill (only to the damage effect's
+/// `adjust_damage_by_height` flag), so the buff-effect tests need no skill row.
+const HEIGHT_SKILL: u32 = 42_000;
+
+fn height_dot_data(stack_rule: u32) -> GameData {
+    let mut data =
+        dot_data_with_stack_rule(height_damage_effect(DOT_EFFECT), 1_000, 1_000.0, stack_rule);
+    data.formulas.insert_formula(HEIGHT_ROW, HEIGHT_FORMULA);
+    data
+}
+
+/// The real DoT path: a skill's `BuffEffect` (`combat::buff_effect`) applies the DoT buff and
+/// captures the height factor at the application, like the archery distance. (The test above
+/// covers `buffs::apply_template`, whose callers are channeling and toggle buffs.)
+#[tokio::test]
+async fn damage_pipeline_height_bonus_buff_effect_captures_the_application_height() {
+    for (apply_height, tick_height, expected) in [(10.0, 0.0, 115), (0.0, 10.0, 100)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(height_dot_data(0));
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + apply_height);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index = apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, HEIGHT_SKILL);
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + tick_height);
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied {apply_height} m above, ticked {tick_height} m above"
+        );
+    }
+}
+
+/// A DoT that stacks by refresh takes the height factor of its latest application, in both
+/// directions (the refresh arm of `Buffs::add_buff_with_duration` must carry the field, like the
+/// archery range factor).
+#[tokio::test]
+async fn damage_pipeline_height_bonus_refreshed_dot_uses_the_latest_application() {
+    for (first, second, expected) in [(10.0, 0.0, 100), (0.0, 10.0, 115)] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(
+            height_dot_data(crate::data::skills::stack_rule::REFRESH),
+        );
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + first);
+        let index = apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, HEIGHT_SKILL);
+        player
+            .data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0, 100.0 + second);
+        let refreshed =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, HEIGHT_SKILL);
+        assert_eq!(
+            refreshed, index,
+            "the second application refreshed the buff"
+        );
+        assert_eq!(
+            target.with_base_unit(|b| b.buffs().buff_count_by_id(DOT_BUFF)),
+            1,
+            "refreshed, not stacked"
+        );
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied {first} m above, then {second} m above"
+        );
+    }
+}

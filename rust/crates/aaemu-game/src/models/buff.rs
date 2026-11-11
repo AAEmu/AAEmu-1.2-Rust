@@ -84,8 +84,9 @@ pub struct Buff {
     /// by refresh). Runtime only: a buff restored from the database starts at 1.0.
     pub range_damage_multiplier: f32,
     /// The height multiplier (`formulas` row 11) at the moment this buff was applied, used by
-    /// its damage ticks whose damage effect sets `adjust_damage_by_height`. Runtime only: a
-    /// buff restored from the database starts at 1.0.
+    /// its damage ticks whose damage effect sets `adjust_damage_by_height`. A refresh by a new
+    /// application replaces it, like the range factor. Runtime only: a buff restored from the
+    /// database starts at 1.0.
     pub height_damage_multiplier: f32,
 }
 
@@ -430,8 +431,8 @@ impl Buffs {
         match last {
             // `last.OverwriteWith(buff)`: charge, ab level, caster and skill caster are taken
             // over, the timer restarts (Extend adds the remaining time), everything else (index,
-            // skill, template, passive flag) stays. The Rust-only close-range factor belongs to
-            // the latest application, like the caster.
+            // skill, template, passive flag) stays. The Rust-only damage factors (close-range
+            // and height) belong to the latest application, like the caster.
             Some(i) => {
                 let e = &mut self.effects[i];
                 let previous_caster_obj_id = e.caster_obj_id;
@@ -444,6 +445,7 @@ impl Buffs {
                 e.skill_caster_bytes = buff.skill_caster_bytes;
                 e.session_only |= buff.session_only;
                 e.range_damage_multiplier = buff.range_damage_multiplier;
+                e.height_damage_multiplier = buff.height_damage_multiplier;
                 e.start_time_ms = now_ms;
                 e.duration = if e.permanent {
                     0
@@ -591,6 +593,36 @@ mod tests {
                 (buffs.effects[0].range_damage_multiplier - second).abs() < 1e-6,
                 "first shot x{first}, second shot x{second}: ticks use x{}",
                 buffs.effects[0].range_damage_multiplier
+            );
+        }
+    }
+
+    /// Same for the height factor (`formulas` row 11): the refresh arm must carry every Rust-only
+    /// damage factor of the new application, in both directions.
+    #[test]
+    fn a_refresh_takes_the_new_applications_height_factor() {
+        let mut t = BuffTemplate::simple(196, BuffKind::Bad);
+        t.duration = 14_000;
+        t.stack_rule = stack_rule::REFRESH;
+        for (first, second) in [(1.15, 1.0), (1.0, 1.15)] {
+            let mut buffs = Buffs::default();
+            let mut a = Buff::new(t.clone(), SkillCaster::default(), None, 0);
+            a.height_damage_multiplier = first;
+            a.range_damage_multiplier = 0.8;
+            buffs.add_buff(a, 0, 0, 0);
+            let mut b = Buff::new(t.clone(), SkillCaster::default(), None, 500);
+            b.height_damage_multiplier = second;
+            b.range_damage_multiplier = 1.0;
+            buffs.add_buff(b, 0, 0, 500);
+            assert_eq!(buffs.effects.len(), 1, "refreshed, not stacked");
+            assert!(
+                (buffs.effects[0].height_damage_multiplier - second).abs() < 1e-6,
+                "first x{first}, second x{second}: ticks use x{}",
+                buffs.effects[0].height_damage_multiplier
+            );
+            assert!(
+                (buffs.effects[0].range_damage_multiplier - 1.0).abs() < 1e-6,
+                "the range factor is still taken over with it"
             );
         }
     }
