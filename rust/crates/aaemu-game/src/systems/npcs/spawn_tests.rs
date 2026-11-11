@@ -3401,7 +3401,7 @@ fn quest_fill_npcs_reach_the_area_spawner_minimum() {
 /// `npc_spawns_quest_fill.json` points bring the spawn points of its area spawner members to the
 /// spawner's authored `min_population` (and not above its `maxPopulation` where the fill applied).
 /// Points are counted within 350 m of the area centre, distinct per template (the loader drops
-/// rows of the same template within 2 m, so the stacked Schima Rogue rows count once). Four areas
+/// rows of the same template within 2 m, so the stacked Schima Rogue rows count once). Three areas
 /// already held their `min_population` and were left alone: the Poacher 2514 camp (4 >= 4), the
 /// Wild Fangs Poacher 9201 camp (5 points, already above its max 3) and the Pavitra's Fall site
 /// 12814 (15 = min; its Death Shroud 2906 share is 3 of the authored mix, so quest 943's 8 kills
