@@ -774,6 +774,11 @@ fn use_skill_impl(
             caster,
             target.as_ref().and_then(Target::as_obj),
         ) {
+            tracing::debug!(
+                skill_id = template.id,
+                requirement = req,
+                "Skill use refused: the buff skill requirement failed"
+            );
             skill.state().cancelled = true;
             return (skill_result::SKILL_REQ_FAIL, req);
         }
