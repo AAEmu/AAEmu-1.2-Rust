@@ -3386,11 +3386,28 @@ impl SpawnManager {
         // Oldest booking first: a placement that dropped out never loses its stable deadline,
         // and budget-starved passes continue with the same oldest entrants next time.
         cold.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        // A placement whose NPCs are streamed by a far quest-map viewer is still warm even when
+        // it sits outside every player's warm ring; reclaiming it would only make the map
+        // refresh rebuild it (cold-reclaim churn).
+        let streamed = server.systems.quests.quest_map.streamed_npc_ids();
         let resident_gate = server.config.world.npc_resident_service_npcs;
         let residents = server.systems.npcs.spawns.resident_npcs(server);
         let mut bookings: Vec<(u32, Instant)> = Vec::new();
+        let mut keep_warm: Vec<u32> = Vec::new();
         let mut drop_entries: Vec<u32> = Vec::new();
         for (expires_at, id, spawner, resident) in cold {
+            if !streamed.is_empty()
+                && spawner
+                    .spawned_npcs()
+                    .values()
+                    .flatten()
+                    .any(|npc| streamed.contains(&npc.obj_id))
+            {
+                // Clear the retention booking: if streaming stops the placement starts its
+                // countdown from that pass instead of expiring immediately.
+                keep_warm.push(id);
+                continue;
+            }
             // The homogeneous residency fast path is re-validated against the live members: a
             // placement whose classification is cached from an earlier pass must not stay
             // skipped once a runtime-owned (never resident) member appears.
@@ -3430,6 +3447,11 @@ impl SpawnManager {
         for (id, deadline) in bookings {
             if let Some(entry) = state.warmed.get_mut(&id) {
                 entry.expires_at = Some(deadline);
+            }
+        }
+        for id in keep_warm {
+            if let Some(entry) = state.warmed.get_mut(&id) {
+                entry.expires_at = None;
             }
         }
         for id in drop_entries {
@@ -3623,6 +3645,9 @@ pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
 /// the respawn of an NPC that died. No-op for NPCs without a spawner. The caller must not hold
 /// any object lock.
 pub fn on_npc_died(server: &GameServer, npc: &NpcRef) {
+    // A far quest-map viewer only knows this NPC through the map option; the death broadcast
+    // never reaches it, so its marker must be removed explicitly.
+    server.systems.quests.quest_map.forget_npc(server, npc);
     if let Some(s) = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id) {
         s.do_despawn(server, npc);
     }

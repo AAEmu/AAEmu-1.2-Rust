@@ -13,7 +13,7 @@
 //! driver sends `/questmap <m|0>` after entering the world and when the option is saved.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::server::GameServer;
@@ -111,6 +111,10 @@ struct PlayerState {
 #[derive(Debug, Default)]
 pub struct State {
     players: Mutex<HashMap<u32, PlayerState>>,
+    /// Serializes a snapshot + world work + commit with range changes. A refresh holds this,
+    /// takes `players` only to snapshot / commit, releases it before any world call and never
+    /// takes this lock from inside a world / spawner path.
+    refreshing: Mutex<()>,
 }
 
 impl State {
@@ -133,6 +137,61 @@ impl State {
             .expect("quest map state poisoned")
             .remove(&character_id);
     }
+
+    /// Obj ids of the extra marker NPCs currently streamed by any tracked player. The spawn
+    /// activation sweep keeps their placements warm instead of reclaiming and rebuilding them
+    /// every retention period.
+    pub fn streamed_npc_ids(&self) -> HashSet<u32> {
+        self.players
+            .lock()
+            .expect("quest map state poisoned")
+            .values()
+            .flat_map(|p| p.extra.keys().copied())
+            .collect()
+    }
+
+    /// Test guard against the 2026-11-11 lock cycle: a world call must never run while the
+    /// state mutex is held. `try_lock` re-entered from the owning thread fails, so a caller
+    /// that kept the guard across world work trips this.
+    #[cfg(test)]
+    fn assert_unlocked(&self) {
+        assert!(
+            self.players.try_lock().is_ok(),
+            "quest map state lock held across a world call"
+        );
+    }
+
+    /// Forgets `npc` for every player that streamed it only through this option and sends
+    /// those players the unit removal. The ordinary removal broadcast reaches only the NPC's
+    /// region neighbourhood; a far quest-map viewer would otherwise keep a ghost unit / marker.
+    pub fn forget_npc(&self, server: &GameServer, npc: &NpcRef) {
+        let mut targets: Vec<u32> = Vec::new();
+        {
+            let mut players = self.players.lock().expect("quest map state poisoned");
+            for (&character_id, ps) in players.iter_mut() {
+                if ps
+                    .extra
+                    .get(&npc.obj_id)
+                    .is_some_and(|tracked| Arc::ptr_eq(tracked, npc))
+                {
+                    ps.extra.remove(&npc.obj_id);
+                    targets.push(character_id);
+                }
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let obj = WorldObject::Npc(npc.clone());
+        let Some(world) = server.world.world_of(&obj) else {
+            return;
+        };
+        for character_id in targets {
+            if let Some(player) = server.world.character_by_id(character_id) {
+                visibility::remove_visible_object(&world, &obj, &player);
+            }
+        }
+    }
 }
 
 fn new_player_state(range: Range) -> PlayerState {
@@ -147,6 +206,7 @@ fn new_player_state(range: Range) -> PlayerState {
 /// `/questmap <100|200|300|0>`: changes the range and applies it immediately.
 pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range {
     let state = &server.systems.quests.quest_map;
+    let _serial = state.refreshing.lock().expect("quest map state poisoned");
     let previous = {
         let mut players = state.players.lock().expect("quest map state poisoned");
         let entry = players
@@ -157,7 +217,7 @@ pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range
         entry.last_refresh = Instant::now() - REFRESH_INTERVAL * 2;
         previous
     };
-    refresh_player(server, player, SPAWN_BUDGET_PER_TICK);
+    refresh_player_locked(server, player, SPAWN_BUDGET_PER_TICK);
     if range.is_default() {
         // Nothing can be extra at 100 m; the removal pass above has run.
         state
@@ -197,13 +257,28 @@ pub fn tick(server: &GameServer) {
     }
 }
 
-/// Applies the player's range and returns the NPC creation budget spent.
+/// Refreshes one tracked player (tick / [`set_range`] entry point).
 fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
     let state = &server.systems.quests.quest_map;
-    let mut players = state.players.lock().expect("quest map state poisoned");
-    let Some(ps) = players.get_mut(&player.character_id) else {
-        return 0;
+    let _serial = state.refreshing.lock().expect("quest map state poisoned");
+    refresh_player_locked(server, player, budget)
+}
+
+/// Applies the player's range and returns the NPC creation budget spent. The caller holds
+/// [`State::refreshing`] and must not hold the `players` mutex: it is taken only to snapshot
+/// and to commit, never across a world call (2026-11-11 lock cycle).
+fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
+    let state = &server.systems.quests.quest_map;
+    let (range, last_refresh, last_pos, extra) = {
+        let players = state.players.lock().expect("quest map state poisoned");
+        let Some(ps) = players.get(&player.character_id) else {
+            return 0;
+        };
+        (ps.range, ps.last_refresh, ps.last_pos, ps.extra.clone())
     };
+    #[cfg(test)]
+    state.assert_unlocked();
+
     let now = Instant::now();
     let Some((inst, prx, pry)) = player.region() else {
         return 0;
@@ -213,14 +288,11 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
     };
     let world_object = WorldObject::from(player);
     let pos = world.world_pos_rot(&world_object);
-    let range = ps.range;
-    let forced = ps.last_refresh.elapsed() >= REFRESH_INTERVAL
-        || (pos.x - ps.last_pos.0).powi(2) + (pos.y - ps.last_pos.1).powi(2) > MOVE_EPSILON_SQ;
+    let forced = last_refresh.elapsed() >= REFRESH_INTERVAL
+        || (pos.x - last_pos.0).powi(2) + (pos.y - last_pos.1).powi(2) > MOVE_EPSILON_SQ;
     if !forced && !range.is_default() {
         return 0;
     }
-    ps.last_refresh = now;
-    ps.last_pos = (pos.x, pos.y);
 
     let radius = range.radius();
     let radius2 = if radius.is_finite() {
@@ -240,7 +312,8 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
         spent: 0,
     };
     if !range.is_default() {
-        collect_live_quest_givers(server, &world, &query, &mut set);
+        #[cfg(test)]
+        state.assert_unlocked();
         if let Some(manager) =
             crate::systems::npcs::spawn_manager::manager_of(server, &world_object, Some(inst))
         {
@@ -249,14 +322,24 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
     }
 
     // Removals first: an NPC that left the range, despawned or became naturally visible.
+    #[cfg(test)]
+    state.assert_unlocked();
     let mut dead: Vec<u32> = Vec::new();
     let mut removals: Vec<NpcRef> = Vec::new();
-    for (id, stored) in ps.extra.iter() {
+    for (id, stored) in extra.iter() {
         let current = world.object(*id).and_then(|o| o.as_npc().cloned());
-        let same = current
-            .as_ref()
-            .is_some_and(|npc| std::sync::Arc::ptr_eq(npc, stored));
+        let same = current.as_ref().is_some_and(|npc| Arc::ptr_eq(npc, stored));
         if !same {
+            // The unit the client still holds is gone (deleted, or its id reused). Do not hide
+            // a replacement that already became naturally visible under the reused id.
+            let replacement_visible = current.as_ref().is_some_and(|npc| {
+                world
+                    .region_of(&WorldObject::Npc(npc.clone()))
+                    .is_some_and(|r| set.natural.contains(&r))
+            });
+            if !replacement_visible {
+                removals.push(stored.clone());
+            }
             dead.push(*id);
             continue;
         }
@@ -265,12 +348,14 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
         let is_natural = world
             .region_of(&obj)
             .is_some_and(|r| set.natural.contains(&r));
-        let np = world.world_pos_rot(&obj);
-        let d2 = (np.x - pos.x).powi(2) + (np.y - pos.y).powi(2);
         if is_natural {
             // The regular region add/remove path owns it from now on.
             dead.push(*id);
-        } else if d2 > radius2 {
+            continue;
+        }
+        let np = world.world_pos_rot(&obj);
+        let d2 = (np.x - pos.x).powi(2) + (np.y - pos.y).powi(2);
+        if d2 > radius2 || !npc.is_visible() {
             removals.push(npc);
             dead.push(*id);
         }
@@ -278,21 +363,21 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
     for npc in removals {
         visibility::remove_visible_object(&world, &WorldObject::Npc(npc), player);
     }
-    for id in dead {
-        ps.extra.remove(&id);
-    }
 
     // Adds: nearest first, bounded by the option cap.
+    let mut added: Vec<(u32, NpcRef)> = Vec::new();
     if !range.is_default() {
+        #[cfg(test)]
+        state.assert_unlocked();
         let mut ordered: Vec<(f32, NpcRef)> = set.candidates.into_values().collect();
         ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
         let ctx = server.view_ctx();
         for (_, npc) in ordered {
-            if ps.extra.len() >= MAX_EXTRA_NPCS {
+            if extra.len() + added.len() >= MAX_EXTRA_NPCS {
                 break;
             }
             let id = npc.obj_id;
-            if ps.extra.contains_key(&id) {
+            if extra.contains_key(&id) {
                 continue;
             }
             let obj = WorldObject::Npc(npc.clone());
@@ -303,13 +388,50 @@ fn refresh_player(server: &GameServer, player: &PlayerRef, budget: i64) -> i64 {
                 continue;
             }
             visibility::add_visible_object(&world, &obj, player, &ctx);
-            ps.extra.insert(id, npc);
+            added.push((id, npc));
+        }
+    }
+
+    // Commit briefly. `refreshing` keeps range changes out, so only a `forget` (leave-world)
+    // can have removed the entry; a changed set is merged by Arc identity.
+    let committed = {
+        let mut players = state.players.lock().expect("quest map state poisoned");
+        match players.get_mut(&player.character_id) {
+            Some(ps) if ps.range == range => {
+                for id in &dead {
+                    let tracked = extra.get(id);
+                    if ps
+                        .extra
+                        .get(id)
+                        .is_some_and(|n| tracked.is_some_and(|t| Arc::ptr_eq(n, t)))
+                    {
+                        ps.extra.remove(id);
+                    }
+                }
+                for (id, npc) in &added {
+                    if ps.extra.len() >= MAX_EXTRA_NPCS {
+                        break;
+                    }
+                    ps.extra.entry(*id).or_insert_with(|| npc.clone());
+                }
+                ps.last_refresh = now;
+                ps.last_pos = (pos.x, pos.y);
+                true
+            }
+            _ => false,
+        }
+    };
+    if !committed {
+        // The player left the world or changed range while this refresh ran: nothing may stay
+        // streamed without being tracked, it would never be removed.
+        for (_, npc) in added {
+            visibility::remove_visible_object(&world, &WorldObject::Npc(npc), player);
         }
     }
     set.spent
 }
 
-/// The player-centred query shared by the two candidate collectors.
+/// The player-centred query of the placement collector.
 struct MarkerQuery {
     center: (f32, f32),
     radius: f32,
@@ -323,39 +445,10 @@ struct CandidateSet {
     spent: i64,
 }
 
-/// Live NPCs already in the instance whose template is a safe quest giver.
-fn collect_live_quest_givers(
-    server: &GameServer,
-    world: &WorldInstance,
-    query: &MarkerQuery,
-    set: &mut CandidateSet,
-) {
-    let residents = server.systems.npcs.spawns.resident_npcs(server);
-    let npcs = &server.game_data.systems.npcs.npc;
-    for npc in world.all_npcs() {
-        let template_id = npc.data().unit.template_id;
-        let Some(template) = npcs.template(template_id) else {
-            continue;
-        };
-        if !residents.is_quest_map_candidate(template) {
-            continue;
-        }
-        let obj = WorldObject::Npc(npc.clone());
-        if world
-            .region_of(&obj)
-            .is_some_and(|r| set.natural.contains(&r))
-        {
-            continue;
-        }
-        let p = world.world_pos_rot(&obj);
-        let d2 = (p.x - query.center.0).powi(2) + (p.y - query.center.1).powi(2);
-        if d2 <= query.radius2 {
-            set.candidates.entry(npc.obj_id).or_insert((d2, npc));
-        }
-    }
-}
-
 /// Prepares ordinary quest-giver placements around the player and collects their live NPCs.
+/// This is the only marker source: every production quest giver / reporter is created by an
+/// ordinary spawner placement, so the placement index already yields the same live NPCs a
+/// world-wide `all_npcs()` scan would, without scanning tens of thousands of NPCs per player.
 fn collect_from_spawners(
     server: &GameServer,
     world: &WorldInstance,
@@ -364,6 +457,8 @@ fn collect_from_spawners(
     budget: i64,
     set: &mut CandidateSet,
 ) {
+    #[cfg(test)]
+    server.systems.quests.quest_map.assert_unlocked();
     let residents = server.systems.npcs.spawns.resident_npcs(server);
     let npcs = &server.game_data.systems.npcs.npc;
     for spawner in manager.quest_giver_spawners_near(
@@ -388,7 +483,7 @@ fn collect_from_spawners(
             if !residents.is_quest_map_candidate(template) {
                 continue;
             }
-            if npc.data().unit.is_dead() {
+            if npc.data().unit.is_dead() || !npc.is_visible() {
                 continue;
             }
             let obj = WorldObject::Npc(npc.clone());
@@ -412,21 +507,58 @@ fn collect_from_spawners(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use aaemu_commons::PacketStream;
 
     use super::*;
     use crate::data::GameData;
     use crate::models::npc::Npc;
     use crate::opcodes::sc;
+    use crate::systems::npcs::doodad::spawner::{NpcSpawnerDef, SpawnerBase};
     use crate::systems::npcs::npc::data::NpcTemplate;
+    use crate::systems::npcs::npc::spawner_data::{
+        NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate,
+    };
+    use crate::systems::npcs::spawn_manager::{backend::TestBackend, SpawnManager};
     use crate::systems::quests::data::QuestData;
     use crate::systems::quests::model::kind;
     use crate::systems::quests::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
     use crate::test_support::*;
-    use crate::world::Entity;
+    use crate::world::{DoodadRef, Entity, NpcRef, WorldInstance};
 
     const QUEST_NPC: u32 = 500;
     const OTHER_NPC: u32 = 600;
+    const GIVER_SPAWNER: u32 = 10;
+    const OTHER_SPAWNER: u32 = 20;
+
+    /// Creates NPCs for the ordinary spawner path without the DB-backed manager.
+    struct Backend;
+
+    impl TestBackend for Backend {
+        fn npc_create(&self, server: &GameServer, obj_id: u32, template_id: u32) -> Option<NpcRef> {
+            let id = if obj_id == 0 {
+                server.ids.object.get_next_id().ok()?
+            } else {
+                obj_id
+            };
+            let mut n = Npc::new(template_id);
+            n.unit.level = 5;
+            n.unit.hp = 100;
+            n.unit.max_hp = 100;
+            Some(Entity::new(id, n))
+        }
+
+        fn doodad_create(
+            &self,
+            _server: &GameServer,
+            _world: &Arc<WorldInstance>,
+            _obj_id: u32,
+            _template_id: u32,
+        ) -> Option<DoodadRef> {
+            None
+        }
+    }
 
     fn add_quest_act(q: &mut QuestData, id: u32, component_kind: u8, act: ActKind) {
         q.add_template(QuestTemplate {
@@ -465,12 +597,85 @@ mod tests {
 
     fn npc(template_id: u32, x: f32, y: f32) -> Npc {
         let mut n = Npc::new(template_id);
-        n.unit.name = format!("npc{template_id}");
         n.unit.level = 5;
         n.unit.hp = 100;
         n.unit.max_hp = 100;
         n.unit.transform.set_xyz(x, y, 100.0);
         n
+    }
+
+    fn spawner_template(id: u32) -> NpcSpawnerTemplate {
+        NpcSpawnerTemplate {
+            id,
+            name: format!("t{id}"),
+            max_population: 1,
+            spawn_delay_min: 10.0,
+            spawn_delay_max: 10.0,
+            test_radius_npc: 3.0,
+            ..NpcSpawnerTemplate::default()
+        }
+    }
+
+    fn spawner_member(id: u32, spawner_id: u32, npc_id: u32) -> NpcSpawnerNpc {
+        NpcSpawnerNpc {
+            id,
+            npc_spawner_template_id: spawner_id,
+            member_id: npc_id,
+            member_type: "Npc".into(),
+            weight: 1.0,
+            unit_id: 0,
+        }
+    }
+
+    fn npc_def(unit_id: u32, x: f32, y: f32) -> NpcSpawnerDef {
+        let base = SpawnerBase {
+            unit_id,
+            position: crate::data::world_templates::WorldSpawnPosition {
+                x,
+                y,
+                z: 100.0,
+                ..Default::default()
+            },
+            ..SpawnerBase::default()
+        };
+        NpcSpawnerDef {
+            base,
+            count: 1,
+            npc_spawner_ids: Vec::new(),
+        }
+    }
+
+    fn server() -> Arc<GameServer> {
+        let mut gd = data();
+        gd.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+            vec![
+                spawner_template(GIVER_SPAWNER),
+                spawner_template(OTHER_SPAWNER),
+            ],
+            vec![
+                spawner_member(100, GIVER_SPAWNER, QUEST_NPC),
+                spawner_member(200, OTHER_SPAWNER, OTHER_NPC),
+            ],
+        )
+        .expect("spawner data");
+        let server = Arc::new(test_server_with(gd));
+        server.set_self();
+        *server
+            .systems
+            .npcs
+            .spawns
+            .test_backend
+            .lock()
+            .expect("test backend") = Some(Arc::new(Backend));
+        server
+    }
+
+    fn manager(server: &Arc<GameServer>) -> Arc<SpawnManager> {
+        server
+            .systems
+            .npcs
+            .spawns
+            .get_or_create(&server.world.world(0).expect("main_world"))
     }
 
     fn ids_packet(ids: &[u32]) -> (u16, Vec<u8>) {
@@ -498,26 +703,26 @@ mod tests {
 
     #[tokio::test]
     async fn range_streams_far_quest_givers_and_removes_them_again() {
-        let server = test_server_with(data());
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        m.add_npc_spawner(&server, npc_def(OTHER_NPC, 1000.0, 1270.0))
+            .expect("other placement");
         let mut client = TestClient::new(&server, 1, 1001);
         let player = spawn_player(
             &server,
             &client,
             test_character(1, "Quester", 1000.0, 1000.0),
-            0x100,
+            5000,
         );
         client.drain();
+        let world = server.world.world(0).expect("main_world");
 
         // 250 m away: outside the ordinary 2-region neighbourhood.
-        let far = Entity::new(0x500, npc(QUEST_NPC, 1000.0, 1250.0));
-        let other = Entity::new(0x600, npc(OTHER_NPC, 1000.0, 1270.0));
-        let world = server.world.world(0).expect("main_world");
-        let ctx = server.view_ctx();
-        world.spawn(&far, &ctx);
-        world.spawn(&other, &ctx);
-        assert!(client.drain().is_empty(), "both are naturally out of range");
+        assert!(client.drain().is_empty(), "nothing is streamed yet");
 
-        // 300 m: only the safe quest giver is streamed.
+        // 300 m: only the safe quest giver placement is prepared and streamed.
         set_range(&server, &player, Range::Meters300);
         let frames = client.drain();
         assert_eq!(
@@ -525,21 +730,39 @@ mod tests {
             vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
             "one quest giver"
         );
+        let giver = world
+            .all_npcs()
+            .into_iter()
+            .find(|n| n.data().unit.template_id == QUEST_NPC)
+            .expect("prepared giver");
         let mut expected = npc(QUEST_NPC, 1000.0, 1250.0);
-        let body =
-            crate::world::unit_state::npc_unit_state(0x500, &mut expected, "", ctx.now_ms).body;
+        let body = crate::world::unit_state::npc_unit_state(
+            giver.obj_id,
+            &mut expected,
+            "",
+            server.view_ctx().now_ms,
+        )
+        .body;
         assert_eq!(
             frames[0].1, body,
             "SCUnitState body is the NPC's own writer"
         );
+        assert!(
+            !world
+                .all_npcs()
+                .iter()
+                .any(|n| n.data().unit.template_id == OTHER_NPC),
+            "a non-quest placement is never prepared for a marker"
+        );
 
         // Back to the default: the extra marker is removed.
+        let giver_id = giver.obj_id;
         set_range(&server, &player, Range::Meters100);
-        assert_eq!(client.drain(), vec![ids_packet(&[0x500])]);
+        assert_eq!(client.drain(), vec![ids_packet(&[giver_id])]);
 
-        // Unlimited reaches an NPC far across the instance, still only quest givers.
-        let far2 = Entity::new(0x501, npc(QUEST_NPC, 0.0, 2000.0));
-        world.spawn(&far2, &ctx);
+        // Unlimited reaches a second quest giver far across the instance.
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 0.0, 2000.0))
+            .expect("far placement");
         client.drain();
         set_range(&server, &player, Range::Unlimited);
         let ops = client.drain_ops();
@@ -561,22 +784,30 @@ mod tests {
 
     #[tokio::test]
     async fn default_range_does_not_stream_anything() {
-        let server = test_server_with(data());
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
         let mut client = TestClient::new(&server, 1, 1001);
         let player = spawn_player(
             &server,
             &client,
             test_character(1, "Quester", 1000.0, 1000.0),
-            0x100,
+            5000,
         );
-        let world = server.world.world(0).expect("main_world");
-        let ctx = server.view_ctx();
-        let far = Entity::new(0x500, npc(QUEST_NPC, 1000.0, 1250.0));
-        world.spawn(&far, &ctx);
         client.drain();
 
         set_range(&server, &player, Range::Meters100);
         assert!(client.drain().is_empty());
+        assert!(
+            server
+                .world
+                .world(0)
+                .expect("main_world")
+                .all_npcs()
+                .is_empty(),
+            "the default range prepares and streams nothing"
+        );
         assert_eq!(
             server
                 .systems
@@ -585,5 +816,154 @@ mod tests {
                 .range_of(player.character_id),
             Range::Meters100
         );
+    }
+
+    /// The 2026-11-11 lock cycle: a refresh used to hold `players` while it called into the
+    /// world (spawner `update_warm`, NPC data locks, visibility packets). The world paths of a
+    /// normal refresh assert the state mutex is free, so holding it across them fails here.
+    #[tokio::test]
+    async fn refresh_runs_world_work_without_the_state_lock() {
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+
+        set_range(&server, &player, Range::Meters300);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+        set_range(&server, &player, Range::Meters100);
+        assert_eq!(server.systems.quests.quest_map.tracked_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn despawned_extra_npc_sends_the_unit_removal_to_the_far_player() {
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        set_range(&server, &player, Range::Meters300);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+
+        let world = server.world.world(0).expect("main_world");
+        let npc = world
+            .all_npcs()
+            .into_iter()
+            .find(|n| n.data().unit.template_id == QUEST_NPC)
+            .expect("streamed giver");
+        let obj_id = npc.obj_id;
+        let spawner = server
+            .systems
+            .npcs
+            .spawns
+            .npc_spawner_of(obj_id)
+            .expect("spawner link");
+
+        // The player is several regions away: the ordinary deletion broadcast never reaches it.
+        spawner.despawn(&server, &npc);
+        assert_eq!(
+            client.drain(),
+            vec![ids_packet(&[obj_id])],
+            "the far viewer must not keep a ghost marker"
+        );
+        assert!(server
+            .systems
+            .quests
+            .quest_map
+            .streamed_npc_ids()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn dying_extra_npc_sends_the_unit_removal_to_the_far_player() {
+        let server = server();
+        // The NPC death path reaches `after_death` through the skills -> npcs bridge.
+        crate::systems::npcs::install_hooks(&server);
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        set_range(&server, &player, Range::Meters300);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+
+        let world = server.world.world(0).expect("main_world");
+        let npc = world
+            .all_npcs()
+            .into_iter()
+            .find(|n| n.data().unit.template_id == QUEST_NPC)
+            .expect("streamed giver");
+        let obj_id = npc.obj_id;
+        crate::systems::npcs::npc::death::do_die(&server, &npc, None, 0);
+        let frames = client.drain();
+        assert!(
+            frames.contains(&ids_packet(&[obj_id])),
+            "a dying marker is removed for the far viewer: {frames:?}"
+        );
+        assert!(server
+            .systems
+            .quests
+            .quest_map
+            .streamed_npc_ids()
+            .is_empty());
+    }
+
+    /// Markers come from the ordinary quest-giver placement index, not from a world-wide NPC
+    /// scan: an ad-hoc NPC with a quest-giver template is not a marker source.
+    #[tokio::test]
+    async fn markers_come_from_placements_not_a_world_npc_scan() {
+        let server = server();
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        let world = server.world.world(0).expect("main_world");
+        let ctx = server.view_ctx();
+        world.spawn(Entity::new(0x500, npc(QUEST_NPC, 1000.0, 1250.0)), &ctx);
+        client.drain();
+
+        set_range(&server, &player, Range::Meters300);
+        assert!(
+            client.drain().is_empty(),
+            "a directly spawned quest giver is not a placement marker"
+        );
+        assert!(server
+            .systems
+            .quests
+            .quest_map
+            .streamed_npc_ids()
+            .is_empty());
     }
 }

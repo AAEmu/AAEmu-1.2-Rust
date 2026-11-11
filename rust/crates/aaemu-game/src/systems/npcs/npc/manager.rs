@@ -607,6 +607,9 @@ pub fn delete(server: &GameServer, world: &crate::world::WorldInstance, npc: &Np
     // 10.x partial respawn (`npcs/npc/group.rs`).
     server.systems.npcs.group_batches.on_member_removed(npc);
     world.delete(npc);
+    // The ordinary removal broadcast reaches only the NPC's region neighbourhood; players that
+    // streamed it merely for its quest-map marker must get the unit removal themselves.
+    server.systems.quests.quest_map.forget_npc(server, npc);
 }
 
 #[cfg(test)]
