@@ -190,9 +190,58 @@ async fn a_player_outside_the_sphere_does_not_collapse_the_bridge() {
     );
 }
 
+/// The bridge doodad lies 1.9 m from the centre of its 5 m area (shipped data), so it is out of
+/// the skill's 4 m range of the point where a character crosses into the area (4.5 m or more
+/// along the line through the bridge). The interaction is tried again on every tick while the
+/// character stays inside and fires when it steps onto the bridge; it settles once it has acted,
+/// so a respawned bridge is not collapsed again while the character stays.
+#[tokio::test]
+async fn a_player_who_enters_out_of_range_collapses_the_bridge_when_stepping_onto_it() {
+    let server = test_server_with(data());
+    server.systems.quests.spheres.set_areas(vec![SphereArea {
+        world: "main_world".into(),
+        zone: TEST_ZONE,
+        sphere_id: SPHERE,
+        xyz: (100.0, 100.0, 100.0),
+        radius: 5.0,
+    }]);
+    let client = TestClient::new(&server, 1, 1);
+    // Inside the 5 m area, 4.9 m from the bridge (skill range 4 m).
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 104.9, 100.0),
+        0x100,
+    );
+    let bridge = bridge(&server);
+
+    server.systems.quests.spheres.tick_at(&server, 0);
+    server.systems.quests.spheres.tick_at(&server, 500);
+    assert_eq!(
+        bridge.data().func_group_id,
+        BRIDGE_PHASE,
+        "entered 4.9 m from the bridge: out of the skill's range"
+    );
+
+    // Still inside the area, now 2 m from the bridge.
+    player.data().unit.transform.set_xyz(102.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert_eq!(
+        bridge.data().func_group_id,
+        BROKEN_PHASE,
+        "stepping onto the bridge inside the area collapses it without a new entry"
+    );
+
+    // Settled: the same stay does not collapse the bridge again after it respawned.
+    bridge.data().func_group_id = BRIDGE_PHASE;
+    server.systems.quests.spheres.tick_at(&server, 1_500);
+    assert_eq!(bridge.data().func_group_id, BRIDGE_PHASE);
+}
+
 /// The sphere's own `unit_reqs` gate the dispatch like they gate a `SphereAcceptQuest` offer
 /// (sphere 1161 "needs quest 2288", 501 / 513 / 514 ...): a character that misses them does not
-/// trigger the area, one that meets them does on its next entry.
+/// trigger the area, one that meets them does on the next tick (a level-up while inside) or on
+/// its next entry.
 #[tokio::test]
 async fn a_sphere_whose_requirements_the_player_misses_does_not_collapse_the_bridge() {
     let mut data = data();
@@ -238,10 +287,65 @@ async fn a_sphere_whose_requirements_the_player_misses_does_not_collapse_the_bri
         "a character that misses the sphere's requirements must not trigger it"
     );
 
-    // Level 50 and a fresh entry: the sphere fires.
+    // Level 50 while still inside: the next tick fires, no new entry needed.
     player.data().unit.level = 50;
-    player.data().unit.transform.set_xyz(200.0, 200.0, 100.0);
     server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert_eq!(bridge.data().func_group_id, BROKEN_PHASE);
+}
+
+/// A character that meets the requirements only after leaving the area triggers it on its next
+/// entry (the pending retry ends with the stay).
+#[tokio::test]
+async fn a_player_who_meets_the_requirements_outside_triggers_the_sphere_on_the_next_entry() {
+    // A range wider than the area, so that only the pending retry could reach the bridge from
+    // outside the area.
+    let mut data = data_with_range(100);
+    data.systems
+        .quests
+        .unit_reqs
+        .by_owner
+        .entry("Sphere".into())
+        .or_default()
+        .insert(
+            SPHERE,
+            vec![UnitReq {
+                id: 1,
+                owner_id: SPHERE,
+                owner_type: "Sphere".into(),
+                kind: req_kind::LEVEL,
+                value1: 50,
+                value2: 0,
+            }],
+        );
+    let server = test_server_with(data);
+    server.systems.quests.spheres.set_areas(vec![SphereArea {
+        world: "main_world".into(),
+        zone: TEST_ZONE,
+        sphere_id: SPHERE,
+        xyz: (100.0, 100.0, 100.0),
+        radius: 5.0,
+    }]);
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 100.0, 100.0),
+        0x100,
+    );
+    let bridge = bridge(&server);
+    server.systems.quests.spheres.tick_at(&server, 0);
+    assert_eq!(bridge.data().func_group_id, BRIDGE_PHASE);
+
+    // Leave (20 m from the bridge, outside the 5 m area), level up there, enter again.
+    player.data().unit.transform.set_xyz(120.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    player.data().unit.level = 50;
+    server.systems.quests.spheres.tick_at(&server, 1_500);
+    assert_eq!(
+        bridge.data().func_group_id,
+        BRIDGE_PHASE,
+        "nothing is pending outside the area"
+    );
     player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
     server.systems.quests.spheres.tick_at(&server, 2_000);
     assert_eq!(bridge.data().func_group_id, BROKEN_PHASE);

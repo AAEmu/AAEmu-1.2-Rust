@@ -4730,7 +4730,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `SphereAcceptQuest` offers), it runs the enter row of each doodad of the player's region
   neighbourhood that lies inside the area and within the authored skill's `max_range` (skill
   11284 has 4 m; the largest of the 105 shipped rows is 30 m) under the doodad's phase
-  reservation, then `DoChangePhase`. Sharpwind sphere 1552 ("bridge collapse area", r 5 at the
+  reservation, then `DoChangePhase`. The attempt is repeated on every 500 ms tick while the
+  character stays inside, until it has acted or no doodad inside the area reacts: the bridge
+  doodad lies 1.9 m from the centre of its 5 m area, so it is 3.1 to 6.9 m from the point where
+  a character crosses into the area and only an entry within 48 degrees of the direction to the
+  bridge is inside the 4 m range (the start pool is 60 m east of the bridge: a character coming
+  from it enters the east edge about 5 m from the bridge). An entry-only trigger therefore
+  never collapsed the bridge for a character that walks onto it; the sphere row's
+  `trigger_condition_id` 3 (`EVERY_N_TIME_AFTER`, 500 ms) also describes a repeated check while
+  inside. The same retry runs a sphere whose `unit_reqs` the character meets only
+  while inside (a level-up). A doodad that respawns during the same stay is not triggered again;
+  the cost of a retry is one region-neighbourhood scan per tick for a character that stays in an
+  area whose doodad is out of range. **Inferred (no 1.2 server evidence):** that the retry
+  stops at the first action (a repeated check might trigger every respawn). Sharpwind sphere
+  1552 ("bridge collapse area", r 5 at the
   bridge) contains only doodad 5058, whose row 11162 (`next_phase` 13148) swaps the rail
   model for `rail_a_broken`. **Inferred (no 1.2 server evidence) / capture-pending
   CAP-DOODAD-1:** the shipped `sphere_doodad_interacts.doodad_family_id` (50000) cannot be
@@ -4752,7 +4765,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `doodad::funcs::tests::area_trigger_func_advances_the_bridge_phase_for_a_player`,
   `quests::sphere_doodad_tests::{crossing_the_bridge_sphere_advances_the_bridge_to_its_broken_phase,
   a_player_outside_the_sphere_does_not_collapse_the_bridge,
+  a_player_who_enters_out_of_range_collapses_the_bridge_when_stepping_onto_it,
   a_sphere_whose_requirements_the_player_misses_does_not_collapse_the_bridge,
+  a_player_who_meets_the_requirements_outside_triggers_the_sphere_on_the_next_entry,
   a_bridge_in_a_neighbouring_region_is_reached_inside_the_skill_range,
   a_bridge_inside_the_area_but_out_of_the_skill_range_stands,
   a_bridge_reserved_by_another_thread_is_not_advanced}`; real data (`AAEMU_COMPACT_DB` = a copy
