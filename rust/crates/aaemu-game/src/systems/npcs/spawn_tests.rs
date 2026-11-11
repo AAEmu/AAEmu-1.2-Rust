@@ -2658,6 +2658,68 @@ fn quest_server() -> Arc<GameServer> {
 }
 
 #[tokio::test]
+async fn quest_giver_index_filters_placements_and_tracks_membership_changes() {
+    let server = quest_server();
+    let m = manager(&server);
+
+    // Nothing loaded yet: the lazily built index is empty.
+    assert!(m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 10)
+        .is_empty());
+
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1000.0))
+        .unwrap();
+    let ids: Vec<u32> = m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 10)
+        .iter()
+        .map(|s| s.unit_id)
+        .collect();
+    assert_eq!(ids, vec![500], "only the safe quest giver placement");
+
+    // Radius and limit are applied before anything is spawned.
+    assert!(m
+        .quest_giver_spawners_near(&server, 2000.0, 2000.0, 50.0, 10)
+        .is_empty());
+    assert_eq!(
+        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 0)
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn quest_map_range_prepares_a_far_spawner_and_streams_its_npc() {
+    let server = quest_server();
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1000.0),
+        5000,
+    );
+    client.drain();
+
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    assert_eq!(
+        client.drain_ops(),
+        vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
+        "the far placement is prepared and its quest giver streamed"
+    );
+    let world = server.world.world(0).unwrap();
+    assert!(world
+        .all_npcs()
+        .iter()
+        .any(|n| n.data().unit.template_id == 500));
+}
+
+#[tokio::test]
 async fn activation_quest_giver_and_reporter_stay_resident_and_resend_state() {
     let server = quest_server();
     let m = manager(&server);

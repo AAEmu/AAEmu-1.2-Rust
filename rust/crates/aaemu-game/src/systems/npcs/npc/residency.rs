@@ -47,6 +47,20 @@ impl ResidentNpcTemplates {
         Self { quest_npcs }
     }
 
+    /// Whether `npc_id` is a quest giver / reporter template (`ConAcceptNpc`,
+    /// `ConAcceptNpcEmotion` or `ConReportNpc`).
+    pub fn is_quest_npc(&self, npc_id: u32) -> bool {
+        self.quest_npcs.contains(&npc_id)
+    }
+
+    /// Whether `template` may be streamed purely for its quest marker by the quest-map
+    /// distance option: a quest giver / reporter and safe to create far from the player
+    /// (nonaggressive, not visible to the creator only). Service-role NPCs without a quest
+    /// role are not included.
+    pub fn is_quest_map_candidate(&self, template: &NpcTemplate) -> bool {
+        !template.aggression && !template.visible_to_creator_only && self.is_quest_npc(template.id)
+    }
+
     /// Whether `template` is an ordinary resident candidate: nonaggressive, not visible to the
     /// creator only, and either a quest giver / reporter or an actual service role (merchant,
     /// banker, skill trainer, auctioneer, priest, blacksmith, teleporter, ability changer,
@@ -240,5 +254,30 @@ mod tests {
             };
             assert!(!residents.is_resident(&t), "npc {id}");
         }
+    }
+
+    #[test]
+    fn quest_map_candidates_are_safe_quest_givers_only() {
+        let residents = ResidentNpcTemplates::from_game_data(&game_data_with_quests());
+        let giver = NpcTemplate {
+            id: 500,
+            ..NpcTemplate::default()
+        };
+        assert!(residents.is_quest_npc(500));
+        assert!(residents.is_quest_map_candidate(&giver));
+        let mut aggressive = giver.clone();
+        aggressive.aggression = true;
+        assert!(!residents.is_quest_map_candidate(&aggressive));
+        let mut creator_only = giver.clone();
+        creator_only.visible_to_creator_only = true;
+        assert!(!residents.is_quest_map_candidate(&creator_only));
+        // A service role without a quest role is not a map marker candidate.
+        let merchant = role_template(|t| t.merchant = true);
+        assert!(residents.is_resident(&merchant));
+        assert!(!residents.is_quest_map_candidate(&merchant));
+        assert!(!residents.is_quest_map_candidate(&NpcTemplate {
+            id: 700,
+            ..NpcTemplate::default()
+        }));
     }
 }

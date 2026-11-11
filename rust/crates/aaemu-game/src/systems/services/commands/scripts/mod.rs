@@ -76,6 +76,7 @@ pub mod online;
 pub mod ping_position;
 pub mod premium_cmd;
 pub mod quest_cmd;
+pub mod quest_map;
 pub mod reload_auction;
 pub mod reload_configs;
 pub mod rename;
@@ -367,6 +368,7 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         // QuestCmd.cs
         (&["quest"], Arc::new(quest_cmd::QuestCmd::new(env))),
+        (&["questmap"], Arc::new(quest_map::QuestMap::new(env))),
         // ReloadAuction.cs
         (
             &["reloadauction", "reload_auction", "reloadah", "reload_ah"],

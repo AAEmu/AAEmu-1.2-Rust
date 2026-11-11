@@ -954,6 +954,16 @@ struct ActivationState {
     warmed: HashMap<u32, WarmEntry>,
 }
 
+/// Quest-map streaming index: ordinary placements that may be prepared only because a player
+/// selected a wider map range. Built lazily from the same spawner membership generation as the
+/// activation index; keyed by authored 64 m region.
+#[derive(Debug, Default)]
+struct QuestGiverIndex {
+    built: bool,
+    generation: u64,
+    regions: HashMap<(i32, i32), Vec<Arc<NpcSpawner>>>,
+}
+
 /// `SpawnManager`.
 #[derive(Debug)]
 pub struct SpawnManager {
@@ -976,6 +986,8 @@ pub struct SpawnManager {
     /// Bumped whenever the ordinary `NpcSpawners` membership changes; invalidates the index and
     /// the candidate queues without rebuilding them per tick.
     activation_generation: AtomicU64,
+    /// Quest-map streaming candidates (see [`QuestGiverIndex`]).
+    quest_giver_index: Mutex<QuestGiverIndex>,
 }
 
 /// `Directory.GetFiles(dir, "<prefix>*.json")` (file-name order, case-insensitive match);
@@ -1030,11 +1042,119 @@ impl SpawnManager {
             spawn_tasks: Mutex::new(Vec::new()),
             activation: Mutex::new(ActivationState::default()),
             activation_generation: AtomicU64::new(0),
+            quest_giver_index: Mutex::new(QuestGiverIndex::default()),
         }
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("spawn manager poisoned")
+    }
+
+    // ----- quest-map streaming index -----
+
+    /// Rebuilds the quest-map candidate index when the ordinary spawner membership changed.
+    fn ensure_quest_giver_index(&self, server: &GameServer) {
+        let generation = self.activation_generation.load(Ordering::SeqCst);
+        {
+            let index = self
+                .quest_giver_index
+                .lock()
+                .expect("quest giver index poisoned");
+            if index.built && index.generation == generation {
+                return;
+            }
+        }
+        let residents = server.systems.npcs.spawns.resident_npcs(server);
+        let mut regions: HashMap<(i32, i32), Vec<Arc<NpcSpawner>>> = HashMap::new();
+        {
+            let inner = self.inner();
+            for spawners in inner.npc_spawners.values() {
+                for spawner in spawners {
+                    if !spawner_is_quest_map_candidate(server, residents, spawner) {
+                        continue;
+                    }
+                    let p = spawner.position();
+                    if let Some(region) = self.world.region_by_pos(p.x, p.y) {
+                        regions.entry(region).or_default().push(spawner.clone());
+                    }
+                }
+            }
+        }
+        let mut index = self
+            .quest_giver_index
+            .lock()
+            .expect("quest giver index poisoned");
+        index.regions = regions;
+        index.generation = generation;
+        index.built = true;
+    }
+
+    /// Ordinary placements that can provide a quest marker within `radius` metres of
+    /// `(center_x, center_y)`, nearest first. `radius` may be infinite (the Unlimited option).
+    ///
+    /// Only placements whose members are all safe quest givers / reporters are returned, so a
+    /// monster camp with one quest NPC is not spawned for a map marker. `limit` bounds the work
+    /// (and therefore what the caller can stream); 0 means no bound.
+    pub fn quest_giver_spawners_near(
+        &self,
+        server: &GameServer,
+        center_x: f32,
+        center_y: f32,
+        radius: f32,
+        limit: usize,
+    ) -> Vec<Arc<NpcSpawner>> {
+        self.ensure_quest_giver_index(server);
+        let index = self
+            .quest_giver_index
+            .lock()
+            .expect("quest giver index poisoned");
+        let radius2 = radius * radius;
+        let center_region = self.world.region_by_pos(center_x, center_y);
+        let region_radius = if radius.is_finite() && radius > 0.0 {
+            (radius / REGION_SIZE as f32).ceil() as i32 + 1
+        } else {
+            0
+        };
+        let mut found: Vec<(f32, u32, Arc<NpcSpawner>)> = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut visit = |region: (i32, i32)| {
+            let Some(spawners) = index.regions.get(&region) else {
+                return;
+            };
+            for spawner in spawners {
+                if !seen.insert(spawner.id) {
+                    continue;
+                }
+                let p = spawner.position();
+                let dx = p.x - center_x;
+                let dy = p.y - center_y;
+                let d2 = dx * dx + dy * dy;
+                if d2 <= radius2 {
+                    found.push((d2, spawner.id, spawner.clone()));
+                }
+            }
+        };
+        match center_region {
+            Some((rx, ry)) if region_radius > 0 => {
+                for dx in -region_radius..=region_radius {
+                    for dy in -region_radius..=region_radius {
+                        visit((rx + dx, ry + dy));
+                    }
+                }
+            }
+            Some(_) | None => {
+                // Unlimited: the index only holds quest giver placements, so a full scan is
+                // still bounded by the quest content (about two thousand placements in 1.2).
+                for &region in index.regions.keys() {
+                    visit(region);
+                }
+            }
+        }
+        found.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        if limit > 0 {
+            found.truncate(limit);
+        }
+        found.into_iter().map(|(_, _, s)| s).collect()
     }
 
     // ----- AddNpcSpawner -----
@@ -3338,6 +3458,37 @@ fn spawner_is_resident(
     } else {
         members.iter().all(|member| is_resident(member.member_id))
     }
+}
+
+/// Whether an ordinary placement may be prepared for the quest-map range option: every
+/// authored member is a safe quest giver / reporter (nonaggressive, not creator-only) and at
+/// least one member carries a quest role. Mixed camps with hostile members are excluded.
+fn spawner_is_quest_map_candidate(
+    server: &GameServer,
+    residents: &ResidentNpcTemplates,
+    spawner: &NpcSpawner,
+) -> bool {
+    let npcs = &server.game_data.systems.npcs.npc;
+    let members = spawner.spawnable_npcs();
+    let member_ids: Vec<u32> = if members.is_empty() {
+        vec![spawner.unit_id]
+    } else {
+        members.iter().map(|m| m.member_id).collect()
+    };
+    if member_ids.is_empty() {
+        return false;
+    }
+    let mut has_quest_npc = false;
+    for id in member_ids {
+        let Some(template) = npcs.template(id) else {
+            return false;
+        };
+        if !residents.is_quest_map_candidate(template) {
+            return false;
+        }
+        has_quest_npc = true;
+    }
+    has_quest_npc
 }
 
 /// Whether any live NPC of an otherwise resident placement is not resident per the
