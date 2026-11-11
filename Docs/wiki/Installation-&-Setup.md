@@ -87,6 +87,8 @@ Cash shop (ICS) content is operator policy. The base schema creates `ics_menu`,
 `ics_shop_items` and `ics_skus` without a catalogue;
 `SQL/examples/example-ics-default-en.sql` is an optional example data set. See
 [Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings#cash-shop-ics-content-is-operator-policy).
+For a private test server, [Test server content](Test-Server-Content) describes the generated
+0/1-credit catalogue and the bulk GM kits.
 
 ### Login server configuration (manual)
 

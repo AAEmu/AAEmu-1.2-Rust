@@ -8,7 +8,7 @@ use crate::systems::skills::buffs;
 use crate::world::{PlayerRef, WorldObject};
 
 use super::runtime;
-use super::state::SiegeSide;
+use super::state::{SiegeSide, SiegeState};
 
 pub const OFFENSE_PARTICIPANT_BUFF: u32 = 3733;
 pub const DEFENSE_PARTICIPANT_BUFF: u32 = 3734;
@@ -41,6 +41,42 @@ pub fn clear_player(server: &GameServer, player: &PlayerRef) {
     project(server, player, None);
 }
 
+/// The one meaning of "siege participant". The participant buffs ([`selected_buff`]), the
+/// participant seals (`seals`), the hostility rule (`hostility`) and the eviction of
+/// non-participants (`siege_area`) all ask this function, so they cannot disagree.
+///
+/// A character is a participant of `siege`, on the side of its roster entry, while it still
+/// belongs to that side's expedition: the entry, the character's `current_expedition` and the
+/// expedition manager all name the side's expedition, and that expedition is not disbanded. A
+/// member who left or was kicked mid-siege keeps the roster entry (nothing removes it) but is
+/// no participant any more.
+pub fn participant_side(
+    server: &GameServer,
+    siege: &SiegeState,
+    character_id: u32,
+    current_expedition: u32,
+) -> Option<SiegeSide> {
+    let participant = siege.participants.get(&character_id)?;
+    let side_expedition = match participant.side {
+        SiegeSide::Attacker => siege.attacker_expedition_id,
+        SiegeSide::Defender => siege.defender_expedition_id,
+    };
+    // The currently implemented authority registers members of the two named expeditions.
+    // A future verified mercenary flow must extend that authority before granting its buffs.
+    if current_expedition == 0
+        || participant.expedition_id != side_expedition
+        || current_expedition != side_expedition
+        || server.expeditions.expedition_of_character(character_id) != current_expedition
+        || !server
+            .expeditions
+            .get(current_expedition)
+            .is_some_and(|e| !e.is_disbanded)
+    {
+        return None;
+    }
+    Some(participant.side)
+}
+
 fn selected_buff(server: &GameServer, player: &PlayerRef, now: i64) -> Option<u32> {
     let (online, expedition, transform) = {
         let c = player.data();
@@ -68,31 +104,12 @@ fn selected_buff(server: &GameServer, player: &PlayerRef, now: i64) -> Option<u3
     {
         return None;
     }
-    let participant = siege.participants.get(&player.character_id)?;
-    let side_expedition = match participant.side {
-        SiegeSide::Attacker => siege.attacker_expedition_id,
-        SiegeSide::Defender => siege.defender_expedition_id,
-    };
-    // The currently implemented authority registers members of the two named expeditions.
-    // A future verified mercenary flow must extend that authority before granting its buffs.
-    if expedition == 0
-        || participant.expedition_id != side_expedition
-        || expedition != side_expedition
-        || server
-            .expeditions
-            .expedition_of_character(player.character_id)
-            != expedition
-        || !server
-            .expeditions
-            .get(expedition)
-            .is_some_and(|e| !e.is_disbanded)
-    {
-        return None;
-    }
-    Some(match participant.side {
-        SiegeSide::Attacker => OFFENSE_PARTICIPANT_BUFF,
-        SiegeSide::Defender => DEFENSE_PARTICIPANT_BUFF,
-    })
+    Some(
+        match participant_side(server, siege, player.character_id, expedition)? {
+            SiegeSide::Attacker => OFFENSE_PARTICIPANT_BUFF,
+            SiegeSide::Defender => DEFENSE_PARTICIPANT_BUFF,
+        },
+    )
 }
 
 pub(super) fn sync_player_at(server: &GameServer, player: &PlayerRef, now: i64) {

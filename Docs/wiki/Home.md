@@ -25,6 +25,7 @@ Open source server software for ArcheAge written in Rust (originally written in 
 ### Configuration
 
 - [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
+- [Test server content (Marketplace catalogue and GM kits)](Test-Server-Content)
 
 ### Operations and Troubleshooting
 
