@@ -845,7 +845,7 @@ form `FeatureSet__Siege=false`.
 | `achievement` | 63 | `true` | Achievement window. |
 | `dwarfWarborn` | 74 | `false` | Dwarf / Warborn race selection. The shipped `characters` data has both races `creatable = 'f'`, so turning the bit on does not make them creatable by itself. |
 | `mailCoolTime` | 75 | `true` | Mail send cooldown display (INFERRED). |
-| `hudAuctionButton` | 81 | `true` | Auction-house button in the HUD. |
+| `hudAuctionButton` | 81 | `true` | Auction-house button in the HUD. While `true` the server also accepts auction requests from players who are not at an auctioneer NPC; set it to `false` to require the NPC again. |
 | `auctionPostBuff` | 83 | `true` | Auction posting buff / UI (INFERRED). |
 | `aaPoint` | 44 | `false` | AA-point amounts in price and currency displays. AA points are not supported, so keep it off. |
 | `ExtraBits` | any | `{}` | `bit -> bool` overrides for the unnamed `flag_x_y` bits (`0..=87`); a `false` value turns a default-on bit off. Bit 78 is the mate equipment whitelist. The C++ reads 32, 34, 41, 42, 47, 60 and 73 too, but their purpose is unresolved. |
