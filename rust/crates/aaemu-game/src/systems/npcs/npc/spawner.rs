@@ -62,11 +62,26 @@ pub struct NpcSpawnerShared {
     player_in_radius_cache: Mutex<HashMap<(u32, u32), (bool, u64)>>,
     /// `_npcsInZoneCache` (count, areNpcsInZone); invalidated on membership changes.
     npcs_in_zone_cache: Mutex<HashMap<u32, (i32, bool, Instant)>>,
+    /// One of this placement's NPCs died where the run keeps its dead (authored
+    /// `npc_spawners.save_indun`, or a spawn-file placement in a per-run dungeon), so the
+    /// placement's population is fixed for the run (no respawn, no periodic refill). A fresh
+    /// run creates new spawners, which start unfrozen. The C# loaded `save_indun` but never
+    /// read it.
+    saved_death: AtomicBool,
 }
 
 impl NpcSpawnerShared {
     pub fn set_management_group(&self, group: u32) {
         self.management_group.store(group, Ordering::Relaxed);
+    }
+    /// Whether a member of this placement died under the one-run freeze.
+    pub fn saved_death(&self) -> bool {
+        self.saved_death.load(Ordering::Relaxed)
+    }
+
+    /// Freezes the placement after a member died where the run keeps its dead.
+    pub fn set_saved_death(&self) {
+        self.saved_death.store(true, Ordering::Relaxed);
     }
     pub fn management_group(&self) -> u32 {
         self.management_group.load(Ordering::Relaxed)
@@ -147,6 +162,10 @@ pub struct NpcSpawner {
     pub npc_spawner_ids: Vec<u32>,
     shared: Arc<NpcSpawnerShared>,
     state: Mutex<State>,
+    /// `true` for a spawner created by a spawn-file placement (`SpawnManager::NpcSpawners`);
+    /// event / tower / summon spawners keep `false`. Set once when the placement is created, so
+    /// the one-run death freeze is a flag read instead of a scan over every spawner.
+    placement: AtomicBool,
 }
 
 /// `TimeSpan.FromHours(hours)` ticks (100 ns).
@@ -255,7 +274,18 @@ impl NpcSpawner {
                 is_despawn_scheduled: false,
                 respawn_denied: false,
             }),
+            placement: AtomicBool::new(false),
         }
+    }
+
+    /// Marks a spawner created by a spawn-file placement (`SpawnManager::AddNpcSpawner`).
+    pub fn mark_placement(&self) {
+        self.placement.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether this spawner is a spawn-file placement (see [`Self::mark_placement`]).
+    pub fn is_placement(&self) -> bool {
+        self.placement.load(Ordering::Relaxed)
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -295,6 +325,26 @@ impl NpcSpawner {
 
     pub fn set_respawn_time(&self, v: i32) {
         self.st().respawn_time = v;
+    }
+
+    /// Whether a member of this placement died under the one-run freeze.
+    pub fn saved_death(&self) -> bool {
+        self.shared.saved_death()
+    }
+
+    /// Whether a dead spawn-file placement must stay dead for its run: a per-run dungeon
+    /// (`Dungeon::is_system = false`, not the client-driven prologue) keeps its trash and
+    /// bosses dead for the run. System / persistent instances (Mirage Isle, the Library wings,
+    /// battlefields) and ordinary event / tower / summon spawners keep their respawn rules.
+    fn instance_placement_freezes(&self, server: &GameServer) -> bool {
+        self.is_placement()
+            && self.parent_world().is_some_and(|id| {
+                server
+                    .systems
+                    .instances
+                    .dungeon_of_world(id)
+                    .is_some_and(|d| !d.is_system && !d.indun_zone.client_driven)
+            })
     }
 
     pub fn parent_world(&self) -> Option<u32> {
@@ -761,7 +811,7 @@ impl NpcSpawner {
     /// the living NPCs of the whole shared map plus the slots still reserved by future respawn
     /// deadlines and by `enable_respawn` batches' partial respawns must stay below the target.
     fn check_spawn_count_can_spawn(&self, server: &GameServer) -> bool {
-        if self.template().is_none() {
+        if self.template().is_none() || self.shared.saved_death() {
             return false;
         }
         self.live_population_direct()
@@ -1004,6 +1054,7 @@ impl NpcSpawner {
         batch_size: i64,
     ) -> bool {
         if !self.shared.management_enabled()
+            || self.shared.saved_death()
             || self.template().is_none()
             || self.is_despawn_scheduled()
             || !self.is_optimal_spawner(server)
@@ -1143,6 +1194,15 @@ impl NpcSpawner {
         };
         let respawn_time = self.respawn_time();
         let now = spawn_manager::now();
+        // Authored `npc_spawners.save_indun`, or a spawn-file placement in a per-run dungeon:
+        // a 1.2 run is one run long and the dead stay dead until the run is recreated. The
+        // placement is frozen so neither the respawn deadline nor the periodic refill
+        // (`do_spawn` / the activation tick) brings the member back.
+        let freezes =
+            npc.data().unit.is_dead() && (t.save_indun || self.instance_placement_freezes(server));
+        if freezes {
+            self.shared.set_saved_death();
+        }
         // `npc_groups.enable_respawn = 't'`: a dead member whose batch still has a living
         // member is respawned by the group's partial timer (`RespawnLostGroupMembers`), not by
         // a whole-batch spawner refill. The group reserves its dead slots in
@@ -1151,6 +1211,7 @@ impl NpcSpawner {
         let partial_group_respawn =
             npc.data().unit.is_dead() && server.systems.npcs.group_batches.on_member_died(npc);
         if !partial_group_respawn
+            && !freezes
             && respawn_time > 0
             && i64::from(self.are_other_npcs_in_spawn_zone().1) + i64::from(self.scheduled_count())
                 < i64::from(t.max_population)
@@ -1253,8 +1314,13 @@ impl NpcSpawner {
         let manager = spawn_manager::manager_of(server, &obj, self.parent_world());
         spawn_manager::delete_object(server, &obj, self.parent_world());
         let respawn_time = self.respawn_time();
+        let freezes = self.template().is_some_and(|t| t.save_indun)
+            || self.instance_placement_freezes(server);
+        if freezes {
+            self.shared.set_saved_death();
+        }
         let max = self.template().map_or(0, |t| i64::from(t.max_population));
-        if respawn_time > 0 && i64::from(self.are_other_npcs_in_spawn_zone().1) < max {
+        if !freezes && respawn_time > 0 && i64::from(self.are_other_npcs_in_spawn_zone().1) < max {
             let at = spawn_manager::add_secs(spawn_manager::now(), f64::from(respawn_time));
             if let Some(m) = manager {
                 m.add_respawn(server, obj, Some(at));
@@ -1319,7 +1385,7 @@ impl NpcSpawner {
     /// pass leaves the spawner unscheduled so it is retried.
     pub fn do_spawn_bounded(self: &Arc<Self>, server: &GameServer, budget: i64) -> usize {
         let _items = server.systems.economy.operation_scope();
-        if budget <= 0 {
+        if budget <= 0 || self.shared.saved_death() {
             return 0;
         }
         let Some(t) = self.template() else {

@@ -44,13 +44,18 @@
     },
     {
 
+        // Sharpwind Mines: the start pool under the green arrival portal (exit doodad 5723
+        // at 739.4 / 326.7 / 166.2; the pond sound area `..._dance1990_2` spans x 722-759,
+        // y 311-342). The old 796.3 / 325.386 / 249.54 is the end-of-run exit (doodad 5723
+        // at 804.1 / 327.7 / 248.1), 80 m above the start; the party lands in the pool,
+        // beside the Temple Priestess at 718.7 / 329.9 / 168.3.
         "Name": "instance_cuttingwind_deadmine",
         "SpawnPosition": {
             "ZoneId": 262,
-            "X": 796.3,
-            "Y": 325.386,
-            "Z": 249.54,
-            "Yaw": 90.0
+            "X": 739.4,
+            "Y": 326.7,
+            "Z": 166.2,
+            "Yaw": -89.3565
         }
     },
     {
