@@ -8208,8 +8208,20 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   the cast source (skill 13210 needs a dead source) and the origin of every packet, and a
   gimmick caster has no skill cooldown or global cooldown (a rolling gimmick hits every unit it
   touches).
+  A gimmick goes with its thrower: `owner_character` finds the owner through the live spawner
+  unit, so a gimmick that outlived its thrower would be ownerless and skip Peace, no-PvP and the
+  siege rule, and a disconnect would lift the protection of the player a bomb is about to reach.
+  The gimmick therefore records the character it acts for when it spawns
+  (`GimmickState.owner_character_id`, 0 for a spawner, doodad or NPC gimmick) and the tick
+  removes it as soon as that character has left the world (`character_by_id`). Residual: a
+  contact that fires in the tick a character leaves, between the check and the cast, still runs
+  ownerless; and a gimmick whose parent gimmick is gone (the link `owner_character` follows) is
+  ownerless although its thrower is online. No r208022 gimmick skill spawns a gimmick (checked:
+  none of the 30 collision and 40 delayed skills has a `SpawnGimmickEffect`), so the second
+  case has no shipped trigger.
   **Inferred (no 1.2 server evidence):** this attribution (the 1.2 C# cast the delayed skill
-  from the spawner unit). Not covered: the home-zone protection reads the casting *player*
+  from the spawner unit) and the removal with the thrower (a gone spawner could not cast it).
+  Not covered: the home-zone protection reads the casting *player*
   itself, so it still skips a gimmick hit; the PvP assist history, weapon durability and the NPC
   AI's reaction to a gimmick hit still name the gimmick.
   **Level and damage.** A gimmick has no level in the data and is created at level 1 (the effect

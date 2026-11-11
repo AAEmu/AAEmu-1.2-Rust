@@ -106,6 +106,13 @@ pub struct GimmickState {
     /// an elevator reaching its stop) is broadcast even though the position no longer changes,
     /// otherwise clients keep extrapolating the last non-zero velocity.
     pub last_vel: [f32; 3],
+    /// The character this gimmick acts for, resolved when it was spawned: the thrower of a
+    /// gimmick that a player (or a unit of a player: mate, slave, another gimmick) cast, 0 for a
+    /// spawner / doodad / NPC gimmick. Not a C# member. `gimmick_tick` removes the gimmick as soon
+    /// as that character is no longer in the world: `relation::owner_character` finds the owner
+    /// through the live spawner unit, so a gimmick that outlived its thrower would be owner-less
+    /// and skip every rule keyed on the character (Peace, no-PvP, siege hostility, tagging).
+    pub owner_character_id: u32,
 }
 
 impl GimmickState {
@@ -239,7 +246,8 @@ impl GimmickManager {
 /// `GimmickManager.AddActiveGimmick`: attaches the movement handler, sets `Time` and registers it.
 /// `authored_motion` is part of the state from the start: a tick between the registration and a
 /// later write of the flag would take the gimmick for a non-authored one and overwrite its
-/// authored `vel` / `ang_vel` with the position delta.
+/// authored `vel` / `ang_vel` with the position delta. The same goes for `owner_character_id`: a
+/// tick before a later write would see an ownerless gimmick.
 fn add_active_gimmick(
     server: &GameServer,
     world_id: u32,
@@ -247,6 +255,7 @@ fn add_active_gimmick(
     spawner: Arc<GimmickSpawner>,
     template: Option<GimmickTemplate>,
     authored_motion: bool,
+    owner_character_id: u32,
 ) -> Arc<ActiveGimmick> {
     let (template_id, entity_guid) = {
         let g = gimmick.data();
@@ -262,6 +271,7 @@ fn add_active_gimmick(
     };
     let state = GimmickState {
         authored_motion,
+        owner_character_id,
         time: time_of_day_ms(world::now_ms()),
         ..Default::default()
     };
@@ -372,8 +382,9 @@ fn create(
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
     session::handle_zone_changes(server, changes);
+    // A spawner gimmick (an elevator, a raft) belongs to nobody.
     Some(add_active_gimmick(
-        server, world.id, gimmick, spawner, template, false,
+        server, world.id, gimmick, spawner, template, false, 0,
     ))
 }
 
@@ -548,6 +559,10 @@ fn spawn_effect_gimmick(
         g.ang_vel = rotate_local([params.ang_vel_x, params.ang_vel_y, params.ang_vel_z]);
         authored_motion = true;
     }
+    // The character the caster acts for, resolved now while the spawner chain is alive (a bomb
+    // that spawns fragments is gone before they are). 0 for a doodad / NPC caster.
+    let owner_character_id = crate::systems::skills::relation::owner_character(server, caster)
+        .map_or(0, |owner| owner.character_id);
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
     session::handle_zone_changes(server, changes);
@@ -558,6 +573,7 @@ fn spawn_effect_gimmick(
         spawner,
         Some(template),
         authored_motion,
+        owner_character_id,
     );
     Some(gimmick)
 }
@@ -864,6 +880,17 @@ pub fn gimmick_tick(
     now_ms: i64,
 ) {
     let delta_time = delta.as_secs_f32();
+    // A gimmick acts for the character that threw it (`relation::owner_character`). Once that
+    // character has left the world nobody answers for what the gimmick hits and the rules keyed
+    // on the owner (Peace, no-PvP, siege hostility, tagging, crime evidence) no longer apply to
+    // it, so it goes with its thrower instead of fighting on ownerless (a disconnect must not
+    // lift the protection of a player a bomb is about to reach).
+    let owner = active.state().owner_character_id;
+    if owner != 0 && server.world.character_by_id(owner).is_none() {
+        active.state().despawned = true;
+        despawn(server, active);
+        return;
+    }
     // LastLifeTime / TotalLifeTime, TimeLeft
     let last_life_time = {
         let mut st = active.state();
@@ -2128,6 +2155,76 @@ mod tests {
             assert_eq!(tagging.taggers, vec![(thrower.obj_id, 100)]);
         }
         assert_eq!(thrower.data().unit.hp, 500, "the thrower is out of reach");
+    }
+
+    /// A gimmick a player threw goes with its thrower. `owner_character` finds the owner through
+    /// the live spawner unit, so a gimmick that outlived its thrower would be ownerless and skip
+    /// Peace / no-PvP / siege hostility: a disconnect must not lift the protection of a player a
+    /// bomb is about to reach. A gimmick no character stands behind (a doodad's here) stays.
+    #[tokio::test]
+    async fn a_player_thrown_gimmick_is_removed_when_its_thrower_leaves_the_world() {
+        let data = with_thrower_factions(contact_data(contact_template(false), 0));
+        let server = crate::test_support::test_server_with(data);
+        while server.ids.object.get_next_id().expect("object id") < 0x400 {}
+        crate::systems::skills::bridges::install(&server);
+        let world = test_world(&server);
+        let (_client, thrower) = thrower_in(&server);
+        let doodad = doodad_at(&server, &world, (200.0, 200.0, 100.0));
+        let victim = hostile_npc(&server, &world, 0x301, 105.2);
+        let throw = |source: &WorldObject| {
+            let g = spawn_from_effect(
+                &server,
+                &world,
+                &SpawnGimmickParams {
+                    gimmick_id: CONTACT_GIMMICK,
+                    offset_coordinate_id: 2,
+                    offset_x: 5.0,
+                    scale: 1.0,
+                    velocity_coordinate_id: 2,
+                    velocity_x: 5.0,
+                    ..Default::default()
+                },
+                source,
+            )
+            .expect("gimmick spawned");
+            let active = server.systems.npcs.gimmicks.find(g.obj_id).unwrap();
+            (g, active)
+        };
+        // 5 m in front of the thrower, rolling east at 5 m/s: the first tick touches the victim.
+        let (thrown, thrown_active) = throw(&WorldObject::from(&thrower));
+        let (kept, kept_active) = throw(&doodad);
+        assert_eq!(
+            thrown_active.state().owner_character_id,
+            thrower.character_id,
+            "the thrower's character is recorded when the gimmick is spawned"
+        );
+        assert_eq!(
+            kept_active.state().owner_character_id,
+            0,
+            "a doodad has none"
+        );
+        assert!(server.world.character_by_id(thrower.character_id).is_some());
+
+        // The thrower leaves the way `leave_world` does: out of the grid, then out of the
+        // character registry.
+        world.remove_object(thrower.obj_id);
+        assert!(server.world.try_remove_character(thrower.obj_id));
+
+        let dt = Duration::from_millis(50);
+        gimmick_tick(&server, &world, &thrown_active, dt, 1_000);
+        gimmick_tick(&server, &world, &kept_active, dt, 1_000);
+        assert!(
+            world.gimmick(thrown.obj_id).is_none(),
+            "the gimmick left the world with its thrower"
+        );
+        assert!(server.systems.npcs.gimmicks.find(thrown.obj_id).is_none());
+        assert_eq!(
+            victim.data().unit.hp,
+            1000,
+            "it was removed before its contact could hit as an ownerless gimmick"
+        );
+        assert!(world.gimmick(kept.obj_id).is_some());
+        assert!(server.systems.npcs.gimmicks.find(kept.obj_id).is_some());
     }
 
     /// A refused cast leaves everything as it was: nothing is latched and a
