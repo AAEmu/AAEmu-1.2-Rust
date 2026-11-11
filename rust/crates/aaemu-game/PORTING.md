@@ -4797,11 +4797,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   families its `DoodadFuncLogic` accepts (each subscribed family is one input, missing = false).
   Thus 5064 (50002) and 5068 (50003) feed gate 5070 (50005), whose AND (delay 1 = 1 s) emits to
   50006 (gate 5071) and 50007 (5072); gate 5071 ANDs 5069 (50004) with gate 5070 (50005) and
-  emits to 50001 (lake 5063) and 50008 (5073). The switches' `DoodadFuncPulse(flag)` now runs
-  only for a character-caused phase (the C# `if (caster is not null)`), and their
-  `DoodadFuncPulseTrigger` fires on a character-caused phase entry (the C# `Use`), so using a
-  switch pulses the network and then reaches its `DoodadFuncFinal` (13163/13177/13180, the rock
-  disappears after 1 s). The lake then runs 13157 -pulse-> 14184 -5 s timer-> 13158
+  emits to 50001 (lake 5063) and 50008 (5073). A signal from the spawner's `RelatedIds` is an
+  explicit authored route like a client wire and bypasses that subscriber source filter (the
+  shipped rows of Howling Abyss, Howling Abyss 2 and Immortal Isle carry no `FamilyId`). The
+  switches' `DoodadFuncPulse(flag)` now runs only when the phase is entered with a caster (the C#
+  `if (caster is not null)`), and a `DoodadFuncPulseTrigger` also fires on the pulse its own
+  group's `DoodadFuncPulse` sent in the same phase entry when the flags match, so using a switch
+  pulses the network and then reaches its `DoodadFuncFinal` (13163/13177/13180, the rock
+  disappears after 1 s). A phase entered by a signal or a timer fires no trigger by itself (the
+  player caster travels along both): Sal Temple's Ice Machine 4752 -> Ice Trap 4751 toggle
+  (`PulseTrigger(t -> 11796)` / `PulseTrigger(f -> 11795)`) switches off at the false pulse and
+  stays off, and Jolly Roger Tower 3382 group 7885 (`Pulse(f)` + `PulseTrigger(t -> 8260)`) stays
+  put. **Inferred (no 1.2 server evidence):** this trigger rule. The AAEmu C#
+  `DoodadFuncPulseTrigger.Use` returns `true` for a non-character caster and otherwise fires a
+  `Flag == true` row whose shared `PulseTriggered` flag is false (reset only by a source
+  `DoodadFuncPulse(true)` for its `RelatedIds` targets), i.e. on the first character-caused
+  entry, which would bounce every toggle here. The lake then runs 13157 -pulse-> 14184 -5 s timer-> 13158
   (`DoodadFuncWaterVolume` 22 m / 22 s + 22 s timer) -> 13159 (`cuttingwind.water2`, whose
   client prefab is the same water volume raised by +22.000046 m; the client's water volume
   provides the swim/buoyancy that lifts the party, so no server position lift is needed).
@@ -4813,8 +4824,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`LoadDoodadPhaseFuncDescs`, `sub_39BE6B30`) selects the table without `ORDER BY`, i.e. row
   order, which also runs the pulse first. (2) `DoodadFuncLogic`
   delays are implemented for all eight authored enum values (1 s .. 30 min); the old code
-  refused anything but 1 s and emitted immediately. (3) per-doodad `pulse_triggered` state (the
-  C# flag lived on the shared func list, so one doodad's trigger suppressed every instance's).
+  refused anything but 1 s and emitted immediately. (3) the per-doodad, per-entry `pulsed` flag
+  replaces the C# `PulseTriggered`, which lived on the shared func list (one doodad's trigger
+  suppressed every instance of the template).
   **INFERRED:** the five stream positions and the three switch/gate/lake positions are the
   10.x editor placements, not a 1.2 server DB export (no such export exists here); the level
   file positions are confirmed by the five pre-existing stream rows. Tests:

@@ -105,7 +105,6 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         let previous = d.func_group_id;
         d.func_group_id = value;
         d.phase.interaction_counts.clear();
-        d.phase.pulse_triggered.clear();
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
@@ -877,11 +876,12 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
 
     let mut stop = false;
     let manager = &ctx.server.systems.npcs.doodads;
-    // `DoodadFuncPulseTrigger` reacts to the signals the same phase's `DoodadFuncPulse` emits
-    // (C# `DoodadFuncPulse` re-arms the row and re-enters the phase, so the trigger observes the
-    // pulse). The shipped `doodad_phase_funcs.actual_func_id` order runs the trigger first
-    // (Sharpwind 13161: 274 before 287), which stopped the group before its pulse was sent;
-    // the trigger rows therefore run after the other phase funcs. Nothing else changes order.
+    // A `DoodadFuncPulseTrigger` fires on the pulse this entry's own `DoodadFuncPulse` sent
+    // (`phase_funcs::use_phase_func`); a pulse of an earlier entry does not count.
+    ctx.doodad.data().phase.pulsed = None;
+    // The trigger rows therefore run after the group's other phase funcs: the shipped
+    // `doodad_phase_funcs.actual_func_id` order runs the trigger first (Sharpwind 13161: 274
+    // before 287), which stopped the group before its pulse was sent. Nothing else changes order.
     let (triggers, others): (Vec<_>, Vec<_>) = phase_funcs
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");

@@ -351,6 +351,15 @@ fn group(d: &DoodadRef) -> u32 {
     d.data().func_group_id
 }
 
+/// `manager::create` (an obj id from the id manager) placed at `x`, spawned, then `InitDoodad`.
+fn place(f: &Fx, template: u32, x: f32) -> DoodadRef {
+    let d = manager::create(&f.server, &f.world, 0, template, None, true).unwrap();
+    d.data().transform.set_xyz(x, 100.0, 100.0);
+    manager::spawn(&f.server, &f.world, &d);
+    manager::init_doodad(&f.server, &f.world, &d);
+    d
+}
+
 #[tokio::test]
 async fn loaded_player_doodad_is_spawned_before_its_immediate_final_phase() {
     let b = Builder::default()
@@ -833,7 +842,7 @@ async fn replaced_logic_output_emits_once_with_the_last_value() {
         manager::init_doodad(&f.server, &f.world, &d);
         d
     };
-    // `None` caster: the phase-entry `PulseTrigger` rows only react to a character, so the
+    // A phase-entry `PulseTrigger` never fires without a pulse of its own group, so the
     // receiver's groups advance once per received signal.
     let source = make(100, 40_000, 101.0);
     let receiver = make(101, 500, 102.0);
@@ -926,8 +935,7 @@ async fn a_wire_linked_during_the_logic_delay_receives_nothing_until_the_emit() 
     let f = fx(b);
     let make = |template: u32, x: f32| {
         let d = manager::create(&f.server, &f.world, 0, template, None, true).unwrap();
-        // `link` checks `owner_id`; a real player-owned doodad would also resolve the player as
-        // the init caster and fire the receiver's phase-entry pulse trigger.
+        // `link` requires the player to own both doodads.
         d.data().owner_id = f.player.character_id;
         d.data().transform.set_xyz(x, 100.0, 100.0);
         manager::spawn(&f.server, &f.world, &d);
@@ -2467,23 +2475,223 @@ async fn pulse_triggers_require_matching_signal_and_do_not_affect_other_objects(
         );
     let mut f = fx(b);
     let d = f.doodad(TEMPLATE);
+    // Entering a phase registers a listener; a character's presence is not a pulse.
     assert_eq!(group(&d), 10);
     let caster = f.caster();
     let ctx = DoodadCtx::new(&f.server, f.world.clone(), d.clone());
-    // The spawn init runs the entry phase without a caster: no fire.
     do_change_phase(&ctx, None, 10);
     assert_eq!(group(&d), 10);
-    // A character-caused entry fires the trigger (C# `if (caster is not Character) return true`).
+    // Entering the phase fires nothing with a character caster either: only a received signal
+    // or the pulse of the trigger's own group is a pulse (the previous rule fired on every
+    // character-caused entry and bounced toggles, see the `toggle` / Sal Temple tests).
     do_change_phase(&ctx, Some(&caster), 10);
-    assert_eq!(group(&d), 11, "a character-caused phase entry fires it");
-    f.use_(&d); // 11 -> 10: a fresh entry re-arms the row and fires again
+    assert_eq!(
+        group(&d),
+        10,
+        "a character-caused phase entry is not a pulse"
+    );
+    super::super::logic::receive(&ctx, &d, Some(&caster), true, false);
     assert_eq!(group(&d), 11);
+    f.use_(&d); // 11 -> 10: the entry does not fire the row again, stays in 10
+    assert_eq!(group(&d), 10);
     let other = manager::create(&f.server, &f.world, 0x501, TEMPLATE, None, true).unwrap();
+    let other_ctx = DoodadCtx::new(&f.server, f.world.clone(), other.clone());
+    do_change_phase(&other_ctx, Some(&caster), 10);
+    assert_eq!(group(&other), 10);
     // A received signal only fires on the authored flag value.
     super::super::logic::receive(&ctx, &other, Some(&caster), false, false);
     assert_eq!(group(&other), 10);
     super::super::logic::receive(&ctx, &other, Some(&caster), true, false);
     assert_eq!(group(&other), 11);
+}
+
+/// A `DoodadFuncPulseTrigger` fires on a received signal or on the pulse its own group sent in
+/// this phase entry, never because a player caster travelled along a signal chain. Toggle shape
+/// (63 template pairs, e.g. Sal Temple's Ice Trap 4751): `A: PulseTrigger(true -> B)`,
+/// `B: PulseTrigger(false -> A)`. The signals true, false, true (all carrying the player caster,
+/// as every signal of a player-started chain does) must leave it in B, A, B.
+#[tokio::test]
+async fn a_toggle_pair_follows_its_signals_when_the_chain_carries_a_player_caster() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 1,
+                flag: true,
+                next_phase: 21,
+            }),
+        )
+        .phase_func(
+            21,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 2,
+                flag: false,
+                next_phase: 20,
+            }),
+        );
+    let f = fx(b);
+    let source = place(&f, 100, 101.0);
+    let toggle = place(&f, 101, 102.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), source);
+    let caster = f.caster();
+    assert_eq!(group(&toggle), 20);
+    logic::receive(&ctx, &toggle, Some(&caster), true, true);
+    assert_eq!(group(&toggle), 21, "the true signal switches it on");
+    logic::receive(&ctx, &toggle, Some(&caster), false, true);
+    assert_eq!(
+        group(&toggle),
+        20,
+        "the false signal switches it off, for good"
+    );
+    logic::receive(&ctx, &toggle, Some(&caster), true, true);
+    assert_eq!(group(&toggle), 21);
+}
+
+/// Jolly Roger Tower 3382 group 7885 shape: `Pulse(false)` + `PulseTrigger(true -> X)`. The
+/// group's own pulse is false and the trigger waits for true, so a character-caused entry must
+/// not move the doodad on.
+#[tokio::test]
+async fn a_false_pulse_does_not_fire_the_true_trigger_of_its_own_group() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2)])
+        .fake_use(10, 1, 11)
+        .phase_func(
+            11,
+            FuncTemplate::Pulse(DoodadFuncPulse { id: 5, flag: false }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 6,
+                flag: true,
+                next_phase: 12,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.use_(&d);
+    assert_eq!(
+        group(&d),
+        11,
+        "a false pulse is not the true trigger's signal"
+    );
+}
+
+/// Sharpwind switch 13161 shape, rows in the shipped `actual_func_id` order (trigger 274 before
+/// pulse 287): a character-caused entry pulses true and the group's own true trigger then takes
+/// the doodad to its final phase. Entered without a caster (a world spawn) nothing pulses, so
+/// the trigger of the same group stays armed.
+#[tokio::test]
+async fn a_true_pulse_fires_the_true_trigger_of_its_own_group() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2)])
+        .fake_use(10, 1, 11)
+        .phase_func(
+            11,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 6,
+                flag: true,
+                next_phase: 12,
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::Pulse(DoodadFuncPulse { id: 5, flag: true }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.use_(&d);
+    assert_eq!(group(&d), 12, "the use pulses true and its trigger fires");
+
+    let spawned = place(&f, TEMPLATE, 130.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), spawned.clone());
+    do_change_phase(&ctx, None, 11);
+    assert_eq!(group(&spawned), 11, "no caster, no pulse, no fire");
+}
+
+/// Sal Temple Palace Cellar with the shipped group shapes: using the Ice Machine 4752
+/// (`RelatedIds [4751]`) starts timers of 2.7 s / 4.3 s / 2.7 s that all carry the player caster,
+/// `Pulse(true)` in 11800 and `Pulse(false)` back in the start group 11798. The Ice Trap 4751
+/// (`11795: PulseTrigger(true -> 11796)`, `11796: PulseTrigger(false -> 11795)`) goes on at the
+/// true pulse and has to stay off after the false one: its entry into 11795 by that signal is not
+/// a pulse (the previous rule fired it again and switched the ice field on for good).
+#[tokio::test]
+async fn sal_temple_ice_trap_stays_off_after_the_ice_machines_false_pulse() {
+    let b = Builder::default()
+        .template(4752, &[(11798, 1), (11799, 2), (11800, 2), (11801, 2)])
+        .fake_use(11798, 2335, 11799)
+        .phase_func(
+            11798,
+            FuncTemplate::Pulse(DoodadFuncPulse {
+                id: 259,
+                flag: false,
+            }),
+        )
+        .phase_func(
+            11798,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 419,
+                family_id: 30_014,
+            }),
+        )
+        .phase_func(11799, timer(4565, 2_700, 11800))
+        .phase_func(
+            11800,
+            FuncTemplate::Pulse(DoodadFuncPulse {
+                id: 260,
+                flag: true,
+            }),
+        )
+        .phase_func(
+            11800,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 420,
+                family_id: 30_014,
+            }),
+        )
+        .phase_func(11800, timer(4566, 4_300, 11801))
+        .phase_func(11801, timer(4567, 2_700, 11798))
+        .template(4751, &[(11795, 1), (11796, 2)])
+        .phase_func(
+            11795,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 252,
+                flag: true,
+                next_phase: 11796,
+            }),
+        )
+        .phase_func(
+            11796,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 253,
+                flag: false,
+                next_phase: 11795,
+            }),
+        );
+    let mut f = fx(b);
+    let trap = f.doodad(4751);
+    let machine = new_spawner_with(4752, 700, Some(vec![4751]), 0)
+        .spawn(&f.server, 0)
+        .expect("the Ice Machine spawns");
+    assert_eq!((group(&machine), group(&trap)), (11798, 11795));
+
+    f.use_(&machine);
+    assert_eq!(group(&machine), 11799);
+    f.advance(2_700);
+    assert_eq!(group(&machine), 11800);
+    assert_eq!(group(&trap), 11796, "the true pulse switches the trap on");
+    f.advance(4_300);
+    assert_eq!(group(&machine), 11801);
+    assert_eq!(group(&trap), 11796);
+    f.advance(2_700);
+    assert_eq!(group(&machine), 11798);
+    assert_eq!(
+        group(&trap),
+        11795,
+        "the false pulse switches the trap off and it stays off"
+    );
 }
 
 #[tokio::test]

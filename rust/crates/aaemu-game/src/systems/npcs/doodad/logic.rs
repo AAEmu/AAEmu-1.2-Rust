@@ -14,10 +14,12 @@
 //!   (`enum_doodad_logic_operations`: 1 AND, 2 NAND, 3 OR, 4 XOR, 5/6 NOT/NOR, 7 XNOR) and emits
 //!   the result after `enum_doodad_logic_delays` (1 = 1 s, 2 = 5 s, 3 = 10 s, 4 = 30 s, 5 =
 //!   1 min, 6 = 5 min, 7 = 10 min, 8 = 30 min).
-//! * `DoodadFuncPulse { flag }` — emits `flag` on a character-caused phase entry (the C# ran it
-//!   only with a caster), to the provider families and to the spawner's `RelatedIds`.
+//! * `DoodadFuncPulse { flag }` — emits `flag` when a phase is entered with a caster (the C# ran
+//!   it only with a caster), to the provider families and to the spawner's `RelatedIds`.
 //! * `DoodadFuncPulseTrigger { flag, next_phase }` — a received signal equal to `flag` advances
-//!   the phase.
+//!   the phase, and so does the pulse of the same flag that the trigger's own group sent in this
+//!   phase entry (the Sharpwind switches). Entering a phase through a signal or a timer fires
+//!   nothing by itself.
 //!
 //! Sharpwind (`instance_cuttingwind_deadmine`, zone 262; editor families 50001-50008):
 //! switches 5064 (50002) and 5068 (50003) provide 50005, the family of gate 5070, whose AND over

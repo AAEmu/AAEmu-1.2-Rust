@@ -351,10 +351,12 @@ pub struct DoodadPhaseState {
     /// cannot emit.
     pub pending_output: Option<bool>,
     pub pending_output_generation: u64,
-    /// `DoodadFuncPulseTrigger` rows (func ids) that already fired in this phase; cleared when
-    /// the phase changes. The C# `PulseTriggered` lived on the shared func list (a port bug);
-    /// here it is per doodad so instances of one template do not suppress each other.
-    pub pulse_triggered: std::collections::HashSet<u32>,
+    /// The flag this doodad's own `DoodadFuncPulse` sent during the current phase entry (`None` =
+    /// nothing sent): a `DoodadFuncPulseTrigger` of the same group fires only on a pulse of its
+    /// own flag. Reset at the start of every phase entry (`phase::do_phase_funcs`); no shipped
+    /// group has two `DoodadFuncPulse` rows. Replaces the C# `PulseTriggered`, which lived on the
+    /// shared func list (one doodad's trigger suppressed every instance of the template).
+    pub pulsed: Option<bool>,
     /// `ToNextPhase`.
     pub to_next_phase: bool,
     /// A `DoodadFuncLootItem` row missed its percent roll during the current `Use` pass.
