@@ -8204,5 +8204,8 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
   mana-spending class skill enters the window for 5 s and then returns to `ManaRegen`; a
   channel refreshes the window at its end) and
   `effects::special::combat::mana_cost_tests::item_cast_skips_the_scaled_plot_charge`.
-  Live (`r7-postcast`): a headless GM client using skill 22520 repeatedly — the server's
-  `SCUnitPoints` MP rose at the normal rate (see the lane report).
+  Live (`r7-postcast`, headless GM client, weapon regrade skill 22520 five times in a row,
+  buff 2320 for mana headroom): on the fixed build the `SCUnitPoints` MP rose +18/s through
+  every cast and the 5 s after it (688 -> 1794 over the run). With the pre-fix `consume_mana`
+  (guard removed) each cast was followed by 5 s at +1/s (e.g. 1012 -> 1013 -> 1014 -> 1015
+  -> 1016 -> 1017) and only then returned to +18/s: the stalled regen of the owner report.
