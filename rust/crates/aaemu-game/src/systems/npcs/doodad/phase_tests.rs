@@ -13,7 +13,9 @@ use crate::systems::npcs::area_trigger::{AreaShape, AREA_SHAPE_CUBOID};
 use crate::systems::npcs::doodad::data::DoodadData;
 use crate::systems::npcs::doodad::logic;
 use crate::systems::npcs::doodad::manager;
-use crate::systems::npcs::doodad::spawner::{DoodadSpawner, DoodadSpawnerDef, SpawnerBase};
+use crate::systems::npcs::doodad::spawner::{
+    parse_list, DoodadSpawner, DoodadSpawnerDef, SpawnerBase,
+};
 use crate::systems::npcs::doodad::templates::*;
 use crate::test_support::*;
 use crate::world::{PlayerRef, WorldInstance};
@@ -3920,4 +3922,97 @@ async fn real_compact_db_sharpwind_water_network_rows() {
             other => panic!("{other:?}"),
         }
     }
+}
+
+/// The shipped Sharpwind water chain driven from the shipped data: the real compact DB and the
+/// shipped `doodad_spawns.json` (22 rows, 11 of them the water network with their `FamilyId`s).
+/// A character uses the three "Blocked Geyser" switches (skill 18321); the gates, the five
+/// streams and the lake follow through the family network on the virtual clock, and the lake
+/// reaches its raised phase 13159 (1 s gate delay, 5 s pre-roll, 22 s rise). Each switch's own
+/// `Final` removes it 1 s after its use and must not undo its gate input.
+#[tokio::test]
+#[ignore]
+async fn real_data_sharpwind_shipped_rows_raise_the_lake() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let spawn_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("app/Data/Worlds/instance_cuttingwind_deadmine/doodad_spawns.json");
+    let Ok(text) = std::fs::read_to_string(spawn_file) else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = DoodadData::load_from(&conn).unwrap();
+    let f = fx(Builder {
+        data,
+        ..Default::default()
+    });
+    let defs = parse_list(&text, DoodadSpawnerDef::from_json).expect("doodad_spawns.json");
+    assert_eq!(defs.len(), 22, "the shipped Sharpwind rows");
+    for (i, def) in defs.into_iter().enumerate() {
+        let template = def.base.unit_id;
+        assert!(
+            Arc::new(DoodadSpawner::new(def, Some(0)))
+                .spawn(&f.server, 0)
+                .is_some(),
+            "row {i} (template {template}) spawns"
+        );
+    }
+    let of = |template: u32| -> Vec<DoodadRef> {
+        let mut found: Vec<_> = f
+            .world
+            .all_doodads()
+            .into_iter()
+            .filter(|d| d.data().template_id == template)
+            .collect();
+        found.sort_by_key(|d| d.obj_id);
+        found
+    };
+    let (switches, lake) = (
+        [5064u32, 5068, 5069].map(|t| of(t).pop().expect("a switch is placed")),
+        of(5063).pop().expect("the lake is placed"),
+    );
+    let (streams_a, streams_b) = (of(5072), of(5073));
+    assert_eq!((streams_a.len(), streams_b.len()), (3, 2));
+    assert_eq!(
+        switches.each_ref().map(group),
+        [13160, 13175, 13178],
+        "the switches start in their start groups"
+    );
+    assert_eq!(group(&lake), 13157);
+
+    let use_switch = |switch: &DoodadRef| {
+        manager::use_doodad(&f.server, &f.world, switch, Some(&f.caster()), 18321, 0);
+    };
+    // Switches 5064 and 5068 feed gate 5070 (AND, 1 s): after the second one, the 5072 streams
+    // run; gate 5071 still waits for switch 5069.
+    use_switch(&switches[0]);
+    assert_eq!(group(&switches[0]), 13163, "the used switch's final phase");
+    f.advance(1_000);
+    assert!(
+        switches[0].data().phase.deleted,
+        "the switch's Final removed it"
+    );
+    assert!(streams_a.iter().all(|s| group(s) == 13183));
+    use_switch(&switches[1]);
+    f.advance(1_000);
+    assert!(
+        streams_a.iter().all(|s| group(s) == 13184),
+        "gate 5070 opens the 5072 streams although switch 5064 is gone: {:?}",
+        streams_a.iter().map(group).collect::<Vec<_>>()
+    );
+    assert!(streams_b.iter().all(|s| group(s) == 13185));
+    assert_eq!(group(&lake), 13157);
+
+    // Switch 5069 completes gate 5071: the 5073 streams erupt and the lake starts its sequence.
+    use_switch(&switches[2]);
+    f.advance(1_000);
+    assert!(streams_b.iter().all(|s| group(s) == 13186));
+    assert_eq!(group(&lake), 14184);
+    f.advance(5_000);
+    assert_eq!(group(&lake), 13158, "the 5 s pre-roll ends");
+    f.advance(22_000);
+    assert_eq!(group(&lake), 13159, "the lake is raised");
 }

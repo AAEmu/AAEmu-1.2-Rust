@@ -4887,8 +4887,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `doodad::logic::tests::{authored_logic_operations_cover_true_false_and_mixed_inputs,
   logic_delay_table_follows_the_qa_names_and_the_inferred_ids}`,
   `npcs::spawn_tests::real_data_sharpwind_water_network_placements` and (gated by
-  `AAEMU_COMPACT_DB`) `doodad::phase::tests::{real_compact_db_sharpwind_water_network_rows,
-  real_compact_db_related_ids_signal_opens_the_howling_abyss_2_gate}`.
+  `AAEMU_COMPACT_DB` = a copy of the r208022 `compact.sqlite3`) `doodad::phase::tests::{
+  real_compact_db_sharpwind_water_network_rows,
+  real_compact_db_related_ids_signal_opens_the_howling_abyss_2_gate,
+  real_data_sharpwind_shipped_rows_raise_the_lake}` (the last drives the shipped
+  `doodad_spawns.json` rows through the three switches to the raised lake): `cargo test -p
+  aaemu-game --lib -- --ignored real_compact_db_sharpwind real_compact_db_related_ids
+  real_data_sharpwind`.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
