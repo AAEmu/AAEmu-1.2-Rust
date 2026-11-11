@@ -1674,3 +1674,61 @@ async fn real_npc_quest_fill_spawns_on_the_ground() {
         );
     }
 }
+
+/// The two Bloodhand Base Cannons (slave 57) of `slave_spawns.json` stand on the Marooned Isle
+/// rampart floor (the wall walk at Z 126, 10 m above the terrain under it), and every Bloodhand
+/// Pillager (8014) on the docks below is within the cannon skill's range (15134: 10-130 m) of
+/// one of them. The slave spawner places a slave at its file Z (no ground snap).
+/// `AAEMU_GAME_PAK=C:/AA1.2/game_pak cargo test -p aaemu-game real_bloodhand_cannons -- --ignored`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_bloodhand_cannons_stand_on_the_rampart_in_range_of_the_docks() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef, SimpleSpawnerDef};
+    let Some(e) = env_with(true) else { return };
+    let server = real_server_with(&e, true);
+    let dir = app_path().join("Data/Worlds/main_world");
+    let slaves = std::fs::read_to_string(dir.join("slave_spawns.json")).expect("slave_spawns");
+    let cannons: Vec<_> = parse_list(&slaves, SimpleSpawnerDef::from_json)
+        .expect("parse slave_spawns")
+        .into_iter()
+        .filter(|d| d.base.unit_id == 57)
+        .map(|d| d.base.position)
+        .collect();
+    assert_eq!(cannons.len(), 2);
+    for p in &cannons {
+        let floor = super::ground_height_probe(&server, 0, p.x, p.y, p.z + 1.0, 0.0, 3.0)
+            .flatten()
+            .expect("a floor under the cannon");
+        let terrain = super::terrain_height(&server, 0, p.x, p.y).expect("terrain");
+        println!(
+            "cannon ({}, {}, {}): floor {floor}, terrain {terrain}",
+            p.x, p.y, p.z
+        );
+        assert!(
+            (floor - p.z).abs() <= 0.3,
+            "cannon at {} stands on {floor}",
+            p.z
+        );
+        assert!(p.z > terrain + 5.0, "on the wall walk, not the ground");
+    }
+    let npcs = std::fs::read_to_string(dir.join("npc_spawns.json")).expect("npc_spawns");
+    let pillagers: Vec<_> = parse_list(&npcs, NpcSpawnerDef::from_json)
+        .expect("parse npc_spawns")
+        .into_iter()
+        .filter(|d| d.base.unit_id == 8014)
+        .map(|d| d.base.position)
+        .collect();
+    assert!(!pillagers.is_empty());
+    for t in &pillagers {
+        let nearest = cannons
+            .iter()
+            .map(|c| ((c.x - t.x).powi(2) + (c.y - t.y).powi(2) + (c.z - t.z).powi(2)).sqrt())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (10.0..=130.0).contains(&nearest),
+            "pillager at ({}, {}) is {nearest} m from the nearest cannon",
+            t.x,
+            t.y
+        );
+    }
+}

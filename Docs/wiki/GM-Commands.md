@@ -170,6 +170,14 @@ are printed by the spawn/info/find commands.
 | `/auction_post_siege_items [duration] [startPrice] [buyoutPrice]` | Posts the six Siege Camp system lots. | `/auction_post_siege_items` |
 | `/auction_cancel <lotId>` | Cancels an unbid system auction lot. | `/auction_cancel 42` |
 
+What a tester meets during a running siege: a roster entry (`/joinsiege`, `/dominion register`)
+hands out the side's Guardian or Marching Seal at the next one-second sweep, not instantly;
+inside the siege area the two sides are hostile to each other even within one nation; and a
+non-participant inside the area is moved to the nearest return point outside it with "Not a siege
+participant". Characters with access level 100 are exempt from that eviction, and
+`Housing.SiegeEvictNonParticipants: false` turns it off. The castle zones are `closed` in the 1.2
+data, so only GMs can stand in a castle area at the moment.
+
 `zoneGroupId` is the zone group of the territory (`/dominion info` and `/zonestate` help identify
 it). A guild must exist before owner/bestow/register commands work.
 
