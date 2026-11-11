@@ -516,10 +516,15 @@ struct PendingAuctionMail {
 /// start`, `fee = floor(price * rate + 0.5)`, at least 1, capped at `MaxListingFee`.
 ///
 /// The client computes it in `X2Auction.CalcDeposit` (`putup.alb` proto 0.5) through
-/// `FUN_398a6060` (x2game). Retail's rate per duration class and its cap were server-set
+/// `FUN_398a6060` (x2game), reading the rate per duration class from `content_configs` id
+/// `12 + duration` (times 0.001) and the cap from id 40. Those are data rows, not client
+/// constants: in every 1.2-era database we have they are 10 / 20 / 30 / 40 and 1,000,000
 /// (`ui_texts` 5389/5390 `auction_deposit_ratio_diff_body` / `auction_deposit_limit_diff_body`
-/// are the mails for a changed multiplier / upper limit), so the C# server's values are kept:
-/// 1 % per duration step (`0.01 * (duration + 1)`) and 1,000,000.
+/// are the mails for a changed multiplier / upper limit). The constants here equal them, and
+/// are the C# server's values: 1 % per duration step (`0.01 * (duration + 1)`) and 1,000,000.
+/// They are not read from `server.game_data.content_configs` (this function has no server
+/// handle), so a database with other rows would show the client a different deposit than the
+/// server charges.
 pub fn listing_fee(direct_money: i32, start_money: i32, duration: u8) -> i32 {
     let price = if direct_money > 0 {
         direct_money

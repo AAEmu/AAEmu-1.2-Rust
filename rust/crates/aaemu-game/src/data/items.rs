@@ -805,10 +805,10 @@ pub struct ItemTemplate {
     pub living_point_price: i32,
     pub char_gender: u8,
     pub specialty_zone_id: u32,
-    /// `items.limited_sale_count`: how many of this template one character may buy
+    /// `items.limited_sale_count`: how many of this template one account may buy
     /// (0 = unlimited).
     pub limited_sale_count: i32,
-    /// `items.one_time_sale`: one character may buy this template once.
+    /// `items.one_time_sale`: one account may buy this template once.
     pub one_time_sale: bool,
 }
 

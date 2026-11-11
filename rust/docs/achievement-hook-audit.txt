@@ -87,7 +87,7 @@ k19 GET_HONOR_POINT v1=1 siege / v1=0 zone-conflict; v2=0 or zone_groups.id
                     points; +N per honor GAINED with context (spends never credit)
                     zone-conflict: skills/combat.rs::award_pvp_honor (L746, private) has
                     victim_zone_group + killer/assist amounts; match v1==0 && v2==zone group.
-                    siege honor: no Rust producer (siege rewards unimplemented, see Q1).
+                    siege honor of k19 (v1=1): no producer (Q1 credits only k57-60).
 k20 SPEND_LABOR     v1/v2=0, labor; +(-change) whenever labor is consumed
                     skills/progress.rs::change_labor_locked (L229) is the single ChangeLabor
                     body (fired with change<0); economy/inventory.rs::change_labor (L1347) is
@@ -109,7 +109,8 @@ k25 KILL_NPC        v1=npc template id, v2=party-member level cap
                     quests/bridges.rs::on_npc_killed (L253) or a new hook. No object lock.
 k26 KILL_SLAVE      v1=slaves.id (2 = siege catapult), v2=1 (single authored row; read as
                     the opposing side, INFERRED, Q5), count; +1 when a player destroys that
-                    slave during an active siege while on the other roster side
+                    slave during an active siege and is not on the owner's side (the owner
+                    must be on the roster; a killer off the roster is credited)
                     vehicles/mod.rs::on_do_die -> vehicles/slaves.rs::do_die ->
                     credit_siege_catapult_kill.
 k29 GET_ITEM_TYPE   v1=items.id, v2=grade id or -1 (ANY). All 216 rows are -1 in 1.2.
@@ -300,8 +301,9 @@ Q1 siege k57-60: housing/dominion/credit.rs::credit_siege_outcome credits the ro
    their character_records row.
 Q2 k49 MY_DISHONORABLE_POINT: implemented as recommended - the pardon path reports an absolute
    1 at the faction exit (social/faction.rs::apply_crime_faction_change), not "current infamy".
-Q5 k26 KILL_SLAVE v2=1: implemented as the opposing side (INFERRED: the killer and the catapult
-   owner must both be on the siege roster, on different sides).
+Q5 k26 KILL_SLAVE v2=1: implemented as the opposing side (INFERRED: the catapult owner must be
+   on the siege roster and the killer not on the owner's side; a killer off the roster is
+   credited).
 
 === UNRESOLVED / UNPROVEN (do not fabricate) ===
 Q3 k28 quest repeats: the entry back-credit can only prove UNIQUE completions (completed

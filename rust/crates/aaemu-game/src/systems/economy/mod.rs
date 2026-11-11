@@ -133,7 +133,7 @@ pub struct System {
     pub craft: craft::CraftManager,
     /// Store state (`Character.BuyBackItems`) and its hooks.
     pub store: store::StoreManager,
-    /// Per-character purchases of `items.limited_sale_count` / `items.one_time_sale` templates.
+    /// Per-account purchases of `items.limited_sale_count` / `items.one_time_sale` templates.
     pub shop_limits: shop_limits::ShopLimits,
     /// `SpecialtyManager` (trade pack ratios).
     pub specialty: specialty::SpecialtyManager,

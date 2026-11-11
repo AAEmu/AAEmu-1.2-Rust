@@ -2096,7 +2096,17 @@ async fn hostile_declaration_updates_the_relation_broadcasts_and_allows_attack()
     let nation = nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true)
         .expect("declaration");
     let (mut haranya_client, haranya) = spawn_side_player(&f.server, 3, "Haranya", 149, 0x102);
-    // The template makes a fresh nation hostile to Haranya; a treaty changes that first.
+    // The template makes a fresh nation hostile to Haranya, but nobody declared that.
+    let inherited = f
+        .server
+        .systems
+        .social
+        .nations
+        .relation_row(nation.id, 149)
+        .expect("template row");
+    assert_eq!(inherited.state, faction::relation_state::HOSTILE);
+    assert!(!inherited.is_declared_hostile());
+    // A treaty changes that first.
     assert!(f.server.systems.social.nations.set_relation(
         nation.id,
         149,
@@ -2132,6 +2142,7 @@ async fn hostile_declaration_updates_the_relation_broadcasts_and_allows_attack()
     assert_eq!(row.state, faction::relation_state::HOSTILE);
     assert!(row.expire_at > Utc::now().timestamp());
     assert_eq!(row.next_state, faction::relation_state::HOSTILE);
+    assert!(row.is_declared_hostile());
 
     // The king gets the result; both sides get the new state.
     let leader_frames = f.leader_client.drain();
@@ -2162,6 +2173,17 @@ async fn hostile_declaration_updates_the_relation_broadcasts_and_allows_attack()
         &Target::Obj(me),
         &Target::Obj(target)
     ));
+
+    // The declaration window ends: the relation stays hostile (no treaty) and the row keeps the
+    // declared marker, so it still counts as a declaration.
+    let nations = &f.server.systems.social.nations;
+    nations.expire_relations(row.expire_at);
+    let ended = nations.relation_row(nation.id, 149).expect("relation row");
+    assert_eq!(
+        (ended.state, ended.expire_at),
+        (faction::relation_state::HOSTILE, 0)
+    );
+    assert!(ended.is_declared_hostile());
 }
 
 #[tokio::test]

@@ -265,7 +265,10 @@ impl ReceiverLookup {
     /// The 1.2 `SCErrorMsg` id the client maps to the matching gift-refusal text. 623 is
     /// `INGAME_SHOP_FIND_CHARACTER_NAME_FAIL`, 790 `INGAME_SHOP_CHRACTER_DELETE_REQUESTED`,
     /// 791 `INGAME_SHOP_CHRACTER_TRANSFER_REQUESTED` (`x2game` error -> BFR reason map,
-    /// `FUN_39040000`, and `ui_texts` keys of the same names).
+    /// `FUN_39040000`, and `ui_texts` keys of the same names). **791 as a *receiver* refusal is
+    /// UNVERIFIED:** its client text ("Can't make purchases while a server transfer is
+    /// pending") describes the buyer, and `transfer_request_time` is never set by the server
+    /// (only loaded and saved), so this refusal cannot fire today.
     pub fn refusal_error(&self) -> Option<i16> {
         match self {
             Self::Found(_) => None,
@@ -980,8 +983,9 @@ fn send_error(p: &PlayerRef, error: i16) {
 }
 
 /// The generic checkout failure text: `INGAME_SHOP_BUY_GIFT_FAIL` (594) for a gift,
-/// `INGAME_SHOP_BUY_FAIL` (590) otherwise. Both ids are in the client's error -> BFR reason map
-/// (`FUN_39040000`), so the result window shows its own failure text.
+/// `INGAME_SHOP_BUY_FAIL` (590) otherwise. Neither id is in the client's error -> BFR reason
+/// map (`FUN_39040000`, a switch on `id - 591`): both fall through to its default reason 1, the
+/// generic failure result, so they differ only in the text of the error message the buyer sees.
 fn buy_fail_error(is_gift: bool) -> i16 {
     if is_gift {
         error_message::INGAME_SHOP_BUY_GIFT_FAIL
@@ -1527,9 +1531,8 @@ pub async fn execute_buy_for(
                     });
                 }
             }
-            if let Some(p) = &target.player {
-                send_error(p, buy_fail_error(is_gift));
-            }
+            // The buyer paid and is the one who is told; an offline receiver has nobody to tell.
+            send_error(buyer, buy_fail_error(is_gift));
             continue;
         }
 

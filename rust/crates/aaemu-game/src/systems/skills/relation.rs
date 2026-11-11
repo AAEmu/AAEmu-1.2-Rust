@@ -125,41 +125,51 @@ fn is_peace_zone(server: &GameServer, target: &Target) -> bool {
 ///
 /// The rule is the owner's 2026-11-10 recollection of EU 1.2 and covers only the cycling
 /// conflict zones (`conflict_zones`): a zone in the Peace state is an absolute PvP lockdown and
-/// pirates are fully protected too (a pirate cannot be attacked and cannot attack). The
-/// "except for pirates" of `ui_texts` 5195 `state_peace_tooltip` is about the permanently safe
-/// faction-controlled home zones, which have no conflict cycle at all; pirate attacks there are
-/// ordinary hostile attacks and must not be blocked (see `PORTING.md`).
+/// pirates are fully protected too (a pirate cannot be attacked and cannot attack). The client
+/// text of `ui_texts` 5195 `state_peace_tooltip` says "except for pirates" (EN / DE / FR); the
+/// owner's recollection is that this is about the permanently safe faction-controlled home
+/// zones, which have no conflict cycle at all, where pirate attacks are ordinary hostile attacks
+/// that must not be blocked. That is the owner's call: revisit if a capture contradicts it (see
+/// `PORTING.md`).
 ///
 /// The remaining exceptions are the owner's clarification:
-/// * the two characters are duelling each other (`DuelManager.IsInDuelWith`);
-/// * their factions have an explicit hostile diplomacy relation. Only the runtime nation rows
-///   (`NationManager.relation`, written by `CSFactionDeclareHostile`) count: the static
-///   `system_faction_relations` table makes Nuia and Haranya hostile everywhere, and using it
-///   would leave Peace blocking nothing but friendly fire.
+/// * the two characters are duelling each other: an **accepted** duel
+///   (`DuelManager::is_dueling_with`). A pending, unanswered challenge registers both characters
+///   for up to 30 s but agrees nothing, so it must not lift the lockdown;
+/// * their factions are in a hostile diplomacy relation that a nation **declared**
+///   (`CSFactionDeclareHostile`, see [`nation::declared_hostile`]). Not every Hostile nation
+///   row counts: every new nation copies the faction-166 template rows, which are hostile to
+///   both alliances from the start without any declaration, and the static
+///   `system_faction_relations` table makes Nuia and Haranya hostile everywhere; either would
+///   leave Peace blocking nothing.
 ///
 /// Force attack / Retribution never reach this function's callers' shortcuts: the caller checks
 /// this rule before those flags turn a friendly pair attackable.
 fn peace_allows_attack(server: &GameServer, attacker: &PlayerRef, target: &PlayerRef) -> bool {
-    // (a) A duel between exactly these two characters. The duel team factions are hostile, so
-    // this must run before the peace refusal (and it covers the duel's own units too).
+    // (a) An accepted duel between exactly these two characters. The duel team factions are
+    // hostile, so this must run before the peace refusal (and it covers the duel's own units
+    // too).
     if server
         .systems
         .social
         .duels
-        .is_in_duel_with(attacker.character_id, target.character_id)
+        .is_dueling_with(attacker.character_id, target.character_id)
     {
         return true;
     }
-    // (b) A declared hostile diplomacy relation (a runtime nation row).
+    // (b) A hostile diplomacy relation that a nation declared (a runtime nation row with the
+    // declared marker, not a faction-166 template row).
     let nations = &server.systems.social.nations;
     let a = attacker.data().unit.faction_id;
     let b = target.data().unit.faction_id;
-    (nations.is_nation(a) || nations.is_nation(b))
-        && faction_relation(server, a, b) == RelationState::Hostile
+    (nations.is_nation(a) || nations.is_nation(b)) && nation::declared_hostile(server, a, b)
 }
 
-/// The rules that protect a target from a **player-controlled** attacker even though the
-/// faction relation is Hostile: Peace, no-PvP instances and the faction-controlled home zones.
+/// The rules that protect a target from a **player-controlled** attacker whatever the faction
+/// relation says: Peace, no-PvP instances and the faction-controlled home zones. Callers apply
+/// it to the targets of hostile skills (a `Hostile` skill's single cast, its target list and its
+/// non-friendly effects). In Peace it therefore also drops allied players from a `Hostile`
+/// skill's list, not only hostile ones.
 ///
 /// Non-damage effects use this instead of the whole [`can_attack`]: a Neutral target (faction 2
 /// interaction NPCs, an NPC caster's trap) keeps the damage-free C# behaviour, while a protected
@@ -1070,7 +1080,8 @@ mod tests {
     }
 
     /// Two duellists may keep fighting in Peace (owner recollection 2026-11-10); after the
-    /// duel ends the same pair is refused again.
+    /// duel ends the same pair is refused again. Only an **accepted** duel counts: while the
+    /// request is unanswered the lockdown still holds.
     #[tokio::test]
     async fn peace_allows_a_duel_between_the_two_players() {
         use crate::systems::social::duel::duel_det_type;
@@ -1092,12 +1103,27 @@ mod tests {
             .social
             .duels
             .is_in_duel_with(a.character_id, b.character_id));
+        assert!(
+            !server
+                .systems
+                .social
+                .duels
+                .is_dueling_with(a.character_id, b.character_id),
+            "a pending request is no duel"
+        );
+        assert!(!can_attack(&server, &ta, &tb), "the request is unanswered");
+        assert!(!can_attack(&server, &tb, &ta), "the request is unanswered");
         server
             .systems
             .social
             .duels
             .duel_accepted(&server, &b, a.character_id)
             .await;
+        assert!(server
+            .systems
+            .social
+            .duels
+            .is_dueling_with(a.character_id, b.character_id));
         assert_eq!(a.data().unit.faction_id, RED_TEAM);
         assert_eq!(b.data().unit.faction_id, BLUE_TEAM);
         assert!(can_attack(&server, &ta, &tb));
@@ -1116,49 +1142,121 @@ mod tests {
         assert!(!can_attack(&server, &ta, &tb), "the peace rule is back");
     }
 
-    /// Exception (c): a nation's `CSFactionDeclareHostile` relation row lets it fight the
-    /// declared faction in Peace. The static Nuia/Haranya hostility is not a declaration and
-    /// does not except.
+    /// Exception (b): a hostile diplomacy relation that a nation *declared*
+    /// (`CSFactionDeclareHostile`) lets it fight the declared alliance in Peace: while the
+    /// declaration window is open and after it ended (the row then has `expire_at` 0 again but
+    /// keeps the hostile `next_state` marker). Hostility nobody declared does not except: not the
+    /// faction-166 template rows every new nation copies (hostile to both alliances from the
+    /// start, `next_state` 0), and not the static Nuia/Haranya hostility.
     #[tokio::test]
     async fn peace_allows_factions_in_a_declared_hostile_diplomacy_relation() {
         use crate::systems::social::nation::{Nation, NationRelation};
         let server = crate::test_support::test_server_with(pvp_data());
         init_conflicts(&server);
-        server.systems.social.nations.add(Nation {
-            id: 5000,
+        let hostile = RelationState::Hostile as u8;
+        let nation = |id: u32, relations: Vec<NationRelation>| Nation {
+            id,
             expedition_id: 0,
             owner_character_id: 0,
             owner_name: "King".into(),
-            name: "Kingdom".into(),
+            name: format!("Kingdom {id}"),
             created_at: 1,
             allow_change_name: 0,
-            relations: vec![NationRelation {
-                other_faction_id: 148,
-                state: RelationState::Hostile as u8,
-                expire_at: 0,
-                next_state: RelationState::Hostile as u8,
-            }],
+            relations,
             offline_members: Vec::new(),
-        });
+        };
+        let row = |other_faction_id: u32, expire_at: i64, next_state: u8| NationRelation {
+            other_faction_id,
+            state: hostile,
+            expire_at,
+            next_state,
+        };
+        // 5000 declared hostility toward Nuia (window still open) and only inherited the
+        // template row toward Haranya; 5001's declaration toward Nuia ran out its window.
+        server.systems.social.nations.add(nation(
+            5000,
+            vec![row(148, 4_000_000_000, hostile), row(149, 0, 0)],
+        ));
+        server
+            .systems
+            .social
+            .nations
+            .add(nation(5001, vec![row(148, 0, hostile)]));
         let ca = crate::test_support::TestClient::new(&server, 1, 1);
         let cb = crate::test_support::TestClient::new(&server, 2, 2);
         let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
         let citizen = player_in(&server, &ca, 0x101, 5000, PEACE_ZONE, 0);
         let nuian = player_in(&server, &cb, 0x109, 101, PEACE_ZONE, 0);
-        let harani = player_in(&server, &cc, 0x201, 109, PEACE_ZONE, 0);
+        let harani = player_in(&server, &cc, 0x20A, 109, PEACE_ZONE, 0);
+        let veteran = player_in(&server, &cd, 0x30B, 5001, PEACE_ZONE, 0);
+        // Every row below makes the pair Hostile; only the declared ones except.
         assert_eq!(faction_relation(&server, 5000, 101), RelationState::Hostile);
-        let (tcit, tnu, thar) = (
+        assert_eq!(faction_relation(&server, 5000, 109), RelationState::Hostile);
+        assert_eq!(faction_relation(&server, 5001, 101), RelationState::Hostile);
+        let (tcit, tnu, thar, tvet) = (
             obj_target(&citizen),
             obj_target(&nuian),
             obj_target(&harani),
+            obj_target(&veteran),
         );
-        assert!(can_attack(&server, &tcit, &tnu));
-        assert!(can_attack(&server, &tnu, &tcit));
-        // The relation with Haranya was not declared: the static alliance hostility alone does
-        // not except, and neither does the plain alliance pair.
-        assert_eq!(faction_relation(&server, 5000, 109), RelationState::Neutral);
-        assert!(!can_attack(&server, &tcit, &thar));
+        assert!(can_attack(&server, &tcit, &tnu), "declared (window open)");
+        assert!(can_attack(&server, &tnu, &tcit), "declared (window open)");
+        assert!(can_attack(&server, &tvet, &tnu), "declared (window ended)");
+        assert!(can_attack(&server, &tnu, &tvet), "declared (window ended)");
+        assert!(
+            !can_attack(&server, &tcit, &thar),
+            "an inherited template row is not a declaration"
+        );
+        assert!(
+            !can_attack(&server, &thar, &tcit),
+            "an inherited template row is not a declaration"
+        );
+        // The static alliance hostility alone does not except either.
         assert!(!can_attack(&server, &tnu, &thar));
+    }
+
+    /// A duel request nobody answered yet is not a duel: for the 30 s the challenge lives, the
+    /// lockdown still holds for a hostile pair and, with Ctrl+F, for a same-faction pair.
+    #[tokio::test]
+    async fn peace_refuses_attacks_while_a_duel_request_is_unanswered() {
+        let server = crate::test_support::test_server_with(pvp_data());
+        init_conflicts(&server);
+        let ca = crate::test_support::TestClient::new(&server, 1, 1);
+        let cb = crate::test_support::TestClient::new(&server, 2, 2);
+        let cc = crate::test_support::TestClient::new(&server, 3, 3);
+        let cd = crate::test_support::TestClient::new(&server, 4, 4);
+        let nuian = player_in(&server, &ca, 0x101, 101, PEACE_ZONE, 0);
+        let harani = player_in(&server, &cb, 0x109, 109, PEACE_ZONE, 0);
+        let friend_a = player_in(&server, &cc, 0x102, 101, PEACE_ZONE, 0);
+        let friend_b = player_in(&server, &cd, 0x10A, 101, PEACE_ZONE, 0);
+        let duels = &server.systems.social.duels;
+        duels.duel_request(&server, &nuian, harani.character_id);
+        duels.duel_request(&server, &friend_a, friend_b.character_id);
+        for (x, y) in [(&nuian, &harani), (&friend_a, &friend_b)] {
+            assert!(
+                duels.is_in_duel_with(x.character_id, y.character_id),
+                "the request is registered"
+            );
+            assert!(
+                !duels.is_dueling_with(x.character_id, y.character_id),
+                "but nobody accepted it"
+            );
+        }
+        friend_a.data().unit.force_attack = true;
+        let (tn, th, tfa, tfb) = (
+            obj_target(&nuian),
+            obj_target(&harani),
+            obj_target(&friend_a),
+            obj_target(&friend_b),
+        );
+        assert_eq!(relation_to(&server, &tn, &th), RelationState::Hostile);
+        assert!(!can_attack(&server, &tn, &th));
+        assert!(!can_attack(&server, &th, &tn));
+        assert!(
+            !can_attack(&server, &tfa, &tfb),
+            "Ctrl+F does not turn an unanswered request into a duel"
+        );
     }
 
     /// Ctrl+F force attack (bloodlust) makes friendly players attackable, but not in Peace.

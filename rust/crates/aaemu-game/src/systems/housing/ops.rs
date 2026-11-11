@@ -724,8 +724,9 @@ pub fn return_house_items_with_payment(
 
     // If returning items because of a new House Owner, then don't include the design
     if new_owner.is_none() {
-        // 1.2 design items are fixed_grade -1 and no 1.2 text names a Full-Kit, so the plain
-        // design return carries every grade there is.
+        // 1.2 design items are fixed_grade -1 except 30013 / 30014 (fixed at 2, which `new_item`
+        // honours), and no 1.2 text names a Full-Kit, so the plain design return carries every
+        // grade there is.
         let design_item_id = data.item_id_by_design(template.id, |id| {
             server.game_data.items.template(id).is_some()
         });

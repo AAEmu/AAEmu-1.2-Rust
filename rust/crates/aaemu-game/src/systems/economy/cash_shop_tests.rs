@@ -1395,6 +1395,48 @@ async fn generic_gift_failure_uses_the_gift_fail_text() {
     );
 }
 
+/// A mail hook whose delivery fails (`CommercialMail.Send()` returned false).
+struct FailingMail;
+
+impl CashShopMailHooks for FailingMail {
+    fn send_commercial_mail(&self, _server: &GameServer, _mail: CommercialMailRequest) -> bool {
+        false
+    }
+}
+
+/// When the delivery fails the checkout is refunded and the BUYER is told (the gift text); the
+/// receiver, who may not even be online, is not involved.
+#[tokio::test]
+async fn failed_gift_delivery_is_reported_to_the_buyer_not_the_receiver() {
+    let mut s = shop();
+    s.w.server
+        .systems
+        .economy
+        .cash_shop
+        .mail
+        .install(Arc::new(FailingMail));
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+    let (pa, pb) = (s.w.pa.clone(), s.w.pb.clone());
+    execute_buy(&s.w.server, 1, &pa, &pb, &cart(&shop_state(), &[(100, 0)])).await;
+    let buyer = s.w.a.drain();
+    assert!(
+        buyer.contains(&(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::INGAME_SHOP_BUY_GIFT_FAIL)
+        )),
+        "the buyer is told the gift failed: {buyer:?}"
+    );
+    assert!(
+        s.w.b.drain().is_empty(),
+        "the receiver is not told anything"
+    );
+    assert_eq!(
+        s.db.accounts.lock().unwrap()[&1001].0,
+        100,
+        "the credits are refunded"
+    );
+}
+
 #[tokio::test]
 async fn gift_to_accent_different_name_is_refused() {
     // `characters.name` is accent-insensitive, so the SQL `name = ?` returns "Élan" for a gift to

@@ -3562,11 +3562,12 @@ async fn pull_aggro_disabled_switches_at_101_percent() {
     assert_eq!(f.npc.data().unit.current_target, TAUNTER2_OBJ);
 }
 
-/// Home (non-conflict) zone rule: a faction guard aggroes a hostile pirate in range. The
+/// A faction guard aggroes a hostile pirate in range, as in the permanently safe home zones. The
 /// relation comes from `system_faction_relations` (161 pirate / 167 Nuia guard, both hostile),
-/// so the same `can_attack` gate the AI uses accepts the pair.
+/// so the same `can_attack` gate the AI uses accepts the pair. The fixture sets no zone faction
+/// and no conflict cycle: it covers the relation path only, not a zone's own protection rules.
 #[tokio::test]
-async fn a_guard_aggroes_a_pirate_in_a_home_zone() {
+async fn a_guard_aggroes_a_hostile_pirate() {
     use crate::data::world_data::{FactionRelation, SystemFaction};
     use crate::systems::skills::geometry::Target;
 

@@ -1043,8 +1043,8 @@ async fn challenge_validation_errors() {
         .await
         .unwrap();
     assert_eq!(err_ids(&f.a.drain()), vec![util::error::ALREADY_IN_DUEL]);
-    // ... the target (busy with the pending challenge, not yet duelling) is "other busy" for a
-    // third character.
+    // ... the target (registered with the pending challenge, not yet duelling) is "other already
+    // in duel" for a third character, as for a started duel (515 `duel_other_busy` is not sent).
     let mut c = TestClient::new(&f.server, 3, 3);
     let pc = spawn_player(
         &f.server,
@@ -1059,7 +1059,10 @@ async fn challenge_validation_errors() {
         .handle_frame(&mut c.conn, &challenge(2))
         .await
         .unwrap();
-    assert_eq!(err_ids(&c.drain()), vec![util::error::DUEL_OTHER_BUSY]);
+    assert_eq!(
+        err_ids(&c.drain()),
+        vec![util::error::OTHER_ALREADY_IN_DUEL]
+    );
     // The first challenge is untouched and still answerable.
     assert!(find(&f.b.drain(), sc::SCDuelChallengedPacket).is_empty());
     assert!(f.duels().is_in_duel_with(1, 2) && f.duels().len() == 2);
@@ -1099,20 +1102,69 @@ async fn challenge_refused_in_another_world_instance() {
     assert!(f.b.drain().is_empty() && f.duels().is_empty());
 }
 
-/// Exactly [`DUEL_REQUEST_RANGE`] is allowed; a metre more is `target_too_far`.
+/// The challenge range is twice the surrender distance (the flag spawns halfway between the two,
+/// so each duelist is half of their distance from it): everything up to 150 m is allowed, in
+/// particular 75 .. 150 m, which a range equal to the surrender distance wrongly refused; a metre
+/// more is `target_too_far`. The distances are spelled out from [`DISTANCE_FOR_SURRENDER`] so
+/// the test fails if [`DUEL_REQUEST_RANGE`] drifts from it.
 #[tokio::test]
-async fn challenge_range_is_the_duel_surrender_distance() {
-    let mut f = Fixture::new(true);
-    f.pb.data().unit.transform.x = 1000.0 + DUEL_REQUEST_RANGE;
-    f.challenge().await;
-    assert!(f.a.drain().is_empty());
-    assert!(f.duels().is_in_duel_with(1, 2));
+async fn challenge_range_is_twice_the_surrender_distance() {
+    let two_radii = 2.0 * DISTANCE_FOR_SURRENDER;
+    for distance in [
+        DISTANCE_FOR_SURRENDER,
+        DISTANCE_FOR_SURRENDER + 1.0,
+        100.0,
+        two_radii,
+    ] {
+        let mut f = Fixture::new(true);
+        f.pb.data().unit.transform.x = 1000.0 + distance;
+        f.challenge().await;
+        assert!(f.a.drain().is_empty(), "{distance} m is allowed");
+        assert!(f.duels().is_in_duel_with(1, 2), "{distance} m is allowed");
+    }
+    for distance in [two_radii + 1.0, 300.0] {
+        let mut f = Fixture::new(true);
+        f.pb.data().unit.transform.x = 1000.0 + distance;
+        f.challenge().await;
+        assert_eq!(
+            err_ids(&f.a.drain()),
+            vec![util::error::TARGET_TOO_FAR],
+            "{distance} m is refused"
+        );
+        assert!(f.b.drain().is_empty() && f.duels().is_empty());
+    }
+}
 
-    let mut f = Fixture::new(true);
-    f.pb.data().unit.transform.x = 1000.0 + DUEL_REQUEST_RANGE + 1.0;
-    f.challenge().await;
-    assert_eq!(err_ids(&f.a.drain()), vec![util::error::TARGET_TOO_FAR]);
-    assert!(f.b.drain().is_empty() && f.duels().is_empty());
+/// Why the limit is where it is: accepted at [`DUEL_REQUEST_RANGE`], the flag is halfway and both
+/// duelists stand exactly on the surrender radius, so the start's own distance check already
+/// reports a side too far and no further check is scheduled (nothing ends such a duel by
+/// distance); two metres closer both are inside and the check keeps running.
+#[tokio::test]
+async fn the_range_limit_puts_both_duelists_on_the_surrender_radius() {
+    for (distance, expected) in [
+        (DUEL_REQUEST_RANGE, DuelDistance::ChallengerFar),
+        (DUEL_REQUEST_RANGE - 2.0, DuelDistance::Near),
+    ] {
+        let mut f = Fixture::new(true);
+        // The flag stands at Z = 90 (`FlagHooks::terrain_height`): stand on it, so the 3D
+        // distances to the flag are the horizontal ones.
+        for p in [&f.pa, &f.pb] {
+            p.data().unit.transform.z = 90.0;
+        }
+        f.pb.data().unit.transform.x = 1000.0 + distance;
+        f.start().await;
+        let far = expected != DuelDistance::Near;
+        assert_eq!(
+            f.duel().state().distance_check_task.is_none(),
+            far,
+            "{distance} m: a check is scheduled only while both are inside the radius"
+        );
+        assert_eq!(
+            f.duels().duel_distance_check(&f.server, 1),
+            expected,
+            "{distance} m"
+        );
+    }
 }
 
 /// Re-checked at the acceptance: the challenged moved beyond the range after the request, so
@@ -1264,8 +1316,8 @@ async fn accept_refusal_mirrors_the_force_attack_errors() {
     assert!(f.duels().is_empty());
 }
 
-/// A target in a started duel is `other_already_in_duel` (the pending-challenge case is
-/// `duel_other_busy`, see [`challenge_validation_errors`]).
+/// A target in a started duel is `other_already_in_duel`, like one with a pending challenge
+/// (see [`challenge_validation_errors`]).
 #[tokio::test]
 async fn challenge_refused_when_target_is_already_duelling() {
     let mut f = Fixture::new(true);

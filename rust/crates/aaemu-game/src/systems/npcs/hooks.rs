@@ -311,7 +311,7 @@ pub trait EconomyBridge: Send + Sync {
         false
     }
 
-    /// Checks and reserves `count` copies of `template_id` from the character's per-character
+    /// Checks and reserves `count` copies of `template_id` from the character's per-account
     /// shop purchase allowance (`items.limited_sale_count` / `items.one_time_sale`); returns
     /// false when the purchase would cross the limit. Call before consuming the price, and
     /// [`Self::release_shop_purchase`] if the purchase still fails after the claim.

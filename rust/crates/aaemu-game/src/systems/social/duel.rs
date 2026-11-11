@@ -41,17 +41,20 @@ pub const CHECK_DELAY: Duration = Duration::from_millis(1000);
 /// `DistanceForSurrender` (75 m from the flag, 3D).
 pub const DISTANCE_FOR_SURRENDER: f32 = 75.0;
 /// Maximum distance between the challenger and the challenged at `CSChallengeDuelPacket` time
-/// (3D), and again when the challenged accepts.
+/// (3D), and again when the challenged accepts: twice [`DISTANCE_FOR_SURRENDER`] (150 m).
 ///
-/// No 1.2 source has a separate challenge range: the 1.2 C# `DuelManager` (git `a2ab80abd^`)
-/// checked nothing at all, `popup_menu_proc.alb` only asks `X2Unit.CanChallengeTargetToDuel`
-/// (x2game `FUN_3903b2f0`: self / dead / duel-state, no distance), and the 10.x request
-/// validation has no distance check either. The only duel distance the 1.2 code defines is
-/// `DistanceForSurrender` (75 m from the flag), and a challenge farther than that cannot start
-/// a playable duel: the flag spawns halfway between the two and the first 1 s distance check
-/// would end it. Refuse with the client's `TARGET_TOO_FAR` (error 517, `ui_texts`
-/// `TARGET_TOO_FAR`).
-pub const DUEL_REQUEST_RANGE: f32 = DISTANCE_FOR_SURRENDER;
+/// **Inferred (no 1.2 server evidence):** no 1.2 source has a challenge range. The 1.2 C#
+/// `DuelManager` (git `a2ab80abd^`) checked nothing at all, `popup_menu_proc.alb` only asks
+/// `X2Unit.CanChallengeTargetToDuel` (x2game `FUN_3903b2f0`: self / dead / duel-state, no
+/// distance), and the 10.x request validation has no distance check either. The value comes from
+/// the flag geometry alone: the flag spawns at the midpoint of the pair (`duel_accepted`), so each
+/// duelist is half of their distance from it, and the surrender radius is
+/// [`DISTANCE_FOR_SURRENDER`] (75 m from the flag), so a pair 150 m or more apart starts out
+/// already at the surrender radius. Nothing ends such a duel by distance (`duel_start` discards
+/// the first distance check and `duel_distance_check` schedules no further one once it reports a
+/// side too far, as in the C#): it would only end with the HP result or the end timer. Refuse
+/// with the client's `TARGET_TOO_FAR` (error 517, `ui_texts` `TARGET_TOO_FAR`).
+pub const DUEL_REQUEST_RANGE: f32 = 2.0 * DISTANCE_FOR_SURRENDER;
 /// `DuelDurationTime` (5 min).
 pub const DUEL_DURATION: Duration = Duration::from_secs(5 * 60);
 /// `DuelStartTask` delay (3 s).
@@ -270,6 +273,14 @@ pub struct DuelInfo {
     pub started: bool,
 }
 
+impl DuelInfo {
+    /// Whether `a` and `b` are the two participants (in either role).
+    fn is_between(&self, a: u32, b: u32) -> bool {
+        (self.challenger_id == a && self.challenged_id == b)
+            || (self.challenger_id == b && self.challenged_id == a)
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     /// `_duels` (both participants' character ids).
@@ -346,12 +357,19 @@ impl DuelManager {
         })
     }
 
-    /// Whether characters `a` and `b` are the two sides of the same duel.
+    /// Whether characters `a` and `b` are the two sides of the same duel, **including a pending
+    /// challenge**: [`Self::duel_request`] registers both characters as soon as it is sent.
     pub fn is_in_duel_with(&self, a: u32, b: u32) -> bool {
-        self.duel_of(a).is_some_and(|d| {
-            (d.challenger_id == a && d.challenged_id == b)
-                || (d.challenger_id == b && d.challenged_id == a)
-        })
+        self.duel_of(a).is_some_and(|d| d.is_between(a, b))
+    }
+
+    /// Whether `a` and `b` are the two sides of the same duel that was **accepted** (`started`).
+    /// An unanswered challenge (for which [`Self::is_in_duel_with`] is already true) is no duel
+    /// yet: nothing was agreed, it lives up to [`REQUEST_TIMEOUT`] and can be repeated, so a rule
+    /// that exempts duellists (the Peace-period PvP lockdown) must use this one.
+    pub fn is_dueling_with(&self, a: u32, b: u32) -> bool {
+        self.duel_of(a)
+            .is_some_and(|d| d.started && d.is_between(a, b))
     }
 
     /// `SaveFactions[id]`.
@@ -465,10 +483,11 @@ impl DuelManager {
     /// `bad_duel_target`, another world instance -> `bad_duel_target`, instant game (either
     /// side) -> `duel_bad_location`, force attack -> `cannot_duel_during_force_attack(_other)`,
     /// farther than [`DUEL_REQUEST_RANGE`] -> `target_too_far`, challenger already registered ->
-    /// `already_in_duel`, target in a started duel -> `other_already_in_duel`, target busy with
-    /// a pending challenge -> `duel_other_busy`. The 1.2 C# threw a NullReferenceException for
-    /// an unknown target and checked nothing else; an unanswered challenge expires after
-    /// [`REQUEST_TIMEOUT`] as in 10.x.
+    /// `already_in_duel`, target registered (a started duel or a pending challenge) ->
+    /// `other_already_in_duel`. `duel_other_busy` (515) is in the client's error table but no
+    /// rule that sends it is evidenced (the 10.x registry rule is 505 / 506), so it is never
+    /// sent. The 1.2 C# threw a NullReferenceException for an unknown target and checked nothing
+    /// else; an unanswered challenge expires after [`REQUEST_TIMEOUT`] as in 10.x.
     pub fn duel_request(&self, server: &GameServer, challenger: &PlayerRef, challenged_id: u32) {
         if challenged_id == challenger.character_id {
             send_error(challenger, util::error::BAD_DUEL_SELF);
@@ -508,14 +527,10 @@ impl DuelManager {
             let mut st = self.st();
             let error = if st.duels.contains_key(&challenger.character_id) {
                 Some(util::error::ALREADY_IN_DUEL)
+            } else if st.duels.contains_key(&challenged.character_id) {
+                Some(util::error::OTHER_ALREADY_IN_DUEL)
             } else {
-                st.duels.get(&challenged.character_id).map(|duel| {
-                    if duel.state().started {
-                        util::error::OTHER_ALREADY_IN_DUEL
-                    } else {
-                        util::error::DUEL_OTHER_BUSY
-                    }
-                })
+                None
             };
             if let Some(e) = error {
                 drop(st);
