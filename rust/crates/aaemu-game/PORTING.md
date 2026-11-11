@@ -1758,17 +1758,21 @@ blobs, 1.0 GB heap of which about 600 MB are the heightmap cells, 8 s; 1.0 µs p
   5 routes, mostly flying / golem routes) cross a wall. Tested by `ai::behaviors::walk_tests`
   and (gated) `collision::real_data_tests::{real_roam_path_block_rates, real_walk_check_rates}`.
 * **Alert / phase grounding (2026-11-11)**: `BaseCombatBehavior.CheckPipeName()` grounded
-  `phase_dragon_ground` / phase 1 owners on `GeoData.GetHeight`, the navigation mesh. The 1.2
-  navmesh is a walking-surface graph above the terrain (measured navmesh minus raw heightmap:
-  2.8 m at the Dewstone Nui statue, 4.9 m south of Vedisa, 4.5-5.7 m at the Cloaked Forest
-  flesh-golem camp), so `AlertBehavior.Enter` lifted every ground walker by that much and its
-  `StopMovement` broadcast the lifted Z (live golem 731 at the statue alternated 114.3 / 117.2 m
-  at the same spot). **Deviation:** a ground walker (not `moves_freely`) now uses the same floor
+  `phase_dragon_ground` / phase 1 owners on `GeoData.GetHeight`, the navigation mesh. The
+  navmesh height can lie several metres above or below the ground (measured navmesh minus raw
+  heightmap: 2.8 m at the Dewstone Nui statue, 4.9 m south of Vedisa, 4.5-5.7 m at the Cloaked
+  Forest flesh-golem camp; below the ground elsewhere, see the geodata deviations above), so
+  `AlertBehavior.Enter` lifted (or sank) every re-alerting ground walker by that much (the first
+  Enter only arms the pipe, so it is the NPC's second alert on) and its `StopMovement`
+  broadcast that Z (live golem 731 at the statue alternated 114.3 / 117.2 m at the same spot).
+  **Inferred (no 1.2 server evidence):** the cause (the navmesh as a walking-surface graph
+  above the terrain); the fix does not depend on it. **Deviation:** a ground walker (not `moves_freely`) now uses the same floor
   as its movement steps, `ai::npc::reference_height_in` (collision floor first, then the bounded
   navmesh / heightmap fallback); flying and swimming NPCs keep the C# navigation height. Chase,
   return, roaming, path following and group formation already went through
   `reference_height_in`, and spawns use `spawn_ground_z` (collision floor / raw heightmap), so
-  the alert pipe was the only movement path that read the navmesh directly. Tested by
+  the alert pipe was the only movement path of NPCs with an AI that read the navmesh directly.
+  Tested by
   `ai::npc::npc_height_tests::{alert_grounds_a_walker_on_the_collision_floor_not_the_navmesh,
   alert_keeps_a_walker_on_the_structure_floor_it_stands_on,
   alert_keeps_a_flying_npc_on_the_navigation_height}`.
