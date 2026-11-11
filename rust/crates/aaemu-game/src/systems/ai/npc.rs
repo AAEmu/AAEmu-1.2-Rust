@@ -391,6 +391,7 @@ fn stealth_formula_unavailable(kind: FormulaKind) {
 /// `CanDetect` formulas / unit attribute 94, so the server mirrors that (71 stealth buffs; 30
 /// lack tag 100, 10 tag-100 buffs are not stealth).
 pub fn can_see_target(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
+    let _profile = super::profile::step(super::profile::Step::CanSee);
     target.is_visible() && can_detect(server, observer, target)
 }
 
@@ -849,6 +850,7 @@ pub fn around(
     radius: f32,
     use_model_size: bool,
 ) -> Vec<WorldObject> {
+    let _profile = super::profile::step(super::profile::Step::Around);
     geometry::around_radius(server, &Target::Obj(obj.clone()), radius, use_model_size)
 }
 

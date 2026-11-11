@@ -484,6 +484,7 @@ fn on_enemy_seen(c: &mut AiCtx<'_>, target: &WorldObject) {
 
 /// The units sorted by 3D distance (`CheckAggression` / `CheckAlert`).
 fn units_by_distance(c: &AiCtx<'_>, radius: f32) -> Vec<(WorldObject, f32)> {
+    let _profile = super::profile::step(super::profile::Step::TargetSearch);
     let me = c.obj.clone();
     let mut v: Vec<(WorldObject, f32)> = npc::around(c.server, &me, radius, false)
         .into_iter()
@@ -547,6 +548,7 @@ fn scan_for_enemy(
 
 /// `Behavior.CheckAggression()`.
 pub fn check_aggression(c: &mut AiCtx<'_>, _k: BehaviorKind) -> bool {
+    let _profile = super::profile::step(super::profile::Step::Aggression);
     let t = template_scalars(c);
     if !t.aggression {
         return false;
@@ -578,6 +580,7 @@ pub fn check_alert(c: &mut AiCtx<'_>, _k: BehaviorKind) -> bool {
     if c.npc.data().unit.is_in_battle {
         return false;
     }
+    let _profile = super::profile::step(super::profile::Step::Alert);
     let t = template_scalars(c);
     match scan_for_enemy(c, t.sight_range_scale * 15.0, 4.0, 1.75, 2.0) {
         Some(unit) => {
@@ -1629,6 +1632,7 @@ fn check_for_talk(c: &mut AiCtx<'_>, k: BehaviorKind) {
     if c.ai.current_behavior() == Some(B::Talk) {
         return;
     }
+    let _profile = super::profile::step(super::profile::Step::Talk);
     let now = now_ms();
     let greeted = c.st(k).greeted.clone();
     let players = players_in_range(c, GREET_RANGE, GREET_FOV, &greeted, GREET_COOLDOWN_MS);

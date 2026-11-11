@@ -36,6 +36,7 @@ use crate::server::GameServer;
 use crate::world::{NpcRef, WorldObject};
 
 use super::framework::{AiCtx, AiKind, NpcAi};
+use super::profile;
 
 /// Ticks a newly added AI stays a candidate so its initialization (queued `GoToSpawn` /
 /// home position / path, `NpcSpawnerNpc.Spawn`) is never starved by the region selection.
@@ -166,6 +167,23 @@ pub struct AiTickDiagnostics {
     pub maintenance_ms: u64,
 }
 
+/// The opt-in profile window (`AAEMU_AI_PROFILE`): the counters to subtract, the batch wall
+/// times and candidate counts of the current window.
+#[derive(Debug, Default)]
+struct ProfileWindow {
+    last: Option<profile::Snapshot>,
+    total_ms: Vec<u64>,
+    plan_ms: Vec<u64>,
+    tick_ms: Vec<u64>,
+    candidates: Vec<u64>,
+    batches: u64,
+}
+
+/// Batches per profile window (about one line per second at the 100 ms tick).
+const PROFILE_WINDOW_BATCHES: u64 = 10;
+/// Slow NPC ticks reported per profile window.
+const PROFILE_TOP_SLOW_NPCS: usize = 5;
+
 /// `AIManager`.
 #[derive(Debug, Default)]
 pub struct AiManager {
@@ -189,6 +207,8 @@ pub struct AiManager {
     /// Serializes asynchronous batches: [`tick_batch`] is public and may be called
     /// concurrently, and two batches must never overlap on one manager.
     batch_lock: tokio::sync::Mutex<()>,
+    /// `AAEMU_AI_PROFILE` window: the last profile snapshot and the window's batch samples.
+    profile_window: Mutex<ProfileWindow>,
     /// Test-only: ordinals of the handles whose `NpcAi::Tick` ran, in execution order.
     #[cfg(test)]
     tick_order: Mutex<Vec<u64>>,
@@ -539,6 +559,7 @@ fn tick_handle(
                     let obj = WorldObject::from(&npc);
                     let activity =
                         local.contains(&h.ordinal) || manager.always.contains_key(&h.ordinal);
+                    let behavior = st.current_behavior();
                     let mut ctx = AiCtx {
                         server,
                         npc,
@@ -554,6 +575,17 @@ fn tick_handle(
                         tracing::error!("AI tick of npc {id} panicked");
                     }
                     let npc_took = npc_started.elapsed();
+                    if profile::enabled() {
+                        let ns = npc_took.as_nanos() as u64;
+                        if let Some(behavior) = behavior {
+                            profile::behavior_tick(behavior.index(), ns);
+                        }
+                        profile::record_slow_npc(
+                            ns / 1_000,
+                            id,
+                            behavior.map(super::framework::BehaviorKind::index),
+                        );
+                    }
                     if npc_took > SLOW_NPC_TICK {
                         tracing::warn!(
                             "AI tick of npc {id} (template {}, {:?}, behavior {:?}) took {}ms",
@@ -576,6 +608,7 @@ fn tick_handle(
         }
     } else {
         h.try_drain(server);
+        let _profile = profile::step(profile::Step::WokenRefresh);
         manager.refresh_woken(h);
     }
 }
@@ -685,13 +718,14 @@ fn batch_worker_count(server: &GameServer) -> usize {
 pub async fn tick_batch(server: &Arc<GameServer>, delta_ms: i64) -> AiTickDiagnostics {
     let started = Instant::now();
     let diag = tick_batch_with_workers(server, delta_ms, batch_worker_count(server)).await;
+    let total_ms = started.elapsed().as_millis() as u64;
     // Opt-in per-batch profile (`RUST_LOG` at debug). `total_ms` is the whole awaited
     // batch as seen here: supervisor spawn, batch-lock serialization and blocking-pool dispatch
     // are included; `plan_ms`/`maintenance_ms` are measured inside their jobs and the parallel
     // `tick_ms` spans the whole chunk phase (see `AiTickDiagnostics`). Any remaining gap can
     // include supervisor, batch-lock and finalization overhead; it does not identify one cause.
     tracing::debug!(
-        total_ms = started.elapsed().as_millis() as u64,
+        total_ms,
         plan_ms = diag.plan_ms,
         tick_ms = diag.tick_ms,
         maintenance_ms = diag.maintenance_ms,
@@ -701,7 +735,102 @@ pub async fn tick_batch(server: &Arc<GameServer>, delta_ms: i64) -> AiTickDiagno
         removed = diag.removed,
         "AI tick batch profile"
     );
+    if profile::enabled() {
+        log_profile_window(server, &diag, total_ms);
+    }
     diag
+}
+
+/// `p`-th percentile of `values` (0..=100), 0 for an empty slice.
+fn percentile(values: &mut [u64], p: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = (values.len() * p).div_ceil(100).max(1) - 1;
+    values[rank.min(values.len() - 1)]
+}
+
+/// Appends one batch to the `AAEMU_AI_PROFILE` window and, every [`PROFILE_WINDOW_BATCHES`],
+/// logs the window's tick-time distribution, the profile step / behavior deltas and the slowest
+/// NPC ticks. The counters are process-wide, so the window is the delta against the previous
+/// one (the first window is the delta against zero, i.e. since process start).
+fn log_profile_window(server: &GameServer, diag: &AiTickDiagnostics, total_ms: u64) {
+    let manager = &server.systems.ai.ais;
+    let mut w = lock(&manager.profile_window);
+    w.batches += 1;
+    w.total_ms.push(total_ms);
+    w.plan_ms.push(diag.plan_ms);
+    w.tick_ms.push(diag.tick_ms);
+    w.candidates.push(diag.candidates as u64);
+    if !w.batches.is_multiple_of(PROFILE_WINDOW_BATCHES) {
+        return;
+    }
+    let now = profile::snapshot();
+    let window = match w.last.replace(now.clone()) {
+        Some(prev) => profile::delta(&now, &prev),
+        None => now,
+    };
+    let mut total = std::mem::take(&mut w.total_ms);
+    let plan = std::mem::take(&mut w.plan_ms);
+    let tick = std::mem::take(&mut w.tick_ms);
+    let candidates = std::mem::take(&mut w.candidates);
+    let candidates_avg = candidates.iter().sum::<u64>() / candidates.len().max(1) as u64;
+    tracing::info!(
+        batches = PROFILE_WINDOW_BATCHES,
+        candidates_avg,
+        total_ms_p50 = percentile(&mut total, 50),
+        total_ms_p99 = percentile(&mut total, 99),
+        total_ms_max = total.iter().max().copied().unwrap_or(0),
+        plan_ms_avg = plan.iter().sum::<u64>() / plan.len().max(1) as u64,
+        tick_ms_avg = tick.iter().sum::<u64>() / tick.len().max(1) as u64,
+        "AI tick profile window"
+    );
+    let mut steps = String::new();
+    for step in profile::Step::ALL {
+        let i = step as usize;
+        if window.step_calls[i] == 0 {
+            continue;
+        }
+        if !steps.is_empty() {
+            steps.push_str(", ");
+        }
+        steps.push_str(&format!(
+            "{}={:.1}ms/{}",
+            profile::step_name(step),
+            window.step_ns[i] as f64 / 1e6,
+            window.step_calls[i]
+        ));
+    }
+    tracing::info!("AI tick profile steps (cumulative, nests): {steps}");
+    let mut behaviors = String::new();
+    for (i, kind) in super::framework::BehaviorKind::ALL.iter().enumerate() {
+        if window.behavior_calls[i] == 0 {
+            continue;
+        }
+        if !behaviors.is_empty() {
+            behaviors.push_str(", ");
+        }
+        behaviors.push_str(&format!(
+            "{:?}={:.1}ms/{}",
+            kind,
+            window.behavior_ns[i] as f64 / 1e6,
+            window.behavior_calls[i]
+        ));
+    }
+    tracing::info!("AI tick profile behaviors: {behaviors}");
+    let slow: Vec<String> = profile::take_slow_npcs(PROFILE_TOP_SLOW_NPCS)
+        .iter()
+        .map(|(us, obj_id, behavior)| {
+            let behavior = behavior
+                .and_then(|i| super::framework::BehaviorKind::ALL.get(i))
+                .map_or_else(|| "none".to_string(), |b| format!("{b:?}"));
+            format!("npc {obj_id} ({behavior}) {:.1}ms", *us as f64 / 1e3)
+        })
+        .collect();
+    if !slow.is_empty() {
+        tracing::info!("AI tick profile slowest NPCs: {}", slow.join(", "));
+    }
 }
 
 /// [`tick_batch`] with an explicit worker count (clamped; tests): spawns the owning supervisor

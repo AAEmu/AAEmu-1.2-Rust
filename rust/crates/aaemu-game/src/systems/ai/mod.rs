@@ -47,6 +47,7 @@ pub mod packets;
 pub mod params;
 pub mod path_handler;
 pub mod physics;
+pub mod profile;
 pub mod simulation;
 pub mod skills;
 
