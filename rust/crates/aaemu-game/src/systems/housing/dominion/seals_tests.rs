@@ -226,6 +226,55 @@ async fn a_scheduled_roster_keeps_the_seal_until_the_siege_ends() {
 }
 
 #[tokio::test]
+async fn reconcile_hands_a_missing_seal_back_to_an_online_member() {
+    let f = fixture();
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    grant_for_participant(&f.server, &state(&f), 1, SiegeSide::Attacker);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+    // Simulate the 240-minute expiry / a destructive action during the siege.
+    f.server.systems.skills.ext.items().consume_item_template(
+        &f.server,
+        &f.attacker,
+        OFFENSE_SEAL,
+        1,
+    );
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+}
+
+#[tokio::test]
+async fn reconcile_grants_to_a_member_who_was_offline_at_registration() {
+    let f = fixture();
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    f.attacker.data().is_online = false;
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0);
+    f.attacker.data().is_online = true;
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+}
+
+#[tokio::test]
+async fn a_rejoin_before_the_removal_keeps_the_seal() {
+    let f = fixture();
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    grant_for_participant(&f.server, &state(&f), 1, SiegeSide::Attacker);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+    f.server
+        .systems
+        .housing
+        .dominions
+        .unregister_participant(GROUP, 1)
+        .unwrap();
+    // The join path inserts the roster before its grant; the reconcile removal re-reads the
+    // roster under the seal-action lock, so this rejoin is visible and the seal is kept.
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+}
+
+#[tokio::test]
 async fn an_already_held_reinforcement_seal_is_not_duplicated_or_revoked() {
     let f = fixture();
     // Skill 16975 (defence reinforcements) grants the same defence seal outside the roster.

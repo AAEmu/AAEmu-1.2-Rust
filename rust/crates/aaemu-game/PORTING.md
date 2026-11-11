@@ -5546,13 +5546,18 @@ and in NPC wandering / buff remaining times.
   paths (`/joinsiege` and `/dominion register`) and a sweep at the Scheduled -> Active
   transition (`tick_once`); a character that already holds the item (the defence
   reinforcement skill 16975 grants the same defence seal) gets no duplicate and stays
-  untracked. Removal: `seals::reconcile` in the 1-second participant tick takes one seal back
-  once the siege record is finished (an end or a cancel) or the character left its roster
-  entry; a warmup / still-scheduled record keeps it (the first live run caught the earlier
-  active-only check taking the seal back a second after the join, and the fix has its own
-  test); an offline character keeps the item for its authored lifetime (the backstop), and
-  the runtime grant set is deliberately not persisted (after a restart the lifetime is the
-  only cleanup). Grant uses
+  untracked. `seals::reconcile` in the 1-second participant tick then (a) re-grants a missing
+  seal to every online roster member of an unfinished siege (offline at registration or at
+  the start, a GM registration of an offline character, a full bag whose first grant failed,
+  or the 240-minute expiry during the siege; `holds` keeps the sweep idempotent) and (b) takes
+  one seal back once the siege record is finished (an end or a cancel) or the character left
+  its roster entry; a warmup / still-scheduled record keeps it (the first live run caught the
+  earlier active-only check taking the seal back a second after the join, and the fix has its
+  own test). A seal-action lock serialises the grant with the removal, and the removal
+  re-reads the current roster and the held item under it, so a leave and rejoin cannot race
+  the take into removing the rejoined seal. An offline character keeps the item for its
+  authored lifetime (the backstop), and the runtime grant set is deliberately not persisted
+  (after a restart the lifetime is the only cleanup). Grant uses
   item task 42 (`SkillEffectGainItem`, the existing verified ticket-grant task in
   `skills/effects/special/items.rs`); the removal uses the ordinary consume path. The retail
   grant/removal trigger and packet are UNKNOWN (no 1.2 capture); this is the owner's
@@ -5560,6 +5565,10 @@ and in NPC wandering / buff remaining times.
   `seals_tests::{a_selected_participant_receives_the_side_seal_once,
   the_roster_sweep_hands_the_seal_to_every_online_member,
   the_seal_is_taken_back_after_the_siege_ends_or_the_member_leaves,
+  a_scheduled_roster_keeps_the_seal_until_the_siege_ends,
+  reconcile_hands_a_missing_seal_back_to_an_online_member,
+  reconcile_grants_to_a_member_who_was_offline_at_registration,
+  a_rejoin_before_the_removal_keeps_the_seal,
   an_already_held_reinforcement_seal_is_not_duplicated_or_revoked,
   an_offline_member_keeps_the_item_for_its_authored_lifetime_backstop,
   the_grant_is_client_visible_as_an_item_task}` and the command flow test

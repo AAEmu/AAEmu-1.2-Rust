@@ -8,13 +8,21 @@
 //! "selects from the eligible participants for Attackers and Defenders up to the allotted
 //! limits" — a selected participant is marked with their side's seal. There is no 1.2 CS
 //! packet for it (siege.md 0: the client has no siege-specific CS), so this server hands the
-//! seal when the roster accepts the character and takes it back when the siege ends.
+//! seal when the roster accepts the character and keeps it for the siege record.
 //!
-//! The 240-minute item lifetime is the retail backstop: a character who is offline when the
-//! siege ends keeps the seal only until that timer expires. The runtime grant set below is
-//! deliberately not persisted; after a restart the lifetime is the only owner of the cleanup,
-//! and a seal granted by the defence-reinforcement skill 16975 (`GetSiegeTicket`) is never
-//! removed by this module (it is not in the set).
+//! The 1-second [`reconcile`] sweep (a) re-grants a missing seal to every online roster member
+//! of an unfinished siege — covering a participant who was offline at registration or at the
+//! start, a GM registration of an offline character, a full bag whose first grant failed, and
+//! the authored 240-minute expiry during a long siege — and (b) takes the seal back when the
+//! record ends or the roster entry / side is gone. The grant is idempotent (`holds`), and one
+//! seal-action lock covers the grant insert and the removal's participation/`holds` re-check,
+//! so a leave and rejoin cannot race a removal into taking the rejoined seal. The runtime
+//! grant set is deliberately not persisted; after a restart the item lifetime is the only
+//! cleanup for a character who is offline.
+//!
+//! The authored 240-minute lifetime is the backstop for a character who is offline when the
+//! siege ends; a seal granted by the defence-reinforcement skill 16975 (`GetSiegeTicket`) is
+//! never removed by this module (it is not in the runtime set).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -28,15 +36,23 @@ use crate::world::PlayerRef;
 /// Runtime-only record of the seals this server handed to a roster entry.
 ///
 /// Keyed by zone group and character id; the side is kept so reconcile can compare it with the
-/// current roster entry without re-reading the item template.
+/// current roster entry without re-reading the item template. `action` serialises a grant with
+/// a removal, so the removal's fresh participation + item check cannot race a rejoin's grant.
 #[derive(Debug, Default)]
 pub struct SealRuntime {
     granted: Mutex<BTreeMap<(u32, u32), SiegeSide>>,
+    action: Mutex<()>,
 }
 
 impl SealRuntime {
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<(u32, u32), SiegeSide>> {
         self.granted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_action(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.action
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -90,10 +106,10 @@ fn holds(server: &GameServer, player: &PlayerRef, template_id: u32) -> bool {
         > 0
 }
 
-/// Hand the side's seal to one accepted roster entry. A character that already holds the item
-/// (the defence-reinforcement skill 16975 grants the same defence seal) gets no duplicate and
-/// is not tracked; an offline character cannot be given one and gets none.
-pub fn grant_for_participant(
+/// Hand the side's seal to one accepted roster entry. The caller holds the seal-action lock.
+/// A character that already holds the item (the defence-reinforcement skill 16975 grants the
+/// same defence seal) gets no duplicate and is not tracked; an offline character gets none.
+fn grant_locked(
     server: &GameServer,
     state: &DominionState,
     character_id: u32,
@@ -117,7 +133,8 @@ pub fn grant_for_participant(
         0,
     );
     if !acquired {
-        tracing::warn!(
+        // The reconcile sweep retries every second (a full bag is the common cause).
+        tracing::debug!(
             "Dominion {}: could not hand seal {template_id} to character {character_id}",
             state.zone_group_id
         );
@@ -131,13 +148,25 @@ pub fn grant_for_participant(
     true
 }
 
+/// Hand the side's seal to one accepted roster entry (the join-command path).
+pub fn grant_for_participant(
+    server: &GameServer,
+    state: &DominionState,
+    character_id: u32,
+    side: SiegeSide,
+) -> bool {
+    let _action = server.systems.housing.siege_seals.lock_action();
+    grant_locked(server, state, character_id, side)
+}
+
 /// Hand the seals to every online member of a just-started roster.
 pub fn grant_roster(server: &GameServer, state: &DominionState) {
     let Some(siege) = state.siege.as_ref() else {
         return;
     };
+    let _action = server.systems.housing.siege_seals.lock_action();
     for participant in siege.participants.values() {
-        grant_for_participant(server, state, participant.character_id, participant.side);
+        grant_locked(server, state, participant.character_id, participant.side);
     }
 }
 
@@ -150,17 +179,18 @@ fn take_one(server: &GameServer, player: &PlayerRef, template_id: u32) {
         .consume_item_template(server, player, template_id, 1);
 }
 
-/// Remove the seals this server handed out whose roster entry is gone. Runs once a second from
-/// the participant tick; the item's own 240-minute lifetime covers offline characters and
-/// restarts. A tracked character that is offline while the siege still runs keeps the record.
-pub fn reconcile(server: &GameServer) {
-    super::siege_area::refresh(server);
-    for ((zone_group_id, character_id), side) in server.systems.housing.siege_seals.tracked() {
-        let state = server.systems.housing.dominions.get(zone_group_id);
-        // A roster entry keeps its seal through the whole record, including the warmup (and a
-        // GM-scheduled start still in the future); only the end of the siege (or leaving the
-        // roster / a side change) ends the entitlement.
-        let still_participating = state.as_ref().is_some_and(|state| {
+fn still_entitled(
+    server: &GameServer,
+    zone_group_id: u32,
+    character_id: u32,
+    side: SiegeSide,
+) -> bool {
+    server
+        .systems
+        .housing
+        .dominions
+        .get(zone_group_id)
+        .is_some_and(|state| {
             state.siege.as_ref().is_some_and(|siege| {
                 siege.status != SiegeStatus::Finished
                     && siege
@@ -168,18 +198,37 @@ pub fn reconcile(server: &GameServer) {
                         .get(&character_id)
                         .is_some_and(|participant| participant.side == side)
             })
-        });
-        if still_participating {
+        })
+}
+
+/// (Re)grant missing seals and remove ended ones. Runs once a second from the participant
+/// tick; also rebuilds the per-zone siege-area cache the hostility rule reads.
+pub fn reconcile(server: &GameServer) {
+    super::siege_area::refresh(server);
+    let _action = server.systems.housing.siege_seals.lock_action();
+    // (a) Every online roster member of an unfinished siege holds its side's seal. A missing
+    // item (offline at registration or at the start, a GM registration of an offline
+    // character, a full bag whose first grant failed, or the 240-minute expiry during a long
+    // siege) is handed again; `holds` keeps the repeated sweep idempotent.
+    for state in server.systems.housing.dominions.all() {
+        let Some(siege) = state
+            .siege
+            .as_ref()
+            .filter(|siege| siege.status != SiegeStatus::Finished)
+        else {
             continue;
+        };
+        for participant in siege.participants.values() {
+            grant_locked(server, &state, participant.character_id, participant.side);
         }
+    }
+    // (b) Remove seals whose entitlement ended. The fresh participation re-read and the
+    // `holds` check run under the same seal-action lock as a command's grant, so a leave and
+    // rejoin between the sweep above and this take cannot lose the rejoined seal.
+    for ((zone_group_id, character_id), side) in server.systems.housing.siege_seals.tracked() {
         let Some(player) = online_player(server, character_id) else {
             // Nothing to take from an offline character: the authored lifetime ends the item.
-            if state.as_ref().is_none_or(|state| {
-                state
-                    .siege
-                    .as_ref()
-                    .is_none_or(|siege| siege.status == SiegeStatus::Finished)
-            }) {
+            if !still_entitled(server, zone_group_id, character_id, side) {
                 server
                     .systems
                     .housing
@@ -188,8 +237,13 @@ pub fn reconcile(server: &GameServer) {
             }
             continue;
         };
+        if still_entitled(server, zone_group_id, character_id, side) {
+            continue;
+        }
         if let Some(template_id) = seal_item(server, zone_group_id, side) {
-            take_one(server, &player, template_id);
+            if holds(server, &player, template_id) {
+                take_one(server, &player, template_id);
+            }
         }
         server
             .systems
