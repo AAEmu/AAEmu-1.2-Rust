@@ -39,9 +39,9 @@ pub fn register(reg: &mut PacketRegistry) {
 /// (or the NPC the player is interacting with) must be an NPC with the auctioneer flag within
 /// [`SERVICE_RANGE`]. With `hudAuctionButton` (feature bit 81) on, the 1.2 client's HUD button
 /// opens the auction window away from an auctioneer (`right_button_set.alb`
-/// `CreateAuctionToggleBtn` / `ToggleAuctionWindow`; owner, 2026-11-11: the remote button was
-/// usable by everyone, not Patron-only), so the request is accepted without one; with the bit
-/// off the NPC guard stays. The C# ignored both ids.
+/// `CreateAuctionToggleBtn` / `ToggleAuctionWindow`; owner recollection, 2026-11-11: the remote
+/// button was usable by everyone, not Patron-only; no 1.2 server evidence), so the request is
+/// accepted without one; with the bit off the NPC guard stays. The C# ignored both ids.
 fn at_auctioneer(server: &GameServer, p: &PlayerRef, id: u32, id2: u32) -> bool {
     if server
         .systems

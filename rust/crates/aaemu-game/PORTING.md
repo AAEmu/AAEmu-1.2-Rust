@@ -2743,8 +2743,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy (auction HUD button, 2026-11-11): the 1.2 client's HUD menu bar opens the
   auction window with `CreateAuctionToggleBtn` / `ToggleAuctionWindow`
   (`ui/game/scriptsbin/x2ui/hud/main_menu_bar/right_button_set.alb`) when feature
-  `hudAuctionButton` (bit 81) is on. The owner (EU 1.2, 2026-11-11) confirmed the remote button
-  was usable by everyone, not Patron-only. The server now accepts auction post / search / bid /
+  `hudAuctionButton` (bit 81) is on. The owner's recollection (EU 1.2, 2026-11-11) is that the
+  remote button was usable by everyone, not Patron-only. **Inferred (no 1.2 server evidence):**
+  the server side of that: the 1.2 client only shows that bit 81 gates the button (the HUD
+  script has no premium condition on it), what the zone server answered is not evidenced. The
+  server now accepts auction post / search / bid /
   cancel / my-bid-list / lowest-price requests without an auctioneer when the runtime feature
   set has bit 81 on; with the bit off the auctioneer-NPC guard of ff6cacd6c stays. This
   supersedes the unconditional-guard part of ff6cacd6c; every other auction validation is
@@ -2812,7 +2815,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   merchant within 3 m, lists each item once and pays only for items actually moved to buy-back
   (the C# paid repeated entries and failed moves, with
   wrapping arithmetic); auction requests require an auctioneer NPC (`auctioneer` template flag)
-  named by the packet ids or the current interaction object within 5 m (the C# ignored both ids
+  named by the packet ids or the current interaction object within 5 m (lifted while
+  `hudAuctionButton` is on, see the auction HUD-button bullet; the C# ignored both ids
   and the `AuctionManager` only null-checked). The 5 m bank / auction range matches the other NPC
   service interactions (`repair.rs`, `mates.rs`); retail's own range is unverified.
 * systems::economy (loot range, 2026-10-20): `CSLootItemPacket` (and loot-all from the bag)
@@ -4871,7 +4875,7 @@ config is the baseline.
 | `achievement` | 63 | on | Achievement window. |
 | `dwarfWarborn` | 74 | off | Dwarf / Warborn race selection. The shipped `characters` data has races 7/8 `creatable = 'f'`, so turning the bit on does not by itself make those races creatable. |
 | `mailCoolTime` | 75 | on | Mail send cooldown display (INFERRED). |
-| `hudAuctionButton` | 81 | on | Auction-house button in the HUD. |
+| `hudAuctionButton` | 81 | on | Auction-house button in the HUD. While on, the server also accepts auction requests without an auctioneer NPC; with the bit off the NPC is required again. |
 | `auctionPostBuff` | 83 | on | Auction posting buff / UI (INFERRED). |
 | `aaPoint` | 44 | off | AA-point amounts in price and currency displays (`x2game.dll.c:66363` sets `grade_enchant_cost` / `grade_enchant_currency`, also `633707`, `659611`, `733342`). AA points are not supported; keep it off. |
 | `ExtraBits` | any | `{}` | Override map for the unnamed `flag_x_y` bits, `0..=87`. The C++ reads unnamed bits 32, 34, 41, 42, 47, 60 and 73 (purpose unresolved); 78 is the mate equipment whitelist (`PORTING.md`, mate equipment). Defaults: 32 on (plus inherited 16-19, 24-27, 35, 37, 49); 34, 41, 42, 47, 60, 73 and 78 off. |
