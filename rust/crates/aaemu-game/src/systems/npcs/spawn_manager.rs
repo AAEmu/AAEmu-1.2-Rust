@@ -902,6 +902,16 @@ struct AuthoredCandidate {
     radius: f32,
 }
 
+/// Snapshot of one warmed entry outside the warm set, taken before the sweep's world reads.
+#[derive(Debug)]
+struct ColdWarmEntry {
+    expires_at: Option<Instant>,
+    id: u32,
+    spawner: Arc<NpcSpawner>,
+    resident: bool,
+    map_only: bool,
+}
+
 /// One tracked warm placement of the activation registry.
 #[derive(Debug, Clone)]
 struct WarmEntry {
@@ -912,6 +922,10 @@ struct WarmEntry {
     /// a mixed placement still expires its nonresident members per live NPC. Gated by
     /// `World.NpcResidentServiceNpcs` at booking and at reclamation time.
     resident: bool,
+    /// Prepared by the quest-map range option while outside every player's warm ring. Once no
+    /// viewer streams its NPCs any more it is reclaimed even when its members are resident
+    /// service templates: nothing near it needs the service, it only fed a far map marker.
+    map_only: bool,
     /// Stable retention deadline, booked once when the placement dropped out of the warm set
     /// (`None` while it is warm or resident). Independent of later queue rebuilds / unchanged
     /// player revisions.
@@ -1155,6 +1169,36 @@ impl SpawnManager {
             found.truncate(limit);
         }
         found.into_iter().map(|(_, _, s)| s).collect()
+    }
+
+    /// Registers placements the quest-map option prepared for far markers. They may sit outside
+    /// every player's warm ring, so the activation phase never examined them; without a
+    /// [`WarmEntry`] the sweep would never reclaim their NPCs after streaming stops. An entry
+    /// the activation phase already tracks keeps its booking (only ordinary placements that are
+    /// not currently warm become `map_only`).
+    pub fn track_quest_map_placements(&self, server: &GameServer, spawners: &[Arc<NpcSpawner>]) {
+        if spawners.is_empty() {
+            return;
+        }
+        let residents = server.systems.npcs.spawns.resident_npcs(server);
+        let resident_gate = server.config.world.npc_resident_service_npcs;
+        let prepared: Vec<(Arc<NpcSpawner>, bool)> = spawners
+            .iter()
+            .map(|spawner| {
+                let resident = resident_gate && spawner_is_resident(server, residents, spawner);
+                (spawner.clone(), resident)
+            })
+            .collect();
+        let mut state = self.activation.lock().expect("spawn manager poisoned");
+        for (spawner, resident) in prepared {
+            let map_only = !state.warm_ids.contains(&spawner.id);
+            state.warmed.entry(spawner.id).or_insert(WarmEntry {
+                spawner,
+                resident,
+                map_only,
+                expires_at: None,
+            });
+        }
     }
 
     // ----- AddNpcSpawner -----
@@ -3335,6 +3379,7 @@ impl SpawnManager {
                 WarmEntry {
                     spawner,
                     resident,
+                    map_only: false,
                     expires_at: None,
                 },
             );
@@ -3360,7 +3405,7 @@ impl SpawnManager {
         let retention = Duration::from_secs(server.config.world.npc_warm_retention_seconds);
         // Snapshot the two halves before taking the activation guard; the object-data /
         // population reads below happen without it.
-        let mut cold: Vec<(Option<Instant>, u32, Arc<NpcSpawner>, bool)> = Vec::new();
+        let mut cold: Vec<ColdWarmEntry> = Vec::new();
         let mut warm: Vec<u32> = Vec::new();
         {
             let state = self.activation.lock().expect("spawn manager poisoned");
@@ -3368,7 +3413,13 @@ impl SpawnManager {
                 if state.warm_ids.contains(id) {
                     warm.push(*id);
                 } else {
-                    cold.push((entry.expires_at, *id, entry.spawner.clone(), entry.resident));
+                    cold.push(ColdWarmEntry {
+                        expires_at: entry.expires_at,
+                        id: *id,
+                        spawner: entry.spawner.clone(),
+                        resident: entry.resident,
+                        map_only: entry.map_only,
+                    });
                 }
             }
         }
@@ -3385,7 +3436,11 @@ impl SpawnManager {
         }
         // Oldest booking first: a placement that dropped out never loses its stable deadline,
         // and budget-starved passes continue with the same oldest entrants next time.
-        cold.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        cold.sort_by(|a, b| {
+            a.expires_at
+                .cmp(&b.expires_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         // A placement whose NPCs are streamed by a far quest-map viewer is still warm even when
         // it sits outside every player's warm ring; reclaiming it would only make the map
         // refresh rebuild it (cold-reclaim churn).
@@ -3395,7 +3450,14 @@ impl SpawnManager {
         let mut bookings: Vec<(u32, Instant)> = Vec::new();
         let mut keep_warm: Vec<u32> = Vec::new();
         let mut drop_entries: Vec<u32> = Vec::new();
-        for (expires_at, id, spawner, resident) in cold {
+        for ColdWarmEntry {
+            expires_at,
+            id,
+            spawner,
+            resident,
+            map_only,
+        } in cold
+        {
             if !streamed.is_empty()
                 && spawner
                     .spawned_npcs()
@@ -3408,11 +3470,14 @@ impl SpawnManager {
                 keep_warm.push(id);
                 continue;
             }
+            // A map-only placement fed a far marker and nothing near it needs the service, so
+            // its resident templates do not exempt it from the reclaim.
+            let effective_gate = resident_gate && !map_only;
             // The homogeneous residency fast path is re-validated against the live members: a
             // placement whose classification is cached from an earlier pass must not stay
             // skipped once a runtime-owned (never resident) member appears.
             let resident_skip = resident
-                && resident_gate
+                && effective_gate
                 && !spawner_has_nonresident_live_npc(server, residents, &spawner);
             if spawner.can_despawn_npcs(server) {
                 // Authored schedule / management removal keeps its own lifecycle: it wins over
@@ -3429,7 +3494,7 @@ impl SpawnManager {
                 };
                 if now >= deadline && *budget > 0 {
                     let removed =
-                        spawner.reclaim_cold_npcs(server, *budget, residents, resident_gate);
+                        spawner.reclaim_cold_npcs(server, *budget, residents, effective_gate);
                     *budget -= removed as i64;
                     stats.reclaimed += removed;
                 }
