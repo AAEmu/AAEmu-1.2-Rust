@@ -1261,9 +1261,9 @@ async fn teleport_ended_without_a_recorded_destination_keeps_the_server_position
 
 #[tokio::test]
 async fn navi_teleport_ends_a_running_trade_when_it_is_issued() {
-    // `SCNaviTeleport` is a same-instance client load like `SCTeleportUnit`: the client clears
-    // its trade UI and sends no `CSCancelTrade`, and `world::session::teleport_character` is
-    // not involved, so `begin_teleport` itself must end the trade (Greptile finding on #106).
+    // `SCNaviTeleport` is a same-instance client teleport like `SCTeleportUnit`, and
+    // `world::session::teleport_character` is not involved, so `begin_teleport` itself must
+    // end the trade.
     use crate::systems::economy::trade::{CSCanStartTradePacket, CSStartTradePacket};
     let server = test_server_with(navi_data());
     server.systems.npcs.doodads.tasks.set_manual(true);

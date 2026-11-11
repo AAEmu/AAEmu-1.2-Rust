@@ -2959,20 +2959,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sender faction stays in the sender block. Channel copies substitute the actual `ChatChannel` sub
   type / faction while keeping the requested chat type (zone Shout / Trade / LFG and raid /
   raid-leader included).
-* systems::economy: **Trade cancel reasons and server-initiated cancels (2026-11-10).**
+* systems::economy: **Trade cancel reasons and server-initiated cancels (2026-11-11).**
   `SCTradeCanceled` always prints ui_text 569 `canceled` ("거래가 취소되었습니다.", "Trade
   canceled.") through the client's Lua `TRADE_CANCELED` handler (`trade.alb` proto 30 calls the
   message function with `true`); only reason 5 (`TCR_OPEND_MONEY_WINDOW`) additionally shows
   error 538 `trade_target_is_not_possible_state` (causedByMe false) or 539
   `cant_trade_with_other_view` (true) in `FUN_394ff1f0`. The client's own reasons are 0 normal,
   1 partner missing and 2 at `>= sqrt(25) = 5` m (`X2::GameClient::UpdateTradeChecks`,
-  `FUN_394fd9a0`), and 5 for another exclusive window. The port keeps 0 for internal
-  cancellations, uses 1 for leave-world, 2 for its own 5 m check, and 0 for death / loading zone
-  change (the client suppresses its own line on `ENTERED_LOADING`); `CSCancelTrade` reasons pass
-  through, so the client's 5 keeps its 538/539 text. Death, a server-forced teleport (portal,
-  GM move, instance/world load or resurrection displacement, same zone group included) and
-  movement out of range now end the trade for both players; a plain zone-group crossing on foot
-  keeps it. The teleport cancel runs when the teleport is **issued**, at both load chokes:
+  `FUN_394fd9a0`), 3 and 4 for two state changes (`FUN_394fd760`, states `0x10` and `0x3b`), and
+  5 for another exclusive window. The port keeps 0 for internal cancellations, including
+  leave-world, death and teleports, and uses 1 and 2 only in its own copy of the
+  `UpdateTradeChecks` rule; `CSCancelTrade` reasons pass through, so the client's 5 keeps its
+  538/539 text. On `ENTERED_LOADING` the client hides the trade window without the chat line;
+  the window's `OnHide` handler calls `X2Trade:CancelTrade(TCR_NORMAL)` (`trade.alb` protos 44
+  -> 6 -> 19), which sends `CSCancelTrade(0)` while the client's trade state is active, and
+  `UpdateTradeChecks` ends a trade within 1 s. **Inferred (no 1.2 server evidence):** the server
+  rules below (that the 1.2 server ended trades on death, teleports and distance, and the
+  reasons it uses): they make the end of a trade independent of the client (no modified or
+  headless client, no 1 s window keeps one open). Not verified: that `Show(false)` raises
+  `OnHide` synchronously and that `SCTeleportUnit` raises `ENTERED_LOADING`. Death, a
+  server-forced teleport (portal, GM move, instance/world load or resurrection displacement,
+  same zone group included) and movement out of range end the trade for both players; a plain
+  zone-group crossing on foot keeps it. The teleport cancel runs when the teleport is
+  **issued**, at both load chokes:
   `world::session::teleport_character` (instance/world loads, resurrection, trial), the
   zone-access return transport (its own hook) and `world::session::begin_teleport` (every
   `SCTeleportUnit` sender —
@@ -2983,8 +2992,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `UpdateTradeChecks` (`FUN_394fd9a0`) every 1000 ms (`trade::check_running_trades`, started by
   `trade::start_checks`): a missing partner / another instance cancels with 1, `>= 5` m with 2.
   That covers players carried by a vehicle or mate and seat-bound players whose own movement
-  packets `world::session::move_unit` ignores (Greptile findings on PR #106). Hooks only cancel
-  when a trade exists; a second hook call after `teleport_character` is a no-op. Tests:
+  packets `world::session::move_unit` ignores (up to 1 s late, like the client's own cadence).
+  The check works on a snapshot of the table and cancels only the very trade it saw (id and
+  both players): freed trade ids are reused at once, so the id alone could name a newer trade.
+  Hooks only cancel when a trade exists; a second hook call after `teleport_character` is a
+  no-op. The hooks and the periodic check take the entry out under the manager mutex and send
+  after dropping it (leaf rule); the older trade operations still send under it. Tests:
+  `the_periodic_check_does_not_cancel_a_newer_trade_that_reused_the_id`,
   `moving_out_of_range_cancels_with_the_client_checks_reason`,
   `a_death_cancels_a_running_trade_for_both_players`,
   `crossing_a_zone_group_border_keeps_a_running_trade`,

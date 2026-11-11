@@ -234,9 +234,9 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
             destination.instance_id
         );
     }
-    // A teleport is a client load (same zone or not): the 1.2 client clears the trade UI on
-    // `ENTERED_LOADING` and does not send `CSCancelTrade` for a same-zone teleport, so end the
-    // trade now. A plain zone-group crossing on foot does not come through here.
+    // A teleport ends a running trade when it is issued (see `trade::on_player_teleported`: the
+    // client's own cancel on a load is not relied on). A plain zone-group crossing on foot does
+    // not come through here.
     crate::systems::economy::trade::on_player_teleported(server, p);
     // A rider, a bound seat or a doodad bond would stay half attached on the server once the
     // transform loses its parent (the client is moved off it): dismount first, as the GM
@@ -356,9 +356,8 @@ pub fn send_teleport_unit(server: &GameServer, p: &PlayerRef, packet: SCTeleport
 /// The lock + destination half of [`send_teleport_unit`], for teleports the client is told about
 /// by another packet (`SCNaviTeleport`).
 pub fn begin_teleport(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
-    // The 1.2 client clears its trade UI on a loading teleport and sends no `CSCancelTrade` for
-    // a same-zone one. End the trade when the teleport is issued, not when its acknowledgement
-    // arrives: a same-instance portal / navi sign / GM move reaches the client without
+    // End the trade when the teleport is issued, not when its acknowledgement arrives: a
+    // same-instance portal / navi sign / GM move reaches the client without
     // [`teleport_character`], and a client that never reports the arrival (or is carried by a
     // vehicle) must not keep both players marked as trading. A second hook call for a load
     // that also goes through [`teleport_character`] is a no-op once the trade is gone.

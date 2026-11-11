@@ -70,7 +70,7 @@ impl TradeManager {
         self.trades.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The running trades (copies, for tests / GM tools).
+    /// The running trades (copies: the periodic check's snapshot, tests / GM tools).
     pub fn trades(&self) -> Vec<TradeTemplate> {
         self.lock().clone()
     }
@@ -430,14 +430,45 @@ pub fn cancel_trade(server: &GameServer, obj_id: u32, reason: i32, trade_id: u32
 /// Cancels `obj_id`'s running trade only when one exists. Server lifecycle hooks (death, zone
 /// change, movement) use this: unlike `CSCancelTrade` with no trade, they must not send a
 /// spurious `SCTradeCanceled` to a player who is not trading.
+///
+/// Like the other server-side entry points added for those hooks it keeps the manager mutex a
+/// leaf (CONTRIBUTING-PORT rule 5): the entry is taken out under the lock and the packets go out
+/// after the guard is dropped.
 fn cancel_if_trading(server: &GameServer, obj_id: u32, reason: i32) -> bool {
-    let mut trades = manager(server).lock();
-    let trade_id = get_trade_id(&trades, obj_id);
-    if trade_id == 0 {
-        return false;
-    }
-    cancel_locked(server, &mut trades, obj_id, reason, trade_id);
+    let removed = {
+        let mut trades = manager(server).lock();
+        let trade_id = get_trade_id(&trades, obj_id);
+        let Some(idx) = (trade_id != 0)
+            .then(|| trades.iter().position(|t| t.id == trade_id))
+            .flatten()
+        else {
+            return false;
+        };
+        trades.remove(idx)
+    };
+    server.ids.trade.release_id(removed.id);
+    send_canceled(server, &removed, obj_id, reason);
     true
+}
+
+/// Cancels `snapshot` only while the table still holds that very trade (same id and same two
+/// players). Freed trade ids are handed out again at once (`release_id`, lowest first), so the id
+/// alone can name a newer trade of two other players between a snapshot and its cancel. The
+/// entry is taken out under the lock and the packets go out after the guard is dropped.
+fn cancel_snapshot(server: &GameServer, snapshot: &TradeTemplate, obj_id: u32, reason: i32) {
+    let removed = {
+        let mut trades = manager(server).lock();
+        let Some(idx) = trades.iter().position(|t| {
+            t.id == snapshot.id
+                && t.owner_obj_id == snapshot.owner_obj_id
+                && t.target_obj_id == snapshot.target_obj_id
+        }) else {
+            return;
+        };
+        trades.remove(idx)
+    };
+    server.ids.trade.release_id(removed.id);
+    send_canceled(server, &removed, obj_id, reason);
 }
 
 /// Ends only this departing player's trade and invitations. Repeated lifecycle calls are
@@ -461,7 +492,7 @@ pub fn on_player_departed(server: &GameServer, player: &PlayerRef) {
             server,
             &mut trades,
             player.obj_id,
-            cancel_reason::PARTNER_GONE,
+            cancel_reason::NORMAL,
             id,
         );
     }
@@ -520,24 +551,30 @@ pub fn on_player_moved(server: &GameServer, player: &PlayerRef) {
 /// parent transform of their own — so this check runs on its own timer like the client's.
 ///
 /// The trade table is snapshotted under its lock and released before any world lookup or
-/// packet is made; each cancel is re-checked against the exact trade id, so a trade that ended
-/// (or a new one) between the snapshot and the cancel is not touched.
+/// packet is made; each cancel ([`cancel_snapshot`]) is re-checked against the exact trade (id
+/// and both players), so a trade that ended, or was replaced by another pair that got the freed
+/// id, between the snapshot and the cancel is not touched.
 pub fn check_running_trades(server: &GameServer) {
-    let trades = manager(server).trades();
+    check_snapshot(server, manager(server).trades());
+}
+
+/// [`check_running_trades`] on a given snapshot of the table (tests land a trade change between
+/// the snapshot and the cancels).
+pub(super) fn check_snapshot(server: &GameServer, trades: Vec<TradeTemplate>) {
     for t in trades {
         let Some(owner) = character(server, t.owner_obj_id) else {
-            cancel_trade(server, t.target_obj_id, cancel_reason::PARTNER_GONE, t.id);
+            cancel_snapshot(server, &t, t.target_obj_id, cancel_reason::PARTNER_GONE);
             continue;
         };
         let Some(target) = character(server, t.target_obj_id) else {
-            cancel_trade(server, t.owner_obj_id, cancel_reason::PARTNER_GONE, t.id);
+            cancel_snapshot(server, &t, t.owner_obj_id, cancel_reason::PARTNER_GONE);
             continue;
         };
         let owner_instance = owner.data().unit.transform.instance_id;
         let target_instance = target.data().unit.transform.instance_id;
         if owner_instance != target_instance {
             // Different instances have unrelated coordinate spaces; the partner is not reachable.
-            cancel_trade(server, t.owner_obj_id, cancel_reason::PARTNER_GONE, t.id);
+            cancel_snapshot(server, &t, t.owner_obj_id, cancel_reason::PARTNER_GONE);
             continue;
         }
         let distance = crate::systems::skills::geometry::distance_to(
@@ -549,7 +586,7 @@ pub fn check_running_trades(server: &GameServer) {
             true,
         );
         if distance >= TRADE_RANGE_M {
-            cancel_trade(server, t.owner_obj_id, cancel_reason::TOO_FAR, t.id);
+            cancel_snapshot(server, &t, t.owner_obj_id, cancel_reason::TOO_FAR);
         }
     }
 }
@@ -569,17 +606,24 @@ pub fn start_checks(server: &Arc<GameServer>) {
 }
 
 /// A dying player's trade ends (`DoDie`); the client shows "Trade canceled." for the generic
-/// reason. The client suppresses its own copy while it is loading, so the other player still
-/// gets the packet.
+/// reason. **Inferred (no 1.2 server evidence):** that the 1.2 server ended a trade on death.
 pub fn on_player_died(server: &GameServer, player: &PlayerRef) {
     cancel_if_trading(server, player.obj_id, cancel_reason::NORMAL);
 }
 
 /// A server-forced teleport (portal, GM move, instance/world load, resurrection displacement)
-/// ends a running trade at once: the 1.2 client clears the trade UI on `ENTERED_LOADING` and
-/// sends no `CSCancelTrade` for a same-zone teleport, so the next movement packet could be the
-/// only thing that would have ended it. A plain zone-group crossing on foot is not a load and
-/// must keep the trade (the per-move distance check still covers moving apart).
+/// ends a running trade when it is issued. On `ENTERED_LOADING` the 1.2 client hides the trade
+/// window without the chat line; the window's `OnHide` handler calls
+/// `X2Trade:CancelTrade(TCR_NORMAL)` (`trade.alb` protos 44 -> 6 -> 19), which sends
+/// `CSCancelTrade(0)` while the client's trade state is active, and the client's own
+/// `UpdateTradeChecks` ends a trade within 1 s (reasons 1 / 2). Ending it here as well means no
+/// modified or headless client, and no 1 s window, can keep a trade open across a teleport. A
+/// plain zone-group crossing on foot is not a load and keeps the trade (the per-move distance
+/// check still covers moving apart).
+///
+/// **Inferred (no 1.2 server evidence):** that the 1.2 server ended trades on teleports. Not
+/// verified: that `Show(false)` raises `OnHide` synchronously and that `SCTeleportUnit` raises
+/// `ENTERED_LOADING` on the client.
 pub fn on_player_teleported(server: &GameServer, player: &PlayerRef) {
     cancel_if_trading(server, player.obj_id, cancel_reason::NORMAL);
 }

@@ -9,7 +9,8 @@
 //! gmraw <command line>               same, without draining (the caller asserts the reply)
 //! tp <x> <y> <z>                     /move there, acknowledge the teleport, wait for the area
 //! moverel <dx> <dy> <dz>             /move to self + delta (e.g. leave an aura radius)
-//! walkrel <dx> <dy> <dz>             plain CSMoveUnit to self + delta (no GM command)
+//! walkrel <dx> <dy> <dz>             plain CSMoveUnit to self + delta (no GM command; keep it to
+//!                                    a few metres, the move guard refuses a larger step)
 //! gopeer [name]                      /move to the peer's position (no drain)
 //! pump <secs>                        just read packets
 //! units [<npc template>...]          NPCs in sight (all within 60 m when no template given)

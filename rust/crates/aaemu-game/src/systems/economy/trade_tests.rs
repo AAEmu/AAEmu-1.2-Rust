@@ -246,8 +246,8 @@ async fn trade_departure_cancels_peer_and_reconnect_starts_without_stale_cleanup
                 .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(cancellations(w.a.drain()), vec![canceled(1, true)]);
-        assert_eq!(cancellations(w.b.drain()), vec![canceled(1, false)]);
+        assert_eq!(cancellations(w.a.drain()), vec![canceled(0, true)]);
+        assert_eq!(cancellations(w.b.drain()), vec![canceled(0, false)]);
         assert_eq!(
             item_at(&departed, slot_type::INVENTORY, 0).unwrap().id,
             item_id
@@ -1319,10 +1319,9 @@ fn spawn_same_instance_portal(
 
 #[tokio::test]
 async fn a_same_instance_portal_ends_a_running_trade_when_it_is_issued() {
-    // Greptile finding on PR #106: the same-instance portal branch only sends
-    // `SCTeleportUnit`; the client clears its trade UI on the load and sends no
-    // `CSCancelTrade` for a same-zone teleport, and no move necessarily follows, so the
-    // teleport itself must end the trade (reason 0, the client's generic cancel).
+    // The same-instance portal branch only sends `SCTeleportUnit` and never goes through
+    // `teleport_character`, and no move necessarily follows, so the teleport itself must end
+    // the trade (reason 0, the client's generic cancel).
     use crate::systems::npcs::portal::packets::CSUsePortalPacket;
     let mut w = world();
     start(&mut w);
@@ -1449,6 +1448,76 @@ async fn a_vehicle_carried_passenger_ends_the_trade_with_the_periodic_check() {
     assert_eq!(canceled_frames(w.a.drain()), vec![canceled(2, true)]);
     assert_eq!(canceled_frames(w.b.drain()), vec![canceled(2, false)]);
     assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+/// Another connection on `w`'s server: a player standing at `(x, 100)` who is alive (a unit with
+/// 0 hp is dead and cannot trade).
+fn extra_trader(
+    w: &World,
+    id: u32,
+    name: &str,
+    obj_id: u32,
+    x: f32,
+) -> (crate::test_support::TestClient, crate::world::PlayerRef) {
+    use crate::test_support::{spawn_player, test_character, TestClient};
+    let mut client = TestClient::new(&w.server, id, 1000 + id);
+    let mut character = test_character(id, name, x, 100.0);
+    character.unit.hp = 100;
+    character.unit.max_hp = 100;
+    let player = spawn_player(&w.server, &client, character, obj_id);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    (client, player)
+}
+
+/// Runs a client packet on `conn` (the harness's `run` only knows Alice and Bob).
+fn run_on<P: ClientPacket>(
+    w: &World,
+    conn: &mut crate::net::connection::GameConnection,
+    body: &[u8],
+) {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    let p = P::read(&mut s).expect("read");
+    futures::executor::block_on(p.handle(&w.server, conn)).expect("handle");
+}
+
+/// The periodic check works on a snapshot of the table. Freed trade ids are handed out again at
+/// once, so a trade that ended and was replaced by another pair between the snapshot and the
+/// cancel must not be cancelled for the old pair's sake.
+#[tokio::test]
+async fn the_periodic_check_does_not_cancel_a_newer_trade_that_reused_the_id() {
+    let mut w = world();
+    start(&mut w);
+    let (mut carol, _pc) = extra_trader(&w, 3, "Carol", 0x102, 120.0);
+    let (mut dave, _pd) = extra_trader(&w, 4, "Dave", 0x103, 121.0);
+    // Bob walks away: a snapshot taken now holds a trade the check must end.
+    w.pb.data().unit.transform.set_xyz(130.0, 100.0, 100.0);
+    let stale = w.server.systems.economy.trade.trades();
+    assert_eq!(stale.len(), 1);
+    // Meanwhile the trade ends (the client's own `CSCancelTrade`) and Carol and Dave start
+    // one: it gets the freed id.
+    cancel_trade(&w.server, 0x100, 0, 0);
+    run_on::<CSCanStartTradePacket>(&w, &mut carol.conn, &bc(0x103));
+    run_on::<CSStartTradePacket>(&w, &mut dave.conn, &bc(0x102));
+    let now = w.server.systems.economy.trade.trades();
+    assert_eq!(now.len(), 1);
+    assert_eq!(
+        (now[0].owner_obj_id, now[0].target_obj_id),
+        (0x102, 0x103),
+        "Carol and Dave trade"
+    );
+    assert_eq!(now[0].id, stale[0].id, "the freed id is handed out again");
+    carol.drain();
+    dave.drain();
+
+    check_snapshot(&w.server, stale);
+
+    assert_eq!(
+        w.server.systems.economy.trade.trades(),
+        now,
+        "the newer trade of the same id is untouched"
+    );
+    assert!(carol.drain().is_empty() && dave.drain().is_empty());
 }
 
 #[tokio::test]
