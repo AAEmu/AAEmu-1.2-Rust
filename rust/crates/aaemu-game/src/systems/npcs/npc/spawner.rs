@@ -64,9 +64,9 @@ pub struct NpcSpawnerShared {
     npcs_in_zone_cache: Mutex<HashMap<u32, (i32, bool, Instant)>>,
     /// One of this placement's NPCs died where the run keeps its dead (authored
     /// `npc_spawners.save_indun`, or a spawn-file placement in a per-run dungeon), so the
-    /// placement's population is fixed for the run (no respawn, no periodic refill). A fresh
-    /// run creates new spawners, which start unfrozen. The C# loaded `save_indun` but never
-    /// read it.
+    /// placement's population is fixed for the run (no respawn, no periodic refill, no
+    /// distance reclaim of the survivors). A fresh run creates new spawners, which start
+    /// unfrozen. The C# loaded `save_indun` but never read it.
     saved_death: AtomicBool,
 }
 
@@ -552,7 +552,10 @@ impl NpcSpawner {
     /// always-active AI, actual combat against a live in-leash opponent) are left alone, as are
     /// live residents ([`npc_is_resident`] under the `World.NpcResidentServiceNpcs` gate), so a
     /// mixed service / hostile placement keeps its resident members and expires its nonresident
-    /// ones. The caller holds the activation pass's serialization.
+    /// ones. A frozen placement ([`Self::saved_death`]) is never reclaimed: nothing refills it
+    /// (`check_spawn_count_can_spawn` / `do_spawn_bounded` refuse it), so reclaiming the
+    /// survivors of a one-run placement would leave its room empty for the rest of the run.
+    /// The caller holds the activation pass's serialization.
     pub fn reclaim_cold_npcs(
         self: &Arc<Self>,
         server: &GameServer,
@@ -560,7 +563,7 @@ impl NpcSpawner {
         residents: &ResidentNpcTemplates,
         resident_gate: bool,
     ) -> usize {
-        if budget <= 0 {
+        if budget <= 0 || self.shared.saved_death() {
             return 0;
         }
         let _lock = server.systems.npcs.spawns.spawn_lock();

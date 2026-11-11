@@ -476,15 +476,29 @@ async fn save_indun_spawner_does_not_respawn_a_dead_member() {
     drop(player);
 }
 
-/// [`server`] with a fresh world instance + spawn manager and a registered live `Dungeon`
-/// (`is_system` / `client_driven` as given). The placement uses template 10 (`save_indun =
-/// 'f'`), so only the run kind decides.
-fn instance_server(
+/// A player standing in the world instance `world` (any instance, not just 0) at `(x, y)`.
+fn spawn_player_in(
+    server: &Arc<GameServer>,
+    world: &Arc<WorldInstance>,
+    client: &TestClient,
+    (x, y): (f32, f32),
+) -> PlayerRef {
+    let mut character = test_character(1, "P", x, y);
+    character.obj_id = 5000;
+    let player = Player::new(character, client.conn.handle());
+    server.world.try_add_character(&player);
+    world.spawn(&player, &server.view_ctx());
+    player
+}
+
+/// A fresh world instance `id` on `server` with a registered live `Dungeon` (`is_system` /
+/// `client_driven` as given): the runtime answer the one-run freeze asks for.
+fn dungeon_world(
+    server: &Arc<GameServer>,
     id: u32,
     is_system: bool,
     client_driven: bool,
-) -> (Arc<GameServer>, Arc<WorldInstance>) {
-    let server = server();
+) -> Arc<WorldInstance> {
     let template = server
         .game_data
         .worlds
@@ -493,11 +507,23 @@ fn instance_server(
         .clone();
     let world = server.world.create_world_instance(Arc::new(template), id);
     crate::systems::instances::dungeon::register_test_dungeon(
-        &server,
+        server,
         &world,
         is_system,
         client_driven,
     );
+    world
+}
+
+/// [`server`] with a fresh [`dungeon_world`]. The placement uses template 10 (`save_indun =
+/// 'f'`), so only the run kind decides.
+fn instance_server(
+    id: u32,
+    is_system: bool,
+    client_driven: bool,
+) -> (Arc<GameServer>, Arc<WorldInstance>) {
+    let server = server();
+    let world = dungeon_world(&server, id, is_system, client_driven);
     (server, world)
 }
 
@@ -587,6 +613,66 @@ async fn client_driven_instance_placement_still_respawns() {
         "the prologue keeps its respawn deadline"
     );
     assert!(!spawner.saved_death());
+}
+
+/// A frozen placement keeps its survivors: when the players leave, the distance reclaim of the
+/// cold placement must not remove the living members of a placement one member of which died
+/// (nothing refills a frozen placement, so the room would stay empty for the rest of the run).
+#[tokio::test]
+async fn frozen_placement_survivors_are_not_reclaimed_when_the_players_leave() {
+    let mut t = template(10, 3);
+    t.min_population = 3;
+    let server = activation_server(t);
+    let world = dungeon_world(&server, 100, false, false);
+    let m = server.systems.npcs.spawns.get_or_create(&world);
+    let mut def = npc_def(500, 100.0, 100.0);
+    def.count = 3;
+    assert_eq!(m.add_npc_spawner(&server, def), Ok(1));
+    let spawner = only_spawner(&m);
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player_in(&server, &world, &client, (100.0, 100.0));
+    let living = || {
+        world
+            .all_npcs()
+            .iter()
+            .filter(|n| !n.data().unit.is_dead())
+            .count()
+    };
+
+    assert_eq!(activate(&server).created, 3);
+    assert_eq!(living(), 3);
+
+    // One member dies: the placement is frozen for the run, its two survivors stay.
+    let dead = world.all_npcs().first().cloned().expect("spawned");
+    {
+        let mut d = dead.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &dead);
+    assert!(spawner.saved_death());
+    assert_eq!(living(), 2);
+
+    // The player walks away and the retention interval (60 s) passes.
+    player.data().unit.transform.set_xyz(1200.0, 1200.0, 100.0);
+    world.add_visible_object(&player, &server.view_ctx());
+    activate(&server); // books the stable countdown
+    advance(60);
+    let stats = activate(&server);
+    assert_eq!(stats.reclaimed, 0, "a frozen placement is never reclaimed");
+    m.check_respawns_tick(&server);
+    assert_eq!(
+        living(),
+        2,
+        "the survivors are still alive after the retention"
+    );
+
+    // Coming back finds them where they were; nothing is refilled or duplicated.
+    player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
+    world.add_visible_object(&player, &server.view_ctx());
+    let stats = activate(&server);
+    assert_eq!(stats.created, 0, "the frozen placement is not refilled");
+    assert_eq!(living(), 2);
 }
 
 #[tokio::test]
