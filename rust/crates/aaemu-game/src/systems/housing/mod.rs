@@ -67,6 +67,8 @@ pub struct System {
     pub calendar: dominion::runtime::CalendarRuntime,
     /// Runtime-only record of the participant seals this server handed out.
     pub siege_seals: dominion::seals::SealRuntime,
+    /// Per-zone siege area / roster snapshot, rebuilt once a second by `seals::reconcile`.
+    pub siege_areas: dominion::siege_area::SiegeAreaCache,
     /// Items / money / mail (installed by the economy subsystem).
     pub hooks: hooks::HousingHookSlot,
 }

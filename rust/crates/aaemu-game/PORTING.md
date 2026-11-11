@@ -5512,8 +5512,12 @@ and in NPC wandering / buff remaining times.
   attacker expedition), yielding same party friendly, two different attacker parties neutral,
   otherwise hostile, and either unit in no party falls through to the normal faction / zone
   rules. The 10.x enum numbers the running siege 3 and the 1.2 client numbers it 4
-  (`siege.md` 1.2); the Rust keys on `SiegeState::active_at`, so the active window is the
-  gate. The 1.2 siege record carries one attacker expedition, so the neutral branch is
+  (`siege.md` 1.2); the Rust keys on the active window, so the period gate is the same. The
+  per-attack check reads a small per-zone `SiegeAreaCache` (rebuilt once a second by
+  `seals::reconcile`) instead of cloning a `DominionState`, does the party mapping before any
+  world lookup, and picks its clock like `DominionManager::tick_dual` (the calendar / GM test
+  clock for a calendar materialisation, the real clock for a GM schedule; a GM-clock test
+  pins it). The 1.2 siege record carries one attacker expedition, so the neutral branch is
   reachable only through the pure `classify` helper (`hostility.rs`); it is kept and tested
   because it is part of the evidenced rule. The area is the lodestone's
   `guard_tower_settings.radius_siege` circle or the bound offense HQ's `radius_offense_hq`
@@ -5526,9 +5530,11 @@ and in NPC wandering / buff remaining times.
   `hostility_tests::{attackers_and_defenders_are_hostile_inside_the_running_siege_only,
   the_same_party_is_friendly_inside_and_the_circle_gate_preserves_faction_rules,
   a_second_attacker_party_would_be_neutral,
+  the_calendar_clock_arms_the_siege_relation,
   peace_and_no_pvp_protections_still_refuse_the_siege_attack,
   a_non_participant_is_not_made_hostile_by_the_siege}`; the first two were mutation-checked
-  against the removed call site.
+  against the removed call site and the calendar-clock test against the real-clock-only
+  fallback.
 * systems::housing (siege participant seals, 2026-11-10): an accepted roster entry is handed
   the side's seal item from `siege_zones` (`defense_ticket_id` / `offense_ticket_id`; items
   21313-21320 / 28170-28173, category 120, not sellable, `price`/`honor_price` 0, 240-minute
@@ -5571,15 +5577,16 @@ and in NPC wandering / buff remaining times.
   (`npcs::portal::closest_return_portal`), then the character's saved `main_world_position`,
   and only when the destination is outside the area; no safe point leaves the character in
   place with a warning. The sweep runs once a second in the participant tick (never under the
-  housing operation lock), skips dead characters and a character with a teleport already
-  pending. The area is the one of the hostility row. **Policy, capture-pending:** GMs are not
-  exempt (the rule is applied literally), and the exact retail destination/teleport reason
-  (`TeleportReason.MoveToLocation` 14) is chosen from the server's existing forced-teleport
-  paths. Tests:
+  housing operation lock), reads the same per-zone `SiegeAreaCache` and clock as the hostility
+  rule, skips dead characters and a character with a teleport already pending. **Policy,
+  capture-pending:** GMs are not exempt (the rule is applied literally), and the exact retail
+  destination/teleport reason (`TeleportReason.MoveToLocation` 14) is chosen from the
+  server's existing forced-teleport paths. Tests:
   `siege_area_tests::{a_non_participant_inside_the_circle_is_moved_to_the_return_point,
   a_non_participant_outside_the_circle_or_outside_the_running_siege_is_kept,
   an_unregistered_defender_expedition_member_is_still_evicted,
   a_pending_teleport_or_a_dead_character_is_not_moved_again,
+  the_calendar_clock_moves_the_siege_area_window,
   the_area_rule_matches_the_hostility_gate}`; the participant-keep assertion and the area
   gate were mutation-checked.
 * systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's

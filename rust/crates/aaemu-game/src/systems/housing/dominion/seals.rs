@@ -154,6 +154,7 @@ fn take_one(server: &GameServer, player: &PlayerRef, template_id: u32) {
 /// the participant tick; the item's own 240-minute lifetime covers offline characters and
 /// restarts. A tracked character that is offline while the siege still runs keeps the record.
 pub fn reconcile(server: &GameServer) {
+    super::siege_area::refresh(server);
     for ((zone_group_id, character_id), side) in server.systems.housing.siege_seals.tracked() {
         let state = server.systems.housing.dominions.get(zone_group_id);
         // A roster entry keeps its seal through the whole record, including the warmup (and a

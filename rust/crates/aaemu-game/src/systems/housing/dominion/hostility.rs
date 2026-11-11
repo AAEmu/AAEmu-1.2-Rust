@@ -15,8 +15,13 @@
 //! attacker_expedition_id`, the `SCSiegeState`/`SCSiegeDeclared` attacker team), so the
 //! neutral branch is only reachable through the pure [`classify`] helper; it is kept because
 //! it is part of the evidenced rule. The 10.x enum numbers the running siege 3, the 1.2
-//! client numbers it 4 (`siege.md` 1.2); the check uses `SiegeState::active_at` (the running
-//! window) rather than either number.
+//! client numbers it 4 (`siege.md` 1.2); [`SiegeArea::active_at`] follows the same clock
+//! choice as the authority's `tick_dual` (calendar / GM test clock for a calendar
+//! materialisation, the real clock for a GM schedule).
+//!
+//! `can_attack` runs for every hit, so the rule reads the per-zone [`SiegeAreaCache`] (one
+//! small copy, rebuilt once a second) instead of cloning a `DominionState`; the cheap party
+//! check runs before any world / position lookup.
 //!
 //! The rule sits in `skills::relation::can_attack` after the Peace, no-PvP and own-mount
 //! refusals, so it can never make an attack possible where those protections refuse it.
@@ -24,10 +29,11 @@
 use chrono::Utc;
 
 use crate::server::GameServer;
-use crate::systems::housing::dominion::siege_area;
-use crate::systems::housing::dominion::state::{SiegeSide, SiegeState};
+use crate::systems::housing::dominion::siege_area::SiegeArea;
+use crate::systems::housing::dominion::state::SiegeSide;
 use crate::systems::skills::geometry::Target;
 use crate::systems::skills::relation::owner_character;
+
 /// One unit's siege party: its side and the expedition that side names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Party {
@@ -53,16 +59,16 @@ pub fn classify(me: Party, target: Party) -> SiegeRelation {
     }
 }
 
-fn party(siege: &SiegeState, expedition_id: u32) -> Option<Party> {
+fn party(area: &SiegeArea, expedition_id: u32) -> Option<Party> {
     if expedition_id == 0 {
         return None;
     }
-    if expedition_id == siege.defender_expedition_id {
+    if expedition_id == area.defender_expedition_id {
         Some(Party {
             side: SiegeSide::Defender,
             expedition_id,
         })
-    } else if expedition_id == siege.attacker_expedition_id {
+    } else if expedition_id == area.attacker_expedition_id {
         Some(Party {
             side: SiegeSide::Attacker,
             expedition_id,
@@ -101,32 +107,27 @@ pub fn relation(server: &GameServer, me: &Target, target: &Target) -> Option<Sie
     {
         return None;
     }
-    let state = server.systems.housing.dominions.get(group)?;
-    let siege = state.siege.as_ref()?;
-    if !siege.active_at(Utc::now().timestamp())
-        || state.tower.instance_id != me_transform.instance_id
-    {
+    // Cheap gate first: the cached window and the party mapping, before any world lookup.
+    let area = server.systems.housing.siege_areas.get(group)?;
+    if !area.active_at(
+        Utc::now().timestamp(),
+        server.systems.housing.calendar.now(),
+    ) {
         return None;
     }
+    let me_party = party(&area, me_expedition)?;
+    let target_party = party(&area, target_expedition)?;
+    // Only a pair that is bound by the siege rule pays for the area / position test.
     let me_world = server.world.world_of(me_object)?;
     let target_world = server.world.world_of(target_object)?;
     let me_pos = me_world.world_pos_rot(me_object);
     let target_pos = target_world.world_pos_rot(target_object);
-    if !siege_area::inside(server, &state, me_transform.instance_id, me_pos.x, me_pos.y)
-        || !siege_area::inside(
-            server,
-            &state,
-            target_transform.instance_id,
-            target_pos.x,
-            target_pos.y,
-        )
+    if !area.inside(me_transform.instance_id, me_pos.x, me_pos.y)
+        || !area.inside(target_transform.instance_id, target_pos.x, target_pos.y)
     {
         return None;
     }
-    Some(classify(
-        party(siege, me_expedition)?,
-        party(siege, target_expedition)?,
-    ))
+    Some(classify(me_party, target_party))
 }
 
 /// `Some(true)` = the siege rule makes the pair attackable, `Some(false)` = it makes them

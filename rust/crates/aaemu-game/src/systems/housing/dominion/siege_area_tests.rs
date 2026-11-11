@@ -14,6 +14,7 @@ use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
 use crate::systems::skills::geometry::Target;
+use crate::systems::vehicles::data::attach_point;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{Entity, PlayerRef, WorldObject};
 
@@ -123,6 +124,7 @@ fn fixture(active: bool) -> Fixture {
         .dominions
         .register_participant(GROUP, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker, now - 10)
         .unwrap();
+    super::siege_area::refresh(&server);
     attacker_client.drain();
     outsider_client.drain();
     Fixture {
@@ -146,6 +148,47 @@ fn teleports(client: &mut TestClient) -> Vec<(i16, f32, f32, f32)> {
             (error, x, y, z)
         })
         .collect()
+}
+
+/// A calendar-materialised siege: its start/end follow the calendar / GM test clock, like
+/// `DominionManager::tick_dual`.
+fn materialised_fixture(clock: i64) -> Fixture {
+    let f = fixture(true);
+    let now = clock - 100;
+    f.server
+        .systems
+        .housing
+        .dominions
+        .cancel_siege(GROUP, chrono::Utc::now().timestamp())
+        .unwrap();
+    let cycle = 1_000i64;
+    f.server
+        .systems
+        .housing
+        .dominions
+        .declare(GROUP, ATTACKER_EXPEDITION, cycle, now, 0, (0.0, 0.0, 0.0))
+        .unwrap();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .materialise_declaration(
+            GROUP,
+            cycle,
+            clock - 10,
+            clock + 3_600,
+            now,
+            crate::systems::housing::dominion::SiegeLimits::NATIVE,
+        )
+        .unwrap();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .register_participant(GROUP, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker, now)
+        .unwrap();
+    super::siege_area::refresh(&f.server);
+    f
 }
 
 fn move_to(fixture: &Fixture, player: &PlayerRef, (x, y): (f32, f32)) {
@@ -203,6 +246,34 @@ async fn an_unregistered_defender_expedition_member_is_still_evicted() {
 }
 
 #[tokio::test]
+async fn the_calendar_clock_moves_the_siege_area_window() {
+    let clock = chrono::Utc::now().timestamp() + 100_000;
+    let mut f = materialised_fixture(clock);
+    f.server
+        .systems
+        .housing
+        .calendar
+        .set_clock(Some(clock - 100));
+    evict_non_participants(&f.server);
+    assert!(
+        teleports(&mut f.outsider_client).is_empty(),
+        "before the calendar start"
+    );
+    f.server
+        .systems
+        .housing
+        .calendar
+        .set_clock(Some(clock + 10));
+    evict_non_participants(&f.server);
+    assert_eq!(
+        teleports(&mut f.outsider_client).len(),
+        1,
+        "inside the calendar window"
+    );
+    f.server.systems.housing.calendar.set_clock(None);
+}
+
+#[tokio::test]
 async fn a_pending_teleport_or_a_dead_character_is_not_moved_again() {
     let mut f = fixture(true);
     f.outsider.data().set_disabled_set_position(true);
@@ -220,20 +291,9 @@ async fn the_area_rule_matches_the_hostility_gate() {
     let outsider = Target::Obj(WorldObject::from(&f.outsider));
     let attacker = Target::Obj(WorldObject::from(&f.attacker));
     // Both are inside, but neither the outsider's party gate nor the same-party gate is
-    // hostile: the eviction and the hostility rule share the same area helper.
-    assert!(super::siege_area::inside(
-        &f.server,
-        &f.server.systems.housing.dominions.get(GROUP).unwrap(),
-        0,
-        INSIDE.0,
-        INSIDE.1
-    ));
-    assert!(!super::siege_area::inside(
-        &f.server,
-        &f.server.systems.housing.dominions.get(GROUP).unwrap(),
-        0,
-        OUTSIDE.0,
-        OUTSIDE.1
-    ));
+    // hostile: the eviction and the hostility rule share the same cached area.
+    let area = f.server.systems.housing.siege_areas.get(GROUP).unwrap();
+    assert!(area.inside(0, INSIDE.0, INSIDE.1));
+    assert!(!area.inside(0, OUTSIDE.0, OUTSIDE.1));
     assert_eq!(siege_can_attack(&f.server, &attacker, &outsider), None);
 }

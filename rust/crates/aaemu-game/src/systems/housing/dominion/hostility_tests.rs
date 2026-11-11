@@ -154,6 +154,7 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
         .dominions
         .schedule_siege(GROUP, ATTACKER_EXPEDITION, starts_at, ends_at, scheduled_at)
         .unwrap();
+    super::siege_area::refresh(&server);
     attacker_client.drain();
     defender_client.drain();
     same_party_client.drain();
@@ -169,6 +170,40 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
         same_party,
         outsider,
     }
+}
+
+/// A calendar-materialised siege: its window follows the calendar / GM test clock.
+fn materialised_fixture(clock: i64) -> Fixture {
+    let f = fixture(true, false);
+    let now = clock - 100;
+    f.server
+        .systems
+        .housing
+        .dominions
+        .cancel_siege(GROUP, chrono::Utc::now().timestamp())
+        .unwrap();
+    let cycle = 1_000i64;
+    f.server
+        .systems
+        .housing
+        .dominions
+        .declare(GROUP, ATTACKER_EXPEDITION, cycle, now, 0, (0.0, 0.0, 0.0))
+        .unwrap();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .materialise_declaration(
+            GROUP,
+            cycle,
+            clock - 10,
+            clock + 3_600,
+            now,
+            crate::systems::housing::dominion::SiegeLimits::NATIVE,
+        )
+        .unwrap();
+    super::siege_area::refresh(&f.server);
+    f
 }
 
 fn target(player: &PlayerRef) -> Target {
@@ -233,6 +268,31 @@ async fn the_same_party_is_friendly_inside_and_the_circle_gate_preserves_faction
         &target(&f.attacker),
         &target(&f.same_party)
     ));
+}
+
+#[tokio::test]
+async fn the_calendar_clock_arms_the_siege_relation() {
+    let clock = chrono::Utc::now().timestamp() + 100_000;
+    let f = materialised_fixture(clock);
+    f.server
+        .systems
+        .housing
+        .calendar
+        .set_clock(Some(clock - 100));
+    assert!(
+        !can_attack(&f.server, &target(&f.attacker), &target(&f.defender)),
+        "before the calendar start"
+    );
+    f.server
+        .systems
+        .housing
+        .calendar
+        .set_clock(Some(clock + 10));
+    assert!(
+        can_attack(&f.server, &target(&f.attacker), &target(&f.defender)),
+        "inside the calendar window"
+    );
+    f.server.systems.housing.calendar.set_clock(None);
 }
 
 #[tokio::test]
