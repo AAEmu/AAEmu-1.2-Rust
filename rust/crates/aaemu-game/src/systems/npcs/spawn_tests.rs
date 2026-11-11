@@ -2581,6 +2581,14 @@ async fn activation_authored_schedule_wins_over_residency_and_retention() {
 /// Quest fixture: NPC 500 accepts quest 100 (which then waits in PROGRESS on an unfinished hunt
 /// objective), NPC 501 reports quest 110 (both nonaggressive).
 fn quest_server() -> Arc<GameServer> {
+    quest_server_with(|_, _, _| {})
+}
+
+/// [`quest_server`] whose game data a test extends first: `extend` may add NPC templates and
+/// quest acts (the quest tables are finished afterwards) and spawner templates / members.
+fn quest_server_with(
+    extend: impl FnOnce(&mut GameData, &mut Vec<NpcSpawnerTemplate>, &mut Vec<NpcSpawnerNpc>),
+) -> Arc<GameServer> {
     let mut game = GameData::empty();
     for id in [500u32, 501] {
         game.systems.npcs.npc.templates.insert(
@@ -2644,17 +2652,329 @@ fn quest_server() -> Arc<GameServer> {
                 alias_id: 0,
             },
         );
-        q.finish();
     }
-    game.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
-        vec![template(10, 1), template(20, 1)],
-        vec![member(100, 10, 500), member(200, 20, 501)],
-    )
-    .unwrap();
+    let mut spawner_templates = vec![template(10, 1), template(20, 1)];
+    let mut spawner_members = vec![member(100, 10, 500), member(200, 20, 501)];
+    extend(&mut game, &mut spawner_templates, &mut spawner_members);
+    game.systems.quests.finish();
+    game.systems.npcs.npc_spawners =
+        NpcSpawnerData::from_parts(spawner_templates, spawner_members).unwrap();
     let s = Arc::new(test_server_with(game));
     s.set_self();
     *s.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
     s
+}
+
+#[tokio::test]
+async fn quest_giver_index_filters_placements_and_tracks_membership_changes() {
+    let server = quest_server();
+    let m = manager(&server);
+
+    let none = HashSet::new();
+
+    // Nothing loaded yet: the lazily built index is empty.
+    assert!(m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, &none, 10)
+        .is_empty());
+
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1000.0))
+        .unwrap();
+    let ids: Vec<u32> = m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, &none, 10)
+        .iter()
+        .map(|s| s.unit_id)
+        .collect();
+    assert_eq!(ids, vec![500], "only the safe quest giver placement");
+
+    // Radius and limit are applied before anything is spawned.
+    assert!(m
+        .quest_giver_spawners_near(&server, 2000.0, 2000.0, 50.0, &none, 10)
+        .is_empty());
+    assert_eq!(
+        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, &none, 0)
+            .len(),
+        1
+    );
+
+    // A region in `skip_regions` is left out (the caller's own neighbourhood).
+    let own_region = server
+        .world
+        .world(0)
+        .unwrap()
+        .region_by_pos(1000.0, 1000.0)
+        .expect("a region of the test world");
+    assert!(m
+        .quest_giver_spawners_near(
+            &server,
+            1000.0,
+            1000.0,
+            50.0,
+            &HashSet::from([own_region]),
+            10
+        )
+        .is_empty());
+}
+
+/// Adds `npc` as a quest giver (`ConAcceptNpc`) to the quest tables of a [`quest_server_with`].
+fn add_quest_giver_act(game: &mut GameData, quest: u32, npc: u32) {
+    let q = &mut game.systems.quests;
+    q.add_template(QuestTemplate {
+        id: quest,
+        ..QuestTemplate::default()
+    });
+    q.add_component(QuestComponentTemplate {
+        id: quest,
+        quest_id: quest,
+        kind_id: kind::START,
+        ..QuestComponentTemplate::default()
+    });
+    q.add_act(
+        quest,
+        quest,
+        quest,
+        0,
+        ActKind::ConAcceptNpc { npc_id: npc },
+    );
+}
+
+/// A monster camp with one quest NPC must not be prepared for a map marker, and neither must an
+/// aggressive quest NPC: every member of the placement has to be a safe quest giver / reporter.
+#[tokio::test]
+async fn quest_giver_index_skips_mixed_and_aggressive_placements() {
+    let server = quest_server_with(|game, templates, members| {
+        for id in [502u32, 503] {
+            game.systems.npcs.npc.templates.insert(
+                id,
+                NpcTemplate {
+                    id,
+                    aggression: true,
+                    ..NpcTemplate::default()
+                },
+            );
+        }
+        // NPC 503 gives a quest, but is aggressive.
+        add_quest_giver_act(game, 120, 503);
+        // Spawner 30: the quest giver 500 camped with the hostile monster 502. Spawner 31: the
+        // aggressive quest giver alone.
+        templates.extend([template(30, 2), template(31, 1)]);
+        members.extend([
+            member(300, 30, 500),
+            member(301, 30, 502),
+            member(310, 31, 503),
+        ]);
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(502, 1000.0, 1000.0))
+        .unwrap();
+    m.add_npc_spawner(&server, npc_def(503, 1010.0, 1000.0))
+        .unwrap();
+    // NPC 500 belongs to two spawner templates: its own (10) and the camp (30).
+    m.add_npc_spawner(&server, npc_def(500, 1020.0, 1000.0))
+        .unwrap();
+
+    let found: Vec<(u32, u32)> = m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 100.0, &HashSet::new(), 0)
+        .iter()
+        .map(|s| (s.spawner_id, s.unit_id))
+        .collect();
+    assert_eq!(
+        found,
+        vec![(10, 500)],
+        "only the giver's own template, not its clone of the camp"
+    );
+}
+
+/// An `NpcGroup` row names a group, not an NPC template: a group whose id equals a quest giver's
+/// NPC id must not pass for that quest giver (the spawner would spawn the group).
+#[tokio::test]
+async fn quest_giver_index_skips_npc_group_members() {
+    let server = quest_server_with(|game, templates, members| {
+        game.systems.npcs.npc.templates.insert(
+            505,
+            NpcTemplate {
+                id: 505,
+                ..NpcTemplate::default()
+            },
+        );
+        add_quest_giver_act(game, 121, 505);
+        // Spawner 32 spawns the NPC *group* 505.
+        templates.push(template(32, 1));
+        members.push(NpcSpawnerNpc {
+            member_type: "NpcGroup".into(),
+            ..member(320, 32, 505)
+        });
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(505, 1000.0, 1000.0))
+        .unwrap();
+
+    assert!(m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 100.0, &HashSet::new(), 0)
+        .is_empty());
+}
+
+/// The index answers nearest first (ties by spawner id, i.e. placement order) and `limit` keeps
+/// the nearest ones.
+#[tokio::test]
+async fn quest_giver_index_orders_nearest_first_and_truncates() {
+    let server = quest_server();
+    let m = manager(&server);
+    // Around (1000, 1000): 100 m east, 300 m east, 200 m north and, tying with the first,
+    // 100 m west.
+    for (x, y) in [
+        (1100.0, 1000.0),
+        (1300.0, 1000.0),
+        (1000.0, 1200.0),
+        (900.0, 1000.0),
+    ] {
+        m.add_npc_spawner(&server, npc_def(500, x, y)).unwrap();
+    }
+    let near = |limit: usize| -> Vec<(i32, i32)> {
+        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 400.0, &HashSet::new(), limit)
+            .iter()
+            .map(|s| {
+                let p = s.position();
+                (p.x as i32, p.y as i32)
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        near(0),
+        vec![(1100, 1000), (900, 1000), (1000, 1200), (1300, 1000)]
+    );
+    assert_eq!(near(2), vec![(1100, 1000), (900, 1000)]);
+    assert_eq!(near(1), vec![(1100, 1000)]);
+}
+
+#[tokio::test]
+async fn quest_map_range_prepares_a_far_spawner_and_streams_its_npc() {
+    let server = quest_server();
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1000.0),
+        5000,
+    );
+    client.drain();
+
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    assert_eq!(
+        client.drain_ops(),
+        vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
+        "the far placement is prepared and its quest giver streamed"
+    );
+    let world = server.world.world(0).unwrap();
+    assert!(world
+        .all_npcs()
+        .iter()
+        .any(|n| n.data().unit.template_id == 500));
+}
+
+/// A placement streamed only through the quest-map range must not be reclaimed as cold and
+/// rebuilt by the next map refresh. The resident gate is off so distance retention (not
+/// residency) decides, and retention 0 would reclaim on the same pass.
+#[tokio::test]
+async fn quest_map_streamed_placement_stays_warm_and_is_not_recreated() {
+    let server = quest_server();
+    server.config.update(|c| {
+        c.world.npc_warm_retention_seconds = 0;
+        c.world.npc_resident_service_npcs = false;
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let spawner = only_spawner(&m);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1250.0),
+        5000,
+    );
+    let world = server.world.world(0).unwrap();
+
+    // Prepare the placement through the ordinary activation pass (the player stands on it).
+    assert_eq!(activate(&server).created, 1);
+    client.drain();
+
+    // Move 250 m away and stream it only through the quest-map option (inside 300 m).
+    player.data().unit.transform.set_xyz(1000.0, 1000.0, 100.0);
+    world.add_visible_object(&player, &server.view_ctx());
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    client.drain();
+    assert_eq!(spawner.current_spawn_count(), 1);
+
+    // Retention 0 would reclaim the now-cold placement on this pass. Streaming keeps it warm,
+    // so the map refresh finds its NPC instead of rebuilding it every tick.
+    for _ in 0..3 {
+        let stats = activate(&server);
+        assert_eq!(stats.reclaimed, 0, "a streamed placement is not cold");
+        assert_eq!(stats.created, 0);
+        assert_eq!(spawner.current_spawn_count(), 1);
+        crate::systems::quests::quest_map::tick(&server);
+        client.drain();
+    }
+}
+
+/// The option prepares placements far from every player, outside what the activation pass ever
+/// examines. They must be tracked like activation-prepared ones, so that once streaming stops
+/// the retention sweep reclaims them (resident gate off, retention 0: the first cold pass);
+/// untracked they leaked until restart.
+#[tokio::test]
+async fn quest_map_prepared_placement_is_reclaimed_once_streaming_stops() {
+    let server = quest_server();
+    server.config.update(|c| {
+        c.world.npc_warm_retention_seconds = 0;
+        c.world.npc_resident_service_npcs = false;
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let spawner = only_spawner(&m);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1000.0),
+        5000,
+    );
+    client.drain();
+    assert_eq!(spawner.current_spawn_count(), 0, "nothing prepared it yet");
+
+    // 250 m from the unprepared placement, outside every warm ring: the option creates and
+    // streams its NPC, and the sweep keeps it while it is streamed.
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    client.drain();
+    assert_eq!(spawner.current_spawn_count(), 1);
+    assert_eq!(activate(&server).reclaimed, 0, "streamed placements stay");
+    assert_eq!(spawner.current_spawn_count(), 1);
+
+    // Streaming stops: the placement is cold and gets reclaimed.
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters100,
+    );
+    client.drain();
+    assert_eq!(activate(&server).reclaimed, 1);
+    assert_eq!(spawner.current_spawn_count(), 0);
 }
 
 #[tokio::test]

@@ -304,8 +304,13 @@ pub(crate) fn remove_visible_object(world: &WorldInstance, obj: &WorldObject, ta
                 }
             }
         }
-        WorldObject::Npc(_)
-        | WorldObject::Slave(_)
+        WorldObject::Npc(_) => {
+            // Systems that stream NPCs outside the region grid (the quest-map range) must know
+            // this client no longer has the unit.
+            target.note_region_removed_npc(id);
+            target.send(SCUnitsRemovedPacket { ids: vec![id] });
+        }
+        WorldObject::Slave(_)
         | WorldObject::Mate(_)
         | WorldObject::Transfer(_)
         | WorldObject::Shipyard(_) => target.send(SCUnitsRemovedPacket { ids: vec![id] }),

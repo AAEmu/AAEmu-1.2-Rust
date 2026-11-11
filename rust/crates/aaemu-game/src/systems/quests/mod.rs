@@ -23,6 +23,7 @@ pub mod events;
 pub mod hooks;
 pub mod model;
 pub mod packets;
+pub mod quest_map;
 pub mod reward_scale;
 pub mod spheres;
 pub mod state;
@@ -109,6 +110,8 @@ pub struct System {
     timers: Mutex<HashMap<u32, Vec<TimerEntry>>>,
     /// `WorldInstance.SphereQuestManager`.
     pub spheres: spheres::SphereQuestManager,
+    /// "Quest Details Map Display" range state (wider given-quest markers).
+    pub quest_map: quest_map::State,
     /// The quest hooks (`bridges::GameQuestHooks`, installed at start).
     pub hooks: HookSlot<dyn QuestHooks>,
     /// The economy subsystem's `QuestHooks` (items, money, mails, trade packs) that
@@ -166,6 +169,18 @@ impl System {
                     break;
                 };
                 crate::systems::run_blocking(&server, |s| s.systems.quests.spheres.tick(s)).await;
+            }
+        });
+        // Quest-map marker range: prepare far quest givers and keep the visible set in sync.
+        let weak = Arc::downgrade(server);
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                iv.tick().await;
+                let Some(server) = weak.upgrade() else {
+                    break;
+                };
+                crate::systems::run_blocking(&server, quest_map::tick).await;
             }
         });
         // QuestDailyResetTask ("0 0 0 */1 * *": every day at midnight, UTC here)
@@ -501,6 +516,7 @@ pub fn on_leave_world(server: &GameServer, character_id: u32) {
     server.systems.quests.remove_quest_timer(character_id, 0);
     server.systems.quests.forget_entering(character_id);
     server.systems.quests.spheres.forget_character(character_id);
+    server.systems.quests.quest_map.forget(character_id);
 }
 
 /// `CSNotifyInGameCompletedPacket` (`WorldManager.OnPlayerJoin`): releases the evaluations
