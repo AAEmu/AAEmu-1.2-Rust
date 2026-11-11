@@ -5334,8 +5334,8 @@ and in NPC wandering / buff remaining times.
   `dominion_auction_post_marker_round_trips_through_its_row` (MySQL).
   The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
   open: the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
-  `doodad_func_purchase_siege_tickets` has no rows) and siege hostility WP-SD7 (decision-blocked:
-  no evidence shows how retail made the two sides attackable). The siege-shop period / side
+  `doodad_func_purchase_siege_tickets` has no rows). Siege hostility (WP-SD7) is implemented
+  from the 10.x relationship engine; see the siege-hostility bullet below. The siege-shop period / side
   gate WP-SD4a is implemented behind `Housing.SiegeShopGate` (default off; the rule is
   INFERRED from the pack names, capture-pending).
   Known, not fixed:
@@ -5557,6 +5557,127 @@ and in NPC wandering / buff remaining times.
   `siege_shop_gate_refuses_non_participants_during_the_siege`,
   `siege_shop_gate_off_keeps_both_packs_selling_at_any_time_to_anyone` and the config binder.
   Live capture of the restriction and side rule is still pending.
+* systems::housing / systems::skills (siege hostility, 2026-11-10): the two siege sides are
+  hostile inside a running siege's area. Rule: the 10.x common relationship engine's siege
+  branch (`verify-claims-10x.md` claim 2: dispatcher `sub_39CC17B0`, `Z:2790654-2790950`;
+  `sub_390E19B0` -> `sub_39CC3BF0` -> `sub_39CC3110`, `Z:362920-362975` / `Z:2792862-2792880`)
+  runs only while the siege period is active and both units lie inside the siege area; each
+  unit is mapped to a party by its owner character's expedition (defender expedition /
+  attacker expedition), yielding same party friendly, two different attacker parties neutral,
+  otherwise hostile, and either unit in no party falls through to the normal faction / zone
+  rules. The 10.x enum numbers the running siege 3 and the 1.2 client numbers it 4
+  (`siege.md` 1.2); the Rust keys on the active window, so the period gate is the same. The
+  per-attack check reads a small per-zone `SiegeAreaCache` (rebuilt once a second by
+  `seals::reconcile`) instead of cloning a `DominionState`, does the party mapping before any
+  world lookup, and picks its clock like `DominionManager::tick_dual` (the calendar / GM test
+  clock for a calendar materialisation, the real clock for a GM schedule; a GM-clock test
+  pins it). The 1.2 siege record carries one attacker expedition, so the neutral branch is
+  reachable only through the pure `classify` helper (`hostility.rs`); it is kept and tested
+  because it is part of the evidenced rule. The area is the lodestone's
+  `guard_tower_settings.radius_siege` circle or the bound offense HQ's `radius_offense_hq`
+  circle (`siege_area.rs`; `sub_39695460`'s two circles). The check sits in
+  `skills::relation::can_attack` after the Peace, no-PvP and own-mount refusals, so it can
+  never weaken those protections (a Peace/no-PvP test pins the order). NPCs, position targets
+  and non-participants are unchanged. Deviation from `siege.md` WP-S9's earlier "no evidence"
+  note: the rule is now implemented from the 10.x engine and the owner's flow source; no 1.2
+  zone binary exists to confirm the mechanism in 1.2 (capture-pending). Tests:
+  `hostility_tests::{attackers_and_defenders_are_hostile_inside_the_running_siege_only,
+  the_same_party_is_friendly_inside_and_the_circle_gate_preserves_faction_rules,
+  a_second_attacker_party_would_be_neutral,
+  the_calendar_clock_arms_the_siege_relation,
+  peace_and_no_pvp_protections_still_refuse_the_siege_attack,
+  a_non_participant_is_not_made_hostile_by_the_siege}`; the first two were mutation-checked
+  against the removed call site and the calendar-clock test against the real-clock-only
+  fallback.
+* systems::housing (siege participant seals, 2026-11-10): an accepted roster entry is handed
+  the side's seal item from `siege_zones` (`defense_ticket_id` / `offense_ticket_id`; items
+  21313-21320 / 28170-28173, category 120, not sellable, `price`/`honor_price` 0, 240-minute
+  absolute lifetime) and loses it when the siege ends or the entry leaves. The flow source is
+  the same period source as the hostility row (IGN 2014-09-26 "Castles" and Total ArcheAge
+  2014-11-20, grade C): the game "selects from the eligible participants for Attackers and
+  Defenders up to the allotted limits"; the 1.2 client has no siege-participation CS
+  (`siege.md` 0), so the roster acceptance is the selection point. Grant: both roster-join
+  paths (`/joinsiege` and `/dominion register`) and a sweep at the Scheduled -> Active
+  transition (`tick_once`); a character that already holds the item (the defence
+  reinforcement skill 16975 grants the same defence seal) gets no duplicate and stays
+  untracked. `seals::reconcile` in the 1-second participant tick then (a) re-grants a missing
+  seal to every online roster member of an unfinished siege (offline at registration or at
+  the start, a GM registration of an offline character, a full bag whose first grant failed,
+  or the 240-minute expiry during the siege; `holds` keeps the sweep idempotent) and (b) takes
+  one seal back once the siege record is finished (an end or a cancel) or the character left
+  its roster entry; a warmup / still-scheduled record keeps it (the first live run caught the
+  earlier active-only check taking the seal back a second after the join, and the fix has its
+  own test). A seal-action lock serialises the grant with the removal, and the removal
+  re-reads the current roster and the held item under it, so a leave and rejoin cannot race
+  the take into removing the rejoined seal. An offline character keeps the item for its
+  authored lifetime (the backstop), and the runtime grant set is deliberately not persisted
+  (after a restart the lifetime is the only cleanup). Grant uses
+  item task 42 (`SkillEffectGainItem`, the existing verified ticket-grant task in
+  `skills/effects/special/items.rs`); the removal uses the ordinary consume path. The retail
+  grant/removal trigger and packet are UNKNOWN (no 1.2 capture); this is the owner's
+  participant-list rule. Tests:
+  `seals_tests::{a_selected_participant_receives_the_side_seal_once,
+  the_roster_sweep_hands_the_seal_to_every_online_member,
+  the_seal_is_taken_back_after_the_siege_ends_or_the_member_leaves,
+  a_scheduled_roster_keeps_the_seal_until_the_siege_ends,
+  reconcile_hands_a_missing_seal_back_to_an_online_member,
+  reconcile_grants_to_a_member_who_was_offline_at_registration,
+  a_rejoin_before_the_removal_keeps_the_seal,
+  an_already_held_reinforcement_seal_is_not_duplicated_or_revoked,
+  an_offline_member_keeps_the_item_for_its_authored_lifetime_backstop,
+  the_grant_is_client_visible_as_an_item_task}` and the command flow test
+  `joining_hands_the_side_seal_and_the_end_of_the_siege_takes_it_back`; the grant and the
+  reconcile removal were mutation-checked.
+* systems::housing (siege non-participant eviction, 2026-11-10): while a siege runs, a
+  character inside the siege area that is not on its roster is moved out. Evidence is the
+  owner's flow source (IGN 2014-09-26 "Castles"; Total ArcheAge 2014-11-20, grade C): "only
+  designated participants can enter" the perimeter and "those who do not qualify ... are
+  transported out of the siege perimeter when it begins". The 1.2 client texts contain no
+  separate warning before the removal (checked `ui_texts` for the siege keys), so the forced
+  `SCTeleportUnitPacket` carries the error in its error-message field: 446
+  `SIEGE_NOT_PARTICIPANT` (ui_texts 2505, the id the owner quote calls "Not a siege
+  participant"). Destination: the existing `PortalManager.GetClosestReturnPortal`
+  (`npcs::portal::closest_return_portal`), then the character's saved `main_world_position`,
+  and only when the destination is outside the area; no safe point leaves the character in
+  place with a warning. The sweep runs once a second in the participant tick (never under the
+  housing operation lock), reads the same per-zone `SiegeAreaCache` and clock as the hostility
+  rule, skips dead characters and a character with a teleport already pending. Before the
+  teleport it runs `Character.ForceDismount` (`vehicles::force_dismount`, the
+  `PrefabChanged` call the move guard / jail move / GM teleport use), so a rider, driver or
+  transfer passenger is not moved while attached to the mount or vehicle. **Policy,
+  capture-pending:** GMs are not exempt (the rule is applied literally), and the exact retail
+  destination/teleport reason (`TeleportReason.MoveToLocation` 14) is chosen from the
+  server's existing forced-teleport paths. Tests:
+  `siege_area_tests::{a_non_participant_inside_the_circle_is_moved_to_the_return_point,
+  a_non_participant_outside_the_circle_or_outside_the_running_siege_is_kept,
+  an_unregistered_defender_expedition_member_is_still_evicted,
+  a_pending_teleport_or_a_dead_character_is_not_moved_again,
+  the_calendar_clock_moves_the_siege_area_window,
+  a_mounted_non_participant_is_dismounted_before_the_move,
+  the_area_rule_matches_the_hostility_gate}`; the participant-keep assertion and the area
+  gate were mutation-checked.
+* systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's
+  flow points were checked against the implementation and the 1.2 data. Auction scroll: the
+  automatic camp-lot posting (WP-SD1c, `auction_post.rs`) matches "every 3 weeks, starting bid
+  500 gold" - the lot is the zone's `declare_item_id`, the start bid is the item `price`
+  5,000,000 copper = 500 gold, the cycle is the three-week pair rotation, one lot per
+  castle in its week (`round6-siege.md` 1, the WP-SD1c bullet above). Placed scroll: the camp
+  use (WP-SD2b, `declare.rs`) spawns the authored camp 4307, binds it as the offense HQ
+  (WP-SD2c) and the respawn path uses that HQ (`headquarters::respawn_portal`); the camp's
+  phase funcs carry the `DoodadFuncClout` safe zone (`npcs/doodad/phase_funcs.rs`), so the
+  attackers' respawn / safe area is implemented. Numbers: 70 attackers vs 50 defenders and
+  the +20 reinforcement wave are implemented from `siege_settings` and
+  `siege_zones.reinforce_defense_delay_mins` = 20 (`reinforce.rs`); the owner's 1.2 flow
+  source says 30 minutes and a later forum note about an hour, but the shipped data and the
+  2014-11-30 siege video (`D:/aaemu-audits/video-evidence/siege-2014-11-30-ollo.md`) show the
+  20-minute wave, so the data is kept. Wall breach: castle walls/gates are destructible
+  fortification houses (WP-SD3 fort work, `fort.rs` + `can_attack_tower`); there is no
+  separate "at least one wall breached" gate. **Missing:** the inner "crystal"/"sword pillar"
+  object (no such 1.2 data row is identified) and the respawn-point flip between the two
+  teams after it is destroyed; the current respawn always uses the character's own side's HQ.
+  Tower channel: the destroyed lodestone becomes engravable and the 5-minute uninterrupted
+  channel captures the territory (`ENGRAVING_MIN_DURATION_MS`, `runtime.rs`). The two missing
+  flow points have no evidence in the 1.2 data yet and are recorded here instead of invented.
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

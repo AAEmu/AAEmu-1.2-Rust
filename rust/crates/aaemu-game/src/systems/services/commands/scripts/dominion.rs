@@ -224,6 +224,20 @@ fn participation(
             );
             crate::systems::social::dominion::broadcast_snapshot(server, &state, false);
             crate::systems::housing::dominion::participants::sync_player(server, &player);
+            if join {
+                if let Some(participant) = state
+                    .siege
+                    .as_ref()
+                    .and_then(|siege| siege.participants.get(&player.character_id))
+                {
+                    crate::systems::housing::dominion::seals::grant_for_participant(
+                        server,
+                        &state,
+                        player.character_id,
+                        participant.side,
+                    );
+                }
+            }
             CommandManager::send_normal_text(
                 command,
                 out,
@@ -587,7 +601,23 @@ impl Command for Dominion {
                     crate::systems::housing::dominion::ParticipantCap::NATIVE,
                     |state| reinforce::participant_cap(state, side),
                 );
-                manager.register_participant_with_cap(zone, character, expedition, side, now, cap)
+                let registered = manager
+                    .register_participant_with_cap(zone, character, expedition, side, now, cap);
+                if let Ok(state) = &registered {
+                    if let Some(participant) = state
+                        .siege
+                        .as_ref()
+                        .and_then(|siege| siege.participants.get(&character))
+                    {
+                        crate::systems::housing::dominion::seals::grant_for_participant(
+                            server,
+                            state,
+                            character,
+                            participant.side,
+                        );
+                    }
+                }
+                registered
             }
             "unregister" => {
                 let Some(name) = args.get(2) else {
@@ -650,11 +680,14 @@ impl Command for Dominion {
 mod tests {
     use super::super::harness::{self, Pc};
     use super::*;
+    use crate::data::items::ItemTemplate;
     use crate::data::world_data::{SystemFaction, Zone};
     use crate::data::GameData;
     use crate::models::house::House;
     use crate::opcodes::sc;
-    use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate, SiegeSettings};
+    use crate::systems::housing::data::{
+        GuardTowerSetting, HousingTemplate, SiegeSettings, SiegeZone,
+    };
     use crate::systems::housing::dominion::{DominionError, DominionState, SiegeLimits};
     use crate::systems::skills::data::BuffTemplate;
     use crate::systems::social::expedition::{
@@ -665,6 +698,8 @@ mod tests {
     use aaemu_commons::PacketStream;
 
     const ZONE: u32 = 25;
+    const DEFENSE_SEAL: u32 = 21313;
+    const OFFENSE_SEAL: u32 = 21317;
 
     struct Fixture {
         server: Arc<GameServer>,
@@ -716,6 +751,22 @@ mod tests {
                 dead_applicable: true,
                 ..Default::default()
             });
+        }
+        data.systems.housing.castles.siege_zones.insert(
+            ZONE,
+            SiegeZone {
+                id: 1,
+                zone_group_id: ZONE,
+                siege_hours: 1,
+                siege_mins: 30,
+                reinforce_defense_delay_mins: 20,
+                defense_ticket_id: DEFENSE_SEAL,
+                offense_ticket_id: OFFENSE_SEAL,
+                ..Default::default()
+            },
+        );
+        for id in [DEFENSE_SEAL, OFFENSE_SEAL] {
+            data.items.templates.insert(id, ItemTemplate::plain(id, 1));
         }
         configure(&mut data);
         let server = harness::server_with(data);
@@ -862,6 +913,41 @@ mod tests {
         let (_, denied) = harness::run_at(&f.server, &f.attacker.p, "dominion cancel 25", 0).await;
         assert_eq!(denied, ["|cFFFF0000Insufficient privileges.|r"]);
         assert_eq!(state(&f), before);
+    }
+
+    #[tokio::test]
+    async fn joining_hands_the_side_seal_and_the_end_of_the_siege_takes_it_back() {
+        let f = fixture();
+        harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
+        assert_eq!(
+            crate::systems::housing::dominion::seals::seal_count(&f.attacker.p, OFFENSE_SEAL),
+            1
+        );
+        harness::run_at(&f.server, &f.defender.p, "joinsiege 25", 0).await;
+        assert_eq!(
+            crate::systems::housing::dominion::seals::seal_count(&f.defender.p, DEFENSE_SEAL),
+            1
+        );
+        // Leaving the roster ends the entitlement; the participant tick's reconcile runs the
+        // same call.
+        harness::run_at(&f.server, &f.attacker.p, "leavesiege 25", 0).await;
+        crate::systems::housing::dominion::seals::reconcile(&f.server);
+        assert_eq!(
+            crate::systems::housing::dominion::seals::seal_count(&f.attacker.p, OFFENSE_SEAL),
+            0
+        );
+        // The end of the siege takes the defender's seal back.
+        f.server
+            .systems
+            .housing
+            .dominions
+            .cancel_siege(ZONE, chrono::Utc::now().timestamp())
+            .unwrap();
+        crate::systems::housing::dominion::seals::reconcile(&f.server);
+        assert_eq!(
+            crate::systems::housing::dominion::seals::seal_count(&f.defender.p, DEFENSE_SEAL),
+            0
+        );
     }
 
     #[tokio::test]

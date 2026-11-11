@@ -319,6 +319,17 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     {
         return false;
     }
+    // The siege rule (10.x `sub_39CC3110`, `verify-claims-10x.md` claim 2): while the siege
+    // runs and both units are inside its area, the two siege parties are hostile, the same
+    // party is friendly and a different attacker party is neutral. Either unit in no party
+    // falls through to the normal rules, which is also why non-participants are not made
+    // hostile by a siege. It runs after the Peace / no-PvP / own-mount refusals, so it never
+    // weakens those protections.
+    if let Some(allowed) =
+        crate::systems::housing::dominion::hostility::siege_can_attack(server, me, target)
+    {
+        return allowed;
+    }
     let relation = relation_to(server, me, target);
     let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
     let zone_key = super::geometry::instance_and_zone(target).1;
