@@ -3268,5 +3268,595 @@
       "Z": 246.021,
       "Yaw": 280.0
     }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20094.488,
+      "Y": 8372.933,
+      "Z": 215.157,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20183.135,
+      "Y": 8272.513,
+      "Z": 212.313,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20183.977,
+      "Y": 8366.142,
+      "Z": 220.014,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20162.377,
+      "Y": 8329.800,
+      "Z": 221.138,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20085.500,
+      "Y": 8372.461,
+      "Z": 216.027,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20174.146,
+      "Y": 8272.041,
+      "Z": 212.378,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20174.988,
+      "Y": 8365.670,
+      "Z": 221.274,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20153.387,
+      "Y": 8329.328,
+      "Z": 218.851,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20081.414,
+      "Y": 8364.443,
+      "Z": 216.938,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20170.061,
+      "Y": 8264.023,
+      "Z": 212.628,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 2514,
+    "Title": "Poacher",
+    "Position": {
+      "X": 20170.902,
+      "Y": 8357.652,
+      "Z": 221.869,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19890.219,
+      "Y": 8657.612,
+      "Z": 213.475,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19926.764,
+      "Y": 8654.000,
+      "Z": 214.441,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19856.018,
+      "Y": 8688.018,
+      "Z": 212.190,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19863.439,
+      "Y": 8666.539,
+      "Z": 210.689,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19911.242,
+      "Y": 8632.880,
+      "Z": 213.374,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19881.230,
+      "Y": 8657.141,
+      "Z": 212.311,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19917.775,
+      "Y": 8653.528,
+      "Z": 214.353,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19847.029,
+      "Y": 8687.546,
+      "Z": 211.484,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19854.451,
+      "Y": 8666.067,
+      "Z": 210.443,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 9201,
+    "Title": "Poacher",
+    "Position": {
+      "X": 19902.254,
+      "Y": 8632.408,
+      "Z": 211.693,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2510,
+    "Title": "Mahadevi Seabug",
+    "Position": {
+      "X": 18585.432,
+      "Y": 7668.459,
+      "Z": 101.982,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 2510,
+    "Title": "Mahadevi Seabug",
+    "Position": {
+      "X": 18695.812,
+      "Y": 7736.509,
+      "Z": 105.637,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 2510,
+    "Title": "Mahadevi Seabug",
+    "Position": {
+      "X": 18699.658,
+      "Y": 7646.358,
+      "Z": 101.637,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 2510,
+    "Title": "Mahadevi Seabug",
+    "Position": {
+      "X": 18576.443,
+      "Y": 7667.988,
+      "Z": 101.890,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 2510,
+    "Title": "Mahadevi Seabug",
+    "Position": {
+      "X": 18686.824,
+      "Y": 7736.038,
+      "Z": 105.058,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 2509,
+    "Title": "Tropical Turtle",
+    "Position": {
+      "X": 18572.357,
+      "Y": 7659.969,
+      "Z": 101.439,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2509,
+    "Title": "Tropical Turtle",
+    "Position": {
+      "X": 18682.738,
+      "Y": 7728.019,
+      "Z": 103.636,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 2509,
+    "Title": "Tropical Turtle",
+    "Position": {
+      "X": 18577.260,
+      "Y": 7652.421,
+      "Z": 101.429,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 2509,
+    "Title": "Tropical Turtle",
+    "Position": {
+      "X": 18687.641,
+      "Y": 7720.471,
+      "Z": 102.939,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2906,
+    "Title": "Death Shroud",
+    "Position": {
+      "X": 17129.086,
+      "Y": 8439.020,
+      "Z": 199.984,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 2906,
+    "Title": "Death Shroud",
+    "Position": {
+      "X": 17222.359,
+      "Y": 8345.160,
+      "Z": 184.884,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 2906,
+    "Title": "Death Shroud",
+    "Position": {
+      "X": 17120.098,
+      "Y": 8438.548,
+      "Z": 200.634,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 2906,
+    "Title": "Death Shroud",
+    "Position": {
+      "X": 17213.371,
+      "Y": 8344.689,
+      "Z": 184.380,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 2906,
+    "Title": "Death Shroud",
+    "Position": {
+      "X": 17067.955,
+      "Y": 8255.773,
+      "Z": 179.447,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 2907,
+    "Title": "Headless Knight",
+    "Position": {
+      "X": 17156.016,
+      "Y": 8300.170,
+      "Z": 181.879,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2907,
+    "Title": "Headless Knight",
+    "Position": {
+      "X": 17181.785,
+      "Y": 8336.119,
+      "Z": 182.207,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 2907,
+    "Title": "Headless Knight",
+    "Position": {
+      "X": 17147.027,
+      "Y": 8299.698,
+      "Z": 182.798,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 2907,
+    "Title": "Headless Knight",
+    "Position": {
+      "X": 17142.941,
+      "Y": 8291.680,
+      "Z": 181.871,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17199.283,
+      "Y": 8030.299,
+      "Z": 154.568,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17071.207,
+      "Y": 8022.354,
+      "Z": 137.261,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17097.094,
+      "Y": 8033.360,
+      "Z": 137.530,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17078.469,
+      "Y": 8013.879,
+      "Z": 136.292,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17190.295,
+      "Y": 8029.828,
+      "Z": 154.563,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17062.219,
+      "Y": 8021.883,
+      "Z": 137.192,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17088.105,
+      "Y": 8032.889,
+      "Z": 137.690,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17068.383,
+      "Y": 8004.474,
+      "Z": 135.829,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17058.133,
+      "Y": 8013.864,
+      "Z": 136.369,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17084.020,
+      "Y": 8024.870,
+      "Z": 136.734,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16329.601,
+      "Y": 8459.709,
+      "Z": 172.506,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16331.332,
+      "Y": 8439.984,
+      "Z": 174.773,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16318.862,
+      "Y": 8439.030,
+      "Z": 174.342,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16357.029,
+      "Y": 8469.727,
+      "Z": 174.328,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16321.188,
+      "Y": 8463.181,
+      "Z": 170.995,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16306.414,
+      "Y": 8446.270,
+      "Z": 173.329,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16901.760,
+      "Y": 7371.977,
+      "Z": 107.438,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16371.845,
+      "Y": 7657.620,
+      "Z": 207.205,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16353.596,
+      "Y": 7667.010,
+      "Z": 206.159,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16379.482,
+      "Y": 7678.015,
+      "Z": 206.391,
+      "Yaw": 200.0
+    }
   }
 ]
