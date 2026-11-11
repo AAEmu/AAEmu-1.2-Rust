@@ -162,7 +162,9 @@ mod tests {
                free_fall_damping REAL, graspable NUM, gravity REAL, air_resistance REAL,
                no_ground_collider NUM);
              INSERT INTO gimmicks VALUES (37, 'chest', 'm.cgf', 1.5, 2, 't', 0, 0, 0, NULL, 500,
-               60000, 0, 7, 'f', 't', 0, 1, 2, 0, 0, 1, -9.8, 0, 'f');",
+               60000, 0, 7, 'f', 't', 0, 1, 2, 0, 0, 1, -9.8, 0, 'f');
+             INSERT INTO gimmicks VALUES (38, 'rock', 'r.cgf', -1, 2, 'f', 0, 0, 0, NULL, 0,
+               10000, 3, 11, 't', 'f', 0, 1, 2, 0, 0, 0, 9.8, 0, 'f');",
         )
         .unwrap();
         let files = ClientFileManager::new();
@@ -182,6 +184,13 @@ mod tests {
         assert!(!t.disappear_by_collision); // text 'f'
         assert!(t.graspable); // integer 1
         assert_eq!((t.life_time, t.skill_delay, t.mass), (60000, 500, 1.5));
+        // The opposite flag values: `disappear_by_collision` text 't' reads true (the C# integer
+        // `GetBoolean` read it false, so reverting to `r.bool` fails here), the unit-only flag 'f'.
+        let rock = d.get_gimmick_template(38).unwrap();
+        assert!(rock.disappear_by_collision);
+        assert!(!rock.collision_unit_only);
+        assert!(!rock.pushable_by_player);
+        assert_eq!((rock.collision_skill_id, rock.mass), (11, -1.0));
         conn.execute_batch("INSERT INTO gimmicks SELECT * FROM gimmicks;")
             .unwrap();
         assert!(GimmickData::load(&ctx).is_err());
