@@ -348,6 +348,9 @@ policy. `SQL/examples/example-ics-default-en.sql` is an optional example catalog
 of the base schema or the required updates. `SQL/examples/example-ics-eu-1.2.sql` is
 a second example catalogue of EU 1.2-era marketplace items (129 SKUs, including the
 Loyalty tab); most of its prices are INFERRED and must be reviewed before importing.
+`SQL/examples/example-ics-test.sql` is a generated catalogue for private test servers
+(every item costs 0 or 1 credit); see
+[Test server content](Test-Server-Content) for loading it and for the bulk GM kits.
 Check each SKU's `currency` (credits,
 AA points, loyalty or coins) and price before importing. AA points are not
 supported: AA-priced SKUs (`currency = 1`) are refused with error 592 and nothing is
