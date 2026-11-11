@@ -562,6 +562,10 @@ pub struct NpcData {
     pub interactions: HashMap<i32, Vec<u32>>,
     /// `aggro_links` / `npc_aggro_links` (template-id groups that help each other).
     pub aggro_links: AggroLinkData,
+    /// True when at least one `aggro_link_special_guard` template lacks
+    /// `aggro_link_special_ignore_npc_attacker`. Only then can an NPC attacker pull a guard, so
+    /// the player-victim guard scan is skipped for an NPC attacker when this is false.
+    pub special_guards_allow_npc_attacker: bool,
 }
 
 fn dup(what: &str, id: u32) -> crate::data::GameDataError {
@@ -1020,6 +1024,10 @@ impl NpcData {
         d.load_localized_names(conn, language)?;
         d.load_interactions(conn)?;
         d.load_aggro_links(conn)?;
+        d.special_guards_allow_npc_attacker = d
+            .templates
+            .values()
+            .any(|t| t.aggro_link_special_guard && !t.aggro_link_special_ignore_npc_attacker);
         Ok(d)
     }
 
