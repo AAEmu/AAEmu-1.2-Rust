@@ -12,6 +12,8 @@ mod move_guard_tests;
 pub mod object;
 #[cfg(test)]
 mod player_activity_tests;
+#[cfg(test)]
+mod region_removed_tests;
 pub mod session;
 #[cfg(test)]
 mod session_tests;
