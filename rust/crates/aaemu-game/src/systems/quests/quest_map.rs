@@ -14,9 +14,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use crate::server::GameServer;
+use crate::systems::npcs::spawn_manager;
 use crate::world::visibility;
 use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
 
@@ -194,11 +197,17 @@ impl State {
     }
 }
 
-fn new_player_state(range: Range) -> PlayerState {
+/// A refresh time that is already overdue, so the next refresh runs at once. `checked_sub`:
+/// a monotonic clock younger than the interval cannot be moved back that far (it would panic).
+fn overdue(now: Instant) -> Instant {
+    now.checked_sub(REFRESH_INTERVAL * 2).unwrap_or(now)
+}
+
+fn new_player_state(range: Range, now: Instant) -> PlayerState {
     PlayerState {
         range,
         extra: HashMap::new(),
-        last_refresh: Instant::now() - REFRESH_INTERVAL * 2,
+        last_refresh: overdue(now),
         last_pos: (f32::NAN, f32::NAN),
     }
 }
@@ -207,14 +216,15 @@ fn new_player_state(range: Range) -> PlayerState {
 pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range {
     let state = &server.systems.quests.quest_map;
     let _serial = state.refreshing.lock().expect("quest map state poisoned");
+    let now = spawn_manager::now();
     let previous = {
         let mut players = state.players.lock().expect("quest map state poisoned");
         let entry = players
             .entry(player.character_id)
-            .or_insert_with(|| new_player_state(range));
+            .or_insert_with(|| new_player_state(range, now));
         let previous = entry.range;
         entry.range = range;
-        entry.last_refresh = Instant::now() - REFRESH_INTERVAL * 2;
+        entry.last_refresh = overdue(now);
         previous
     };
     refresh_player_locked(server, player, SPAWN_BUDGET_PER_TICK);
@@ -231,13 +241,17 @@ pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range
 
 /// One quest-map tick: refresh every player that selected a wider range, drop stale state.
 pub fn tick(server: &GameServer) {
+    let state = &server.systems.quests.quest_map;
+    if state.tracked_count() == 0 {
+        // Nobody selected a wider range (the usual case): do not walk every character.
+        return;
+    }
     let present: HashSet<u32> = server
         .world
         .all_characters()
         .iter()
         .map(|p| p.character_id)
         .collect();
-    let state = &server.systems.quests.quest_map;
     let mut budget = SPAWN_BUDGET_PER_TICK;
     let tracked: Vec<PlayerRef> = {
         let mut players = state.players.lock().expect("quest map state poisoned");
@@ -279,7 +293,7 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
     #[cfg(test)]
     state.assert_unlocked();
 
-    let now = Instant::now();
+    let now = spawn_manager::now();
     let Some((inst, prx, pry)) = player.region() else {
         return 0;
     };
@@ -288,7 +302,7 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
     };
     let world_object = WorldObject::from(player);
     let pos = world.world_pos_rot(&world_object);
-    let forced = last_refresh.elapsed() >= REFRESH_INTERVAL
+    let forced = now.saturating_duration_since(last_refresh) >= REFRESH_INTERVAL
         || (pos.x - last_pos.0).powi(2) + (pos.y - last_pos.1).powi(2) > MOVE_EPSILON_SQ;
     if !forced && !range.is_default() {
         return 0;
@@ -965,5 +979,42 @@ mod tests {
             .quest_map
             .streamed_npc_ids()
             .is_empty());
+    }
+
+    /// `tick` refreshes a standing player only once [`REFRESH_INTERVAL`] has passed (or the
+    /// player moved). The spawn clock is the seam, so the test does not sleep.
+    #[tokio::test]
+    async fn tick_refreshes_a_standing_player_only_after_the_interval() {
+        let server = server();
+        let m = manager(&server);
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("giver placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        set_range(&server, &player, Range::Meters300);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+
+        // A second giver placement appears 250 m east: the next refresh is not due yet ...
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1250.0, 1000.0))
+            .expect("second placement");
+        tick(&server);
+        assert!(client.drain().is_empty(), "inside the refresh interval");
+
+        // ... and runs once the interval has passed.
+        spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
     }
 }
