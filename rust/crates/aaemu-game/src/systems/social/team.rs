@@ -1909,55 +1909,6 @@ impl TeamManager {
         deferred.run(server);
     }
 
-    /// `MemberRemoveFromTeam(unit, source, leaveType)`.
-    pub fn member_remove_from_team(
-        &self,
-        server: &GameServer,
-        unit: &PlayerRef,
-        source: &PlayerRef,
-        leave_type: u8,
-    ) {
-        let mut deferred = Deferred::default();
-        let mut st = self.lock();
-        let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
-            drop(st);
-            deferred.run(server);
-            return;
-        };
-        let team = st.teams.get_mut(&team_id).expect("team");
-        if team.change_status(unit).is_none() {
-            return;
-        }
-        // `activeTeam.ChangeStatus(source)` (source must be in the same team object).
-        if team.change_status(source).is_none() {
-            return;
-        }
-        if Self::team_id_by_unit(&st, source.character_id) != Some(team_id) {
-            return;
-        }
-        let team = &st.teams[&team_id];
-        let owners = (team.id, team.owner_id, team.is_party);
-        let party_number = team.party_number_of(unit.character_id);
-        let leaving = unit.clone();
-        deferred.push(move |server| {
-            if !owners.2 {
-                raid_channel(server, owners.0, owners.1).leave(&leaving);
-            }
-            party_channel(server, owners.0, party_number, owners.1).leave(&leaving);
-        });
-        self.ask_risky_team_locked(
-            server,
-            &mut st,
-            source,
-            team_id,
-            unit.character_id,
-            leave_type,
-            &mut deferred,
-        );
-        drop(st);
-        deferred.run(server);
-    }
-
     /// `UpdatePosition(id)` (from `Character.SetPosition` when `InParty`).
     pub fn update_position(&self, server: &GameServer, id: u32) {
         let st = self.lock();
@@ -2223,62 +2174,6 @@ impl TeamManager {
         let m = team.members[pick].as_mut().expect("member");
         m.has_gone_round_robin = true;
         Some(m.character.clone())
-    }
-
-    /// `GetNextEligibleLooter(teamId, owner)`: the first member within 200 m of `owner_pos`
-    /// that has not looted in this round, else resets the round to the first member.
-    pub fn next_eligible_looter(
-        &self,
-        server: &GameServer,
-        team_id: u32,
-        owner_pos: (f32, f32, f32),
-    ) -> Option<PlayerRef> {
-        // Positions need character data: collect the round-robin candidates first, read the
-        // positions without the team lock, then mark the chosen member under a second section
-        // that revalidates by character id.
-        let candidates: Vec<(PlayerRef, bool)> = {
-            let st = self.lock();
-            st.teams
-                .get(&team_id)?
-                .members
-                .iter()
-                .flatten()
-                .map(|m| (m.character.clone(), m.has_gone_round_robin))
-                .collect()
-        };
-        let mut chosen = None;
-        for (p, gone) in &candidates {
-            if *gone {
-                continue;
-            }
-            let pos = util::world_position(server, p);
-            if util::distance(pos, owner_pos, true) >= 200.0 {
-                continue;
-            }
-            chosen = Some(p.character_id);
-            break;
-        }
-        let mut st = self.lock();
-        let team = st.teams.get_mut(&team_id)?;
-        if let Some(id) = chosen {
-            if let Some(m) = team
-                .members
-                .iter_mut()
-                .flatten()
-                .find(|m| m.character.character_id == id)
-            {
-                m.has_gone_round_robin = true;
-                return Some(m.character.clone());
-            }
-        }
-        let mut ret: Option<PlayerRef> = None;
-        for m in team.members.iter_mut().flatten() {
-            m.has_gone_round_robin = ret.is_none();
-            if ret.is_none() {
-                ret = Some(m.character.clone());
-            }
-        }
-        ret
     }
 
     /// Starts the `TickManager` subscription (`Load()`): `UpdateAllTeams` every 500 ms.
