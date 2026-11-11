@@ -55,6 +55,7 @@ CI/non-lane builds that use the stock profile.
 | E3 | E1 with MSVC `link.exe` instead of `rust-lld` | 282 s | 9.9 GB | 46 % | 8.0 GB | 117 s |
 | E4 | E1 with `debug = 0` | 301 s | 9.8 GB | 40 % | 6.2 GB | 131 s |
 | E8 | E1 with `CARGO_INCREMENTAL=0` | 303 s | 10.7 GB | 45 % | **3.7 GB** | 160 s |
+| E9 | E1 with `RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zthreads=8` (nightly-only parallel front-end, experiment) | 260 s | - | 75 % | 8.0 GB | 289 s |
 | E5 | E1 + sccache, empty cache | 317 s | 10.3 GB | 43 % | 8.0 GB | 157 s |
 | E6 | E1 + sccache, **new** target dir, warm cache (92.8 % hits) | 301 s | 10.3 GB | 39 % | 8.0 GB | 128 s |
 | E2 | **stock repo config**: no local config (`link.exe`, full debuginfo, `jobs=16`) | **388 s** | **17.4 GB** | 45 % | **17.4 GB** | 104 s |
@@ -250,9 +251,10 @@ here: it schedules tests better but still starts every binary
   dependencies), `data`, `packets` and generated tables, then `economy`, `npcs`, `skills`. Splitting also makes
   incremental rebuilds and clippy smaller. This is a refactor, not a configuration change.
 - **Parallel front-end (nightly only).** About 100 s of the critical unit are type and borrow check,
-  which the nightly `-Zthreads=N` front-end parallelises. This is the one experiment that was not
-  run (it needs a nightly toolchain or `RUSTC_BOOTSTRAP=1`, and an otherwise idle machine); the
-  potential is bounded by the ~100 s of type and borrow check plus the single-threaded IR generation.
+  which the nightly `-Zthreads=N` front-end parallelises. Measured with `RUSTC_BOOTSTRAP=1
+  RUSTFLAGS=-Zthreads=8` on the stable compiler (E9): the critical unit went from 222 s to 178 s
+  (-20 %) and the cold build from 287 s to 260 s (-10 %), at 75 % instead of 55 % average CPU. A real
+  but modest gain that needs a nightly toolchain: low priority next to the items above.
 - The test-cfg compile is 65 % larger than the library compile; moving rarely changed generated or
   data-heavy test modules into integration-test crates would take them off the critical path.
 
