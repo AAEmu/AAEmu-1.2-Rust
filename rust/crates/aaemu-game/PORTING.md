@@ -8014,9 +8014,14 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   latch below (retail: a 3000 ms immunity).
   One touch fires one skill, not one per touched unit: the collision skills are area skills
   (18717 r20, 14649 r30, ...), so a tick casts once (from the first newly touched unit;
-  position-targeted skills center on the gimmick) and latches every unit the firing covers (the
-  skill's area radius around the gimmick plus every touched unit) so a unit already hit by a
-  firing never triggers another. A `disappear_by_collision` gimmick fires once in total and
+  position-targeted skills center on the gimmick) and latches the units the firing reached: the
+  touched units and the units inside the skill's area around the cast's real centre (the unit
+  that fired it for a unit-targeted skill such as AnyUnit, the gimmick for a position or self
+  skill; the same radius rule as the cast: area plus the centre's model size, the target's model
+  size, the vertical limit), so a unit already hit by a firing never triggers another, while a
+  unit the cast did not reach keeps its first hit. A gimmick whose velocity changes (a stop at a
+  travel cap, an elevator at the end of its run) broadcasts that change even though its
+  position no longer moves. A `disappear_by_collision` gimmick fires once in total and
   despawns (22 of the 30 contact templates; the other 8 keep rolling). Only an accepted cast
   latches and despawns: a refused cast (no resources, a target rule) latches nothing and removes
   nothing, and the next unlatched contact or tick tries again. A gimmick whose collision skill
