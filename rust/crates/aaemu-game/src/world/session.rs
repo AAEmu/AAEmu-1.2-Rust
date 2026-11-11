@@ -234,6 +234,10 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
             destination.instance_id
         );
     }
+    // A teleport ends a running trade when it is issued (see `trade::on_player_teleported`: the
+    // client's own cancel on a load is not relied on). A plain zone-group crossing on foot does
+    // not come through here.
+    crate::systems::economy::trade::on_player_teleported(server, p);
     // A rider, a bound seat or a doodad bond would stay half attached on the server once the
     // transform loses its parent (the client is moved off it): dismount first, as the GM
     // teleport and the trial do (`Character.ForceDismount`, `AttachUnitReason.PrefabChanged`).
@@ -342,8 +346,9 @@ pub const TELEPORT_ACK_HORIZONTAL_TOLERANCE: f32 = 10.0;
 pub const TELEPORT_ACK_VERTICAL_TOLERANCE: f32 = 30.0;
 
 /// Locks the character's position (`DisabledSetPosition`), records the destination and sends the
-/// `SCTeleportUnit`. Every server-forced teleport of a player goes through here, so
-/// [`teleport_ended`] can check the client's acknowledgement against what the server asked for.
+/// `SCTeleportUnit`. Every server-forced teleport of a player goes through here (or through
+/// [`send_teleport_unit_ending_trade`], which adds the trade hook), so [`teleport_ended`] can
+/// check the client's acknowledgement against what the server asked for.
 pub fn send_teleport_unit(p: &PlayerRef, packet: SCTeleportUnitPacket) {
     begin_teleport(p, packet.x, packet.y, packet.z);
     p.send(packet);
@@ -355,6 +360,30 @@ pub fn begin_teleport(p: &PlayerRef, x: f32, y: f32, z: f32) {
     let mut c = p.data();
     c.set_disabled_set_position(true);
     c.pending_teleport = Some((x, y, z));
+}
+
+/// [`send_teleport_unit`] for a teleport the server issues to a player that may be trading: the
+/// trade ends first ([`begin_teleport_ending_trade`]). The two plain entry points above keep
+/// their signatures (CONTRIBUTING-PORT section 3: no signature change in `world/*`); the
+/// server-side senders call this one.
+pub fn send_teleport_unit_ending_trade(
+    server: &GameServer,
+    p: &PlayerRef,
+    packet: SCTeleportUnitPacket,
+) {
+    crate::systems::economy::trade::on_player_teleported(server, p);
+    send_teleport_unit(p, packet);
+}
+
+/// [`begin_teleport`] that also ends the player's running trade. The trade ends when the
+/// teleport is issued, not when its acknowledgement arrives: a same-instance portal / navi sign /
+/// GM move reaches the client without [`teleport_character`], and a client that never reports the
+/// arrival (or is carried by a vehicle) must not keep both players marked as trading. A second
+/// hook call for a load that also goes through [`teleport_character`] is a no-op once the trade
+/// is gone.
+pub fn begin_teleport_ending_trade(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
+    crate::systems::economy::trade::on_player_teleported(server, p);
+    begin_teleport(p, x, y, z);
 }
 
 /// `CSTeleportEndedPacket`: the client acknowledges an `SCTeleportUnit`. The server copy follows

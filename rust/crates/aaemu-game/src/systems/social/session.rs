@@ -91,6 +91,9 @@ pub fn on_moved(server: &GameServer, p: &PlayerRef) {
             .teams
             .update_position(server, p.character_id);
     }
+    // `X2::GameClient::UpdateTradeChecks` also runs on the server so a client that does not
+    // send its own `CSCancelTrade(1/2)` cannot keep a trade open across the 5 m range.
+    crate::systems::economy::trade::on_player_moved(server, p);
 }
 
 /// `CSSendChatMessagePacket` for `ChatType.Raid` / `RaidLeader` / `Party` / `Judge`. Returns
