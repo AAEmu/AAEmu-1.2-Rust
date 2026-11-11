@@ -102,6 +102,10 @@ pub struct GimmickState {
     /// rate-limited to [`SPIN_BROADCAST_MS`] and a static one stops broadcasting.
     pub last_broadcast_ms: i64,
     pub broadcast_sent: bool,
+    /// The velocity of the last movement packet: a change (a gimmick stopping at a travel cap or
+    /// an elevator reaching its stop) is broadcast even though the position no longer changes,
+    /// otherwise clients keep extrapolating the last non-zero velocity.
+    pub last_vel: [f32; 3],
 }
 
 impl GimmickState {
@@ -730,8 +734,25 @@ fn collision_tick(
     if !candidates.iter().any(|o| o.as_player().is_some()) {
         return false;
     }
+    // Where the cast centres its area (`Skill.GetInitialTarget`): on the touched unit for a
+    // unit-targeted skill (AnyUnit, Hostile, ...), on the gimmick itself for a position or self
+    // skill. Which units a firing hits therefore depends on the unit that fired it.
+    use crate::systems::skills::types::SkillTargetType as T;
+    let unit_centred = matches!(
+        T::from_raw(i64::from(skill.target_type)),
+        Some(
+            T::Friendly
+                | T::Hostile
+                | T::AnyUnit
+                | T::Doodad
+                | T::Others
+                | T::Building
+                | T::FriendlyOthers
+        )
+    );
+    // Every contact-eligible unit around: its world position and model size.
+    let mut seen: Vec<([f32; 3], f32, u32)> = Vec::new();
     let mut contacts: Vec<(u32, WorldObject)> = Vec::new();
-    let mut covered: Vec<u32> = Vec::new();
     for unit in candidates {
         if !contact_unit(world, &unit) {
             continue;
@@ -744,20 +765,11 @@ fn collision_tick(
         let dx = p.x - origin[0];
         let dy = p.y - origin[1];
         let dz = p.z - origin[2];
-        let distance_sq = dx * dx + dy * dy + dz * dz;
         let reach = COLLISION_RADIUS + model;
-        if distance_sq <= reach * reach {
+        if dx * dx + dy * dy + dz * dz <= reach * reach {
             contacts.push((unit.obj_id(), unit.clone()));
         }
-        if area > 0.0 {
-            // The skill centers its area on the first touched unit (AnyUnit target) or on the
-            // gimmick (position target); include the contact radius so either center's area is
-            // covered by the latch.
-            let cover = area + COLLISION_RADIUS + model;
-            if distance_sq <= cover * cover {
-                covered.push(unit.obj_id());
-            }
-        }
+        seen.push(([p.x, p.y, p.z], model, unit.obj_id()));
     }
     // The unlatched contacts, in world order. A full latch ignores every further touch (the cap
     // is checked first, so an unlatchable unit cannot fire the skill on every tick).
@@ -776,7 +788,7 @@ fn collision_tick(
         return false;
     };
     // No lock is held across the cast. The first contact whose cast is accepted is the firing.
-    let mut fired = false;
+    let mut fired: Option<&WorldObject> = None;
     for unit in unlatched {
         tracing::debug!(
             gimmick = me.obj_id(),
@@ -786,16 +798,45 @@ fn collision_tick(
             "Gimmick collision: casting the collision skill"
         );
         if h.use_gimmick_collision_skill(server, &me, unit, template.collision_skill_id) {
-            fired = true;
+            fired = Some(unit);
             break;
         }
     }
-    if !fired {
+    let Some(fired) = fired else {
         return false;
-    }
+    };
     {
-        // Only a firing latches units: a unit merely inside the skill's area while nothing
-        // fires was not hit and must still trigger a firing when it later touches.
+        // Only a firing latches units, and only the units the firing reached: the touching units
+        // and the units inside the skill's area around its centre (a unit merely nearby, or
+        // inside a larger sphere, was not hit and must still fire when it later touches).
+        let fired_pos = world.world_pos_rot(fired);
+        let (centre, centre_model) = if unit_centred {
+            let model = crate::systems::skills::geometry::model_size(
+                server,
+                &crate::systems::skills::geometry::Target::Obj(fired.clone()),
+            );
+            ([fired_pos.x, fired_pos.y, fired_pos.z], model)
+        } else {
+            let model = crate::systems::skills::geometry::model_size(
+                server,
+                &crate::systems::skills::geometry::Target::Obj(me.clone()),
+            );
+            (origin, model)
+        };
+        let reach = area + centre_model;
+        let vertical =
+            crate::systems::skills::geometry::area_vertical_limit(area, skill.target_valid_height);
+        let in_area = |pos: &[f32; 3], model: f32| {
+            let dx = pos[0] - centre[0];
+            let dy = pos[1] - centre[1];
+            area > 0.0
+                && dx * dx + dy * dy < reach * reach + model * model
+                && (pos[2] - centre[2]).abs() <= vertical
+        };
+        let covered = seen
+            .iter()
+            .filter(|(pos, model, _)| in_area(pos, *model))
+            .map(|(_, _, id)| *id);
         let mut st = active.state();
         for id in contacts.iter().map(|(id, _)| *id).chain(covered) {
             if st.collision_hits.len() >= MAX_COLLISION_HITS {
@@ -934,7 +975,7 @@ pub fn gimmick_tick(
 
     let time = time_of_day_ms(now_ms);
     let authored_motion = active.state().authored_motion;
-    let (packet, pos, rot) = {
+    let (packet, pos, rot, vel) = {
         let last_pos = active.state().last_pos;
         let mut g = active.gimmick.data();
         let t = g.unit.transform;
@@ -957,6 +998,7 @@ pub fn gimmick_tick(
             SCGimmickMovementPacket::new(active.gimmick.obj_id, time, &g),
             pos,
             [t.rot_x, t.rot_y, t.rot_z],
+            g.vel,
         )
     };
     let send = {
@@ -964,10 +1006,15 @@ pub fn gimmick_tick(
         st.time = time;
         let moved = pos != st.last_pos;
         let turned = rot != st.last_rot;
+        // A gimmick that stops (a travel cap zeroes the velocity, an elevator ends its run) keeps
+        // its position: without the velocity change no packet would tell the clients to stop.
+        let stopped_or_started = vel != st.last_vel;
         st.last_pos = pos;
         st.last_rot = rot;
+        st.last_vel = vel;
         let send = !st.broadcast_sent
             || moved
+            || stopped_or_started
             || (turned && now_ms.saturating_sub(st.last_broadcast_ms) >= SPIN_BROADCAST_MS);
         if send {
             st.last_broadcast_ms = now_ms;
@@ -1515,6 +1562,66 @@ mod tests {
         assert_eq!(caster.data().unit.hp, 500, "the friendly caster is not");
     }
 
+    /// The x velocity (f32 at byte 44: obj id, time, two i64 coordinates, z, the quaternion) of
+    /// every movement packet a client received.
+    fn movement_velocities(client: &mut crate::test_support::TestClient) -> Vec<f32> {
+        client
+            .drain()
+            .into_iter()
+            .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCGimmickMovementPacket)
+            .map(|(_, body)| f32::from_le_bytes([body[44], body[45], body[46], body[47]]))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_gimmick_stopping_at_the_travel_cap_broadcasts_the_stop() {
+        // A moving gimmick that reaches the cap keeps its position, so only the velocity change
+        // tells the clients to stop extrapolating the last non-zero velocity.
+        let mut f = contact_fixture(
+            GimmickTemplate {
+                id: CONTACT_GIMMICK,
+                ..Default::default()
+            },
+            (200.0, 100.0),
+        );
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&f, &source, [10.0, 0.0, 0.0]);
+        f.client.drain();
+        for i in 0..500 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                1_000 + i * 50,
+            );
+        }
+        let velocities = movement_velocities(&mut f.client);
+        assert!(
+            velocities.iter().any(|v| *v > 9.0),
+            "the gimmick was broadcast while moving: {velocities:?}"
+        );
+        assert_eq!(
+            velocities.last().copied(),
+            Some(0.0),
+            "the last packet is the stop (zero velocity)"
+        );
+        // Further ticks after the stop send nothing.
+        for i in 0..10 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                40_000 + i * 50,
+            );
+        }
+        assert!(
+            movement_velocities(&mut f.client).is_empty(),
+            "a stopped gimmick stays quiet"
+        );
+    }
+
     #[tokio::test]
     async fn authored_motion_stops_after_the_travel_cap() {
         let f = contact_fixture(contact_template(false), (300.0, 300.0));
@@ -1684,6 +1791,41 @@ mod tests {
             1_050,
         );
         assert_eq!(f.victim.data().unit.hp, 400, "hit on touch");
+    }
+
+    #[tokio::test]
+    async fn contact_gimmick_keeps_the_hit_of_a_unit_the_cast_did_not_reach() {
+        // The skill centres its r5 area on the touched unit (AnyUnit). Unit A touches the
+        // gimmick 1 m behind it; unit B stands 6 m ahead of the gimmick, 7 m from A: inside a
+        // sphere around the gimmick that is larger than the area, but outside the cast. B was not
+        // hit, so it must not be latched, and its own touch later still fires the skill.
+        let mut f = contact_fixture_with_area(contact_template(false), (99.0, 100.0), 5);
+        let (_client_b, b) = control_player(&f, 2, (106.0, 100.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        f.client.drain();
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_000,
+        );
+        assert_eq!(f.victim.data().unit.hp, 400, "A touched it and was hit");
+        assert_eq!(b.data().unit.hp, 500, "B is outside the cast's area");
+        // A walks off; B reaches the gimmick: its first touch fires (a cast centred on B, 10 m
+        // from A) and A, latched and out of that area, is not hit again.
+        f.victim.data().unit.transform.set_xyz(90.0, 100.0, 100.0);
+        b.data().unit.transform.set_xyz(100.6, 100.0, 100.0);
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(50),
+            1_050,
+        );
+        assert_eq!(b.data().unit.hp, 400, "B's first touch still hits");
+        assert_eq!(f.victim.data().unit.hp, 400, "A keeps its single hit");
     }
 
     #[tokio::test]

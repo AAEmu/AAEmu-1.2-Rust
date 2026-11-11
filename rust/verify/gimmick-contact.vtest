@@ -17,6 +17,10 @@ bot keg2 gm
 [keg1]
 waitpeer 120 ${keg2}
 sync ready 2
+# keg2's `expectlog` only sees lines written after it starts, and keg2 leaves the barrier up to
+# 200 ms after keg1 does (its poll interval): wait before the spawn so the contact line cannot
+# be written before keg2 is watching.
+pump 1
 gmraw gimmick spawn 56
 expectpkt SCGimmicksRemovedPacket 10
 pump 4
