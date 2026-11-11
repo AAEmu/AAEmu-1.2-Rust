@@ -1,0 +1,34 @@
+# Gimmick contact hits: a bot stands on the Cutting Wind powder keg (gimmick 56) when it spawns.
+#
+# keg1's GM command spawns the keg from keg1's own player faction, so both bots are friendly to
+# it and take no damage; the collision skill (18717, r20) still has to be cast. keg2 stands 3 m
+# in front of keg1 (the spawn-effect offset), so the keg appears on top of keg2 and the first
+# gimmick tick after the spawn is a contact. The keg has `life_time` 0 and
+# `disappear_by_collision`, so it only leaves the world through an accepted contact cast: keg1
+# asserts that removal (`SCGimmicksRemovedPacket`, the observable effect) and keg2 the debug
+# line written when the contact fires (it needs aaemu_game::systems::npcs::gimmick=debug, which
+# Scripts/verify.sh adds to RUST_LOG). `gmraw` instead of `gm` so the command does not drain the
+# packets `expectpkt` waits for. This suite does not count firings (`expectlog` accepts one or
+# more lines): that one touch fires one skill is covered by the unit tests only.
+suite gimmick-contact
+bot keg1 gm
+bot keg2 gm
+
+[keg1]
+waitpeer 120 ${keg2}
+sync ready 2
+# keg2's `expectlog` only sees lines written after it starts, and keg2 leaves the barrier up to
+# 200 ms after keg1 does (its poll interval): wait before the spawn so the contact line cannot
+# be written before keg2 is watching.
+pump 1
+gmraw gimmick spawn 56
+expectpkt SCGimmicksRemovedPacket 10
+pump 4
+
+[keg2]
+waitpeer 120 ${keg1}
+gopeer ${keg1}
+moverel 0 3 0
+sync ready 2
+expectlog "Gimmick collision: casting the collision skill" 10
+pump 6

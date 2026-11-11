@@ -38,7 +38,9 @@ pub fn install(server: &GameServer) {
 }
 
 /// `new Skill(template).Use(caster, casterCaster, targetCaster, skillObject, bypassGcd)`;
-/// `None` when the skill template does not exist.
+/// `None` when the skill template does not exist. A gimmick caster bypasses the global cooldown:
+/// it is a projectile with no cast rhythm, and `default_gcd` (23 of the 25 collision skills)
+/// would otherwise refuse a second hit of a gimmick that keeps rolling within 850 ms.
 pub fn use_skill_with(
     server: &GameServer,
     caster: &WorldObject,
@@ -57,7 +59,7 @@ pub fn use_skill_with(
             caster_caster,
             &mut target_caster,
             skill_object,
-            false,
+            caster.as_gimmick().is_some(),
         )
         .0,
     )
@@ -244,34 +246,62 @@ impl SkillsBridge for SkillsForNpcs {
     fn use_gimmick_skill(
         &self,
         server: &GameServer,
-        caster: Option<&WorldObject>,
+        _caster: Option<&WorldObject>,
         gimmick: &WorldObject,
         skill_id: u32,
         pos: (f32, f32, f32),
     ) {
-        // UseSkillTask(skill, caster, SkillDoodad(gimmick), gimmick, SkillCastPositionTarget)
-        let Some(caster) = caster.cloned() else {
-            return; // Skill.Use(null, ..): InvalidSource
-        };
+        // `Gimmick.DoGimmickSkill` casts at the gimmick's position. The C# used the spawner unit
+        // as the caster; once the gimmick moved (a thrown barrel bomb), the caster-to-position
+        // range check refused the cast, and a doodad-spawned gimmick has no spawner unit at all.
+        // Cast from the gimmick itself (a unit in the object model) at its current position: the
+        // spawner unit's faction is copied to the gimmick at spawn, and the gimmick-source
+        // validation bypass (no health, no range, no obstacle ray) applies.
+        if server.game_data.systems.skills.skill(skill_id).is_none() {
+            return;
+        }
         let gimmick_id = gimmick.obj_id();
-        super::tasks::schedule(server, 0, move |srv| {
-            use_skill_with(
-                &srv,
-                &caster,
-                SkillCaster::Doodad(gimmick_id),
-                SkillCastTarget::Position {
-                    obj_id: 0,
-                    x: pos.0,
-                    y: pos.1,
-                    z: pos.2,
-                    rot: 0.0,
-                    obj_id1: 0,
-                    obj_id2: 0,
-                },
-                skill_id,
-                Some(SkillObject::default()),
-            );
-        });
+        use_skill_with(
+            server,
+            gimmick,
+            SkillCaster::Doodad(gimmick_id),
+            SkillCastTarget::Position {
+                obj_id: 0,
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                rot: 0.0,
+                obj_id1: 0,
+                obj_id2: 0,
+            },
+            skill_id,
+            Some(SkillObject::default()),
+        );
+    }
+
+    fn use_gimmick_collision_skill(
+        &self,
+        server: &GameServer,
+        gimmick: &WorldObject,
+        unit: &WorldObject,
+        skill_id: u32,
+    ) -> bool {
+        // `GimmickTemplate.CollisionSkillId` on contact: cast from the gimmick (a unit in the
+        // object model) at the unit it touched. The gimmick is the caster because a
+        // doodad-spawned gimmick has no spawner unit; `SkillCaster::Doodad` matches the
+        // existing gimmick skill path (`Gimmick.DoGimmickSkill`). `true` only when the cast was
+        // accepted, so the caller latches the touched units and despawns the gimmick for a cast
+        // that really ran.
+        let gimmick_id = gimmick.obj_id();
+        use_skill_with(
+            server,
+            gimmick,
+            SkillCaster::Doodad(gimmick_id),
+            SkillCastTarget::Unit(unit.obj_id()),
+            skill_id,
+            Some(SkillObject::default()),
+        )
+        .is_some_and(|r| r == skill_result::SUCCESS)
     }
 
     fn use_doodad_func_skill(

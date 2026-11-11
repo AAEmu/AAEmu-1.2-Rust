@@ -251,9 +251,16 @@ pub fn post_update_current_hp(
         return;
     }
     // attackerUnit.Events.OnKill(attackerUnit, { Target = attackerUnit }) (sic, C#); the
-    // dungeon `OnUnitKilled` world event is the instances subsystem's.
-    if let Some(ap) = attacker.and_then(WorldObject::as_player) {
-        crate::systems::quests::events::on_kill(server, ap, attacker, None, None);
+    // dungeon `OnUnitKilled` world event is the instances subsystem's. A gimmick's kill counts
+    // for the character it acts for (`relation::credited_player`).
+    if let Some(ap) = attacker.and_then(|a| super::relation::credited_player(server, a)) {
+        crate::systems::quests::events::on_kill(
+            server,
+            &ap,
+            Some(&WorldObject::from(&ap)),
+            None,
+            None,
+        );
     }
     if attacker.is_some_and(WorldObject::is_unit) {
         // `attackerUnit.Events.OnKill` + dungeon `OnUnitKilled` / `OnUnitCombatEnd` / `OnDeath`
@@ -387,9 +394,16 @@ fn do_die_after_claim(
     set_in_battle(server, victim, false);
     // Events.OnDeath (buff triggers listening to the victim, `Shipyard.OnDeath`)
     buffs::fire_unit_event(server, victim.obj_id(), BuffEventTriggerKind::Death, 0);
-    // killerUnit?.Events.OnKill(this, { Killer, Victim }) (quest subscribers of a player)
-    if let Some(kp) = killer.and_then(WorldObject::as_player) {
-        crate::systems::quests::events::on_kill(server, kp, None, killer, Some(victim));
+    // killerUnit?.Events.OnKill(this, { Killer, Victim }) (quest subscribers of a player; a
+    // gimmick's kill goes to the character it acts for)
+    if let Some(kp) = killer.and_then(|k| super::relation::credited_player(server, k)) {
+        crate::systems::quests::events::on_kill(
+            server,
+            &kp,
+            None,
+            Some(&WorldObject::from(&kp)),
+            Some(victim),
+        );
     }
     // ParentWorld.Events.OnUnitKilled + killerUnit?.Events.OnKill (systems::instances).
     crate::systems::instances::events::on_do_die(server, victim, killer);
@@ -942,7 +956,8 @@ fn character_death_tail(
         &Target::Obj(killer.clone()),
         &Target::Obj(victim.clone()),
     );
-    let arrestor = killer.as_player().cloned();
+    // A gimmick's kill counts for the character it acts for (`relation::credited_player`).
+    let arrestor = super::relation::credited_player(server, killer);
     if let Some(enemy) = &arrestor {
         if relation != super::types::RelationState::Friendly {
             enemy.data().hostile_faction_kills += 1;
@@ -1281,7 +1296,8 @@ fn add_tagger(server: &GameServer, owner: &WorldObject, unit: &WorldObject, dama
             check = WorldObject::from(c);
         }
     }
-    let Some(player) = check.as_player().cloned() else {
+    // A gimmick's damage is tagged for the character it acts for (`relation::credited_player`).
+    let Some(player) = super::relation::credited_player(server, &check) else {
         return;
     };
     let social = server.systems.skills.ext.social();

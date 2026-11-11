@@ -21,6 +21,7 @@ use crate::server::GameServer;
 use crate::systems::skills::combat::MAX_LOOTING_RANGE;
 use crate::systems::skills::geometry::{distance_to, Target};
 use crate::systems::skills::progress::{grant_honor, HonorSource};
+use crate::systems::skills::relation::credited_player;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{
     lowest_party_level, AchievementInput, RecordMatch,
@@ -260,7 +261,8 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
             grant_honor(server, p, HonorSource::NpcKill, base);
         }
     };
-    let killer_player = killer.and_then(|k| k.as_player().cloned());
+    // A gimmick's kill (a thrown bomb, a rolling rock) is credited to the character it acts for.
+    let killer_player = killer.and_then(|k| credited_player(server, k));
     let quests = server.systems.npcs.hooks.quests.get();
     let KillCredits {
         eligible,
@@ -397,7 +399,7 @@ pub fn all_contributors(server: &GameServer, npc: &WorldObject, dealers: &[u32])
 /// `LootingContainer.GenerateLoot(killer)` (inside `base.DoDie`, economy): sets
 /// `HasLootLeft`.
 pub fn generate_loot(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObject>) {
-    let killer_player = killer.and_then(|k| k.as_player().cloned());
+    let killer_player = killer.and_then(|k| credited_player(server, k));
     if let Some(e) = server.systems.npcs.hooks.economy.get() {
         let has_loot = e.on_npc_loot(server, npc, killer_player.as_ref());
         npc.data().unit.has_loot_left = has_loot;
@@ -543,6 +545,90 @@ mod tests {
             vec!["exp 256 140 513".to_string(), "kill 256 513".to_string()]
         );
         assert_eq!(npc2.data().tagger_obj_id, 0);
+    }
+
+    /// A gimmick (a thrown bomb) spawned by `spawner` (`Gimmick.SpawnerUnitId`), in the world.
+    fn gimmick_of(server: &GameServer, obj_id: u32, spawner: u32) -> crate::world::GimmickRef {
+        let mut g = crate::models::gimmick::Gimmick::new(900);
+        g.spawner_unit_id = spawner;
+        g.unit.transform.set_xyz(105.0, 100.0, 100.0);
+        let g = crate::world::Entity::new(obj_id, g);
+        server.world.world(0).unwrap().spawn(&g, &server.view_ctx());
+        g
+    }
+
+    /// An NPC killed by a gimmick credits the player the gimmick acts for (kill experience and
+    /// the monster-hunt event when nobody holds tagging rights), as a kill by the player would;
+    /// the death packet still names the gimmick. A gimmick with no owning character credits
+    /// nobody.
+    #[tokio::test]
+    async fn a_gimmick_kill_is_credited_to_the_player_it_acts_for() {
+        let server = test_server_with(super::super::manager::tests::npc_game_data());
+        crate::systems::npcs::install_hooks(&server);
+        let rec = Arc::new(Recorder::default());
+        server.systems.npcs.hooks.quests.install(rec.clone());
+        let a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        let world = server.world.world(0).unwrap();
+        let npc = super::super::manager::create(&server, 0x200, 100).unwrap();
+        npc.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+        world.spawn(&npc, &server.view_ctx());
+        npc.data().unit.hp = 0;
+        let bomb = gimmick_of(&server, 0x300, pa.obj_id);
+        do_die(
+            &server,
+            &npc,
+            Some(&WorldObject::from(&bomb)),
+            super::super::packets::kill_reason::DAMAGE,
+        );
+        // KillExp of a level 50 grade 1 NPC: (50*5 + 90) * 1 * 1.0 + 0 = 340
+        assert_eq!(
+            *rec.0.lock().unwrap(),
+            vec!["kill 256 512".to_string(), "exp 256 340 512".to_string()]
+        );
+
+        // A gimmick of a spawner that is no character credits nobody.
+        rec.0.lock().unwrap().clear();
+        let npc2 = super::super::manager::create(&server, 0x201, 100).unwrap();
+        npc2.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+        world.spawn(&npc2, &server.view_ctx());
+        npc2.data().unit.hp = 0;
+        let orphan = gimmick_of(&server, 0x301, 0x7777);
+        do_die(
+            &server,
+            &npc2,
+            Some(&WorldObject::from(&orphan)),
+            super::super::packets::kill_reason::DAMAGE,
+        );
+        assert!(rec.0.lock().unwrap().is_empty());
+    }
+
+    /// A hit that does not kill tags the NPC for the player the gimmick acts for, so the later
+    /// kill pays that player.
+    #[tokio::test]
+    async fn gimmick_damage_tags_the_player_it_acts_for() {
+        let server = test_server_with(super::super::manager::tests::npc_game_data());
+        crate::systems::npcs::install_hooks(&server);
+        let a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        let npc = super::super::manager::create(&server, 0x200, 100).unwrap();
+        npc.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        let bomb = gimmick_of(&server, 0x300, pa.obj_id);
+        crate::systems::skills::combat::add_damage_aggro(
+            &server,
+            &WorldObject::from(&npc),
+            &WorldObject::from(&bomb),
+            10,
+            10,
+        );
+        let d = npc.data();
+        assert_eq!(d.unit.skill_state.tagging.tagger, pa.obj_id);
+        assert_eq!(d.unit.skill_state.tagging.taggers, vec![(pa.obj_id, 10)]);
     }
 
     /// `Npc.ClearAllAggroTargetsAndCheckCombatState`: `player.IsInBattle = false` uses the setter,
