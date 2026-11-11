@@ -389,7 +389,7 @@ impl SubCommand for NpcSpawnSubCommand {
         position.roll = 0.0;
 
         let npc_spawner = add_runtime_npc_spawner(server, &world, npc_template_id, position)?;
-        npc_spawner.update(server);
+        update_runtime_npc_spawner(server, &npc_spawner);
         Ok(())
     }
 }

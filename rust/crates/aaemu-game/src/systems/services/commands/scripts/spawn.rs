@@ -227,10 +227,10 @@ mod tests {
             },
             NpcSpawnerShared::new(WorldSpawnPosition::default()),
         ));
-        let (_, events) =
-            crate::test_support::capture_events(|| {
-                super::spawn_runtime_npc_spawner(&server, &spawner)
-            });
+        let (_, events) = crate::test_support::capture_events(|| {
+            super::spawn_runtime_npc_spawner(&server, &spawner);
+            super::update_runtime_npc_spawner(&server, &spawner);
+        });
         assert!(
             !events
                 .iter()
