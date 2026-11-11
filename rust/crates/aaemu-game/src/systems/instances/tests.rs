@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 use super::data::*;
 use super::packets::*;
+use crate::config::ServerProfile;
 use crate::net::packet::{encode, ServerPacket};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
@@ -850,18 +851,76 @@ fn entry_attempts_are_limited_within_four_hours() {
         enter_count: 3,
         ..IndunZone::default()
     };
+    let dungeons = super::config::DungeonsConfig::default();
     // Checking does not add an entry.
-    assert!(m.check_entry_attempt_count(1, 55, &zone, false));
+    assert!(m.check_entry_attempt_count(1, 55, &zone, false, &dungeons, ServerProfile::EuLaunch));
     assert_eq!(m.entry_count(1, 55), 0);
     for _ in 0..3 {
-        assert!(m.check_entry_attempt_count(1, 55, &zone, true));
+        assert!(m.check_entry_attempt_count(
+            1,
+            55,
+            &zone,
+            true,
+            &dungeons,
+            ServerProfile::EuLaunch
+        ));
     }
     assert_eq!(m.entry_count(1, 55), 3);
-    assert!(!m.check_entry_attempt_count(1, 55, &zone, true));
-    assert!(!m.check_entry_attempt_count(1, 55, &zone, false));
+    assert!(!m.check_entry_attempt_count(1, 55, &zone, true, &dungeons, ServerProfile::EuLaunch));
+    assert!(!m.check_entry_attempt_count(1, 55, &zone, false, &dungeons, ServerProfile::EuLaunch));
     // Other players / zone groups are separate.
-    assert!(m.check_entry_attempt_count(2, 55, &zone, true));
-    assert!(m.check_entry_attempt_count(1, 56, &zone, true));
+    assert!(m.check_entry_attempt_count(2, 55, &zone, true, &dungeons, ServerProfile::EuLaunch));
+    assert!(m.check_entry_attempt_count(1, 56, &zone, true, &dungeons, ServerProfile::EuLaunch));
+}
+
+/// The owner's EU 1.2 recollection (2026-11-10): 1.2 had no dungeon entry limit, so the
+/// `EuAuroria` profile keeps the history but admits a fourth entry in the window.
+#[test]
+fn eu_auroria_has_no_dungeon_entry_limit_but_keeps_the_history() {
+    let m = super::indun::IndunManager::default();
+    let zone = IndunZone {
+        zone_group_id: 55,
+        enter_count: 3,
+        ..IndunZone::default()
+    };
+    let dungeons = super::config::DungeonsConfig::default();
+    for _ in 0..4 {
+        assert!(m.check_entry_attempt_count(
+            1,
+            55,
+            &zone,
+            true,
+            &dungeons,
+            ServerProfile::EuAuroria
+        ));
+    }
+    assert_eq!(m.entry_count(1, 55), 4);
+}
+
+/// The loader's `EnterCount` 1000 rows (zone group 49 / channel dungeons) stay unlimited even
+/// when the configured count is low.
+#[test]
+fn the_enter_count_1000_rows_stay_unlimited() {
+    let m = super::indun::IndunManager::default();
+    let zone = IndunZone {
+        zone_group_id: 49,
+        enter_count: 1000,
+        ..IndunZone::default()
+    };
+    let mut dungeons = super::config::DungeonsConfig::default();
+    dungeons.entry_limit.enabled = Some(true);
+    dungeons.entry_limit.count = 1;
+    for _ in 0..3 {
+        assert!(m.check_entry_attempt_count(
+            1,
+            49,
+            &zone,
+            true,
+            &dungeons,
+            ServerProfile::EuLaunch
+        ));
+    }
+    assert_eq!(m.entry_count(1, 49), 3);
 }
 
 /// The real entrance rows (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game
