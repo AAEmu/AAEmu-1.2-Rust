@@ -53,6 +53,7 @@ impl Command for Nudge {
         let w = world_pos(server, &obj);
         // C#: `World.Rotation.Z` is already in radians, `DegToRad()` converts it again.
         teleport_player(
+            server,
             &character,
             TELEPORT_REASON_GM,
             w.x,

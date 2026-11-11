@@ -760,6 +760,172 @@ async fn cancel_paths() {
 }
 
 #[tokio::test]
+async fn moving_out_of_range_cancels_with_the_client_checks_reason() {
+    let mut w = world();
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    // `X2::GameClient::UpdateTradeChecks` (FUN_394fd9a0) sends `CSCancelTrade(2)` at
+    // `>= sqrt(25) = 5` m; the server applies the same boundary from a move.
+    w.pb.data().unit.transform.set_xyz(104.9, 100.0, 100.0);
+    crate::systems::social::session::on_moved(&w.server, &w.pb);
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert_eq!(w.server.systems.economy.trade.trades().len(), 1);
+    w.pb.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+    crate::systems::social::session::on_moved(&w.server, &w.pb);
+    assert_eq!(w.a.drain(), vec![canceled(2, false)]);
+    assert_eq!(w.b.drain(), vec![canceled(2, true)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn a_death_cancels_a_running_trade_for_both_players() {
+    let mut w = world();
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    let victim = crate::world::WorldObject::from(w.pa.clone());
+    let killer = crate::world::WorldObject::from(w.pb.clone());
+    crate::systems::skills::combat::do_die(
+        &w.server,
+        &victim,
+        Some(&killer),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    let canceled_only = |frames: Vec<(u16, Vec<u8>)>| {
+        frames
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .collect::<Vec<_>>()
+    };
+    // The dead player is the canceller; the client shows ui_text 569 for reason 0.
+    assert_eq!(canceled_only(w.a.drain()), vec![canceled(0, true)]);
+    assert_eq!(canceled_only(w.b.drain()), vec![canceled(0, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn crossing_a_zone_group_border_keeps_a_running_trade() {
+    use crate::data::world_data::{Zone, ZoneGroup};
+    use crate::systems::economy::tests::{test_data, world_with};
+    let mut data = test_data();
+    for (id, name) in [(1, "Group One"), (2, "Group Two")] {
+        data.zones.groups.insert(
+            id,
+            ZoneGroup {
+                id,
+                name: name.into(),
+                ..Default::default()
+            },
+        );
+    }
+    for (key, group) in [(1000, 1), (2000, 2)] {
+        data.zones.zones.insert(
+            key,
+            Zone {
+                id: key,
+                name: format!("Zone {key}"),
+                zone_key: key,
+                group_id: group,
+                ..Default::default()
+            },
+        );
+    }
+    let mut w = world_with(data);
+    w.pa.data().unit.transform.zone_id = 1000;
+    w.pb.data().unit.transform.zone_id = 1000;
+    // 2 m apart: still in trade range while the border is crossed on foot.
+    w.pb.data().unit.transform.set_xyz(102.0, 100.0, 100.0);
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    // `handle_zone_changes` fires for plain movement; a zone-group border crossing is not a
+    // client load and keeps its trade UI, so the server must keep the trade too.
+    crate::world::session::on_zone_change(&w.server, &w.pa, 1000, 2000);
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert_eq!(w.server.systems.economy.trade.trades().len(), 1);
+}
+
+#[tokio::test]
+async fn a_same_group_teleport_cancels_a_running_trade_at_once() {
+    use crate::data::world_data::{Zone, ZoneGroup};
+    use crate::models::transform::Transform;
+    use crate::systems::economy::tests::{test_data, world_with};
+    let mut data = test_data();
+    data.zones.groups.insert(
+        1,
+        ZoneGroup {
+            id: 1,
+            name: "Group One".into(),
+            ..Default::default()
+        },
+    );
+    for key in [1000, 1001] {
+        data.zones.zones.insert(
+            key,
+            Zone {
+                id: key,
+                name: format!("Zone {key}"),
+                zone_key: key,
+                group_id: 1,
+                ..Default::default()
+            },
+        );
+    }
+    let mut w = world_with(data);
+    w.pa.data().unit.transform.zone_id = 1000;
+    w.pb.data().unit.transform.zone_id = 1000;
+    w.pb.data().unit.transform.set_xyz(102.0, 100.0, 100.0);
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    let instance_id = w.pa.data().unit.transform.instance_id;
+    // A portal / GM move inside one zone group is still a client load; the client clears the
+    // trade UI without CSCancelTrade, so the teleport itself must end the trade.
+    assert!(crate::world::session::teleport_character(
+        &w.server,
+        &w.pa,
+        Transform {
+            instance_id,
+            zone_id: 1001,
+            x: 102.0,
+            y: 100.0,
+            z: 100.0,
+            ..Default::default()
+        },
+    ));
+    assert_eq!(w.a.drain(), vec![canceled(0, true)]);
+    assert_eq!(w.b.drain(), vec![canceled(0, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn lifecycle_hooks_without_a_trade_send_no_cancel_packet() {
+    let mut w = world();
+    w.a.drain();
+    w.b.drain();
+    let canceled_only = |frames: Vec<(u16, Vec<u8>)>| {
+        frames
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .collect::<Vec<_>>()
+    };
+    crate::systems::social::session::on_moved(&w.server, &w.pb);
+    assert!(canceled_only(w.a.drain()).is_empty());
+    assert!(canceled_only(w.b.drain()).is_empty());
+    let victim = crate::world::WorldObject::from(w.pb.clone());
+    let killer = crate::world::WorldObject::from(w.pa.clone());
+    crate::systems::skills::combat::do_die(
+        &w.server,
+        &victim,
+        Some(&killer),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    assert!(canceled_only(w.a.drain()).is_empty());
+    assert!(canceled_only(w.b.drain()).is_empty());
+}
+
+#[tokio::test]
 async fn bag_full_cancels() {
     let mut w = world();
     let pa = w.pa.clone();
@@ -1117,4 +1283,255 @@ async fn item_locked_after_lock_aborts_the_trade_without_paying() {
         .all(|(op, _)| *op != sc::SCTradeMadePacket));
     assert!(w.server.systems.economy.trade.trades().is_empty());
     assert_untouched(&w, id, 4, (100, 500));
+}
+
+/// A same-instance portal gate NPC (`PortalManager.UsePortal` takes any NPC with `portal`).
+fn spawn_same_instance_portal(
+    server: &crate::server::GameServer,
+    at: (f32, f32),
+    destination: (f32, f32, f32),
+) -> crate::world::NpcRef {
+    use crate::models::npc::{Npc, PortalInfo};
+    use crate::models::transform::Transform;
+    use crate::world::Entity;
+    let mut npc = Npc::new(1);
+    npc.unit.transform.set_xyz(at.0, at.1, 100.0);
+    npc.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    npc.unit.hp = 1;
+    let mut tp = Transform {
+        zone_id: crate::test_support::TEST_ZONE,
+        ..Transform::default()
+    };
+    tp.set_position(destination.0, destination.1, destination.2, 0.0, 0.0, 0.0);
+    npc.portal = Some(PortalInfo {
+        teleport_position: tp,
+        linked_portal_obj_id: 0,
+    });
+    // A fixed id above the test players' 0x100 / 0x101 (the allocator's first ids).
+    let npc = Entity::new(0x00A0_0001, npc);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&npc, &server.view_ctx());
+    npc
+}
+
+#[tokio::test]
+async fn a_same_instance_portal_ends_a_running_trade_when_it_is_issued() {
+    // The same-instance portal branch only sends `SCTeleportUnit` and never goes through
+    // `teleport_character`, and no move necessarily follows, so the teleport itself must end
+    // the trade (reason 0, the client's generic cancel).
+    use crate::systems::npcs::portal::packets::CSUsePortalPacket;
+    let mut w = world();
+    start(&mut w);
+    let portal = spawn_same_instance_portal(&w.server, (101.0, 100.0), (120.0, 100.0, 100.0));
+    w.a.drain();
+    w.b.drain();
+    let mut body = PacketStream::new();
+    body.write_bc(portal.obj_id).write_bool(false);
+    run::<CSUsePortalPacket>(&mut w, 0, body.as_bytes());
+    // The portal's own frames still go out; exactly one cancel per side, no duplicate when
+    // the arrival is later acknowledged (or a move packet arrives).
+    let canceled_frames = |frames: Vec<(u16, Vec<u8>)>| {
+        frames
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(canceled_frames(w.a.drain()), vec![canceled(0, true)]);
+    assert_eq!(canceled_frames(w.b.drain()), vec![canceled(0, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    crate::systems::social::session::on_moved(&w.server, &w.pa);
+    assert!(canceled_frames(w.a.drain()).is_empty());
+    assert!(canceled_frames(w.b.drain()).is_empty());
+}
+
+/// The periodic check's vehicle scenario: Bob rides as a passenger while Charlie drives the
+/// cart away. Bob's own movement packets are ignored while seated (`move_unit` returns before
+/// `SetPlayerMoved`), so only the 1 s check sees the pair part.
+fn vehicle_data() -> crate::data::GameData {
+    use crate::systems::vehicles::data::{attach_point, slave_kind, SlaveTemplate};
+    let mut d = crate::systems::economy::tests::test_data();
+    d.systems.vehicles.slave_templates.insert(
+        CART_TEMPLATE,
+        SlaveTemplate {
+            id: CART_TEMPLATE,
+            name: "Cart".into(),
+            model_id: CART_MODEL,
+            level: 1,
+            slave_kind: slave_kind::MACHINE,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems.vehicles.model_bindings.insert(
+        CART_MODEL,
+        vec![attach_point::DRIVER, attach_point::PASSENGER0],
+    );
+    d
+}
+
+const CART_TEMPLATE: u32 = 7;
+const CART_MODEL: u32 = 300;
+
+#[tokio::test]
+async fn a_vehicle_carried_passenger_ends_the_trade_with_the_periodic_check() {
+    use crate::models::movement::{MoveKind, MoveType, VehicleMove};
+    use crate::models::slave::Slave;
+    use crate::systems::vehicles::data::attach_point;
+    use crate::test_support::{spawn_player, test_character, TestClient};
+    use crate::world::{Entity, WorldObject};
+    let mut w = world_with(vehicle_data());
+    start(&mut w);
+    let mut c = TestClient::new(&w.server, 3, 1003);
+    let pc = spawn_player(
+        &w.server,
+        &c,
+        test_character(3, "Driver", 103.0, 100.0),
+        0x102,
+    );
+    c.conn.active_char = Some(pc.clone());
+    let world = w.server.world.world(0).unwrap();
+    let mut cart = Slave::new(0, CART_TEMPLATE);
+    cart.unit.hp = 1000;
+    cart.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    cart.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+    cart.summoner_obj_id = pc.obj_id;
+    cart.summoner_id = pc.character_id;
+    let cart = Entity::new(0x300, cart);
+    world.spawn(&cart, &w.server.view_ctx());
+    crate::systems::vehicles::slaves::bind_slave(
+        &w.server,
+        &pc,
+        cart.obj_id,
+        attach_point::DRIVER,
+        7,
+        Some(4.0),
+    );
+    crate::systems::vehicles::slaves::bind_slave(
+        &w.server,
+        &w.pb,
+        cart.obj_id,
+        attach_point::PASSENGER0,
+        7,
+        Some(4.0),
+    );
+    assert_eq!(w.pb.data().unit.transform.parent_obj_id, cart.obj_id);
+    w.a.drain();
+    w.b.drain();
+    c.drain();
+    let mv = MoveType::new(MoveKind::Vehicle(VehicleMove {
+        x: 120.0,
+        y: 125.0,
+        z: 100.0,
+        ..VehicleMove::default()
+    }));
+    crate::world::session::move_unit(&w.server, &mut c.conn, cart.obj_id, mv).await;
+    // The passenger was carried along (its own movement packets are ignored while seated).
+    let at = w
+        .server
+        .world
+        .world(0)
+        .unwrap()
+        .world_pos_rot(&WorldObject::from(&w.pb));
+    assert!(at.x > 110.0, "the passenger must follow the cart: {at:?}");
+    // Only the periodic check ends a trade that no own move packet reaches.
+    assert_eq!(w.server.systems.economy.trade.trades().len(), 1);
+    let canceled_frames = |frames: Vec<(u16, Vec<u8>)>| {
+        frames
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .collect::<Vec<_>>()
+    };
+    assert!(canceled_frames(w.a.drain()).is_empty());
+    check_running_trades(&w.server);
+    assert_eq!(canceled_frames(w.a.drain()), vec![canceled(2, true)]);
+    assert_eq!(canceled_frames(w.b.drain()), vec![canceled(2, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+/// Another connection on `w`'s server: a player standing at `(x, 100)` who is alive (a unit with
+/// 0 hp is dead and cannot trade).
+fn extra_trader(
+    w: &World,
+    id: u32,
+    name: &str,
+    obj_id: u32,
+    x: f32,
+) -> (crate::test_support::TestClient, crate::world::PlayerRef) {
+    use crate::test_support::{spawn_player, test_character, TestClient};
+    let mut client = TestClient::new(&w.server, id, 1000 + id);
+    let mut character = test_character(id, name, x, 100.0);
+    character.unit.hp = 100;
+    character.unit.max_hp = 100;
+    let player = spawn_player(&w.server, &client, character, obj_id);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    (client, player)
+}
+
+/// Runs a client packet on `conn` (the harness's `run` only knows Alice and Bob).
+fn run_on<P: ClientPacket>(
+    w: &World,
+    conn: &mut crate::net::connection::GameConnection,
+    body: &[u8],
+) {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    let p = P::read(&mut s).expect("read");
+    futures::executor::block_on(p.handle(&w.server, conn)).expect("handle");
+}
+
+/// The periodic check works on a snapshot of the table. Freed trade ids are handed out again at
+/// once, so a trade that ended and was replaced by another pair between the snapshot and the
+/// cancel must not be cancelled for the old pair's sake.
+#[tokio::test]
+async fn the_periodic_check_does_not_cancel_a_newer_trade_that_reused_the_id() {
+    let mut w = world();
+    start(&mut w);
+    let (mut carol, _pc) = extra_trader(&w, 3, "Carol", 0x102, 120.0);
+    let (mut dave, _pd) = extra_trader(&w, 4, "Dave", 0x103, 121.0);
+    // Bob walks away: a snapshot taken now holds a trade the check must end.
+    w.pb.data().unit.transform.set_xyz(130.0, 100.0, 100.0);
+    let stale = w.server.systems.economy.trade.trades();
+    assert_eq!(stale.len(), 1);
+    // Meanwhile the trade ends (the client's own `CSCancelTrade`) and Carol and Dave start
+    // one: it gets the freed id.
+    cancel_trade(&w.server, 0x100, 0, 0);
+    run_on::<CSCanStartTradePacket>(&w, &mut carol.conn, &bc(0x103));
+    run_on::<CSStartTradePacket>(&w, &mut dave.conn, &bc(0x102));
+    let now = w.server.systems.economy.trade.trades();
+    assert_eq!(now.len(), 1);
+    assert_eq!(
+        (now[0].owner_obj_id, now[0].target_obj_id),
+        (0x102, 0x103),
+        "Carol and Dave trade"
+    );
+    assert_eq!(now[0].id, stale[0].id, "the freed id is handed out again");
+    carol.drain();
+    dave.drain();
+
+    check_snapshot(&w.server, stale);
+
+    assert_eq!(
+        w.server.systems.economy.trade.trades(),
+        now,
+        "the newer trade of the same id is untouched"
+    );
+    assert!(carol.drain().is_empty() && dave.drain().is_empty());
+}
+
+#[tokio::test]
+async fn the_periodic_check_cancels_a_trade_whose_partner_disappeared() {
+    let mut w = world();
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    // A partner that is no longer registered (e.g. a leave path that did not clean up).
+    assert!(w.server.world.try_remove_character(w.pb.obj_id));
+    check_running_trades(&w.server);
+    // A missing partner makes the C# throw before either packet: the table entry goes, no
+    // stale SCTradeCanceled is sent to a character that is not there.
+    assert!(w.a.drain().is_empty());
+    assert!(w.b.drain().is_empty());
+    assert!(w.server.systems.economy.trade.trades().is_empty());
 }

@@ -252,6 +252,8 @@ impl System {
         mail::start_delivery_task(server);
         tracing::debug!("economy: starting item timers");
         item_timers::start(server);
+        tracing::debug!("economy: starting trade checks");
+        trade::start_checks(server);
         Ok(())
     }
 

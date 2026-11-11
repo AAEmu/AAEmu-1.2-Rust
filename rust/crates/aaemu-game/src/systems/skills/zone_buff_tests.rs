@@ -338,7 +338,7 @@ async fn teleport_ended_out_of_the_open_sea_removes_the_turbulence_buff() {
     let index = pc.buff_index();
 
     // GM `/move` / portal / navi: the teleport is armed with `SCTeleportUnit`.
-    teleport_player(&pc.p, 0, LAND_SPOT.0, LAND_SPOT.1, 100.0, 0.0);
+    teleport_player(&server, &pc.p, 0, LAND_SPOT.0, LAND_SPOT.1, 100.0, 0.0);
     assert!(pc.p.data().disabled_set_position);
     pc.client.drain();
 
@@ -407,7 +407,7 @@ async fn teleport_ended_detaches_a_deck_stander_before_following_the_position() 
     pc.client.drain();
     assert_ne!(pc.p.data().unit.transform.parent_obj_id, 0);
 
-    teleport_player(&pc.p, 0, LAND_SPOT.0, LAND_SPOT.1, 100.0, 0.0);
+    teleport_player(&server, &pc.p, 0, LAND_SPOT.0, LAND_SPOT.1, 100.0, 0.0);
     pc.client.drain();
     let mut s = PacketStream::new();
     s.write_i64(crate::models::transform::convert_long(LAND_SPOT.0))
