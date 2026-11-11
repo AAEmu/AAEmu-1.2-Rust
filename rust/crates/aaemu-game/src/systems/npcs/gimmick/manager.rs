@@ -714,6 +714,13 @@ fn contact_unit(world: &WorldInstance, obj: &WorldObject) -> bool {
 /// touched unit), so a unit already hit by a firing never triggers another one. A
 /// `disappear_by_collision` gimmick fires once in total and despawns.
 ///
+/// The latch is the gimmick's collision immunity (who may fire it), not a damage immunity: the
+/// area of a later firing, started by a unit outside the earlier one, hits every unit inside it,
+/// a latched one included. Only the contact templates that do not `disappear_by_collision` can
+/// fire twice. **Inferred (no 1.2 server evidence):** retail's 3000 ms immunity is a rule of the
+/// collision, and nothing says whether the area effects of another touch skipped a unit in
+/// immunity.
+///
 /// Only an accepted cast latches and despawns: a refused one (no resources, ...) leaves the
 /// units unlatched and the gimmick alive, and the next unlatched contact or tick tries again. A
 /// gimmick whose skill row does not exist is skipped (r208022 has no skill 14768, 18424, 23476
@@ -1853,6 +1860,36 @@ mod tests {
         );
         assert_eq!(b.data().unit.hp, 400, "B's first touch still hits");
         assert_eq!(f.victim.data().unit.hp, 400, "A keeps its single hit");
+    }
+
+    /// The latch is the gimmick's collision immunity (who may fire it), not a damage immunity: a
+    /// later firing hits every unit in its own area, a latched one included (PORTING.md, "One
+    /// touch fires one skill").
+    #[tokio::test]
+    async fn a_latched_unit_inside_a_later_firings_area_is_hit_by_it_again() {
+        let mut f = contact_fixture_with_area(contact_template(false), (99.0, 100.0), 5);
+        let (_client_b, b) = control_player(&f, 2, (106.0, 100.0));
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let (_, active) = spawn_contact_gimmick(&f, &source, [5.0, 0.0, 0.0]);
+        f.client.drain();
+        let dt = Duration::from_millis(50);
+        gimmick_tick(&f.server, &f.world, &active, dt, 1_000);
+        assert_eq!(f.victim.data().unit.hp, 400, "A touched it and was hit");
+        assert_eq!(b.data().unit.hp, 500, "B is outside the cast's area");
+        // A stays 1.6 m behind the gimmick, inside the area of the cast B's touch fires; A is
+        // latched, so it cannot fire the skill again, but it is hit by B's firing.
+        b.data().unit.transform.set_xyz(100.6, 100.0, 100.0);
+        gimmick_tick(&f.server, &f.world, &active, dt, 1_050);
+        assert_eq!(b.data().unit.hp, 400, "B's touch fires");
+        assert_eq!(
+            f.victim.data().unit.hp,
+            300,
+            "A, latched but inside the new area, is hit by this firing as well"
+        );
+        // Nothing fires again while both stay put: both are latched.
+        gimmick_tick(&f.server, &f.world, &active, dt, 1_100);
+        assert_eq!(b.data().unit.hp, 400);
+        assert_eq!(f.victim.data().unit.hp, 300);
     }
 
     #[tokio::test]

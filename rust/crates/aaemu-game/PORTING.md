@@ -8183,9 +8183,17 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   that fired it for a unit-targeted skill such as AnyUnit, the gimmick for a position or self
   skill; the same radius rule as the cast: area plus the centre's model size, the target's model
   size, the vertical limit), so a unit already hit by a firing never triggers another, while a
-  unit the cast did not reach keeps its first hit. A gimmick whose velocity changes (a stop at a
-  travel cap, an elevator at the end of its run) broadcasts that change even though its
-  position no longer moves. A `disappear_by_collision` gimmick fires once in total and
+  unit the cast did not reach keeps its first hit. The latch is the gimmick's collision immunity
+  (who may fire it), not a damage immunity: the area of a later firing, started by a unit
+  outside the earlier one, hits every unit inside it, a latched one included, so a rolling
+  gimmick (the 8 templates that do not despawn on contact) can hit a unit that stays in reach
+  more than once.
+  **Inferred (no 1.2 server evidence):** retail's 3000 ms immunity is a rule of the collision;
+  whether the area effects of another touch skipped a unit in immunity is unknown (test
+  `a_latched_unit_inside_a_later_firings_area_is_hit_by_it_again`).
+  A gimmick whose velocity changes (a stop at a travel cap, an elevator at the end of its run)
+  broadcasts that change even though its position no longer moves. A
+  `disappear_by_collision` gimmick fires once in total and
   despawns (22 of the 30 contact templates; the other 8 keep rolling). Only an accepted cast
   latches and despawns: a refused cast (no resources, a target rule) latches nothing and removes
   nothing, and the next unlatched contact or tick tries again. A gimmick whose collision skill
