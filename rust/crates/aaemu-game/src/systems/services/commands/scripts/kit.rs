@@ -284,6 +284,73 @@ mod tests {
         assert!(none.kitconfig.itemkits.is_empty());
     }
 
+    /// The shipped `app/Scripts/Commands/kits.json` must only name real 1.2 items, so a tester
+    /// can run every kit on the test server. Gated by `AAEMU_COMPACT_DB` (read-only).
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn real_compact_has_every_shipped_kit_item() {
+        let Ok(compact) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let env = ScriptEnv {
+            app_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app"),
+            profile: crate::config::ServerProfile::default(),
+        };
+        let kit = AddKit::init_kits(&env);
+        assert!(
+            kit.itemkits.len() >= 500,
+            "the shipped kit list, got {} entries",
+            kit.itemkits.len()
+        );
+        for name in [
+            "vocation_alchemy",
+            "vocation_carpentry",
+            "vocation_fishing",
+            "vocation_mining",
+            "tradepack_materials",
+            "seeds",
+            "regrade_test",
+            "lunagem_set",
+            "gear_10",
+            "gear_20",
+            "gear_30",
+            "gear_40",
+            "gear_50",
+            "tax_certificates",
+        ] {
+            assert!(
+                kit.itemkitnames.iter().any(|n| n == name),
+                "missing kit {name}"
+            );
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            compact,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open compact.sqlite3");
+        for entry in &kit.itemkits {
+            assert!(
+                entry.item_count >= 1,
+                "kit item {} has count {}",
+                entry.item_id,
+                entry.item_count
+            );
+            assert!(entry.item_grade <= 11, "grade {}", entry.item_grade);
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM items WHERE id = ?1",
+                    [entry.item_id],
+                    |r| r.get(0),
+                )
+                .expect("items lookup");
+            assert_eq!(
+                count, 1,
+                "kit item {} ({:?}) is not in compact",
+                entry.item_id, entry.kitnames
+            );
+        }
+    }
+
     #[tokio::test]
     async fn kit_adds_the_kit_items() {
         let mut data = GameData::empty();
