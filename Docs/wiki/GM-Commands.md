@@ -267,7 +267,13 @@ spaces. Without trailing numbers it sends only the letter.
 
 | Command | What it does | Example |
 | --- | --- | --- |
-| `/questmap <100\|200\|300\|0>` | Sets the "Quest Details Map Display" range: quest giver markers up to 100/200/300 m, or 0 = unlimited (the 256 nearest quest givers in the instance; those already inside your normal view do not count). The injected client driver sends it on world entry and when the option is saved; typing it also works. | `/questmap 300` |
+| `/questmap <100\|200\|300\|0>` | Sets the "Quest Details Map Display" range: quest giver / reporter markers up to 100/200/300 m, or 0 = unlimited. Beyond the normal view the server streams at most the 256 nearest quest giver NPCs of the instance (placements already inside the normal view do not count), so unlimited is "the 256 nearest", not every quest giver. Quest NPCs flagged aggressive (about a quarter of them) are never streamed, and a marker is streamed for every candidate whether or not you can take its quests. 100 m is the default and changes nothing; the normal view already reaches at least 128 m on every side, so only 300 m and unlimited add much. The injected client driver sends it on world entry and when the option is saved; typing it also works. A change is applied at once at most once per second per character (a faster one is applied by the next server tick). | `/questmap 300` |
+
+The command is level 0 only where the server's own `Configurations/AccessLevels.json` has the key
+`"questmap": 0` (the file shipped in the repository has it). Commands that are not listed there
+default to level 100, so a copy without the key shows every driver player "Insufficient
+privileges." at each world entry. Update the server before the driver: a server without the
+command treats the driver's `/questmap` line as ordinary chat.
 
 ## Command behaviour every tester should know
 

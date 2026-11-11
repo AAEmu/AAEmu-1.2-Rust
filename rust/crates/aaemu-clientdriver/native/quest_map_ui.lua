@@ -1,8 +1,10 @@
 -- "Quest Details Map Display" (Options > Game Settings > Game Info).
 -- 1.2 has no equivalent client option: the injected driver adds the row, stores its value in
 -- the client's own option storage (OL_CHARACTER) and asks the server to widen the given-quest
--- markers with a level-0 chat command. Tooltip and steps follow the ArcheAge Classic 3.5
--- option (option_map_given_quest_distance, 100/200/300/unlimited).
+-- markers with a level-0 chat command. The steps follow the ArcheAge Classic 3.5 option
+-- (option_map_given_quest_distance, 100/200/300/unlimited). The tooltip keeps only the first
+-- sentence of the 3.5 one: its second sentence (Event NPCs from 200m) is not shown because
+-- nothing implements event NPCs; only quest givers / reporters are streamed.
 if not X2Option or not RegisterOptionItem or not CreateGameInfoOptionFrame or
    not CreateOptionSubFrame or not UIParent or OL_CHARACTER == nil then
   return nil
@@ -16,8 +18,7 @@ end
 local OPTION_ID = 'QuestMapGivenDistance'
 local LABELS = { '100 m', '200 m', '300 m', 'Unlimited' }
 local METERS = { [0] = 100, [1] = 200, [2] = 300, [3] = 0 }
-local TOOLTIP = 'Sets the range for which quest targets will be displayed on the map.\n' ..
-                'Selecting at least 200m also displays the location of Event NPCs.'
+local TOOLTIP = 'Sets the range for which quest targets will be displayed on the map.'
 
 local function sendRange(slot)
   local value = math.floor(tonumber(slot) or 0)

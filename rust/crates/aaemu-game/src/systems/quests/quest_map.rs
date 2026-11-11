@@ -1,16 +1,28 @@
-//! "Quest Details Map Display" range: the client's given-quest map markers are produced by
-//! `X2::GameClient::ClientUnit::UpdateQuestMark` for every unit the server streams
-//! (`D:/aa-re/client12/out-x2game/x2game.dll.c:693168` `FUN_39359c60`, event `0x34` at
-//! `FUN_39359e90`). 1.2 has no client-side distance option, so the range is widened by
-//! streaming safely quest-relevant NPCs further than the ordinary 2-region neighbourhood.
+//! "Quest Details Map Display" range. **Inferred (no 1.2 server evidence):** the 1.2 server never
+//! streams units beyond the ordinary 2-region neighbourhood; doing it for a per-character range
+//! is a Rust-only deviation (`PORTING.md`). The 1.2 client's given-quest map markers are
+//! produced per unit by `X2::GameClient::ClientUnit::UpdateQuestMark` (x2game.dll, r208022
+//! dump, VA `0x39359C60`; the event `0x34` is raised by the function at VA `0x39359E90`), so a
+//! unit the client was never sent has no mark. 1.2 has no client-side distance option, so the
+//! range is widened by streaming safely quest-relevant NPCs further than the ordinary 2-region
+//! neighbourhood.
 //!
 //! The 3.5 option semantics (`option_map_given_quest_distance`, slot * 100 m, 4.0 =
-//! unlimited; 10.x `sub_396433C0`) are reproduced as a per-character range. Quest objectives
-//! of accepted quests are already map-wide (`X2Map:AddNotifyQuestInfo` reads the static quest
-//! data, `FUN_392b6ac0`); this module only adds quest givers / reporters.
+//! unlimited) come from a 10.x decompile that cannot be checked here (only the option name is
+//! verifiable, in the 10.x client's strings); they are reproduced as a per-character range.
+//! Quest objectives of accepted quests are already map-wide (`X2Map:AddNotifyQuestInfo` reads
+//! the static quest data); this module only adds quest givers / reporters.
 //!
 //! The range is not persisted server-side: the client stores the option value and the injected
 //! driver sends `/questmap <m|0>` after entering the world and when the option is saved.
+//!
+//! Locking: `State::players` is the leaf (`CONTRIBUTING-PORT.md` rule 5): it is taken only to
+//! snapshot or commit and never held across a world, spawner or packet call.
+//! `State::refreshing` is not a state mutex but an outer serialisation token (the pattern of
+//! the spawn manager's reentrant spawn lock): a refresh, a range change and a client world
+//! reset hold it across their world work so they cannot interleave. It is taken before
+//! `players`, never while a manager lock or the spawn `operation_scope` is held, and never from
+//! a world or spawner path (`forget_npc` deliberately does not take it).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

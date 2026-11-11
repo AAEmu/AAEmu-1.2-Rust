@@ -116,7 +116,10 @@ expire, and runtime-owned or creator-only actors are never residents. Authored s
 and management despawns still win. Casting, plots and skill controllers, persistent or
 `ActivateAiAlways` AI work and actual combat against a live opponent inside the authored return
 leash protect an NPC from reclamation; the persistent-work check includes the same finite work
-(an active command after its queue drained, spawn settling, return home).
+(an active command after its queue drained, spawn settling, return home). A placement whose NPC
+a player streams only for the quest-map range option (`/questmap`, see
+[GM-Commands](GM-Commands)) is not cold while it is streamed, and the placements that option
+prepares are tracked in the same registry, so the retention rules apply once streaming stops.
 
 The AI manager's ~100 ms tick visits only the AIs selected for it: NPCs in the 2-region
 neighborhood around active players (their region plus two rings), plus AIs with persistent

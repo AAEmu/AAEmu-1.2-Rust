@@ -1028,12 +1028,15 @@ as 1920x1080 with 119 frames (31 repeated, none dropped, `ffmpeg_exit` 0). Examp
 
 The driver installs `native/quest_map_ui.lua` (RCDATA 202) next to the auction UI repair. It
 adds **Options > Game Settings > Game Info > Quest Details Map Display**, a four-step slider
-(`100 m`, `200 m`, `300 m`, `Unlimited`) with the ArcheAge Classic 3.5 tooltip. The 1.2 client
-has no equivalent option; the value is stored in the client's own option storage
-(`X2Option:CreateOptionItemFloat(..., OL_CHARACTER)`) and therefore survives restarts.
+(`100 m`, `200 m`, `300 m`, `Unlimited`) with the first sentence of the ArcheAge Classic 3.5
+tooltip ("Sets the range for which quest targets will be displayed on the map."). The second
+sentence of the 3.5 tooltip, about Event NPCs from 200 m, is left out: nothing implements event
+NPCs, only quest givers / reporters are streamed. The 1.2 client has no equivalent option; the
+value is stored in the client's own option storage (the script's `RegisterOptionItem`, which
+wraps `X2Option:CreateOptionItemFloat(..., OL_CHARACTER)`) and therefore survives restarts.
 
-The client computes given-quest map markers in `ClientUnit::UpdateQuestMark` (`FUN_39359c60` in
-`D:/aa-re/client12/out-x2game/x2game.dll.c`) for every unit the server streams, so the range is
+The client computes given-quest map markers in `ClientUnit::UpdateQuestMark` (x2game.dll, r208022
+dump, `FUN_39359c60` = VA `0x39359C60`) for every unit the server streams, so the range is
 applied by the server, not by the client UI. On world entry and when the slider is saved, the
 script sends a normal Say command:
 
@@ -1041,9 +1044,13 @@ script sends a normal Say command:
 /questmap 100 | 200 | 300 | 0        (0 = unlimited)
 ```
 
-The server command (`systems/quests/quest_map.rs`) streams safe quest giver / reporter NPCs
-within the selected range (beyond the ordinary 2-region visibility) and removes them when they
-leave the range. It does not change any client files and does not need a new packet.
+The server side is the `/questmap` command (`systems/services/commands/scripts/quest_map.rs`)
+and the streaming it drives (`systems/quests/quest_map.rs`): it streams safe quest giver /
+reporter NPCs within the selected range (beyond the ordinary 2-region visibility, nearest 256 at
+most) and removes them when they leave the range. It does not change any client files and does
+not need a new packet. The ordinary view already reaches at least 128 m on every side, so only
+`300 m` and `Unlimited` make a visible difference (`GM-Commands.md`, `PORTING.md` list what is
+streamed and what is not).
 
 ```powershell
 $driver = 'D:\aaemu-target\<lane>\release\aaemu-clientdriver.exe'
@@ -1055,3 +1062,20 @@ Get-Content rust\crates\aaemu-clientdriver\native\quest_map_ui_tests.lua -Raw |
 
 The option item id is `QuestMapGivenDistance` (0..3). `100 m` is the default and behaves exactly
 like the original client (markers only for units the player already sees).
+
+Deployment:
+
+- **Server first, then the driver.** A server without the command does not know `/questmap`:
+  the line falls through to ordinary chat, so every player with the new driver says
+  "/questmap 0" aloud on each world entry.
+- **The key `"questmap": 0` must be in the operator's own `Configurations/AccessLevels.json`.**
+  Commands that are not listed there default to level 100, so a deployment whose local copy lacks
+  the key answers every driver player with "Insufficient privileges." at each world entry (the
+  copy shipped in the repository has the key).
+- **Rebuild what embeds `aadriver.dll`.** The change is in `aadriver.dll` (the script is its
+  RCDATA 202, built by `native/build.bat`); `aainject.exe` is untouched and needs no rebuild.
+  The player GUI launcher carries `aadriver.dll` as an embedded resource and
+  `Scripts/build-player-launcher.ps1` overwrites it with the player-build driver, so a player kit
+  has to be rebuilt with
+  `Scripts/build-client-distribution.ps1 -LauncherExe <supplied AAEmuLauncher.exe>`; an
+  `AAEmuLauncher.exe` built earlier still carries the old driver without the option.
