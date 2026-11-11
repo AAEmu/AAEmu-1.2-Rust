@@ -243,9 +243,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26541.385,
+      "X": 26515.385,
       "Y": 6533.558,
-      "Z": 393.631,
+      "Z": 393.443,
       "Yaw": 0.0
     }
   },
@@ -253,9 +253,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26486.665,
-      "Y": 6552.539,
-      "Z": 392.402,
+      "X": 26497.136,
+      "Y": 6542.947,
+      "Z": 392.916,
       "Yaw": 140.0
     }
   },
@@ -263,9 +263,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26509.326,
-      "Y": 6511.443,
-      "Z": 392.905,
+      "X": 26509.116,
+      "Y": 6513.833,
+      "Z": 392.916,
       "Yaw": 280.0
     }
   },
@@ -273,9 +273,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26517.302,
-      "Y": 6546.493,
-      "Z": 393.490,
+      "X": 26523.022,
+      "Y": 6553.953,
+      "Z": 393.693,
       "Yaw": 50.0
     }
   },
@@ -283,29 +283,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26497.144,
-      "Y": 6531.746,
-      "Z": 392.801,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 8932,
-    "Title": "Sandwind Buffalo",
-    "Position": {
-      "X": 26533.120,
-      "Y": 6517.188,
-      "Z": 393.555,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 8932,
-    "Title": "Sandwind Buffalo",
-    "Position": {
-      "X": 26500.998,
-      "Y": 6557.314,
-      "Z": 393.162,
+      "X": 26502.867,
+      "Y": 6550.361,
+      "Z": 393.182,
       "Yaw": 110.0
     }
   },
@@ -313,9 +293,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26498.767,
-      "Y": 6516.962,
-      "Z": 392.405,
+      "X": 26496.646,
+      "Y": 6512.880,
+      "Z": 391.901,
       "Yaw": 240.0
     }
   },
@@ -323,9 +303,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26519.408,
-      "Y": 6537.949,
-      "Z": 393.571,
+      "X": 26534.813,
+      "Y": 6543.575,
+      "Z": 393.693,
       "Yaw": 20.0
     }
   },
@@ -333,29 +313,9 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26476.974,
-      "Y": 6546.110,
-      "Z": 391.411,
-      "Yaw": 160.0
-    }
-  },
-  {
-    "UnitId": 8932,
-    "Title": "Sandwind Buffalo",
-    "Position": {
-      "X": 26518.830,
-      "Y": 6509.103,
-      "Z": 393.131,
-      "Yaw": 300.0
-    }
-  },
-  {
-    "UnitId": 8932,
-    "Title": "Sandwind Buffalo",
-    "Position": {
-      "X": 26513.699,
-      "Y": 6553.691,
-      "Z": 393.574,
+      "X": 26513.639,
+      "Y": 6553.500,
+      "Z": 393.550,
       "Yaw": 70.0
     }
   },
@@ -363,19 +323,59 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26517.008,
-      "Y": 6529.113,
-      "Z": 393.443,
-      "Yaw": 340.0
+      "X": 26539.323,
+      "Y": 6526.538,
+      "Z": 393.631,
+      "Yaw": 350.0
     }
   },
   {
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26490.546,
-      "Y": 6520.513,
-      "Z": 391.715,
+      "X": 26479.638,
+      "Y": 6552.859,
+      "Z": 391.682,
+      "Yaw": 150.0
+    }
+  },
+  {
+    "UnitId": 8932,
+    "Title": "Sandwind Buffalo",
+    "Position": {
+      "X": 26483.092,
+      "Y": 6525.805,
+      "Z": 391.249,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 8932,
+    "Title": "Sandwind Buffalo",
+    "Position": {
+      "X": 26479.342,
+      "Y": 6540.946,
+      "Z": 391.569,
+      "Yaw": 170.0
+    }
+  },
+  {
+    "UnitId": 8932,
+    "Title": "Sandwind Buffalo",
+    "Position": {
+      "X": 26512.199,
+      "Y": 6526.072,
+      "Z": 393.387,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 8932,
+    "Title": "Sandwind Buffalo",
+    "Position": {
+      "X": 26491.021,
+      "Y": 6520.881,
+      "Z": 391.786,
       "Yaw": 220.0
     }
   },
@@ -383,39 +383,39 @@
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26500.933,
-      "Y": 6540.530,
-      "Z": 393.081,
-      "Yaw": 130.0
+      "X": 26531.364,
+      "Y": 6515.364,
+      "Z": 393.503,
+      "Yaw": 320.0
     }
   },
   {
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26500.904,
-      "Y": 6503.345,
-      "Z": 391.933,
-      "Yaw": 260.0
+      "X": 26519.071,
+      "Y": 6502.055,
+      "Z": 392.881,
+      "Yaw": 290.0
     }
   },
   {
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
-      "X": 26527.763,
-      "Y": 6548.040,
-      "Z": 393.693,
-      "Yaw": 40.0
+      "X": 26491.604,
+      "Y": 6560.472,
+      "Z": 392.701,
+      "Yaw": 120.0
     }
   },
   {
     "UnitId": 8924,
     "Title": "Giant Sand Scorpion",
     "Position": {
-      "X": 23960.477,
+      "X": 23934.477,
       "Y": 6546.641,
-      "Z": 324.688,
+      "Z": 326.062,
       "Yaw": 0.0
     }
   },
@@ -423,9 +423,9 @@
     "UnitId": 8924,
     "Title": "Giant Sand Scorpion",
     "Position": {
-      "X": 23905.757,
-      "Y": 6565.622,
-      "Z": 324.677,
+      "X": 23916.228,
+      "Y": 6556.030,
+      "Z": 325.931,
       "Yaw": 140.0
     }
   },
@@ -433,29 +433,9 @@
     "UnitId": 8924,
     "Title": "Giant Sand Scorpion",
     "Position": {
-      "X": 23928.418,
-      "Y": 6524.526,
-      "Z": 330.226,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 8924,
-    "Title": "Giant Sand Scorpion",
-    "Position": {
-      "X": 23936.394,
-      "Y": 6559.576,
-      "Z": 324.046,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 8924,
-    "Title": "Giant Sand Scorpion",
-    "Position": {
-      "X": 23916.236,
-      "Y": 6544.829,
-      "Z": 327.449,
+      "X": 23895.360,
+      "Y": 6541.136,
+      "Z": 328.403,
       "Yaw": 190.0
     }
   },
@@ -463,149 +443,159 @@
     "UnitId": 8924,
     "Title": "Giant Sand Scorpion",
     "Position": {
-      "X": 23952.212,
-      "Y": 6530.271,
-      "Z": 327.892,
+      "X": 23932.835,
+      "Y": 6533.055,
+      "Z": 328.317,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 8924,
+    "Title": "Giant Sand Scorpion",
+    "Position": {
+      "X": 23958.415,
+      "Y": 6539.621,
+      "Z": 325.925,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 8924,
+    "Title": "Giant Sand Scorpion",
+    "Position": {
+      "X": 23898.434,
+      "Y": 6554.029,
+      "Z": 326.439,
+      "Yaw": 170.0
+    }
+  },
+  {
+    "UnitId": 8924,
+    "Title": "Giant Sand Scorpion",
+    "Position": {
+      "X": 23950.456,
+      "Y": 6528.447,
+      "Z": 328.359,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 8924,
+    "Title": "Giant Sand Scorpion",
+    "Position": {
+      "X": 23924.686,
+      "Y": 6556.479,
+      "Z": 325.366,
+      "Yaw": 100.0
+    }
+  },
+  {
+    "UnitId": 8924,
+    "Title": "Giant Sand Scorpion",
+    "Position": {
+      "X": 23908.948,
+      "Y": 6538.329,
+      "Z": 328.401,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 8924,
+    "Title": "Giant Sand Scorpion",
+    "Position": {
+      "X": 23924.149,
+      "Y": 6535.788,
+      "Z": 328.404,
+      "Yaw": 260.0
+    }
+  },
+  {
+    "UnitId": 8937,
+    "Title": "Shadowhawk Assassin",
+    "Position": {
+      "X": 24842.870,
+      "Y": 6623.121,
+      "Z": 328.266,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 8937,
+    "Title": "Shadowhawk Assassin",
+    "Position": {
+      "X": 24725.782,
+      "Y": 6669.243,
+      "Z": 321.633,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 8937,
+    "Title": "Shadowhawk Assassin",
+    "Position": {
+      "X": 24803.753,
+      "Y": 6617.616,
+      "Z": 326.448,
+      "Yaw": 190.0
+    }
+  },
+  {
+    "UnitId": 8937,
+    "Title": "Shadowhawk Assassin",
+    "Position": {
+      "X": 24719.848,
+      "Y": 6642.675,
+      "Z": 325.349,
       "Yaw": 330.0
     }
   },
   {
-    "UnitId": 8924,
-    "Title": "Giant Sand Scorpion",
+    "UnitId": 1009,
+    "Title": "Giant Direwolf",
     "Position": {
-      "X": 23920.090,
-      "Y": 6570.397,
-      "Z": 323.512,
+      "X": 24707.417,
+      "Y": 6658.051,
+      "Z": 321.863,
       "Yaw": 110.0
     }
   },
   {
-    "UnitId": 8924,
-    "Title": "Giant Sand Scorpion",
+    "UnitId": 1009,
+    "Title": "Giant Direwolf",
     "Position": {
-      "X": 23917.859,
-      "Y": 6530.045,
-      "Z": 329.684,
+      "X": 24828.079,
+      "Y": 6609.188,
+      "Z": 328.100,
       "Yaw": 240.0
     }
   },
   {
-    "UnitId": 8924,
-    "Title": "Giant Sand Scorpion",
+    "UnitId": 1009,
+    "Title": "Giant Direwolf",
     "Position": {
-      "X": 23938.500,
-      "Y": 6551.032,
-      "Z": 325.187,
+      "X": 24730.053,
+      "Y": 6656.698,
+      "Z": 323.588,
       "Yaw": 20.0
     }
   },
   {
-    "UnitId": 8924,
-    "Title": "Giant Sand Scorpion",
-    "Position": {
-      "X": 23896.066,
-      "Y": 6559.193,
-      "Z": 325.754,
-      "Yaw": 160.0
-    }
-  },
-  {
-    "UnitId": 8937,
-    "Title": "Shadowhawk Assassin",
-    "Position": {
-      "X": 24744.145,
-      "Y": 6648.847,
-      "Z": 325.560,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 8937,
-    "Title": "Shadowhawk Assassin",
-    "Position": {
-      "X": 24689.425,
-      "Y": 6667.828,
-      "Z": 319.256,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 8937,
-    "Title": "Shadowhawk Assassin",
-    "Position": {
-      "X": 24712.086,
-      "Y": 6626.732,
-      "Z": 325.819,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 8937,
-    "Title": "Shadowhawk Assassin",
-    "Position": {
-      "X": 24720.062,
-      "Y": 6661.783,
-      "Z": 322.240,
-      "Yaw": 50.0
-    }
-  },
-  {
     "UnitId": 1009,
     "Title": "Giant Direwolf",
     "Position": {
-      "X": 24744.145,
-      "Y": 6648.847,
-      "Z": 325.560,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1009,
-    "Title": "Giant Direwolf",
-    "Position": {
-      "X": 24689.425,
-      "Y": 6667.828,
-      "Z": 319.256,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1009,
-    "Title": "Giant Direwolf",
-    "Position": {
-      "X": 24712.086,
-      "Y": 6626.732,
-      "Z": 325.819,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 1009,
-    "Title": "Giant Direwolf",
-    "Position": {
-      "X": 24720.062,
-      "Y": 6661.783,
-      "Z": 322.240,
-      "Yaw": 50.0
+      "X": 24838.470,
+      "Y": 6635.717,
+      "Z": 326.787,
+      "Yaw": 70.0
     }
   },
   {
     "UnitId": 9712,
     "Title": "Scent Spider",
     "Position": {
-      "X": 29235.518,
-      "Y": 7265.839,
-      "Z": 447.439,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 2908,
-    "Title": "Water Elemental Seeker",
-    "Position": {
-      "X": 17241.850,
-      "Y": 7273.704,
-      "Z": 103.349,
+      "X": 29264.238,
+      "Y": 7246.858,
+      "Z": 448.815,
       "Yaw": 0.0
     }
   },
@@ -613,9 +603,9 @@
     "UnitId": 2908,
     "Title": "Water Elemental Seeker",
     "Position": {
-      "X": 17187.130,
-      "Y": 7292.685,
-      "Z": 106.093,
+      "X": 17197.601,
+      "Y": 7283.093,
+      "Z": 104.713,
       "Yaw": 140.0
     }
   },
@@ -623,29 +613,9 @@
     "UnitId": 2908,
     "Title": "Water Elemental Seeker",
     "Position": {
-      "X": 17209.791,
-      "Y": 7251.589,
-      "Z": 99.907,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 2908,
-    "Title": "Water Elemental Seeker",
-    "Position": {
-      "X": 17217.767,
-      "Y": 7286.640,
-      "Z": 104.707,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2908,
-    "Title": "Water Elemental Seeker",
-    "Position": {
-      "X": 17197.609,
-      "Y": 7271.892,
-      "Z": 103.200,
+      "X": 17176.733,
+      "Y": 7268.199,
+      "Z": 103.497,
       "Yaw": 190.0
     }
   },
@@ -653,9 +623,9 @@
     "UnitId": 2908,
     "Title": "Water Elemental Seeker",
     "Position": {
-      "X": 17233.585,
-      "Y": 7257.334,
-      "Z": 101.713,
+      "X": 17217.553,
+      "Y": 7267.532,
+      "Z": 102.068,
       "Yaw": 330.0
     }
   },
@@ -663,129 +633,89 @@
     "UnitId": 2908,
     "Title": "Water Elemental Seeker",
     "Position": {
-      "X": 17201.463,
-      "Y": 7297.460,
-      "Z": 106.093,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 2908,
-    "Title": "Water Elemental Seeker",
-    "Position": {
-      "X": 17199.232,
-      "Y": 7257.108,
-      "Z": 101.087,
-      "Yaw": 240.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16936.191,
-      "Y": 7347.154,
-      "Z": 106.521,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16881.471,
-      "Y": 7366.135,
-      "Z": 106.406,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16904.132,
-      "Y": 7325.039,
-      "Z": 102.468,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16912.108,
-      "Y": 7360.090,
-      "Z": 106.648,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16891.950,
-      "Y": 7345.343,
-      "Z": 104.315,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16927.926,
-      "Y": 7330.785,
-      "Z": 104.086,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16895.804,
-      "Y": 7370.911,
-      "Z": 107.348,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16893.573,
-      "Y": 7330.559,
-      "Z": 102.933,
-      "Yaw": 240.0
-    }
-  },
-  {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
-    "Position": {
-      "X": 16914.214,
-      "Y": 7351.546,
-      "Z": 105.840,
+      "X": 17235.278,
+      "Y": 7283.722,
+      "Z": 104.311,
       "Yaw": 20.0
     }
   },
   {
-    "UnitId": 2911,
-    "Title": "Armored Crayfish",
+    "UnitId": 2908,
+    "Title": "Water Elemental Seeker",
     "Position": {
-      "X": 16871.780,
-      "Y": 7359.706,
-      "Z": 105.257,
-      "Yaw": 160.0
+      "X": 17214.208,
+      "Y": 7260.118,
+      "Z": 100.970,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 2908,
+    "Title": "Water Elemental Seeker",
+    "Position": {
+      "X": 17184.663,
+      "Y": 7260.265,
+      "Z": 102.556,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 2908,
+    "Title": "Water Elemental Seeker",
+    "Position": {
+      "X": 17239.788,
+      "Y": 7266.684,
+      "Z": 102.753,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 2908,
+    "Title": "Water Elemental Seeker",
+    "Position": {
+      "X": 17226.506,
+      "Y": 7289.430,
+      "Z": 104.903,
+      "Yaw": 40.0
     }
   },
   {
     "UnitId": 2911,
     "Title": "Armored Crayfish",
     "Position": {
-      "X": 16913.636,
-      "Y": 7322.700,
-      "Z": 101.853,
+      "X": 16910.191,
+      "Y": 7347.154,
+      "Z": 105.271,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16891.942,
+      "Y": 7356.544,
+      "Z": 105.422,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16897.673,
+      "Y": 7363.958,
+      "Z": 106.426,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16908.549,
+      "Y": 7333.569,
+      "Z": 103.753,
       "Yaw": 300.0
     }
   },
@@ -793,9 +723,69 @@
     "UnitId": 2911,
     "Title": "Armored Crayfish",
     "Position": {
-      "X": 16908.505,
-      "Y": 7367.287,
-      "Z": 107.263,
+      "X": 16934.129,
+      "Y": 7340.135,
+      "Z": 105.464,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16899.815,
+      "Y": 7328.808,
+      "Z": 102.978,
+      "Yaw": 260.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16871.917,
+      "Y": 7348.404,
+      "Z": 103.677,
+      "Yaw": 180.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16929.842,
+      "Y": 7350.877,
+      "Z": 106.759,
+      "Yaw": 10.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16874.444,
+      "Y": 7366.456,
+      "Z": 106.775,
+      "Yaw": 150.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16926.170,
+      "Y": 7328.961,
+      "Z": 103.918,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16907.279,
+      "Y": 7359.659,
+      "Z": 106.406,
       "Yaw": 70.0
     }
   },
@@ -803,19 +793,29 @@
     "UnitId": 2911,
     "Title": "Armored Crayfish",
     "Position": {
-      "X": 16911.814,
-      "Y": 7342.709,
-      "Z": 104.715,
-      "Yaw": 340.0
+      "X": 16884.662,
+      "Y": 7338.843,
+      "Z": 103.315,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 2911,
+    "Title": "Armored Crayfish",
+    "Position": {
+      "X": 16916.048,
+      "Y": 7357.002,
+      "Z": 106.628,
+      "Yaw": 40.0
     }
   },
   {
     "UnitId": 1005,
     "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 24305.668,
+      "X": 24279.668,
       "Y": 7532.542,
-      "Z": 325.721,
+      "Z": 326.101,
       "Yaw": 0.0
     }
   },
@@ -823,9 +823,9 @@
     "UnitId": 1005,
     "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 24250.948,
-      "Y": 7551.524,
-      "Z": 327.494,
+      "X": 24266.579,
+      "Y": 7421.527,
+      "Z": 318.678,
       "Yaw": 140.0
     }
   },
@@ -833,19 +833,9 @@
     "UnitId": 1005,
     "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 24273.609,
-      "Y": 7510.428,
-      "Z": 323.770,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 1005,
-    "Title": "Steppe Twinhead Viper",
-    "Position": {
-      "X": 24281.585,
-      "Y": 7545.478,
-      "Z": 326.630,
+      "X": 24292.465,
+      "Y": 7432.534,
+      "Z": 317.380,
       "Yaw": 50.0
     }
   },
@@ -853,9 +843,9 @@
     "UnitId": 1005,
     "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 24261.427,
-      "Y": 7530.731,
-      "Z": 326.399,
+      "X": 24240.551,
+      "Y": 7527.038,
+      "Z": 326.662,
       "Yaw": 190.0
     }
   },
@@ -863,9 +853,9 @@
     "UnitId": 1005,
     "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 24297.403,
-      "Y": 7516.173,
-      "Z": 324.092,
+      "X": 24286.531,
+      "Y": 7405.966,
+      "Z": 317.441,
       "Yaw": 330.0
     }
   },
@@ -873,99 +863,19 @@
     "UnitId": 1005,
     "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 24265.281,
-      "Y": 7556.299,
-      "Z": 326.902,
+      "X": 24267.150,
+      "Y": 7549.346,
+      "Z": 326.672,
       "Yaw": 110.0
     }
   },
   {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
+    "UnitId": 1005,
+    "Title": "Steppe Twinhead Viper",
     "Position": {
-      "X": 16393.759,
-      "Y": 7649.601,
-      "Z": 208.763,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16339.039,
-      "Y": 7668.582,
-      "Z": 206.074,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16361.700,
-      "Y": 7627.486,
-      "Z": 211.911,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16369.676,
-      "Y": 7662.536,
-      "Z": 206.916,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16349.518,
-      "Y": 7647.789,
-      "Z": 208.405,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16385.494,
-      "Y": 7633.231,
-      "Z": 211.046,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16353.372,
-      "Y": 7673.357,
-      "Z": 205.833,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16351.141,
-      "Y": 7633.005,
-      "Z": 210.534,
-      "Yaw": 240.0
-    }
-  },
-  {
-    "UnitId": 2942,
-    "Title": "Saffron Thief",
-    "Position": {
-      "X": 16371.782,
-      "Y": 7653.992,
-      "Z": 207.712,
+      "X": 24299.096,
+      "Y": 7542.560,
+      "Z": 327.126,
       "Yaw": 20.0
     }
   },
@@ -973,29 +883,119 @@
     "UnitId": 2942,
     "Title": "Saffron Thief",
     "Position": {
-      "X": 16329.348,
-      "Y": 7662.153,
-      "Z": 206.718,
-      "Yaw": 160.0
+      "X": 16367.759,
+      "Y": 7649.601,
+      "Z": 208.398,
+      "Yaw": 0.0
     }
   },
   {
     "UnitId": 2942,
     "Title": "Saffron Thief",
     "Position": {
-      "X": 16371.204,
-      "Y": 7625.146,
-      "Z": 213.012,
+      "X": 16349.510,
+      "Y": 7658.990,
+      "Z": 206.754,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16375.396,
+      "Y": 7669.996,
+      "Z": 206.597,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16328.642,
+      "Y": 7644.096,
+      "Z": 209.201,
+      "Yaw": 190.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16387.187,
+      "Y": 7659.618,
+      "Z": 207.777,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16366.117,
+      "Y": 7636.015,
+      "Z": 210.258,
       "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16336.572,
+      "Y": 7636.162,
+      "Z": 210.108,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16391.697,
+      "Y": 7642.581,
+      "Z": 209.537,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16353.939,
+      "Y": 7633.415,
+      "Z": 210.488,
+      "Yaw": 250.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16331.716,
+      "Y": 7656.989,
+      "Z": 207.272,
+      "Yaw": 170.0
+    }
+  },
+  {
+    "UnitId": 2942,
+    "Title": "Saffron Thief",
+    "Position": {
+      "X": 16357.968,
+      "Y": 7659.439,
+      "Z": 206.716,
+      "Yaw": 100.0
     }
   },
   {
     "UnitId": 2509,
     "Title": "Tropical Turtle",
     "Position": {
-      "X": 18615.346,
+      "X": 18589.346,
       "Y": 7660.440,
-      "Z": 102.189,
+      "Z": 101.877,
       "Yaw": 0.0
     }
   },
@@ -1003,9 +1003,9 @@
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16359.250,
-      "Y": 8043.910,
-      "Z": 157.549,
+      "X": 16569.460,
+      "Y": 7965.660,
+      "Z": 143.420,
       "Yaw": 0.0
     }
   },
@@ -1013,9 +1013,9 @@
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16304.530,
-      "Y": 8062.891,
-      "Z": 152.194,
+      "X": 16482.431,
+      "Y": 7953.049,
+      "Z": 143.377,
       "Yaw": 140.0
     }
   },
@@ -1023,59 +1023,9 @@
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16327.191,
-      "Y": 8021.795,
-      "Z": 151.612,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16335.167,
-      "Y": 8056.846,
-      "Z": 155.625,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16315.009,
-      "Y": 8042.098,
-      "Z": 150.811,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16350.985,
-      "Y": 8027.540,
-      "Z": 150.927,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16316.632,
-      "Y": 8027.314,
-      "Z": 154.734,
-      "Yaw": 240.0
-    }
-  },
-  {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16384.353,
-      "Y": 8023.731,
-      "Z": 151.238,
+      "X": 16588.888,
+      "Y": 7975.678,
+      "Z": 143.190,
       "Yaw": 20.0
     }
   },
@@ -1083,39 +1033,89 @@
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16341.919,
-      "Y": 8031.892,
-      "Z": 150.627,
-      "Yaw": 160.0
+      "X": 16580.116,
+      "Y": 7981.386,
+      "Z": 143.190,
+      "Yaw": 40.0
     }
   },
   {
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16383.775,
-      "Y": 7994.886,
-      "Z": 150.524,
-      "Yaw": 300.0
+      "X": 16551.805,
+      "Y": 8172.398,
+      "Z": 195.959,
+      "Yaw": 320.0
     }
   },
   {
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16378.644,
-      "Y": 8039.473,
-      "Z": 154.829,
-      "Yaw": 70.0
+      "X": 16571.203,
+      "Y": 7982.667,
+      "Z": 143.340,
+      "Yaw": 60.0
     }
   },
   {
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16359.179,
-      "Y": 8011.718,
-      "Z": 151.506,
+      "X": 16573.080,
+      "Y": 8166.425,
+      "Z": 196.619,
+      "Yaw": 340.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16476.316,
+      "Y": 7930.983,
+      "Z": 144.133,
+      "Yaw": 220.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16568.344,
+      "Y": 8026.093,
+      "Z": 143.805,
+      "Yaw": 190.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16459.129,
+      "Y": 7988.637,
+      "Z": 148.855,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16559.669,
+      "Y": 7975.498,
+      "Z": 143.445,
+      "Yaw": 100.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16574.911,
+      "Y": 8020.018,
+      "Z": 143.191,
       "Yaw": 210.0
     }
   },
@@ -1123,9 +1123,29 @@
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16369.311,
-      "Y": 7996.035,
-      "Z": 152.940,
+      "X": 16459.328,
+      "Y": 7999.381,
+      "Z": 149.859,
+      "Yaw": 340.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16545.679,
+      "Y": 7992.575,
+      "Z": 145.175,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 2914,
+    "Title": "Earth Elemental Seeker",
+    "Position": {
+      "X": 16490.352,
+      "Y": 7932.807,
+      "Z": 143.456,
       "Yaw": 260.0
     }
   },
@@ -1133,329 +1153,309 @@
     "UnitId": 2914,
     "Title": "Earth Elemental Seeker",
     "Position": {
-      "X": 16448.607,
-      "Y": 8018.173,
-      "Z": 151.445,
+      "X": 16325.565,
+      "Y": 8052.604,
+      "Z": 151.491,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17203.197,
+      "Y": 8022.280,
+      "Z": 155.800,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17067.122,
+      "Y": 8014.335,
+      "Z": 136.642,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 2952,
+    "Title": "Fire Elemental Explorer",
+    "Position": {
+      "X": 17093.008,
+      "Y": 8025.341,
+      "Z": 136.304,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 9888,
+    "Title": "Wind Elemental Seeker",
+    "Position": {
+      "X": 16381.629,
+      "Y": 8234.475,
+      "Z": 168.543,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9888,
+    "Title": "Wind Elemental Seeker",
+    "Position": {
+      "X": 16363.380,
+      "Y": 8243.864,
+      "Z": 165.242,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 9888,
+    "Title": "Wind Elemental Seeker",
+    "Position": {
+      "X": 16369.111,
+      "Y": 8251.278,
+      "Z": 166.492,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 9888,
+    "Title": "Wind Elemental Seeker",
+    "Position": {
+      "X": 16362.890,
+      "Y": 8213.797,
+      "Z": 166.889,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 9888,
+    "Title": "Wind Elemental Seeker",
+    "Position": {
+      "X": 16350.442,
+      "Y": 8221.036,
+      "Z": 165.482,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9069.108,
+      "Y": 8439.351,
+      "Z": 165.091,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9054.333,
+      "Y": 8422.440,
+      "Z": 164.881,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9049.773,
+      "Y": 8455.181,
+      "Z": 166.338,
+      "Yaw": 150.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9053.424,
+      "Y": 8433.642,
+      "Z": 166.240,
+      "Yaw": 190.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9057.157,
+      "Y": 8443.085,
+      "Z": 166.107,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9085.520,
+      "Y": 8435.879,
+      "Z": 166.711,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9375,
+    "Title": "Mahadevi Gorilla",
+    "Position": {
+      "X": 9073.156,
+      "Y": 8446.302,
+      "Z": 167.004,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 9378,
+    "Title": "Mahadevi Elephant",
+    "Position": {
+      "X": 9102.978,
+      "Y": 8420.582,
+      "Z": 167.102,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 9378,
+    "Title": "Mahadevi Elephant",
+    "Position": {
+      "X": 9059.168,
+      "Y": 8460.615,
+      "Z": 167.245,
+      "Yaw": 130.0
+    }
+  },
+  {
+    "UnitId": 9378,
+    "Title": "Mahadevi Elephant",
+    "Position": {
+      "X": 9044.369,
+      "Y": 8441.939,
+      "Z": 166.539,
+      "Yaw": 170.0
+    }
+  },
+  {
+    "UnitId": 9378,
+    "Title": "Mahadevi Elephant",
+    "Position": {
+      "X": 9081.120,
+      "Y": 8448.475,
+      "Z": 168.468,
+      "Yaw": 70.0
+    }
+  },
+  {
+    "UnitId": 9378,
+    "Title": "Mahadevi Elephant",
+    "Position": {
+      "X": 9096.289,
+      "Y": 8434.807,
+      "Z": 168.704,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9378,
+    "Title": "Mahadevi Elephant",
+    "Position": {
+      "X": 9070.162,
+      "Y": 8456.718,
+      "Z": 168.293,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16333.515,
+      "Y": 8451.689,
+      "Z": 174.416,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16327.246,
+      "Y": 8431.965,
+      "Z": 174.479,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16314.776,
+      "Y": 8431.011,
+      "Z": 174.322,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16352.943,
+      "Y": 8461.707,
+      "Z": 174.553,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16317.103,
+      "Y": 8455.161,
+      "Z": 172.880,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16302.328,
+      "Y": 8438.250,
+      "Z": 173.518,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16357.453,
+      "Y": 8444.669,
+      "Z": 175.681,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 9924,
+    "Title": "Ghostly Soldier",
+    "Position": {
+      "X": 16344.171,
+      "Y": 8467.415,
+      "Z": 172.233,
       "Yaw": 40.0
     }
   },
   {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16423.460,
-      "Y": 8007.313,
-      "Z": 150.172,
-      "Yaw": 180.0
-    }
-  },
-  {
-    "UnitId": 2914,
-    "Title": "Earth Elemental Seeker",
-    "Position": {
-      "X": 16457.692,
-      "Y": 7984.401,
-      "Z": 148.346,
-      "Yaw": 320.0
-    }
-  },
-  {
-    "UnitId": 2952,
-    "Title": "Fire Elemental Explorer",
-    "Position": {
-      "X": 17111.371,
-      "Y": 8004.945,
-      "Z": 136.644,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 2952,
-    "Title": "Fire Elemental Explorer",
-    "Position": {
-      "X": 17056.651,
-      "Y": 8023.926,
-      "Z": 136.949,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 2952,
-    "Title": "Fire Elemental Explorer",
-    "Position": {
-      "X": 17079.312,
-      "Y": 7982.830,
-      "Z": 136.560,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9888,
-    "Title": "Wind Elemental Seeker",
-    "Position": {
-      "X": 16352.909,
-      "Y": 8253.456,
-      "Z": 163.843,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 9888,
-    "Title": "Wind Elemental Seeker",
-    "Position": {
-      "X": 16375.570,
-      "Y": 8212.360,
-      "Z": 169.241,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9888,
-    "Title": "Wind Elemental Seeker",
-    "Position": {
-      "X": 16383.546,
-      "Y": 8247.411,
-      "Z": 168.895,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 9888,
-    "Title": "Wind Elemental Seeker",
-    "Position": {
-      "X": 16363.388,
-      "Y": 8232.663,
-      "Z": 165.296,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 9888,
-    "Title": "Wind Elemental Seeker",
-    "Position": {
-      "X": 16399.364,
-      "Y": 8218.105,
-      "Z": 170.914,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9056.800,
-      "Y": 8454.860,
-      "Z": 166.626,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9079.461,
-      "Y": 8413.764,
-      "Z": 164.377,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9087.437,
-      "Y": 8448.815,
-      "Z": 170.345,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9067.279,
-      "Y": 8434.067,
-      "Z": 164.621,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9103.255,
-      "Y": 8419.509,
-      "Z": 167.059,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9071.133,
-      "Y": 8459.635,
-      "Z": 169.135,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 9375,
-    "Title": "Mahadevi Gorilla",
-    "Position": {
-      "X": 9068.902,
-      "Y": 8419.283,
-      "Z": 164.315,
-      "Yaw": 240.0
-    }
-  },
-  {
-    "UnitId": 9378,
-    "Title": "Mahadevi Elephant",
-    "Position": {
-      "X": 9056.800,
-      "Y": 8454.860,
-      "Z": 166.626,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 9378,
-    "Title": "Mahadevi Elephant",
-    "Position": {
-      "X": 9079.461,
-      "Y": 8413.764,
-      "Z": 164.377,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9378,
-    "Title": "Mahadevi Elephant",
-    "Position": {
-      "X": 9087.437,
-      "Y": 8448.815,
-      "Z": 170.345,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 9378,
-    "Title": "Mahadevi Elephant",
-    "Position": {
-      "X": 9067.279,
-      "Y": 8434.067,
-      "Z": 164.621,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 9378,
-    "Title": "Mahadevi Elephant",
-    "Position": {
-      "X": 9103.255,
-      "Y": 8419.509,
-      "Z": 167.059,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 9378,
-    "Title": "Mahadevi Elephant",
-    "Position": {
-      "X": 9071.133,
-      "Y": 8459.635,
-      "Z": 169.135,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16359.515,
-      "Y": 8451.689,
-      "Z": 175.755,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16304.795,
-      "Y": 8470.670,
-      "Z": 168.948,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16327.456,
-      "Y": 8429.574,
-      "Z": 174.472,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16335.432,
-      "Y": 8464.625,
-      "Z": 171.650,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16315.274,
-      "Y": 8449.877,
-      "Z": 173.656,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16351.250,
-      "Y": 8435.319,
-      "Z": 176.293,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16319.128,
-      "Y": 8475.445,
-      "Z": 168.294,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 9924,
-    "Title": "Ghostly Soldier",
-    "Position": {
-      "X": 16316.897,
-      "Y": 8435.093,
-      "Z": 174.315,
-      "Yaw": 240.0
-    }
-  },
-  {
     "UnitId": 9379,
     "Title": "Airain Rock Reindeer",
     "Position": {
-      "X": 8995.541,
+      "X": 8969.541,
       "Y": 8456.236,
-      "Z": 157.048,
+      "Z": 155.766,
       "Yaw": 0.0
     }
   },
@@ -1463,9 +1463,9 @@
     "UnitId": 9379,
     "Title": "Airain Rock Reindeer",
     "Position": {
-      "X": 8940.821,
-      "Y": 8475.217,
-      "Z": 158.603,
+      "X": 8951.292,
+      "Y": 8465.625,
+      "Z": 156.995,
       "Yaw": 140.0
     }
   },
@@ -1473,9 +1473,9 @@
     "UnitId": 9379,
     "Title": "Airain Rock Reindeer",
     "Position": {
-      "X": 8963.482,
-      "Y": 8434.121,
-      "Z": 156.127,
+      "X": 8963.272,
+      "Y": 8436.512,
+      "Z": 156.143,
       "Yaw": 280.0
     }
   },
@@ -1483,9 +1483,19 @@
     "UnitId": 4198,
     "Title": "Poisonous Slime",
     "Position": {
-      "X": 22834.548,
-      "Y": 9013.888,
-      "Z": 631.107,
+      "X": 22988.424,
+      "Y": 8950.267,
+      "Z": 629.551,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9391,
+    "Title": "Enchanted Greataxe",
+    "Position": {
+      "X": 9076.221,
+      "Y": 9150.939,
+      "Z": 185.030,
       "Yaw": 140.0
     }
   },
@@ -1493,59 +1503,49 @@
     "UnitId": 9391,
     "Title": "Enchanted Greataxe",
     "Position": {
-      "X": 9065.750,
-      "Y": 9160.531,
-      "Z": 185.001,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 9391,
-    "Title": "Enchanted Greataxe",
-    "Position": {
-      "X": 9088.411,
-      "Y": 9119.435,
-      "Z": 188.267,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9391,
-    "Title": "Enchanted Greataxe",
-    "Position": {
-      "X": 9096.387,
-      "Y": 9154.486,
-      "Z": 180.444,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 9391,
-    "Title": "Enchanted Greataxe",
-    "Position": {
-      "X": 9076.229,
-      "Y": 9139.738,
-      "Z": 188.419,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 9391,
-    "Title": "Enchanted Greataxe",
-    "Position": {
-      "X": 9080.083,
-      "Y": 9165.306,
-      "Z": 183.582,
+      "X": 9081.952,
+      "Y": 9158.353,
+      "Z": 183.596,
       "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 9391,
+    "Title": "Enchanted Greataxe",
+    "Position": {
+      "X": 9092.828,
+      "Y": 9127.964,
+      "Z": 184.645,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 9391,
+    "Title": "Enchanted Greataxe",
+    "Position": {
+      "X": 9064.396,
+      "Y": 9165.404,
+      "Z": 184.990,
+      "Yaw": 130.0
+    }
+  },
+  {
+    "UnitId": 9391,
+    "Title": "Enchanted Greataxe",
+    "Position": {
+      "X": 9061.823,
+      "Y": 9154.193,
+      "Z": 186.206,
+      "Yaw": 150.0
     }
   },
   {
     "UnitId": 9408,
     "Title": "Palm Turtle",
     "Position": {
-      "X": 10094.812,
-      "Y": 9189.836,
-      "Z": 102.002,
+      "X": 10294.747,
+      "Y": 9283.117,
+      "Z": 101.411,
       "Yaw": 0.0
     }
   },
@@ -1553,8 +1553,8 @@
     "UnitId": 9408,
     "Title": "Palm Turtle",
     "Position": {
-      "X": 10040.092,
-      "Y": 9208.817,
+      "X": 10050.563,
+      "Y": 9199.225,
       "Z": 101.939,
       "Yaw": 140.0
     }
@@ -1563,9 +1563,9 @@
     "UnitId": 9408,
     "Title": "Palm Turtle",
     "Position": {
-      "X": 10062.753,
-      "Y": 9167.721,
-      "Z": 102.002,
+      "X": 10288.478,
+      "Y": 9263.393,
+      "Z": 100.824,
       "Yaw": 280.0
     }
   },
@@ -1573,8 +1573,8 @@
     "UnitId": 9408,
     "Title": "Palm Turtle",
     "Position": {
-      "X": 10070.729,
-      "Y": 9202.772,
+      "X": 10076.449,
+      "Y": 9210.232,
       "Z": 101.939,
       "Yaw": 50.0
     }
@@ -1583,9 +1583,9 @@
     "UnitId": 9408,
     "Title": "Palm Turtle",
     "Position": {
-      "X": 10050.571,
-      "Y": 9188.024,
-      "Z": 102.002,
+      "X": 10255.630,
+      "Y": 9277.612,
+      "Z": 101.951,
       "Yaw": 190.0
     }
   },
@@ -1593,8 +1593,8 @@
     "UnitId": 9408,
     "Title": "Palm Turtle",
     "Position": {
-      "X": 10086.547,
-      "Y": 9173.466,
+      "X": 10070.515,
+      "Y": 9183.664,
       "Z": 102.002,
       "Yaw": 330.0
     }
@@ -1603,29 +1603,9 @@
     "UnitId": 4210,
     "Title": "Schima Rogue",
     "Position": {
-      "X": 23849.771,
-      "Y": 9363.847,
-      "Z": 560.090,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 4210,
-    "Title": "Schima Rogue",
-    "Position": {
-      "X": 23795.051,
-      "Y": 9382.828,
-      "Z": 566.730,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 4210,
-    "Title": "Schima Rogue",
-    "Position": {
-      "X": 23817.712,
-      "Y": 9341.732,
-      "Z": 566.327,
+      "X": 23831.303,
+      "Y": 9453.658,
+      "Z": 557.257,
       "Yaw": 280.0
     }
   },
@@ -1633,29 +1613,9 @@
     "UnitId": 4210,
     "Title": "Schima Rogue",
     "Position": {
-      "X": 23825.688,
-      "Y": 9376.783,
-      "Z": 563.326,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 4210,
-    "Title": "Schima Rogue",
-    "Position": {
-      "X": 23805.530,
-      "Y": 9362.035,
-      "Z": 566.948,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 4210,
-    "Title": "Schima Rogue",
-    "Position": {
-      "X": 23841.506,
-      "Y": 9347.477,
-      "Z": 560.509,
+      "X": 23825.474,
+      "Y": 9357.675,
+      "Z": 563.127,
       "Yaw": 330.0
     }
   },
@@ -1663,9 +1623,9 @@
     "UnitId": 4210,
     "Title": "Schima Rogue",
     "Position": {
-      "X": 23809.384,
-      "Y": 9387.603,
-      "Z": 565.466,
+      "X": 23825.054,
+      "Y": 9490.185,
+      "Z": 556.928,
       "Yaw": 110.0
     }
   },
@@ -1673,79 +1633,119 @@
     "UnitId": 4210,
     "Title": "Schima Rogue",
     "Position": {
-      "X": 23807.153,
-      "Y": 9347.251,
-      "Z": 569.326,
+      "X": 23813.395,
+      "Y": 9345.500,
+      "Z": 566.892,
+      "Yaw": 260.0
+    }
+  },
+  {
+    "UnitId": 4210,
+    "Title": "Schima Rogue",
+    "Position": {
+      "X": 23823.752,
+      "Y": 9457.196,
+      "Z": 559.534,
+      "Yaw": 250.0
+    }
+  },
+  {
+    "UnitId": 4210,
+    "Title": "Schima Rogue",
+    "Position": {
+      "X": 23793.697,
+      "Y": 9387.701,
+      "Z": 566.696,
+      "Yaw": 130.0
+    }
+  },
+  {
+    "UnitId": 4210,
+    "Title": "Schima Rogue",
+    "Position": {
+      "X": 23813.791,
+      "Y": 9500.297,
+      "Z": 559.431,
+      "Yaw": 120.0
+    }
+  },
+  {
+    "UnitId": 4210,
+    "Title": "Schima Rogue",
+    "Position": {
+      "X": 23828.690,
+      "Y": 9339.570,
+      "Z": 563.237,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 4210,
+    "Title": "Schima Rogue",
+    "Position": {
+      "X": 23827.172,
+      "Y": 9442.475,
+      "Z": 558.054,
+      "Yaw": 270.0
+    }
+  },
+  {
+    "UnitId": 9412,
+    "Title": "Fable Hill Goblin Mage",
+    "Position": {
+      "X": 9591.210,
+      "Y": 9738.760,
+      "Z": 200.329,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 9412,
+    "Title": "Fable Hill Goblin Mage",
+    "Position": {
+      "X": 9584.941,
+      "Y": 9719.036,
+      "Z": 200.540,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 9412,
+    "Title": "Fable Hill Goblin Mage",
+    "Position": {
+      "X": 9712.098,
+      "Y": 9744.087,
+      "Z": 189.853,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 9414,
+    "Title": "Fable Hill Goblin Fighter",
+    "Position": {
+      "X": 9695.604,
+      "Y": 9736.326,
+      "Z": 190.012,
       "Yaw": 240.0
     }
   },
   {
-    "UnitId": 4210,
-    "Title": "Schima Rogue",
+    "UnitId": 9414,
+    "Title": "Fable Hill Goblin Fighter",
     "Position": {
-      "X": 23841.595,
-      "Y": 9477.773,
-      "Z": 552.466,
+      "X": 9722.303,
+      "Y": 9758.110,
+      "Z": 189.426,
       "Yaw": 20.0
     }
   },
   {
-    "UnitId": 9412,
-    "Title": "Fable Hill Goblin Mage",
-    "Position": {
-      "X": 9617.210,
-      "Y": 9738.760,
-      "Z": 200.454,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 9412,
-    "Title": "Fable Hill Goblin Mage",
-    "Position": {
-      "X": 9562.490,
-      "Y": 9757.741,
-      "Z": 201.839,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 9412,
-    "Title": "Fable Hill Goblin Mage",
-    "Position": {
-      "X": 9585.151,
-      "Y": 9716.645,
-      "Z": 200.556,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 9414,
-    "Title": "Fable Hill Goblin Fighter",
-    "Position": {
-      "X": 9617.210,
-      "Y": 9738.760,
-      "Z": 200.454,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 9414,
-    "Title": "Fable Hill Goblin Fighter",
-    "Position": {
-      "X": 9562.490,
-      "Y": 9757.741,
-      "Z": 201.839,
-      "Yaw": 140.0
-    }
-  },
-  {
     "UnitId": 1288,
     "Title": "Hulking Rock Elemental",
     "Position": {
-      "X": 26006.434,
+      "X": 25980.434,
       "Y": 9771.771,
-      "Z": 805.388,
+      "Z": 806.590,
       "Yaw": 0.0
     }
   },
@@ -1753,9 +1753,9 @@
     "UnitId": 1288,
     "Title": "Hulking Rock Elemental",
     "Position": {
-      "X": 25951.714,
-      "Y": 9790.752,
-      "Z": 805.364,
+      "X": 25962.185,
+      "Y": 9781.160,
+      "Z": 806.594,
       "Yaw": 140.0
     }
   },
@@ -1763,9 +1763,9 @@
     "UnitId": 1288,
     "Title": "Hulking Rock Elemental",
     "Position": {
-      "X": 25974.375,
-      "Y": 9749.656,
-      "Z": 808.986,
+      "X": 25974.165,
+      "Y": 9752.046,
+      "Z": 808.857,
       "Yaw": 280.0
     }
   },
@@ -1773,19 +1773,9 @@
     "UnitId": 1288,
     "Title": "Hulking Rock Elemental",
     "Position": {
-      "X": 25982.351,
-      "Y": 9784.706,
-      "Z": 806.355,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 1288,
-    "Title": "Hulking Rock Elemental",
-    "Position": {
-      "X": 25962.193,
-      "Y": 9769.959,
-      "Z": 807.603,
+      "X": 25941.317,
+      "Y": 9766.266,
+      "Z": 806.216,
       "Yaw": 190.0
     }
   },
@@ -1793,369 +1783,379 @@
     "UnitId": 1288,
     "Title": "Hulking Rock Elemental",
     "Position": {
-      "X": 25998.169,
-      "Y": 9755.401,
-      "Z": 807.171,
-      "Yaw": 330.0
+      "X": 25967.916,
+      "Y": 9788.574,
+      "Z": 806.719,
+      "Yaw": 110.0
     }
   },
   {
     "UnitId": 1288,
     "Title": "Hulking Rock Elemental",
     "Position": {
-      "X": 25966.047,
-      "Y": 9795.527,
-      "Z": 806.232,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 1620,
-    "Title": "Fire Elemental Warrior",
-    "Position": {
-      "X": 12822.933,
-      "Y": 10289.863,
-      "Z": 132.274,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1620,
-    "Title": "Fire Elemental Warrior",
-    "Position": {
-      "X": 12768.213,
-      "Y": 10308.844,
-      "Z": 126.805,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1620,
-    "Title": "Fire Elemental Warrior",
-    "Position": {
-      "X": 12790.874,
-      "Y": 10267.748,
-      "Z": 136.916,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 1620,
-    "Title": "Fire Elemental Warrior",
-    "Position": {
-      "X": 12798.850,
-      "Y": 10302.799,
-      "Z": 130.716,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 1621,
-    "Title": "Fire Elemental Spy",
-    "Position": {
-      "X": 12822.933,
-      "Y": 10289.863,
-      "Z": 132.274,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1621,
-    "Title": "Fire Elemental Spy",
-    "Position": {
-      "X": 12768.213,
-      "Y": 10308.844,
-      "Z": 126.805,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1621,
-    "Title": "Fire Elemental Spy",
-    "Position": {
-      "X": 12790.874,
-      "Y": 10267.748,
-      "Z": 136.916,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 8087,
-    "Title": "Decayed Drowned Corpse",
-    "Position": {
-      "X": 12646.101,
-      "Y": 10321.028,
-      "Z": 99.917,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 8087,
-    "Title": "Decayed Drowned Corpse",
-    "Position": {
-      "X": 12591.381,
-      "Y": 10340.009,
-      "Z": 103.034,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 8087,
-    "Title": "Decayed Drowned Corpse",
-    "Position": {
-      "X": 12622.018,
-      "Y": 10333.964,
-      "Z": 101.997,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 8087,
-    "Title": "Decayed Drowned Corpse",
-    "Position": {
-      "X": 12601.860,
-      "Y": 10319.216,
-      "Z": 100.977,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 8087,
-    "Title": "Decayed Drowned Corpse",
-    "Position": {
-      "X": 12605.714,
-      "Y": 10344.784,
-      "Z": 103.225,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 1762,
-    "Title": "Brown Mountain Goat",
-    "Position": {
-      "X": 12765.561,
-      "Y": 10841.664,
-      "Z": 117.974,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1762,
-    "Title": "Brown Mountain Goat",
-    "Position": {
-      "X": 12710.841,
-      "Y": 10860.645,
-      "Z": 122.526,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1613,
-    "Title": "Giant Direwolf",
-    "Position": {
-      "X": 12765.561,
-      "Y": 10841.664,
-      "Z": 117.974,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1613,
-    "Title": "Giant Direwolf",
-    "Position": {
-      "X": 12710.841,
-      "Y": 10860.645,
-      "Z": 122.526,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1613,
-    "Title": "Giant Direwolf",
-    "Position": {
-      "X": 12733.502,
-      "Y": 10819.549,
-      "Z": 122.188,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 1579,
-    "Title": "Cruel Overseer",
-    "Position": {
-      "X": 12370.090,
-      "Y": 10800.561,
-      "Z": 137.627,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1579,
-    "Title": "Cruel Overseer",
-    "Position": {
-      "X": 12315.370,
-      "Y": 10819.542,
-      "Z": 136.815,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1579,
-    "Title": "Cruel Overseer",
-    "Position": {
-      "X": 12338.031,
-      "Y": 10778.446,
-      "Z": 136.753,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 7955,
-    "Title": "Tame Ogre",
-    "Position": {
-      "X": 12370.090,
-      "Y": 10800.561,
-      "Z": 137.627,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 7955,
-    "Title": "Tame Ogre",
-    "Position": {
-      "X": 12315.370,
-      "Y": 10819.542,
-      "Z": 136.815,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 7955,
-    "Title": "Tame Ogre",
-    "Position": {
-      "X": 12338.031,
-      "Y": 10778.446,
-      "Z": 136.753,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 1782,
-    "Title": "Cruel Mine Guard",
-    "Position": {
-      "X": 12370.090,
-      "Y": 10800.561,
-      "Z": 137.627,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1782,
-    "Title": "Cruel Mine Guard",
-    "Position": {
-      "X": 12315.370,
-      "Y": 10819.542,
-      "Z": 136.815,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1782,
-    "Title": "Cruel Mine Guard",
-    "Position": {
-      "X": 12338.031,
-      "Y": 10778.446,
-      "Z": 136.753,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22926.791,
-      "Y": 10869.402,
-      "Z": 466.352,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22872.071,
-      "Y": 10888.383,
-      "Z": 458.150,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22894.732,
-      "Y": 10847.287,
-      "Z": 458.047,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22902.708,
-      "Y": 10882.338,
-      "Z": 461.102,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22882.550,
-      "Y": 10867.590,
-      "Z": 457.329,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22918.526,
-      "Y": 10853.032,
-      "Z": 459.514,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22886.404,
-      "Y": 10893.158,
-      "Z": 460.202,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 5090,
-    "Title": "Crazed Disciple",
-    "Position": {
-      "X": 22884.173,
-      "Y": 10852.806,
-      "Z": 456.794,
+      "X": 25961.695,
+      "Y": 9751.093,
+      "Z": 809.686,
       "Yaw": 240.0
     }
   },
   {
+    "UnitId": 1288,
+    "Title": "Hulking Rock Elemental",
+    "Position": {
+      "X": 25978.688,
+      "Y": 9791.713,
+      "Z": 806.616,
+      "Yaw": 70.0
+    }
+  },
+  {
+    "UnitId": 1620,
+    "Title": "Fire Elemental Warrior",
+    "Position": {
+      "X": 12796.933,
+      "Y": 10289.863,
+      "Z": 132.648,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1620,
+    "Title": "Fire Elemental Warrior",
+    "Position": {
+      "X": 12816.361,
+      "Y": 10299.881,
+      "Z": 130.472,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 1620,
+    "Title": "Fire Elemental Warrior",
+    "Position": {
+      "X": 12807.589,
+      "Y": 10305.589,
+      "Z": 130.178,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 1620,
+    "Title": "Fire Elemental Warrior",
+    "Position": {
+      "X": 12774.839,
+      "Y": 10272.971,
+      "Z": 132.747,
+      "Yaw": 230.0
+    }
+  },
+  {
+    "UnitId": 1621,
+    "Title": "Fire Elemental Spy",
+    "Position": {
+      "X": 12786.205,
+      "Y": 10299.067,
+      "Z": 130.332,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 1621,
+    "Title": "Fire Elemental Spy",
+    "Position": {
+      "X": 12813.381,
+      "Y": 10285.139,
+      "Z": 133.842,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 1621,
+    "Title": "Fire Elemental Spy",
+    "Position": {
+      "X": 12787.829,
+      "Y": 10279.220,
+      "Z": 133.795,
+      "Yaw": 260.0
+    }
+  },
+  {
+    "UnitId": 8087,
+    "Title": "Decayed Drowned Corpse",
+    "Position": {
+      "X": 12620.101,
+      "Y": 10321.028,
+      "Z": 101.178,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 8087,
+    "Title": "Decayed Drowned Corpse",
+    "Position": {
+      "X": 12601.852,
+      "Y": 10330.417,
+      "Z": 101.478,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 8087,
+    "Title": "Decayed Drowned Corpse",
+    "Position": {
+      "X": 12627.738,
+      "Y": 10341.424,
+      "Z": 102.839,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 8087,
+    "Title": "Decayed Drowned Corpse",
+    "Position": {
+      "X": 12580.984,
+      "Y": 10315.523,
+      "Z": 100.877,
+      "Yaw": 190.0
+    }
+  },
+  {
+    "UnitId": 8087,
+    "Title": "Decayed Drowned Corpse",
+    "Position": {
+      "X": 12607.583,
+      "Y": 10337.831,
+      "Z": 102.355,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 1762,
+    "Title": "Brown Mountain Goat",
+    "Position": {
+      "X": 12869.497,
+      "Y": 10763.695,
+      "Z": 116.611,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1762,
+    "Title": "Brown Mountain Goat",
+    "Position": {
+      "X": 12721.312,
+      "Y": 10851.053,
+      "Z": 123.468,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 1613,
+    "Title": "Giant Direwolf",
+    "Position": {
+      "X": 12812.748,
+      "Y": 10883.006,
+      "Z": 108.830,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 1613,
+    "Title": "Giant Direwolf",
+    "Position": {
+      "X": 12881.405,
+      "Y": 10771.546,
+      "Z": 116.303,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 1613,
+    "Title": "Giant Direwolf",
+    "Position": {
+      "X": 12706.069,
+      "Y": 10851.433,
+      "Z": 123.966,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 1579,
+    "Title": "Cruel Overseer",
+    "Position": {
+      "X": 12344.090,
+      "Y": 10800.561,
+      "Z": 136.831,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1579,
+    "Title": "Cruel Overseer",
+    "Position": {
+      "X": 12325.841,
+      "Y": 10809.950,
+      "Z": 136.691,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 1579,
+    "Title": "Cruel Overseer",
+    "Position": {
+      "X": 12337.821,
+      "Y": 10780.837,
+      "Z": 136.752,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 7955,
+    "Title": "Tame Ogre",
+    "Position": {
+      "X": 12361.548,
+      "Y": 10785.264,
+      "Z": 137.203,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 7955,
+    "Title": "Tame Ogre",
+    "Position": {
+      "X": 12329.299,
+      "Y": 10786.628,
+      "Z": 136.729,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 7955,
+    "Title": "Tame Ogre",
+    "Position": {
+      "X": 12355.998,
+      "Y": 10808.412,
+      "Z": 137.465,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 1782,
+    "Title": "Cruel Mine Guard",
+    "Position": {
+      "X": 12348.015,
+      "Y": 10778.134,
+      "Z": 136.888,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 1782,
+    "Title": "Cruel Mine Guard",
+    "Position": {
+      "X": 12343.923,
+      "Y": 10830.865,
+      "Z": 138.373,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 1782,
+    "Title": "Cruel Mine Guard",
+    "Position": {
+      "X": 12326.699,
+      "Y": 10794.458,
+      "Z": 136.774,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22902.494,
+      "Y": 10863.230,
+      "Z": 459.233,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22892.853,
+      "Y": 10857.002,
+      "Z": 457.833,
+      "Yaw": 270.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22882.545,
+      "Y": 10859.001,
+      "Z": 456.822,
+      "Yaw": 230.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22913.675,
+      "Y": 10857.577,
+      "Z": 459.544,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22908.428,
+      "Y": 10889.798,
+      "Z": 461.386,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22868.498,
+      "Y": 10861.649,
+      "Z": 455.538,
+      "Yaw": 200.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22911.730,
+      "Y": 10866.248,
+      "Z": 460.919,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 5090,
+    "Title": "Crazed Disciple",
+    "Position": {
+      "X": 22920.442,
+      "Y": 10873.125,
+      "Z": 463.319,
+      "Yaw": 10.0
+    }
+  },
+  {
     "UnitId": 2348,
     "Title": "Possessed Human",
     "Position": {
-      "X": 14463.126,
+      "X": 14437.126,
       "Y": 11018.753,
-      "Z": 118.213,
+      "Z": 118.065,
       "Yaw": 0.0
     }
   },
@@ -2163,9 +2163,9 @@
     "UnitId": 2348,
     "Title": "Possessed Human",
     "Position": {
-      "X": 14408.406,
-      "Y": 11037.734,
-      "Z": 119.101,
+      "X": 14418.877,
+      "Y": 11028.142,
+      "Z": 118.631,
       "Yaw": 140.0
     }
   },
@@ -2173,29 +2173,29 @@
     "UnitId": 2366,
     "Title": "Possessed Human",
     "Position": {
-      "X": 14463.126,
-      "Y": 11018.753,
-      "Z": 118.213,
-      "Yaw": 0.0
+      "X": 14454.584,
+      "Y": 11003.456,
+      "Z": 119.401,
+      "Yaw": 330.0
     }
   },
   {
     "UnitId": 2366,
     "Title": "Possessed Human",
     "Position": {
-      "X": 14408.406,
-      "Y": 11037.734,
-      "Z": 119.101,
-      "Yaw": 140.0
+      "X": 14449.034,
+      "Y": 11026.604,
+      "Z": 118.452,
+      "Yaw": 20.0
     }
   },
   {
     "UnitId": 8201,
     "Title": "Alerted Lioness",
     "Position": {
-      "X": 12904.738,
+      "X": 12878.738,
       "Y": 11209.383,
-      "Z": 133.710,
+      "Z": 127.201,
       "Yaw": 0.0
     }
   },
@@ -2203,189 +2203,59 @@
     "UnitId": 8200,
     "Title": "Angry Lion",
     "Position": {
-      "X": 12904.738,
-      "Y": 11209.383,
-      "Z": 133.710,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 8084,
-    "Title": "Minotaur Scout",
-    "Position": {
-      "X": 13462.219,
-      "Y": 11276.444,
-      "Z": 150.981,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 8084,
-    "Title": "Minotaur Scout",
-    "Position": {
-      "X": 13484.880,
-      "Y": 11235.348,
-      "Z": 157.492,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 8084,
-    "Title": "Minotaur Scout",
-    "Position": {
-      "X": 13492.856,
-      "Y": 11270.399,
-      "Z": 157.449,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 8084,
-    "Title": "Minotaur Scout",
-    "Position": {
-      "X": 13472.698,
-      "Y": 11255.651,
-      "Z": 153.633,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 8084,
-    "Title": "Minotaur Scout",
-    "Position": {
-      "X": 13476.552,
-      "Y": 11281.219,
-      "Z": 155.764,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23312.870,
-      "Y": 11310.681,
-      "Z": 313.028,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23335.531,
-      "Y": 11269.585,
-      "Z": 312.902,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23343.507,
-      "Y": 11304.636,
-      "Z": 313.113,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23323.349,
-      "Y": 11289.888,
-      "Z": 310.149,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23359.325,
-      "Y": 11275.330,
-      "Z": 311.985,
+      "X": 12896.196,
+      "Y": 11194.086,
+      "Z": 127.564,
       "Yaw": 330.0
     }
   },
   {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
+    "UnitId": 8084,
+    "Title": "Minotaur Scout",
     "Position": {
-      "X": 23327.203,
-      "Y": 11315.456,
-      "Z": 316.834,
+      "X": 13478.421,
+      "Y": 11274.266,
+      "Z": 153.926,
       "Yaw": 110.0
     }
   },
   {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
+    "UnitId": 8084,
+    "Title": "Minotaur Scout",
     "Position": {
-      "X": 23324.972,
-      "Y": 11275.104,
-      "Z": 312.089,
+      "X": 13472.200,
+      "Y": 11236.785,
+      "Z": 156.418,
       "Yaw": 240.0
     }
   },
   {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
+    "UnitId": 8084,
+    "Title": "Minotaur Scout",
     "Position": {
-      "X": 23346.623,
-      "Y": 11258.971,
-      "Z": 313.941,
-      "Yaw": 20.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23304.189,
-      "Y": 11267.132,
-      "Z": 317.553,
+      "X": 13474.527,
+      "Y": 11260.935,
+      "Z": 153.127,
       "Yaw": 160.0
     }
   },
   {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
+    "UnitId": 8084,
+    "Title": "Minotaur Scout",
     "Position": {
-      "X": 23346.045,
-      "Y": 11230.126,
-      "Z": 317.894,
-      "Yaw": 300.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23321.449,
-      "Y": 11246.958,
-      "Z": 320.392,
+      "X": 13459.752,
+      "Y": 11244.024,
+      "Z": 153.247,
       "Yaw": 210.0
     }
   },
   {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
+    "UnitId": 8084,
+    "Title": "Minotaur Scout",
     "Position": {
-      "X": 23317.690,
-      "Y": 11278.630,
-      "Z": 311.863,
-      "Yaw": 130.0
-    }
-  },
-  {
-    "UnitId": 3109,
-    "Title": "Warlock's Imp",
-    "Position": {
-      "X": 23331.581,
-      "Y": 11231.275,
-      "Z": 321.416,
+      "X": 13480.563,
+      "Y": 11239.116,
+      "Z": 156.596,
       "Yaw": 260.0
     }
   },
@@ -2393,49 +2263,179 @@
     "UnitId": 3109,
     "Title": "Warlock's Imp",
     "Position": {
-      "X": 23375.187,
-      "Y": 11299.013,
-      "Z": 312.331,
-      "Yaw": 40.0
-    }
-  },
-  {
-    "UnitId": 3110,
-    "Title": "Otherworldly Warlock",
-    "Position": {
-      "X": 23367.590,
-      "Y": 11291.700,
-      "Z": 312.528,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 3110,
-    "Title": "Otherworldly Warlock",
-    "Position": {
-      "X": 23312.870,
-      "Y": 11310.681,
-      "Z": 313.028,
+      "X": 23397.721,
+      "Y": 11272.079,
+      "Z": 313.865,
       "Yaw": 140.0
     }
   },
   {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23344.303,
+      "Y": 11248.408,
+      "Z": 315.596,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23491.488,
+      "Y": 11231.355,
+      "Z": 323.610,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23508.058,
+      "Y": 11274.092,
+      "Z": 319.063,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23384.783,
+      "Y": 11249.251,
+      "Z": 315.855,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23353.256,
+      "Y": 11270.306,
+      "Z": 318.095,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23443.231,
+      "Y": 11283.326,
+      "Z": 314.714,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23499.483,
+      "Y": 11214.096,
+      "Z": 331.906,
+      "Yaw": 60.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23327.770,
+      "Y": 11275.514,
+      "Z": 312.090,
+      "Yaw": 250.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23379.282,
+      "Y": 11262.120,
+      "Z": 313.656,
+      "Yaw": 270.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23434.209,
+      "Y": 11300.358,
+      "Z": 314.094,
+      "Yaw": 100.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23373.416,
+      "Y": 11256.168,
+      "Z": 313.052,
+      "Yaw": 290.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23516.785,
+      "Y": 11279.314,
+      "Z": 319.325,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "UnitId": 3109,
+    "Title": "Warlock's Imp",
+    "Position": {
+      "X": 23528.264,
+      "Y": 11266.969,
+      "Z": 321.691,
+      "Yaw": 230.0
+    }
+  },
+  {
     "UnitId": 3110,
     "Title": "Otherworldly Warlock",
     "Position": {
-      "X": 23335.531,
-      "Y": 11269.585,
-      "Z": 312.902,
-      "Yaw": 280.0
+      "X": 23338.528,
+      "Y": 11361.199,
+      "Z": 315.151,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 3110,
+    "Title": "Otherworldly Warlock",
+    "Position": {
+      "X": 23367.620,
+      "Y": 11364.026,
+      "Z": 314.681,
+      "Yaw": 70.0
+    }
+  },
+  {
+    "UnitId": 3110,
+    "Title": "Otherworldly Warlock",
+    "Position": {
+      "X": 23564.760,
+      "Y": 11153.250,
+      "Z": 351.592,
+      "Yaw": 210.0
     }
   },
   {
     "UnitId": 8002,
     "Title": "Stag",
     "Position": {
-      "X": 12313.292,
+      "X": 12287.292,
       "Y": 11327.746,
-      "Z": 126.941,
+      "Z": 126.224,
       "Yaw": 0.0
     }
   },
@@ -2443,9 +2443,9 @@
     "UnitId": 535,
     "Title": "Armored Boar",
     "Position": {
-      "X": 11028.952,
+      "X": 11002.952,
       "Y": 11528.903,
-      "Z": 125.645,
+      "Z": 128.407,
       "Yaw": 0.0
     }
   },
@@ -2453,19 +2453,9 @@
     "UnitId": 535,
     "Title": "Armored Boar",
     "Position": {
-      "X": 10974.232,
-      "Y": 11547.884,
-      "Z": 126.389,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 535,
-    "Title": "Armored Boar",
-    "Position": {
-      "X": 10996.893,
-      "Y": 11506.788,
-      "Z": 129.219,
+      "X": 10996.683,
+      "Y": 11509.179,
+      "Z": 129.131,
       "Yaw": 280.0
     }
   },
@@ -2473,439 +2463,419 @@
     "UnitId": 535,
     "Title": "Armored Boar",
     "Position": {
-      "X": 11004.869,
-      "Y": 11541.839,
-      "Z": 126.511,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 535,
-    "Title": "Armored Boar",
-    "Position": {
-      "X": 10984.711,
-      "Y": 11527.091,
-      "Z": 128.104,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 535,
-    "Title": "Armored Boar",
-    "Position": {
-      "X": 11020.687,
-      "Y": 11512.533,
-      "Z": 126.354,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 11028.952,
-      "Y": 11528.903,
-      "Z": 125.645,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 10974.232,
-      "Y": 11547.884,
-      "Z": 126.389,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 10996.893,
-      "Y": 11506.788,
-      "Z": 129.219,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 11004.869,
-      "Y": 11541.839,
-      "Z": 126.511,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 10984.711,
-      "Y": 11527.091,
-      "Z": 128.104,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 11020.687,
-      "Y": 11512.533,
-      "Z": 126.354,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 534,
-    "Title": "Redmane Fox",
-    "Position": {
-      "X": 10988.565,
-      "Y": 11552.659,
-      "Z": 124.717,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13515.036,
-      "Y": 11645.058,
-      "Z": 129.566,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13545.673,
-      "Y": 11639.013,
-      "Z": 132.082,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13525.515,
-      "Y": 11624.265,
-      "Z": 129.303,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13529.369,
-      "Y": 11649.833,
-      "Z": 130.551,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13547.779,
-      "Y": 11630.468,
-      "Z": 130.683,
-      "Yaw": 20.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13542.070,
-      "Y": 11646.210,
-      "Z": 132.246,
-      "Yaw": 70.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13545.379,
-      "Y": 11621.632,
-      "Z": 129.515,
-      "Yaw": 340.0
-    }
-  },
-  {
-    "UnitId": 8089,
-    "Title": "Violent Water Elemental",
-    "Position": {
-      "X": 13529.304,
-      "Y": 11633.050,
-      "Z": 132.268,
-      "Yaw": 130.0
-    }
-  },
-  {
-    "UnitId": 1596,
-    "Title": "Hungry Spotted Boar",
-    "Position": {
-      "X": 12865.750,
-      "Y": 11660.215,
-      "Z": 131.693,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 1596,
-    "Title": "Hungry Spotted Boar",
-    "Position": {
-      "X": 12811.030,
-      "Y": 11679.196,
-      "Z": 128.169,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 1596,
-    "Title": "Hungry Spotted Boar",
-    "Position": {
-      "X": 12833.691,
-      "Y": 11638.100,
-      "Z": 132.588,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 1596,
-    "Title": "Hungry Spotted Boar",
-    "Position": {
-      "X": 12841.667,
-      "Y": 11673.151,
-      "Z": 132.400,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 1596,
-    "Title": "Hungry Spotted Boar",
-    "Position": {
-      "X": 12821.509,
-      "Y": 11658.403,
-      "Z": 131.566,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 1596,
-    "Title": "Hungry Spotted Boar",
-    "Position": {
-      "X": 12857.485,
-      "Y": 11643.845,
-      "Z": 132.733,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 7996,
-    "Title": "Moss Slime",
-    "Position": {
-      "X": 12305.483,
-      "Y": 11696.205,
-      "Z": 137.095,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 7996,
-    "Title": "Moss Slime",
-    "Position": {
-      "X": 12250.763,
-      "Y": 11715.186,
-      "Z": 138.627,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 7996,
-    "Title": "Moss Slime",
-    "Position": {
-      "X": 12273.424,
-      "Y": 11674.090,
-      "Z": 139.321,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 7995,
-    "Title": "Sated Sarracenia",
-    "Position": {
-      "X": 12305.483,
-      "Y": 11696.205,
-      "Z": 137.095,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 7995,
-    "Title": "Sated Sarracenia",
-    "Position": {
-      "X": 12250.763,
-      "Y": 11715.186,
-      "Z": 138.627,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 7995,
-    "Title": "Sated Sarracenia",
-    "Position": {
-      "X": 12273.424,
-      "Y": 11674.090,
-      "Z": 139.321,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 7995,
-    "Title": "Sated Sarracenia",
-    "Position": {
-      "X": 12281.400,
-      "Y": 11709.141,
-      "Z": 137.646,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 533,
-    "Title": "Violent Buffalo",
-    "Position": {
-      "X": 10789.906,
-      "Y": 11722.487,
-      "Z": 127.316,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 533,
-    "Title": "Violent Buffalo",
-    "Position": {
-      "X": 10735.186,
-      "Y": 11741.468,
-      "Z": 129.108,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 533,
-    "Title": "Violent Buffalo",
-    "Position": {
-      "X": 10757.847,
-      "Y": 11700.372,
-      "Z": 132.616,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 533,
-    "Title": "Violent Buffalo",
-    "Position": {
-      "X": 10765.823,
-      "Y": 11735.423,
-      "Z": 128.878,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14482.223,
-      "Y": 11855.963,
-      "Z": 148.063,
-      "Yaw": 0.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14427.503,
-      "Y": 11874.944,
-      "Z": 148.969,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14450.164,
-      "Y": 11833.848,
-      "Z": 147.646,
-      "Yaw": 280.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14458.140,
-      "Y": 11868.899,
-      "Z": 147.315,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14437.982,
-      "Y": 11854.151,
-      "Z": 147.191,
-      "Yaw": 190.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14473.958,
-      "Y": 11839.593,
-      "Z": 148.258,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14441.836,
-      "Y": 11879.719,
-      "Z": 148.121,
-      "Yaw": 110.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14439.605,
-      "Y": 11839.367,
-      "Z": 147.597,
+      "X": 10984.213,
+      "Y": 11508.225,
+      "Z": 129.586,
       "Yaw": 240.0
     }
   },
   {
+    "UnitId": 535,
+    "Title": "Armored Boar",
+    "Position": {
+      "X": 10986.540,
+      "Y": 11532.375,
+      "Z": 127.312,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 535,
+    "Title": "Armored Boar",
+    "Position": {
+      "X": 10971.765,
+      "Y": 11515.464,
+      "Z": 129.451,
+      "Yaw": 210.0
+    }
+  },
+  {
+    "UnitId": 535,
+    "Title": "Armored Boar",
+    "Position": {
+      "X": 10967.205,
+      "Y": 11548.205,
+      "Z": 127.995,
+      "Yaw": 150.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 11014.860,
+      "Y": 11536.754,
+      "Z": 127.121,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 10969.460,
+      "Y": 11538.672,
+      "Z": 126.930,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 11009.787,
+      "Y": 11499.202,
+      "Z": 128.904,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 11019.400,
+      "Y": 11524.179,
+      "Z": 127.177,
+      "Yaw": 350.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 10993.848,
+      "Y": 11518.260,
+      "Z": 128.885,
+      "Yaw": 260.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 11007.368,
+      "Y": 11539.922,
+      "Z": 127.040,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 534,
+    "Title": "Redmane Fox",
+    "Position": {
+      "X": 11015.588,
+      "Y": 11509.391,
+      "Z": 127.116,
+      "Yaw": 320.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13543.756,
+      "Y": 11626.077,
+      "Z": 131.963,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13527.344,
+      "Y": 11629.549,
+      "Z": 131.386,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13545.499,
+      "Y": 11643.084,
+      "Z": 131.771,
+      "Yaw": 60.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13522.153,
+      "Y": 11639.342,
+      "Z": 131.193,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13530.595,
+      "Y": 11647.977,
+      "Z": 130.939,
+      "Yaw": 100.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13538.990,
+      "Y": 11653.185,
+      "Z": 129.814,
+      "Yaw": 80.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13540.570,
+      "Y": 11618.592,
+      "Z": 129.493,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 8089,
+    "Title": "Violent Water Elemental",
+    "Position": {
+      "X": 13549.613,
+      "Y": 11635.925,
+      "Z": 129.420,
+      "Yaw": 40.0
+    }
+  },
+  {
+    "UnitId": 1596,
+    "Title": "Hungry Spotted Boar",
+    "Position": {
+      "X": 12839.750,
+      "Y": 11660.215,
+      "Z": 132.600,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1596,
+    "Title": "Hungry Spotted Boar",
+    "Position": {
+      "X": 12888.663,
+      "Y": 11619.979,
+      "Z": 127.544,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 1596,
+    "Title": "Hungry Spotted Boar",
+    "Position": {
+      "X": 12847.387,
+      "Y": 11680.611,
+      "Z": 133.844,
+      "Yaw": 50.0
+    }
+  },
+  {
+    "UnitId": 1596,
+    "Title": "Hungry Spotted Boar",
+    "Position": {
+      "X": 12909.981,
+      "Y": 11664.755,
+      "Z": 126.402,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 1596,
+    "Title": "Hungry Spotted Boar",
+    "Position": {
+      "X": 12827.232,
+      "Y": 11677.018,
+      "Z": 130.873,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 1596,
+    "Title": "Hungry Spotted Boar",
+    "Position": {
+      "X": 12888.173,
+      "Y": 11589.912,
+      "Z": 128.687,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 7996,
+    "Title": "Moss Slime",
+    "Position": {
+      "X": 12279.483,
+      "Y": 11696.205,
+      "Z": 138.371,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 7996,
+    "Title": "Moss Slime",
+    "Position": {
+      "X": 12261.234,
+      "Y": 11705.594,
+      "Z": 138.666,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 7996,
+    "Title": "Moss Slime",
+    "Position": {
+      "X": 12273.214,
+      "Y": 11676.481,
+      "Z": 139.127,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 7995,
+    "Title": "Sated Sarracenia",
+    "Position": {
+      "X": 12296.941,
+      "Y": 11680.908,
+      "Z": 137.918,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 7995,
+    "Title": "Sated Sarracenia",
+    "Position": {
+      "X": 12264.692,
+      "Y": 11682.272,
+      "Z": 139.048,
+      "Yaw": 240.0
+    }
+  },
+  {
+    "UnitId": 7995,
+    "Title": "Sated Sarracenia",
+    "Position": {
+      "X": 12291.391,
+      "Y": 11704.056,
+      "Z": 137.287,
+      "Yaw": 20.0
+    }
+  },
+  {
+    "UnitId": 7995,
+    "Title": "Sated Sarracenia",
+    "Position": {
+      "X": 12245.991,
+      "Y": 11705.974,
+      "Z": 138.441,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 533,
+    "Title": "Violent Buffalo",
+    "Position": {
+      "X": 10745.657,
+      "Y": 11731.876,
+      "Z": 130.629,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 533,
+    "Title": "Violent Buffalo",
+    "Position": {
+      "X": 10859.563,
+      "Y": 11750.025,
+      "Z": 123.236,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 533,
+    "Title": "Violent Buffalo",
+    "Position": {
+      "X": 10753.530,
+      "Y": 11704.140,
+      "Z": 133.029,
+      "Yaw": 260.0
+    }
+  },
+  {
+    "UnitId": 533,
+    "Title": "Violent Buffalo",
+    "Position": {
+      "X": 10725.632,
+      "Y": 11723.737,
+      "Z": 131.823,
+      "Yaw": 180.0
+    }
+  },
+  {
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14494.165,
-      "Y": 11920.425,
-      "Z": 145.841,
+      "X": 14456.223,
+      "Y": 11855.963,
+      "Z": 147.190,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14471.893,
+      "Y": 11925.423,
+      "Z": 146.527,
+      "Yaw": 140.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14609.203,
+      "Y": 11747.768,
+      "Z": 136.485,
+      "Yaw": 280.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14617.175,
+      "Y": 11761.320,
+      "Z": 136.996,
+      "Yaw": 330.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14443.705,
+      "Y": 11872.766,
+      "Z": 147.497,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14634.900,
+      "Y": 11777.510,
+      "Z": 136.454,
       "Yaw": 20.0
     }
   },
@@ -2913,9 +2883,9 @@
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14451.731,
-      "Y": 11928.586,
-      "Z": 148.798,
+      "X": 14439.811,
+      "Y": 11859.435,
+      "Z": 147.127,
       "Yaw": 160.0
     }
   },
@@ -2923,19 +2893,9 @@
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14493.587,
-      "Y": 11891.580,
-      "Z": 147.670,
-      "Yaw": 300.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14488.456,
-      "Y": 11936.167,
-      "Z": 146.300,
+      "X": 14613.726,
+      "Y": 11787.434,
+      "Z": 137.903,
       "Yaw": 70.0
     }
   },
@@ -2943,19 +2903,9 @@
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14468.991,
-      "Y": 11908.412,
-      "Z": 146.623,
-      "Yaw": 210.0
-    }
-  },
-  {
-    "UnitId": 2330,
-    "Title": "Skeletal Horse",
-    "Position": {
-      "X": 14465.232,
-      "Y": 11940.084,
-      "Z": 146.377,
+      "X": 14600.225,
+      "Y": 11777.799,
+      "Z": 138.371,
       "Yaw": 130.0
     }
   },
@@ -2963,9 +2913,9 @@
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14479.123,
-      "Y": 11892.729,
-      "Z": 146.387,
+      "X": 14445.847,
+      "Y": 11837.616,
+      "Z": 147.389,
       "Yaw": 260.0
     }
   },
@@ -2973,9 +2923,9 @@
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14620.929,
-      "Y": 11778.835,
-      "Z": 137.254,
+      "X": 14500.798,
+      "Y": 11931.760,
+      "Z": 145.702,
       "Yaw": 40.0
     }
   },
@@ -2983,19 +2933,69 @@
     "UnitId": 2330,
     "Title": "Skeletal Horse",
     "Position": {
-      "X": 14595.782,
-      "Y": 11767.975,
-      "Z": 137.875,
+      "X": 14577.198,
+      "Y": 11768.742,
+      "Z": 138.945,
       "Yaw": 180.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14481.397,
+      "Y": 11932.117,
+      "Z": 146.315,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14593.378,
+      "Y": 11750.600,
+      "Z": 137.459,
+      "Yaw": 230.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14454.395,
+      "Y": 11935.336,
+      "Z": 147.374,
+      "Yaw": 150.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14457.966,
+      "Y": 11872.970,
+      "Z": 147.315,
+      "Yaw": 60.0
+    }
+  },
+  {
+    "UnitId": 2330,
+    "Title": "Skeletal Horse",
+    "Position": {
+      "X": 14619.158,
+      "Y": 11735.990,
+      "Z": 136.795,
+      "Yaw": 290.0
     }
   },
   {
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12662.781,
+      "X": 12636.781,
       "Y": 11965.386,
-      "Z": 102.188,
+      "Z": 101.594,
       "Yaw": 0.0
     }
   },
@@ -3003,8 +3003,8 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12608.061,
-      "Y": 11984.367,
+      "X": 12618.532,
+      "Y": 11974.775,
       "Z": 101.439,
       "Yaw": 140.0
     }
@@ -3013,8 +3013,8 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12630.722,
-      "Y": 11943.271,
+      "X": 12630.512,
+      "Y": 11945.662,
       "Z": 101.439,
       "Yaw": 280.0
     }
@@ -3023,9 +3023,9 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12638.698,
-      "Y": 11978.322,
-      "Z": 102.005,
+      "X": 12644.418,
+      "Y": 11985.782,
+      "Z": 102.351,
       "Yaw": 50.0
     }
   },
@@ -3033,8 +3033,8 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12618.540,
-      "Y": 11963.574,
+      "X": 12597.664,
+      "Y": 11959.881,
       "Z": 101.439,
       "Yaw": 190.0
     }
@@ -3043,18 +3043,8 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12654.516,
-      "Y": 11949.016,
-      "Z": 101.988,
-      "Yaw": 330.0
-    }
-  },
-  {
-    "UnitId": 7774,
-    "Title": "Halcyona Pirate Crewman",
-    "Position": {
-      "X": 12622.394,
-      "Y": 11989.142,
+      "X": 12624.263,
+      "Y": 11982.189,
       "Z": 101.439,
       "Yaw": 110.0
     }
@@ -3063,8 +3053,8 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12620.163,
-      "Y": 11948.790,
+      "X": 12618.042,
+      "Y": 11944.708,
       "Z": 101.439,
       "Yaw": 240.0
     }
@@ -3073,9 +3063,9 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12640.804,
-      "Y": 11969.777,
-      "Z": 102.014,
+      "X": 12656.209,
+      "Y": 11975.404,
+      "Z": 102.689,
       "Yaw": 20.0
     }
   },
@@ -3083,29 +3073,29 @@
     "UnitId": 7774,
     "Title": "Halcyona Pirate Crewman",
     "Position": {
-      "X": 12598.370,
-      "Y": 11977.938,
+      "X": 12635.035,
+      "Y": 11985.328,
+      "Z": 101.752,
+      "Yaw": 70.0
+    }
+  },
+  {
+    "UnitId": 7774,
+    "Title": "Halcyona Pirate Crewman",
+    "Position": {
+      "X": 12605.594,
+      "Y": 11951.947,
       "Z": 101.439,
-      "Yaw": 160.0
+      "Yaw": 210.0
     }
   },
   {
     "UnitId": 10743,
     "Title": "Drowned Corpse",
     "Position": {
-      "X": 20299.780,
-      "Y": 11965.781,
-      "Z": 105.080,
-      "Yaw": 140.0
-    }
-  },
-  {
-    "UnitId": 2336,
-    "Title": "Faceless",
-    "Position": {
-      "X": 15135.599,
-      "Y": 12108.901,
-      "Z": 106.705,
+      "X": 20389.290,
+      "Y": 11987.231,
+      "Z": 123.227,
       "Yaw": 0.0
     }
   },
@@ -3113,9 +3103,9 @@
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15080.879,
-      "Y": 12127.882,
-      "Z": 107.064,
+      "X": 15190.512,
+      "Y": 12362.559,
+      "Z": 107.603,
       "Yaw": 140.0
     }
   },
@@ -3123,9 +3113,9 @@
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15103.540,
-      "Y": 12086.786,
-      "Z": 107.217,
+      "X": 15103.330,
+      "Y": 12089.177,
+      "Z": 107.095,
       "Yaw": 280.0
     }
   },
@@ -3133,19 +3123,9 @@
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15111.516,
-      "Y": 12121.837,
-      "Z": 107.479,
-      "Yaw": 50.0
-    }
-  },
-  {
-    "UnitId": 2336,
-    "Title": "Faceless",
-    "Position": {
-      "X": 15091.358,
-      "Y": 12107.089,
-      "Z": 106.752,
+      "X": 15169.644,
+      "Y": 12347.665,
+      "Z": 105.910,
       "Yaw": 190.0
     }
   },
@@ -3153,9 +3133,9 @@
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15127.334,
-      "Y": 12092.531,
-      "Z": 106.185,
+      "X": 15111.302,
+      "Y": 12102.729,
+      "Z": 106.627,
       "Yaw": 330.0
     }
   },
@@ -3163,9 +3143,9 @@
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15095.212,
-      "Y": 12132.657,
-      "Z": 107.685,
+      "X": 15104.609,
+      "Y": 12257.185,
+      "Z": 119.423,
       "Yaw": 110.0
     }
   },
@@ -3173,29 +3153,49 @@
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15092.981,
-      "Y": 12092.305,
-      "Z": 107.095,
-      "Yaw": 240.0
+      "X": 15129.027,
+      "Y": 12118.919,
+      "Z": 106.905,
+      "Yaw": 20.0
     }
   },
   {
     "UnitId": 2336,
     "Title": "Faceless",
     "Position": {
-      "X": 15121.150,
-      "Y": 12244.773,
-      "Z": 121.239,
-      "Yaw": 20.0
+      "X": 15100.715,
+      "Y": 12243.854,
+      "Z": 118.377,
+      "Yaw": 160.0
+    }
+  },
+  {
+    "UnitId": 2336,
+    "Title": "Faceless",
+    "Position": {
+      "X": 15207.119,
+      "Y": 12339.584,
+      "Z": 104.797,
+      "Yaw": 300.0
+    }
+  },
+  {
+    "UnitId": 2336,
+    "Title": "Faceless",
+    "Position": {
+      "X": 15107.853,
+      "Y": 12128.843,
+      "Z": 108.018,
+      "Yaw": 70.0
     }
   },
   {
     "UnitId": 789,
     "Title": "Corrupted Guard",
     "Position": {
-      "X": 11796.915,
+      "X": 11770.915,
       "Y": 12889.126,
-      "Z": 124.826,
+      "Z": 130.520,
       "Yaw": 0.0
     }
   },
@@ -3203,9 +3203,9 @@
     "UnitId": 1990,
     "Title": "Blackfur Scorpion",
     "Position": {
-      "X": 10912.057,
+      "X": 10886.057,
       "Y": 17038.100,
-      "Z": 205.561,
+      "Z": 206.578,
       "Yaw": 0.0
     }
   },
@@ -3213,9 +3213,9 @@
     "UnitId": 1990,
     "Title": "Blackfur Scorpion",
     "Position": {
-      "X": 10857.337,
-      "Y": 17057.081,
-      "Z": 202.910,
+      "X": 10867.808,
+      "Y": 17047.489,
+      "Z": 204.391,
       "Yaw": 140.0
     }
   },
@@ -3223,9 +3223,9 @@
     "UnitId": 1990,
     "Title": "Blackfur Scorpion",
     "Position": {
-      "X": 10879.998,
-      "Y": 17015.985,
-      "Z": 205.628,
+      "X": 10879.788,
+      "Y": 17018.376,
+      "Z": 205.506,
       "Yaw": 280.0
     }
   },
@@ -3233,19 +3233,19 @@
     "UnitId": 1990,
     "Title": "Blackfur Scorpion",
     "Position": {
-      "X": 10887.974,
-      "Y": 17051.036,
-      "Z": 207.757,
-      "Yaw": 50.0
+      "X": 10873.539,
+      "Y": 17054.903,
+      "Z": 206.640,
+      "Yaw": 110.0
     }
   },
   {
     "UnitId": 1998,
     "Title": "Red Clay Naga",
     "Position": {
-      "X": 11970.571,
+      "X": 11944.571,
       "Y": 17847.240,
-      "Z": 250.618,
+      "Z": 246.590,
       "Yaw": 0.0
     }
   },
@@ -3253,9 +3253,9 @@
     "UnitId": 1998,
     "Title": "Red Clay Naga",
     "Position": {
-      "X": 11915.851,
-      "Y": 17866.221,
-      "Z": 242.615,
+      "X": 11926.322,
+      "Y": 17856.629,
+      "Z": 244.762,
       "Yaw": 140.0
     }
   },
@@ -3263,9 +3263,9 @@
     "UnitId": 1998,
     "Title": "Red Clay Naga",
     "Position": {
-      "X": 11938.512,
-      "Y": 17825.125,
-      "Z": 246.355,
+      "X": 11938.302,
+      "Y": 17827.516,
+      "Z": 246.021,
       "Yaw": 280.0
     }
   }

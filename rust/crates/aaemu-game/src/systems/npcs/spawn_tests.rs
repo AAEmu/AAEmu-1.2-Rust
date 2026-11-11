@@ -3581,6 +3581,127 @@ fn quest_fill_reported_areas_reach_the_area_spawner_minimum() {
     }
 }
 
+/// The 2026-11-11 world-wide fill must not put two NPCs of an area on top of each other. The
+/// loader scatters an NPC that would spawn on another live NPC only onto a 1.5-3 m ring
+/// (`stacked_npcs::scatter_position`), so a fill point closer than the documented 8 m minimum to
+/// another fill point or to an authored point of its area is still a stacked spawn in practice.
+/// The first version of the fill left Giant Direwolf 1009 on Shadowhawk Assassin 8937, Mahadevi
+/// Gorilla 9375 on Elephant 9378, and Cruel Overseer 1579 on its camp members; this test pins the
+/// regenerated points of all 43 areas, their per-template counts, and the 8 m spacing (X/Y).
+#[test]
+fn quest_fill_points_keep_eight_metres_from_each_other_and_the_authored_points() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app/Data/Worlds/main_world");
+    let mut authored: Vec<(u32, f32, f32)> = Vec::new();
+    let mut fill: Vec<(u32, f32, f32)> = Vec::new();
+    for file in ["npc_spawns.json", "npc_spawns_10x.json"] {
+        let text = std::fs::read_to_string(dir.join(file)).expect(file);
+        for d in parse_list(&text, NpcSpawnerDef::from_json).expect(file) {
+            let p = d.base.position;
+            authored.push((d.base.unit_id, p.x, p.y));
+        }
+    }
+    let text = std::fs::read_to_string(dir.join("npc_spawns_quest_fill.json"))
+        .expect("npc_spawns_quest_fill.json");
+    let fill_defs = parse_list(&text, NpcSpawnerDef::from_json).expect("fill file");
+    // (centre X, centre Y, area member templates, fill points per member)
+    let areas: [(f32, f32, &[u32], &[usize]); 43] = [
+        (26507.38, 6533.56, &[8932], &[17]),
+        (23926.48, 6546.64, &[8924], &[10]),
+        (24834.87, 6623.12, &[1009, 8937], &[4, 4]),
+        (29256.24, 7246.86, &[9712], &[1]),
+        (17207.85, 7273.70, &[2908], &[8]),
+        (16902.19, 7347.15, &[2911], &[13]),
+        (24271.67, 7532.54, &[1005], &[7]),
+        (16359.76, 7649.60, &[2942], &[11]),
+        (18581.35, 7660.44, &[2509, 2510], &[1, 0]),
+        (16561.46, 7965.66, &[2914], &[16]),
+        (17195.2, 8022.28, &[2952], &[3]),
+        (16373.63, 8234.48, &[9888], &[5]),
+        (9077.52, 8435.88, &[9375, 9378], &[7, 6]),
+        (16325.51, 8451.69, &[9924], &[8]),
+        (8961.54, 8456.24, &[9379], &[3]),
+        (22980.42, 8950.27, &[4198], &[1]),
+        (9086.47, 9141.55, &[9391], &[5]),
+        (10286.75, 9283.12, &[9408], &[6]),
+        (23829.57, 9473.38, &[4210], &[9]),
+        (9583.21, 9738.76, &[9412, 9414], &[3, 2]),
+        (25972.43, 9771.77, &[1288], &[7]),
+        (12788.93, 10289.86, &[1620, 1621], &[4, 3]),
+        (12612.1, 10321.03, &[8087], &[5]),
+        (12861.5, 10763.69, &[1613, 1762], &[3, 2]),
+        (12336.09, 10800.56, &[1579, 1782, 7955], &[3, 3, 3]),
+        (22892.79, 10869.4, &[5090], &[8]),
+        (14429.13, 11018.75, &[2348, 2366], &[2, 2]),
+        (12870.74, 11209.38, &[8200, 8201], &[1, 1]),
+        (13482.94, 11257.46, &[8084], &[5]),
+        (23407.97, 11262.69, &[3109, 3110], &[14, 3]),
+        (12279.29, 11327.75, &[8002, 8003, 8005, 8006], &[1, 0, 0, 0]),
+        (10994.95, 11528.9, &[534, 535], &[7, 6]),
+        (13535.76, 11626.08, &[8089], &[8]),
+        (12831.75, 11660.22, &[1596], &[6]),
+        (12271.48, 11696.2, &[7995, 7996], &[4, 3]),
+        (10864.08, 11733.22, &[533], &[4]),
+        (14448.22, 11855.96, &[2330], &[17]),
+        (12628.78, 11965.39, &[7774], &[10]),
+        (20381.29, 11987.23, &[10743], &[1]),
+        (15109.13, 12240.38, &[2336], &[9]),
+        (11762.92, 12889.13, &[789], &[1]),
+        (10878.06, 17038.1, &[1990], &[4]),
+        (11936.57, 17847.24, &[1998], &[3]),
+    ];
+    let members: HashSet<u32> = areas
+        .iter()
+        .flat_map(|(_, _, members, _)| members.iter().copied())
+        .collect();
+    for d in &fill_defs {
+        let p = d.base.position;
+        if members.contains(&d.base.unit_id) {
+            fill.push((d.base.unit_id, p.x, p.y));
+        } else {
+            // The upstream fill (before the 2026-11-11 fill) is authored data of its areas.
+            authored.push((d.base.unit_id, p.x, p.y));
+        }
+    }
+    for (ax, ay, area_members, expected) in areas {
+        let in_area = |x: f32, y: f32| (x - ax).hypot(y - ay) <= 350.0;
+        let area_fill: Vec<(u32, f32, f32)> = fill
+            .iter()
+            .copied()
+            .filter(|(unit, x, y)| area_members.contains(unit) && in_area(*x, *y))
+            .collect();
+        let area_authored: Vec<(u32, f32, f32)> = authored
+            .iter()
+            .copied()
+            .filter(|(_, x, y)| in_area(*x, *y))
+            .collect();
+        for (i, (unit, x, y)) in area_fill.iter().enumerate() {
+            for (other, ox, oy) in &area_fill[i + 1..] {
+                let d = (x - ox).hypot(y - oy);
+                assert!(
+                    d >= 8.0,
+                    "fill points of {unit} and {other} at ({x}, {y}) / ({ox}, {oy}) are {d:.2} m apart"
+                );
+            }
+            for (other, ox, oy) in &area_authored {
+                let d = (x - ox).hypot(y - oy);
+                assert!(
+                    d >= 8.0,
+                    "fill point of {unit} at ({x}, {y}) is {d:.2} m from authored point of {other} at ({ox}, {oy})"
+                );
+            }
+        }
+        for (unit, count) in area_members.iter().zip(expected) {
+            let got = area_fill.iter().filter(|(u, _, _)| u == unit).count();
+            assert_eq!(
+                got, *count,
+                "fill points of {unit} in the area around ({ax}, {ay})"
+            );
+        }
+    }
+}
+
 /// The authored Mistfiend (NPC 4227) cave placements of the shipped `main_world` files with the
 /// real compact DB: all six load (template 4323, 55 s delay), a player at the first authored
 /// point activates them through the normal `active_region_tick`, they spawn at their authored Z,
