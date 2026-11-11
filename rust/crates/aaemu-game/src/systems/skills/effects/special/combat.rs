@@ -13,7 +13,8 @@ use super::super::super::packets::{SCCastingDelayedPacket, SCSkillCooldownResetP
 use super::super::super::packets_special::SCNotifyResurrectionPacket;
 use super::super::super::progress;
 use super::super::super::skill::{
-    apply_skill_modifiers, delay_cast, level_and_inc, mana_level_scale, start_auto_skill, use_skill,
+    apply_skill_modifiers, delay_cast, level_and_inc, mana_level_scale, skips_level_mana,
+    start_auto_skill, use_skill,
 };
 use super::super::super::state::{SkillRun, SkillTaskKind};
 use super::super::super::stats::{stat, StatKind};
@@ -263,7 +264,9 @@ pub fn skill_use(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
 /// (`mana_cost + mana_level_md * (1 + T) * scale`) instead of the C# guess `value2 / 6.35`.
 /// The 22 others are plot effects whose skill row has `mana_level_md` 0 or 1 (`value2` 1,
 /// 100-600): they charge an amount of their own, which this formula takes at face value
-/// (`value2` percent of the scaled term).
+/// (`value2` percent of the scaled term). An ability-less skill cast from an item skips the
+/// scaled term like [`super::super::super::skill::mana_cost`] does (the one item row here,
+/// capture net 22590, then charges its `value1` 0).
 fn plot_mana_cost(value1: i32, value2: i32, scale: f64, inc: f64) -> f64 {
     f64::from(value1) + f64::from(value2) / 100.0 * (1.0 + inc) * scale
 }
@@ -281,14 +284,15 @@ pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         tracing::error!("Special effects: ManaCost without a skill (NullReferenceException)");
         return;
     };
-    let (level, inc) = level_and_inc(server, skill, caster);
-    let mana = apply_skill_modifiers(
-        server,
-        skill,
-        caster,
-        SkillAttribute::ManaCost,
-        plot_mana_cost(v[0], v[1], mana_level_scale(server, level), inc),
-    );
+    // The item-use rule of `skill::mana_cost`: an ability-less skill cast from an item keeps
+    // only the fixed part (`value1`, the skill's `mana_cost`), without the level-scaled term.
+    let mana = if skips_level_mana(&skill.template, &args.caster_caster) {
+        f64::from(v[0])
+    } else {
+        let (level, inc) = level_and_inc(server, skill, caster);
+        plot_mana_cost(v[0], v[1], mana_level_scale(server, level), inc)
+    };
+    let mana = apply_skill_modifiers(server, skill, caster, SkillAttribute::ManaCost, mana);
     unit_combat::reduce_current_mp(server, caster, mana as i32);
     let mut c = p.data();
     c.skill_char.last_cast_ms = now_ms();
@@ -552,6 +556,8 @@ pub fn consume_labor_power(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 
 
 #[cfg(test)]
 mod mana_cost_tests {
+    use std::sync::Arc;
+
     use super::plot_mana_cost;
 
     #[test]
@@ -565,5 +571,68 @@ mod mana_cost_tests {
         assert!((plot_mana_cost(0, 155, scale, 0.5) - tooltip * 1.5).abs() < 1e-9);
         // skill 18132 (mana_cost 30, md 0): fixed cost only
         assert_eq!(plot_mana_cost(30, 0, scale, 0.5), 30.0);
+    }
+
+    /// The item rule reaches the plot `ManaCost` effect: capture net 22590 (ability 0, item
+    /// 26836) has plot effect 0/600, so a unit cast charges 600% of `LevelMana(55)` while the
+    /// item use charges only the effect's fixed `value1` (0).
+    #[tokio::test]
+    async fn item_cast_skips_the_scaled_plot_charge() {
+        use crate::world::WorldObject;
+
+        use super::super::super::super::cast_validation_tests::fixture;
+        use super::super::super::super::data::SkillTemplate;
+        use super::super::super::super::geometry::Target;
+        use super::super::super::super::skill_tests::formula_data;
+        use super::super::super::super::state::SkillRun;
+        use super::super::super::super::types::{
+            CastAction, SkillCastTarget, SkillCaster, SkillObject,
+        };
+        use super::super::super::{EffectArgs, EffectSource};
+
+        let (server, _client, player, npc) = fixture(formula_data());
+        player.data().unit.level = 55;
+        player.data().unit.mp = 2000;
+        let caster = WorldObject::from(&player);
+        let template = Arc::new(SkillTemplate {
+            id: 22590,
+            ability_id: 0,
+            ability_level: 1,
+            level_step: 1,
+            mana_cost: 0,
+            mana_level_md: 0.0,
+            ..SkillTemplate::default()
+        });
+        let skill = SkillRun::new(template, 1);
+        let skill_object = SkillObject::None;
+        let args = |caster_caster| EffectArgs {
+            caster: Some(caster.clone()),
+            caster_caster,
+            target: Target::Obj(WorldObject::from(&npc)),
+            target_caster: SkillCastTarget::Unit(npc.obj_id),
+            cast: CastAction::BuffTarget,
+            source: EffectSource::from_skill(skill.clone()),
+            skill_object: &skill_object,
+        };
+        super::mana_cost(
+            &server,
+            &args(SkillCaster::Unit(player.obj_id)),
+            [0, 600, 0, 0],
+        );
+        let scale = (55.0 * 1.6 + 8.0) * 3.0 / 3.65;
+        assert_eq!(player.data().unit.mp, 2000 - (6.0 * scale) as i32);
+        player.data().unit.mp = 2000;
+        super::mana_cost(
+            &server,
+            &args(SkillCaster::Item {
+                obj_id: player.obj_id,
+                item_id: 1,
+                item_template_id: 26836,
+                type1: 0,
+                type2: 0,
+            }),
+            [0, 600, 0, 0],
+        );
+        assert_eq!(player.data().unit.mp, 2000);
     }
 }

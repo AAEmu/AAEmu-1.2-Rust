@@ -6262,8 +6262,26 @@ Which rank applies (`FUN_3941e750`):
   at the learned base skill's rank, not at rank 1.
 * An `ability_id == 0` skill uses the rank from the character's level,
   `(charLevel - ability_level) / level_step + 1`, learned or not (rank 1 when
-  `level_step <= 0`). This covers the item / default / interaction skills: 422 item use-skills
-  with `mana_level_md > 0` are ability 0, so their `LevelMana` argument is the character level.
+  `level_step <= 0`). This is what the client tooltip evaluates (`FUN_3941e750`); it applies to
+  non-item casts (quest / interaction / doodad / NPC). **Item uses are different**
+  (`SkillCaster::Item`): an ability-less skill cast from an item has **no `mana_level_md`
+  term** and pays only the fixed `mana_cost` (`skill::skips_level_mana`, used by
+  `skill::mana_cost`, the resource pre-check and the plot `ManaCost` effect). All 3,829
+  distinct `items.use_skill_id` skills are ability 0 and 422 have `mana_level_md > 0` (407 of
+  them with `mana_cost` 0), so the level term alone charged them. Retail charged no mana for
+  socketing a lunagem (23728: 0/1.0), opening "Open" boxes or summoning a mount/pet (13220
+  Brown Bear Summon: 0/1.0) — owner play-test 2026-11-11. The 1.2 client evaluator
+  `FUN_398a01b0` kind 0 has no item branch (it always computes
+  `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`), and its tooltip paths
+  (`FUN_3941e750`, `FUN_39420b30`) show the scaled value, so the client alone cannot decide
+  the charge; retail behaviour is the source and the item cast path is the rule. **Regression
+  note:** the C# `Skill.ManaCost` used `LevelMana(0)` for these (~6 mana) and `a5a9efa05`
+  replaced it with the character level (~50 at level 55); this row restores the retail 0 while
+  the fixed `mana_cost` of the 17 item skills that carry one is still charged. The plot
+  `ManaCost` rule reaches one item row (capture net 22590, effect 0/600), which now charges
+  its `value1` only. Live (`aaemu-testclient` scenario `socket`, GM `/level 50`): the valid
+  lunagem cast still runs `consume_mana` (a second `SCUnitPoints` right after the cast) but
+  the character's MP stays at 2974; the old formula would have taken 72.
 * A non-character caster (an NPC) keeps the effective level the old `Skill.ManaCost` used as
   its `LevelMana` argument, the unit level or `ab_level_override`, whatever the `level_step`;
   `T` is derived from that level. This keeps the former NPC cost (e.g. skill 23693 at NPC
