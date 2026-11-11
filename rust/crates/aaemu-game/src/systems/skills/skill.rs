@@ -237,6 +237,14 @@ pub fn mana_cost(
     source: &SkillCaster,
 ) -> i32 {
     let t = &skill.template;
+    // A gimmick (a thrown bomb, a rolling rock) has no mana pool (`mp` 0): its skills charge
+    // nothing and are never refused for mana, here and in `consume_mana` alike. Twelve of the 46
+    // gimmick skills have `mana_cost` 0 but a level-scaled `mana_level_md` (1.0 or 5.5), which a
+    // level-1 caster with no mana could never pay: without this exemption `check_resources`
+    // refused every cast of 11 of the 30 contact gimmicks.
+    if caster.as_gimmick().is_some() {
+        return 0;
+    }
     let cost2 = if skips_level_mana(t, source) {
         f64::from(t.mana_cost)
     } else {

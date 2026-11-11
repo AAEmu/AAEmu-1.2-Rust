@@ -537,6 +537,71 @@ async fn item_skill_with_fixed_mana_cost_still_costs_it() {
     assert_eq!(player.data().unit.mp, 0);
 }
 
+/// A gimmick has no mana pool, so its skills are never refused for mana and charge nothing.
+/// Twelve gimmick skills have `mana_cost` 0 but a level-scaled `mana_level_md` (1.0 or 5.5):
+/// with the character `LevelMana` formula a level-1 gimmick owed 7 or 43 mana and every cast
+/// was refused with "lack mana". The NPC control pays the same skill (so the exemption is the
+/// only difference).
+#[tokio::test]
+async fn a_gimmick_caster_owes_no_mana() {
+    for (md, npc_owes) in [(1.0_f32, 7), (5.5_f32, 43)] {
+        let server = test_server_with(formula_data());
+        let mut g = crate::models::gimmick::Gimmick::new(900);
+        g.unit.level = 1;
+        let gimmick = WorldObject::from(&Entity::new(0x204, g));
+        let mut n = Npc::new(1);
+        n.unit.level = 1;
+        let npc = WorldObject::from(&Entity::new(0x205, n));
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                id: 11_931,
+                ability_id: 0,
+                ability_level: 1,
+                level_step: 0,
+                mana_cost: 0,
+                mana_level_md: md,
+                ..SkillTemplate::default()
+            }),
+            1,
+        );
+        assert_eq!(
+            super::skill::mana_cost(&server, &skill, &npc, &SkillCaster::Unit(npc.obj_id())),
+            npc_owes,
+            "md {md}: a level-1 NPC owes LevelMana(1) x md"
+        );
+        assert!(
+            super::validation::check_resources(
+                &server,
+                &skill,
+                &npc,
+                &SkillCaster::Unit(npc.obj_id())
+            )
+            .is_err(),
+            "md {md}: the NPC control with no mana is refused"
+        );
+        assert_eq!(
+            super::skill::mana_cost(
+                &server,
+                &skill,
+                &gimmick,
+                &SkillCaster::Unit(gimmick.obj_id())
+            ),
+            0,
+            "md {md}: a gimmick owes nothing"
+        );
+        assert!(
+            super::validation::check_resources(
+                &server,
+                &skill,
+                &gimmick,
+                &SkillCaster::Unit(gimmick.obj_id())
+            )
+            .is_ok(),
+            "md {md}: a gimmick with no mana pool is not refused for mana"
+        );
+    }
+}
+
 /// A non-character caster keeps its previous `LevelMana` argument: the unit level (or
 /// `ab_level_override`) for any `level_step`, with only the `casting_inc` term on top.
 #[tokio::test]
