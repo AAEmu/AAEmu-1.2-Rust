@@ -1,0 +1,345 @@
+# GM command audit: every registered command with a typical valid call and one invalid call.
+# The `gm` script command sends "/<text>" as a GM chat command and prints the replies; the
+# server log carries the error lines. Docs/wiki/GM-Commands.md is the tester guide derived from
+# this suite. Run: Scripts/verify.sh --only gm-commands
+#
+# The bot must be a GM (access level 100): Scripts/verify.sh provisions the `gm` bot accounts.
+# Commands that need an object id created at run time (doodad phases, item expiry, ...) are
+# covered with an invalid id here and with unit tests in the command modules.
+suite GM command audit
+bot gm gm
+
+[gm]
+# --- help and echo -------------------------------------------------------------------------
+gm help
+gm help gold
+gm echo hello audit
+gm help no_such_command
+
+# --- items and money ----------------------------------------------------------------------
+gm gold add self 1 2 3
+gm gold add self notanumber
+gm gold remove self 0 0 1
+gm gold set self 0
+gm item add self 23633 2
+gm item add self 23633
+gm item add self notanumber
+gm item add nobody 23633
+gm item add self 23633 1 9
+gm item add self 23633 1 12
+gm item expire 999999999
+gm item expire abc
+gm item unwrap 999999999
+gm item unwrap abc
+gm kit
+gm kit consumables
+gm kit no_such_kit
+gm kit self no_such_kit
+gm labor 10
+gm labor -5
+gm labor abc
+gm xp 100
+gm xp abc
+gm vocation 10
+gm vocation abc
+gm premium self off
+gm premium self on 1
+gm premium nobody on
+
+# --- level and skills ---------------------------------------------------------------------
+gm level 20
+gm level 1
+gm level abc
+gm ignoreskillcds true
+gm ignoreskillcds false
+gm ignoreskillcds maybe
+gm resetcd
+gm fly true
+gm fly false
+gm fly maybe
+gm run
+gm run
+gm failskill 1
+gm failskill 0
+gm useskill 1
+gm useskill notaskill
+gm resetcd
+
+# --- movement and teleport ----------------------------------------------------------------
+gm position
+gm position nobody
+gm height
+gm nudge 5
+gm nudge abc
+gm teleport solis
+gm teleport nosuchplace
+gm move 15578 15382 126
+gm move abc
+gm setpos self * * *
+gm setpos self x=15578 y=15382 z=126
+gm setpos self x=abc
+gm setrot self 90 0 0
+gm setrot self x=abc
+gm rotate 90
+gm rotate abc
+gm pingpos
+gm distance
+gm distance 999999
+gm soloparty
+gm register_portal AuditPoint
+gm register_portal
+gm fly false
+
+# --- NPCs, doodads and world objects ------------------------------------------------------
+gm spawn npc 3597
+gm spawn doodad 4252
+gm spawn npc 99999999
+gm spawn nothing 1
+gm doodad chain 4252
+gm doodad chain 99999999
+gm doodad spawn 4252
+gm doodad spawn 99999999
+gm doodad phase list 5
+gm doodad phase change 5 1
+gm doodad pos 5 x=1
+gm doodad age 5 60
+gm doodad save nonsense
+gm gimmick spawn 10
+gm gimmick spawn 99999999
+gm slave spawn 10
+gm slave spawn 99999999
+gm slave info id 5
+gm slave pos id 5 x=1
+gm slave save nonsense
+gm slave remove id 5
+gm findobject npc 3597
+gm findobject npc 99999999
+gm findobject nothing 1
+gm spawngrid npc 3597 2 2 5
+gm spawngrid npc 99999999 2 2 5
+gm spawngrid nothing 1 1 1 1
+gm stackednpcs 100
+gm stackednpcs fix 100
+gm around all 30
+gm around nothing 30
+gm around npc
+gm despawn npc 3597 100
+gm despawn nothing 1 1
+gm nwrite
+gm nwrite target
+gm testnavmesh
+gm tickdoodad 5
+gm tickdoodad abc
+gm doodad_location 5 1 2 3
+gm doodad_location abc 1 2 3
+gm house info
+gm house taxmail
+gm build
+gm build abc
+gm house_binding_move 1 0 0 0
+gm house_binding_move abc 0 0 0
+gm coffer view
+gm coffer close
+gm coffer bogus
+gm sphere list
+gm sphere add 1
+gm sphere bogus
+
+# --- combat and target state --------------------------------------------------------------
+gm spawn npc 3597
+target 3597
+gm npc info target
+gm npc info id 5
+gm npc spawn 3597
+gm npc spawn 99999999
+gm npc pos id 5 x=1
+gm npc save nonsense
+gm npc remove id 5
+gm buff 1000
+gm buff -1000
+gm buff 99999999
+gm damage 10
+gm damage 10 %
+gm damage abc
+gm heal
+gm heal nobody
+gm rotate 90
+gm rotate abc
+gm distance
+gm setfaction 101
+gm setfaction nosuchfaction
+gm getattribute all
+gm getattribute used
+gm getattribute bogus
+gm testcombat cleared
+gm testcombat text
+gm testcombat bogus
+gm testai list
+gm testai bogus
+gm testtracker
+gm kill
+gm revive
+gm kill
+gm revive
+gm clearcombat
+gm godmode true
+gm godmode false
+gm invisible true
+gm invisible false
+targetself
+gm heal
+target 3597
+gm testheightvisualizer
+gm testheightvisualizer testpos
+gm testslave
+gm testchatchannel list
+gm testchatchannel bogus
+gm testfsets
+gm testguild
+gm testguild rename
+
+# --- quests, crime and mail ---------------------------------------------------------------
+gm quest list
+gm quest add 330 Npc 3597
+gm quest step 330 Progress
+gm quest progress 330 0 1
+gm quest remove 330
+gm quest resetdaily 330
+gm quest bogus
+gm quest add abc
+gm crime
+gm crime points self crime=100 infamy=5 jury=1
+gm crime points self crime=abc
+gm crime points nobody
+gm crime ask_guilty self crime=10 time=1
+gm crime jury_invite self
+gm crime court self list court=1
+gm crime court self list
+gm crime trial_state self trial=1 state=1 jury=1 time=1
+gm crime create 877 owner=1 victim=1
+gm crime create 1 owner=1 victim=1
+gm crime fake self self evidence=1
+gm crime bogus
+gm crime points self crime=0
+gm set_crime_value ${gm} 10
+gm set_crime_value ${gm} abc
+gm clear_crime_status ${gm}
+gm set_bounty_money ${gm} 100
+gm set_bounty_money ${gm} abc
+gm clear_crime_status ${gm}
+gm restrict_chat ${gm} 1
+gm restrict_chat ${gm} 0
+gm restrict_chat nobody 1
+gm imprison nobody
+gm set_jury ${gm} 1
+gm set_jury nobody 1
+gm mail admin ${gm} "Audit title" "Audit body" 100
+gm mail admin ${gm} "Audit title"
+gm mail admin nobody "Title" "Body"
+gm announce 3 FF00FF00 2000 GM command audit
+gm announce bad args here
+gm title 42
+gm title abc
+gm vocation 10
+gm setfaction 101
+gm setfaction nosuchfaction
+gm nation info
+gm nation create force
+gm nation bogus
+
+# --- world state, housing and siege -------------------------------------------------------
+gm time set 12 30
+gm time set 99
+gm time set abc
+gm world set exprate 1
+gm world set exprate abc
+gm world set motd Audit
+gm world set bogus 1
+gm feature check
+gm feature set 1 true
+gm feature set 1 bogus
+gm fishfinder set start
+gm pathfind bogus
+gm zonestate 7
+gm zonestate 99
+gm zonestate abc
+gm dungeon status
+gm dungeon reset 1
+gm dungeon bogus
+gm towerdef list
+gm towerdef start 99999999
+gm towerdef bogus
+gm dominion info
+gm dominion clock off
+gm dominion schedule 1 1 60
+gm dominion bogus
+gm joinsiege
+gm leavesiege
+gm collectdominion 1
+gm schedule_siege 1 2026 1 1 0 0
+gm stop_siege 1
+gm delete_dominion ${gm} 1
+gm change_dominion_owner 1 1
+gm bestow_dominion 1 1
+gm set_dominion_non_pvp 1
+gm set_dominion_limit 5
+gm set_dominion_limit abc
+gm auction_post_siege_items 9
+gm auction_post_siege_items
+gm auction_cancel 999999
+gm delay_tax_due_date ${gm}
+gm delay_tax_due_date ${gm} abc
+gm resend_house_tax_mail ${gm}
+gm resend_house_tax_mail nobody
+gm settradepackmaildelay 5
+gm settradepackmaildelay abc
+gm ingamecashshop on
+gm ingamecashshop off
+gm ingamecashshop bogus
+gm snow true
+gm snow false
+gm snow maybe
+gm reloadauction
+gm reloadconfig
+gm waterdebug info
+gm waterdebug reload
+gm shipbarrier status
+gm shipbarrier bogus
+gm testmail list
+gm testmail clear
+gm testmail bogus
+gm testtransfer
+gm online
+gm online *
+gm inventory
+gm inventory 2
+gm inventory 99
+gm showinv
+gm packet zz
+gm packet not/a/file
+gm nwrite target
+gm ignorecooldowns true
+gm allowguildrename 999999
+gm allowguildrename nosuchguild
+gm renameguild 999999 NewName
+gm renameguild 1 nosuchname!
+gm rename nobody nobodyelse
+gm testguild
+gm scripts
+gm scripts bogus
+gm scripts reload force
+gm help gold
+
+# --- path finding (near the end: this used to wedge the game server) ---------------------
+gm spawn npc 3597
+target 3597
+gm pathfind start x=15578 y=15382 z=126
+gm pathfind goal x=15600 y=15400 z=126
+gm pathfind find 0
+gm pathfind view 0
+gm online
+gm help gold
+
+# --- last: world-wide cleanup ------------------------------------------------------------
+gm despawnall
+gm online

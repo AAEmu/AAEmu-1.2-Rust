@@ -142,7 +142,10 @@ impl std::fmt::Debug for CommandManager {
     }
 }
 
-/// `SplitCommandString`: words or double-quoted substrings (`(?<=")[^"]*(?=")|[^" ]+`).
+/// `SplitCommandString`: words or double-quoted substrings (`(?<=")[^"]*(?=")|[^" ]+`),
+/// except that the whitespace between two quoted arguments is not a token of its own. The
+/// .NET regex would match that gap as a "quoted" substring; that breaks the natural
+/// `/mail admin Bob "Title" "Body"` form by shifting every later argument.
 pub fn split_command_string(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
@@ -155,7 +158,13 @@ pub fn split_command_string(s: &str) -> Vec<String> {
                 k += 1;
             }
             if k < chars.len() {
-                out.push(chars[p..k].iter().collect());
+                let gap: String = chars[p..k].iter().collect();
+                if !gap.is_empty() && gap.chars().all(char::is_whitespace) {
+                    // Whitespace-only "quoted" match between two quoted arguments.
+                    p = k;
+                    continue;
+                }
+                out.push(gap);
                 p = if k == p { p + 1 } else { k };
                 continue;
             }

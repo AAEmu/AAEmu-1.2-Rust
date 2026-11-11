@@ -537,15 +537,20 @@ fn sub_command_routing_and_help() {
 }
 
 #[test]
-fn split_command_string_matches_the_dotnet_regex() {
+fn split_command_string_splits_words_and_quoted_text() {
     assert_eq!(split_command_string("a b  c"), ["a", "b", "c"]);
     assert_eq!(
         split_command_string("say \"hello world\" x"),
         ["say", "hello world", "x"]
     );
     assert_eq!(split_command_string("a\"b c\"d"), ["a", "b c", "d"]);
-    // Between two quoted parts the separator is itself a "quoted" match.
-    assert_eq!(split_command_string("\"a\" \"b\""), ["a", " ", "b"]);
+    // Between two quoted parts the whitespace gap is not a token (the .NET regex matches
+    // it as a "quoted" substring; that would shift the arguments of `/mail admin`).
+    assert_eq!(split_command_string("\"a\" \"b\""), ["a", "b"]);
+    assert_eq!(
+        split_command_string("mail admin Bob \"Audit title\" \"Audit body\" 100"),
+        ["mail", "admin", "Bob", "Audit title", "Audit body", "100"]
+    );
     assert_eq!(split_command_string("x \"\" y"), ["x", "", "y"]);
     assert!(split_command_string("").is_empty());
 }
