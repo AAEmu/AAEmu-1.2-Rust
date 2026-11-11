@@ -55,8 +55,9 @@ pub enum FuncTaskKind {
     Pulse {
         source: DoodadRef,
         value: bool,
-        /// The signal came from a client-created wire (bypasses the family filter).
-        via_link: bool,
+        /// The signal travels an authored wire (a client link or the spawner's `RelatedIds`),
+        /// which bypasses the subscriber-family filter.
+        explicit: bool,
     },
     /// The delayed output of a `DoodadFuncLogic` (`enum_doodad_logic_delays`). `generation`
     /// identifies the pending output it was scheduled for; the task is stale when a later input
@@ -579,10 +580,10 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
         FuncTaskKind::Pulse {
             source,
             value,
-            via_link,
+            explicit,
         } => {
             let source_ctx = DoodadCtx::new(server, ctx.world.clone(), source);
-            super::logic::receive(&source_ctx, &ctx.doodad, caster, value, via_link);
+            super::logic::receive(&source_ctx, &ctx.doodad, caster, value, explicit);
         }
         FuncTaskKind::Logic { value, generation } => {
             // Only the latest scheduled output wins: an input that replaced the pending result
@@ -606,7 +607,7 @@ pub(crate) fn schedule_pulse(
     target: &DoodadRef,
     caster: Option<&WorldObject>,
     value: bool,
-    via_link: bool,
+    explicit: bool,
 ) {
     schedule(
         ctx.server,
@@ -619,7 +620,7 @@ pub(crate) fn schedule_pulse(
             kind: FuncTaskKind::Pulse {
                 source: ctx.doodad.clone(),
                 value,
-                via_link,
+                explicit,
             },
         },
         Duration::from_millis(10),

@@ -25,8 +25,8 @@
 //! ANDs switch 5069 (50004) with gate 5070 (50005) and emits to 50001 (lake 5063 → water rises)
 //! and 50008 (streams 5073).
 //!
-//! Client-created wires (`DoodadFuncLogic` link packets) still connect two live handles
-//! directly and bypass the family filter.
+//! Client-created wires (`DoodadFuncLogic` link packets) and the spawner's `RelatedIds` are
+//! explicit routes: they address their target directly and bypass the subscriber-family filter.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -200,6 +200,10 @@ pub fn clear_links(ctx: &DoodadCtx<'_>) {
 
 /// Emit `value` to every route of the doodad: explicit wires, the `family_id`s named by its
 /// `DoodadFuncLogicFamilyProvider` rows, and the spawner's `RelatedIds` templates.
+///
+/// Client wires and the spawner's `RelatedIds` are *explicit* routes: someone authored them for
+/// exactly this source/target pair, so they skip the subscriber-family source filter of
+/// [`receive`]. Only the family-routed signals go through that filter.
 pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
     let root = PULSE_PATH.with(|path| {
         let mut path = path.borrow_mut();
@@ -255,18 +259,22 @@ pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
                 .filter(|d| related.contains(&d.data().template_id))
             {
                 if seen.insert(identity(&target)) {
-                    targets.push((target, false));
+                    // The spawn row names the target template: an authored wire like a client
+                    // wire. The shipped rows carry no `FamilyId`, so the family filter would
+                    // drop the first signal into every target that has a subscriber row
+                    // (Howling Abyss 2 6345 -> 6346).
+                    targets.push((target, true));
                 }
             }
         }
     }
-    for (target, via_link) in targets {
+    for (target, explicit) in targets {
         let fresh = PULSE_PATH.with(|path| {
             let mut path = path.borrow_mut();
             path.len() < 256 && path.insert(identity(&target))
         });
         if fresh {
-            receive(ctx, &target, caster, value, via_link);
+            receive(ctx, &target, caster, value, explicit);
         }
     }
 }
@@ -292,20 +300,22 @@ fn evaluate(operation: u32, inputs: impl Iterator<Item = bool>) -> Option<bool> 
 
 /// Deliver one signal from `source` to `target`.
 ///
-/// With `via_link` the client wire connects the two handles and the family filter is skipped;
-/// otherwise a target with `DoodadFuncLogicFamilySubscriber` rows only accepts the source whose
-/// `family_id` it subscribes to. `DoodadFuncLogic` targets evaluate their inputs and emit after
-/// the authored delay; other targets run a matching `DoodadFuncPulseTrigger`.
+/// An `explicit` signal travels a wire authored for exactly this pair (a client-created link or
+/// an entry of the spawner's `RelatedIds`) and skips the family filter. A family-routed signal
+/// (`explicit == false`) reaches a target with `DoodadFuncLogicFamilySubscriber` rows only when
+/// the source's `family_id` is one it subscribes to. `DoodadFuncLogic` targets evaluate their
+/// inputs and emit after the authored delay; other targets run a matching
+/// `DoodadFuncPulseTrigger`.
 pub(crate) fn receive(
     source: &DoodadCtx<'_>,
     target: &DoodadRef,
     caster: Option<&WorldObject>,
     value: bool,
-    via_link: bool,
+    explicit: bool,
 ) {
     let Some(_operation) = phase::Operation::enter(target) else {
         if !target.data().phase.deleted {
-            super::tasks::schedule_pulse(source, target, caster, value, via_link);
+            super::tasks::schedule_pulse(source, target, caster, value, explicit);
         }
         return;
     };
@@ -313,7 +323,7 @@ pub(crate) fn receive(
     let group = target.data().func_group_id;
     let funcs = ctx.data().phase_funcs(group);
     let subscribed = families(&ctx, target, false);
-    let key = if !via_link && !subscribed.is_empty() {
+    let key = if !explicit && !subscribed.is_empty() {
         let family = source.doodad.data().family_id;
         if family == 0 || !subscribed.contains(&family) {
             return;
@@ -341,7 +351,7 @@ pub(crate) fn receive(
         };
         let output = {
             let d = target.data();
-            if !via_link && !subscribed.is_empty() {
+            if !explicit && !subscribed.is_empty() {
                 let mut families: Vec<u32> = subscribed.into_iter().collect();
                 families.sort_unstable();
                 evaluate(

@@ -312,6 +312,16 @@ fn ratio_respawn(id: u32, ratio: i32, spawn_doodad_id: u32) -> FuncTemplate {
 /// A real spawner for `unit_id` in the test world; `id > 0` because `RatioRespawn` ignores
 /// spawners without an index.
 fn new_spawner(unit_id: u32, id: u32) -> Arc<DoodadSpawner> {
+    new_spawner_with(unit_id, id, None, 0)
+}
+
+/// [`new_spawner`] with the spawn row's `RelatedIds` and `FamilyId`.
+fn new_spawner_with(
+    unit_id: u32,
+    id: u32,
+    related_ids: Option<Vec<u32>>,
+    family_id: u32,
+) -> Arc<DoodadSpawner> {
     Arc::new(DoodadSpawner::new(
         DoodadSpawnerDef {
             base: SpawnerBase {
@@ -329,8 +339,8 @@ fn new_spawner(unit_id: u32, id: u32) -> Arc<DoodadSpawner> {
             },
             scale: 1.0,
             count: 1,
-            related_ids: None,
-            family_id: 0,
+            related_ids,
+            family_id,
             respawn_doodad_template_id: 0,
         },
         Some(0),
@@ -449,6 +459,55 @@ async fn family_pulses_route_by_the_level_design_family_and_owner_scope() {
     logic::emit(&ctx, None, false);
     assert_eq!(group(&receiver), 20);
     assert_eq!(group(&late_receiver), 20);
+}
+
+/// A spawner's `RelatedIds` is an authored wire from that placement to the named template, like
+/// a client wire: it must not go through the subscriber-family source filter. Shipped shape
+/// (Howling Abyss 2 6345 -> 6346 and 18 more pairs): the source's group pulses true, the target's
+/// start group holds a `DoodadFuncLogicFamilySubscriber` and a true `DoodadFuncPulseTrigger`, and
+/// neither placement row carries a `FamilyId`.
+#[tokio::test]
+async fn spawner_related_ids_reach_a_subscribed_target_without_family_ids() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Pulse(DoodadFuncPulse { id: 1, flag: true }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::LogicFamilySubscriber(DoodadFuncLogicFamilySubscriber {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 3,
+                flag: true,
+                next_phase: 21,
+            }),
+        );
+    let mut f = fx(b);
+    let target = f.doodad(101);
+    let source = new_spawner_with(100, 600, Some(vec![101]), 0)
+        .spawn(&f.server, 0)
+        .expect("the source spawns");
+    assert_eq!((source.data().family_id, target.data().family_id), (0, 0));
+    assert_eq!(
+        group(&target),
+        20,
+        "spawning the source pulses nothing (no caster)"
+    );
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), source.clone());
+    logic::emit(&ctx, Some(&f.caster()), true);
+    assert_eq!(
+        group(&target),
+        21,
+        "the RelatedIds signal reaches the target's trigger"
+    );
 }
 
 /// The Sharpwind Mines water chain over a synthetic copy of the shipped rows: switches 5064
@@ -2571,6 +2630,36 @@ async fn real_compact_db_template_2336() {
     f.advance(30_000);
     assert_eq!(group(&d), 4651);
     assert_eq!(f.phase_packets(), vec![4651]);
+}
+
+/// Howling Abyss 2 "Strange Device" 6345 -> "Iron Gate" 6346 with the real compact data: the
+/// spawn rows carry `RelatedIds [6346]` and no `FamilyId`, the gate's start group 16787 holds a
+/// `DoodadFuncLogicFamilySubscriber` (30200) and a `DoodadFuncPulseTrigger` (true -> 16788), and a
+/// character using the device (skill 21394 -> group 16786, `DoodadFuncPulse` true) must open it.
+#[tokio::test]
+#[ignore]
+async fn real_compact_db_related_ids_signal_opens_the_howling_abyss_2_gate() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = DoodadData::load_from(&conn).unwrap();
+    let f = fx(Builder {
+        data,
+        ..Default::default()
+    });
+    let gate = new_spawner(6346, 700)
+        .spawn(&f.server, 0)
+        .expect("spawns the gate");
+    let device = new_spawner_with(6345, 701, Some(vec![6346]), 0)
+        .spawn(&f.server, 0)
+        .expect("spawns the device");
+    assert_eq!((group(&device), group(&gate)), (16785, 16787));
+    manager::use_doodad(&f.server, &f.world, &device, Some(&f.caster()), 21394, 0);
+    assert_eq!(group(&device), 16786);
+    assert_eq!(group(&gate), 16788, "the used device opens the gate");
 }
 
 /// Weather marker 2768 (func group 7055 respawns into 2768 / 3085 / 3086 / 3225 / 3226 at 20% each
