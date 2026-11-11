@@ -301,6 +301,14 @@ fn start_global_cooldown(server: &GameServer, skill: &SkillRef, caster: &WorldOb
     caster.with_unit(|u| u.unit_mut().global_cooldown_ms = now + ms);
 }
 
+/// A gimmick (a thrown bomb, a rolling rock) is a projectile: `owner_character` maps it to the
+/// character that threw it for the PvP and credit rules, but it is not a unit that character
+/// controls, so it has no skill cooldowns of its own (a contact gimmick that keeps rolling hits
+/// every unit it touches, whatever the skill's `cooldown_time`).
+fn cooldown_exempt(caster: &WorldObject) -> bool {
+    caster.as_gimmick().is_some()
+}
+
 fn cooldown_ignored(server: &GameServer, caster: &WorldObject) -> bool {
     caster
         .as_player()
@@ -315,6 +323,9 @@ fn on_skill_cooldown(
     caster: &WorldObject,
     now: i64,
 ) -> bool {
+    if cooldown_exempt(caster) {
+        return false;
+    }
     // Preserve the existing server-controlled NPC policy: only a character or its
     // controlled unit is subject to skill cooldown admission, on that unit's own store.
     let owner = caster
@@ -339,7 +350,7 @@ fn on_skill_cooldown(
 }
 
 fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObject, now: i64) {
-    if cooldown_ignored(server, caster) {
+    if cooldown_exempt(caster) || cooldown_ignored(server, caster) {
         return;
     }
     // Native 1.2 `3989A360` -> `3989F900`, attribute 1: modify the started skill's
@@ -2923,6 +2934,9 @@ pub(super) fn reset_cooldown_if_ignored(
     skill: &SkillRun,
     caster: &WorldObject,
 ) {
+    if cooldown_exempt(caster) {
+        return;
+    }
     if let Some(o) = owner_character(server, caster) {
         if o.data().skill_char.ignore_skill_cooldowns {
             let tag = skill.template.cooldown_tag_id.max(0) as u32;
