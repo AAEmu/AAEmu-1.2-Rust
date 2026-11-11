@@ -2007,6 +2007,18 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (whether a link may override distance/battle at all, and how it orders against rules 1..4)
   stay open until a retail 1.2 zone server can be recorded.
 
+* systems::ai (2026-11-10, rule-0 aggro help; **deviation**): the C# `UpdateAggroHelp`
+  (`Behavior.cs`, `a2ab80abd^`) let every aggressive, accepting rule-0 template within its
+  `aggro_link_help_dist` take the abuser into its aggro table, whatever its faction. Tester
+  report (Requiem Cape fort): the system-neutral Gossiper Banshees (8037 / 10840 / 10841,
+  faction 2, aggressive, rule 0, help distance 6 m) "aggro" a player who pulls a faction-115
+  Bloodhand next to them, deal no damage (they cannot attack a player: `can_attack` is
+  hostile-only) and stay in combat until a relog. `update_aggro_help` now lets a rule-0 helper
+  join only when it shares the attacked NPC's faction or can attack the abuser itself, so
+  same-faction packs (neutral ones included) and hostile neighbours help as before. Rules 1..4
+  and the `aggro_links` group path are unchanged. Test:
+  `ai::behaviors::tests::rule_zero_help_needs_the_same_faction_or_a_hostile_abuser`.
+
 * systems::ai (2026-11-05, WP-5a FollowUnit / WP-5b `ai_command_sets.can_interact`): these are
   the first consumers of two C#-era data paths. Evidence: the 1.2 `ai_commands.cmd_id = 1` rows
   (sets 1 "test_npc", 20 "Q851 fled soldier", 33 "Q1307 bring the lumberjack", all with
