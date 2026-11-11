@@ -5578,7 +5578,10 @@ and in NPC wandering / buff remaining times.
   and only when the destination is outside the area; no safe point leaves the character in
   place with a warning. The sweep runs once a second in the participant tick (never under the
   housing operation lock), reads the same per-zone `SiegeAreaCache` and clock as the hostility
-  rule, skips dead characters and a character with a teleport already pending. **Policy,
+  rule, skips dead characters and a character with a teleport already pending. Before the
+  teleport it runs `Character.ForceDismount` (`vehicles::force_dismount`, the
+  `PrefabChanged` call the move guard / jail move / GM teleport use), so a rider, driver or
+  transfer passenger is not moved while attached to the mount or vehicle. **Policy,
   capture-pending:** GMs are not exempt (the rule is applied literally), and the exact retail
   destination/teleport reason (`TeleportReason.MoveToLocation` 14) is chosen from the
   server's existing forced-teleport paths. Tests:
@@ -5587,6 +5590,7 @@ and in NPC wandering / buff remaining times.
   an_unregistered_defender_expedition_member_is_still_evicted,
   a_pending_teleport_or_a_dead_character_is_not_moved_again,
   the_calendar_clock_moves_the_siege_area_window,
+  a_mounted_non_participant_is_dismounted_before_the_move,
   the_area_rule_matches_the_hostility_gate}`; the participant-keep assertion and the area
   gate were mutation-checked.
 * systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's

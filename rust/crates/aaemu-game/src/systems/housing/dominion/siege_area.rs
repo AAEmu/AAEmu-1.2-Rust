@@ -324,6 +324,11 @@ pub fn evict_non_participants(server: &GameServer) {
             player.data().unit.name,
             player.character_id
         );
+        crate::systems::vehicles::force_dismount(
+            server,
+            &player,
+            crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+        );
         session::send_teleport_unit(&player, packet);
     }
 }

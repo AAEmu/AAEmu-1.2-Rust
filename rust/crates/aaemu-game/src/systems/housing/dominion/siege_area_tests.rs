@@ -10,6 +10,7 @@ use super::state::SiegeSide;
 use crate::data::world_data::{Portal, Zone};
 use crate::data::GameData;
 use crate::models::house::House;
+use crate::models::slave::Slave;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
@@ -25,6 +26,7 @@ const INSIDE: (f32, f32) = (100.0, 100.0);
 const OUTSIDE: (f32, f32) = (600.0, 100.0);
 const RETURN_POINT: (f32, f32, f32) = (1_000.0, 1_000.0, 100.0);
 const ERROR_SIEGE_NOT_PARTICIPANT: i16 = 446;
+const SLAVE_TEMPLATE: u32 = 300;
 
 struct Fixture {
     server: GameServer,
@@ -271,6 +273,42 @@ async fn the_calendar_clock_moves_the_siege_area_window() {
         "inside the calendar window"
     );
     f.server.systems.housing.calendar.set_clock(None);
+}
+
+#[tokio::test]
+async fn a_mounted_non_participant_is_dismounted_before_the_move() {
+    let mut f = fixture(true);
+    // A slave passenger is an "attached" character (the mount / vehicle case the forced move
+    // must not carry along): one seat on a live slave, the character seated in it.
+    let mut slave = Slave::new(0x300, SLAVE_TEMPLATE);
+    slave.unit.tl_id = 77;
+    slave.unit.transform.zone_id = TEST_ZONE;
+    slave.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    slave
+        .attached_characters
+        .push((attach_point::PASSENGER0, f.outsider.obj_id));
+    let slave = Entity::new(0x300, slave);
+    f.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&slave, &f.server.view_ctx());
+    {
+        let mut c = f.outsider.data();
+        c.is_riding = true;
+        c.attached_point = attach_point::PASSENGER0;
+    }
+    evict_non_participants(&f.server);
+    assert!(
+        !f.outsider.data().is_riding,
+        "the passenger must be off the seat before the teleport"
+    );
+    assert!(slave
+        .data()
+        .attached_characters
+        .iter()
+        .all(|(_, c)| *c != f.outsider.obj_id));
+    assert_eq!(teleports(&mut f.outsider_client).len(), 1);
 }
 
 #[tokio::test]
