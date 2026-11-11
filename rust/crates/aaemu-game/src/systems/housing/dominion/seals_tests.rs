@@ -4,6 +4,7 @@
 
 use super::runtime;
 use super::seals::{reconcile, seal_count};
+use super::siege_fixtures::{disband_expedition, join_expedition, leave_expedition};
 use super::state::SiegeSide;
 use crate::data::items::ItemTemplate;
 use crate::data::world_data::Zone;
@@ -72,9 +73,10 @@ fn fixture_at(active: bool) -> Fixture {
     let mut defender_client = TestClient::new(&server, 2, 1002);
     let make_player = |id, name, expedition, client: &TestClient| {
         let mut c = test_character(id, name, INSIDE.0, INSIDE.1);
-        c.unit.expedition_id = expedition;
         c.is_online = true;
-        spawn_player(&server, client, c, 0x100 + id)
+        let player = spawn_player(&server, client, c, 0x100 + id);
+        join_expedition(&server, expedition, &player);
+        player
     };
     let attacker = make_player(1, "Attacker", ATTACKER_EXPEDITION, &attacker_client);
     let defender = make_player(2, "Defender", DEFENDER_EXPEDITION, &defender_client);
@@ -286,6 +288,44 @@ async fn a_member_who_leaves_and_rejoins_ends_up_with_one_seal() {
     register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
     reconcile(&f.server);
     assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+}
+
+#[tokio::test]
+async fn an_ex_member_with_a_roster_entry_loses_the_seal_and_gets_none() {
+    let f = fixture();
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+    // Left (or kicked): nothing removes the roster entry, but the member is no participant.
+    leave_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    let roster = f.server.systems.housing.dominions.get(GROUP).unwrap().siege;
+    assert!(roster.unwrap().participants.contains_key(&1));
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0, "not handed again");
+    // Back in the guild they are a participant again and get a seal.
+    join_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 1);
+
+    // A member who left before the first sweep is never handed one.
+    let f = fixture();
+    register(&f, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker);
+    leave_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.attacker, OFFENSE_SEAL), 0);
+}
+
+#[tokio::test]
+async fn a_disbanded_expedition_has_no_participants() {
+    let f = fixture();
+    register(&f, 2, DEFENDER_EXPEDITION, SiegeSide::Defender);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.defender, DEFENSE_SEAL), 1);
+    disband_expedition(&f.server, DEFENDER_EXPEDITION);
+    reconcile(&f.server);
+    assert_eq!(seal_count(&f.defender, DEFENSE_SEAL), 0);
 }
 
 #[tokio::test]

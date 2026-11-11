@@ -20,15 +20,19 @@
 //! `DominionManager::tick_dual` does (the calendar / GM test clock for a calendar-materialised
 //! siege, the real clock for a GM schedule), not on a specific period number.
 //!
-//! [`SiegeAreaCache`] is rebuilt once a second by [`refresh`] (the participant tick) so the
+//! [`SiegeAreaCache`] is rebuilt once a second by [`refresh`] (the participant sweep) so the
 //! per-attack hostility check does not clone the authority's `DominionState`: the cache holds
-//! only the siege parties, the window, the two circle centres and the roster ids.
+//! only the siege parties, the window, the two circle centres and the participants. A
+//! participant is whoever `participants::participant_side` accepts at the time of the sweep
+//! (roster entry + current expedition + live expedition); the eviction re-asks the authority
+//! before it moves anyone.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::server::GameServer;
 use crate::systems::economy::error_message;
+use crate::systems::housing::dominion::participants::participant_side;
 use crate::systems::housing::dominion::runtime;
 use crate::systems::housing::dominion::state::{SiegeSide, SiegeStatus, TowerIdentity};
 use crate::systems::skills::packets_special::{
@@ -67,6 +71,14 @@ pub struct SiegeArea {
 }
 
 impl SiegeArea {
+    /// The expedition the siege record names for `side`.
+    pub fn expedition_of(&self, side: SiegeSide) -> u32 {
+        match side {
+            SiegeSide::Attacker => self.attacker_expedition_id,
+            SiegeSide::Defender => self.defender_expedition_id,
+        }
+    }
+
     /// The clock choice of `DominionManager::tick_dual`: a calendar materialisation follows
     /// the calendar / GM test clock, a GM schedule the real clock.
     pub fn active_at(&self, real_now: i64, calendar_now: i64) -> bool {
@@ -97,11 +109,12 @@ impl SiegeArea {
     }
 }
 
-/// Rebuilt once a second from the authority: the unfinished sieges' areas and rosters.
+/// Rebuilt once a second from the authority: the unfinished sieges' areas and the participants
+/// of each (character id -> side), as `participants::participant_side` saw them.
 #[derive(Debug, Default)]
 pub struct SiegeAreaCache {
     areas: Mutex<BTreeMap<u32, SiegeArea>>,
-    rosters: Mutex<BTreeMap<u32, BTreeSet<u32>>>,
+    participants: Mutex<BTreeMap<u32, BTreeMap<u32, SiegeSide>>>,
 }
 
 impl SiegeAreaCache {
@@ -113,12 +126,23 @@ impl SiegeAreaCache {
             .copied()
     }
 
-    pub fn is_participant(&self, zone_group_id: u32, character_id: u32) -> bool {
-        self.rosters
+    /// The side of a participant of `area`'s siege, or `None` for anybody else. The snapshot of
+    /// the last sweep says who qualified; the character's live `current_expedition` must still
+    /// be that side's expedition, so a member who just left is no participant at once.
+    pub fn participant_side(
+        &self,
+        area: &SiegeArea,
+        character_id: u32,
+        current_expedition: u32,
+    ) -> Option<SiegeSide> {
+        let side = self
+            .participants
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&zone_group_id)
-            .is_some_and(|ids| ids.contains(&character_id))
+            .get(&area.zone_group_id)?
+            .get(&character_id)
+            .copied()?;
+        (current_expedition != 0 && current_expedition == area.expedition_of(side)).then_some(side)
     }
 }
 
@@ -169,12 +193,12 @@ fn area_snapshot(
     })
 }
 
-/// Rebuild the per-zone cache. Called once a second by the participant tick (it clones each
+/// Rebuild the per-zone cache. Called once a second by the participant sweep (it clones each
 /// `DominionState` once then, never per attack), and by tests that drive the rules directly.
 pub fn refresh(server: &GameServer) {
     let states = server.systems.housing.dominions.all();
     let mut areas = BTreeMap::new();
-    let mut rosters = BTreeMap::new();
+    let mut participants = BTreeMap::new();
     for state in states {
         let Some(siege) = state
             .siege
@@ -186,11 +210,24 @@ pub fn refresh(server: &GameServer) {
         let Some(area) = area_snapshot(server, &state) else {
             continue;
         };
+        // A roster entry is not a participant by itself: ask the shared rule whether the
+        // character still belongs to the side's expedition (the manager's word, since the
+        // character may be offline).
+        let roster: BTreeMap<u32, SiegeSide> = siege
+            .participants
+            .values()
+            .filter_map(|entry| {
+                participant_side(
+                    server,
+                    siege,
+                    entry.character_id,
+                    area.expedition_of(entry.side),
+                )
+                .map(|side| (entry.character_id, side))
+            })
+            .collect();
         areas.insert(state.zone_group_id, area);
-        rosters.insert(
-            state.zone_group_id,
-            siege.participants.keys().copied().collect(),
-        );
+        participants.insert(state.zone_group_id, roster);
     }
     let cache = &server.systems.housing.siege_areas;
     *cache
@@ -198,9 +235,30 @@ pub fn refresh(server: &GameServer) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = areas;
     *cache
-        .rosters
+        .participants
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = rosters;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = participants;
+}
+
+/// Whether the authority, asked now, still has `character_id` as a participant of the siege of
+/// `zone_group_id`: the snapshot is up to a second old, and a join that raced the sweep must not
+/// be moved.
+fn is_participant_now(
+    server: &GameServer,
+    zone_group_id: u32,
+    character_id: u32,
+    current_expedition: u32,
+) -> bool {
+    server
+        .systems
+        .housing
+        .dominions
+        .get(zone_group_id)
+        .is_some_and(|state| {
+            state.siege.as_ref().is_some_and(|siege| {
+                participant_side(server, siege, character_id, current_expedition).is_some()
+            })
+        })
 }
 
 /// The nearest safe resurrection point (`PortalManager.GetClosestReturnPortal`, the same
@@ -267,12 +325,13 @@ pub fn evict_non_participants(server: &GameServer) {
     let real_now = chrono::Utc::now().timestamp();
     let calendar_now = server.systems.housing.calendar.now();
     for player in server.world.all_characters() {
-        let (online, dead, teleporting, transform) = {
+        let (online, dead, teleporting, expedition, transform) = {
             let c = player.data();
             (
                 c.is_online,
                 c.unit.hp <= 0,
                 c.disabled_set_position,
+                c.unit.expedition_id,
                 c.unit.transform,
             )
         };
@@ -307,7 +366,10 @@ pub fn evict_non_participants(server: &GameServer) {
             .systems
             .housing
             .siege_areas
-            .is_participant(zone, player.character_id)
+            .participant_side(&area, player.character_id, expedition)
+            .is_some()
+            // The snapshot is up to a second old: a member who joined since must not be moved.
+            || is_participant_now(server, zone, player.character_id, expedition)
         {
             continue;
         }

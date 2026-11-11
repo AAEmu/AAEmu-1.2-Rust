@@ -52,6 +52,8 @@ mod seals_tests;
 #[cfg(test)]
 mod siege_area_tests;
 #[cfg(test)]
+mod siege_fixtures;
+#[cfg(test)]
 mod tax_tests;
 #[cfg(test)]
 mod tests;

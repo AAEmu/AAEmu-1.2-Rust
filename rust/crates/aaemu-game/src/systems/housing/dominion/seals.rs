@@ -23,6 +23,10 @@
 //! * (b) takes the seal back once the siege record is finished or the character is no longer a
 //!   participant of it.
 //!
+//! "Participant" is [`participant_side`], the one rule the participant buffs, the hostility
+//! rule and the eviction use as well: a roster entry alone is not enough, a member who left or
+//! was kicked from the side's expedition mid-siege keeps the entry but loses the seal.
+//!
 //! The grant is idempotent (`holds`), and a seal taken while a member left is handed again by
 //! (a) on the next sweep if they rejoin, so no lock between the two halves is needed. The
 //! runtime grant set is deliberately not persisted; after a restart the item lifetime is the
@@ -36,6 +40,7 @@ use std::sync::Mutex;
 
 use crate::models::item_task::task_type;
 use crate::server::GameServer;
+use crate::systems::housing::dominion::participants::participant_side;
 use crate::systems::housing::dominion::state::{SiegeSide, SiegeStatus};
 use crate::world::PlayerRef;
 
@@ -147,11 +152,15 @@ fn take_one(server: &GameServer, player: &PlayerRef, template_id: u32) {
         .consume_item_template(server, player, template_id, 1);
 }
 
+/// Whether `character_id` is still a participant of the unfinished siege of `zone_group_id`
+/// on `side`, read fresh from the authority. `current_expedition` is the character's current
+/// expedition (the unit's while online, the expedition manager's while offline).
 fn still_entitled(
     server: &GameServer,
     zone_group_id: u32,
     character_id: u32,
     side: SiegeSide,
+    current_expedition: u32,
 ) -> bool {
     server
         .systems
@@ -161,10 +170,8 @@ fn still_entitled(
         .is_some_and(|state| {
             state.siege.as_ref().is_some_and(|siege| {
                 siege.status != SiegeStatus::Finished
-                    && siege
-                        .participants
-                        .get(&character_id)
-                        .is_some_and(|participant| participant.side == side)
+                    && participant_side(server, siege, character_id, current_expedition)
+                        == Some(side)
             })
         })
 }
@@ -173,7 +180,8 @@ fn still_entitled(
 /// tick, after the siege-area snapshot was rebuilt.
 pub fn reconcile(server: &GameServer) {
     // (a) Every online participant of an unfinished siege holds its side's seal; `holds` keeps
-    // the repeated sweep idempotent.
+    // the repeated sweep idempotent. "Participant" is `participants::participant_side`: a roster
+    // entry alone is not enough, a member who left the expedition since is none.
     for state in server.systems.housing.dominions.all() {
         let Some(siege) = state
             .siege
@@ -183,8 +191,14 @@ pub fn reconcile(server: &GameServer) {
             continue;
         };
         for participant in siege.participants.values() {
-            if let Some(player) = online_player(server, participant.character_id) {
-                grant(server, state.zone_group_id, &player, participant.side);
+            let Some(player) = online_player(server, participant.character_id) else {
+                continue;
+            };
+            let expedition = player.data().unit.expedition_id;
+            if let Some(side) =
+                participant_side(server, siege, participant.character_id, expedition)
+            {
+                grant(server, state.zone_group_id, &player, side);
             }
         }
     }
@@ -192,14 +206,19 @@ pub fn reconcile(server: &GameServer) {
     // authority, so a member who left and rejoined since (a) keeps theirs; one who rejoins
     // after the take is handed a new seal by (a) on the next sweep.
     for ((zone_group_id, character_id), side) in server.systems.housing.siege_seals.tracked() {
-        if still_entitled(server, zone_group_id, character_id, side) {
+        let player = online_player(server, character_id);
+        let expedition = match &player {
+            Some(player) => player.data().unit.expedition_id,
+            None => server.expeditions.expedition_of_character(character_id),
+        };
+        if still_entitled(server, zone_group_id, character_id, side, expedition) {
             continue;
         }
         // Nothing to take from an offline character: the authored lifetime ends the item.
-        if let Some(player) = online_player(server, character_id) {
+        if let Some(player) = &player {
             if let Some(template_id) = seal_item(server, zone_group_id, side) {
-                if holds(server, &player, template_id) {
-                    take_one(server, &player, template_id);
+                if holds(server, player, template_id) {
+                    take_one(server, player, template_id);
                 }
             }
         }

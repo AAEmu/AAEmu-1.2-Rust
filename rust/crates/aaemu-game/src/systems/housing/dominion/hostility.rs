@@ -33,6 +33,7 @@ use crate::systems::housing::dominion::siege_area::SiegeArea;
 use crate::systems::housing::dominion::state::SiegeSide;
 use crate::systems::skills::geometry::Target;
 use crate::systems::skills::relation::owner_character;
+use crate::world::PlayerRef;
 
 /// One unit's siege party: its side and the expedition that side names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,23 +60,21 @@ pub fn classify(me: Party, target: Party) -> SiegeRelation {
     }
 }
 
-fn party(area: &SiegeArea, expedition_id: u32) -> Option<Party> {
-    if expedition_id == 0 {
-        return None;
-    }
-    if expedition_id == area.defender_expedition_id {
-        Some(Party {
-            side: SiegeSide::Defender,
-            expedition_id,
-        })
-    } else if expedition_id == area.attacker_expedition_id {
-        Some(Party {
-            side: SiegeSide::Attacker,
-            expedition_id,
-        })
-    } else {
-        None
-    }
+/// The siege party of a unit's owner character: its side and expedition when the character is a
+/// participant of the siege (`participants::participant_side`, through the snapshot of the last
+/// sweep), `None` for anybody else: no roster entry, or a roster entry whose member left the
+/// side's expedition since.
+fn party(server: &GameServer, area: &SiegeArea, owner: &PlayerRef) -> Option<Party> {
+    let expedition_id = owner.data().unit.expedition_id;
+    let side = server.systems.housing.siege_areas.participant_side(
+        area,
+        owner.character_id,
+        expedition_id,
+    )?;
+    Some(Party {
+        side,
+        expedition_id,
+    })
 }
 
 /// The siege relation between two units, or `None` when the siege rule does not apply (no
@@ -86,8 +85,6 @@ pub fn relation(server: &GameServer, me: &Target, target: &Target) -> Option<Sie
     let target_object = target.as_obj()?;
     let me_owner = owner_character(server, me_object)?;
     let target_owner = owner_character(server, target_object)?;
-    let me_expedition = me_owner.data().unit.expedition_id;
-    let target_expedition = target_owner.data().unit.expedition_id;
     let me_transform = me_object.transform();
     let target_transform = target_object.transform();
     if me_transform.instance_id != target_transform.instance_id {
@@ -115,8 +112,8 @@ pub fn relation(server: &GameServer, me: &Target, target: &Target) -> Option<Sie
     ) {
         return None;
     }
-    let me_party = party(&area, me_expedition)?;
-    let target_party = party(&area, target_expedition)?;
+    let me_party = party(server, &area, &me_owner)?;
+    let target_party = party(server, &area, &target_owner)?;
     // Only a pair that is bound by the siege rule pays for the area / position test.
     let me_world = server.world.world_of(me_object)?;
     let target_world = server.world.world_of(target_object)?;

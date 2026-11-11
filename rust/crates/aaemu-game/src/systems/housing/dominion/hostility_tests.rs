@@ -4,6 +4,7 @@
 
 use super::hostility::{classify, Party, SiegeRelation};
 use super::runtime;
+use super::siege_fixtures::{join_expedition, leave_expedition};
 use super::state::SiegeSide;
 use crate::data::world_data::{conflict_type, FactionRelation, SystemFaction, Zone, ZoneConflict};
 use crate::data::GameData;
@@ -91,10 +92,13 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
     let mut outsider_client = TestClient::new(&server, 4, 1004);
     let make_player = |id, name, expedition, faction, x, y, client: &TestClient| {
         let mut c = test_character(id, name, x, y);
-        c.unit.expedition_id = expedition;
         c.unit.faction_id = faction;
         c.is_online = true;
-        spawn_player(&server, client, c, 0x100 + id)
+        let player = spawn_player(&server, client, c, 0x100 + id);
+        if expedition != 0 {
+            join_expedition(&server, expedition, &player);
+        }
+        player
     };
     let attacker = make_player(
         1,
@@ -154,6 +158,19 @@ fn fixture(active: bool, no_pvp: bool) -> Fixture {
         .dominions
         .schedule_siege(GROUP, ATTACKER_EXPEDITION, starts_at, ends_at, scheduled_at)
         .unwrap();
+    // The roster: both attacker-guild members and the defender. The outsider is on no roster.
+    for (character_id, expedition, side) in [
+        (1, ATTACKER_EXPEDITION, SiegeSide::Attacker),
+        (2, DEFENDER_EXPEDITION, SiegeSide::Defender),
+        (3, ATTACKER_EXPEDITION, SiegeSide::Attacker),
+    ] {
+        server
+            .systems
+            .housing
+            .dominions
+            .register_participant(GROUP, character_id, expedition, side, scheduled_at)
+            .unwrap();
+    }
     super::siege_area::refresh(&server);
     attacker_client.drain();
     defender_client.drain();
@@ -202,6 +219,18 @@ fn materialised_fixture(clock: i64) -> Fixture {
             crate::systems::housing::dominion::SiegeLimits::NATIVE,
         )
         .unwrap();
+    // The new record starts with an empty roster.
+    for (character_id, expedition, side) in [
+        (1, ATTACKER_EXPEDITION, SiegeSide::Attacker),
+        (2, DEFENDER_EXPEDITION, SiegeSide::Defender),
+    ] {
+        f.server
+            .systems
+            .housing
+            .dominions
+            .register_participant(GROUP, character_id, expedition, side, now)
+            .unwrap();
+    }
     super::siege_area::refresh(&f.server);
     f
 }
@@ -388,10 +417,61 @@ async fn a_non_participant_is_not_made_hostile_by_the_siege() {
     // A hostile-faction outsider keeps the normal faction relation (attackable), which proves
     // the siege rule did not neutralise it.
     let hostile_outsider = f.same_party.clone();
-    hostile_outsider.data().unit.expedition_id = 0;
+    leave_expedition(&f.server, ATTACKER_EXPEDITION, &hostile_outsider);
     assert!(can_attack(
         &f.server,
         &target(&f.defender),
         &target(&hostile_outsider)
+    ));
+}
+
+#[tokio::test]
+async fn an_unregistered_guild_member_is_not_made_hostile() {
+    let f = fixture(true, false);
+    // The outsider belongs to the defending guild but never joined the roster: the same rule
+    // that evicts them (`participants::participant_side`) keeps them out of the siege parties,
+    // so the faction rules decide (same faction: friendly).
+    join_expedition(&f.server, DEFENDER_EXPEDITION, &f.outsider);
+    assert!(!can_attack(
+        &f.server,
+        &target(&f.attacker),
+        &target(&f.outsider)
+    ));
+    assert!(!can_attack(
+        &f.server,
+        &target(&f.outsider),
+        &target(&f.attacker)
+    ));
+}
+
+#[tokio::test]
+async fn an_ex_member_with_a_roster_entry_is_not_made_hostile() {
+    let f = fixture(true, false);
+    assert!(can_attack(
+        &f.server,
+        &target(&f.attacker),
+        &target(&f.defender)
+    ));
+    // The attacker leaves the guild; the roster entry stays. Live at once, and after the next
+    // snapshot as well.
+    leave_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    assert!(!can_attack(
+        &f.server,
+        &target(&f.attacker),
+        &target(&f.defender)
+    ));
+    super::siege_area::refresh(&f.server);
+    assert!(!can_attack(
+        &f.server,
+        &target(&f.defender),
+        &target(&f.attacker)
+    ));
+    // Back in the guild they fight again once the snapshot has seen it.
+    join_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    super::siege_area::refresh(&f.server);
+    assert!(can_attack(
+        &f.server,
+        &target(&f.defender),
+        &target(&f.attacker)
     ));
 }

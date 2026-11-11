@@ -3,9 +3,9 @@
 //! Mutation check: without `evict_non_participants` (or with the participant test removed)
 //! the outsider receives no teleport and the assertions fail.
 
-use super::hostility::siege_can_attack;
 use super::runtime;
 use super::siege_area::evict_non_participants;
+use super::siege_fixtures::{join_expedition, leave_expedition};
 use super::state::SiegeSide;
 use crate::data::world_data::{Portal, Zone};
 use crate::data::GameData;
@@ -14,7 +14,6 @@ use crate::models::slave::Slave;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
-use crate::systems::skills::geometry::Target;
 use crate::systems::vehicles::data::attach_point;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{Entity, PlayerRef, WorldObject};
@@ -75,11 +74,14 @@ fn fixture(active: bool) -> Fixture {
     let mut outsider_client = TestClient::new(&server, 2, 1002);
     let make_player = |id, name, expedition, x, y, client: &TestClient| {
         let mut c = test_character(id, name, x, y);
-        c.unit.expedition_id = expedition;
         c.unit.hp = 1_000;
         c.unit.max_hp = 1_000;
         c.is_online = true;
-        spawn_player(&server, client, c, 0x100 + id)
+        let player = spawn_player(&server, client, c, 0x100 + id);
+        if expedition != 0 {
+            join_expedition(&server, expedition, &player);
+        }
+        player
     };
     let attacker = make_player(
         1,
@@ -242,9 +244,56 @@ async fn a_non_participant_outside_the_circle_or_outside_the_running_siege_is_ke
 async fn an_unregistered_defender_expedition_member_is_still_evicted() {
     let mut f = fixture(true);
     // A member of the defending guild who never joined the roster is not a participant.
-    f.outsider.data().unit.expedition_id = DEFENDER_EXPEDITION;
+    join_expedition(&f.server, DEFENDER_EXPEDITION, &f.outsider);
     evict_non_participants(&f.server);
     assert_eq!(teleports(&mut f.outsider_client).len(), 1);
+}
+
+#[tokio::test]
+async fn an_ex_member_with_a_roster_entry_is_moved_like_any_outsider() {
+    // The snapshot still lists the attacker (it was taken before the leave): the live
+    // expedition of the character decides at once.
+    let mut f = fixture(true);
+    leave_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    evict_non_participants(&f.server);
+    assert_eq!(teleports(&mut f.attacker_client).len(), 1);
+
+    // After the next snapshot the shared participant rule leaves them out as well.
+    let mut f = fixture(true);
+    leave_expedition(&f.server, ATTACKER_EXPEDITION, &f.attacker);
+    super::siege_area::refresh(&f.server);
+    let roster = f.server.systems.housing.dominions.get(GROUP).unwrap().siege;
+    assert!(roster.unwrap().participants.contains_key(&1));
+    evict_non_participants(&f.server);
+    assert_eq!(teleports(&mut f.attacker_client).len(), 1);
+}
+
+#[tokio::test]
+async fn a_member_who_joined_after_the_snapshot_is_not_moved() {
+    let mut f = fixture(true);
+    // The outsider joins the attacking guild and the roster after the snapshot of `fixture`.
+    join_expedition(&f.server, ATTACKER_EXPEDITION, &f.outsider);
+    f.server
+        .systems
+        .housing
+        .dominions
+        .register_participant(
+            GROUP,
+            f.outsider.character_id,
+            ATTACKER_EXPEDITION,
+            SiegeSide::Attacker,
+            chrono::Utc::now().timestamp(),
+        )
+        .unwrap();
+    evict_non_participants(&f.server);
+    assert!(
+        teleports(&mut f.outsider_client).is_empty(),
+        "the authority is asked again before anyone is moved"
+    );
+    // The next snapshot agrees.
+    super::siege_area::refresh(&f.server);
+    evict_non_participants(&f.server);
+    assert!(teleports(&mut f.outsider_client).is_empty());
 }
 
 #[tokio::test]
@@ -321,17 +370,4 @@ async fn a_pending_teleport_or_a_dead_character_is_not_moved_again() {
     f.outsider.data().unit.hp = 0;
     evict_non_participants(&f.server);
     assert!(teleports(&mut f.outsider_client).is_empty());
-}
-
-#[tokio::test]
-async fn the_area_rule_matches_the_hostility_gate() {
-    let f = fixture(true);
-    let outsider = Target::Obj(WorldObject::from(&f.outsider));
-    let attacker = Target::Obj(WorldObject::from(&f.attacker));
-    // Both are inside, but neither the outsider's party gate nor the same-party gate is
-    // hostile: the eviction and the hostility rule share the same cached area.
-    let area = f.server.systems.housing.siege_areas.get(GROUP).unwrap();
-    assert!(area.inside(0, INSIDE.0, INSIDE.1));
-    assert!(!area.inside(0, OUTSIDE.0, OUTSIDE.1));
-    assert_eq!(siege_can_attack(&f.server, &attacker, &outsider), None);
 }
