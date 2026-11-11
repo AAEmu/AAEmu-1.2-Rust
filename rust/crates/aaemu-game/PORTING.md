@@ -2938,6 +2938,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   cut scene (or unidentified cinema) the owner gets an `SCMateSpawnedPacket` for each of its
   spawned mates again (`vehicles::mates::resend_owner_mates_spawned`; the summon builds the
   same packet in `mate_spawned_packet`).
+  2026-11-10: a rider now leaves a cut scene on foot. With the re-attach the tester could
+  neither move nor dismount after accepting quest 1352 "Another One Down" (component 6758,
+  cinema 147 `zq_09_helmire`, `Flags` 0x18) from Pederson while mounted, and only a desummon
+  recovered: the server kept the rider seated (its own moves ignored, `unmount_mate` needs that
+  seat) while the client evidently did not. `CSCompletedCinema` force-dismounts the rider
+  (`SCUnitDetached` names only the rider, which the wipe keeps) before the mate records and the
+  repaint, so the mate comes back without a passenger. A cinema that is not a cut scene keeps
+  the rider mounted. Tests: `vehicles::cinema_mate_tests`.
 * systems::quests (component named in the update, 2026-11-01): `Quest.SetStep` clears
   `ComponentId` ("used by packet only"), so the final C# sent `SCQuestContextUpdatedPacket`
   with component 0 after every step change (`engine.rs` `run_current_step`). The 1.2 client

@@ -147,28 +147,48 @@ async fn a_cut_scene_restores_the_mate_record_before_the_mate() {
     assert!(spawned < state, "{:x?}", ops(&frames));
 }
 
+/// A rider leaves a cut scene on foot: the server dismounts it (`SCUnitDetached` for the rider)
+/// before the repaint, which then restores the mate record and the mate without re-attaching
+/// the rider (tester report: unable to move or dismount after Pederson's cinema while mounted).
 #[tokio::test]
-async fn a_cut_scene_restores_the_mate_record_before_the_rider_is_attached() {
+async fn a_cut_scene_dismounts_the_rider_before_the_repaint() {
     let mut r = rider(true);
     let frames = r.play(Some(COMP_CUT)).await;
+    let detached = r.index_of(&frames, sc::SCUnitDetachedPacket, PA);
     let spawned = frames
         .iter()
         .position(|f| f.0 == sc::SCMateSpawnedPacket)
         .expect("SCMateSpawnedPacket");
     let state = r.index_of(&frames, sc::SCUnitStatePacket, r.mate.obj_id);
-    let attached = r.index_of(&frames, sc::SCUnitAttachedPacket, PA);
-    assert!(spawned < state && state < attached, "{:x?}", ops(&frames));
+    assert!(detached < spawned && spawned < state, "{:x?}", ops(&frames));
+    assert!(
+        !ops(&frames).contains(&sc::SCUnitAttachedPacket),
+        "{:x?}",
+        ops(&frames)
+    );
+    assert!(!r.owner.data().is_riding);
+    assert!(r
+        .mate
+        .data()
+        .passenger(attach_point::DRIVER)
+        .is_none_or(|seat| seat.obj_id == 0));
 }
 
 #[tokio::test]
 async fn an_unidentified_cinema_restores_the_mate_record_too() {
     let mut r = rider(true);
     let frames = r.play(None).await;
-    let spawned = frames
-        .iter()
-        .position(|f| f.0 == sc::SCMateSpawnedPacket)
-        .expect("SCMateSpawnedPacket");
-    assert!(spawned < r.index_of(&frames, sc::SCUnitAttachedPacket, PA));
+    assert!(frames.iter().any(|f| f.0 == sc::SCMateSpawnedPacket));
+    assert!(!ops(&frames).contains(&sc::SCUnitAttachedPacket));
+    assert!(!r.owner.data().is_riding);
+}
+
+/// A cinema that is not a cut scene keeps the rider mounted (nothing was wiped).
+#[tokio::test]
+async fn a_cinema_that_is_not_a_cut_scene_keeps_the_rider_mounted() {
+    let mut r = rider(true);
+    r.play(Some(COMP_PLAIN)).await;
+    assert!(r.owner.data().is_riding);
 }
 
 #[tokio::test]
