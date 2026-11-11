@@ -780,23 +780,29 @@ fn navmesh_server(surface: f32, nav_z: f32) -> GameServer {
     use crate::systems::ai::geodata::manager::AiGeoData;
 
     let server = test_server_with(GameData::empty());
-    server
-        .systems
-        .npcs
-        .heightmaps
-        .install(heightmaps_with_mode(surface, true));
+    let heights = heightmaps_with_mode(surface, true);
+    server.systems.npcs.heightmaps.install(heights.clone());
     server.config.update(|c| c.world.geo_data_mode = true);
     let files = NavFiles(HashMap::from([(
         "game/worlds/main_world/paths/001_001/netmission0.bai".into(),
         net_mission(&[(1, [500.0, 500.0, nav_z])], &[]),
     )]));
-    server.systems.ai.geodata.install(Arc::new(AiGeoData::new(
+    let geo = Arc::new(AiGeoData::new(
         &crate::data::world_templates::WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
         true,
         Arc::new(files),
         Arc::new(UsedAreaNames::default()),
         None,
-    )));
+    ));
+    server.systems.ai.geodata.install(geo.clone());
+    // `geodata::start` connects the navmesh to `HeightmapWorlds` the same way (the
+    // `WorldManager.GetHeight` fallback): without it these walkers would only ever see the raw
+    // terrain, so a regression that took an unbounded heightmap / navmesh lookup would not fail.
+    let all = HashMap::from([(geo.template_id, geo)]);
+    heights.install_geo_data(Arc::new(move |template_id, x, y, z| {
+        all.get(&template_id)
+            .map_or(0.0, |g| g.get_height(Vec3::new(x, y, z)))
+    }));
     server
 }
 
