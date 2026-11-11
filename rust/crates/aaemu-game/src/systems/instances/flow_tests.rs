@@ -4094,6 +4094,56 @@ async fn return_in_the_main_world_is_unchanged() {
     assert!((a.p.data().unit.transform.x - 120.0).abs() < 0.01);
 }
 
+/// A main-world gate next to the caster (Brimblaze Tower's up / down circles, Hadir Farm's
+/// escape circle): `SCLoadInstance` empties the client's world although the character stays
+/// filed in the main world. `CSInstanceLoaded` must resend the objects of the neighbourhood the
+/// departure and the arrival share, not only the regions that are new; a repeated load must not.
+#[tokio::test]
+async fn return_to_a_nearby_main_world_gate_repaints_the_shared_neighbourhood() {
+    let server = build_return_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let main = server.world.world(0).unwrap();
+    let ctx = server.view_ctx();
+    // Between the caster (100, 100) and the gate (120, 210): in both neighbourhoods.
+    let mut npc = Npc::new(500);
+    npc.unit.transform.set_xyz(110.0, 150.0, 25.0);
+    let npc = Entity::new(0x6101, npc);
+    main.spawn(&npc, &ctx);
+    let mut doodad = Doodad::new(600);
+    doodad.transform.set_xyz(112.0, 150.0, 25.0);
+    let doodad = Entity::new(0x6102, doodad);
+    main.spawn(&doodad, &ctx);
+    let departure = a.p.region().unwrap();
+    a.frames();
+
+    cast_return(&server, &a.p, RETURN_GATE_MAIN as i32);
+    assert!(a.ops().contains(&sc::SCLoadInstancePacket));
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let f = a.frames();
+    assert_ne!(a.p.region(), Some(departure));
+    assert_eq!(a.p.region().map(|r| r.0), Some(0));
+    assert!(
+        f.iter()
+            .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x6101),
+        "shared-neighbourhood NPC resent: {f:?}"
+    );
+    assert!(
+        f.iter().any(|(op, b)| *op == sc::SCDoodadsCreatedPacket
+            && b.first() == Some(&1)
+            && bc(&b[1..]) == 0x6102),
+        "shared-neighbourhood doodad resent: {f:?}"
+    );
+
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let again = a.frames();
+    assert!(!again
+        .iter()
+        .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x6101));
+    assert!(!again
+        .iter()
+        .any(|(op, _)| *op == sc::SCDoodadsCreatedPacket));
+}
+
 fn build_return_server() -> Arc<GameServer> {
     let server = dungeon_server_with(return_gate_data());
     // The world gate lookup is the npcs subsystem's hook.
