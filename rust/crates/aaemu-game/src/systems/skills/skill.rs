@@ -1681,10 +1681,10 @@ pub fn end_channeling(
             .npcs()
             .delete_doodad(server, channel_doodad);
     }
-    // The 1.2 client starts a channel's post-cast window when the channel ends, not when it
-    // starts (`FUN_39397ff0` @ 0x39397ff0, DEC 748451: `channeling_time > 0` and not
-    // `keep_mana_regen` set `LastCast`); the window therefore covers the channel and the 5 s
-    // after it (`X2::Unit::UpdateManaRegen`, `FUN_390b63f0`).
+    // The 1.2 client also refreshes `LastCast` when a channel ends (`FUN_39397ff0` @ 0x39397ff0,
+    // DEC 748451: `channeling_time > 0` and not `keep_mana_regen`), on top of the cast start.
+    // The window is `LastCast + 5 s` (`X2::Unit::UpdateManaRegen`, `FUN_390b63f0`), so it covers
+    // the first 5 s of a longer channel and the 5 s after the channel's end.
     if t.channeling_time > 0 && !t.keep_mana_regen {
         if let Some(p) = caster.as_player() {
             let mut c = p.data();

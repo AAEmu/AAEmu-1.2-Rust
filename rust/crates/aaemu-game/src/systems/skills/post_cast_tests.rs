@@ -17,7 +17,7 @@ use crate::world::{now_ms, WorldObject};
 
 use super::cast_validation_tests::fixture;
 use super::data::SkillTemplate;
-use super::skill::use_skill;
+use super::skill::{end_channeling, use_skill};
 use super::state::SkillRun;
 use super::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
 
@@ -186,42 +186,59 @@ async fn class_skill_that_spends_mana_enters_post_cast_for_five_seconds() {
     assert_eq!(p.unit.mp, 102, "normal ManaRegen (25) + persistent (1)");
 }
 
-/// A channel starts the window when it ends (`FUN_39397ff0`), not only when it starts: the
-/// refresh keeps the persistent rate through the channel and the 5 s after it.
+/// A channel refreshes `LastCast` when it ends (`FUN_39397ff0`), not only when it starts, unless
+/// the skill has `keep_mana_regen`. The channel is ended directly (no timer, no sleep): the
+/// window is first reset to "long ago", so only the channel end can set it again.
 #[tokio::test]
 async fn channel_refreshes_the_window_at_its_end() {
-    let (server, _client, player, _npc) = fixture(GameData::empty());
-    let skill = SkillRun::new(
-        Arc::new(SkillTemplate {
-            id: 9010,
-            ability_id: 1,
-            timing_id: 1,
-            channeling_time: 50,
-            ..SkillTemplate::default()
-        }),
-        1,
-    );
-    let caster = WorldObject::from(&player);
-    let (r, _) = use_skill(
-        &server,
-        &skill,
-        &caster,
-        SkillCaster::Unit(player.obj_id),
-        &mut SkillCastTarget::Unit(NPC_OBJ),
-        Some(SkillObject::None),
-        false,
-    );
-    assert_eq!(r, skill_result::SUCCESS);
-    let cast_at = player.data().skill_char.last_cast_ms;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let p = player.data();
-    assert!(p.skill_char.is_in_post_cast);
-    assert!(
-        p.skill_char.last_cast_ms >= cast_at + 40,
-        "the channel end refreshes LastCast: {} -> {}",
-        cast_at,
-        p.skill_char.last_cast_ms
-    );
+    for (keep_mana_regen, refreshed) in [(false, true), (true, false)] {
+        let (server, _client, player, _npc) = fixture(GameData::empty());
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                id: 9010,
+                ability_id: 1,
+                timing_id: 1,
+                channeling_time: 50,
+                keep_mana_regen,
+                ..SkillTemplate::default()
+            }),
+            1,
+        );
+        let caster = WorldObject::from(&player);
+        let (r, _) = use_skill(
+            &server,
+            &skill,
+            &caster,
+            SkillCaster::Unit(player.obj_id),
+            &mut SkillCastTarget::Unit(NPC_OBJ),
+            Some(SkillObject::None),
+            false,
+        );
+        assert_eq!(r, skill_result::SUCCESS);
+        {
+            let mut c = player.data();
+            c.skill_char.last_cast_ms = 1;
+            c.skill_char.is_in_post_cast = false;
+        }
+        end_channeling(
+            &server,
+            &skill,
+            &caster,
+            0,
+            &SkillCaster::Unit(player.obj_id),
+            true,
+        );
+        let p = player.data();
+        assert_eq!(
+            p.skill_char.is_in_post_cast, refreshed,
+            "keep_mana_regen {keep_mana_regen}: the channel end starts the window"
+        );
+        assert_eq!(
+            p.skill_char.last_cast_ms > 1,
+            refreshed,
+            "keep_mana_regen {keep_mana_regen}: the channel end refreshes LastCast"
+        );
+    }
 }
 
 /// `ReduceCurrentMp` sends no `SCUnitPoints` when the change is zero: the client predicts
