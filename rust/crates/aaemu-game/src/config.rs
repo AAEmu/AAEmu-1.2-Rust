@@ -1734,6 +1734,33 @@ mod tests {
         assert_eq!(cfg.account.access_level_first_account, 100);
     }
 
+    /// Test accounts receive their starting Credits/Loyalty when the game creates their account
+    /// row on first login. The defaults stay 0, so a normal server is unaffected.
+    #[test]
+    fn test_server_starting_credits_and_loyalty_bind() {
+        assert_eq!(AppConfig::default().credits.default, 0);
+        assert_eq!(AppConfig::default().loyalty.default, 0);
+        let cfg = AppConfig::from_value(json!({
+            "Credits": { "Default": 1_000_000 },
+            "Loyalty": { "Default": "5000" }
+        }))
+        .unwrap();
+        assert_eq!(cfg.credits.default, 1_000_000);
+        assert_eq!(cfg.loyalty.default, 5_000);
+    }
+
+    /// The shipped example file binds to the values the wiki page documents (a typo in the file
+    /// would otherwise only show up on a test server).
+    #[test]
+    fn the_shipped_test_server_example_binds_to_its_documented_values() {
+        let value: serde_json::Value =
+            serde_json::from_str(include_str!("../app/ExampleConfig.TestServer.json"))
+                .expect("the example is valid JSON");
+        let cfg = AppConfig::from_value(value).unwrap();
+        assert_eq!(cfg.credits.default, 1_000_000);
+        assert_eq!(cfg.loyalty.default, 5_000);
+    }
+
     #[test]
     fn characters_config_binds_the_base_slot_count() {
         let cfg = AppConfig::from_value(json!({

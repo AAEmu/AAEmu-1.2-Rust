@@ -15,10 +15,16 @@
 //!   `0x393a9236`) is gated. The spot must be in a non-zero zone group whose dominion record is
 //!   owned by the caster's own expedition and lies within the tower's 2D `radius_dominion`,
 //!   else `LOCATE_INVALID_DOMINION_AREA` (749). Every other item skips the gate.
+//! * footprint terrain spread: step 2 (`FUN_393a7720` -> `FUN_393a73a0`), the terrain heights
+//!   at the four rotated bottom corners of the ghost's render OBB and their centre; refuse
+//!   `max - min > 6.0` m (strict) with `DOODAD_SIM_LOW_TERRAIN` (279) "Terrain is too low.".
+//!   Skipped for template groups 2, 3, 5, 12, 37, 40 and 80 (`doodad_almighties.group_id`).
+//!   The client uses the render OBB, which the server does not have: the model's collision
+//!   bounds (`collision::objects::shape_bounds`) are the documented proxy, and a model
+//!   without bounds skips the check rather than refusing. The client's z snap to the minimum
+//!   sample is not mirrored (a modded client's z is only bounded by the spread).
 //!
 //! Not implemented (open items in PORTING.md):
-//! * the 6 m terrain-height spread of step 2 (`FUN_393a7720`; footprint sampling undecoded,
-//!   capture F7 not driven), skipped by the 1.2 client for groups 2, 3, 5, 12, 37, 40 and 80;
 //! * the house/farm area rule of step 0/0b (the server keeps its own house/public-farm checks);
 //! * the area-box test `FUN_393287c0` (0x114), the overlap skip list
 //!   (`FUN_397a7cc0` / `FUN_397a7ce0`), and the farm-plot radius call `FUN_3983b280(..,1)`; the
@@ -27,12 +33,23 @@
 //! The client's water test (`worldvtbl+0xf4`) was not decoded; this uses the server's
 //! `WorldInstance.IsWater` (water volumes + ocean), the same query class.
 
+use aaemu_physics::geometry::primitives::BoxPrim;
+
 use crate::server::GameServer;
+use crate::systems::ai::collision;
 use crate::systems::housing::dominion::fort;
 use crate::systems::npcs::doodad::packets::error_message;
 use crate::systems::npcs::doodad::templates::DoodadTemplate;
 use crate::systems::npcs::terrain_surface::SurfaceMaterial;
 use crate::world::{PlayerRef, WorldInstance, WorldObject};
+
+/// `FUN_393a7720` step 1: the client skips the footprint terrain spread for these template
+/// groups (`doodad_almighties.group_id`, `DoodadTemplate::group_id`): 37 is the static
+/// `0x399d2450`, `FUN_3983b2f0` covers 2, 3 and 12, `FUN_3983b320` 5 and 80, `FUN_3983b340`
+/// 40.
+pub const FOOTPRINT_SKIP_GROUPS: [u32; 7] = [2, 3, 5, 12, 37, 40, 80];
+/// `0x3999ecf4` (static 6.0): the client refuses `max - min > 6.0` m (strict).
+pub use crate::systems::ai::collision::placement::MAX_FOOTPRINT_SPREAD;
 
 /// `FUN_393a8fa0` step 3: at most 30 m in 3D (`900.0 < d²` refuses, so exactly 30 m is
 /// allowed). F1's screen-projected sweep cannot pin the boundary; the decompile can.
@@ -65,6 +82,8 @@ pub enum Refusal {
     Doodad,
     /// `DOODAD_SIM_TOO_CLOSE_TO_OTHER_UNIT` (278).
     Unit,
+    /// `DOODAD_SIM_LOW_TERRAIN` (279): the model footprint's terrain spread exceeds 6 m.
+    Terrain,
     /// `TOO_FAR_AWAY` (154).
     TooFar,
     /// `LOCATE_INVALID_DOMINION_AREA` (749): the Territory Statue blueprint's spot is not
@@ -78,6 +97,7 @@ impl Refusal {
             Self::Area => error_message::DOODAD_SIM_AREA,
             Self::Doodad => error_message::DOODAD_SIM_TOO_CLOSE_TO_OTHER_DOODAD,
             Self::Unit => error_message::DOODAD_SIM_TOO_CLOSE_TO_OTHER_UNIT,
+            Self::Terrain => error_message::DOODAD_SIM_LOW_TERRAIN,
             Self::TooFar => error_message::TOO_FAR_AWAY,
             Self::Dominion => error_message::LOCATE_INVALID_DOMINION_AREA,
         }
@@ -223,11 +243,53 @@ fn surface_material_refusal(
     }
 }
 
+/// The starting func-group model of the template (`DoodadManager.Create`'s
+/// `GetFuncGroupId`) as collision bounds: the documented proxy for the client's ghost render
+/// OBB. `None` without a model reference or physics geometry.
+fn template_bounds(server: &GameServer, template: &DoodadTemplate) -> Option<BoxPrim> {
+    let group = crate::systems::npcs::doodad::phase::get_func_group_id(
+        &server.game_data.systems.npcs.doodad,
+        template.id,
+    );
+    let model = server
+        .game_data
+        .systems
+        .ai
+        .collision
+        .func_group_model(group)?;
+    collision::objects::model_bounds(server, model)
+}
+
+/// `FUN_393a7720` -> `FUN_393a73a0` step 2: the terrain height spread over the placed model's
+/// footprint. The client samples the ghost's render OBB; the server substitutes the collision
+/// bounds and skips the check when the model has none (render bounds can be larger, so the
+/// proxy only ever under-refuses). The client's z snap to the minimum sample is not mirrored.
+fn footprint_refusal(
+    server: &GameServer,
+    world: &WorldInstance,
+    template: &DoodadTemplate,
+    pos: (f32, f32, f32),
+    z_rot: f32,
+    scale: f32,
+) -> Option<Refusal> {
+    if FOOTPRINT_SKIP_GROUPS.contains(&template.group_id) {
+        return None;
+    }
+    let bounds = template_bounds(server, template)?;
+    let scale = scale.max(0.0);
+    let bounds = BoxPrim::aligned(bounds.center * scale, bounds.size * scale);
+    let (min, max) =
+        collision::placement::footprint_terrain_spread(server, world.id, pos, z_rot, &bounds)?;
+    (max - min > MAX_FOOTPRINT_SPREAD).then_some(Refusal::Terrain)
+}
+
 /// The placement refusal of `pos` for `template`, or `None` when the spot is free.
 ///
 /// Order follows `FUN_393a8fa0`: area (restrict zone) -> water -> range -> doodads -> units ->
 /// dominion (only for the Territory Statue blueprint, by `item_template_id`). The place-skin
-/// terrain material rule of step 0 runs last, only with `Housing.PlacementStrictSurface` on.
+/// terrain material rule of step 0 runs last, only with `Housing.PlacementStrictSurface` on,
+/// and the footprint terrain spread completes the checks.
+#[allow(clippy::too_many_arguments)]
 pub fn refusal(
     server: &GameServer,
     world: &WorldInstance,
@@ -235,6 +297,8 @@ pub fn refusal(
     template: &DoodadTemplate,
     item_template_id: u32,
     pos: (f32, f32, f32),
+    z_rot: f32,
+    scale: f32,
 ) -> Option<Refusal> {
     let (x, y, z) = pos;
     // F11: the 1.2 client refuses the restricted-zone seed with 276 before it starts a builder.
@@ -302,6 +366,9 @@ pub fn refusal(
         if let Some(refusal) = surface_material_refusal(server, world, template, x, y) {
             return Some(refusal);
         }
+    }
+    if let Some(refusal) = footprint_refusal(server, world, template, pos, z_rot, scale) {
+        return Some(refusal);
     }
     None
 }
