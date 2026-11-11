@@ -1092,6 +1092,10 @@ impl SpawnManager {
     /// Ordinary placements that can provide a quest marker within `radius` metres of
     /// `(center_x, center_y)`, nearest first. `radius` may be infinite (the Unlimited option).
     ///
+    /// Placements filed (by their authored position) in `skip_regions` are left out and do not
+    /// count against `limit`: the caller passes the player's own neighbourhood, which the region
+    /// path already streams, so it must neither be prepared for a marker nor use up the limit.
+    ///
     /// Only placements whose members are all safe quest givers / reporters are returned, so a
     /// monster camp with one quest NPC is not spawned for a map marker. `limit` bounds the work
     /// (and therefore what the caller can stream); 0 means no bound.
@@ -1101,6 +1105,7 @@ impl SpawnManager {
         center_x: f32,
         center_y: f32,
         radius: f32,
+        skip_regions: &HashSet<(i32, i32)>,
         limit: usize,
     ) -> Vec<Arc<NpcSpawner>> {
         self.ensure_quest_giver_index(server);
@@ -1118,6 +1123,9 @@ impl SpawnManager {
         let mut found: Vec<(f32, u32, Arc<NpcSpawner>)> = Vec::new();
         let mut seen: HashSet<u32> = HashSet::new();
         let mut visit = |region: (i32, i32)| {
+            if skip_regions.contains(&region) {
+                return;
+            }
             let Some(spawners) = index.regions.get(&region) else {
                 return;
             };

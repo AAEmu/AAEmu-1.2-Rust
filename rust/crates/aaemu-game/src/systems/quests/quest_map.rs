@@ -27,11 +27,14 @@ use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// Movement that forces an immediate refresh even inside [`REFRESH_INTERVAL`].
 const MOVE_EPSILON_SQ: f32 = 64.0; // 8 m
-/// Hard cap of extra marker NPCs streamed per character. Keeps the Unlimited option bounded
-/// (the 1.2 world has about two thousand quest giver placements).
+/// Hard cap of extra marker NPCs streamed per character: the nearest ones, a nearer NPC replaces
+/// a farther streamed one. Keeps the Unlimited option bounded (the 1.2 world has about two
+/// thousand quest giver placements).
 pub const MAX_EXTRA_NPCS: usize = 256;
-/// Placements prepared per refresh; the rest follow on later ticks.
-const MAX_SPAWNERS_PER_REFRESH: usize = 192;
+/// Placements looked at beyond the NPC cap. The cap counts NPCs and a placement can have none
+/// right now (creation budget, respawn delay, schedule), so a few spare placements keep the
+/// streamed set full. The player's own neighbourhood is not part of the list.
+const SPARE_PLACEMENTS: usize = 8;
 /// NPC creations per refresh across all tracked players (one quest-map tick).
 pub const SPAWN_BUDGET_PER_TICK: i64 = 32;
 
@@ -110,6 +113,14 @@ struct PlayerState {
     last_pos: (f32, f32),
 }
 
+/// Test-only knobs of [`State`].
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestSeams {
+    /// Replaces [`MAX_EXTRA_NPCS`] while it is not 0.
+    cap: std::sync::atomic::AtomicUsize,
+}
+
 /// Per-character quest-map range state (`server.systems.quests.quest_map`).
 #[derive(Debug, Default)]
 pub struct State {
@@ -118,9 +129,31 @@ pub struct State {
     /// takes `players` only to snapshot / commit, releases it before any world call and never
     /// takes this lock from inside a world / spawner path.
     refreshing: Mutex<()>,
+    #[cfg(test)]
+    seams: TestSeams,
 }
 
 impl State {
+    /// The most marker NPCs one character streams ([`MAX_EXTRA_NPCS`]; tests lower it).
+    fn cap(&self) -> usize {
+        #[cfg(test)]
+        {
+            let lowered = self.seams.cap.load(std::sync::atomic::Ordering::Relaxed);
+            if lowered != 0 {
+                return lowered;
+            }
+        }
+        MAX_EXTRA_NPCS
+    }
+
+    /// Lowers [`State::cap`] (tests).
+    #[cfg(test)]
+    fn set_cap(&self, cap: usize) {
+        self.seams
+            .cap
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn range_of(&self, character_id: u32) -> Range {
         self.players
             .lock()
@@ -338,6 +371,7 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
         return 0;
     }
 
+    let cap = state.cap();
     let radius = range.radius();
     let radius2 = if radius.is_finite() {
         radius * radius
@@ -349,6 +383,7 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
         center: (pos.x, pos.y),
         radius,
         radius2,
+        placements: cap + SPARE_PLACEMENTS,
     };
     let mut set = CandidateSet {
         natural,
@@ -370,6 +405,8 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
     state.assert_unlocked();
     let mut dead: Vec<u32> = Vec::new();
     let mut removals: Vec<NpcRef> = Vec::new();
+    // The extras that stay valid, with their squared distance (see the selection below).
+    let mut kept: Vec<(u32, f32)> = Vec::new();
     for (id, stored) in extra.iter() {
         let current = world.object(*id).and_then(|o| o.as_npc().cloned());
         let same = current.as_ref().is_some_and(|npc| Arc::ptr_eq(npc, stored));
@@ -402,28 +439,41 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
         if d2 > radius2 || !npc.is_visible() {
             removals.push(npc);
             dead.push(*id);
+        } else {
+            kept.push((*id, d2));
+        }
+    }
+
+    // The streamed set is the `cap` nearest NPCs of the kept extras and the new candidates: a
+    // nearer candidate displaces the farthest extra, so a moving player, and the unlimited
+    // range that never leaves a radius, converge on the markers around the current position.
+    let cands: Vec<(u32, f32)> = set
+        .candidates
+        .iter()
+        .filter(|(id, _)| !extra.contains_key(*id))
+        .map(|(&id, &(d2, _))| (id, d2))
+        .collect();
+    let (displaced, to_add) = select_extras(cap, &kept, &cands);
+    for id in displaced {
+        if let Some(stored) = extra.get(&id) {
+            removals.push(stored.clone());
+            dead.push(id);
         }
     }
     for npc in removals {
         visibility::remove_visible_object(&world, &WorldObject::Npc(npc), player);
     }
 
-    // Adds: nearest first, bounded by the option cap.
+    // Adds: nearest first.
     let mut added: Vec<(u32, NpcRef)> = Vec::new();
-    if !range.is_default() {
+    if !to_add.is_empty() {
         #[cfg(test)]
         state.assert_unlocked();
-        let mut ordered: Vec<(f32, NpcRef)> = set.candidates.into_values().collect();
-        ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
         let ctx = server.view_ctx();
-        for (_, npc) in ordered {
-            if extra.len() + added.len() >= MAX_EXTRA_NPCS {
-                break;
-            }
-            let id = npc.obj_id;
-            if extra.contains_key(&id) {
+        for id in to_add {
+            let Some((_, npc)) = set.candidates.remove(&id) else {
                 continue;
-            }
+            };
             let obj = WorldObject::Npc(npc.clone());
             if world
                 .region_of(&obj)
@@ -452,10 +502,8 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
                         ps.extra.remove(id);
                     }
                 }
+                // `select_extras` keeps the kept extras plus the additions within the cap.
                 for (id, npc) in &added {
-                    if ps.extra.len() >= MAX_EXTRA_NPCS {
-                        break;
-                    }
                     ps.extra.entry(*id).or_insert_with(|| npc.clone());
                 }
                 ps.last_refresh = now;
@@ -475,11 +523,36 @@ fn refresh_player_locked(server: &GameServer, player: &PlayerRef, budget: i64) -
     set.spent
 }
 
+/// Which marker NPCs a player streams: the `cap` nearest of the extras that stay valid (`kept`)
+/// and the new candidates (`cands`), both as `(obj id, squared distance)`. Returns the kept
+/// extras a nearer candidate displaces (they are removed from the client) and the candidates to
+/// add, nearest first. Ties break by id, so the choice does not depend on map iteration order.
+fn select_extras(cap: usize, kept: &[(u32, f32)], cands: &[(u32, f32)]) -> (Vec<u32>, Vec<u32>) {
+    let mut ranked: Vec<(f32, u32, bool)> = kept
+        .iter()
+        .map(|&(id, d2)| (d2, id, true))
+        .chain(cands.iter().map(|&(id, d2)| (d2, id, false)))
+        .collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let mut displaced = Vec::new();
+    let mut add = Vec::new();
+    for (rank, (_, id, is_kept)) in ranked.into_iter().enumerate() {
+        match (rank < cap, is_kept) {
+            (true, false) => add.push(id),
+            (false, true) => displaced.push(id),
+            _ => {}
+        }
+    }
+    (displaced, add)
+}
+
 /// The player-centred query of the placement collector.
 struct MarkerQuery {
     center: (f32, f32),
     radius: f32,
     radius2: f32,
+    /// Placements to look at: the NPC cap plus [`SPARE_PLACEMENTS`].
+    placements: usize,
 }
 
 /// Candidate NPCs and the state shared while collecting them.
@@ -505,12 +578,15 @@ fn collect_from_spawners(
     server.systems.quests.quest_map.assert_unlocked();
     let residents = server.systems.npcs.spawns.resident_npcs(server);
     let npcs = &server.game_data.systems.npcs.npc;
+    // The player's own neighbourhood is left out of the placement list (the region path streams
+    // it), so its placements neither get prepared here nor count against the placement limit.
     for spawner in manager.quest_giver_spawners_near(
         server,
         query.center.0,
         query.center.1,
         query.radius,
-        MAX_SPAWNERS_PER_REFRESH,
+        &set.natural,
+        query.placements,
     ) {
         if set.spent < budget {
             let want = (budget - set.spent).clamp(0, 4);
@@ -1115,6 +1191,195 @@ mod tests {
         assert_eq!(
             client.drain_ops(),
             vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+    }
+
+    #[test]
+    fn select_extras_keeps_the_nearest_and_displaces_the_farthest() {
+        // The cap is full of far extras: a nearer candidate displaces the farthest one.
+        assert_eq!(
+            select_extras(2, &[(1, 900.0 * 900.0), (2, 800.0 * 800.0)], &[(3, 100.0)]),
+            (vec![1], vec![3])
+        );
+        // Room left: nothing is displaced and the candidates come nearest first.
+        assert_eq!(
+            select_extras(4, &[(1, 50.0)], &[(5, 30.0), (4, 10.0)]),
+            (vec![], vec![4, 5])
+        );
+        // A full cap without a nearer candidate changes nothing.
+        assert_eq!(
+            select_extras(2, &[(1, 1.0), (2, 2.0)], &[(3, 3.0)]),
+            (vec![], vec![])
+        );
+        // Ties break by id.
+        assert_eq!(
+            select_extras(1, &[(7, 10.0)], &[(6, 10.0), (8, 20.0)]),
+            (vec![7], vec![6])
+        );
+        // A zero cap streams nothing.
+        assert_eq!(
+            select_extras(0, &[(1, 1.0)], &[(2, 0.5)]),
+            (vec![1], vec![])
+        );
+    }
+
+    /// The NPC the world holds at `(x, y)` (the placements of these tests are far apart).
+    fn npc_at(world: &WorldInstance, x: f32, y: f32) -> NpcRef {
+        world
+            .all_npcs()
+            .into_iter()
+            .find(|n| {
+                let p = world.world_pos_rot(&WorldObject::Npc(n.clone()));
+                (p.x - x).abs() < 1.0 && (p.y - y).abs() < 1.0
+            })
+            .unwrap_or_else(|| panic!("no NPC at ({x}, {y})"))
+    }
+
+    /// Unlimited has no radius to drop far extras by, so with the cap full the nearest NPCs must
+    /// win: after the player walked, a nearer giver displaces the farthest streamed one.
+    #[tokio::test]
+    async fn unlimited_swaps_in_a_nearer_giver_when_the_cap_is_full() {
+        let server = server();
+        let quest_map = &server.systems.quests.quest_map;
+        quest_map.set_cap(2);
+        let m = manager(&server);
+        // 800 m and 900 m north of the player, and one far to the south-west.
+        for (x, y) in [(1000.0, 1900.0), (1000.0, 1800.0), (100.0, 100.0)] {
+            m.add_npc_spawner(&server, npc_def(QUEST_NPC, x, y))
+                .expect("giver placement");
+        }
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        let world = server.world.world(0).expect("main_world");
+
+        // The cap of 2 streams the two nearest of the three.
+        set_range(&server, &player, Range::Unlimited);
+        assert_eq!(
+            client.drain_ops().len(),
+            4,
+            "two givers, state + points each"
+        );
+        let far = npc_at(&world, 1000.0, 1900.0);
+        let mid = npc_at(&world, 1000.0, 1800.0);
+        let south_west = npc_at(&world, 100.0, 100.0);
+        assert_eq!(
+            quest_map.streamed_npc_ids(),
+            HashSet::from([far.obj_id, mid.obj_id])
+        );
+
+        // The player walks to the south-west: that giver is 412 m away now, the 900 m one is the
+        // farthest streamed. Nothing leaves a radius, only the selection can swap them.
+        player.data().unit.transform.set_xyz(200.0, 500.0, 100.0);
+        world.add_visible_object(&player, &server.view_ctx());
+        client.drain();
+        tick(&server);
+        let frames = client.drain();
+        assert_eq!(frames.len(), 3, "one removal, one add: {frames:?}");
+        assert_eq!(
+            frames[0],
+            ids_packet(&[far.obj_id]),
+            "the farthest extra is removed first"
+        );
+        assert_eq!(
+            frames[1..].iter().map(|f| f.0).collect::<Vec<_>>(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+        assert_eq!(
+            quest_map.streamed_npc_ids(),
+            HashSet::from([mid.obj_id, south_west.obj_id])
+        );
+    }
+
+    /// 15 x 14 placements 70 m apart, all outside the player's neighbourhood: all 200 are
+    /// streamed (the placement list used to stop at 192 placements, the player's own
+    /// neighbourhood included).
+    #[tokio::test]
+    async fn unlimited_streams_two_hundred_placements() {
+        let server = server();
+        let m = manager(&server);
+        for i in 0..200u32 {
+            let (col, row) = ((i % 15) as f32, (i / 15) as f32);
+            m.add_npc_spawner(
+                &server,
+                npc_def(QUEST_NPC, 400.0 + 70.0 * col, 400.0 + 70.0 * row),
+            )
+            .expect("giver placement");
+        }
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 100.0, 100.0),
+            5000,
+        );
+        client.drain();
+        let world = server.world.world(0).expect("main_world");
+
+        // A refresh prepares at most 32 NPCs: repeat until the set is stable.
+        set_range(&server, &player, Range::Unlimited);
+        for _ in 0..10 {
+            spawn_manager::advance_test_clock(REFRESH_INTERVAL);
+            tick(&server);
+        }
+        assert_eq!(world.all_npcs().len(), 200);
+        assert_eq!(
+            server.systems.quests.quest_map.streamed_npc_ids().len(),
+            200
+        );
+    }
+
+    /// The player's own neighbourhood is no marker source: its placements are neither prepared
+    /// for the option nor do they use up the placement limit (cap + spare) the far ones need.
+    #[tokio::test]
+    async fn natural_placements_do_not_use_up_the_placement_limit() {
+        let server = server();
+        let quest_map = &server.systems.quests.quest_map;
+        quest_map.set_cap(5); // 5 + SPARE_PLACEMENTS = 13 placements are looked at
+        let m = manager(&server);
+        // 20 placements inside the player's 5x5 regions (x, y < 256), 20 in a row far east.
+        for i in 0..20u32 {
+            let (col, row) = ((i % 5) as f32, (i / 5) as f32);
+            m.add_npc_spawner(
+                &server,
+                npc_def(QUEST_NPC, 40.0 + 40.0 * col, 40.0 + 40.0 * row),
+            )
+            .expect("natural placement");
+            m.add_npc_spawner(&server, npc_def(QUEST_NPC, 500.0 + 40.0 * i as f32, 100.0))
+                .expect("far placement");
+        }
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 100.0, 100.0),
+            5000,
+        );
+        client.drain();
+        let world = server.world.world(0).expect("main_world");
+
+        set_range(&server, &player, Range::Unlimited);
+        let x_of = |id: u32| {
+            let npc = world.npc(id).expect("a live NPC");
+            world.world_pos_rot(&WorldObject::Npc(npc)).x as i32
+        };
+        let mut streamed: Vec<i32> = quest_map.streamed_npc_ids().into_iter().map(x_of).collect();
+        streamed.sort_unstable();
+        assert_eq!(
+            streamed,
+            vec![500, 540, 580, 620, 660],
+            "the cap of 5, nearest"
+        );
+        let prepared: Vec<i32> = world.all_npcs().iter().map(|n| x_of(n.obj_id)).collect();
+        assert_eq!(prepared.len(), 13, "the limit of 13 placements, all far");
+        assert!(
+            prepared.iter().all(|&x| x >= 500),
+            "no placement of the player's own neighbourhood is prepared: {prepared:?}"
         );
     }
 }

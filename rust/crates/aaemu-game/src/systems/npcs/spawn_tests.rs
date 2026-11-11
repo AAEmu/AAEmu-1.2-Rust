@@ -2662,15 +2662,17 @@ async fn quest_giver_index_filters_placements_and_tracks_membership_changes() {
     let server = quest_server();
     let m = manager(&server);
 
+    let none = HashSet::new();
+
     // Nothing loaded yet: the lazily built index is empty.
     assert!(m
-        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 10)
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, &none, 10)
         .is_empty());
 
     m.add_npc_spawner(&server, npc_def(500, 1000.0, 1000.0))
         .unwrap();
     let ids: Vec<u32> = m
-        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 10)
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, &none, 10)
         .iter()
         .map(|s| s.unit_id)
         .collect();
@@ -2678,13 +2680,31 @@ async fn quest_giver_index_filters_placements_and_tracks_membership_changes() {
 
     // Radius and limit are applied before anything is spawned.
     assert!(m
-        .quest_giver_spawners_near(&server, 2000.0, 2000.0, 50.0, 10)
+        .quest_giver_spawners_near(&server, 2000.0, 2000.0, 50.0, &none, 10)
         .is_empty());
     assert_eq!(
-        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 0)
+        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, &none, 0)
             .len(),
         1
     );
+
+    // A region in `skip_regions` is left out (the caller's own neighbourhood).
+    let own_region = server
+        .world
+        .world(0)
+        .unwrap()
+        .region_by_pos(1000.0, 1000.0)
+        .expect("a region of the test world");
+    assert!(m
+        .quest_giver_spawners_near(
+            &server,
+            1000.0,
+            1000.0,
+            50.0,
+            &HashSet::from([own_region]),
+            10
+        )
+        .is_empty());
 }
 
 #[tokio::test]

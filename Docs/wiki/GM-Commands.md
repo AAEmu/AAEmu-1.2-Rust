@@ -267,7 +267,7 @@ spaces. Without trailing numbers it sends only the letter.
 
 | Command | What it does | Example |
 | --- | --- | --- |
-| `/questmap <100\|200\|300\|0>` | Sets the "Quest Details Map Display" range: quest giver markers up to 100/200/300 m, or 0 = unlimited (nearest 256 quest givers in the instance). The injected client driver sends it on world entry and when the option is saved; typing it also works. | `/questmap 300` |
+| `/questmap <100\|200\|300\|0>` | Sets the "Quest Details Map Display" range: quest giver markers up to 100/200/300 m, or 0 = unlimited (the 256 nearest quest givers in the instance; those already inside your normal view do not count). The injected client driver sends it on world entry and when the option is saved; typing it also works. | `/questmap 300` |
 
 ## Command behaviour every tester should know
 
