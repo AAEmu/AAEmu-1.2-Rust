@@ -97,10 +97,11 @@ else
 fi
 
 # The spoof check reads a debug line from the express-text handler, the aggro-link suite one
-# from the AI behaviors and the music suites the upload / save-notes lines (services::music,
-# skills::effects::special); give the game log those filters, then restart this lane's stack so the
+# from the AI behaviors, the music suites the upload / save-notes lines (services::music,
+# skills::effects::special) and the gimmick-contact suite the contact-cast line
+# (npcs::gimmick); give the game log those filters, then restart this lane's stack so the
 # filters and the patched config apply.
-export RUST_LOG="${RUST_LOG:-info},aaemu_game::systems::services::express_text=debug,aaemu_game::systems::ai::behaviors=debug,aaemu_game::systems::services::music=debug,aaemu_game::systems::skills::effects::special=debug"
+export RUST_LOG="${RUST_LOG:-info},aaemu_game::systems::services::express_text=debug,aaemu_game::systems::ai::behaviors=debug,aaemu_game::systems::services::music=debug,aaemu_game::systems::skills::effects::special=debug,aaemu_game::systems::npcs::gimmick=debug"
 "$REPO/Scripts/live-stack.sh" stop
 
 export AAEMU_VERIFY_GAME_LOG="$GAME_LOG"
