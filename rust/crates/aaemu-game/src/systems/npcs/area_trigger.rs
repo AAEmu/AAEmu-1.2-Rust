@@ -399,6 +399,25 @@ impl AreaTrigger {
         self.state().removed
     }
 
+    /// Whether the units the last update put inside the shape include a player that is still in
+    /// a world.
+    ///
+    /// A clout buff is permanent (`duration` 0) and is only taken off by `OnLeave`. A player who
+    /// teleports, respawns or changes instance leaves the owner's region neighbourhood before
+    /// the next tick, and the C# `HasPlayerActivity` gate then stopped ticking the trigger, so
+    /// the leave never ran: the peace clout buff 2149 (Nui statue marker) stayed on the unit and
+    /// every later cast was refused with `SkillReqFail` (requirement 25) for the rest of the
+    /// session. Such a tracked player keeps the trigger ticking until `UpdateUnits` releases it.
+    /// A player removed from the world (logout) is deliberately left cached so a reconnect with
+    /// the reused object id is compared by identity; units that cannot leave without player
+    /// activity (NPCs) keep the C# fast path.
+    pub fn tracks_player_in_world(&self, server: &GameServer) -> bool {
+        self.state()
+            .units
+            .iter()
+            .any(|u| u.as_player().is_some() && server.world.object(u.obj_id()).is_some())
+    }
+
     /// `UpdateUnits()`.
     fn update_units(self: &Arc<Self>, server: &GameServer) {
         if self.is_removed() {
@@ -616,7 +635,13 @@ impl AreaTriggerManager {
                     _ => false,
                 }
             });
-            if active {
+            // A tracked player is released on the next tick even when no player is near the
+            // owner any more (teleport / respawn / instance change); see
+            // `tracks_player_in_world`.
+            // A tracked player is released on the next tick even when no player is near the
+            // owner any more (teleport / respawn / instance change); see
+            // `tracks_player_in_world`.
+            if active || trigger.tracks_player_in_world(server) {
                 trigger.tick(server);
             }
         }
@@ -841,6 +866,85 @@ mod tests {
             &WorldObject::from(&doodad),
             &WorldObject::from(&inside)
         ));
+    }
+
+    /// A clout buff is permanent; a player who teleports out of the owner's region
+    /// neighbourhood (respawn, portal, instance change) must lose it even though no player is
+    /// near the owner any more, otherwise `skill_reqs` refuses every later cast with
+    /// `SkillReqFail` (buff 2149, requirement 25). The manager used to skip the trigger as soon
+    /// as `HasPlayerActivity` turned false, so `OnLeave` never ran.
+    #[tokio::test]
+    async fn a_player_that_teleports_out_of_the_neighbourhood_is_released() {
+        use crate::data::skills::{BuffKind, BuffTemplate as DataBuff};
+        use crate::systems::skills::data::BuffTemplate;
+        use crate::test_support::{spawn_player, test_character, TestClient};
+
+        const CLOUT_BUFF: u32 = 631;
+        let mut data = crate::data::GameData::empty();
+        data.systems.skills.add_buff(BuffTemplate {
+            id: CLOUT_BUFF,
+            kind: 1,
+            stack_rule: 1,
+            duration: 0,
+            ..Default::default()
+        });
+        data.skills
+            .buffs
+            .insert(CLOUT_BUFF, DataBuff::simple(CLOUT_BUFF, BuffKind::Good));
+        let server = Arc::new(crate::test_support::test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+
+        let world = server.world.world(0).unwrap();
+        let doodad = Entity::new(server.ids.object.get_next_id().unwrap(), Doodad::new(1));
+        {
+            let mut d = doodad.data();
+            d.transform.set_position(100.0, 100.0, 0.0, 0.0, 0.0, 0.0);
+            d.transform.instance_id = world.id;
+        }
+        let _ = world.spawn(&doodad, &server.view_ctx());
+        let client = TestClient::new(&server, 92, 1092);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(92, "Leaver", 105.0, 100.0),
+            0x920,
+        );
+        let trigger = Arc::new(AreaTrigger {
+            shape: Some(AreaShape {
+                id: 1000,
+                kind: AREA_SHAPE_SPHERE,
+                value1: 10.0,
+                value2: 0.0,
+                value3: 0.0,
+            }),
+            owner: Some(doodad.clone()),
+            caster: Some(WorldObject::from(&doodad)),
+            target_relation: skill_target_relation::ANY,
+            inside_buff_id: Some(CLOUT_BUFF),
+            ..Default::default()
+        });
+        add_area_trigger(&server, trigger.clone());
+        server.systems.npcs.area_triggers.tick(&server);
+        assert_eq!(player.data().unit.trigger_count(CLOUT_BUFF), 1);
+        assert!(
+            player.data().unit.buffs.check_buff(CLOUT_BUFF),
+            "the clout buff is applied while the player stands inside"
+        );
+
+        // Teleport 1.4 km away: the owner's region has no player activity any more.
+        player.data().unit.transform.set_xyz(1500.0, 100.0, 0.0);
+        let _ = world.add_visible_object(&player, &server.view_ctx());
+        assert!(!region_has_player_activity(&world, (1, 1)));
+        server.systems.npcs.area_triggers.tick(&server);
+        assert_eq!(player.data().unit.trigger_count(CLOUT_BUFF), 0);
+        assert!(
+            !player.data().unit.buffs.check_buff(CLOUT_BUFF),
+            "the permanent clout buff is released without nearby player activity"
+        );
+        // Nothing left to track: the inactive trigger costs nothing again.
+        assert!(!trigger.tracks_player_in_world(&server));
+        assert!(trigger.unit_ids().is_empty());
     }
 
     /// A visible doodad at (100, 100) with a sphere trigger (buff 631) over `count` NPCs
