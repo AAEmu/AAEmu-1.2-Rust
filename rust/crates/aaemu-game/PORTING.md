@@ -4799,16 +4799,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   / 0.27 / 0.15 m, z within 0.16 m): they show that five doodads stood there, not what the
   editor file contains. **All five old rows change template, 5064 -> 5072 / 5073** (the
   authored positions replace them), and the three switches, the two gates and the lake are
-  added. **Network:** the editor family id is
-  the doodad's identity (`Doodad::family_id`, spawn row `FamilyId`; the C# JSON model never had
-  it). A `DoodadFuncLogicFamilyProvider { family_id }` row names the **receiver** families of
-  the doodad's signal; a `DoodadFuncLogicFamilySubscriber { family_id }` row names the **source**
+  added. **Network:** the editor family id is the doodad's identity (`Doodad::family_id`, spawn
+  row `FamilyId`; the C# JSON model never had it). A `DoodadFuncLogicFamilyProvider { family_id }`
+  row names the **receiver** families of the doodad's signal; a `DoodadFuncLogicFamilySubscriber { family_id }` row names the **source**
   families its `DoodadFuncLogic` accepts (each subscribed family is one input, missing = false).
   **Inferred (no 1.2 server evidence):** that every other chain reads the two tables this way;
   only Sharpwind's graph closes (every id 50001-50008 has exactly one carrier, provider labels
   are receiver ids, subscriber labels are sender ids), and the template-level reading `main` used
-  (provider family == subscriber family) is incoherent for it. Thus 5064 (50002) and 5068 (50003) feed gate 5070 (50005), whose AND (delay 1 = 1 s) emits to
-  50006 (gate 5071) and 50007 (5072); gate 5071 ANDs 5069 (50004) with gate 5070 (50005) and
+  (provider family == subscriber family) is incoherent for it. Thus 5064 (50002) and 5068
+  (50003) feed gate 5070 (50005), whose AND (delay 1 = 1 s) emits to 50006 (gate 5071) and 50007
+  (5072); gate 5071 ANDs 5069 (50004) with gate 5070 (50005) and
   emits to 50001 (lake 5063) and 50008 (5073). A signal from the spawner's `RelatedIds` is an
   explicit authored route like a client wire and bypasses that subscriber source filter (the
   shipped rows of Howling Abyss, Howling Abyss 2 and Immortal Isle carry no `FamilyId`).
