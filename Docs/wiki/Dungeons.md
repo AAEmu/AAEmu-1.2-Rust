@@ -22,10 +22,19 @@ again to create a fresh run; all party bindings to the old run are removed toget
 | Palace Cellar | `/dungeon reset 170` |
 | Sharpwind Mines | `/dungeon reset 184` |
 
-Entry limits still apply to fresh runs. A character's first admission consumes one configured
-entry item and one attempt; returning to the same run does not charge again. Failed admission
-and full dungeons do not charge. Capacity includes players waiting while the dungeon loads.
-The existing entry policy permits three fresh runs per four-hour window for ordinary dungeons.
+Entry rules apply to fresh runs. A character's first admission consumes one configured entry
+item (unless `Dungeons.RequireEntryItems` is `false`) and records one attempt; returning to the
+same run does not charge again. Failed admission and full dungeons do not charge. Capacity
+includes players waiting while the dungeon loads.
+Whether a visit cap applies follows the era profile (`World.Profile`): the default `EuAuroria`
+profile has no cap, `EuLaunch` and `Kr12` keep the old AAEmu cap of three fresh runs per
+four-hour window for ordinary dungeons. `Dungeons.EntryLimit` overrides the profile and changes
+the count and the window; see [Dungeon entry rules](Working-with-the-Config.json-files-and-server-listings.md#dungeon-entry-rules).
+Five dungeon zone groups (55, 62, 64, 66 and the Library's 76 in the 1.2 data) have a
+`restore_item_time` of one hour: after leaving a run that consumed an entry item, one new run of
+the same zone group within that hour consumes no item (once per ticket, on every profile, no
+switch). A ticket whose entry never completed (loader aborted, admission withdrawn, run
+destroyed before arrival) is not lost.
 A queued admission already accepted counts as an attempt even if the player disconnects or
 leaves the party before loading finishes.
 Party membership is checked again when loading finishes; leaving or being kicked while queued

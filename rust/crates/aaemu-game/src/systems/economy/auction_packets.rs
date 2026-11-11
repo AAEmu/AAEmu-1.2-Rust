@@ -6,6 +6,7 @@
 use aaemu_commons::{Marshal, PacketStream};
 use chrono::{DateTime, Utc};
 
+use crate::data::features::Feature;
 use crate::error::Result;
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
@@ -19,7 +20,7 @@ use super::auction::{AuctionBid, AuctionLot, AuctionSearch, ClientAuctionLot};
 use super::error_message;
 use super::inventory;
 use super::item_handlers::{active, sync_client_packet};
-use super::store::{near_service_npc, SERVICE_RANGE};
+use super::store::{near_service, Service};
 
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSAuctionPostPacket>(LEVEL_PLAIN, cs::CSAuctionPostPacket);
@@ -34,17 +35,31 @@ pub fn register(reg: &mut PacketRegistry) {
 // C->S
 // ---------------------------------------------------------------------------------------------
 
-/// The auction house is only reachable at an auctioneer NPC: one of the packet's ids (or the
-/// NPC the player is interacting with) must be an NPC with the auctioneer flag within
-/// [`SERVICE_RANGE`]. The C# ignored both ids.
+/// The auction house is normally only reachable at an auctioneer: one of the packet's ids (or
+/// the object the player is interacting with) must be an NPC with the auctioneer flag within
+/// [`SERVICE_RANGE`](super::store::SERVICE_RANGE), or an auction doodad (the Fellowship
+/// Plaza's "Auctioneer/Warehouse") must be in range ([`near_service`]). With `hudAuctionButton`
+/// (feature bit 81) on, the 1.2 client's HUD button opens the auction window away from an
+/// auctioneer (`right_button_set.alb` `CreateAuctionToggleBtn` / `ToggleAuctionWindow`; owner
+/// recollection, 2026-11-11: the remote button was usable by everyone, not Patron-only; no 1.2
+/// server evidence), so the request is accepted without one; with the bit off the guard stays.
+/// The C# ignored both ids.
 fn at_auctioneer(server: &GameServer, p: &PlayerRef, id: u32, id2: u32) -> bool {
+    if server
+        .systems
+        .services
+        .features(server)
+        .check(Feature::HudAuctionButton)
+    {
+        return true;
+    }
     let interaction = p.data().unit.current_interaction_object;
     let ok = [id, id2, interaction]
         .into_iter()
-        .any(|npc| near_service_npc(server, p, npc, SERVICE_RANGE, |i| i.auctioneer));
+        .any(|obj| near_service(server, p, obj, Service::Auction));
     if !ok {
         tracing::warn!(
-            "{}: rejected auction request: no auctioneer NPC in range (ids {id}/{id2})",
+            "{}: rejected auction request: no auctioneer in range (ids {id}/{id2})",
             p.data().unit.name
         );
         inventory::send_error_message(p, error_message::AUC_AUCTIONEER_TOO_FAR_AWAY, 0, true);

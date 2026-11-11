@@ -19,14 +19,16 @@ use crate::data::client_files::ClientFileManager;
 use crate::data::GameData;
 use crate::models::npc::Npc;
 use crate::server::GameServer;
+use crate::systems::ai::behaviors;
 use crate::systems::ai::collision::objects::{apply_doodads, collision_flags, DoodadInfo};
 use crate::systems::ai::collision::terrain::tests::Plane;
+use crate::systems::ai::framework::{AiCtx, AiKind, BehaviorKind, NpcAi};
 use crate::systems::npcs::heightmap::{
     HeightmapConfig, HeightmapWorlds, ReferenceHeightAi, WorldHeightmap, CELL_HMAP_RESOLUTION,
 };
 use crate::systems::skills::controllers::Vec3;
 use crate::test_support::{test_server_with, TEST_ZONE};
-use crate::world::Entity;
+use crate::world::{Entity, WorldObject};
 
 use super::reference_height_in;
 
@@ -36,11 +38,24 @@ const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usiz
 
 /// A flat heightmap at `surface` metres for the test zone's cell (0, 0).
 fn heightmaps(surface: f32) -> Arc<HeightmapWorlds> {
-    heightmaps_with_holes(surface, &[])
+    heightmaps_with_mode(surface, false)
+}
+
+/// [`heightmaps`] with `World.GeoDataMode` (the navmesh heights first, as in production).
+fn heightmaps_with_mode(surface: f32, geo_data_mode: bool) -> Arc<HeightmapWorlds> {
+    heightmaps_with_holes_mode(surface, &[], geo_data_mode)
 }
 
 /// [`heightmaps`] with terrain holes at the given grid points of cell (0, 0).
 fn heightmaps_with_holes(surface: f32, holes: &[(i32, i32)]) -> Arc<HeightmapWorlds> {
+    heightmaps_with_holes_mode(surface, holes, false)
+}
+
+fn heightmaps_with_holes_mode(
+    surface: f32,
+    holes: &[(i32, i32)],
+    geo_data_mode: bool,
+) -> Arc<HeightmapWorlds> {
     let t = WorldHeightmap::with_size(0, "main_world", 2, 2, COEF);
     let value = (f64::from(surface) * COEF) as u16;
     assert!(t.insert_cell_with_holes(0, 0, vec![value; CELL_POINTS], holes));
@@ -50,6 +65,7 @@ fn heightmaps_with_holes(surface: f32, holes: &[(i32, i32)]) -> Arc<HeightmapWor
         HashMap::from([(TEST_ZONE, 0)]),
         HeightmapConfig {
             heightmaps_enable: true,
+            geo_data_mode,
             ..Default::default()
         },
     ))
@@ -722,4 +738,208 @@ mod displaced {
         assert!(p.x > 495.0, "teleported next to the target: {p:?}");
         assert!((p.z - 193.0).abs() <= 1.0, "dropped to the terrain: {p:?}");
     }
+}
+
+// --- the alert phase's `phase_dragon_ground` pipe (`CheckPipeName`) ---
+
+/// A synthetic navmesh at `nav_z` over the test zone's cell (0, 0).
+struct NavFiles(HashMap<String, Vec<u8>>);
+
+impl crate::systems::ai::geodata::bai::BaiFiles for NavFiles {
+    fn files_in_directory(&self, dir: &str, pattern: &str) -> Vec<String> {
+        let prefix = pattern.split('*').next().unwrap_or("");
+        let mut files: Vec<_> = self
+            .0
+            .keys()
+            .filter(|p| {
+                p.starts_with(dir) && p.rsplit('/').next().unwrap_or("").starts_with(prefix)
+            })
+            .cloned()
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn file_exists(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    fn read_file(&self, name: &str) -> Option<Vec<u8>> {
+        self.0.get(name).cloned()
+    }
+}
+
+/// [`cave_server`] with a navmesh plane at `nav_z` over the test cell and `GeoDataMode` on (as
+/// in production). The 1.2 navmesh is a walking-surface graph that sits above the terrain
+/// (measured navmesh minus raw heightmap: 2.8 m at the Dewstone Nui statue, 4.9 m south of
+/// Vedisa, 4.5-5.7 m at the Cloaked Forest flesh-golem camp); this is the separation the alert
+/// pipe used to stand walkers on.
+fn navmesh_server(surface: f32, nav_z: f32) -> GameServer {
+    use crate::systems::ai::geodata::bai::test_files::net_mission;
+    use crate::systems::ai::geodata::bai::UsedAreaNames;
+    use crate::systems::ai::geodata::manager::AiGeoData;
+
+    let server = test_server_with(GameData::empty());
+    server
+        .systems
+        .npcs
+        .heightmaps
+        .install(heightmaps_with_mode(surface, true));
+    server.config.update(|c| c.world.geo_data_mode = true);
+    let files = NavFiles(HashMap::from([(
+        "game/worlds/main_world/paths/001_001/netmission0.bai".into(),
+        net_mission(&[(1, [500.0, 500.0, nav_z])], &[]),
+    )]));
+    server.systems.ai.geodata.install(Arc::new(AiGeoData::new(
+        &crate::data::world_templates::WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
+        true,
+        Arc::new(files),
+        Arc::new(UsedAreaNames::default()),
+        None,
+    )));
+    server
+}
+
+/// An NPC with an AI, spawned in instance 0.
+fn ai_npc(server: &GameServer, obj_id: u32, z: f32, can_fly: bool) -> crate::world::NpcRef {
+    let mut n = Npc::new(1);
+    n.unit.hp = 1000;
+    n.unit.max_hp = 1000;
+    n.unit.transform.set_xyz(500.0, 500.0, z);
+    n.unit.transform.zone_id = TEST_ZONE;
+    n.spawner_z = Some(z);
+    n.can_fly = can_fly;
+    let npc = Entity::new(obj_id, n);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&npc, &server.view_ctx());
+    npc
+}
+
+/// `AlertBehavior.Enter` twice: the first enter arms the behavior's `phase_dragon_ground` pipe,
+/// the second runs `CheckPipeName` with it (the C# field persists across enters).
+fn enter_alert_twice(server: &GameServer, npc: &crate::world::NpcRef) {
+    let mut ai = NpcAi::new(AiKind::Roaming, npc);
+    let mut c = AiCtx {
+        server,
+        npc: npc.clone(),
+        obj: WorldObject::from(npc),
+        ai: &mut ai,
+    };
+    behaviors::enter(&mut c, BehaviorKind::Alert);
+    behaviors::exit(&mut c, BehaviorKind::Alert);
+    behaviors::enter(&mut c, BehaviorKind::Alert);
+}
+
+/// The Z of every `SCOneUnitMovementPacket` in `frames` (the same wire bytes the client reads).
+fn movement_zs(frames: &[(u16, Vec<u8>)]) -> Vec<f32> {
+    use crate::opcodes::sc;
+    let mut zs = Vec::new();
+    for (op, body) in frames {
+        if *op != sc::SCOneUnitMovementPacket || body.get(3) != Some(&1) {
+            continue;
+        }
+        let Some(&flags) = body.get(8) else { continue };
+        let offset = 9 + usize::from(flags & 0x10 != 0) * 5;
+        let Some(bytes) = body.get(offset..offset + 9).and_then(|b| b.try_into().ok()) else {
+            continue;
+        };
+        zs.push(aaemu_commons::helpers::decode_position(&bytes).2);
+    }
+    zs
+}
+
+#[tokio::test]
+async fn alert_grounds_a_walker_on_the_collision_floor_not_the_navmesh() {
+    // Terrain at 100 m, navmesh 8 m above it (the measured offsets are 2.8-11 m).
+    let server = navmesh_server(100.0, 108.0);
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1);
+    let player = crate::test_support::spawn_player(
+        &server,
+        &client,
+        crate::test_support::test_character(1, "Watcher", 520.0, 500.0),
+        0x100,
+    );
+    let _ = player;
+    let npc = ai_npc(&server, 0x200, 100.0, false);
+    enter_alert_twice(&server, &npc);
+    let z = npc.data().unit.transform.z;
+    assert!(
+        (z - 100.0).abs() < 0.1,
+        "the alert lifted the walker onto the navmesh: {z}"
+    );
+    // The alert's `StopMovement` is what the client sees; both enters must carry the ground Z
+    // (the second one is the one after `CheckPipeName`).
+    let zs = movement_zs(&client.drain());
+    assert_eq!(zs.len(), 2, "two alert StopMovement packets: {zs:?}");
+    for z in zs {
+        assert!((z - 100.0).abs() < 0.1, "broadcast z {z}");
+    }
+}
+
+#[tokio::test]
+async fn alert_keeps_a_walker_on_the_structure_floor_it_stands_on() {
+    // Terrain at 100 m, a structure floor at 105 m under the NPC, navmesh at 108 m.
+    let server = navmesh_server(100.0, 108.0);
+    add_cave_floor(&server, 105.0);
+    let npc = ai_npc(&server, 0x200, 105.0, false);
+    enter_alert_twice(&server, &npc);
+    let z = npc.data().unit.transform.z;
+    assert!(
+        (z - 105.0).abs() < 0.01,
+        "the alert dropped the walker off its floor: {z}"
+    );
+}
+
+#[tokio::test]
+async fn alert_keeps_a_flying_npc_on_the_navigation_height() {
+    let server = navmesh_server(100.0, 108.0);
+    let npc = ai_npc(&server, 0x200, 100.0, true);
+    enter_alert_twice(&server, &npc);
+    let z = npc.data().unit.transform.z;
+    assert!(
+        (z - 108.0).abs() < 0.01,
+        "a flyer keeps the navigation height: {z}"
+    );
+}
+
+#[tokio::test]
+async fn chase_steps_towards_a_higher_or_lower_target_stay_on_the_ground() {
+    let server = cave_server(100.0);
+    let npc = ai_npc(&server, 0x200, 100.0, false);
+    let ai = super::MoveAi {
+        hold_or_idle: false,
+    };
+    // A target 30 m above: the step's 3D interpolation must not lift the walker.
+    super::move_towards(
+        &server,
+        &npc,
+        Some(ai),
+        Vec3::new(520.0, 500.0, 130.0),
+        1.0,
+        4,
+        1.0,
+    );
+    let p = npc.data().unit.transform;
+    assert!(
+        (p.z - 100.0).abs() < 0.1,
+        "lifted towards a higher target: {p:?}"
+    );
+    // A target 40 m below: still walks on the ground under its own column.
+    super::move_towards(
+        &server,
+        &npc,
+        Some(ai),
+        Vec3::new(540.0, 500.0, 60.0),
+        1.0,
+        4,
+        1.0,
+    );
+    let p = npc.data().unit.transform;
+    assert!(
+        (p.z - 100.0).abs() < 0.1,
+        "sunk towards a lower target: {p:?}"
+    );
 }

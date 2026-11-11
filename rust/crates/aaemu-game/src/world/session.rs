@@ -245,6 +245,18 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
     );
     let obj = WorldObject::from(p);
     let old = p.data().unit.transform;
+    // A server-forced move to another instance is a leave: an item-paid dungeon visit starts its
+    // `indun_zones.restore_item_time` re-entry window (exit doors / disconnect / kicks note it
+    // themselves; this covers resurrection to an open-world return portal and the like).
+    if old.instance_id != destination.instance_id {
+        if let Some(dungeon) = server.systems.instances.dungeon_of_world(old.instance_id) {
+            server.systems.instances.indun.note_entry_item_leave(
+                p.character_id,
+                dungeon.zone_group_id(),
+                dungeon.indun_zone.restore_item_time,
+            );
+        }
+    }
     // The C# `new Transform(character, null, ...)` has no parent.
     if let Some(old_world) = server.world.world_of(&obj) {
         old_world.detach_child(&obj);
@@ -1508,6 +1520,19 @@ pub async fn send_chat_message(
                 message,
                 ability,
                 language_type,
+            );
+        }
+        chat_type::PERFORM => {
+            // `chat_commands` row 14 (Korean "연주", English "RP") lets the 1.2 client send type
+            // 13, but the client's chat display (`chat_msg_event.alb`, function 20: its channel
+            // comparison chain; the constants are in `baselib.alb`) has no branch for it: it
+            // logs "Unknown chat channel: 13" and shows nothing. A broadcast would have no
+            // visible recipient, so the message is dropped with a warning (no reply to the
+            // sender, as for every other unsupported type).
+            tracing::warn!(
+                "Dropping chat type {} (performance / RP) from {}: the 1.2 client has no display channel for type 13",
+                chat,
+                sender.name
             );
         }
         other => tracing::warn!("Unsupported chat type {other} from {}", sender.name),
