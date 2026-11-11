@@ -1392,4 +1392,32 @@ mod tests {
         assert!(l.iter().all(Option::is_some));
         assert!(l.len() > 10);
     }
+
+    /// Sharpwind's arrival point is the start pool (the green portal above it), not the
+    /// end-of-run exit 80 m above: the instance teleport and the "Revive at the entrance"
+    /// resurrection both use this row.
+    #[test]
+    fn shipped_sharpwind_arrival_point_is_the_start_pool() {
+        let text = decode_text(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("app/Data/Worlds/world_spawns.json"),
+            )
+            .expect("shipped world_spawns.json"),
+        );
+        let l = parse_world_spawns(&text).expect("shipped world_spawns.json must parse");
+        let sharpwind = l
+            .iter()
+            .flatten()
+            .find(|l| l.name.as_deref() == Some("instance_cuttingwind_deadmine"))
+            .and_then(|l| l.spawn_position)
+            .expect("Sharpwind spawn row");
+        assert_eq!(
+            (sharpwind.zone_id, sharpwind.x, sharpwind.y, sharpwind.z),
+            (262, 739.4, 326.7, 166.2),
+            "the arrival is the pool's green portal (doodad 5723 at 739.4 / 326.7 / 166.2)"
+        );
+        // The old row was the upper exit (doodad 5723 at 804.1 / 327.7 / 248.1).
+        assert!(sharpwind.z < 200.0);
+    }
 }

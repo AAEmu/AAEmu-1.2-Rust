@@ -230,12 +230,27 @@ pub fn use_func(
             tracing::trace!("{} next phase {next_phase}", t.func_type());
             set_to_next_phase(ctx, is_player(caster) && next_phase > 0);
         }
+        // --- area triggers ---
+        // `doodad_func_area_triggers`: the doodad advances when a unit enters (or leaves) the
+        // authored area. The 1.2 world server gets the edge from the zone relay; here the
+        // `SphereDoodadInteract` sphere (`sphere_area_fill.json`) is the only area source and
+        // it casts its skill on the doodads inside that area (see `quests::spheres`). The
+        // func itself is the marker: a player-triggered use on an enter row advances the
+        // phase (Sharpwind's Derelict Bridge: rail_a -> rail_a_broken, 13147 -> 13148).
+        // C# only logged, so the bridge never gave way.
+        F::AreaTrigger(f) => {
+            tracing::trace!(
+                "DoodadFuncAreaTrigger, npc {}, is_enter {}",
+                f.npc_id,
+                f.is_enter
+            );
+            set_to_next_phase(ctx, is_player(caster) && f.is_enter && next_phase > 0);
+        }
         // --- C# stubs (logging only) ---
         // A phase-func contribution for the crime system (`social/bridges.rs`); the `Use`
         // arm has nothing to answer.
         F::EvidenceItemLoot(_) => tracing::trace!("DoodadFuncEvidenceItemLoot"),
-        F::AreaTrigger(_)
-        | F::AuctionUi(_)
+        F::AuctionUi(_)
         | F::BankUi(_)
         | F::Bubble(_)
         | F::Climb(_)

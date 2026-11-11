@@ -406,6 +406,384 @@ async fn npc_spawn_death_despawn_respawn_timing() {
     drop(player);
 }
 
+/// A server whose spawner template 10 (NPC 500) is authored `npc_spawners.save_indun = 't'`.
+fn save_indun_server() -> Arc<GameServer> {
+    let mut data = GameData::empty();
+    let mut t10 = template(10, 1);
+    t10.save_indun = true;
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![template(1, 1), t10],
+        vec![member(1, 1, 1), member(100, 10, 500)],
+    )
+    .unwrap();
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    server
+}
+
+/// A player standing in the world instance `world` (any instance, not just 0) at `(x, y)`.
+fn spawn_player_in(
+    server: &Arc<GameServer>,
+    world: &Arc<WorldInstance>,
+    client: &TestClient,
+    (x, y): (f32, f32),
+) -> PlayerRef {
+    let mut character = test_character(1, "P", x, y);
+    character.obj_id = 5000;
+    let player = Player::new(character, client.conn.handle());
+    server.world.try_add_character(&player);
+    world.spawn(&player, &server.view_ctx());
+    player
+}
+
+/// `npc_spawners.save_indun = 't'` (the authored dungeon spawners, e.g. Sharpwind's slimes):
+/// inside a live dungeon a dead member stays dead for the run - no respawn deadline and no
+/// periodic refill. The dungeon is a *system* one, which the one-run rule for the un-authored
+/// placements leaves alone, so only the authored flag can freeze the placement here.
+#[tokio::test]
+async fn save_indun_spawner_does_not_respawn_a_dead_member() {
+    let server = save_indun_server();
+    let world = dungeon_world(&server, 100, true, false);
+    let m = server.systems.npcs.spawns.get_or_create(&world);
+    assert_eq!(
+        m.add_npc_spawner(&server, npc_def(500, 500.0, 500.0)),
+        Ok(1)
+    );
+    let spawner = only_spawner(&m);
+    assert!(spawner.template().unwrap().save_indun);
+
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player_in(&server, &world, &client, (510.0, 500.0));
+    spawn_manager::active_region_tick(&server);
+    let npcs = world.all_npcs();
+    assert_eq!(npcs.len(), 1);
+    let npc = npcs[0].clone();
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &npc);
+    assert!(
+        m.pending_respawns().is_empty(),
+        "save_indun must not schedule a respawn"
+    );
+    assert!(spawner.saved_death());
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawn_manager::active_region_tick(&server);
+    assert!(
+        !world
+            .all_npcs()
+            .iter()
+            .any(|n| !n.data().unit.is_dead() && n.data().unit.template_id == 500),
+        "the periodic refill must not resurrect a save_indun member"
+    );
+
+    advance(20);
+    m.check_respawns_tick(&server);
+    spawn_manager::active_region_tick(&server);
+    spawner.do_spawn(&server);
+    assert!(
+        !world.all_npcs().iter().any(|n| !n.data().unit.is_dead()),
+        "a direct fill must stay frozen too"
+    );
+    drop(player);
+}
+
+/// The authored `save_indun` means "save in dungeon": in the open world (no `Dungeon`, so no
+/// run) the member respawns as usual. A quest NPC whose only spawner row is `'t'` (the
+/// Privateer Lieutenant / Quartermaster, Irene Royster) must not be gone until a restart.
+#[tokio::test]
+async fn save_indun_spawner_still_respawns_outside_a_dungeon() {
+    let server = save_indun_server();
+    let m = manager(&server);
+    assert_eq!(
+        m.add_npc_spawner(&server, npc_def(500, 500.0, 500.0)),
+        Ok(1)
+    );
+    let spawner = only_spawner(&m);
+    assert!(spawner.template().unwrap().save_indun);
+
+    let client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(&server, &client, test_character(1, "P", 510.0, 500.0), 5000);
+    spawn_manager::active_region_tick(&server);
+    let world = server.world.world(0).unwrap();
+    let npc = world.all_npcs().first().cloned().expect("spawned");
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &npc);
+    assert_eq!(
+        m.pending_respawns().len(),
+        1,
+        "outside a dungeon save_indun keeps the respawn deadline"
+    );
+    assert!(!spawner.saved_death());
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawn_manager::active_region_tick(&server);
+    assert!(
+        world
+            .all_npcs()
+            .iter()
+            .any(|n| !n.data().unit.is_dead() && n.data().unit.template_id == 500),
+        "the open-world member respawns"
+    );
+}
+
+/// A fresh world instance `id` on `server` with a registered live `Dungeon` (`is_system` /
+/// `client_driven` as given): the runtime answer the one-run freeze asks for.
+fn dungeon_world(
+    server: &Arc<GameServer>,
+    id: u32,
+    is_system: bool,
+    client_driven: bool,
+) -> Arc<WorldInstance> {
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_id(0)
+        .unwrap()
+        .clone();
+    let world = server.world.create_world_instance(Arc::new(template), id);
+    crate::systems::instances::dungeon::register_test_dungeon(
+        server,
+        &world,
+        is_system,
+        client_driven,
+    );
+    world
+}
+
+/// [`server`] with a fresh [`dungeon_world`]. The placement uses template 10 (`save_indun =
+/// 'f'`), so only the run kind decides.
+fn instance_server(
+    id: u32,
+    is_system: bool,
+    client_driven: bool,
+) -> (Arc<GameServer>, Arc<WorldInstance>) {
+    let server = server();
+    let world = dungeon_world(&server, id, is_system, client_driven);
+    (server, world)
+}
+
+/// Spawns NPC 500 of a fresh spawn-file placement in `world` and returns (manager, spawner, npc).
+fn spawn_one_placement(
+    server: &Arc<GameServer>,
+    world: &Arc<WorldInstance>,
+) -> (Arc<SpawnManager>, Arc<NpcSpawner>, NpcRef) {
+    let m = server.systems.npcs.spawns.get_or_create(world);
+    assert_eq!(m.add_npc_spawner(server, npc_def(500, 500.0, 500.0)), Ok(1));
+    let spawner = only_spawner(&m);
+    assert!(spawner.is_placement());
+    spawner.do_spawn(server);
+    let npc = world.all_npcs().first().cloned().expect("spawned");
+    (m, spawner, npc)
+}
+
+/// Spawns NPC 500 in `world`, kills it and returns (manager, spawner).
+fn kill_one_placement(
+    server: &Arc<GameServer>,
+    world: &Arc<WorldInstance>,
+) -> (Arc<SpawnManager>, Arc<NpcSpawner>) {
+    let (m, spawner, npc) = spawn_one_placement(server, world);
+    assert!(!spawner.template().unwrap().save_indun);
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(server, &npc);
+    (m, spawner)
+}
+
+/// A spawn-file placement inside a per-run dungeon stays dead even without `save_indun` (e.g.
+/// Sharpwind's Blackbeard assassin 11572, whose only spawner row is `save_indun = 'f'`): a 1.2
+/// dungeon run is one run, so its trash and bosses never respawn.
+#[tokio::test]
+async fn instance_placement_without_save_indun_stays_dead() {
+    let (server, world) = instance_server(100, false, false);
+    let (m, spawner) = kill_one_placement(&server, &world);
+    assert!(
+        m.pending_respawns().is_empty(),
+        "a dungeon-run placement must not schedule a respawn"
+    );
+    assert!(spawner.saved_death());
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawner.do_spawn(&server);
+    assert!(
+        !world.all_npcs().iter().any(|n| !n.data().unit.is_dead()),
+        "neither the timer nor a refill may resurrect it"
+    );
+}
+
+/// A system / persistent instance (Mirage Isle, the Library wings, channels) keeps its normal
+/// respawn rules: it is not a one-run dungeon copy.
+#[tokio::test]
+async fn system_instance_placement_still_respawns() {
+    let (server, world) = instance_server(101, true, false);
+    let (m, spawner) = kill_one_placement(&server, &world);
+    assert_eq!(
+        m.pending_respawns().len(),
+        1,
+        "a system instance placement keeps its respawn deadline"
+    );
+    assert!(!spawner.saved_death());
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawner.do_spawn(&server);
+    assert!(
+        world
+            .all_npcs()
+            .iter()
+            .any(|n| !n.data().unit.is_dead() && n.data().unit.template_id == 500),
+        "the system instance must respawn the NPC"
+    );
+}
+
+/// The client-driven prologue is a scripted solo instance, not a normal party dungeon run: its
+/// placements keep their respawn rules too.
+#[tokio::test]
+async fn client_driven_instance_placement_still_respawns() {
+    let (server, world) = instance_server(102, false, true);
+    let (m, spawner) = kill_one_placement(&server, &world);
+    assert_eq!(
+        m.pending_respawns().len(),
+        1,
+        "the prologue keeps its respawn deadline"
+    );
+    assert!(!spawner.saved_death());
+}
+
+/// A scripted removal of a living NPC that finished its walk (`Simulation.StopMove` ->
+/// `despawn_with_respawn`) is not a death: the placement of a per-run dungeon keeps its respawn.
+#[tokio::test]
+async fn scripted_walk_removal_in_a_dungeon_keeps_the_respawn() {
+    let (server, world) = instance_server(100, false, false);
+    let (m, spawner, npc) = spawn_one_placement(&server, &world);
+    spawner.despawn_with_respawn(&server, &npc);
+    assert!(!spawner.saved_death());
+    assert_eq!(
+        m.pending_respawns().len(),
+        1,
+        "a living NPC that walked off is respawned"
+    );
+}
+
+/// `KillNpcWithoutCorpse` claims the NPC's life (`scripted_removed`) before it removes it, and
+/// counts as a kill for the monster hunt: inside a per-run dungeon that kill is final.
+#[tokio::test]
+async fn claimed_scripted_removal_in_a_dungeon_freezes_the_placement() {
+    let (server, world) = instance_server(100, false, false);
+    let (m, spawner, npc) = spawn_one_placement(&server, &world);
+    assert!(crate::systems::npcs::npc::death::claim_scripted_removal(
+        &npc
+    ));
+    spawner.despawn_with_respawn(&server, &npc);
+    assert!(spawner.saved_death());
+    assert!(
+        m.pending_respawns().is_empty(),
+        "a scripted kill in a dungeon run schedules no respawn"
+    );
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawner.do_spawn(&server);
+    assert!(
+        world.all_npcs().is_empty(),
+        "neither the timer nor a refill brings it back"
+    );
+}
+
+/// The scripted-removal path keeps the dungeon-only rule of the authored `save_indun`: outside a
+/// dungeon the claimed removal of such an NPC is respawned as usual.
+#[tokio::test]
+async fn claimed_scripted_removal_of_a_save_indun_npc_outside_a_dungeon_respawns() {
+    let server = save_indun_server();
+    let world = server.world.world(0).unwrap();
+    let (m, spawner, npc) = spawn_one_placement(&server, &world);
+    assert!(spawner.template().unwrap().save_indun);
+    assert!(crate::systems::npcs::npc::death::claim_scripted_removal(
+        &npc
+    ));
+    spawner.despawn_with_respawn(&server, &npc);
+    assert!(!spawner.saved_death());
+    assert_eq!(
+        m.pending_respawns().len(),
+        1,
+        "the open world has no run to freeze"
+    );
+}
+
+/// A frozen placement keeps its survivors: when the players leave, the distance reclaim of the
+/// cold placement must not remove the living members of a placement one member of which died
+/// (nothing refills a frozen placement, so the room would stay empty for the rest of the run).
+#[tokio::test]
+async fn frozen_placement_survivors_are_not_reclaimed_when_the_players_leave() {
+    let mut t = template(10, 3);
+    t.min_population = 3;
+    let server = activation_server(t);
+    let world = dungeon_world(&server, 100, false, false);
+    let m = server.systems.npcs.spawns.get_or_create(&world);
+    let mut def = npc_def(500, 100.0, 100.0);
+    def.count = 3;
+    assert_eq!(m.add_npc_spawner(&server, def), Ok(1));
+    let spawner = only_spawner(&m);
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player_in(&server, &world, &client, (100.0, 100.0));
+    let living = || {
+        world
+            .all_npcs()
+            .iter()
+            .filter(|n| !n.data().unit.is_dead())
+            .count()
+    };
+
+    assert_eq!(activate(&server).created, 3);
+    assert_eq!(living(), 3);
+
+    // One member dies: the placement is frozen for the run, its two survivors stay.
+    let dead = world.all_npcs().first().cloned().expect("spawned");
+    {
+        let mut d = dead.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &dead);
+    assert!(spawner.saved_death());
+    assert_eq!(living(), 2);
+
+    // The player walks away and the retention interval (60 s) passes.
+    player.data().unit.transform.set_xyz(1200.0, 1200.0, 100.0);
+    world.add_visible_object(&player, &server.view_ctx());
+    activate(&server); // books the stable countdown
+    advance(60);
+    let stats = activate(&server);
+    assert_eq!(stats.reclaimed, 0, "a frozen placement is never reclaimed");
+    m.check_respawns_tick(&server);
+    assert_eq!(
+        living(),
+        2,
+        "the survivors are still alive after the retention"
+    );
+
+    // Coming back finds them where they were; nothing is refilled or duplicated.
+    player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
+    world.add_visible_object(&player, &server.view_ctx());
+    let stats = activate(&server);
+    assert_eq!(stats.created, 0, "the frozen placement is not refilled");
+    assert_eq!(living(), 2);
+}
+
 #[tokio::test]
 async fn fully_looted_corpse_uses_shortened_deadline_and_respawn_keeps_its_own_timer() {
     use crate::data::items::ITEM_COINS;
