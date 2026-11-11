@@ -7968,9 +7968,11 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   because object ids are reused), so the Peace lockdown, the no-PvP instance rule, the siege
   hostility rule and crime evidence apply to a thrown bomb, and `credited_player` gives the
   thrower the tagging, kill experience, loot, quest events and PvP kill credit of a hit or kill
-  by the gimmick (a mate / slave keeps its own credit rules). The gimmick stays the cast source
-  (skill 13210 needs a dead source) and the origin of every packet, and a gimmick caster has no
-  skill cooldown or global cooldown (a rolling gimmick hits every unit it touches).
+  by the gimmick (a mate / slave keeps its own credit rules). As for a mate or slave, a gimmick
+  never damages the character it acts for (the own-unit rule of `can_attack`). The gimmick stays
+  the cast source (skill 13210 needs a dead source) and the origin of every packet, and a
+  gimmick caster has no skill cooldown or global cooldown (a rolling gimmick hits every unit it
+  touches).
   **Inferred (no 1.2 server evidence):** this attribution (the 1.2 C# cast the delayed skill
   from the spawner unit). Not covered: the home-zone protection reads the casting *player*
   itself, so it still skips a gimmick hit; the PvP assist history, weapon durability and the NPC

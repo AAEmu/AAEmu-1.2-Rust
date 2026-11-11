@@ -1059,6 +1059,16 @@ mod tests {
         assert!(can_attack(&server, &tbomb, &tvictim));
         assert!(!protected_from(&server, &tbomb, &tvictim));
 
+        // As for a mate or slave, never the character it acts for, whatever the faction relation
+        // says (the own-unit rule of `can_attack`): a gimmick of the hostile side 109 still
+        // cannot hurt its own thrower (side 101).
+        let turncoat = gimmick_of(&server, 0x304, conflict_thrower.obj_id, 109);
+        assert!(!can_attack(
+            &server,
+            &Target::Obj(WorldObject::from(&turncoat)),
+            &obj_target(&conflict_thrower)
+        ));
+
         // No owning character (the spawner is gone): the faction decision alone, as before.
         let orphan = gimmick_of(&server, 0x303, 0x7777, 101);
         assert!(can_attack(
