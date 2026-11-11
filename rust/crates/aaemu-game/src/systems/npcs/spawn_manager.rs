@@ -853,9 +853,12 @@ pub struct LoadStats {
     /// Generated ("fake") spawner templates (the generated spawner is stored too, unlike the C#).
     pub npc_fake_spawners: usize,
     pub npc_event_spawners: usize,
-    /// Plain rows that would have expanded into an event-only (`npc_spawners.activation_state =
-    /// 'f'`) or cutscene-only spawner and no longer do (see [`spawner_starts_active`]).
+    /// Plain rows that skipped a spawner with `npc_spawners.activation_state = 'f'` in a dungeon
+    /// instance (see [`spawner_skip`]).
     pub npc_event_only_spawners_skipped: usize,
+    /// Plain rows that skipped a category-0 `연출` cutscene spawner (any world; see
+    /// [`spawner_skip`]).
+    pub npc_cutscene_spawners_skipped: usize,
     pub tower_def_spawners: usize,
     pub doodad_files: usize,
     pub doodad_entries: usize,
@@ -1035,29 +1038,55 @@ fn read_spawn_file(world: &WorldInstance, path: &Path) -> Option<String> {
 struct AddedSpawners {
     /// Spawner clones stored in `NpcSpawners`.
     added: usize,
-    /// Game-data spawners a plain row would have expanded into but that only exist through an
-    /// activating effect / cutscene (see [`spawner_starts_active`]).
-    skipped: usize,
+    /// Game-data spawners a plain row would have expanded into but that start inactive
+    /// (`activation_state = 'f'` in a dungeon instance; see [`spawner_skip`]).
+    skipped_inactive: usize,
+    /// Category-0 `연출` cutscene spawners a plain row would have expanded into (see
+    /// [`spawner_skip`]).
+    skipped_cutscene: usize,
 }
 
-/// Whether a plain (no `NpcSpawnerIds`) spawn-file row may create this game-data spawner when a
+/// Why a plain (no `NpcSpawnerIds`) spawn-file row must not create a game-data spawner when a
 /// world or dungeon instance starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpawnerSkip {
+    /// Category-0 (`NORMAL`) spawner marked `연출` ("staging/cutscene") in its name or comment
+    /// (e.g. `instance_cuttingwind_deadmine_alistair0` / `연출용 알리스테어0`): a cutscene actor
+    /// placed for a scripted scene, not for world spawning. Skipped in every world.
+    Cutscene,
+    /// `npc_spawners.activation_state = 'f'` in a dungeon instance: the spawner starts inactive
+    /// and appears only through its activating skill / indun event, whose row names the spawner
+    /// id itself. Kept in open worlds, where 'f' does not mean "absent at start" (see
+    /// [`skips_inactive_at_start`]).
+    InactiveAtStart,
+}
+
+/// Whether a plain row may skip `activation_state = 'f'` spawners in this world.
 ///
-/// `npc_spawners.activation_state = 'f'` marks spawners that are inactive at start: they appear
-/// only through their activating skill / quest / indun event, whose effect row names the
-/// spawner id itself. A category-0 (`NORMAL`) spawner marked `연출` ("staging/cutscene") in its
-/// name or comment (e.g. `instance_cuttingwind_deadmine_alistair0` / `연출용 알리스테어0`) is a
-/// cutscene actor: it is placed for a scripted scene and stands in its acting pose, not for
-/// world spawning. Both kinds are skipped when a plain row expands into every spawner that
-/// lists its NPC template; an event row (`NpcSpawnerIds`) still registers the spawner for the
-/// effect that activates it.
-pub(crate) fn spawner_starts_active(template: &NpcSpawnerTemplate) -> bool {
-    if !template.activation_state {
-        return false;
-    }
+/// Only dungeon instances: their spawners are placed for an indun event / `NpcSpawnerSpawnEffect`
+/// that names the spawner id. In the open worlds 'f' does not mean "absent at start":
+/// `arche_mall_world`'s vendors (Wardrobe Stylist, Fairmoon Clerks, Veroe Weapons Dealer, Premium
+/// Potion Merchant, ...) and `racing_test_world`'s NPCs are all 'f', and so are `main_world`'s
+/// quest givers (Liteia, Baron Alfonso, Bard Pagos, the Alliance Quartermasters, the five capital
+/// Arena Managers). `instance_library` is excluded too: its activating indun action
+/// (`IndunActionNpcSpawner`) only logs in the C# and here, only 3 of its 49 'f' spawner ids have
+/// a schedule binding and no spawn effect / quest component names the other 46, so the whole
+/// dungeon would stay empty.
+fn skips_inactive_at_start(world_name: &str) -> bool {
+    world_name.starts_with("instance_") && world_name != "instance_library"
+}
+
+/// [`SpawnerSkip`] for a plain row in `world_name`, `None` when the spawner may start.
+pub(crate) fn spawner_skip(world_name: &str, template: &NpcSpawnerTemplate) -> Option<SpawnerSkip> {
     let cutscene = template.npc_spawner_category_id == npc_spawner_category::NORMAL
         && (template.name.contains("연출") || template.comment.contains("연출"));
-    !cutscene
+    if cutscene {
+        return Some(SpawnerSkip::Cutscene);
+    }
+    if !template.activation_state && skips_inactive_at_start(world_name) {
+        return Some(SpawnerSkip::InactiveAtStart);
+    }
+    None
 }
 
 impl SpawnManager {
@@ -1342,7 +1371,8 @@ impl SpawnManager {
             let game_data_ids = data.get_spawner_ids(b.unit_id).unwrap_or_default();
             let mut spawners = Vec::new();
             let mut added = 0;
-            let mut skipped = 0;
+            let mut skipped_inactive = 0;
+            let mut skipped_cutscene = 0;
             if game_data_ids.is_empty() {
                 // No pre-defined spawner: generate one from template 1 ("Test Warrior").
                 tracing::trace!("SpawnerIds for Npc={} doesn't exist", b.unit_id);
@@ -1390,13 +1420,21 @@ impl SpawnManager {
                 let shared = new_shared();
                 for &id in &game_data_ids {
                     let template = data.get_npc_spawner_template(id);
-                    if template
+                    match template
                         .as_deref()
-                        .is_some_and(|t| !spawner_starts_active(t))
+                        .and_then(|t| spawner_skip(&self.world.template.name, t))
                     {
-                        // Event-only / cutscene spawner: a plain row must not pre-spawn it.
-                        skipped += 1;
-                        continue;
+                        Some(SpawnerSkip::InactiveAtStart) => {
+                            // Event spawner of a dungeon: a plain row must not pre-spawn it.
+                            skipped_inactive += 1;
+                            continue;
+                        }
+                        Some(SpawnerSkip::Cutscene) => {
+                            // Staging actor: it is not a world spawn.
+                            skipped_cutscene += 1;
+                            continue;
+                        }
+                        None => {}
                     }
                     let spawner = NpcSpawner::new(
                         init(inner.next_id, id, game_data_ids.clone(), template.clone()),
@@ -1414,7 +1452,11 @@ impl SpawnManager {
                 inner.npc_spawners.entry(key).or_insert(spawners);
                 self.invalidate_activation_index();
             }
-            Ok(AddedSpawners { added, skipped })
+            Ok(AddedSpawners {
+                added,
+                skipped_inactive,
+                skipped_cutscene,
+            })
         } else {
             // NPC spawns for events.
             let last = *ids.last().expect("non-empty");
@@ -1617,7 +1659,8 @@ impl SpawnManager {
                 let event = !def.npc_spawner_ids.is_empty() && def.npc_spawner_ids != [0];
                 let fake_before = server.systems.npcs.spawns.peek_fake_spawner_id();
                 let result = self.add_npc_spawner_with(server, def, true)?;
-                stats.npc_event_only_spawners_skipped += result.skipped;
+                stats.npc_event_only_spawners_skipped += result.skipped_inactive;
+                stats.npc_cutscene_spawners_skipped += result.skipped_cutscene;
                 let added = result.added;
                 if event {
                     stats.npc_event_spawners += 1;

@@ -26,7 +26,7 @@ use crate::systems::npcs::npc::spawner_data::{
     npc_spawner_category, NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate,
 };
 use crate::systems::npcs::spawn_manager::{
-    backend::TestBackend, spawner_starts_active, LoadStats, TemplateExists,
+    backend::TestBackend, spawner_skip, LoadStats, SpawnManager, SpawnerSkip, TemplateExists,
 };
 use crate::test_support::{test_character, TestClient, TEST_ZONE};
 use crate::world::{DoodadRef, Entity, NpcRef, Player, PlayerRef, WorldInstance, WorldObject};
@@ -92,12 +92,19 @@ fn member(id: u32, spawner: u32, npc: u32) -> NpcSpawnerNpc {
     }
 }
 
-fn data_server(spawners: NpcSpawnerData) -> Arc<GameServer> {
+/// A synthetic server whose only world is `name` (the start-active rule depends on the world).
+fn data_server_in(name: &str, spawners: NpcSpawnerData) -> Arc<GameServer> {
     let mut data = GameData::empty();
     data.systems.npcs.npc_spawners = spawners;
-    let server = Arc::new(crate::test_support::test_server_with(data));
+    let template = WorldTemplate::synthetic(0, name, 2, 2, TEST_ZONE);
+    let server = Arc::new(crate::test_support::test_server_with_world(
+        data,
+        template.clone(),
+    ));
     server.set_self();
     *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    // `GameServer::new` only creates `main_world`; the other test worlds are created here.
+    server.world.create_world_instance(Arc::new(template), 0);
     server
 }
 
@@ -120,74 +127,105 @@ fn plain_def(unit_id: u32, x: f32, y: f32) -> NpcSpawnerDef {
     }
 }
 
-/// A plain row must skip event-only (`activation_state = 'f'`) and cutscene (category 0 with a
-/// `연출` marker) spawners, while a category-1 "staging NPC" template and ordinary spawners
-/// still create their placement. The skipped spawner stays reachable for its effect.
+/// Start-active rule: a category-0 `연출` cutscene spawner is skipped in every world; an
+/// `activation_state = 'f'` spawner is skipped only in dungeon instances (not in an open world
+/// and not in `instance_library`, whose indun action never activates its spawners). A
+/// category-1 "staging NPC" template and ordinary spawners always create their placement. The
+/// skipped spawner stays reachable for its effect.
 #[tokio::test]
-async fn plain_rows_skip_event_only_and_cutscene_spawners() {
-    let data = NpcSpawnerData::from_parts(
-        vec![
-            tpl(
-                10,
-                npc_spawner_category::AUTOCREATED,
-                "500: villager",
-                "",
-                true,
-            ),
-            tpl(
-                11,
-                npc_spawner_category::AUTOCREATED,
-                "비활성_500_event",
-                "",
-                false,
-            ),
-            tpl(
-                12,
-                npc_spawner_category::NORMAL,
-                "instance_x_alistair0",
-                "연출용 알리스테어0",
-                true,
-            ),
-            tpl(
-                13,
-                npc_spawner_category::NORMAL,
-                "instance_x_melee",
-                "",
-                true,
-            ),
-            tpl(
-                14,
-                npc_spawner_category::AUTOCREATED,
-                "500 (연출용NPC)",
-                "연출용",
-                true,
-            ),
-        ],
-        (10u32..=14).map(|s| member(s, s, 500)).collect(),
-    )
-    .unwrap();
-    let server = data_server(data);
-    let world = server.world.world(0).unwrap();
-    let m = server.systems.npcs.spawns.get_or_create(&world);
+async fn plain_rows_skip_cutscene_everywhere_and_inactive_at_start_in_dungeons() {
+    fn spawner_data() -> NpcSpawnerData {
+        NpcSpawnerData::from_parts(
+            vec![
+                tpl(
+                    10,
+                    npc_spawner_category::AUTOCREATED,
+                    "500: villager",
+                    "",
+                    true,
+                ),
+                tpl(
+                    11,
+                    npc_spawner_category::AUTOCREATED,
+                    "비활성_500_event",
+                    "",
+                    false,
+                ),
+                tpl(
+                    12,
+                    npc_spawner_category::NORMAL,
+                    "instance_x_alistair0",
+                    "연출용 알리스테어0",
+                    true,
+                ),
+                tpl(
+                    13,
+                    npc_spawner_category::NORMAL,
+                    "instance_x_melee",
+                    "",
+                    true,
+                ),
+                tpl(
+                    14,
+                    npc_spawner_category::AUTOCREATED,
+                    "500 (연출용NPC)",
+                    "연출용",
+                    true,
+                ),
+            ],
+            (10u32..=14).map(|s| member(s, s, 500)).collect(),
+        )
+        .unwrap()
+    }
 
+    fn placed_ids(m: &SpawnManager) -> Vec<u32> {
+        let mut ids: Vec<u32> = m
+            .get_all_spawners()
+            .into_values()
+            .flatten()
+            .map(|s| s.spawner_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    // Open world: 'f' spawner 11 is a plain placement (main_world keeps its quest givers and
+    // arche_mall its vendors); the cutscene actor 12 is not.
+    let server = data_server_in("main_world", spawner_data());
+    let m = server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&server.world.world(0).unwrap());
+    assert_eq!(
+        m.add_npc_spawner(&server, plain_def(500, 20.0, 20.0)),
+        Ok(4)
+    );
+    assert_eq!(
+        placed_ids(&m),
+        vec![10, 11, 13, 14],
+        "open world: cutscene 12 only"
+    );
+
+    // Dungeon instance: both the event spawner 11 and the cutscene actor 12 are skipped; the
+    // category-1 staging NPC 14 stays.
+    let server = data_server_in("instance_test", spawner_data());
+    let m = server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&server.world.world(0).unwrap());
     assert_eq!(
         m.add_npc_spawner(&server, plain_def(500, 20.0, 20.0)),
         Ok(3)
     );
-    let mut ids: Vec<u32> = m
-        .get_all_spawners()
-        .into_values()
-        .flatten()
-        .map(|s| s.spawner_id)
-        .collect();
-    ids.sort();
     assert_eq!(
-        ids,
+        placed_ids(&m),
         vec![10, 13, 14],
-        "event-only 11 and cutscene 12 must not be placed; the category-1 staging NPC stays"
+        "dungeon: inactive-at-start 11 and cutscene 12"
     );
 
-    // The event spawner the plain row skipped is still registered by its effect row.
+    // The event spawner the dungeon plain row skipped is still registered by its effect row.
     let mut event = plain_def(500, 30.0, 30.0);
     event.npc_spawner_ids = vec![11];
     assert_eq!(m.add_npc_spawner(&server, event), Ok(0));
@@ -195,6 +233,23 @@ async fn plain_rows_skip_event_only_and_cutscene_spawners() {
     assert_eq!(spawned.len(), 1, "the activating effect finds spawner 11");
     assert!(spawned[0].force_spawn(&server, 0).is_some());
     assert_eq!(spawned[0].current_spawn_count(), 1);
+
+    // The instance_library exclusion keeps its 'f' spawners; cutscene rules still apply.
+    let server = data_server_in("instance_library", spawner_data());
+    let m = server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&server.world.world(0).unwrap());
+    assert_eq!(
+        m.add_npc_spawner(&server, plain_def(500, 20.0, 20.0)),
+        Ok(4)
+    );
+    assert_eq!(
+        placed_ids(&m),
+        vec![10, 11, 13, 14],
+        "instance_library: no indun activation, so only cutscene 12 is skipped"
+    );
 }
 
 /// The real tables of one world directory and the independent re-count of what
@@ -211,8 +266,10 @@ struct ExpectedNpcLoad {
     rows_only_event_spawners: usize,
     /// Start-active spawner clones the plain rows create.
     spawners: usize,
-    /// Event-only / cutscene clones the plain rows no longer create.
-    skipped: usize,
+    /// `activation_state = 'f'` clones the plain rows no longer create (dungeon instances).
+    skipped_inactive: usize,
+    /// Category-0 `연출` clones the plain rows no longer create (every world).
+    skipped_cutscene: usize,
 }
 
 fn world_dirs(app_path: &Path) -> Vec<(String, PathBuf)> {
@@ -259,7 +316,12 @@ fn npc_spawn_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Independent re-count of `SpawnManager::load_npc_spawns` (dedup, missing templates, event
 /// rows, and the start-active filter), driven only by the compact DB and the shipped JSON.
-fn expected_npc_load(dir: &Path, npcs: &HashSet<u32>, data: &NpcSpawnerData) -> ExpectedNpcLoad {
+fn expected_npc_load(
+    world: &str,
+    dir: &Path,
+    npcs: &HashSet<u32>,
+    data: &NpcSpawnerData,
+) -> ExpectedNpcLoad {
     let mut out = ExpectedNpcLoad::default();
     let mut stored: HashMap<u32, Vec<(f32, f32, f32)>> = HashMap::new();
     for path in npc_spawn_files(dir) {
@@ -299,8 +361,12 @@ fn expected_npc_load(dir: &Path, npcs: &HashSet<u32>, data: &NpcSpawnerData) -> 
             let mut kept = 0;
             for id in ids {
                 match data.get_npc_spawner_template(id) {
-                    Some(t) if !spawner_starts_active(&t) => out.skipped += 1,
-                    _ => kept += 1,
+                    Some(t) => match spawner_skip(world, &t) {
+                        Some(SpawnerSkip::Cutscene) => out.skipped_cutscene += 1,
+                        Some(SpawnerSkip::InactiveAtStart) => out.skipped_inactive += 1,
+                        None => kept += 1,
+                    },
+                    None => kept += 1,
                 }
             }
             if kept > 0 {
@@ -315,16 +381,18 @@ fn expected_npc_load(dir: &Path, npcs: &HashSet<u32>, data: &NpcSpawnerData) -> 
     out
 }
 
-/// Builds a server whose `main_world` and the Sharpwind instance template exist, plus the
-/// instance `INSTANCE_ID` and its spawn manager (the `DungeonLoaderTask` load target).
-fn sharpwind_server(npc_spawners: NpcSpawnerData) -> (Arc<GameServer>, Arc<WorldInstance>) {
+/// Builds a server with the given synthetic world templates `(id, name, zone)`.
+fn server_with_worlds(
+    npc_spawners: NpcSpawnerData,
+    worlds: impl IntoIterator<Item = (u32, String, u32)>,
+) -> Arc<GameServer> {
     let mut data = GameData::empty();
     data.systems.npcs.npc_spawners = npc_spawners;
     data.worlds = WorldTemplates::from_templates(
-        vec![
-            WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
-            WorldTemplate::synthetic(1, WORLD, 2, 2, ZONE),
-        ],
+        worlds
+            .into_iter()
+            .map(|(id, name, zone)| WorldTemplate::synthetic(id, &name, 2, 2, zone))
+            .collect(),
         Vec::new(),
     )
     .unwrap();
@@ -340,6 +408,19 @@ fn sharpwind_server(npc_spawners: NpcSpawnerData) -> (Arc<GameServer>, Arc<World
     let server = Arc::new(GameServer::new(config, db, data));
     server.set_self();
     *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    server
+}
+
+/// Builds a server whose `main_world` and the Sharpwind instance template exist, plus the
+/// instance `INSTANCE_ID` and its spawn manager (the `DungeonLoaderTask` load target).
+fn sharpwind_server(npc_spawners: NpcSpawnerData) -> (Arc<GameServer>, Arc<WorldInstance>) {
+    let server = server_with_worlds(
+        npc_spawners,
+        [
+            (0, "main_world".to_string(), TEST_ZONE),
+            (1, WORLD.to_string(), ZONE),
+        ],
+    );
     let template = server
         .game_data
         .worlds
@@ -394,6 +475,11 @@ fn npc_ids(conn: &Connection) -> HashSet<u32> {
 }
 
 fn load_sharpwind(server: &Arc<GameServer>, conn: &Connection) -> LoadStats {
+    load_world(server, conn, INSTANCE_ID, WORLD)
+}
+
+/// `load_spawn_files` of `Data/Worlds/<name>` for the manager of world id `world_id`.
+fn load_world(server: &Arc<GameServer>, conn: &Connection, world_id: u32, name: &str) -> LoadStats {
     let npcs = npc_ids(conn);
     let none = |_: u32| false;
     let npc = |id: u32| npcs.contains(&id);
@@ -406,8 +492,9 @@ fn load_sharpwind(server: &Arc<GameServer>, conn: &Connection) -> LoadStats {
     };
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("app/Data/Worlds")
-        .join(WORLD);
-    let m = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
+        .join(name);
+    let world = server.world.world(world_id).expect("world instance");
+    let m = server.systems.npcs.spawns.get_or_create(&world);
     m.load_spawn_files(server, &path, &exists).unwrap()
 }
 
@@ -426,7 +513,11 @@ async fn real_data_sharpwind_instance_creation_spawns_the_authored_npcs() {
     let (server, world) = sharpwind_server(data);
     let stats = load_sharpwind(&server, &conn);
     eprintln!("sharpwind load: {stats:?}");
-    assert_eq!(stats.npc_event_only_spawners_skipped, 9);
+    assert_eq!(
+        stats.npc_event_only_spawners_skipped, 0,
+        "Sharpwind has no plain-row 'f' spawner that stays inactive"
+    );
+    assert_eq!(stats.npc_cutscene_spawners_skipped, 9);
 
     let m = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
     let spawner_ids: Vec<u32> = m
@@ -584,6 +675,8 @@ async fn real_data_sharpwind_vera_effect_spawns_one_nerta() {
 /// Counts the spawner expansions the start-active rule skips in every shipped world (gated:
 /// `AAEMU_COMPACT_DB=... cargo test -p aaemu-game sharpwind -- --ignored`). The counts are a
 /// conformance snapshot: a data change that alters them must update this table deliberately.
+/// `main_world` 0 'f' skips and 0 skipped rows is the guard against the unsafe global rule;
+/// the open worlds skip only `연출` cutscene spawners.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_start_active_rule_counts_per_world() {
@@ -595,9 +688,29 @@ async fn real_data_start_active_rule_counts_per_world() {
         Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let data = NpcSpawnerData::load_from(&conn).unwrap();
     let npcs = npc_ids(&conn);
-    // One manager, reloaded per world; the loader clears its tables.
-    let (server, _world) = sharpwind_server(NpcSpawnerData::load_from(&conn).unwrap());
-    let m = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
+    let worlds = world_dirs(&app_path);
+    // One manager per world: the rule keys on the world name (instance vs open world). Instance
+    // ids start at 1 because `GameServer::new` already created `main_world` as instance 0.
+    let server = server_with_worlds(
+        NpcSpawnerData::load_from(&conn).unwrap(),
+        worlds
+            .iter()
+            .enumerate()
+            .map(|(id, (name, _))| (id as u32 + 1, name.clone(), 1000 + id as u32)),
+    );
+    let mut managers = Vec::new();
+    for (id, (name, _)) in worlds.iter().enumerate() {
+        let template = server
+            .game_data
+            .worlds
+            .get_world_template_by_name(name)
+            .expect("world template")
+            .clone();
+        let world = server
+            .world
+            .create_world_instance(Arc::new(template), id as u32 + 1);
+        managers.push(server.systems.npcs.spawns.get_or_create(&world));
+    }
     let none = |_: u32| false;
     let npc = |id: u32| npcs.contains(&id);
     let exists = TemplateExists {
@@ -608,18 +721,22 @@ async fn real_data_start_active_rule_counts_per_world() {
         slave: &none,
     };
 
-    let mut counts: Vec<(String, usize, usize)> = Vec::new();
-    for (name, dir) in world_dirs(&app_path) {
-        let expected = expected_npc_load(&dir, &npcs, &data);
-        let stats = m.load_spawn_files(&server, &dir, &exists).unwrap();
+    let mut counts: Vec<(String, usize, usize, usize)> = Vec::new();
+    for ((name, dir), m) in worlds.iter().zip(&managers) {
+        let expected = expected_npc_load(name, dir, &npcs, &data);
+        let stats = m.load_spawn_files(&server, dir, &exists).unwrap();
         assert_eq!(
             stats.npc_entries - stats.npc_duplicates - stats.npc_missing_templates,
             expected.entries,
             "{name}: entries"
         );
         assert_eq!(
-            stats.npc_event_only_spawners_skipped, expected.skipped,
-            "{name}: skipped event-only / cutscene spawner expansions"
+            stats.npc_event_only_spawners_skipped, expected.skipped_inactive,
+            "{name}: skipped activation_state='f' spawner expansions (dungeon instances only)"
+        );
+        assert_eq!(
+            stats.npc_cutscene_spawners_skipped, expected.skipped_cutscene,
+            "{name}: skipped category-0 연출 cutscene spawner expansions"
         );
         assert_eq!(
             stats.npc_spawners, expected.spawners,
@@ -629,33 +746,138 @@ async fn real_data_start_active_rule_counts_per_world() {
             stats.npc_event_spawners, expected.event_rows,
             "{name}: event rows"
         );
-        counts.push((name, expected.skipped, expected.rows_only_event_spawners));
+        counts.push((
+            name.clone(),
+            expected.skipped_inactive,
+            expected.skipped_cutscene,
+            expected.rows_only_event_spawners,
+        ));
     }
-    eprintln!("world, skipped expansions, rows whose spawners are all event-only:");
-    for (name, skipped, only_event) in &counts {
-        eprintln!("{name}: {skipped} skipped, {only_event} rows only event spawners");
+    eprintln!("world, 'f' skips, cutscene skips, rows whose spawners are all skipped:");
+    for (name, inactive, cutscene, only_event) in &counts {
+        eprintln!(
+            "{name}: {inactive} 'f', {cutscene} cutscene, {only_event} rows only event spawners"
+        );
     }
     assert_eq!(
         counts,
         vec![
-            ("arche_mall_world".into(), 42, 42),
-            ("instance_burntcastle_armory".into(), 5, 1),
-            ("instance_cradle_of_destruction".into(), 5, 0),
-            ("instance_cuttingwind_deadmine".into(), 9, 0),
-            ("instance_hadir_farm".into(), 102, 1),
-            ("instance_howling_abyss".into(), 0, 0),
-            ("instance_howling_abyss_2".into(), 0, 0),
-            ("instance_immortal_isle".into(), 1, 1),
-            ("instance_immortal_isle_easy".into(), 1, 1),
-            ("instance_library".into(), 323, 143),
-            ("instance_nachashgar".into(), 9, 1),
-            ("instance_nachashgar_easy".into(), 0, 0),
-            ("instance_prologue".into(), 0, 0),
-            ("instance_sal_temple".into(), 0, 0),
-            ("instance_training_camp".into(), 4, 4),
-            ("instance_training_camp_1on1".into(), 0, 0),
-            ("main_world".into(), 552, 247),
-            ("racing_test_world".into(), 48, 48),
+            ("arche_mall_world".into(), 0, 0, 0),
+            ("instance_burntcastle_armory".into(), 2, 3, 1),
+            ("instance_cradle_of_destruction".into(), 5, 0, 0),
+            ("instance_cuttingwind_deadmine".into(), 0, 9, 0),
+            ("instance_hadir_farm".into(), 102, 0, 1),
+            ("instance_howling_abyss".into(), 0, 0, 0),
+            ("instance_howling_abyss_2".into(), 0, 0, 0),
+            ("instance_immortal_isle".into(), 1, 0, 1),
+            ("instance_immortal_isle_easy".into(), 1, 0, 1),
+            ("instance_library".into(), 0, 0, 0),
+            ("instance_nachashgar".into(), 9, 0, 1),
+            ("instance_nachashgar_easy".into(), 0, 0, 0),
+            ("instance_prologue".into(), 0, 0, 0),
+            ("instance_sal_temple".into(), 0, 0, 0),
+            ("instance_training_camp".into(), 4, 0, 4),
+            ("instance_training_camp_1on1".into(), 0, 0, 0),
+            ("main_world".into(), 0, 4, 0),
+            ("racing_test_world".into(), 0, 0, 0),
         ]
     );
+}
+
+fn placed_spawner_ids(m: &SpawnManager) -> Vec<u32> {
+    m.get_all_spawners()
+        .into_values()
+        .flatten()
+        .map(|s| s.spawner_id)
+        .collect()
+}
+
+/// The narrowed rule must leave the open worlds alone: `activation_state = 'f'` does not mean
+/// "absent at start" there. Guards against reintroducing the global 'f' skip: `arche_mall_world`
+/// keeps its always-present vendors and `main_world` keeps its quest-accept NPCs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_open_worlds_keep_inactive_at_start_npcs() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    // Instance 0 is `main_world` (created by `GameServer::new`); the test worlds get 1 and 2.
+    let server = server_with_worlds(
+        NpcSpawnerData::load_from(&conn).unwrap(),
+        [
+            (1, "arche_mall_world".to_string(), 1000),
+            (2, "main_world".to_string(), 1001),
+        ],
+    );
+    for (id, name) in [(1u32, "arche_mall_world"), (2u32, "main_world")] {
+        let template = server
+            .game_data
+            .worlds
+            .get_world_template_by_name(name)
+            .expect("world template")
+            .clone();
+        server.world.create_world_instance(Arc::new(template), id);
+    }
+
+    // arche_mall_world: 42 plain rows of always-present mall NPCs with 'f' spawners. They must
+    // all stay (the review's vendors and models), or the world is empty.
+    let stats = load_world(&server, &conn, 1, "arche_mall_world");
+    assert_eq!(
+        stats.npc_event_only_spawners_skipped, 0,
+        "arche_mall_world must not skip its 'f' vendors"
+    );
+    assert_eq!(stats.npc_cutscene_spawners_skipped, 0);
+    let mall = placed_spawner_ids(&server.systems.npcs.spawns.get(1).unwrap());
+    for (spawner, npc, name) in [
+        (15192, 13639, "Wardrobe Stylist"),
+        (15195, 13642, "Fairmoon Clerk"),
+        (15197, 13644, "Fairmoon Clerk"),
+        (15198, 13645, "Veroe Weapons Dealer"),
+        (15199, 13646, "Fairmoon Clerk"),
+        (15240, 13685, "Fairmoon Model"),
+        (15654, 14067, "Maintenance Foreman"),
+        (15655, 14068, "Premium Potion Merchant"),
+        (15656, 14069, "Receptionist"),
+        (15952, 14320, "All Hallows Merchant"),
+    ] {
+        assert!(
+            mall.contains(&spawner),
+            "{name} (npc {npc}) spawner {spawner} must be placed"
+        );
+    }
+
+    // main_world: 0 'f' skips. The only cutscene skips are the four 뱀의틈연출 actors 3709.
+    let stats = load_world(&server, &conn, 2, "main_world");
+    assert_eq!(
+        stats.npc_event_only_spawners_skipped, 0,
+        "main_world must not skip its 'f' quest givers"
+    );
+    assert_eq!(
+        stats.npc_cutscene_spawners_skipped, 4,
+        "main_world only skips the 뱀의틈연출 cutscene actors"
+    );
+    let world = placed_spawner_ids(&server.systems.npcs.spawns.get(2).unwrap());
+    assert_eq!(
+        world.iter().filter(|&&s| s == 15350).count(),
+        5,
+        "the five capital Arena Managers (13792)"
+    );
+    for (spawner, npc, name) in [
+        (15202, 13649, "Nuia Alliance Quartermaster"),
+        (15205, 13652, "Mercenary Quartermaster"),
+        (15216, 13663, "Harani Alliance Quartermaster"),
+        (15102, 13559, "Liteia"),
+        (15103, 13560, "Baron Alfonso"),
+        (15104, 13561, "Bard Pagos"),
+        (11542, 10393, "Pavitra's Spirit"),
+        (15280, 13725, "Arcane Soul"),
+        (7948, 7152, "Century Root"),
+    ] {
+        assert!(
+            world.contains(&spawner),
+            "{name} (npc {npc}) spawner {spawner} must be placed"
+        );
+    }
 }
