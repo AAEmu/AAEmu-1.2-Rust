@@ -4169,6 +4169,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the origin source and 602 of them have a next phase. The task now changes the phase of the
   doodad that owns the clout.
 
+* systems::npcs (2026-11-10, effect-only clouts; **deviation**): the C# `AreaTrigger.ApplyEffects`
+  needs `InsideBuffTemplate`, so a `DoodadFuncClout` without a loadable `buff_id` (401 of the
+  447 clouts with effects) never applied its effects. Tester report (Silent Forest, the
+  Soundless Lake): no air bubbles; Lake Bubbles (doodad 4336, start-phase clout 997, sphere
+  shape 633 r 10 m, tick 1 s) carries only effect 17315, a `BuffEffect` of Air Bubble 3036
+  (tick effect 17316 = special 5562 `AddBreath` +1000). The trigger now applies the **Good**
+  (`buffs.kind_id` 1) buff effects of such a clout (`phase_funcs::good_buff_effects`, key 0 of
+  `effects_per_buff`): campfires, merchants' words, Air Bubbles, haste zones. Its damage effects
+  (184 clouts), Bad / Hidden buffs (traps, stuns, boss mechanics such as Wynn's Laser Beam) and
+  other effects stay off until each is verified. `AddBreath` also refills the character holding
+  the buff (the effect target) when the caster is not a character: the C# refilled only a
+  character caster, and a doodad-applied Air Bubble has the doodad as caster, so the diver
+  drowned inside the bubbles. Tests: `npcs::area_trigger::tests::effect_only_clout_applies_its_good_buffs`,
+  `integration_tests::add_breath_from_a_doodad_buff_refills_the_diver`.
 * systems::npcs (2026-10-30): a `DoodadFuncClout` whose doodad is initialised before its `Spawn`
   (the `SummonDoodad` path runs `InitDoodad` first, then `Spawn`) keeps that doodad as the area
   trigger origin even with `UseOriginSource`. The C# anchor moved the area to the first doodad

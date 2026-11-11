@@ -2464,6 +2464,44 @@ async fn hang_and_unhang_track_the_sticky_parent() {
     assert_eq!(&body[3..6], &npc.obj_id.to_le_bytes()[..3]);
 }
 
+/// Air Bubble (3036) applied by the Lake Bubbles doodad ticks `AddBreath` (special 54) with the
+/// doodad as caster: the diver holding the buff (the effect target) gets the breath, capped at
+/// its lung capacity. A diver out of the water is left alone.
+#[tokio::test]
+async fn add_breath_from_a_doodad_buff_refills_the_diver() {
+    let server = server_with(false);
+    let a = pc(&server, 1, "Diver", 100.0);
+    let me = WorldObject::from(&a.p);
+    crate::systems::vehicles::set_unit_position(&server, &me, 100.0, 100.0, 97.0, 0.0, 0.0, 0.0);
+    assert!(a.p.data().unit.is_under_water);
+    a.p.data().breath = 10;
+    let bubbles = Entity::new(0x7700, Doodad::new(4336));
+    let tick = |p: &PlayerRef| {
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&bubbles)),
+            caster_caster: SkillCaster::Doodad(bubbles.obj_id),
+            target: Target::Obj(WorldObject::from(p)),
+            target_caster: SkillCastTarget::Unit(p.obj_id),
+            cast: CastAction::Skill {
+                skill_id: 0,
+                tl_id: 0,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+        crate::systems::skills::effects::special::execute(&server, 54, &args, [1000, 0, 0, 0]);
+    };
+    tick(&a.p);
+    assert_eq!(a.p.data().breath, 1010);
+    a.p.data().breath = 59_500;
+    tick(&a.p);
+    assert_eq!(a.p.data().breath, 60_000, "capped at the lung capacity");
+    crate::systems::vehicles::set_unit_position(&server, &me, 100.0, 100.0, 120.0, 0.0, 0.0, 0.0);
+    a.p.data().breath = 10;
+    tick(&a.p);
+    assert_eq!(a.p.data().breath, 10, "no breath out of the water");
+}
+
 #[tokio::test]
 async fn moving_under_the_water_surface_toggles_the_underwater_state() {
     let server = server_with(false);

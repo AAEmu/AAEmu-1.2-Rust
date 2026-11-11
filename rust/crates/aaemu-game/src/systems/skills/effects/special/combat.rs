@@ -406,16 +406,26 @@ pub fn stop_mana_regen(_server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4])
 /// C#). Negative changes clamp at zero.
 pub fn add_breath(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "AddBreath", v);
-    let Some(caster) = args.caster.as_ref() else {
+    // Deviation: the C# refilled only a character caster. A buff a doodad applied (Air Bubble
+    // 3036 from the Lake Bubbles clout, tick effect 17316) has the doodad as its caster, so its
+    // breath tick did nothing and the player drowned inside the bubbles; the character holding
+    // the buff (the effect target) breathes instead.
+    let target = args.target.as_obj().filter(|o| o.as_player().is_some());
+    let Some(breather) = args
+        .caster
+        .as_ref()
+        .filter(|c| c.as_player().is_some())
+        .or(target)
+    else {
         return;
     };
-    let Some(p) = caster.as_player() else {
+    let Some(p) = breather.as_player() else {
         return;
     };
     if !p.data().unit.is_under_water {
         return;
     }
-    let lung = stat(server, caster, StatKind::LungCapacity) as u32;
+    let lung = stat(server, breather, StatKind::LungCapacity) as u32;
     let mut c = p.data();
     let sum = i64::from(c.breath) + i64::from(v[0]);
     c.breath = sum.clamp(0, i64::from(lung)) as u32;
