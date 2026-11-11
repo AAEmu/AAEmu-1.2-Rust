@@ -9,6 +9,17 @@
 //! Membership online state is kept on [`TeamMember`] (like `ExpeditionMember`), so the manager
 //! can decide and broadcast without reading a `Character`. Nothing calls into the manager while
 //! holding a player's data lock.
+//!
+//! Ordering of the deferred effects: the state change of an operation is atomic, its effects
+//! (run after the guard) are not ordered against a second operation on the same character. The
+//! join effects (chat channels, `InParty`) are therefore applied and then verified with
+//! [`TeamManager::is_member_now`]; a character that is no longer a member gets them taken
+//! back. That is race-free because a removal queues its own leave effects after its state
+//! change: either the verify sees the removal and undoes the join, or the removal's leave runs
+//! after the join. Residual: the packets. The `SCJoinedTeam` of a deferred join is a snapshot
+//! of the team at its state change, so the broadcast of a concurrent member change can reach
+//! the new member before it (its client shows a ghost / missing member until it logs in
+//! again), and the dungeon `OnTeamJoin` event is not taken back.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -484,6 +495,76 @@ pub fn raid_chat(server: &GameServer, team: &Team) -> crate::managers::chat::Cha
     raid_channel(server, team.id, team.owner_id)
 }
 
+/// A point where a concurrent operation can land between the apply and the verify of a deferred
+/// join effect (tests only, see [`interleave`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interleave {
+    /// A join effect for `character_id` was applied and is about to be verified against `team_id`.
+    JoinApplied { team_id: u32, character_id: u32 },
+}
+
+#[cfg(test)]
+type InterleaveHook = std::rc::Rc<dyn Fn(&GameServer, Interleave)>;
+
+#[cfg(test)]
+thread_local! {
+    static INTERLEAVE: std::cell::RefCell<Option<InterleaveHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: runs the hook installed on this thread (if any). It lets a test land the removal
+/// of a member exactly between the apply and the verify of a join effect, which is the window a
+/// concurrent kick hits, without threads or timing.
+#[cfg(test)]
+fn interleave(server: &GameServer, at: Interleave) {
+    let hook = INTERLEAVE.with(|h| h.borrow().clone());
+    if let Some(hook) = hook {
+        hook(server, at);
+    }
+}
+
+/// Whether `p` still is a member of `team_id` after one of its join effects was applied (one
+/// short state lock, nothing else under it: [`TeamManager::is_member_now`]).
+fn still_member(server: &GameServer, team_id: u32, p: &PlayerRef) -> bool {
+    #[cfg(test)]
+    interleave(
+        server,
+        Interleave::JoinApplied {
+            team_id,
+            character_id: p.character_id,
+        },
+    );
+    server
+        .systems
+        .social
+        .teams
+        .is_member_now(team_id, p.character_id)
+}
+
+/// Joins `p` to `channel` (a chat channel of `team_id`) and takes the join back when `p` is not
+/// a member of the team any more ("apply, then verify", see the module header).
+fn join_chat_verified(
+    server: &GameServer,
+    team_id: u32,
+    channel: &crate::managers::chat::ChannelRef,
+    p: &PlayerRef,
+) {
+    channel.join(p);
+    if !still_member(server, team_id, p) {
+        channel.leave(p);
+    }
+}
+
+/// [`set_in_party`] for a character that joined `team_id`: a `true` is taken back when the
+/// character is not a member any more ("apply, then verify", see the module header).
+fn set_in_party_verified(server: &GameServer, team_id: u32, p: &PlayerRef, value: bool) {
+    set_in_party(server, p, value);
+    if value && !still_member(server, team_id, p) {
+        set_in_party(server, p, false);
+    }
+}
+
 /// [`raid_chat`] from the ids a caller captured under the team lock (no `Team` borrow).
 pub fn raid_channel(
     server: &GameServer,
@@ -595,6 +676,16 @@ impl TeamManager {
                 .flatten()
                 .any(|m| m.character.obj_id == obj_id)
         })
+    }
+
+    /// Whether `character_id` is a member of team `team_id` right now: one short state lock and
+    /// nothing else under it. The deferred join effects (chat channels, `InParty`) call it after
+    /// they were applied and take them back for a character that left meanwhile.
+    pub fn is_member_now(&self, team_id: u32, character_id: u32) -> bool {
+        self.lock()
+            .teams
+            .get(&team_id)
+            .is_some_and(|t| t.is_member(character_id))
     }
 
     /// Number of active teams.
@@ -1048,7 +1139,7 @@ impl TeamManager {
                     let target = target.clone();
                     deferred.push(move |server| {
                         target.send(joined_team_packet(server, &team));
-                        set_in_party(server, &target, true);
+                        set_in_party_verified(server, team.id, &target, true);
                         target.send(SCTeamPingPosPacket {
                             has_ping: true,
                             position: team.ping_position,
@@ -1066,9 +1157,10 @@ impl TeamManager {
                         // Deviation (C#: the new member never joined the party / raid chat, so
                         // it could talk into the channel but not hear it until its next login).
                         if !team.is_party {
-                            raid_chat(server, &team).join(&target);
+                            join_chat_verified(server, team.id, &raid_chat(server, &team), &target);
                         }
-                        party_chat(server, &team, target.character_id).join(&target);
+                        let channel = party_chat(server, &team, target.character_id);
+                        join_chat_verified(server, team.id, &channel, &target);
                         refresh_team_member_obj_ids(&team, &target, false);
                     });
                 }
@@ -1162,9 +1254,9 @@ impl TeamManager {
         let target = inv.target.clone();
         deferred.push(move |server| {
             owner.send(joined_team_packet(server, &team));
-            set_in_party(server, &owner, true);
+            set_in_party_verified(server, team.id, &owner, true);
             target.send(joined_team_packet(server, &team));
-            set_in_party(server, &target, true);
+            set_in_party_verified(server, team.id, &target, true);
             let ping = owner.data().local_ping_position;
             team.broadcast(
                 &SCTeamPingPosPacket {
@@ -1175,11 +1267,13 @@ impl TeamManager {
                 0,
             );
             if !team.is_party {
-                raid_chat(server, &team).join(&owner);
-                raid_chat(server, &team).join(&target);
+                join_chat_verified(server, team.id, &raid_chat(server, &team), &owner);
+                join_chat_verified(server, team.id, &raid_chat(server, &team), &target);
             }
-            party_chat(server, &team, owner.character_id).join(&owner);
-            party_chat(server, &team, target.character_id).join(&target);
+            for p in [&owner, &target] {
+                let channel = party_chat(server, &team, p.character_id);
+                join_chat_verified(server, team.id, &channel, p);
+            }
             // Trigger events (systems::instances dungeons).
             crate::systems::instances::events::on_team_join(server, &owner, &team);
             crate::systems::instances::events::on_team_join(server, &target, &team);
@@ -1211,7 +1305,7 @@ impl TeamManager {
         let p = p.clone();
         drop(st);
         p.send(joined_team_packet(server, &team));
-        set_in_party(server, &p, as_party);
+        set_in_party_verified(server, team.id, &p, as_party);
         team.broadcast(
             &SCTeamPingPosPacket {
                 has_ping: true,
@@ -1221,9 +1315,10 @@ impl TeamManager {
             0,
         );
         if !team.is_party {
-            raid_chat(server, &team).join(&p);
+            join_chat_verified(server, team.id, &raid_chat(server, &team), &p);
         }
-        party_chat(server, &team, p.character_id).join(&p);
+        let channel = party_chat(server, &team, p.character_id);
+        join_chat_verified(server, team.id, &channel, &p);
         // Trigger events (systems::instances dungeons).
         crate::systems::instances::events::on_team_join(server, &p, &team);
     }
@@ -1476,7 +1571,7 @@ impl TeamManager {
         drop(st);
         team.broadcast(&SCTeamBecameRaidTeamPacket { team_id: team.id }, 0);
         for m in team.members.iter().flatten() {
-            raid_chat(server, &team).join(&m.character);
+            join_chat_verified(server, team.id, &raid_chat(server, &team), &m.character);
         }
         refresh_all_team_member_obj_ids(&team);
         // TODO (C#): Handle raids in dungeons
@@ -1675,7 +1770,8 @@ impl TeamManager {
         if moved {
             for (id, party_number) in new_party {
                 if let Some(t) = server.world.character_by_id(id) {
-                    party_channel(server, owners.0, party_number, owners.1).join(&t);
+                    let channel = party_channel(server, owners.0, party_number, owners.1);
+                    join_chat_verified(server, owners.0, &channel, &t);
                 }
             }
         }
@@ -1882,7 +1978,7 @@ impl TeamManager {
         let unit = unit.clone();
         drop(st);
         unit.send(joined_team_packet(server, &team));
-        set_in_party(server, &unit, true);
+        set_in_party_verified(server, team.id, &unit, true);
         let others: Vec<TeamMemberInfo> = team
             .members
             .iter()
@@ -1913,9 +2009,10 @@ impl TeamManager {
         }
         refresh_team_member_obj_ids(&team, &unit, true);
         if !team.is_party {
-            raid_chat(server, &team).join(&unit);
+            join_chat_verified(server, team.id, &raid_chat(server, &team), &unit);
         }
-        party_chat(server, &team, unit.character_id).join(&unit);
+        let channel = party_chat(server, &team, unit.character_id);
+        join_chat_verified(server, team.id, &channel, &unit);
     }
 
     /// `UpdateAllTeams` (the 500 ms tick): zombie-team disband, then the remote-member sync
@@ -2464,5 +2561,276 @@ mod deadlock_tests {
             drop(team_lock);
             worker.join().expect("refresh thread");
         });
+    }
+}
+
+#[cfg(test)]
+mod membership_verify_tests {
+    //! The deferred join effects (chat channels, `InParty`) are applied after the guard is
+    //! dropped and then verified against the team state (module header). The window of a
+    //! concurrent kick is landed deterministically through the `interleave` seam: the removal
+    //! runs on the test thread between the apply and the verify, so no thread or timing is
+    //! involved.
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::managers::chat::ChannelRef;
+    use crate::opcodes::sc;
+    use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+
+    /// Three online characters (ids 1..=3, owner first) in render distance of each other.
+    fn players(server: &GameServer) -> (Vec<TestClient>, Vec<PlayerRef>) {
+        let mut clients = Vec::new();
+        let mut players = Vec::new();
+        for id in 1..=3u32 {
+            let client = TestClient::new(server, id, 1000 + id);
+            let p = spawn_player(
+                server,
+                &client,
+                test_character(id, &format!("P{id}"), 100.0 + id as f32, 100.0),
+                0x100 + id,
+            );
+            p.data().is_online = true;
+            clients.push(client);
+            players.push(p);
+        }
+        (clients, players)
+    }
+
+    /// `owner` invites `target`, who accepts (the production flow, no hook installed).
+    fn invite_and_accept(server: &GameServer, owner: &PlayerRef, target: &PlayerRef) {
+        let teams = &server.systems.social.teams;
+        teams.ask_to_join(server, owner, "", 0, true, Some(target));
+        teams.reply_to_join_team(
+            server,
+            target,
+            0,
+            true,
+            owner.character_id,
+            false,
+            "",
+            false,
+        );
+    }
+
+    /// Removes `victim` from its team the first time one of its join effects is verified (what
+    /// a kick on another thread does between the apply and the verify). The hook is removed
+    /// when the value is dropped.
+    struct KickWindow {
+        fired: Rc<Cell<bool>>,
+    }
+
+    impl KickWindow {
+        fn open(victim: u32) -> Self {
+            let fired = Rc::new(Cell::new(false));
+            let seen = fired.clone();
+            let hook: InterleaveHook = Rc::new(move |server, at| {
+                let Interleave::JoinApplied {
+                    team_id,
+                    character_id,
+                } = at;
+                if character_id != victim || seen.replace(true) {
+                    return;
+                }
+                let removed = server
+                    .systems
+                    .social
+                    .teams
+                    .lock()
+                    .teams
+                    .get_mut(&team_id)
+                    .expect("team")
+                    .remove_member(victim);
+                assert!(removed, "the victim was a member until the kick");
+            });
+            INTERLEAVE.with(|h| *h.borrow_mut() = Some(hook));
+            Self { fired }
+        }
+
+        /// Whether a join effect of the victim reached its verify (the seam was exercised).
+        fn fired(&self) -> bool {
+            self.fired.get()
+        }
+    }
+
+    impl Drop for KickWindow {
+        fn drop(&mut self) {
+            INTERLEAVE.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
+    /// Party 0 chat channel of the team (character 1 owns it; the owner only names the channel).
+    fn party_zero(server: &GameServer, team_id: u32) -> ChannelRef {
+        party_channel(server, team_id, 0, 1)
+    }
+
+    /// The chat frames (join / leave) of a drained connection, in order.
+    fn chat_ops(client: &mut TestClient) -> Vec<u16> {
+        client
+            .drain_ops()
+            .into_iter()
+            .filter(|op| {
+                *op == sc::SCJoinedChatChannelPacket || *op == sc::SCLeavedChatChannelPacket
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn is_member_now_follows_the_team_state() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        assert!(teams.is_member_now(team_id, 1));
+        assert!(teams.is_member_now(team_id, 2));
+        assert!(!teams.is_member_now(team_id, 3), "not invited");
+        assert!(!teams.is_member_now(team_id + 100, 1), "no such team");
+        assert!(!teams.is_member_now(0, 1), "team 0 is nobody's team");
+        teams.ask_risky_team(&server, &p[0], team_id, 2, risky_action::KICK);
+        assert!(!teams.is_member_now(team_id, 2), "kicked");
+    }
+
+    /// A member that stays a member keeps every effect (the verify must not undo the normal
+    /// path): the party chat and `InParty` of the whole party.
+    #[tokio::test]
+    async fn effects_of_members_are_kept() {
+        let server = test_server();
+        let (mut clients, p) = players(&server);
+        invite_and_accept(&server, &p[0], &p[1]);
+        invite_and_accept(&server, &p[0], &p[2]);
+        let team_id = server
+            .systems
+            .social
+            .teams
+            .active_team_by_unit(1)
+            .expect("team")
+            .id;
+        let channel = party_zero(&server, team_id);
+        for (client, player) in clients.iter_mut().zip(&p) {
+            assert!(player.data().in_party);
+            assert!(channel.contains(player));
+            assert_eq!(
+                chat_ops(client),
+                vec![sc::SCJoinedChatChannelPacket],
+                "joined once and never left"
+            );
+        }
+    }
+
+    /// `reply_to_join_team` into an existing team: the accepted member is kicked after its
+    /// state change and before its effects are verified.
+    #[tokio::test]
+    async fn a_late_join_of_a_member_that_left_meanwhile_is_taken_back() {
+        let server = test_server();
+        let (mut clients, p) = players(&server);
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = server
+            .systems
+            .social
+            .teams
+            .active_team_by_unit(1)
+            .expect("team")
+            .id;
+        clients.iter_mut().for_each(|c| {
+            c.drain();
+        });
+        let window = KickWindow::open(3);
+        invite_and_accept(&server, &p[0], &p[2]);
+        assert!(window.fired(), "the late joiner reached its verify");
+        let channel = party_zero(&server, team_id);
+        assert!(!p[2].data().in_party, "InParty is taken back");
+        assert!(!channel.contains(&p[2]), "the party chat is taken back");
+        assert_eq!(
+            chat_ops(&mut clients[2]),
+            vec![sc::SCJoinedChatChannelPacket, sc::SCLeavedChatChannelPacket]
+        );
+        // The members that are still in the team keep theirs.
+        assert!(channel.contains(&p[0]) && channel.contains(&p[1]));
+        assert!(p[0].data().in_party && p[1].data().in_party);
+    }
+
+    /// `CreateNewTeam` through `reply_to_join_team`: the invited member is kicked before its
+    /// effects are verified; the owner keeps its own.
+    #[tokio::test]
+    async fn a_new_team_member_that_left_meanwhile_is_taken_back() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        let window = KickWindow::open(2);
+        invite_and_accept(&server, &p[0], &p[1]);
+        assert!(window.fired());
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        let channel = party_zero(&server, team_id);
+        assert!(!p[1].data().in_party && !channel.contains(&p[1]));
+        assert!(p[0].data().in_party && channel.contains(&p[0]));
+    }
+
+    /// `UpdateAtLogin` of a member that was kicked in the meantime.
+    #[tokio::test]
+    async fn a_login_of_a_member_that_left_meanwhile_is_taken_back() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        let window = KickWindow::open(2);
+        teams.update_at_login(&server, &p[1]);
+        assert!(window.fired());
+        let channel = party_zero(&server, team_id);
+        assert!(!p[1].data().in_party && !channel.contains(&p[1]));
+        assert!(p[0].data().in_party && channel.contains(&p[0]));
+    }
+
+    /// `ConvertToRaid` joins every member to the raid chat; one was kicked meanwhile.
+    #[tokio::test]
+    async fn a_raid_conversion_skips_a_member_that_left_meanwhile() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        let window = KickWindow::open(2);
+        teams.convert_to_raid(&server, &p[0], team_id);
+        assert!(window.fired());
+        let raid = raid_channel(&server, team_id, 1);
+        assert!(raid.contains(&p[0]));
+        assert!(!raid.contains(&p[1]), "the raid chat is taken back");
+    }
+
+    /// `CreateSoloTeam` (GM `soloparty`) for a character that left its team meanwhile.
+    #[tokio::test]
+    async fn a_solo_team_member_that_left_meanwhile_is_taken_back() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        let window = KickWindow::open(1);
+        teams.create_solo_team(&server, &p[0], true);
+        assert!(window.fired());
+        assert!(!p[0].data().in_party);
+        let channels = server.chat.list_all_channels();
+        assert!(channels.iter().all(|c| !c.contains(&p[0])));
+    }
+
+    /// `MoveTeamMember` joins the two characters the client names to their new party chat; the
+    /// client can name any online character, so only members may keep the join.
+    #[tokio::test]
+    async fn a_member_move_never_joins_a_non_member_to_the_party_chat() {
+        let server = test_server();
+        let (_clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        invite_and_accept(&server, &p[0], &p[1]);
+        let team_id = teams.active_team_by_unit(1).expect("team").id;
+        // Slot 1 <-> 0 with a member and an outsider (character 3) named as the two targets.
+        teams.move_team_member(&server, &p[0], team_id, 2, 3, 1, 0);
+        let channel = party_zero(&server, team_id);
+        assert!(channel.contains(&p[1]), "the named member is re-joined");
+        assert!(!channel.contains(&p[2]), "the outsider is not");
+        // The kicked-in-the-window variant: the named member leaves before the verify.
+        let window = KickWindow::open(2);
+        teams.move_team_member(&server, &p[0], team_id, 2, 0, 0, 1);
+        assert!(window.fired());
+        assert!(!channel.contains(&p[1]), "the move join is taken back");
     }
 }
