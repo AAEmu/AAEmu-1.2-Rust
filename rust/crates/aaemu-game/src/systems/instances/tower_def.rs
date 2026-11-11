@@ -100,8 +100,10 @@ struct State {
     active: BTreeMap<EventKey, Event>,
     ever_started: bool,
     previous_hour: Option<f32>,
-    day: u64,
-    scheduled_days: HashMap<EventKey, u64>,
+    /// The epoch-derived game day (`TimeManager::get_day`), read every tick: `scheduled_days`
+    /// and `tod_day_interval` stay restart-stable.
+    day: i64,
+    scheduled_days: HashMap<EventKey, i64>,
     war_active: HashSet<EventKey>,
     /// Victory follow-ups (and the zone of the event that triggered them) waiting for the next
     /// tick to start.
@@ -612,6 +614,7 @@ pub fn initialize(server: &GameServer) -> anyhow::Result<()> {
         state.events = accepted;
         state.events_from_config = explicit;
         state.previous_hour = Some(server.time.get_time());
+        state.day = server.time.get_day();
     }
     Ok(())
 }
@@ -1294,9 +1297,9 @@ fn schedule_tick(server: &GameServer) {
             .expect("tower defense poisoned");
         let previous = state.previous_hour.replace(hour).unwrap_or(hour);
         let wrapped = hour < previous;
-        if wrapped {
-            state.day += 1;
-        }
+        // The same epoch-derived day as the clock: a restart does not reset the parity of
+        // `tod_day_interval`, and a boot after an event's `tod` does not replay it.
+        state.day = server.time.get_day();
         for c in &events {
             let key = EventKey::from(c);
             let Some(def) = server
@@ -1336,7 +1339,7 @@ fn schedule_tick(server: &GameServer) {
             };
             if let Some(day) = occurrence {
                 if def.time_of_day_day_interval > 0
-                    && day.is_multiple_of(u64::from(def.time_of_day_day_interval))
+                    && day.rem_euclid(i64::from(def.time_of_day_day_interval)) == 0
                     && state.scheduled_days.get(&key) != Some(&day)
                 {
                     state.scheduled_days.insert(key, day);

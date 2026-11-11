@@ -4,6 +4,7 @@ use super::*;
 use crate::data::world_data::{Zone, ZoneConflict};
 use crate::data::world_templates::WorldSpawnPosition;
 use crate::data::GameData;
+use crate::managers::time::ManualClock;
 use crate::models::npc::Npc;
 use crate::opcodes::sc;
 use crate::systems::instances::data::{
@@ -157,6 +158,18 @@ fn fixture() -> Arc<GameServer> {
 
 fn advance(seconds: u64) {
     spawn_manager::advance_test_clock(Duration::from_secs(seconds));
+}
+
+/// The Unix time at game `hour` on game `day` at the default `World.GameTimeOffset` 0
+/// (`unix_seconds * 6 = day * 86400 + hour * 3600`).
+fn unix_at(day: i64, hour: f32) -> f64 {
+    (day as f64 * 86_400.0 + f64::from(hour) * 3_600.0) / 6.0
+}
+
+/// Moves the manual wall clock and refreshes the game clock (the time manager's 10 s tick).
+fn move_clock(server: &GameServer, clock: &ManualClock, unix_seconds: f64) {
+    clock.set(unix_seconds);
+    server.time.tick();
 }
 
 const HALCYONA_GROUP: u16 = 22;
@@ -840,17 +853,18 @@ async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() 
                 zone_id: TEST_ZONE,
             })
     });
-    server.time.set(17.0);
+    let clock = ManualClock::new(unix_at(0, 17.0));
+    server.time.set_test_clock(clock.clock(), 0.0);
     initialize(&server).unwrap();
-    server.time.set(18.0);
+    move_clock(&server, &clock, unix_at(0, 18.0));
     tick(&server);
     assert!(infos(&server, 0).is_empty());
     server
         .config
         .update(|c| c.dungeons.tower_defense.enabled = true);
-    server.time.set(17.0);
+    move_clock(&server, &clock, unix_at(0, 17.0));
     initialize(&server).unwrap();
-    server.time.set(18.1);
+    move_clock(&server, &clock, unix_at(0, 18.1));
     tick(&server);
     assert_eq!(infos(&server, 0).len(), 1);
     end(&server, KEY).unwrap();
@@ -869,16 +883,141 @@ async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() 
         .unwrap();
     def.time_of_day = 0.0;
     def.time_of_day_day_interval = 2;
-    server.time.set(23.9);
+    move_clock(&server, &clock, unix_at(0, 23.9));
     tick(&server);
-    server.time.set(0.0);
+    move_clock(&server, &clock, unix_at(1, 0.0));
     tick(&server);
-    assert!(infos(&server, 0).is_empty(), "skip day 1");
-    server.time.set(23.9);
+    assert!(infos(&server, 0).is_empty(), "day 1 is not a multiple of 2");
+    move_clock(&server, &clock, unix_at(1, 23.9));
     tick(&server);
-    server.time.set(0.0);
+    move_clock(&server, &clock, unix_at(2, 0.0));
     tick(&server);
-    assert_eq!(infos(&server, 0).len(), 1, "start on day 2 at midnight");
+    assert_eq!(infos(&server, 0).len(), 1, "day 2 starts at midnight");
+}
+
+/// A boot before an event's `tod` sees the crossing and starts it once; the game day number is
+/// the wall-clock-derived one, so the crossing is not replayed on later ticks.
+#[tokio::test]
+async fn tower_def_boot_before_the_tod_starts_the_event_at_the_crossing() {
+    let mut server = fixture();
+    let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();
+    data.systems
+        .instances
+        .tower_defs
+        .tower_defs
+        .get_mut(&12)
+        .unwrap()
+        .time_of_day = 14.0;
+    server.config.update(|c| {
+        c.dungeons.tower_defense.enabled = true;
+        c.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
+            id: 12,
+            world_id: 0,
+            zone_group_id: 5,
+            zone_id: TEST_ZONE,
+        }];
+    });
+    let clock = ManualClock::new(unix_at(8, 13.0 + 50.0 / 60.0));
+    server.time.set_test_clock(clock.clock(), 0.0);
+    initialize(&server).unwrap();
+    tick(&server);
+    assert!(
+        infos(&server, 0).is_empty(),
+        "13:50 is before the 14:00 event"
+    );
+    clock.advance(100.0); // 10 real minutes = 10 game minutes
+    server.time.tick();
+    tick(&server);
+    assert_eq!(infos(&server, 0).len(), 1, "the 14:00 crossing starts it");
+    tick(&server);
+    assert_eq!(infos(&server, 0).len(), 1, "once per game day");
+}
+
+/// A boot after an event's `tod` (14:10) does not replay it; only the next game day's crossing
+/// (through midnight, observed while running) starts it.
+#[tokio::test]
+async fn tower_def_boot_after_the_tod_waits_for_the_next_game_day() {
+    let mut server = fixture();
+    let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();
+    data.systems
+        .instances
+        .tower_defs
+        .tower_defs
+        .get_mut(&12)
+        .unwrap()
+        .time_of_day = 14.0;
+    server.config.update(|c| {
+        c.dungeons.tower_defense.enabled = true;
+        c.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
+            id: 12,
+            world_id: 0,
+            zone_group_id: 5,
+            zone_id: TEST_ZONE,
+        }];
+    });
+    let clock = ManualClock::new(unix_at(8, 14.0 + 10.0 / 60.0));
+    server.time.set_test_clock(clock.clock(), 0.0);
+    initialize(&server).unwrap();
+    tick(&server);
+    assert!(
+        infos(&server, 0).is_empty(),
+        "the 14:00 crossing happened before the boot"
+    );
+    move_clock(&server, &clock, unix_at(8, 23.0));
+    tick(&server);
+    assert!(infos(&server, 0).is_empty(), "still the same game day");
+    move_clock(&server, &clock, unix_at(9, 0.0));
+    tick(&server);
+    assert!(infos(&server, 0).is_empty(), "midnight does not fire it");
+    move_clock(&server, &clock, unix_at(9, 14.0));
+    tick(&server);
+    assert_eq!(
+        infos(&server, 0).len(),
+        1,
+        "the next game day's 14:00 crossing starts it"
+    );
+}
+
+/// `tod_day_interval` counts on the wall-clock-derived game day, not on a per-boot counter:
+/// an odd epoch day does not start a two-day event, the next (even) day does.
+#[tokio::test]
+async fn tower_def_day_interval_counts_the_epoch_game_day() {
+    let mut server = fixture();
+    let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();
+    let def = data
+        .systems
+        .instances
+        .tower_defs
+        .tower_defs
+        .get_mut(&12)
+        .unwrap();
+    def.time_of_day = 14.0;
+    def.time_of_day_day_interval = 2;
+    server.config.update(|c| {
+        c.dungeons.tower_defense.enabled = true;
+        c.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
+            id: 12,
+            world_id: 0,
+            zone_group_id: 5,
+            zone_id: TEST_ZONE,
+        }];
+    });
+    // Day 11 is odd: its 14:00 crossing does not start the event.
+    let clock = ManualClock::new(unix_at(11, 13.0 + 50.0 / 60.0));
+    server.time.set_test_clock(clock.clock(), 0.0);
+    initialize(&server).unwrap();
+    move_clock(&server, &clock, unix_at(11, 14.0));
+    tick(&server);
+    assert!(
+        infos(&server, 0).is_empty(),
+        "odd epoch day 11 is not a multiple of 2"
+    );
+    // Day 12 (even) starts it, even though the scheduler booted on day 11.
+    move_clock(&server, &clock, unix_at(12, 13.0 + 50.0 / 60.0));
+    tick(&server);
+    move_clock(&server, &clock, unix_at(12, 14.0));
+    tick(&server);
+    assert_eq!(infos(&server, 0).len(), 1, "even epoch day 12 starts it");
 }
 
 #[tokio::test]
