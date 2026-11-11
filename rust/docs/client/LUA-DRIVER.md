@@ -1047,10 +1047,12 @@ script sends a normal Say command:
 The server side is the `/questmap` command (`systems/services/commands/scripts/quest_map.rs`)
 and the streaming it drives (`systems/quests/quest_map.rs`): it streams safe quest giver /
 reporter NPCs within the selected range (beyond the ordinary 2-region visibility, nearest 256 at
-most) and removes them when they leave the range. It does not change any client files and does
-not need a new packet. The ordinary view already reaches at least 128 m on every side, so only
-`300 m` and `Unlimited` make a visible difference (`GM-Commands.md`, `PORTING.md` list what is
-streamed and what is not).
+most) and removes them when they leave the range. It streams them again when the client lost
+them behind the server's back: after a cut scene, a zone load or a teleport emptied the client's
+world, and after the ordinary 2-region view took one off the client. It does not change any
+client files and does not need a new packet. The ordinary view already reaches at least 128 m on
+every side, so only `300 m` and `Unlimited` make a visible difference (`GM-Commands.md`,
+`PORTING.md` list what is streamed and what is not).
 
 ```powershell
 $driver = 'D:\aaemu-target\<lane>\release\aaemu-clientdriver.exe'

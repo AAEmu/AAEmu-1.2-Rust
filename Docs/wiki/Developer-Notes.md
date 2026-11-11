@@ -119,7 +119,12 @@ leash protect an NPC from reclamation; the persistent-work check includes the sa
 (an active command after its queue drained, spawn settling, return home). A placement whose NPC
 a player streams only for the quest-map range option (`/questmap`, see
 [GM-Commands](GM-Commands)) is not cold while it is streamed, and the placements that option
-prepares are tracked in the same registry, so the retention rules apply once streaming stops.
+prepares are tracked in the same registry, so the retention rules apply once streaming stops. The
+option keeps its own list of what it streamed, and the client can lose those units without the
+option hearing of it, so the list is corrected: the region visibility path logs every NPC unit it
+removes from a client (`Player::note_region_removed_npc`, the newest 4,096 per player) and the
+next refresh applies that log and runs at once, and a client world wipe (cut-scene end, zone load,
+teleport ended) resets the list (`client_world_reset`).
 
 The AI manager's ~100 ms tick visits only the AIs selected for it: NPCs in the 2-region
 neighborhood around active players (their region plus two rings), plus AIs with persistent
