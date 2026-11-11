@@ -386,13 +386,13 @@ fn bank_request_allowed(server: &GameServer, p: &PlayerRef, what: &str, amount: 
     banker_in_range(server, p, what)
 }
 
-/// The player is interacting with a banker NPC in range (the only way to open the warehouse:
-/// 1.2 has no item or doodad that does).
+/// The player is interacting with a banker NPC in range, or stands at a warehouse doodad
+/// (the Fellowship Plaza's "Auctioneer/Warehouse", see [`super::store::near_service`]).
 fn banker_in_range(server: &GameServer, p: &PlayerRef, what: &str) -> bool {
     let npc = p.data().unit.current_interaction_object;
-    if !super::store::near_service_npc(server, p, npc, super::store::SERVICE_RANGE, |i| i.banker) {
+    if !super::store::near_service(server, p, npc, super::store::Service::Bank) {
         tracing::warn!(
-            "{}: rejected {what}: no banker NPC in range (interaction object {npc})",
+            "{}: rejected {what}: no banker in range (interaction object {npc})",
             p.data().unit.name
         );
         inventory::send_error_message(p, error_message::TOO_FAR_AWAY, 0, true);

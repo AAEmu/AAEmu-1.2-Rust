@@ -34,6 +34,7 @@ pub mod models;
 pub mod move_verify;
 pub mod movement;
 pub mod objects;
+pub mod placement;
 pub mod query;
 pub mod residency;
 pub mod terrain;

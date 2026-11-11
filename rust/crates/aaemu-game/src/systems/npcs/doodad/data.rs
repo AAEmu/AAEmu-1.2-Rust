@@ -2559,6 +2559,16 @@ mod tests {
         }
         assert!(d.func_templates["DoodadFuncAuctionUi"].is_empty());
         assert!(d.func_templates["DoodadFuncBankUi"].is_empty());
+        // ... but their func rows are loaded: the bank / auction checks match them by type
+        // (`economy::store::near_service`). Group 22065 = the Fellowship Plaza's
+        // "Auctioneer/Warehouse" (7983).
+        let plaza: Vec<&str> = d
+            .funcs_for_group(22065)
+            .iter()
+            .map(|f| f.func_type.as_str())
+            .collect();
+        assert!(plaza.contains(&"DoodadFuncBankUi"), "{plaza:?}");
+        assert!(plaza.contains(&"DoodadFuncAuctionUi"), "{plaza:?}");
         assert_eq!(d.templates.len(), count(&c, "doodad_almighties"));
         assert_eq!(d.all_func_groups.len(), count(&c, "doodad_func_groups"));
         // WP-UI1: the authored phase messages (research evidence: 160 groups, 29 of them

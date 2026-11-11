@@ -21,7 +21,7 @@ use super::world::{ObjKind, Owner};
 use super::Files;
 
 /// A CGF whose default physics is a 2 × 2 × 2 m box centred on the origin.
-fn box_cgf() -> Vec<u8> {
+pub(crate) fn box_cgf() -> Vec<u8> {
     let g = BoxGeom::new(&BoxPrim::aligned(Vec3::ZERO, Vec3::splat(1.0)));
     let h = PhysGeomHeader {
         inertia: Vec3::splat(1.0),

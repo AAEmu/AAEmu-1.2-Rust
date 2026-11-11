@@ -283,15 +283,15 @@ impl SubCommand for DoodadPhaseChangeSubCommand {
         let doodad_obj_id = parameters.require("ObjId")?.as_u32()?;
         let phase_id = parameters.require("PhaseId")?.as_i32()?;
         let (world, doodad) = doodad_by_obj_id(ctx, doodad_obj_id)?;
-        if doodad.is_none() {
+        // C# has no return after the message and then throws on `doodad.TemplateId`.
+        let Some(doodad) = doodad else {
             self.base.send_color_message(
                 out,
                 Color::RED,
                 &format!("Doodad with objId {doodad_obj_id} Does not exist"),
             );
-        }
-        // C#: no return after the message, `doodad.TemplateId` throws.
-        let doodad = doodad.ok_or_else(nre)?;
+            return Ok(());
+        };
 
         let server = ctx.server()?;
         let template_id = doodad.data().template_id;
@@ -668,10 +668,7 @@ mod tests {
         let (_, out) = harness::run(&server, &gm.p, "doodad setphase change 9 1").await;
         assert_eq!(
             out,
-            [
-                "|cFFFF0000[Doodad Phase Change] Doodad with objId 9 Does not exist|r",
-                "|cFFFF0000[Doodad Phase Change] Unexpected error: Object reference not set to an instance of an object.|r",
-            ]
+            ["|cFFFF0000[Doodad Phase Change] Doodad with objId 9 Does not exist|r"]
         );
         let (_, out) = harness::run(
             &server,

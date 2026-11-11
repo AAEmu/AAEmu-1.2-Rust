@@ -196,11 +196,15 @@ impl Command for AddKit {
         }
 
         if items_added > 0 {
+            // Deviation: the C# `Kit.cs` guards both summary messages with `character.Id !=
+            // targetPlayer.Id`, so it says nothing when you kit yourself; the port always tells
+            // the sender what was added (a silent success reads as a failure to a tester). Only
+            // the notification to the target is for others (PORTING.md, commands section).
+            ctx.character.send_message(&format!(
+                "[Items] added {items_added} items to {}'s inventory",
+                name_of(&target)
+            ));
             if is_other(&character, &target) {
-                ctx.character.send_message(&format!(
-                    "[Items] added {items_added} items to {}'s inventory",
-                    name_of(&target)
-                ));
                 send_player_message(
                     &target,
                     &format!(
@@ -284,6 +288,99 @@ mod tests {
         assert!(none.kitconfig.itemkits.is_empty());
     }
 
+    /// The shipped `app/Scripts/Commands/kits.json` must only name real 1.2 items, so a tester
+    /// can run every kit on the test server. Gated by `AAEMU_COMPACT_DB` (read-only).
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn real_compact_has_every_shipped_kit_item() {
+        let Ok(compact) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let env = ScriptEnv {
+            app_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app"),
+            profile: crate::config::ServerProfile::default(),
+        };
+        let kit = AddKit::init_kits(&env);
+        assert!(
+            kit.itemkits.len() >= 500,
+            "the shipped kit list, got {} entries",
+            kit.itemkits.len()
+        );
+        for name in [
+            "vocation_alchemy",
+            "vocation_carpentry",
+            "vocation_fishing",
+            "vocation_mining",
+            "tradepack_materials",
+            "seeds",
+            "saplings",
+            "livestock",
+            "regrade_test",
+            "lunagem_set",
+            "gear_10",
+            "gear_20",
+            "gear_30",
+            "gear_40",
+            "gear_50",
+            "tax_certificates",
+        ] {
+            assert!(
+                kit.itemkitnames.iter().any(|n| n == name),
+                "missing kit {name}"
+            );
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            compact,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open compact.sqlite3");
+        for entry in &kit.itemkits {
+            assert!(
+                entry.item_count >= 1,
+                "kit item {} has count {}",
+                entry.item_id,
+                entry.item_count
+            );
+            assert!(entry.item_grade <= 11, "grade {}", entry.item_grade);
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM items WHERE id = ?1",
+                    [entry.item_id],
+                    |r| r.get(0),
+                )
+                .expect("items lookup");
+            assert_eq!(
+                count, 1,
+                "kit item {} ({:?}) is not in compact",
+                entry.item_id, entry.kitnames
+            );
+        }
+        // Every kit must fit an empty 50-slot bag: an entry is added all-or-nothing into the
+        // free slots and there is no mail fallback, so a bigger kit hands out a partial set.
+        // Slots = sum over the entries of ceil(count / max_stack_size).
+        let mut slots: std::collections::BTreeMap<String, i64> = Default::default();
+        for entry in &kit.itemkits {
+            let max_stack: i64 = conn
+                .query_row(
+                    "SELECT max_stack_size FROM items WHERE id = ?1",
+                    [entry.item_id],
+                    |r| r.get(0),
+                )
+                .expect("items lookup");
+            let stack = max_stack.max(1);
+            let needed = (i64::from(entry.item_count) + stack - 1) / stack;
+            for name in &entry.kitnames {
+                *slots.entry(name.clone()).or_default() += needed;
+            }
+        }
+        for (name, needed) in &slots {
+            assert!(
+                *needed <= 50,
+                "kit {name} needs {needed} bag slots, a fresh bag has 50"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn kit_adds_the_kit_items() {
         let mut data = GameData::empty();
@@ -324,7 +421,7 @@ mod tests {
         );
 
         harness::run(&server, &gm.p, "kit STARTER").await;
-        assert!(gm.chat().is_empty());
+        assert_eq!(gm.chat(), ["[Items] added 2 items to Gm's inventory"]);
         let inv = Inv::of(&gm.p);
         assert_eq!(inv.items_count_in(slot_type::INVENTORY, 1000, -1), 5);
         assert_eq!(inv.items_count_in(slot_type::INVENTORY, 2000, -1), 1);
