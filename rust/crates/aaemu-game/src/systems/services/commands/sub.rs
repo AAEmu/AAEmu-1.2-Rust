@@ -802,15 +802,18 @@ impl SubCommand for AStarPointSubCommand {
             return Ok(());
         };
         let player = ctx.player()?;
-        let (px, py, pz) = {
-            let c = player.data();
-            let world = server.world.world_of(&player.clone().into());
-            match world {
-                Some(w) => {
-                    let p = w.world_pos_rot(&player.clone().into());
-                    (p.x, p.y, p.z)
-                }
-                None => (c.unit.transform.x, c.unit.transform.y, c.unit.transform.z),
+        // Resolve the world before taking the character data lock: `world_of` reads the
+        // object's region/transform through the same lock, so holding it across the call
+        // deadlocked the whole game server on the first `/pathfind start|goal` with a target.
+        let world = server.world.world_of(&player.clone().into());
+        let (px, py, pz) = match world {
+            Some(w) => {
+                let p = w.world_pos_rot(&player.clone().into());
+                (p.x, p.y, p.z)
+            }
+            None => {
+                let c = player.data();
+                (c.unit.transform.x, c.unit.transform.y, c.unit.transform.z)
             }
         };
         let x = optional_parameter(parameters, "x", px, |v| v.as_f32())?;
@@ -978,3 +981,37 @@ impl SubCommand for AStarViewSubCommand {
 /// The runtime `FeaturesManager.Fsets` (changed by `FeatureSetSubCommand`).
 #[derive(Debug, Default)]
 pub struct RuntimeFeatures(pub RwLock<Option<crate::data::FeatureSet>>);
+
+#[cfg(test)]
+mod astar_deadlock_tests {
+    //! `/pathfind start|goal` used to hold the character data lock while `world_of` took the
+    //! same lock again, wedging the whole game server. Each command runs on its own thread so
+    //! the test fails on a timeout instead of hanging the suite.
+    use crate::systems::services::commands::scripts::harness;
+    use crate::systems::services::commands::scripts::util::objects_test_support as ts;
+
+    fn run_with_timeout(command: &'static str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async move {
+                let server = ts::server();
+                let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+                let npc = ts::spawn_npc(&server, ts::NPC, 105.0, 100.0);
+                gm.p.data().unit.current_target = npc.obj_id;
+                let _ = harness::run(&server, &gm.p, command).await;
+            });
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+            "{command} deadlocked"
+        );
+    }
+
+    #[test]
+    fn pathfind_start_and_goal_do_not_deadlock() {
+        run_with_timeout("pathfind start x=1 y=2 z=3");
+        run_with_timeout("pathfind goal x=1 y=2 z=3");
+    }
+}

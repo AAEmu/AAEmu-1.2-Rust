@@ -8,9 +8,13 @@ use crate::data::pak::test_util::temp_path;
 use crate::data::world_data::{SystemFaction, Zone};
 use crate::data::{items::ItemTemplate, GameData};
 use crate::models::house::House;
+use crate::systems::ai::collision::flow_tests::box_cgf;
+use crate::systems::ai::collision::terrain::tests::Plane;
 use crate::systems::economy::inventory::Inv;
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
-use crate::systems::npcs::doodad::templates::DoodadTemplate;
+use crate::systems::npcs::doodad::templates::{
+    doodad_func_group_kind, DoodadFuncGroups, DoodadTemplate,
+};
 use crate::systems::npcs::heightmap::{
     HeightmapConfig, HeightmapWorlds, WorldHeightmap, CELL_HMAP_RESOLUTION,
 };
@@ -1657,4 +1661,172 @@ async fn refused_planting_is_still_logged_at_warn() {
             .any(|(l, m)| *l == Level::WARN && m.contains("CreateDoodad")),
         "{events:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `FUN_393a7720` step 2: the footprint terrain spread (doodad seed builder, error 279).
+// ---------------------------------------------------------------------------------------------
+
+const BOX_MODEL: &str = "cgf://objects/test/box.cgf";
+
+/// A planting fixture whose doodad 4020 has a START func group; `model` maps that group to a
+/// collision model (`None` leaves the template without one: the no-bounds case). The collision
+/// service answers with a plane `z = 110 + b·x`, so the 2 m box's footprint spans `2·b` m.
+fn ground_fixture(
+    group_id: u32,
+    model: Option<&str>,
+    b: f32,
+) -> (GameServer, PlayerRef, u64, TestClient) {
+    let mut data = GameData::empty();
+    data.items
+        .templates
+        .insert(1020, ItemTemplate::plain(1020, 20));
+    data.items.item_doodads.insert(4020, vec![1020]);
+    let mut template = DoodadTemplate {
+        id: 4020,
+        group_id,
+        ..Default::default()
+    };
+    if let Some(model) = model {
+        template.func_groups.push(DoodadFuncGroups {
+            id: 5020,
+            almighty: 4020,
+            group_kind_id: doodad_func_group_kind::START,
+            ..Default::default()
+        });
+        data.systems
+            .ai
+            .collision
+            .func_group_models
+            .insert(5020, model.to_string());
+    }
+    data.systems.npcs.doodad.templates.insert(4020, template);
+    let server = test_server_with(data);
+    crate::systems::economy::bridges::install(&server);
+    let mut files = HashMap::new();
+    files.insert("game/objects/test/box.cgf".to_string(), box_cgf());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(files))
+        .unwrap();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Plane {
+            a: DRY_Z,
+            b,
+            c: 0.0,
+            n: 16384,
+        }))
+        .unwrap_or_else(|_| panic!("terrain"));
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Planter", 100.0, 100.0),
+        server.ids.object.get_next_id().unwrap(),
+    );
+    player.data().labor_power = 20;
+    for (_, container) in player.data().inventory.containers.clone() {
+        server.items.add_container(container);
+    }
+    let item = server
+        .items
+        .create(1020, 2, 0, 1, &server.game_data.items, &server.ids.item, 0)
+        .unwrap();
+    let item_id = item.id;
+    Inv::of(&player)
+        .bag()
+        .lock()
+        .unwrap()
+        .add_new_item(item, 0, &server.game_data.items)
+        .unwrap();
+    (server, player, item_id, client)
+}
+
+#[tokio::test]
+async fn ground_rule_passes_a_model_on_flat_terrain() {
+    let (server, player, id, mut client) = ground_fixture(24, Some(BOX_MODEL), 0.0);
+    let codes = send_placement(
+        &mut client,
+        &server,
+        &player,
+        4020,
+        id,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "flat ground: {codes:?}");
+    assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
+}
+
+#[tokio::test]
+async fn ground_rule_refuses_a_corner_seven_metres_lower_with_279() {
+    // `z = 110 + 3.5·x` across the box's 2 m footprint: the corners differ by exactly 7 m.
+    let (server, player, id, mut client) = ground_fixture(24, Some(BOX_MODEL), 3.5);
+    let codes = send_placement(
+        &mut client,
+        &server,
+        &player,
+        4020,
+        id,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert_eq!(codes, vec![error_message::DOODAD_SIM_LOW_TERRAIN]);
+    assert_eq!(
+        Inv::of(&player).item_by_id(id).map(|item| item.count),
+        Some(2),
+        "a refused placement keeps the seed"
+    );
+    assert!(server.world.world(0).unwrap().all_doodads().is_empty());
+
+    // Exactly 6 m is allowed (`max - min > 6.0` refuses, strictly).
+    let (server, player, id, mut client) = ground_fixture(24, Some(BOX_MODEL), 3.0);
+    let codes = send_placement(
+        &mut client,
+        &server,
+        &player,
+        4020,
+        id,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "exactly 6 m is allowed: {codes:?}");
+}
+
+#[tokio::test]
+async fn ground_rule_is_skipped_for_the_client_groups() {
+    // `FUN_393a7720`: groups 2, 3, 5, 12, 37, 40 and 80 never run the footprint spread.
+    // Group 40 (marine crops) still needs water, so its spot is below the 100 m ocean level.
+    for group in placement::FOOTPRINT_SKIP_GROUPS {
+        let z = if group == placement::MARINE_CROPS {
+            90.0
+        } else {
+            DRY_Z
+        };
+        let (server, player, id, mut client) = ground_fixture(group, Some(BOX_MODEL), 3.5);
+        let codes = send_placement(&mut client, &server, &player, 4020, id, (102.0, 100.0, z));
+        assert!(codes.is_empty(), "group {group} is skipped: {codes:?}");
+        assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn ground_rule_is_skipped_without_model_bounds() {
+    // The render OBB stands in for the model bounds; a model without physics geometry skips the
+    // check instead of refusing on a slope the server cannot measure.
+    let (server, player, id, mut client) = ground_fixture(24, None, 3.5);
+    let codes = send_placement(
+        &mut client,
+        &server,
+        &player,
+        4020,
+        id,
+        (102.0, 100.0, DRY_Z),
+    );
+    assert!(codes.is_empty(), "no bounds: {codes:?}");
+    assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
 }

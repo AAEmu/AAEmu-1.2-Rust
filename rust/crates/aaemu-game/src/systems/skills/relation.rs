@@ -37,8 +37,18 @@ pub fn faction_of(t: &Target) -> u32 {
 }
 
 /// `BaseUnit.GetRelationStateTo(unit)`.
+///
+/// Inside the area of a running siege the two siege parties decide first: the attacking and the
+/// defending participants are `Hostile` to each other (even two characters of one faction), the
+/// participants of one party are `Friendly` (even of hostile factions), and everybody who is no
+/// participant, or stands outside the area, keeps the faction relation
+/// (`housing::dominion::hostility`). Every reader of the relation sees it: the skill target
+/// filters, the hostile-only / friendly-only effect checks, the crime check and the PvP honor.
 pub fn relation_to(server: &GameServer, a: &Target, b: &Target) -> RelationState {
-    faction_relation(server, faction_of(a), faction_of(b))
+    match crate::systems::housing::dominion::hostility::relation(server, a, b) {
+        Some(siege) => siege.relation_state(),
+        None => faction_relation(server, faction_of(a), faction_of(b)),
+    }
 }
 
 /// How many spawner links [`gimmick_owner`] follows. A gimmick can be spawned by another gimmick
@@ -360,6 +370,10 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     {
         return false;
     }
+    // The siege rule lives in `relation_to` (inside a running siege's area the two parties are
+    // Hostile, a party is Friendly to itself): it comes after the Peace / no-PvP / own-mount
+    // refusals above, so it never weakens those protections, and the faction / zone logic below
+    // reads the same relation as every skill path.
     let relation = relation_to(server, me, target);
     let me_char = me.as_obj().and_then(|o| o.as_player().cloned());
     let zone_key = super::geometry::instance_and_zone(target).1;

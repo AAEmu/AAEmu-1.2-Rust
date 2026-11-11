@@ -387,6 +387,59 @@ pub fn shape_bounds(shape: &ColliderShape) -> Option<BoxPrim> {
         .then_some(BoxPrim::aligned((min + max) * 0.5, half))
 }
 
+/// The union collision bounds of a model reference in its local frame: the documented server
+/// stand-in for the render OBB the 1.2 placement checks sample (`FUN_393a73a0`). Shares the
+/// collider sync's shape cache. `None` when the model has no physics geometry (the placement
+/// check is then skipped, never refused).
+pub fn model_bounds(server: &GameServer, reference: &str) -> Option<BoxPrim> {
+    let files = super::files(server)?;
+    let models = super::model_cache(server, &files);
+    let mut shapes = server.systems.ai.collision.shape_cache();
+    let shape = shapes.entry(reference.to_string()).or_insert_with(|| {
+        let mut prefab_xml = HashMap::new();
+        resolve_shape(
+            &files,
+            &models,
+            &mut prefab_xml,
+            &parse_model_ref(reference),
+        )
+    });
+    shape.as_ref().and_then(shape_bounds)
+}
+
+/// The union collision bounds of a house's model (`prefab_models` / `prefab_elements` rows,
+/// as the collider sync builds them) in its local frame. `None` without prefab data.
+pub fn house_model_bounds(server: &GameServer, model_id: u32, state: u32) -> Option<BoxPrim> {
+    let refs = server
+        .game_data
+        .systems
+        .ai
+        .collision
+        .house_prefabs(model_id, state)?;
+    let files = super::files(server)?;
+    let models = super::model_cache(server, &files);
+    let mut shapes = server.systems.ai.collision.shape_cache();
+    let shape = shapes
+        .entry(format!("house:{}", refs.join("|")))
+        .or_insert_with(|| {
+            let mut prefab_xml = HashMap::new();
+            let parts = refs
+                .iter()
+                .filter_map(|reference| {
+                    resolve_house_shape(
+                        &files,
+                        &models,
+                        &mut prefab_xml,
+                        &parse_model_ref(reference),
+                    )
+                })
+                .flat_map(|shape| shape.parts)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then_some(ColliderShape { parts })
+        });
+    shape.as_ref().and_then(shape_bounds)
+}
+
 /// The world placement of a doodad as the zone receives it (position, quaternion, scale).
 pub fn object_placement(world: &WorldInstance, obj: &WorldObject, scale: f32) -> (Vec3, Quat, f32) {
     let p = world.world_pos_rot(obj);

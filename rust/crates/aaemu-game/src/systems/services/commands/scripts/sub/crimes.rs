@@ -657,9 +657,12 @@ impl SubCommand for CrimeCreateSubCommand {
         let unit_template_id = parameters.require("templateId")?.as_u32()?;
         let owner_id = parameters.require("owner")?.as_u32()?;
         let victim_id = parameters.require("victim")?.as_u32()?;
-        // C#: `parameters["source"]` of an optional parameter throws KeyNotFoundException when
-        // it was not given.
-        let source_doodad_template_id = parameters.require("source")?.as_u32()?;
+        // C# reads the optional `source` parameter like a required one and throws
+        // KeyNotFoundException when it is omitted; default it to 0 instead.
+        let source_doodad_template_id = match parameters.get("source") {
+            Some(value) => value.as_u32()?,
+            None => 0,
+        };
         let server = ctx.server()?;
         if !server.game_data.systems.npcs.doodad.exist(unit_template_id) {
             self.base.send_color_message(
@@ -1522,14 +1525,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn crime_create_defaults_the_optional_source_to_zero() {
+        let server = server();
+        let mut gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        // C# read the optional `source` like a required parameter and threw
+        // KeyNotFoundException; the command must spawn the evidence with source 0.
+        let (_, out) = harness::run(&server, &gm.p, "crime create 877 owner=2 victim=3").await;
+        assert!(out.is_empty());
+        let world = server.world.world(0).unwrap();
+        let d = world
+            .all_doodads()
+            .into_iter()
+            .find(|d| d.data().template_id == 877)
+            .expect("evidence spawned");
+        assert_eq!(
+            gm.chat(),
+            [format!(
+                "Crime Evidence Doodad ObjId:{}, Template 877 spawned, Owner: 2, Victim: 3, Source: 0",
+                d.obj_id
+            )]
+        );
+        assert_eq!(d.data().item_template_id, 0);
+    }
+
+    #[tokio::test]
     async fn crime_create_spawns_evidence() {
         let server = server();
         let mut gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
-        let (_, out) = harness::run(&server, &gm.p, "crime create 877 owner=2 victim=3").await;
-        assert_eq!(
-            out,
-            ["|cFFFF0000[Crime Create] Unexpected error: The given key 'source' was not present in the dictionary.|r"]
-        );
         let (_, out) =
             harness::run(&server, &gm.p, "crime create 5 owner=2 victim=3 source=9").await;
         assert_eq!(

@@ -251,6 +251,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_mail_accepts_a_quoted_title_and_text() {
+        let server = harness::server_with(data());
+        server.names.add_character(1, "Gm", 1001);
+        server.names.add_character(2, "Bob", 1002);
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        let bob = harness::pc(&server, 2, "Bob", 101.0, 100.0);
+        for p in [&gm.p, &bob.p] {
+            for (_, c) in Inv::of(p).containers {
+                server.items.add_container(c);
+            }
+        }
+
+        let (handled, out) = harness::run(
+            &server,
+            &gm.p,
+            "mail admin Bob \"Audit title\" \"Audit body\" 100",
+        )
+        .await;
+        assert!(handled);
+        assert_eq!(
+            out,
+            [harness::normal(
+                "mail",
+                "Sent admin mail to Bob (100 copper, 0 item stack(s))"
+            )]
+        );
+        let (_, m) = mail_for(&server, 2);
+        assert_eq!(
+            (m.title.as_str(), m.body.text.as_str()),
+            ("Audit title", "Audit body")
+        );
+        // `header.attachments` counts the copper as one entry (as in the first test).
+        assert_eq!(m.header.attachments, 1);
+    }
+
+    #[tokio::test]
     async fn admin_mail_to_an_offline_character_is_stored_and_delivered_later() {
         let server = harness::server_with(data());
         server.names.add_character(1, "Gm", 1001);

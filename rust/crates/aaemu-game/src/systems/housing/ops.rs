@@ -237,7 +237,9 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
     // a second CSCreateHouse at the same spot must see this house. Sends below only queue
     // on the connection and never block.
     let placement_guard = world.placement_guard();
-    if let Err(e) = super::placement::validate_house(server, player, template, p.x, p.y, p.z) {
+    if let Err(e) =
+        super::placement::validate_house(server, player, template, p.x, p.y, p.z, p.z_rot)
+    {
         drop(placement_guard);
         send_error(player, e);
         return;

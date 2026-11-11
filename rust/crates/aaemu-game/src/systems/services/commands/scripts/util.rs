@@ -1136,6 +1136,32 @@ pub fn add_runtime_npc_spawner(
     )))
 }
 
+/// Spawns the object returned by [`add_runtime_npc_spawner`]. Only the generated-template
+/// copy (an NPC without an authored spawner) spawns itself; when the NPC has authored
+/// spawners the returned object is a template-less command copy and the manager's clone
+/// spawns on the active-region tick. Calling `SpawnAll` on the copy only logs a misleading
+/// "template is null" error.
+pub fn spawn_runtime_npc_spawner(
+    server: &GameServer,
+    spawner: &Arc<crate::systems::npcs::npc::spawner::NpcSpawner>,
+) {
+    if spawner.template().is_some() {
+        spawner.spawn_all(server, false);
+    }
+}
+
+/// [`NpcSpawner::update`] for the object returned by [`add_runtime_npc_spawner`]: a
+/// template-less command copy must not log the misleading "template is null" warning either;
+/// the manager clone (`/npc spawn`) already holds the template.
+pub fn update_runtime_npc_spawner(
+    server: &GameServer,
+    spawner: &Arc<crate::systems::npcs::npc::spawner::NpcSpawner>,
+) {
+    if spawner.template().is_some() {
+        spawner.update(server);
+    }
+}
+
 /// The spawner of a doodad (`doodad.Spawner`).
 pub fn doodad_spawner_of(server: &GameServer, obj_id: u32) -> Option<Arc<DoodadSpawner>> {
     server.systems.npcs.spawns.doodad_spawner_of(obj_id)

@@ -313,7 +313,12 @@ impl Command for Dominion {
         let manager = &server.systems.housing.dominions;
         if args.is_empty() || args[0] == "info" {
             let now = chrono::Utc::now().timestamp();
-            for state in manager.all() {
+            let states = manager.all();
+            if states.is_empty() {
+                CommandManager::send_normal_text(self, out, "No dominions.");
+                return Ok(());
+            }
+            for state in states {
                 let calendar = crate::systems::social::dominion::snapshot(server, &state, now)
                     .map(|data| {
                         (
@@ -650,11 +655,14 @@ impl Command for Dominion {
 mod tests {
     use super::super::harness::{self, Pc};
     use super::*;
+    use crate::data::items::ItemTemplate;
     use crate::data::world_data::{SystemFaction, Zone};
     use crate::data::GameData;
     use crate::models::house::House;
     use crate::opcodes::sc;
-    use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate, SiegeSettings};
+    use crate::systems::housing::data::{
+        GuardTowerSetting, HousingTemplate, SiegeSettings, SiegeZone,
+    };
     use crate::systems::housing::dominion::{DominionError, DominionState, SiegeLimits};
     use crate::systems::skills::data::BuffTemplate;
     use crate::systems::social::expedition::{
@@ -665,6 +673,16 @@ mod tests {
     use aaemu_commons::PacketStream;
 
     const ZONE: u32 = 25;
+    const DEFENSE_SEAL: u32 = 21313;
+    const OFFENSE_SEAL: u32 = 21317;
+
+    #[tokio::test]
+    async fn info_without_dominions_says_so() {
+        let server = harness::server();
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        let (_, out) = harness::run(&server, &gm.p, "dominion info").await;
+        assert_eq!(out, [harness::normal("dominion", "No dominions.")]);
+    }
 
     struct Fixture {
         server: Arc<GameServer>,
@@ -716,6 +734,22 @@ mod tests {
                 dead_applicable: true,
                 ..Default::default()
             });
+        }
+        data.systems.housing.castles.siege_zones.insert(
+            ZONE,
+            SiegeZone {
+                id: 1,
+                zone_group_id: ZONE,
+                siege_hours: 1,
+                siege_mins: 30,
+                reinforce_defense_delay_mins: 20,
+                defense_ticket_id: DEFENSE_SEAL,
+                offense_ticket_id: OFFENSE_SEAL,
+                ..Default::default()
+            },
+        );
+        for id in [DEFENSE_SEAL, OFFENSE_SEAL] {
+            data.items.templates.insert(id, ItemTemplate::plain(id, 1));
         }
         configure(&mut data);
         let server = harness::server_with(data);
@@ -862,6 +896,34 @@ mod tests {
         let (_, denied) = harness::run_at(&f.server, &f.attacker.p, "dominion cancel 25", 0).await;
         assert_eq!(denied, ["|cFFFF0000Insufficient privileges.|r"]);
         assert_eq!(state(&f), before);
+    }
+
+    #[tokio::test]
+    async fn the_seal_sweep_hands_the_seal_after_a_join_and_takes_it_back() {
+        use crate::systems::housing::dominion::seals::{reconcile, seal_count};
+        let f = fixture();
+        harness::run_at(&f.server, &f.attacker.p, "joinsiege 25", 0).await;
+        harness::run_at(&f.server, &f.defender.p, "joinsiege 25", 0).await;
+        // The command runs under the economy operation scope and the housing operation lock,
+        // so it hands nothing itself: the sweep (`seals::reconcile`) is the only writer.
+        assert_eq!(seal_count(&f.attacker.p, OFFENSE_SEAL), 0);
+        assert_eq!(seal_count(&f.defender.p, DEFENSE_SEAL), 0);
+        reconcile(&f.server);
+        assert_eq!(seal_count(&f.attacker.p, OFFENSE_SEAL), 1);
+        assert_eq!(seal_count(&f.defender.p, DEFENSE_SEAL), 1);
+        // Leaving the roster ends the entitlement; the next sweep takes the seal back.
+        harness::run_at(&f.server, &f.attacker.p, "leavesiege 25", 0).await;
+        reconcile(&f.server);
+        assert_eq!(seal_count(&f.attacker.p, OFFENSE_SEAL), 0);
+        // The end of the siege takes the defender's seal back.
+        f.server
+            .systems
+            .housing
+            .dominions
+            .cancel_siege(ZONE, chrono::Utc::now().timestamp())
+            .unwrap();
+        reconcile(&f.server);
+        assert_eq!(seal_count(&f.defender.p, DEFENSE_SEAL), 0);
     }
 
     #[tokio::test]

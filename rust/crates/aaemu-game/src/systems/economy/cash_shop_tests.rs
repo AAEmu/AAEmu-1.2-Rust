@@ -1593,3 +1593,129 @@ fn real_compact_has_every_example_ics_eu_item() {
         "items missing from compact: {missing:?}"
     );
 }
+
+/// The TEST catalogue (`SQL/examples/example-ics-test.sql`) must only list items of the real
+/// 1.2 `compact.sqlite3`, cost 0 or 1 credit, and be reachable from every tab it declares.
+/// Gated by `AAEMU_COMPACT_DB` (read-only).
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_has_every_example_ics_test_item() {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let Ok(compact) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../SQL/examples/example-ics-test.sql");
+    let sql = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+    fn rows<'a>(sql: &'a str, table: &str, next: &str) -> Vec<Vec<&'a str>> {
+        let block = sql
+            .split_once(&format!("REPLACE INTO `{table}`"))
+            .unwrap_or_else(|| panic!("{table} statement"))
+            .1
+            .split_once(next)
+            .unwrap_or_else(|| panic!("{table} end"))
+            .0
+            .split_once("VALUES")
+            .unwrap_or_else(|| panic!("{table} VALUES"))
+            .1;
+        block
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('('))
+            .map(|line| {
+                line.trim_start_matches('(')
+                    .trim_end_matches([')', ',', ';'])
+                    .split(',')
+                    .map(str::trim)
+                    .collect()
+            })
+            .collect()
+    }
+
+    // SKU: sku, shop_id, position, item_id, item_count, select_type, is_default, event_type,
+    // event_end_date, currency, price, discount_price, bonus_item_id, bonus_item_count.
+    let skus = rows(&sql, "ics_skus", "REPLACE INTO `ics_menu`");
+    assert!(
+        skus.len() >= 700,
+        "the test catalogue ships its full set, got {} SKUs",
+        skus.len()
+    );
+    let conn =
+        rusqlite::Connection::open_with_flags(compact, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open compact.sqlite3");
+    let mut missing = Vec::new();
+    let mut shops = HashSet::new();
+    for row in &skus {
+        assert!(row.len() >= 14, "short ics_skus row: {row:?}");
+        assert_eq!(row[9].parse::<u8>().unwrap(), 0, "credits only: {row:?}");
+        assert!(row[10].parse::<u32>().unwrap() <= 1, "0-1 credit: {row:?}");
+        assert!(
+            row[4].parse::<u32>().unwrap() >= 1,
+            "positive count: {row:?}"
+        );
+        shops.insert(row[1].parse::<u32>().unwrap());
+        let id: u32 = row[3]
+            .parse()
+            .unwrap_or_else(|e| panic!("item id in {row:?}: {e}"));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .expect("items lookup");
+        if count == 0 {
+            missing.push(id);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "items missing from compact: {missing:?}"
+    );
+
+    // MENU: id, main_tab, sub_tab, tab_pos, shop_id.
+    let menu = rows(&sql, "ics_menu", ";");
+    let mut menu_shops = HashSet::new();
+    for row in &menu {
+        assert!(row.len() >= 5, "short ics_menu row: {row:?}");
+        let main: u8 = row[1].parse().unwrap();
+        let sub: u8 = row[2].parse().unwrap();
+        assert!((1..=6).contains(&main), "main tab {main}");
+        assert!((1..=7).contains(&sub), "sub tab {sub}");
+        assert!(row[3].parse::<u32>().unwrap() >= 1, "tab_pos: {row:?}");
+        let shop: u32 = row[4].parse().unwrap();
+        assert!(shops.contains(&shop), "menu lists unknown shop {shop}");
+        menu_shops.insert(shop);
+    }
+    assert_eq!(menu_shops, shops, "every shop must appear in a tab");
+    for expected in [
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (2, 4),
+        (2, 7),
+        (3, 1),
+        (3, 2),
+        (3, 3),
+        (3, 4),
+        (4, 1),
+        (4, 2),
+        (4, 3),
+        (4, 7),
+        (5, 1),
+        (5, 2),
+        (5, 3),
+        (6, 1),
+        (6, 2),
+        (6, 5),
+    ] {
+        assert!(
+            menu.iter().any(|row| {
+                row[1].parse::<u8>().ok() == Some(expected.0)
+                    && row[2].parse::<u8>().ok() == Some(expected.1)
+            }),
+            "catalogue tab {expected:?} is empty"
+        );
+    }
+}

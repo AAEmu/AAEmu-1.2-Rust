@@ -57,7 +57,7 @@ pub fn spawn_npc(
 ) -> anyhow::Result<()> {
     let position = grid_position(server, character, new_x, new_y);
     let npc_spawner = add_runtime_npc_spawner(server, world, unit_id, position)?;
-    npc_spawner.spawn_all(server, false);
+    spawn_runtime_npc_spawner(server, &npc_spawner);
     Ok(())
 }
 
