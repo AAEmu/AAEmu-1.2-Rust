@@ -1749,6 +1749,18 @@ mod tests {
         assert_eq!(cfg.loyalty.default, 5_000);
     }
 
+    /// The shipped example file binds to the values the wiki page documents (a typo in the file
+    /// would otherwise only show up on a test server).
+    #[test]
+    fn the_shipped_test_server_example_binds_to_its_documented_values() {
+        let value: serde_json::Value =
+            serde_json::from_str(include_str!("../app/ExampleConfig.TestServer.json"))
+                .expect("the example is valid JSON");
+        let cfg = AppConfig::from_value(value).unwrap();
+        assert_eq!(cfg.credits.default, 1_000_000);
+        assert_eq!(cfg.loyalty.default, 5_000);
+    }
+
     #[test]
     fn characters_config_binds_the_base_slot_count() {
         let cfg = AppConfig::from_value(json!({

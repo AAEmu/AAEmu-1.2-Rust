@@ -1,23 +1,31 @@
 # Test server content (Marketplace catalogue and GM kits)
 
+- Audience: Operators and testers of a private test server
+- Last verified against: `main` on November 11, 2026
+- Prerequisites: a running game server and database ([Installation & Setup](Installation-&-Setup))
+
 This page is for a **private test server**: the goal is to make every system reachable quickly,
 not to balance an economy. It ships three things:
 
 - `SQL/examples/example-ics-test.sql` — a generated Marketplace catalogue where every item costs
-  **0 or 1 credit**.
-- `rust/crates/aaemu-game/app/Scripts/Commands/kits.json` — bulk GM kits (`/kit <name>`).
-- `rust/crates/aaemu-game/app/ExampleConfig.TestServer.json` — starting Credits/Loyalty for new
-  test accounts.
+  **0 or 1 credit**. It is only loaded by hand; no installer, compose file or script imports it.
+- `rust/crates/aaemu-game/app/Scripts/Commands/kits.json` — bulk GM kits (`/kit <name>`). Unlike
+  the other two files this one is **shipped data that every server loads**: `/kit` (access
+  level 50) lists and hands out these kits on any server. Remove the test kits from your own
+  `kits.json` if a production server should not offer them.
+- `rust/crates/aaemu-game/app/ExampleConfig.TestServer.json` — an example of the existing
+  `Credits.Default` / `Loyalty.Default` settings (starting Credits/Loyalty for new accounts). The
+  game ignores this file unless you merge its sections into your own configuration.
 
-Do not use these on a public server.
+Do not use the catalogue or the credit example on a public server.
 
 ## Marketplace catalogue
 
 The file is generated from the 1.2 `compact.sqlite3`; do not hand-edit it. Import it **after**
-`SQL/aaemu_game.sql`:
+`SQL/aaemu_game.sql`, with your own MySQL host, port and user:
 
 ```sh
-mysql -h127.0.0.1 -P3317 -uroot aaemu_game < SQL/examples/example-ics-test.sql
+mysql -h<host> -P<port> -u<user> -p aaemu_game < SQL/examples/example-ics-test.sql
 ```
 
 When the test catalogue replaces another catalogue (for example
@@ -31,7 +39,8 @@ DELETE FROM ics_skus;
 
 Then import the file, or run `/ics reload` on a running server instead of restarting it.
 
-`ics_menu` uses the 1.2 client's own tab labels (read from `ui_texts`). The generated groups are:
+`ics_menu` uses the 1.2 client's own tab labels (read from `ui_texts`; sub-tab 3 / 4 has no label
+there). The generated groups are:
 
 | Tab | 1.2 label | Contents |
 | --- | --- | --- |
@@ -77,31 +86,41 @@ below.
 
 ```sh
 python -I rust/tools/test_catalogue/gen.py \
-    --compact D:/aaemu-live/rs-game/Data/compact.sqlite3
+    --compact <path to the 1.2 compact.sqlite3>
 ```
 
 The default output is `SQL/examples/example-ics-test.sql`; the script prints the shop/SKU/menu
-counts and the counts per tab. `--kits-out <file>` writes the generated `itemkits` JSON as well.
-The SQL and the kit list are committed, so a normal build does not run Python.
+counts and the counts per tab. `--kits-out <file>` writes the generated `itemkits` JSON as well
+(`kits.generated.json`, without comments). The SQL and the kit list are committed, so a normal
+build does not run Python; the committed kit block is that generated list plus the item-name
+comments and `// --- kit ---` markers that were added to it by hand, so merge a regenerated list
+into `kits.json` instead of replacing the block blindly.
 
 ## GM kits
 
-The test kits are at the end of `rust/crates/aaemu-game/app/Scripts/Commands/kits.json`; they are
-loaded at server start and can be re-read with `/kit` (the command list help) and `/kit ?`.
+The test kits are at the end of `rust/crates/aaemu-game/app/Scripts/Commands/kits.json`. The file
+is read when the command scripts are (re)loaded: at server start, or with `/scripts reload`.
+`/kit` only prints how many kits exist and `/kit ?` lists their names; neither re-reads the file.
 
 | Kit | Contents |
 | --- | --- |
 | `vocation_alchemy` … `vocation_carpentry` | the eight most used materials of each vocation craft (100 each), from `crafts`/`craft_materials` |
 | `vocation_fishing`, `vocation_mining` | the 1.2 craft table has no recipes for these two, so the kit carries bait/hooks/lines and ores/stone |
 | `tradepack_materials` | the fifteen most used trade-pack materials (100 each) |
-| `seeds` | crop seeds, tree saplings and livestock (20 each) |
+| `seeds` | the sixteen crop seeds (20 each) |
+| `saplings` | the sixteen tree saplings (20 each) |
+| `livestock` | young animals and eggs: 3 of each animal that does not stack, 10 of each that stacks to 10 |
 | `regrade_test` | weapon/armor/accessory regrade scrolls, charms, blank scroll and items to regrade |
 | `lunagem_set` | lunagems, lunadrops and the Insightful/Vital lunafrosts used by the live tests |
 | `gear_10` … `gear_50` | a cloth, leather and plate set plus five weapons for the level bracket, at heroic (grade 5) |
 | `tax_certificates` | tax certificate, bound tax certificate and the 10-pack |
 
 Use `/kit <name>` (or `/kit <player> <name>`), for example `/kit gear_30`. A kit adds every entry
-to the default bag; the largest kit is 44 entries, so a fresh character has enough slots.
+to the default bag, entry by entry and all-or-nothing: an entry that does not fit the free slots
+fails with a red "Item could not be created!" and the command goes on with the next one (there
+is no mail fallback). The kits are sized for an empty 50-slot bag: each needs at most 26 slots
+(`gear_10` … `gear_50` and `livestock` are the largest), so a fresh character can take any one
+kit; empty the bag between kits.
 
 ## Starting Credits/Loyalty for test accounts
 
@@ -115,8 +134,10 @@ The game creates the `accounts` row on an account's **first login** and copies
 }
 ```
 
-Copy `rust/crates/aaemu-game/app/ExampleConfig.TestServer.json` over the game server's
-`Config.Local.json` (or merge those two sections into it). Because this only runs on the insert,
+Merge the two sections of `rust/crates/aaemu-game/app/ExampleConfig.TestServer.json` into the
+game server's `Config.Local.json`; do not copy the file over it, because your `Config.Local.json`
+also holds your connections, client data sources and login network settings. The settings
+themselves already exist in the game (the shipped values are `0`). Because this only runs on the insert,
 an account that already exists keeps its current values; `UPDATE accounts SET credits = 1000000,
 loyalty = 5000 WHERE account_id = <id>` is the operator way to top one up. The value is granted
 once per account, not once per character.
@@ -138,3 +159,9 @@ gm kit gear_30
 
 `buyics` checks that the purchase succeeds and that a CHARGED Marketplace mail arrives; `/kit`
 prints the item task result in the server log.
+
+## Related
+
+- [Home](Home)
+- [Installation & Setup](Installation-&-Setup)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)

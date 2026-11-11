@@ -125,7 +125,7 @@ COSTUME_KEYWORDS = [
 ]
 
 class Item:
-    __slots__ = ("id", "kor", "en", "category", "impl", "level", "req", "fixed_grade")
+    __slots__ = ("id", "kor", "en", "category", "impl", "level", "req", "fixed_grade", "max_stack")
 
     def __init__(self, row, en):
         self.id = row[0]
@@ -136,6 +136,9 @@ class Item:
         self.level = row[4]
         self.req = row[5]
         self.fixed_grade = row[6]
+        # A kit entry is all-or-nothing per bag slot: never ask for more than one stack of an
+        # item that does not stack (see top_materials and the livestock kit).
+        self.max_stack = max(1, row[7] or 1)
 
     @property
     def name(self):
@@ -153,7 +156,8 @@ class Data:
         }
         self.items = {}
         for row in conn.execute(
-            "SELECT id, name, category_id, impl_id, LEVEL, level_requirement, fixed_grade "
+            "SELECT id, name, category_id, impl_id, LEVEL, level_requirement, fixed_grade, "
+            "max_stack_size "
             "FROM items"
         ):
             self.items[row[0]] = Item(row, names.get(row[0], ""))
@@ -610,7 +614,7 @@ def write_sql(cards, out_path, data):
         "-- name looks like a test/sample/dev row, junk/quest categories, and summons without",
         "-- their mate/slave row are skipped (see the generator header).",
         "--",
-        "-- Tabs (1.2 client labels from ui_texts): 2/1 All, 2/2 Consumables, 2/3 Luxury,",
+        "-- Tabs (1.2 client labels from ui_texts; 3/4 has no client label, \"ships/vehicles\" is ours): 2/1 All, 2/2 Consumables, 2/3 Luxury,",
         "-- 2/4 Character, 2/7 Other; 3/1 All, 3/2 Glider, 3/3 Mount, 3/4 ships/vehicles;",
         "-- 4/1 All, 4/2 Tax/Sales, 4/3 Decor, 4/7 Misc.; 5/1 All, 5/2 Consume, 5/3 Costume;",
         "-- 6/1 All, 6/2 Items, 6/5 Pets. Counts per tab:",
@@ -658,7 +662,7 @@ def top_materials(data, entries, count, limit, skip=()):
         item = data.items.get(item_id)
         if item is None or not data.usable(item_id):
             continue
-        picked.append({"id": item_id, "count": count})
+        picked.append({"id": item_id, "count": min(count, item.max_stack)})
         seen.add(item_id)
         if len(picked) >= limit:
             break
@@ -712,8 +716,17 @@ def build_kits(data):
         for item in guaranteed_sorted(data, 21)
         if data.usable(item.id)
     ][:12]
-    for item in seeds + saplings + livestock:
+    # Three kits instead of one: 44 entries of 20 need 182 bag slots because every animal
+    # item is its own slot, and a fresh character has 50. Crops and saplings stack (one slot
+    # each); the animals are 3 each when they do not stack, 10 when they stack to 10.
+    for item in seeds:
         kits.append(kit_entry(["seeds"], item.id, 20))
+    for item in saplings:
+        kits.append(kit_entry(["saplings"], item.id, 20))
+    for item in livestock:
+        kits.append(
+            kit_entry(["livestock"], item.id, 3 if item.max_stack == 1 else min(10, item.max_stack))
+        )
 
     for item_id in REGRADE_SCROLLS:
         if data.usable(item_id):

@@ -1630,7 +1630,7 @@
                 "vocation_construction"
             ],
             "id": 15566,
-            "count": 100
+            "count": 1
         },
         {
             // Leather
@@ -2925,7 +2925,7 @@
         {
             // Apple Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4856,
             "count": 20
@@ -2933,7 +2933,7 @@
         {
             // Oak Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4857,
             "count": 20
@@ -2941,7 +2941,7 @@
         {
             // Ash Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4858,
             "count": 20
@@ -2949,7 +2949,7 @@
         {
             // Willow Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4859,
             "count": 20
@@ -2957,7 +2957,7 @@
         {
             // Hornbeam Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4860,
             "count": 20
@@ -2965,7 +2965,7 @@
         {
             // Olive Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4861,
             "count": 20
@@ -2973,7 +2973,7 @@
         {
             // Cork Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4862,
             "count": 20
@@ -2981,7 +2981,7 @@
         {
             // Aspen Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4863,
             "count": 20
@@ -2989,7 +2989,7 @@
         {
             // Birch Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4864,
             "count": 20
@@ -2997,7 +2997,7 @@
         {
             // Grapevine Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4865,
             "count": 20
@@ -3005,7 +3005,7 @@
         {
             // Cottonwood Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 4866,
             "count": 20
@@ -3013,7 +3013,7 @@
         {
             // Lemon Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 13724,
             "count": 20
@@ -3021,7 +3021,7 @@
         {
             // Fig Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 13725,
             "count": 20
@@ -3029,7 +3029,7 @@
         {
             // Bay Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 13726,
             "count": 20
@@ -3037,7 +3037,7 @@
         {
             // Palm Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 13727,
             "count": 20
@@ -3045,7 +3045,7 @@
         {
             // Rubber Tree Sapling
             "names": [
-                "seeds"
+                "saplings"
             ],
             "id": 13728,
             "count": 20
@@ -3053,98 +3053,98 @@
         {
             // Golden Lamb
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 4899,
-            "count": 20
+            "count": 3
         },
         {
             // Dairy Calf
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 16225,
-            "count": 20
+            "count": 3
         },
         {
             // Lamb
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 16226,
-            "count": 20
+            "count": 3
         },
         {
             // Piglet
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 16229,
-            "count": 20
+            "count": 3
         },
         {
             // Chick
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 16230,
-            "count": 20
+            "count": 10
         },
         {
             // Hatching Egg
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 17619,
-            "count": 20
+            "count": 10
         },
         {
             // Duckling
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 19939,
-            "count": 20
+            "count": 10
         },
         {
             // Gosling
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 19940,
-            "count": 20
+            "count": 10
         },
         {
             // Turkey Chick
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 19941,
-            "count": 20
+            "count": 10
         },
         {
             // Goat Kid
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 19942,
-            "count": 20
+            "count": 3
         },
         {
             // Water Buffalo Calf
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 19943,
-            "count": 20
+            "count": 3
         },
         {
             // Yata Calf
             "names": [
-                "seeds"
+                "livestock"
             ],
             "id": 21331,
-            "count": 20
+            "count": 3
         },
         // --- regrade_test ---
         {

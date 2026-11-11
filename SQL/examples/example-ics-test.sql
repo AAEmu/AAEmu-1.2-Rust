@@ -19,7 +19,7 @@
 -- name looks like a test/sample/dev row, junk/quest categories, and summons without
 -- their mate/slave row are skipped (see the generator header).
 --
--- Tabs (1.2 client labels from ui_texts): 2/1 All, 2/2 Consumables, 2/3 Luxury,
+-- Tabs (1.2 client labels from ui_texts; 3/4 has no client label, "ships/vehicles" is ours): 2/1 All, 2/2 Consumables, 2/3 Luxury,
 -- 2/4 Character, 2/7 Other; 3/1 All, 3/2 Glider, 3/3 Mount, 3/4 ships/vehicles;
 -- 4/1 All, 4/2 Tax/Sales, 4/3 Decor, 4/7 Misc.; 5/1 All, 5/2 Consume, 5/3 Costume;
 -- 6/1 All, 6/2 Items, 6/5 Pets. Counts per tab:
