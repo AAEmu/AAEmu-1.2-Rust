@@ -2983,7 +2983,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   zone-group crossing on foot keeps it. The teleport cancel runs when the teleport is
   **issued**, at both load chokes:
   `world::session::teleport_character` (instance/world loads, resurrection, trial), the
-  zone-access return transport (its own hook) and `world::session::begin_teleport` (every
+  zone-access return transport (its own hook) and `world::session::begin_teleport_ending_trade`
+  / `send_teleport_unit_ending_trade` (`begin_teleport` / `send_teleport_unit` keep their
+  signatures, CONTRIBUTING-PORT section 3; every server-side
   `SCTeleportUnit` sender —
   same-instance portal, NPC teleporter, dominion headquarters / siege area, instant game,
   GM `/move` / nudge / sphere / jail, move-guard correction, deck standers, skill displacements
@@ -2993,8 +2995,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `trade::start_checks`): a missing partner / another instance cancels with 1, `>= 5` m with 2.
   That covers players carried by a vehicle or mate and seat-bound players whose own movement
   packets `world::session::move_unit` ignores (up to 1 s late, like the client's own cadence).
-  The check works on a snapshot of the table and cancels only the very trade it saw (id and
-  both players): freed trade ids are reused at once, so the id alone could name a newer trade.
+  The check works on a snapshot of the table and cancels only the very trade it saw (id and a
+  never-reused generation): freed trade ids are reused at once, so the id alone could name a
+  newer trade.
   Hooks only cancel when a trade exists; a second hook call after `teleport_character` is a
   no-op. The hooks and the periodic check take the entry out under the manager mutex and send
   after dropping it (leaf rule); the older trade operations still send under it. Tests:

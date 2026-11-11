@@ -484,7 +484,7 @@ pub fn teleport_player(
     z: f32,
     z2: f32,
 ) {
-    crate::world::session::send_teleport_unit(
+    crate::world::session::send_teleport_unit_ending_trade(
         server,
         target,
         crate::systems::skills::packets_special::SCTeleportUnitPacket {

@@ -1285,7 +1285,7 @@ fn respawn_after_kill(
             true,
         );
     } else {
-        crate::world::session::send_teleport_unit(
+        crate::world::session::send_teleport_unit_ending_trade(
             server,
             killer,
             SCTeleportUnitPacket {

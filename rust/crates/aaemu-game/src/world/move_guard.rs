@@ -419,7 +419,7 @@ pub fn guard_vehicle_move(
 }
 
 fn teleport_back(server: &GameServer, me: &PlayerRef, at: &PositionAndRotation) {
-    crate::world::session::send_teleport_unit(
+    crate::world::session::send_teleport_unit_ending_trade(
         server,
         me,
         SCTeleportUnitPacket {

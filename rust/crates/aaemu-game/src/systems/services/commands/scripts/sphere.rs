@@ -444,7 +444,7 @@ pub mod sphere_util {
                     let p = sphere.position.ok_or_else(|| {
                         anyhow::anyhow!("Object reference not set to an instance of an object.")
                     })?;
-                    crate::world::session::send_teleport_unit(
+                    crate::world::session::send_teleport_unit_ending_trade(
                         ctx.server()?,
                         &player,
                         SCTeleportUnitPacket {

@@ -2241,7 +2241,7 @@ fn try_delete(
     // state reaches its client. It kept its world pose above; tell its own client where that
     // is, as every other server-forced move does (portal, recall, GM teleport).
     for (player, t) in deck_standers {
-        crate::world::session::send_teleport_unit(
+        crate::world::session::send_teleport_unit_ending_trade(
             server,
             &player,
             SCTeleportUnitPacket {

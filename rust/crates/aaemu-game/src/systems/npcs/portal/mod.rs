@@ -1003,7 +1003,7 @@ pub fn use_portal_with_preference(
     } else {
         player.data().set_disabled_set_position(true);
     }
-    crate::world::session::send_teleport_unit(
+    crate::world::session::send_teleport_unit_ending_trade(
         server,
         player,
         SCTeleportUnitPacket {
@@ -1167,7 +1167,7 @@ pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
         return;
     }
     run_navi_func(server, &doodad, player, &func);
-    session::begin_teleport(server, player, pos.x, pos.y, pos.z);
+    session::begin_teleport_ending_trade(server, player, pos.x, pos.y, pos.z);
     player.send(packets::SCNaviTeleportPacket {
         x: pos.x,
         y: pos.y,
@@ -1280,7 +1280,7 @@ pub fn use_teleport(
             return; // NotEnoughMoney is sent by ChangeMoney
         }
     }
-    crate::world::session::send_teleport_unit(
+    crate::world::session::send_teleport_unit_ending_trade(
         server,
         player,
         SCTeleportUnitPacket {

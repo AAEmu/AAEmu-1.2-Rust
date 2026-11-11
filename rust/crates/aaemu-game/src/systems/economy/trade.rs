@@ -15,6 +15,7 @@
 //! reconnect can start a fresh trade without first clearing stale object ids.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use aaemu_commons::{Marshal, PacketStream};
@@ -42,6 +43,10 @@ use super::item_handlers::{active, sync_client_packet};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TradeTemplate {
     pub id: u32,
+    /// Tells this trade from a later one that was handed the same (reused) `id`; never reused.
+    /// A snapshot of the table cancels only the trade it saw ([`cancel_snapshot`]). Not a C#
+    /// member.
+    pub generation: u64,
     pub owner_obj_id: u32,
     pub target_obj_id: u32,
     pub lock_owner: bool,
@@ -59,6 +64,8 @@ pub struct TradeTemplate {
 #[derive(Debug, Default)]
 pub struct TradeManager {
     trades: Mutex<Vec<TradeTemplate>>,
+    /// Source of [`TradeTemplate::generation`].
+    generations: AtomicU64,
     /// (requester, recipient) -> expiry; a reply must match a server-issued invitation.
     invitations: Mutex<HashMap<(u32, u32), i64>>,
 }
@@ -402,6 +409,7 @@ pub fn start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRef) {
     };
     trades.push(TradeTemplate {
         id: next_id,
+        generation: manager(server).generations.fetch_add(1, Ordering::Relaxed) + 1,
         owner_obj_id: owner.obj_id,
         target_obj_id: target.obj_id,
         ..TradeTemplate::default()
@@ -451,18 +459,17 @@ fn cancel_if_trading(server: &GameServer, obj_id: u32, reason: i32) -> bool {
     true
 }
 
-/// Cancels `snapshot` only while the table still holds that very trade (same id and same two
-/// players). Freed trade ids are handed out again at once (`release_id`, lowest first), so the id
-/// alone can name a newer trade of two other players between a snapshot and its cancel. The
-/// entry is taken out under the lock and the packets go out after the guard is dropped.
+/// Cancels `snapshot` only while the table still holds that very trade (same id and same
+/// generation). Freed trade ids are handed out again at once (`release_id`, lowest first), so the
+/// id alone can name a newer trade between a snapshot and its cancel. The check and the removal
+/// are one critical section; the packets go out after the guard is dropped.
 fn cancel_snapshot(server: &GameServer, snapshot: &TradeTemplate, obj_id: u32, reason: i32) {
     let removed = {
         let mut trades = manager(server).lock();
-        let Some(idx) = trades.iter().position(|t| {
-            t.id == snapshot.id
-                && t.owner_obj_id == snapshot.owner_obj_id
-                && t.target_obj_id == snapshot.target_obj_id
-        }) else {
+        let Some(idx) = trades
+            .iter()
+            .position(|t| t.id == snapshot.id && t.generation == snapshot.generation)
+        else {
             return;
         };
         trades.remove(idx)
@@ -552,8 +559,8 @@ pub fn on_player_moved(server: &GameServer, player: &PlayerRef) {
 ///
 /// The trade table is snapshotted under its lock and released before any world lookup or
 /// packet is made; each cancel ([`cancel_snapshot`]) is re-checked against the exact trade (id
-/// and both players), so a trade that ended, or was replaced by another pair that got the freed
-/// id, between the snapshot and the cancel is not touched.
+/// and generation), so a trade that ended, or was replaced by another that got the freed id,
+/// between the snapshot and the cancel is not touched.
 pub fn check_running_trades(server: &GameServer) {
     check_snapshot(server, manager(server).trades());
 }

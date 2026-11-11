@@ -431,7 +431,7 @@ pub fn evict_non_participants(server: &GameServer) {
         // The client's own text for it (ui_texts 2505 "Not a siege participant"), through the
         // channel every other client error uses.
         send_error(&player, error_message::SIEGE_NOT_PARTICIPANT);
-        session::send_teleport_unit(server, &player, packet);
+        session::send_teleport_unit_ending_trade(server, &player, packet);
     }
     cache.retain_warned(&stuck);
 }
