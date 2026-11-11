@@ -1681,6 +1681,17 @@ pub fn end_channeling(
             .npcs()
             .delete_doodad(server, channel_doodad);
     }
+    // The 1.2 client starts a channel's post-cast window when the channel ends, not when it
+    // starts (`FUN_39397ff0` @ 0x39397ff0, DEC 748451: `channeling_time > 0` and not
+    // `keep_mana_regen` set `LastCast`); the window therefore covers the channel and the 5 s
+    // after it (`X2::Unit::UpdateManaRegen`, `FUN_390b63f0`).
+    if t.channeling_time > 0 && !t.keep_mana_regen {
+        if let Some(p) = caster.as_player() {
+            let mut c = p.data();
+            c.skill_char.last_cast_ms = now_ms();
+            c.skill_char.is_in_post_cast = true;
+        }
+    }
     end_skill(server, skill, caster);
     if !skill.cancelled() {
         if let (
@@ -3050,6 +3061,16 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
 }
 
 /// `Skill.ConsumeMana(caster)`.
+///
+/// The post-cast (persistent-mana-regen) window mirrors the 1.2 client rather than the C#:
+/// `OnSkillFired` (`FUN_3939b010` @ 0x3939b010, DEC 750714) sets the client's `LastCast` only
+/// when the skill has a `timing_id` (`+0x1bc`) and does not keep mana regen (`+0xdd`,
+/// `keep_mana_regen`); `X2::Unit::UpdateManaRegen` (`FUN_390b63f0` @ 0x390b63f0, DEC 150487)
+/// then uses `persistent_mana_regen` (attribute 68) until `LastCast + 5000`. The item-use
+/// skills (regrade scrolls: 22520 weapon / 22522 armor regrade, and 2283 `keep_mana_regen`
+/// rows in `compact.sqlite3`) keep mana regen, so the client never stalls it for them. The C#
+/// `Skill.ConsumeMana` set `IsInPostCast` for every cast, which kept a regrading character on
+/// the persistent rate forever; see PORTING.md.
 pub fn consume_mana(
     server: &GameServer,
     skill: &SkillRun,
@@ -3061,6 +3082,9 @@ pub fn consume_mana(
     }
     let cost = mana_cost(server, skill, caster, source);
     unit_combat::reduce_current_mp(server, caster, cost);
+    if skill.template.timing_id == 0 || skill.template.keep_mana_regen {
+        return;
+    }
     if let Some(p) = caster.as_player() {
         let mut c = p.data();
         c.skill_char.last_cast_ms = now_ms();
