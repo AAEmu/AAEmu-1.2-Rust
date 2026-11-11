@@ -3397,6 +3397,190 @@ fn quest_fill_npcs_reach_the_area_spawner_minimum() {
     );
 }
 
+/// The kill-quest areas of the 2026-11-11 tester reports after the second fill. Each area's
+/// `npc_spawns_quest_fill.json` points bring the spawn points of its area spawner members to the
+/// spawner's authored `min_population` (and not above its `maxPopulation` where the fill applied).
+/// Points are counted within 350 m of the area centre, distinct per template (the loader drops
+/// rows of the same template within 2 m, so the stacked Schima Rogue rows count once). Four areas
+/// already held their `min_population` and were left alone: the Poacher 2514 camp (4 >= 4), the
+/// Wild Fangs Poacher 9201 camp (5 points, already above its max 3) and the Pavitra's Fall site
+/// 12814 (15 = min; its Death Shroud 2906 share is 3 of the authored mix, so quest 943's 8 kills
+/// wait on the 75 s respawn).
+#[test]
+fn quest_fill_reported_areas_reach_the_area_spawner_minimum() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app/Data/Worlds/main_world");
+    let mut points: Vec<(u32, f32, f32, f32)> = Vec::new();
+    for file in [
+        "npc_spawns.json",
+        "npc_spawns_10x.json",
+        "npc_spawns_quest_fill.json",
+    ] {
+        let Ok(text) = std::fs::read_to_string(dir.join(file)) else {
+            return;
+        };
+        for d in parse_list(&text, NpcSpawnerDef::from_json).expect(file) {
+            let p = d.base.position;
+            points.push((d.base.unit_id, p.x, p.y, p.z));
+        }
+    }
+    let near = |units: &[u32], x: f32, y: f32| {
+        let mut seen: Vec<(u32, f32, f32, f32)> = Vec::new();
+        for &(unit, px, py, pz) in &points {
+            if !units.contains(&unit) || (px - x).hypot(py - y) > 350.0 {
+                continue;
+            }
+            if seen.iter().any(|&(su, sx, sy, sz)| {
+                su == unit
+                    && (sx - px).abs() < 2.0
+                    && (sy - py).abs() < 2.0
+                    && (sz - pz).abs() < 2.0
+            }) {
+                continue;
+            }
+            seen.push((unit, px, py, pz));
+        }
+        seen.len()
+    };
+    // (spawner, min, max, whether this fill changed the area, members, centre, report item)
+    type Area = (
+        u32,
+        usize,
+        usize,
+        bool,
+        &'static [u32],
+        f32,
+        f32,
+        &'static str,
+    );
+    let areas: [Area; 11] = [
+        (
+            8778,
+            11,
+            15,
+            true,
+            &[4210],
+            23829.6,
+            9473.4,
+            "Schima Rogue, quests 1367/2758/2759",
+        ),
+        (
+            5588,
+            4,
+            7,
+            false,
+            &[2514],
+            20090.4,
+            8364.9,
+            "Poacher, quests 861/2703",
+        ),
+        (
+            12808,
+            2,
+            3,
+            false,
+            &[9201],
+            19886.1,
+            8649.6,
+            "Wild Fangs Poacher, quest 3307",
+        ),
+        (
+            5585,
+            7,
+            12,
+            true,
+            &[2509, 2510],
+            18581.4,
+            7660.4,
+            "Mahadevi Seabug / Tropical Turtle, quests 2711/2902",
+        ),
+        (
+            12814,
+            15,
+            21,
+            false,
+            &[2905, 2906, 2907, 2953],
+            17178.5,
+            8356.8,
+            "Pavitra's Fall site, quests 943/951/2770",
+        ),
+        (
+            7933,
+            5,
+            9,
+            true,
+            &[2952],
+            17195.2,
+            8022.3,
+            "Fire Elemental Explorer, quest 3862",
+        ),
+        (
+            4131,
+            24,
+            40,
+            true,
+            &[2914],
+            16561.5,
+            7965.7,
+            "Earth Elemental Seeker, quest 2774",
+        ),
+        (
+            4130,
+            9,
+            15,
+            true,
+            &[9924],
+            16325.5,
+            8451.7,
+            "Ghostly Soldier, quest 3866",
+        ),
+        (
+            4128,
+            14,
+            20,
+            true,
+            &[2911],
+            16902.2,
+            7347.2,
+            "Armored Crayfish, quest 3861",
+        ),
+        (
+            4138,
+            12,
+            20,
+            true,
+            &[2942],
+            16359.8,
+            7649.6,
+            "Saffron Thief, quests 947/2776",
+        ),
+        (
+            5255,
+            9,
+            15,
+            true,
+            &[5090],
+            22892.8,
+            10869.4,
+            "Crazed Disciple, quest 1415",
+        ),
+    ];
+    for (spawner, min, max, filled, units, x, y, what) in areas {
+        let count = near(units, x, y);
+        assert!(
+            count >= min,
+            "spawner {spawner} {what}: {count} points within 350 m, min_population {min}"
+        );
+        if filled {
+            assert!(
+                count <= max,
+                "spawner {spawner} {what}: {count} points within 350 m, max_population {max}"
+            );
+        }
+    }
+}
+
 /// The authored Mistfiend (NPC 4227) cave placements of the shipped `main_world` files with the
 /// real compact DB: all six load (template 4323, 55 s delay), a player at the first authored
 /// point activates them through the normal `active_region_tick`, they spawn at their authored Z,
