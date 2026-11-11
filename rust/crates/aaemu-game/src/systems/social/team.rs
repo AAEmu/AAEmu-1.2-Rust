@@ -495,17 +495,20 @@ pub fn raid_chat(server: &GameServer, team: &Team) -> crate::managers::chat::Cha
     raid_channel(server, team.id, team.owner_id)
 }
 
-/// A point where a concurrent operation can land between the apply and the verify of a deferred
-/// join effect (tests only, see [`interleave`]).
+/// A point between two steps of a manager operation where a concurrent operation can land
+/// (tests only, see [`interleave`]).
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Interleave {
     /// A join effect for `character_id` was applied and is about to be verified against `team_id`.
     JoinApplied { team_id: u32, character_id: u32 },
+    /// `reply_to_join_team` read the inviter's online flag of `target_id`'s invitation and is
+    /// about to lock the state again.
+    InviterRead { target_id: u32 },
 }
 
 #[cfg(test)]
-type InterleaveHook = std::rc::Rc<dyn Fn(&GameServer, Interleave)>;
+type InterleaveHook = std::rc::Rc<dyn Fn(&TeamManager, Interleave)>;
 
 #[cfg(test)]
 thread_local! {
@@ -513,33 +516,31 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Test seam: runs the hook installed on this thread (if any). It lets a test land the removal
-/// of a member exactly between the apply and the verify of a join effect, which is the window a
-/// concurrent kick hits, without threads or timing.
+/// Test seam: runs the hook installed on this thread (if any). It lets a test land another
+/// operation exactly between two steps (the removal of a member between the apply and the
+/// verify of a join effect, a replaced invitation between the two lock sections of a reply),
+/// which is the window a concurrent thread hits, without threads or timing.
 #[cfg(test)]
-fn interleave(server: &GameServer, at: Interleave) {
+fn interleave(teams: &TeamManager, at: Interleave) {
     let hook = INTERLEAVE.with(|h| h.borrow().clone());
     if let Some(hook) = hook {
-        hook(server, at);
+        hook(teams, at);
     }
 }
 
 /// Whether `p` still is a member of `team_id` after one of its join effects was applied (one
 /// short state lock, nothing else under it: [`TeamManager::is_member_now`]).
 fn still_member(server: &GameServer, team_id: u32, p: &PlayerRef) -> bool {
+    let teams = &server.systems.social.teams;
     #[cfg(test)]
     interleave(
-        server,
+        teams,
         Interleave::JoinApplied {
             team_id,
             character_id: p.character_id,
         },
     );
-    server
-        .systems
-        .social
-        .teams
-        .is_member_now(team_id, p.character_id)
+    teams.is_member_now(team_id, p.character_id)
 }
 
 /// Joins `p` to `channel` (a chat channel of `team_id`) and takes the join back when `p` is not
@@ -1021,6 +1022,34 @@ impl TeamManager {
         true
     }
 
+    /// Locks the state with the pending invitation of `target_id` and whether its inviter is
+    /// online. The flag is a character data read, so it is taken between two state-lock
+    /// sections (the manager must not take a character data lock while it holds its mutex). The
+    /// invitation is looked at again under the second lock: when it names another inviter than
+    /// the flag was read for (it was replaced, or appeared, in between) the flag is not the
+    /// invitation's own and the read is repeated once. `None` when that fails again.
+    fn lock_with_inviter_online(&self, target_id: u32) -> Option<(MutexGuard<'_, State>, bool)> {
+        for _ in 0..2 {
+            let inviter = self
+                .lock()
+                .invitations
+                .get(&target_id)
+                .map(|inv| inv.owner.clone());
+            let online = inviter.as_ref().is_some_and(|p| p.data().is_online);
+            #[cfg(test)]
+            interleave(self, Interleave::InviterRead { target_id });
+            let st = self.lock();
+            let current = st
+                .invitations
+                .get(&target_id)
+                .map(|inv| inv.owner.character_id);
+            if current == inviter.map(|p| p.character_id) {
+                return Some((st, online));
+            }
+        }
+        None
+    }
+
     /// `ReplyToJoinTeam(target, teamId, isParty, ownerId, isReject, charName, isArea)`.
     ///
     /// Deviations from the C# (see PORTING.md): an acceptance that fails is reported (no / expired
@@ -1040,16 +1069,12 @@ impl TeamManager {
         _is_area: bool,
     ) {
         let target_name = target.data().unit.name.clone();
-        // The inviter's online flag is read between two state-lock sections: the manager must
-        // not take a character data lock while it holds its mutex. The invitation itself is
-        // re-read and revalidated under the second lock, so only the flag is a snapshot.
-        let inviter = self
-            .lock()
-            .invitations
-            .get(&target.character_id)
-            .map(|inv| inv.owner.clone());
-        let owner_online = inviter.as_ref().is_some_and(|p| p.data().is_online);
-        let mut st = self.lock();
+        let Some((mut st, owner_online)) = self.lock_with_inviter_online(target.character_id)
+        else {
+            // The invitation was replaced twice while this reply ran: ignore it like the answer
+            // of a stale popup.
+            return;
+        };
         let Some(inv) = st.invitations.get(&target.character_id).cloned() else {
             // Cancelled (the inviter left, or nobody answered for a minute) or never sent.
             drop(st);
@@ -2565,12 +2590,12 @@ mod deadlock_tests {
 }
 
 #[cfg(test)]
-mod membership_verify_tests {
-    //! The deferred join effects (chat channels, `InParty`) are applied after the guard is
-    //! dropped and then verified against the team state (module header). The window of a
-    //! concurrent kick is landed deterministically through the `interleave` seam: the removal
-    //! runs on the test thread between the apply and the verify, so no thread or timing is
-    //! involved.
+mod interleave_tests {
+    //! Operations that run concurrently on the server, landed deterministically through the
+    //! `interleave` seam (no thread, no timing): the deferred join effects (chat channels,
+    //! `InParty`) are applied after the guard is dropped and then verified against the team
+    //! state (module header), and a reply reads the inviter's online flag between two lock
+    //! sections. The hook runs on the test thread exactly between the two steps.
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -2614,29 +2639,44 @@ mod membership_verify_tests {
         );
     }
 
+    /// The hook installed on this thread; it is removed when the value is dropped.
+    struct Installed;
+
+    fn install(hook: impl Fn(&TeamManager, Interleave) + 'static) -> Installed {
+        let hook: InterleaveHook = Rc::new(hook);
+        INTERLEAVE.with(|h| *h.borrow_mut() = Some(hook));
+        Installed
+    }
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            INTERLEAVE.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
     /// Removes `victim` from its team the first time one of its join effects is verified (what
-    /// a kick on another thread does between the apply and the verify). The hook is removed
-    /// when the value is dropped.
+    /// a kick on another thread does between the apply and the verify).
     struct KickWindow {
         fired: Rc<Cell<bool>>,
+        _installed: Installed,
     }
 
     impl KickWindow {
         fn open(victim: u32) -> Self {
             let fired = Rc::new(Cell::new(false));
             let seen = fired.clone();
-            let hook: InterleaveHook = Rc::new(move |server, at| {
+            let installed = install(move |teams, at| {
                 let Interleave::JoinApplied {
                     team_id,
                     character_id,
-                } = at;
+                } = at
+                else {
+                    return;
+                };
                 if character_id != victim || seen.replace(true) {
                     return;
                 }
-                let removed = server
-                    .systems
-                    .social
-                    .teams
+                let removed = teams
                     .lock()
                     .teams
                     .get_mut(&team_id)
@@ -2644,19 +2684,15 @@ mod membership_verify_tests {
                     .remove_member(victim);
                 assert!(removed, "the victim was a member until the kick");
             });
-            INTERLEAVE.with(|h| *h.borrow_mut() = Some(hook));
-            Self { fired }
+            Self {
+                fired,
+                _installed: installed,
+            }
         }
 
         /// Whether a join effect of the victim reached its verify (the seam was exercised).
         fn fired(&self) -> bool {
             self.fired.get()
-        }
-    }
-
-    impl Drop for KickWindow {
-        fn drop(&mut self) {
-            INTERLEAVE.with(|h| *h.borrow_mut() = None);
         }
     }
 
@@ -2832,5 +2868,82 @@ mod membership_verify_tests {
         teams.move_team_member(&server, &p[0], team_id, 2, 0, 0, 1);
         assert!(window.fired());
         assert!(!channel.contains(&p[1]), "the move join is taken back");
+    }
+
+    /// A pending invitation of `inviter` for `target` (what `invite_locked` inserts).
+    fn invitation(inviter: &PlayerRef, target: &PlayerRef) -> Invitation {
+        Invitation {
+            team_id: 0,
+            owner: inviter.clone(),
+            target: target.clone(),
+            time_ms: util::now_ms(),
+            is_party: true,
+            is_area: false,
+        }
+    }
+
+    /// `ReplyToJoinTeam` reads the inviter's online flag between two lock sections. When the
+    /// invitation is replaced by another inviter's in between, the flag belongs to the old
+    /// inviter: the reply reads it again instead of answering `TEAM_INVITOR_OFFLINE` and
+    /// dropping the fresh invitation.
+    #[tokio::test]
+    async fn a_reply_reads_the_inviter_flag_again_when_the_invitation_was_replaced() {
+        let server = test_server();
+        let (mut clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        // P1 invites P2 and goes offline: its flag is what the first read sees.
+        teams.ask_to_join(&server, &p[0], "", 0, true, Some(&p[1]));
+        p[0].data().is_online = false;
+        // P3's invitation replaces it between the two lock sections of P2's reply.
+        let replaced = Rc::new(Cell::new(false));
+        let seen = replaced.clone();
+        let (invitee, inviter) = (p[1].clone(), p[2].clone());
+        let _installed = install(move |teams, at| {
+            if at == (Interleave::InviterRead { target_id: 2 }) && !seen.replace(true) {
+                let fresh = invitation(&inviter, &invitee);
+                teams.lock().invitations.insert(2, fresh);
+            }
+        });
+        clients[1].drain();
+        teams.reply_to_join_team(&server, &p[1], 0, true, 3, false, "", false);
+        assert!(
+            replaced.get(),
+            "the replacement landed between the sections"
+        );
+        let team = teams.active_team_by_unit(2).expect("P2 joined P3's team");
+        assert!(team.is_member(3) && !team.is_member(1));
+        assert!(
+            !clients[1].drain_ops().contains(&sc::SCErrorMsgPacket),
+            "no TEAM_INVITOR_OFFLINE for the stale flag"
+        );
+        assert_eq!(teams.invitation_count(), 0, "the invitation was consumed");
+    }
+
+    /// An invitation that keeps changing under the reply is not answered at all (like the
+    /// answer of a stale popup): no team, no error, the pending invitation stays.
+    #[tokio::test]
+    async fn a_reply_is_ignored_when_the_invitation_keeps_changing() {
+        let server = test_server();
+        let (mut clients, p) = players(&server);
+        let teams = &server.systems.social.teams;
+        teams.ask_to_join(&server, &p[0], "", 0, true, Some(&p[1]));
+        let reads = Rc::new(Cell::new(0u32));
+        let counted = reads.clone();
+        let (invitee, inviters) = (p[1].clone(), [p[2].clone(), p[0].clone()]);
+        let _installed = install(move |teams, at| {
+            if at != (Interleave::InviterRead { target_id: 2 }) {
+                return;
+            }
+            // P3, then P1 again: the invitation differs from every snapshot.
+            let n = counted.replace(counted.get() + 1) as usize;
+            let fresh = invitation(&inviters[n % 2], &invitee);
+            teams.lock().invitations.insert(2, fresh);
+        });
+        clients[1].drain();
+        teams.reply_to_join_team(&server, &p[1], 0, true, 3, false, "", false);
+        assert_eq!(reads.get(), 2, "one retry, then it gives up");
+        assert!(teams.active_team_by_unit(2).is_none());
+        assert!(clients[1].drain().is_empty());
+        assert_eq!(teams.invitation_count(), 1, "the pending invitation stays");
     }
 }
