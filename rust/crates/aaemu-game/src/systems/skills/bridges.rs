@@ -38,7 +38,9 @@ pub fn install(server: &GameServer) {
 }
 
 /// `new Skill(template).Use(caster, casterCaster, targetCaster, skillObject, bypassGcd)`;
-/// `None` when the skill template does not exist.
+/// `None` when the skill template does not exist. A gimmick caster bypasses the global cooldown:
+/// it is a projectile with no cast rhythm, and `default_gcd` (23 of the 25 collision skills)
+/// would otherwise refuse a second hit of a gimmick that keeps rolling within 850 ms.
 pub fn use_skill_with(
     server: &GameServer,
     caster: &WorldObject,
@@ -57,7 +59,7 @@ pub fn use_skill_with(
             caster_caster,
             &mut target_caster,
             skill_object,
-            false,
+            caster.as_gimmick().is_some(),
         )
         .0,
     )
@@ -283,14 +285,13 @@ impl SkillsBridge for SkillsForNpcs {
         gimmick: &WorldObject,
         unit: &WorldObject,
         skill_id: u32,
-    ) {
+    ) -> bool {
         // `GimmickTemplate.CollisionSkillId` on contact: cast from the gimmick (a unit in the
         // object model) at the unit it touched. The gimmick is the caster because a
         // doodad-spawned gimmick has no spawner unit; `SkillCaster::Doodad` matches the
-        // existing gimmick skill path (`Gimmick.DoGimmickSkill`).
-        if server.game_data.systems.skills.skill(skill_id).is_none() {
-            return;
-        }
+        // existing gimmick skill path (`Gimmick.DoGimmickSkill`). `true` only when the cast was
+        // accepted, so the caller latches the touched units and despawns the gimmick for a cast
+        // that really ran.
         let gimmick_id = gimmick.obj_id();
         use_skill_with(
             server,
@@ -299,7 +300,8 @@ impl SkillsBridge for SkillsForNpcs {
             SkillCastTarget::Unit(unit.obj_id()),
             skill_id,
             Some(SkillObject::default()),
-        );
+        )
+        .is_some_and(|r| r == skill_result::SUCCESS)
     }
 
     fn use_doodad_func_skill(

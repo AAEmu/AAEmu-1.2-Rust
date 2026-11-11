@@ -129,7 +129,9 @@ pub trait SkillsBridge: Send + Sync {
     /// `Gimmick.DoGimmickSkill`: casts the skill from the gimmick at its current position
     /// (`SkillDoodad(gimmick.ObjId)`, `SkillCastPositionTarget(pos)`), so a gimmick that moved
     /// since spawn still fires. The spawner unit (`caster`) is its owner; the C# used it as the
-    /// cast source, which refused moved gimmicks and doodad-spawned ones. Default: nothing.
+    /// cast source, which refused moved gimmicks and doodad-spawned ones. **Inferred (no 1.2
+    /// server evidence):** casting from the gimmick itself (retail's zone process is not
+    /// decompiled here). Default: nothing.
     fn use_gimmick_skill(
         &self,
         _server: &GameServer,
@@ -140,16 +142,21 @@ pub trait SkillsBridge: Send + Sync {
     ) {
     }
 
-    /// `GimmickTemplate.CollisionSkillId`: the gimmick touched `unit`. Retail's zone process
-    /// reported the collision (`ZWGimmickCollided`) and cast the skill from the gimmick; the
-    /// 1.2 client has no packet for it, so the server detects the touch. Default: nothing.
+    /// `GimmickTemplate.CollisionSkillId`: the gimmick touched `unit`. The 1.2 client has no
+    /// packet for a gimmick collision, so the server detects the touch. Retail's zone process
+    /// has a `ZWGimmickCollided` packet (RTTI name plus
+    /// `rust/docs/physics/ZONE-PHYSICS-USAGE.md:264-266`; no decompile here). **Inferred (no 1.2
+    /// server evidence):** that retail cast the skill from the gimmick. Returns `true` when the
+    /// cast was accepted (the caller latches the touched units and despawns a
+    /// `disappear_by_collision` gimmick only then). Default: nothing is cast, `false`.
     fn use_gimmick_collision_skill(
         &self,
         _server: &GameServer,
         _gimmick: &WorldObject,
         _unit: &WorldObject,
         _skill_id: u32,
-    ) {
+    ) -> bool {
+        false
     }
 
     // ---- doodad funcs / world interactions (`systems::npcs::doodad::{funcs, interactions}`) ----
