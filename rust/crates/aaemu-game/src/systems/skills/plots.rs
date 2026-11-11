@@ -36,6 +36,10 @@ mod aoe_tests;
 #[path = "plot_cast_tests.rs"]
 mod cast_tests;
 
+#[cfg(test)]
+#[path = "tiger_strike_tests.rs"]
+mod tiger_strike_tests;
+
 /// The mutable part of `PlotState`.
 #[derive(Debug, Default)]
 pub struct PlotStateInner {
@@ -248,6 +252,39 @@ pub(crate) fn finish_item_plot(server: &GameServer, plot_id: u32, state: &Arc<Pl
 
 type QueueItem = (usize, i64, PlotTargetInfo);
 
+/// A due node whose effects and packet are still pending: `(node, target info, condition)`.
+type ExecuteItem = (usize, PlotTargetInfo, bool);
+
+/// Test-only one-shot flush stall: `(plot id, event id, ms)`. The next flush that carries
+/// `event id` sleeps before it applies the event's effects, standing in for a stalled runtime.
+/// Keyed by plot and event so parallel plot tests are not affected.
+#[cfg(test)]
+static TEST_FLUSH_STALL: Mutex<Option<(u32, u32, u64)>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn stall_next_flush_with(plot_id: u32, event_id: u32, ms: u64) {
+    *TEST_FLUSH_STALL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((plot_id, event_id, ms));
+}
+
+#[cfg(test)]
+fn apply_test_flush_stall(tree: &PlotTree, q: &VecDeque<ExecuteItem>) {
+    let mut stall = TEST_FLUSH_STALL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some((plot_id, event_id, ms)) = *stall else {
+        return;
+    };
+    if tree.plot_id == plot_id
+        && q.iter()
+            .any(|(node, _, _)| tree.nodes[*node].event_id == event_id)
+    {
+        *stall = None;
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
 /// `PlotTree.ExecuteAsync`.
 pub async fn execute_tree(server: &GameServer, plot_id: u32, state: &Arc<PlotState>) {
     let data = &server.game_data.systems.skills;
@@ -257,18 +294,12 @@ pub async fn execute_tree(server: &GameServer, plot_id: u32, state: &Arc<PlotSta
         return;
     };
     let mut queue: VecDeque<QueueItem> = VecDeque::new();
-    let mut execute_queue: VecDeque<(usize, PlotTargetInfo)> = VecDeque::new();
+    let mut execute_queue: VecDeque<ExecuteItem> = VecDeque::new();
     queue.push_back((0, now_ms(), PlotTargetInfo::from_state(state)));
     let mut last_event = 1u8;
-    while let Some(mut item) = queue.pop_front() {
-        let now = now_ms();
-        let node = item.0;
-        let is_channeling = state.inner().is_channeling;
-        if is_channeling && state.channeling_finish_requested() {
-            handle_channeling_finish(server, &tree, node, state, &mut queue, &item);
-            last_event = 0;
-            continue;
-        }
+    while !queue.is_empty() || !execute_queue.is_empty() {
+        // Checked before the flush so a cancel drops pending effects like the C# (which returns
+        // before its final `FlushExecutionQueue`).
         if state.cancellation_requested() {
             let (casting, landed) = {
                 let inner = state.inner();
@@ -303,6 +334,21 @@ pub async fn execute_tree(server: &GameServer, plot_id: u32, state: &Arc<PlotSta
             do_plot_end(server, state);
             return;
         }
+        // The queue can run dry while due nodes still wait for their flush (their children are
+        // only enqueued by the flush, see `flush_execution_queue`).
+        if queue.is_empty() {
+            flush_execution_queue(server, &tree, &mut execute_queue, state, &mut queue);
+            continue;
+        }
+        let mut item = queue.pop_front().expect("queue was checked non-empty");
+        let now = now_ms();
+        let node = item.0;
+        let is_channeling = state.inner().is_channeling;
+        if is_channeling && state.channeling_finish_requested() {
+            handle_channeling_finish(server, &tree, node, state, &mut queue, &item);
+            last_event = 0;
+            continue;
+        }
         let event_id = tree.nodes[node].event_id;
         let Some(event) = data.plots.event(event_id) else {
             continue;
@@ -322,30 +368,12 @@ pub async fn execute_tree(server: &GameServer, plot_id: u32, state: &Arc<PlotSta
                 continue;
             }
             let condition = check_conditions(server, event, state, &item.2);
-            if condition {
-                execute_queue.push_back((node, item.2.clone()));
-            }
-            for &child in &tree.nodes[node].children {
-                let Some(next) = data.plots.parent_next_event(&tree, child) else {
-                    continue;
-                };
-                if condition != next.fail {
-                    if next.per_target {
-                        for t in &item.2.effected {
-                            let ti = PlotTargetInfo::new(item.2.source.clone(), Some(t.clone()));
-                            let d = compute_delay(server, &tree, child, state, &ti);
-                            queue.push_back((child, now + i64::from(d), ti));
-                        }
-                    } else {
-                        let ti = PlotTargetInfo::new(item.2.source.clone(), item.2.target.clone());
-                        let d = compute_delay(server, &tree, child, state, &ti);
-                        queue.push_back((child, now + i64::from(d), ti));
-                    }
-                }
-            }
+            // The effects (and the packet) are applied at the flush; the children are
+            // scheduled from the time that flush reaches the client, not from this pop.
+            execute_queue.push_back((node, item.2.clone(), condition));
         } else {
             queue.push_back(item);
-            flush_execution_queue(server, &tree, &mut execute_queue, state);
+            flush_execution_queue(server, &tree, &mut execute_queue, state, &mut queue);
         }
         if !queue.is_empty() {
             let now = now_ms();
@@ -355,7 +383,7 @@ pub async fn execute_tree(server: &GameServer, plot_id: u32, state: &Arc<PlotSta
             }
         }
     }
-    flush_execution_queue(server, &tree, &mut execute_queue, state);
+    flush_execution_queue(server, &tree, &mut execute_queue, state, &mut queue);
     do_plot_end(server, state);
 }
 
@@ -405,13 +433,44 @@ fn handle_channeling_finish(
 fn flush_execution_queue(
     server: &GameServer,
     tree: &PlotTree,
-    q: &mut VecDeque<(usize, PlotTargetInfo)>,
+    q: &mut VecDeque<ExecuteItem>,
     state: &Arc<PlotState>,
+    queue: &mut VecDeque<QueueItem>,
 ) {
+    #[cfg(test)]
+    apply_test_flush_stall(tree, q);
+    let data = &server.game_data.systems.skills;
     let mut packets = super::packets::CompressedGamePackets::new();
-    while let Some((node, ti)) = q.pop_front() {
-        if let Some(p) = node_execute_packet(server, tree, node, state, &ti) {
-            packets.add(&p);
+    while let Some((node, ti, condition)) = q.pop_front() {
+        if condition {
+            if let Some(p) = node_execute_packet(server, tree, node, state, &ti) {
+                packets.add(&p);
+            }
+        }
+        // The authored `plot_next_events.delay` counts from the moment the parent event
+        // reaches the client, which is this flush (it broadcasts `packets` right below), not
+        // the earlier moment the tree dequeued it. Basing the children on the dequeue time let
+        // a deferred flush (the 15 ms between passes, a busy runtime) eat into the delay the
+        // client observes: Tiger Strike's leap (plot 17 event 118, 400 ms) could arrive together
+        // with, or after, the damage event (121). The C# has the same dequeue-time base.
+        let sent_at = now_ms();
+        for &child in &tree.nodes[node].children {
+            let Some(next) = data.plots.parent_next_event(tree, child) else {
+                continue;
+            };
+            if condition != next.fail {
+                if next.per_target {
+                    for t in &ti.effected {
+                        let child_ti = PlotTargetInfo::new(ti.source.clone(), Some(t.clone()));
+                        let d = compute_delay(server, tree, child, state, &child_ti);
+                        queue.push_back((child, sent_at + i64::from(d), child_ti));
+                    }
+                } else {
+                    let child_ti = PlotTargetInfo::new(ti.source.clone(), ti.target.clone());
+                    let d = compute_delay(server, tree, child, state, &child_ti);
+                    queue.push_back((child, sent_at + i64::from(d), child_ti));
+                }
+            }
         }
     }
     if !packets.is_empty() {
