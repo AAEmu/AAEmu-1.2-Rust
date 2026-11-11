@@ -3523,8 +3523,10 @@ fn spawner_is_resident(
 }
 
 /// Whether an ordinary placement may be prepared for the quest-map range option: every
-/// authored member is a safe quest giver / reporter (nonaggressive, not creator-only) and at
-/// least one member carries a quest role. Mixed camps with hostile members are excluded.
+/// authored member is a plain `Npc` row naming a safe quest giver / reporter (nonaggressive, not
+/// creator-only) and at least one member carries a quest role. Mixed camps with hostile members
+/// are excluded, and so are `NpcGroup` rows: their `member_id` is a group id, not an NPC
+/// template id (the spawner spawns the whole group), even when the number is also an NPC id.
 fn spawner_is_quest_map_candidate(
     server: &GameServer,
     residents: &ResidentNpcTemplates,
@@ -3534,6 +3536,8 @@ fn spawner_is_quest_map_candidate(
     let members = spawner.spawnable_npcs();
     let member_ids: Vec<u32> = if members.is_empty() {
         vec![spawner.unit_id]
+    } else if members.iter().any(|m| m.member_type != "Npc") {
+        return false;
     } else {
         members.iter().map(|m| m.member_id).collect()
     };

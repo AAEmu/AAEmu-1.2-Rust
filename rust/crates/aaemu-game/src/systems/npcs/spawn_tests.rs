@@ -2581,6 +2581,14 @@ async fn activation_authored_schedule_wins_over_residency_and_retention() {
 /// Quest fixture: NPC 500 accepts quest 100 (which then waits in PROGRESS on an unfinished hunt
 /// objective), NPC 501 reports quest 110 (both nonaggressive).
 fn quest_server() -> Arc<GameServer> {
+    quest_server_with(|_, _, _| {})
+}
+
+/// [`quest_server`] whose game data a test extends first: `extend` may add NPC templates and
+/// quest acts (the quest tables are finished afterwards) and spawner templates / members.
+fn quest_server_with(
+    extend: impl FnOnce(&mut GameData, &mut Vec<NpcSpawnerTemplate>, &mut Vec<NpcSpawnerNpc>),
+) -> Arc<GameServer> {
     let mut game = GameData::empty();
     for id in [500u32, 501] {
         game.systems.npcs.npc.templates.insert(
@@ -2644,13 +2652,13 @@ fn quest_server() -> Arc<GameServer> {
                 alias_id: 0,
             },
         );
-        q.finish();
     }
-    game.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
-        vec![template(10, 1), template(20, 1)],
-        vec![member(100, 10, 500), member(200, 20, 501)],
-    )
-    .unwrap();
+    let mut spawner_templates = vec![template(10, 1), template(20, 1)];
+    let mut spawner_members = vec![member(100, 10, 500), member(200, 20, 501)];
+    extend(&mut game, &mut spawner_templates, &mut spawner_members);
+    game.systems.quests.finish();
+    game.systems.npcs.npc_spawners =
+        NpcSpawnerData::from_parts(spawner_templates, spawner_members).unwrap();
     let s = Arc::new(test_server_with(game));
     s.set_self();
     *s.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
@@ -2705,6 +2713,138 @@ async fn quest_giver_index_filters_placements_and_tracks_membership_changes() {
             10
         )
         .is_empty());
+}
+
+/// Adds `npc` as a quest giver (`ConAcceptNpc`) to the quest tables of a [`quest_server_with`].
+fn add_quest_giver_act(game: &mut GameData, quest: u32, npc: u32) {
+    let q = &mut game.systems.quests;
+    q.add_template(QuestTemplate {
+        id: quest,
+        ..QuestTemplate::default()
+    });
+    q.add_component(QuestComponentTemplate {
+        id: quest,
+        quest_id: quest,
+        kind_id: kind::START,
+        ..QuestComponentTemplate::default()
+    });
+    q.add_act(
+        quest,
+        quest,
+        quest,
+        0,
+        ActKind::ConAcceptNpc { npc_id: npc },
+    );
+}
+
+/// A monster camp with one quest NPC must not be prepared for a map marker, and neither must an
+/// aggressive quest NPC: every member of the placement has to be a safe quest giver / reporter.
+#[tokio::test]
+async fn quest_giver_index_skips_mixed_and_aggressive_placements() {
+    let server = quest_server_with(|game, templates, members| {
+        for id in [502u32, 503] {
+            game.systems.npcs.npc.templates.insert(
+                id,
+                NpcTemplate {
+                    id,
+                    aggression: true,
+                    ..NpcTemplate::default()
+                },
+            );
+        }
+        // NPC 503 gives a quest, but is aggressive.
+        add_quest_giver_act(game, 120, 503);
+        // Spawner 30: the quest giver 500 camped with the hostile monster 502. Spawner 31: the
+        // aggressive quest giver alone.
+        templates.extend([template(30, 2), template(31, 1)]);
+        members.extend([
+            member(300, 30, 500),
+            member(301, 30, 502),
+            member(310, 31, 503),
+        ]);
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(502, 1000.0, 1000.0))
+        .unwrap();
+    m.add_npc_spawner(&server, npc_def(503, 1010.0, 1000.0))
+        .unwrap();
+    // NPC 500 belongs to two spawner templates: its own (10) and the camp (30).
+    m.add_npc_spawner(&server, npc_def(500, 1020.0, 1000.0))
+        .unwrap();
+
+    let found: Vec<(u32, u32)> = m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 100.0, &HashSet::new(), 0)
+        .iter()
+        .map(|s| (s.spawner_id, s.unit_id))
+        .collect();
+    assert_eq!(
+        found,
+        vec![(10, 500)],
+        "only the giver's own template, not its clone of the camp"
+    );
+}
+
+/// An `NpcGroup` row names a group, not an NPC template: a group whose id equals a quest giver's
+/// NPC id must not pass for that quest giver (the spawner would spawn the group).
+#[tokio::test]
+async fn quest_giver_index_skips_npc_group_members() {
+    let server = quest_server_with(|game, templates, members| {
+        game.systems.npcs.npc.templates.insert(
+            505,
+            NpcTemplate {
+                id: 505,
+                ..NpcTemplate::default()
+            },
+        );
+        add_quest_giver_act(game, 121, 505);
+        // Spawner 32 spawns the NPC *group* 505.
+        templates.push(template(32, 1));
+        members.push(NpcSpawnerNpc {
+            member_type: "NpcGroup".into(),
+            ..member(320, 32, 505)
+        });
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(505, 1000.0, 1000.0))
+        .unwrap();
+
+    assert!(m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 100.0, &HashSet::new(), 0)
+        .is_empty());
+}
+
+/// The index answers nearest first (ties by spawner id, i.e. placement order) and `limit` keeps
+/// the nearest ones.
+#[tokio::test]
+async fn quest_giver_index_orders_nearest_first_and_truncates() {
+    let server = quest_server();
+    let m = manager(&server);
+    // Around (1000, 1000): 100 m east, 300 m east, 200 m north and, tying with the first,
+    // 100 m west.
+    for (x, y) in [
+        (1100.0, 1000.0),
+        (1300.0, 1000.0),
+        (1000.0, 1200.0),
+        (900.0, 1000.0),
+    ] {
+        m.add_npc_spawner(&server, npc_def(500, x, y)).unwrap();
+    }
+    let near = |limit: usize| -> Vec<(i32, i32)> {
+        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 400.0, &HashSet::new(), limit)
+            .iter()
+            .map(|s| {
+                let p = s.position();
+                (p.x as i32, p.y as i32)
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        near(0),
+        vec![(1100, 1000), (900, 1000), (1000, 1200), (1300, 1000)]
+    );
+    assert_eq!(near(2), vec![(1100, 1000), (900, 1000)]);
+    assert_eq!(near(1), vec![(1100, 1000)]);
 }
 
 #[tokio::test]
