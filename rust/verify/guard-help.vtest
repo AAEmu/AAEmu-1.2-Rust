@@ -1,0 +1,36 @@
+# City-guard aggro-link help (10.x sub_39321C80 guard branch, PORTING "aggregate" row):
+# a pirate attacking a protected-faction player next to a city guard pulls the guard.
+#
+# The victim bot (Haranya faction 109, guard_help t, not the zone's protected nation) spawns
+# guard NPC 14148 (faction 162 "neutral guard", aggro_link_special_guard t, rule 4 everyone,
+# non-aggressive, sight check) at its own position; the attacker bot takes the pirate faction
+# 161 (hostile to the guard faction, so CanAttack accepts it) and melees the victim. Guard 14148
+# does not aggro the pirate on sight (aggression false), so the join can only come from the
+# guard-help rule. The victim's damage event must log the guard join (`ai::behaviors=debug`) and
+# the guard must actually hit the attacker.
+suite guard-help
+bot victim gm
+bot attacker gm
+
+[victim]
+targetself
+gm setfaction 109
+gm spawn npc 14148
+pump 1
+units 14148
+waitpeer 120 ${attacker}
+sync pos 2
+sync ready 2
+expectlog "guard help: joined the fight" 25
+pump 2
+
+[attacker]
+targetself
+gm setfaction 161
+waitpeer 120 ${victim}
+gopeer ${victim}
+walkrel 3 0 0
+sync pos 2
+sync ready 2
+nattack 2 ${victim}
+pump 5
