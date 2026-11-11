@@ -1205,8 +1205,9 @@ mod tests {
     }
 
     /// `tick` refreshes a standing player only once [`REFRESH_INTERVAL`] has passed (or the
-    /// player moved). The spawn clock is the seam, so the test does not sleep.
-    #[tokio::test]
+    /// player moved). The spawn clock is the seam, so the test does not sleep; the tokio clock
+    /// is paused, so real elapsed time cannot cross the interval on a slow machine either.
+    #[tokio::test(start_paused = true)]
     async fn tick_refreshes_a_standing_player_only_after_the_interval() {
         let server = server();
         let m = manager(&server);
@@ -1578,8 +1579,9 @@ mod tests {
     }
 
     /// A change to a wider range refreshes at once at most once per second per character; a
-    /// faster one is recorded and applied by the next tick, so the last value still wins.
-    #[tokio::test]
+    /// faster one is recorded and applied by the next tick, so the last value still wins. (The
+    /// tokio clock is paused: only the spawn test clock moves time.)
+    #[tokio::test(start_paused = true)]
     async fn a_range_change_within_the_interval_is_applied_by_the_next_tick() {
         let server = server();
         let m = manager(&server);
@@ -1630,8 +1632,9 @@ mod tests {
     }
 
     /// Going back to the default is always applied at once (it only removes what was streamed),
-    /// but it does not reset the limit: alternating cannot force a refresh per command.
-    #[tokio::test]
+    /// but it does not reset the limit: alternating cannot force a refresh per command. (The
+    /// tokio clock is paused: only the spawn test clock moves time.)
+    #[tokio::test(start_paused = true)]
     async fn alternating_with_the_default_does_not_reset_the_limit() {
         let (server, mut client, player) = streamed_giver_fixture().await;
 
