@@ -4947,6 +4947,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `doodad_spawns.json` rows through the three switches to the raised lake): `cargo test -p
   aaemu-game --lib -- --ignored real_compact_db_sharpwind real_compact_db_related_ids
   real_data_sharpwind`.
+* systems::npcs (Sharpwind scripted doodad placements, 2026-11-11): the scripted doodads of the
+  Nerta door chain (spec item 5), the two powder-keg rock walls (items 6 and 9), the stalactite
+  corridor (item 10) and the Okape exit / secret chest / attack ban (item 12) are now placed in
+  `app/Data/Worlds/instance_cuttingwind_deadmine/doodad_spawns.json`. Added: `5541` "Guild
+  Storage Door" family 50009 at (487.015, 327.783, 165.839) and `5542` "Stone Lion" family 50010
+  at (489.476, 323.844, 167.294), replacing the wrong-template Howling Abyss lion `5602` (family
+  30039) that stood at the lion spot; `5280` "Rock" x2, the ogre-corridor wall at (519.932,
+  365.755, 169.029) and the exit wall at (615.935, 469.958, 155.602, scale 1.3); the level's keg
+  sets `5282` x18, `5606` x4 (dormant until Allistair-2's dialogue 11) and `5568` x5, replacing
+  the older approximations (including the `5282` rows where the level has `5606`);
+  `5365` "Falling Stalactite" x8 with families 50011-50018 and `5364` "Shattered Stalactite" x4
+  with families 50019-50022; `5724` "Sharpwind Mines Exit" at (613.364, 642.913, 139.813);
+  `7522` "Okape's Secret Chest" at (614.247, 636.359, 139.486), whose start group 20831 is the
+  invisible phase the Okape death skill hits; and the three `5957` attack-ban doodads. The
+  Derelict Bridge `5058` keeps its 1.2-era position (the sphere centre) and now carries the
+  level family 50000. The death-skill chests `6130` (Nerta) and `6197` (Okape's log) are
+  deliberately not placed; their skills create them. **Inferred:** the positions/families are
+  the 10.x level editor rows (`game/worlds/instance_cuttingwind_deadmine/cells/000_000/
+  doodad.g`); the 1.2 templates and start groups are from `compact.sqlite3`. Tests:
+  `npcs::sharpwind_doodad_tests::sharpwind_scripted_doodad_spawn_placements` and (gated by
+  `AAEMU_COMPACT_DB`) `real_compact_db_sharpwind_scripted_doodad_spawn_templates`.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
