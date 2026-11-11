@@ -97,6 +97,8 @@ mod resurrection_target_tests;
 #[cfg(test)]
 mod sc_unit_impulse_packet_tests;
 #[cfg(test)]
+mod self_hit_tests;
+#[cfg(test)]
 mod skill_tests;
 #[cfg(test)]
 pub(crate) mod tests;
