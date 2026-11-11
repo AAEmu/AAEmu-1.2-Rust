@@ -286,13 +286,46 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             None => false, // caster is not a player, allow execution as we can't check
         },
         FuncTemplate::Pulse(f) => {
+            // C# `DoodadFuncPulse.Use`: `if (caster is not null)`. A world spawn runs its entry
+            // phase with no caster, so the initial `Pulse(flag = false)` rows only take effect
+            // when a phase is entered with a caster (a player's use, or a timer / signal that
+            // carries one). The pulse is recorded first, so the group's own trigger sees it.
+            if caster.is_none() {
+                return false;
+            }
+            ctx.doodad.data().phase.pulsed = Some(f.flag);
             super::logic::emit(ctx, caster, f.flag);
             false
         }
-        // These describe routing/operations; a trigger runs only on a received signal.
-        FuncTemplate::PulseTrigger(_)
-        | FuncTemplate::Logic(_)
-        | FuncTemplate::LogicFamilyProvider(_) => false,
+        // A `DoodadFuncPulseTrigger` fires on the pulse its own group's `DoodadFuncPulse` sent in
+        // this phase entry, when the flags match: the Sharpwind switches (group 13161: `Pulse(t)`
+        // + `PulseTrigger(t -> final)`) use this to reach their `DoodadFuncFinal` after the use
+        // pulse (the trigger rows run after the group's other phase funcs, see
+        // `phase::do_phase_funcs`). It does not fire because a player caster was propagated along
+        // a signal chain or a timer: Sal Temple's Ice Trap 4751 (`PulseTrigger(t -> B)` /
+        // `PulseTrigger(f -> A)`) must stay off after the Ice Machine's false pulse, and Jolly
+        // Roger Tower 3382 group 7885 (`Pulse(f)` + `PulseTrigger(t -> 8260)`) must stay put. A
+        // pulse received from another doodad is handled by `logic::receive`.
+        //
+        // **Inferred (no 1.2 server evidence):** the C# AAEmu `DoodadFuncPulseTrigger.Use`
+        // returns `true` for a caster that is not a `Character` (the sequence stops) and
+        // otherwise, when `Flag` is true and its shared `PulseTriggered` is false, sets
+        // `OverridePhase = NextPhase`; only a source `DoodadFuncPulse` with `Flag == true` resets
+        // `PulseTriggered`, for its `RelatedIds` targets. That fires a trigger on the first
+        // character-caused entry of its group; here the player caster also travels along signals
+        // and timers, so every toggle (`A: t -> B`, `B: f -> A`) would bounce back. Neither
+        // reading is backed by the 1.2 server; this one is the narrowest that reaches the
+        // Sharpwind `Final` and leaves the chains that work on `main` alone.
+        FuncTemplate::PulseTrigger(f) => {
+            let mut d = ctx.doodad.data();
+            if f.next_phase <= 0 || d.phase.pulsed != Some(f.flag) {
+                return false;
+            }
+            d.phase.override_phase = f.next_phase;
+            true
+        }
+        // These describe routing/operations; the logic runs on a received signal.
+        FuncTemplate::Logic(_) | FuncTemplate::LogicFamilyProvider(_) => false,
         FuncTemplate::LogicFamilySubscriber(f) => super::logic::subscribe(ctx, caster, f.family_id),
         // PrefabDoodadModel::PlayFlowGraph is client-owned; the phase and visibility packets
         // already cause the 1.2 client to execute these events from its own compact data.
@@ -461,6 +494,7 @@ fn use_respawn(ctx: &DoodadCtx<'_>, player: &crate::world::PlayerRef) {
         scale: 1.0,
         count: 1,
         related_ids: None,
+        family_id: 0,
         respawn_doodad_template_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(ctx.world.id)));

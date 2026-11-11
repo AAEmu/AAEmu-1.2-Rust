@@ -529,7 +529,7 @@ buff unchanged, absolute-value inference, real-compact loader for the three colu
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
 | `SpawnManager` (one per instance) + `WorldManager.ActiveRegionTick` spawner part | `spawn_manager.rs` | done | main_world: 25 118 NPC entries -> 24 047 ordinary placements / 38 174 spawner clones (1 011 duplicates and 60 event entries filtered, 0 missing templates), 42 649 doodads, 69 transfers, 14 gimmicks, 5 slaves, 0 parse errors. Ordinary spawning is a bounded per-instance 64 m region-index activation pass (`World.NpcPrewarmRegionMargin` / `World.NpcSpawnTickMs` / `World.NpcSpawnsPerTick`) with warm retention and resident-service retention (`World.NpcWarmRetentionSeconds` / `World.NpcResidentServiceNpcs`; see deviations). Persistent doodads from MySQL. Transfers / slaves: `systems::vehicles`; houses and their doodads: `systems::housing`; trial court doodads / NPCs linked after the spawns (`TrialManager.Initialize*`). |
 | `DoodadManager.Load` (templates, func groups, funcs, phase funcs, all 121 func template tables) | `doodad/data.rs`, `doodad/templates.rs` | done | 7 124 templates, 13 974 funcs, 24 465 phase funcs (counts match the DB). |
-| `Doodad` phase machine (`Use`, `DoFunc`, `DoPhaseFuncs`, `DoChangePhase`, `InitDoodad`, `OnSkillHit`, `FuncGroupId` setter, ToD triggers), 42 phase funcs, func tasks, `DoodadManager` runtime (Create, CreatePlayerDoodad, ChangeDoodadData, coffers), persistence (`doodads` table) | `doodad/{phase,phase_funcs,tasks,manager,db,logic}.rs` | partial | Serialized interactions, per-object counters, generation and handle guards for timers, ToD transitions, ordered MySQL persistence. Authored immediate logic/family pulses, spawn management groups and moving gimmicks are implemented. FlowGraph runs in the client. Logic delay descriptors 2/3 lack timing semantics; spawn groups 73–76 lack authored membership in shipped data. |
+| `Doodad` phase machine (`Use`, `DoFunc`, `DoPhaseFuncs`, `DoChangePhase`, `InitDoodad`, `OnSkillHit`, `FuncGroupId` setter, ToD triggers), 42 phase funcs, func tasks, `DoodadManager` runtime (Create, CreatePlayerDoodad, ChangeDoodadData, coffers), persistence (`doodads` table) | `doodad/{phase,phase_funcs,tasks,manager,db,logic}.rs` | partial | Serialized interactions, per-object counters, generation and handle guards for timers, ToD transitions, ordered MySQL persistence. Authored logic/family pulses, spawn management groups and moving gimmicks are implemented (phase funcs load in `actual_func_id` order with the `PulseTrigger` rows deferred by the executor, see the Sharpwind water entry; `DoodadFuncLogic` supports the delays 1 s / 5 s / 10 s (ids 1–3, evidenced) and an inferred 30 s–30 min (ids 4–8); the doodad spawn row carries the level-design `FamilyId`). FlowGraph runs in the client. Spawn groups 73–76 lack authored membership in shipped data. |
 | `blocked_child_doodads` (buff id -> child doodad template id) | `systems/skills/data/mod.rs` (loader), `doodad/{phase,interactions,packets}.rs`, `npcs/{bridges,portal/mod}.rs`, `economy/store.rs` (use entry guards) | added | The C# did not load this table; the 1.2 client does (`dll.c` `39a0c158` / `39a0c460`: `SELECT owner_type, owner_id, doodad_id FROM blocked_child_doodads`). The two rows are buff 6064 -> doodad 6560 (fishing boat crane) and buff 6245 -> doodad 3446 (backpack storage box). While such a buff is active on the child doodad's parent unit, a player's use is refused with the existing `NO_INTERACTION_AVAILABLE` error (no new packet) and `Character.SkillCancelled`, so a running cast refunds its item / labor cost. Only `owner_type = 'Buff'` is handled (the only evidenced value; other / NULL values are skipped at debug, NULL ids too). Covered player entries: `Doodad.Use` (skills `InteractionEffect` / `ScopedFEffect`, `CSHang`, harpoon, loot bag; `funcs::use_func` is reached through it), world interactions (`execute_interaction_with`, incl. the `CSLootOpenBag` recover path and `CheckGrowth`), `CSChangeDoodadPhase`, the `CSBuyCoinItem` and `CSBuyItems` purchase paths, and navi open / teleport. Doodads without a parent are unchanged and internal phase changes (timers, ToD, func chaining, instance events, GM phase commands, crime-evidence loot) are not gated. Who casts 6064 / 6245 in the live flow is UNKNOWN. Tests: `blocked_child_tests` (refused with the buff, allowed without / unrelated buff, parentless doodad) and gated `blocked_child_doodads_real_compact_db`. |
 | 79 non-phase funcs, 41 world interactions (`execute_interaction` for the skills InteractionEffect), coffers, bond / seats | `doodad/funcs/`, `doodad/interactions.rs`, `doodad/coffer.rs` | done | Items, loot, coffers through the economy `EconomyBridge`; skills, quests, housing through the bridges; instance funcs (`systems::instances`), `BindSlave` (`systems::vehicles`). Sticky parents are not modelled. The funcs that stay trace-only (`DoodadFuncBankUi` / `_AuctionUi` / `_StoreUi` / `_CofferPerm` / `_RenewItem`, `Climb`, `CraftStart/Act/GetItem/Cancel/Info/Pack`, `InsertCounter`, `StampMaker`, `UccImprint`) are **client-driven**: the 1.2 client loads `doodad_func_bank_uis`, `_auction_uis`, `_store_uis`, `_coffer_perms` and `_renew_items` itself (`strings.txt:13498-13557`), so there is no server answer to add (do not reopen). |
 | `doodad_funcs.perm_id` (`DoodadFuncPermission`) | `doodad/permission.rs`, `doodad/phase.rs`, `doodad/interactions.rs`, `doodad/funcs/skills.rs`, `housing/dominion/larceny.rs`, `permission_tests.rs` | added | The C# read `Doodad.FuncPermission` only in `CharacterCraft` (its enum was a guess) and never enforced it in `Doodad.Use`; the 1.2 client filters every interaction entry by `FUN_393b3300(func->perm, doodad, ...)`, so a direct `CSStartSkill` / `CSLootOpenBag` bypassed the filter. Decoded and enforced: 0 any (13 228 rows), 1 owner, 2 owner or family, 3 expedition membership with the role right (`FUN_392f8af0`: leader `0xff` or the role policy's `siege_master` byte) and the doodad's expedition (`+0x350`) is mine or 0, with **no owner shortcut**, 4 owner or party/raid, 5 owner or raid, 6 same account, 7 the doodad's zone **group** is owned by my player-founded nation (dominion owner expedition through `FUN_392f8180`; `zones.faction_id` is not read), 8 a house of mine is in the doodad's zone **group**, other values deny (client default). Evidence: the data patterns (territory statues 7229-7234 and QA doodads 7251 "이 존이 내 국가" (perm 7) / 7252 "이 존에 내 집" (perm 8), beds/fences/livestock perm 1, the single perm-2 QA uproot, the perm-3 siege-declaration backpack, perm-5 storage box / fish crane, perm-6 farm bench / cushions), the decompile (`FUN_393b3300`; family map `FUN_39302aa0`/`FUN_39300340`, expedition role policy `FUN_392f8af0`/`FUN_398a40c0`, raid `FUN_39308dd0`, account `FUN_393b32c0`, zone nation `FUN_39053360`/`FUN_392fa6b0`/`FUN_392f3510`/`FUN_3983a730`/`FUN_392f8180`, zone house `FUN_3932aaf0`/`FUN_397a6c60`) and the C# history (`git log -S Perm`: only `CharacterCraft`). Deviation: the C# enum's names are wrong (3 is expedition, not owner-only; 1 is owner-only) and value 7 was missing. The owner is the owning character (CHARACTER owner, house owner, slave owner). `perm 0` is not an owner rule: the shipped player crop groups carry perm 0 on water 13625 and uproot 13789 (98 groups bind both), so a house garden stays behind the house permission (unchanged) and a public farm behind the guard time (unchanged). Gate: `phase::use_doodad` (the skill-bound func before `do_func`, the skill-less loot rows one by one) plus the direct `CheckGrowth` and `RecoverItem` branches; a refusal sends `interaction_permission_deny` 232 and cancels the cast so its cost is refunded. Siege larceny: the window never grants the uproot skill 13789 (produce only), and the `funcs::skills::use_` window fallback has the same exclusion; most group-5 (baby livestock) and 4594 rows are perm 1, so the window does not grant them either, matching the client filter. **perm 7 / EuAuroria:** with player nations off no player passes `FUN_392fa6b0`, so the territory-statue buffs (statues 7229-7234, buffs 23681 and 23684-23688) are unusable under that profile; that is the client rule, not a regression. **SYSTEM-owned rows (public-farm release):** `PublicFarmTick` turns an expired public-farm crop into owner type SYSTEM; its perm-1 rows (livestock group 5 care/loot among them) then refuse everyone, and the client hides the same rows because its owner lookup returns null. **perm 3 inference:** the client's doodad `+0x350` is the field `Doodad.Write` sends as 0 (C# `stream.Write(0); // family TODO`), so the server resolves it from the dominion declaration's attacker expedition (the only perm-3 row is the camp 4307 recover and the camp is that declaration's HQ); the policy byte at `+0x90` is `siege_master` (decoded from `FUN_392faa00`'s column mapping: `expedition_management` ALB columns 6 = join_siege at `+0x91`, 7 = siege_master at `+0x90`). A chained loot iteration (an earlier row already ran and advanced the phase) skips a denied row silently instead of refusing and refunding a finished cast. Tests: `doodad/permission_tests` (every value, owner/family/guild-role-right/team/raid/account/nation/zone-resident, system- and slave-owned doodads, uproot vs water, the 232 + cast cancel, no owner shortcut for perm 3, the territory-owner nation, the chained skip, the direct recover and CheckGrowth paths, house permission on top of perm 0) and `dominion/larceny_tests::the_window_grants_produce_but_not_the_uproot`; each denial test was mutation-checked against the disabled/old rule. |
@@ -4828,10 +4828,124 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   a_bridge_inside_the_area_but_out_of_the_skill_range_stands,
   a_bridge_reserved_by_another_thread_is_not_advanced}`; real data (`AAEMU_COMPACT_DB` = a copy
   of the r208022 `compact.sqlite3`): `cargo test -p aaemu-game --lib
-  real_data_sphere_doodad_interact -- --ignored --nocapture`. The geyser water level itself is
-  a client-side phase model (`water_switch1` -> `water_switch2`); the authored logic network
-  around it references doodads 5068 / 5071 / 5073 that no shipped spawn file places, so the
-  "water rises" transition remains a data gap (see the run report), not a code stub.
+  real_data_sphere_doodad_interact -- --ignored --nocapture`.
+* systems::npcs (Sharpwind "water rises" geyser network, 2026-11-11): the missing placements and
+  the logic network are now in place, so clearing the Blocked Geysers raises the lake.
+  **Placements (data):** the 10.x client level editor `doodad.xml` (`ArcheAge Returns 10.0.2.13
+  r575`, `game/worlds/instance_cuttingwind_deadmine/cells/000_000/editor/02_01/doodad.xml`,
+  6437 B, MD5 74CFA418149294B9A36E4675CC119299, subcell origin +256 m; it is in neither r208022
+  nor r223748 and only its pak catalogue entry is on this machine, so the coordinates and family
+  ids below could not be re-read from the file) places `5064`/`5068`/`5069` "Blocked Geyser"
+  switches at (678.33, 338.67, 143.87) / (672.68, 317.62, 143.79) / (691.12, 317.28, 143.60),
+  invisible water gates `5070`/`5071` at (681.18, 342.82, 143.99) / (684.98, 341.37, 144.03),
+  water streams `5072` x3 / `5073` x2 at (687.91, 333.87, 143.96) / (692.93, 326.99, 143.71) /
+  (684.83, 314.11, 143.86) / (670.13, 330.63, 143.99) / (697.69, 319.18, 143.85), and the lake
+  `5063` at (650.86, 292.16, 143.28), each with the editor `Family_Id` (50001-50008). The level
+  is the same as 1.2: the heightmap, object, brush, entities and navmesh files of the instance
+  have identical size and MD5 in the r223748 pak and the 10.x r575 pak (r208022 has the same
+  sizes; pak catalogue comparison), the 1.2 prefab `cuttingwind.water1` lake polygon contains
+  all 11 water placements, and five old server rows already stood at the stream positions. The
+  old `doodad_spawns.json` had five `5064` rows (the AAEmu hand-add of 2023, commit
+  `853fa8543`, with the wrong template) with the same yaws 0.03-0.71 m from the five stream
+  positions (row 1, (697.2, 319.7), is 0.71 m from (697.69, 319.18); the others are 0.03 / 0.17
+  / 0.27 / 0.15 m, z within 0.16 m): they show that five doodads stood there, not what the
+  editor file contains. **All five old rows change template, 5064 -> 5072 / 5073** (the
+  authored positions replace them), and the three switches, the two gates and the lake are
+  added. **Network:** the editor family id is the doodad's identity (`Doodad::family_id`, spawn
+  row `FamilyId`; the C# JSON model never had it). A `DoodadFuncLogicFamilyProvider { family_id }`
+  row names the **receiver** families of the doodad's signal; a `DoodadFuncLogicFamilySubscriber { family_id }` row names the **source**
+  families its `DoodadFuncLogic` accepts (each subscribed family is one input, missing = false).
+  **Inferred (no 1.2 server evidence):** that every other chain reads the two tables this way;
+  only Sharpwind's graph closes (every id 50001-50008 has exactly one carrier, provider labels
+  are receiver ids, subscriber labels are sender ids), and the template-level reading `main` used
+  (provider family == subscriber family) is incoherent for it. Thus 5064 (50002) and 5068
+  (50003) feed gate 5070 (50005), whose AND (delay 1 = 1 s) emits to 50006 (gate 5071) and 50007
+  (5072); gate 5071 ANDs 5069 (50004) with gate 5070 (50005) and
+  emits to 50001 (lake 5063) and 50008 (5073). A signal from the spawner's `RelatedIds` is an
+  explicit authored route like a client wire and bypasses that subscriber source filter (the
+  shipped rows of Howling Abyss, Howling Abyss 2 and Immortal Isle carry no `FamilyId`).
+  **Family routing therefore needs the `FamilyId` of the placement rows:** a level whose rows
+  carry none has no family routing (`RelatedIds` and client wires still work). The 6
+  template-level pairs of `instance_nachashgar` rooms 4 / 6 / 7 that `main` connected by
+  matching a provider family of one template against a subscriber family of another (6643 ->
+  6646 via 50103, 6724 -> 6727 via 50108, 6647 -> 6643 via 50100, 6727 -> 6729 via 50111,
+  6737 -> 6739 via 50115, 6641 -> 6644 via 50102; no `RelatedIds`, no `FamilyId` in those rows)
+  are inert now. `zones.closed` is `t` for both `instance_nachashgar` (zone 192) and
+  `instance_nachashgar_easy` (zone 204) in the r208022 compact DB, so no player is affected in
+  1.2. No template-level fallback was added: Sharpwind never needs one, and the template
+  reading is not evidenced for the other chains (test
+  `no_family_id_on_the_placement_means_no_family_routing`). The
+  switches' `DoodadFuncPulse(flag)` now runs only when the phase is entered with a caster (the C#
+  `if (caster is not null)`), and a `DoodadFuncPulseTrigger` also fires on the pulse its own
+  group's `DoodadFuncPulse` sent in the same phase entry when the flags match, so using a switch
+  pulses the network and then reaches its `DoodadFuncFinal` (13163/13177/13180, the rock
+  disappears after 1 s). A phase entered by a signal or a timer fires no trigger by itself (the
+  player caster travels along both): Sal Temple's Ice Machine 4752 -> Ice Trap 4751 toggle
+  (`PulseTrigger(t -> 11796)` / `PulseTrigger(f -> 11795)`) switches off at the false pulse and
+  stays off, and Jolly Roger Tower 3382 group 7885 (`Pulse(f)` + `PulseTrigger(t -> 8260)`) stays
+  put. **Inferred (no 1.2 server evidence):** this trigger rule. The AAEmu C#
+  `DoodadFuncPulseTrigger.Use` returns `true` for a non-character caster and otherwise fires a
+  `Flag == true` row whose shared `PulseTriggered` flag is false (reset only by a source
+  `DoodadFuncPulse(true)` for its `RelatedIds` targets), i.e. on the first character-caused
+  entry, which would bounce every toggle here. The lake then runs 13157 -pulse-> 14184 -5 s timer-> 13158
+  (`DoodadFuncWaterVolume` 22 m / 22 s + 22 s timer) -> 13159 (`cuttingwind.water2`, whose
+  client prefab is the same water volume raised by +22.000046 m; the client's water volume
+  provides the swim/buoyancy that lifts the party, so no server position lift is needed).
+  **Deviations:** (1) `doodad_phase_funcs` load in the C# `actual_func_id` order
+  (`ORDER BY doodad_func_group_id, actual_func_id`), but the phase executor
+  (`phase::do_phase_funcs`) runs a group's `DoodadFuncPulseTrigger` rows after its other phase
+  funcs; in the C# execution order the switch's `PulseTrigger` (274) ran before its `Pulse`
+  (287) and stopped the sequence, so the signal was never sent. The 10.x zone loader
+  (`LoadDoodadPhaseFuncDescs`, `sub_39BE6B30`) selects the table without `ORDER BY`, i.e. row
+  order, which also runs the pulse first (the SQL string without `ORDER BY` is in the 10.x
+  dedicated-server DLL, but the loader function itself is not decompiled on this machine:
+  **Inferred (no 1.2 server evidence)** that it runs the pulse first). (2) `DoodadFuncLogic`
+  delays: ids 1 / 2 / 3 = 1 s / 5 s / 10 s are the only ids in the shipped rows (74
+  `doodad_func_logics` rows: 61 / 6 / 7) and are evidenced by the QA gate template names
+  1754-1773 ("(1초)" / "(5초)" / "(10초)", e.g. 1754 "로직게이트 and (5초)" has delay 2);
+  **Inferred (no 1.2 server evidence):** ids 4..8 = 30 s / 1 min / 5 min / 10 min / 30 min (no
+  shipped row uses them and no `enum_doodad_logic_delays` table exists in the r208022, r223748,
+  AAEmu CN or MailRU r243378 compact DB). The old code refused anything but 1 s and emitted
+  immediately; the nine placed delay-1 gates (main_world 815, 1589, 2167, 2171, 2172; Howling
+  Abyss 3788, 5603; Howling Abyss 2 6364, 6418) now emit after 1 s instead of immediately (the 13
+  delay-2 / delay-3 QA gate templates are not placed). (3) the per-doodad, per-entry `pulsed` flag
+  replaces the C# `PulseTriggered`, which lived on the shared func list (one doodad's trigger
+  suppressed every instance of the template). (4) a `DoodadFuncLogic` result that returns to the
+  value it already emitted before its delay ends is cancelled instead of emitted a second time
+  (the downstream `PulseTrigger` rows would run twice); a pending result that differs from the
+  emitted one still emits after its delay, replaced ones never do. **Inferred (no 1.2 server
+  evidence):** this inertial output rule.
+  **Inferred (no 1.2 server evidence):** the five stream positions and the three
+  switch/gate/lake positions are the 10.x editor placements, not a 1.2 server DB export (no
+  such export exists here); the five pre-existing stream rows only show that five doodads stood
+  at those positions. Tests: `doodad::phase::tests::{
+  sharpwind_switches_raise_the_lake_through_the_family_network,
+  family_pulses_route_by_the_level_design_family_and_owner_scope,
+  spawner_related_ids_reach_a_subscribed_target_without_family_ids,
+  no_family_id_on_the_placement_means_no_family_routing,
+  a_spawner_gives_its_family_id_to_the_doodad_it_spawns,
+  pulse_triggers_require_matching_signal_and_do_not_affect_other_objects,
+  a_toggle_pair_follows_its_signals_when_the_chain_carries_a_player_caster,
+  a_false_pulse_does_not_fire_the_true_trigger_of_its_own_group,
+  a_true_pulse_fires_the_true_trigger_of_its_own_group,
+  sal_temple_ice_trap_stays_off_after_the_ice_machines_false_pulse,
+  a_pulse_without_a_caster_emits_nothing,
+  replaced_logic_output_emits_once_with_the_last_value,
+  a_pending_logic_output_that_returns_to_the_emitted_value_is_cancelled,
+  a_wire_linked_during_the_logic_delay_receives_nothing_until_the_emit,
+  subscribe_replays_only_the_emitted_logic_value,
+  deleted_doodads_take_no_part_in_family_routing,
+  clear_links_cancels_a_pending_logic_output}`,
+  `doodad::logic::tests::{authored_logic_operations_cover_true_false_and_mixed_inputs,
+  logic_delay_table_follows_the_qa_names_and_the_inferred_ids}`,
+  `npcs::spawn_tests::real_data_sharpwind_water_network_placements` and (gated by
+  `AAEMU_COMPACT_DB` = a copy of the r208022 `compact.sqlite3`) `doodad::phase::tests::{
+  real_compact_db_sharpwind_water_network_rows,
+  real_compact_db_related_ids_signal_opens_the_howling_abyss_2_gate,
+  real_data_sharpwind_shipped_rows_raise_the_lake}` (the last drives the shipped
+  `doodad_spawns.json` rows through the three switches to the raised lake): `cargo test -p
+  aaemu-game --lib -- --ignored real_compact_db_sharpwind real_compact_db_related_ids
+  real_data_sharpwind`.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body

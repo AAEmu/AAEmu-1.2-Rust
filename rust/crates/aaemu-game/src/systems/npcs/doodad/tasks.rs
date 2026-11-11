@@ -52,7 +52,18 @@ pub enum FuncTaskKind {
     /// `InitDoodad()` resolved at the cast.
     Spawn,
     /// A family/link signal deferred while the target is processing an interaction.
-    Pulse { source: DoodadRef, value: bool },
+    Pulse {
+        source: DoodadRef,
+        value: bool,
+        /// The signal travels an authored wire (a client link or the spawner's `RelatedIds`),
+        /// which bypasses the subscriber-family filter.
+        explicit: bool,
+    },
+    /// The delayed output of a `DoodadFuncLogic` (its `delay_id`, see `logic::logic_delay_ms`).
+    /// `generation`
+    /// identifies the pending output it was scheduled for; the task is stale when a later input
+    /// replaced that output.
+    Logic { value: bool, generation: u64 },
 }
 
 /// One scheduled doodad task.
@@ -71,6 +82,11 @@ pub struct DoodadTask {
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh generation for a pending func task or `DoodadFuncLogic` output.
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// The scheduler of `DoodadManager` (`server.systems.npcs.doodads.tasks`).
 #[derive(Debug, Default)]
@@ -562,9 +578,27 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
             phase::init_doodad_for(&ctx, caster);
             super::manager::spawn(server, &ctx.world, &ctx.doodad);
         }
-        FuncTaskKind::Pulse { source, value } => {
+        FuncTaskKind::Pulse {
+            source,
+            value,
+            explicit,
+        } => {
             let source_ctx = DoodadCtx::new(server, ctx.world.clone(), source);
-            super::logic::receive(&source_ctx, &ctx.doodad, caster, value);
+            super::logic::receive(&source_ctx, &ctx.doodad, caster, value, explicit);
+        }
+        FuncTaskKind::Logic { value, generation } => {
+            // Only the latest scheduled output wins: an input that replaced the pending result
+            // before the delay elapsed bumped `pending_output_generation` and this task is stale.
+            {
+                let mut d = ctx.doodad.data();
+                if d.phase.pending_output_generation != generation
+                    || d.phase.pending_output != Some(value)
+                {
+                    return;
+                }
+                d.phase.pending_output = None;
+            }
+            super::logic::emit(&ctx, caster, value);
         }
     }
 }
@@ -574,6 +608,7 @@ pub(crate) fn schedule_pulse(
     target: &DoodadRef,
     caster: Option<&WorldObject>,
     value: bool,
+    explicit: bool,
 ) {
     schedule(
         ctx.server,
@@ -586,8 +621,31 @@ pub(crate) fn schedule_pulse(
             kind: FuncTaskKind::Pulse {
                 source: ctx.doodad.clone(),
                 value,
+                explicit,
             },
         },
         Duration::from_millis(10),
+    );
+}
+
+/// Deferred `DoodadFuncLogic` output (its `delay_id`, see `logic::logic_delay_ms`).
+pub(crate) fn schedule_logic_emit(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    value: bool,
+    generation: u64,
+    delay: Duration,
+) {
+    schedule(
+        ctx.server,
+        DoodadTask {
+            world: Some(Arc::downgrade(&ctx.world)),
+            doodad: ctx.doodad.clone(),
+            holder: ctx.doodad.clone(),
+            caster: caster.cloned(),
+            generation: 0,
+            kind: FuncTaskKind::Logic { value, generation },
+        },
+        delay,
     );
 }

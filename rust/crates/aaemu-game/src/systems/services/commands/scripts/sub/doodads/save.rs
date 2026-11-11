@@ -253,9 +253,9 @@ impl DoodadSaveSubCommand {
             .iter()
             .map(|d| {
                 let pos = world_pos(server, &WorldObject::from(d));
-                let (template_id, scale, func_group_id) = {
+                let (template_id, scale, func_group_id, family_id) = {
                     let d = d.data();
-                    (d.template_id, d.scale, d.func_group_id)
+                    (d.template_id, d.scale, d.func_group_id, d.family_id)
                 };
                 let id = last_obj_id;
                 last_obj_id = last_obj_id.wrapping_add(1);
@@ -273,6 +273,7 @@ impl DoodadSaveSubCommand {
                     }),
                     scale,
                     func_group_id,
+                    family_id,
                     ..JsonSpawnEntry::default()
                 }
             })
@@ -328,9 +329,15 @@ impl DoodadSaveSubCommand {
             return Ok(());
         };
 
-        let (t, template_id, scale, func_group_id) = {
+        let (t, template_id, scale, func_group_id, family_id) = {
             let d = doodad.data();
-            (d.transform, d.template_id, d.scale, d.func_group_id)
+            (
+                d.transform,
+                d.template_id,
+                d.scale,
+                d.func_group_id,
+                d.family_id,
+            )
         };
         let Some(world) = server.world.world(t.instance_id) else {
             self.base.send_color_message(
@@ -358,6 +365,7 @@ impl DoodadSaveSubCommand {
             }),
             scale,
             func_group_id,
+            family_id,
             ..JsonSpawnEntry::default()
         };
 

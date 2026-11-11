@@ -209,6 +209,7 @@ impl SocialHooks for GameSocialHooks {
                 scale: 1.0,
                 count: 1,
                 related_ids: None,
+                family_id: 0,
                 respawn_doodad_template_id: 0,
             },
             Some(instance_id),

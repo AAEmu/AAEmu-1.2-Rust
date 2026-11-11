@@ -98,7 +98,9 @@ impl JsonNpcSpawns {
     }
 }
 
-/// `JsonDoodadSpawns` (`RelatedIds` is not written).
+/// `JsonDoodadSpawns` (`RelatedIds` is not written). `FamilyId` is the Rust-only level-design
+/// family id (the `Family_Id` of the 10.x client level editor's `doodad.xml`, r575); the C#
+/// model did not carry it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct JsonDoodadSpawns {
     pub id: u32,
@@ -108,6 +110,7 @@ pub struct JsonDoodadSpawns {
     pub position: Option<JsonPosition>,
     pub scale: f32,
     pub func_group_id: u32,
+    pub family_id: u32,
 }
 
 impl JsonDoodadSpawns {
@@ -123,6 +126,7 @@ impl JsonDoodadSpawns {
             ),
             ("FuncGroupId", JValue::from(self.func_group_id)),
             ("Scale", JValue::Single(self.scale)),
+            ("FamilyId", JValue::from(self.family_id)),
         ])
     }
 }
