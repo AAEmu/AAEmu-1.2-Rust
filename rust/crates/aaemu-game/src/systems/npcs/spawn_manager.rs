@@ -1089,6 +1089,38 @@ impl SpawnManager {
         index.built = true;
     }
 
+    /// Tracks a placement that the quest-map range option prepared far from every player: the
+    /// activation pass registers only the placements it examined itself, so without this entry
+    /// the retention sweep never reclaims the NPCs the option created (they would leak until
+    /// restart while `World.NpcResidentServiceNpcs` is off). A placement that is already tracked
+    /// keeps its entry; while a player streams one of its NPCs the sweep keeps it warm
+    /// (`activation_sweep`).
+    pub fn note_prepared(&self, server: &GameServer, spawner: &Arc<NpcSpawner>) {
+        if self
+            .activation
+            .lock()
+            .expect("spawn manager poisoned")
+            .warmed
+            .contains_key(&spawner.id)
+        {
+            return;
+        }
+        // Classified like the activation pass does, before taking the activation guard again.
+        let residents = server.systems.npcs.spawns.resident_npcs(server);
+        let resident = server.config.world.npc_resident_service_npcs
+            && spawner_is_resident(server, residents, spawner);
+        self.activation
+            .lock()
+            .expect("spawn manager poisoned")
+            .warmed
+            .entry(spawner.id)
+            .or_insert(WarmEntry {
+                spawner: spawner.clone(),
+                resident,
+                expires_at: None,
+            });
+    }
+
     /// Ordinary placements that can provide a quest marker within `radius` metres of
     /// `(center_x, center_y)`, nearest first. `radius` may be infinite (the Unlimited option).
     ///

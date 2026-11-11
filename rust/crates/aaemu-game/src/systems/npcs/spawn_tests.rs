@@ -2789,6 +2789,54 @@ async fn quest_map_streamed_placement_stays_warm_and_is_not_recreated() {
     }
 }
 
+/// The option prepares placements far from every player, outside what the activation pass ever
+/// examines. They must be tracked like activation-prepared ones, so that once streaming stops
+/// the retention sweep reclaims them (resident gate off, retention 0: the first cold pass);
+/// untracked they leaked until restart.
+#[tokio::test]
+async fn quest_map_prepared_placement_is_reclaimed_once_streaming_stops() {
+    let server = quest_server();
+    server.config.update(|c| {
+        c.world.npc_warm_retention_seconds = 0;
+        c.world.npc_resident_service_npcs = false;
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let spawner = only_spawner(&m);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1000.0),
+        5000,
+    );
+    client.drain();
+    assert_eq!(spawner.current_spawn_count(), 0, "nothing prepared it yet");
+
+    // 250 m from the unprepared placement, outside every warm ring: the option creates and
+    // streams its NPC, and the sweep keeps it while it is streamed.
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    client.drain();
+    assert_eq!(spawner.current_spawn_count(), 1);
+    assert_eq!(activate(&server).reclaimed, 0, "streamed placements stay");
+    assert_eq!(spawner.current_spawn_count(), 1);
+
+    // Streaming stops: the placement is cold and gets reclaimed.
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters100,
+    );
+    client.drain();
+    assert_eq!(activate(&server).reclaimed, 1);
+    assert_eq!(spawner.current_spawn_count(), 0);
+}
+
 #[tokio::test]
 async fn activation_quest_giver_and_reporter_stay_resident_and_resend_state() {
     let server = quest_server();

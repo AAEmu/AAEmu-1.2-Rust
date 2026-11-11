@@ -641,14 +641,21 @@ fn collect_from_spawners(
         &set.natural,
         query.placements,
     ) {
+        let mut created = 0;
         if set.spent < budget {
             let want = (budget - set.spent).clamp(0, 4);
             if want > 0 {
-                let created = spawner.update_warm(server, true, want);
+                created = spawner.update_warm(server, true, want);
                 set.spent += created as i64;
             }
         }
-        for npc in spawner.spawned_npcs().into_values().flatten() {
+        let live = spawner.spawned_npcs();
+        if created > 0 || !live.is_empty() {
+            // Track the placement like one the activation pass prepared, so the retention sweep
+            // reclaims it once nobody streams it any more.
+            manager.note_prepared(server, &spawner);
+        }
+        for npc in live.into_values().flatten() {
             let template_id = npc.data().unit.template_id;
             let Some(template) = npcs.template(template_id) else {
                 continue;
