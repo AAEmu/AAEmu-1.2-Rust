@@ -154,8 +154,9 @@ pub(super) fn check_resources(
     server: &GameServer,
     skill: &SkillRun,
     caster: &WorldObject,
+    source: &super::types::SkillCaster,
 ) -> Result<(), (u8, u32)> {
-    if super::skill::mana_cost(server, skill, caster)
+    if super::skill::mana_cost(server, skill, caster, source)
         > caster.with_unit(|u| u.unit().mp).unwrap_or(0)
     {
         return fail("skill_lack_mana");

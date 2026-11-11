@@ -83,6 +83,8 @@ mod mana_regen_manager_tests;
 #[cfg(test)]
 mod player_skill_audit_tests;
 #[cfg(test)]
+mod post_cast_tests;
+#[cfg(test)]
 mod quest_item_start_tests;
 #[cfg(test)]
 mod quest_machine_flow_tests;
@@ -96,6 +98,8 @@ mod resurrection_buff_tests;
 mod resurrection_target_tests;
 #[cfg(test)]
 mod sc_unit_impulse_packet_tests;
+#[cfg(test)]
+mod self_hit_tests;
 #[cfg(test)]
 mod skill_tests;
 #[cfg(test)]
