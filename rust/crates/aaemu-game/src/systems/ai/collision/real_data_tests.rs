@@ -1527,7 +1527,7 @@ fn real_object_dat_vegetation_audit() {
 /// report: "Rose Estate Rafflesia clipping inside the building floor"). Each row is
 /// `(unit id, X, Y, Z)` with X / Y equal to a 1.2 client `npc_map/e_ynystere.dat` record of
 /// the same NPC and Z that record's height, kept only where the 1.2 collision has a floor within
-/// 1 m of it (`real_ynystere_floor_fixes_stand_on_a_collision_floor`) and it is above the
+/// 1 m of it (`real_client_floor_fixes_stand_on_a_collision_floor`) and it is above the
 /// terrain. The other 76 Ynystere records more than 2 m off the spawn Z were left alone: flying
 /// or swimming NPCs without a floor there, points under the terrain, and a stacked marker site
 /// whose heights step by 2 m.
@@ -1562,9 +1562,36 @@ const YNYSTERE_FLOOR_FIXES: [(u32, f32, f32, f32); 28] = [
     (13070, 20900.83, 13316.93, 124.138),
 ];
 
-/// The spawn file carries the client floor height of every [`YNYSTERE_FLOOR_FIXES`] row.
+/// The same correction for Silent Forest (`npc_map/e_ancient_forest.dat`, 764 records, 809
+/// matched spawns, 107 more than 2 m off, these 11 pass the floor check). Tester reports: the
+/// westmost tomb of the Ancient Necropolis had its quest giver (Ancient Ghost 3266, 10 m under
+/// the tomb floor at 350.366) and four Cursed Swordsmen (7496, 2.7 m under it) inside the
+/// terrain; Warlock Erik (3123) and Avidin (8604) of the Cloaked Forest camp stood 21-22 m
+/// below their floors.
+const SILENT_FOREST_FLOOR_FIXES: [(u32, f32, f32, f32); 11] = [
+    (3123, 23579.02, 11168.734, 373.848),
+    (3141, 22684.18, 12103.12, 287.478),
+    (3266, 24222.01, 11551.15, 350.366),
+    (3311, 23121.2, 12171.22, 250.633),
+    (3335, 22922.17, 12403.75, 251.362),
+    (7496, 24261.45, 11559.21, 342.753),
+    (7496, 24239.6, 11545.189, 342.775),
+    (7496, 24258.129, 11542.83, 342.775),
+    (7496, 24246.5, 11566.68, 342.775),
+    (7498, 24522.15, 11726.91, 367.701),
+    (8604, 23478.87, 11354.01, 342.266),
+];
+
+/// Every client-floor correction: [`YNYSTERE_FLOOR_FIXES`] and [`SILENT_FOREST_FLOOR_FIXES`].
+fn client_floor_fixes() -> impl Iterator<Item = (u32, f32, f32, f32)> {
+    YNYSTERE_FLOOR_FIXES
+        .into_iter()
+        .chain(SILENT_FOREST_FLOOR_FIXES)
+}
+
+/// The spawn file carries the client floor height of every [`client_floor_fixes`] row.
 #[test]
-fn ynystere_structure_npcs_keep_the_client_floor_height() {
+fn structure_npcs_keep_the_client_floor_height() {
     use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
     let Ok(text) =
         std::fs::read_to_string(app_path().join("Data/Worlds/main_world/npc_spawns.json"))
@@ -1572,7 +1599,7 @@ fn ynystere_structure_npcs_keep_the_client_floor_height() {
         return;
     };
     let defs = parse_list(&text, NpcSpawnerDef::from_json).expect("npc_spawns.json");
-    for (uid, x, y, z) in YNYSTERE_FLOOR_FIXES {
+    for (uid, x, y, z) in client_floor_fixes() {
         let found: Vec<f32> = defs
             .iter()
             .filter(|d| d.base.unit_id == uid)
@@ -1590,17 +1617,17 @@ fn ynystere_structure_npcs_keep_the_client_floor_height() {
     }
 }
 
-/// Every [`YNYSTERE_FLOOR_FIXES`] spawn lands on a 1.2 collision floor within 1 m of its Z
+/// Every [`client_floor_fixes`] spawn lands on a 1.2 collision floor within 1 m of its Z
 /// (the live `spawn_ground_z` path, GeoDataMode on), so it neither sinks back onto the terrain
 /// under the structure nor floats.
-/// `AAEMU_GAME_PAK=C:/AA1.2/game_pak cargo test -p aaemu-game real_ynystere_floor_fixes -- --ignored`
+/// `AAEMU_GAME_PAK=C:/AA1.2/game_pak cargo test -p aaemu-game real_client_floor_fixes -- --ignored`
 #[tokio::test]
 #[ignore = "needs AAEMU_GAME_PAK"]
-async fn real_ynystere_floor_fixes_stand_on_a_collision_floor() {
+async fn real_client_floor_fixes_stand_on_a_collision_floor() {
     let Some(e) = env_with(true) else { return };
     let server = real_server_with(&e, true);
     let world = server.world.world(0).expect("main world");
-    for (uid, x, y, z) in YNYSTERE_FLOOR_FIXES {
+    for (uid, x, y, z) in client_floor_fixes() {
         let terrain = super::terrain_height(&server, 0, x, y).expect("terrain");
         let spawn = crate::systems::npcs::npc::spawner::spawn_ground_z(&server, &world, x, y, z)
             .expect("a floor under the spawn");
@@ -1612,6 +1639,38 @@ async fn real_ynystere_floor_fixes_stand_on_a_collision_floor() {
         assert!(
             z >= terrain - 0.5,
             "npc {uid} at ({x}, {y}, {z}) is under the terrain {terrain}"
+        );
+    }
+}
+
+/// Every `npc_spawns_quest_fill.json` entry spawns on the ground at its Z: the live NPC spawn
+/// snap (`spawn_ground_z`, collision, GeoDataMode on) lands within 0.5 m of it.
+/// `AAEMU_GAME_PAK=C:/AA1.2/game_pak cargo test -p aaemu-game real_npc_quest_fill -- --ignored`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_npc_quest_fill_spawns_on_the_ground() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
+    let Some(e) = env_with(true) else { return };
+    let server = real_server_with(&e, true);
+    let world = server.world.world(0).expect("main world");
+    let text = std::fs::read_to_string(
+        app_path().join("Data/Worlds/main_world/npc_spawns_quest_fill.json"),
+    )
+    .expect("npc_spawns_quest_fill.json");
+    let defs = parse_list(&text, NpcSpawnerDef::from_json).expect("parse");
+    assert!(!defs.is_empty());
+    for d in &defs {
+        let (uid, p) = (d.base.unit_id, d.base.position);
+        let spawn =
+            crate::systems::npcs::npc::spawner::spawn_ground_z(&server, &world, p.x, p.y, p.z)
+                .expect("a floor under the fill spawn");
+        println!(
+            "fill npc {uid} ({}, {}, {}): spawns at {spawn}",
+            p.x, p.y, p.z
+        );
+        assert!(
+            (spawn - p.z).abs() <= 0.5,
+            "fill npc {uid} at {p:?} spawns at {spawn}"
         );
     }
 }

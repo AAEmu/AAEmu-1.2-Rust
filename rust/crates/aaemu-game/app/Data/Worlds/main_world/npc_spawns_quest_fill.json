@@ -188,5 +188,55 @@
       "Z": 107.591,
       "Yaw": -70.0
     }
+  },
+  {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23852.246,
+      "Y": 12102.071,
+      "Z": 305.518,
+      "Yaw": -70.0
+    }
+  },
+  {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23828.988,
+      "Y": 12165.971,
+      "Z": 305.050,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23846.090,
+      "Y": 12118.986,
+      "Z": 305.816,
+      "Yaw": -70.0
+    }
+  },
+  {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23835.145,
+      "Y": 12149.056,
+      "Z": 303.136,
+      "Yaw": 110.0
+    }
+  },
+  {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23847.045,
+      "Y": 12141.681,
+      "Z": 305.977,
+      "Yaw": 50.0
+    }
   }
 ]
