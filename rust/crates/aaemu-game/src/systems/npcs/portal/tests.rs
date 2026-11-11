@@ -5,16 +5,26 @@ use std::collections::HashMap;
 
 use super::packets::*;
 use super::*;
+use crate::data::items::{ItemTemplate, TemplateKind};
 use crate::data::world_data::{DistrictReturnPoint, Zone};
 use crate::data::GameData;
+use crate::models::container::slot_type;
+use crate::models::item::Item;
 use crate::net::packet::{encode, encode_raw};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::{cs, sc};
 use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 
+const PORTAL_MATE_NPC: u32 = 950;
+const PORTAL_MATE_ITEM: u32 = 5100;
+
 fn body(p: &dyn crate::net::packet::ServerPacket) -> Vec<u8> {
     encode(p)[6..].to_vec()
+}
+
+fn ops(frames: &[(u16, Vec<u8>)]) -> Vec<u16> {
+    frames.iter().map(|f| f.0).collect()
 }
 
 fn recall(id: u32, sub_zone: u32, name: &str) -> Portal {
@@ -110,7 +120,92 @@ fn data() -> GameData {
             },
         );
     }
+    // A summonable mate for the teleport-dismiss tests.
+    d.systems.npcs.npc.templates.insert(
+        PORTAL_MATE_NPC,
+        NpcTemplate {
+            id: PORTAL_MATE_NPC,
+            name: "Horse".into(),
+            level: 1,
+            model_id: 77,
+            scale: 1.0,
+            ..NpcTemplate::default()
+        },
+    );
+    d.items.templates.insert(
+        PORTAL_MATE_ITEM,
+        ItemTemplate {
+            kind: TemplateKind::SummonMate {
+                npc_id: PORTAL_MATE_NPC,
+            },
+            ..ItemTemplate::plain(PORTAL_MATE_ITEM, 1)
+        },
+    );
+    d.formulas = crate::systems::vehicles::stats::tests::formulas(
+        &[(1, "1000", 14, 5), (2, "100", 15, 5)],
+        &[],
+    );
+    d.systems.vehicles.model_bindings.insert(
+        77,
+        vec![
+            crate::systems::vehicles::data::attach_point::DRIVER,
+            crate::systems::vehicles::data::attach_point::PASSENGER0,
+        ],
+    );
     d
+}
+
+/// A summon item in `p`'s bag; returns its item id.
+fn give_summon_item(server: &GameServer, p: &PlayerRef, item_id: u64) -> u64 {
+    let t = server
+        .game_data
+        .items
+        .template(PORTAL_MATE_ITEM)
+        .expect("summon mate template")
+        .clone();
+    let mut item = Item::create(item_id, &t, 1, 0, 1, &server.game_data.items, 0);
+    item.owner_id = u64::from(p.data().id);
+    item.slot_type = slot_type::INVENTORY;
+    item.slot = 0;
+    p.data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .cloned()
+        .expect("bag")
+        .lock()
+        .unwrap()
+        .items
+        .push(item);
+    item_id
+}
+
+/// The player's summoned mate, mounted in the driver seat.
+fn mounted_mate(server: &GameServer, p: &PlayerRef, item_id: u64) -> crate::world::MateRef {
+    crate::systems::vehicles::mates::spawn_mount(server, p, item_id);
+    let mate = crate::systems::vehicles::mates::first_active_mate(server, p).expect("mate");
+    let tl = u32::from(mate.data().unit.tl_id);
+    crate::systems::vehicles::mates::mount_mate(
+        server,
+        p,
+        tl,
+        crate::systems::vehicles::data::attach_point::DRIVER,
+        1,
+    );
+    mate
+}
+
+fn assert_mate_gone(server: &GameServer, p: &PlayerRef, mate: &crate::world::MateRef) {
+    assert!(mate.data().deleted);
+    assert!(server.world.world(0).unwrap().mate(mate.obj_id).is_none());
+    assert!(server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(p.data().id)
+        .is_empty());
+    assert!(!p.data().is_riding);
+    assert_eq!(p.data().unit.transform.parent_obj_id, 0);
 }
 
 /// A portal NPC teleporting to (500, 600, 70) with a 90 degree yaw.
@@ -415,6 +510,50 @@ async fn use_portal_teleports_and_teleport_ended_resends_objects() {
         ops.contains(&sc::SCUnitStatePacket) && ops.contains(&sc::SCUnitPointsPacket),
         "the arrival observer is shown: {ops:?}"
     );
+}
+
+/// A same-instance portal moves the owner: the active mate is dismissed with the move instead
+/// of standing at the old spot. The mounted rider is detached first (SCUnitDetached), then the
+/// mate is removed and the teleport sent.
+#[tokio::test]
+async fn a_same_instance_portal_dismisses_the_owners_mate() {
+    let server = test_server_with(data());
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    let portal = portal_npc(&server, (101.0, 101.0));
+    let item_id = give_summon_item(&server, &me, 0x7100);
+    let mate = mounted_mate(&server, &me, item_id);
+    client.drain();
+
+    request_portal(&server, &mut client, portal.obj_id, false).await;
+    let frames = client.drain();
+    let ops = ops(&frames);
+    assert!(ops.contains(&sc::SCUnitDetachedPacket), "{ops:x?}");
+    assert!(ops.contains(&sc::SCUnitsRemovedPacket), "{ops:x?}");
+    assert!(ops.contains(&sc::SCTeleportUnitPacket), "{ops:x?}");
+    let detach = ops
+        .iter()
+        .position(|op| *op == sc::SCUnitDetachedPacket)
+        .unwrap();
+    let teleport = ops
+        .iter()
+        .position(|op| *op == sc::SCTeleportUnitPacket)
+        .unwrap();
+    assert!(
+        detach < teleport,
+        "the rider is freed before the move: {ops:x?}"
+    );
+    assert_mate_gone(&server, &me, &mate);
+
+    // The destination is unchanged: the portal still teleports the character.
+    assert!(me.data().disabled_set_position);
+    assert_eq!(me.data().unit.transform.x, 100.0);
 }
 
 #[tokio::test]
@@ -1134,6 +1273,42 @@ async fn use_teleport_pays_the_fare_and_teleports_to_the_return_point() {
     use_teleport(&server, &me, 5, 0, teleporter.obj_id);
     assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
     assert!(!me.data().disabled_set_position);
+}
+
+/// A recall teleport (`CSUseTeleport` -> `SCTeleportUnit`) moves the owner too: the active mate
+/// is dismissed instead of staying at the old spot.
+#[tokio::test]
+async fn a_recall_teleport_dismisses_the_owners_mate() {
+    let mut gd = data();
+    gd.systems.npcs.npc.templates.insert(
+        900,
+        NpcTemplate {
+            id: 900,
+            teleporter: true,
+            ..NpcTemplate::default()
+        },
+    );
+    let server = test_server_with(gd);
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    let teleporter = plain_npc(&server, 900, (103.0, 100.0));
+    let item_id = give_summon_item(&server, &me, 0x7101);
+    let mate = mounted_mate(&server, &me, item_id);
+    client.drain();
+
+    use_teleport(&server, &me, 5, 0, teleporter.obj_id);
+    let frames = client.drain();
+    let ops = ops(&frames);
+    assert!(ops.contains(&sc::SCTeleportUnitPacket), "{ops:x?}");
+    assert!(ops.contains(&sc::SCUnitDetachedPacket), "{ops:x?}");
+    assert_mate_gone(&server, &me, &mate);
+    assert!(me.data().disabled_set_position);
 }
 
 /// A player at (100, 100, 100) with a pending `SCTeleportUnit` to (300, 400, 50).
