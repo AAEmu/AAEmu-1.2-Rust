@@ -38,8 +38,8 @@ const PLOT: u32 = 17;
 const CASTER_FACTION: u32 = 4;
 const MOB_FACTION: u32 = 3;
 
-/// The real `system_faction_relations` resolve 4 and 3 as hostile in 1.2; the fixture keeps
-/// only what the damage/attack gates read.
+/// The fixture resolves the two sides as Hostile (`RelationState`, not a faction id); the mob
+/// uses the real hostile root faction 3, the caster a fixture-only faction 4.
 const HOSTILE: u8 = 1;
 
 fn plot_rows(conn: &Connection) {
