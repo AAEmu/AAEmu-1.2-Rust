@@ -10,9 +10,16 @@
 //! * The first `doodad_func_groups` pass (`ORDER BY doodad_almighty_id, ...`) runs before any
 //!   template exists, so it adds nothing (its column reads still run). The groups come from the
 //!   second, unordered pass, which does not read `model` (`Model` stays null).
-//! * `doodad_funcs` / `doodad_phase_funcs` lists keep their `ORDER BY doodad_func_group_id,
-//!   actual_func_id` order; `FuncGroups` of a template and `IsCofferTemplate` follow the insertion
-//!   order of `_allFuncGroups` (plain `doodad_func_groups` row order).
+//! * `doodad_funcs` and `doodad_phase_funcs` keep their
+//!   `ORDER BY doodad_func_group_id, actual_func_id` order (the C# order).
+//!   **Deviation (2026-11-11):** the C# order runs a `DoodadFuncPulseTrigger` (274) before the
+//!   same phase's `DoodadFuncPulse` (287) and stops the sequence, so Sharpwind's switches never
+//!   pulsed their logic network. The executor (`phase::do_phase_funcs`) therefore runs the
+//!   `DoodadFuncPulseTrigger` rows of a group after its other phase funcs; the loader order
+//!   itself is unchanged. The 10.x zone loader (`LoadDoodadPhaseFuncDescs`, `sub_39BE6B30`)
+//!   selects `doodad_phase_funcs` without an `ORDER BY`, i.e. in row (= authoring) order, which
+//!   also runs the pulse first. `FuncGroups` of a template and `IsCofferTemplate` follow the
+//!   insertion order of `_allFuncGroups` (plain `doodad_func_groups` row order).
 //! * Template tables go to `_funcTemplates` or `_phaseFuncTemplates` by the base class of their
 //!   C# type (dictionaries created by reflection). Item / child tables whose classes derive from
 //!   `DoodadPhaseFuncTemplate` therefore live with the phase func templates:

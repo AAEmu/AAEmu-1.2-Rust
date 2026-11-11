@@ -84,6 +84,10 @@ pub struct Doodad {
     pub puzzle_group: i32,
     /// `Spawner?.Id` (0 = none).
     pub spawner_id: u32,
+    /// Level-design logic family id of this placement (the 1.2 client level editor's
+    /// `doodad.xml` `Family_Id`, e.g. Sharpwind's 50001-50008; 0 = none). `DoodadFuncPulse` /
+    /// `DoodadFuncLogic` address other doodads by it (see `systems::npcs::doodad::logic`).
+    pub family_id: u32,
     /// `(world id, spawn key)` of a world-spawned doodad whose growth state is persisted in
     /// `doodad_spawn_states` (`systems::npcs::doodad::natural`); `None` = not tracked.
     pub natural_key: Option<(u32, String)>,
@@ -219,6 +223,7 @@ impl Doodad {
             quest_glow: 0,
             puzzle_group: -1,
             spawner_id: 0,
+            family_id: 0,
             natural_key: None,
             phase: DoodadPhaseState::default(),
             coffer: None,
@@ -336,8 +341,20 @@ pub struct DoodadPhaseState {
     /// Completed interactions toward the current phase's authored act_count thresholds.
     pub interaction_counts: std::collections::HashMap<u32, u32>,
     pub logic_links: std::collections::HashMap<u32, usize>,
+    /// `DoodadFuncLogic` inputs: by the source doodad's family id when the target has
+    /// `DoodadFuncLogicFamilySubscriber` rows (the authored network), else by source handle.
     pub logic_inputs: std::collections::HashMap<usize, bool>,
+    /// The last `DoodadFuncLogic` result actually emitted; links and `subscribe` replay it.
     pub logic_output: Option<bool>,
+    /// A `DoodadFuncLogic` result still waiting for its authored delay (not yet emitted).
+    /// `pending_output_generation` ties it to the scheduled task, so a replaced result's task
+    /// cannot emit.
+    pub pending_output: Option<bool>,
+    pub pending_output_generation: u64,
+    /// `DoodadFuncPulseTrigger` rows (func ids) that already fired in this phase; cleared when
+    /// the phase changes. The C# `PulseTriggered` lived on the shared func list (a port bug);
+    /// here it is per doodad so instances of one template do not suppress each other.
+    pub pulse_triggered: std::collections::HashSet<u32>,
     /// `ToNextPhase`.
     pub to_next_phase: bool,
     /// A `DoodadFuncLootItem` row missed its percent roll during the current `Use` pass.

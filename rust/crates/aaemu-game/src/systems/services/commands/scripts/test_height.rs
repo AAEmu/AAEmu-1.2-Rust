@@ -81,6 +81,7 @@ fn spawn_pillar(
         scale: 1.0,
         count: 1,
         related_ids: None,
+        family_id: 0,
         respawn_doodad_template_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(world.id)));

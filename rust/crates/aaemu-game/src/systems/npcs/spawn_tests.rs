@@ -4471,3 +4471,55 @@ fn real_data_old_memoria_lake_trees_for_low_on_lumber() {
     lake.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(lake, expected);
 }
+
+/// The Sharpwind Mines water network (`instance_cuttingwind_deadmine`, zone 262) as the 1.2
+/// client level editor authored it (`cells/000_000/editor/02_01/doodad.xml`, subcell `02_01` at
+/// +256 m): the three "Blocked Geyser" switches, the two invisible water gates, the five water
+/// streams (whose positions the old file carried as five extra 5064 rows), the lake volume and
+/// the family ids that wire them to the `doodad_func_logic_family_*` rows.
+#[test]
+fn real_data_sharpwind_water_network_placements() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, DoodadSpawnerDef};
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("app/Data/Worlds/instance_cuttingwind_deadmine/doodad_spawns.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let defs = parse_list(&text, DoodadSpawnerDef::from_json).expect("doodad_spawns.json");
+    let rows: Vec<(u32, u32, f32, f32, f32)> = defs
+        .iter()
+        .filter(|d| (5063..=5073).contains(&d.base.unit_id))
+        .map(|d| {
+            let p = &d.base.position;
+            (d.base.unit_id, d.family_id, p.x, p.y, p.z)
+        })
+        .collect();
+
+    let expected = [
+        (5063, 50_001, 650.86, 292.16, 143.28), // lake (water volume)
+        (5064, 50_002, 678.33, 338.67, 143.87), // switch 1
+        (5068, 50_003, 672.68, 317.62, 143.79), // switch 2
+        (5069, 50_004, 691.12, 317.28, 143.60), // switch 3
+        (5070, 50_005, 681.18, 342.82, 143.99), // gate 1
+        (5071, 50_006, 684.98, 341.37, 144.03), // gate 2
+        (5072, 50_007, 687.91, 333.87, 143.96), // stream 1
+        (5072, 50_007, 692.93, 326.99, 143.71),
+        (5072, 50_007, 684.83, 314.11, 143.86),
+        (5073, 50_008, 670.13, 330.63, 143.99), // stream 2
+        (5073, 50_008, 697.69, 319.18, 143.85),
+    ];
+    assert_eq!(rows.len(), expected.len(), "water doodad rows: {rows:?}");
+    for (template, family, x, y, z) in expected {
+        assert!(
+            rows.iter().any(|&(t, f, rx, ry, rz)| {
+                t == template
+                    && f == family
+                    && (rx - x).abs() < 0.01
+                    && (ry - y).abs() < 0.01
+                    && (rz - z).abs() < 0.01
+            }),
+            "missing template {template} family {family} at ({x}, {y}, {z})"
+        );
+    }
+}
