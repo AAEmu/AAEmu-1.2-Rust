@@ -1479,6 +1479,88 @@ async fn team_member_online_copy_follows_logout_login_and_hard_disconnect() {
     assert!(b.frames().is_empty());
 }
 
+/// `CSMoveTeamMember`: the move is broadcast first (`SCTeamMemberMoved`, inline under the
+/// manager's guard), then the named members leave their old and join their new party chat
+/// channel (character work after the guard). The C# left the old channels before the move and
+/// joined the new ones after the broadcast; the leave now comes after it. The test pins this
+/// order per recipient (nothing pinned it before the lock-order change) and that the chat
+/// follows the slot.
+#[tokio::test]
+async fn moving_a_team_member_broadcasts_before_the_party_chat_changes() {
+    use crate::packets::world::{SCJoinedChatChannelPacket, SCLeavedChatChannelPacket};
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    let mut s = PacketStream::new();
+    s.write_u32(team_id);
+    a.send(&server, cs::CSConvertToRaidTeamPacket, s).await;
+    settle(&mut [&mut a, &mut b]);
+
+    // The owner moves Bob from slot 1 (party 0) to the empty slot 5 (party 1).
+    let mut s = PacketStream::new();
+    s.write_u32(team_id)
+        .write_u32(2)
+        .write_u32(0)
+        .write_u8(1)
+        .write_u8(5);
+    a.send(&server, cs::CSMoveTeamMemberPacket, s).await;
+    let moved = body(&SCTeamMemberMovedPacket {
+        team_id,
+        id_from: 2,
+        id_to: 0,
+        from: 1,
+        to: 5,
+    });
+    assert_eq!(
+        a.frames(),
+        vec![(sc::SCTeamMemberMovedPacket, moved.clone())],
+        "a bystander only hears the move"
+    );
+    assert_eq!(
+        b.frames(),
+        vec![
+            (sc::SCTeamMemberMovedPacket, moved),
+            (
+                sc::SCLeavedChatChannelPacket,
+                body(&SCLeavedChatChannelPacket {
+                    chat_type: chat_type::PARTY,
+                    sub_type: (team_id << 6) as i16,
+                    faction_id: 0,
+                })
+            ),
+            (
+                sc::SCJoinedChatChannelPacket,
+                body(&SCJoinedChatChannelPacket {
+                    chat_type: chat_type::PARTY,
+                    sub_type: ((team_id << 6) + 1) as i16,
+                    faction_id: 0,
+                })
+            ),
+        ],
+        "the moved member hears the move, then leaves party 1 and joins party 2"
+    );
+
+    // The party chat follows the slot: Bob (party 2) and Al (party 1) no longer share it.
+    b.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::PARTY, "y"),
+    )
+    .await;
+    assert_eq!(b.ops(), vec![sc::SCChatMessagePacket]);
+    assert!(a.ops().is_empty());
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::PARTY, "x"),
+    )
+    .await;
+    assert_eq!(a.ops(), vec![sc::SCChatMessagePacket]);
+    assert!(b.ops().is_empty());
+}
+
 #[tokio::test]
 async fn remote_member_sync_is_delta_cached() {
     let server = test_server();
