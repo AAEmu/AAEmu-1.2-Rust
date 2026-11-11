@@ -246,8 +246,8 @@ async fn trade_departure_cancels_peer_and_reconnect_starts_without_stale_cleanup
                 .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(cancellations(w.a.drain()), vec![canceled(0, true)]);
-        assert_eq!(cancellations(w.b.drain()), vec![canceled(0, false)]);
+        assert_eq!(cancellations(w.a.drain()), vec![canceled(1, true)]);
+        assert_eq!(cancellations(w.b.drain()), vec![canceled(1, false)]);
         assert_eq!(
             item_at(&departed, slot_type::INVENTORY, 0).unwrap().id,
             item_id
@@ -757,6 +757,172 @@ async fn cancel_paths() {
     cancel_trade(&w.server, 0x100, 0, 0);
     assert_eq!(w.a.drain(), vec![canceled(0, true)]);
     assert_eq!(w.b.drain(), vec![canceled(0, false)]);
+}
+
+#[tokio::test]
+async fn moving_out_of_range_cancels_with_the_client_checks_reason() {
+    let mut w = world();
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    // `X2::GameClient::UpdateTradeChecks` (FUN_394fd9a0) sends `CSCancelTrade(2)` at
+    // `>= sqrt(25) = 5` m; the server applies the same boundary from a move.
+    w.pb.data().unit.transform.set_xyz(104.9, 100.0, 100.0);
+    crate::systems::social::session::on_moved(&w.server, &w.pb);
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert_eq!(w.server.systems.economy.trade.trades().len(), 1);
+    w.pb.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+    crate::systems::social::session::on_moved(&w.server, &w.pb);
+    assert_eq!(w.a.drain(), vec![canceled(2, false)]);
+    assert_eq!(w.b.drain(), vec![canceled(2, true)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn a_death_cancels_a_running_trade_for_both_players() {
+    let mut w = world();
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    let victim = crate::world::WorldObject::from(w.pa.clone());
+    let killer = crate::world::WorldObject::from(w.pb.clone());
+    crate::systems::skills::combat::do_die(
+        &w.server,
+        &victim,
+        Some(&killer),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    let canceled_only = |frames: Vec<(u16, Vec<u8>)>| {
+        frames
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .collect::<Vec<_>>()
+    };
+    // The dead player is the canceller; the client shows ui_text 569 for reason 0.
+    assert_eq!(canceled_only(w.a.drain()), vec![canceled(0, true)]);
+    assert_eq!(canceled_only(w.b.drain()), vec![canceled(0, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn crossing_a_zone_group_border_keeps_a_running_trade() {
+    use crate::data::world_data::{Zone, ZoneGroup};
+    use crate::systems::economy::tests::{test_data, world_with};
+    let mut data = test_data();
+    for (id, name) in [(1, "Group One"), (2, "Group Two")] {
+        data.zones.groups.insert(
+            id,
+            ZoneGroup {
+                id,
+                name: name.into(),
+                ..Default::default()
+            },
+        );
+    }
+    for (key, group) in [(1000, 1), (2000, 2)] {
+        data.zones.zones.insert(
+            key,
+            Zone {
+                id: key,
+                name: format!("Zone {key}"),
+                zone_key: key,
+                group_id: group,
+                ..Default::default()
+            },
+        );
+    }
+    let mut w = world_with(data);
+    w.pa.data().unit.transform.zone_id = 1000;
+    w.pb.data().unit.transform.zone_id = 1000;
+    // 2 m apart: still in trade range while the border is crossed on foot.
+    w.pb.data().unit.transform.set_xyz(102.0, 100.0, 100.0);
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    // `handle_zone_changes` fires for plain movement; a zone-group border crossing is not a
+    // client load and keeps its trade UI, so the server must keep the trade too.
+    crate::world::session::on_zone_change(&w.server, &w.pa, 1000, 2000);
+    assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
+    assert_eq!(w.server.systems.economy.trade.trades().len(), 1);
+}
+
+#[tokio::test]
+async fn a_same_group_teleport_cancels_a_running_trade_at_once() {
+    use crate::data::world_data::{Zone, ZoneGroup};
+    use crate::models::transform::Transform;
+    use crate::systems::economy::tests::{test_data, world_with};
+    let mut data = test_data();
+    data.zones.groups.insert(
+        1,
+        ZoneGroup {
+            id: 1,
+            name: "Group One".into(),
+            ..Default::default()
+        },
+    );
+    for key in [1000, 1001] {
+        data.zones.zones.insert(
+            key,
+            Zone {
+                id: key,
+                name: format!("Zone {key}"),
+                zone_key: key,
+                group_id: 1,
+                ..Default::default()
+            },
+        );
+    }
+    let mut w = world_with(data);
+    w.pa.data().unit.transform.zone_id = 1000;
+    w.pb.data().unit.transform.zone_id = 1000;
+    w.pb.data().unit.transform.set_xyz(102.0, 100.0, 100.0);
+    start(&mut w);
+    w.a.drain();
+    w.b.drain();
+    let instance_id = w.pa.data().unit.transform.instance_id;
+    // A portal / GM move inside one zone group is still a client load; the client clears the
+    // trade UI without CSCancelTrade, so the teleport itself must end the trade.
+    assert!(crate::world::session::teleport_character(
+        &w.server,
+        &w.pa,
+        Transform {
+            instance_id,
+            zone_id: 1001,
+            x: 102.0,
+            y: 100.0,
+            z: 100.0,
+            ..Default::default()
+        },
+    ));
+    assert_eq!(w.a.drain(), vec![canceled(0, true)]);
+    assert_eq!(w.b.drain(), vec![canceled(0, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn lifecycle_hooks_without_a_trade_send_no_cancel_packet() {
+    let mut w = world();
+    w.a.drain();
+    w.b.drain();
+    let canceled_only = |frames: Vec<(u16, Vec<u8>)>| {
+        frames
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCTradeCanceledPacket)
+            .collect::<Vec<_>>()
+    };
+    crate::systems::social::session::on_moved(&w.server, &w.pb);
+    assert!(canceled_only(w.a.drain()).is_empty());
+    assert!(canceled_only(w.b.drain()).is_empty());
+    let victim = crate::world::WorldObject::from(w.pb.clone());
+    let killer = crate::world::WorldObject::from(w.pa.clone());
+    crate::systems::skills::combat::do_die(
+        &w.server,
+        &victim,
+        Some(&killer),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    assert!(canceled_only(w.a.drain()).is_empty());
+    assert!(canceled_only(w.b.drain()).is_empty());
 }
 
 #[tokio::test]

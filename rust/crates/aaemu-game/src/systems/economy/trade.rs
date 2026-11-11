@@ -122,7 +122,7 @@ fn is_trading(server: &GameServer, trades: &mut Trades<'_>, obj_id: u32) -> bool
     if trade_id == 0 {
         return false;
     }
-    cancel_locked(server, trades, obj_id, 0, trade_id); // TODO (C#) - reason?
+    cancel_locked(server, trades, obj_id, cancel_reason::NORMAL, trade_id);
     true
 }
 
@@ -134,7 +134,9 @@ fn cancel_locked(
     reason: i32,
     trade_id: u32,
 ) {
-    // TODO (C#) - All reasons.
+    // The C# passed 0 at every server-internal call site; the client shows its `canceled`
+    // line for every reason (see `cancel_reason`), so only the flows that mirror a specific
+    // client reason (UpdateTradeChecks / leave-world) pass anything else.
     let trade_id = if trade_id == 0 {
         get_trade_id(trades, obj_id)
     } else {
@@ -168,7 +170,7 @@ fn send_canceled(server: &GameServer, t: &TradeTemplate, obj_id: u32, reason: i3
         return;
     };
     tracing::info!(
-        "Trade Id:{} between {}({}) - {}({}) is canceled.",
+        "Trade Id:{} between {}({}) - {}({}) is canceled (reason {reason}, caused by {obj_id}).",
         t.id,
         name_of(&owner),
         owner.obj_id,
@@ -220,6 +222,30 @@ fn partners(server: &GameServer, t: &TradeTemplate) -> Option<(PlayerRef, Player
 /// is edge-to-edge (`FUN_398b1ab0`: centre distance minus both radii, 3D), the same measure
 /// `geometry::distance_to` returns.
 const TRADE_RANGE_M: f32 = 5.0;
+
+/// The reason values the 1.2 client puts in `CSCancelTrade` (and expects back in
+/// `SCTradeCanceled`):
+///
+/// - `NORMAL` is `TCR_NORMAL` (0) from the trade window's Cancel button and every
+///   server-internal cancellation;
+/// - `PARTNER_GONE` (1) and `TOO_FAR` (2) are what `X2::GameClient::UpdateTradeChecks`
+///   (`x2game.dll` `FUN_394fd9a0`, every 1000 ms) sends when the partner object is missing or
+///   the player is at `>= sqrt(25) = 5` m;
+/// - 3 and 4 are the client's other state-change reasons (`FUN_394fd760`);
+/// - `OTHER_VIEW` is `TCR_OPEND_MONEY_WINDOW` (5), sent when another exclusive window opens.
+///
+/// `OnTradeCanceled` (`x2game.dll` `FUN_394ff1f0`) shows an extra error only for
+/// `OTHER_VIEW` (538 `trade_target_is_not_possible_state` when `causedByMe` is false, 539
+/// `cant_trade_with_other_view` when true). Every reason reaches the Lua `TRADE_CANCELED`
+/// handler, which always dispatches ui_text 569 `canceled` ("거래가 취소되었습니다.",
+/// "Trade canceled.") — so a server-initiated cancel with any of these reasons shows the
+/// owner's remembered text; only `OTHER_VIEW` adds the reason-specific line.
+pub mod cancel_reason {
+    pub const NORMAL: i32 = 0;
+    pub const PARTNER_GONE: i32 = 1;
+    pub const TOO_FAR: i32 = 2;
+    pub const OTHER_VIEW: i32 = 5;
+}
 
 /// Why a trade request or acceptance is refused, and what the requester is told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,6 +427,19 @@ pub fn cancel_trade(server: &GameServer, obj_id: u32, reason: i32, trade_id: u32
     cancel_locked(server, &mut trades, obj_id, reason, trade_id);
 }
 
+/// Cancels `obj_id`'s running trade only when one exists. Server lifecycle hooks (death, zone
+/// change, movement) use this: unlike `CSCancelTrade` with no trade, they must not send a
+/// spurious `SCTradeCanceled` to a player who is not trading.
+fn cancel_if_trading(server: &GameServer, obj_id: u32, reason: i32) -> bool {
+    let mut trades = manager(server).lock();
+    let trade_id = get_trade_id(&trades, obj_id);
+    if trade_id == 0 {
+        return false;
+    }
+    cancel_locked(server, &mut trades, obj_id, reason, trade_id);
+    true
+}
+
 /// Ends only this departing player's trade and invitations. Repeated lifecycle calls are
 /// harmless; an old player handle must not cancel a new session reusing its object id.
 pub fn on_player_departed(server: &GameServer, player: &PlayerRef) {
@@ -418,8 +457,75 @@ pub fn on_player_departed(server: &GameServer, player: &PlayerRef) {
         if id == 0 {
             break;
         }
-        cancel_locked(server, &mut trades, player.obj_id, 0, id);
+        cancel_locked(
+            server,
+            &mut trades,
+            player.obj_id,
+            cancel_reason::PARTNER_GONE,
+            id,
+        );
     }
+}
+
+/// The server half of the 1.2 client's `UpdateTradeChecks` (`x2game.dll` `FUN_394fd9a0`): a
+/// running trade ends when the partner object is gone or the players are at least 5 m apart.
+/// The stock client already sends `CSCancelTrade(1/2)` once per second; enforcing the same
+/// rule here means a modified client cannot keep the window open, and a headless client that
+/// does not run the client check still ends the trade.
+pub fn on_player_moved(server: &GameServer, player: &PlayerRef) {
+    let partner_obj_id = {
+        let trades = manager(server).lock();
+        let trade_id = get_trade_id(&trades, player.obj_id);
+        if trade_id == 0 {
+            return;
+        }
+        let Some(t) = trades.iter().find(|t| t.id == trade_id) else {
+            return;
+        };
+        if t.owner_obj_id == player.obj_id {
+            t.target_obj_id
+        } else {
+            t.owner_obj_id
+        }
+    };
+    let Some(other) = character(server, partner_obj_id) else {
+        cancel_if_trading(server, player.obj_id, cancel_reason::PARTNER_GONE);
+        return;
+    };
+    // Different instances have unrelated coordinate spaces; the partner is not reachable.
+    let player_instance = player.data().unit.transform.instance_id;
+    let other_instance = other.data().unit.transform.instance_id;
+    if player_instance != other_instance {
+        cancel_if_trading(server, player.obj_id, cancel_reason::PARTNER_GONE);
+        return;
+    }
+    let distance = crate::systems::skills::geometry::distance_to(
+        server,
+        &crate::systems::skills::geometry::Target::Obj(crate::world::WorldObject::from(
+            player.clone(),
+        )),
+        &crate::systems::skills::geometry::Target::Obj(crate::world::WorldObject::from(other)),
+        true,
+    );
+    if distance >= TRADE_RANGE_M {
+        cancel_if_trading(server, player.obj_id, cancel_reason::TOO_FAR);
+    }
+}
+
+/// A dying player's trade ends (`DoDie`); the client shows "Trade canceled." for the generic
+/// reason. The client suppresses its own copy while it is loading, so the other player still
+/// gets the packet.
+pub fn on_player_died(server: &GameServer, player: &PlayerRef) {
+    cancel_if_trading(server, player.obj_id, cancel_reason::NORMAL);
+}
+
+/// A server-forced teleport (portal, GM move, instance/world load, resurrection displacement)
+/// ends a running trade at once: the 1.2 client clears the trade UI on `ENTERED_LOADING` and
+/// sends no `CSCancelTrade` for a same-zone teleport, so the next movement packet could be the
+/// only thing that would have ended it. A plain zone-group crossing on foot is not a load and
+/// must keep the trade (the per-move distance check still covers moving apart).
+pub fn on_player_teleported(server: &GameServer, player: &PlayerRef) {
+    cancel_if_trading(server, player.obj_id, cancel_reason::NORMAL);
 }
 
 /// `TradeManager.AddItem(character, slotType, slot, amount)`. Only `amount` units are traded:
@@ -429,17 +535,35 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
     let trade_id = get_trade_id(&trades, character.obj_id);
     let item = Inv::of(character).item_at(st, slot);
     if trade_id == 0 {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     // C#: `item.Count` throws on an empty slot.
     let Some(item) = item else { return };
     if amount <= 0 || item.count < amount {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     if super::item_security::refuse_if_locked(character, &item) {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id);
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     // Only unbound bag items may be put up (as for mail and auction).
@@ -456,7 +580,13 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
                 super::error_message::TRADE_SOUL_BOUND_ITEM,
             );
         }
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id);
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     let Some(t) = trade_mut(&mut trades, trade_id) else {
@@ -507,7 +637,13 @@ pub fn add_money(server: &GameServer, character: &PlayerRef, money_amount: i32) 
     let money = character.data().money;
     // A negative amount would be stored and then skipped when the trade is made; reject it.
     if trade_id == 0 || money_amount < 0 || money < i64::from(money_amount) {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     let Some(t) = trade_mut(&mut trades, trade_id) else {
@@ -560,7 +696,13 @@ pub fn remove_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8)
     let trade_id = get_trade_id(&trades, character.obj_id);
     let item = Inv::of(character).item_at(st, slot);
     let Some(item) = item.filter(|_| trade_id != 0) else {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     };
     let Some(t) = trade_mut(&mut trades, trade_id) else {
@@ -609,7 +751,13 @@ pub fn lock_trade(server: &GameServer, character: &PlayerRef, lock: bool) {
     let mut trades = manager(server).lock();
     let trade_id = get_trade_id(&trades, character.obj_id);
     if trade_id == 0 {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     let Some(t) = trade_mut(&mut trades, trade_id) else {
@@ -670,7 +818,13 @@ pub fn ok_trade(server: &GameServer, character: &PlayerRef) {
     let mut trades = manager(server).lock();
     let trade_id = get_trade_id(&trades, character.obj_id);
     if trade_id == 0 {
-        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
+        cancel_locked(
+            server,
+            &mut trades,
+            character.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     let Some(t) = trade_mut(&mut trades, trade_id) else {
@@ -717,11 +871,23 @@ pub fn ok_trade(server: &GameServer, character: &PlayerRef) {
     // removed entry in the next check / FinishTrade: one cancel, no trade.
     let (owner_items, target_items) = (t.owner_items.len(), t.target_items.len());
     if (Inv::of(&owner).free_slot_count(slot_type::INVENTORY) as i64) < target_items as i64 {
-        cancel_locked(server, &mut trades, owner.obj_id, 0, trade_id);
+        cancel_locked(
+            server,
+            &mut trades,
+            owner.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     if (Inv::of(&target).free_slot_count(slot_type::INVENTORY) as i64) < owner_items as i64 {
-        cancel_locked(server, &mut trades, target.obj_id, 0, trade_id);
+        cancel_locked(
+            server,
+            &mut trades,
+            target.obj_id,
+            cancel_reason::NORMAL,
+            trade_id,
+        );
         return;
     }
     // Finish trade (the entry leaves the table before the item operation starts)

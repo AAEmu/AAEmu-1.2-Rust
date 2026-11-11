@@ -234,6 +234,10 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
             destination.instance_id
         );
     }
+    // A teleport is a client load (same zone or not): the 1.2 client clears the trade UI on
+    // `ENTERED_LOADING` and does not send `CSCancelTrade` for a same-zone teleport, so end the
+    // trade now. A plain zone-group crossing on foot does not come through here.
+    crate::systems::economy::trade::on_player_teleported(server, p);
     // A rider, a bound seat or a doodad bond would stay half attached on the server once the
     // transform loses its parent (the client is moved off it): dismount first, as the GM
     // teleport and the trial do (`Character.ForceDismount`, `AttachUnitReason.PrefabChanged`).
