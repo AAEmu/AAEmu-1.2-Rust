@@ -2221,8 +2221,18 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             )
         });
     }
+    // C# (`Skill.ApplyEffects`: "Add origin in case of no targets and using a target position
+    // cast") pushed the caster unconditionally. The relation still decides whether the caster
+    // is a target: a Hostile area never takes its caster (skill 27005, the Berserk Red Dragon
+    // Roar meteor, is one of the 76 no-plot Hostile position skills whose effects carry both
+    // `friendly` and `non_friendly`), and `Others` excludes it too. Any / Party / Friendly /
+    // Raid keep the fallback (a Friendly area heal still reaches its caster).
     if possible.is_empty() && matches!(ctx.target_caster, SkillCastTarget::Position { .. }) {
-        possible.push(caster_t.clone());
+        let relation = SkillTargetRelation::from_raw(i64::from(t.target_relation))
+            .unwrap_or(SkillTargetRelation::Any);
+        if super::relation::is_relation_valid(server, relation, &caster_t, &caster_t) {
+            possible.push(caster_t.clone());
+        }
     }
     if t.target_area_count > 0 && possible.len() > t.target_area_count as usize {
         let mut with_d: Vec<(f32, Target)> = possible
