@@ -196,11 +196,12 @@ impl Command for AddKit {
         }
 
         if items_added > 0 {
+            // C# sends the summary for self as well; only the target notification is for others.
+            ctx.character.send_message(&format!(
+                "[Items] added {items_added} items to {}'s inventory",
+                name_of(&target)
+            ));
             if is_other(&character, &target) {
-                ctx.character.send_message(&format!(
-                    "[Items] added {items_added} items to {}'s inventory",
-                    name_of(&target)
-                ));
                 send_player_message(
                     &target,
                     &format!(
@@ -324,7 +325,10 @@ mod tests {
         );
 
         harness::run(&server, &gm.p, "kit STARTER").await;
-        assert!(gm.chat().is_empty());
+        assert_eq!(
+            gm.chat(),
+            ["[Items] added 2 items to Gm's inventory"]
+        );
         let inv = Inv::of(&gm.p);
         assert_eq!(inv.items_count_in(slot_type::INVENTORY, 1000, -1), 5);
         assert_eq!(inv.items_count_in(slot_type::INVENTORY, 2000, -1), 1);
