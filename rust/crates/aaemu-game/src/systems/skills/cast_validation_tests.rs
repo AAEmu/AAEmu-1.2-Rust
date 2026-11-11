@@ -1026,10 +1026,13 @@ async fn labor_and_reagents_are_checked_before_cast_mutations() {
         }),
         1,
     );
-    assert!(
-        super::validation::check_resources(&server, &alternate, &WorldObject::from(&player))
-            .is_ok()
-    );
+    assert!(super::validation::check_resources(
+        &server,
+        &alternate,
+        &WorldObject::from(&player),
+        &SkillCaster::Unit(player.obj_id)
+    )
+    .is_ok());
 }
 
 #[tokio::test]

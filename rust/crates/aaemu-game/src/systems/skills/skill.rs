@@ -208,16 +208,42 @@ pub fn mana_level_scale(server: &GameServer, level: i32) -> f64 {
         .evaluate(&std::collections::HashMap::from([("level_dps", level_dps)]))
 }
 
+/// Whether a cast has no `mana_level_md` (`LevelMana`) term: an ability-less skill
+/// (`ability_id == 0`) used from an item (`SkillCaster::Item`).
+///
+/// Retail charged no scaled mana for item uses (owner play-test 2026-11-11: socketing a
+/// lunagem, opening "Open" boxes, mount/pet summons); the 1.2 data gives those item skills
+/// `mana_cost` 0 with `mana_level_md` 1.0, so only the level term can charge them. The fixed
+/// `mana_cost` (a few quest capture/plant item skills have one) still applies. The 1.2 client
+/// evaluator (`FUN_398a01b0` kind 0) has no item branch and its tooltip path (`FUN_3941e750`)
+/// computes `L` from the character level for ability-0 skills, so the client alone cannot
+/// decide the charge; retail behaviour is the source (see PORTING.md). The C# charged
+/// `LevelMana(0)` (~6) and the rank port `a5a9efa05` the character level (~50): both were
+/// regressions for item uses.
+pub fn skips_level_mana(t: &SkillTemplate, source: &SkillCaster) -> bool {
+    t.ability_id == 0 && matches!(source, SkillCaster::Item { .. })
+}
+
 /// `Skill.ManaCost(caster)`: `TRUNC(mana_cost + mana_level_md * (1 + T) * LevelMana(L))`, then
-/// the caster's skill modifiers (`FUN_398a01b0` kind 0, then `FUN_3989f900`).
+/// the caster's skill modifiers (`FUN_398a01b0` kind 0, then `FUN_3989f900`). An item use of
+/// an ability-less skill keeps only the fixed `mana_cost` ([`skips_level_mana`]).
 ///
 /// The original r208022 client truncates the final value, not rounds it: 68/68 tooltip
 /// readings reproduce exactly, 32 of them with a fractional mana part >= 0.5 (see PORTING.md).
-pub fn mana_cost(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
+pub fn mana_cost(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    source: &SkillCaster,
+) -> i32 {
     let t = &skill.template;
-    let (level, inc) = level_and_inc(server, skill, caster);
-    let base = mana_level_scale(server, level);
-    let cost2 = f64::from(t.mana_cost) + f64::from(t.mana_level_md) * (1.0 + inc) * base;
+    let cost2 = if skips_level_mana(t, source) {
+        f64::from(t.mana_cost)
+    } else {
+        let (level, inc) = level_and_inc(server, skill, caster);
+        let base = mana_level_scale(server, level);
+        f64::from(t.mana_cost) + f64::from(t.mana_level_md) * (1.0 + inc) * base
+    };
     let tags = server.game_data.systems.skills.skill_tags(t.id).to_vec();
     caster
         .with_unit(|u| {
@@ -810,7 +836,7 @@ fn use_skill_impl(
             _ => {}
         }
     }
-    if let Err(result) = super::validation::check_resources(server, skill, caster) {
+    if let Err(result) = super::validation::check_resources(server, skill, caster, &caster_caster) {
         tracing::debug!(
             skill_id = skill.id,
             result = ?result,
@@ -1217,7 +1243,9 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 Ok(())
             }
         })
-        .and_then(|()| super::validation::check_resources(server, skill, caster))
+        .and_then(|()| {
+            super::validation::check_resources(server, skill, caster, &ctx.caster_caster)
+        })
         .and_then(|()| {
             super::validation::check_build_materials(server, skill, caster, &ctx.target)
         });
@@ -1312,7 +1340,7 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             *slot = None;
         }
     });
-    consume_mana(server, skill, caster);
+    consume_mana(server, skill, caster, &ctx.caster_caster);
     start_skill_cooldown(server, skill, caster, now);
     if t.channeling_time > 0 {
         start_channeling(server, skill, ctx);
@@ -3017,11 +3045,16 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
 }
 
 /// `Skill.ConsumeMana(caster)`.
-pub fn consume_mana(server: &GameServer, skill: &SkillRun, caster: &WorldObject) {
+pub fn consume_mana(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    source: &SkillCaster,
+) {
     if !caster.is_unit() {
         return;
     }
-    let cost = mana_cost(server, skill, caster);
+    let cost = mana_cost(server, skill, caster, source);
     unit_combat::reduce_current_mp(server, caster, cost);
     if let Some(p) = caster.as_player() {
         let mut c = p.data();
