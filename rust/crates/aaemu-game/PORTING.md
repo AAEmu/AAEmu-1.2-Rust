@@ -2028,6 +2028,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `return_distance` in every case, and `return_state_enter` teleports an NPC that is past the
   absolute distance straight to its idle position (`on_completed_return`), as that C# note
   intended. Test: `ai::flow_tests::npc_pulled_past_the_absolute_return_distance_goes_home`.
+* systems::skills (2026-11-10, full NPC follows a rising maximum; Rust addition):
+  `refresh_cached_stats` never clamps or rescales HP (as in the C#), so an NPC created at full
+  HP whose OnSpawn skill then raised its maximum stayed below full until a fight ended in a
+  return. Tester report: the Enraged Treants (3140) of the Sawblade Logging Site sat at 70-80 %
+  (skill 13279 "Wood Elemental's Blessing" applies buff 1384 "Energy of the Forest", +40 %
+  MaxHealth: 100 / 140). An NPC that is alive, out of combat and at full HP now follows a rising
+  maximum (MP too when it was full) and its viewers get `SCUnitPoints`; hurt or fighting NPCs and
+  falling maximums are unchanged. Test:
+  `skills::stats::vehicle_gear_tests::a_full_idle_npc_follows_a_rising_maximum`.
 
 * systems::ai (2026-11-05, WP-5a FollowUnit / WP-5b `ai_command_sets.can_interact`): these are
   the first consumers of two C#-era data paths. Evidence: the 1.2 `ai_commands.cmd_id = 1` rows
