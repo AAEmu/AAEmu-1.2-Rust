@@ -10,6 +10,7 @@
         
         "online": 0,
         "soloparty": 0,
+        "questmap": 0,
         
         // Moderaters
         "fly": 50,

@@ -1023,3 +1023,35 @@ as 1920x1080 with 119 frames (31 repeated, none dropped, `ffmpeg_exit` 0). Examp
 {"src":"orig","wall_us":1793742229704677,"frame":1958,"kind":"fx","phase":"spawn","name":"collisions.footsteps.water_shallow","pos":[4313.7593,4117.396,126.2457],"scale":0.99999994,"rot":[0.7071067,0,0,0.70710677],"flags":1048577,"emitter":"0x4f1b0ae4","effect":"0x2ec48e3c"}
 {"src":"orig","wall_us":1793742232026898,"frame":2010,"kind":"press","key":"1","slot":1}
 ```
+
+## 14. Quest Details Map Display option
+
+The driver installs `native/quest_map_ui.lua` (RCDATA 202) next to the auction UI repair. It
+adds **Options > Game Settings > Game Info > Quest Details Map Display**, a four-step slider
+(`100 m`, `200 m`, `300 m`, `Unlimited`) with the ArcheAge Classic 3.5 tooltip. The 1.2 client
+has no equivalent option; the value is stored in the client's own option storage
+(`X2Option:CreateOptionItemFloat(..., OL_CHARACTER)`) and therefore survives restarts.
+
+The client computes given-quest map markers in `ClientUnit::UpdateQuestMark` (`FUN_39359c60` in
+`D:/aa-re/client12/out-x2game/x2game.dll.c`) for every unit the server streams, so the range is
+applied by the server, not by the client UI. On world entry and when the slider is saved, the
+script sends a normal Say command:
+
+```text
+/questmap 100 | 200 | 300 | 0        (0 = unlimited)
+```
+
+The server command (`systems/quests/quest_map.rs`) streams safe quest giver / reporter NPCs
+within the selected range (beyond the ordinary 2-region visibility) and removes them when they
+leave the range. It does not change any client files and does not need a new packet.
+
+```powershell
+$driver = 'D:\aaemu-target\<lane>\release\aaemu-clientdriver.exe'
+& $driver ping                                  # quest_map_ui=1 once installed
+& $driver lua -t ui 'return AAEmuQuestMapSlot'  # last value sent
+Get-Content rust\crates\aaemu-clientdriver\native\quest_map_ui_tests.lua -Raw |
+  & $driver lua -t ui -                        # opens the row, changes and restores it
+```
+
+The option item id is `QuestMapGivenDistance` (0..3). `100 m` is the default and behaves exactly
+like the original client (markers only for units the player already sees).

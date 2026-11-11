@@ -2658,6 +2658,118 @@ fn quest_server() -> Arc<GameServer> {
 }
 
 #[tokio::test]
+async fn quest_giver_index_filters_placements_and_tracks_membership_changes() {
+    let server = quest_server();
+    let m = manager(&server);
+
+    // Nothing loaded yet: the lazily built index is empty.
+    assert!(m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 10)
+        .is_empty());
+
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1000.0))
+        .unwrap();
+    let ids: Vec<u32> = m
+        .quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 10)
+        .iter()
+        .map(|s| s.unit_id)
+        .collect();
+    assert_eq!(ids, vec![500], "only the safe quest giver placement");
+
+    // Radius and limit are applied before anything is spawned.
+    assert!(m
+        .quest_giver_spawners_near(&server, 2000.0, 2000.0, 50.0, 10)
+        .is_empty());
+    assert_eq!(
+        m.quest_giver_spawners_near(&server, 1000.0, 1000.0, 50.0, 0)
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn quest_map_range_prepares_a_far_spawner_and_streams_its_npc() {
+    let server = quest_server();
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1000.0),
+        5000,
+    );
+    client.drain();
+
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    assert_eq!(
+        client.drain_ops(),
+        vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
+        "the far placement is prepared and its quest giver streamed"
+    );
+    let world = server.world.world(0).unwrap();
+    assert!(world
+        .all_npcs()
+        .iter()
+        .any(|n| n.data().unit.template_id == 500));
+}
+
+/// A placement streamed only through the quest-map range must not be reclaimed as cold and
+/// rebuilt by the next map refresh. The resident gate is off so distance retention (not
+/// residency) decides, and retention 0 would reclaim on the same pass.
+#[tokio::test]
+async fn quest_map_streamed_placement_stays_warm_and_is_not_recreated() {
+    let server = quest_server();
+    server.config.update(|c| {
+        c.world.npc_warm_retention_seconds = 0;
+        c.world.npc_resident_service_npcs = false;
+    });
+    let m = manager(&server);
+    m.add_npc_spawner(&server, npc_def(500, 1000.0, 1250.0))
+        .unwrap();
+    let spawner = only_spawner(&m);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "P", 1000.0, 1250.0),
+        5000,
+    );
+    let world = server.world.world(0).unwrap();
+
+    // Prepare the placement through the ordinary activation pass (the player stands on it).
+    assert_eq!(activate(&server).created, 1);
+    client.drain();
+
+    // Move 250 m away and stream it only through the quest-map option (inside 300 m).
+    player.data().unit.transform.set_xyz(1000.0, 1000.0, 100.0);
+    world.add_visible_object(&player, &server.view_ctx());
+    crate::systems::quests::quest_map::set_range(
+        &server,
+        &player,
+        crate::systems::quests::quest_map::Range::Meters300,
+    );
+    client.drain();
+    assert_eq!(spawner.current_spawn_count(), 1);
+
+    // Retention 0 would reclaim the now-cold placement on this pass. Streaming keeps it warm,
+    // so the map refresh finds its NPC instead of rebuilding it every tick.
+    for _ in 0..3 {
+        let stats = activate(&server);
+        assert_eq!(stats.reclaimed, 0, "a streamed placement is not cold");
+        assert_eq!(stats.created, 0);
+        assert_eq!(spawner.current_spawn_count(), 1);
+        crate::systems::quests::quest_map::tick(&server);
+        client.drain();
+    }
+}
+
+#[tokio::test]
 async fn activation_quest_giver_and_reporter_stay_resident_and_resend_state() {
     let server = quest_server();
     let m = manager(&server);

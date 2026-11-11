@@ -15,10 +15,12 @@ if not defined AADRIVER_OUT set "AADRIVER_OUT=%~dp0out"
 if not exist "%AADRIVER_OUT%" mkdir "%AADRIVER_OUT%"
 rc /nologo /I "%~dp0." /fo "%AADRIVER_OUT%\auction_ui.res" "%~dp0auction_ui.rc"
 if errorlevel 1 ( echo [!] auction UI resource build failed & exit /b 1 )
+rc /nologo /I "%~dp0." /fo "%AADRIVER_OUT%\quest_map_ui.res" "%~dp0quest_map_ui.rc"
+if errorlevel 1 ( echo [!] quest map UI resource build failed & exit /b 1 )
 if "%AADRIVER_PLAYER%"=="1" (
-  cl /nologo /O2 /MT /EHsc /W4 /DAADRIVER_PLAYER /LD "%~dp0aadriver.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO kernel32.lib shell32.lib
+  cl /nologo /O2 /MT /EHsc /W4 /DAADRIVER_PLAYER /LD "%~dp0aadriver.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\quest_map_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO kernel32.lib shell32.lib
 ) else (
-  cl /nologo /O2 /MT /EHsc /W4 /LD "%~dp0aadriver.cpp" "%~dp0visuals.cpp" "%~dp0skilltrace.cpp" "%~dp0video.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0input.cpp" "%~dp0audio.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO user32.lib kernel32.lib d3d11.lib dxgi.lib gdiplus.lib ole32.lib shell32.lib
+  cl /nologo /O2 /MT /EHsc /W4 /LD "%~dp0aadriver.cpp" "%~dp0visuals.cpp" "%~dp0skilltrace.cpp" "%~dp0video.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0input.cpp" "%~dp0audio.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\quest_map_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO user32.lib kernel32.lib d3d11.lib dxgi.lib gdiplus.lib ole32.lib shell32.lib
 )
 if errorlevel 1 ( echo [!] driver build failed & exit /b 1 )
 cl /nologo /O2 /MT /EHsc /W4 "%~dp0startup-test.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\startup-test.exe" /link /NOLOGO kernel32.lib

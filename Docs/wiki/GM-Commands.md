@@ -17,7 +17,7 @@ Commands check your account's access level:
 
 | Level | Typical use | Examples |
 | --- | --- | --- |
-| 0 | everyone | `/help`, `/dungeon status`, `/online`, `/soloparty`, `/joinsiege`, `/leavesiege`, `/collectdominion` |
+| 0 | everyone | `/help`, `/dungeon status`, `/online`, `/soloparty`, `/joinsiege`, `/leavesiege`, `/collectdominion`, `/questmap` |
 | 50 | moderator | `/fly`, `/teleport`, `/heal`, `/kill`, `/kick`, `/spawn`, `/despawn`, `/announce` |
 | 100 | administrator | everything else (`/item`, `/gold`, `/level`, `/world`, `/dominion`, `/mail`, `/scripts`, …) |
 
@@ -262,6 +262,12 @@ spaces. Without trailing numbers it sends only the letter.
 | `/testtracker (target) [objId]` | Toggles movement debug. | `/testtracker` |
 | `/testtransfer` | Disabled (access level 999). | – |
 | `/stackednpcs`, `/tickdoodad`, `/waterdebug`, `/shipbarrier` | See [NPCs and doodads](#npcs-and-doodads) and [World state](#world-state-time-zones-events-sieges). | – |
+
+## Quest map range
+
+| Command | What it does | Example |
+| --- | --- | --- |
+| `/questmap <100\|200\|300\|0>` | Sets the "Quest Details Map Display" range: quest giver markers up to 100/200/300 m, or 0 = unlimited (nearest 256 quest givers in the instance). The injected client driver sends it on world entry and when the option is saved; typing it also works. | `/questmap 300` |
 
 ## Command behaviour every tester should know
 

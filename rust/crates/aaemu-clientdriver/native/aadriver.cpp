@@ -95,6 +95,10 @@ static std::string g_auctionUiScript;
 static bool g_auctionUiApplied;
 static bool g_auctionUiFailed;
 static ULONGLONG g_auctionUiNextCheck;
+static std::string g_questMapUiScript;
+static bool g_questMapUiApplied;
+static bool g_questMapUiFailed;
+static ULONGLONG g_questMapUiNextCheck;
 #ifndef AADRIVER_PLAYER
 static CRITICAL_SECTION g_lock;
 static bool g_hideOnStart;
@@ -300,6 +304,27 @@ static void __fastcall HookUpdate(void* self, void* /*edx*/) {
             }
         }
     }
+    if (!g_unloading && GetCurrentThreadId() == g_mainTid &&
+        self == scriptSystemFor('U') && !g_questMapUiFailed) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= g_questMapUiNextCheck) {
+            g_questMapUiNextCheck = now + 250;
+            std::string state = runLua('U',
+                "local p=AAEmuQuestMapUiInstalled return type(p)=='table' and "
+                "p.create==CreateGameInfoOptionFrame");
+            if (state != "0true") {
+                g_questMapUiApplied = false;
+                std::string reply = runLua('U', g_questMapUiScript);
+                if (reply == "0ready") {
+                    g_questMapUiApplied = true;
+                    logf("quest map UI: Game Info range option installed");
+                } else if (!reply.empty() && reply[0] == '1') {
+                    g_questMapUiFailed = true;
+                    logf("quest map UI unavailable: %s", reply.c_str() + 1);
+                }
+            }
+        }
+    }
 #ifndef AADRIVER_PLAYER
     if (!g_unloading && GetCurrentThreadId() == g_mainTid) {
         // Profile/UI scripts can reset audio during Update. The process session
@@ -381,13 +406,19 @@ static bool waitForClient() {
     return false;
 }
 
-static bool installHook() {
-    HRSRC resource = FindResourceW(g_self, MAKEINTRESOURCEW(201), MAKEINTRESOURCEW(10));
+static bool loadUiScript(int resourceId, std::string& target, const char* what) {
+    HRSRC resource = FindResourceW(g_self, MAKEINTRESOURCEW(resourceId), MAKEINTRESOURCEW(10));
     HGLOBAL loaded = resource ? LoadResource(g_self, resource) : NULL;
     const char* script = loaded ? static_cast<const char*>(LockResource(loaded)) : NULL;
     DWORD scriptSize = resource ? SizeofResource(g_self, resource) : 0;
-    if (!script || !scriptSize) { logf("auction UI script resource missing"); return false; }
-    g_auctionUiScript.assign(script, scriptSize);
+    if (!script || !scriptSize) { logf("%s script resource missing", what); return false; }
+    target.assign(script, scriptSize);
+    return true;
+}
+
+static bool installHook() {
+    if (!loadUiScript(201, g_auctionUiScript, "auction UI")) return false;
+    if (!loadUiScript(202, g_questMapUiScript, "quest map UI")) return false;
     g_vtbl = (void**)(g_css + RVA_vtbl);
     p_loadbuffer = (luaL_loadbuffer_t)(g_css + RVA_luaL_loadbuffer);
     p_pcall      = (lua_pcall_t)(g_css + RVA_lua_pcall);
@@ -442,7 +473,8 @@ static std::string pingInfo() {
                 env ? *(void**)(env + OFF_gEnv_SSThird) : NULL, g_hooked, g_mainTid);
     return std::string(buf) + visuals::info() + skilltrace::info() + video::info() + startup::info() + virtualpak::info() +
         " fast=" + (g_fastApplied ? "1" : "0") + " silent=" + (g_silent ? "1" : "0") +
-        " auction_ui=" + (g_auctionUiApplied ? "1" : "0");
+        " auction_ui=" + (g_auctionUiApplied ? "1" : "0") +
+        " quest_map_ui=" + (g_questMapUiApplied ? "1" : "0");
 }
 
 static std::string submit(char op, char target, const std::string& code, DWORD timeoutMs) {
