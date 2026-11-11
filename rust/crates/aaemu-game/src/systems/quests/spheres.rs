@@ -13,14 +13,16 @@ use std::sync::{Mutex, OnceLock};
 use crate::data::world_data::ZoneData;
 use crate::data::world_templates::WorldTemplates;
 
-use super::data::{QuestData, RawSignSphere};
+use super::data::{DbSphere, QuestData, RawSignSphere};
 use super::model::sphere_trigger;
 use super::packets::SCAreaTeamMessagePacket;
 use super::templates::ActKind;
 use super::ui_packets::SCQuestAcceptConditionalPacket;
 use crate::server::GameServer;
+use crate::systems::npcs::doodad::phase::{do_change_phase, do_func, Operation};
+use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
-use crate::world::{PlayerRef, WorldObject};
+use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
 /// `SphereQuest` (one `quest_sign_sphere.g` area, world coordinates).
 #[derive(Debug, Clone, PartialEq)]
@@ -787,7 +789,7 @@ impl SphereQuestManager {
                 });
             }
             if enter && sphere.sphere_detail_type == "SphereDoodadInteract" {
-                dispatch_doodad_interact(server, &player, &areas[area], sphere.sphere_detail_id);
+                dispatch_doodad_interact(server, &player, &areas[area], sphere);
             }
         }
         // `SphereAcceptQuest` offers: on entry and when a character already inside becomes
@@ -1017,12 +1019,22 @@ impl SphereQuestManager {
 /// (4 m for skill 11284) and the sphere area bound the candidates. Sharpwind's sphere 1552
 /// ("bridge collapse area", 5 m at the Derelict Bridge) contains only the bridge doodad
 /// (5058, phase func `DoodadFuncAreaTrigger`), which advances to the broken model.
+///
+/// The hook is generic, so it also drives every other shipped `SphereDoodadInteract` area whose
+/// doodad has a `DoodadFuncAreaTrigger` row: the open world's quarry rock piles (doodad 2803
+/// inside the areas of sphere 1446) and Unstable Floor (doodad 1495, sphere 429), see
+/// `PORTING.md`. The sphere's own requirements
+/// (`unit_reqs`) gate it like the `SphereAcceptQuest` offers do. The candidates are the doodads
+/// of the player's region neighbourhood (two regions around, at least 128 m; the largest
+/// authored `max_range` of the 105 shipped rows is 30 m), never the whole instance, so the scan
+/// is bounded by the grid and not by the number of doodads in the world.
 fn dispatch_doodad_interact(
     server: &GameServer,
     player: &PlayerRef,
     area: &SphereArea,
-    sphere_detail_id: u32,
+    sphere: &DbSphere,
 ) {
+    let sphere_detail_id = sphere.sphere_detail_id;
     let Some(detail) = server
         .game_data
         .systems
@@ -1034,6 +1046,16 @@ fn dispatch_doodad_interact(
         return;
     };
     if detail.skill_id == 0 {
+        return;
+    }
+    // `None`: the character's quest state is unavailable this tick; the edge is not retried (it
+    // is an enter edge), exactly like a failed requirement.
+    let (id, or) = (sphere.id, sphere.or_unit_reqs);
+    if !super::events::with_quests(server, player, None, move |ctx| {
+        ctx.can_trigger_sphere(id, or)
+    })
+    .unwrap_or(false)
+    {
         return;
     }
     let max_range = server
@@ -1048,7 +1070,16 @@ fn dispatch_doodad_interact(
     };
     let me = world.world_pos_rot(&WorldObject::from(player));
     let caster = WorldObject::from(player);
-    for doodad in world.all_doodads() {
+    let Some(region) = world.region_by_pos(me.x, me.y) else {
+        return;
+    };
+    let candidates: Vec<DoodadRef> = world
+        .neighbors(region)
+        .into_iter()
+        .flat_map(|n| world.objects_in_region(n))
+        .filter_map(|o| o.as_doodad().cloned())
+        .collect();
+    for doodad in candidates {
         let pos = world.world_pos_rot(&WorldObject::from(&doodad));
         if !area.contains((pos.x, pos.y, pos.z)) {
             continue;
@@ -1074,24 +1105,32 @@ fn dispatch_doodad_interact(
         else {
             continue;
         };
+        // The phase reservation every other phase driver takes (`Doodad.Use`, a period
+        // boundary): a doodad busy on another thread, or already deleted, is skipped.
+        let Some(_operation) = Operation::enter(&doodad) else {
+            continue;
+        };
+        // One object-data lock at a time: copy the logged values out first.
+        let template_id = doodad.data().template_id;
+        let name = player.data().unit.name.clone();
         tracing::debug!(
             "SphereDoodadInteract {}: using doodad {} ({}) for {}",
             sphere_detail_id,
             doodad.obj_id,
-            doodad.data().template_id,
-            player.data().unit.name
+            template_id,
+            name
         );
-        let ctx = crate::systems::npcs::doodad::runtime::DoodadCtx::new(
-            server,
-            world.clone(),
-            doodad.clone(),
-        );
-        doodad.data().phase.to_next_phase = true;
-        crate::systems::npcs::doodad::phase::do_func(&ctx, Some(&caster), 0, Some(&func));
-        if doodad.data().phase.to_next_phase {
+        let ctx = DoodadCtx::new(server, world.clone(), doodad.clone());
+        // No pre-set: the `DoodadFuncAreaTrigger` arm alone decides (player caster, enter row,
+        // authored next phase), so a func that stops early cannot advance the doodad.
+        doodad.data().phase.to_next_phase = false;
+        if !do_func(&ctx, Some(&caster), 0, Some(&func)) {
+            // `do_func` moved the doodad to the authored next phase: run that phase's funcs and
+            // announce it, as `Doodad.Use` does after an advance.
             let next = doodad.data().func_group_id as i32;
-            crate::systems::npcs::doodad::phase::do_change_phase(&ctx, Some(&caster), next);
+            do_change_phase(&ctx, Some(&caster), next);
         }
+        doodad.data().phase.to_next_phase = false;
     }
 }
 
