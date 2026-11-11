@@ -38,6 +38,7 @@ use crate::systems::housing::dominion::state::{SiegeSide, SiegeStatus, TowerIden
 use crate::systems::skills::packets_special::{
     SCTeleportUnitPacket, TELEPORT_REASON_MOVE_TO_LOCATION,
 };
+use crate::systems::social::chat::GM_ACCESS_LEVEL;
 use crate::world::session;
 use crate::world::WorldObject;
 
@@ -321,29 +322,36 @@ fn safe_destination(
     })
 }
 
-/// Move every online, living non-participant out of an active siege area. A teleport that is
-/// already pending is skipped: the server position only follows the client's acknowledgement,
-/// so re-sending would stack packets while the client loads.
+/// Move every online, living non-participant out of an active siege area, unless the
+/// `Housing.SiegeEvictNonParticipants` switch is off. GMs (`access_level >= 100`, the threshold
+/// of the closed-zone bypass) are never moved: they inspect the lodestone and the camps and run
+/// the siege tooling. A teleport that is already pending is skipped: the server position only
+/// follows the client's acknowledgement, so re-sending would stack packets while the client
+/// loads.
 ///
 /// `Character.ForceDismount` runs first (the same `PrefabChanged` call the move guard, the
 /// jail move and the GM teleport use), so a rider / driver / transfer passenger is not moved
-/// while attached to the mount or vehicle. Called once a second by the participant tick, and
+/// while attached to the mount or vehicle. Called once a second by the participant sweep, and
 /// by the tests.
 pub fn evict_non_participants(server: &GameServer) {
+    if !server.config.housing.siege_evict_non_participants {
+        return;
+    }
     let real_now = chrono::Utc::now().timestamp();
     let calendar_now = server.systems.housing.calendar.now();
     for player in server.world.all_characters() {
-        let (online, dead, teleporting, expedition, transform) = {
+        let (online, dead, teleporting, gm, expedition, transform) = {
             let c = player.data();
             (
                 c.is_online,
                 c.unit.hp <= 0,
                 c.disabled_set_position,
+                c.access_level >= GM_ACCESS_LEVEL,
                 c.unit.expedition_id,
                 c.unit.transform,
             )
         };
-        if !online || dead || teleporting {
+        if !online || dead || teleporting || gm {
             continue;
         }
         let Some(zone) = server

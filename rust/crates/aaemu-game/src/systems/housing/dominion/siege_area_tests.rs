@@ -14,6 +14,7 @@ use crate::models::slave::Slave;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
+use crate::systems::social::chat::GM_ACCESS_LEVEL;
 use crate::systems::vehicles::data::attach_point;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{Entity, PlayerRef, WorldObject};
@@ -294,6 +295,37 @@ async fn a_member_who_joined_after_the_snapshot_is_not_moved() {
     super::siege_area::refresh(&f.server);
     evict_non_participants(&f.server);
     assert!(teleports(&mut f.outsider_client).is_empty());
+}
+
+#[tokio::test]
+async fn a_gm_inside_the_circle_is_not_moved() {
+    // One level below the GM threshold is an ordinary outsider ...
+    let mut f = fixture(true);
+    f.outsider.data().access_level = GM_ACCESS_LEVEL - 1;
+    evict_non_participants(&f.server);
+    assert_eq!(teleports(&mut f.outsider_client).len(), 1);
+
+    // ... a GM inspects the lodestone and the camps undisturbed.
+    let mut f = fixture(true);
+    f.outsider.data().access_level = GM_ACCESS_LEVEL;
+    evict_non_participants(&f.server);
+    assert!(teleports(&mut f.outsider_client).is_empty());
+}
+
+#[tokio::test]
+async fn the_switch_off_evicts_nobody() {
+    let mut f = fixture(true);
+    f.server
+        .config
+        .update(|config| config.housing.siege_evict_non_participants = false);
+    evict_non_participants(&f.server);
+    assert!(teleports(&mut f.outsider_client).is_empty());
+    // Back on (the default), the same outsider is moved.
+    f.server
+        .config
+        .update(|config| config.housing.siege_evict_non_participants = true);
+    evict_non_participants(&f.server);
+    assert_eq!(teleports(&mut f.outsider_client).len(), 1);
 }
 
 #[tokio::test]
