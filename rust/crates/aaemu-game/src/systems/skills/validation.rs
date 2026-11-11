@@ -344,10 +344,15 @@ pub(super) fn check(
             )
         })
         .ok_or((skill_result_for_key("skill_invalid_source"), 0))?;
-    if hp <= 0 && template.source_alive && !template.source_dead {
+    // A gimmick's collision skill (`GimmickTemplate.CollisionSkillId`) is cast by the server
+    // when the gimmick touches a unit; the 1.2 client has no packet for it. A gimmick is a
+    // physics prop with no health, so the source life flags cannot apply, the touch already is
+    // the range, and a line-of-sight ray between touching objects is meaningless.
+    let gimmick_source = caster.as_gimmick().is_some();
+    if !gimmick_source && hp <= 0 && template.source_alive && !template.source_dead {
         return fail("skill_source_died");
     }
-    if hp > 0 && template.source_dead && !template.source_alive {
+    if !gimmick_source && hp > 0 && template.source_dead && !template.source_alive {
         return fail("skill_source_alive");
     }
     if template.source_not_swim && source_in_water(server, caster) {
@@ -456,7 +461,7 @@ pub(super) fn check(
             0.0
         }
     });
-    if distance > max_range + extent && !unbounded_placement {
+    if !gimmick_source && distance > max_range + extent && !unbounded_placement {
         return fail("skill_too_far_range");
     }
     // The 1.2 client never runs the obstacle ray for a doodad target: the cast target check for
@@ -467,7 +472,8 @@ pub(super) fn check(
     // geometry (workbench stalls, house fixtures, objects baked into a brush), so the ray
     // always hit that geometry and refused the interaction ("Too far from target"). The
     // retail zone does not check obstacles either and the C# tree had no check at all.
-    if template.check_obstacle
+    if !gimmick_source
+        && template.check_obstacle
         && !target
             .as_obj()
             .is_some_and(|o| o.same(caster) || o.as_doodad().is_some())

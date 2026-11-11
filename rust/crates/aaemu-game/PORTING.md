@@ -7929,8 +7929,36 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   exchange (0 rows) and buy-fish model rows (prefab strings), `gem_visual_effect_id` (the
   client loads the effect), mate `SpawnEffect` rows (the 4 unreachable rows above), slave
   customizing styles (`slave_customizings` is client-loaded; one customizable slave), radar
-  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`,
-  gimmick collision: capture-pending / design-blocked).
+  shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`).
+* **Gimmick collision skills are server-detected contact hits (2026-11-10).** The owner
+  decision of 2026-11-06 (leave them) is reversed: in the 50 ms gimmick tick a gimmick whose
+  template has `collision_skill_id` and whose speed reaches `collision_min_speed` fires that
+  skill (`systems/npcs/gimmick/manager.rs::collision_tick`). The 1.2 client has no gimmick
+  packet (only SC 0x13c-0x141), so the server detects the touch, as retail's zone process did
+  (`ZWGimmickCollided`). One touch fires one skill, not one per touched unit: the collision
+  skills are area skills (18717 r20, 14649 r30, ...), so a tick casts once (from the first
+  newly touched unit; position-targeted skills center on the gimmick) and latches every unit
+  the firing covers (the skill's area radius around the gimmick plus every touched unit) so a
+  unit already hit by a firing never triggers another. A `disappear_by_collision` gimmick fires
+  once in total and despawns (22 of the 30 contact templates; the other 8 keep rolling). The
+  `gimmicks` table has no size / radius column and a gimmick has no actor `model_id`, so the
+  contact radius is the documented 1.5 m constant plus the touched unit's actor radius.
+  `disappear_by_collision` and `collision_unit_only` are read from their shipped `'t'`/`'f'`
+  text form (`GetBoolean(fromString: true)`); the C# `GetBoolean` read both as false and never
+  used them. Terrain contact is not simulated (the motion has no gravity / ground), so only
+  unit touches trigger the skill or despawn and `collision_unit_only` changes nothing.
+  `SpawnGimmickEffect` velocity / angular velocity are authored in the caster's local frame
+  (forward +Y, up +Z) and are rotated by the caster's yaw at spawn; all nonzero shipped rows
+  use coordinate type 2. Authored motion stops after 30 s or 200 m and an effect/doodad gimmick
+  that leaves the world grid despawns; a stationary gimmick sends no movement packets and a
+  spin-only one is limited to 5 Hz (the client queues and interpolates `SCGimmickMovement`).
+  The gimmick's faction is copied from the casting unit at spawn (the doodad spawn path keeps
+  its authored `faction_id`), so friendly/hostile collision effects land on the right side.
+  Delayed skills (`skill_id` / `skill_delay`) and `Gimmick.StopMovement` cast from the gimmick
+  at its current position with the gimmick as source; the C# used the spawner unit, which
+  refused moved gimmicks by the range check and never fired for doodad-spawned ones. The C#
+  `GimmickSpawner` constructor stored `Velocity*` / `AngVel*` but never applied them, so
+  effect-spawned gimmicks never moved.
 * **`conflict_zones.peace_protected_faction_id` / `peace_tower_def_id` are placeholders.**
   All 16 rows carry faction id 5 and a NULL `peace_tower_def_id`; faction 5 does not exist in
   `system_factions` (ids 1, 2, 3 and 101-179) and neither column is ever read

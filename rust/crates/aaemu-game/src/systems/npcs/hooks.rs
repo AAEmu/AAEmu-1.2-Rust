@@ -126,9 +126,10 @@ pub trait SkillsBridge: Send + Sync {
     ) {
     }
 
-    /// `Gimmick.DoGimmickSkill`: schedules `UseSkillTask(new Skill(template), caster
-    /// (= ParentWorld.GetUnit(SpawnerUnitId), may be null), new SkillDoodad(gimmick.ObjId),
-    /// gimmick, SkillCastPositionTarget(pos), new SkillObject())`. Default: nothing.
+    /// `Gimmick.DoGimmickSkill`: casts the skill from the gimmick at its current position
+    /// (`SkillDoodad(gimmick.ObjId)`, `SkillCastPositionTarget(pos)`), so a gimmick that moved
+    /// since spawn still fires. The spawner unit (`caster`) is its owner; the C# used it as the
+    /// cast source, which refused moved gimmicks and doodad-spawned ones. Default: nothing.
     fn use_gimmick_skill(
         &self,
         _server: &GameServer,
@@ -136,6 +137,18 @@ pub trait SkillsBridge: Send + Sync {
         _gimmick: &WorldObject,
         _skill_id: u32,
         _pos: (f32, f32, f32),
+    ) {
+    }
+
+    /// `GimmickTemplate.CollisionSkillId`: the gimmick touched `unit`. Retail's zone process
+    /// reported the collision (`ZWGimmickCollided`) and cast the skill from the gimmick; the
+    /// 1.2 client has no packet for it, so the server detects the touch. Default: nothing.
+    fn use_gimmick_collision_skill(
+        &self,
+        _server: &GameServer,
+        _gimmick: &WorldObject,
+        _unit: &WorldObject,
+        _skill_id: u32,
     ) {
     }
 

@@ -244,34 +244,62 @@ impl SkillsBridge for SkillsForNpcs {
     fn use_gimmick_skill(
         &self,
         server: &GameServer,
-        caster: Option<&WorldObject>,
+        _caster: Option<&WorldObject>,
         gimmick: &WorldObject,
         skill_id: u32,
         pos: (f32, f32, f32),
     ) {
-        // UseSkillTask(skill, caster, SkillDoodad(gimmick), gimmick, SkillCastPositionTarget)
-        let Some(caster) = caster.cloned() else {
-            return; // Skill.Use(null, ..): InvalidSource
-        };
+        // `Gimmick.DoGimmickSkill` casts at the gimmick's position. The C# used the spawner unit
+        // as the caster; once the gimmick moved (a thrown barrel bomb), the caster-to-position
+        // range check refused the cast, and a doodad-spawned gimmick has no spawner unit at all.
+        // Cast from the gimmick itself (a unit in the object model) at its current position: the
+        // spawner unit's faction is copied to the gimmick at spawn, and the gimmick-source
+        // validation bypass (no health, no range, no obstacle ray) applies.
+        if server.game_data.systems.skills.skill(skill_id).is_none() {
+            return;
+        }
         let gimmick_id = gimmick.obj_id();
-        super::tasks::schedule(server, 0, move |srv| {
-            use_skill_with(
-                &srv,
-                &caster,
-                SkillCaster::Doodad(gimmick_id),
-                SkillCastTarget::Position {
-                    obj_id: 0,
-                    x: pos.0,
-                    y: pos.1,
-                    z: pos.2,
-                    rot: 0.0,
-                    obj_id1: 0,
-                    obj_id2: 0,
-                },
-                skill_id,
-                Some(SkillObject::default()),
-            );
-        });
+        use_skill_with(
+            server,
+            gimmick,
+            SkillCaster::Doodad(gimmick_id),
+            SkillCastTarget::Position {
+                obj_id: 0,
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                rot: 0.0,
+                obj_id1: 0,
+                obj_id2: 0,
+            },
+            skill_id,
+            Some(SkillObject::default()),
+        );
+    }
+
+    fn use_gimmick_collision_skill(
+        &self,
+        server: &GameServer,
+        gimmick: &WorldObject,
+        unit: &WorldObject,
+        skill_id: u32,
+    ) {
+        // `GimmickTemplate.CollisionSkillId` on contact: cast from the gimmick (a unit in the
+        // object model) at the unit it touched. The gimmick is the caster because a
+        // doodad-spawned gimmick has no spawner unit; `SkillCaster::Doodad` matches the
+        // existing gimmick skill path (`Gimmick.DoGimmickSkill`).
+        if server.game_data.systems.skills.skill(skill_id).is_none() {
+            return;
+        }
+        let gimmick_id = gimmick.obj_id();
+        use_skill_with(
+            server,
+            gimmick,
+            SkillCaster::Doodad(gimmick_id),
+            SkillCastTarget::Unit(unit.obj_id()),
+            skill_id,
+            Some(SkillObject::default()),
+        );
     }
 
     fn use_doodad_func_skill(

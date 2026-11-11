@@ -68,7 +68,10 @@ pub struct GimmickData {
 
 impl GimmickData {
     /// `GimmickGameData.Load`. Booleans use `GetBoolean` (Microsoft.Data.Sqlite `GetInt64 != 0`):
-    /// the `'t'`/`'f'` text values of compact.sqlite3 all read as false, as in C#.
+    /// the `'t'`/`'f'` text values of compact.sqlite3 all read as false, as in C#. The two
+    /// collision flags are the exception: the contact-hit feature reads them, and the shipped
+    /// data stores them only as text, so they use `GetBoolean(fromString: true)`
+    /// ([`crate::data::sqlite::SqlRow::bool_str`]).
     pub fn load(ctx: &DataLoadCtx<'_>) -> Result<Self, crate::data::GameDataError> {
         let mut d = Self::default();
         let mut duplicate = None;
@@ -78,10 +81,10 @@ impl GimmickData {
                 air_resistance: r.f32("air_resistance")?,
                 collision_min_speed: r.f32("collision_min_speed")?,
                 collision_skill_id: r.u32_or("collision_skill_id", 0)?,
-                collision_unit_only: r.bool("collision_unit_only")?,
+                collision_unit_only: r.bool_str("collision_unit_only")?,
                 damping: r.f32("damping")?,
                 density: r.f32("density")?,
-                disappear_by_collision: r.bool("disappear_by_collision")?,
+                disappear_by_collision: r.bool_str("disappear_by_collision")?,
                 fade_in_duration: r.u32("fade_in_duration")?,
                 fade_out_duration: r.u32("fade_out_duration")?,
                 free_fall_damping: r.f32("free_fall_damping")?,
@@ -174,7 +177,9 @@ mod tests {
         assert!(d.exist(37) && !d.exist(1));
         assert_eq!(t.skill_id, 0); // NULL -> default
         assert_eq!(t.collision_skill_id, 7);
-        assert!(!t.pushable_by_player && !t.collision_unit_only); // 't' -> GetInt64 = 0
+        assert!(!t.pushable_by_player); // 't' -> GetInt64 = 0
+        assert!(t.collision_unit_only); // text 't' (collision flags read fromString)
+        assert!(!t.disappear_by_collision); // text 'f'
         assert!(t.graspable); // integer 1
         assert_eq!((t.life_time, t.skill_delay, t.mass), (60000, 500, 1.5));
         conn.execute_batch("INSERT INTO gimmicks SELECT * FROM gimmicks;")
@@ -224,11 +229,28 @@ mod real_data_tests {
             .iter()
             .filter(|s| s.unit_id != 0 && !d.exist(s.unit_id))
             .count();
+        let contact = d
+            .templates
+            .values()
+            .filter(|t| t.collision_skill_id > 0)
+            .count();
+        let disappear = d
+            .templates
+            .values()
+            .filter(|t| t.collision_skill_id > 0 && t.disappear_by_collision)
+            .count();
         eprintln!(
-            "gimmicks {} spawners {} (elevators {elevators}, unknown templates {unknown})",
+            "gimmicks {} spawners {} (elevators {elevators}, unknown templates {unknown}, \
+             contact {contact} of which despawn on collision {disappear})",
             d.templates.len(),
             spawners.len()
         );
+        assert_eq!(contact, 30);
+        assert_eq!(disappear, 22);
+        // The static spawns are elevators (template 0) and carry no collision skill.
+        assert!(spawners.iter().all(|s| s.unit_id == 0
+            || d.get_gimmick_template(s.unit_id)
+                .is_none_or(|t| t.collision_skill_id == 0)));
         assert!(!spawners.is_empty());
         assert!(spawners.iter().all(|s| s.position.is_some()));
     }
