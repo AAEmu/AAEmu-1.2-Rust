@@ -703,9 +703,10 @@ impl SphereQuestManager {
     /// sends `SCAreaChatBubble(enter, the player's unit, sphere_detail_id)` and any row with a
     /// non-empty `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player only
     /// (CAP-UI-6: `is_personal_msg` is true for every shipped `team_msg` row; the non-personal
-    /// audience is UNKNOWN). On leave only a row with `enter_or_leave` set fires. The other
-    /// sphere types (SphereSkill / SphereSound / SphereDoodadInteract / SphereBuff) are loaded
-    /// but have no effect here (a separate content decision).
+    /// audience is UNKNOWN). On leave only a row with `enter_or_leave` set fires.
+    /// `SphereDoodadInteract` casts its authored skill on the doodads inside the area (see
+    /// [`dispatch_doodad_interact`]); the other types (SphereSkill / SphereSound / SphereBuff)
+    /// are loaded but have no effect here (a separate content decision).
     fn tick_area_spheres(&self, server: &GameServer, now: i64) {
         let Some(areas) = self.areas.get() else {
             return;
@@ -784,6 +785,9 @@ impl SphereQuestManager {
                     enter,
                     sphere_id: sphere.id,
                 });
+            }
+            if enter && sphere.sphere_detail_type == "SphereDoodadInteract" {
+                dispatch_doodad_interact(server, &player, &areas[area], sphere.sphere_detail_id);
             }
         }
         // `SphereAcceptQuest` offers: on entry and when a character already inside becomes
@@ -1000,6 +1004,94 @@ impl SphereQuestManager {
         // A character that left the world between `forget_character` and its removal from the
         // regions may have been recorded again by this very tick.
         last.retain(|id, _| server.world.character_by_id(*id).is_some());
+    }
+}
+
+/// `SphereDoodadInteract`: on entering the sphere, use the authored skill on the doodads inside
+/// the sphere's `sphere_area_fill.json` area.
+///
+/// Evidence: the 10.x `DoodadAreaTriggerRuntime` documents zone area edges of kind 21
+/// (`SphereDoodadInteract`) whose `value1` is the `spheres.id`, resolved through
+/// `sphere_doodad_interacts` (`id, skill_id, doodad_family_id`). `doodad_families` is empty in
+/// the 1.2 compact, so the family filter cannot be resolved; the skill's own `max_range`
+/// (4 m for skill 11284) and the sphere area bound the candidates. Sharpwind's sphere 1552
+/// ("bridge collapse area", 5 m at the Derelict Bridge) contains only the bridge doodad
+/// (5058, phase func `DoodadFuncAreaTrigger`), which advances to the broken model.
+fn dispatch_doodad_interact(
+    server: &GameServer,
+    player: &PlayerRef,
+    area: &SphereArea,
+    sphere_detail_id: u32,
+) {
+    let Some(detail) = server
+        .game_data
+        .systems
+        .npcs
+        .sphere
+        .sphere_doodad_interacts
+        .get(sphere_detail_id)
+    else {
+        return;
+    };
+    if detail.skill_id == 0 {
+        return;
+    }
+    let max_range = server
+        .game_data
+        .systems
+        .skills
+        .skill(detail.skill_id)
+        .map_or(0.0, |t| t.max_range as f32)
+        .max(1.0);
+    let Some(world) = server.world.world_of(&WorldObject::from(player)) else {
+        return;
+    };
+    let me = world.world_pos_rot(&WorldObject::from(player));
+    let caster = WorldObject::from(player);
+    for doodad in world.all_doodads() {
+        let pos = world.world_pos_rot(&WorldObject::from(&doodad));
+        if !area.contains((pos.x, pos.y, pos.z)) {
+            continue;
+        }
+        let (dx, dy, dz) = (pos.x - me.x, pos.y - me.y, pos.z - me.z);
+        if dx * dx + dy * dy + dz * dz > max_range * max_range {
+            continue;
+        }
+        // The 10.x `DoodadAreaTriggerRuntime.Dispatch` runs the owning `DoodadFuncAreaTrigger`
+        // row directly (`DoFunc`) and changes the phase when it asked for the next one; the
+        // normal `Doodad.Use` funnel only matches rows by skill id and the shipped rows have
+        // none.
+        let group = doodad.data().func_group_id;
+        let Some(func) = server
+            .game_data
+            .systems
+            .npcs
+            .doodad
+            .funcs_for_group(group)
+            .iter()
+            .find(|f| f.func_type == "DoodadFuncAreaTrigger")
+            .cloned()
+        else {
+            continue;
+        };
+        tracing::debug!(
+            "SphereDoodadInteract {}: using doodad {} ({}) for {}",
+            sphere_detail_id,
+            doodad.obj_id,
+            doodad.data().template_id,
+            player.data().unit.name
+        );
+        let ctx = crate::systems::npcs::doodad::runtime::DoodadCtx::new(
+            server,
+            world.clone(),
+            doodad.clone(),
+        );
+        doodad.data().phase.to_next_phase = true;
+        crate::systems::npcs::doodad::phase::do_func(&ctx, Some(&caster), 0, Some(&func));
+        if doodad.data().phase.to_next_phase {
+            let next = doodad.data().func_group_id as i32;
+            crate::systems::npcs::doodad::phase::do_change_phase(&ctx, Some(&caster), next);
+        }
     }
 }
 

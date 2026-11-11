@@ -406,6 +406,76 @@ async fn npc_spawn_death_despawn_respawn_timing() {
     drop(player);
 }
 
+/// `npc_spawners.save_indun = 't'` (the authored dungeon spawners, e.g. Sharpwind's slimes):
+/// a dead member stays dead for the instance run - no respawn deadline and no periodic refill.
+#[tokio::test]
+async fn save_indun_spawner_does_not_respawn_a_dead_member() {
+    let mut data = GameData::empty();
+    let mut t10 = template(10, 1);
+    t10.save_indun = true;
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![template(1, 1), t10],
+        vec![member(1, 1, 1), member(100, 10, 500)],
+    )
+    .unwrap();
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    let m = manager(&server);
+    assert_eq!(
+        m.add_npc_spawner(&server, npc_def(500, 500.0, 500.0)),
+        Ok(1)
+    );
+    let spawner = m
+        .get_all_spawners()
+        .values()
+        .flatten()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(spawner.template().unwrap().save_indun);
+
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(&server, &client, test_character(1, "P", 510.0, 500.0), 5000);
+    spawn_manager::active_region_tick(&server);
+    let world = server.world.world(0).unwrap();
+    let npcs = world.all_npcs();
+    assert_eq!(npcs.len(), 1);
+    let npc = npcs[0].clone();
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &npc);
+    assert!(
+        m.pending_respawns().is_empty(),
+        "save_indun must not schedule a respawn"
+    );
+    assert!(spawner.saved_death());
+
+    advance(11);
+    m.check_respawns_tick(&server);
+    spawn_manager::active_region_tick(&server);
+    assert!(
+        !world
+            .all_npcs()
+            .iter()
+            .any(|n| !n.data().unit.is_dead() && n.data().unit.template_id == 500),
+        "the periodic refill must not resurrect a save_indun member"
+    );
+
+    advance(20);
+    m.check_respawns_tick(&server);
+    spawn_manager::active_region_tick(&server);
+    spawner.do_spawn(&server);
+    assert!(
+        !world.all_npcs().iter().any(|n| !n.data().unit.is_dead()),
+        "a direct fill must stay frozen too"
+    );
+    drop(player);
+}
+
 #[tokio::test]
 async fn fully_looted_corpse_uses_shortened_deadline_and_respawn_keeps_its_own_timer() {
     use crate::data::items::ITEM_COINS;
