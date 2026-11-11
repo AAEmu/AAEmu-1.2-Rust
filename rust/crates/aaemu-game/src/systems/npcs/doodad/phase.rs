@@ -458,10 +458,15 @@ fn use_doodad_with_gate(
     // refused here. Loot / fake use / purchase, direct skill-less interacts (`CSLootOpenBag`,
     // harpoon) and `OnSkillHit` must still run while a unit holds the doodad; the occupant's
     // own pending / delayed effect also passes. The cast-start gate refuses the common case.
+    // The refused cast is cancelled like a permission refusal, so its labor / item cost is
+    // refunded instead of being paid for an interaction that never ran.
     if gate_new_timed
         && super::occupancy::refuses_new_timed(server, &ctx.doodad, caster, started_skill_id)
     {
         super::occupancy::send_already_interacting(caster);
+        if let Some(player) = caster.as_player() {
+            funcs::skills_hook(server).cancel_skill(server, player);
+        }
         return;
     }
 

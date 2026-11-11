@@ -353,7 +353,8 @@ pub struct SocialConfig {
     /// Family member cap (`FAMILY_MAXIMUM`). The 1.2 compact has no family tables or
     /// `content_configs` keys and the 1.2 `Family.Write` only says `// TODO max length 8`; the
     /// 10.x server reads `family_max_count` from `content_configs` and its tests use 8, so the
-    /// default here is 8 (`systems::social::family::max_members`).
+    /// default here is 8. The 1.2 client reads at most 8 members of a family, so
+    /// `systems::social::family::max_members` clamps the configured value to 2..=8.
     #[serde(rename = "familymaxmembers", deserialize_with = "lenient")]
     pub family_max_members: usize,
 }
@@ -432,6 +433,10 @@ mod tests {
         assert!(!cfg.social.bounty_board);
         // Player nations follow the era profile unless the key is explicit.
         assert_eq!(cfg.social.player_nations, None);
+        // The family cap ships at 8, the most members the 1.2 client reads, and so does the
+        // built-in default.
+        assert_eq!(cfg.social.family_max_members, 8);
+        assert_eq!(super::SocialConfig::default().family_max_members, 8);
     }
 
     #[test]

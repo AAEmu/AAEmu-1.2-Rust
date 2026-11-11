@@ -1726,25 +1726,25 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         let d = distance_to(server, &Target::Obj(caster.clone()), &ctx.target, false);
         total_delay += (d / t.effect_speed * 1000.0) as i32;
     }
-    // The cast slot is already cleared; a delayed interaction effect still owes the doodad's
-    // `once_one_man` funnel, so the hold must survive until `apply_effects` / `end_skill`.
-    if total_delay > 0 {
-        if let Some(doodad) = ctx.target.as_obj().and_then(WorldObject::as_doodad) {
-            if crate::systems::npcs::doodad::occupancy::is_interaction_skill(server, t) {
-                crate::systems::npcs::doodad::occupancy::mark_effects_pending(
-                    server,
-                    doodad,
-                    caster,
-                    i64::from(total_delay),
-                );
-            }
-        }
-    }
     let fire_anim_id = fire_anim_for(t, super::plots::weapon_wield_kind(server, caster));
     if fire_anim_id != 0 && t.use_anim_time {
         if let Some(anim) = data.anims.get(fire_anim_id) {
             let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
             total_delay += (anim.combat_sync_time as f32 * (mul / 100.0)) as i32;
+        }
+    }
+    // The cast slot is already cleared, and the interaction effect of a skill that holds a
+    // `once_one_man` doodad still owes the doodad's funnel (after the whole delay, the
+    // animation time included, or at once): the hold must survive until `apply_effects` /
+    // `end_skill`, so another unit cannot take the doodad in between.
+    if skill.state().holds_doodad {
+        if let Some(doodad) = ctx.target.as_obj().and_then(WorldObject::as_doodad) {
+            crate::systems::npcs::doodad::occupancy::mark_effects_pending(
+                server,
+                doodad,
+                caster,
+                i64::from(total_delay),
+            );
         }
     }
     let weapon_anim = weapon_attack_anim_id(server, skill, caster);
@@ -2807,9 +2807,16 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
         return;
     }
     // The cast (completed, cancelled or interrupted) no longer holds a `once_one_*` doodad.
-    // A seat occupation of the same unit keeps its own bond flag.
-    let target = skill.state().initial_target;
-    if target != 0 {
+    // A seat occupation of the same unit keeps its own bond flag. Only a use that took the hold
+    // visits the occupancy map: every other skill ends here, combat skills included.
+    let (target, holds_doodad) = {
+        let mut state = skill.state();
+        (
+            state.initial_target,
+            std::mem::take(&mut state.holds_doodad),
+        )
+    };
+    if holds_doodad && target != 0 {
         crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster);
     }
     if !caster.is_unit() {

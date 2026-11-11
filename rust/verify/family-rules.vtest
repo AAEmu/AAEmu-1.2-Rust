@@ -26,9 +26,14 @@ expectseen 367 5
 # Yourself.
 rawcs 01a STR(${leader})STR(Kid)
 expectseen 364 5
-# Titles: a leading '.' and a blocked word are refused before any invitation is sent.
-# (`XlIsValidName` allows punctuation, so `!!!` is not an error.)
+# Titles: the client's VNT_FAMILY_TITLE rule (NamePolicy type 3) is 1-12 letters, so punctuation
+# and digits are refused, and so is a blocked word, before any invitation is sent.
+# (`STR(...)` cannot carry a space, so the space case is only in the unit tests.)
 rawcs 01a STR(${member})STR(.Name)
+expectseen 365 5
+rawcs 01a STR(${member})STR(Kid99)
+expectseen 365 5
+rawcs 01a STR(${member})STR(Kid!)
 expectseen 365 5
 rawcs 01a STR(${member})STR(Admin)
 expectseen 366 5

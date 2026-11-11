@@ -795,6 +795,7 @@ overridden in `Config.Local.json` or with `Social__BountyBoard`.
 | --- | --- | --- |
 | `BountyBoard` | `false` | Fill the `CSNaviOpenBounty` answer with the wanted-player board (characters that have an unpaid bounty) instead of the empty list. Rows are capped at the client's 20 entries and online / offline characters are both listed. `false` keeps the C# server's empty list. |
 | `PlayerNations` | `World:Profile` | Player nations (independence, diplomacy, national tax, monuments). The default follows the era profile (`on` for `Kr12`, `off` for `EuAuroria` / `EuLaunch`); an explicit `true` / `false` wins. When off, founding uses the existing precondition refusal and the client `FeatureSet.nations` bit is off. |
+| `FamilyMaxMembers` | `8` | Family member cap (`FAMILY_MAXIMUM`), enforced on invite and on accept. The 1.2 compact has no family tables or `content_configs` keys, so 8 follows the 1.2 `// TODO max length 8` comment and the 10.x `family_max_count`. The 1.2 client reads at most 8 members of a family, so the value is clamped to 2..8. |
 
 **Capture-pending:** the C# server noted that a filled board broke the 1.2
 client Lua and the cause was never confirmed. Keep `BountyBoard` off until an
