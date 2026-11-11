@@ -717,6 +717,259 @@ async fn sharpwind_switches_raise_the_lake_through_the_family_network() {
     assert_eq!(group(&lake), 13159, "the raised water2 phase is reached");
 }
 
+/// Greptile PR #108 finding 1: with 1 s delays, outputs at 0 ms (true), 200 ms (false) and
+/// 400 ms (true) must emit once, at 1400 ms, with the final value; the replaced outputs cannot
+/// fire at their own (earlier) due times.
+#[tokio::test]
+async fn replaced_logic_output_emits_once_with_the_last_value() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Logic(DoodadFuncLogic {
+                id: 1,
+                operation_id: 3,
+                delay_id: 1,
+            }),
+        )
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2), (22, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 3,
+                flag: true,
+                next_phase: 21,
+            }),
+        )
+        .phase_func(
+            21,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 4,
+                flag: true,
+                next_phase: 22,
+            }),
+        )
+        .phase_func(
+            21,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 5,
+                flag: false,
+                next_phase: 20,
+            }),
+        )
+        .template(102, &[(30, 1)]);
+    let f = fx(b);
+    let make = |template: u32, family: u32, x: f32| {
+        let d = manager::create(&f.server, &f.world, 0, template, None, true).unwrap();
+        d.data().transform.set_xyz(x, 100.0, 100.0);
+        d.data().family_id = family;
+        manager::spawn(&f.server, &f.world, &d);
+        manager::init_doodad(&f.server, &f.world, &d);
+        d
+    };
+    // `None` caster: the phase-entry `PulseTrigger` rows only react to a character, so the
+    // receiver's groups advance once per received signal.
+    let source = make(100, 40_000, 101.0);
+    let receiver = make(101, 500, 102.0);
+    let driver = make(102, 0, 103.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), driver);
+    logic::receive(&ctx, &source, None, true, true);
+    assert_eq!(
+        source.data().phase.logic_output,
+        None,
+        "a pending result is not emitted yet"
+    );
+    assert_eq!(source.data().phase.pending_output, Some(true));
+    f.advance(200);
+    logic::receive(&ctx, &source, None, false, true);
+    f.advance(200);
+    logic::receive(&ctx, &source, None, true, true);
+    assert_eq!(group(&receiver), 20);
+
+    f.advance(599);
+    assert_eq!(group(&receiver), 20, "still inside the first 1 s delay");
+    f.advance(1);
+    assert_eq!(
+        group(&receiver),
+        20,
+        "the replaced 0 ms output must not emit at 1000 ms"
+    );
+    assert_eq!(source.data().phase.logic_output, None);
+    f.advance(200);
+    assert_eq!(
+        group(&receiver),
+        20,
+        "the replaced 200 ms output must not emit at 1200 ms"
+    );
+    assert_eq!(source.data().phase.logic_output, None);
+
+    f.advance(200);
+    assert_eq!(
+        group(&receiver),
+        21,
+        "the last output emits once, at 1400 ms"
+    );
+    assert_eq!(source.data().phase.logic_output, Some(true));
+    assert_eq!(source.data().phase.pending_output, None);
+    f.advance(5_000);
+    assert_eq!(
+        group(&receiver),
+        21,
+        "a replaced output does not emit a second time"
+    );
+}
+
+/// Greptile PR #108 finding 2: a wire linked while a result is still pending receives nothing
+/// until the delayed emit; on the emit it receives the value once.
+#[tokio::test]
+async fn a_wire_linked_during_the_logic_delay_receives_nothing_until_the_emit() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Logic(DoodadFuncLogic {
+                id: 1,
+                operation_id: 3,
+                delay_id: 1,
+            }),
+        )
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::LogicFamilySubscriber(DoodadFuncLogicFamilySubscriber {
+                id: 3,
+                family_id: 500,
+            }),
+        )
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 4,
+                flag: true,
+                next_phase: 21,
+            }),
+        )
+        .template(102, &[(30, 1)]);
+    let f = fx(b);
+    let make = |template: u32, x: f32| {
+        let d = manager::create(&f.server, &f.world, 0, template, None, true).unwrap();
+        // `link` checks `owner_id`; a real player-owned doodad would also resolve the player as
+        // the init caster and fire the receiver's phase-entry pulse trigger.
+        d.data().owner_id = f.player.character_id;
+        d.data().transform.set_xyz(x, 100.0, 100.0);
+        manager::spawn(&f.server, &f.world, &d);
+        manager::init_doodad(&f.server, &f.world, &d);
+        d
+    };
+    let source = make(100, 101.0);
+    let subscriber = make(101, 102.0);
+    let driver = make(102, 103.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), driver);
+    logic::receive(&ctx, &source, None, true, true);
+
+    f.advance(200);
+    assert!(
+        logic::link(&f.server, &f.player, source.obj_id, subscriber.obj_id),
+        "the player owns and stands next to both doodads"
+    );
+    assert_eq!(
+        group(&subscriber),
+        20,
+        "the wire must not receive the pending value"
+    );
+    assert_eq!(source.data().phase.logic_output, None);
+    assert_eq!(source.data().phase.pending_output, Some(true));
+    f.advance(799);
+    assert_eq!(group(&subscriber), 20);
+    f.advance(1);
+    assert_eq!(group(&subscriber), 21, "the delayed emit reaches the wire");
+}
+
+/// Greptile PR #108 finding 2: `subscribe` replays only the last emitted value, never a result
+/// that is still waiting for its delay.
+#[tokio::test]
+async fn subscribe_replays_only_the_emitted_logic_value() {
+    let b = Builder::default()
+        .template(100, &[(10, 1)])
+        .phase_func(
+            10,
+            FuncTemplate::Logic(DoodadFuncLogic {
+                id: 1,
+                operation_id: 3,
+                delay_id: 1,
+            }),
+        )
+        .phase_func(
+            10,
+            FuncTemplate::LogicFamilyProvider(DoodadFuncLogicFamilyProvider {
+                id: 2,
+                family_id: 500,
+            }),
+        )
+        .template(101, &[(20, 1), (21, 2)])
+        .phase_func(
+            20,
+            FuncTemplate::LogicFamilySubscriber(DoodadFuncLogicFamilySubscriber {
+                id: 3,
+                family_id: 500,
+            }),
+        )
+        .phase_func(
+            20,
+            FuncTemplate::PulseTrigger(DoodadFuncPulseTrigger {
+                id: 4,
+                flag: true,
+                next_phase: 21,
+            }),
+        )
+        .template(102, &[(30, 1)]);
+    let f = fx(b);
+    let make = |template: u32, family: u32, x: f32| {
+        let d = manager::create(&f.server, &f.world, 0, template, None, true).unwrap();
+        d.data().transform.set_xyz(x, 100.0, 100.0);
+        d.data().family_id = family;
+        manager::spawn(&f.server, &f.world, &d);
+        manager::init_doodad(&f.server, &f.world, &d);
+        d
+    };
+    let source = make(100, 500, 101.0);
+    let driver = make(102, 0, 103.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), driver);
+    logic::receive(&ctx, &source, None, true, true);
+
+    f.advance(100);
+    let receiver = make(101, 500, 102.0);
+    assert_eq!(
+        group(&receiver),
+        20,
+        "the phase-entry subscribe must not replay the pending value"
+    );
+    assert_eq!(source.data().phase.logic_output, None);
+    assert_eq!(source.data().phase.pending_output, Some(true));
+    f.advance(900);
+    assert_eq!(
+        group(&receiver),
+        21,
+        "the delayed emit reaches the subscriber"
+    );
+    f.advance(5_000);
+    assert_eq!(group(&receiver), 21, "subscribe replays nothing again");
+}
+
 #[tokio::test]
 async fn use_then_timer_returns_to_start_phase() {
     let b = Builder::default()

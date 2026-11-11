@@ -174,6 +174,7 @@ pub fn clear_links(ctx: &DoodadCtx<'_>) {
         !d.phase.logic_links.is_empty()
             || !d.phase.logic_inputs.is_empty()
             || d.phase.logic_output.is_some()
+            || d.phase.pending_output.is_some()
     };
     if !active {
         return;
@@ -192,6 +193,9 @@ pub fn clear_links(ctx: &DoodadCtx<'_>) {
     d.phase.logic_links.clear();
     d.phase.logic_inputs.clear();
     d.phase.logic_output = None;
+    // A pending output must not emit after the cleanup; its task no longer matches.
+    d.phase.pending_output = None;
+    d.phase.pending_output_generation = super::tasks::next_generation();
 }
 
 /// Emit `value` to every route of the doodad: explicit wires, the `family_id`s named by its
@@ -355,12 +359,27 @@ pub(crate) fn receive(
             }
         };
         if let Some(output) = output {
-            if target.data().phase.logic_output != Some(output) {
-                target.data().phase.logic_output = Some(output);
+            // The pending result (if any) is what the next change is compared against; the last
+            // emitted value only matters when nothing is pending. Each scheduled output gets its
+            // own generation so a replaced one cannot emit after its delay.
+            let generation = {
+                let mut d = target.data();
+                let last = d.phase.pending_output.or(d.phase.logic_output);
+                if last == Some(output) {
+                    None
+                } else {
+                    let generation = super::tasks::next_generation();
+                    d.phase.pending_output = Some(output);
+                    d.phase.pending_output_generation = generation;
+                    Some(generation)
+                }
+            };
+            if let Some(generation) = generation {
                 super::tasks::schedule_logic_emit(
                     &ctx,
                     caster,
                     output,
+                    generation,
                     Duration::from_millis(delay),
                 );
             }

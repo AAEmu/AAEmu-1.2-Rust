@@ -344,7 +344,13 @@ pub struct DoodadPhaseState {
     /// `DoodadFuncLogic` inputs: by the source doodad's family id when the target has
     /// `DoodadFuncLogicFamilySubscriber` rows (the authored network), else by source handle.
     pub logic_inputs: std::collections::HashMap<usize, bool>,
+    /// The last `DoodadFuncLogic` result actually emitted; links and `subscribe` replay it.
     pub logic_output: Option<bool>,
+    /// A `DoodadFuncLogic` result still waiting for its authored delay (not yet emitted).
+    /// `pending_output_generation` ties it to the scheduled task, so a replaced result's task
+    /// cannot emit.
+    pub pending_output: Option<bool>,
+    pub pending_output_generation: u64,
     /// `DoodadFuncPulseTrigger` rows (func ids) that already fired in this phase; cleared when
     /// the phase changes. The C# `PulseTriggered` lived on the shared func list (a port bug);
     /// here it is per doodad so instances of one template do not suppress each other.

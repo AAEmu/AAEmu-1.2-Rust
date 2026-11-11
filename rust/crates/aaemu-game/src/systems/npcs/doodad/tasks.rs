@@ -58,8 +58,10 @@ pub enum FuncTaskKind {
         /// The signal came from a client-created wire (bypasses the family filter).
         via_link: bool,
     },
-    /// The delayed output of a `DoodadFuncLogic` (`enum_doodad_logic_delays`).
-    Logic { value: bool },
+    /// The delayed output of a `DoodadFuncLogic` (`enum_doodad_logic_delays`). `generation`
+    /// identifies the pending output it was scheduled for; the task is stale when a later input
+    /// replaced that output.
+    Logic { value: bool, generation: u64 },
 }
 
 /// One scheduled doodad task.
@@ -78,6 +80,11 @@ pub struct DoodadTask {
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh generation for a pending func task or `DoodadFuncLogic` output.
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// The scheduler of `DoodadManager` (`server.systems.npcs.doodads.tasks`).
 #[derive(Debug, Default)]
@@ -577,11 +584,17 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
             let source_ctx = DoodadCtx::new(server, ctx.world.clone(), source);
             super::logic::receive(&source_ctx, &ctx.doodad, caster, value, via_link);
         }
-        FuncTaskKind::Logic { value } => {
-            // Only the latest scheduled output wins: a later input that flips the result before
-            // the delay elapsed overwrote `logic_output` and this task is stale.
-            if ctx.doodad.data().phase.logic_output != Some(value) {
-                return;
+        FuncTaskKind::Logic { value, generation } => {
+            // Only the latest scheduled output wins: an input that replaced the pending result
+            // before the delay elapsed bumped `pending_output_generation` and this task is stale.
+            {
+                let mut d = ctx.doodad.data();
+                if d.phase.pending_output_generation != generation
+                    || d.phase.pending_output != Some(value)
+                {
+                    return;
+                }
+                d.phase.pending_output = None;
             }
             super::logic::emit(&ctx, caster, value);
         }
@@ -618,6 +631,7 @@ pub(crate) fn schedule_logic_emit(
     ctx: &DoodadCtx<'_>,
     caster: Option<&WorldObject>,
     value: bool,
+    generation: u64,
     delay: Duration,
 ) {
     schedule(
@@ -628,7 +642,7 @@ pub(crate) fn schedule_logic_emit(
             holder: ctx.doodad.clone(),
             caster: caster.cloned(),
             generation: 0,
-            kind: FuncTaskKind::Logic { value },
+            kind: FuncTaskKind::Logic { value, generation },
         },
         delay,
     );
