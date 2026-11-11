@@ -1511,13 +1511,14 @@ pub async fn send_chat_message(
             );
         }
         chat_type::PERFORM => {
-            // `chat_commands` row 14 ("연주") lets the 1.2 client send type 13, but the client's
-            // chat display (`chat_msg_event.alb` proto 20, `GetChatChannelName`) has no branch
-            // for it: it logs "Unknown chat channel: 13" and shows nothing. Broadcasting it
-            // would therefore have no visible recipient, so refuse it explicitly instead of
-            // silently dropping it.
+            // `chat_commands` row 14 (Korean "연주", English "RP") lets the 1.2 client send type
+            // 13, but the client's chat display (`chat_msg_event.alb`, function 20: its channel
+            // comparison chain; the constants are in `baselib.alb`) has no branch for it: it
+            // logs "Unknown chat channel: 13" and shows nothing. A broadcast would have no
+            // visible recipient, so the message is dropped with a warning (no reply to the
+            // sender, as for every other unsupported type).
             tracing::warn!(
-                "Refusing chat type {} (performance) from {}: the 1.2 client has no display                  channel for type 13",
+                "Dropping chat type {} (performance / RP) from {}: the 1.2 client has no display channel for type 13",
                 chat,
                 sender.name
             );

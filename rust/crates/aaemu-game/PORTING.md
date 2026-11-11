@@ -2923,13 +2923,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   type / faction while keeping the requested chat type (zone Shout / Trade / LFG and raid /
   raid-leader included).
 * systems::social: **Trade / LFG / performance chat (2026-11-10).** `chat_commands` menu rows 8
-  ("거래", type 2) and 9 ("파티찾기", type 3) route to the sender's zone-group channel, like
-  Shout; the C# `ChatManager.GetZoneChat` does the same, and the 2014-10 NA-launch request
-  "Please allow trade to be faction-wide" shows 1.2 trade was not faction-wide. Row 14 ("연주",
-  `chat_type_id` 13) is sendable, but the 1.2 client's chat display (`chat_msg_event.alb` proto
-  20) has no branch for 13 and logs "Unknown chat channel: 13", so it is refused with a warning
-  (`chat_type::PERFORM`) instead of broadcast. Tests:
-  `trade_and_group_find_reach_only_their_zone_group_and_performance_is_refused`.
+  ("거래", type 2) and 9 ("파티찾기", type 3) already route to the sender's zone-group channel,
+  like Shout (`send_chat_message`; the C# `ChatManager.GetZoneChat` does the same); a new test
+  pins that a player in another zone group hears none of Shout / Trade / LFG. **Inferred (no
+  1.2 server evidence):** that retail trade / LFG chat was scoped to the zone group. The 1.2
+  client treats the three alike (the join / leave channel names `chat_zone`, `chat_trade`,
+  `chat_find_party`); a 2014-10 NA-launch forum request "Please allow trade to be
+  faction-wide" is not server evidence. Row 14 (Korean "연주", English label "RP",
+  `chat_type_id` 13) is sendable, but the 1.2 client's chat display (`chat_msg_event.alb`
+  function 20; `baselib.alb` defines no channel constant for 12 or 13) has no branch for 13 and
+  logs "Unknown chat channel: 13", so the server drops it with a warning
+  (`chat_type::PERFORM`; no reply to the sender, the same effect as before, when it fell into
+  the "Unsupported chat type" arm). Tests:
+  `trade_and_group_find_reach_only_their_zone_group_and_performance_chat_is_dropped`.
 * systems::social: **Chat spam.** The 1.2 client applies the delays of
   `SCChatSpamDelayPacket` itself (native `FUN_393C2540`: chat types `0..=14` map to a group and a
   message inside the group's delay is refused with localized message `0x108`). The server now

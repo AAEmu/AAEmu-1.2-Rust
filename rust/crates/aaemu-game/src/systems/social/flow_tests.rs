@@ -724,7 +724,7 @@ async fn faction_and_zone_chat_identity_and_membership() {
 /// Row 14 ("연주", `chat_type_id` 13) is sendable but has no client display branch
 /// (`chat_msg_event.alb` proto 20 logs "Unknown chat channel"), so the server refuses it.
 #[tokio::test]
-async fn trade_and_group_find_reach_only_their_zone_group_and_performance_is_refused() {
+async fn trade_and_group_find_reach_only_their_zone_group_and_performance_chat_is_dropped() {
     use crate::data::world_data::{Zone, ZoneGroup};
     use crate::data::GameData;
     use crate::test_support::test_server_with;
@@ -772,7 +772,7 @@ async fn trade_and_group_find_reach_only_their_zone_group_and_performance_is_ref
         assert_eq!(b.frames(), vec![(sc::SCChatMessagePacket, want)]);
         assert!(c.frames().is_empty());
     }
-    // Performance chat (13) is refused with a warning: nobody receives it, not even the sender.
+    // Performance chat (13) is dropped with a warning: nobody receives it, not even the sender.
     let (capture, guard) = warn_capture();
     a.send(
         &server,
@@ -785,8 +785,8 @@ async fn trade_and_group_find_reach_only_their_zone_group_and_performance_is_ref
     let log = capture.0.lock().unwrap();
     let log = String::from_utf8_lossy(&log);
     assert!(
-        log.lines().any(|l| l.contains("Refusing chat type 13")),
-        "expected an explicit performance-chat refusal, got: {log}"
+        log.lines().any(|l| l.contains("chat type 13")),
+        "expected a warning that names chat type 13, got: {log}"
     );
 }
 
