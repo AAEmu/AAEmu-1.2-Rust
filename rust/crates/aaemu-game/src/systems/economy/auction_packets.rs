@@ -6,6 +6,7 @@
 use aaemu_commons::{Marshal, PacketStream};
 use chrono::{DateTime, Utc};
 
+use crate::data::features::Feature;
 use crate::error::Result;
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
@@ -34,10 +35,22 @@ pub fn register(reg: &mut PacketRegistry) {
 // C->S
 // ---------------------------------------------------------------------------------------------
 
-/// The auction house is only reachable at an auctioneer NPC: one of the packet's ids (or the
-/// NPC the player is interacting with) must be an NPC with the auctioneer flag within
-/// [`SERVICE_RANGE`]. The C# ignored both ids.
+/// The auction house is normally only reachable at an auctioneer NPC: one of the packet's ids
+/// (or the NPC the player is interacting with) must be an NPC with the auctioneer flag within
+/// [`SERVICE_RANGE`]. With `hudAuctionButton` (feature bit 81) on, the 1.2 client's HUD button
+/// opens the auction window away from an auctioneer (`right_button_set.alb`
+/// `CreateAuctionToggleBtn` / `ToggleAuctionWindow`; owner, 2026-11-11: the remote button was
+/// usable by everyone, not Patron-only), so the request is accepted without one; with the bit
+/// off the NPC guard stays. The C# ignored both ids.
 fn at_auctioneer(server: &GameServer, p: &PlayerRef, id: u32, id2: u32) -> bool {
+    if server
+        .systems
+        .services
+        .features(server)
+        .check(Feature::HudAuctionButton)
+    {
+        return true;
+    }
     let interaction = p.data().unit.current_interaction_object;
     let ok = [id, id2, interaction]
         .into_iter()
