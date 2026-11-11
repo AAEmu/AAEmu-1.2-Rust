@@ -488,6 +488,16 @@ struct RespawnFixture {
 /// Spawns the three-member group 50 through a spawner at (100, 100, 100) with a 2 s corpse
 /// despawn and the template's 10 s spawn delay (the group respawn timer).
 fn spawn_group_for_respawn(enable_respawn: bool) -> RespawnFixture {
+    spawn_group_for_respawn_with_delay(enable_respawn, 10.0)
+}
+
+/// [`spawn_group_for_respawn`] with the template's `spawn_delay_min/max` set to `delay` seconds.
+fn spawn_group_for_respawn_with_delay(enable_respawn: bool, delay: f32) -> RespawnFixture {
+    let delayed = |npcs| NpcSpawnerTemplate {
+        spawn_delay_min: delay,
+        spawn_delay_max: delay,
+        ..template(9571, npcs)
+    };
     let mut data = GameData::empty();
     data.systems.npcs.npc_groups = if enable_respawn {
         respawn_sea_worm_group()
@@ -495,18 +505,15 @@ fn spawn_group_for_respawn(enable_respawn: bool) -> RespawnFixture {
         sea_worm_group()
     };
     data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
-        vec![template(9571, Vec::new())],
+        vec![delayed(Vec::new())],
         vec![group_member_row(10075, 9571, 50)],
     )
     .unwrap();
     let server = Arc::new(test_server_with(data));
     server.set_self();
     *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
-    let spawner = make_spawner_with_despawn(
-        template(9571, vec![group_member_row(10075, 9571, 50)]),
-        8564,
-        2,
-    );
+    let spawner =
+        make_spawner_with_despawn(delayed(vec![group_member_row(10075, 9571, 50)]), 8564, 2);
     let client = TestClient::new(&server, 1, 1);
     let player = spawn_player(&server, &client, test_character(1, "P", 100.0, 100.0), 5000);
     spawner.update(&server);
@@ -743,6 +750,23 @@ async fn enable_respawn_waits_while_a_member_fights() {
         3,
         "the member respawns after the new delay"
     );
+}
+
+/// An absurd authored `spawn_delay_min/max` (far beyond what a `Duration` holds) must not panic
+/// the batch registration or the respawn timer: the delay saturates to "never".
+#[tokio::test]
+async fn enable_respawn_survives_an_absurd_spawn_delay() {
+    // The batch registers (and rolls its first delay) inside the fixture.
+    let f = spawn_group_for_respawn_with_delay(true, 1e30);
+    let victim = member_with_offset(&f, (2.0, -3.0, 0.0));
+
+    respawn_tick(&f);
+    kill(&f.server, &victim);
+    spawn_manager::advance_test_clock(Duration::from_secs(3));
+    respawn_tick(&f);
+    spawn_manager::advance_test_clock(Duration::from_secs(3600));
+    respawn_tick(&f);
+    assert_eq!(living(&f).len(), 2, "a saturated delay never elapses");
 }
 
 /// `RespawnLostGroupMembers` is anchored on the move leader: a dead leader blocks the partial

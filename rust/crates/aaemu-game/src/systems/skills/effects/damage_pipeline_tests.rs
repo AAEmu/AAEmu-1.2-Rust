@@ -16,7 +16,7 @@ use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType}
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::skills::buffs;
-use crate::systems::skills::data::effects::{DamageEffect, HealEffect};
+use crate::systems::skills::data::effects::{BuffEffect, DamageEffect, HealEffect};
 use crate::test_support::{spawn_player, test_character, TestClient};
 use crate::world::{Entity, WorldObject};
 
@@ -946,6 +946,16 @@ const HEAL_DOT_BUFF: u32 = 9_102;
 const HEAL_DOT_EFFECT: u32 = 9_103;
 
 fn dot_data(effect: DamageEffect, duration: i32, tick: f64) -> GameData {
+    dot_data_with_stack_rule(effect, duration, tick, 0)
+}
+
+/// [`dot_data`] whose DoT buff has the given `stack_rule` (1 = refresh).
+fn dot_data_with_stack_rule(
+    effect: DamageEffect,
+    duration: i32,
+    tick: f64,
+    stack_rule: u32,
+) -> GameData {
     let mut data = fixture_data();
     let skills = &mut data.systems.skills;
     skills.add_effect(
@@ -957,6 +967,7 @@ fn dot_data(effect: DamageEffect, duration: i32, tick: f64) -> GameData {
         id: DOT_BUFF,
         duration,
         tick,
+        stack_rule,
         tick_effects: vec![skills::data::TickEffect {
             effect_id: DOT_EFFECT,
             target_buff_tag_id: 0,
@@ -1306,10 +1317,12 @@ async fn damage_pipeline_level_bonus_rate_comes_from_the_formula_row() {
         );
     }
 
+    // No row 20 at all. The row must be a level-damage one: a fixed row is exempt from the
+    // bonus anyway and would pass with a hard-coded rate too.
     let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
     player.data().unit.level = 50;
     npc.data().unit.level = 40;
-    let effect = skills::tests::damage_effect(1, 100);
+    let effect = level_damage_effect(1);
     client.drain();
     damage(
         &server,
@@ -1317,7 +1330,11 @@ async fn damage_pipeline_level_bonus_rate_comes_from_the_formula_row() {
         &args((&player).into(), (&npc).into(), 1),
         None,
     );
-    assert_eq!(packet(&mut client, player.obj_id, npc.obj_id).0, 100);
+    assert_eq!(
+        packet(&mut client, player.obj_id, npc.obj_id).0,
+        100,
+        "a missing row 20 leaves the hit unchanged"
+    );
 }
 
 /// The variables name a player character and an NPC: PvP keeps its own battle-resist path.
@@ -1749,6 +1766,119 @@ async fn damage_pipeline_range_penalty_dot_uses_the_application_distance() {
             tick_damage(&server, &target, index),
             expected,
             "applied at {apply_distance} m, ticked at {tick_distance} m"
+        );
+    }
+}
+
+/// A DoT of the listed archery skill whose buff has the given `stack_rule`.
+fn range_dot_data(stack_rule: u32) -> GameData {
+    let mut data =
+        dot_data_with_stack_rule(level_damage_effect(DOT_EFFECT), 1_000, 1_000.0, stack_rule);
+    data.formulas
+        .insert_formula(RANGE_PENALTY_ROW, RANGE_PENALTY_FORMULA);
+    data.systems
+        .skills
+        .range_penalty_skills
+        .insert(ENDLESS_ARROWS);
+    data
+}
+
+/// The real archery DoT path: the skill's `BuffEffect` (`combat::buff_effect`) applies the DoT
+/// buff and captures the skill's close-range factor at the application distance. Applying a
+/// refreshing buff again overwrites the live one. Returns the buff index.
+fn apply_buff_effect_from_skill(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &WorldObject,
+    buff_id: u32,
+    skill_id: u32,
+) -> u32 {
+    buff_effect(
+        server,
+        &BuffEffect {
+            id: 1,
+            buff_id: Some(buff_id),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        },
+        &args_with_skill(caster.clone(), target.clone(), 1, skill_id),
+    );
+    target
+        .with_base_unit(|b| {
+            b.buffs()
+                .effects
+                .iter()
+                .find(|e| e.template.id == buff_id && !e.is_ended())
+                .map(|e| e.index)
+        })
+        .expect("buff applied")
+}
+
+/// The archery DoTs (Toxic Shot's poison, Piercing Shot's bleed) reach their buff through the
+/// skill's `BuffEffect`, which captures the factor when the DoT is applied: a shot at 20 m that
+/// is followed by melee keeps ticking at x1, a shot at 5 m that is followed by a retreat keeps
+/// ticking at x0.8. (`damage_pipeline_range_penalty_dot_uses_the_application_distance` covers
+/// `buffs::apply_template`, whose callers are channeling and toggle buffs.)
+#[tokio::test]
+async fn damage_pipeline_range_penalty_buff_effect_captures_the_application_distance() {
+    for (apply_distance, tick_distance, expected) in [(20.0, 2.0, 100), (5.0, 20.0, 80)] {
+        let (server, mut client, player, npc) =
+            skills::cast_validation_tests::fixture(range_dot_data(0));
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + apply_distance, 100.0);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let index =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, ENDLESS_ARROWS);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + tick_distance, 100.0);
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "applied at {apply_distance} m, ticked at {tick_distance} m"
+        );
+    }
+}
+
+/// The archery DoTs (buffs 196, 242, 514-517 and 2810) stack by refresh: a second shot refreshes
+/// the DoT, and its ticks use the second shot's factor, not the first one's, in both directions.
+#[tokio::test]
+async fn damage_pipeline_range_penalty_refreshed_dot_uses_the_latest_shot() {
+    for (first, second, expected) in [(5.0, 20.0, 100), (20.0, 5.0, 80)] {
+        let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(
+            range_dot_data(crate::data::skills::stack_rule::REFRESH),
+        );
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + first, 100.0);
+        let index =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, ENDLESS_ARROWS);
+        npc.data()
+            .unit
+            .transform
+            .set_xyz(100.0, 100.0 + second, 100.0);
+        let refreshed =
+            apply_buff_effect_from_skill(&server, &caster, &target, DOT_BUFF, ENDLESS_ARROWS);
+        assert_eq!(refreshed, index, "the second shot refreshed the same buff");
+        assert_eq!(
+            target.with_base_unit(|b| b.buffs().buff_count_by_id(DOT_BUFF)),
+            1,
+            "refreshed, not stacked"
+        );
+        client.drain();
+        assert_eq!(
+            tick_damage(&server, &target, index),
+            expected,
+            "shots at {first} m, then {second} m"
         );
     }
 }

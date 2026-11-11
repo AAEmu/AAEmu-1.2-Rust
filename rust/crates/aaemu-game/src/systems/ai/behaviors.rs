@@ -608,7 +608,7 @@ fn report_npc_without_ai(obj_id: u32) -> bool {
 pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
     // `npc_groups.aggro_rule_id == 2` mirrors the aggro table; rule 1 members answer the help
     // call through the group-link path below (10.x `NpcAggroTable::CollectSharedAggroMembers`
-    // and the link-help group-instance bypass).
+    // and the link-help group-instance relation bypass).
     super::group::share_aggro_with_group(c, abuser);
     let t = template_scalars(c);
     let (my_template_id, my_group_instance, my_group_rule, my_faction) = {
@@ -640,17 +640,20 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // 10.x link help with `npc_groups.aggro_rule_id == 1` (Z:823640-823646 /
         // 823849-823851): a candidate of the same spawned batch is accepted even when its own
         // template relation test fails, so the group mates answer the help call together. The
-        // batch's rule 2 members are already on the table (mirrored above); rule 0 neither
-        // mirrors nor answers by group.
+        // scan still requires the candidate's `accept_aggro_link` (Z:823774), so a template that
+        // declines aggro links keeps declining (43 of the 376 rule-1 member rows). The batch's
+        // rule 2 members are already on the table (mirrored above); rule 0 neither mirrors nor
+        // answers by group.
         let group_link = my_group_instance != 0
             && my_group_rule == 1
-            && other_group_instance == my_group_instance;
+            && other_group_instance == my_group_instance
+            && ot.accept_aggro_link;
         // 1.2 data: the members of an `aggro_links` group help each other even when their own
         // template (`accept_aggro_link`, `aggression` / `aggro_link_special_rule_id`) would
         // decline. No consumer was found in the 10.x decompile, so this rule is data-inferred
         // (capture-pending AGGROLINK-1). Non-members keep the template rules exactly.
         let same_group = link_data.share_group(my_template_id, ot.id);
-        if in_battle || (!ot.accept_aggro_link && !same_group && !group_link) {
+        if in_battle || (!ot.accept_aggro_link && !same_group) {
             continue;
         }
         // Rule-1 batch mates answer out to their own aggression radius as a fallback: the 1.2
@@ -698,8 +701,9 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         // Link path (AGGROLINK-1): the sight check applies only when the helper enables it.
         let link_helps = same_group
             && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
-        // Rule-1 group mates always answer the help call (the relation test above is bypassed);
-        // the helper's own sight check still applies, as in the 10.x candidate scan.
+        // Rule-1 group mates that accept aggro links answer the help call (the relation test
+        // above is bypassed); the helper's own sight check still applies, as in the 10.x
+        // candidate scan.
         let group_link_helps = group_link
             && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
         if !template_helps && !link_helps && !group_link_helps {

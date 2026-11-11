@@ -122,10 +122,11 @@ fn server() -> Arc<GameServer> {
     server
 }
 
-/// [`server`] whose group template declines the template-driven help path: the helper would not
-/// answer through `accept_aggro_link` / `aggro_link_special_rule_id` (rule 1 needs a matching
-/// faction) at all, so only the rule-1 group link can make it join.
-fn server_with_declining_helpers() -> Arc<GameServer> {
+/// [`server`] whose group template declines the template-driven help path (not aggressive, and a
+/// faction rule whose sight check is off), so only the rule-1 group link can make a mate join.
+/// `accept_aggro_link` is the template's own flag: the group link replaces the relation test but
+/// still honours it.
+fn server_with_link_only_helpers(accept_aggro_link: bool) -> Arc<GameServer> {
     let mut data = data();
     let t = data
         .systems
@@ -134,7 +135,7 @@ fn server_with_declining_helpers() -> Arc<GameServer> {
         .templates
         .get_mut(&NPC_TEMPLATE)
         .expect("fixture template");
-    t.accept_aggro_link = false;
+    t.accept_aggro_link = accept_aggro_link;
     t.aggro_link_special_rule_id = 1;
     t.aggro_link_help_dist = 6.0;
     let server = Arc::new(test_server_with(data));
@@ -262,11 +263,32 @@ fn behavior(server: &GameServer, id: u32) -> Option<B> {
         .flatten()
 }
 
+/// One real 100 ms AI tick. Idle / HoldPosition / Talk start with `Behavior.Throttle(0.1)`
+/// (`behaviors::throttle`), which compares the WALL clock with the last accepted tick, so a
+/// `tick_all` + `sleep(1ms)` loop gets about one effective tick per 50 iterations on Linux (and
+/// one per timer period on Windows). Forget the stamps instead of waiting.
+fn tick(server: &GameServer) {
+    for id in [LEADER_OBJ, FOLLOWER_OBJ, FOLLOWER2_OBJ] {
+        super::manager::run_now(server, id, |c| {
+            for k in [B::Idle, B::HoldPosition, B::Talk] {
+                // `st` would create a slot for a behavior the AI does not have.
+                if c.ai.has_behavior(k) {
+                    c.st(k).last_tick = None;
+                }
+            }
+        });
+    }
+    tick_all(server, 100);
+}
+
 /// A moving leader: the follower walks to `leader position + formation_offset_*` and stops
 /// within `formation_tension` of it.
 #[tokio::test]
 async fn follower_moves_to_the_leader_plus_offset_and_stops_within_tension() {
     let f = fixture(1, AiKind::HoldPosition);
+    // The settle loop may already have taken a step or two towards the formation point; start
+    // from its spawn so the walk below does not depend on how many ticks it accepted.
+    f.follower.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
     let start = npc_pos(&f.follower);
     let target = Vec3::new(102.0, 97.0, 100.0);
     let start_dist = xy_dist(start, target);
@@ -275,11 +297,11 @@ async fn follower_moves_to_the_leader_plus_offset_and_stops_within_tension() {
         "fixture: the follower starts away, {start_dist}"
     );
 
-    for _ in 0..60 {
+    // One step is 10 m/s x 0.1 s = 1 m, so the walk of about 8 m needs about 8 ticks.
+    for _ in 0..30 {
         // The leader keeps reporting a movement step (`MoveTowards`).
         f.leader.data().last_move_ms = crate::world::now_ms();
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
     let pos = npc_pos(&f.follower);
     assert!(
@@ -295,7 +317,7 @@ async fn follower_moves_to_the_leader_plus_offset_and_stops_within_tension() {
     let settled = npc_pos(&f.follower);
     for _ in 0..10 {
         f.leader.data().last_move_ms = crate::world::now_ms();
-        tick_all(&f.server, 100);
+        tick(&f.server);
     }
     assert!(
         xy_dist(npc_pos(&f.follower), settled) < 0.01,
@@ -374,9 +396,8 @@ async fn a_returning_follower_goes_to_its_formation_point() {
     // (102, 97).
     f.follower.data().unit.transform.set_xyz(90.0, 100.0, 100.0);
     post(&f.server, FOLLOWER_OBJ, |c| c.go_to_return());
-    for _ in 0..80 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+    for _ in 0..40 {
+        tick(&f.server);
     }
     let target = Vec3::new(102.0, 97.0, 100.0);
     let pos = npc_pos(&f.follower);
@@ -484,12 +505,12 @@ async fn aggro_rule_1_does_not_mirror_the_aggro_table() {
 }
 
 /// `aggro_rule_id == 1` (`aggro_link`): the group mates answer the attacked member's help call
-/// even when their own template declines (`accept_aggro_link` false, non-matching relation), as
-/// in the 10.x link-help scan's same-group-instance accept branch (Z:823640-823646 /
-/// 823849-823851).
+/// even when their own template's relation test declines (not aggressive, a faction rule with
+/// the sight check off), as in the 10.x link-help scan's same-group-instance accept branch
+/// (Z:823640-823646 / 823849-823851). The control of the test below.
 #[tokio::test]
-async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
-    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
+async fn aggro_rule_1_members_answer_the_help_call_despite_a_failing_relation_test() {
+    let f = fixture_on(server_with_link_only_helpers(true), 1, AiKind::HoldPosition);
     let player = f.server.world.object(PLAYER_OBJ).expect("player");
     let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
     let mut c = ctx(&f.server, &f.follower, &mut ai);
@@ -504,13 +525,38 @@ async fn aggro_rule_1_members_answer_the_help_call_despite_their_template() {
     );
 }
 
+/// The group link replaces only the relation test: a rule-1 mate whose template declines aggro
+/// links (`accept_aggro_link` false: 43 of the 376 rule-1 member rows of the 1.2 data) keeps
+/// declining, as the 10.x scan still requires `accept_aggro_link` (Z:823774). Same geometry as
+/// the test above, only the template flag differs.
+#[tokio::test]
+async fn aggro_rule_1_does_not_override_a_template_that_declines_aggro_links() {
+    let f = fixture_on(
+        server_with_link_only_helpers(false),
+        1,
+        AiKind::HoldPosition,
+    );
+    let player = f.server.world.object(PLAYER_OBJ).expect("player");
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &f.follower);
+    let mut c = ctx(&f.server, &f.follower, &mut ai);
+    super::behaviors::update_aggro_help(&mut c, &player, 200.0);
+    assert!(
+        !has_aggro_on_player(&f.leader) && !has_aggro_on_player(&f.follower2),
+        "a mate that declines aggro links does not answer the group help call"
+    );
+}
+
 /// Rule-1 batches spread past their 6 m `aggro_link_help_dist` still answer: the group link
 /// falls back to the template's 10 m aggression scan radius (`attack_start_range_scale * 10`).
 #[tokio::test]
 async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance() {
-    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
-    // The attacked member is at (95, 100); its mate moves 8 m away, beyond the 6 m helper
-    // distance but inside the 10 m aggression radius.
+    let f = fixture_on(server_with_link_only_helpers(true), 1, AiKind::HoldPosition);
+    // The settle loop may already have walked the follower towards its formation point; pin it
+    // to its spawn so the distances below do not depend on how far it got. `distance_to`
+    // subtracts both 0.5 m model radii.
+    f.follower.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
+    // The mate moves 8 m - 1 m = 7 m away from the attacked member: beyond the 6 m helper
+    // distance, inside the 10 m aggression radius.
     f.follower2
         .data()
         .unit
@@ -529,8 +575,11 @@ async fn aggro_rule_1_help_uses_the_aggression_radius_beyond_the_helper_distance
 /// Outside the fallback radius the same-batch help still refuses.
 #[tokio::test]
 async fn aggro_rule_1_help_refuses_a_mate_beyond_the_aggression_radius() {
-    let f = fixture_on(server_with_declining_helpers(), 1, AiKind::HoldPosition);
-    // 12 m away: beyond both the 6 m helper distance and the 10 m aggression radius.
+    let f = fixture_on(server_with_link_only_helpers(true), 1, AiKind::HoldPosition);
+    // Pinned to its spawn like in the test above (`distance_to` subtracts both 0.5 m radii).
+    f.follower.data().unit.transform.set_xyz(95.0, 100.0, 100.0);
+    // 12 m - 1 m = 11 m away: beyond both the 6 m helper distance and the 10 m aggression
+    // radius.
     f.follower2
         .data()
         .unit
@@ -626,10 +675,9 @@ async fn formation_move_uses_the_ground_height_not_the_spawner_height() {
     let f = fixture_on(server, 1, AiKind::HoldPosition);
     f.follower.data().spawner_z = Some(250.0);
 
-    for _ in 0..220 {
+    for _ in 0..40 {
         f.leader.data().last_move_ms = crate::world::now_ms();
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
     let pos = npc_pos(&f.follower);
     assert!(
@@ -648,10 +696,9 @@ async fn a_follower_off_its_formation_point_walks_back_while_the_leader_stands_s
     let f = fixture(1, AiKind::HoldPosition);
     f.follower.data().unit.transform.set_xyz(90.0, 100.0, 100.0);
 
-    for _ in 0..220 {
+    for _ in 0..40 {
         f.leader.data().last_move_ms = 0;
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
     let pos = npc_pos(&f.follower);
     assert!(
@@ -668,14 +715,14 @@ async fn a_returning_follower_tracks_a_moving_leaders_current_position() {
     f.follower.data().unit.transform.set_xyz(90.0, 100.0, 100.0);
     post(&f.server, FOLLOWER_OBJ, |c| c.go_to_return());
     for _ in 0..5 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
 
+    // The leader moves on while the follower is still on its way back: the point it returns to
+    // moves with the leader.
     f.leader.data().unit.transform.set_xyz(110.0, 100.0, 100.0);
-    for _ in 0..300 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+    for _ in 0..60 {
+        tick(&f.server);
     }
     let pos = npc_pos(&f.follower);
     assert!(
@@ -707,8 +754,7 @@ async fn old_survivors_do_not_follow_a_reused_leader_object_id() {
         None,
     );
     for _ in 0..25 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
     assert!(
         group::move_leader(&f.server, &f.follower).is_none(),
@@ -717,8 +763,7 @@ async fn old_survivors_do_not_follow_a_reused_leader_object_id() {
 
     for _ in 0..40 {
         new_leader.data().last_move_ms = crate::world::now_ms();
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
     assert!(
         xy_dist(npc_pos(&f.follower), start) < 0.05,
@@ -747,10 +792,9 @@ async fn a_blocked_formation_point_falls_back_to_the_leader_position() {
     );
     let f = fixture_on(server, 1, AiKind::HoldPosition);
 
-    for _ in 0..220 {
+    for _ in 0..40 {
         f.leader.data().last_move_ms = crate::world::now_ms();
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tick(&f.server);
     }
     let pos = npc_pos(&f.follower);
     assert!(
@@ -770,8 +814,7 @@ async fn a_waiting_hold_position_follower_still_checks_for_talk() {
     let f = fixture(1, AiKind::HoldPosition);
     // Let the spawn-time greeting of the first player finish (Talk throttles at 100 ms).
     for _ in 0..10 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tick(&f.server);
     }
     assert_eq!(behavior(&f.server, FOLLOWER_OBJ), Some(B::HoldPosition));
 
@@ -782,8 +825,7 @@ async fn a_waiting_hold_position_follower_still_checks_for_talk() {
         c.st(B::HoldPosition).greeted.clear();
     });
     for _ in 0..3 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tick(&f.server);
     }
     let greeted = super::manager::run_now(&f.server, FOLLOWER_OBJ, |c| {
         c.st(B::HoldPosition).greeted.clone()
@@ -805,8 +847,7 @@ async fn a_second_fight_after_the_abuser_died_shares_again() {
 
     f._player.data().unit.hp = 0;
     for _ in 0..60 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tick(&f.server);
         if f.leader.data().unit.skill_state.aggro_table.is_empty()
             && behavior(&f.server, FOLLOWER_OBJ) == Some(B::HoldPosition)
         {

@@ -189,11 +189,7 @@ fn range_damage_multiplier(
     if let Some(stored) = source.range_multiplier {
         return stored;
     }
-    let Some(skill_id) = source
-        .skill()
-        .map(|s| s.template.id)
-        .or(source.source_skill_id)
-    else {
+    let Some(skill_id) = source.skill().map(|s| s.template.id) else {
         return 1.0;
     };
     range_multiplier_for_skill(server, caster, trg, skill_id)

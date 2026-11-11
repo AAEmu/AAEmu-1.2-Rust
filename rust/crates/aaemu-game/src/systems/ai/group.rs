@@ -88,14 +88,14 @@ fn walkable_formation_target(c: &AiCtx<'_>, leader_pos: Vec3, point: Vec3) -> Ve
             instance,
             [from.x, from.y, from.z],
             [to.x, to.y, to.z],
-        )
+        ) == Some(true)
     };
-    if blocked(point) == Some(true) && blocked(leader_pos) != Some(true) {
-        leader_pos
-    } else if blocked(point) == Some(true) {
-        from
-    } else {
+    if !blocked(point) {
         point
+    } else if !blocked(leader_pos) {
+        leader_pos
+    } else {
+        from
     }
 }
 
@@ -122,7 +122,6 @@ pub fn follower_tick(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
         return false;
     };
     let point = group::formation_point(c.server, &c.npc, &leader);
-    let target = walkable_formation_target(c, leader_pos, point);
     let pos = npc::world_pos(c.server, &c.obj);
     let tension = c.npc.data().npc_group_formation_tension;
     // A standing leader is waited for, unless the follower was left behind (then it re-forms).
@@ -131,7 +130,15 @@ pub fn follower_tick(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
     } else {
         tension + FORMATION_SETTLE_MARGIN
     };
-    if calculate_distance(pos, target, false) <= tolerance {
+    let within = |to: Vec3| calculate_distance(pos, to, false) <= tolerance;
+    // A waiting follower is the common case: it needs no wall check (raycasts) while it is
+    // already within the tolerance of its formation point.
+    if within(point) {
+        stop_formation_move(c);
+        return true;
+    }
+    let target = walkable_formation_target(c, leader_pos, point);
+    if within(target) {
         stop_formation_move(c);
         return true;
     }

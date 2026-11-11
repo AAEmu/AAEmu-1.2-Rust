@@ -32,10 +32,6 @@ use super::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
 pub struct EffectSource {
     pub skill: Option<SkillRef>,
     pub buff: Option<Arc<BuffTemplate>>,
-    /// `Buff.Skill?.Template.Id` of a damage effect applied by a buff tick: the live buff knows
-    /// the skill that applied it, while `skill` stays `None` so the buff's own modifiers and
-    /// hit rules still apply.
-    pub source_skill_id: Option<u32>,
     /// A buff tick's `Buff.range_damage_multiplier`: the close-range penalty of the applying
     /// skill was evaluated once when the buff was applied, so the tick does not use its own
     /// distance. `None` for direct effects and buff triggers.
