@@ -8,12 +8,15 @@
 //! 1.2 data names both radii: `guard_tower_settings.radius_siege` (250 m small / 450 m large
 //! castles) and `radius_offense_hq` (100 / 120 m).
 //!
-//! The removal rule is the owner's source for the 1.2-era siege flow (IGN, 2014-09-26,
-//! "Castles"; Total ArcheAge, 2014-11-20, grade C): "only designated participants can enter"
-//! the perimeter and "those who do not qualify ... are transported out of the siege perimeter
-//! when it begins". The 1.2 client has no separate warning text for it; the error table has
-//! `SIEGE_NOT_PARTICIPANT` 446 (ui_texts 2505 "Not a siege participant"), which the forced
-//! `SCTeleportUnitPacket` carries in its error-message field.
+//! The removal rule is **inferred** from the owner's source for the 1.2-era siege flow (IGN,
+//! 2014-09-26, "Castles"; Total ArcheAge, 2014-11-20, grade C): "only designated participants
+//! can enter" the perimeter and "those who do not qualify ... are transported out of the siege
+//! perimeter when it begins". There is no 1.2 server evidence for it, so it sits behind
+//! `Housing.SiegeEvictNonParticipants`, and GMs are never moved. The 1.2 client has no separate
+//! warning text for it; its error table has `SIEGE_NOT_PARTICIPANT` 446 (ui_texts 2505 "Not a
+//! siege participant"), sent as an `SCErrorMsgPacket` right before the forced move. Whether the
+//! 1.2 client also shows a text for an `SCTeleportUnit` error message is not evidenced, so that
+//! field stays 0.
 //!
 //! The 10.x enum numbers the running siege 3; the 1.2 client numbers it 4 (siege.md 1.2).
 //! Both callers gate on [`SiegeArea::active_at`], which picks the clock exactly like
@@ -27,7 +30,7 @@
 //! (roster entry + current expedition + live expedition); the eviction re-asks the authority
 //! before it moves anyone.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use crate::server::GameServer;
@@ -39,6 +42,7 @@ use crate::systems::skills::packets_special::{
     SCTeleportUnitPacket, TELEPORT_REASON_MOVE_TO_LOCATION,
 };
 use crate::systems::social::chat::GM_ACCESS_LEVEL;
+use crate::systems::social::util::send_error;
 use crate::world::session;
 use crate::world::WorldObject;
 
@@ -116,6 +120,9 @@ impl SiegeArea {
 pub struct SiegeAreaCache {
     areas: Mutex<BTreeMap<u32, SiegeArea>>,
     participants: Mutex<BTreeMap<u32, BTreeMap<u32, SiegeSide>>>,
+    /// Characters the eviction already warned about ("no safe point"), so the warning is not
+    /// repeated every second for as long as they stand there.
+    warned: Mutex<BTreeSet<u32>>,
 }
 
 impl SiegeAreaCache {
@@ -152,6 +159,24 @@ impl SiegeAreaCache {
             .get(&character_id)
             .copied()?;
         (current_expedition != 0 && current_expedition == area.expedition_of(side)).then_some(side)
+    }
+
+    /// `true` the first time a character is reported as stuck (no safe point), `false` while it
+    /// stays stuck.
+    pub(super) fn first_warning(&self, character_id: u32) -> bool {
+        self.warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(character_id)
+    }
+
+    /// Forget every character that is no longer stuck, so a later stay warns again and the set
+    /// cannot grow past the characters currently stuck.
+    fn retain_warned(&self, stuck: &BTreeSet<u32>) {
+        self.warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|id| stuck.contains(id));
     }
 }
 
@@ -270,55 +295,47 @@ fn is_participant_now(
         })
 }
 
-/// The nearest safe resurrection point (`PortalManager.GetClosestReturnPortal`, the same
-/// fallback the ordinary resurrection uses), or the character's saved main-world position,
-/// provided the destination is outside the siege area. `None` when the data has no safe spot.
+/// The nearest safe resurrection point **outside** the siege area
+/// (`PortalManager.GetClosestReturnPortal`, the same table and filters the ordinary
+/// resurrection uses, but the closest point that lies outside the area, not the closest point
+/// refused when it happens to lie inside). `None` when no such point exists, in which case the
+/// character is left where it stands: the character's saved `main_world_position` is no
+/// fallback, it is the spot of the last instance entry and so an arbitrary old place, and
+/// `SCTeleportUnit` is a same-instance move that cannot leave an instance anyway.
 fn safe_destination(
     server: &GameServer,
     player: &crate::world::PlayerRef,
     area: &SiegeArea,
     instance_id: u32,
 ) -> Option<SCTeleportUnitPacket> {
-    let portal = crate::systems::npcs::portal::closest_return_portal(server, player);
-    if portal.id != 0
-        && [portal.x, portal.y, portal.z]
-            .into_iter()
-            .all(f32::is_finite)
-        && !area.inside(instance_id, portal.x, portal.y)
-    {
-        let z = crate::systems::ai::collision::ground_height_or(
-            server,
-            instance_id,
-            portal.x,
-            portal.y,
-            portal.z,
-            || portal.z,
-        );
-        if z.is_finite() {
-            return Some(SCTeleportUnitPacket {
-                reason: TELEPORT_REASON_MOVE_TO_LOCATION,
-                error_message: error_message::SIEGE_NOT_PARTICIPANT,
-                x: portal.x,
-                y: portal.y,
-                z,
-                z2: portal.z_rot.to_radians(),
-            });
-        }
-    }
-    let mwp = player.data().main_world_position?;
-    if mwp.instance_id != instance_id
-        || ![mwp.x, mwp.y, mwp.z].into_iter().all(f32::is_finite)
-        || area.inside(instance_id, mwp.x, mwp.y)
-    {
+    let portal =
+        crate::systems::npcs::portal::closest_return_portal_matching(server, player, |portal| {
+            [portal.x, portal.y, portal.z]
+                .into_iter()
+                .all(f32::is_finite)
+                && !area.inside(instance_id, portal.x, portal.y)
+        });
+    // `id == 0` is the fail-safe of `closest_return_portal` (the character's own position).
+    if portal.id == 0 {
         return None;
     }
-    Some(SCTeleportUnitPacket {
+    let z = crate::systems::ai::collision::ground_height_or(
+        server,
+        instance_id,
+        portal.x,
+        portal.y,
+        portal.z,
+        || portal.z,
+    );
+    z.is_finite().then_some(SCTeleportUnitPacket {
         reason: TELEPORT_REASON_MOVE_TO_LOCATION,
-        error_message: error_message::SIEGE_NOT_PARTICIPANT,
-        x: mwp.x,
-        y: mwp.y,
-        z: mwp.z,
-        z2: mwp.rot_z,
+        // The text travels in an `SCErrorMsgPacket` (see `evict_non_participants`): no 1.2 code
+        // sends a non-zero `SCTeleportUnit` error message, so the field stays 0 like everywhere.
+        error_message: 0,
+        x: portal.x,
+        y: portal.y,
+        z,
+        z2: portal.z_rot.to_radians(),
     })
 }
 
@@ -339,6 +356,8 @@ pub fn evict_non_participants(server: &GameServer) {
     }
     let real_now = chrono::Utc::now().timestamp();
     let calendar_now = server.systems.housing.calendar.now();
+    let cache = &server.systems.housing.siege_areas;
+    let mut stuck = BTreeSet::new();
     for player in server.world.all_characters() {
         let (online, dead, teleporting, gm, expedition, transform) = {
             let c = player.data();
@@ -362,7 +381,7 @@ pub fn evict_non_participants(server: &GameServer) {
         else {
             continue;
         };
-        let Some(area) = server.systems.housing.siege_areas.get(zone) else {
+        let Some(area) = cache.get(zone) else {
             continue;
         };
         if !area.active_at(real_now, calendar_now)
@@ -378,10 +397,7 @@ pub fn evict_non_participants(server: &GameServer) {
         if !area.inside(transform.instance_id, position.x, position.y) {
             continue;
         }
-        if server
-            .systems
-            .housing
-            .siege_areas
+        if cache
             .participant_side(&area, player.character_id, expedition)
             .is_some()
             // The snapshot is up to a second old: a member who joined since must not be moved.
@@ -390,11 +406,16 @@ pub fn evict_non_participants(server: &GameServer) {
             continue;
         }
         let Some(packet) = safe_destination(server, &player, &area, transform.instance_id) else {
-            tracing::warn!(
-                "Dominion {zone}: no safe point outside the siege area for '{}' ({}); not moved",
-                player.data().unit.name,
-                player.character_id
-            );
+            // Once per stuck character, not once per sweep: it would repeat every second for
+            // as long as they stay.
+            stuck.insert(player.character_id);
+            if cache.first_warning(player.character_id) {
+                tracing::warn!(
+                    "Dominion {zone}: no safe point outside the siege area for '{}' ({}); not moved",
+                    player.data().unit.name,
+                    player.character_id
+                );
+            }
             continue;
         };
         tracing::info!(
@@ -407,6 +428,10 @@ pub fn evict_non_participants(server: &GameServer) {
             &player,
             crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
         );
+        // The client's own text for it (ui_texts 2505 "Not a siege participant"), through the
+        // channel every other client error uses.
+        send_error(&player, error_message::SIEGE_NOT_PARTICIPANT);
         session::send_teleport_unit(&player, packet);
     }
+    cache.retain_warned(&stuck);
 }
