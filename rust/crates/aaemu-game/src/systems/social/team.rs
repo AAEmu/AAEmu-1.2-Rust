@@ -7,8 +7,8 @@
 //! another manager. Work that needs character data (packet bodies, chat channels, `InParty`,
 //! instance events) is collected while the state is mutated and run after the guard is dropped.
 //! Membership online state is kept on [`TeamMember`] (like `ExpeditionMember`), so the manager
-//! can decide and broadcast without reading a `Character`. Nothing calls into the manager while
-//! holding a player's data lock.
+//! can decide and broadcast without reading a `Character`. Calling the manager's read APIs while
+//! holding a player's data lock is fine: the leaf property is what keeps that order safe.
 //!
 //! Ordering of the deferred effects: the state change of an operation is atomic, its effects
 //! (run after the guard) are not ordered against a second operation on the same character. The
@@ -443,7 +443,9 @@ pub fn set_in_party(server: &GameServer, p: &PlayerRef, value: bool) {
     friend::send_status_change(server, p, false, value);
     p.data().in_party = value;
     if value {
-        // ENROLL_PARTY / ENROLL_RAID_GROUP: queued, the team manager's lock is held here.
+        // ENROLL_PARTY / ENROLL_RAID_GROUP: queued like the family and guild joins, the report
+        // runs from the flush at the end of the operation. The team manager's guard is never
+        // held here: every caller runs after dropping it.
         crate::systems::refresh_achievements_later(server, p);
     }
 }

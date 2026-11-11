@@ -148,7 +148,8 @@ pub fn fire_disconnect(server: &GameServer, p: &PlayerRef) {
 }
 
 /// `character.Events.OnTeamJoin(sender, { Team, Player })` (`TeamManager.CreateNewTeam` /
-/// `CreateSoloTeam`). Only reads `team` (callers may hold the team manager's lock).
+/// `CreateSoloTeam`). Only reads `team` (a snapshot: the team manager calls this after it
+/// dropped its guard).
 pub fn on_team_join(server: &GameServer, p: &PlayerRef, team: &Team) {
     let handlers = server
         .systems
@@ -164,7 +165,7 @@ pub fn on_team_join(server: &GameServer, p: &PlayerRef, team: &Team) {
 }
 
 /// `character.Events.OnTeamLeave(sender, { Id, Team, Player })` (`TeamManager.AskRiskyTeam`).
-/// Does not call into the team manager (callers hold its lock).
+/// Does not call into the team manager; the manager runs it after it dropped its guard.
 pub fn on_team_leave(server: &GameServer, p: &PlayerRef, team_id: u32) {
     let handlers = server
         .systems

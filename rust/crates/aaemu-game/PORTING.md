@@ -6789,6 +6789,30 @@ is the closest text.
   a party) and its party chat channel. `AskRiskyTeam` made the *acting unit* leave the channels,
   so the kicker lost its party chat while the kicked member kept hearing it; the member that
   leaves / is kicked leaves them now (before it is removed, the slot names its party).
+- **Team manager lock discipline (PR #104, 2026-11-11).** A party accept (team mutex, then the
+  inviter's character lock) and the achievement refresh (character lock, then the team mutex)
+  froze the server, so `TeamManager.state` is a leaf lock (`CONTRIBUTING-PORT.md`, rule 5). The C#
+  ran everything under one lock; here `TeamMember.online` is the manager's copy of
+  `Character.IsOnline` (kept by `add_member`, `UpdateAtLogin`, `SetOffline`, like
+  `ExpeditionMember.is_online`) so it decides and broadcasts without a character lock, and the
+  packet bodies that read a `Character`, chat joins / leaves, `InParty` and the dungeon
+  `OnTeamJoin` / `OnTeamLeave` run after the guard (same order inside one call). A `Team` copy
+  carries the online flags of the moment it was taken: the dungeon's retained team after a
+  disband counts the flags of its last refresh, where the C# object reference saw live ones
+  (`leave_dungeon_tick` destroys an orphaned dungeon first, so only the all-offline destroy after
+  a disband can notice). Operations are atomic but their effects are not ordered against a second
+  operation on the same character, so each deferred chat join and `InParty = true` is verified
+  with `TeamManager::is_member_now` after it was applied and taken back for a character that left
+  meanwhile (a removal queues its own leave after its state change: either the verify sees it or
+  the leave runs after the join). **Residual:** the `SCJoinedTeam` of a deferred join is a
+  snapshot, so the broadcast of a concurrent member change can reach the new member before it (a
+  ghost / missing member until relog), and the dungeon `OnTeamJoin` event is not taken back.
+  `CSMoveTeamMember` broadcasts `SCTeamMemberMoved` before the two members leave their old and
+  join their new party chat (the C# left, moved, broadcast, then joined), and only members are
+  joined (a client-named non-member used to be joined to the chat of party 1). `family.rs` has
+  the opposite shape (its mutex is held while it writes member characters); the review of PR #104
+  found no path that takes the family mutex under a character lock, so it is dormant: do not
+  copy it.
 - **One team at a time.** Accepting an invitation while in a team is refused with `TEAM_JOIN_ALONE`
   (the invitee) and `TEAM_INVITEE_IN_TEAM` / `TEAM_INVITEE_MEMBER` (the inviter); the invitation
   itself is refused up front for such targets. The team of an invitation is the inviter's own
