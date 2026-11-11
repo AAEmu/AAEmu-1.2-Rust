@@ -2,7 +2,7 @@
 //!
 //! Owner report (Berserk Red Dragon Roar staff, item 28905 / use skill 27005): a ground-target
 //! meteor (`target_type_id` 6 Pos, `target_selection_id` 2 Target, `target_relation_id` 4
-//! Hostile, `target_area_radius` 3) tripped (buff 12883) its own caster. `apply_effects` mirrors
+//! Hostile, `target_area_radius` 3) tripped (BuffEffect 12883, buff 8327) its own caster. `apply_effects` mirrors
 //! the C# "Add origin in case of no targets and using a target position cast" fallback and pushed
 //! the caster into the target list without a relation check; the effect carries both
 //! `friendly` and `non_friendly`, so neither per-target effect gate skips it there.
@@ -27,7 +27,7 @@ use crate::world::{Entity, PlayerRef, WorldObject};
 /// The reported skill (meteor of the Berserk Red Dragon Roar staff, item 28905).
 const SKILL: u32 = 27_005;
 const ITEM: u32 = 28_905;
-/// A stand-in for the trip buff (12883): a debuff applied by the skill's BuffEffect.
+/// A stand-in for the trip buff (8327 "Meteor Impact"): a debuff applied by the skill's BuffEffect.
 const TRIP_BUFF: u32 = 50_883;
 const HEAL_EFFECT: u32 = 900_301;
 const BUFF_EFFECT: u32 = 900_302;
