@@ -879,9 +879,10 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
     // A `DoodadFuncPulseTrigger` fires on the pulse this entry's own `DoodadFuncPulse` sent
     // (`phase_funcs::use_phase_func`); a pulse of an earlier entry does not count.
     ctx.doodad.data().phase.pulsed = None;
-    // The trigger rows therefore run after the group's other phase funcs: the shipped
-    // `doodad_phase_funcs.actual_func_id` order runs the trigger first (Sharpwind 13161: 274
-    // before 287), which stopped the group before its pulse was sent. Nothing else changes order.
+    // The trigger rows run after the group's other phase funcs, so the pulse is sent before the
+    // trigger looks for it: the shipped `doodad_phase_funcs.actual_func_id` order runs the
+    // trigger first (Sharpwind 13161: 274 before 287), which would stop the group before its
+    // pulse was sent. Nothing else changes order.
     let (triggers, others): (Vec<_>, Vec<_>) = phase_funcs
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");

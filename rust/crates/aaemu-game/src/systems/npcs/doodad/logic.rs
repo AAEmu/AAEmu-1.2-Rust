@@ -218,9 +218,10 @@ pub fn clear_links(ctx: &DoodadCtx<'_>) {
 /// Emit `value` to every route of the doodad: explicit wires, the `family_id`s named by its
 /// `DoodadFuncLogicFamilyProvider` rows, and the spawner's `RelatedIds` templates.
 ///
-/// Client wires and the spawner's `RelatedIds` are *explicit* routes: someone authored them for
-/// exactly this source/target pair, so they skip the subscriber-family source filter of
-/// `receive`. Only the family-routed signals go through that filter.
+/// Client wires and the spawner's `RelatedIds` are *explicit* routes: they were authored for
+/// this source (a wire between two handles; a spawn row naming the target template), so they
+/// skip the subscriber-family source filter of `receive`. Only the family-routed signals go
+/// through that filter.
 pub fn emit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, value: bool) {
     let root = PULSE_PATH.with(|path| {
         let mut path = path.borrow_mut();

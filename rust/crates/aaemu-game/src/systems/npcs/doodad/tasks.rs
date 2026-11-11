@@ -59,7 +59,8 @@ pub enum FuncTaskKind {
         /// which bypasses the subscriber-family filter.
         explicit: bool,
     },
-    /// The delayed output of a `DoodadFuncLogic` (`enum_doodad_logic_delays`). `generation`
+    /// The delayed output of a `DoodadFuncLogic` (its `delay_id`, see `logic::logic_delay_ms`).
+    /// `generation`
     /// identifies the pending output it was scheduled for; the task is stale when a later input
     /// replaced that output.
     Logic { value: bool, generation: u64 },
@@ -627,7 +628,7 @@ pub(crate) fn schedule_pulse(
     );
 }
 
-/// Deferred `DoodadFuncLogic` output (`enum_doodad_logic_delays`).
+/// Deferred `DoodadFuncLogic` output (its `delay_id`, see `logic::logic_delay_ms`).
 pub(crate) fn schedule_logic_emit(
     ctx: &DoodadCtx<'_>,
     caster: Option<&WorldObject>,
