@@ -37,6 +37,8 @@ pub const MAX_EXTRA_NPCS: usize = 256;
 const SPARE_PLACEMENTS: usize = 8;
 /// NPC creations per refresh across all tracked players (one quest-map tick).
 pub const SPAWN_BUDGET_PER_TICK: i64 = 32;
+/// Minimum time between two `/questmap` changes of one character that refresh at once.
+const MIN_RANGE_CHANGE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The four option steps. Values match the client option item (0..3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,11 +140,36 @@ pub struct State {
     /// takes `players` only to snapshot / commit, releases it before any world call and never
     /// takes this lock from inside a world / spawner path.
     refreshing: Mutex<()>,
+    /// When each character last had a range change refreshed at once (see [`set_range`]). A leaf
+    /// like `players`, never held together with it; it outlives the `players` entry, which is
+    /// dropped at the default range, and only holds changes younger than the interval.
+    range_changes: Mutex<HashMap<u32, Instant>>,
     #[cfg(test)]
     seams: TestSeams,
 }
 
 impl State {
+    /// Whether a range change of `character_id` may refresh at once: at most one per
+    /// [`MIN_RANGE_CHANGE_INTERVAL`]. Records the change when it is allowed.
+    fn admit_range_change(&self, character_id: u32, now: Instant) -> bool {
+        let mut changes = self.range_changes.lock().expect("quest map state poisoned");
+        match changes.get(&character_id) {
+            Some(&at) if now.saturating_duration_since(at) < MIN_RANGE_CHANGE_INTERVAL => false,
+            _ => {
+                changes.insert(character_id, now);
+                true
+            }
+        }
+    }
+
+    /// Forgets the range changes that are old enough not to limit anything any more.
+    fn prune_range_changes(&self, now: Instant) {
+        self.range_changes
+            .lock()
+            .expect("quest map state poisoned")
+            .retain(|_, at| now.saturating_duration_since(*at) < MIN_RANGE_CHANGE_INTERVAL);
+    }
+
     /// The most marker NPCs one character streams ([`MAX_EXTRA_NPCS`]; tests lower it).
     fn cap(&self) -> usize {
         #[cfg(test)]
@@ -290,29 +317,43 @@ fn new_player_state(range: Range, now: Instant) -> PlayerState {
     }
 }
 
-/// `/questmap <100|200|300|0>`: changes the range and applies it immediately.
+/// `/questmap <100|200|300|0>`: changes the range and applies it immediately. Returns the range
+/// that was in force.
+///
+/// Any player can send the command (level 0) and the driver sends it on every world entry and
+/// options-window init, so it is cheap to repeat: the range already in force does nothing. A
+/// change to a wider range refreshes at once only if the character's previous such change is at
+/// least [`MIN_RANGE_CHANGE_INTERVAL`] old; a faster one is recorded and applied by the next
+/// tick, so the last value still wins while a client that spams the command cannot make the
+/// server rebuild its marker set per packet. Going back to the default only removes what was
+/// streamed and is always applied at once.
 pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range {
     let state = &server.systems.quests.quest_map;
     let _serial = state.refreshing.lock().expect("quest map state poisoned");
+    let previous = state.range_of(player.character_id);
+    if previous == range {
+        return previous;
+    }
     let now = spawn_manager::now();
-    let previous = {
+    let at_once = range.is_default() || state.admit_range_change(player.character_id, now);
+    {
         let mut players = state.players.lock().expect("quest map state poisoned");
         let entry = players
             .entry(player.character_id)
             .or_insert_with(|| new_player_state(range, now));
-        let previous = entry.range;
         entry.range = range;
         entry.last_refresh = overdue(now);
-        previous
-    };
-    refresh_player_locked(server, player, SPAWN_BUDGET_PER_TICK);
-    if range.is_default() {
-        // Nothing can be extra at 100 m; the removal pass above has run.
-        state
-            .players
-            .lock()
-            .expect("quest map state poisoned")
-            .remove(&player.character_id);
+    }
+    if at_once {
+        refresh_player_locked(server, player, SPAWN_BUDGET_PER_TICK);
+        if range.is_default() {
+            // Nothing can be extra at 100 m; the removal pass above has run.
+            state
+                .players
+                .lock()
+                .expect("quest map state poisoned")
+                .remove(&player.character_id);
+        }
     }
     previous
 }
@@ -320,6 +361,7 @@ pub fn set_range(server: &GameServer, player: &PlayerRef, range: Range) -> Range
 /// One quest-map tick: refresh every player that selected a wider range, drop stale state.
 pub fn tick(server: &GameServer) {
     let state = &server.systems.quests.quest_map;
+    state.prune_range_changes(spawn_manager::now());
     if state.tracked_count() == 0 {
         // Nobody selected a wider range (the usual case): do not walk every character.
         return;
@@ -941,10 +983,12 @@ mod tests {
         set_range(&server, &player, Range::Meters100);
         assert_eq!(client.drain(), vec![ids_packet(&[giver_id])]);
 
-        // Unlimited reaches a second quest giver far across the instance.
+        // Unlimited reaches a second quest giver far across the instance. (A change within a
+        // second of the 300 m one would only be applied by the next tick.)
         m.add_npc_spawner(&server, npc_def(QUEST_NPC, 0.0, 2000.0))
             .expect("far placement");
         client.drain();
+        spawn_manager::advance_test_clock(MIN_RANGE_CHANGE_INTERVAL);
         set_range(&server, &player, Range::Unlimited);
         let ops = client.drain_ops();
         assert_eq!(
@@ -1496,6 +1540,101 @@ mod tests {
             .quest_map
             .streamed_npc_ids()
             .is_empty());
+    }
+
+    /// The driver re-sends the stored range on every world entry and options-window init, and any
+    /// player can type the command: repeating the range in force must cost nothing.
+    #[tokio::test]
+    async fn a_repeated_range_is_not_refreshed_again() {
+        let (server, mut client, player) = streamed_giver_fixture().await;
+        // A refresh would stream this second giver; the repeated command must not refresh, also
+        // when the interval of range changes is long over.
+        manager(&server)
+            .add_npc_spawner(&server, npc_def(QUEST_NPC, 1250.0, 1000.0))
+            .expect("second placement");
+        spawn_manager::advance_test_clock(MIN_RANGE_CHANGE_INTERVAL);
+
+        assert_eq!(
+            set_range(&server, &player, Range::Meters300),
+            Range::Meters300
+        );
+        assert!(
+            client.drain().is_empty(),
+            "the range in force is not applied again"
+        );
+        assert_eq!(server.systems.quests.quest_map.streamed_npc_ids().len(), 1);
+    }
+
+    /// A change to a wider range refreshes at once at most once per second per character; a
+    /// faster one is recorded and applied by the next tick, so the last value still wins.
+    #[tokio::test]
+    async fn a_range_change_within_the_interval_is_applied_by_the_next_tick() {
+        let server = server();
+        let m = manager(&server);
+        // A giver 250 m north (inside 300 m) and one 600 m north (only unlimited reaches it).
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1250.0))
+            .expect("near placement");
+        m.add_npc_spawner(&server, npc_def(QUEST_NPC, 1000.0, 1600.0))
+            .expect("far placement");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Quester", 1000.0, 1000.0),
+            5000,
+        );
+        client.drain();
+        let world = server.world.world(0).expect("main_world");
+        let quest_map = &server.systems.quests.quest_map;
+
+        set_range(&server, &player, Range::Meters300);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
+
+        // The option is dragged on to Unlimited within the same second: recorded, not applied.
+        assert_eq!(
+            set_range(&server, &player, Range::Unlimited),
+            Range::Meters300
+        );
+        assert!(
+            client.drain().is_empty(),
+            "applied by the next tick, not at once"
+        );
+        assert_eq!(quest_map.range_of(player.character_id), Range::Unlimited);
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket],
+            "the tick streams the giver only unlimited reaches"
+        );
+
+        // A second later a change is applied at once again.
+        spawn_manager::advance_test_clock(MIN_RANGE_CHANGE_INTERVAL);
+        set_range(&server, &player, Range::Meters300);
+        let far = npc_at(&world, 1000.0, 1600.0);
+        assert_eq!(client.drain(), vec![ids_packet(&[far.obj_id])]);
+    }
+
+    /// Going back to the default is always applied at once (it only removes what was streamed),
+    /// but it does not reset the limit: alternating cannot force a refresh per command.
+    #[tokio::test]
+    async fn alternating_with_the_default_does_not_reset_the_limit() {
+        let (server, mut client, player) = streamed_giver_fixture().await;
+
+        set_range(&server, &player, Range::Meters100);
+        assert_eq!(client.drain().len(), 1, "the giver is removed at once");
+        set_range(&server, &player, Range::Meters300);
+        assert!(
+            client.drain().is_empty(),
+            "within the interval: left to the tick"
+        );
+        tick(&server);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCUnitStatePacket, sc::SCUnitPointsPacket]
+        );
     }
 
     /// The death hook normally removes a dying extra; if it is missed the NPC stays as a corpse

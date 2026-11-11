@@ -51,9 +51,10 @@ impl Command for QuestMap {
             return Ok(());
         };
         quest_map::set_range(server, &player, range);
-        // The driver sends this on every world entry; a chat confirmation would spam the
-        // player, so only log it (invalid arguments above still answer the caller).
-        tracing::info!(
+        // The driver sends this on every world entry and every options-window init; a chat
+        // confirmation would spam the player and an info line would spam the log, so it is only
+        // traced (invalid arguments above still answer the caller).
+        tracing::debug!(
             character_id = player.character_id,
             meters = range.meters(),
             "quest details map display range set"
@@ -95,7 +96,17 @@ mod tests {
             Range::Meters300
         );
 
+        // A second change inside the same second is recorded (the tick applies it).
         let (handled, out) = harness::run_at(&server, &gm.p, "questmap 0", 0).await;
+        assert!(handled);
+        assert!(out.is_empty());
+        assert_eq!(
+            server.systems.quests.quest_map.range_of(gm.p.character_id),
+            Range::Unlimited
+        );
+
+        // The driver repeats the stored range: silent, and nothing changes.
+        let (handled, out) = harness::run_at(&server, &gm.p, "questmap unlimited", 0).await;
         assert!(handled);
         assert!(out.is_empty());
         assert_eq!(
