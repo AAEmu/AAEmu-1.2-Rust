@@ -185,7 +185,7 @@ async fn level_with_zero_ability_level_calculates_correctly() {
 
 /// Game data with only the character `LevelDps` / `LevelMana` unit formulas (the real
 /// `compact.sqlite3` rows): `(ab_level * 1.6 + 8) * 3` and `level_dps / 3.65`.
-fn formula_data() -> GameData {
+pub(super) fn formula_data() -> GameData {
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch(
         "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
@@ -223,7 +223,7 @@ async fn mana_level_scale_evaluates_the_data_formulas() {
         ..SkillTemplate::default()
     });
     let skill = SkillRun::new(template, 1);
-    let cost = super::skill::mana_cost(&server, &skill, &npc);
+    let cost = super::skill::mana_cost(&server, &skill, &npc, &SkillCaster::Unit(npc.obj_id()));
     assert_eq!(cost, (30.0 + 1.5 * scale) as i32);
 
     // Without the formulas (no data) the scale is 0: only the fixed cost remains.
@@ -296,7 +296,15 @@ async fn mana_cost_uses_the_rank_level_and_truncates_the_final_value() {
         raw as i32, 75,
         "the fixture must have a fractional part >= 0.5"
     );
-    assert_eq!(super::skill::mana_cost(&server, &skill, &caster), 75);
+    assert_eq!(
+        super::skill::mana_cost(
+            &server,
+            &skill,
+            &caster,
+            &SkillCaster::Unit(caster.obj_id())
+        ),
+        75
+    );
 }
 
 /// The 1.2 cast time: `(int)(casting_time * (1 + T))` (`FUN_398a01b0` kind 4) before the
@@ -372,7 +380,161 @@ async fn ability_0_skill_takes_the_rank_from_the_character_level() {
     let skill = SkillRun::new(template, 1);
     let scale55 = (55.0 * 1.6 + 8.0) * 3.0 / 3.65;
     assert_eq!(scale55 as i32, 78);
-    assert_eq!(super::skill::mana_cost(&server, &skill, &caster), 78);
+    assert_eq!(
+        super::skill::mana_cost(
+            &server,
+            &skill,
+            &caster,
+            &SkillCaster::Unit(caster.obj_id())
+        ),
+        78
+    );
+}
+
+/// An item cast of an ability-less skill has no `LevelMana` term (`skips_level_mana`).
+fn item_caster(player: &crate::world::PlayerRef) -> SkillCaster {
+    SkillCaster::Item {
+        obj_id: player.obj_id,
+        item_id: 1,
+        item_template_id: 23728,
+        type1: 0,
+        type2: 0,
+    }
+}
+
+/// Socket Lunagem (23728: ability 0, `ability_level` 1, `level_step` 1, `mana_cost` 0,
+/// `mana_level_md` 1.0) charged ~50 mana at level 55 after a5a9efa05 and ~6 before it, but
+/// retail charged nothing for the item use. The same skill without an item keeps the
+/// rank-level term, so the item path is the only change.
+#[tokio::test]
+async fn socket_lunagem_item_skill_costs_no_mana() {
+    let (server, _client, player, npc) = super::cast_validation_tests::fixture(formula_data());
+    player.data().unit.level = 55;
+    let caster = WorldObject::from(&player);
+    let template = Arc::new(SkillTemplate {
+        id: 23728,
+        ability_id: 0,
+        ability_level: 1,
+        level_step: 1,
+        mana_cost: 0,
+        mana_level_md: 1.0,
+        ..SkillTemplate::default()
+    });
+    let skill = SkillRun::new(template, 1);
+    assert_eq!(
+        super::skill::mana_cost(&server, &skill, &caster, &item_caster(&player)),
+        0
+    );
+    assert_eq!(
+        super::skill::mana_cost(&server, &skill, &caster, &SkillCaster::Unit(player.obj_id)),
+        78
+    );
+    // The real cast path (instant in this fixture) accepts and charges 0.
+    player.data().unit.mp = 10;
+    let result = use_skill(
+        &server,
+        &skill,
+        &caster,
+        item_caster(&player),
+        &mut SkillCastTarget::Unit(npc.obj_id),
+        Some(super::types::SkillObject::None),
+        true,
+    )
+    .0;
+    assert_eq!(result, skill_result::SUCCESS);
+    assert_eq!(player.data().unit.mp, 10);
+}
+
+/// Brown Bear Summon (item skill 13220: ability 0, `mana_level_md` 1.0) is another item use
+/// retail charged no mana for.
+#[tokio::test]
+async fn mount_summon_item_skill_costs_no_mana() {
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(formula_data());
+    player.data().unit.level = 55;
+    let caster = WorldObject::from(&player);
+    let template = Arc::new(SkillTemplate {
+        id: 13220,
+        ability_id: 0,
+        ability_level: 1,
+        level_step: 1,
+        mana_cost: 0,
+        mana_level_md: 1.0,
+        ..SkillTemplate::default()
+    });
+    assert_eq!(
+        super::skill::mana_cost(
+            &server,
+            &SkillRun::new(template, 1),
+            &caster,
+            &item_caster(&player)
+        ),
+        0
+    );
+}
+
+/// The item rule never drops a class skill's rank-scaled mana, even on the item cast path
+/// (the bind-on-pickup doodad use).
+#[tokio::test]
+async fn class_skill_mana_is_unchanged_on_the_item_path() {
+    let (server, _client, player, _npc) = super::cast_validation_tests::fixture(formula_data());
+    let caster = WorldObject::from(&player);
+    let template = Arc::new(SkillTemplate {
+        id: 9001,
+        ability_id: FIGHT,
+        ability_level: 10,
+        level_step: 10,
+        mana_cost: 10,
+        mana_level_md: 1.0,
+        casting_inc: 100, // rank 2 -> L 20, T 1.0
+        ..SkillTemplate::default()
+    });
+    let skill = SkillRun::new(template, 2);
+    let unit = super::skill::mana_cost(&server, &skill, &caster, &SkillCaster::Unit(player.obj_id));
+    assert_eq!(unit, 75);
+    assert_eq!(
+        super::skill::mana_cost(&server, &skill, &caster, &item_caster(&player)),
+        unit
+    );
+}
+
+/// An item skill keeps its fixed `mana_cost`: 13239's shape (ability 0, `mana_cost` 14,
+/// `mana_level_md` 1.0) costs 14 from an item, and the pre-check refuses 13 and charges 14.
+#[tokio::test]
+async fn item_skill_with_fixed_mana_cost_still_costs_it() {
+    let (server, _client, player, npc) = super::cast_validation_tests::fixture(formula_data());
+    player.data().unit.level = 55;
+    let caster = WorldObject::from(&player);
+    let template = Arc::new(SkillTemplate {
+        id: 13239,
+        ability_id: 0,
+        ability_level: 1,
+        level_step: 1,
+        mana_cost: 14,
+        mana_level_md: 1.0,
+        ..SkillTemplate::default()
+    });
+    let skill = SkillRun::new(template, 1);
+    assert_eq!(
+        super::skill::mana_cost(&server, &skill, &caster, &item_caster(&player)),
+        14
+    );
+    let cast = |mp: i32| {
+        player.data().unit.mp = mp;
+        use_skill(
+            &server,
+            &skill,
+            &caster,
+            item_caster(&player),
+            &mut SkillCastTarget::Unit(npc.obj_id),
+            Some(super::types::SkillObject::None),
+            true,
+        )
+        .0
+    };
+    assert_eq!(cast(13), skill_result::LACK_MANA);
+    assert_eq!(player.data().unit.mp, 13);
+    assert_eq!(cast(14), skill_result::SUCCESS);
+    assert_eq!(player.data().unit.mp, 0);
 }
 
 /// A non-character caster keeps its previous `LevelMana` argument: the unit level (or
@@ -396,7 +558,12 @@ async fn npc_skill_keeps_its_old_mana_cost() {
     let old = (54.0 * 1.6 + 8.0) * 3.0 / 3.65 * 150.0;
     assert_eq!(old as i32, 11_638);
     assert_eq!(
-        super::skill::mana_cost(&server, &SkillRun::new(flat, 1), &npc),
+        super::skill::mana_cost(
+            &server,
+            &SkillRun::new(flat, 1),
+            &npc,
+            &SkillCaster::Unit(npc.obj_id())
+        ),
         11_638
     );
     // A step-1 ability-0 skill also keeps the unit level exactly.
@@ -410,7 +577,12 @@ async fn npc_skill_keeps_its_old_mana_cost() {
         ..SkillTemplate::default()
     });
     assert_eq!(
-        super::skill::mana_cost(&server, &SkillRun::new(stepped, 1), &npc),
+        super::skill::mana_cost(
+            &server,
+            &SkillRun::new(stepped, 1),
+            &npc,
+            &SkillCaster::Unit(npc.obj_id())
+        ),
         ((54.0 * 1.6 + 8.0) * 3.0 / 3.65) as i32
     );
 }
@@ -446,7 +618,12 @@ async fn rank_1_cast_is_charged_the_truncated_formula_and_the_pre_check_agrees()
         .0
     };
     assert_eq!(
-        super::skill::mana_cost(&server, &SkillRun::new(template.clone(), 1), &caster),
+        super::skill::mana_cost(
+            &server,
+            &SkillRun::new(template.clone(), 1),
+            &caster,
+            &SkillCaster::Unit(caster.obj_id())
+        ),
         cost
     );
     assert_eq!(cast(100), skill_result::SUCCESS);
@@ -567,7 +744,12 @@ async fn real_compact_skill_tooltips_match_the_1_2_client() {
         );
         let skill = SkillRun::new(template, rank);
         assert_eq!(
-            super::skill::mana_cost(&server, &skill, &caster),
+            super::skill::mana_cost(
+                &server,
+                &skill,
+                &caster,
+                &SkillCaster::Unit(caster.obj_id())
+            ),
             mana,
             "skill {id} rank {rank}: mana"
         );
