@@ -666,6 +666,10 @@ pub(crate) fn is_retryable_transaction_error(error: &sqlx::Error) -> bool {
 /// Runs `op` again while MySQL rolls it back with a deadlock / lock wait timeout, up to
 /// `max_attempts` calls in total. Both errors roll the whole statement back, so `op` merely
 /// repeats the same write; a short pause lets the other transaction finish.
+///
+/// Only for **autocommit single statements** on the pool: inside an open transaction 1213 has
+/// rolled back the whole transaction and 1205 only the last statement, so repeating one
+/// statement there would silently lose the earlier ones.
 async fn retry_transaction<T, F, Fut>(max_attempts: u32, mut op: F) -> sqlx::Result<T>
 where
     F: FnMut() -> Fut,
@@ -687,20 +691,25 @@ where
     }
 }
 
-/// Attempts per `add_divine_clock_time` statement: the periodic save holds `accounts` rows for
-/// up to a few seconds, so two quick retries are enough to outlast it.
+/// Attempts per `add_divine_clock_time` statement (the first call plus two retries). A retried
+/// statement does not need to outlast the periodic save: it blocks inside MySQL on the rows the
+/// save still holds until the save commits (up to `innodb_lock_wait_timeout`, then 1205 and the
+/// next attempt). The retry only recovers the statement from a rollback.
 const ADD_DIVINE_CLOCK_ATTEMPTS: u32 = 3;
 
 /// Adds `delta` seconds to the divine clock of every account in `account_ids` with one atomic
 /// statement. `divine_clock_time` is `INT UNSIGNED`: the sum saturates at `u32::MAX` instead of
 /// wrapping like the C# `uint` (a strict-mode overflow would otherwise fail the whole batch).
 ///
-/// The ids are written in ascending order because InnoDB locks the rows of
-/// `WHERE account_id IN (...)` in primary-key order. The periodic save flushes one
-/// `accounts.labor` row per character (ordered by account id in `SaveManager`); a save and this
-/// 5 s online-tracking statement that take the rows in opposite orders deadlock (MySQL 1213),
-/// which rolled these clock updates back on the cloud bot server. A deadlock whose victim is
-/// this statement is retried, so the sample is not lost.
+/// InnoDB locks the rows of `WHERE account_id IN (...)` in primary-key order whatever the bind
+/// order, so sorting the ids here only makes the statement deterministic (and the dedup removes
+/// a duplicate id that would make the per-account lock in `services/accounts.rs` wait on
+/// itself). The lock-order fix proper is in `SaveManager`: the periodic save flushes one
+/// `accounts.labor` row per character, now ordered by account id, so the save and this 5 s
+/// online-tracking statement take the rows in the same order. Before that they could take them
+/// in opposite orders and deadlock (MySQL 1213), which rolled these clock updates back on the
+/// cloud bot server. A deadlock whose victim is this statement is retried, so the sample is not
+/// lost.
 pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta: u32) {
     if account_ids.is_empty() || delta == 0 {
         return;
