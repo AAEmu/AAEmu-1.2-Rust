@@ -941,6 +941,20 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         tracing::error!("SpawnMount: npc template {npc_id} missing (NullReferenceException)");
         return;
     };
+    // Using the summon item of the mate that is out dismisses it: the 1.2 C# despawned the
+    // active mate(s) and returned (one pet, the item toggles). This runs before the corpse
+    // refusal, because the item is also the only way the owner can put away a dead mate's
+    // corpse; the flag would otherwise block its own dismiss toggle.
+    let manager = manager_of(server, owner);
+    let active = manager.get_active_mates(owner_id);
+    let toggles = active.iter().any(|old| old.data().item_id == skill_item_id);
+    if toggles {
+        for old in &active {
+            let tl = u32::from(old.data().unit.tl_id);
+            despawn_mate(server, owner, tl);
+        }
+        return;
+    }
     // A dead mate (item flag set, or a saved row without HP) cannot be summoned until a
     // stablehand revives it; the client never checks the flag on its own.
     let saved = server
@@ -959,19 +973,11 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         super::error(owner, error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE);
         return;
     }
-    // Using the summon item of the mate that is out dismisses it: the 1.2 C# despawned the
-    // active mate(s) and returned (one pet, the item toggles). A different mate's item replaces
-    // it: despawn the previous mate (as the C# did, so the owner is unmounted before the new
-    // mate's position is taken from the owner's transform) and continue to spawn the new one.
-    let manager = manager_of(server, owner);
-    let active = manager.get_active_mates(owner_id);
-    let toggles = active.iter().any(|old| old.data().item_id == skill_item_id);
+    // A different mate's item replaces the current one (as the C# did, so the owner is unmounted
+    // before the new mate's position is taken from the owner's transform); continue to spawn it.
     for old in &active {
         let tl = u32::from(old.data().unit.tl_id);
         despawn_mate(server, owner, tl);
-    }
-    if toggles {
-        return;
     }
     let Ok(tl_id) = server.ids.tl.get_next_id() else {
         return;
