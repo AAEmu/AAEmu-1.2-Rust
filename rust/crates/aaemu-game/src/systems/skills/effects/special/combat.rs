@@ -272,12 +272,17 @@ fn plot_mana_cost(value1: i32, value2: i32, scale: f64, inc: f64) -> f64 {
 }
 
 /// `ManaCost`: [`plot_mana_cost`] (skill modifiers applied) is taken from the character.
+///
+/// It does not start the post-cast window: the 1.2 client's `OnPlotEvent` (`FUN_3938e6b0` @
+/// 0x3938e6b0) only sets `LastCast` for the `StopManaRegen` special effect (0x34), and a plot
+/// is not a `SCSkillFired` (`FUN_3939b010`). The C# also set `IsInPostCast` here; see
+/// PORTING.md.
 pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "ManaCost", v);
     let Some(caster) = args.caster.as_ref() else {
         return;
     };
-    let Some(p) = caster.as_player() else {
+    if caster.as_player().is_none() {
         return;
     };
     let Some(skill) = args.source.skill() else {
@@ -294,9 +299,6 @@ pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     };
     let mana = apply_skill_modifiers(server, skill, caster, SkillAttribute::ManaCost, mana);
     unit_combat::reduce_current_mp(server, caster, mana as i32);
-    let mut c = p.data();
-    c.skill_char.last_cast_ms = now_ms();
-    c.skill_char.is_in_post_cast = true;
 }
 
 /// `Cooldown`: puts the skill on cooldown for `value1` ms (skill modifiers applied).
@@ -397,6 +399,10 @@ pub fn reset_cooldown(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
 }
 
 /// `StopManaRegen`: `IsInPostCast = true`, `LastCast = now`.
+///
+/// The 1.2 client does exactly this in its `OnPlotEvent` handler (`FUN_3938e6b0` @ 0x3938e6b0,
+/// DEC 740255: special effect 0x34 -> `FUN_390b3ab0` @ 0x390b3ab0 sets `LastCast`;
+/// `FUN_390b63f0` then uses `persistent_mana_regen` until `LastCast + 5000`).
 pub fn stop_mana_regen(_server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "StopManaRegen", v);
     if let Some(p) = args.caster.as_ref().and_then(WorldObject::as_player) {
@@ -621,6 +627,9 @@ mod mana_cost_tests {
         );
         let scale = (55.0 * 1.6 + 8.0) * 3.0 / 3.65;
         assert_eq!(player.data().unit.mp, 2000 - (6.0 * scale) as i32);
+        // The plot effect charges mana but does not start the client's post-cast window: its
+        // `OnPlotEvent` only does that for `StopManaRegen` (effect 52).
+        assert!(!player.data().skill_char.is_in_post_cast);
         player.data().unit.mp = 2000;
         super::mana_cost(
             &server,
@@ -634,5 +643,6 @@ mod mana_cost_tests {
             [0, 600, 0, 0],
         );
         assert_eq!(player.data().unit.mp, 2000);
+        assert!(!player.data().skill_char.is_in_post_cast);
     }
 }

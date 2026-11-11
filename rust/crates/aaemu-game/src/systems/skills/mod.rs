@@ -83,6 +83,8 @@ mod mana_regen_manager_tests;
 #[cfg(test)]
 mod player_skill_audit_tests;
 #[cfg(test)]
+mod post_cast_tests;
+#[cfg(test)]
 mod quest_item_start_tests;
 #[cfg(test)]
 mod quest_machine_flow_tests;

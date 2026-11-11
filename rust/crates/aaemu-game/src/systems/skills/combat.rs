@@ -289,18 +289,28 @@ pub fn try_claim_death(target: &WorldObject) -> bool {
 }
 
 /// `ReduceCurrentMp(unit, value)`.
+///
+/// Deviation (the C# broadcast every time): a change that leaves `Mp` unchanged sends no
+/// `SCUnitPoints`. The 1.2 client predicts its own regen between packets
+/// (`X2::Unit::UpdateManaRegen`, `FUN_390b63f0` @ 0x390b63f0), so a packet for a zero change
+/// (a 0-mana item use such as a regrade scroll) only snaps the bar back to the server's older
+/// value while the client has already predicted further ahead. See PORTING.md.
 pub fn reduce_current_mp(server: &GameServer, target: &WorldObject, value: i32) {
-    let Some((hp, mp)) = target.with_unit(|u| {
-        let u = u.unit_mut();
-        if u.hp == 0 {
-            return (0, -1);
-        }
-        u.mp = (u.mp - value).max(0);
-        (u.hp, u.mp)
-    }) else {
+    let Some((hp, old_mp, mp)) = target
+        .with_unit(|u| {
+            let u = u.unit_mut();
+            if u.hp == 0 {
+                return None;
+            }
+            let old = u.mp;
+            u.mp = (u.mp - value).max(0);
+            Some((u.hp, old, u.mp))
+        })
+        .flatten()
+    else {
         return;
     };
-    if mp < 0 {
+    if mp == old_mp {
         return;
     }
     broadcast(
