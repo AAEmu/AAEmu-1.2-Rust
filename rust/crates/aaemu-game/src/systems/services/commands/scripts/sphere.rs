@@ -445,6 +445,7 @@ pub mod sphere_util {
                         anyhow::anyhow!("Object reference not set to an instance of an object.")
                     })?;
                     crate::world::session::send_teleport_unit(
+                        ctx.server()?,
                         &player,
                         SCTeleportUnitPacket {
                             reason: 0,

@@ -239,6 +239,8 @@ fn transport(server: &GameServer, player: &PlayerRef, destination: Transform) {
     {
         return;
     }
+    // This displacement is a teleport/return load, not a plain zone crossing: end a trade.
+    crate::systems::economy::trade::on_player_teleported(server, player);
     if old.instance_id != destination.instance_id {
         leave_instance_membership(server, player, old.instance_id);
     }

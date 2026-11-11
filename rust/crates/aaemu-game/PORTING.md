@@ -585,7 +585,7 @@ connected by `systems::economy::wiring`).
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`; a multi-pack NPC sells the union of all its packs. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data,mail_system}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. `/mail admin` sends an `ADMIN` system letter to an online or offline character. `quest_mails` / `quest_mail_attachments` are loaded; `SCQuestMailSentPacket` (0x150) is defined but never sent (trigger capture-pending, see the mail-leftovers deviation). Retention follows the client's `mail_guide` (5/30 normal, 5/90 system, configurable in `Configurations/Mail.json`; system mail with unclaimed attachments is kept, player attachments are returned, REGISTERED/deleted-sender escrow is kept); the level-10 send gate and the 3-repeat limit are enforced (see the 2026-11-08 mail bullets below). |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids); with `hudAuctionButton` (feature bit 81) on, the 1.2 client's HUD button sends them away from an auctioneer and they are accepted without one (see the auction HUD-button deviation). |
-| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
+| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. Cancel reasons and the death / zone-change / movement cancels are in the trade-cancel note below. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. A gift receiver is resolved from the online world first and the `characters` row second (the C# only found online characters), so an offline receiver gets the type-9 mail on next login; unknown / deleted-or-pending-deletion / transfer-pending / same-account receivers are refused with 623 / 790 / 791 / 779 (`x2game` `FUN_39040000` error-to-BFR map, `ui_texts` keys of the same names) before any charge (**791 as a receiver refusal is UNVERIFIED:** its client text, `ui_texts` 6111 "Can't make purchases while a server transfer is pending.", describes the buyer, and the server never sets `transfer_request_time` (it is only loaded and saved), so that refusal cannot fire today); typing one's own name in gift mode is refused with 779 (the C# treated it as a self-buy), and the row is re-read under the purchase lock before delivery so a deletion/transfer in the 1 s delay also refuses. The offline name match requires the same lowercased spelling as the online lookup, because the `characters` collation is accent-insensitive. Generic gift checkout failures use 594. 589/593 are not sent: `SCICSBuyResult` shows the success text (result window `noticeBuyGood` / `noticePresentGood`). |
 | Premium service shop (`CSPremiumServiceList` / `Buy` / `Msg`, `SCPremiumServiceList`, `PremiumDetail`) | `systems/economy/premium_service.rs` | done | Rust only: the C# answered the list with a fixed Russian 30-day entry and only logged buy / msg. The catalogue is the empty-by-default operator table `aaemu_game.premium_services`; the purchase is one atomic MySQL transaction. See the WP-C deviation below. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
@@ -2959,6 +2959,41 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sender faction stays in the sender block. Channel copies substitute the actual `ChatChannel` sub
   type / faction while keeping the requested chat type (zone Shout / Trade / LFG and raid /
   raid-leader included).
+* systems::economy: **Trade cancel reasons and server-initiated cancels (2026-11-10).**
+  `SCTradeCanceled` always prints ui_text 569 `canceled` ("거래가 취소되었습니다.", "Trade
+  canceled.") through the client's Lua `TRADE_CANCELED` handler (`trade.alb` proto 30 calls the
+  message function with `true`); only reason 5 (`TCR_OPEND_MONEY_WINDOW`) additionally shows
+  error 538 `trade_target_is_not_possible_state` (causedByMe false) or 539
+  `cant_trade_with_other_view` (true) in `FUN_394ff1f0`. The client's own reasons are 0 normal,
+  1 partner missing and 2 at `>= sqrt(25) = 5` m (`X2::GameClient::UpdateTradeChecks`,
+  `FUN_394fd9a0`), and 5 for another exclusive window. The port keeps 0 for internal
+  cancellations, uses 1 for leave-world, 2 for its own 5 m check, and 0 for death / loading zone
+  change (the client suppresses its own line on `ENTERED_LOADING`); `CSCancelTrade` reasons pass
+  through, so the client's 5 keeps its 538/539 text. Death, a server-forced teleport (portal,
+  GM move, instance/world load or resurrection displacement, same zone group included) and
+  movement out of range now end the trade for both players; a plain zone-group crossing on foot
+  keeps it. The teleport cancel runs when the teleport is **issued**, at both load chokes:
+  `world::session::teleport_character` (instance/world loads, resurrection, trial), the
+  zone-access return transport (its own hook) and `world::session::begin_teleport` (every
+  `SCTeleportUnit` sender —
+  same-instance portal, NPC teleporter, dominion headquarters / siege area, instant game,
+  GM `/move` / nudge / sphere / jail, move-guard correction, deck standers, skill displacements
+  — and `SCNaviTeleport`), so neither a same-zone teleport nor a client that never answers
+  `CSTeleportEnded` can leave the trade open. The server also runs the client's own
+  `UpdateTradeChecks` (`FUN_394fd9a0`) every 1000 ms (`trade::check_running_trades`, started by
+  `trade::start_checks`): a missing partner / another instance cancels with 1, `>= 5` m with 2.
+  That covers players carried by a vehicle or mate and seat-bound players whose own movement
+  packets `world::session::move_unit` ignores (Greptile findings on PR #106). Hooks only cancel
+  when a trade exists; a second hook call after `teleport_character` is a no-op. Tests:
+  `moving_out_of_range_cancels_with_the_client_checks_reason`,
+  `a_death_cancels_a_running_trade_for_both_players`,
+  `crossing_a_zone_group_border_keeps_a_running_trade`,
+  `a_same_group_teleport_cancels_a_running_trade_at_once`,
+  `a_same_instance_portal_ends_a_running_trade_when_it_is_issued`,
+  `navi_teleport_ends_a_running_trade_when_it_is_issued`,
+  `a_vehicle_carried_passenger_ends_the_trade_with_the_periodic_check`,
+  `the_periodic_check_cancels_a_trade_whose_partner_disappeared`,
+  `lifecycle_hooks_without_a_trade_send_no_cancel_packet`.
 * systems::social: **Trade / LFG / performance chat (2026-11-10).** `chat_commands` menu rows 8
   ("거래", type 2) and 9 ("파티찾기", type 3) already route to the sender's zone-group channel,
   like Shout (`send_chat_message`; the C# `ChatManager.GetZoneChat` does the same); a new test

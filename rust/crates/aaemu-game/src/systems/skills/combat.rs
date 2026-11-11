@@ -431,6 +431,9 @@ fn do_die_after_claim(
     if let Some(p) = victim.as_player() {
         // Escalating respawn timer — runs BEFORE base.DoDie sends SCUnitDeathPacket
         compute_death_wait_time(server, p, now_ms());
+        // A dead player cannot finish a trade; the client shows "Trade canceled." for the
+        // generic reason (it only suppresses its own copy while loading).
+        crate::systems::economy::trade::on_player_died(server, p);
         // Death penalties are PvE-only in 1.2. A kill by a `no_penalty` NPC (guards, siege
         // cannons, battlefield pets) and a PvP kill (another player, or a mate / slave owned by
         // one) take no exp and no death durability loss; the killing blow's attribution is the

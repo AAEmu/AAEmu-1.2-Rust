@@ -627,6 +627,7 @@ fn teleport(server: &GameServer, p: &PlayerRef, pos: SpawnPosition, reason: u8, 
         });
     }
     crate::world::session::send_teleport_unit(
+        server,
         p,
         SCTeleportUnitPacket {
             reason,

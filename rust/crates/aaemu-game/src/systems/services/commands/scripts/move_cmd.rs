@@ -58,7 +58,7 @@ impl Command for Move {
                 &target_player,
                 crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
             );
-            teleport_player(&target_player, 0, my_x, my_y, my_z, 0.0);
+            teleport_player(server, &target_player, 0, my_x, my_y, my_z, 0.0);
             CommandManager::send_normal_text(
                 self,
                 out,
@@ -80,7 +80,7 @@ impl Command for Move {
                 &character,
                 crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
             );
-            teleport_player(&character, 0, target_x, target_y, target_z, 0.0);
+            teleport_player(server, &character, 0, target_x, target_y, target_z, 0.0);
             CommandManager::send_normal_text(
                 self,
                 out,
@@ -115,7 +115,7 @@ impl Command for Move {
                 &target_player,
                 crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
             );
-            teleport_player(&target_player, 0, new_x, new_y, new_z, 0.0);
+            teleport_player(server, &target_player, 0, new_x, new_y, new_z, 0.0);
             CommandManager::send_normal_text(
                 self,
                 out,

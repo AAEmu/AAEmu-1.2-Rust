@@ -2242,6 +2242,7 @@ fn try_delete(
     // is, as every other server-forced move does (portal, recall, GM teleport).
     for (player, t) in deck_standers {
         crate::world::session::send_teleport_unit(
+            server,
             &player,
             SCTeleportUnitPacket {
                 reason: TELEPORT_REASON_MOVE_TO_LOCATION,

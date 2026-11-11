@@ -532,7 +532,7 @@ impl Command for Teleport {
                             ),
                         );
                         force_dismount(server, &character);
-                        teleport_player(&character, 0, px, py, height, 0.0);
+                        teleport_player(server, &character, 0, px, py, height, 0.0);
                     }
                 }
             } else if character.data().unit.transform.instance_id != DEFAULT_INSTANCE_ID {
@@ -556,6 +556,7 @@ impl Command for Teleport {
                         );
                         force_dismount(server, &character);
                         teleport_player(
+                            server,
                             &character,
                             0,
                             item.x as f32,
