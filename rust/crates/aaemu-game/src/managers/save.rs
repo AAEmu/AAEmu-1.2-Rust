@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 
 use crate::db_character::save_character;
 use crate::models::character::Character;
@@ -188,6 +188,96 @@ mod tests {
             BTreeMap::from([(1, 5), (2, 8)]),
             "zero samples and a repeated account are folded"
         );
+    }
+
+    /// An account online across midnight keeps its pre-midnight seconds queued until the next
+    /// save. The daily claim resets `divine_clock_time` for the new day, so the flush must drop
+    /// them instead of adding them to the new total.
+    #[tokio::test]
+    async fn divine_clock_seconds_of_a_previous_day_are_dropped_at_flush() {
+        let s = test_server();
+        let today = Utc::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+        s.save.add_divine_clock_on(1, yesterday, 30);
+        // The only queued entry is stale: the flush has no statement to make, so no database is
+        // needed.
+        s.save.flush_divine_clock_on(&s, today).await;
+        assert_eq!(s.save.pending_divine_clock(), BTreeMap::new());
+    }
+
+    /// The reported sequence: the account is online across midnight, the daily claim resets its
+    /// clock, and the next save must not add the queued pre-midnight seconds to the new day.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn divine_clock_claim_drops_the_queued_previous_day() {
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+        use std::str::FromStr;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "Only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        sqlx::query(
+            "CREATE TEMPORARY TABLE accounts ( \
+             account_id INT NOT NULL PRIMARY KEY, credits INT NOT NULL DEFAULT 0, \
+             loyalty INT NOT NULL DEFAULT 0, last_daily_reward DATETIME NULL DEFAULT NULL, \
+             divine_clock_time INT UNSIGNED NOT NULL DEFAULT 0, \
+             divine_clock_taken INT UNSIGNED NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temporary accounts table");
+        sqlx::query(
+            "INSERT INTO accounts (account_id, divine_clock_time, divine_clock_taken) \
+             VALUES (1, 120, 60)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let clock = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT CAST(divine_clock_time AS SIGNED) FROM accounts WHERE account_id = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let mut server = test_server();
+        server.db = pool.clone();
+        let today = Utc::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+        server.save.add_divine_clock_on(1, yesterday, 30);
+
+        // The midnight claim of the account that stayed online resets the clock.
+        assert!(
+            crate::db::claim_daily_reward(&pool, 1, today.and_hms_opt(0, 0, 0).unwrap(), 0, 0,)
+                .await
+                .is_some()
+        );
+        assert_eq!(clock().await, 0, "the claim zeroed the clock");
+
+        server.save.flush_divine_clock_on(&server, today).await;
+        assert_eq!(
+            clock().await,
+            0,
+            "seconds counted before the claim must not enter the new day"
+        );
+
+        // Seconds counted after the claim still flush.
+        server.save.add_divine_clock_on(1, today, 7);
+        server.save.flush_divine_clock_on(&server, today).await;
+        assert_eq!(clock().await, 7);
+        pool.close().await;
     }
 
     #[tokio::test]
@@ -511,11 +601,14 @@ pub struct SaveManager {
     /// `(money, money2)` last committed to (or loaded from) the database per online character.
     /// A character without an entry counts as financially dirty. Never held with a data lock.
     committed_money: Mutex<HashMap<u32, (i64, i64)>>,
-    /// Online-tracking seconds not yet committed to `accounts.divine_clock_time`, per account.
-    /// The 5 s tracking task queues them and the next financial save writes them after its
-    /// commit: as a separate 5 s statement the clock update waited on the account rows the
-    /// save's transaction held (1-2.5 s on the 2026-11-11 cloud run).
-    pending_divine_clock: Mutex<BTreeMap<u32, u32>>,
+    /// Online-tracking seconds not yet committed to `accounts.divine_clock_time`, per account,
+    /// tagged with the UTC day they were counted in. The 5 s tracking task queues them and the
+    /// next financial save writes them after its commit: as a separate 5 s statement the clock
+    /// update waited on the account rows the save's transaction held (1-2.5 s on the 2026-11-11
+    /// cloud run). Seconds of a day the account no longer plays in are dropped: the daily claim
+    /// resets `divine_clock_time` to zero, so a pre-midnight backlog must not enter the new day's
+    /// total.
+    pending_divine_clock: Mutex<BTreeMap<u32, (NaiveDate, u32)>>,
 }
 
 /// Account ids per `UPDATE ... IN (...)` statement of the divine-clock flush.
@@ -524,6 +617,12 @@ const CLOCK_UPDATE_CHUNK: usize = 500;
 impl SaveManager {
     /// Queues online-tracking seconds for an account; the next financial save writes them.
     pub(crate) fn add_divine_clock(&self, account_id: u32, delta: u32) {
+        self.queue_divine_clock(account_id, Utc::now().date_naive(), delta);
+    }
+
+    /// Queues seconds counted on `day`. A new day starts a new total: an older day's backlog is
+    /// dropped, because `claim_daily_reward` reset the account's clock when the day changed.
+    fn queue_divine_clock(&self, account_id: u32, day: NaiveDate, delta: u32) {
         if delta == 0 {
             return;
         }
@@ -531,8 +630,17 @@ impl SaveManager {
             .pending_divine_clock
             .lock()
             .expect("divine clock poisoned");
-        let total = pending.entry(account_id).or_insert(0);
-        *total = total.saturating_add(delta);
+        let total = pending.entry(account_id).or_insert((day, 0));
+        if total.0 != day {
+            *total = (day, 0);
+        }
+        total.1 = total.1.saturating_add(delta);
+    }
+
+    /// Test hook: queue seconds with an explicit day.
+    #[cfg(test)]
+    pub(crate) fn add_divine_clock_on(&self, account_id: u32, day: NaiveDate, delta: u32) {
+        self.queue_divine_clock(account_id, day, delta);
     }
 
     /// Pending per-account seconds (tests).
@@ -541,16 +649,25 @@ impl SaveManager {
         self.pending_divine_clock
             .lock()
             .expect("divine clock poisoned")
-            .clone()
+            .iter()
+            .map(|(account, (_, delta))| (*account, *delta))
+            .collect()
     }
 
     /// Writes the queued divine-clock seconds, one statement per distinct delta (accounts with
     /// the same number of seconds share it). Called after a save committed while the caller
     /// still holds the save transaction lock: the committed save no longer holds the account
-    /// rows, so no statement waits for its commit. A failed statement puts its accounts back
-    /// for the next save.
+    /// rows, so no statement waits for its commit. Seconds of an earlier day are dropped (the
+    /// daily claim reset the clock); a failed statement puts its accounts back for the next
+    /// save, keeping the day they were counted in.
     async fn flush_divine_clock(&self, server: &GameServer) {
-        let pending: BTreeMap<u32, u32> = std::mem::take(
+        self.flush_divine_clock_on(server, Utc::now().date_naive())
+            .await;
+    }
+
+    /// [`flush_divine_clock`] for an explicit UTC day (tests pin it).
+    async fn flush_divine_clock_on(&self, server: &GameServer, today: NaiveDate) {
+        let pending: BTreeMap<u32, (NaiveDate, u32)> = std::mem::take(
             &mut *self
                 .pending_divine_clock
                 .lock()
@@ -559,19 +676,20 @@ impl SaveManager {
         if pending.is_empty() {
             return;
         }
-        let mut groups: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        for (account, delta) in pending {
-            if delta != 0 {
-                groups.entry(delta).or_default().push(account);
+        let mut groups: BTreeMap<u32, Vec<(u32, NaiveDate)>> = BTreeMap::new();
+        for (account, (day, delta)) in pending {
+            if delta != 0 && day == today {
+                groups.entry(delta).or_default().push((account, day));
             }
         }
-        for (delta, ids) in groups {
-            for chunk in ids.chunks(CLOCK_UPDATE_CHUNK) {
-                if !crate::systems::services::accounts::add_divine_clock_time(server, chunk, delta)
+        for (delta, accounts) in groups {
+            for chunk in accounts.chunks(CLOCK_UPDATE_CHUNK) {
+                let ids: Vec<u32> = chunk.iter().map(|(account, _)| *account).collect();
+                if !crate::systems::services::accounts::add_divine_clock_time(server, &ids, delta)
                     .await
                 {
-                    for &id in chunk {
-                        self.add_divine_clock(id, delta);
+                    for &(id, day) in chunk {
+                        self.queue_divine_clock(id, day, delta);
                     }
                 }
             }

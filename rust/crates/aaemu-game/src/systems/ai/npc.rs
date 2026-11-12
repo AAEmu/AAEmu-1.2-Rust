@@ -849,6 +849,22 @@ pub fn world_unit(server: &GameServer, owner: &WorldObject, obj_id: u32) -> Opti
     geometry::world_of(server, owner)?.unit(obj_id)
 }
 
+/// `WorldManager.GetAround<T>(obj, radius, useModelSize)` for every kind (callers filter), with
+/// the objects' world positions. The one timed scan path: [`around`] and [`units_around`] both
+/// go through it, so every region scan records exactly one [`super::profile::Step::Around`].
+fn scan_around(
+    server: &GameServer,
+    obj: &WorldObject,
+    radius: f32,
+    use_model_size: bool,
+) -> Vec<(WorldObject, PositionAndRotation)> {
+    let _profile = super::profile::step(super::profile::Step::Around);
+    if let Some(entries) = super::tick_view::around_entries(server, obj, radius, use_model_size) {
+        return entries;
+    }
+    geometry::around_radius_entries(server, &Target::Obj(obj.clone()), radius, use_model_size)
+}
+
 /// `WorldManager.GetAround<T>(obj, radius, useModelSize)` for every kind (callers filter).
 pub fn around(
     server: &GameServer,
@@ -856,11 +872,10 @@ pub fn around(
     radius: f32,
     use_model_size: bool,
 ) -> Vec<WorldObject> {
-    let _profile = super::profile::step(super::profile::Step::Around);
-    if let Some(entries) = super::tick_view::around_entries(server, obj, radius, use_model_size) {
-        return entries.into_iter().map(|(o, _)| o).collect();
-    }
-    geometry::around_radius(server, &Target::Obj(obj.clone()), radius, use_model_size)
+    scan_around(server, obj, radius, use_model_size)
+        .into_iter()
+        .map(|(o, _)| o)
+        .collect()
 }
 
 /// `WorldManager.GetAround<Unit>(obj, radius, useModelSize)` with the units' world positions, so
@@ -872,18 +887,9 @@ pub fn units_around(
     radius: f32,
     use_model_size: bool,
 ) -> Vec<(WorldObject, PositionAndRotation)> {
-    if let Some(mut entries) = super::tick_view::around_entries(server, obj, radius, use_model_size)
-    {
-        entries.retain(|(o, _)| o.is_unit());
-        return entries;
-    }
-    geometry::around_radius(server, &Target::Obj(obj.clone()), radius, use_model_size)
+    scan_around(server, obj, radius, use_model_size)
         .into_iter()
-        .filter(WorldObject::is_unit)
-        .map(|u| {
-            let p = geometry::world_pos(server, &Target::Obj(u.clone()));
-            (u, p)
-        })
+        .filter(|(o, _)| o.is_unit())
         .collect()
 }
 
@@ -918,7 +924,9 @@ mod tests {
     use crate::systems::ai::collision::objects::{apply_doodads, collision_flags, DoodadInfo};
     use crate::systems::ai::collision::terrain::tests::Plane;
     use crate::systems::ai::data::ActorModel;
-    use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+    use crate::test_support::{
+        spawn_player, test_character, test_server, test_server_with, TestClient,
+    };
     use crate::world::Entity;
 
     #[test]
@@ -926,6 +934,47 @@ mod tests {
         assert_eq!(real_movement_flags(0.05), 3);
         assert_eq!(real_movement_flags(1.9), 5);
         assert_eq!(real_movement_flags(2.0), 4);
+    }
+
+    /// The enemy and greeting searches use `units_around`, so it must record the `Around` step
+    /// like `around` does, exactly once per scan (no double counting).
+    #[tokio::test]
+    async fn units_around_records_one_around_step() {
+        let server = test_server();
+        let world = server.world.world(0).expect("world");
+        let ctx = server.view_ctx();
+        let mut origin = Npc::new(1);
+        origin.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        origin.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+        let origin = Entity::new(0x700, origin);
+        world.spawn(&origin, &ctx);
+        let origin = WorldObject::from(&origin);
+        let mut other = Npc::new(1);
+        other.unit.transform.set_xyz(104.0, 100.0, 100.0);
+        other.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+        let other = Entity::new(0x701, other);
+        world.spawn(&other, &ctx);
+
+        let around_step = super::super::profile::Step::Around as usize;
+        super::super::profile::force_enabled(true);
+        let before = super::super::profile::snapshot();
+        let found = super::units_around(&server, &origin, 10.0, false);
+        let after = super::super::profile::snapshot();
+        assert!(!found.is_empty(), "the other NPC is in range");
+        assert_eq!(
+            after.step_calls[around_step] - before.step_calls[around_step],
+            1,
+            "units_around times its region scan once"
+        );
+        let before = after;
+        let _ = super::around(&server, &origin, 10.0, false);
+        let after = super::super::profile::snapshot();
+        super::super::profile::force_enabled(false);
+        assert_eq!(
+            after.step_calls[around_step] - before.step_calls[around_step],
+            1,
+            "around is not double counted"
+        );
     }
 
     #[test]

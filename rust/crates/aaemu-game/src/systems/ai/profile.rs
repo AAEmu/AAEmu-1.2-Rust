@@ -65,11 +65,29 @@ static BEHAVIOR_CALLS: [AtomicU64; BEHAVIORS] = [const { AtomicU64::new(0) }; BE
 
 /// Whether the profile is enabled (`AAEMU_AI_PROFILE`, not `0` / empty).
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if FORCE_ENABLED.with(std::cell::Cell::get) {
+        return true;
+    }
     *ENABLED
         .get_or_init(|| std::env::var("AAEMU_AI_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
+
+// Test-only: `ENABLED` is cached once per process, so a test cannot rely on setting the
+// environment variable after another test already read it. This thread-local override makes
+// the scopes and counters record on the test's thread only.
+#[cfg(test)]
+thread_local! {
+    static FORCE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test hook for [`enabled`] (see [`FORCE_ENABLED`]).
+#[cfg(test)]
+pub(crate) fn force_enabled(on: bool) {
+    FORCE_ENABLED.with(|flag| flag.set(on));
+}
 
 /// A timed scope; does nothing (and reads no clock) while the profile is disabled.
 pub struct Scope {
@@ -171,6 +189,25 @@ pub type SlowNpc = (u64, u32, Option<usize>);
 
 static SLOW_NPCS: Mutex<Vec<SlowNpc>> = Mutex::new(Vec::new());
 
+/// Keeps a per-NPC tick that cost more than [`SLOW_NPC_US`] for the window's report, retaining
+/// the slowest [`MAX_SLOW_NPCS`]: once full, a slower sample replaces the fastest kept sample.
+fn keep_slowest(slow: &mut Vec<SlowNpc>, sample: SlowNpc) {
+    if slow.len() < MAX_SLOW_NPCS {
+        slow.push(sample);
+        return;
+    }
+    let min = slow
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, kept)| kept.0)
+        .map(|(index, _)| index);
+    if let Some(index) = min {
+        if sample.0 > slow[index].0 {
+            slow[index] = sample;
+        }
+    }
+}
+
 /// Keeps a per-NPC tick that cost more than [`SLOW_NPC_US`] for the window's report.
 pub fn record_slow_npc(us: u64, obj_id: u32, behavior: Option<usize>) {
     if !enabled() || us < SLOW_NPC_US {
@@ -179,10 +216,7 @@ pub fn record_slow_npc(us: u64, obj_id: u32, behavior: Option<usize>) {
     let mut slow = SLOW_NPCS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slow.len() >= MAX_SLOW_NPCS {
-        return;
-    }
-    slow.push((us, obj_id, behavior));
+    keep_slowest(&mut slow, (us, obj_id, behavior));
 }
 
 /// Takes the window's slow NPC ticks, sorted slowest first (at most `top`).
@@ -209,5 +243,32 @@ mod tests {
         for (i, kind) in BehaviorKind::ALL.iter().enumerate() {
             assert_eq!(kind.index(), i, "{kind:?}");
         }
+    }
+
+    /// Once the window holds [`MAX_SLOW_NPCS`] samples, a slower tick must still make it in:
+    /// the first 64 qualifying ticks are not the slowest 64.
+    #[test]
+    fn slow_npc_samples_keep_the_largest_when_full() {
+        force_enabled(true);
+        let _ = take_slow_npcs(usize::MAX);
+        for i in 0..MAX_SLOW_NPCS {
+            record_slow_npc(SLOW_NPC_US + i as u64, i as u32, None);
+        }
+        record_slow_npc(SLOW_NPC_US + 10_000, MAX_SLOW_NPCS as u32, Some(1));
+        let kept = take_slow_npcs(usize::MAX);
+        force_enabled(false);
+        assert_eq!(
+            kept.len(),
+            MAX_SLOW_NPCS,
+            "the retained window stays capped"
+        );
+        assert!(
+            kept.contains(&(SLOW_NPC_US + 10_000, MAX_SLOW_NPCS as u32, Some(1))),
+            "a slower tick replaces the fastest kept sample"
+        );
+        assert!(
+            !kept.contains(&(SLOW_NPC_US, 0, None)),
+            "the smallest sample made room"
+        );
     }
 }
