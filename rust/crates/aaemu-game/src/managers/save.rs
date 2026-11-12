@@ -3,7 +3,7 @@
 //! (houses, mails, auction, crimes, slaves) are written by `systems::save_stage` at the C#
 //! positions of the transaction.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -173,6 +173,22 @@ mod tests {
     use crate::models::slave::Slave;
     use crate::test_support::{spawn_player, test_character, test_server, TestClient};
     use crate::world::{Entity, WorldObject};
+
+    /// The 5 s tracking only queues the seconds; the next save writes them, so the statement
+    /// never contends with the save's account rows. An account with several characters adds up.
+    #[test]
+    fn divine_clock_seconds_accumulate_per_account_until_a_save() {
+        let s = SaveManager::default();
+        s.add_divine_clock(2, 5);
+        s.add_divine_clock(1, 5);
+        s.add_divine_clock(2, 3);
+        s.add_divine_clock(3, 0);
+        assert_eq!(
+            s.pending_divine_clock(),
+            BTreeMap::from([(1, 5), (2, 8)]),
+            "zero samples and a repeated account are folded"
+        );
+    }
 
     #[tokio::test]
     async fn snapshot_saves_world_position_of_attached_character() {
@@ -495,9 +511,73 @@ pub struct SaveManager {
     /// `(money, money2)` last committed to (or loaded from) the database per online character.
     /// A character without an entry counts as financially dirty. Never held with a data lock.
     committed_money: Mutex<HashMap<u32, (i64, i64)>>,
+    /// Online-tracking seconds not yet committed to `accounts.divine_clock_time`, per account.
+    /// The 5 s tracking task queues them and the next financial save writes them after its
+    /// commit: as a separate 5 s statement the clock update waited on the account rows the
+    /// save's transaction held (1-2.5 s on the 2026-11-11 cloud run).
+    pending_divine_clock: Mutex<BTreeMap<u32, u32>>,
 }
 
+/// Account ids per `UPDATE ... IN (...)` statement of the divine-clock flush.
+const CLOCK_UPDATE_CHUNK: usize = 500;
+
 impl SaveManager {
+    /// Queues online-tracking seconds for an account; the next financial save writes them.
+    pub(crate) fn add_divine_clock(&self, account_id: u32, delta: u32) {
+        if delta == 0 {
+            return;
+        }
+        let mut pending = self
+            .pending_divine_clock
+            .lock()
+            .expect("divine clock poisoned");
+        let total = pending.entry(account_id).or_insert(0);
+        *total = total.saturating_add(delta);
+    }
+
+    /// Pending per-account seconds (tests).
+    #[cfg(test)]
+    pub(crate) fn pending_divine_clock(&self) -> BTreeMap<u32, u32> {
+        self.pending_divine_clock
+            .lock()
+            .expect("divine clock poisoned")
+            .clone()
+    }
+
+    /// Writes the queued divine-clock seconds, one statement per distinct delta (accounts with
+    /// the same number of seconds share it). Called after a save committed while the caller
+    /// still holds the save transaction lock: the committed save no longer holds the account
+    /// rows, so no statement waits for its commit. A failed statement puts its accounts back
+    /// for the next save.
+    async fn flush_divine_clock(&self, server: &GameServer) {
+        let pending: BTreeMap<u32, u32> = std::mem::take(
+            &mut *self
+                .pending_divine_clock
+                .lock()
+                .expect("divine clock poisoned"),
+        );
+        if pending.is_empty() {
+            return;
+        }
+        let mut groups: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (account, delta) in pending {
+            if delta != 0 {
+                groups.entry(delta).or_default().push(account);
+            }
+        }
+        for (delta, ids) in groups {
+            for chunk in ids.chunks(CLOCK_UPDATE_CHUNK) {
+                if !crate::systems::services::accounts::add_divine_clock_time(server, chunk, delta)
+                    .await
+                {
+                    for &id in chunk {
+                        self.add_divine_clock(id, delta);
+                    }
+                }
+            }
+        }
+    }
+
     /// Seeds the committed wallet of a character that just entered the world from the database.
     pub(crate) fn seed_committed_money(&self, player: &PlayerRef) {
         let money = {
@@ -602,6 +682,7 @@ impl SaveManager {
             let receipt = write_financial_snapshot(server, &mut tx, snapshot).await?;
             tx.commit().await?;
             commit_financial_snapshot(server, receipt);
+            self.flush_divine_clock(server).await;
             Ok(())
         }
         .await;
@@ -658,6 +739,7 @@ impl SaveManager {
             }
             tx.commit().await?;
             commit_financial_snapshot(server, receipt);
+            self.flush_divine_clock(server).await;
             if items + deleted > 0 {
                 tracing::debug!(
                     "Updated {items} and deleted {deleted} items in {containers} containers ..."
@@ -714,6 +796,7 @@ impl SaveManager {
             let receipt = write_financial_snapshot(server, &mut tx, snapshot).await?;
             tx.commit().await?;
             commit_financial_snapshot(server, receipt);
+            self.flush_divine_clock(server).await;
             Ok(())
         }
         .await;
