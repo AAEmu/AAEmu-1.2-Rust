@@ -552,6 +552,19 @@ fn commit_character_save(server: &GameServer, ack: CharacterSaveAck) {
             {
                 server.world.try_remove_character(ack.player.obj_id);
             }
+            // A late `CSSaveUIDataPacket` can change the options between the check above and
+            // this removal. It writes the options before it requeues the character, so either
+            // its requeue comes after this removal or the options read here already differ;
+            // in the second case put the entry back so the next save writes the newer value.
+            if ack.player.data().options != ack.options {
+                server
+                    .save
+                    .departing
+                    .lock()
+                    .expect("departure saves poisoned")
+                    .entry(ack.player.character_id)
+                    .or_insert_with(|| ack.player.clone());
+            }
         }
     }
 }
