@@ -700,19 +700,21 @@ const ADD_DIVINE_CLOCK_ATTEMPTS: u32 = 3;
 /// Adds `delta` seconds to the divine clock of every account in `account_ids` with one atomic
 /// statement. `divine_clock_time` is `INT UNSIGNED`: the sum saturates at `u32::MAX` instead of
 /// wrapping like the C# `uint` (a strict-mode overflow would otherwise fail the whole batch).
+/// Returns `false` (after the retries) when the statement did not commit, so the caller can
+/// keep the sample for the next save.
 ///
 /// InnoDB locks the rows of `WHERE account_id IN (...)` in primary-key order whatever the bind
 /// order, so sorting the ids here only makes the statement deterministic (and the dedup removes
 /// a duplicate id that would make the per-account lock in `services/accounts.rs` wait on
 /// itself). The lock-order fix proper is in `SaveManager`: the periodic save flushes one
-/// `accounts.labor` row per character, now ordered by account id, so the save and this 5 s
+/// `accounts.labor` row per character, now ordered by account id, so the save and this
 /// online-tracking statement take the rows in the same order. Before that they could take them
 /// in opposite orders and deadlock (MySQL 1213), which rolled these clock updates back on the
 /// cloud bot server. A deadlock whose victim is this statement is retried, so the sample is not
 /// lost.
-pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta: u32) {
+pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta: u32) -> bool {
     if account_ids.is_empty() || delta == 0 {
-        return;
+        return true;
     }
     let mut ids = account_ids.to_vec();
     ids.sort_unstable();
@@ -729,12 +731,13 @@ pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta:
         q.execute(pool)
     })
     .await;
-    if let Err(e) = result {
+    if let Err(e) = &result {
         tracing::error!(
             "add_divine_clock_time({} account(s), delta {delta}): {e}",
             ids.len()
         );
     }
+    result.is_ok()
 }
 
 /// `AccountManager.GetDivineClock`: `(divine_clock_time, divine_clock_taken)`, `(0, 0)` when the

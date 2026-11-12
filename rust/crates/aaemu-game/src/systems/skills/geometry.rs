@@ -194,7 +194,7 @@ pub fn in_angle(a: &PositionAndRotation, b: &PositionAndRotation, angle: f32) ->
 }
 
 /// `RadiusFitsCurrentRegion`.
-fn radius_fits_region(x: f32, y: f32, radius: f32) -> bool {
+pub(crate) fn radius_fits_region(x: f32, y: f32, radius: f32) -> bool {
     let size = REGION_SIZE as f32;
     let xm = x % size;
     if xm - radius < 0.0 || xm + radius > size {
@@ -220,6 +220,20 @@ pub fn around_radius(
     radius: f32,
     use_model_size: bool,
 ) -> Vec<WorldObject> {
+    around_radius_entries(server, origin, radius, use_model_size)
+        .into_iter()
+        .map(|(obj, _)| obj)
+        .collect()
+}
+
+/// [`around_radius`] with each object's world position, so a caller that needs the position
+/// (the AI perception scans) does not read it a second time.
+pub(crate) fn around_radius_entries(
+    server: &GameServer,
+    origin: &Target,
+    radius: f32,
+    use_model_size: bool,
+) -> Vec<(WorldObject, PositionAndRotation)> {
     let mut out = Vec::new();
     if radius <= 0.0 {
         return out;
@@ -262,7 +276,7 @@ pub fn around_radius(
             }
             let dy = (p.y - pos.y) * (p.y - pos.y);
             if dx + dy < final_rad {
-                out.push(o);
+                out.push((o, p));
             }
         }
     }

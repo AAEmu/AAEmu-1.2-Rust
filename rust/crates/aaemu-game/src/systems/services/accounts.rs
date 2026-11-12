@@ -279,8 +279,9 @@ pub async fn update_divine_clock(server: &GameServer, account_id: u32, time: u32
 /// Batched online-tracking write: adds `delta` seconds to each account's divine clock, holding
 /// the per-account locks in ascending order (so no lock-order cycle with another batch) so it
 /// cannot interleave with `update_divine_clock`. The same ascending order is the `accounts`
-/// row order the periodic save uses (`db::add_divine_clock_time`).
-pub async fn add_divine_clock_time(server: &GameServer, account_ids: &[u32], delta: u32) {
+/// row order the periodic save uses (`db::add_divine_clock_time`). Returns `false` when the
+/// statement did not commit, so the caller can keep the sample.
+pub async fn add_divine_clock_time(server: &GameServer, account_ids: &[u32], delta: u32) -> bool {
     let mut ids = account_ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
@@ -289,7 +290,7 @@ pub async fn add_divine_clock_time(server: &GameServer, account_ids: &[u32], del
     for l in &locks {
         guards.push(l.lock().await);
     }
-    db::add_divine_clock_time(&server.db, &ids, delta).await;
+    db::add_divine_clock_time(&server.db, &ids, delta).await
 }
 
 /// The cached payment / premium state of an account. Callers that only have an account id
