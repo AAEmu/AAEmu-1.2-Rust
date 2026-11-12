@@ -1,0 +1,22 @@
+[
+    {
+        "World": "instance_burntcastle_armory",
+        "NpcTemplateId": 8962,
+        "Text": "Thanks for testing Raziel's code!"
+    },
+    {
+        "World": "instance_cradle_of_destruction",
+        "NpcTemplateId": 11171,
+        "Text": "Thanks for testing Raziel's code!"
+    },
+    {
+        "World": "instance_cuttingwind_deadmine",
+        "NpcTemplateId": 12188,
+        "Text": "Thanks for testing Raziel's code!"
+    },
+    {
+        "World": "instance_hadir_farm",
+        "NpcTemplateId": 9798,
+        "Text": "Thanks for testing Raziel's code!"
+    }
+]
