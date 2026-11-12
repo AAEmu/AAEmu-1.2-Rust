@@ -1103,6 +1103,11 @@ impl SphereQuestManager {
 /// `SphereDoodadInteract` retry), or `use_skill` accepted the cast; `false` when the normal
 /// cast path refused it (e.g. the character was casting or channeling) and the next area tick
 /// retries while the character stays inside, so a refused cast does not consume the entry.
+///
+/// A skill whose effects are restricted by `target_npc_tag_id` also waits while no matching NPC
+/// is in its area: those trigger NPCs spawn on the ordinary, budget-limited NPC tick, so a
+/// character can enter before one exists. The self-centred area cast would succeed with nothing
+/// to affect and consume the entry, leaving the wave dormant until someone re-enters.
 fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSphere) -> bool {
     let sphere_detail_id = sphere.sphere_detail_id;
     let Some(detail) = server
@@ -1142,6 +1147,18 @@ fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSph
     };
     let skill = crate::systems::skills::state::SkillRun::new(template, 1);
     let caster = WorldObject::from(player.clone());
+    if let Some(tag_ids) = crate::systems::skills::skill::npc_tag_targets(
+        &server.game_data.systems.skills,
+        &skill.template,
+    ) {
+        if !area_has_tagged_npc(server, &caster, &skill, &tag_ids) {
+            tracing::debug!(
+                "SphereSkill {sphere_detail_id}: skill {} waits for a tagged NPC",
+                detail.skill_id
+            );
+            return false;
+        }
+    }
     let mut target = crate::systems::skills::types::SkillCastTarget::Unit(player.obj_id);
     let (result, _) = crate::systems::skills::skill::use_skill(
         server,
@@ -1158,6 +1175,42 @@ fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSph
         player.data().unit.name
     );
     result == crate::systems::skills::types::skill_result::SUCCESS
+}
+
+/// Whether `caster`'s skill area holds an NPC whose template one of `tag_ids` accepts.
+///
+/// The candidates follow `skills::skill::apply_effects`: the skill's area around the caster,
+/// with its area-radius modifier and vertical limit; the effect filter then keeps the NPC
+/// templates of the `tagged_npcs` row (`skills::Data::npcs_by_tag`) used by
+/// `target_npc_tag_id`.
+fn area_has_tagged_npc(
+    server: &GameServer,
+    caster: &WorldObject,
+    skill: &crate::systems::skills::state::SkillRun,
+    tag_ids: &[u32],
+) -> bool {
+    use crate::systems::skills::geometry::{self, Target};
+
+    let template = &skill.template;
+    let radius = crate::systems::skills::skill::apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        crate::models::unit::SkillAttribute::AreaRadius,
+        f64::from(template.target_area_radius),
+    )
+    .max(0.0) as f32;
+    let origin = Target::Obj(caster.clone());
+    let mut units = geometry::around_radius(server, &origin, radius, true);
+    let limit = geometry::area_vertical_limit(radius, template.target_valid_height);
+    let origin_z = geometry::world_pos(server, &origin).z;
+    units.retain(|o| {
+        (geometry::world_pos(server, &Target::Obj(o.clone())).z - origin_z).abs() <= limit
+    });
+    units.iter().any(|o| {
+        o.as_npc()
+            .is_some_and(|n| tag_ids.contains(&n.data().unit.template_id))
+    })
 }
 
 /// `SphereDoodadInteract`: use the authored skill on the doodads the sphere selects. Tried when
