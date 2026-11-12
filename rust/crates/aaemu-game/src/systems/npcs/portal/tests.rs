@@ -1302,7 +1302,15 @@ async fn a_recall_teleport_dismisses_the_owners_mate() {
     let mate = mounted_mate(&server, &me, item_id);
     client.drain();
 
-    use_teleport(&server, &me, 5, 0, teleporter.obj_id);
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_u32(5).write_i32(0).write_bc(teleporter.obj_id);
+    server
+        .handle_frame(
+            &mut client.conn,
+            &encode_raw(1, cs::CSUseTeleportPacket, b.as_bytes()),
+        )
+        .await
+        .unwrap();
     let frames = client.drain();
     let ops = ops(&frames);
     assert!(ops.contains(&sc::SCTeleportUnitPacket), "{ops:x?}");
