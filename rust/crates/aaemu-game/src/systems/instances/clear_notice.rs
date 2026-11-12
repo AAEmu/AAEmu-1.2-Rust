@@ -37,12 +37,22 @@ const NOTICE_KIND: u8 = 3;
 /// skipped.
 pub fn load(data_folder: &Path) -> Vec<ClearNotice> {
     let path = data_folder.join("indun_clear_notices.json");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        tracing::debug!(
-            "Missing file: {} (dungeon clear notices off)",
-            path.display()
-        );
-        return Vec::new();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                "Missing file: {} (dungeon clear notices off)",
+                path.display()
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Cannot read {}: {e} (dungeon clear notices off)",
+                path.display()
+            );
+            return Vec::new();
+        }
     };
     if contents.trim().is_empty() {
         tracing::warn!("File {} is empty.", path.display());
