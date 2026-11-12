@@ -50,11 +50,14 @@ pub mod physics;
 pub mod profile;
 pub mod simulation;
 pub mod skills;
+pub mod tick_view;
 
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
 mod group_tests;
+#[cfg(test)]
+mod perf_tests;
 #[cfg(test)]
 mod real_data_tests;
 

@@ -194,7 +194,7 @@ pub fn in_angle(a: &PositionAndRotation, b: &PositionAndRotation, angle: f32) ->
 }
 
 /// `RadiusFitsCurrentRegion`.
-fn radius_fits_region(x: f32, y: f32, radius: f32) -> bool {
+pub(crate) fn radius_fits_region(x: f32, y: f32, radius: f32) -> bool {
     let size = REGION_SIZE as f32;
     let xm = x % size;
     if xm - radius < 0.0 || xm + radius > size {

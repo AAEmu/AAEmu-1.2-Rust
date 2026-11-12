@@ -623,6 +623,9 @@ fn process_plan(
     delta_ms: i64,
     diag: &mut AiTickDiagnostics,
 ) {
+    // One region/position view per pass: the perception scans of all candidates then read each
+    // region once instead of re-reading it for every NPC (see `tick_view`).
+    let _view = super::tick_view::begin();
     for h in candidates {
         if catch_unwind(AssertUnwindSafe(|| {
             tick_handle(server, h, local, delta_ms, diag)

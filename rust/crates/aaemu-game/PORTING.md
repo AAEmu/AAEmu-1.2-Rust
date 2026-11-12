@@ -4168,6 +4168,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   thread pool is created. Focused tests in `systems/ai/manager.rs` cover the candidate selection
   and batching.
 
+* systems::ai (2026-11-12, AI tick cost; **deviation**): `Behavior.CheckAggression` /
+  `CheckAlert` / `CheckForTalk` call `GetAround` two or three times per NPC tick, and every call
+  re-read the region grid and each object's world position under its lock. With 1450 candidates
+  in the player neighborhoods of the cloud run that made the 100 ms tick take 100-188 ms (the
+  scans were 90% of the per-NPC time). During one AI pass (`process_plan`) `tick_view` now
+  records each queried region's objects and world positions on its first query and later
+  queries filter the recorded entries; the view lives on the pass's thread and is dropped when
+  the pass ends, so skills, packets, physics and GM commands outside the tick still read live
+  positions. The scan rules (region selection, radius, model size, order, filters) are
+  unchanged; the deviation is that within one 100 ms tick every NPC perceives the units at the
+  positions of the first scan of that region in the same pass instead of a slightly different
+  instant per NPC. `units_by_distance` / `players_in_range` also use the positions returned by
+  the cached query instead of reading them a second time, and `GetAround<Unit>` filtering
+  happens on the cached entries. `AAEMU_AI_PROFILE=1` keeps the stage profile available. The
+  reproducible bench `ai::perf_tests::tick_cost_with_1500_active_npcs` (real compact data, 1500
+  NPCs, 50 players, live profile) measures 62.1 ms p50 / 103.2 ms p99 before and 8.6 / 14.0 ms
+  after; test `ai::tick_view::tests::tick_view_matches_the_live_around` pins the cached result
+  to the live one.
+
 * systems::npcs (2026-10-14): the Halloween schedules of the 1.2 compact data are one-off rows
   (`53`/`54`/`55` "Halloween event 12:00/17:00/22:00" 2013-10-16 .. 10-30, `57` "Halloween
   event NPC" 2013-10-16 .. 10-30, `58` "Halloween event craft doodad" 2013-10-16 .. 11-06,

@@ -14,6 +14,7 @@ use crate::data::formulas::FormulaKind;
 use crate::models::movement::{
     GameStanceType, MoveKind, MoveType, MoveTypeActorFlags, MoveTypeFlags, UnitMove,
 };
+use crate::models::transform::PositionAndRotation;
 use crate::models::unit::UnitAttribute;
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::packets::world_objects::SCTargetChangedPacket;
@@ -48,6 +49,11 @@ pub const BUFF_NPC_RETURN: u32 = 550;
 pub fn world_pos(server: &GameServer, obj: &WorldObject) -> Vec3 {
     let p = geometry::world_pos(server, &Target::Obj(obj.clone()));
     Vec3::new(p.x, p.y, p.z)
+}
+
+/// `Transform.World` of an object (position and rotation).
+pub fn world_pos_and_rot(server: &GameServer, obj: &WorldObject) -> PositionAndRotation {
+    geometry::world_pos(server, &Target::Obj(obj.clone()))
 }
 
 /// `Transform.Local.Position`.
@@ -851,7 +857,48 @@ pub fn around(
     use_model_size: bool,
 ) -> Vec<WorldObject> {
     let _profile = super::profile::step(super::profile::Step::Around);
+    if let Some(entries) = super::tick_view::around_entries(server, obj, radius, use_model_size) {
+        return entries.into_iter().map(|(o, _)| o).collect();
+    }
     geometry::around_radius(server, &Target::Obj(obj.clone()), radius, use_model_size)
+}
+
+/// `WorldManager.GetAround<Unit>(obj, radius, useModelSize)` with the units' world positions, so
+/// the perception scans do not read every unit's position a second time. Uses the AI tick view
+/// during a tick (see [`super::tick_view`]) and live positions outside it.
+pub fn units_around(
+    server: &GameServer,
+    obj: &WorldObject,
+    radius: f32,
+    use_model_size: bool,
+) -> Vec<(WorldObject, PositionAndRotation)> {
+    if let Some(mut entries) = super::tick_view::around_entries(server, obj, radius, use_model_size)
+    {
+        entries.retain(|(o, _)| o.is_unit());
+        return entries;
+    }
+    geometry::around_radius(server, &Target::Obj(obj.clone()), radius, use_model_size)
+        .into_iter()
+        .filter(WorldObject::is_unit)
+        .map(|u| {
+            let p = geometry::world_pos(server, &Target::Obj(u.clone()));
+            (u, p)
+        })
+        .collect()
+}
+
+/// `MathUtil.IsFront(a, b, fovScale)` with the already known world positions.
+pub fn is_front_at(a: &PositionAndRotation, b: &PositionAndRotation, fov_scale: f64) -> bool {
+    if fov_scale >= 2.0 {
+        return true;
+    }
+    if fov_scale <= 0.0 {
+        return false;
+    }
+    let angle =
+        f64::from(b.y - a.y).atan2(f64::from(b.x - a.x)) * 180.0 / std::f64::consts::PI % 360.0;
+    let deg = clamp_deg_angle(angle - 90.0 - f64::from(a.rot_z) * 180.0 / std::f64::consts::PI);
+    deg >= -90.0 * fov_scale && deg <= 90.0 * fov_scale
 }
 
 #[cfg(test)]
