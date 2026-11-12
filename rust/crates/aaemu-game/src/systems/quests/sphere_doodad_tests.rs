@@ -570,10 +570,10 @@ async fn a_bridge_reserved_by_another_thread_is_not_advanced() {
 /// a shipped `sphere_area_fill.json` area of the sphere (the skill range narrows it further at
 /// run time). The doodad's start phase must hold an enter `DoodadFuncAreaTrigger` row with a
 /// next phase either way. With the r208022 data and the placement data of this checkout the
-/// answer is empty: the Sharpwind stalactites (5364/5365, families 50011-50022) and the bridge
-/// (5058, family 50000) need their `FamilyId` spawn rows, which are the data lane's placements.
-/// A new pair is a new content effect that `PORTING.md` ("Sharpwind opening chain") has to
-/// list.
+/// dispatch selects the Sharpwind bridge 5058 (sphere 1552, family 50000) and the twelve
+/// stalactites: 5365 under spheres 1836-1843 (families 50011-50018) and 5364 under spheres
+/// 1844-1847 (families 50019-50022). A new pair is a new content effect that `PORTING.md`
+/// ("Sharpwind opening chain") has to list.
 ///
 /// `AAEMU_COMPACT_DB` must name a COPY of the r208022 `compact.sqlite3` (never the client
 /// install): `cargo test -p aaemu-game --lib real_data_sphere_doodad_interact -- --ignored
@@ -685,9 +685,23 @@ fn real_data_sphere_doodad_interact_selection_matches_the_shipped_placements() {
         *counts.entry((*sphere, *id)).or_default() += 1;
     }
     println!("(sphere, doodad template) -> selected placements: {counts:?}");
+    let expected: BTreeMap<(u32, u32), usize> = BTreeMap::from([
+        ((1552, 5058), 1),
+        ((1836, 5365), 1),
+        ((1837, 5365), 1),
+        ((1838, 5365), 1),
+        ((1839, 5365), 1),
+        ((1840, 5365), 1),
+        ((1841, 5365), 1),
+        ((1842, 5365), 1),
+        ((1843, 5365), 1),
+        ((1844, 5364), 1),
+        ((1845, 5364), 1),
+        ((1846, 5364), 1),
+        ((1847, 5364), 1),
+    ]);
     assert_eq!(
-        counts,
-        BTreeMap::new(),
+        counts, expected,
         "the doodads the SphereDoodadInteract dispatch selects changed (a new placement with a \
          FamilyId, or the selection rule): update this expectation and PORTING.md"
     );

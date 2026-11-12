@@ -379,6 +379,10 @@ struct AreaState {
     /// settled yet: tried again on every tick until it acts or the character leaves the area
     /// (see [`dispatch_doodad_interact`]).
     pending_interact: Vec<usize>,
+    /// `SphereSkill` areas (indexes) the character is inside whose enter-edge cast was refused
+    /// (e.g. it was casting or channeling): tried again on every tick until a cast is accepted
+    /// or the character leaves the area (see [`dispatch_sphere_skill`]).
+    pending_skill: Vec<usize>,
 }
 
 /// Minimum interval between two `SCQuestAcceptConditional` offers of the same sphere to the
@@ -713,7 +717,8 @@ impl SphereQuestManager {
     /// `SphereDoodadInteract` casts its authored skill on the doodads inside the area, on entry
     /// and then on every tick while the character stays inside until it has acted (see
     /// [`dispatch_doodad_interact`]). `SphereSkill` casts `sphere_skills.skill_id` with the
-    /// character as caster on the enter edge only (see [`dispatch_sphere_skill`]); the remaining
+    /// character as caster on the enter edge and retries while the character stays inside when
+    /// the cast was refused (see [`dispatch_sphere_skill`]); the remaining
     /// types (SphereSound / SphereBuff) are loaded but have no effect here (a separate content
     /// decision).
     fn tick_area_spheres(&self, server: &GameServer, now: i64) {
@@ -770,6 +775,8 @@ impl SphereQuestManager {
                 let st = states.entry(id).or_default();
                 st.pending_interact
                     .retain(|area| inside.binary_search(area).is_ok());
+                st.pending_skill
+                    .retain(|area| inside.binary_search(area).is_ok());
                 st.inside = inside;
             }
         }
@@ -781,6 +788,8 @@ impl SphereQuestManager {
         // `SphereDoodadInteract` areas to try this tick: the ones entered now and the ones a
         // character stands in whose interaction has not settled yet.
         let mut interact: Vec<(PlayerRef, usize)> = Vec::new();
+        // The same for `SphereSkill`: the enter edge, plus a refused cast while inside.
+        let mut skill: Vec<(PlayerRef, usize)> = Vec::new();
         for (player, area, enter) in events {
             let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
                 continue;
@@ -805,8 +814,7 @@ impl SphereQuestManager {
                 interact.push((player.clone(), area));
             }
             if enter && sphere.sphere_detail_type == "SphereSkill" {
-                // No lock is held across the cast (it takes the character's and the targets').
-                dispatch_sphere_skill(server, &player, sphere);
+                skill.push((player.clone(), area));
             }
         }
         {
@@ -823,6 +831,14 @@ impl SphereQuestManager {
                         interact.push((player.clone(), area));
                     }
                 }
+                for &area in &st.pending_skill {
+                    if !skill
+                        .iter()
+                        .any(|(p, a)| *a == area && p.character_id == player.character_id)
+                    {
+                        skill.push((player.clone(), area));
+                    }
+                }
             }
         }
         for (player, area) in interact {
@@ -836,6 +852,19 @@ impl SphereQuestManager {
             st.pending_interact.retain(|a| *a != area);
             if !settled {
                 st.pending_interact.push(area);
+            }
+        }
+        for (player, area) in skill {
+            let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
+                continue;
+            };
+            // No lock is held across the cast (it takes the character's and the targets').
+            let cast = dispatch_sphere_skill(server, &player, sphere);
+            let mut states = self.area_state.lock().expect("area state poisoned");
+            let st = states.entry(player.character_id).or_default();
+            st.pending_skill.retain(|a| *a != area);
+            if !cast {
+                st.pending_skill.push(area);
             }
         }
         // `SphereAcceptQuest` offers: on entry and when a character already inside becomes
@@ -1068,7 +1097,13 @@ impl SphereQuestManager {
 /// `trigger_condition_id` 3 (`EVERY_N_TIME_AFTER`, 1000 ms) is not used as a period here (it
 /// would re-cast a finished set on every period); the enter edge produces at most one cast per
 /// stay.
-fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSphere) {
+///
+/// Returns whether the enter edge is settled: `true` when there is nothing to cast, the
+/// sphere's requirements do not pass (the entry is evaluated once, unlike the
+/// `SphereDoodadInteract` retry), or `use_skill` accepted the cast; `false` when the normal
+/// cast path refused it (e.g. the character was casting or channeling) and the next area tick
+/// retries while the character stays inside, so a refused cast does not consume the entry.
+fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSphere) -> bool {
     let sphere_detail_id = sphere.sphere_detail_id;
     let Some(detail) = server
         .game_data
@@ -1078,10 +1113,10 @@ fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSph
         .sphere_skills
         .get(sphere_detail_id)
     else {
-        return;
+        return true;
     };
     if detail.skill_id == 0 {
-        return;
+        return true;
     }
     let (id, or) = (sphere.id, sphere.or_unit_reqs);
     if !super::events::with_quests(server, player, None, move |ctx| {
@@ -1089,7 +1124,7 @@ fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSph
     })
     .unwrap_or(false)
     {
-        return;
+        return true;
     }
     let Some(template) = server
         .game_data
@@ -1103,7 +1138,7 @@ fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSph
             sphere_detail_id,
             detail.skill_id
         );
-        return;
+        return true;
     };
     let skill = crate::systems::skills::state::SkillRun::new(template, 1);
     let caster = WorldObject::from(player.clone());
@@ -1122,6 +1157,7 @@ fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSph
         detail.skill_id,
         player.data().unit.name
     );
+    result == crate::systems::skills::types::skill_result::SUCCESS
 }
 
 /// `SphereDoodadInteract`: use the authored skill on the doodads the sphere selects. Tried when

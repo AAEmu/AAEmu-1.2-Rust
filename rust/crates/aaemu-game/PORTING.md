@@ -4817,8 +4817,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   1495 inside the areas of sphere 429, skill 10134, `max_range` 10), whose enter rows
   (`doodad_funcs` 5424 / 10916) lead to a `DoodadFuncFinal` phase. The affected (sphere,
   doodad) pairs are listed by the `#[ignore]`d real-data test below; with the placement data
-  of this checkout it is empty (the bridge 5058 needs `FamilyId` 50000 and the stalactites are
-  not placed yet), so the test is the canary for those rows. Tests:
+  of this checkout it selects the bridge 5058 (sphere 1552, family 50000) and the twelve
+  stalactites (5365 under spheres 1836-1843, families 50011-50018; 5364 under spheres
+  1844-1847, families 50019-50022), so the test is the canary for those rows. Tests:
   `doodad::funcs::tests::area_trigger_func_advances_the_bridge_phase_for_a_player`,
   `quests::sphere_doodad_tests::{crossing_the_bridge_sphere_advances_the_bridge_to_its_broken_phase,
   a_player_outside_the_sphere_does_not_collapse_the_bridge,

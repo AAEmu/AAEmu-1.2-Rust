@@ -24,6 +24,7 @@ use crate::systems::skills::data::effects::BuffEffect;
 use crate::systems::skills::data::{
     BuffTemplate, EffectKind, EffectTemplate, SkillEffect, SkillTemplate,
 };
+use crate::systems::skills::state::{CancelToken, SkillRun, SkillTaskKind, SkillTaskSlot};
 use crate::systems::DataLoadCtx;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{Entity, NpcRef};
@@ -195,6 +196,57 @@ async fn entering_the_sphere_casts_the_skill_on_the_tagged_npc_once() {
     _player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
     server.systems.quests.spheres.tick_at(&server, 1_500);
     assert!(has_buff(&tagged), "a new stay casts the sphere skill again");
+}
+
+/// A character that enters while channeling is refused by the normal cast path
+/// (`skill_cannot_cast_in_channeling`), so the enter edge is not consumed: the sphere retries
+/// on the next area tick and casts once the channel ends, while the character still stands
+/// inside. After the successful cast the stay does not cast again.
+#[tokio::test]
+async fn entering_while_channeling_casts_the_skill_after_the_channel_ends() {
+    let server = test_server_with(data());
+    server.systems.quests.spheres.set_areas(vec![area()]);
+    let client = TestClient::new(&server, 1, 1);
+    let player = player_at(&server, &client, 100.0);
+    let tagged = spawn_npc(&server, 0x200, TRIGGER_TEMPLATE, 104.0);
+
+    // The character is channeling when it crosses into the sphere. The task slot is the state
+    // `use_skill` checks; starting a real channel needs the skills task scheduler, which the
+    // unit fixture does not bind.
+    let channel = SkillRun::new(
+        Arc::new(SkillTemplate {
+            id: 19_999,
+            channeling_time: 10_000,
+            ..SkillTemplate::default()
+        }),
+        1,
+    );
+    player.data().unit.skill_state.skill_task = Some(SkillTaskSlot {
+        kind: SkillTaskKind::EndChanneling { channel_doodad: 0 },
+        skill: channel,
+        cancel: CancelToken::new(),
+        extend_ms: 0,
+    });
+
+    server.systems.quests.spheres.tick_at(&server, 0);
+    assert!(
+        !has_buff(&tagged),
+        "the channel refuses the sphere skill on the enter edge"
+    );
+
+    player.data().unit.skill_state.skill_task = None;
+    server.systems.quests.spheres.tick_at(&server, 500);
+    assert!(
+        has_buff(&tagged),
+        "the refused cast is retried once the channel ends"
+    );
+
+    clear_buff(&tagged);
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert!(
+        !has_buff(&tagged),
+        "a successful cast settles the enter edge"
+    );
 }
 
 /// A character that misses the sphere's `unit_reqs` at the entry is not served later while it
