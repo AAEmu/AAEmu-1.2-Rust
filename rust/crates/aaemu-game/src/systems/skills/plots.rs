@@ -270,19 +270,27 @@ pub(crate) fn stall_next_flush_with(plot_id: u32, event_id: u32, ms: u64) {
 
 #[cfg(test)]
 fn apply_test_flush_stall(tree: &PlotTree, q: &VecDeque<ExecuteItem>) {
-    let mut stall = TEST_FLUSH_STALL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some((plot_id, event_id, ms)) = *stall else {
-        return;
-    };
-    if tree.plot_id == plot_id
-        && q.iter()
-            .any(|(node, _, _)| tree.nodes[*node].event_id == event_id)
-    {
+    // Take the matching stall out under the lock, release it, then sleep: every plot flush in
+    // a test takes this lock, so holding it across the sleep would pause non-matching flushes
+    // in parallel tests too.
+    let ms = {
+        let mut stall = TEST_FLUSH_STALL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((plot_id, event_id, ms)) = *stall else {
+            return;
+        };
+        if tree.plot_id != plot_id
+            || !q
+                .iter()
+                .any(|(node, _, _)| tree.nodes[*node].event_id == event_id)
+        {
+            return;
+        }
         *stall = None;
-        std::thread::sleep(Duration::from_millis(ms));
-    }
+        ms
+    };
+    std::thread::sleep(Duration::from_millis(ms));
 }
 
 /// `PlotTree.ExecuteAsync`.
