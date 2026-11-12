@@ -2182,5 +2182,115 @@
       "Z": 137.3,
       "Yaw": 120.9
     }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 58999 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 684.421,
+      "Y": 630.566,
+      "Z": 145.656,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59008 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 686.317,
+      "Y": 633.423,
+      "Z": 145.656,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59004 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 681.827,
+      "Y": 638.37,
+      "Z": 145.656,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59011 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 683.629,
+      "Y": 635.055,
+      "Z": 145.656,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59006 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 676.083,
+      "Y": 635.165,
+      "Z": 145.656,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59010 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 676.968,
+      "Y": 630.752,
+      "Z": 145.657,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 58994 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 676.466,
+      "Y": 626.528,
+      "Z": 145.657,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59003 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 679.499,
+      "Y": 635.795,
+      "Z": 145.656,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 58991 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 683.498,
+      "Y": 625.839,
+      "Z": 145.657,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59012 NPC 10021",
+    "UnitId": 10021,
+    "Position": {
+      "X": 704.74,
+      "Y": 641.444,
+      "Z": 145.818,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "hadir-start: 10.x level spawner 59009 NPC 9473",
+    "UnitId": 9473,
+    "Position": {
+      "X": 680.718,
+      "Y": 627.622,
+      "Z": 145.657,
+      "Yaw": 0.0
+    }
   }
 ]

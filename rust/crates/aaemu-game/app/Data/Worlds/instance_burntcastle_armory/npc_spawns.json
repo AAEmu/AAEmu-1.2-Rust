@@ -919,5 +919,35 @@
       "Z": 20.538,
       "Yaw": -90.0
     }
+  },
+  {
+    "Title": "burnt-start: 10.x level spawner 65997 NPC 10454",
+    "UnitId": 10454,
+    "Position": {
+      "X": 187.252,
+      "Y": 101.823,
+      "Z": 20.538,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "Title": "burnt-start: 10.x level spawner 65998 NPC 10454",
+    "UnitId": 10454,
+    "Position": {
+      "X": 187.112,
+      "Y": 98.175,
+      "Z": 20.538,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "Title": "burnt-start: 10.x level spawner 65996 NPC 10453",
+    "UnitId": 10453,
+    "Position": {
+      "X": 187.567,
+      "Y": 99.998,
+      "Z": 20.538,
+      "Yaw": 90.0
+    }
   }
 ]

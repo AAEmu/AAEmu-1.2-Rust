@@ -6,7 +6,8 @@
 //! event skills name 74 of the 86 level spawner ids (the sphere 1298/1299 camps 60909-60911,
 //! 61146-61148 and 68235-68240 are 10.x-only effects; see `PORTING.md`). The shipped `npc_spawns.json` therefore needs the
 //! level's event rows (one per referenced spawner id, `NpcSpawnerIds`), the trigger NPCs whose
-//! level spawner is active at start as plain rows, and the scripted doodads of the golem and
+//! level spawner is active at start as plain rows, the start-active skeleton camp (9473 x10) and
+//! Bloodmage (10021) rows the 1.2-era file misses, and the scripted doodads of the golem and
 //! cauldron chains. The event rows are listed first in the file: the loader's duplicate filter
 //! keys on `(UnitId, position)`, and two level spawners (61148, 68236) stand within 2 m of a
 //! kept 1.2-era plain row; an event row after them would be dropped before its spawner
@@ -154,6 +155,24 @@ const TRIGGER_ROWS: &[(u32, f32, f32, f32, f32, u32)] = &[
     (10164, 724.703, 569.151, 136.602, 0.0, 61976),
 ];
 
+/// The eleven start-active level NPCs the 1.2-era rows miss: the ten skeleton-camp 9473 and the
+/// 10021 Bloodmage: `(unit, x, y, z, yaw, level spawner id)`. Compact 10557 / 11113 are
+/// `activation_state = 't'`; the inactive variants 11225 / 11220 are skipped by the loader, and
+/// 10021's NORMAL farm group spawner 13501 stays idle without a schedule (the C# rule).
+const START_ACTIVE_ROWS: &[(u32, f32, f32, f32, f32, u32)] = &[
+    (9473, 684.421, 630.566, 145.656, 0.0, 58999),
+    (9473, 686.317, 633.423, 145.656, 0.0, 59008),
+    (9473, 681.827, 638.37, 145.656, 0.0, 59004),
+    (9473, 683.629, 635.055, 145.656, 0.0, 59011),
+    (9473, 676.083, 635.165, 145.656, 0.0, 59006),
+    (9473, 676.968, 630.752, 145.657, 0.0, 59010),
+    (9473, 676.466, 626.528, 145.657, 0.0, 58994),
+    (9473, 679.499, 635.795, 145.656, 0.0, 59003),
+    (9473, 683.498, 625.839, 145.657, 0.0, 58991),
+    (10021, 704.74, 641.444, 145.818, 0.0, 59012),
+    (9473, 680.718, 627.622, 145.657, 0.0, 59009),
+];
+
 /// The scripted doodads of the Hadir Farm chains (template, x, y, z). 5958 is the
 /// attack-ban guard of the Rotten Flesh Golem, 4143 the Necromancer's Cauldron (skill 16577
 /// spawns 61613 through the farm manager's command set). The two farm exits keep their
@@ -209,7 +228,11 @@ fn event_row_rows(defs: &[NpcSpawnerDef]) -> Vec<(u32, u32)> {
 #[test]
 fn hadir_level_event_spawners_and_trigger_npcs_are_placed_once() {
     let defs = npc_defs();
-    assert_eq!(defs.len(), 214, "86 event + 12 trigger + 116 kept rows");
+    assert_eq!(
+        defs.len(),
+        225,
+        "86 event + 12 trigger + 11 start-active + 116 kept rows"
+    );
 
     let events = event_row_rows(&defs);
     assert_eq!(events.len(), EVENT_SPAWNERS.len(), "event row count");
@@ -250,6 +273,23 @@ fn hadir_level_event_spawners_and_trigger_npcs_are_placed_once() {
         assert_eq!(
             matches, 1,
             "trigger NPC {unit} of level spawner {level_spawner} at ({x}, {y}, {z})"
+        );
+    }
+    for (unit, x, y, z, yaw, level_spawner) in START_ACTIVE_ROWS {
+        let matches = plain
+            .iter()
+            .filter(|d| {
+                let p = &d.base.position;
+                d.base.unit_id == *unit
+                    && (p.x - x).abs() < 0.001
+                    && (p.y - y).abs() < 0.001
+                    && (p.z - z).abs() < 0.001
+                    && (p.yaw - yaw).abs() < 0.001
+            })
+            .count();
+        assert_eq!(
+            matches, 1,
+            "start-active NPC {unit} of level spawner {level_spawner} at ({x}, {y}, {z})"
         );
     }
     // The secret chest 7661 is a doodad (quest-spawns rows), never an NPC row.
@@ -437,12 +477,12 @@ async fn real_compact_db_hadir_instance_loads_the_authored_spawns() {
     server.systems.npcs.spawns.get_or_create(&world);
     let stats = load_world(&server, &conn, INSTANCE_ID);
     eprintln!("hadir load: {stats:?}");
-    assert_eq!(stats.npc_entries, 214);
+    assert_eq!(stats.npc_entries, 225);
     assert_eq!(stats.npc_duplicates, 2, "the two kept 1.2-era duplicates");
     assert_eq!(stats.npc_missing_templates, 0);
     assert_eq!(stats.npc_event_spawners, 86);
-    assert_eq!(stats.npc_spawners, 176);
-    assert_eq!(stats.npc_event_only_spawners_skipped, 102);
+    assert_eq!(stats.npc_spawners, 188);
+    assert_eq!(stats.npc_event_only_spawners_skipped, 113);
     assert_eq!(stats.npc_cutscene_spawners_skipped, 0);
     assert_eq!(
         stats.doodad_entries, 21,
@@ -474,6 +514,58 @@ async fn real_compact_db_hadir_instance_loads_the_authored_spawns() {
             ids.contains(&spawner),
             "trigger NPC {unit} must start from spawner {spawner}, got {ids:?}"
         );
+    }
+
+    // The eleven start-active rows keep their compact spawners at the authored placements:
+    // 9473 keeps the AUTOCREATED 10557 (and skips the inactive 11225); 10021 keeps 11113 and
+    // clones the NORMAL farm group spawner 13501, which stays idle without a schedule.
+    let placements: Vec<_> = m
+        .get_all_spawners()
+        .into_values()
+        .flatten()
+        .filter(|s| s.is_placement())
+        .collect();
+    for (unit, x, y, z, _, level_spawner) in START_ACTIVE_ROWS {
+        let clones: Vec<_> = placements
+            .iter()
+            .filter(|s| {
+                let p = s.position();
+                s.unit_id == *unit
+                    && (p.x - x).abs() < 0.001
+                    && (p.y - y).abs() < 0.001
+                    && (p.z - z).abs() < 0.001
+            })
+            .collect();
+        if *unit == 10021 {
+            let ids: Vec<u32> = clones.iter().map(|s| s.spawner_id).collect();
+            assert!(
+                ids.contains(&11113),
+                "10021 at ({x}, {y}, {z}) keeps spawner 11113, got {ids:?}"
+            );
+            assert!(
+                ids.contains(&13501),
+                "10021 at ({x}, {y}, {z}) clones the farm group spawner 13501, got {ids:?}"
+            );
+            let group = clones
+                .iter()
+                .find(|s| s.spawner_id == 13501)
+                .expect("farm group clone");
+            assert!(
+                !group.is_optimal_spawner(&server),
+                "the NORMAL farm group clone stays idle without a schedule"
+            );
+        } else {
+            assert_eq!(
+                clones.len(),
+                1,
+                "9473 at ({x}, {y}, {z}) keeps one start-active spawner (level {level_spawner})"
+            );
+            assert_eq!(
+                clones[0].spawner_id, 10557,
+                "9473 at ({x}, {y}, {z}) start spawner"
+            );
+            assert!(clones[0].is_optimal_spawner(&server));
+        }
     }
 
     // The scripted doodad templates and their 1.2 start phases.

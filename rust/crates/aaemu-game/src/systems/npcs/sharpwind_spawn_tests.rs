@@ -766,7 +766,7 @@ async fn real_data_start_active_rule_counts_per_world() {
             ("instance_burntcastle_armory".into(), 2, 2, 1),
             ("instance_cradle_of_destruction".into(), 5, 0, 0),
             ("instance_cuttingwind_deadmine".into(), 0, 9, 0),
-            ("instance_hadir_farm".into(), 102, 0, 1),
+            ("instance_hadir_farm".into(), 113, 0, 1),
             ("instance_howling_abyss".into(), 0, 0, 0),
             ("instance_howling_abyss_2".into(), 0, 0, 0),
             ("instance_immortal_isle".into(), 1, 0, 1),

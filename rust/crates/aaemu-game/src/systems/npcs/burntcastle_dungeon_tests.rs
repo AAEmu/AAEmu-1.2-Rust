@@ -11,7 +11,9 @@
 //! a plain `npc_spawns.json` row for the same NPC would either never spawn or (at the same
 //! position) shadow the event row through the loader's duplicate filter. The plain 8962 row
 //! the 2026 spawn import added at the 3rd boss's event-spawner position is therefore gone;
-//! the boss appears through the 66033 event row, as in the level.
+//! the boss appears through the 66033 event row, as in the level. The start-active level NPCs
+//! beside Cruz / Richard whose 1.2-era rows were missing (10454 x2, 10453) are plain rows; the
+//! compact spawners 11604/11603 are `activation_state = 't'` and no skill names them.
 //!
 //! The real-data tests read `AAEMU_COMPACT_DB` like the Sharpwind suites:
 //! `$env:AAEMU_COMPACT_DB = '...\compact.sqlite3'; cargo test -p aaemu-game burntcastle -- --ignored`
@@ -85,6 +87,16 @@ const TRIGGER_NPCS: &[(u32, f32, f32, f32)] = &[
     (10574, 231.196, 311.845, 20.858),
     (10575, 258.364, 279.845, 20.538),
     (10815, 210.269, 304.687, 20.520),
+];
+
+/// The start-active level NPCs next to Cruz / Richard that the 1.2-era rows miss: `(unit, x, y,
+/// z, yaw)`. The 10.x level spawners 65997 / 65998 (10454) and 65996 (10453) are active at
+/// start, and the 1.2 compact spawners 11604 (10454) / 11603 (10453) are
+/// `activation_state = 't'`, so a plain row starts them; no skill names them (no event row).
+const START_ACTIVE_NPCS: &[(u32, f32, f32, f32, f32)] = &[
+    (10454, 187.252, 101.823, 20.538, 90.0),
+    (10454, 187.112, 98.175, 20.538, 90.0),
+    (10453, 187.567, 99.998, 20.538, 90.0),
 ];
 
 /// The five static doodads: `(template, start phase, x, y, z)`.
@@ -168,6 +180,30 @@ fn burnt_scripted_rows_are_placed_once() {
             "NPC {unit} must not have a plain start row"
         );
     }
+    // The start-active level NPCs next to Cruz / Richard are plain rows at their placements.
+    for (unit, x, y, z, yaw) in START_ACTIVE_NPCS {
+        let matching: Vec<&&NpcSpawnerDef> = plain
+            .iter()
+            .filter(|d| {
+                let p = &d.base.position;
+                d.base.unit_id == *unit
+                    && close(p.x, *x)
+                    && close(p.y, *y)
+                    && close(p.z, *z)
+                    && close(p.yaw, *yaw)
+            })
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "start-active NPC {unit} at ({x}, {y}, {z}) once"
+        );
+    }
+    assert_eq!(
+        plain.iter().filter(|d| d.base.unit_id == 10454).count(),
+        2,
+        "both 10454 level placements"
+    );
     // The 1.2-era rows stay (only the 2026 spawn-import 8962 row was replaced by the script).
     for unit in [8960, 12190, 10518, 502, 8839, 3086] {
         assert!(
@@ -384,6 +420,55 @@ async fn real_data_burnt_event_spawners_and_trigger_npcs_resolve() {
             t.z
         );
     }
+
+    // The start-active level NPCs next to Cruz / Richard register their compact spawner clones
+    // (11604 x2, 11603) and spawn at the authored placements.
+    let mut seen = 0;
+    for spawner in m.get_all_spawners().into_values().flatten() {
+        if !spawner.is_placement() || !matches!(spawner.unit_id, 10453 | 10454) {
+            continue;
+        }
+        let p = spawner.position();
+        let expected = START_ACTIVE_NPCS
+            .iter()
+            .find(|row| {
+                row.0 == spawner.unit_id
+                    && close(p.x, row.1)
+                    && close(p.y, row.2)
+                    && close(p.z, row.3)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "unexpected start spawner {} at ({}, {}, {})",
+                    spawner.unit_id, p.x, p.y, p.z
+                )
+            });
+        assert_eq!(
+            spawner.spawner_id,
+            if expected.0 == 10454 { 11604 } else { 11603 },
+            "NPC {} keeps its compact spawner",
+            expected.0
+        );
+        let npc = spawner.force_spawn(&server, 0).expect("start NPC spawns");
+        let t = npc.data().unit.transform;
+        assert!(
+            close(t.x, expected.1) && close(t.y, expected.2) && close(t.z, expected.3),
+            "NPC {} at ({}, {}, {}), got ({}, {}, {})",
+            expected.0,
+            expected.1,
+            expected.2,
+            expected.3,
+            t.x,
+            t.y,
+            t.z
+        );
+        seen += 1;
+    }
+    assert_eq!(
+        seen,
+        START_ACTIVE_NPCS.len(),
+        "all start-active level NPC rows are placed"
+    );
     // The tags the skills filter by resolve to the placed templates.
     for (tag, unit) in [
         (532, 10474),

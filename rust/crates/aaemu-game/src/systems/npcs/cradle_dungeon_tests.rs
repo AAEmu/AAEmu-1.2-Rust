@@ -11,7 +11,9 @@
 //! `level_design/cells/.../doodad.g`), **Inferred** for the 1.2 server (see `PORTING.md`);
 //! templates, spawner ids, skills and NPC tags are 1.2 `compact.sqlite3` data. The blockers are
 //! doodad 5725 (worldgate, `DoodadFuncUse` skill 19616), 5726 (Sprigg's death skill 18670) and
-//! 5762 (Arkanis's death skill 19236, then `DoodadFuncExitIndun`).
+//! 5762 (Arkanis's death skill 19236, then `DoodadFuncExitIndun`). The 15 Carnivore's Egg event
+//! rows are kept although their 1.2 spawn-effect rows have no `effects` row (no 1.2 skill can
+//! trigger them; see the gated data test and `PORTING.md`).
 //!
 //! The synthetic tests run in CI; the real-data tests are gated by `AAEMU_COMPACT_DB` like the
 //! rest of the crate's data tests.
@@ -119,6 +121,14 @@ const PLAIN_ROWS: [(u32, f32, f32, f32); 11] = [
     (11368, 301.289, 737.207, 184.557),
     (11356, 685.530, 755.001, 173.062),
     (11552, 709.579, 744.144, 173.076),
+];
+
+/// The 15 Carnivore's Egg level spawners (the 10.x level has no 88973). Their
+/// `npc_spawner_spawn_effects` rows (588, 591-604) have no 1.2 `effects` row, so no 1.2 skill
+/// reaches them; the event rows stay (see `PORTING.md`).
+const CARNIVORE_EGG_SPAWNERS: &[u32] = &[
+    88966, 88967, 88968, 88969, 88970, 88971, 88972, 88974, 88975, 88976, 88977, 88978, 88979,
+    88980, 88981,
 ];
 
 /// The 45 scripted + interactive doodad rows: template, level family, position (Inferred).
@@ -313,6 +323,37 @@ fn cradle_added_npc_rows_are_placed_once_each() {
             "plain row {unit} at ({x}, {y}, {z})"
         );
     }
+
+    // The 15 Carnivore's Egg event rows are kept even though no 1.2 effect reaches them (their
+    // spawn-effect rows have no `effects` row; see PORTING.md and the gated data test below).
+    let eggs = defs
+        .iter()
+        .filter(|d| {
+            d.npc_spawner_ids.len() == 1
+                && CARNIVORE_EGG_SPAWNERS.contains(&d.npc_spawner_ids[0])
+                && d.base.unit_id == 11162
+        })
+        .count();
+    assert_eq!(
+        eggs,
+        CARNIVORE_EGG_SPAWNERS.len(),
+        "the egg event rows are kept"
+    );
+
+    // The dummy Princess Surya 11555 stays a plain start row: compact template 12794 is its
+    // only 1.2 spawner, and the despawn effect's level id 92695 has no spawn effect, so it
+    // cannot start an event row instead (see PORTING.md).
+    assert_eq!(
+        defs.iter()
+            .filter(|d| d.npc_spawner_ids.is_empty() && d.base.unit_id == 11555)
+            .count(),
+        1,
+        "the dummy Princess Surya start row"
+    );
+    assert!(
+        !defs.iter().any(|d| d.npc_spawner_ids == [92695]),
+        "no event row for the 10.x level spawner 92695"
+    );
 
     // 12166 / 12170 (tags 845 / 844) have inactive level spawners (`activation_state = 'f'`);
     // they must stay event rows, otherwise the dungeon's start-active rule skips the plain row
@@ -531,6 +572,13 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
         2,
         "both 12198 level spawners"
     );
+    // The dummy Princess Surya starts from compact 12794; the level id the despawn effect names
+    // (92695) has no event row, so `GetNpcSpawner(92695)` stays empty (see PORTING.md).
+    assert!(
+        placed.contains(&12794),
+        "dummy Princess Surya start spawner"
+    );
+    assert!(!placed.contains(&92695));
     for spawner in [13467, 13471] {
         assert!(
             !placed.contains(&spawner),
@@ -623,6 +671,96 @@ fn real_compact_db_cradle_scripted_doodad_templates_and_funcs() {
             "group {group} Use {skill}"
         );
     }
+}
+
+/// The 1.2 compact proves why two Cradle residuals are not row mistakes:
+///
+/// * the 15 Carnivore's Egg spawn-effect rows (588, 591-604) have no `effects` row, so no 1.2
+///   skill or buff trigger can reach them; the event rows stay for a future data fix;
+/// * skill 19707's `NpcSpawnerDespawnEffect` (row 35) names the 10.x level spawner 92695, which
+///   is not a compact spawner and has no spawn effect; the 1.2 start-active template for 11555
+///   is 12794, so the dummy Princess Surya stays after the moving princess appears.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+fn real_compact_db_cradle_egg_and_surya_gaps_are_the_1_2_data_shape() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn = conn_of(&path);
+
+    let mut effect_rows = Vec::new();
+    for spawner in CARNIVORE_EGG_SPAWNERS {
+        let id: u32 = conn
+            .query_row(
+                "SELECT id FROM npc_spawner_spawn_effects WHERE spawner_id = ?1",
+                [spawner],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| panic!("npc_spawner_spawn_effects row for spawner {spawner}"));
+        effect_rows.push(id);
+    }
+    effect_rows.sort_unstable();
+    assert_eq!(
+        effect_rows,
+        vec![588, 591, 592, 593, 594, 595, 596, 597, 598, 599, 600, 601, 602, 603, 604],
+        "the egg spawn-effect rows"
+    );
+    for id in effect_rows {
+        let refs: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM effects \
+                 WHERE actual_type = 'NpcSpawnerSpawnEffect' AND actual_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            refs, 0,
+            "npc_spawner_spawn_effects {id} has no 1.2 effects row"
+        );
+    }
+
+    let despawn: u32 = conn
+        .query_row(
+            "SELECT spawner_id FROM npc_spawner_despawn_effects WHERE id = 35",
+            [],
+            |r| r.get(0),
+        )
+        .expect("despawn effect 35");
+    assert_eq!(despawn, 92695, "skill 19707 despawns the level spawner id");
+    let level_row: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM npc_spawners WHERE id = 92695",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        level_row, 0,
+        "92695 is a 10.x level spawner id, not a 1.2 compact template"
+    );
+    let spawn_effect: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM npc_spawner_spawn_effects WHERE spawner_id = 92695",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        spawn_effect, 0,
+        "no 1.2 spawn effect can start an event row 92695 at instance start"
+    );
+    let compact: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM npc_spawners WHERE id = 12794 AND activation_state = 't'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        compact, 1,
+        "11555's 1.2 start-active compact template is 12794"
+    );
 }
 
 /// Siranus's room: the entry sphere casts 19666, whose `NpcControlEffect` tag 915 commands the

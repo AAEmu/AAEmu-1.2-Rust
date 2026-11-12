@@ -5082,7 +5082,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `NpcSpawnerSpawnEffect` / `NpcControlEffect` lookups found no spawner / tag target) and the
   worldgate, gate and exit doodads were missing. `instance_cradle_of_destruction/npc_spawns.json`
   now carries the 36 event spawner rows (`NpcSpawnerIds` = the level `spawnerId` the effect
-  names: Carnivore's Eggs 88966-88981, statues 88999-89002, Metamoze summons 92250/92257/
+  names: Carnivore's Eggs 88966-88981 - kept although their `npc_spawner_spawn_effects` rows
+  588/591-604 have no `effects` row in the 1.2 compact, so no 1.2 skill can trigger them (see
+  open item (a)); statues 88999-89002; Metamoze summons 92250/92257/
   93513/93593, Sprigg's gate squad 96069/96253/96256, the Siranus room 96271-96274 and
   96372-96374, and Arkanis's 96467-96470), the seven `NpcControlEffect` tag targets as plain
   rows (12157 tag 830, 11268 tag 685, 12180 tag 915, 12200 tag 852, 12198 x2 and 12199 tag
@@ -5098,11 +5100,17 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   1.2-era doodad rows (the four 5257 without families, three 5252, eighteen 5880, two 5549,
   five 5516) are kept: the audit does not prove them wrong. **Open items (reported, not
   changed):** (a) spawner ids 104053/104060 (skill 20189 on statue 11184) exist in the effect
-  table but have no placement in this world's level, so no event row was invented; (b) skill
-  19707 despawns level spawner 92695 (the dummy Princess Surya 11555) but a plain-row placement
-  registers the compact template id (12794), so `GetNpcSpawner(92695)` does not find it and the
-  dummy stays after the moving princess spawns; (c) Sprigg's command set 222 begins with
-  `FollowPath` rows, which an event-spawned Kuwon cannot run without a simulation, so the gate
+  table but have no placement in this world's level, so no event row was invented; the 15
+  Carnivore's Egg rows are likewise dormant in 1.2 (their `npc_spawner_spawn_effects` rows
+  588/591-604 have no `effects` row, so nothing casts them; kept for a future data fix);
+  (b) skill 19707's `NpcSpawnerDespawnEffect` (row 35) despawns the 10.x level spawner 92695
+  (the dummy Princess Surya 11555), but a plain-row placement registers the compact template id
+  (12794), so `GetNpcSpawner(92695)` does not find it and the dummy stays after the moving
+  princess spawns. No data-only fix exists: `GetNpcSpawner` only indexes event spawners, and no
+  1.2 spawn effect names 92695, so an event row [92695] could never start the dummy at instance
+  start; it would only drop the start placement. A correct fix is code (despawn by the plain
+  spawner's level id) or an owner decision, not a spawn-file edit; (c) Sprigg's command set 222
+  begins with `FollowPath` rows, which an event-spawned Kuwon cannot run without a simulation, so the gate
   opens and Kuwon spawns but the two soldiers' full scene is not reproduced (the Siranus room
   proves the sphere -> command set -> spawner chain). Tests: `npcs::cradle_dungeon_tests`
   (`cradle_added_doodad_rows_are_placed_once_each`, `cradle_added_npc_rows_are_placed_once_each`
@@ -5123,8 +5131,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   rows (`NpcSpawnerIds` = the level spawnerId of every `NpcSpawnerSpawnEffect` the chains name,
   e.g. 61979-62018 for the six skeleton camps, 68521-68527/68597 for the Velarre hall,
   62019/68524/68525/68669/68671/68672 for the boss-death cleanup slaves), and the 12 plain rows
-  of the trigger NPCs whose level spawner is active at start (10067 x2, 10068 x2, 10076 x4,
-  10164 x3, 13851 x1). The 116 shipped 1.2-era rows are kept (two of them are within 2 m of each
+   of the trigger NPCs whose level spawner is active at start (10067 x2, 10068 x2, 10076 x4,
+  10164 x3, 13851 x1). **Follow-up (same day):** the start-active skeleton camp (9473 x10 at
+  the level spawners 58991-59011) and the 10021 Bloodmage (59012) that had no row are plain
+  rows at their level placements (Inferred); compact 10557/11113 are `activation_state = 't'`
+  and the inactive 11225/11220 variants are skipped by the loader. The 10021 row also clones
+  the NORMAL farm group spawner 13501, which stays idle without a schedule, as for the other
+  farm members. The 116 shipped 1.2-era rows are kept (two of them are within 2 m of each
   other and stay skipped as before). **Event rows are listed first in the file:** the 10.x level
   spawners 61148 and 68236 stand within 2 m of kept plain 9480/9481 rows, and the loader's
   duplicate filter keys on `(UnitId, position)`; event entries never feed that position table,
@@ -5144,8 +5157,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_hadir_spheres_run_the_buff_trigger_chains` (sphere 1300 -> buff 2931 -> spawners
   61979-61988; sphere 1308 -> buff 2939 -> 68521-68523) and
   `real_data_hadir_golem_death_spawns_the_cleanup_slaves` (skill 17608 -> 68524/68525/62019).
-  The start-active conformance snapshot (`instance_hadir_farm` 102 'f' / 0 cutscene / 1 row with
-  only event spawners) is unchanged.
+  The start-active conformance snapshot (`instance_hadir_farm`) is now 113 `'f'` skips / 0
+  cutscene / 1 row with only event spawners: the eleven new rows each skip one inactive variant;
+  the shared Sharpwind snapshot was updated deliberately.
   **Open item (reported, not changed):** the 12 event rows for 60909-60911, 61146-61148 and
   68235-68240 (the sphere 1298/1299 camps via skills 16726/16727) have no 1.2 producer: their
   `npc_spawner_spawn_effects` rows exist, but the 1.2 `compact.sqlite3` has no `skill_effects`
