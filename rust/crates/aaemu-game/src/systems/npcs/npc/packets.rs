@@ -398,15 +398,9 @@ impl ClientPacket for CSStartInteractionPacket {
                 // does not gate the send, so the server refuses a forged far interaction. The
                 // client gets nothing: no error message is evidenced.
                 if server.config.interaction.npc_reach_check {
-                    use crate::systems::skills::geometry::{distance_to, Target};
-                    let reach = crate::systems::npcs::config::NPC_INTERACTION_REACH_METERS
-                        + server.config.interaction.npc_reach_tolerance_meters;
-                    let distance = distance_to(
-                        server,
-                        &Target::Obj(WorldObject::from(&me)),
-                        &Target::Obj(WorldObject::from(&npc)),
-                        true,
-                    );
+                    let reach = super::reach::interaction_reach(server);
+                    let distance =
+                        super::reach::interaction_distance(server, &me, &WorldObject::from(&npc));
                     if distance > reach {
                         tracing::debug!(
                             "StartInteraction refused: npc {} is {:.2} m away (reach {:.2} m)",

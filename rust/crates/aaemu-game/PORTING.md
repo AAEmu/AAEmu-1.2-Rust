@@ -582,7 +582,7 @@ connected by `systems::economy::wiring`).
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. **C# PR #1488 (2026-11-08):** a loot row whose item template is missing (185 of the 13 823 1.2 `loots` rows) is skipped at debug level instead of aborting the pack, on the corpse path (`generate_pack_v2` -> `retain_known_items`), the shared player-pack path (`generate_pack_for_player`: item use, `DoodadFuncLootPack`, fishing) and `give_loot_pack`; a quest reward item without a template (282 `quest_act_supply_items` rows) is filtered out of the reward pool once in `distribute_rewards` so it no longer counts against the free-slot check (the rest of the items, exp and copper still pay out), and the fish conversion lottery filters such rows before its roll instead of building an `Item` with an unknown template. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed`, recipe learning (`item_recipes`, `train_craft_effects`) | `systems/economy/{craft,craft_data,craft_learning}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. `TrainCraftEffect` teaches `item_recipes[source item]` (or the effect's craft without a source item), persisted in `character_crafts`; `Crafting.RequireLearnedRecipes` (default off) gates execution. |
-| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`; a multi-pack NPC sells the union of all its packs. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
+| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`; a multi-pack NPC sells the union of all its packs. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within the interaction reach (3 m from the shape plus the interaction tolerance, see the store-range entry), lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data,mail_system}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. `/mail admin` sends an `ADMIN` system letter to an online or offline character. `quest_mails` / `quest_mail_attachments` are loaded; `SCQuestMailSentPacket` (0x150) is defined but never sent (trigger capture-pending, see the mail-leftovers deviation). Retention follows the client's `mail_guide` (5/30 normal, 5/90 system, configurable in `Configurations/Mail.json`; system mail with unclaimed attachments is kept, player attachments are returned, REGISTERED/deleted-sender escrow is kept); the level-10 send gate and the 3-repeat limit are enforced (see the 2026-11-08 mail bullets below). |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids); with `hudAuctionButton` (feature bit 81) on, the 1.2 client's HUD button sends them away from an auctioneer and they are accepted without one (see the auction HUD-button deviation). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. Cancel reasons and the death / zone-change / movement cancels are in the trade-cancel note below. |
@@ -2836,7 +2836,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   interaction object; `CSBuyItems` accepts goods only from a pack of the interacting NPC (every
   `merchants` row, the client's union) or the doodad's `DoodadFuncStoreUi` pack (the C# validated
   only the NPC's last pack and sold any template through a doodad); `CSSellItems` requires a
-  merchant within 3 m, lists each item once and pays only for items actually moved to buy-back
+  merchant within the interaction reach (see the store-range entry below), lists each item once
+  and pays only for items actually moved to buy-back
   (the C# paid repeated entries and failed moves, with
   wrapping arithmetic); auction requests require an auctioneer NPC (`auctioneer` template flag)
   named by the packet ids or the current interaction object within 5 m (lifted while
@@ -4965,7 +4966,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy (doodad purchase, 2026-11-03): `CSBuyCoinItemPacket` names a `doodad_funcs`
   row (`bc objId` + `u32 funcId`; writer `FUN_397bae00`) and now only runs a
   `DoodadFuncPurchase` of the doodad's current phase that is priced in a coin item
-  (`coin_item_id > 0`, `coin_count >= 1`) within the 3 m doodad store range; the phase check and
+  (`coin_item_id > 0`, `coin_count >= 1`) within the store window's reach (see the store-range
+  entry); the phase check and
   the purchase run under the doodad's phase-operation guard. `FUN_393b80d0`
   (`x2game.dll.c:774526`) opens a purchase dialog in both branches: the money form (vtable
   `399d3158`) when the purchase's coin item is the sentinel or its coin count is below one, the
@@ -4985,6 +4987,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   e.g. `doodad_funcs.id` 10159 -> group 11449); the C# never advanced because
   `DoodadFuncPurchase.Use` set no `ToNextPhase` and the coin packet called the template
   directly. **Deviation:** that advance is added behaviour, not a C# port.
+* systems::economy (store range, 2026-11-12): the 1.2 client opens and keeps the store window
+  within 3.0 m of the NPC's shape plus the configured tolerance (`FUN_393bef10` /
+  `FUN_3932a3b0`, `sqrt(9.0)`; the `CSStartInteraction` reach), but `CSBuyItems` (NPC goods,
+  buy-back and every currency: money, honour, vocation), `CSSellItems` and the
+  `CSBuyCoinItemPacket` doodad purchase checked 3 m centre-to-centre in 2D. A large merchant's
+  window stayed open while the transactions answered `TOO_FAR_AWAY` (tester report). All of
+  them now use `systems::npcs::npc::reach::within_interaction_reach`, the same shape-edge
+  `skills::geometry::distance_to` and reach as the window open check; a doodad has no actor
+  model, so its placement radius (`sim_radius`) stands in for its edge. The C# buy check was a
+  flat 3 m centre distance and its `CSSellItems` never checked distance, so this is a
+  **Deviation** for client parity. `CSListSoldItem` only lists (the buy-back purchase itself
+  goes through `CSBuyItems`), the priest blessing keeps its own 5 m shape check and the
+  specialty pack sale keeps the C# 2.5 m centre check; loyalty is the cash shop (no NPC).
+  Tests: `shop_transactions_share_the_interaction_window_reach` (a 2 m-radius merchant at 4 m
+  centre: window, buy, sell and buy-back pass; at 10 m the window, buy and sell refuse) and
+  `doodad_shop_buy_uses_the_interaction_window_reach` (a 2 m-radius stall at 4 m centre).
 * systems::economy (shop limits, 2026-11-03): the `DoodadFuncPurchase` path claims the purchase
   limit, debits the coins and grants the item as three separate steps; they share the economy
   operation scope but not one `ItemTxn`, so a crash between them can lose the coin and the
