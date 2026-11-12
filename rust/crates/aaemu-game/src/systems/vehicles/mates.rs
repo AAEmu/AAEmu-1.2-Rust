@@ -686,14 +686,18 @@ pub fn remove_active_mate_and_despawn(server: &GameServer, owner: &PlayerRef, tl
     despawn_mate_ref(server, owner, &mate);
 }
 
-/// Saves a mate's live state into its `mates` row and despawns it. The mate is no longer in the
-/// manager's active list (`replace` or `remove` took it out), so this must not look it up there.
-fn despawn_mate_ref(server: &GameServer, owner: &PlayerRef, mate: &MateRef) {
-    if mate.data().owner_obj_id != owner.obj_id {
-        return;
-    }
-    let owner_id = owner.data().id;
-    let tl_id = u32::from(mate.data().unit.tl_id);
+/// The live `mates` row fields a despawn copies before the spawn is deleted.
+struct MateLiveState {
+    item_id: u64,
+    hp: i32,
+    level: u8,
+    experience: i32,
+}
+
+/// Copies a live mate's pools / progress into its `mates` row (`CharacterMates.Save`). Every
+/// path that despawns an owned mate runs this first, so a teleport, portal, logout or death
+/// never leaves stale HP/MP behind for the next summon to restore.
+fn save_mate_live_state(server: &GameServer, owner_id: u32, mate: &MateRef) -> MateLiveState {
     let snapshot = {
         let d = mate.data();
         (
@@ -717,16 +721,37 @@ fn despawn_mate_ref(server: &GameServer, owner: &PlayerRef, mate: &MateRef) {
             db.updated_at = chrono::Utc::now().naive_utc();
         }
     });
-    if snapshot.1 <= 0 {
-        // Idempotent: the death hook already flagged the item and told the client.
-        record_mate_death(server, owner, snapshot.0, snapshot.3, snapshot.4);
+    MateLiveState {
+        item_id: snapshot.0,
+        hp: snapshot.1,
+        level: snapshot.3,
+        experience: snapshot.4,
     }
-    let instance = owner.data().unit.transform.instance_id;
+}
+
+/// The one despawn of an owned mate: saves its live state, unmounts its passengers and deletes
+/// it. `owner` is passed when the character is still reachable, so a mate that died without the
+/// death hook reaching it still gets its summon item flagged (idempotent, see
+/// [`record_mate_death`]).
+fn despawn_owned_mate(
+    server: &GameServer,
+    owner_id: u32,
+    instance_id: u32,
+    owner: Option<&PlayerRef>,
+    mate: &MateRef,
+) {
+    let saved = save_mate_live_state(server, owner_id, mate);
+    if saved.hp <= 0 {
+        if let Some(owner) = owner {
+            record_mate_death(server, owner, saved.item_id, saved.level, saved.experience);
+        }
+    }
+    let tl_id = u32::from(mate.data().unit.tl_id);
     let passengers = mate.data().passengers.clone();
     for (point, _) in &passengers {
         unmount_mate_by(
             server,
-            Some(instance),
+            Some(instance_id),
             tl_id,
             *point,
             attach_reason::SLAVE_BINDING,
@@ -734,16 +759,30 @@ fn despawn_mate_ref(server: &GameServer, owner: &PlayerRef, mate: &MateRef) {
     }
     delete_mate(server, mate);
     tracing::debug!(
-        "Mount removed. ownerObjId: {}, tlId: {tl_id}, mateObjId: {}",
-        owner.obj_id,
+        "Mount removed. ownerId: {owner_id}, tlId: {tl_id}, mateObjId: {}",
         mate.obj_id
     );
 }
 
+/// Saves a mate's live state into its `mates` row and despawns it. The mate is no longer in the
+/// manager's active list (`replace` or `remove` took it out), so this must not look it up there.
+fn despawn_mate_ref(server: &GameServer, owner: &PlayerRef, mate: &MateRef) {
+    if mate.data().owner_obj_id != owner.obj_id {
+        return;
+    }
+    // Copy the owner fields before the despawn: a `owner.data()` guard in argument position
+    // would live until the end of the call and `world.delete` re-locks the same player data.
+    let (owner_id, instance) = {
+        let c = owner.data();
+        (c.id, c.unit.transform.instance_id)
+    };
+    despawn_owned_mate(server, owner_id, instance, Some(owner), mate);
+}
+
 /// `RemoveAndDespawnAllActiveOwnedMates(character)` of one instance. The active list is keyed by
 /// the character id (as `GetActiveMates`), so exactly that entry is removed once its mates were
-/// despawned. Deviation: the C# removed the entries by `OwnerObjId` and left the character's
-/// entry (the deleted mates stayed listed).
+/// saved and despawned ([`despawn_owned_mate`]). Deviation: the C# removed the entries by
+/// `OwnerObjId` and left the character's entry (the deleted mates stayed listed).
 pub fn remove_and_despawn_all_active_owned_mates(
     server: &GameServer,
     instance_id: u32,
@@ -751,20 +790,15 @@ pub fn remove_and_despawn_all_active_owned_mates(
 ) {
     let manager = server.systems.vehicles.mates.get(instance_id);
     for mate in manager.get_active_mates(character_id) {
-        let (tl, passengers) = {
-            let d = mate.data();
-            (u32::from(d.unit.tl_id), d.passengers.clone())
-        };
-        for (point, _) in &passengers {
-            unmount_mate_by(
-                server,
-                Some(instance_id),
-                tl,
-                *point,
-                attach_reason::SLAVE_BINDING,
-            );
-        }
-        delete_mate(server, &mate);
+        // The character is still in the world on every call that has a live session (teleport,
+        // portal, logout, disconnect, dungeon entry); the select-character cleanup runs after
+        // the new entry exists. Its obj id may differ from the old mate's owner, so only the
+        // death record needs the match; the state save is keyed by the character id.
+        let owner = server
+            .world
+            .character_by_id(character_id)
+            .filter(|p| p.obj_id == mate.data().owner_obj_id);
+        despawn_owned_mate(server, character_id, instance_id, owner.as_ref(), &mate);
     }
     manager.remove_key(character_id);
 }

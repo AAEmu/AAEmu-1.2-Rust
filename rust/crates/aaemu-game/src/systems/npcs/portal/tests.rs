@@ -556,6 +556,70 @@ async fn a_same_instance_portal_dismisses_the_owners_mate() {
     assert_eq!(me.data().unit.transform.x, 100.0);
 }
 
+/// A teleport dismisses the mate, but the row must keep the pools the mate had at that moment
+/// (the persist path of `DespawnMate`, `despawn_mate_ref`): the next summon restores the
+/// damaged HP and drained MP instead of the values from before the fight.
+#[tokio::test]
+async fn a_teleport_saves_the_mates_live_pools_before_dismissing_it() {
+    let server = test_server_with(data());
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    let portal = portal_npc(&server, (101.0, 101.0));
+    let item_id = give_summon_item(&server, &me, 0x7102);
+    let mate = mounted_mate(&server, &me, item_id);
+    let (max_hp, max_mp) = {
+        let d = mate.data();
+        (d.unit.max_hp, d.unit.max_mp)
+    };
+    assert!(
+        max_hp > 2 && max_mp > 3,
+        "the test mate needs room to be damaged (hp {max_hp}, mp {max_mp})"
+    );
+    let (hp, mp) = (max_hp / 2, max_mp / 3);
+    {
+        let mut d = mate.data();
+        d.unit.hp = hp;
+        d.unit.mp = mp;
+    }
+    client.drain();
+
+    request_portal(&server, &mut client, portal.obj_id, false).await;
+    assert_mate_gone(&server, &me, &mate);
+
+    // The row was saved before the delete, not left at the values of the previous despawn.
+    let row = server
+        .systems
+        .vehicles
+        .mates
+        .character_mates(1)
+        .unwrap()
+        .get(item_id)
+        .cloned()
+        .expect("mate row");
+    assert_eq!(
+        (row.hp, row.mp),
+        (hp, mp),
+        "the teleport must save the live pools"
+    );
+    client.drain();
+
+    // Resummoning restores the saved pools; the pre-teleport damage and drain survive.
+    crate::systems::vehicles::mates::spawn_mount(&server, &me, item_id);
+    let again =
+        crate::systems::vehicles::mates::first_active_mate(&server, &me).expect("re-summoned mate");
+    let (hp_again, mp_again) = {
+        let d = again.data();
+        (d.unit.hp, d.unit.mp)
+    };
+    assert_eq!((hp_again, mp_again), (hp, mp));
+}
+
 #[tokio::test]
 async fn use_portal_needs_the_character_within_the_use_range() {
     let server = test_server_with(data());
