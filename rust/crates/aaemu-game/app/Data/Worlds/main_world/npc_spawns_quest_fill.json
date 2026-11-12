@@ -3858,5 +3858,145 @@
       "Z": 206.391,
       "Yaw": 200.0
     }
+  },
+  {
+    "UnitId": 527,
+    "Title": "Goblin Fighter",
+    "Position": {
+      "X": 10548.683,
+      "Y": 11752.29,
+      "Z": 162.23685,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 4946,
+    "Title": "Unknown Wizard",
+    "Position": {
+      "X": 11253.278,
+      "Y": 11382.39,
+      "Z": 133.0489,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2352,
+    "Title": "Seafolk Wizard",
+    "Position": {
+      "X": 15488.32,
+      "Y": 11520.91,
+      "Z": 93.3608,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2354,
+    "Title": "Seafolk Healer",
+    "Position": {
+      "X": 15570.91,
+      "Y": 11498.07,
+      "Z": 78.54807,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2357,
+    "Title": "Seafolk Wizard",
+    "Position": {
+      "X": 15536.16,
+      "Y": 11490.74,
+      "Z": 78.110565,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2483,
+    "Title": "Nuzod",
+    "Position": {
+      "X": 21416.85,
+      "Y": 7385.75,
+      "Z": 234.86296,
+      "Yaw": 2.8125
+    }
+  },
+  {
+    "UnitId": 3105,
+    "Title": "Vicious Treant",
+    "Position": {
+      "X": 23469.77,
+      "Y": 11270.21,
+      "Z": 315.9892,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 3106,
+    "Title": "Silent Treant",
+    "Position": {
+      "X": 23521.49,
+      "Y": 11257.1,
+      "Z": 321.8799,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 3478,
+    "Title": "Four Fingers Bladeslinger",
+    "Position": {
+      "X": 13851.72,
+      "Y": 14482.15,
+      "Z": 120.79872,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1763,
+    "Title": "Broken Corpse Warrior",
+    "Position": {
+      "X": 12554.296,
+      "Y": 10531.682,
+      "Z": 116.43928,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 732,
+    "Title": "Unhinged Stone Golem",
+    "Position": {
+      "X": 12451.787,
+      "Y": 14091.77,
+      "Z": 119.5487,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2918,
+    "Title": "Seafolk Javelineer",
+    "Position": {
+      "X": 15765.35,
+      "Y": 8446.72,
+      "Z": 78.98558,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2919,
+    "Title": "Seafolk Illusionist",
+    "Position": {
+      "X": 15744.41,
+      "Y": 8389.17,
+      "Z": 79.29809,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 2941,
+    "Title": "Seafolk Healer",
+    "Position": {
+      "X": 15707.99,
+      "Y": 8333.49,
+      "Z": 84.423164,
+      "Yaw": 0.0
+    }
   }
 ]
