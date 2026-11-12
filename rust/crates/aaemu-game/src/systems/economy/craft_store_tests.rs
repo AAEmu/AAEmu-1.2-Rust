@@ -2274,29 +2274,43 @@ fn interaction_body(npc: u32, obj: u32) -> Vec<u8> {
 
 /// Tester report: the store window opens within 3 m of the NPC's shape plus the 2 m tolerance,
 /// but buy/sell/buy-back compared centres at 3 m, so a large merchant refused every transaction
-/// while its window stayed open. A 2 m-radius merchant at 4 m centre (2 m from the shape edge):
-/// the window opens and buy, sell and buy-back succeed; at 10 m (8 m edge) the window stays shut
-/// and buy and sell are refused.
+/// while its window stayed open. A 2 m-radius merchant beyond the flat centre reach but inside
+/// the shape reach: the window opens and buy, sell and buy-back succeed; just beyond the shape
+/// reach the window stays shut and buy and sell are refused.
 #[tokio::test]
 async fn shop_transactions_share_the_interaction_window_reach() {
     const BIG_MODEL: u32 = 9001;
+    const NPC_RADIUS: f32 = 2.0;
     let mut d = data();
-    d.systems.skills.model_radii.insert(BIG_MODEL, 2.0);
+    d.systems.skills.model_radii.insert(BIG_MODEL, NPC_RADIUS);
     let mut w = catalog_world(d, &[(STACK, 0)]);
+    // Compute from the configured reach: the 3 m client reach plus the interaction tolerance.
+    let reach = crate::systems::npcs::npc::reach::interaction_reach(&w.server);
+    // Edge distance = centre - NPC radius (the player model has no actor radius in this data).
+    let success_at = 100.0 + reach + 1.0;
+    let refusal_at = 100.0 + reach + 3.0;
+    assert!(
+        success_at - 100.0 > reach && success_at - 100.0 - NPC_RADIUS <= reach,
+        "the success case must need the shape edge, not a flat centre reach"
+    );
+    assert!(
+        refusal_at - 100.0 - NPC_RADIUS > reach,
+        "the refusal case must be beyond the shape reach"
+    );
     {
         let world = w.server.world.world(0).unwrap();
         let npc = world.npc(MERCHANT_NPC).unwrap();
         let mut n = npc.data();
         n.unit.model_id = BIG_MODEL;
         n.unit.scale = 1.0;
-        n.unit.transform.set_xyz(104.0, 100.0, 100.0);
+        n.unit.transform.set_xyz(success_at, 100.0, 100.0);
     }
     w.a.drain();
     w.b.drain();
     let pa = w.pa.clone();
     pa.data().money = 1000;
 
-    // The window opens at 4 m centre (the client measures the shape edge, 2 m).
+    // The window opens at the centre distance, measured from the shape edge.
     run::<CSStartInteractionPacket>(&mut w, 0, &interaction_body(MERCHANT_NPC, 0x100));
     assert_eq!(w.a.drain_ops(), vec![sc::SCNpcInteractionSkillListPacket]);
 
@@ -2321,7 +2335,7 @@ async fn shop_transactions_share_the_interaction_window_reach() {
     assert_eq!(pa.data().money, 970);
     w.a.drain();
 
-    // 10 m centre (8 m from the shape edge) is outside the 5 m reach.
+    // Just beyond the shape reach: the window stays shut and buy and sell are refused.
     {
         let world = w.server.world.world(0).unwrap();
         world
@@ -2330,7 +2344,7 @@ async fn shop_transactions_share_the_interaction_window_reach() {
             .data()
             .unit
             .transform
-            .set_xyz(110.0, 100.0, 100.0);
+            .set_xyz(refusal_at, 100.0, 100.0);
     }
     run::<CSStartInteractionPacket>(&mut w, 0, &interaction_body(MERCHANT_NPC, 0x100));
     assert!(w.a.drain().is_empty());
@@ -2399,25 +2413,47 @@ async fn real_compact_db_merchant_1000_sells_within_the_interaction_reach() {
 }
 
 /// A doodad shop is bought from its own open store window too: its placement radius stands in
-/// for the shape edge, so a 2 m-radius stall at 4 m centre (2 m edge) sells, where the old 3 m
-/// centre check refused.
+/// for the shape edge. Beyond the flat centre reach but inside the shape reach the stall sells;
+/// just beyond the shape reach the buy is refused.
 #[tokio::test]
 async fn doodad_shop_buy_uses_the_interaction_window_reach() {
+    const STALL_RADIUS: f32 = 2.0;
     let mut d = with_doodad_shop(7);
     d.systems.npcs.doodad.templates.insert(
         1234,
         DoodadTemplate {
             id: 1234,
-            sim_radius: 2000,
+            sim_radius: (STALL_RADIUS * 1000.0) as i32,
             ..Default::default()
         },
     );
     let mut w = world_with_data(d);
     w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
-    spawn_doodad(&mut w, 0x600, 1234, 42, 104.0);
+    let reach = crate::systems::npcs::npc::reach::interaction_reach(&w.server);
+    let success_at = 100.0 + reach + 1.0;
+    let refusal_at = 100.0 + reach + 3.0;
+    assert!(
+        success_at - 100.0 > reach && success_at - 100.0 - STALL_RADIUS <= reach,
+        "the success case must need the placement radius, not a flat centre reach"
+    );
+    assert!(
+        refusal_at - 100.0 - STALL_RADIUS > reach,
+        "the refusal case must be beyond the shape reach"
+    );
+    let stall = spawn_doodad(&mut w, 0x600, 1234, 42, success_at);
     let pa = w.pa.clone();
     pa.data().money = 1000;
     run::<CSBuyItemsPacket>(&mut w, 0, &doodad_buy_body(0x600, &[(STACK, 2, 0)], &[]));
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 2);
+    assert_eq!(pa.data().money, 980);
+    w.a.drain();
+
+    stall.data().transform.set_xyz(refusal_at, 100.0, 100.0);
+    run::<CSBuyItemsPacket>(&mut w, 0, &doodad_buy_body(0x600, &[(STACK, 1, 0)], &[]));
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(154, 154, 0, true))]
+    );
     assert_eq!(item_at(&pa, 2, 0).unwrap().count, 2);
     assert_eq!(pa.data().money, 980);
 }
