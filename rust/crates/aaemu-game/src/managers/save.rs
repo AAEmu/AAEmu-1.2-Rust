@@ -3,7 +3,7 @@
 //! (houses, mails, auction, crimes, slaves) are written by `systems::save_stage` at the C#
 //! positions of the transaction.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -323,6 +323,66 @@ mod tests {
             .collect();
         assert_eq!(order, [(10, 11), (20, 10)]);
     }
+
+    /// A late `CSSaveUIDataPacket` requeues the departed character. If the next save captured
+    /// the old options and a second packet updated them while that save waited for the
+    /// database, committing the older snapshot must not drop the departure entry: the newer
+    /// value is only in the live character.
+    #[tokio::test]
+    async fn an_older_commit_keeps_a_departure_with_newer_ui_options() {
+        use crate::net::registry::ClientPacket;
+        use crate::systems::services::character_packets::CSSaveUIDataPacket;
+
+        let s = test_server();
+        let mut client = TestClient::new(&s, 1, 1);
+        let player = spawn_player(&s, &client, test_character(1, "Al", 10.0, 10.0), 0x100);
+        client.conn.active_char = Some(player.clone());
+        client.drain();
+        s.world.try_remove_character(player.obj_id);
+        let save = |data: &str| CSSaveUIDataPacket {
+            ui_data_type: 5,
+            id: 1,
+            data: data.into(),
+        };
+        save("old").handle(&s, &mut client.conn).await.unwrap();
+        assert!(s.save.pending_departure(1).is_some());
+
+        let snapshot = capture_financial_snapshot(&s);
+        let (_, captured) = snapshot
+            .characters
+            .iter()
+            .find(|(p, _)| p.character_id == 1)
+            .expect("the departed character is in the save");
+        assert_eq!(captured.get_option(5), "old");
+        let ack = CharacterSaveAck {
+            player: player.clone(),
+            updated: captured.updated,
+            removed: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            money: (captured.money, captured.money2),
+            labor: captured.labor_power_unsaved,
+            learned_crafts: Vec::new(),
+            options: captured.options.clone(),
+        };
+
+        // The newer packet lands while the older snapshot is on its way to the database.
+        save("new").handle(&s, &mut client.conn).await.unwrap();
+        commit_character_save(&s, ack);
+        assert!(
+            s.save.pending_departure(1).is_some(),
+            "an older save must not clear the newer options from the departure set"
+        );
+        let next = capture_financial_snapshot(&s);
+        let (_, next) = next
+            .characters
+            .iter()
+            .find(|(p, _)| p.character_id == 1)
+            .expect("the departure stays in the next save");
+        assert_eq!(
+            next.get_option(5),
+            "new",
+            "the next save writes the newer value"
+        );
+    }
 }
 
 struct CharacterSaveAck {
@@ -335,6 +395,9 @@ struct CharacterSaveAck {
     labor: i32,
     /// The captured clone's learned crafts written by `save_character`.
     learned_crafts: Vec<u32>,
+    /// The captured clone's UI options. A late `CSSaveUIDataPacket` after the capture changes
+    /// the live map, and those newer options are not in this save.
+    options: BTreeMap<u16, String>,
 }
 
 pub(crate) struct FinancialSaveReceipt {
@@ -399,6 +462,7 @@ pub(crate) async fn write_financial_snapshot(
         let mut learned_crafts: Vec<u32> =
             character.learned_crafts_unsaved.iter().copied().collect();
         learned_crafts.sort_unstable();
+        let options = character.options.clone();
         if let Err(error) = save_character(tx, &mut character, Utc::now().timestamp()).await {
             tracing::error!(
                 "Failed to save character {} - {}: {error}",
@@ -414,6 +478,7 @@ pub(crate) async fn write_financial_snapshot(
             money: (character.money, character.money2),
             labor,
             learned_crafts,
+            options,
         });
     }
     systems += save_stage(server, tx, SaveStage::AfterCharacters).await?;
@@ -438,45 +503,67 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
         .schedule_items
         .commit_save(receipt.schedule_items);
     for ack in receipt.characters {
-        server
+        commit_character_save(server, ack);
+    }
+}
+
+/// Applies one committed character save. A departure entry is only dropped when the live
+/// character still matches the snapshot it wrote: money, labor and the UI options, which a late
+/// `CSSaveUIDataPacket` can update while the save waits for the database. Removing the entry
+/// then would lose the newer options from both the saved row and the pending departures.
+fn commit_character_save(server: &GameServer, ack: CharacterSaveAck) {
+    server
+        .save
+        .set_committed_money(ack.player.character_id, ack.money);
+    let mut live = ack.player.data();
+    let unchanged_money = (live.money, live.money2) == ack.money;
+    let options_unchanged = live.options == ack.options;
+    live.updated = ack.updated;
+    let [friends, blocked, skills, quests] = ack.removed;
+    live.removed_friends.retain(|id| !friends.contains(id));
+    live.removed_blocked.retain(|id| !blocked.contains(id));
+    live.skills.removed.retain(|id| !skills.contains(id));
+    live.quests.removed.retain(|id| !quests.contains(id));
+    let learned_crafts = ack.learned_crafts;
+    live.learned_crafts_unsaved
+        .retain(|id| !learned_crafts.contains(id));
+    // The saved snapshot flushed `ack.labor` into `accounts.labor`; whatever the live
+    // character spent since the capture stays pending for the next save.
+    live.labor_power_unsaved -= ack.labor;
+    let labor_pending = live.labor_power_unsaved != 0;
+    drop(live);
+    if unchanged_money && options_unchanged && !labor_pending {
+        let mut departing = server
             .save
-            .set_committed_money(ack.player.character_id, ack.money);
-        let mut live = ack.player.data();
-        let unchanged_money = (live.money, live.money2) == ack.money;
-        live.updated = ack.updated;
-        let [friends, blocked, skills, quests] = ack.removed;
-        live.removed_friends.retain(|id| !friends.contains(id));
-        live.removed_blocked.retain(|id| !blocked.contains(id));
-        live.skills.removed.retain(|id| !skills.contains(id));
-        live.quests.removed.retain(|id| !quests.contains(id));
-        let learned_crafts = ack.learned_crafts;
-        live.learned_crafts_unsaved
-            .retain(|id| !learned_crafts.contains(id));
-        // The saved snapshot flushed `ack.labor` into `accounts.labor`; whatever the live
-        // character spent since the capture stays pending for the next save.
-        live.labor_power_unsaved -= ack.labor;
-        let labor_pending = live.labor_power_unsaved != 0;
-        drop(live);
-        if unchanged_money && !labor_pending {
-            let mut departing = server
-                .save
-                .departing
-                .lock()
-                .expect("departure saves poisoned");
-            if departing
-                .get(&ack.player.character_id)
-                .is_some_and(|p| Arc::ptr_eq(p, &ack.player))
+            .departing
+            .lock()
+            .expect("departure saves poisoned");
+        if departing
+            .get(&ack.player.character_id)
+            .is_some_and(|p| Arc::ptr_eq(p, &ack.player))
+        {
+            departing.remove(&ack.player.character_id);
+            drop(departing);
+            server.save.forget_committed_money(ack.player.character_id);
+            if server
+                .world
+                .character_by_obj_id(ack.player.obj_id)
+                .is_some_and(|p| Arc::ptr_eq(&p, &ack.player))
             {
-                departing.remove(&ack.player.character_id);
-                drop(departing);
-                server.save.forget_committed_money(ack.player.character_id);
-                if server
-                    .world
-                    .character_by_obj_id(ack.player.obj_id)
-                    .is_some_and(|p| Arc::ptr_eq(&p, &ack.player))
-                {
-                    server.world.try_remove_character(ack.player.obj_id);
-                }
+                server.world.try_remove_character(ack.player.obj_id);
+            }
+            // A late `CSSaveUIDataPacket` can change the options between the check above and
+            // this removal. It writes the options before it requeues the character, so either
+            // its requeue comes after this removal or the options read here already differ;
+            // in the second case put the entry back so the next save writes the newer value.
+            if ack.player.data().options != ack.options {
+                server
+                    .save
+                    .departing
+                    .lock()
+                    .expect("departure saves poisoned")
+                    .entry(ack.player.character_id)
+                    .or_insert_with(|| ack.player.clone());
             }
         }
     }

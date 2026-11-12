@@ -705,22 +705,48 @@ impl ClientPacket for CSSaveUIDataPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
+        server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            if let Some(p) = &conn.active_char {
-                if self.ui_data_type > MAX_UI_DATA_TYPE || self.data.len() > MAX_UI_DATA_LEN {
-                    tracing::warn!(
-                        "SaveUIData refused, {} ({}): key {}, {} bytes (max key {MAX_UI_DATA_TYPE}, {MAX_UI_DATA_LEN} bytes)",
-                        p.data().unit.name,
-                        p.character_id,
-                        self.ui_data_type,
-                        self.data.len()
-                    );
-                    return Ok(());
-                }
-                p.data().options.insert(self.ui_data_type, self.data);
+            let Some(p) = &conn.active_char else {
+                tracing::debug!(
+                    "SaveUIData dropped, connection {}: no active character (key {}, {} bytes)",
+                    conn.id,
+                    self.ui_data_type,
+                    self.data.len()
+                );
+                return Ok(());
+            };
+            let data_len = self.data.len();
+            if self.ui_data_type > MAX_UI_DATA_TYPE || data_len > MAX_UI_DATA_LEN {
+                tracing::warn!(
+                    "SaveUIData refused, {} ({}): key {}, {} bytes (max key {MAX_UI_DATA_TYPE}, {MAX_UI_DATA_LEN} bytes)",
+                    p.data().unit.name,
+                    p.character_id,
+                    self.ui_data_type,
+                    data_len
+                );
+                return Ok(());
+            }
+            p.data().options.insert(self.ui_data_type, self.data);
+            // The connection keeps its character through leave-world, so a save can arrive
+            // after `save_and_remove_from_world` already wrote the departure. The character
+            // is then no longer a live world entry and only this in-memory copy holds the
+            // value; keep it in the departure set so the next save writes it (the autosave,
+            // or the character's next select, which flushes pending departures). A character
+            // that is live again or owned by another session is not resurrected here.
+            if server.world.character_by_id(p.character_id).is_none()
+                && server.enter_world.character_owner(p.character_id).is_none()
+            {
+                let name = p.data().unit.name.clone();
+                server.save.remember_departing(p);
+                tracing::debug!(
+                    "SaveUIData kept for departed character '{name}' ({}), connection {}: key {}, {data_len} bytes",
+                    p.character_id,
+                    conn.id,
+                    self.ui_data_type
+                );
             }
             Ok(())
         })
@@ -1173,5 +1199,85 @@ mod tests {
             "an oversized UI data value was stored"
         );
         assert!(a.drain_ops().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ui_data_saved_after_the_departure_is_kept_for_the_next_save() {
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Al", 10.0, 10.0), 0x100);
+        a.conn.active_char = Some(pa.clone());
+        a.drain();
+        // The departure save committed: the character no longer has a world entry and its
+        // departure entry was dropped after the commit (`commit_financial_snapshot`).
+        server.world.try_remove_character(pa.obj_id);
+        assert!(server.save.pending_departure(1).is_none());
+
+        let data = "<data>quest_notifier_list ( 330 )</data>";
+        CSSaveUIDataPacket {
+            ui_data_type: 5,
+            id: 1,
+            data: data.into(),
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+
+        assert_eq!(pa.data().get_option(5), data);
+        let departing = server
+            .save
+            .pending_departure(1)
+            .expect("a late save must stay in the departure set");
+        assert!(std::sync::Arc::ptr_eq(&departing, &pa));
+        let snapshot = crate::managers::save::capture_financial_snapshot(&server);
+        let (_, saved) = snapshot
+            .characters
+            .iter()
+            .find(|(p, _)| p.character_id == 1)
+            .expect("the departed character is in the next save");
+        assert_eq!(saved.get_option(5), data);
+    }
+
+    #[tokio::test]
+    async fn ui_data_save_of_a_live_character_does_not_mark_it_departing() {
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Al", 10.0, 10.0), 0x100);
+        a.conn.active_char = Some(pa.clone());
+        a.drain();
+        CSSaveUIDataPacket {
+            ui_data_type: 5,
+            id: 1,
+            data: "x=1".into(),
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+        assert_eq!(pa.data().get_option(5), "x=1");
+        assert!(server.save.pending_departure(1).is_none());
+    }
+
+    #[tokio::test]
+    async fn ui_data_save_without_an_active_character_is_logged() {
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        assert!(a.conn.active_char.is_none());
+        let (_, events) = crate::test_support::capture_events(|| {
+            futures::executor::block_on(
+                CSSaveUIDataPacket {
+                    ui_data_type: 5,
+                    id: 1,
+                    data: "x=1".into(),
+                }
+                .handle(&server, &mut a.conn),
+            )
+            .unwrap()
+        });
+        assert!(
+            events.iter().any(|(level, message)| {
+                *level == tracing::Level::DEBUG && message.contains("SaveUIData dropped")
+            }),
+            "the dropped save was not logged: {events:?}"
+        );
     }
 }
