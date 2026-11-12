@@ -8890,3 +8890,25 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
   every cast and the 5 s after it (688 -> 1794 over the run). With the pre-fix `consume_mana`
   (guard removed) each cast was followed by 5 s at +1/s (e.g. 1012 -> 1013 -> 1014 -> 1015
   -> 1016 -> 1017) and only then returned to +18/s: the stalled regen of the owner report.
+
+## Plot event delays start when the event is sent (Rust only, 2026-11-11)
+
+- **Deviation from the C#.** `PlotTree.ExecuteAsync` measured every child's `plot_next_events`
+  delay from the moment it dequeued the parent node, but the parent's `SCPlotEventPacket` (and
+  its effects) only went out at the next `FlushExecutionQueue`, which the loop reaches after the
+  inter-pass `Task.Delay(15)` or a busy runtime. The client therefore saw less than the authored
+  delay, and when the runtime stalled, the damage landed before the leap it belongs to.
+  Tiger Strike (skill 13315, plot 17) is the report: event 118 (SkillController 2278, Leap,
+  400 ms) must reach the client 400 ms before event 121 (DamageEffect 945); with a 250 ms stall
+  of the leap's flush the client received the death only 170 ms after the leap event, and the
+  1.2 client does not leap onto a unit that is already dead.
+  `flush_execution_queue` now schedules a node's children from the time that flush handles the
+  node (`sent_at`), which is when its packet is broadcast. The due nodes are still collected in
+  one batch, so the packet contents and their order are unchanged; only the base of the delays
+  moves to the send. A node without effects is still not executed when its condition failed, but
+  its children are scheduled (the `fail` branches), as before.
+- Tests: `systems::skills::plots::tiger_strike_tests` (a faithful plot-17 fixture and the real
+  `compact.sqlite3` rows: event 118 precedes the damage by >= 350 ms of the authored 400; a
+  one-mob cast has no bounce event 119, a two-mob cast bounces onto the other mob; a 250 ms
+  stall injected into the leap's flush still leaves the full delay). The stall test fails with
+  the dequeue-time base (`damage 170 ms after the leap`).
