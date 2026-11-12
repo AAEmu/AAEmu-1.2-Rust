@@ -1253,5 +1253,6 @@ pub fn load_all(ctx: &DataLoadCtx<'_>) -> Result<super::Data, GameDataError> {
         battlefields: BattlefieldData::load(ctx.conn, json.as_deref())?,
         tower_defs: TowerDefData::load(ctx.conn)?,
         zone_order: ZoneOrder::load(ctx.conn)?,
+        clear_notices: super::clear_notice::load(&ctx.app_path.join("Data")),
     })
 }
