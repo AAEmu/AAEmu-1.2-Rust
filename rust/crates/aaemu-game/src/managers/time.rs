@@ -8,8 +8,9 @@
 //! existing `TickDelay * 10` per 10 s tick: one game minute per 10 real seconds) and
 //! `game day = floor((unix_seconds * 6 + offset) / 86400)`. `offset` comes from
 //! `World.GameTimeOffset` (game seconds, default 0) and `Set(hours)` moves it at runtime while
-//! keeping the current game day. The tower defense scheduler gates `tod` events on the same
-//! epoch-derived day.
+//! keeping the current game day (the hours are normalised into `[0, 24)`). The tower defense
+//! scheduler gates `tod` events on the same epoch-derived day, read from the same clock
+//! snapshot as the hour.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,10 @@ struct State {
     /// The cached game time in seconds (`0..86400`), refreshed from the wall clock every tick
     /// and set exactly by [`TimeManager::set`].
     time: f64,
+    /// The game day of the same wall-clock read as `time`, refreshed with it: the tower
+    /// defense scheduler reads both through [`TimeManager::get_time_and_day`], so a crossing
+    /// is attributed to the day it happened even immediately after midnight.
+    day: i64,
     /// Game seconds added to `unix_seconds * GAME_SECONDS_PER_REAL_SECOND` (the configured
     /// offset, moved by `Set`).
     offset: f64,
@@ -107,10 +112,13 @@ impl TimeManager {
     }
 
     pub(crate) fn with_clock(offset_seconds: f64, clock: UnixClock) -> Self {
-        let time = game_seconds(clock(), offset_seconds);
+        let now = clock();
+        let time = game_seconds(now, offset_seconds);
+        let day = game_day(now, offset_seconds);
         Self {
             state: Arc::new(Mutex::new(State {
                 time,
+                day,
                 offset: offset_seconds,
                 clock,
                 observers: HashMap::new(),
@@ -126,7 +134,9 @@ impl TimeManager {
         let mut st = self.state.lock().expect("time poisoned");
         st.clock = clock;
         st.offset = offset_seconds;
-        st.time = game_seconds((st.clock)(), st.offset);
+        let now = (st.clock)();
+        st.time = game_seconds(now, st.offset);
+        st.day = game_day(now, st.offset);
     }
 
     /// `GetTime` (hours).
@@ -139,26 +149,38 @@ impl TimeManager {
         self.state.lock().expect("time poisoned").time as f32
     }
 
-    /// The game day number (`floor((unix_seconds * 6 + offset) / 86400)`): the tower defense
-    /// schedule's `tod_day_interval` and `scheduled_days` gate on it, so a restart keeps the day
-    /// parity.
+    /// The game day number (`floor((unix_seconds * 6 + offset) / 86400)`) of the clock snapshot
+    /// cached by the last tick / [`TimeManager::set`]: the tower defense schedule's
+    /// `tod_day_interval` and `scheduled_days` gate on it, so a restart keeps the day parity.
+    /// Use [`TimeManager::get_time_and_day`] when the hour is needed too: a separate live
+    /// `get_day` after midnight would pair the cached hour with the next day.
     pub fn get_day(&self) -> i64 {
-        let (clock, offset) = {
-            let st = self.state.lock().expect("time poisoned");
-            (st.clock.clone(), st.offset)
-        };
-        game_day(clock(), offset)
+        self.state.lock().expect("time poisoned").day
+    }
+
+    /// The cached time of day in hours and the game day of the same clock snapshot. The tower
+    /// defense scheduler reads both here (one lock, one refresh) so a crossing is attributed
+    /// to the day it happened even when the clock was refreshed just before midnight and the
+    /// tick lands just after it.
+    pub fn get_time_and_day(&self) -> (f32, i64) {
+        let st = self.state.lock().expect("time poisoned");
+        (st.time as f32 / 3600.0, st.day)
     }
 
     /// `Set(hours)`: moves the wall-clock mapping so the time of day is `hours`, keeping the
-    /// current game day (the C# only had a float and no day).
+    /// current game day (the C# only had a float and no day). `hours` is normalised into
+    /// `[0, 24)`, so `/time set 24 0` is midnight of the same day, not of the next one.
     pub fn set(&self, hours: f32) {
+        if !hours.is_finite() {
+            return;
+        }
+        let hours = f64::from(hours).rem_euclid(24.0);
         let mut st = self.state.lock().expect("time poisoned");
         let now = (st.clock)();
         let day = game_day(now, st.offset);
-        st.offset =
-            day as f64 * MAX_TIME + f64::from(hours) * 3600.0 - now * GAME_SECONDS_PER_REAL_SECOND;
+        st.offset = day as f64 * MAX_TIME + hours * 3600.0 - now * GAME_SECONDS_PER_REAL_SECOND;
         st.time = game_seconds(now, st.offset);
+        st.day = day;
     }
 
     /// `Subscribe(connection, observer)`: sends `SCDetailedTimeOfDayPacket` and registers the
@@ -204,7 +226,9 @@ impl TimeManager {
     pub fn tick(&self) {
         let (time, observers) = {
             let mut st = self.state.lock().expect("time poisoned");
-            st.time = game_seconds((st.clock)(), st.offset);
+            let now = (st.clock)();
+            st.time = game_seconds(now, st.offset);
+            st.day = game_day(now, st.offset);
             (
                 st.time as f32 / 3600.0,
                 st.observers.values().cloned().collect::<Vec<_>>(),
@@ -329,6 +353,46 @@ mod tests {
         clock.advance(100.0); // 100 real s = 600 game s = 10 game minutes
         time.tick();
         assert!((time.get_time() - (6.5 + 10.0 / 60.0)).abs() < 1e-4);
+    }
+
+    /// `Set(hours)` normalises the request into `[0, 24)`: `24` is midnight of the same day,
+    /// not the next one, and a negative hour wraps back into the same day.
+    #[test]
+    fn gm_set_wraps_out_of_range_hours_and_keeps_the_game_day() {
+        // Day 5, 03:00 (`unix * 6 = 5 * 86400 + 3 * 3600`).
+        let clock = super::ManualClock::new((5.0 * 86_400.0 + 3.0 * 3_600.0) / 6.0);
+        let time = super::TimeManager::with_clock(0.0, clock.clock());
+        assert_eq!(time.get_day(), 5);
+        time.set(24.0);
+        assert_eq!(time.get_time(), 0.0, "24:00 is midnight");
+        assert_eq!(time.get_day(), 5, "24:00 keeps the current game day");
+        time.set(-1.0);
+        assert_eq!(time.get_time(), 23.0, "-1:00 wraps to 23:00");
+        assert_eq!(time.get_day(), 5);
+        time.set(6.5 + 24.0);
+        assert_eq!(time.get_time(), 6.5);
+        assert_eq!(time.get_day(), 5);
+        // A non-finite request is ignored instead of poisoning the offset.
+        time.set(f32::NAN);
+        assert_eq!(time.get_time(), 6.5);
+        assert_eq!(time.get_day(), 5);
+    }
+
+    /// The hour and the day come from one cached clock snapshot: a tick after midnight before
+    /// the next clock refresh still reports the day the cached hour belongs to.
+    #[test]
+    fn time_and_day_are_one_cached_snapshot() {
+        let clock = super::ManualClock::new(0.0);
+        let time = super::TimeManager::with_clock(0.0, clock.clock());
+        // Day 8, 23:59:50 (`unix * 6 = 8 * 86400 + 23:59:50`).
+        clock.set((8.0 * 86_400.0 + 23.0 * 3_600.0 + 59.0 * 60.0 + 50.0) / 6.0);
+        time.tick();
+        let (hour, day) = time.get_time_and_day();
+        assert_eq!(day, 8);
+        assert!((hour - (23.0 + 59.0 / 60.0 + 50.0 / 3_600.0)).abs() < 1e-4);
+        // The wall clock crosses midnight; until the next refresh the pair stays day 8.
+        clock.set((9.0 * 86_400.0 + 5.0) / 6.0);
+        assert_eq!(time.get_time_and_day(), (hour, 8));
     }
 
     #[tokio::test]

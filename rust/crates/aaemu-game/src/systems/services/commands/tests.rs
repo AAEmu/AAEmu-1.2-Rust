@@ -748,4 +748,37 @@ async fn world_set_and_time_sub_commands() {
         out.messages(),
         ["[Time Information] Changed game time 12.00 -> 6.50 (6h30m)"]
     );
+
+    // Out-of-range arguments are refused with an error before `set`: 24 is not midnight of
+    // the next day and a negative hour does not move the clock back a day.
+    let day = server.time.get_day();
+    let before = server.time.get_time();
+    let mut out = CharacterMessageOutput::new(c.clone());
+    for (hour, minute) in [("24", "0"), ("-1", "0"), ("6", "60")] {
+        pre_execute(&time, &ctx, "set", &[hour.into(), minute.into()], &mut out);
+        assert_eq!(
+            server.time.get_time(),
+            before,
+            "/time set {hour} {minute} must not move the clock"
+        );
+        assert_eq!(
+            server.time.get_day(),
+            day,
+            "/time set {hour} {minute} must keep the game day"
+        );
+    }
+    assert_eq!(
+        out.messages(),
+        [
+            Color::RED.wrap(
+                "[Time Information] The number 24 should be between 0 and 23 for parameter: hour"
+            ),
+            Color::RED.wrap(
+                "[Time Information] The number -1 should be between 0 and 23 for parameter: hour"
+            ),
+            Color::RED.wrap(
+                "[Time Information] The number 60 should be between 0 and 59 for parameter: minute"
+            ),
+        ]
+    );
 }

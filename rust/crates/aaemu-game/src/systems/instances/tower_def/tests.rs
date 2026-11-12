@@ -1020,6 +1020,56 @@ async fn tower_def_day_interval_counts_the_epoch_game_day() {
     assert_eq!(infos(&server, 0).len(), 1, "even epoch day 12 starts it");
 }
 
+/// A crossing just before midnight is attributed to the day it happened even when the clock
+/// cache was refreshed before midnight and the scheduler tick lands after it: the hour and the
+/// day are one snapshot, so even day 8's 23:59:30 event is not checked against day 9.
+#[tokio::test]
+async fn tower_def_late_crossing_keeps_the_day_of_the_cached_hour() {
+    let mut server = fixture();
+    let data = Arc::get_mut(&mut Arc::get_mut(&mut server).unwrap().game_data).unwrap();
+    let def = data
+        .systems
+        .instances
+        .tower_defs
+        .tower_defs
+        .get_mut(&12)
+        .unwrap();
+    def.time_of_day = 23.0 + 59.0 / 60.0 + 30.0 / 3600.0;
+    def.time_of_day_day_interval = 2;
+    server.config.update(|c| {
+        c.dungeons.tower_defense.enabled = true;
+        c.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
+            id: 12,
+            world_id: 0,
+            zone_group_id: 5,
+            zone_id: TEST_ZONE,
+        }];
+    });
+    // Day 8 (even), 23:59:20: the 23:59:30 crossing is still ahead.
+    let clock = ManualClock::new(unix_at(8, 23.0 + 59.0 / 60.0 + 20.0 / 3600.0));
+    server.time.set_test_clock(clock.clock(), 0.0);
+    initialize(&server).unwrap();
+    tick(&server);
+    assert!(
+        infos(&server, 0).is_empty(),
+        "23:59:20 is before the 23:59:30 event"
+    );
+    // The clock refreshes just before midnight; the next scheduler tick runs just after it,
+    // without another clock refresh.
+    move_clock(
+        &server,
+        &clock,
+        unix_at(8, 23.0 + 59.0 / 60.0 + 50.0 / 3600.0),
+    );
+    clock.set(unix_at(9, 5.0 / 3600.0));
+    tick(&server);
+    assert_eq!(
+        infos(&server, 0).len(),
+        1,
+        "even day 8's 23:59:30 crossing fires, not day 9's"
+    );
+}
+
 #[tokio::test]
 async fn tower_def_war_event_runs_once_per_war_and_stops_on_peace() {
     let mut server = fixture();

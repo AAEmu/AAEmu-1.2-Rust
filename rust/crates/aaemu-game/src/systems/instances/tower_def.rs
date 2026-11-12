@@ -100,8 +100,10 @@ struct State {
     active: BTreeMap<EventKey, Event>,
     ever_started: bool,
     previous_hour: Option<f32>,
-    /// The epoch-derived game day (`TimeManager::get_day`), read every tick: `scheduled_days`
-    /// and `tod_day_interval` stay restart-stable.
+    /// The epoch-derived game day of the same clock snapshot as `previous_hour`
+    /// (`TimeManager::get_time_and_day`), read every tick: `scheduled_days` and
+    /// `tod_day_interval` stay restart-stable and a crossing is attributed to the day it
+    /// happened.
     day: i64,
     scheduled_days: HashMap<EventKey, i64>,
     war_active: HashSet<EventKey>,
@@ -607,14 +609,15 @@ pub fn initialize(server: &GameServer) -> anyhow::Result<()> {
         );
     }
     {
+        let (hour, day) = server.time.get_time_and_day();
         let mut state = manager(server)
             .state
             .lock()
             .expect("tower defense poisoned");
         state.events = accepted;
         state.events_from_config = explicit;
-        state.previous_hour = Some(server.time.get_time());
-        state.day = server.time.get_day();
+        state.previous_hour = Some(hour);
+        state.day = day;
     }
     Ok(())
 }
@@ -1246,7 +1249,7 @@ fn schedule_tick(server: &GameServer) {
     if !config.enabled {
         return;
     }
-    let hour = server.time.get_time();
+    let (hour, day) = server.time.get_time_and_day();
     if !hour.is_finite() || !(0.0..=24.0).contains(&hour) {
         return;
     }
@@ -1297,9 +1300,10 @@ fn schedule_tick(server: &GameServer) {
             .expect("tower defense poisoned");
         let previous = state.previous_hour.replace(hour).unwrap_or(hour);
         let wrapped = hour < previous;
-        // The same epoch-derived day as the clock: a restart does not reset the parity of
-        // `tod_day_interval`, and a boot after an event's `tod` does not replay it.
-        state.day = server.time.get_day();
+        // The hour and the day are one clock snapshot: the cached hour may still be the one
+        // refreshed just before midnight while the wall clock (and a separate `get_day`) has
+        // already crossed it, and a 23:59 crossing must stay on the day it happened.
+        state.day = day;
         for c in &events {
             let key = EventKey::from(c);
             let Some(def) = server
