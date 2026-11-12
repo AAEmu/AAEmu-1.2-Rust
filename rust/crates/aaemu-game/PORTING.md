@@ -1315,7 +1315,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `SphereQuestManager`, `SphereQuest*`, `SphereGameData` (spheres, sphere_quests, `IsInsideAreaSphere`, `GetSphereIdFromQuest`) | `spheres.rs`, `data.rs` | done | `quest_sign_sphere.g` of `main_world`; one manager per server (500 ms tick). Other `sphere_*` tables not loaded (unused by quests). |
 | `AreaSphere` unit requirement (kind 35) of skills and quest components | `spheres.rs` (`inside_requirement_sphere`), `bridges.rs`, `engine.rs` (`EnvView`) | added | The C# `IsInsideAreaSphere` only tests the client sign spheres of the sphere's `sphere_quests` quest. 147 skill rows use kind 35; when that quest has no sign sphere at the requirement's place the skill can never be used. Tester report: quest 2273 "March of Respect" could not place its Ritual Offering Bundle (item 18638, skill 15204, `or_unit_reqs`: sphere 1152 OR doodad 3339 within `value2` / 1000 = 0.001 m): sphere 1152 ("Q2273...") links to quest 2907 (`sphere_quests` 660), which has no sign sphere at Prince Reander's Monument. The requirement now also passes inside the sphere's own `sphere_area_fill.json` area (1152: radius 6 m around the altar), for `SphereQuest` spheres only; the areas are not world-filtered (the callers have a position only; sphere ids are unique). Abandoning the quest destroying the bundle is the data (supply act 1822: `destroy_when_drop`). Test: `quests::tests::requirement_sphere_falls_back_to_the_shipped_area`. |
 | Imported quest sign spheres (`quest_sign_sphere_fill.json`) | `spheres.rs` (`load_sign_sphere_fill`), `mod.rs` (start), `app/Data/Worlds/*/quest_sign_sphere_fill.json`; converter `rust/tools/quest_sign_sphere_import/` | added | The 19 quests of `Docs/wiki/Quest-Audit.md` whose objective sphere has no 1.2 client sign sphere (1012, 1024, 1033, 1039, 1372, 1392, 1398, 1400, 1650, 1897, 5272, 5439, 5716, 5898, 5979, 6039, 6050, 6213, 6216). One offline converter reads the 10.x `world_server/quest_area_sphere.g` (`stype` = `spheres.id`) and the 10.x client `client/quest_sign_sphere.g` (`qtype` / `ctype`), both zone-local in the source, and writes **8 spheres in 7 quests** in world coordinates (`source_zone_origin * 1024 + local`, z as is; the loader uses fill rows as world and adds no origin): 1650 (main_world 142), 5716 (main_world 186), 5979 (instance_training_camp 198, two areas), 6039 / 6050 (instance_prologue 300), 6213 (main_world 144), 6216 (main_world 158). The other 12 quests are dropped with a reason: 1012 / 1024 / 1033 / 1039 because the 10.x `spheres` row was reused for another quest (`sphere_mapping_mismatch`; e.g. 10.x sphere 945 -> quest 5804 while 1.2 uses it for 1033), 1400 because its 10.x component id differs (7021/36416 vs the 1.2 7020), and 1372 / 1392 / 1398 / 1897 / 5272 / 5439 / 5898 because their sphere ids have no block in the 10.x files at all. 5716's second block is dropped because it lies in zone 159 while the quest is authored in zone 186; 6039 / 6050's second files are dropped because zone 348 does not exist in 1.2. Guards: the 10.x and 1.2 `spheres` / `sphere_quests` rows must name the same detail and quest, the 1.2 component must have a `QuestActObjSphere` / `QuestActCheckSphere` act for the same `sphere_id`, the zone must belong to the named 1.2 world and be open (`zones.closed = 'f'`), a 1.2 client sphere for the same (quest, component) is never overridden, and a 1.2 `mission_mission0.xml` `AreaSphere` with the same `value1` within 1.5 m must agree on the radius. The loader repeats the runtime guards, loads the file after the client spheres and rejects duplicates; the quest sphere triggers compare the sphere's `world_id` with the player's world (a main_world area no longer fires inside an instance). The 10.x client sign sphere file contributed no kept entry (its only matching old quests are in zones closed in 1.2), and the 10 contexts without components are untouched. Location note: the active manager/loader is `systems/quests/spheres.rs`; the world-side copy `systems/npcs/sphere_quest.rs` is not started (`start` is a no-op), so the fill is wired into the active path. |
-| Imported area spheres (`SCAreaChatBubble` 0x153, `SCAreaTeamMessage` 0x155, `SphereDoodadInteract`) | `spheres.rs` (`SphereArea`, `load_sphere_areas`, `tick_area_spheres`, `dispatch_doodad_interact`), `packets.rs` | added / INFERRED | Enter / leave of a `sphere_area_fill.json` area in the same 500 ms tick as the quest spheres (run first, the quest sphere code is unchanged): a `SphereBubble` row sends `SCAreaChatBubble(enter, player unit, sphere_detail_id)` and any row with a non-blank `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player; leave only when `enter_or_leave` is set. **INFERRED trigger and audience** (CAP-UI-7 / CAP-UI-6): the 1.2 client has the readers and handlers (`FUN_397b6330` / `FUN_391dc340`, `FUN_397b63b0` / `FUN_391dc460`) but no captured sender; `is_personal_msg` is true for all 67 shipped `team_msg` rows and the Rust sends to the player only (the non-personal audience is UNKNOWN). `SphereDoodadInteract` runs the enter `DoodadFuncAreaTrigger` row of the doodads inside the area / skill range once the sphere's own `unit_reqs` pass (Sharpwind's Derelict Bridge, the 12 open-world quarry rock piles of doodad 2803 in sphere 1446's areas and the open-world Unstable Floor 1495 in sphere 429's; capture-pending CAP-DOODAD-1, see "Sharpwind opening chain"). `SphereSkill` / `SphereSound` / `SphereBuff` areas load but have no effect (a separate content decision). A missing JSON file is an empty table; ids are re-guarded against the loaded `spheres` table. |
+| Imported area spheres (`SCAreaChatBubble` 0x153, `SCAreaTeamMessage` 0x155, `SphereDoodadInteract`, `SphereSkill`) | `spheres.rs` (`SphereArea`, `load_sphere_areas`, `tick_area_spheres`, `dispatch_doodad_interact`, `dispatch_sphere_skill`), `packets.rs` | added / INFERRED | Enter / leave of a `sphere_area_fill.json` area in the same 500 ms tick as the quest spheres (run first, the quest sphere code is unchanged): a `SphereBubble` row sends `SCAreaChatBubble(enter, player unit, sphere_detail_id)` and any row with a non-blank `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player; leave only when `enter_or_leave` is set. **INFERRED trigger and audience** (CAP-UI-7 / CAP-UI-6): the 1.2 client has the readers and handlers (`FUN_397b6330` / `FUN_391dc340`, `FUN_397b63b0` / `FUN_391dc460`) but no captured sender; `is_personal_msg` is true for all 67 shipped `team_msg` rows and the Rust sends to the player only (the non-personal audience is UNKNOWN). `SphereDoodadInteract` runs the enter `DoodadFuncAreaTrigger` row of the doodads its `sphere_doodad_interacts` row selects once the sphere's own `unit_reqs` pass: a non-zero `doodad_family_id` selects the doodads of the instance whose `FamilyId` equals it (Sharpwind's stalactites 50011-50022 and bridge 50000, skipping the area / skill range), family 0 keeps the area / skill-range selection (see "Sharpwind opening chain"). `SphereSkill` casts `sphere_skills.skill_id` with the character as caster on the enter edge (Sharpwind spheres 1965-1968 run the invisible slaves' command sets, see "Sharpwind opening chain"). `SphereSound` / `SphereBuff` areas load but have no effect (a separate content decision). A missing JSON file is an empty table; ids are re-guarded against the loaded `spheres` table. |
 | `QuestActObjZoneKill.OnZoneKill` level window | `systems/quests/acts.rs` (`level_in_range`) | deviation | **Deviation:** a level bound of 0 is "unset". The 1.2 data has `lv_min_npc` / `lv_max_npc` = 0 / 0 on 103 of the 110 NPC-kill acts (`lv_min` / `lv_max` are the questor's window and differ from the NPC bounds on the 7 acts that set both), and the C# rejected every real victim against the raw 0..0 range, so those quests could never complete. The player-kill window uses the same rule. |
 | `QuestActObjZoneKill` team share | `systems/quests/acts.rs`, `events.rs` (`run_deferred`) | deviation | **Deviation:** only the original killer shares the kill (the `ObjTalk` / `ObjInteraction` guard). The C# re-delegated `OnZoneKill` from every receiver ("to avoid loops") and bounced between members holding the same quest without end. NPC deaths raise the event for each eligible party member, who all share it again, so in the C# a member counted the kill once directly and once per sharing member. **Deviation:** each member now counts a kill once per act. `Npc.DoDie` (`npcs/npc/death.rs`) notes the victim in the `direct_kill_credits` of everyone it hands a direct event (eligible players, the fallback killer, Tag Share contributors) before the first event is raised, and a team-shared `ObjZoneKill` ignores a victim in that list and counts a shared victim once per (quest, act) (`CharacterSkillState::claim_shared_kill_credit`, 30 s memory because object ids are reused). Team members out of range, who get no direct event, still receive the share (once). |
 | `QuestActObjZoneKill` PvP kills | `systems/skills/combat.rs` (`raise_pvp_zone_kill`, from `character_death_tail`) | deviation | **Deviation:** the C# only raised `OnZoneKill` from `Npc.DoDie` (`DoOnMonsterHuntEvents`), so the 16 `count_player_kill > 0` acts (e.g. quests 5982-5991) never progressed. A player killed by another player's hand (hostile relation, the same branch that awards PvP honor) now raises `ZoneKill` (zone group of the victim, killer and victim as `KillUnit`s) for the killer only; `team_share` acts hand it to the killer's team through the usual `TeamEvent`. Friendly-fire kills and mate / slave kills raise nothing. |
@@ -3579,6 +3579,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reading `DateTime.UtcNow`; `local_impulse_to_world_displacement` takes horizontal (x, y)
   positions only, because the C# zeroes the direction's Z so the vertical offset never
   contributes.
+* systems::npcs (2026-11-12, Burnt Castle Armory scripted data): the world's 32 event spawners
+  (the `Hieronimus's Summon` waves 46629-46656, the intro / 2nd-boss-end / 3rd-boss souls
+  65999/66025/66026 and the 3rd-boss cutscene actors 66033/66037-66052) are event rows in
+  `app/Data/Worlds/instance_burntcastle_armory/npc_spawns.json`; the ten invisible trigger NPCs
+  of the reachable `tagged_npcs` groups are plain rows. **Placements are Inferred** from the
+  10.x level editor's `zone_server/npc_spawners.g` and `level_design/cells/000_000/doodad.g`;
+  spawner ids, NPC/skill/tag links and doodad func groups are the 1.2 `compact.sqlite3`. The
+  five level doodads are the SkillHit gates 3612/3613/4417, the entrance exit 3673 and the
+  invisible-until-Hieronimus-dies exit 4923 (18024 -> phase 12257); both exits answer the 1.2
+  exit skill 15667 (world gate 320). The 2026 spawn-import plain row for 8962 was removed: it
+  stood on the 66033 event-spawner position (the loader's duplicate filter checks only plain
+  rows, so ordering made the script spawner register but the boss also stand at t=0) - the
+  killable 3rd boss now appears through the cutscene, and the 1.2-era start rows 8960 (Sorvell)
+  and 12190 (Winters) stay active as in the level, as does the 10518 Prince Hieronimus display.
+  The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
+  (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
+  `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /
+  2 cutscene skips instead of 2 / 3 (the removed 8962 plain row no longer skips its 11694
+  cutscene spawner); that shared test table still has the old counts (open item).
 * systems::npcs (2026-10-13): corpse timers read the current despawn field, so fully looting
   an NPC applies the existing shorter deadline instead of retaining the five-minute loot
   extension captured at death. Only living NPCs count towards spawner population limits;
@@ -4802,23 +4821,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   stops at the first action (a repeated check might trigger every respawn). Sharpwind sphere
   1552 ("bridge collapse area", r 5 at the
   bridge) contains only doodad 5058, whose row 11162 (`next_phase` 13148) swaps the rail
-  model for `rail_a_broken`. **Inferred (no 1.2 server evidence) / capture-pending
-  CAP-DOODAD-1:** the shipped `sphere_doodad_interacts.doodad_family_id` (50000) cannot be
-  resolved because the 1.2 compact `doodad_families` table is empty; the skill range and the
-  sphere area bound the candidates instead (a guess only if several doodads share the area).
-  The dispatch is generic, so besides the bridge (sphere 1552, doodad 5058) it also reaches
-  two kinds of open-world (`main_world`) doodads: the **12 quarry rock piles** (doodad 2803
-  "Arcum Iris Quarry Rock Pile") inside the five areas of sphere 1446 (skill 2, `max_range`
-  25: every pile within 25 m of the entering player), and the single **Unstable Floor**
-  (doodad 1495 at 14146.3 / 14966.2 / 144.3, zone 142) inside the areas of sphere 429 ("floor
-  that collapses on entry", skill 10134, `max_range` 10). Their enter rows (`doodad_funcs`
-  5424 and 10916) advance the start phase (6231 / 2336) to a phase whose phase func is a
-  `DoodadFuncFinal` (6232 / 2337), so the doodad crumbles away and respawns. This is accepted
-  as the intended data behaviour (the authored sphere, skill and func rows say so; probably
-  cosmetic); the other shipped `SphereDoodadInteract` areas find no doodad with an enter row
-  today (Sharpwind's stalactite doodads 5364 / 5365 / 5420 are placed by no spawn file). The
-  affected (sphere, doodad) pairs are listed by the `#[ignore]`d real-data test below (r208022
-  data: (429, 1495) x 1, (1446, 2803) x 12, (1552, 5058) x 1). Tests:
+  model for `rail_a_broken`. **Selection by family (2026-11-11):** a non-zero
+  `sphere_doodad_interacts.doodad_family_id` selects every doodad of the instance whose
+  `Doodad.family_id` equals it, anywhere in the instance and without the area / skill-range
+  test; the 10.x `DoodadAreaTriggerRuntime` (kind 21) and the level design's `Family_Id` (now
+  the spawn file's `FamilyId`) carry the same link. The 1.2 compact `doodad_families` table is
+  empty, so the placement data is the source. This is what makes the Sharpwind stalactites
+  work: doodads 5364 / 5365 (families 50019-50022 / 50011-50018) hang 13-16 m above their
+  sphere centres, outside the old area / 4 m skill range. **The stalactite and trigger-NPC
+  placements are Inferred (the 10.x level's `doodad.g` / `npc_spawners.g` with 1.2 template
+  ids); the sphere, family, skill and func rows are 1.2 data.** Family 0 (all other shipped
+  rows) keeps the older selection and still drives the open-world quarry rock piles (doodad
+  2803 inside the areas of sphere 1446, skill 2, `max_range` 25) and the Unstable Floor (doodad
+  1495 inside the areas of sphere 429, skill 10134, `max_range` 10), whose enter rows
+  (`doodad_funcs` 5424 / 10916) lead to a `DoodadFuncFinal` phase. The affected (sphere,
+  doodad) pairs are listed by the `#[ignore]`d real-data test below; with the placement data
+  of this checkout it selects the bridge 5058 (sphere 1552, family 50000) and the twelve
+  stalactites (5365 under spheres 1836-1843, families 50011-50018; 5364 under spheres
+  1844-1847, families 50019-50022), so the test is the canary for those rows. Tests:
   `doodad::funcs::tests::area_trigger_func_advances_the_bridge_phase_for_a_player`,
   `quests::sphere_doodad_tests::{crossing_the_bridge_sphere_advances_the_bridge_to_its_broken_phase,
   a_player_outside_the_sphere_does_not_collapse_the_bridge,
@@ -4827,9 +4847,38 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   a_player_who_meets_the_requirements_outside_triggers_the_sphere_on_the_next_entry,
   a_bridge_in_a_neighbouring_region_is_reached_inside_the_skill_range,
   a_bridge_inside_the_area_but_out_of_the_skill_range_stands,
-  a_bridge_reserved_by_another_thread_is_not_advanced}`; real data (`AAEMU_COMPACT_DB` = a copy
-  of the r208022 `compact.sqlite3`): `cargo test -p aaemu-game --lib
+  a_bridge_reserved_by_another_thread_is_not_advanced,
+  a_family_sphere_reaches_a_doodad_far_outside_the_area_and_range,
+  a_family_sphere_selects_only_doodads_of_its_family,
+  a_family_less_sphere_keeps_the_area_and_range_selection}`; real data (`AAEMU_COMPACT_DB` = a
+  copy of the r208022 `compact.sqlite3`): `cargo test -p aaemu-game --lib
   real_data_sphere_doodad_interact -- --ignored --nocapture`.
+* systems::quests (Sharpwind `SphereSkill` proximity triggers, 2026-11-11): the C# loaded the
+  `sphere_skills` table but never used it, so the invisible "Spawn Slave" NPCs never ran their
+  command sets. Rust casts `sphere_skills.skill_id` with the character as caster on the enter
+  edge of a `SphereSkill` area, once per stay, only when the sphere's own `unit_reqs` pass at
+  that moment (`can_trigger_sphere`, like the other sphere kinds; a level-up inside does not
+  retro-trigger). **Inferred (no 1.2 server evidence):** the enter-edge rule (the row's
+  `trigger_condition_id` 3 `EVERY_N_TIME_AFTER` / 1000 ms would re-cast a finished set every
+  period), that the requirement is evaluated only on entry, and that `max_rate` / `min_rate` are
+  not used as a chance roll (no 1.2 code used the table; all Sharpwind rows are 100 / 100). The
+  shipped rows are self-centred
+  area skills (sphere 1965-1968 -> `sphere_skills` 175-178 -> skills 19522-19524 / 19533,
+  `target_type` 0, radius 50, tag filter 798-801), so the caster is the area centre; the
+  `NpcControlEffect` category 5 (`RunCommandSet`) and the tag filter already existed. The
+  chains (1.2 data): sphere 1965 -> skill 19522 -> NPC 12116 (tag 798) -> set 202 -> skill
+  19525 -> slime spawners 94761-94765 + the slave removes itself; sphere 1968 -> skill 19533 ->
+  NPC 12119 (tag 801) -> set 206 -> skill 19534 -> Okape's spawner 90004 + the slave removes
+  itself. **The trigger NPC placements (12113-12119 and the slime/Okape spawner ids) are
+  Inferred from the 10.x level spawners; the NPC, tag, sphere, skill and command-set rows are
+  1.2 data.** The skills assume the spawner ids 94761-94765 / 90004 exist as spawners in the
+  world (the level spawners are not in the 1.2 `npc_spawners` table), which the event spawner
+  rows of the NPC spawn data provide. Tests:
+  `quests::sphere_skill_tests::{entering_the_sphere_casts_the_skill_on_the_tagged_npc_once,
+  a_character_that_misses_the_requirements_is_not_cast_for_while_inside,
+  a_non_character_inside_the_sphere_does_not_cast_the_skill}`; real data (`AAEMU_COMPACT_DB`):
+  `cargo test -p aaemu-game --lib real_data_sharpwind_spheres -- --ignored --nocapture`
+  places the triggers itself and asserts the five slime spawners and Okape's spawner.
 * systems::npcs (Sharpwind "water rises" geyser network, 2026-11-11): the missing placements and
   the logic network are now in place, so clearing the Blocked Geysers raises the lake.
   **Placements (data):** the 10.x client level editor `doodad.xml` (`ArcheAge Returns 10.0.2.13
@@ -4947,6 +4996,175 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `doodad_spawns.json` rows through the three switches to the raised lake): `cargo test -p
   aaemu-game --lib -- --ignored real_compact_db_sharpwind real_compact_db_related_ids
   real_data_sharpwind`.
+* systems::npcs (Sharpwind scripted doodad placements, 2026-11-11): the scripted doodads of the
+  Nerta door chain (spec item 5), the two powder-keg rock walls (items 6 and 9), the stalactite
+  corridor (item 10) and the Okape exit / secret chest / attack ban (item 12) are now placed in
+  `app/Data/Worlds/instance_cuttingwind_deadmine/doodad_spawns.json`. Added: `5541` "Guild
+  Storage Door" family 50009 at (487.015, 327.783, 165.839) and `5542` "Stone Lion" family 50010
+  at (489.476, 323.844, 167.294), replacing the wrong-template Howling Abyss lion `5602` (family
+  30039) that stood at the lion spot; `5280` "Rock" x2, the ogre-corridor wall at (519.932,
+  365.755, 169.029) and the exit wall at (615.935, 469.958, 155.602, scale 1.3); the level's keg
+  sets `5282` x18, `5606` x4 (dormant until Allistair-2's dialogue 11) and `5568` x5, replacing
+  the older approximations (including the `5282` rows where the level has `5606`);
+  `5365` "Falling Stalactite" x8 with families 50011-50018 and `5364` "Shattered Stalactite" x4
+  with families 50019-50022; `5724` "Sharpwind Mines Exit" at (613.364, 642.913, 139.813);
+  `7522` "Okape's Secret Chest" at (614.247, 636.359, 139.486), whose start group 20831 is the
+  invisible phase the Okape death skill hits; and the three `5957` attack-ban doodads. The
+  Derelict Bridge `5058` keeps its 1.2-era position (the sphere centre) and now carries the
+  level family 50000. The death-skill chests `6130` (Nerta) and `6197` (Okape's log) are
+  deliberately not placed; their skills create them. **Inferred:** the positions/families are
+  the 10.x level editor rows (`game/worlds/instance_cuttingwind_deadmine/cells/000_000/
+  doodad.g`); the 1.2 templates and start groups are from `compact.sqlite3`. Tests:
+  `npcs::sharpwind_doodad_tests::sharpwind_scripted_doodad_spawn_placements` and (gated by
+  `AAEMU_COMPACT_DB`) `real_compact_db_sharpwind_scripted_doodad_spawn_templates`.
+* systems::npcs (start-active spawners / Sharpwind NPC spawn data, 2026-11-11): a plain
+  `npc_spawns.json` row (no `NpcSpawnerIds`) expands into **every** game-data spawner that lists
+  the NPC as a member (`SpawnManager::AddNpcSpawner` / `get_spawner_ids`), and neither the C#
+  nor the Rust read `npc_spawners.activation_state`. So the event-only Sharpwind spawners and
+  the cutscene actors were created at instance start: Nerta 11362/12146 and Okape 12188 existed
+  from t=0 (their OnSpawn skills fired with nobody there), the slimes 11361 and the researchers
+  12153/12155 stood in the instance, and Alistair 12108/12109 spawned twice (the regular
+  spawners 13382-13386 plus the cutscene actors 13387/13388 at the same place). **Deviation
+  from the C# (narrow rule, `spawn_manager::spawner_skip`):** a plain row skips (a) a category-0
+  (`NORMAL`) spawner whose name or comment carries the level editor's `연출` ("staging") marker
+  in **every** world (cutscene actors), and (b) an `activation_state = 'f'` spawner **only in
+  `instance_*` worlds except `instance_library`**. Event rows (`NpcSpawnerIds`) still register
+  their spawner for the effect, and nothing else changes. **Why not global (review, 2026-11-11):**
+  'f' does not mean "absent at start" in 1.2. The removed C# never gated spawning on it, and the
+  open worlds prove it: `arche_mall_world`'s 42 rows are all-'f' always-present vendors
+  (Wardrobe Stylist 13639, Fairmoon Clerks 13642/13644/13646, Veroe Weapons Dealer 13645,
+  Premium Potion Merchant 14068, ...), `racing_test_world` has the same 48, and `main_world`'s
+  247 all-'f' rows include quest givers (Liteia 13559, Baron Alfonso 13560, Bard Pagos 13561,
+  Pavitra's Spirit 10393, Arcane Soul 13725, Century Root 7152, the three Alliance
+  Quartermasters 13649/13652/13663 and the five capital Arena Managers 13792). A global rule
+  emptied the two mall worlds and removed those `main_world` NPCs. `instance_library` is
+  excluded too: its activating indun action is `IndunActionNpcSpawner`, which only logs in the
+  C# and here, only 3 of its 49 'f' spawner ids carry a `game_schedule_spawners` binding, and
+  no `npc_spawner_spawn_effects` / `quest_components.npc_spawner_id` row names the other 46, so
+  skipping would leave the whole dungeon without its 143 all-'f' rows. The `'f'` part of the
+  rule is direct in Sharpwind (its event spawners are activated by `NpcSpawnerSpawnEffect`
+  skills that name the spawner id, e.g. Vera's death effect 24094 -> 94694, which is tested);
+  the other instance worlds mark the skipped rows `비활성_...` ("inactive") but their indun
+  scripts are not implemented yet (`IndunActionNpcSpawner` only logs), so skipping keeps them
+  dormant instead of standing in the instance until those scripts arrive. That retail also
+  starts these spawners inactive is **Inferred** (no 1.2 server capture). Caveat for later:
+  `instance_training_camp`'s Red/Blue Army Defense Cannons 13347/13348 (4 rows),
+  `instance_burntcastle_armory`'s Bloodhand Watcher 3086, `instance_nachashgar`'s Jehsen 14413
+  and `instance_immortal_isle`'s Bloated Corpse 13713 are not named by any spawn effect,
+  schedule or quest component either; if they turn out to be permanent they need an explicit
+  exception (the review flagged the cannons as probably permanent battlefield defences).
+  **Open item (reported, not changed):** `get_spawner_ids` is keyed by `member_id` only (the C#
+  behaviour), so 7 `main_world` rows also expand into `"NpcGroup"` spawners whose group id
+  collides with the NPC id (NPC 42 -> 9129, NPC 45 -> 3832); filtering by `member_type` is a
+  separate fix. The gated real-data test counts every skipped expansion per world: `main_world`
+  0 'f' / 4 cutscene (spawner 3709 뱀의틈연출), `arche_mall_world` 0/0, `racing_test_world` 0/0,
+  `instance_library` 0/0, Sharpwind 0 'f' / 9 cutscene (the Alistair and trigger cutscene
+  actors; every Sharpwind plain row keeps a spawner), `instance_hadir_farm` 102 'f' / 0,
+  `instance_nachashgar` 9/0, `instance_cradle_of_destruction` 5/0, `instance_training_camp` 4/0
+  (4 rows with no spawner left), `instance_burntcastle_armory` 2/3, `instance_immortal_isle`
+  and `_easy` 1/0 each, the remaining instances 0/0.
+  **Sharpwind data (`npc_spawns.json`):** removed the plain rows of 11362 x2 (Nerta boss),
+  11361 x16 (slimes), 12188 (Okape), 12146 (cutscene Nerta), 12153 x4 / 12155 (researchers,
+  now spawned by the trigger spheres) and the 3 stray 11106 rows at (199.8, 180.4, ...);
+  added the 7 invisible "Spawn Slave" trigger NPCs 12113-12119 and the 32 level-placement event
+  rows (`NpcSpawnerIds` = the level's `spawnerId`, e.g. Vera's death effect 24094 -> 94694 for
+  the boss Nerta). **Inferred (10.x level, 1.2 templates):** the added placement positions
+  (`npc_spawners.g` `spawnerId`/`spawnerType` of zone 262). Tests (new module
+  `npcs::sharpwind_spawn_tests`): `plain_rows_skip_cutscene_everywhere_and_inactive_at_start_in_dungeons`
+  (CI) and (gated by `AAEMU_COMPACT_DB`)
+  `real_data_sharpwind_instance_creation_spawns_the_authored_npcs`,
+  `real_data_sharpwind_vera_effect_spawns_one_nerta`,
+  `real_data_start_active_rule_counts_per_world` and
+  `real_data_open_worlds_keep_inactive_at_start_npcs` (guards the mall vendors and the
+  `main_world` quest givers).
+* systems::npcs (Kroloal Cradle scripted data, 2026-11-12): the 1.2-era spawn files held only
+  the start placements, so the dungeon's scripted waves never appeared (the skills'
+  `NpcSpawnerSpawnEffect` / `NpcControlEffect` lookups found no spawner / tag target) and the
+  worldgate, gate and exit doodads were missing. `instance_cradle_of_destruction/npc_spawns.json`
+  now carries the 36 event spawner rows (`NpcSpawnerIds` = the level `spawnerId` the effect
+  names: Carnivore's Eggs 88966-88981 - kept although their `npc_spawner_spawn_effects` rows
+  588/591-604 have no `effects` row in the 1.2 compact, so no 1.2 skill can trigger them (see
+  open item (a)); statues 88999-89002; Metamoze summons 92250/92257/
+  93513/93593, Sprigg's gate squad 96069/96253/96256, the Siranus room 96271-96274 and
+  96372-96374, and Arkanis's 96467-96470), the seven `NpcControlEffect` tag targets as plain
+  rows (12157 tag 830, 11268 tag 685, 12180 tag 915, 12200 tag 852, 12198 x2 and 12199 tag
+  851; 12166/12170 are event rows because their spawners 13467/13471 are `activation_state =
+  'f'` and skills 19645/19646 spawn them) and the four start-active NPCs that had no row
+  (11555, 11368, 11356, 11552). `doodad_spawns.json` adds the 41 scripted + 4 interactive level
+  doodads, including the blockers `5725` worldgate (family 30044, Use 19616), `5726` stone gate
+  (SkillHit 18670 on Sprigg's death -> phase 14678) and `5762` end exit (SkillHit 19236 on
+  Arkanis's death -> phase 14770, `DoodadFuncExitIndun` 19688). Decor and skill-summoned
+  doodads are not placed. **Inferred:** positions/yaws/families are the 10.x level editor rows
+  (`level_design/zone/264/.../npc_spawners.g`, `level_design/cells/*/doodad.g`); templates,
+  spawner ids, skills, tags and start groups are 1.2 `compact.sqlite3` data. The pre-existing
+  1.2-era doodad rows (the four 5257 without families, three 5252, eighteen 5880, two 5549,
+  five 5516) are kept: the audit does not prove them wrong. **Open items (reported, not
+  changed):** (a) spawner ids 104053/104060 (skill 20189 on statue 11184) exist in the effect
+  table but have no placement in this world's level, so no event row was invented; the 15
+  Carnivore's Egg rows are likewise dormant in 1.2 (their `npc_spawner_spawn_effects` rows
+  588/591-604 have no `effects` row, so nothing casts them; kept for a future data fix);
+  (b) skill 19707's `NpcSpawnerDespawnEffect` (row 35) despawns the 10.x level spawner 92695
+  (the dummy Princess Surya 11555), but a plain-row placement registers the compact template id
+  (12794), so `GetNpcSpawner(92695)` does not find it and the dummy stays after the moving
+  princess spawns. No data-only fix exists: `GetNpcSpawner` only indexes event spawners, and no
+  1.2 spawn effect names 92695, so an event row [92695] could never start the dummy at instance
+  start; it would only drop the start placement. A correct fix is code (despawn by the plain
+  spawner's level id) or an owner decision, not a spawn-file edit; (c) Sprigg's command set 222
+  begins with `FollowPath` rows, which an event-spawned Kuwon cannot run without a simulation, so the gate
+  opens and Kuwon spawns but the two soldiers' full scene is not reproduced (the Siranus room
+  proves the sphere -> command set -> spawner chain). Tests: `npcs::cradle_dungeon_tests`
+  (`cradle_added_doodad_rows_are_placed_once_each`, `cradle_added_npc_rows_are_placed_once_each`
+  in CI; gated by `AAEMU_COMPACT_DB`:
+  `real_compact_db_cradle_scripted_doodad_templates_and_funcs`,
+  `real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner`,
+  `real_data_cradle_siranus_sphere_runs_the_command_set`,
+  `real_data_cradle_statue_sphere_wakes_the_four_statues`,
+  `real_data_cradle_sprigg_death_opens_the_gate_and_spawns_the_squad`,
+  `real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad`).
+* systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
+  (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
+  has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->
+  `sphere_skills` -> skills -> `buff_triggers` event 6 (Timeout) / `npc_control_effects` command
+  sets / `np_skills` NPC events -> `npc_spawner_spawn_effects`), and the 13 `tags` rows select
+  the invisible trigger NPCs (469 -> 10076, 496 -> 10164, 594-599 -> 10805-10810, 497 -> 10025,
+  463/458 -> 10067, 463/459 -> 10068, 1317 -> 13851). `npc_spawns.json` gained: the 86 event
+  rows (`NpcSpawnerIds` = the level spawnerId of every `NpcSpawnerSpawnEffect` the chains name,
+  e.g. 61979-62018 for the six skeleton camps, 68521-68527/68597 for the Velarre hall,
+  62019/68524/68525/68669/68671/68672 for the boss-death cleanup slaves), and the 12 plain rows
+   of the trigger NPCs whose level spawner is active at start (10067 x2, 10068 x2, 10076 x4,
+  10164 x3, 13851 x1). **Follow-up (same day):** the start-active skeleton camp (9473 x10 at
+  the level spawners 58991-59011) and the 10021 Bloodmage (59012) that had no row are plain
+  rows at their level placements (Inferred); compact 10557/11113 are `activation_state = 't'`
+  and the inactive 11225/11220 variants are skipped by the loader. The 10021 row also clones
+  the NORMAL farm group spawner 13501, which stays idle without a schedule, as for the other
+  farm members. The 116 shipped 1.2-era rows are kept (two of them are within 2 m of each
+  other and stay skipped as before). **Event rows are listed first in the file:** the 10.x level
+  spawners 61148 and 68236 stand within 2 m of kept plain 9480/9481 rows, and the loader's
+  duplicate filter keys on `(UnitId, position)`; event entries never feed that position table,
+  so an event row after the plain row would be dropped before its spawner registration.
+  `doodad_spawns.json` gained the 15 `5958` "Hadir_Rotten Flesh Golem_Unable to Attack" guards
+  and the two `4143` Necromancer's Cauldrons (skill 16577 -> the farm manager's command set ->
+  spawner 61613); the two farm exits 4289/4927 keep their 1.2-era rows. The quest chest 7661
+  (owned by the quest-spawn lane) and the decor Necronomicon 4142 are not placed.
+  **Inferred (10.x level editor, 1.2 templates):** the added positions are the zone-241
+  `npc_spawners.g` / doodad rows of the 10.x client level; template ids, tags, skills, buffs and
+  start phases are 1.2 `compact.sqlite3`. The L50 Annmit rows 13799/13741 are included because
+  the 1.2 data has the chain: sphere 2246 -> skill 23512 -> command set 320 -> 23513 -> buff
+  6776 (timeout) -> spawner 123727, and 23505 -> set 321 -> 23521 -> spawner 123729. Tests (new
+  module `npcs::hadir_dungeon_tests`): the shipped-row placement tests (CI) and (gated by
+  `AAEMU_COMPACT_DB`) `real_compact_db_hadir_instance_loads_the_authored_spawns`,
+  `real_compact_db_hadir_annmit_chain_is_in_the_1_2_data`,
+  `real_data_hadir_spheres_run_the_buff_trigger_chains` (sphere 1300 -> buff 2931 -> spawners
+  61979-61988; sphere 1308 -> buff 2939 -> 68521-68523) and
+  `real_data_hadir_golem_death_spawns_the_cleanup_slaves` (skill 17608 -> 68524/68525/62019).
+  The start-active conformance snapshot (`instance_hadir_farm`) is now 113 `'f'` skips / 0
+  cutscene / 1 row with only event spawners: the eleven new rows each skip one inactive variant;
+  the shared Sharpwind snapshot was updated deliberately.
+  **Open item (reported, not changed):** the 12 event rows for 60909-60911, 61146-61148 and
+  68235-68240 (the sphere 1298/1299 camps via skills 16726/16727) have no 1.2 producer: their
+  `npc_spawner_spawn_effects` rows exist, but the 1.2 `compact.sqlite3` has no `skill_effects`
+  rows for 16726/16727 (the 10.x data has them), so those camps stay dormant until the effect
+  rows exist. The other 74 rows are referenced by 1.2 rows.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
@@ -6656,13 +6874,14 @@ See Docs/wiki/Quest-Audit.md and Docs/wiki/Mail-Audit.md.
 | Zones whose origin differs between the 1.2 and 10.x `world.xml` (190, 192, 193, 200, 227, 251, 266, 281, 286, 287) | same | data | The content sits at the 10.x position (zone origin x 1024 + local): the 1.2 origin never fits the 1.2 heightmap (0 of 154 editor candidates with unclipped terrain), the 10.x frame does (many points within 0.1 m). Z values above the 1024 m ceiling cannot be verified. Candidates whose terrain differs by tens of metres (10.x-only zones such as 157, parts of 190/281) were rejected. |
 | 10.x world spawns backported into 1.2 `main_world` | `app/Data/Worlds/main_world/{npc_spawns_10x,doodad_spawns_10x}.json`, `rust/tools/spawn_import/backport_10x.py` | data | Source: the 10.x `main_world` `npc_spawns.json` (28,434) / `doodad_spawns.json` (89,121). Filters in order: template id exists in the 1.2 compact (NPC -2,563, doodad -8,200); 10.x `Title` equals the 1.2 `en_us` name (ids were reused: NPC -2,202, doodad -60); the X/Y lies in a non-zero 1.2 `world.xml` zone (doodad -1,618); excluded doodad names `Restricted Area: Under Construction` (1,105) and `Sunken Treasure Chest` (1,323; no 1.2 system); the terrain rule of the October 17 import (`|dz| <= 5 m` to the 1.2 heightmap, or within 40 m / 8 m of an existing 1.2 spawn, or clipped ground; NPC -256, doodad -10,995) after the match; a one-to-one match per template before the terrain rule: each 10.x entry is paired, greedily by ascending XY distance, with the nearest unmatched existing 1.2 spawn of the same template within 20 m (NPC) / 10 m (doodad) and dropped (NPC -22,828, doodad -30,481), so shifted copies of an existing pack are not doubled and only the surplus survives; 10.x entries within 2 m of each other then collapse (NPC -6, doodad -3,677). Result: 579 NPC and 31,662 doodad entries. The NPC entries and the 670 mining veins (645 Iron Vein, 25 Starshard Vein) ship (the loader's `npc_spawns*.json` / `doodad_spawns*.json` glob reads them; they carry `Title`). The 10.x source is a live-server snapshot: its other surviving doodads were mostly player-planted trees, crops, livestock and housing furniture, which share templates with natural spawns and cannot be told apart, so they were removed (2026-10-27). Zones whose 10.x terrain differs from 1.2 (e.g. most of Rookborne Basin, zone 270: 128 of 145 10.x Iron Veins sit 100-300 m off the 1.2 ground) are correctly rejected by the terrain rule, so that zone gains only 3 veins. Rerun steps are in the script docstring (the heightmap dump is the ignored test `dump_terrain_heights`). |
 | Quest 869 giver doodad, quest 1618 cave cobweb and the quest-referenced doodads dropped by the 10.x vein-only filter missing from every spawn file | `app/Data/Worlds/main_world/doodad_spawns_quest_fill.json` | data | One entry: doodad 1137 "Unknown Crate", the giver of quest 869 "Treasure of the Towers" (Mahadevi, level 16, open zone). The position 19065.793, 8919.587, 352.82 from the 10.x `main_world` cell `018_008` `doodad.g` (type 1137) agrees to 0.0 m with the 10.x `map_data/doodad_map/e_mahadevi.dat` and `doodad_map.dat` records (1137); the 1.2 `e_mahadevi.dat` (D:/AA1.2 pak, 124 records) has no 1137 record, as the 1.2 `doodad_map` only holds a subset of map markers and is not an existence source; yaw 66.9998 degrees comes from the 10.x quaternion `(0, 0, 0.551936, 0.833887)`; the position lies in open zone 196 (`e_mahadevi_2`), whose `world.xml` origin is identical in 1.2 and 10.x. The raw 1.2 heightmap reads 241.78 m there, the 1.2 navmesh (the live `GeoDataMode` height path) 352.81982 m, 0.0002 m from the spawn Z; the ignored test `real_data_quest_fill_spawns_on_terrain` re-checks the loaded spawn, the open zone and that height. Second entry: doodad 1877 "Dungeon Cobweb", burned in quest 1618 "Beneath Castle Ronbann" (FakeUse skill 12477, phase 3655, respawn 60 s) at the cave entrance in Lilyut Meadow (`w_lilyut_meadow`); position 12840.637, 16329.311, 372.802 from the 10.x `main_world` cell `012_015` `doodad.g` (cell offset 552.637, 969.311, 372.802), which agrees to 0.0 m with the 10.x `map_data/doodad_map/doodad_map.dat` and `w_lilyut_meadow.dat` records (1877); the quaternion is the identity, so yaw 0 (it was the only spawn in the dropped 10.x backport, commit 007a40d1b). The 1.2 `w_lilyut_meadow.dat` (D:/AA1.2 pak, 123 records) has no 1877/1878/1879 record, again because it is only a marker subset; the neighbouring quest doodads 1878/1879 are already spawned. The 1.2 navmesh height at the cobweb is 367.905 m, 4.897 m below the authored Z 372.802 (zone 195, open): the web is a prefab hung across the cave mouth, so the ignored test `real_data_quest_fill_spawns_on_terrain` allows 1877 alone up to 6 m above the navmesh (every other fill entry stays within 3 m). For comparison the existing 1.2-data spawns of 1878/1879 sit on the navmesh: Z minus height is -0.374, -0.582, -0.685, +0.010 (1878) and -0.586, +0.254 (1879). Third batch (commit 77026d2ad kept only veins of the 10.x server snapshot, dropping quest doodads): every entry's position is a 10.x `main_world` `level_design/cells/<cx>_<cy>/doodad.g` record (world = cell*1024 + local) that agrees to 0.05 m with a `map_data/doodad_map/doodad_map.dat` record of the same template, yaw from the quaternion about Z, in an open zone, within 3 m of the 1.2 navmesh height (the test; 3377 and 1877 are the documented `RAISED_FILL_PLACEMENTS`). Restored: 3307 Giant Beehive x17 (quest 2903, FakeUse + RequireQuest 2903, loot item 18458 = gather act 1207; the hive has no item or farm that plants it), 4162 Swan Feather Arrow x25 (quest 3761, RequireQuest 3761, loot item 20066 = gather acts 1577/2336; 29 in `doodad.g`, the 4 whose navmesh height is 3.2 to 7.6 m above them (9023.4/8450.1, 9100.8/8492.2, 9104.5/8446.7, 9127.0/8434.0) are left out although the raw heightmap agrees to 0.7 m), 3375 and 3377 Pirate Urn (quest 2908; its gather acts 1213-1216 each need their own urn, 3374 and 3376 are already in `doodad_spawns.json`; loot items 13988 and 14022; 3377 at 19234.263, 8635.435 is 5.0 m above both the navmesh and the raw heightmap, the NPC spawns 30-60 m away stand on that 226.36 ground, so it is allowed up to 6 m above, a raised ledge not visually confirmed), 3629 Suspicious Footprints x14 (quest 1969, highlight of sphere act 496; quest-only `quest_footsteps` prefab), 4122 Windheart Lake Altar (quest 3205, highlight of item-use act 518), 7823 Malcolm's Armor x3 (quest 2486, highlight of talk act 969). Excluded: 4347 Eastern Gate and 4348 Northern Gate Task Board (quests 353/371): not missing, they alternate with 4351/4352 at the same spot, which `doodad_spawns.json` spawns; each has a `DoodadFuncTod` phase that ends in `DoodadFuncFinal` + `DoodadFuncRatioRespawn` 524-527 (10000) spawning its twin, and a live client saw a 4347 / 4348 object at the board positions through that chain, so a fill entry would double the board, 1366 Snow Flower x27 (quest 1017, but zone 154 w_bronze_rock is closed in 1.2), 7313 Glass Shard Mound x34 and 7976 Remains x21 (quests 6220/6221, zone 301 o_shining_shore_2 closed, later-patch content), 6212/6215 Blue Salt Brotherhood Bulletin Board (quests 5151/5153 start only from them, but they exist only in the old 10.x server-data snapshot at 15371.62, 11552.05, 108.327 / 20935.4, 13152.78, 114.4854 and not in any `doodad.g` or `doodad_map` of the 10.x client files, so there is no second source; undecided), 1140 Basement Door, 1141 Sacrificial Pen, 1480 Bone Heap, 2779 Belethe (their only act rows reference `quest_components` 3647/4054/5674/10074 that do not exist in the 1.2 data and the candidate quests 795/872/1245/2328/2318 have no act that uses them), 1560 Thief's Chest (needs quest 1483, which has no `quest_contexts` row; act component 6988 missing), 3544 Serpent God Statue (its only act row references the missing component 13163; its RequireQuest is quest 5695 whose gather item 29258 is not looted from it; `mgmt_spawn` is set), 2673 Chick (item 16230 plants it, `farm_group_doodads`; 119 scattered `doodad.g` records are player livestock; its quest use is a phase check in a missing component), 4594 Vita Root (item 23635 plants it; not in `doodad.g`), 6049 Guest Bed (item 18677 places it; the quest only highlights it and the 8 records are player houses). Excluded: 22 NPCs whose 10.x spawner placement and 10.x `npc_map` record agree within 0.5 m but whose quests are in zones closed in 1.2 (Airain Rock 192/193, Sunbite Wilds 157/190, Cradle of Genesis 328, Golden Ruins 281/203, Mistmerrow 307) or are test/dummy (Maisky 13877, Sephvell 14147); the open-zone missing NPCs without a position in both sources (Tame Yata 3450, Asam 1266, Freeblood Maurauder 1772, Trafficker Pirate 12509 and the other one-source/no-source NPCs); library doodads 7992/7993/7994 (level 51-55 later-patch content) and the remaining missing doodads 1082, 2770, 6197, 7404, 4380 (no `doodad.g` + `doodad_map` pair); all missing entities with no 10.x position at all (the majority of the 179 candidates). |
-| `NpcSpawner.SelectSpawnerId` for NORMAL multi-member spawners | `systems/npcs/npc/spawner.rs` (`select_spawner_id`) | matches the C# | Not changed. A JSON entry clones every game-data spawner that has its unit as a member and (memberwise clone) shares one `NpcSpawnerIds` list, so with more than one spawner only an AUTOCREATED unscheduled one or a scheduled one is ever selected: a unit that has no JSON entry of its own and is only a sibling of a NORMAL group spawner (Vicious/Silent Treant 3105/3106, Goblin Fighter 527, ...) never spawns. The 13 audit findings of this kind are all `ConAcceptNpcKill` starters, which `starter_accepts` evaluates as an OR over the component's acts, and in every one of the 7 quests other listed NPCs spawn, so no quest is blocked; the data would need real positions for these units (the 10.x editor has no placement of those group spawners). |
+| `NpcSpawner.SelectSpawnerId` for NORMAL multi-member spawners | `systems/npcs/npc/spawner.rs` (`select_spawner_id`) | matches the C# | Not changed. A JSON entry clones every game-data spawner that has its unit as a member and (memberwise clone) shares one `NpcSpawnerIds` list, so with more than one spawner only an AUTOCREATED unscheduled one or a scheduled one is ever selected: a unit that has no JSON entry of its own and is only a sibling of a NORMAL group spawner (Vicious/Silent Treant 3105/3106, Goblin Fighter 527, ...) never spawns. The 13 audit findings of this kind are all `ConAcceptNpcKill` starters, which `starter_accepts` evaluates as an OR over the component's acts, and in every one of the 7 quests other listed NPCs spawn, so no quest is blocked; the data would need real positions for these units (the 10.x editor has no placement of those group spawners); the 14 class-b units got fill rows at their placed siblings' positions on 2026-11-12 (quest-spawn row below), the rule itself is unchanged. |
 | Kill / loot quest NPCs whose only placement holds one NPC (tester reports, Ynystere, 2026-11-10) | `app/Data/Worlds/main_world/npc_spawns_quest_fill.json`; tests `npcs::spawn_tests::quest_fill_npcs_reach_the_area_spawner_minimum`, `real_data_quest_fill_spawns_on_terrain` | data | The same selection keeps the NORMAL area spawner of a JSON entry idle when an AUTOCREATED single spawner (max 1) shares it, so one point = one NPC. Honouring the area spawners globally is not an option: 7,492 of the 27,033 main_world entries (783 templates) have such a sibling with `min_population` > 1, which would stack ~52,000 NPCs on their single points. Three quest areas had one point: quest 2950 "Peacocking Around" (16 x Blue Crane 8013; area spawner 5407 "Ynystere / River of Longing / riverside", min 7), quest 4197 "A Change in the Herd" (8 x Buffalo Intestines, 100 % from Tainted Buffalo 10721; 5446 "Ynystere / Beech Forest / Tainted Buffalo", min 9) and quest 4207 "Clean Up the Stragglers" (8 x Bloodhand Assassin 8017 / Priest 8018 on the Waveroar Ruins coast; 5449 "Ynystere / Requiem Cape / Bloodhand stragglers", min 7; one 8017 and one 8018 on one point). The 1.2 client `npc_map/e_ynystere.dat` has exactly the same single points, so there is no placement source: the fill adds 6 cranes, 8 buffalo and 3 + 2 Bloodhands (each area reaches its `min_population`), sampled on rings 10-34 m around the original point (farthest-first, at least 8 m apart) where the 1.2 heightmap and navmesh agree within 1 m and stay within 2 m of the original Z, at the heightmap height; yaw faces away from the original point. No other NPC spawns within 45 m except one Ynystere Brown Bear (8039) by the cranes. Second batch (Silent Forest): daily quest 3909 "Slay the Sarracenia" (8 x Thrashing Sarracenia 8606, respawn 92 s) had one point at (23840.617, 12134.021, 304.05); its area spawner 11504 "Ancient Forest / Sarracenia" has min 6, so 5 points 10-34 m around it were added. The navmesh there sits ~5 m above the terrain everywhere (the original point included; no water, collision finds only the terrain), so these points use the live NPC spawn snap instead: `spawn_ground_z` lands within 0.5 m of the terrain height, which is within 2 m of the original Z. Every fill entry is checked against that snap by `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground`. |
 | Hunt quests across the world with one to three mobs where their area spawners call for more (tester reports, 2026-11-11) | `app/Data/Worlds/main_world/npc_spawns_quest_fill.json`; tests `npcs::spawn_tests::quest_fill_reported_areas_reach_the_area_spawner_minimum`, `quest_fill_npcs_reach_the_area_spawner_minimum`, `real_data_quest_fill_spawns_on_terrain`, `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground` | data | The 2026-11-11 kill-quest spawn audit (`D:/aaemu-audits/tester-reports-2026-11-11/kill_quest_spawn_audit.json`, 1,110 hunt acts) found 118 acts that require >=4 kills but whose best 250 m cluster of spawn points holds <=3, plus the open spawn-data items of the tester report (Schima Rogue 4210, Poacher 2514/9201, Mahadevi Seabug 2510 / Tropical Turtle 2509, Death Shroud 2906, Fire Elemental Explorer 2952, Earth Elemental Seeker 2914, Ghostly Soldier 9924, Armored Crayfish 2911, Saffron Thief 2942, Crazed Disciple 5090). For each area spawner (category 0) with one of those NPCs as a member, the fill takes the densest 250 m cluster of its member points and tops the area up to the spawner's `min_population` (capped by its `maxPopulation`), distributing the extra points over the member templates that already have points there: 8-34 m rings around those points, at least 8 m apart, Z from the live spawn snap (`spawn_ground_z`, iterated to its fixed point), only in open 1.2 zones. 43 areas, 303 points: 3867 (+4), 3868 (+13), 3933 (+1), 4081 (+5), 4083 (+7), 4086 (+10), 4092 (+1), 4109 (+7), 4114 (+2), 4116 (+5), 4125 (+8), 4128 (+13), 4130 (+8), 4131 (+16), 4138 (+11), 4173 (+8), 4182 (+7), 4183 (+17), 4185 (+10), 4238 (+1), 4454 (+17), 4511 (+17), 4512 (+4), 4784 (+3), 4785 (+13), 4789 (+5), 4793 (+6), 4795 (+5), 4956 (+1), 5255 (+8), 5341 (+7), 5448 (+1), 5585 (+1), 7933 (+3), 8778 (+9), 9704 (+9), 11439 (+5), 11868 (+9), 11869 (+6), 11896 (+8), 11898 (+5), 12323 (+4), 12328 (+3). Left alone: 29 areas already at `min_population` (the authored mix can be below the act count: the Pavitra's Fall site 12814 holds its 15 points of which 3 are Death Shrouds, so quest 943's 8 kills wait on the 75 s respawn; the Poacher 5588 camp has 4 >= min 4; the Wild Fangs Poacher 12808 camp's 5 points already exceed its max 3), NPCs with no area spawner (unique / named / event / scripted: Dahuta Priestess Efina 614, High Priests 11959-12010, Chief Kirukaru 1281, Guard Captain Hespheros 1581, Zurchira 1251, Grave Keeper Mistfiend 1587, ...), closed zones 154 (Airain Rock: 988, 2101, 2103, 2104, 1027), 275 (Sungold Fields: 6587, 6588, 6592, 6593), 301 (Diamond Shores: 6201) and zone 287 (Sunbite Wilds 1947) which is absent from compact, the inactive Nightmare spawners 14127/14128 (quests 5143/5144), and the 258 hunt acts with no spawn points at all (dungeon / instance / event content). The fill targets `min_population`, not the act count. Live on the lane stack (before -> after): Schima Rogue 2 -> 11, Saffron Thief 1 -> 12, Crazed Disciple 1 -> 9, Armored Crayfish 1 -> 14, Ghostly Soldier 1 -> 9, Fire Elemental Explorer 2 -> 5, Earth Elemental Seeker 8 -> 24, seabugs/turtles 6 -> 7; the Death Shroud count at the Pavitra's Fall site is unchanged (3 of its authored 15). **Inferred (no 1.2 server evidence):** the 303 positions: no 1.2 file holds the area geometry (the json and the client `npc_map` hold one point per area spawner), so the points are rings around the authored points; only the spawner counts (`min_population`, `maxPopulation`, member lists) are 1.2 data, member `weight`s are ignored (the extra points are split evenly over the member templates), and the audit file named above is a local artefact of the tester reports, not part of this repository. |
 | Reported Haranya hunt areas that still bottleneck with several players at the spawner minimum (owner follow-up, 2026-11-11: Mahadevi, Solis, Falcorth) | `app/Data/Worlds/main_world/npc_spawns_quest_fill.json` (+59 points); tests `npcs::spawn_tests::quest_fill_reported_hunts_hold_a_quests_kills`, `quest_fill_points_keep_eight_metres_from_each_other_and_the_authored_points` (46 areas), `quest_fill_reported_areas_reach_the_area_spawner_minimum` (7933 / 5585 caps), `real_data_quest_fill_spawns_on_terrain`, `ai::collision::real_data_tests::real_npc_quest_fill_spawns_on_the_ground` | data (owner-requested deviation) | The owner asked for more mobs than the authored spawner counts ("it might be the classic experience but anyway these mobs seem likely to cause bottlenecks"). Each reported hunt area now holds `clamp(kills, 8, 15)` of its NPC, the kills being the largest count of that NPC's hunt acts (15 for NPCs that only count toward a 26-30 kill group hunt): Poacher 2514 4 -> 15 (quests 861 / 2703 need 8 / 15), Wild Fangs Poacher 9201 5 -> 15 (3307: 20), Mahadevi Seabug 2510 3 -> 8 (2711 / 2902: 5), Tropical Turtle 2509 4 -> 8 (2901: 8 horns), Death Shroud 2906 3 -> 8 and Headless Knight 2907 4 -> 8 (943: 8 each), Fire Elemental Explorer 2952 5 -> 15 (3862: 15), Ghostly Soldier 9924 9 -> 15 (group 3866: 30), Armored Crayfish 2911 14 -> 15 (group 3861: 30), Saffron Thief 2942 12 -> 15 (947 / 2776: 12 / 24); Schima Rogue 4210 (11 distinct for 5) and Earth Elemental Seeker 2914 (24 for group 2774) already held enough. The client `npc_map` holds exactly the authored points (one per spawner), so there is no further 1.2 placement data: the new points are 9-34 m rings around the NPC's own points, at least 8.5 m from every NPC point, in the anchor's zone, within 6 m of its height, above the sea (Z >= 100.5) and on the live spawn snap (`spawn_ground_z`, iterated to its fixed point). Two filled areas now exceed their `maxPopulation` on purpose (7933: 15 > 9, 5585: 16 > 12). Respawn times are unchanged. The "Earth Elemental Seeker quest marker off by a few 100 m" item is the client's own marker: the server's Seekers stand on the client's 8 `npc_map` points and the rings around them. |
 | Ynystere NPCs standing on structures with a terrain spawn Z (2026-11-10) | `app/Data/Worlds/main_world/npc_spawns.json` (28 Z values); tests `ai::collision::real_data_tests::structure_npcs_keep_the_client_floor_height`, `real_client_floor_fixes_stand_on_a_collision_floor` | data | Tester report: Rose Estate Rafflesias (8043) clip inside the manor floor. Their X / Y match the 1.2 client `npc_map/e_ynystere.dat` records (16-byte records: u32 template id, f32 world X / Y / Z) exactly, but the spawn Z was the terrain under the manor (268.7-269.4) while the records put four on the ground floor (271.5-272.7) and two on the upper floor (281.4-281.5), where the 1.2 collision has floors. 104 of the 987 matched Ynystere spawns differ from their record by more than 2 m; 28 were corrected to the record's Z, each above the terrain and within 1 m of a collision floor (`spawn_ground_z` lands on it): Rose Estate Manor (6 x 8043, Kirk 1441, Elizabeth 1458), Brimblaze Tower on Marooned Isle (Kimrei 1467 on the top at 175.925, was 113.0 at the tower base; 5 x Bloodhand Watcher 8015 on the rampart at 126.3-128.9), the Finnea Harbor docks (5 x Stitched Boatman's Corpse 8779, quest kills, were under the sea surface), Mansion Watchman 13070 x 3, Sentry 8243, Yorun 10758, Silleno 1474, Ruby Miner 1419, Caernord Citizen 1423, Brave Ynystere Soldier 1415. Left alone: flying / swimming NPCs without a floor at the record height (Pale Razorbeak 8019, White Shark 8022), records under the terrain (two 8015, 13062, 8033), and the marker stack at (20272, 12268) whose record heights step by 2 m (8051-8055, 12723, 12991-12994). Silent Forest is the next row; the other zones' `npc_map` files were not audited. |
 | Silent Forest NPCs standing on structures with a terrain spawn Z (2026-11-10) | `app/Data/Worlds/main_world/npc_spawns.json` (11 Z values); `SILENT_FOREST_FLOOR_FIXES` in `ai::collision::real_data_tests`, same tests | data | Same rule with `npc_map/e_ancient_forest.dat` (764 records, 809 matched spawns, 107 more than 2 m off, 11 kept). Tester report: in the westmost tomb of the Ancient Necropolis the quest giver Ancient Ghost (3266) stood 10 m under the tomb floor (340.255 -> 350.366, the floor is inside a building brush) and four Cursed Swordsmen (7496) 2.7 m under it (-> 342.75 / 342.775). Also corrected: Warlock Erik 3123 (352.36 -> 373.848) and Avidin 8604 (320.50 -> 342.266) of the Cloaked Forest flesh-golem camp, Cursed Warlock 7498, Sylvia 3141, Yuria 3311, Carmelia's Soul 3335. |
 | Bloodhand Base Cannons missing from the Marooned Isle rampart ("Rout the Bloodhands" 2325, tester report, 2026-11-11) | `app/Data/Worlds/main_world/slave_spawns.json` (2 x slave 57); `skills/relation.rs` (`world_slave_driver`, `acting_faction`, `owner_character`), `skills/combat.rs` (`add_tagger`); tests `skills::relation::tests::a_manned_world_cannon_fights_for_its_gunner`, gated `ai::collision::real_data_tests::real_bloodhand_cannons_stand_on_the_rampart_in_range_of_the_docks` | data + deviation | **Inferred positions:** no 1.2 or 10.x data places slave 57 (every public AAEmu tree, its forks and the 10.x repo ship the same five `slave_spawns.json` rows; the client has no slave map). The quest text puts the cannons "up top of these old rampart walls" above the Bloodhand Pillagers (8014) on the docks: the two cannons stand on the wall walk (collision floor 126.076, terrain 115.6 below) between the Bloodhand Watchers (8015), at (19759, 11755) and (19784, 11742), facing the Pillagers' centre (19810, 11789) (yaw -0.994 / -0.511 rad); every Pillager is 36-77 m away, inside skill 15134's 10-130 m. **Deviation (C# gap):** a slave nobody owns (no summoner, no owner) acts for the character in its driver / gunner seat: `owner_character` returns that character, `can_attack` uses its faction (slave 57 is faction 2 "Neutral", so a manned cannon could damage nothing), and a slave's damage tags its gunner, else its owner (`add_tagger`; the C# tagged only a mate's owner, so no cannon kill credited a quest). NPCs still see the cannon as Neutral, so they do not attack it. Kills of 8014 by other means still count (the objective is a plain `QuestActObjMonsterHunt`). |
+| Quest spawn gaps of the 2026-11-12 audit (`D:/aaemu-audits/quest-spawn-gaps-2026-11-12`) | `app/Data/Worlds/{instance_burntcastle_armory,instance_hadir_farm}/doodad_spawns.json`, `app/Data/Worlds/main_world/npc_spawns_quest_fill.json`; tests `npcs::quest_spawn_tests::{real_data_quest_spawn_mentor_chests_load_hidden_with_their_loot,real_data_quest_spawn_class_b_siblings_are_placed_once}` | data (Inferred) | **B1 mentor chests:** doodad 7659 Hieronimus's Secret Chest x2 at (201.739, 313.111, 20.5188) / (201.744, 310.903, 20.5188) and 7661 Marmas's Secret Chest x2 at (758.372, 683.263, 136.045) / (760.658, 683.337, 136.109), the two authored placements of each in the 10.x per-cell `doodad.g` (the same count as the mentoring runtime's `chest_count = 2`); they stand ~2 m from the boss spawns (8962/10518, 9798/10098). The 1.2 start group is the invisible placeholder (7659 -> 20853, 7661 -> 20848) whose `DoodadFuncSkillHit` is the boss on-death skill 18024 / 18031; the phase chain from there loots the four quest items (31589/31590, 31593/31594). The chests must not start in a lootable phase: `phase::get_func_group_id` picks the kind-START group. 6197 Okape's Log is deliberately not placed (Okape's death skill creates it; Sharpwind note). **B2 class-b NPCs:** 14 rows in `npc_spawns_quest_fill.json` at the positions of the placed siblings of their NORMAL spawners (527, 4946, 2352, 2354, 2357, 2483, 3105, 3106, 3478, 1763, 732, 2918, 2919, 2941; quests 182, 556, 1191, 2120, 2573, 2725, 2742, 3865). Each row loads the unit's AUTOCREATED single spawner, the clone `SelectSpawnerId` selects; the NORMAL group spawner clone stays idle (unchanged C# behaviour). The generic rule "a spawner placed by one member row also spawns its other members" was rejected on the shipped data: per world, plain rows / rows with such a sibling / extra NPCs if each spawned one of every other member / at the spawners' `min_population` = main_world 26,204 / 9,406 / +31,829 / +79,527; instance_library 2,277 / 661 / +1,303 / +1,090; instance_hadir_farm 116 / 45 / +225 / +45; instance_burntcastle_armory 46 / 41 / +233 / +149; instance_howling_abyss 182 / 65 / +465 / +75; instance_howling_abyss_2 219 / 84 / +588 / +84; instance_cuttingwind_deadmine 45 / 26 / +125 / +47; instance_cradle_of_destruction 77 / 28 / +67 / +28; instance_sal_temple 123 / 39 / +282 / +137; arche_mall_world 420 / 7 / +7 / +7; racing_test_world 329 / 0 / 0 / 0. The 14 rows are Inferred (no 1.2 placement exists); class-d units are left alone. Gated by `AAEMU_COMPACT_DB`; the added rows also pass `real_data_quest_fill_spawns_on_terrain` and the 8 m spacing test. |
 
 
 ### Area sphere geometry import (November 5, 2026)
