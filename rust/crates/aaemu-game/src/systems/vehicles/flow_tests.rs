@@ -1145,6 +1145,62 @@ async fn a_killed_mate_flags_its_item_once_and_cannot_be_summoned_until_revived(
         .is_empty());
 }
 
+/// The summon item of a dead, still-summoned mate dismisses its corpse: the toggle runs before
+/// the corpse refusal, so the owner can always put the corpse away. The item stays flagged, and
+/// with no mate out the same item is still refused until a stablehand revive.
+#[tokio::test]
+async fn a_dead_mates_summon_item_dismisses_its_corpse() {
+    let mut t = dead_mate();
+    t.client.drain();
+    let obj_id = t.mate.obj_id;
+    assert_eq!(t.mate.data().unit.hp, 0);
+    assert_eq!(
+        t.server
+            .systems
+            .vehicles
+            .mates
+            .get(0)
+            .get_active_mates(1)
+            .len(),
+        1
+    );
+
+    mates::spawn_mount(&t.server, &t.player, t.item_id);
+    let f = t.client.drain();
+    assert_eq!(error_codes(&f), Vec::<i16>::new(), "{:x?}", ops(&f));
+    assert!(ops(&f).contains(&sc::SCUnitsRemovedPacket));
+    assert!(t
+        .server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .is_empty());
+    assert!(t.mate.data().deleted);
+    assert!(t.server.world.world(0).unwrap().mate(obj_id).is_none());
+    // Dismissing a corpse is not a revive.
+    assert_eq!(t.item().details.mate_dead, 1);
+    assert_eq!(t.row().hp, 0);
+
+    // With no mate out, the flagged item is refused again.
+    mates::spawn_mount(&t.server, &t.player, t.item_id);
+    let f = t.client.drain();
+    assert_eq!(
+        error_codes(&f),
+        vec![error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE]
+    );
+    assert!(task_actions(&f).is_empty());
+    assert!(t
+        .server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .is_empty());
+}
+
 #[tokio::test]
 async fn mate_make_get_up_revives_the_summoned_corpse() {
     let mut t = dead_mate();

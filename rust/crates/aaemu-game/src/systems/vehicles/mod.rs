@@ -680,6 +680,20 @@ pub fn on_instance_change(server: &GameServer, player: &PlayerRef) -> bool {
     true
 }
 
+/// A server-forced teleport moves the owner away from the position the active mates were left
+/// at, so the mates are dismissed with the move instead of standing at the old spot (the 1.2
+/// C# did this only for instance-changing portals; a same-instance portal, a recall or a GM
+/// teleport left the mate behind — tester report 2026-11-12). A rider is detached first:
+/// [`mates::remove_and_despawn_all_active_owned_mates`] unmounts every seat before deleting the
+/// mate. Logout / disconnect already use the same rule.
+pub fn on_player_teleported(server: &GameServer, player: &PlayerRef) {
+    let (instance, id) = {
+        let c = player.data();
+        (c.unit.transform.instance_id, c.id)
+    };
+    mates::remove_and_despawn_all_active_owned_mates(server, instance, id);
+}
+
 /// The mount / slave branch of `CSStartSkillPacket` after the mount skill was used: the
 /// harpoon rope controller (slave casters) and the rider / operator skill
 /// (`MateGameData.GetMountAttachedSkills`). `mount_skill_id` is the `mount_skills` row the

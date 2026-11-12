@@ -247,6 +247,9 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
         p,
         crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
     );
+    // The mate cannot follow a server-applied position change: dismiss it with the owner (the
+    // 1.2 C# only did this for instance-changing portals).
+    crate::systems::vehicles::on_player_teleported(server, p);
     let obj = WorldObject::from(p);
     let old = p.data().unit.transform;
     // A server-forced move to another instance is a leave: an item-paid dungeon visit starts its
@@ -363,26 +366,29 @@ pub fn begin_teleport(p: &PlayerRef, x: f32, y: f32, z: f32) {
 }
 
 /// [`send_teleport_unit`] for a teleport the server issues to a player that may be trading: the
-/// trade ends first ([`begin_teleport_ending_trade`]). The two plain entry points above keep
-/// their signatures (CONTRIBUTING-PORT section 3: no signature change in `world/*`); the
-/// server-side senders call this one.
+/// trade ends first and the active mates are dismissed with the owner
+/// ([`begin_teleport_ending_trade`]). The two plain entry points above keep their signatures
+/// (CONTRIBUTING-PORT section 3: no signature change in `world/*`); the server-side senders call
+/// this one.
 pub fn send_teleport_unit_ending_trade(
     server: &GameServer,
     p: &PlayerRef,
     packet: SCTeleportUnitPacket,
 ) {
     crate::systems::economy::trade::on_player_teleported(server, p);
+    crate::systems::vehicles::on_player_teleported(server, p);
     send_teleport_unit(p, packet);
 }
 
-/// [`begin_teleport`] that also ends the player's running trade. The trade ends when the
-/// teleport is issued, not when its acknowledgement arrives: a same-instance portal / navi sign /
-/// GM move reaches the client without [`teleport_character`], and a client that never reports the
-/// arrival (or is carried by a vehicle) must not keep both players marked as trading. A second
-/// hook call for a load that also goes through [`teleport_character`] is a no-op once the trade
-/// is gone.
+/// [`begin_teleport`] that also ends the player's running trade and dismisses its active mates.
+/// Both happen when the teleport is issued, not when its acknowledgement arrives: a same-instance
+/// portal / navi sign / GM move reaches the client without [`teleport_character`], and a client
+/// that never reports the arrival (or is carried by a vehicle) must not keep both players marked
+/// as trading or leave the mate at the old spot. A second hook call for a load that also goes
+/// through [`teleport_character`] is a no-op once the trade and the mates are gone.
 pub fn begin_teleport_ending_trade(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
     crate::systems::economy::trade::on_player_teleported(server, p);
+    crate::systems::vehicles::on_player_teleported(server, p);
     begin_teleport(p, x, y, z);
 }
 
