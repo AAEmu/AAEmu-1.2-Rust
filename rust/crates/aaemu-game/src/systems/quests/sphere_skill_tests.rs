@@ -198,6 +198,35 @@ async fn entering_the_sphere_casts_the_skill_on_the_tagged_npc_once() {
     assert!(has_buff(&tagged), "a new stay casts the sphere skill again");
 }
 
+/// The trigger NPC spawns on the ordinary, budget-limited NPC tick, so a character can enter
+/// the sphere before it exists. The empty cast must not consume the enter edge: the entry stays
+/// pending and fires on the next area tick once the NPC is there.
+#[tokio::test]
+async fn entering_before_the_trigger_npc_spawned_waits_for_it() {
+    let server = test_server_with(data());
+    server.systems.quests.spheres.set_areas(vec![area()]);
+    let client = TestClient::new(&server, 1, 1);
+    let _player = player_at(&server, &client, 100.0);
+
+    // The sphere tick runs before the NPC tick spawns the trigger.
+    server.systems.quests.spheres.tick_at(&server, 0);
+    let tagged = spawn_npc(&server, 0x200, TRIGGER_TEMPLATE, 104.0);
+    assert!(
+        !has_buff(&tagged),
+        "the first, empty cast must not reach the NPC spawned later"
+    );
+
+    server.systems.quests.spheres.tick_at(&server, 500);
+    assert!(
+        has_buff(&tagged),
+        "the pending entry casts once the trigger NPC exists"
+    );
+
+    clear_buff(&tagged);
+    server.systems.quests.spheres.tick_at(&server, 1_000);
+    assert!(!has_buff(&tagged), "the settled entry does not cast again");
+}
+
 /// A character that enters while channeling is refused by the normal cast path
 /// (`skill_cannot_cast_in_channeling`), so the enter edge is not consumed: the sphere retries
 /// on the next area tick and casts once the channel ends, while the character still stands
