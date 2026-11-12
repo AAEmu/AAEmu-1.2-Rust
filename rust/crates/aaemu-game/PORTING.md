@@ -5113,6 +5113,39 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_cradle_statue_sphere_wakes_the_four_statues`,
   `real_data_cradle_sprigg_death_opens_the_gate_and_spawns_the_squad`,
   `real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad`).
+* systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
+  (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
+  has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->
+  `sphere_skills` -> skills -> `buff_triggers` event 6 (Timeout) / `npc_control_effects` command
+  sets / `np_skills` NPC events -> `npc_spawner_spawn_effects`), and the 13 `tags` rows select
+  the invisible trigger NPCs (469 -> 10076, 496 -> 10164, 594-599 -> 10805-10810, 497 -> 10025,
+  463/458 -> 10067, 463/459 -> 10068, 1317 -> 13851). `npc_spawns.json` gained: the 86 event
+  rows (`NpcSpawnerIds` = the level spawnerId of every `NpcSpawnerSpawnEffect` the chains name,
+  e.g. 61979-62018 for the six skeleton camps, 68521-68527/68597 for the Velarre hall,
+  62019/68524/68525/68669/68671/68672 for the boss-death cleanup slaves), and the 12 plain rows
+  of the trigger NPCs whose level spawner is active at start (10067 x2, 10068 x2, 10076 x4,
+  10164 x3, 13851 x1). The 116 shipped 1.2-era rows are kept (two of them are within 2 m of each
+  other and stay skipped as before). **Event rows are listed first in the file:** the 10.x level
+  spawners 61148 and 68236 stand within 2 m of kept plain 9480/9481 rows, and the loader's
+  duplicate filter keys on `(UnitId, position)`; event entries never feed that position table,
+  so an event row after the plain row would be dropped before its spawner registration.
+  `doodad_spawns.json` gained the 15 `5958` "Hadir_Rotten Flesh Golem_Unable to Attack" guards
+  and the two `4143` Necromancer's Cauldrons (skill 16577 -> the farm manager's command set ->
+  spawner 61613); the two farm exits 4289/4927 keep their 1.2-era rows. The quest chest 7661
+  (owned by the quest-spawn lane) and the decor Necronomicon 4142 are not placed.
+  **Inferred (10.x level editor, 1.2 templates):** the added positions are the zone-241
+  `npc_spawners.g` / doodad rows of the 10.x client level; template ids, tags, skills, buffs and
+  start phases are 1.2 `compact.sqlite3`. The L50 Annmit rows 13799/13741 are included because
+  the 1.2 data has the chain: sphere 2246 -> skill 23512 -> command set 320 -> 23513 -> buff
+  6776 (timeout) -> spawner 123727, and 23505 -> set 321 -> 23521 -> spawner 123729. Tests (new
+  module `npcs::hadir_dungeon_tests`): the shipped-row placement tests (CI) and (gated by
+  `AAEMU_COMPACT_DB`) `real_compact_db_hadir_instance_loads_the_authored_spawns`,
+  `real_compact_db_hadir_annmit_chain_is_in_the_1_2_data`,
+  `real_data_hadir_spheres_run_the_buff_trigger_chains` (sphere 1300 -> buff 2931 -> spawners
+  61979-61988; sphere 1308 -> buff 2939 -> 68521-68523) and
+  `real_data_hadir_golem_death_spawns_the_cleanup_slaves` (skill 17608 -> 68524/68525/62019).
+  The start-active conformance snapshot (`instance_hadir_farm` 102 'f' / 0 cutscene / 1 row with
+  only event spawners) is unchanged.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body

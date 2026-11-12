@@ -217,6 +217,8 @@ mod cradle_dungeon_tests;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
+mod hadir_dungeon_tests;
+#[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
 mod quest_spawn_tests;
