@@ -23,6 +23,7 @@ use sqlx::mysql::MySqlPoolOptions;
 use crate::config::AppConfig;
 use crate::data::world_templates::{WorldTemplate, WorldTemplates};
 use crate::data::GameData;
+use crate::models::npc::Npc;
 use crate::server::GameServer;
 use crate::systems::npcs::doodad::data::DoodadData;
 use crate::systems::npcs::doodad::phase;
@@ -31,7 +32,7 @@ use crate::systems::npcs::doodad::templates::{doodad_func_group_kind, FuncTempla
 use crate::systems::npcs::npc::spawner_data::{npc_spawner_category, NpcSpawnerData};
 use crate::systems::npcs::spawn_manager::{backend::TestBackend, LoadStats, TemplateExists};
 use crate::test_support::TEST_ZONE;
-use crate::world::{DoodadRef, NpcRef, WorldInstance};
+use crate::world::{DoodadRef, NpcRef, WorldInstance, WorldObject};
 
 const BURNTCASTLE: &str = "instance_burntcastle_armory";
 const HADIR: &str = "instance_hadir_farm";
@@ -117,8 +118,21 @@ fn server_with_worlds(
     npc_spawners: NpcSpawnerData,
     worlds: impl IntoIterator<Item = (u32, String, u32)>,
 ) -> Arc<GameServer> {
+    server_with_worlds_and_doodads(None, npc_spawners, worlds)
+}
+
+/// [`server_with_worlds`] with real doodad templates (the live spawn tests need them for the
+/// start phase and the phase funcs).
+fn server_with_worlds_and_doodads(
+    doodads: Option<DoodadData>,
+    npc_spawners: NpcSpawnerData,
+    worlds: impl IntoIterator<Item = (u32, String, u32)>,
+) -> Arc<GameServer> {
     let mut data = GameData::empty();
     data.systems.npcs.npc_spawners = npc_spawners;
+    if let Some(doodads) = doodads {
+        data.systems.npcs.doodad = doodads;
+    }
     data.worlds = WorldTemplates::from_templates(
         worlds
             .into_iter()
@@ -424,6 +438,99 @@ async fn real_data_quest_spawn_mentor_chests_load_hidden_with_their_loot() {
                 doodads.func_group(stage).map(|g| g.almighty),
                 Some(template),
                 "mentoring stage {stage} belongs to template {template}"
+            );
+        }
+    }
+}
+
+/// The authored chest rows are actually spawned by the spawn manager: each one starts in the
+/// invisible placeholder phase, a different boss's on-death skill leaves it hidden, and the
+/// instance's own on-death skill moves the live phase to the next authored phase. This drives
+/// the live phase machine, not a second `DoodadData` copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_quest_spawn_mentor_chests_spawn_hidden_and_the_boss_skill_reveals_them() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let server = server_with_worlds_and_doodads(
+        Some(DoodadData::load_from(&conn).unwrap()),
+        NpcSpawnerData::load_from(&conn).unwrap(),
+        [
+            (0, "main_world".to_string(), TEST_ZONE),
+            (1, BURNTCASTLE.to_string(), 236),
+            (2, HADIR.to_string(), 46),
+        ],
+    );
+    // The real doodad manager applies the template's start phase; the spawn test stub does not.
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = None;
+    instance_world(&server, 1, BURNTCASTLE);
+    instance_world(&server, 2, HADIR);
+    load_world(&server, &conn, 1, BURNTCASTLE);
+    load_world(&server, &conn, 2, HADIR);
+
+    for (world_id, template, start, death_skill, after, other_skill, boss) in [
+        (
+            1u32, 7659u32, 20853u32, 18024u32, 21051u32, 18031u32, 10518u32,
+        ),
+        (2, 7661, 20848, 18031, 21056, 18024, 10098),
+    ] {
+        // The dying boss is the skill caster the chest hit sees.
+        let boss = WorldObject::from(&crate::world::Entity::new(0x9000, Npc::new(boss)));
+        let m = server.systems.npcs.spawns.get(world_id).unwrap();
+        let spawners = m.get_doodad_spawners_by_unit_id(template);
+        assert_eq!(spawners.len(), 2, "template {template} spawners");
+        let world = server.world.world(world_id).unwrap();
+        for spawner in &spawners {
+            let chest = spawner.spawn(&server, 0).expect("the chest spawns");
+            assert!(
+                server
+                    .world
+                    .world(world_id)
+                    .unwrap()
+                    .doodad(chest.obj_id)
+                    .is_some_and(|live| Arc::ptr_eq(&live, &chest)),
+                "template {template}: the spawner did not place the chest in the world"
+            );
+            {
+                let d = chest.data();
+                assert_eq!(
+                    d.func_group_id, start,
+                    "template {template} must spawn in its hidden placeholder phase"
+                );
+                assert_eq!(
+                    d.current_func_types,
+                    vec!["DoodadFuncSkillHit".to_string()],
+                    "template {template}: only the reveal func may be live at spawn"
+                );
+            }
+            // Another instance's boss skill is not the authoring: the chest stays hidden.
+            crate::systems::npcs::doodad::manager::on_skill_hit(
+                &server,
+                &world,
+                &chest,
+                Some(&boss),
+                other_skill,
+            );
+            assert_eq!(
+                chest.data().func_group_id,
+                start,
+                "template {template}: skill {other_skill} must not reveal it"
+            );
+            // The instance's own on-death skill moves the live phase to the next authored one.
+            crate::systems::npcs::doodad::manager::on_skill_hit(
+                &server,
+                &world,
+                &chest,
+                Some(&boss),
+                death_skill,
+            );
+            assert_eq!(
+                chest.data().func_group_id,
+                after,
+                "template {template}: skill {death_skill} must reveal it"
             );
         }
     }
