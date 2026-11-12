@@ -2941,6 +2941,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and 313 bytes; 16 KiB is 3.5x the largest and stays below the 64 KiB `options.value` TEXT
   column. Unknown keys and oversized values are dropped with a warning (the C# stored any
   `ushort` key and any length in memory).
+* systems::services (UI data saved during leave-world, 2026-11-12): the connection keeps its
+  `active_char` through leave-world (as in C#), so a `CSSaveUIData` can arrive after
+  `save_and_remove_from_world` wrote the departure. The value is stored on the character and the
+  character is put back into `SaveManager.departing`, so the next save (autosave, or the next
+  select's pending-departure flush) writes it; a save for a character that is live again or owned
+  by another session is not resurrected. A save with no active character is debug-logged instead
+  of dropped silently. The real 1.2 client saves key 5 (`quest_notifier_list`, the quest tracker)
+  before `CSLeaveWorld` (capture 2026-11-08, `05` key + keybinding / tracker payloads), so the
+  normal path already persisted it; the late path covers a save that arrives after the
+  departure save.
 * systems::economy (multi-pack NPC shops, 2026-11-05): the `merchants` table is additive; the 1.2
   client joins it with `merchant_goods` per NPC (`strings.txt:13227`), so every pack of an NPC
   sells. The C# kept only the last `merchant_pack_id`, which lost goods on the 38 NPCs with
