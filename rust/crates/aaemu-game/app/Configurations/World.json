@@ -3,6 +3,7 @@
         "Profile": "EuAuroria",
         "MOTD": "Welcome to AAEmu!",
         "LogoutMessage": "Hope to see you soon.",
+        "GameTimeOffset": 0.0,
         "AutoSaveInterval": 5.0,
         "ExpLossRateAtDeath": 0.05,
         "MinimumExpLossLevel": 10,
