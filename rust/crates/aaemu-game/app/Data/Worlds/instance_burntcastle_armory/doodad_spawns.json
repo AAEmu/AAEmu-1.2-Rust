@@ -1,11 +1,52 @@
 [
   {
-    "UnitId": 5723,
+    "UnitId": 3612,
+    "Title": "burnt-doodad: scripted 10.x level placement",
     "Position": {
-      "X": 162.6,
-      "Y": 99.8,
-      "Z": 20.0,
-      "Yaw": 89.3565
+      "X": 246.225,
+      "Y": 161.039,
+      "Z": 20.006,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 3613,
+    "Title": "burnt-doodad: scripted 10.x level placement",
+    "Position": {
+      "X": 246.421,
+      "Y": 312.587,
+      "Z": 20.25,
+      "Yaw": 180.0
+    }
+  },
+  {
+    "UnitId": 3673,
+    "Title": "burnt-doodad: interactive 10.x level placement",
+    "Position": {
+      "X": 165.587,
+      "Y": 99.906,
+      "Z": 20.858,
+      "Yaw": -90.0
+    }
+  },
+  {
+    "UnitId": 4417,
+    "Title": "burnt-doodad: scripted 10.x level placement",
+    "Position": {
+      "X": 200.834,
+      "Y": 120.954,
+      "Z": 20.06,
+      "Yaw": -90.0
+    }
+  },
+  {
+    "UnitId": 4923,
+    "Title": "burnt-doodad: scripted 10.x level placement",
+    "Position": {
+      "X": 173.024,
+      "Y": 312.007,
+      "Z": 20.52,
+      "Yaw": -90.0
     }
   },
   {

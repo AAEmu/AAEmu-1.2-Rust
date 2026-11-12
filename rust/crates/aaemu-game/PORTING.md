@@ -3579,6 +3579,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reading `DateTime.UtcNow`; `local_impulse_to_world_displacement` takes horizontal (x, y)
   positions only, because the C# zeroes the direction's Z so the vertical offset never
   contributes.
+* systems::npcs (2026-11-12, Burnt Castle Armory scripted data): the world's 32 event spawners
+  (the `Hieronimus's Summon` waves 46629-46656, the intro / 2nd-boss-end / 3rd-boss souls
+  65999/66025/66026 and the 3rd-boss cutscene actors 66033/66037-66052) are event rows in
+  `app/Data/Worlds/instance_burntcastle_armory/npc_spawns.json`; the ten invisible trigger NPCs
+  of the reachable `tagged_npcs` groups are plain rows. **Placements are Inferred** from the
+  10.x level editor's `zone_server/npc_spawners.g` and `level_design/cells/000_000/doodad.g`;
+  spawner ids, NPC/skill/tag links and doodad func groups are the 1.2 `compact.sqlite3`. The
+  five level doodads are the SkillHit gates 3612/3613/4417, the entrance exit 3673 and the
+  invisible-until-Hieronimus-dies exit 4923 (18024 -> phase 12257); both exits answer the 1.2
+  exit skill 15667 (world gate 320). The 2026 spawn-import plain row for 8962 was removed: it
+  stood on the 66033 event-spawner position (the loader's duplicate filter checks only plain
+  rows, so ordering made the script spawner register but the boss also stand at t=0) - the
+  killable 3rd boss now appears through the cutscene, and the 1.2-era start rows 8960 (Sorvell)
+  and 12190 (Winters) stay active as in the level, as does the 10518 Prince Hieronimus display.
+  The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
+  (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
+  `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /
+  2 cutscene skips instead of 2 / 3 (the removed 8962 plain row no longer skips its 11694
+  cutscene spawner); that shared test table still has the old counts (open item).
 * systems::npcs (2026-10-13): corpse timers read the current despawn field, so fully looting
   an NPC applies the existing shorter deadline instead of retaining the five-minute loot
   extension captured at death. Only living NPCs count towards spawner population limits;

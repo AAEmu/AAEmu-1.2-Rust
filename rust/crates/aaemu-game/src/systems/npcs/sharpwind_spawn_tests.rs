@@ -763,7 +763,7 @@ async fn real_data_start_active_rule_counts_per_world() {
         counts,
         vec![
             ("arche_mall_world".into(), 0, 0, 0),
-            ("instance_burntcastle_armory".into(), 2, 3, 1),
+            ("instance_burntcastle_armory".into(), 2, 2, 1),
             ("instance_cradle_of_destruction".into(), 5, 0, 0),
             ("instance_cuttingwind_deadmine".into(), 0, 9, 0),
             ("instance_hadir_farm".into(), 102, 0, 1),
