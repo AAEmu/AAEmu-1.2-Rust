@@ -379,6 +379,10 @@ struct AreaState {
     /// settled yet: tried again on every tick until it acts or the character leaves the area
     /// (see [`dispatch_doodad_interact`]).
     pending_interact: Vec<usize>,
+    /// `SphereSkill` areas (indexes) the character is inside whose enter-edge cast was refused
+    /// (e.g. it was casting or channeling): tried again on every tick until a cast is accepted
+    /// or the character leaves the area (see [`dispatch_sphere_skill`]).
+    pending_skill: Vec<usize>,
 }
 
 /// Minimum interval between two `SCQuestAcceptConditional` offers of the same sphere to the
@@ -712,8 +716,11 @@ impl SphereQuestManager {
     /// audience is UNKNOWN). On leave only a row with `enter_or_leave` set fires.
     /// `SphereDoodadInteract` casts its authored skill on the doodads inside the area, on entry
     /// and then on every tick while the character stays inside until it has acted (see
-    /// [`dispatch_doodad_interact`]); the other types (SphereSkill / SphereSound / SphereBuff)
-    /// are loaded but have no effect here (a separate content decision).
+    /// [`dispatch_doodad_interact`]). `SphereSkill` casts `sphere_skills.skill_id` with the
+    /// character as caster on the enter edge and retries while the character stays inside when
+    /// the cast was refused (see [`dispatch_sphere_skill`]); the remaining
+    /// types (SphereSound / SphereBuff) are loaded but have no effect here (a separate content
+    /// decision).
     fn tick_area_spheres(&self, server: &GameServer, now: i64) {
         let Some(areas) = self.areas.get() else {
             return;
@@ -768,6 +775,8 @@ impl SphereQuestManager {
                 let st = states.entry(id).or_default();
                 st.pending_interact
                     .retain(|area| inside.binary_search(area).is_ok());
+                st.pending_skill
+                    .retain(|area| inside.binary_search(area).is_ok());
                 st.inside = inside;
             }
         }
@@ -779,6 +788,8 @@ impl SphereQuestManager {
         // `SphereDoodadInteract` areas to try this tick: the ones entered now and the ones a
         // character stands in whose interaction has not settled yet.
         let mut interact: Vec<(PlayerRef, usize)> = Vec::new();
+        // The same for `SphereSkill`: the enter edge, plus a refused cast while inside.
+        let mut skill: Vec<(PlayerRef, usize)> = Vec::new();
         for (player, area, enter) in events {
             let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
                 continue;
@@ -802,6 +813,9 @@ impl SphereQuestManager {
             if enter && sphere.sphere_detail_type == "SphereDoodadInteract" {
                 interact.push((player.clone(), area));
             }
+            if enter && sphere.sphere_detail_type == "SphereSkill" {
+                skill.push((player.clone(), area));
+            }
         }
         {
             let states = self.area_state.lock().expect("area state poisoned");
@@ -817,6 +831,14 @@ impl SphereQuestManager {
                         interact.push((player.clone(), area));
                     }
                 }
+                for &area in &st.pending_skill {
+                    if !skill
+                        .iter()
+                        .any(|(p, a)| *a == area && p.character_id == player.character_id)
+                    {
+                        skill.push((player.clone(), area));
+                    }
+                }
             }
         }
         for (player, area) in interact {
@@ -830,6 +852,19 @@ impl SphereQuestManager {
             st.pending_interact.retain(|a| *a != area);
             if !settled {
                 st.pending_interact.push(area);
+            }
+        }
+        for (player, area) in skill {
+            let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
+                continue;
+            };
+            // No lock is held across the cast (it takes the character's and the targets').
+            let cast = dispatch_sphere_skill(server, &player, sphere);
+            let mut states = self.area_state.lock().expect("area state poisoned");
+            let st = states.entry(player.character_id).or_default();
+            st.pending_skill.retain(|a| *a != area);
+            if !cast {
+                st.pending_skill.push(area);
             }
         }
         // `SphereAcceptQuest` offers: on entry and when a character already inside becomes
@@ -1049,38 +1084,168 @@ impl SphereQuestManager {
     }
 }
 
-/// `SphereDoodadInteract`: use the authored skill on the doodads inside the sphere's
-/// `sphere_area_fill.json` area. Tried when the character enters the area and then on every tick
-/// while it stays inside, until it settles (`SphereQuestManager::tick_area_spheres`): the skill
-/// has a range (4 m for skill 11284) and the Sharpwind bridge doodad lies 1.9 m from the centre
-/// of its 5 m area, so it is 3.1 to 6.9 m from the point where a character enters the area (only
-/// an entry within 48 degrees of the direction to the bridge is in range; the start pool lies
-/// 60 m east of it, so a character coming from there enters about 5 m away) and in range only
-/// once the character steps onto it. An entry-only trigger never collapsed the bridge for a
-/// character that walks onto it. The shipped sphere row points the same way:
-/// `trigger_condition_id` 3 (`EVERY_N_TIME_AFTER`, 500 ms) is a repeated check while inside.
+/// `SphereSkill`: cast `sphere_skills.skill_id` with the character as caster.
 ///
-/// Returns whether the interaction is settled: `true` when a doodad was triggered, or when nothing
-/// in the area can be triggered (no authored skill, no doodad inside the area whose phase has an
-/// area trigger); `false` while the character's requirements are not met or a doodad that reacts
-/// is out of the skill's range or busy, so the next tick tries again.
+/// The shipped Sharpwind rows (sphere 1965-1968, `sphere_skills` 175-178) are self-centred area
+/// skills (`target_type` 0, `target_selection` 1, radius 50/150 m) whose `NpcControlEffect`
+/// (category 5, `RunCommandSet`) is restricted by `skill_effects.target_npc_tag_id` to one
+/// invisible "Spawn Slave" NPC (`tagged_npcs`), so casting the skill with the character as
+/// caster/centre runs the slave's authored command set. **Inferred (no 1.2 server evidence):**
+/// the cast happens on the enter edge, once per stay, and only when the sphere's own `unit_reqs`
+/// pass at that moment (`can_trigger_sphere`, like the other sphere kinds); re-entering after
+/// leaving casts again, which is harmless because the trigger NPC removes itself. The row's
+/// `trigger_condition_id` 3 (`EVERY_N_TIME_AFTER`, 1000 ms) is not used as a period here (it
+/// would re-cast a finished set on every period); the enter edge produces at most one cast per
+/// stay.
 ///
-/// Evidence: the 10.x `DoodadAreaTriggerRuntime` documents zone area edges of kind 21
-/// (`SphereDoodadInteract`) whose `value1` is the `spheres.id`, resolved through
-/// `sphere_doodad_interacts` (`id, skill_id, doodad_family_id`). `doodad_families` is empty in
-/// the 1.2 compact, so the family filter cannot be resolved; the skill's own `max_range`
-/// (4 m for skill 11284) and the sphere area bound the candidates. Sharpwind's sphere 1552
-/// ("bridge collapse area", 5 m at the Derelict Bridge) contains only the bridge doodad
-/// (5058, phase func `DoodadFuncAreaTrigger`), which advances to the broken model.
+/// Returns whether the enter edge is settled: `true` when there is nothing to cast, the
+/// sphere's requirements do not pass (the entry is evaluated once, unlike the
+/// `SphereDoodadInteract` retry), or `use_skill` accepted the cast; `false` when the normal
+/// cast path refused it (e.g. the character was casting or channeling) and the next area tick
+/// retries while the character stays inside, so a refused cast does not consume the entry.
+///
+/// A skill whose effects are restricted by `target_npc_tag_id` also waits while no matching NPC
+/// is in its area: those trigger NPCs spawn on the ordinary, budget-limited NPC tick, so a
+/// character can enter before one exists. The self-centred area cast would succeed with nothing
+/// to affect and consume the entry, leaving the wave dormant until someone re-enters.
+fn dispatch_sphere_skill(server: &GameServer, player: &PlayerRef, sphere: &DbSphere) -> bool {
+    let sphere_detail_id = sphere.sphere_detail_id;
+    let Some(detail) = server
+        .game_data
+        .systems
+        .npcs
+        .sphere
+        .sphere_skills
+        .get(sphere_detail_id)
+    else {
+        return true;
+    };
+    if detail.skill_id == 0 {
+        return true;
+    }
+    let (id, or) = (sphere.id, sphere.or_unit_reqs);
+    if !super::events::with_quests(server, player, None, move |ctx| {
+        ctx.can_trigger_sphere(id, or)
+    })
+    .unwrap_or(false)
+    {
+        return true;
+    }
+    let Some(template) = server
+        .game_data
+        .systems
+        .skills
+        .skill(detail.skill_id)
+        .cloned()
+    else {
+        tracing::debug!(
+            "SphereSkill {}: skill {} has no template",
+            sphere_detail_id,
+            detail.skill_id
+        );
+        return true;
+    };
+    let skill = crate::systems::skills::state::SkillRun::new(template, 1);
+    let caster = WorldObject::from(player.clone());
+    if let Some(tag_ids) = crate::systems::skills::skill::npc_tag_targets(
+        &server.game_data.systems.skills,
+        &skill.template,
+    ) {
+        if !area_has_tagged_npc(server, &caster, &skill, &tag_ids) {
+            tracing::debug!(
+                "SphereSkill {sphere_detail_id}: skill {} waits for a tagged NPC",
+                detail.skill_id
+            );
+            return false;
+        }
+    }
+    let mut target = crate::systems::skills::types::SkillCastTarget::Unit(player.obj_id);
+    let (result, _) = crate::systems::skills::skill::use_skill(
+        server,
+        &skill,
+        &caster,
+        crate::systems::skills::types::SkillCaster::Unit(player.obj_id),
+        &mut target,
+        None,
+        true,
+    );
+    tracing::debug!(
+        "SphereSkill {sphere_detail_id}: skill {} cast for {} -> {result}",
+        detail.skill_id,
+        player.data().unit.name
+    );
+    result == crate::systems::skills::types::skill_result::SUCCESS
+}
+
+/// Whether `caster`'s skill area holds an NPC whose template one of `tag_ids` accepts.
+///
+/// The candidates follow `skills::skill::apply_effects`: the skill's area around the caster,
+/// with its area-radius modifier and vertical limit; the effect filter then keeps the NPC
+/// templates of the `tagged_npcs` row (`skills::Data::npcs_by_tag`) used by
+/// `target_npc_tag_id`.
+fn area_has_tagged_npc(
+    server: &GameServer,
+    caster: &WorldObject,
+    skill: &crate::systems::skills::state::SkillRun,
+    tag_ids: &[u32],
+) -> bool {
+    use crate::systems::skills::geometry::{self, Target};
+
+    let template = &skill.template;
+    let radius = crate::systems::skills::skill::apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        crate::models::unit::SkillAttribute::AreaRadius,
+        f64::from(template.target_area_radius),
+    )
+    .max(0.0) as f32;
+    let origin = Target::Obj(caster.clone());
+    let mut units = geometry::around_radius(server, &origin, radius, true);
+    let limit = geometry::area_vertical_limit(radius, template.target_valid_height);
+    let origin_z = geometry::world_pos(server, &origin).z;
+    units.retain(|o| {
+        (geometry::world_pos(server, &Target::Obj(o.clone())).z - origin_z).abs() <= limit
+    });
+    units.iter().any(|o| {
+        o.as_npc()
+            .is_some_and(|n| tag_ids.contains(&n.data().unit.template_id))
+    })
+}
+
+/// `SphereDoodadInteract`: use the authored skill on the doodads the sphere selects. Tried when
+/// the character enters the area and then on every tick while it stays inside, until it settles
+/// (`SphereQuestManager::tick_area_spheres`): the skill has a range (4 m for skill 11284) and the
+/// Sharpwind bridge doodad lies 1.9 m from the centre of its 5 m area, so it is 3.1 to 6.9 m from
+/// the point where a character enters the area (only an entry within 48 degrees of the direction
+/// to the bridge is in range; the start pool lies 60 m east of it, so a character coming from
+/// there enters about 5 m away) and in range only once the character steps onto it. An
+/// entry-only trigger never collapsed the bridge for a character that walks onto it. The shipped
+/// sphere row points the same way: `trigger_condition_id` 3 (`EVERY_N_TIME_AFTER`, 500 ms) is a
+/// repeated check while inside.
+///
+/// Returns whether the interaction is settled: `true` when a doodad was triggered, or when
+/// nothing the sphere selects can be triggered (no authored skill, no matching doodad whose
+/// phase has an area trigger); `false` while the character's requirements are not met or a
+/// doodad that reacts is out of the skill's range (family-less rows) or busy, so the next tick
+/// tries again.
+///
+/// Selection (10.x `DoodadAreaTriggerRuntime`): `sphere_doodad_interacts.doodad_family_id`
+/// non-zero selects every doodad of the world instance whose `Doodad.family_id` equals it,
+/// without the area / skill-range test. That reaches the Sharpwind stalactites (families
+/// 50011-50022, placed 13-16 m above the sphere centres on the corridor ceiling) and the bridge
+/// (family 50000). The family id is the level design's `Family_Id`, carried into
+/// `doodad_spawns*.json` as `FamilyId`; the 1.2 compact `doodad_families` table is empty, so the
+/// placement data is the source. Family 0 keeps the older selection: the doodads of the player's
+/// region neighbourhood (two regions around, at least 128 m; the largest authored `max_range` of
+/// the 105 shipped rows is 30 m) that lie inside the sphere's `sphere_area_fill.json` area and
+/// within the skill's `max_range` (4 m for skill 11284). Sharpwind's sphere 1552 ("bridge
+/// collapse area", 5 m at the Derelict Bridge) contains only the bridge doodad (5058, phase func
+/// `DoodadFuncAreaTrigger`), which advances to the broken model.
 ///
 /// The hook is generic, so it also drives every other shipped `SphereDoodadInteract` area whose
-/// doodad has a `DoodadFuncAreaTrigger` row: the open world's quarry rock piles (doodad 2803
-/// inside the areas of sphere 1446) and Unstable Floor (doodad 1495, sphere 429), see
-/// `PORTING.md`. The sphere's own requirements
-/// (`unit_reqs`) gate it like the `SphereAcceptQuest` offers do. The candidates are the doodads
-/// of the player's region neighbourhood (two regions around, at least 128 m; the largest
-/// authored `max_range` of the 105 shipped rows is 30 m), never the whole instance, so the scan
-/// is bounded by the grid and not by the number of doodads in the world.
+/// doodad has a `DoodadFuncAreaTrigger` row (see `PORTING.md`). The sphere's own requirements
+/// (`unit_reqs`) gate it like the `SphereAcceptQuest` offers do.
 fn dispatch_doodad_interact(
     server: &GameServer,
     player: &PlayerRef,
@@ -1111,6 +1276,7 @@ fn dispatch_doodad_interact(
     {
         return false;
     }
+    let family_id = detail.doodad_family_id;
     let max_range = server
         .game_data
         .systems
@@ -1126,18 +1292,29 @@ fn dispatch_doodad_interact(
     let Some(region) = world.region_by_pos(me.x, me.y) else {
         return false;
     };
-    let candidates: Vec<DoodadRef> = world
-        .neighbors(region)
-        .into_iter()
-        .flat_map(|n| world.objects_in_region(n))
-        .filter_map(|o| o.as_doodad().cloned())
-        .collect();
+    let candidates: Vec<DoodadRef> = if family_id != 0 {
+        // The family is authored by the level design; the doodads it names are not necessarily
+        // near the sphere (Sharpwind's stalactites hang 13-16 m above the corridor floor), so
+        // the area and the skill range do not apply. The scan is bounded by the instance, and
+        // the interaction settles once it acted or no doodad of the family reacts.
+        world.all_doodads()
+    } else {
+        world
+            .neighbors(region)
+            .into_iter()
+            .flat_map(|n| world.objects_in_region(n))
+            .filter_map(|o| o.as_doodad().cloned())
+            .collect()
+    };
     // `acted`: a doodad was triggered. `waiting`: a doodad that reacts lies inside the area but
     // out of the skill's range of the character (or is busy): it may come in range later.
     let (mut acted, mut waiting) = (false, false);
     for doodad in candidates {
+        if family_id != 0 && doodad.data().family_id != family_id {
+            continue;
+        }
         let pos = world.world_pos_rot(&WorldObject::from(&doodad));
-        if !area.contains((pos.x, pos.y, pos.z)) {
+        if family_id == 0 && !area.contains((pos.x, pos.y, pos.z)) {
             continue;
         }
         // The 10.x `DoodadAreaTriggerRuntime.Dispatch` runs the owning `DoodadFuncAreaTrigger`
@@ -1157,10 +1334,12 @@ fn dispatch_doodad_interact(
         else {
             continue;
         };
-        let (dx, dy, dz) = (pos.x - me.x, pos.y - me.y, pos.z - me.z);
-        if dx * dx + dy * dy + dz * dz > max_range * max_range {
-            waiting = true;
-            continue;
+        if family_id == 0 {
+            let (dx, dy, dz) = (pos.x - me.x, pos.y - me.y, pos.z - me.z);
+            if dx * dx + dy * dy + dz * dz > max_range * max_range {
+                waiting = true;
+                continue;
+            }
         }
         // The phase reservation every other phase driver takes (`Doodad.Use`, a period
         // boundary): a doodad busy on another thread, or already deleted, is skipped.
