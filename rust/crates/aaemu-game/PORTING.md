@@ -5146,6 +5146,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_hadir_golem_death_spawns_the_cleanup_slaves` (skill 17608 -> 68524/68525/62019).
   The start-active conformance snapshot (`instance_hadir_farm` 102 'f' / 0 cutscene / 1 row with
   only event spawners) is unchanged.
+  **Open item (reported, not changed):** the 12 event rows for 60909-60911, 61146-61148 and
+  68235-68240 (the sphere 1298/1299 camps via skills 16726/16727) have no 1.2 producer: their
+  `npc_spawner_spawn_effects` rows exist, but the 1.2 `compact.sqlite3` has no `skill_effects`
+  rows for 16726/16727 (the 10.x data has them), so those camps stay dormant until the effect
+  rows exist. The other 74 rows are referenced by 1.2 rows.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
