@@ -19,6 +19,7 @@ use crate::net::registry::PacketRegistry;
 use crate::opcodes::{cs, sc};
 use crate::packets::packet_def;
 use crate::server::GameServer;
+use crate::systems::npcs::npc::reach;
 use crate::systems::HookSlot;
 use crate::world::{DoodadRef, NpcRef, PlayerRef, WorldInstance, WorldObject};
 
@@ -198,10 +199,6 @@ pub fn world_distance(world: &WorldInstance, a: &WorldObject, b: &WorldObject) -
     let pb = world.world_pos_rot(b);
     distance_2d(pa.x, pa.y, pb.x, pb.y)
 }
-
-/// Interaction range of NPC shops (`CSBuyItemsPacket`, `CSSellItemsPacket`): "3m should be
-/// enough for NPC shops" (C#).
-pub const SHOP_RANGE: f32 = 3.0;
 
 /// Range within which the bank / auction services accept requests. Retail's value is unknown
 /// (the C# never checked); this matches the other NPC service interactions
@@ -440,10 +437,11 @@ impl CSBuyItemsPacket {
             }
             pack_ids = info.merchant_pack_ids;
         }
+        // The 1.2 client keeps the shop window open within the NPC interaction reach (3.0 m
+        // from the target's shape plus the configured tolerance), so every checkout that
+        // window can start must pass. The C# compared centres at a flat 3 m instead.
         if let Some(n) = &npc {
-            let dist = world_distance(&world, &WorldObject::from(&p), &WorldObject::from(n));
-            if dist > SHOP_RANGE {
-                // 3m should be enough for NPC shops
+            if !reach::within_interaction_reach(server, &p, &WorldObject::from(n)) {
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
                 return;
             }
@@ -505,9 +503,9 @@ impl CSBuyItemsPacket {
         // only checked the distance and sold any template (TODO "validate doodad shop").
         if self.doodad_obj_id != 0 {
             let Some(d) = &doodad else { return };
-            let dist = world_distance(&world, &WorldObject::from(&p), &WorldObject::from(d));
-            if dist > SHOP_RANGE {
-                // 3m should be enough for these
+            // The same reach as the NPC window: a doodad shop is bought from its open store
+            // window too (its placement radius stands in for the shape edge).
+            if !reach::within_interaction_reach(server, &p, &WorldObject::from(d)) {
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
                 return;
             }
@@ -869,7 +867,7 @@ impl CSSellItemsPacket {
         if !shop_info(server, &npc).merchant {
             return;
         }
-        if world_distance(&world, &WorldObject::from(&p), &WorldObject::from(&npc)) > SHOP_RANGE {
+        if !reach::within_interaction_reach(server, &p, &WorldObject::from(&npc)) {
             inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
             return;
         }

@@ -38,7 +38,10 @@ use crate::systems::economy::tests::{give, item_at, run, task_body, test_data, W
 use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate};
 use crate::systems::housing::dominion::runtime as dominion_runtime;
 use crate::systems::housing::dominion::state::SiegeSide;
-use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncStoreUi, FuncTemplate};
+use crate::systems::npcs::doodad::templates::{
+    DoodadFunc, DoodadFuncStoreUi, DoodadTemplate, FuncTemplate,
+};
+use crate::systems::npcs::npc::packets::CSStartInteractionPacket;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{DoodadRef, Entity, NpcRef, PlayerRef};
 
@@ -2256,6 +2259,167 @@ async fn buy_sell_and_buy_back() {
     assert_eq!(bb.lock().unwrap().items.len(), 1);
     w.server.systems.economy.store.wipe_buyback(&w.server, 1);
     assert!(bb.lock().unwrap().items.is_empty());
+}
+
+fn interaction_body(npc: u32, obj: u32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_bc(npc)
+        .write_bc(obj)
+        .write_i32(0)
+        .write_i32(0)
+        .write_u8(1)
+        .write_i32(0);
+    s.into_bytes()
+}
+
+/// Tester report: the store window opens within 3 m of the NPC's shape plus the 2 m tolerance,
+/// but buy/sell/buy-back compared centres at 3 m, so a large merchant refused every transaction
+/// while its window stayed open. A 2 m-radius merchant at 4 m centre (2 m from the shape edge):
+/// the window opens and buy, sell and buy-back succeed; at 10 m (8 m edge) the window stays shut
+/// and buy and sell are refused.
+#[tokio::test]
+async fn shop_transactions_share_the_interaction_window_reach() {
+    const BIG_MODEL: u32 = 9001;
+    let mut d = data();
+    d.systems.skills.model_radii.insert(BIG_MODEL, 2.0);
+    let mut w = catalog_world(d, &[(STACK, 0)]);
+    {
+        let world = w.server.world.world(0).unwrap();
+        let npc = world.npc(MERCHANT_NPC).unwrap();
+        let mut n = npc.data();
+        n.unit.model_id = BIG_MODEL;
+        n.unit.scale = 1.0;
+        n.unit.transform.set_xyz(104.0, 100.0, 100.0);
+    }
+    w.a.drain();
+    w.b.drain();
+    let pa = w.pa.clone();
+    pa.data().money = 1000;
+
+    // The window opens at 4 m centre (the client measures the shape edge, 2 m).
+    run::<CSStartInteractionPacket>(&mut w, 0, &interaction_body(MERCHANT_NPC, 0x100));
+    assert_eq!(w.a.drain_ops(), vec![sc::SCNpcInteractionSkillListPacket]);
+
+    // Buy, sell and buy back from the open window.
+    run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 3, 0)], &[]));
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 3);
+    assert_eq!(pa.data().money, 970);
+    w.a.drain();
+
+    let stack = item_at(&pa, 2, 0).unwrap();
+    run::<CSSellItemsPacket>(
+        &mut w,
+        0,
+        &sell_body(MERCHANT_NPC, &[(slot_type::INVENTORY, 0, stack.id)]),
+    );
+    assert!(item_at(&pa, 2, 0).is_none());
+    assert_eq!(pa.data().money, 985);
+    w.a.drain();
+
+    run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[], &[0]));
+    assert_eq!(item_at(&pa, 2, 0).unwrap().id, stack.id);
+    assert_eq!(pa.data().money, 970);
+    w.a.drain();
+
+    // 10 m centre (8 m from the shape edge) is outside the 5 m reach.
+    {
+        let world = w.server.world.world(0).unwrap();
+        world
+            .npc(MERCHANT_NPC)
+            .unwrap()
+            .data()
+            .unit
+            .transform
+            .set_xyz(110.0, 100.0, 100.0);
+    }
+    run::<CSStartInteractionPacket>(&mut w, 0, &interaction_body(MERCHANT_NPC, 0x100));
+    assert!(w.a.drain().is_empty());
+
+    run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(STACK, 1, 0)], &[]));
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(154, 154, 0, true))]
+    );
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 3);
+    assert_eq!(pa.data().money, 970);
+
+    run::<CSSellItemsPacket>(
+        &mut w,
+        0,
+        &sell_body(MERCHANT_NPC, &[(slot_type::INVENTORY, 0, stack.id)]),
+    );
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(154, 154, 0, true))]
+    );
+    assert_eq!(item_at(&pa, 2, 0).unwrap().id, stack.id);
+    assert_eq!(pa.data().money, 970);
+}
+
+/// Real data: NPC 1000 is a `merchants` pack 140 seller with a 0.55 m actor radius. At 4 m
+/// centre (3.45 m from the shape edge) the window opens and the checkout now passes; the old
+/// flat 3 m centre check refused it. `AAEMU_COMPACT_DB=... cargo test -p aaemu-game
+/// real_compact_db_merchant_1000 -- --ignored`.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+async fn real_compact_db_merchant_1000_sells_within_the_interaction_reach() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut data = GameData::empty();
+    data.items = crate::data::ItemData::load(&conn).unwrap();
+    data.systems.npcs.npc =
+        crate::systems::npcs::npc::data::NpcData::load_conn(&conn, "en_us").unwrap();
+    data.systems.skills.model_radii =
+        crate::systems::skills::data::misc::load_actor_model_radii(&conn).unwrap();
+    let (model_id, scale) = {
+        let template = data.systems.npcs.npc.template(1000).unwrap();
+        assert!(template.merchant);
+        assert!(template.merchant_pack_ids.contains(&140));
+        (template.model_id, template.scale)
+    };
+
+    let mut w = world_with_data(data);
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    let mut n = Npc::new(1000);
+    n.unit.model_id = model_id;
+    n.unit.scale = scale;
+    n.unit.transform.set_xyz(104.0, 100.0, 100.0);
+    let world = w.server.world.world(0).unwrap();
+    world.spawn(Entity::new(MERCHANT_NPC, n), &w.server.view_ctx());
+    w.a.drain();
+    let pa = w.pa.clone();
+    pa.data().money = 10_000;
+    run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(MERCHANT_NPC, &[(8582, 1, 0)], &[]));
+    assert_eq!(item_at(&pa, 2, 0).unwrap().template_id, 8582);
+    assert_eq!(pa.data().money, 5_000);
+}
+
+/// A doodad shop is bought from its own open store window too: its placement radius stands in
+/// for the shape edge, so a 2 m-radius stall at 4 m centre (2 m edge) sells, where the old 3 m
+/// centre check refused.
+#[tokio::test]
+async fn doodad_shop_buy_uses_the_interaction_window_reach() {
+    let mut d = with_doodad_shop(7);
+    d.systems.npcs.doodad.templates.insert(
+        1234,
+        DoodadTemplate {
+            id: 1234,
+            sim_radius: 2000,
+            ..Default::default()
+        },
+    );
+    let mut w = world_with_data(d);
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    spawn_doodad(&mut w, 0x600, 1234, 42, 104.0);
+    let pa = w.pa.clone();
+    pa.data().money = 1000;
+    run::<CSBuyItemsPacket>(&mut w, 0, &doodad_buy_body(0x600, &[(STACK, 2, 0)], &[]));
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 2);
+    assert_eq!(pa.data().money, 980);
 }
 
 #[tokio::test]
