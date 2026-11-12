@@ -211,6 +211,8 @@ pub fn register(reg: &mut PacketRegistry) {
 }
 
 #[cfg(test)]
+mod cradle_dungeon_tests;
+#[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
 mod manager_tests;

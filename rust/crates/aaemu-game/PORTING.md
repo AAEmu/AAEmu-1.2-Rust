@@ -5058,6 +5058,42 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_start_active_rule_counts_per_world` and
   `real_data_open_worlds_keep_inactive_at_start_npcs` (guards the mall vendors and the
   `main_world` quest givers).
+* systems::npcs (Kroloal Cradle scripted data, 2026-11-12): the 1.2-era spawn files held only
+  the start placements, so the dungeon's scripted waves never appeared (the skills'
+  `NpcSpawnerSpawnEffect` / `NpcControlEffect` lookups found no spawner / tag target) and the
+  worldgate, gate and exit doodads were missing. `instance_cradle_of_destruction/npc_spawns.json`
+  now carries the 36 event spawner rows (`NpcSpawnerIds` = the level `spawnerId` the effect
+  names: Carnivore's Eggs 88966-88981, statues 88999-89002, Metamoze summons 92250/92257/
+  93513/93593, Sprigg's gate squad 96069/96253/96256, the Siranus room 96271-96274 and
+  96372-96374, and Arkanis's 96467-96470), the seven `NpcControlEffect` tag targets as plain
+  rows (12157 tag 830, 11268 tag 685, 12180 tag 915, 12200 tag 852, 12198 x2 and 12199 tag
+  851; 12166/12170 are event rows because their spawners 13467/13471 are `activation_state =
+  'f'` and skills 19645/19646 spawn them) and the four start-active NPCs that had no row
+  (11555, 11368, 11356, 11552). `doodad_spawns.json` adds the 41 scripted + 4 interactive level
+  doodads, including the blockers `5725` worldgate (family 30044, Use 19616), `5726` stone gate
+  (SkillHit 18670 on Sprigg's death -> phase 14678) and `5762` end exit (SkillHit 19236 on
+  Arkanis's death -> phase 14770, `DoodadFuncExitIndun` 19688). Decor and skill-summoned
+  doodads are not placed. **Inferred:** positions/yaws/families are the 10.x level editor rows
+  (`level_design/zone/264/.../npc_spawners.g`, `level_design/cells/*/doodad.g`); templates,
+  spawner ids, skills, tags and start groups are 1.2 `compact.sqlite3` data. The pre-existing
+  1.2-era doodad rows (the four 5257 without families, three 5252, eighteen 5880, two 5549,
+  five 5516) are kept: the audit does not prove them wrong. **Open items (reported, not
+  changed):** (a) spawner ids 104053/104060 (skill 20189 on statue 11184) exist in the effect
+  table but have no placement in this world's level, so no event row was invented; (b) skill
+  19707 despawns level spawner 92695 (the dummy Princess Surya 11555) but a plain-row placement
+  registers the compact template id (12794), so `GetNpcSpawner(92695)` does not find it and the
+  dummy stays after the moving princess spawns; (c) Sprigg's command set 222 begins with
+  `FollowPath` rows, which an event-spawned Kuwon cannot run without a simulation, so the gate
+  opens and Kuwon spawns but the two soldiers' full scene is not reproduced (the Siranus room
+  proves the sphere -> command set -> spawner chain). Tests: `npcs::cradle_dungeon_tests`
+  (`cradle_added_doodad_rows_are_placed_once_each`, `cradle_added_npc_rows_are_placed_once_each`
+  in CI; gated by `AAEMU_COMPACT_DB`:
+  `real_compact_db_cradle_scripted_doodad_templates_and_funcs`,
+  `real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner`,
+  `real_data_cradle_siranus_sphere_runs_the_command_set`,
+  `real_data_cradle_statue_sphere_wakes_the_four_statues`,
+  `real_data_cradle_sprigg_death_opens_the_gate_and_spawns_the_squad`,
+  `real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad`).
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
