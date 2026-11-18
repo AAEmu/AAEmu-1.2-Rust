@@ -228,6 +228,18 @@ pub fn authorize(
     let Some(def) = definition(template) else {
         return true;
     };
+    // The hidden spawn phase is revealed by the instance boss's own on-death skill hitting the
+    // chest (`DoodadFuncSkillHit`, e.g. 18024 / 18031). That hit comes from the dying boss, never
+    // from a player: players stay gated to the authored seal phases below.
+    if let FuncTemplate::SkillHit(f) = func {
+        if f.skill_id == skill_id
+            && skill_id != 0
+            && !def.phases.contains(&phase)
+            && caster.and_then(WorldObject::as_player).is_none()
+        {
+            return true;
+        }
+    }
     let Some(player) = caster.and_then(WorldObject::as_player) else {
         return false;
     };
