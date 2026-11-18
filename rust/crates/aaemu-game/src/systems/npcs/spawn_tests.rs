@@ -4078,7 +4078,8 @@ async fn real_data_quest_fill_spawns_on_terrain() {
 ///   Waveroar Ruins coast), spawner 5449 "Ynystere / Requiem Cape / Bloodhand stragglers"
 ///   (min 7) around (19930.887, 12591.275);
 /// - daily quest 3909 "Slay the Sarracenia" (8 x Thrashing Sarracenia 8606, Silent Forest),
-///   spawner 11504 "Ancient Forest / Sarracenia" (min 6) around (23840.617, 12134.021).
+///   spawner 11504 "Ancient Forest / Sarracenia" (min 6) around (23840.617, 12134.021),
+///   filled to eight so the daily can be completed in one sweep.
 #[test]
 fn quest_fill_npcs_reach_the_area_spawner_minimum() {
     use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
@@ -4108,7 +4109,7 @@ fn quest_fill_npcs_reach_the_area_spawner_minimum() {
     );
     assert_eq!(
         near(&[8606], 23840.617, 12134.021),
-        6,
+        8,
         "Thrashing Sarracenia (quest 3909)"
     );
     assert_eq!(
@@ -4456,7 +4457,7 @@ fn quest_fill_points_keep_eight_metres_from_each_other_and_the_authored_points()
         .expect("npc_spawns_quest_fill.json");
     let fill_defs = parse_list(&text, NpcSpawnerDef::from_json).expect("fill file");
     // (centre X, centre Y, area member templates, fill points per member)
-    let areas: [(f32, f32, &[u32], &[usize]); 46] = [
+    let areas: [(f32, f32, &[u32], &[usize]); 47] = [
         (26507.38, 6533.56, &[8932], &[17]),
         (23926.48, 6546.64, &[8924], &[10]),
         (24834.87, 6623.12, &[1009, 8937], &[4, 4]),
@@ -4496,6 +4497,7 @@ fn quest_fill_points_keep_eight_metres_from_each_other_and_the_authored_points()
         (14448.22, 11855.96, &[2330], &[17]),
         (12628.78, 11965.39, &[7774], &[10]),
         (20381.29, 11987.23, &[10743], &[1]),
+        (23840.617, 12134.021, &[8606], &[7]),
         (15109.13, 12240.38, &[2336], &[9]),
         (11762.92, 12889.13, &[789], &[1]),
         (10878.06, 17038.1, &[1990], &[4]),

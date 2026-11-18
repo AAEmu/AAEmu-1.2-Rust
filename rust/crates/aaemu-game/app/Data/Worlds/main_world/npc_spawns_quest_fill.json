@@ -240,6 +240,26 @@
     }
   },
   {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23849.168,
+      "Y": 12110.529,
+      "Z": 305.561,
+      "Yaw": -160.0
+    }
+  },
+  {
+    "UnitId": 8606,
+    "Title": "Thrashing Sarracenia",
+    "Position": {
+      "X": 23832.066,
+      "Y": 12157.514,
+      "Z": 304.115,
+      "Yaw": 20.0
+    }
+  },
+  {
     "UnitId": 8932,
     "Title": "Sandwind Buffalo",
     "Position": {
