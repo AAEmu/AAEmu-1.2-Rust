@@ -1643,6 +1643,40 @@ async fn real_client_floor_fixes_stand_on_a_collision_floor() {
     }
 }
 
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_rookborne_quest_spawns_match_their_collision_floors() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef, SimpleSpawnerDef};
+
+    let Some(e) = env_with(true) else { return };
+    let server = real_server_with(&e, true);
+    let world = server.world.world(0).expect("main world");
+    let dir = app_path().join("Data/Worlds/main_world");
+    let npcs = std::fs::read_to_string(dir.join("npc_spawns.json")).expect("npc_spawns.json");
+    let defs = parse_list(&npcs, NpcSpawnerDef::from_json).expect("NPC spawns");
+    for id in [1261, 1294] {
+        let p = defs
+            .iter()
+            .find(|d| d.base.unit_id == id)
+            .expect("quest NPC")
+            .base
+            .position;
+        let z = crate::systems::npcs::npc::spawner::spawn_ground_z(&server, &world, p.x, p.y, p.z)
+            .expect("quest NPC floor");
+        assert!((p.z - z).abs() <= 0.5, "NPC {id} at {p:?} snaps to {z}");
+    }
+    let slaves = std::fs::read_to_string(dir.join("slave_spawns.json")).expect("slave_spawns.json");
+    let defs = parse_list(&slaves, SimpleSpawnerDef::from_json).expect("slave spawns");
+    let p = defs
+        .iter()
+        .find(|d| d.base.unit_id == 99)
+        .expect("Amed's cannon")
+        .base
+        .position;
+    let z = super::ground_height(&server, 0, p.x, p.y, p.z).expect("cannon floor");
+    assert!((p.z - z).abs() <= 0.1, "cannon at {p:?}, floor {z}");
+}
+
 /// Every `npc_spawns_quest_fill.json` entry spawns on the ground at its Z: the live NPC spawn
 /// snap (`spawn_ground_z`, collision, GeoDataMode on) lands within 0.5 m of it.
 /// `AAEMU_GAME_PAK=C:/AA1.2/game_pak cargo test -p aaemu-game real_npc_quest_fill -- --ignored`

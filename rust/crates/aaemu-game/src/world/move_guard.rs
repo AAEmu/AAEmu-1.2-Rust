@@ -79,6 +79,38 @@ struct State {
     last_report_ms: i64,
     suppressed: u32,
     last_correction_ms: i64,
+    launch: Option<NativeLaunch>,
+}
+
+#[derive(Debug)]
+struct NativeLaunch {
+    origin: PositionAndRotation,
+    expires_ms: i64,
+    remaining_up: f32,
+}
+
+impl State {
+    fn new(seed: Seed, now_ms: i64, limits: Limits) -> Self {
+        Self {
+            horizontal: limits.max_speed * limits.burst_seconds,
+            up: limits.max_up_speed * limits.burst_seconds,
+            last_ms: now_ms,
+            seed,
+            violations: VecDeque::new(),
+            last_report_ms: i64::MIN / 2,
+            suppressed: 0,
+            last_correction_ms: i64::MIN / 2,
+            launch: None,
+        }
+    }
+
+    fn reset_position(&mut self, seed: Seed, now_ms: i64, limits: Limits) {
+        self.seed = seed;
+        self.last_ms = now_ms;
+        self.horizontal = limits.max_speed * limits.burst_seconds;
+        self.up = limits.max_up_speed * limits.burst_seconds;
+        self.launch = None;
+    }
 }
 
 /// The outcome of [`MoveGuard::check`].
@@ -122,36 +154,59 @@ impl MoveGuard {
         limits: Limits,
         kick: KickPolicy,
     ) -> Verdict {
+        self.check_at(key, seed, now_ms, cost, limits, kick, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_at(
+        &self,
+        key: u32,
+        seed: Seed,
+        now_ms: i64,
+        cost: Cost,
+        limits: Limits,
+        kick: KickPolicy,
+        destination: Option<(f32, f32, f32)>,
+    ) -> Verdict {
         self.prune(now_ms);
         let cap_h = limits.max_speed * limits.burst_seconds;
         let cap_u = limits.max_up_speed * limits.burst_seconds;
-        let mut st = self.states.entry(key).or_insert_with(|| State {
-            horizontal: cap_h,
-            up: cap_u,
-            last_ms: now_ms,
-            seed,
-            violations: VecDeque::new(),
-            last_report_ms: i64::MIN / 2,
-            suppressed: 0,
-            last_correction_ms: i64::MIN / 2,
-        });
+        let mut st = self
+            .states
+            .entry(key)
+            .or_insert_with(|| State::new(seed, now_ms, limits));
         if st.seed != seed {
-            st.seed = seed;
-            st.horizontal = cap_h;
-            st.up = cap_u;
+            st.reset_position(seed, now_ms, limits);
         } else {
             let dt = (now_ms - st.last_ms).max(0) as f32 / 1000.0;
             st.horizontal = (st.horizontal + dt * limits.max_speed).min(cap_h);
             st.up = (st.up + dt * limits.max_up_speed).min(cap_u);
         }
         st.last_ms = now_ms;
+        let extra_up = (cost.up - st.up).max(0.0);
+        let launch_can_pay = st
+            .launch
+            .as_ref()
+            .zip(destination)
+            .is_some_and(|(launch, to)| {
+                now_ms <= launch.expires_ms
+                    && extra_up <= launch.remaining_up
+                    && cost.up <= 32.0
+                    && (to.0 - launch.origin.x).hypot(to.1 - launch.origin.y) <= 145.0
+                    && (launch.origin.z..=launch.origin.z + 220.0).contains(&to.2)
+            });
         let fits = cost.horizontal.is_finite()
             && cost.up.is_finite()
             && cost.horizontal <= st.horizontal
-            && cost.up <= st.up;
+            && (extra_up == 0.0 || launch_can_pay);
         if fits {
             st.horizontal -= cost.horizontal;
-            st.up -= cost.up;
+            st.up = (st.up - cost.up).max(0.0);
+            if extra_up > 0.0 {
+                if let Some(launch) = st.launch.as_mut() {
+                    launch.remaining_up -= extra_up;
+                }
+            }
             return Verdict::Ok;
         }
         let budget = Cost {
@@ -211,12 +266,108 @@ impl MoveGuard {
     pub fn rebase(&self, key: u32, seed: Seed) {
         if let Some(mut st) = self.states.get_mut(&key) {
             st.seed = seed;
+            st.launch = None;
         }
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.states.len()
+    }
+}
+
+/// The client simulates these quest launches. A successful server cast grants a small,
+/// local budget for the upward part of the arc while ordinary movement checks still run.
+pub(crate) fn grant_quest_launch(server: &GameServer, player: &PlayerRef) {
+    let target = WorldObject::from(player);
+    if target.transform().parent_obj_id != 0 || player.data().unit.is_dead() {
+        return;
+    }
+    let Some(world) = server.world.world(target.transform().instance_id) else {
+        return;
+    };
+    let now = crate::world::now_ms();
+    let origin = world.world_pos_rot(&target);
+    let seed = seed_of(player, &target);
+    let limits = limits_of(server, server.config.world.move_guard_max_speed);
+    let mut state = server
+        .systems
+        .services
+        .move_guard
+        .states
+        .entry(player.obj_id)
+        .or_insert_with(|| State::new(seed, now, limits));
+    if state.seed != seed {
+        state.reset_position(seed, now, limits);
+    }
+    if state
+        .launch
+        .as_ref()
+        .is_some_and(|launch| launch.expires_ms >= now)
+    {
+        return;
+    }
+    state.launch = Some(NativeLaunch {
+        origin,
+        expires_ms: now + 5_500,
+        remaining_up: 155.0,
+    });
+}
+
+#[cfg(test)]
+mod quest_launch_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_local_launch_spends_the_extra_upward_budget() {
+        let guard = MoveGuard::default();
+        let limits = Limits {
+            max_speed: 30.0,
+            max_up_speed: 30.0,
+            burst_seconds: 3.0,
+        };
+        let seed = Seed {
+            teleport_seq: 0,
+            instance_id: 0,
+        };
+        let mut state = State::new(seed, 0, limits);
+        state.up = 0.0;
+        state.launch = Some(NativeLaunch {
+            origin: PositionAndRotation::new(24948.19, 10596.52, 689.5, 0.0, 0.0, 0.0),
+            expires_ms: 5500,
+            remaining_up: 8.3,
+        });
+        guard.states.insert(1, state);
+        let kick = KickPolicy {
+            after: 0,
+            window_ms: 60_000,
+        };
+        let cost = Cost {
+            horizontal: 2.5,
+            up: 8.2,
+        };
+        let inside = Some((24948.19, 10624.68, 812.43));
+        assert_ne!(
+            guard.check_at(
+                1,
+                seed,
+                0,
+                cost,
+                limits,
+                kick,
+                Some((25200.0, 10624.68, 812.43))
+            ),
+            Verdict::Ok
+        );
+        assert_ne!(guard.check(1, seed, 0, cost, limits, kick), Verdict::Ok);
+        assert_eq!(
+            guard.check_at(1, seed, 0, cost, limits, kick, inside),
+            Verdict::Ok
+        );
+        assert_ne!(
+            guard.check_at(1, seed, 0, cost, limits, kick, inside),
+            Verdict::Ok
+        );
     }
 }
 
@@ -344,13 +495,20 @@ pub fn guard_unit_move(
         return true;
     }
     let (cost, from, to) = measure_unit_move(world, target, mt, u);
-    let verdict = server.systems.services.move_guard.check(
+    let launch_destination = (target.as_player().is_some()
+        && target.transform().parent_obj_id == 0
+        && !u
+            .actor_flags
+            .contains(MoveTypeActorFlags::STANDING_ON_OBJECT))
+    .then_some(to);
+    let verdict = server.systems.services.move_guard.check_at(
         target.obj_id(),
         seed_of(me, target),
         crate::world::now_ms(),
         cost,
         limits_of(server, server.config.world.move_guard_max_speed),
         kick_policy(server),
+        launch_destination,
     );
     let Verdict::Reject(r) = verdict else {
         return true;

@@ -161,6 +161,16 @@ pub fn plan_route(c: &mut AiCtx<'_>, target: Vec3) -> Option<usize> {
     c.ai.path_node.found_path.clear();
     let geo = geo_of(c.server, &c.obj)?;
     let (start, end) = (c.ai.path_node.start_point_pos, c.ai.path_node.end_point_pos);
+    // A local ground route can be shorter than the authored navmesh when the victim
+    // is outside its triangles. Keep forbidden areas and actual collision in the check.
+    if matches!(
+        geo.line_passes_through_forbidden_area(start, end),
+        Ok(false)
+    ) && direct_ground_route(c, start, end)
+    {
+        c.ai.path_node.found_path.push_back(end);
+        return Some(1);
+    }
     let smooth = match c
         .ai
         .path_node
@@ -182,6 +192,32 @@ pub fn plan_route(c: &mut AiCtx<'_>, target: Vec3) -> Option<usize> {
     // Chase regeneration compares with the victim's actual position, not a node's centroid.
     c.ai.path_node.end_point_pos = target;
     Some(raw_steps)
+}
+
+fn direct_ground_route(c: &AiCtx<'_>, start: Vec3, end: Vec3) -> bool {
+    use super::collision::{ground_height_probe, walk::walk_blocked};
+
+    let distance = (end.x - start.x).hypot(end.y - start.y);
+    if !(0.25..=24.0).contains(&distance) || (end.z - start.z).abs() > 4.0 {
+        return false;
+    }
+    let segments = (distance / 3.0).ceil() as u32;
+    let instance = c.obj.transform().instance_id;
+    let mut from = [start.x, start.y, start.z];
+    for step in 1..=segments {
+        let t = step as f32 / segments as f32;
+        let x = start.x + t * (end.x - start.x);
+        let y = start.y + t * (end.y - start.y);
+        let Some(Some(z)) = ground_height_probe(c.server, instance, x, y, from[2], 1.0, 1.0) else {
+            return false;
+        };
+        let to = [x, y, z];
+        if walk_blocked(c.server, instance, from, to) != Some(false) {
+            return false;
+        }
+        from = to;
+    }
+    (from[2] - end.z).abs() <= 1.0
 }
 
 /// `Npc.FindPath(abuser)`: a route from the NPC to the abuser as `FoundPath`; a chased player

@@ -1949,6 +1949,22 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             true,
         );
     }
+    if skill.id == 17_539 && caster.transform().instance_id == 0 {
+        if let Some(player) = caster.as_player() {
+            let pos = world_pos(server, &Target::Obj(caster.clone()));
+            // Wind Magic Circle doodads in Duskgleam, Watermist and near Loka's Steps.
+            let near_circle = [
+                (24948.191, 10596.518, 689.323),
+                (25492.527, 9820.238, 714.4568),
+                (25942.076, 8838.086, 645.8761),
+            ]
+            .into_iter()
+            .any(|(x, y, z)| (pos.x - x).hypot(pos.y - y) <= 10.0 && (pos.z - z).abs() <= 5.0);
+            if near_circle {
+                crate::world::move_guard::grant_quest_launch(server, player);
+            }
+        }
+    }
     broadcast(server, caster, &fired, true);
     if total_delay > 0 {
         let skill2 = skill.clone();
