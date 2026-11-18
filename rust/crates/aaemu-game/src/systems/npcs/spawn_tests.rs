@@ -4750,6 +4750,63 @@ fn real_data_ronbann_mine_npcs_are_on_the_mine_floor() {
     );
 }
 
+#[test]
+fn windscour_quest_mobs_have_separate_placements_and_hunt_populations() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app/Data/Worlds/main_world");
+    let mut definitions = Vec::new();
+    for name in [
+        "npc_spawns.json",
+        "npc_spawns_10x.json",
+        "npc_spawns_quest_fill.json",
+    ] {
+        let text = std::fs::read_to_string(dir.join(name)).expect(name);
+        definitions.extend(parse_list(&text, NpcSpawnerDef::from_json).expect(name));
+    }
+
+    // Integrating the Plains has three document-fragment carriers at the ambush site.
+    let firran: Vec<_> = definitions
+        .iter()
+        .filter(|d| matches!(d.base.unit_id, 970 | 1120 | 1121))
+        .map(|d| d.base.position)
+        .filter(|p| (p.x - 24_403.0).hypot(p.y - 6_560.0) < 50.0)
+        .collect();
+    assert_eq!(firran.len(), 3);
+    for (i, p) in firran.iter().enumerate() {
+        for q in &firran[..i] {
+            assert!((p.x - q.x).hypot(p.y - q.y) >= 20.0);
+        }
+    }
+
+    // Each reported hunt site used to have exactly one of the required template.
+    for (unit, x, y) in [
+        (969, 24_020.0, 7_599.0),
+        (1011, 24_362.0, 6_884.0),
+        (1012, 25_670.0, 6_967.0),
+    ] {
+        let points: Vec<_> = definitions
+            .iter()
+            .filter(|d| d.base.unit_id == unit)
+            .map(|d| d.base.position)
+            .filter(|p| (p.x - x).hypot(p.y - y) <= 70.0)
+            .collect();
+        assert!(
+            points.len() >= 8,
+            "hunt NPC {unit}: {} placements",
+            points.len()
+        );
+        for (i, p) in points.iter().enumerate() {
+            for q in &points[..i] {
+                assert!(
+                    (p.x - q.x).hypot(p.y - q.y) >= 10.0,
+                    "hunt NPC {unit} overlaps"
+                );
+            }
+        }
+    }
+}
+
 /// The Old Memoria Lake Tree placements of the level 38 quest "Low on Lumber" (context 2094:
 /// `QuestActObjItemGather` item 16035 x 5 with `highlight_doodad_id` 3848). The C# PR #1793
 /// (upstream 9549c76b) added seven trees at the lake; the shipped file already had one east of

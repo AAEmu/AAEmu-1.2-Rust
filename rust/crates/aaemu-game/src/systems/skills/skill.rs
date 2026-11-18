@@ -43,16 +43,22 @@ use super::{broadcast, unit_reqs};
 /// `SkillsEnum.DigUpTreasureChestMarkedOnMap`.
 pub const DIG_UP_TREASURE_SKILL: u32 = 18_349;
 
-/// The NPC a `KillNpcWithoutCorpseEffect` removes: the matching-template NPC nearest the caster,
-/// restricted to the effect radius when it has one (`None` when none qualifies). Rust-only: the
-/// C# effect is a no-op for a character caster, so the port must not pick the first NPC of the
-/// template from the other side of the world for a player-cast quest skill.
+/// The NPC a `KillNpcWithoutCorpseEffect` removes. A matching caster removes itself.
+/// Other casts select the nearest matching NPC within the effect radius, when it has one.
 fn nearest_kill_npc(
     server: &GameServer,
     caster: &WorldObject,
     template_id: u32,
     radius: f32,
 ) -> Option<crate::world::NpcRef> {
+    if let Some(npc) = caster
+        .as_npc()
+        .filter(|npc| npc.data().unit.template_id == template_id)
+    {
+        // Summoned NPCs can share a position. A self-destruct must remove its own caster
+        // even when another matching NPC is exactly as close.
+        return Some(npc.clone());
+    }
     let world = world_of(server, caster)?;
     let from = Target::Obj(caster.clone());
     let mut best: Option<(f32, crate::world::NpcRef)> = None;
@@ -70,6 +76,81 @@ fn nearest_kill_npc(
         }
     }
     best.map(|(_, npc)| npc)
+}
+
+#[cfg(test)]
+mod self_despawn_tests {
+    use super::*;
+    use crate::data::world_data::SystemFaction;
+    use crate::models::npc::Npc;
+    use crate::systems::skills::data::effects::KillNpcWithoutCorpseEffect;
+    use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
+    use crate::world::Entity;
+
+    #[tokio::test]
+    async fn self_destruct_removes_only_its_caster_when_summons_overlap() {
+        let mut data = crate::data::GameData::empty();
+        data.factions.add(SystemFaction {
+            id: 115,
+            ..Default::default()
+        });
+        let skills = &mut data.systems.skills;
+        skills.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(damage_effect(2729, 1))),
+            15717,
+        );
+        skills.add_effect(
+            EffectKind::KillNpcWithoutCorpseEffect,
+            EffectTemplate::KillNpcWithoutCorpse(KillNpcWithoutCorpseEffect {
+                id: 647,
+                npc_id: 986,
+                radius: 0.0,
+                give_exp: false,
+                vanish: true,
+            }),
+            0,
+        );
+        let mut self_damage = skill_effect(15717, EffectKind::DamageEffect, 2729);
+        self_damage.application_method = ApplicationMethod::SourceOnce as u32;
+        self_damage.friendly = true;
+        let mut template = skill_template(16_444);
+        template.target_type = 0;
+        template.effects.push(self_damage);
+        let skill = SkillRun::new(Arc::new(template), 1);
+        let server = crate::test_support::test_server_with(data);
+        crate::systems::npcs::install_hooks(&server);
+        let world = server.world.world(0).expect("test world");
+        let first = WorldObject::from(Entity::new(601, Npc::new(986)));
+        let second = WorldObject::from(Entity::new(602, Npc::new(986)));
+        for caster in [&first, &second] {
+            {
+                let mut npc = caster.as_npc().unwrap().data();
+                npc.unit.hp = 100;
+                npc.unit.faction_id = 115;
+            }
+            world.spawn(caster, &server.view_ctx());
+        }
+        for caster in [&first, &second] {
+            assert_eq!(
+                nearest_kill_npc(&server, caster, 986, 0.0).unwrap().obj_id,
+                caster.obj_id()
+            );
+        }
+        apply_effects(
+            &server,
+            &skill,
+            &CastCtx {
+                caster: second.clone(),
+                caster_caster: SkillCaster::Unit(second.obj_id()),
+                target: Target::Obj(second.clone()),
+                target_caster: SkillCastTarget::Unit(second.obj_id()),
+                skill_object: SkillObject::None,
+            },
+        );
+        assert!(world.object(first.obj_id()).is_some());
+        assert!(world.object(second.obj_id()).is_none());
+    }
 }
 
 /// The arguments a cast carries through its tasks.
@@ -2188,9 +2269,12 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 units.push(o.clone());
             }
         } else if selection == Some(SkillTargetSelection::Target) {
-            // Deviation from C#: `around_radius` excludes its origin, so a lone primary target
-            // of a target-selected area skill (Concussive Arrow 11933) was never hit.
-            if let Some(o) = target_self.as_obj().filter(|o| o.is_unit()) {
+            // `around_radius` excludes its origin. Keep the explicit target for
+            // Concussive Arrow (11933) and area interactions such as Set Bomb (15724).
+            if let Some(o) = target_self
+                .as_obj()
+                .filter(|o| o.is_unit() || o.as_doodad().is_some())
+            {
                 units.push(o.clone());
             }
         }
@@ -2706,6 +2790,22 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 effect.effect_id
             );
             continue;
+        };
+        // The Combuster actually casts Self-Destruct 16444. Its source-only damage (2729)
+        // can leave it alive, so use the corpse-free removal authored for the same NPC
+        // on Self-Destruct 15992. The explosion's damage and buff on nearby targets are
+        // separate effects.
+        let (kind, id) = if t.id == 16_444
+            && kind == EffectKind::DamageEffect
+            && id == 2729
+            && target.obj_id() == caster.obj_id()
+            && caster
+                .as_npc()
+                .is_some_and(|npc| npc.data().unit.template_id == 986)
+        {
+            (EffectKind::KillNpcWithoutCorpseEffect, 647)
+        } else {
+            (kind, id)
         };
         let Some(template) = data.effect(kind, id) else {
             tracing::debug!(
