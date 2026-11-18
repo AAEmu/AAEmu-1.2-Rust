@@ -37,7 +37,9 @@ use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, Worl
 
 #[path = "zone_access.rs"]
 mod zone_access;
-pub use zone_access::{zone_access_allowed, ZoneAccessState, CLOSED_ZONE};
+pub use zone_access::{
+    recheck_siege_participants, zone_access_allowed, ZoneAccessState, CLOSED_ZONE,
+};
 #[cfg(test)]
 #[path = "zone_access_tests.rs"]
 mod zone_access_tests;

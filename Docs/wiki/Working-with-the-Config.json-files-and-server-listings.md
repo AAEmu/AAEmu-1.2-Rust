@@ -1073,6 +1073,32 @@ unchanged data only GMs can stand in a castle area, and this rule spares them. I
 server whose castle zones are open. The implementation and the open questions are recorded in
 `rust/crates/aaemu-game/PORTING.md`.
 
+## Siege area: letting participants into the closed castle zones
+
+The 1.2 data authors the castle zones themselves (the keep/fortress interior, not the open
+siege area above) as `closed`, so by default the zone-access rule evicts every non-GM
+character from them after five warnings, regardless of a running siege or a roster entry.
+Setting this override to `true` lets a registered attacker or defender enter and stay in its
+own siege's castle zones while that siege is active:
+
+```json
+{
+  "Housing": {
+    "OpenCastleZonesForParticipants": true
+  }
+}
+```
+
+A "registered participant" is the same rule the siege-area removal above and the participant
+buffs use: a roster entry whose side's guild is still the character's current one. Scope is the
+one siege the zone's own territory is fighting, in that territory's own world instance, only
+while it is active (not during the warmup period before the battle starts); other closed zones,
+non-participants, and game masters (always exempt) are unaffected. The exemption is dropped
+again, without the character having to move, as soon as the siege ends or the roster entry is
+removed. The rule is **off** by default, keeping the previous behaviour. The implementation and
+the open question (whether retail opened these zones at all) are recorded in
+`rust/crates/aaemu-game/PORTING.md`.
+
 ## Siege calendar and territory claim-window timezone
 
 `Housing.SiegeCalendarTimezone` is the wall-clock offset of the `siege_zones` weekday/hour
