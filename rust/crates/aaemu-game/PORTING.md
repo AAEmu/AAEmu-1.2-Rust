@@ -1315,7 +1315,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `SphereQuestManager`, `SphereQuest*`, `SphereGameData` (spheres, sphere_quests, `IsInsideAreaSphere`, `GetSphereIdFromQuest`) | `spheres.rs`, `data.rs` | done | `quest_sign_sphere.g` of `main_world`; one manager per server (500 ms tick). Other `sphere_*` tables not loaded (unused by quests). |
 | `AreaSphere` unit requirement (kind 35) of skills and quest components | `spheres.rs` (`inside_requirement_sphere`), `bridges.rs`, `engine.rs` (`EnvView`) | added | The C# `IsInsideAreaSphere` only tests the client sign spheres of the sphere's `sphere_quests` quest. 147 skill rows use kind 35; when that quest has no sign sphere at the requirement's place the skill can never be used. Tester report: quest 2273 "March of Respect" could not place its Ritual Offering Bundle (item 18638, skill 15204, `or_unit_reqs`: sphere 1152 OR doodad 3339 within `value2` / 1000 = 0.001 m): sphere 1152 ("Q2273...") links to quest 2907 (`sphere_quests` 660), which has no sign sphere at Prince Reander's Monument. The requirement now also passes inside the sphere's own `sphere_area_fill.json` area (1152: radius 6 m around the altar), for `SphereQuest` spheres only; the areas are not world-filtered (the callers have a position only; sphere ids are unique). Abandoning the quest destroying the bundle is the data (supply act 1822: `destroy_when_drop`). Test: `quests::tests::requirement_sphere_falls_back_to_the_shipped_area`. |
 | Imported quest sign spheres (`quest_sign_sphere_fill.json`) | `spheres.rs` (`load_sign_sphere_fill`), `mod.rs` (start), `app/Data/Worlds/*/quest_sign_sphere_fill.json`; converter `rust/tools/quest_sign_sphere_import/` | added | The 19 quests of `Docs/wiki/Quest-Audit.md` whose objective sphere has no 1.2 client sign sphere (1012, 1024, 1033, 1039, 1372, 1392, 1398, 1400, 1650, 1897, 5272, 5439, 5716, 5898, 5979, 6039, 6050, 6213, 6216). One offline converter reads the 10.x `world_server/quest_area_sphere.g` (`stype` = `spheres.id`) and the 10.x client `client/quest_sign_sphere.g` (`qtype` / `ctype`), both zone-local in the source, and writes **8 spheres in 7 quests** in world coordinates (`source_zone_origin * 1024 + local`, z as is; the loader uses fill rows as world and adds no origin): 1650 (main_world 142), 5716 (main_world 186), 5979 (instance_training_camp 198, two areas), 6039 / 6050 (instance_prologue 300), 6213 (main_world 144), 6216 (main_world 158). The other 12 quests are dropped with a reason: 1012 / 1024 / 1033 / 1039 because the 10.x `spheres` row was reused for another quest (`sphere_mapping_mismatch`; e.g. 10.x sphere 945 -> quest 5804 while 1.2 uses it for 1033), 1400 because its 10.x component id differs (7021/36416 vs the 1.2 7020), and 1372 / 1392 / 1398 / 1897 / 5272 / 5439 / 5898 because their sphere ids have no block in the 10.x files at all. 5716's second block is dropped because it lies in zone 159 while the quest is authored in zone 186; 6039 / 6050's second files are dropped because zone 348 does not exist in 1.2. Guards: the 10.x and 1.2 `spheres` / `sphere_quests` rows must name the same detail and quest, the 1.2 component must have a `QuestActObjSphere` / `QuestActCheckSphere` act for the same `sphere_id`, the zone must belong to the named 1.2 world and be open (`zones.closed = 'f'`), a 1.2 client sphere for the same (quest, component) is never overridden, and a 1.2 `mission_mission0.xml` `AreaSphere` with the same `value1` within 1.5 m must agree on the radius. The loader repeats the runtime guards, loads the file after the client spheres and rejects duplicates; the quest sphere triggers compare the sphere's `world_id` with the player's world (a main_world area no longer fires inside an instance). The 10.x client sign sphere file contributed no kept entry (its only matching old quests are in zones closed in 1.2), and the 10 contexts without components are untouched. Location note: the active manager/loader is `systems/quests/spheres.rs`; the world-side copy `systems/npcs/sphere_quest.rs` is not started (`start` is a no-op), so the fill is wired into the active path. |
-| Imported area spheres (`SCAreaChatBubble` 0x153, `SCAreaTeamMessage` 0x155, `SphereDoodadInteract`) | `spheres.rs` (`SphereArea`, `load_sphere_areas`, `tick_area_spheres`, `dispatch_doodad_interact`), `packets.rs` | added / INFERRED | Enter / leave of a `sphere_area_fill.json` area in the same 500 ms tick as the quest spheres (run first, the quest sphere code is unchanged): a `SphereBubble` row sends `SCAreaChatBubble(enter, player unit, sphere_detail_id)` and any row with a non-blank `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player; leave only when `enter_or_leave` is set. **INFERRED trigger and audience** (CAP-UI-7 / CAP-UI-6): the 1.2 client has the readers and handlers (`FUN_397b6330` / `FUN_391dc340`, `FUN_397b63b0` / `FUN_391dc460`) but no captured sender; `is_personal_msg` is true for all 67 shipped `team_msg` rows and the Rust sends to the player only (the non-personal audience is UNKNOWN). `SphereDoodadInteract` runs the enter `DoodadFuncAreaTrigger` row of the doodads inside the area / skill range once the sphere's own `unit_reqs` pass (Sharpwind's Derelict Bridge, the 12 open-world quarry rock piles of doodad 2803 in sphere 1446's areas and the open-world Unstable Floor 1495 in sphere 429's; capture-pending CAP-DOODAD-1, see "Sharpwind opening chain"). `SphereSkill` / `SphereSound` / `SphereBuff` areas load but have no effect (a separate content decision). A missing JSON file is an empty table; ids are re-guarded against the loaded `spheres` table. |
+| Imported area spheres (`SCAreaChatBubble` 0x153, `SCAreaTeamMessage` 0x155, `SphereDoodadInteract`, `SphereSkill`) | `spheres.rs` (`SphereArea`, `load_sphere_areas`, `tick_area_spheres`, `dispatch_doodad_interact`, `dispatch_sphere_skill`), `packets.rs` | added / INFERRED | Enter / leave of a `sphere_area_fill.json` area in the same 500 ms tick as the quest spheres (run first, the quest sphere code is unchanged): a `SphereBubble` row sends `SCAreaChatBubble(enter, player unit, sphere_detail_id)` and any row with a non-blank `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player; leave only when `enter_or_leave` is set. **INFERRED trigger and audience** (CAP-UI-7 / CAP-UI-6): the 1.2 client has the readers and handlers (`FUN_397b6330` / `FUN_391dc340`, `FUN_397b63b0` / `FUN_391dc460`) but no captured sender; `is_personal_msg` is true for all 67 shipped `team_msg` rows and the Rust sends to the player only (the non-personal audience is UNKNOWN). `SphereDoodadInteract` runs the enter `DoodadFuncAreaTrigger` row of the doodads its `sphere_doodad_interacts` row selects once the sphere's own `unit_reqs` pass: a non-zero `doodad_family_id` selects the doodads of the instance whose `FamilyId` equals it (Sharpwind's stalactites 50011-50022 and bridge 50000, skipping the area / skill range), family 0 keeps the area / skill-range selection (see "Sharpwind opening chain"). `SphereSkill` casts `sphere_skills.skill_id` with the character as caster on the enter edge (Sharpwind spheres 1965-1968 run the invisible slaves' command sets, see "Sharpwind opening chain"). `SphereSound` / `SphereBuff` areas load but have no effect (a separate content decision). A missing JSON file is an empty table; ids are re-guarded against the loaded `spheres` table. |
 | `QuestActObjZoneKill.OnZoneKill` level window | `systems/quests/acts.rs` (`level_in_range`) | deviation | **Deviation:** a level bound of 0 is "unset". The 1.2 data has `lv_min_npc` / `lv_max_npc` = 0 / 0 on 103 of the 110 NPC-kill acts (`lv_min` / `lv_max` are the questor's window and differ from the NPC bounds on the 7 acts that set both), and the C# rejected every real victim against the raw 0..0 range, so those quests could never complete. The player-kill window uses the same rule. |
 | `QuestActObjZoneKill` team share | `systems/quests/acts.rs`, `events.rs` (`run_deferred`) | deviation | **Deviation:** only the original killer shares the kill (the `ObjTalk` / `ObjInteraction` guard). The C# re-delegated `OnZoneKill` from every receiver ("to avoid loops") and bounced between members holding the same quest without end. NPC deaths raise the event for each eligible party member, who all share it again, so in the C# a member counted the kill once directly and once per sharing member. **Deviation:** each member now counts a kill once per act. `Npc.DoDie` (`npcs/npc/death.rs`) notes the victim in the `direct_kill_credits` of everyone it hands a direct event (eligible players, the fallback killer, Tag Share contributors) before the first event is raised, and a team-shared `ObjZoneKill` ignores a victim in that list and counts a shared victim once per (quest, act) (`CharacterSkillState::claim_shared_kill_credit`, 30 s memory because object ids are reused). Team members out of range, who get no direct event, still receive the share (once). |
 | `QuestActObjZoneKill` PvP kills | `systems/skills/combat.rs` (`raise_pvp_zone_kill`, from `character_death_tail`) | deviation | **Deviation:** the C# only raised `OnZoneKill` from `Npc.DoDie` (`DoOnMonsterHuntEvents`), so the 16 `count_player_kill > 0` acts (e.g. quests 5982-5991) never progressed. A player killed by another player's hand (hostile relation, the same branch that awards PvP honor) now raises `ZoneKill` (zone group of the victim, killer and victim as `KillUnit`s) for the killer only; `team_share` acts hand it to the killer's team through the usual `TeamEvent`. Friendly-fire kills and mate / slave kills raise nothing. |
@@ -4802,23 +4802,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   stops at the first action (a repeated check might trigger every respawn). Sharpwind sphere
   1552 ("bridge collapse area", r 5 at the
   bridge) contains only doodad 5058, whose row 11162 (`next_phase` 13148) swaps the rail
-  model for `rail_a_broken`. **Inferred (no 1.2 server evidence) / capture-pending
-  CAP-DOODAD-1:** the shipped `sphere_doodad_interacts.doodad_family_id` (50000) cannot be
-  resolved because the 1.2 compact `doodad_families` table is empty; the skill range and the
-  sphere area bound the candidates instead (a guess only if several doodads share the area).
-  The dispatch is generic, so besides the bridge (sphere 1552, doodad 5058) it also reaches
-  two kinds of open-world (`main_world`) doodads: the **12 quarry rock piles** (doodad 2803
-  "Arcum Iris Quarry Rock Pile") inside the five areas of sphere 1446 (skill 2, `max_range`
-  25: every pile within 25 m of the entering player), and the single **Unstable Floor**
-  (doodad 1495 at 14146.3 / 14966.2 / 144.3, zone 142) inside the areas of sphere 429 ("floor
-  that collapses on entry", skill 10134, `max_range` 10). Their enter rows (`doodad_funcs`
-  5424 and 10916) advance the start phase (6231 / 2336) to a phase whose phase func is a
-  `DoodadFuncFinal` (6232 / 2337), so the doodad crumbles away and respawns. This is accepted
-  as the intended data behaviour (the authored sphere, skill and func rows say so; probably
-  cosmetic); the other shipped `SphereDoodadInteract` areas find no doodad with an enter row
-  today (Sharpwind's stalactite doodads 5364 / 5365 / 5420 are placed by no spawn file). The
-  affected (sphere, doodad) pairs are listed by the `#[ignore]`d real-data test below (r208022
-  data: (429, 1495) x 1, (1446, 2803) x 12, (1552, 5058) x 1). Tests:
+  model for `rail_a_broken`. **Selection by family (2026-11-11):** a non-zero
+  `sphere_doodad_interacts.doodad_family_id` selects every doodad of the instance whose
+  `Doodad.family_id` equals it, anywhere in the instance and without the area / skill-range
+  test; the 10.x `DoodadAreaTriggerRuntime` (kind 21) and the level design's `Family_Id` (now
+  the spawn file's `FamilyId`) carry the same link. The 1.2 compact `doodad_families` table is
+  empty, so the placement data is the source. This is what makes the Sharpwind stalactites
+  work: doodads 5364 / 5365 (families 50019-50022 / 50011-50018) hang 13-16 m above their
+  sphere centres, outside the old area / 4 m skill range. **The stalactite and trigger-NPC
+  placements are Inferred (the 10.x level's `doodad.g` / `npc_spawners.g` with 1.2 template
+  ids); the sphere, family, skill and func rows are 1.2 data.** Family 0 (all other shipped
+  rows) keeps the older selection and still drives the open-world quarry rock piles (doodad
+  2803 inside the areas of sphere 1446, skill 2, `max_range` 25) and the Unstable Floor (doodad
+  1495 inside the areas of sphere 429, skill 10134, `max_range` 10), whose enter rows
+  (`doodad_funcs` 5424 / 10916) lead to a `DoodadFuncFinal` phase. The affected (sphere,
+  doodad) pairs are listed by the `#[ignore]`d real-data test below; with the placement data
+  of this checkout it selects the bridge 5058 (sphere 1552, family 50000) and the twelve
+  stalactites (5365 under spheres 1836-1843, families 50011-50018; 5364 under spheres
+  1844-1847, families 50019-50022), so the test is the canary for those rows. Tests:
   `doodad::funcs::tests::area_trigger_func_advances_the_bridge_phase_for_a_player`,
   `quests::sphere_doodad_tests::{crossing_the_bridge_sphere_advances_the_bridge_to_its_broken_phase,
   a_player_outside_the_sphere_does_not_collapse_the_bridge,
@@ -4827,9 +4828,38 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   a_player_who_meets_the_requirements_outside_triggers_the_sphere_on_the_next_entry,
   a_bridge_in_a_neighbouring_region_is_reached_inside_the_skill_range,
   a_bridge_inside_the_area_but_out_of_the_skill_range_stands,
-  a_bridge_reserved_by_another_thread_is_not_advanced}`; real data (`AAEMU_COMPACT_DB` = a copy
-  of the r208022 `compact.sqlite3`): `cargo test -p aaemu-game --lib
+  a_bridge_reserved_by_another_thread_is_not_advanced,
+  a_family_sphere_reaches_a_doodad_far_outside_the_area_and_range,
+  a_family_sphere_selects_only_doodads_of_its_family,
+  a_family_less_sphere_keeps_the_area_and_range_selection}`; real data (`AAEMU_COMPACT_DB` = a
+  copy of the r208022 `compact.sqlite3`): `cargo test -p aaemu-game --lib
   real_data_sphere_doodad_interact -- --ignored --nocapture`.
+* systems::quests (Sharpwind `SphereSkill` proximity triggers, 2026-11-11): the C# loaded the
+  `sphere_skills` table but never used it, so the invisible "Spawn Slave" NPCs never ran their
+  command sets. Rust casts `sphere_skills.skill_id` with the character as caster on the enter
+  edge of a `SphereSkill` area, once per stay, only when the sphere's own `unit_reqs` pass at
+  that moment (`can_trigger_sphere`, like the other sphere kinds; a level-up inside does not
+  retro-trigger). **Inferred (no 1.2 server evidence):** the enter-edge rule (the row's
+  `trigger_condition_id` 3 `EVERY_N_TIME_AFTER` / 1000 ms would re-cast a finished set every
+  period), that the requirement is evaluated only on entry, and that `max_rate` / `min_rate` are
+  not used as a chance roll (no 1.2 code used the table; all Sharpwind rows are 100 / 100). The
+  shipped rows are self-centred
+  area skills (sphere 1965-1968 -> `sphere_skills` 175-178 -> skills 19522-19524 / 19533,
+  `target_type` 0, radius 50, tag filter 798-801), so the caster is the area centre; the
+  `NpcControlEffect` category 5 (`RunCommandSet`) and the tag filter already existed. The
+  chains (1.2 data): sphere 1965 -> skill 19522 -> NPC 12116 (tag 798) -> set 202 -> skill
+  19525 -> slime spawners 94761-94765 + the slave removes itself; sphere 1968 -> skill 19533 ->
+  NPC 12119 (tag 801) -> set 206 -> skill 19534 -> Okape's spawner 90004 + the slave removes
+  itself. **The trigger NPC placements (12113-12119 and the slime/Okape spawner ids) are
+  Inferred from the 10.x level spawners; the NPC, tag, sphere, skill and command-set rows are
+  1.2 data.** The skills assume the spawner ids 94761-94765 / 90004 exist as spawners in the
+  world (the level spawners are not in the 1.2 `npc_spawners` table), which the event spawner
+  rows of the NPC spawn data provide. Tests:
+  `quests::sphere_skill_tests::{entering_the_sphere_casts_the_skill_on_the_tagged_npc_once,
+  a_character_that_misses_the_requirements_is_not_cast_for_while_inside,
+  a_non_character_inside_the_sphere_does_not_cast_the_skill}`; real data (`AAEMU_COMPACT_DB`):
+  `cargo test -p aaemu-game --lib real_data_sharpwind_spheres -- --ignored --nocapture`
+  places the triggers itself and asserts the five slime spawners and Okape's spawner.
 * systems::npcs (Sharpwind "water rises" geyser network, 2026-11-11): the missing placements and
   the logic network are now in place, so clearing the Blocked Geysers raises the lake.
   **Placements (data):** the 10.x client level editor `doodad.xml` (`ArcheAge Returns 10.0.2.13
@@ -4947,6 +4977,87 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `doodad_spawns.json` rows through the three switches to the raised lake): `cargo test -p
   aaemu-game --lib -- --ignored real_compact_db_sharpwind real_compact_db_related_ids
   real_data_sharpwind`.
+* systems::npcs (Sharpwind scripted doodad placements, 2026-11-11): the scripted doodads of the
+  Nerta door chain (spec item 5), the two powder-keg rock walls (items 6 and 9), the stalactite
+  corridor (item 10) and the Okape exit / secret chest / attack ban (item 12) are now placed in
+  `app/Data/Worlds/instance_cuttingwind_deadmine/doodad_spawns.json`. Added: `5541` "Guild
+  Storage Door" family 50009 at (487.015, 327.783, 165.839) and `5542` "Stone Lion" family 50010
+  at (489.476, 323.844, 167.294), replacing the wrong-template Howling Abyss lion `5602` (family
+  30039) that stood at the lion spot; `5280` "Rock" x2, the ogre-corridor wall at (519.932,
+  365.755, 169.029) and the exit wall at (615.935, 469.958, 155.602, scale 1.3); the level's keg
+  sets `5282` x18, `5606` x4 (dormant until Allistair-2's dialogue 11) and `5568` x5, replacing
+  the older approximations (including the `5282` rows where the level has `5606`);
+  `5365` "Falling Stalactite" x8 with families 50011-50018 and `5364` "Shattered Stalactite" x4
+  with families 50019-50022; `5724` "Sharpwind Mines Exit" at (613.364, 642.913, 139.813);
+  `7522` "Okape's Secret Chest" at (614.247, 636.359, 139.486), whose start group 20831 is the
+  invisible phase the Okape death skill hits; and the three `5957` attack-ban doodads. The
+  Derelict Bridge `5058` keeps its 1.2-era position (the sphere centre) and now carries the
+  level family 50000. The death-skill chests `6130` (Nerta) and `6197` (Okape's log) are
+  deliberately not placed; their skills create them. **Inferred:** the positions/families are
+  the 10.x level editor rows (`game/worlds/instance_cuttingwind_deadmine/cells/000_000/
+  doodad.g`); the 1.2 templates and start groups are from `compact.sqlite3`. Tests:
+  `npcs::sharpwind_doodad_tests::sharpwind_scripted_doodad_spawn_placements` and (gated by
+  `AAEMU_COMPACT_DB`) `real_compact_db_sharpwind_scripted_doodad_spawn_templates`.
+* systems::npcs (start-active spawners / Sharpwind NPC spawn data, 2026-11-11): a plain
+  `npc_spawns.json` row (no `NpcSpawnerIds`) expands into **every** game-data spawner that lists
+  the NPC as a member (`SpawnManager::AddNpcSpawner` / `get_spawner_ids`), and neither the C#
+  nor the Rust read `npc_spawners.activation_state`. So the event-only Sharpwind spawners and
+  the cutscene actors were created at instance start: Nerta 11362/12146 and Okape 12188 existed
+  from t=0 (their OnSpawn skills fired with nobody there), the slimes 11361 and the researchers
+  12153/12155 stood in the instance, and Alistair 12108/12109 spawned twice (the regular
+  spawners 13382-13386 plus the cutscene actors 13387/13388 at the same place). **Deviation
+  from the C# (narrow rule, `spawn_manager::spawner_skip`):** a plain row skips (a) a category-0
+  (`NORMAL`) spawner whose name or comment carries the level editor's `연출` ("staging") marker
+  in **every** world (cutscene actors), and (b) an `activation_state = 'f'` spawner **only in
+  `instance_*` worlds except `instance_library`**. Event rows (`NpcSpawnerIds`) still register
+  their spawner for the effect, and nothing else changes. **Why not global (review, 2026-11-11):**
+  'f' does not mean "absent at start" in 1.2. The removed C# never gated spawning on it, and the
+  open worlds prove it: `arche_mall_world`'s 42 rows are all-'f' always-present vendors
+  (Wardrobe Stylist 13639, Fairmoon Clerks 13642/13644/13646, Veroe Weapons Dealer 13645,
+  Premium Potion Merchant 14068, ...), `racing_test_world` has the same 48, and `main_world`'s
+  247 all-'f' rows include quest givers (Liteia 13559, Baron Alfonso 13560, Bard Pagos 13561,
+  Pavitra's Spirit 10393, Arcane Soul 13725, Century Root 7152, the three Alliance
+  Quartermasters 13649/13652/13663 and the five capital Arena Managers 13792). A global rule
+  emptied the two mall worlds and removed those `main_world` NPCs. `instance_library` is
+  excluded too: its activating indun action is `IndunActionNpcSpawner`, which only logs in the
+  C# and here, only 3 of its 49 'f' spawner ids carry a `game_schedule_spawners` binding, and
+  no `npc_spawner_spawn_effects` / `quest_components.npc_spawner_id` row names the other 46, so
+  skipping would leave the whole dungeon without its 143 all-'f' rows. The `'f'` part of the
+  rule is direct in Sharpwind (its event spawners are activated by `NpcSpawnerSpawnEffect`
+  skills that name the spawner id, e.g. Vera's death effect 24094 -> 94694, which is tested);
+  the other instance worlds mark the skipped rows `비활성_...` ("inactive") but their indun
+  scripts are not implemented yet (`IndunActionNpcSpawner` only logs), so skipping keeps them
+  dormant instead of standing in the instance until those scripts arrive. That retail also
+  starts these spawners inactive is **Inferred** (no 1.2 server capture). Caveat for later:
+  `instance_training_camp`'s Red/Blue Army Defense Cannons 13347/13348 (4 rows),
+  `instance_burntcastle_armory`'s Bloodhand Watcher 3086, `instance_nachashgar`'s Jehsen 14413
+  and `instance_immortal_isle`'s Bloated Corpse 13713 are not named by any spawn effect,
+  schedule or quest component either; if they turn out to be permanent they need an explicit
+  exception (the review flagged the cannons as probably permanent battlefield defences).
+  **Open item (reported, not changed):** `get_spawner_ids` is keyed by `member_id` only (the C#
+  behaviour), so 7 `main_world` rows also expand into `"NpcGroup"` spawners whose group id
+  collides with the NPC id (NPC 42 -> 9129, NPC 45 -> 3832); filtering by `member_type` is a
+  separate fix. The gated real-data test counts every skipped expansion per world: `main_world`
+  0 'f' / 4 cutscene (spawner 3709 뱀의틈연출), `arche_mall_world` 0/0, `racing_test_world` 0/0,
+  `instance_library` 0/0, Sharpwind 0 'f' / 9 cutscene (the Alistair and trigger cutscene
+  actors; every Sharpwind plain row keeps a spawner), `instance_hadir_farm` 102 'f' / 0,
+  `instance_nachashgar` 9/0, `instance_cradle_of_destruction` 5/0, `instance_training_camp` 4/0
+  (4 rows with no spawner left), `instance_burntcastle_armory` 2/3, `instance_immortal_isle`
+  and `_easy` 1/0 each, the remaining instances 0/0.
+  **Sharpwind data (`npc_spawns.json`):** removed the plain rows of 11362 x2 (Nerta boss),
+  11361 x16 (slimes), 12188 (Okape), 12146 (cutscene Nerta), 12153 x4 / 12155 (researchers,
+  now spawned by the trigger spheres) and the 3 stray 11106 rows at (199.8, 180.4, ...);
+  added the 7 invisible "Spawn Slave" trigger NPCs 12113-12119 and the 32 level-placement event
+  rows (`NpcSpawnerIds` = the level's `spawnerId`, e.g. Vera's death effect 24094 -> 94694 for
+  the boss Nerta). **Inferred (10.x level, 1.2 templates):** the added placement positions
+  (`npc_spawners.g` `spawnerId`/`spawnerType` of zone 262). Tests (new module
+  `npcs::sharpwind_spawn_tests`): `plain_rows_skip_cutscene_everywhere_and_inactive_at_start_in_dungeons`
+  (CI) and (gated by `AAEMU_COMPACT_DB`)
+  `real_data_sharpwind_instance_creation_spawns_the_authored_npcs`,
+  `real_data_sharpwind_vera_effect_spawns_one_nerta`,
+  `real_data_start_active_rule_counts_per_world` and
+  `real_data_open_worlds_keep_inactive_at_start_npcs` (guards the mall vendors and the
+  `main_world` quest givers).
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body

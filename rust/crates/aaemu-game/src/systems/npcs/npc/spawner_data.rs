@@ -102,7 +102,11 @@ impl Default for NpcSpawnerTemplate {
             end_time: 0.0,
             destroy_time: 0.0,
             spawn_delay_min: 5.0,
-            activation_state: false,
+            // The C# property has no initializer (`false`), but nothing there reads it. Every
+            // loaded row carries the authored column; a template built by hand (tests, generated
+            // / event spawners) is start-active, which is what `SpawnManager::AddNpcSpawner`
+            // treats it as.
+            activation_state: true,
             save_indun: false,
             min_population: 0,
             test_radius_npc: 3.0,

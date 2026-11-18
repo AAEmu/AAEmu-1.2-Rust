@@ -2126,6 +2126,22 @@ impl CastSourceDebit<'_> {
     }
 }
 
+/// The NPC template ids a skill's `target_npc_tag_id` effects accept (`tagged_npcs`), or `None`
+/// when no effect restricts its targets by tag. A self-centred area cast with tagged effects
+/// starts successfully even when no such NPC is in the area; the caller can use this to wait
+/// instead of consuming a one-shot trigger.
+pub fn npc_tag_targets(data: &super::Data, template: &SkillTemplate) -> Option<Vec<u32>> {
+    let mut tagged = false;
+    let mut ids = Vec::new();
+    for effect in &template.effects {
+        if effect.target_npc_tag_id > 0 {
+            tagged = true;
+            ids.extend_from_slice(data.npcs_by_tag(effect.target_npc_tag_id));
+        }
+    }
+    tagged.then_some(ids)
+}
+
 /// `Skill.ApplyEffects(caster, casterCaster, targetSelf, targetCaster, skillObject)`.
 pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster = &ctx.caster;
