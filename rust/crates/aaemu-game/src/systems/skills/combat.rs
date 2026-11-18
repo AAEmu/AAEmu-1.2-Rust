@@ -1290,6 +1290,15 @@ pub fn stop_auto_skill(p: &PlayerRef) {
 /// credit the gunner (the C# tagged nobody for slave damage, so "Rout the Bloodhands" 2325,
 /// "Use the Bloodhand cannons to defeat Bloodhand Pillagers", could not count a cannon kill).
 fn add_tagger(server: &GameServer, owner: &WorldObject, unit: &WorldObject, damage: i32) {
+    let Some(player) = tagging_credit(server, unit) else {
+        return;
+    };
+    add_tagger_for(server, owner, &player, damage);
+}
+
+/// The character `unit`'s damage is tagged for: the unit itself, its mate's owner, its slave's
+/// gunner / owner, or the character a gimmick acts for.
+pub(crate) fn tagging_credit(server: &GameServer, unit: &WorldObject) -> Option<PlayerRef> {
     let mut check = unit.clone();
     if let Some(m) = unit.as_mate() {
         let owner_obj = m.data().owner_obj_id;
@@ -1311,9 +1320,10 @@ fn add_tagger(server: &GameServer, owner: &WorldObject, unit: &WorldObject, dama
         }
     }
     // A gimmick's damage is tagged for the character it acts for (`relation::credited_player`).
-    let Some(player) = super::relation::credited_player(server, &check) else {
-        return;
-    };
+    super::relation::credited_player(server, &check)
+}
+
+fn add_tagger_for(server: &GameServer, owner: &WorldObject, player: &PlayerRef, damage: i32) {
     let social = server.systems.skills.ext.social();
     let team = social.team_of(server, player.obj_id);
     let max_hp = owner.with_unit(|u| u.unit().max_hp).unwrap_or(0);
@@ -1397,6 +1407,22 @@ pub fn add_damage_aggro(
     )
 }
 
+/// An owned sport fish never takes aggro or damage credit from a character other than its
+/// owner, so its landing credits the owner. Every aggro-table insert, and with it
+/// [`add_tagger`], passes through here (taunt and aggro copy included).
+pub(crate) fn refuses_foreign_aggro(
+    server: &GameServer,
+    holder: &WorldObject,
+    unit: &WorldObject,
+) -> bool {
+    let Some(npc) = holder.as_npc() else {
+        return false;
+    };
+    crate::systems::economy::fishing::owned_sport_fish_owner(server, npc).is_some_and(|owner| {
+        tagging_credit(server, unit).is_some_and(|credit| credit.character_id != owner)
+    })
+}
+
 fn add_aggro_amounts(
     server: &GameServer,
     owner: &WorldObject,
@@ -1405,6 +1431,9 @@ fn add_aggro_amounts(
     amount: i32,
     damage_credit: Option<i32>,
 ) -> bool {
+    if refuses_foreign_aggro(server, owner, unit) {
+        return false;
+    }
     if buffs::check_buff_tag(server, owner, tags::NO_FIGHT)
         || buffs::check_buff_tag(server, owner, tags::RETURNING)
     {

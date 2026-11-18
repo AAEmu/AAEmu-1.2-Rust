@@ -17,13 +17,17 @@ use super::loot::{loot_convert_fish_from_pack, SharedRandom};
 /// in its configured exception tag. The 1.2 FISH description allows fishing only.
 /// The creator is the NPC's character owner, not its self-cast buff caster.
 /// This does not infer general creator/skill-tag exception rules for other buffs.
+///
+/// A fish whose template starts it with such a status (see [`owned_sport_fish_owner`]) also
+/// refuses every other character's damage after that status was dispelled: the landing plot
+/// dispels it before its scripted killing damage, which must credit the owner.
 pub(crate) fn blocks_character_fish_damage(
     server: &GameServer,
     target: &WorldObject,
     caster: &WorldObject,
     source_skill_id: Option<u32>,
 ) -> bool {
-    let (Some(npc), Some(player)) = (target.as_npc(), caster.as_player()) else {
+    let Some(npc) = target.as_npc() else {
         return false;
     };
     let (owner_id, buff_ids) = {
@@ -41,6 +45,17 @@ pub(crate) fn blocks_character_fish_damage(
     if owner_id == 0 {
         return false;
     }
+    // The durable gate follows the character the hit is credited to, so a foreign mate, slave
+    // or gimmick cannot land the kill either (the same identity the aggro guard uses).
+    if crate::systems::skills::combat::tagging_credit(server, caster)
+        .is_some_and(|credit| credit.character_id != owner_id)
+        && owned_sport_fish_owner(server, npc).is_some()
+    {
+        return true;
+    }
+    let Some(player) = caster.as_player() else {
+        return false;
+    };
     let skills = &server.game_data.systems.skills;
     let fish_buffs = skills
         .buffs_by_tag(crate::systems::ai::npc::tags::FISH)
@@ -58,6 +73,32 @@ pub(crate) fn blocks_character_fish_damage(
                             })))
             })
     })
+}
+
+/// The owning character of an owned sport fish: an NPC with a nonzero character owner whose
+/// template initial buff is FISH-tagged and requests creator immunity. Independent of whether
+/// that status is still live. Takes and releases the NPC lock on its own.
+pub(crate) fn owned_sport_fish_owner(
+    server: &GameServer,
+    npc: &crate::world::NpcRef,
+) -> Option<u32> {
+    let (owner_id, template_id) = {
+        let npc = npc.data();
+        (npc.unit.owner_id, npc.unit.template_id)
+    };
+    if owner_id == 0 {
+        return None;
+    }
+    let skills = &server.game_data.systems.skills;
+    let fish_buffs = skills.buffs_by_tag(crate::systems::ai::npc::tags::FISH)?;
+    let template = server.game_data.systems.npcs.npc.template(template_id)?;
+    template
+        .buffs
+        .iter()
+        .any(|id| {
+            fish_buffs.contains(id) && skills.buff(*id).is_some_and(|b| b.immune_except_creator)
+        })
+        .then_some(owner_id)
 }
 
 fn is_equipped_fish(
