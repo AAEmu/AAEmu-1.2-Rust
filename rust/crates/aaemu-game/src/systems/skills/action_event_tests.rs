@@ -744,7 +744,7 @@ async fn direct_area_damage_respects_the_caster_cone() {
 }
 
 #[tokio::test]
-async fn pet_recovery_restores_percentages_clamps_and_does_not_resurrect() {
+async fn pet_recovery_restores_percentages_and_respects_the_revival_window() {
     let (server, _client, player, _npc) = fixture(GameData::empty());
     let mut mate = Mate::new(1, 1);
     mate.unit.hp = 900;
@@ -763,8 +763,15 @@ async fn pet_recovery_restores_percentages_clamps_and_does_not_resurrect() {
     mate.data().unit.hp = 0;
     execute(&server, 56, &args(&caster, &target), [20, 20, 0, 0]);
     {
+        let mut m = mate.data();
+        assert_eq!((m.unit.hp, m.unit.mp), (200, 100));
+        m.unit.hp = 0;
+        m.corpse_deadline = Some(tokio::time::Instant::now());
+    }
+    execute(&server, 56, &args(&caster, &target), [20, 20, 0, 0]);
+    {
         let m = mate.data();
-        assert_eq!((m.unit.hp, m.unit.mp), (0, 200));
+        assert_eq!((m.unit.hp, m.unit.mp), (0, 100));
     }
 }
 
