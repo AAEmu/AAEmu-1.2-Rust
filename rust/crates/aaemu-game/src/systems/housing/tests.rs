@@ -1368,6 +1368,8 @@ async fn save_rows_and_weekly_tax() {
     }
     house.data().is_dirty = false;
     assert!(manager::save_row(&house).is_none());
+    assert!(!super::pay_weekly_tax(&fx.server, row.id));
+    house.data().protection_end_date = manager::now() + 3 * 86400;
     let (before, id) = {
         let h = house.data();
         (h.protection_end_date, h.id)

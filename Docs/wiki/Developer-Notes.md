@@ -191,8 +191,12 @@ keeps the placed object when permission is denied or the recipient's inventory c
 other players also need the owner's recovery toggle enabled.
 
 New renewable houses receive the prepaid tax period plus seven days of grace before removal.
-Each later payment covers one configured period. Crops and dropped packs preserve their world
-placement when attached to a house and save the corresponding local coordinates for reload.
+Each later payment covers one configured period. For ordinary plots, the tax bill arrives seven
+days before the protection date shown on the building. The building stays protected throughout
+that grace period. Postponing the due date into the future withdraws its outstanding bill.
+
+Crops and dropped packs preserve their world placement when attached to a house and save the
+corresponding local coordinates for reload.
 
 Housing save changes remain pending until the database transaction commits. Normal-state house
 prefab geometry supplies server collision for construction stages and completed floors, walls

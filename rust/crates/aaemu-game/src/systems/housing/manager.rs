@@ -1170,6 +1170,10 @@ pub fn new_tax_mail(server: &GameServer, house: &HouseRef) -> HouseMail {
 
 /// `UpdateTaxInfo(house)`: untouchable / removal buffs, then the tax mails of an owned house.
 pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
+    refresh_tax_info(server, house, true);
+}
+
+fn refresh_tax_info(server: &GameServer, house: &HouseRef, reconcile_future_bills: bool) {
     if template_of(server, house).is_some_and(|template| template.guard_tower_setting_id != 0) {
         let snapshot = house.data().clone();
         let active = claimed_lodestone_state(server, house, &snapshot)
@@ -1214,7 +1218,10 @@ pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
         return;
     }
     let hooks = server.systems.housing.hooks.get();
-    if is_demolished || !super::placement::can_extend_house(server, house) {
+    if is_demolished
+        || !super::placement::can_extend_house(server, house)
+        || (!is_tax_due && reconcile_future_bills)
+    {
         hooks.delete_house_mails(server, id);
     } else if is_tax_due {
         let mails = hooks.house_mail_ids(server, id);
@@ -1248,10 +1255,12 @@ pub fn pay_weekly_tax_for(server: &GameServer, house: &HouseRef, payer_id: Optio
         return false;
     }
     let days = i64::from(server.config.world.days_for_tax_payment);
+    let now = now();
     let mut h = house.data();
     if h.unit.owner_id == 0
         || h.account_id == 0
-        || h.protection_end_date <= now()
+        || h.protection_end_date <= now
+        || tax_due_date(server, &h) > now
         || payer_id.is_some_and(|id| id != h.unit.owner_id)
         || days <= 0
     {
@@ -1304,7 +1313,9 @@ pub fn check_housing_taxes(server: &GameServer) {
             .operation_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        update_tax_info(server, &house);
+        // Loading and schedule changes withdraw obsolete bills. Paid-up houses do not need
+        // a scan of the mailbox on every timer tick.
+        refresh_tax_info(server, &house, false);
     }
     for house in expired {
         super::ops::demolish(server, None, &house, true, false);

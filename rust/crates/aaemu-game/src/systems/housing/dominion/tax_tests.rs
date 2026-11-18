@@ -470,6 +470,49 @@ async fn province_construction_and_weekly_mail_pay_actual_surcharge_once_and_exe
 }
 
 #[tokio::test]
+async fn postponed_property_tax_withdraws_the_bill_and_waits_until_the_new_due_date() {
+    const DAY: i64 = 86_400;
+    let mut f = fixture();
+    give(&f, TAX_CERTIFICATE, 100, 5);
+    let house = place(&f, 300, 9000, 600.0, 0);
+    let id = house.data().id;
+    let now = manager::now();
+    house.data().protection_end_date = now + 4 * DAY;
+    manager::check_housing_taxes(&f.server);
+    let mails = &f.server.systems.economy.mail;
+    let original = mails.get_my_house_mails(id);
+    assert_eq!(original.len(), 1);
+    manager::check_housing_taxes(&f.server);
+    assert_eq!(mails.get_my_house_mails(id), original);
+
+    let postponed = now + 11 * DAY;
+    house.data().protection_end_date = postponed;
+    let balance = certificates(&f);
+    assert!(!mail::pay_housing_tax(
+        &f.server,
+        &f.payer,
+        original[0],
+        false
+    ));
+    assert_eq!(house.data().protection_end_date, postponed);
+    assert_eq!(certificates(&f), balance);
+    manager::update_tax_info(&f.server, &house);
+    manager::check_housing_taxes(&f.server);
+    assert!(mails.get_my_house_mails(id).is_empty());
+    assert_eq!(house.data().unit.owner_id, f.payer.character_id);
+
+    house.data().protection_end_date = now + 7 * DAY;
+    manager::check_housing_taxes(&f.server);
+    let bill = mails.get_my_house_mails(id);
+    assert_eq!(bill.len(), 1);
+    assert_ne!(bill, original);
+    assert!(mail::pay_housing_tax(&f.server, &f.payer, bill[0], false));
+    manager::check_housing_taxes(&f.server);
+    assert_eq!(house.data().protection_end_date, now + 14 * DAY);
+    assert!(mails.get_my_house_mails(id).is_empty());
+}
+
+#[tokio::test]
 async fn collection_receipt_requires_current_leader_and_failed_mail_preserves_balance_and_peace_fund(
 ) {
     let mut f = fixture();
