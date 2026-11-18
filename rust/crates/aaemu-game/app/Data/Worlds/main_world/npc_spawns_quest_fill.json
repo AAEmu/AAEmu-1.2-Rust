@@ -4367,5 +4367,75 @@
       "Z": 677.229,
       "Yaw": 0.0
     }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8672.76,
+      "Y": 8338.413,
+      "Z": 153
+    }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8690.76,
+      "Y": 8320.413,
+      "Z": 153.34
+    }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8708.76,
+      "Y": 8338.413,
+      "Z": 152.75
+    }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8717.76,
+      "Y": 8356.413,
+      "Z": 152.68
+    }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8717.76,
+      "Y": 8311.413,
+      "Z": 153.02
+    }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8672.76,
+      "Y": 8356.413,
+      "Z": 153.08
+    }
+  },
+  {
+    "UnitId": 10072,
+    "Title": "Corinth Hill Poacher and Leopard",
+    "SpawnerId": 4782,
+    "Position": {
+      "X": 8663.76,
+      "Y": 8329.413,
+      "Z": 153.63
+    }
   }
 ]

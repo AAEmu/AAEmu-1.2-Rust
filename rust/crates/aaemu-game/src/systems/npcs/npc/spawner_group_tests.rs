@@ -422,6 +422,50 @@ async fn placements_keep_selecting_the_autocreated_single_member() {
 }
 
 #[tokio::test]
+async fn explicit_group_placement_spawns_one_linked_encounter() {
+    let server = Arc::new(test_server_with(ghost_army_data(None)));
+    server.set_self();
+    *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+    let world = server.world.world(0).unwrap();
+    let manager = server.systems.npcs.spawns.get_or_create(&world);
+    let json = r#"[{"UnitId":12728,"SpawnerId":14133,"Position":{"X":100,"Y":100,"Z":100}}]"#;
+    let mut defs =
+        crate::systems::npcs::doodad::spawner::parse_list(json, NpcSpawnerDef::from_json)
+            .expect("group placement");
+    assert_eq!(manager.add_npc_spawner(&server, defs.remove(0)), Ok(1));
+    let spawner = manager
+        .get_all_spawners()
+        .into_values()
+        .flatten()
+        .next()
+        .unwrap();
+    assert_eq!(spawner.spawner_id, 14133);
+    spawner.update(&server);
+
+    let mut spawned: Vec<_> = world
+        .all_npcs()
+        .into_iter()
+        .map(|npc| {
+            let data = npc.data();
+            (
+                data.unit.template_id,
+                data.unit.transform.x,
+                data.npc_group_instance,
+                data.npc_group_aggro_rule_id,
+            )
+        })
+        .collect();
+    spawned.sort_unstable_by_key(|entry| entry.0);
+    assert_eq!(spawned.len(), 2);
+    let batch = spawned[0].2;
+    assert_ne!(batch, 0);
+    assert_eq!(
+        spawned,
+        [(12728, 100.0, batch, 1), (12729, 103.0, batch, 1)]
+    );
+}
+
+#[tokio::test]
 async fn summon_effect_does_not_rewrite_a_group_template() {
     let mut data = GameData::empty();
     data.systems.npcs.npc_groups = sea_worm_group();

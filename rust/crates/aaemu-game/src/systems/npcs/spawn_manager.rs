@@ -1367,7 +1367,18 @@ impl SpawnManager {
             inner.tower_group_entries.push(def.clone());
             return Ok(AddedSpawners::default());
         }
-        if def.placement_schedule_id != 0 {
+        // A world placement can name a group template explicitly. The ordinary UnitId
+        // lookup intentionally selects single-NPC spawners, even for a group leader.
+        let group_placement = if ids.is_empty() && b.spawner_id != 0 {
+            data.get_npc_spawner_template(b.spawner_id).filter(|t| {
+                matches!(t.npcs.as_slice(), [member] if member.member_type == "NpcGroup"
+                    && server.game_data.systems.npcs.npc_groups.members(member.member_id)
+                        .iter().any(|npc| npc.npc_id == b.unit_id && npc.is_leader))
+            })
+        } else {
+            None
+        };
+        let placement_template = if def.placement_schedule_id != 0 {
             let schedule_id = def.placement_schedule_id;
             let schedule = data
                 .get_npc_spawner_template(schedule_id)
@@ -1394,14 +1405,22 @@ impl SpawnManager {
             template.start_time = schedule.start_time;
             template.end_time = schedule.end_time;
             template.destroy_time = schedule.destroy_time;
+            Some(template)
+        } else {
+            group_placement.map(|template| (*template).clone())
+        };
+        if let Some(mut template) = placement_template {
+            // An area template can describe several packs. The placement count bounds
+            // this point; each NpcGroup member expands to its full encounter.
             template.min_population = def.count;
             template.max_population = def.count;
+            let template_id = template.id;
             let template = Arc::new(template);
             let spawner = NpcSpawner::new(
                 init(
                     inner.next_id,
-                    schedule_id,
-                    vec![schedule_id],
+                    template_id,
+                    vec![template_id],
                     Some(template.clone()),
                 ),
                 new_shared(),

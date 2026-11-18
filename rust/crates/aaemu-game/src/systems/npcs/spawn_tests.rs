@@ -3641,6 +3641,21 @@ async fn real_data_main_world_spawn_files() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     let mut data = GameData::empty();
     data.systems.npcs.npc_spawners = NpcSpawnerData::load_from(&conn).unwrap();
+    data.systems.npcs.npc_groups =
+        crate::systems::npcs::npc::group_data::NpcGroupData::load_from(&conn).unwrap();
+    let group_placements: HashSet<(u32, u32)> = conn
+        .prepare(
+            "SELECT s.npc_spawner_id, g.npc_id FROM npc_spawner_npcs s
+             JOIN npc_group_members g ON g.npc_group_id = s.member_id
+             WHERE s.member_type = 'NpcGroup' AND g.is_leader = 't'
+               AND (SELECT COUNT(*) FROM npc_spawner_npcs m
+                    WHERE m.npc_spawner_id = s.npc_spawner_id) = 1",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
     let npcs = id_set(&conn, "npcs");
     let doodads = id_set(&conn, "doodad_almighties");
     let sd = &data.systems.npcs.npc_spawners;
@@ -3758,7 +3773,12 @@ async fn real_data_main_world_spawn_files() {
                     .is_none_or(|t| spawner_skip("main_world", &t).is_none())
             })
             .count();
-        let n = if !game_data_ids.is_empty() {
+        let group_id = num(e, "SpawnerId") as u32;
+        let n = if num(e, "PlacementScheduleId") > 0.0
+            || group_placements.contains(&(group_id, unit))
+        {
+            1
+        } else if !game_data_ids.is_empty() {
             static_ids
         } else {
             // Every placement keeps a spawner now: the first generates the template, later
