@@ -1140,8 +1140,7 @@ fn unix_or_zero(t: UnixTime) -> i64 {
     t.max(0)
 }
 
-/// `new MailForTax(house)` + `FinalizeMail()` (the mail is sent whatever `FinalizeMail`
-/// returned, as in `UpdateTaxInfo`).
+/// Builds the `MailForTax` payload. The unpaid status is set once a tax quote is available.
 pub fn new_tax_mail(server: &GameServer, house: &HouseRef) -> HouseMail {
     let now_ms = crate::world::now_ms();
     let mut mail = HouseMail {
@@ -1168,8 +1167,13 @@ pub fn new_tax_mail(server: &GameServer, house: &HouseRef) -> HouseMail {
     mail
 }
 
-/// `UpdateTaxInfo(house)`: untouchable / removal buffs, then the tax mails of an owned house.
-pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
+/// `UpdateTaxInfo(house)`: refreshes protection and reconciles the invoice with its due date.
+/// Returns whether the house has a current tax bill after the update.
+pub fn update_tax_info(server: &GameServer, house: &HouseRef) -> bool {
+    refresh_tax_info(server, house, true)
+}
+
+fn refresh_tax_info(server: &GameServer, house: &HouseRef, reconcile_future_bills: bool) -> bool {
     if template_of(server, house).is_some_and(|template| template.guard_tower_setting_id != 0) {
         let snapshot = house.data().clone();
         let active = claimed_lodestone_state(server, house, &snapshot)
@@ -1185,7 +1189,7 @@ pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
             .hooks
             .get()
             .delete_house_mails(server, snapshot.id);
-        return;
+        return false;
     }
     if super::dominion::fort::is_fort(server, house) && house.data().unit.owner_id != 0 {
         let hooks = server.systems.housing.hooks.get();
@@ -1196,7 +1200,7 @@ pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
             .and_then(|state| state.siege)
             .is_some_and(|siege| siege.active_at(now()));
         set_untouchable(server, house, !active);
-        return;
+        return false;
     }
     let now = now();
     let (is_demolished, is_tax_due, owner, id) = {
@@ -1211,25 +1215,34 @@ pub fn update_tax_info(server: &GameServer, house: &HouseRef) {
     set_untouchable(server, house, !is_demolished);
     set_removal_debuff(server, house, is_demolished);
     if owner == 0 {
-        return;
+        return false;
     }
     let hooks = server.systems.housing.hooks.get();
-    if is_demolished || !super::placement::can_extend_house(server, house) {
+    if is_demolished
+        || !super::placement::can_extend_house(server, house)
+        || (!is_tax_due && reconcile_future_bills)
+    {
         hooks.delete_house_mails(server, id);
-    } else if is_tax_due {
-        let mails = hooks.house_mail_ids(server, id);
-        if mails.is_empty() {
-            let mail = new_tax_mail(server, house);
-            hooks.send_mail(server, mail);
-            tracing::trace!("New Tax Mail sent for house {id} owned by {owner}");
-        } else {
-            let update = tax_mail_update(server, house);
-            for m in mails {
-                hooks.update_tax_mail(server, m, &update);
-                tracing::trace!("Tax Mail {m} updated for house {id} owned by {owner}");
-            }
-        }
+        return false;
     }
+    if !is_tax_due {
+        return false;
+    }
+    let mails = hooks.house_mail_ids(server, id);
+    if mails.is_empty() {
+        let mail = new_tax_mail(server, house);
+        if mail.receiver_id == 0 || mail.status != MAIL_STATUS_UNPAID {
+            tracing::warn!("Unable to prepare a tax bill for house {id} owned by {owner}");
+            return false;
+        }
+        return hooks.send_mail(server, mail);
+    }
+    let update = tax_mail_update(server, house);
+    for m in mails {
+        hooks.update_tax_mail(server, m, &update);
+        tracing::trace!("Tax Mail {m} updated for house {id} owned by {owner}");
+    }
+    true
 }
 
 /// `PayWeeklyTax(house)` (called by the mail subsystem when a tax bill is paid).
@@ -1238,8 +1251,8 @@ pub fn pay_weekly_tax(server: &GameServer, house: &HouseRef) -> bool {
 }
 
 /// Extends an owned, protected house, optionally requiring the payer to still own it.
-/// Validation and the protection change share one house lock, so a stale bill cannot be
-/// applied after demolition or an ownership change.
+/// Validation and the protection change share one house lock, so an outdated bill cannot
+/// be applied after postponement, expiration, demolition, or an ownership change.
 pub fn pay_weekly_tax_for(server: &GameServer, house: &HouseRef, payer_id: Option<u32>) -> bool {
     if template_of(server, house).is_some_and(|template| template.guard_tower_setting_id != 0)
         || super::dominion::fort::is_fort(server, house)
@@ -1248,10 +1261,12 @@ pub fn pay_weekly_tax_for(server: &GameServer, house: &HouseRef, payer_id: Optio
         return false;
     }
     let days = i64::from(server.config.world.days_for_tax_payment);
+    let now = now();
     let mut h = house.data();
     if h.unit.owner_id == 0
         || h.account_id == 0
-        || h.protection_end_date <= now()
+        || h.protection_end_date <= now
+        || tax_due_date(server, &h) > now
         || payer_id.is_some_and(|id| id != h.unit.owner_id)
         || days <= 0
     {
@@ -1304,7 +1319,9 @@ pub fn check_housing_taxes(server: &GameServer) {
             .operation_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        update_tax_info(server, &house);
+        // Loading and schedule changes withdraw obsolete bills. Paid-up houses do not need
+        // a scan of the mailbox on every timer tick.
+        refresh_tax_info(server, &house, false);
     }
     for house in expired {
         super::ops::demolish(server, None, &house, true, false);

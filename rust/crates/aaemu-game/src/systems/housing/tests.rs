@@ -526,7 +526,8 @@ async fn build_and_build_steps_flow() {
         fx.eco.calls(),
         vec![
             "money -300000 31".to_string(),
-            format!("consume 33 {DESIGN_ITEM} 1 Some(77)")
+            format!("consume 33 {DESIGN_ITEM} 1 Some(77)"),
+            "delete mails 1".to_string(),
         ]
     );
     let houses = fx.server.systems.housing.manager.by_account(1001);
@@ -680,6 +681,7 @@ async fn tax_certificates_pay_for_a_new_house() {
             format!("consume 31 {} 25 None", manager::BOUND_TAX_CERTIFICATE),
             format!("consume 31 {} 5 None", manager::TAX_CERTIFICATE),
             format!("consume 33 {DESIGN_ITEM} 1 Some(77)"),
+            "delete mails 2".to_string(),
         ]
     );
     assert_eq!(fx.server.systems.housing.manager.count(), 2);
@@ -1368,6 +1370,8 @@ async fn save_rows_and_weekly_tax() {
     }
     house.data().is_dirty = false;
     assert!(manager::save_row(&house).is_none());
+    assert!(!super::pay_weekly_tax(&fx.server, row.id));
+    house.data().protection_end_date = manager::now() + 3 * 86400;
     let (before, id) = {
         let h = house.data();
         (h.protection_end_date, h.id)

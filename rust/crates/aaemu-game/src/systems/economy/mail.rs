@@ -2145,6 +2145,7 @@ pub fn pay_charge_money(
         drop(st);
         super::mail_character::send_unread_mail_count(&mut txn.env.fx, character);
     }
+    delete_house_mails(txn, house_id);
     true
 }
 

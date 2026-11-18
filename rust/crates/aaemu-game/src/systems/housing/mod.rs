@@ -109,6 +109,11 @@ impl System {
             &server.systems.housing.headquarters,
             server,
         );
+        // The rows were loaded before persisted mail. Reconcile once the mailbox is available
+        // so bills left behind by older versions are cleared before players can open them.
+        for house in server.systems.housing.manager.all() {
+            manager::update_tax_info(server, &house);
+        }
         dominion::runtime::start_tick(server);
         manager::start_tax_task(server);
         // The WP-S3 doodad period watcher compares the live dominions with the calendar; it

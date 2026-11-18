@@ -82,6 +82,13 @@ impl Command for DelayTaxDueDate {
             CommandManager::send_error_text(self, out, &format!("Character {name} was not found."));
             return Ok(());
         };
+        let _items = server.systems.economy.operation_scope();
+        let _operation = server
+            .systems
+            .housing
+            .operation_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let houses: Vec<HouseRef> = server
             .systems
             .housing
@@ -109,6 +116,8 @@ impl Command for DelayTaxDueDate {
             let mut data = house.data();
             data.protection_end_date = data.protection_end_date.saturating_add(extend);
             data.is_dirty = true;
+            drop(data);
+            crate::systems::housing::manager::update_tax_info(server, house);
         }
         CommandManager::send_normal_text(
             self,

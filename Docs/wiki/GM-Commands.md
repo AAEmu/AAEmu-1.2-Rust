@@ -217,7 +217,7 @@ it). A guild must exist before owner/bestow/register commands work.
 | `/house info` / `/house taxmail` | Shows house info / creates a tax mail for the targeted house. | `/house info` |
 | `/house_binding_move <attachPointId> <x> <y> <z>` | Moves a house binding point (testing). | `/house_binding_move 1 0 0 0` |
 | `/delay_tax_due_date <character> [days]` | Postpones the tax due date (default 7 days). | `/delay_tax_due_date Bob 14` |
-| `/resend_house_tax_mail <character>` | Sends a new unpaid tax bill. | `/resend_house_tax_mail Bob` |
+| `/resend_house_tax_mail <character>` | Refreshes due bills and issues missing ones. | `/resend_house_tax_mail Bob` |
 | `/coffer <view\|close> [objId]` | Views/force-closes a nearby coffer (4 m; object id optional). | `/coffer view` |
 | `/mail admin <receiver> <title> <text> [money] [[itemId count] ...]` | Sends a system (Admin) mail, online or offline. `money` is copper; up to 10 item stacks then follow as id/count pairs. | `/mail admin Bob "Welcome" "Take this" 250 23633 5` |
 

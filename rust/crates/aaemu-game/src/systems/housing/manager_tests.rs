@@ -623,6 +623,7 @@ async fn startup_date_repair_is_saved_once_and_land_is_scoped_to_instance() {
 async fn tax_payment_rechecks_live_owner_and_refuses_demolished_or_expired_houses() {
     let server = test_housing_server();
     let house = house(&server, 1);
+    house.data().protection_end_date = manager::now() + 4 * 24 * 3600;
     let before = house.data().protection_end_date;
     assert!(!manager::pay_weekly_tax_for(&server, &house, Some(2)));
     assert_eq!(house.data().protection_end_date, before);
