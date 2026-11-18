@@ -622,10 +622,12 @@ pub fn on_kill_in_reduce_hp(server: &GameServer, victim: &WorldObject) {
 }
 
 /// `Unit.DoDie`: `ParentWorld.Events.OnUnitKilled(...)` and `killerUnit?.Events.OnKill(this,
-/// { Killer, Victim })` (instant game scores).
+/// { Killer, Victim })` (instant game scores). The dungeon clear notice lives here too: it runs
+/// once per death, next to the other death events.
 pub fn on_do_die(server: &GameServer, victim: &WorldObject, killer: Option<&WorldObject>) {
     super::tower_def::on_death(server, victim);
     super::mentoring::on_death(server, victim);
+    super::clear_notice::on_npc_died(server, victim);
     let instance = victim.transform().instance_id;
     if let Some(world) = server.world.worlds().into_iter().find(|w| w.id == instance) {
         fire_unit_killed(server, &world, victim);
