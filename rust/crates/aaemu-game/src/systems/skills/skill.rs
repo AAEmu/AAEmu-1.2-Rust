@@ -13,7 +13,7 @@ use crate::models::unit::{SkillAttribute, UnitAttribute, UnitCooldowns};
 use crate::server::GameServer;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
-use crate::world::{now_ms, WorldObject};
+use crate::world::{now_ms, PlayerRef, WorldObject};
 
 use super::buffs;
 use super::combat as unit_combat;
@@ -551,6 +551,31 @@ fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObj
         if let Some(player) = caster.as_player() {
             player.send(packet);
         }
+    }
+}
+
+/// Replaces the client-side Recall timer after a teleport using the remaining server duration.
+pub(crate) fn send_recall_cooldown(player: &PlayerRef) {
+    let mut cooldowns = UnitCooldowns::default();
+    if let Some(entry) = player
+        .data()
+        .unit
+        .cooldowns
+        .cooldowns
+        .get(&RECALL_SKILL)
+        .copied()
+    {
+        cooldowns.cooldowns.insert(RECALL_SKILL, entry);
+    }
+    let packet = SCCooldownsPacket::from_cooldowns(&cooldowns, now_ms());
+    if !packet.is_empty() {
+        player.send(SCSkillCooldownResetPacket {
+            obj_id: player.obj_id,
+            skill_id: RECALL_SKILL,
+            tag_id: 0,
+            gcd: false,
+        });
+        player.send(packet);
     }
 }
 

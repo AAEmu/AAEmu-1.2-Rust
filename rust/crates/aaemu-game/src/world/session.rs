@@ -471,6 +471,10 @@ pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32
         c.set_disabled_set_position(false);
     }
     file_teleport_arrival(server, p);
+    // Same-instance teleports can acknowledge the move before CSInstanceLoaded.
+    if pending.is_some() {
+        crate::systems::skills::skill::send_recall_cooldown(p);
+    }
     true
 }
 

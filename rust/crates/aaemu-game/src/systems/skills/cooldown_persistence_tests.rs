@@ -288,6 +288,17 @@ async fn a_world_load_replaces_the_client_recall_timer_once() {
 
     crate::systems::instances::worlds::instance_loaded(&server, &player);
     assert!(cooldown_packet(&client.drain()).is_none());
+
+    crate::world::session::begin_teleport(&player, 100.0, 102.0, 100.0);
+    assert!(crate::world::session::teleport_ended(
+        &server, &player, 100.0, 102.0, 100.0
+    ));
+    assert_eq!(
+        cooldown_packet(&client.drain()).unwrap().skills[0].0,
+        RECALL
+    );
+    crate::systems::instances::worlds::instance_loaded(&server, &player);
+    assert!(cooldown_packet(&client.drain()).is_none());
 }
 
 #[tokio::test]
