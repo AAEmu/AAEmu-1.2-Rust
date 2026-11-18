@@ -211,7 +211,13 @@ pub fn register(reg: &mut PacketRegistry) {
 }
 
 #[cfg(test)]
+mod burntcastle_dungeon_tests;
+#[cfg(test)]
+mod cradle_dungeon_tests;
+#[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod hadir_dungeon_tests;
 #[cfg(test)]
 mod manager_tests;
 #[cfg(test)]

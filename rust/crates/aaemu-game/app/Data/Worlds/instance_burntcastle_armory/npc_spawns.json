@@ -405,13 +405,549 @@
     }
   },
   {
+    "Title": "burnt-event: 10.x level spawner 46629",
+    "UnitId": 8968,
+    "Position": {
+      "X": 200.0,
+      "Y": 270.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46629
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46631",
+    "UnitId": 8969,
+    "Position": {
+      "X": 157.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46631
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46632",
+    "UnitId": 8969,
+    "Position": {
+      "X": 155.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46632
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46635",
+    "UnitId": 8969,
+    "Position": {
+      "X": 200.0,
+      "Y": 266.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46635
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46636",
+    "UnitId": 8968,
+    "Position": {
+      "X": 200.0,
+      "Y": 267.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46636
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46637",
+    "UnitId": 8965,
+    "Position": {
+      "X": 200.0,
+      "Y": 268.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46637
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46638",
+    "UnitId": 8964,
+    "Position": {
+      "X": 200.0,
+      "Y": 269.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46638
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46639",
+    "UnitId": 8966,
+    "Position": {
+      "X": 200.0,
+      "Y": 271.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46639
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46640",
+    "UnitId": 8964,
+    "Position": {
+      "X": 200.0,
+      "Y": 272.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46640
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46641",
+    "UnitId": 8965,
+    "Position": {
+      "X": 200.0,
+      "Y": 273.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46641
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46642",
+    "UnitId": 8965,
+    "Position": {
+      "X": 200.0,
+      "Y": 274.0,
+      "Z": 21.0,
+      "Yaw": 0.0
+    },
+    "NpcSpawnerIds": [
+      46642
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46644",
+    "UnitId": 8966,
+    "Position": {
+      "X": 154.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46644
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46645",
+    "UnitId": 8968,
+    "Position": {
+      "X": 153.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46645
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46646",
+    "UnitId": 8967,
+    "Position": {
+      "X": 152.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46646
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46647",
+    "UnitId": 8968,
+    "Position": {
+      "X": 156.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46647
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46648",
+    "UnitId": 8964,
+    "Position": {
+      "X": 158.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46648
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46649",
+    "UnitId": 8967,
+    "Position": {
+      "X": 159.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46649
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46650",
+    "UnitId": 8968,
+    "Position": {
+      "X": 160.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46650
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46651",
+    "UnitId": 8964,
+    "Position": {
+      "X": 161.0,
+      "Y": 312.0,
+      "Z": 21.0,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      46651
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46653",
+    "UnitId": 8965,
+    "Position": {
+      "X": 200.0,
+      "Y": 357.0,
+      "Z": 21.0,
+      "Yaw": -180.0
+    },
+    "NpcSpawnerIds": [
+      46653
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46654",
+    "UnitId": 8969,
+    "Position": {
+      "X": 200.0,
+      "Y": 358.0,
+      "Z": 21.0,
+      "Yaw": -180.0
+    },
+    "NpcSpawnerIds": [
+      46654
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 46656",
+    "UnitId": 8966,
+    "Position": {
+      "X": 200.0,
+      "Y": 353.0,
+      "Z": 21.0,
+      "Yaw": -180.0
+    },
+    "NpcSpawnerIds": [
+      46656
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 65999",
+    "UnitId": 10473,
+    "Position": {
+      "X": 208.524,
+      "Y": 106.159,
+      "Z": 20.538,
+      "Yaw": 120.0
+    },
+    "NpcSpawnerIds": [
+      65999
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66025",
+    "UnitId": 10503,
+    "Position": {
+      "X": 259.933,
+      "Y": 273.762,
+      "Z": 20.538,
+      "Yaw": -180.0
+    },
+    "NpcSpawnerIds": [
+      66025
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66026",
+    "UnitId": 10503,
+    "Position": {
+      "X": 234.84,
+      "Y": 312.697,
+      "Z": 20.538,
+      "Yaw": 90.0
+    },
+    "NpcSpawnerIds": [
+      66026
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66033",
     "UnitId": 8962,
-    "Title": "spawn-import: terrain exact-1.2",
     "Position": {
       "X": 199.941,
       "Y": 312.159,
       "Z": 20.52,
-      "Yaw": -90
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      66033
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66037",
+    "UnitId": 10534,
+    "Position": {
+      "X": 208.253,
+      "Y": 301.872,
+      "Z": 20.52,
+      "Yaw": 45.0
+    },
+    "NpcSpawnerIds": [
+      66037
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66039",
+    "UnitId": 10534,
+    "Position": {
+      "X": 191.58,
+      "Y": 300.667,
+      "Z": 20.52,
+      "Yaw": -45.0
+    },
+    "NpcSpawnerIds": [
+      66039
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66044",
+    "UnitId": 10534,
+    "Position": {
+      "X": 191.071,
+      "Y": 325.285,
+      "Z": 20.52,
+      "Yaw": -135.0
+    },
+    "NpcSpawnerIds": [
+      66044
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66045",
+    "UnitId": 10534,
+    "Position": {
+      "X": 210.938,
+      "Y": 314.16,
+      "Z": 20.52,
+      "Yaw": 90.0
+    },
+    "NpcSpawnerIds": [
+      66045
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66046",
+    "UnitId": 10534,
+    "Position": {
+      "X": 207.866,
+      "Y": 325.048,
+      "Z": 20.52,
+      "Yaw": 135.0
+    },
+    "NpcSpawnerIds": [
+      66046
+    ]
+  },
+  {
+    "Title": "burnt-event: 10.x level spawner 66052",
+    "UnitId": 10534,
+    "Position": {
+      "X": 186.787,
+      "Y": 314.397,
+      "Z": 20.52,
+      "Yaw": -90.0
+    },
+    "NpcSpawnerIds": [
+      66052
+    ]
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 549 NPC 10573",
+    "UnitId": 10573,
+    "Position": {
+      "X": 288.093,
+      "Y": 248.45,
+      "Z": 20.538,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 532 NPC 10474",
+    "UnitId": 10474,
+    "Position": {
+      "X": 197.959,
+      "Y": 101.286,
+      "Z": 20.538,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 540 NPC 10499",
+    "UnitId": 10499,
+    "Position": {
+      "X": 241.435,
+      "Y": 312.625,
+      "Z": 20.538,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 552 NPC 10574",
+    "UnitId": 10574,
+    "Position": {
+      "X": 231.196,
+      "Y": 311.845,
+      "Z": 20.858,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 542 NPC 10528",
+    "UnitId": 10528,
+    "Position": {
+      "X": 231.119,
+      "Y": 320.401,
+      "Z": 20.853,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 607 NPC 10815",
+    "UnitId": 10815,
+    "Position": {
+      "X": 210.269,
+      "Y": 304.687,
+      "Z": 20.52,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 548 NPC 10571",
+    "UnitId": 10571,
+    "Position": {
+      "X": 174.43,
+      "Y": 186.661,
+      "Z": 20.538,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 554 NPC 10575",
+    "UnitId": 10575,
+    "Position": {
+      "X": 258.364,
+      "Y": 279.845,
+      "Z": 20.538,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 561 NPC 10455",
+    "UnitId": 10455,
+    "Position": {
+      "X": 185.923,
+      "Y": 100.765,
+      "Z": 20.538,
+      "Yaw": -90.0
+    }
+  },
+  {
+    "Title": "burnt-trigger: tagged_npcs tag 535 NPC 10452",
+    "UnitId": 10452,
+    "Position": {
+      "X": 186.03,
+      "Y": 98.926,
+      "Z": 20.538,
+      "Yaw": -90.0
+    }
+  },
+  {
+    "Title": "burnt-start: 10.x level spawner 65997 NPC 10454",
+    "UnitId": 10454,
+    "Position": {
+      "X": 187.252,
+      "Y": 101.823,
+      "Z": 20.538,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "Title": "burnt-start: 10.x level spawner 65998 NPC 10454",
+    "UnitId": 10454,
+    "Position": {
+      "X": 187.112,
+      "Y": 98.175,
+      "Z": 20.538,
+      "Yaw": 90.0
+    }
+  },
+  {
+    "Title": "burnt-start: 10.x level spawner 65996 NPC 10453",
+    "UnitId": 10453,
+    "Position": {
+      "X": 187.567,
+      "Y": 99.998,
+      "Z": 20.538,
+      "Yaw": 90.0
     }
   }
 ]

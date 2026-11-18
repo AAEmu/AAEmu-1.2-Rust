@@ -3591,6 +3591,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reading `DateTime.UtcNow`; `local_impulse_to_world_displacement` takes horizontal (x, y)
   positions only, because the C# zeroes the direction's Z so the vertical offset never
   contributes.
+* systems::npcs (2026-11-12, Burnt Castle Armory scripted data): the world's 32 event spawners
+  (the `Hieronimus's Summon` waves 46629-46656, the intro / 2nd-boss-end / 3rd-boss souls
+  65999/66025/66026 and the 3rd-boss cutscene actors 66033/66037-66052) are event rows in
+  `app/Data/Worlds/instance_burntcastle_armory/npc_spawns.json`; the ten invisible trigger NPCs
+  of the reachable `tagged_npcs` groups are plain rows. **Placements are Inferred** from the
+  10.x level editor's `zone_server/npc_spawners.g` and `level_design/cells/000_000/doodad.g`;
+  spawner ids, NPC/skill/tag links and doodad func groups are the 1.2 `compact.sqlite3`. The
+  five level doodads are the SkillHit gates 3612/3613/4417, the entrance exit 3673 and the
+  invisible-until-Hieronimus-dies exit 4923 (18024 -> phase 12257); both exits answer the 1.2
+  exit skill 15667 (world gate 320). The 2026 spawn-import plain row for 8962 was removed: it
+  stood on the 66033 event-spawner position (the loader's duplicate filter checks only plain
+  rows, so ordering made the script spawner register but the boss also stand at t=0) - the
+  killable 3rd boss now appears through the cutscene, and the 1.2-era start rows 8960 (Sorvell)
+  and 12190 (Winters) stay active as in the level, as does the 10518 Prince Hieronimus display.
+  The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
+  (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
+  `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /
+  2 cutscene skips instead of 2 / 3 (the removed 8962 plain row no longer skips its 11694
+  cutscene spawner); that shared test table still has the old counts (open item).
 * systems::npcs (2026-10-13): corpse timers read the current despawn field, so fully looting
   an NPC applies the existing shorter deadline instead of retaining the five-minute loot
   extension captured at death. Only living NPCs count towards spawner population limits;
@@ -5089,6 +5108,94 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_start_active_rule_counts_per_world` and
   `real_data_open_worlds_keep_inactive_at_start_npcs` (guards the mall vendors and the
   `main_world` quest givers).
+* systems::npcs (Kroloal Cradle scripted data, 2026-11-12): the 1.2-era spawn files held only
+  the start placements, so the dungeon's scripted waves never appeared (the skills'
+  `NpcSpawnerSpawnEffect` / `NpcControlEffect` lookups found no spawner / tag target) and the
+  worldgate, gate and exit doodads were missing. `instance_cradle_of_destruction/npc_spawns.json`
+  now carries the 36 event spawner rows (`NpcSpawnerIds` = the level `spawnerId` the effect
+  names: Carnivore's Eggs 88966-88981 - kept although their `npc_spawner_spawn_effects` rows
+  588/591-604 have no `effects` row in the 1.2 compact, so no 1.2 skill can trigger them (see
+  open item (a)); statues 88999-89002; Metamoze summons 92250/92257/
+  93513/93593, Sprigg's gate squad 96069/96253/96256, the Siranus room 96271-96274 and
+  96372-96374, and Arkanis's 96467-96470), the seven `NpcControlEffect` tag targets as plain
+  rows (12157 tag 830, 11268 tag 685, 12180 tag 915, 12200 tag 852, 12198 x2 and 12199 tag
+  851; 12166/12170 are event rows because their spawners 13467/13471 are `activation_state =
+  'f'` and skills 19645/19646 spawn them) and the four start-active NPCs that had no row
+  (11555, 11368, 11356, 11552). `doodad_spawns.json` adds the 41 scripted + 4 interactive level
+  doodads, including the blockers `5725` worldgate (family 30044, Use 19616), `5726` stone gate
+  (SkillHit 18670 on Sprigg's death -> phase 14678) and `5762` end exit (SkillHit 19236 on
+  Arkanis's death -> phase 14770, `DoodadFuncExitIndun` 19688). Decor and skill-summoned
+  doodads are not placed. **Inferred:** positions/yaws/families are the 10.x level editor rows
+  (`level_design/zone/264/.../npc_spawners.g`, `level_design/cells/*/doodad.g`); templates,
+  spawner ids, skills, tags and start groups are 1.2 `compact.sqlite3` data. The pre-existing
+  1.2-era doodad rows (the four 5257 without families, three 5252, eighteen 5880, two 5549,
+  five 5516) are kept: the audit does not prove them wrong. **Open items (reported, not
+  changed):** (a) spawner ids 104053/104060 (skill 20189 on statue 11184) exist in the effect
+  table but have no placement in this world's level, so no event row was invented; the 15
+  Carnivore's Egg rows are likewise dormant in 1.2 (their `npc_spawner_spawn_effects` rows
+  588/591-604 have no `effects` row, so nothing casts them; kept for a future data fix);
+  (b) skill 19707's `NpcSpawnerDespawnEffect` (row 35) despawns the 10.x level spawner 92695
+  (the dummy Princess Surya 11555), but a plain-row placement registers the compact template id
+  (12794), so `GetNpcSpawner(92695)` does not find it and the dummy stays after the moving
+  princess spawns. No data-only fix exists: `GetNpcSpawner` only indexes event spawners, and no
+  1.2 spawn effect names 92695, so an event row [92695] could never start the dummy at instance
+  start; it would only drop the start placement. A correct fix is code (despawn by the plain
+  spawner's level id) or an owner decision, not a spawn-file edit; (c) Sprigg's command set 222
+  begins with `FollowPath` rows, which an event-spawned Kuwon cannot run without a simulation, so the gate
+  opens and Kuwon spawns but the two soldiers' full scene is not reproduced (the Siranus room
+  proves the sphere -> command set -> spawner chain). Tests: `npcs::cradle_dungeon_tests`
+  (`cradle_added_doodad_rows_are_placed_once_each`, `cradle_added_npc_rows_are_placed_once_each`
+  in CI; gated by `AAEMU_COMPACT_DB`:
+  `real_compact_db_cradle_scripted_doodad_templates_and_funcs`,
+  `real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner`,
+  `real_data_cradle_siranus_sphere_runs_the_command_set`,
+  `real_data_cradle_statue_sphere_wakes_the_four_statues`,
+  `real_data_cradle_sprigg_death_opens_the_gate_and_spawns_the_squad`,
+  `real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad`).
+* systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
+  (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
+  has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->
+  `sphere_skills` -> skills -> `buff_triggers` event 6 (Timeout) / `npc_control_effects` command
+  sets / `np_skills` NPC events -> `npc_spawner_spawn_effects`), and the 13 `tags` rows select
+  the invisible trigger NPCs (469 -> 10076, 496 -> 10164, 594-599 -> 10805-10810, 497 -> 10025,
+  463/458 -> 10067, 463/459 -> 10068, 1317 -> 13851). `npc_spawns.json` gained: the 86 event
+  rows (`NpcSpawnerIds` = the level spawnerId of every `NpcSpawnerSpawnEffect` the chains name,
+  e.g. 61979-62018 for the six skeleton camps, 68521-68527/68597 for the Velarre hall,
+  62019/68524/68525/68669/68671/68672 for the boss-death cleanup slaves), and the 12 plain rows
+   of the trigger NPCs whose level spawner is active at start (10067 x2, 10068 x2, 10076 x4,
+  10164 x3, 13851 x1). **Follow-up (same day):** the start-active skeleton camp (9473 x10 at
+  the level spawners 58991-59011) and the 10021 Bloodmage (59012) that had no row are plain
+  rows at their level placements (Inferred); compact 10557/11113 are `activation_state = 't'`
+  and the inactive 11225/11220 variants are skipped by the loader. The 10021 row also clones
+  the NORMAL farm group spawner 13501, which stays idle without a schedule, as for the other
+  farm members. The 116 shipped 1.2-era rows are kept (two of them are within 2 m of each
+  other and stay skipped as before). **Event rows are listed first in the file:** the 10.x level
+  spawners 61148 and 68236 stand within 2 m of kept plain 9480/9481 rows, and the loader's
+  duplicate filter keys on `(UnitId, position)`; event entries never feed that position table,
+  so an event row after the plain row would be dropped before its spawner registration.
+  `doodad_spawns.json` gained the 15 `5958` "Hadir_Rotten Flesh Golem_Unable to Attack" guards
+  and the two `4143` Necromancer's Cauldrons (skill 16577 -> the farm manager's command set ->
+  spawner 61613); the two farm exits 4289/4927 keep their 1.2-era rows. The quest chest 7661
+  (owned by the quest-spawn lane) and the decor Necronomicon 4142 are not placed.
+  **Inferred (10.x level editor, 1.2 templates):** the added positions are the zone-241
+  `npc_spawners.g` / doodad rows of the 10.x client level; template ids, tags, skills, buffs and
+  start phases are 1.2 `compact.sqlite3`. The L50 Annmit rows 13799/13741 are included because
+  the 1.2 data has the chain: sphere 2246 -> skill 23512 -> command set 320 -> 23513 -> buff
+  6776 (timeout) -> spawner 123727, and 23505 -> set 321 -> 23521 -> spawner 123729. Tests (new
+  module `npcs::hadir_dungeon_tests`): the shipped-row placement tests (CI) and (gated by
+  `AAEMU_COMPACT_DB`) `real_compact_db_hadir_instance_loads_the_authored_spawns`,
+  `real_compact_db_hadir_annmit_chain_is_in_the_1_2_data`,
+  `real_data_hadir_spheres_run_the_buff_trigger_chains` (sphere 1300 -> buff 2931 -> spawners
+  61979-61988; sphere 1308 -> buff 2939 -> 68521-68523) and
+  `real_data_hadir_golem_death_spawns_the_cleanup_slaves` (skill 17608 -> 68524/68525/62019).
+  The start-active conformance snapshot (`instance_hadir_farm`) is now 113 `'f'` skips / 0
+  cutscene / 1 row with only event spawners: the eleven new rows each skip one inactive variant;
+  the shared Sharpwind snapshot was updated deliberately.
+  **Open item (reported, not changed):** the 12 event rows for 60909-60911, 61146-61148 and
+  68235-68240 (the sphere 1298/1299 camps via skills 16726/16727) have no 1.2 producer: their
+  `npc_spawner_spawn_effects` rows exist, but the 1.2 `compact.sqlite3` has no `skill_effects`
+  rows for 16726/16727 (the 10.x data has them), so those camps stay dormant until the effect
+  rows exist. The other 74 rows are referenced by 1.2 rows.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
