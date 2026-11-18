@@ -669,9 +669,7 @@ fn initial_target(
                     target_caster.set_obj_id(mate.obj_id);
                     target = Some(WorldObject::from(&mate));
                 }
-                if target.as_ref().and_then(WorldObject::as_mate).is_none() {
-                    return None;
-                }
+                target.as_ref().and_then(WorldObject::as_mate)?;
             }
             if let Some(t) = &target {
                 let r = relation_to(server, &caster_t, &Target::Obj(t.clone()));
