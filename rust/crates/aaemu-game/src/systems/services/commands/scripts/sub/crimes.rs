@@ -1136,7 +1136,7 @@ mod tests {
     use crate::systems::social::config::{
         CourtRoomConfig, JailConfig, JusticeConfig, SpawnPosition,
     };
-    use crate::systems::social::crime::{buff, CrimeEvent};
+    use crate::systems::social::crime::{buff, crime_kind, CrimeEvent};
 
     const NUIA: u32 = 148;
 
@@ -1631,6 +1631,9 @@ mod tests {
             out,
             ["|cFFFF0000[Crime Fake Trial] Character victim: nobody was not found.|r"]
         );
+        let crimes = &server.systems.social.crimes;
+        assert!(matches!(super::fake_trial_evidence_kind(crimes), 0..=2));
+        crimes.queue_fake_trial_rng(&[0, 1, 2]);
         let (_, out) = harness::run(&server, &gm.p, "crime fake crook victim evidence=3").await;
         assert_eq!(
             out,
@@ -1640,9 +1643,19 @@ mod tests {
         let events = server.systems.social.crimes.crimes_of_player(2, true);
         assert_eq!(events.len(), 3);
         assert!(events.iter().all(|e| e.reporter == 3));
-        let mut msgs: Vec<String> = events.iter().map(|e| e.msg.clone()).collect();
-        msgs.sort();
-        assert_eq!(msgs, ["Report #1", "Report #2", "Report #3"]);
+        let mut reports: Vec<_> = events
+            .iter()
+            .map(|e| (e.msg.as_str(), e.crime_kind))
+            .collect();
+        reports.sort_unstable();
+        assert_eq!(
+            reports,
+            [
+                ("Report #1", crime_kind::ASSAULT),
+                ("Report #2", crime_kind::MURDER),
+                ("Report #3", crime_kind::THEFT),
+            ]
+        );
         assert_eq!(server.systems.social.trials.trial_ids().len(), 1);
         // The fake pines are gone again.
         let world = server.world.world(0).unwrap();

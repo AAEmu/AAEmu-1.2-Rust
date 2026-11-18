@@ -8,9 +8,11 @@
 //! This boundary orders observations; it does not imply that a server action has settled.
 
 use std::collections::{HashSet, VecDeque};
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use aaemu_game::opcodes::cs;
@@ -690,6 +692,27 @@ enum Completion {
     Stopped(&'static str),
 }
 
+/// A select can remain suspended across executor polls, so recheck the ceilings
+/// immediately before each gameplay poll.
+async fn guarded_action(
+    mut action: Pin<&mut impl Future<Output = anyhow::Result<Value>>>,
+    terminal: &watch::Receiver<Option<&'static str>>,
+    until: Instant,
+    output_until: Option<Instant>,
+) -> anyhow::Result<Completion> {
+    poll_fn(
+        |cx| match check_stop(terminal, until, output_until, "command_deadline") {
+            Ok(Some(reason)) => Poll::Ready(Ok(Completion::Stopped(reason))),
+            Err(error) => Poll::Ready(Err(error)),
+            Ok(None) => action
+                .as_mut()
+                .poll(cx)
+                .map(|result| Ok(Completion::Done(result))),
+        },
+    )
+    .await
+}
+
 /// No output branch awaits a batch. Action receive/keep-alive, terminal input, and
 /// command/global timers remain independently pollable while an output ack is delayed.
 async fn drive(
@@ -713,15 +736,7 @@ async fn drive(
             reason = termination(&mut input.terminal) => return Ok(Completion::Stopped(reason)),
             _ = tokio::time::sleep_until(until) => return Ok(Completion::Stopped("command_deadline")),
             _ = tokio::time::sleep_until(output_until.unwrap_or(until)), if output_until.is_some() => bail!("stdout budget exhausted"),
-            result = std::future::poll_fn(|cx| {
-                // A select can remain suspended across many executor polls. The loop
-                // check alone does not guard a ready action on a later wakeup.
-                match check_stop(&terminal, until, output_until, "command_deadline") {
-                    Ok(Some(reason)) => std::task::Poll::Ready(Ok(Completion::Stopped(reason))),
-                    Err(error) => std::task::Poll::Ready(Err(error)),
-                    Ok(None) => future.as_mut().poll(cx).map(|result| Ok(Completion::Done(result))),
-                }
-            }) => return result,
+            result = guarded_action(future.as_mut(), &terminal, until, output_until) => return result,
             result = report.progress(), if output_until.is_some() => { result?; },
             _ = tick.tick() => report.events(rec)?,
         }
@@ -1182,6 +1197,48 @@ mod tests {
             assert!(matches!(result, Completion::Stopped("eof")));
             assert!(!polled.load(Ordering::SeqCst));
         }
+    }
+
+    #[tokio::test]
+    async fn guarded_action_checks_input_again_before_repolling_gameplay() {
+        let (terminal, status) = watch::channel(None);
+        let mut first_poll = true;
+        let action = poll_fn(|_| {
+            assert!(first_poll, "gameplay was polled after input closed");
+            first_poll = false;
+            Poll::Pending
+        });
+        tokio::pin!(action);
+        let guarded = guarded_action(
+            action.as_mut(),
+            &status,
+            Instant::now() + CONNECT_TIMEOUT,
+            None,
+        );
+        tokio::pin!(guarded);
+
+        assert!(futures::poll!(guarded.as_mut()).is_pending());
+        terminal.send_replace(Some("eof"));
+
+        assert!(matches!(guarded.await.unwrap(), Completion::Stopped("eof")));
+    }
+
+    #[tokio::test]
+    async fn guarded_action_polls_ready_gameplay_only_within_the_output_budget() {
+        let (_terminal, status) = watch::channel(None);
+        let now = Instant::now();
+        let action = std::future::ready(Ok(Value::Null));
+        tokio::pin!(action);
+
+        let result =
+            guarded_action(action.as_mut(), &status, now + CONNECT_TIMEOUT, Some(now)).await;
+        assert!(matches!(result, Err(error) if error.to_string() == "stdout budget exhausted"));
+
+        // A Ready future can complete only once. It must still be ready after the refusal.
+        let result = guarded_action(action.as_mut(), &status, now + CONNECT_TIMEOUT, None)
+            .await
+            .unwrap();
+        assert!(matches!(result, Completion::Done(Ok(Value::Null))));
     }
 
     fn live_recorder() -> Recorder {

@@ -151,6 +151,69 @@ fn converts_synthetic_world() {
 }
 
 #[test]
+fn converts_v1_and_v2_height_samples() {
+    let tmp = TempDir::new("versions");
+    let input = tmp.0.join("worlds");
+    let world = input.join("fixture");
+    let terrain = world.join("cells/000_000/client/terrain");
+    std::fs::create_dir_all(&terrain).unwrap();
+    let xml = world.join("world.xml");
+    std::fs::write(
+        &xml,
+        r#"<World name="fixture" cellXCount="1" cellYCount="1" maxTerrainHeight="4096"/>"#,
+    )
+    .unwrap();
+    std::fs::write(terrain.join("heightmap.dat"), heightmap(33, 0x100)).unwrap();
+
+    for (version, height) in [(VersionCalc::V1, 2621u16), (VersionCalc::V2, 256)] {
+        let data = convert_world(&input.to_string_lossy(), &xml, version).unwrap();
+        assert_eq!(data.heighest_point, u32::from(height), "{version:?}");
+        assert!(
+            data.height_map_raw.iter().all(|&value| value == height),
+            "the {version:?} conversion must apply to every sample"
+        );
+    }
+}
+
+#[test]
+fn gimp_export_reverses_rows_inside_each_cell() {
+    let tmp = TempDir::new("gimp");
+    let mut world = JWorldData {
+        json: JWorld {
+            id: 0,
+            name: Some("fixture".into()),
+            max_height: 4096.0,
+            height_max_coeff: 65535.0 / 2048.0,
+            ocean_level: 0.0,
+            cell_x: 2,
+            cell_y: 1,
+        },
+        heighest_point: 22,
+        zones: Vec::new(),
+        height_map_length: 2,
+        height_map_raw: vec![0; 2 * CELL_SIZE * CELL_SIZE],
+    };
+    world.height_map_raw[0] = 11;
+    world.height_map_raw[CELL_SIZE - 1] = 12;
+    world.height_map_raw[CELL_SIZE * CELL_SIZE] = 21;
+    world.height_map_raw[CELL_SIZE * CELL_SIZE + CELL_SIZE - 1] = 22;
+    let output = tmp.0.join("out");
+    std::fs::create_dir(&output).unwrap();
+    let out = output.to_string_lossy();
+
+    export_world(&out, &world, Export::Gimp, CELL_SIZE).unwrap();
+
+    for (cell, top, bottom) in [(0, 12u16, 11u16), (1, 22, 21)] {
+        let file = format!("{out}\\fixture({cell:02}-00).hmap.data");
+        let bytes = std::fs::read(file).unwrap();
+        let last_row = 2 * CELL_SIZE * (CELL_SIZE - 1);
+        assert_eq!(bytes.len(), 2 * CELL_SIZE * CELL_SIZE);
+        assert_eq!(&bytes[0..2], &top.to_le_bytes());
+        assert_eq!(&bytes[last_row..last_row + 2], &bottom.to_le_bytes());
+    }
+}
+
+#[test]
 fn missing_nodes_is_an_error() {
     let tmp = TempDir::new("broken");
     let input = tmp.0.join("worlds");

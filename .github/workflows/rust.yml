@@ -108,6 +108,13 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Upload workspace line coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-workspace-lcov
+          path: rust/lcov.info
+          if-no-files-found: error
+          retention-days: 14
       - name: Coveralls GitHub Action
         uses: coverallsapp/github-action@v2
         with:
