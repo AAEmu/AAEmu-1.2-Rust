@@ -319,18 +319,31 @@ async fn plain_members_of_a_mixed_spawner_keep_spawning() {
 }
 
 #[tokio::test]
-async fn unknown_group_is_a_retryable_empty_pass_not_a_wrong_npc() {
+async fn failed_spawn_members_leave_the_placement_available_for_retry() {
     let server = server();
-    let mut t = template(9571, vec![group_member_row(10075, 9571, 50)]);
-    t.max_population = 1;
-    let spawner = make_spawner(t, 8564);
-    spawner.set_spawn_scheduled(true);
+    let unsupported_member = NpcSpawnerNpc {
+        member_type: "Unsupported".into(),
+        ..plain_member_row(10075, 9571, 8564)
+    };
+    for row in [
+        group_member_row(10075, 9571, 50),
+        plain_member_row(10075, 9571, 90_000),
+        unsupported_member,
+    ] {
+        let member = format!("{} {}", row.member_type, row.member_id);
+        let mut t = template(9571, vec![row]);
+        t.max_population = 1;
+        let spawner = make_spawner(t, 8564);
+        spawner.set_spawn_scheduled(true);
 
-    spawner.do_spawn(&server);
-
-    assert_eq!(spawner.current_spawn_count(), 0);
-    assert!(!spawner.is_spawn_scheduled(), "the next tick retries");
-    assert!(server.world.world(0).unwrap().all_npcs().is_empty());
+        assert_eq!(spawner.do_spawn_bounded(&server, 1), 0, "{member}");
+        assert_eq!(spawner.current_spawn_count(), 0, "{member}");
+        assert!(!spawner.is_spawn_scheduled(), "{member} can retry");
+        assert!(
+            server.world.world(0).unwrap().all_npcs().is_empty(),
+            "{member}"
+        );
+    }
 }
 
 /// The real data shape: every group member NPC also has an ordinary (mostly AUTOCREATED)
