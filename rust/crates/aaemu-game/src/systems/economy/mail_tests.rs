@@ -1147,20 +1147,20 @@ async fn take_stacks_bag_full_and_single_item() {
     );
     let id = bob_mail_ids(&w.server)[0];
     w.b.drain();
-    // Bob: STACK x10 in slot 3, and only one free slot left in his bag.
-    let own = give(&w, &w.pb.clone(), slot_type::INVENTORY, STACK, 10, 3);
+    // Bob: STACK x10 in slot 1, and only one free slot left in his bag.
+    let own = give(&w, &w.pb.clone(), slot_type::INVENTORY, STACK, 10, 1);
     let bag = Inv::of(&w.pb).bag();
     bag.lock().unwrap().set_container_size(2);
     give(&w, &w.pb.clone(), slot_type::INVENTORY, SINGLE, 1, 0);
     assert_eq!(bag.lock().unwrap().free_slot_count(), 0);
 
-    // Take the stackable attachment alone: merges into slot 3.
+    // Take the stackable attachment alone: merges into slot 1.
     let mut s = PacketStream::new();
     s.write_i64(id).write_u32(STACK).write_u64(s1);
     s.write_raw(&[0u8; 2 + 4 + 1 + 8 + 4 + 4 + 1 + 8 + 8 + 2]);
     run::<CSTakeAttachmentItemPacket>(&mut w, 1, s.as_bytes());
     assert_eq!(
-        item_at(&w.pb, 2, 3).map(|i| (i.id, i.count)),
+        item_at(&w.pb, 2, 1).map(|i| (i.id, i.count)),
         Some((own, 15))
     );
     let f = w.b.drain();
