@@ -82,6 +82,15 @@ impl FishDamageFixture {
                 ..Default::default()
             });
         }
+        // The fish template's initial buff identifies an owned sport fish.
+        data.systems.npcs.npc.templates.insert(
+            12835,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                id: 12835,
+                buffs: vec![FISH_STATUS],
+                ..Default::default()
+            },
+        );
         data.skills.buffs.insert(
             FISH_STATUS,
             crate::data::skills::BuffTemplate::simple(
@@ -280,11 +289,180 @@ async fn fish_creator_scope_excludes_unowned_unflagged_and_removed_fish_status()
     f.damage(&WorldObject::from(&f.foreign), 3);
     assert_eq!(f.fish.data().unit.hp, 900);
 
-    let f = FishDamageFixture::new();
+    // Without the template's initial FISH buff the fish is not an owned sport fish: a dispelled
+    // status leaves it ordinary, so foreign damage lands.
+    let f = FishDamageFixture::with_creator_flag(false);
     buffs::remove_buff(&f.server, &WorldObject::from(&f.fish), FISH_STATUS);
-    assert!(!f.fish.data().unit.buffs.check_buff(FISH_STATUS));
     f.damage(&WorldObject::from(&f.foreign), 3);
     assert_eq!(f.fish.data().unit.hp, 900);
+    let f = FishDamageFixture::new();
+    f.fish.data().unit.template_id = 1;
+    buffs::remove_buff(&f.server, &WorldObject::from(&f.fish), FISH_STATUS);
+    f.damage(&WorldObject::from(&f.foreign), 3);
+    assert_eq!(f.fish.data().unit.hp, 900);
+}
+
+#[tokio::test]
+async fn owned_sport_fish_refuses_foreign_damage_after_the_status_is_dispelled() {
+    use crate::systems::skills::buffs;
+    let f = FishDamageFixture::new();
+    let fish = WorldObject::from(&f.fish);
+    buffs::remove_buff(&f.server, &fish, FISH_STATUS);
+    assert!(!f.fish.data().unit.buffs.check_buff(FISH_STATUS));
+    let before = f.fish.data().unit.skill_state.clone();
+    f.damage(&WorldObject::from(&f.foreign), 3);
+    f.damage_with_skill(&WorldObject::from(&f.foreign), 3, Some(21322));
+    assert_eq!(f.fish.data().unit.hp, 1000);
+    assert_eq!(
+        f.fish.data().unit.skill_state.aggro_table,
+        before.aggro_table
+    );
+    assert_eq!(f.fish.data().unit.skill_state.tagging, before.tagging);
+    assert_eq!(f.foreign.data().unit.summarize_damage, 0);
+    // The owner's delayed landing damage is not restricted by the dispelled status.
+    f.damage_with_skill(&WorldObject::from(&f.owner), 3, Some(21322));
+    assert_eq!(f.fish.data().unit.hp, 900);
+}
+
+#[tokio::test]
+async fn owned_sport_fish_never_acquires_foreign_aggro_or_tagging() {
+    use crate::systems::skills::{buffs, combat, state::AggroKind};
+    let f = FishDamageFixture::new();
+    let fish = WorldObject::from(&f.fish);
+    let foreign = WorldObject::from(&f.foreign);
+    let owner = WorldObject::from(&f.owner);
+    // A second NPC that fought the foreign player, to copy a table from.
+    crate::systems::npcs::bridges::install(&f.server);
+    let mut other = crate::models::npc::Npc::new(1234);
+    other.unit.hp = 1000;
+    other.unit.max_hp = 1000;
+    other.unit.transform.set_xyz(105.0, 101.0, 100.0);
+    let other = Entity::new(0x740, other);
+    f.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&other, &f.server.view_ctx());
+    let other_obj = WorldObject::from(&other);
+    combat::add_unit_aggro(&f.server, &other_obj, AggroKind::Damage, &foreign, 100);
+    combat::add_unit_aggro(&f.server, &other_obj, AggroKind::Damage, &owner, 100);
+
+    for dispelled in [false, true] {
+        if dispelled {
+            buffs::remove_buff(&f.server, &fish, FISH_STATUS);
+        }
+        assert!(!combat::add_unit_aggro(
+            &f.server,
+            &fish,
+            AggroKind::Damage,
+            &foreign,
+            50
+        ));
+        assert!(!combat::add_unit_aggro(
+            &f.server,
+            &fish,
+            AggroKind::Etc,
+            &foreign,
+            50
+        ));
+        assert!(!combat::add_damage_aggro(
+            &f.server, &fish, &foreign, 50, 50
+        ));
+        combat::taunted_by(&f.server, &fish, &foreign, true);
+        let args = crate::systems::skills::effects::EffectArgs {
+            caster: Some(other_obj.clone()),
+            caster_caster: crate::systems::skills::types::SkillCaster::Unit(other_obj.obj_id()),
+            target: crate::systems::skills::geometry::Target::Obj(fish.clone()),
+            target_caster: crate::systems::skills::types::SkillCastTarget::Unit(fish.obj_id()),
+            cast: crate::systems::skills::types::CastAction::Skill {
+                skill_id: 1,
+                tl_id: 1,
+            },
+            source: Default::default(),
+            skill_object: &crate::systems::skills::types::SkillObject::None,
+        };
+        crate::systems::skills::effects::special::execute(&f.server, 104, &args, [0; 4]);
+        let d = f.fish.data();
+        assert!(!d
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&foreign.obj_id()));
+        assert_eq!(d.unit.skill_state.tagging, Default::default());
+        drop(d);
+        assert!(!f
+            .foreign
+            .data()
+            .skill_char
+            .is_in_aggro_list_of
+            .contains(&fish.obj_id()));
+        assert!(!f
+            .server
+            .systems
+            .skills
+            .aggro_watch
+            .lock()
+            .unwrap()
+            .get(&foreign.obj_id())
+            .is_some_and(|holders| holders.contains(&fish.obj_id())));
+        // A copied table keeps the owner's entry only.
+        assert!(f
+            .fish
+            .data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&owner.obj_id()));
+        combat::clear_aggro_of_unit(&f.server, &fish, &owner);
+    }
+    // The owner, and ordinary NPCs, still acquire and tag normally.
+    assert!(!combat::add_damage_aggro(&f.server, &fish, &owner, 10, 10));
+    assert_eq!(
+        f.fish.data().unit.skill_state.tagging.tagger,
+        f.owner.obj_id
+    );
+    assert!(other
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&foreign.obj_id()));
+}
+
+#[tokio::test]
+async fn owned_sport_fish_landing_credits_the_owner_with_loot_rights() {
+    use crate::systems::skills::buffs;
+    let f = FishDamageFixture::new();
+    crate::systems::npcs::bridges::install(&f.server);
+    let fish = WorldObject::from(&f.fish);
+    let foreign = WorldObject::from(&f.foreign);
+    let owner = WorldObject::from(&f.owner);
+    // Foreign attempts before and after the plot's dispel leave no tag behind.
+    f.damage(&foreign, 3);
+    // The owner's authored reaction hit tags the owner.
+    f.damage_with_skill(&owner, 3, Some(21196));
+    assert_eq!(
+        f.fish.data().unit.skill_state.tagging.tagger,
+        f.owner.obj_id
+    );
+    // Landing plot: dispel, a foreign attacker interferes, the owner's scripted damage kills.
+    buffs::remove_buff(&f.server, &fish, FISH_STATUS);
+    f.damage(&foreign, 3);
+    f.fish.data().unit.hp = 100;
+    // Loot rights are read from the tagging state before the death clears it.
+    let tagging = f.fish.data().unit.skill_state.tagging.clone();
+    assert_eq!(tagging.tagger, f.owner.obj_id);
+    assert!(tagging.taggers.iter().all(|(id, _)| *id == f.owner.obj_id));
+    let hooks = f.server.systems.economy.loot.hooks.npcs.get().unwrap();
+    let rights = hooks.tagging(&f.server, &f.fish);
+    assert_eq!(rights.tag_team, 0);
+    assert_eq!(
+        rights.tagger.map(|p| p.character_id),
+        Some(f.owner.character_id)
+    );
+    f.damage_with_skill(&owner, 3, Some(21322));
+    assert_eq!(f.fish.data().unit.hp, 0);
+    assert!(f.fish.data().dead_time_ms > 0);
 }
 
 #[tokio::test]
@@ -1094,4 +1272,56 @@ async fn real_compact_db_sport_fishing_rules_and_plot_consumption() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn owned_sport_fish_refuses_foreign_pet_and_cannon_damage_but_not_the_owners() {
+    use crate::models::mate::Mate;
+    use crate::models::slave::Slave;
+    use crate::systems::skills::buffs;
+    let f = FishDamageFixture::new();
+    let fish = WorldObject::from(&f.fish);
+    let mut foreign_mate = Mate::new(1, 1);
+    foreign_mate.owner_obj_id = f.foreign.obj_id;
+    foreign_mate.unit.hp = 1000;
+    let foreign_mate = Entity::new(0x750, foreign_mate);
+    let mut foreign_slave = Slave::new(1, 1);
+    foreign_slave
+        .attached_characters
+        .push((crate::models::unit::attach_point::DRIVER, f.foreign.obj_id));
+    foreign_slave.unit.hp = 1000;
+    let foreign_slave = Entity::new(0x760, foreign_slave);
+    let mut owner_mate = Mate::new(2, 1);
+    owner_mate.owner_obj_id = f.owner.obj_id;
+    owner_mate.unit.hp = 1000;
+    let owner_mate = Entity::new(0x770, owner_mate);
+    let foreign_pets = [
+        WorldObject::from(&foreign_mate),
+        WorldObject::from(&foreign_slave),
+    ];
+    for dispelled in [false, true] {
+        if dispelled {
+            buffs::remove_buff(&f.server, &fish, FISH_STATUS);
+        }
+        for pet in &foreign_pets {
+            assert!(super::blocks_character_fish_damage(
+                &f.server,
+                &fish,
+                pet,
+                Some(21322)
+            ));
+            f.damage_with_skill(pet, 3, Some(21322));
+            assert_eq!(f.fish.data().unit.hp, 1000);
+        }
+    }
+    // The owner's pet is credited to the owner, and ordinary NPCs are never blocked.
+    let owner_pet = WorldObject::from(&owner_mate);
+    assert!(!super::blocks_character_fish_damage(
+        &f.server,
+        &fish,
+        &owner_pet,
+        Some(21322)
+    ));
+    f.damage_with_skill(&owner_pet, 3, Some(21322));
+    assert_eq!(f.fish.data().unit.hp, 900);
 }
