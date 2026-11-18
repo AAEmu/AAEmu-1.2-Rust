@@ -329,25 +329,34 @@ fn save_portal_needs_doodad(
     })
 }
 
-/// The target of a doodad `SavePortal` must be a doodad within the skill's range whose current
-/// func group has a `DoodadFuncUse` for this exact skill.
+/// The original cast must target a live doodad whose current phase offers this skill.
+/// The fireplace applies the save effect to the player who cast it.
 fn save_portal_targets_its_doodad(server: &GameServer, args: &EffectArgs<'_>) -> bool {
     use crate::systems::npcs::doodad::templates::FuncTemplate;
     let Some(skill) = args.source.skill() else {
         return false;
     };
-    let Target::Obj(target) = &args.target else {
+    let Some(caster) = args.caster.as_ref() else {
+        return false;
+    };
+    let Some(target) = args.source.cast_target.as_ref() else {
         return false;
     };
     let Some(doodad) = target.as_doodad() else {
         return false;
     };
+    if !world_of(server, caster)
+        .and_then(|world| world.object(target.obj_id()))
+        .is_some_and(|live| std::ptr::eq(live.core(), target.core()))
+    {
+        return false;
+    }
     let (group, owner_type, owner_db_id) = {
         let d = doodad.data();
         (d.func_group_id, d.owner_type, d.owner_db_id)
     };
     if owner_type == crate::models::doodad::doodad_owner_type::HOUSING && owner_db_id > 0 {
-        let Some(player) = args.caster.as_ref().and_then(WorldObject::as_player) else {
+        let Some(player) = caster.as_player() else {
             return false;
         };
         let Some(house) = crate::systems::housing::house_by_id(server, owner_db_id) else {
@@ -369,11 +378,7 @@ fn save_portal_targets_its_doodad(server: &GameServer, args: &EffectArgs<'_>) ->
     {
         return false;
     }
-    let from = Target::Obj(
-        args.caster
-            .clone()
-            .unwrap_or_else(|| WorldObject::from(doodad.clone())),
-    );
+    let from = Target::Obj(caster.clone());
     super::super::super::geometry::distance_to(server, &from, &Target::Obj(target.clone()), false)
         <= skill.template.max_range.max(0) as f32
 }

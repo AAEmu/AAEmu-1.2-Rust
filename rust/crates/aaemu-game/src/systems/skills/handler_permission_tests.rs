@@ -1189,7 +1189,7 @@ async fn bind_on_pickup_item_does_not_authorize_npc_or_ability_skills() {
 }
 
 const FIREPLACE_SKILL: u32 = 16_387;
-const FIREPLACE_ITEM: u32 = 6_005;
+const FIREPLACE_ITEM: u32 = 4_045;
 const FIREPLACE_DOODAD: u32 = 9_000;
 const FIREPLACE_GROUP: u32 = 5_000;
 const FIREPLACE_FUNC: u32 = 900;
@@ -1207,6 +1207,7 @@ fn fireplace_data() -> GameData {
         FIREPLACE_ITEM,
         crate::data::items::ItemTemplate {
             bind_type: crate::data::items::bind_type::BIND_ON_PICKUP,
+            use_skill_id: 11_216,
             ..crate::data::items::ItemTemplate::plain(FIREPLACE_ITEM, 1)
         },
     );
@@ -1247,14 +1248,15 @@ fn fireplace_data() -> GameData {
             ..super::tests::skill_template(FIREPLACE_SKILL)
         };
         let mut consume = super::tests::skill_effect(700, EffectKind::SpecialEffect, 700);
+        consume.application_method = super::types::ApplicationMethod::Source as u32;
         consume.consume_item_id = MEMORY_INK;
         consume.consume_item_count = 1;
-        skill.effects.push(consume);
         skill.effects.push(super::tests::skill_effect(
             701,
             EffectKind::InteractionEffect,
             701,
         ));
+        skill.effects.push(consume);
         s.add_skill(skill);
     }
     let doodad_data = &mut d.systems.npcs.doodad;
@@ -1265,7 +1267,7 @@ fn fireplace_data() -> GameData {
             func_id: FIREPLACE_FUNC,
             func_key: FIREPLACE_FUNC,
             func_type: "DoodadFuncUse".into(),
-            next_phase: 1,
+            next_phase: -1,
             sound_id: 0,
             skill_id: FIREPLACE_SKILL,
             perm_id: 0,
@@ -1280,7 +1282,7 @@ fn fireplace_data() -> GameData {
             FIREPLACE_FUNC,
             FuncTemplate::Use(DoodadFuncUse {
                 id: FIREPLACE_FUNC,
-                skill_id: FIREPLACE_SKILL,
+                skill_id: 0,
             }),
         );
     d
@@ -1349,15 +1351,12 @@ async fn fireplace_save_portal_requires_its_doodad_and_memory_ink() {
         let doodad = spawn_fireplace(&server, 102.0);
         let item = if item_cast {
             give_test_item(&server, &a, 0x7007, FIREPLACE_ITEM, 1);
-            give_test_item(&server, &a, 0x7008, MEMORY_INK, 2);
             0x7007
         } else {
-            give_test_item(&server, &a, 0x7008, MEMORY_INK, 2);
             0
         };
-        if !ink {
-            // Remove the ink again: the fireplace must not save for free.
-            Inv::of(&a).bag().lock().unwrap().items.clear();
+        if ink {
+            give_test_item(&server, &a, 0x7008, MEMORY_INK, 2);
         }
         super::handlers::start_skill(
             &server,

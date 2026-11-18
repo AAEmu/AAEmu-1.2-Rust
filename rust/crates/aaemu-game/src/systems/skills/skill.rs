@@ -2851,6 +2851,9 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let mut packets = CompressedGamePackets::new();
     let mut self_destruct_removal = None;
     let mut effect_source = EffectSource::from_skill(skill.clone());
+    if save_portal {
+        effect_source.cast_target = target_self.as_obj().cloned();
+    }
     effect_source.source_item = source_item.clone();
     effect_source.source_item_debited = source_item_debited;
     let tl = skill.tl_id();
