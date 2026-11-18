@@ -7,8 +7,11 @@
 //! `CanSee`), so the step totals overlap; they are meant to attribute cost, not to sum to the
 //! tick time.
 
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// One timed stage of the tick. `Count` is the number of stages, not a stage.
@@ -58,35 +61,37 @@ impl Step {
 /// `BehaviorKind::COUNT` (kept here so the arrays are sized without importing the framework).
 pub const BEHAVIORS: usize = super::framework::BehaviorKind::COUNT;
 
+#[cfg(not(test))]
 static STEP_NS: [AtomicU64; STEPS] = [const { AtomicU64::new(0) }; STEPS];
+#[cfg(not(test))]
 static STEP_CALLS: [AtomicU64; STEPS] = [const { AtomicU64::new(0) }; STEPS];
+#[cfg(not(test))]
 static BEHAVIOR_NS: [AtomicU64; BEHAVIORS] = [const { AtomicU64::new(0) }; BEHAVIORS];
+#[cfg(not(test))]
 static BEHAVIOR_CALLS: [AtomicU64; BEHAVIORS] = [const { AtomicU64::new(0) }; BEHAVIORS];
 
 /// Whether the profile is enabled (`AAEMU_AI_PROFILE`, not `0` / empty).
+#[cfg(not(test))]
 pub fn enabled() -> bool {
-    #[cfg(test)]
-    if FORCE_ENABLED.with(std::cell::Cell::get) {
-        return true;
-    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("AAEMU_AI_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
-static ENABLED: OnceLock<bool> = OnceLock::new();
-
-// Test-only: `ENABLED` is cached once per process, so a test cannot rely on setting the
-// environment variable after another test already read it. This thread-local override makes
-// the scopes and counters record on the test's thread only.
+// Tests opt in per thread and see their own counters.
 #[cfg(test)]
 thread_local! {
-    static FORCE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_COUNTERS: std::cell::RefCell<Option<Snapshot>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Test hook for [`enabled`] (see [`FORCE_ENABLED`]).
+#[cfg(test)]
+pub fn enabled() -> bool {
+    TEST_COUNTERS.with(|counters| counters.borrow().is_some())
+}
+
 #[cfg(test)]
 pub(crate) fn force_enabled(on: bool) {
-    FORCE_ENABLED.with(|flag| flag.set(on));
+    TEST_COUNTERS.with(|counters| *counters.borrow_mut() = on.then(Snapshot::default));
 }
 
 /// A timed scope; does nothing (and reads no clock) while the profile is disabled.
@@ -112,8 +117,19 @@ pub fn step(step: Step) -> Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         if let Some(started) = self.started {
-            STEP_NS[self.step].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            STEP_CALLS[self.step].fetch_add(1, Ordering::Relaxed);
+            let ns = started.elapsed().as_nanos() as u64;
+            #[cfg(not(test))]
+            {
+                STEP_NS[self.step].fetch_add(ns, Ordering::Relaxed);
+                STEP_CALLS[self.step].fetch_add(1, Ordering::Relaxed);
+            }
+            #[cfg(test)]
+            TEST_COUNTERS.with(|counters| {
+                if let Some(snapshot) = counters.borrow_mut().as_mut() {
+                    snapshot.step_ns[self.step] += ns;
+                    snapshot.step_calls[self.step] += 1;
+                }
+            });
         }
     }
 }
@@ -123,8 +139,18 @@ pub fn behavior_tick(kind: usize, ns: u64) {
     if !enabled() || kind >= BEHAVIORS {
         return;
     }
-    BEHAVIOR_NS[kind].fetch_add(ns, Ordering::Relaxed);
-    BEHAVIOR_CALLS[kind].fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(test))]
+    {
+        BEHAVIOR_NS[kind].fetch_add(ns, Ordering::Relaxed);
+        BEHAVIOR_CALLS[kind].fetch_add(1, Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    TEST_COUNTERS.with(|counters| {
+        if let Some(snapshot) = counters.borrow_mut().as_mut() {
+            snapshot.behavior_ns[kind] += ns;
+            snapshot.behavior_calls[kind] += 1;
+        }
+    });
 }
 
 /// One window of counters.
@@ -136,7 +162,8 @@ pub struct Snapshot {
     pub behavior_ns: [u64; BEHAVIORS],
 }
 
-/// The process-wide counters, for the deltas of a profile window.
+/// The counters used to calculate deltas across a profile window.
+#[cfg(not(test))]
 pub fn snapshot() -> Snapshot {
     Snapshot {
         step_calls: std::array::from_fn(|i| STEP_CALLS[i].load(Ordering::Relaxed)),
@@ -144,6 +171,11 @@ pub fn snapshot() -> Snapshot {
         behavior_calls: std::array::from_fn(|i| BEHAVIOR_CALLS[i].load(Ordering::Relaxed)),
         behavior_ns: std::array::from_fn(|i| BEHAVIOR_NS[i].load(Ordering::Relaxed)),
     }
+}
+
+#[cfg(test)]
+pub fn snapshot() -> Snapshot {
+    TEST_COUNTERS.with(|counters| counters.borrow().clone().unwrap_or_default())
 }
 
 /// Subtracts an earlier snapshot from a later one (saturating per counter).
@@ -249,14 +281,14 @@ mod tests {
     /// the first 64 qualifying ticks are not the slowest 64.
     #[test]
     fn slow_npc_samples_keep_the_largest_when_full() {
-        force_enabled(true);
-        let _ = take_slow_npcs(usize::MAX);
+        let mut kept = Vec::new();
         for i in 0..MAX_SLOW_NPCS {
-            record_slow_npc(SLOW_NPC_US + i as u64, i as u32, None);
+            keep_slowest(&mut kept, (SLOW_NPC_US + i as u64, i as u32, None));
         }
-        record_slow_npc(SLOW_NPC_US + 10_000, MAX_SLOW_NPCS as u32, Some(1));
-        let kept = take_slow_npcs(usize::MAX);
-        force_enabled(false);
+        keep_slowest(
+            &mut kept,
+            (SLOW_NPC_US + 10_000, MAX_SLOW_NPCS as u32, Some(1)),
+        );
         assert_eq!(
             kept.len(),
             MAX_SLOW_NPCS,

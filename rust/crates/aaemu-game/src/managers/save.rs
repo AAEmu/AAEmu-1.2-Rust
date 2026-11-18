@@ -190,6 +190,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_failed_previous_day_flush_keeps_new_day_seconds() {
+        let save = SaveManager::default();
+        let today = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        save.add_divine_clock_on(1, yesterday, 30);
+        save.add_divine_clock_on(1, today, 5);
+        save.add_divine_clock_on(1, yesterday, 30);
+        save.add_divine_clock_on(1, today, 3);
+        assert_eq!(save.pending_divine_clock(), BTreeMap::from([(1, 8)]));
+    }
+
+    #[tokio::test]
+    async fn a_flush_keeps_seconds_queued_for_the_next_day() {
+        let server = test_server();
+        let today = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        server
+            .save
+            .add_divine_clock_on(1, today.succ_opt().unwrap(), 5);
+        server.save.flush_divine_clock_on(&server, today).await;
+        assert_eq!(server.save.pending_divine_clock(), BTreeMap::from([(1, 5)]));
+    }
+
     /// An account online across midnight keeps its pre-midnight seconds queued until the next
     /// save. The daily claim resets `divine_clock_time` for the new day, so the flush must drop
     /// them instead of adding them to the new total.
@@ -631,7 +654,10 @@ impl SaveManager {
             .lock()
             .expect("divine clock poisoned");
         let total = pending.entry(account_id).or_insert((day, 0));
-        if total.0 != day {
+        if day < total.0 {
+            return;
+        }
+        if day > total.0 {
             *total = (day, 0);
         }
         total.1 = total.1.saturating_add(delta);
@@ -676,20 +702,24 @@ impl SaveManager {
         if pending.is_empty() {
             return;
         }
-        let mut groups: BTreeMap<u32, Vec<(u32, NaiveDate)>> = BTreeMap::new();
+        let mut groups: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
         for (account, (day, delta)) in pending {
-            if delta != 0 && day == today {
-                groups.entry(delta).or_default().push((account, day));
+            if day == today {
+                groups.entry(delta).or_default().push(account);
+            } else if day > today {
+                // Tracking may already have queued seconds after this flush read the date.
+                self.queue_divine_clock(account, day, delta);
             }
         }
         for (delta, accounts) in groups {
             for chunk in accounts.chunks(CLOCK_UPDATE_CHUNK) {
-                let ids: Vec<u32> = chunk.iter().map(|(account, _)| *account).collect();
-                if !crate::systems::services::accounts::add_divine_clock_time(server, &ids, delta)
-                    .await
+                if !crate::systems::services::accounts::add_divine_clock_time(
+                    server, chunk, today, delta,
+                )
+                .await
                 {
-                    for &(id, day) in chunk {
-                        self.queue_divine_clock(id, day, delta);
+                    for &id in chunk {
+                        self.queue_divine_clock(id, today, delta);
                     }
                 }
             }

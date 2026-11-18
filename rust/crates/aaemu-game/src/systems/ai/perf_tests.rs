@@ -73,7 +73,6 @@ async fn tick_cost_with_1500_active_npcs() {
         .and_then(Path::parent)
         .expect("AAEMU_COMPACT_DB must be <app>/Data/compact.sqlite3")
         .to_path_buf();
-    std::env::set_var("AAEMU_AI_PROFILE", "1");
     // The phase-2 + phase-3 tables the AI reads (no client files needed: the world is the test
     // server's synthetic one).
     let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -131,6 +130,7 @@ async fn tick_cost_with_1500_active_npcs() {
         tick_all(&server, 100);
     }
     let candidates = server.systems.ai.ais.tick_stats().candidates;
+    profile::force_enabled(true);
     let before = profile::snapshot();
     let mut samples = Vec::with_capacity(TICKS);
     for _ in 0..TICKS {
@@ -140,6 +140,7 @@ async fn tick_cost_with_1500_active_npcs() {
         assert_eq!(diag.candidates, candidates, "the load must stay stable");
     }
     let after = profile::snapshot();
+    profile::force_enabled(false);
     let window = profile::delta(&after, &before);
 
     let mut sorted = samples.clone();
