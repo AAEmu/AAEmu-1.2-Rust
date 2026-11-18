@@ -4187,5 +4187,185 @@
       "Y": 6947.327,
       "Z": 344.401
     }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26077.0,
+      "Y": 9608.0,
+      "Z": 812.325,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26077.0,
+      "Y": 9658.0,
+      "Z": 800.856,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26087.0,
+      "Y": 9618.0,
+      "Z": 810.481,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26087.0,
+      "Y": 9638.0,
+      "Z": 802.262,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26097.0,
+      "Y": 9608.0,
+      "Z": 811.700,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26097.0,
+      "Y": 9628.0,
+      "Z": 806.856,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26097.0,
+      "Y": 9658.0,
+      "Z": 803.231,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26107.0,
+      "Y": 9598.0,
+      "Z": 812.044,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26107.0,
+      "Y": 9648.0,
+      "Z": 803.919,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26127.0,
+      "Y": 9608.0,
+      "Z": 812.044,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26127.0,
+      "Y": 9648.0,
+      "Z": 802.512,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1289,
+    "Title": "Giant Spider",
+    "Position": {
+      "X": 26137.0,
+      "Y": 9618.0,
+      "Z": 809.606,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1316,
+    "Title": "Flood Elemental",
+    "Position": {
+      "X": 26031.0,
+      "Y": 9146.0,
+      "Z": 677.417,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1316,
+    "Title": "Flood Elemental",
+    "Position": {
+      "X": 26043.0,
+      "Y": 9170.0,
+      "Z": 676.917,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1316,
+    "Title": "Flood Elemental",
+    "Position": {
+      "X": 26055.0,
+      "Y": 9134.0,
+      "Z": 676.635,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1316,
+    "Title": "Flood Elemental",
+    "Position": {
+      "X": 26055.0,
+      "Y": 9158.0,
+      "Z": 676.917,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1316,
+    "Title": "Flood Elemental",
+    "Position": {
+      "X": 26067.0,
+      "Y": 9170.0,
+      "Z": 676.823,
+      "Yaw": 0.0
+    }
+  },
+  {
+    "UnitId": 1316,
+    "Title": "Flood Elemental",
+    "Position": {
+      "X": 26079.0,
+      "Y": 9146.0,
+      "Z": 677.229,
+      "Yaw": 0.0
+    }
   }
 ]

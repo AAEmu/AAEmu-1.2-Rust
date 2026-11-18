@@ -1517,7 +1517,24 @@ pub fn skill_controller(server: &GameServer, t: &SkillControllerTemplate, args: 
     let Some(caster) = args.caster.as_ref().filter(|c| c.is_unit()) else {
         return;
     };
-    if caster.as_player().is_some() {
+    if let Some(player) = caster.as_player() {
+        // Amed's cannon starts the player's native launch with its first floating
+        // controller. Release the cannon seat so the subsequent flight can replicate.
+        if t.id == 6678 {
+            let seated_in_cannon = super::super::geometry::world_of(server, caster)
+                .and_then(|world| {
+                    crate::systems::vehicles::slaves::get_is_mounted(&world, player.obj_id)
+                })
+                .is_some_and(|(slave, _)| slave.data().unit.template_id == 99);
+            if seated_in_cannon {
+                crate::systems::vehicles::force_dismount(
+                    server,
+                    player,
+                    crate::systems::vehicles::slaves::attach_reason::NONE,
+                );
+                crate::world::move_guard::grant_quest_launch(server, player);
+            }
+        }
         return;
     }
     if args.target.as_obj().is_none() && !matches!(args.target, Target::Pos(_)) {
