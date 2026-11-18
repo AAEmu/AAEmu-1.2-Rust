@@ -653,7 +653,7 @@ async fn npc_policy_keeps_accepting_server_skills_without_shortening_group_expir
 }
 
 #[tokio::test]
-async fn select_snapshot_keeps_native_lists_and_preserves_long_individual_expiry() {
+async fn in_game_sync_keeps_native_lists_and_preserves_long_individual_expiry() {
     let server = crate::test_support::test_server_with(data());
     let mut client = TestClient::new(&server, 1, 1);
     let now = now_ms();
@@ -669,6 +669,11 @@ async fn select_snapshot_keeps_native_lists_and_preserves_long_individual_expiry
         .add_tag_cooldown(9, 3_000, now - 10_000);
     crate::world::session::select_loaded(&server, &mut client.conn, character, Default::default())
         .unwrap();
+    assert!(!client
+        .drain()
+        .iter()
+        .any(|(opcode, _)| *opcode == sc::SCCooldownsPacket));
+    crate::world::session::notify_in_game(&server, &mut client.conn);
     let ui = cooldown_lists(&client.drain());
     assert_eq!(ui.skills.len(), 1);
     assert_eq!(ui.skills[0].0, POTION_NEXT);
