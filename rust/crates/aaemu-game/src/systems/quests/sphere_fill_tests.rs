@@ -163,6 +163,8 @@ async fn fill_rows_are_guarded_against_the_loaded_1_2_data() {
              "x": 10.0, "y": 20.0, "z": 30.0, "radius": 5.0},
             {"quest_id": 21, "component_id": 203, "sphere_id": 6, "zone": 100,
              "x": 1.0, "y": 2.0, "z": 3.0, "radius": 4.0},
+            {"quest_id": 21, "component_id": 203, "sphere_id": 6, "zone": 100,
+             "x": 100.0, "y": 200.0, "z": 30.0, "radius": 1.75, "replace_client": true},
             {"quest_id": 20, "component_id": 999, "sphere_id": 5, "zone": 100,
              "x": 1.0, "y": 2.0, "z": 3.0, "radius": 4.0},
             {"quest_id": 20, "component_id": 202, "sphere_id": 5, "zone": 101,
@@ -189,12 +191,24 @@ async fn fill_rows_are_guarded_against_the_loaded_1_2_data() {
         &server.game_data.zones,
         &server.game_data.worlds,
     );
-    assert_eq!(fill.len(), 1, "{fill:?}");
+    assert_eq!(fill.len(), 2, "{fill:?}");
     assert_eq!(fill[0].0, "main_world");
     assert_eq!(fill[0].1.quest_id, 20);
     assert_eq!(fill[0].1.component_id, 202);
     assert_eq!(fill[0].1.zone_id, 100);
     assert_eq!(fill[0].1.radius, 5.0);
+    let quests = &server.game_data.systems.quests;
+    server
+        .systems
+        .quests
+        .spheres
+        .load(quests, &quests.sign_spheres, &fill, "main_world", |_| {
+            (0, 0)
+        });
+    let areas = server.systems.quests.spheres.quest_spheres(203);
+    assert_eq!(areas.len(), 1, "{areas:?}");
+    assert!(!areas[0].contains((1.0, 2.0, 3.0)));
+    assert!(areas[0].contains((100.0, 200.0, 30.0)));
     let _ = std::fs::remove_dir_all(&app);
 }
 
@@ -281,7 +295,7 @@ fn real_data_imported_quest_sign_spheres_load() {
             );
         }
     }
-    assert_eq!(rows, 8, "the committed fill files hold the 8 kept spheres");
+    assert_eq!(rows, 9, "eight imported spheres and one client override");
 
     if let Ok(pak) = std::env::var("AAEMU_GAME_PAK") {
         let mut files = crate::data::client_files::ClientFileManager::new();
@@ -291,7 +305,7 @@ fn real_data_imported_quest_sign_spheres_load() {
         let worlds = crate::data::world_templates::WorldTemplates::load(&files, &app)
             .expect("world templates");
         let fill = load_sign_sphere_fill(&app, &data, &zones, &worlds);
-        assert_eq!(fill.len(), 8, "{fill:?}");
+        assert_eq!(fill.len(), 9, "{fill:?}");
     }
 }
 
@@ -346,7 +360,7 @@ fn real_data_fill_spheres_lie_inside_their_zone_rectangle() {
 
     let zones = ZoneData::load(&conn).expect("zones");
     let fill = load_sign_sphere_fill(&app, &data, &zones, &worlds);
-    assert_eq!(fill.len(), 8, "committed imported sign spheres");
+    assert_eq!(fill.len(), 9, "committed sign spheres");
     for (world, row) in &fill {
         assert_in_zone(&worlds, world, row.zone_id, row.local[0], row.local[1]);
     }

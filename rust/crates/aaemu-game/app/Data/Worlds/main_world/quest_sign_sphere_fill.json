@@ -46,5 +46,17 @@
     "radius": 8.0,
     "source": "quest_area_sphere.g",
     "radius_source": "10x_area"
+  },
+  {
+    "quest_id": 1803,
+    "component_id": 12839,
+    "sphere_id": 1171,
+    "zone": 206,
+    "x": 9706.16,
+    "y": 10407.58,
+    "z": 224.70,
+    "radius": 1.75,
+    "replace_client": true,
+    "source": "1.2 storehouse interior floor"
   }
 ]

@@ -265,6 +265,11 @@ pub fn closest_return_portal(server: &GameServer, player: &PlayerRef) -> Portal 
     closest_return_portal_matching(server, player, |_| true)
 }
 
+/// Temple resurrection favors shrines marked for the zone where the character died.
+pub fn closest_temple_portal(server: &GameServer, player: &PlayerRef) -> Portal {
+    select_return_portal(server, player, true, |_| true)
+}
+
 /// [`closest_return_portal`] restricted to the respawn points `accept` allows (a caller that
 /// must not send the character to some of them, e.g. a spot inside a siege area, asks for the
 /// closest allowed one instead of giving up on the closest). The same fail-safe applies: when
@@ -272,6 +277,15 @@ pub fn closest_return_portal(server: &GameServer, player: &PlayerRef) -> Portal 
 pub fn closest_return_portal_matching(
     server: &GameServer,
     player: &PlayerRef,
+    accept: impl Fn(&Portal) -> bool,
+) -> Portal {
+    select_return_portal(server, player, false, accept)
+}
+
+fn select_return_portal(
+    server: &GameServer,
+    player: &PlayerRef,
+    prefer_local: bool,
     accept: impl Fn(&Portal) -> bool,
 ) -> Portal {
     let (x, y, z) = player_world_position(server, player);
@@ -285,7 +299,7 @@ pub fn closest_return_portal_matching(
         .factions
         .get(faction_id)
         .map_or(0, |f| f.mother_id);
-    let mut distance = 999_999f32;
+    let mut closest = (true, 999_999f32);
     let mut portal = Portal {
         x,
         y,
@@ -315,11 +329,12 @@ pub fn closest_return_portal_matching(
         if !accept(value) {
             continue;
         }
-        let dist = distance_2d(x, y, value.x, value.y);
-        if dist >= distance {
+        let local = prefer_local && value.prefer_local_respawn && value_zone == zone_id;
+        let rank = (!local, distance_2d(x, y, value.x, value.y));
+        if rank >= closest {
             continue;
         }
-        distance = dist;
+        closest = rank;
         portal = Portal {
             zone_id: value_zone,
             ..value.clone()

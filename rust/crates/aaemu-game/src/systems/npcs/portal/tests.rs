@@ -981,6 +981,42 @@ async fn lookups_and_closest_return_portal() {
     assert_eq!(closest_return_portal(&server, &me).id, 86);
 }
 
+#[tokio::test]
+async fn temple_resurrection_prefers_eligible_local_shrines_at_the_zone_border() {
+    use crate::data::world_templates::WorldTemplate;
+    use crate::test_support::test_server_with_world;
+
+    let mut data = data();
+    let neighbor = TEST_ZONE + 1;
+    data.zones.zones.insert(
+        neighbor,
+        Zone {
+            zone_key: neighbor,
+            ..Default::default()
+        },
+    );
+    let mut world = WorldTemplate::synthetic(1, "main_world", 1, 1, TEST_ZONE);
+    assert!(world.set_zone_key_at(2, 1, neighbor));
+    let respawns = &mut data.systems.npcs.portal.respawns.portals;
+    for shrine in respawns.iter_mut() {
+        shrine.prefer_local_respawn = true;
+    }
+    respawns[2].x = 30.0;
+    let server = test_server_with_world(data, world);
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    player.data().unit.faction_id = 101;
+
+    assert_eq!(closest_return_portal(&server, &player).zone_id, neighbor);
+    let shrine = closest_temple_portal(&server, &player);
+    assert_eq!((shrine.id, shrine.zone_id), (88, TEST_ZONE));
+}
+
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_db_portal_tables() {

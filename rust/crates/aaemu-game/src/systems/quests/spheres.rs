@@ -142,7 +142,7 @@ pub fn load_sphere_areas(app_path: &Path, known_sphere: impl Fn(u32) -> bool) ->
 
 /// Reads every `<app_path>/Data/Worlds/*/quest_sign_sphere_fill.json` (the 10.x-derived
 /// geometry of `Docs/wiki/Quest-Audit.md` quests that the 1.2 client pack has no sign sphere
-/// for). The file is written by `rust/tools/quest_sign_sphere_import`; unlike the client
+/// for, plus server-side corrections to client map markers). Unlike the client
 /// `quest_sign_sphere.g` areas its rows already hold world coordinates (`origin * 1024 + local`
 /// was applied offline by the converter).
 ///
@@ -151,8 +151,8 @@ pub fn load_sphere_areas(app_path: &Path, known_sphere: impl Fn(u32) -> bool) ->
 /// * the quest template and component exist and the component has an objective sphere act
 ///   (`QuestActObjSphere` / `QuestActCheckSphere`) for the same `sphere_id`;
 /// * the `spheres` row is a `SphereQuest` whose `sphere_quests.quest_id` is the row's quest;
-/// * no 1.2 client sign sphere exists for the same `(quest_id, component_id)` (the client pack
-///   always wins);
+/// * a client sign sphere exists for the same quest and component only when the row
+///   explicitly sets `replace_client` and the client sphere is in the same zone;
 /// * the zone belongs to the named 1.2 world and its `zones.closed` is false;
 /// * the radius is finite and positive, and the row is not an exact duplicate.
 ///
@@ -254,11 +254,15 @@ pub fn load_sign_sphere_fill(
                 continue;
             }
 
-            if data
-                .sign_spheres
-                .iter()
-                .any(|s| s.quest_id == quest_id && s.component_id == component_id)
-            {
+            let replace_client = row
+                .get("replace_client")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if data.sign_spheres.iter().any(|s| {
+                s.quest_id == quest_id
+                    && s.component_id == component_id
+                    && (!replace_client || s.zone_id != zone)
+            }) {
                 skipped += 1;
                 continue;
             }
@@ -428,7 +432,16 @@ impl SphereQuestManager {
         origin: impl Fn(u32) -> (i32, i32),
     ) {
         let mut s = Spheres::default();
+        // The fill loader only allows a client marker to share its key with an explicit
+        // replacement. Keep that replacement as the sole server-side objective area.
+        let filled: HashSet<_> = fill
+            .iter()
+            .map(|(world, r)| (world.as_str(), r.zone_id, r.quest_id, r.component_id))
+            .collect();
         for r in raw {
+            if filled.contains(&(world_name, r.zone_id, r.quest_id, r.component_id)) {
+                continue;
+            }
             let (ox, oy) = origin(r.zone_id);
             push_sphere(
                 &mut s,

@@ -271,10 +271,10 @@ fn respawn_portal(server: &GameServer, p: &PlayerRef) -> RespawnPoint {
     } else {
         None
     };
-    // Find the closest return portal (in the world) for the player if none has been found yet
+    // Prefer the death zone's marked shrines when there is no wartime override.
     RespawnPoint {
         portal: faction_portal
-            .unwrap_or_else(|| crate::systems::npcs::portal::closest_return_portal(server, p)),
+            .unwrap_or_else(|| crate::systems::npcs::portal::closest_temple_portal(server, p)),
         instance_id: DEFAULT_INSTANCE_ID,
     }
 }
