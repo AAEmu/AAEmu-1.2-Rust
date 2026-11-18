@@ -321,16 +321,17 @@ async fn plot_only_cancelled_during_casting_restores_cooldown_and_gcd() {
 
 const REEL_A: u32 = 21196;
 const REEL_B: u32 = 21195;
+/// The initial cast (21578) is also in the real tag 1024 but is not a reel response.
+const TAGGED_CAST: u32 = 21578;
+/// The landing skill, also tagged 1024 and not a reel response.
+const TAGGED_LANDING: u32 = 21322;
 const UNRELATED: u32 = 17564;
 
 fn reel_data() -> GameData {
     let mut data = GameData::empty();
     synthetic_plot(&mut data);
-    for id in [REEL_A, REEL_B] {
-        data.systems
-            .skills
-            .skill_tags
-            .insert(id, vec![super::super::types::tags::SPORT_FISHING]);
+    for id in [REEL_A, REEL_B, TAGGED_CAST, TAGGED_LANDING] {
+        data.systems.skills.skill_tags.insert(id, vec![1024]);
     }
     data
 }
@@ -420,6 +421,38 @@ async fn sport_reel_replacement_leaves_unrelated_and_npc_plots_alone() {
     assert!(
         !reel_plot.cancellation_requested(),
         "unrelated replacement keeps reel"
+    );
+
+    // A tagged non-response skill (the initial cast) neither cancels a reel nor is cancelled
+    // by one, although it shares tag 1024.
+    let cast = plot_only(TAGGED_CAST, 13);
+    use_plot_only(&server, &cast, &caster, npc.obj_id);
+    let cast_plot = cast.state().active_plot.clone().unwrap();
+    assert!(
+        !after
+            .state()
+            .active_plot
+            .as_ref()
+            .unwrap()
+            .cancellation_requested(),
+        "tagged cast replacing an unrelated plot cancels nothing"
+    );
+    let reel_after_cast = plot_only(REEL_B, 14);
+    use_plot_only(&server, &reel_after_cast, &caster, npc.obj_id);
+    assert!(
+        !cast_plot.cancellation_requested(),
+        "a reel does not cancel the tagged initial cast"
+    );
+    let cast_again = plot_only(TAGGED_LANDING, 15);
+    use_plot_only(&server, &cast_again, &caster, npc.obj_id);
+    assert!(
+        !reel_after_cast
+            .state()
+            .active_plot
+            .as_ref()
+            .unwrap()
+            .cancellation_requested(),
+        "a tagged non-reel skill replacing a reel does not cancel it"
     );
 
     let npc_caster = WorldObject::from(&npc);
