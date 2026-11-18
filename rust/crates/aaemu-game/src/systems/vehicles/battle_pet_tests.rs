@@ -6,7 +6,7 @@
 use super::super::data::{MountSkills, NpcMountSkills};
 use super::*;
 use crate::models::npc::Npc;
-use crate::systems::skills::data::effects::{EffectTemplate, HealEffect};
+use crate::systems::skills::data::effects::{EffectTemplate, HealEffect, SpecialEffect};
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
 use crate::systems::skills::tests::{damage_effect, skill_effect};
@@ -19,6 +19,9 @@ const HIGH_LEVEL: u32 = 300_203;
 const BAR_HEAL: u32 = 300_204;
 const NOT_ON_BAR: u32 = 300_205;
 const TARGET_OBJ: u32 = 0x0200;
+const POTION_ITEM: u32 = 18649;
+const POTION_SKILL: u32 = 15220;
+const POTION_EFFECT: u32 = 12554;
 
 fn pet_skill(id: u32, hostile: bool) -> crate::systems::skills::data::SkillTemplate {
     let mut t = crate::systems::skills::tests::skill_template(id);
@@ -104,6 +107,42 @@ fn pet_data() -> GameData {
             mount_skill_id: row,
         });
     }
+    // Item 18649 "Pet Dual-Recovery Potion" -> skill 15220 -> effect 12554 -> SpecialEffect
+    // 3461 (type 56 HealPet, 20 / 20).
+    d.items.templates.insert(
+        POTION_ITEM,
+        ItemTemplate {
+            use_skill_id: POTION_SKILL,
+            use_skill_as_reagent: true,
+            ..ItemTemplate::plain(POTION_ITEM, 1)
+        },
+    );
+    let s = &mut d.systems.skills;
+    s.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: POTION_EFFECT,
+            special_effect_type_id: 56,
+            value1: 20,
+            value2: 20,
+            value3: 0,
+            value4: 0,
+        }),
+        POTION_EFFECT,
+    );
+    let mut potion = crate::systems::skills::tests::skill_template(POTION_SKILL);
+    potion.target_type = 1; // Friendly
+    potion.target_selection = 2; // Target
+    potion.target_alive = true;
+    potion.max_range = 3;
+    potion.casting_time = 2000;
+    potion.cooldown_time = 5000;
+    potion.effects = vec![skill_effect(
+        10130,
+        EffectKind::SpecialEffect,
+        POTION_EFFECT,
+    )];
+    s.add_skill(potion);
     d
 }
 
@@ -417,4 +456,92 @@ async fn real_wolfhound_health_regen_heals_and_basic_attack_hits() {
     let (result, frames) = cast(&server, &mut o, packet).await;
     assert_eq!(result, None, "{:x?}", ops(&frames));
     assert!(npc.data().unit.hp < 1_000, "the pet's basic attack landed");
+}
+
+/// Item 18649 "Pet Dual-Recovery Potion" cast through the real item -> skill -> effect chain
+/// heals the owner's summoned mate (value1/value2 = 20 % of the pools), mounted or not, and
+/// broadcasts the mate's `SCUnitPoints`. A cast aimed at the owner itself is a valid use of the
+/// skill but has no mate to heal: the effect does nothing (the skill is Friendly / Target, and
+/// only the mate carries the HealPet effect's target kind).
+#[tokio::test(start_paused = true)]
+async fn pet_dual_recovery_potion_heals_the_summoned_mate() {
+    let mut case = 0u64;
+    for mounted in [false, true] {
+        for target_self in [false, true] {
+            let server = server_with(pet_data());
+            crate::systems::skills::bind(&server);
+            crate::systems::economy::bridges::install(&server);
+            let mut o = owner_with_pet(&server, 1, 100.0, 101.0, 5);
+            // The item caster resolves its source through the item manager's containers.
+            server
+                .items
+                .add_container(crate::systems::economy::inventory::Inv::of(&o.player).bag());
+            {
+                let mut m = o.mate.data();
+                m.unit.hp = 500;
+                m.unit.max_hp = 1_000;
+                m.unit.mp = 500;
+                m.unit.max_mp = 1_000;
+            }
+            if mounted {
+                let tl = u32::from(o.mate.data().unit.tl_id);
+                mates::mount_mate(&server, &o.player, tl, attach_point::DRIVER, 1);
+                assert!(o.player.data().is_riding);
+            }
+            let potion = give_item(&server, &o.player, 0x7200 + case, POTION_ITEM);
+            case += 1;
+            o.client.drain();
+            let target = if target_self {
+                SkillCastTarget::Unit(o.player.obj_id)
+            } else {
+                SkillCastTarget::Unit(o.mate.obj_id)
+            };
+            let packet = pet_cast(
+                SkillCaster::Item {
+                    obj_id: o.player.obj_id,
+                    item_id: potion,
+                    item_template_id: POTION_ITEM,
+                    type1: 0,
+                    type2: 0,
+                },
+                POTION_SKILL,
+                target,
+            );
+            let (result, mut frames) = cast(&server, &mut o, packet).await;
+            // The potion's real 2 s cast: the first settle only covers 1.5 s.
+            settle().await;
+            frames.extend(o.client.drain());
+            let case = format!("mounted {mounted}, target_self {target_self}");
+            assert_eq!(result, None, "{case}: {:x?}", ops(&frames));
+            assert!(
+                ops(&frames).contains(&sc::SCSkillFiredPacket),
+                "{case}: the cast finished: {:x?}",
+                ops(&frames)
+            );
+            let (hp, mp) = {
+                let m = o.mate.data();
+                (m.unit.hp, m.unit.mp)
+            };
+            if target_self {
+                assert_eq!((hp, mp), (500, 500), "{case}: the owner is not a mate");
+                assert!(
+                    !ops(&frames).contains(&sc::SCUnitPointsPacket),
+                    "{case}: no mate points packet: {:x?}",
+                    ops(&frames)
+                );
+                continue;
+            }
+            assert_eq!((hp, mp), (700, 700), "{case}");
+            let expected = crate::packets::world::SCUnitPointsPacket {
+                obj_id: o.mate.obj_id,
+                hp: 700,
+                mp: 700,
+            };
+            assert_eq!(
+                body(&frames, sc::SCUnitPointsPacket),
+                crate::net::packet::encode(&expected)[6..].to_vec(),
+                "{case}: the mate's SCUnitPoints carries the healed pools"
+            );
+        }
+    }
 }
