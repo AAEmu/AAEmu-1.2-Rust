@@ -234,6 +234,7 @@ pub fn create(
 /// `Doodad.Spawn()` (`GameObject.Spawn`: AddObject + Show, then the zone change dispatch).
 pub fn spawn(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRef) {
     let changes = world.spawn(doodad, &server.view_ctx());
+    server.systems.npcs.fish_schools.track(world, doodad);
     crate::world::session::handle_zone_changes(server, changes);
 }
 
@@ -265,6 +266,7 @@ pub fn delete(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRe
     super::natural::forget(server, doodad); // drop the saved growth state of a world doodad
     super::logic::clear_links(&DoodadCtx::new(server, world.clone(), doodad.clone()));
     world.delete(doodad);
+    server.systems.npcs.fish_schools.untrack(world.id, doodad);
     area_trigger::remove_doodad_area_triggers(server, doodad.obj_id);
 
     let (source, persistent, db_id) = {

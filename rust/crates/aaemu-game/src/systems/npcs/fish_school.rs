@@ -6,7 +6,7 @@
 //! `FishDetailsGameData.Create` (building a `BigFish` item) is item code and belongs to the
 //! economy subsystem; the size helpers it uses are here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use aaemu_commons::{Marshal, PacketStream};
@@ -17,7 +17,6 @@ use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::sc;
 use crate::packets::packet_def;
-use crate::server::GameServer;
 use crate::systems::DataLoadCtx;
 use crate::world::{DoodadRef, WorldInstance, WorldObject};
 
@@ -25,6 +24,15 @@ use crate::world::{DoodadRef, WorldInstance, WorldObject};
 pub const FRESHWATER_FISH_SCHOOL: u32 = 6447;
 /// `DoodadConstants.SaltwaterFishSchool`.
 pub const SALTWATER_FISH_SCHOOL: u32 = 6448;
+
+/// The client's school expiry phases. Their Final functions specify a respawn delay
+/// but leave the respawn flag off.
+pub(crate) fn is_school_expiry(template_id: u32, group_id: u32) -> bool {
+    matches!(
+        (template_id, group_id),
+        (FRESHWATER_FISH_SCHOOL, 17140) | (SALTWATER_FISH_SCHOOL, 17079)
+    )
+}
 
 /// `FishDetails`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,27 +136,39 @@ fn lerp(v1: f32, v2: f32, t: f32) -> f32 {
 /// doodads).
 #[derive(Debug, Default)]
 pub struct FishSchoolManager {
-    fish_schools: Mutex<HashMap<u32, Vec<DoodadRef>>>,
+    fish_schools: Mutex<HashMap<u32, BTreeMap<u32, DoodadRef>>>,
 }
 
 impl FishSchoolManager {
-    /// `Initialize()`.
-    pub fn initialize(&self) {
-        self.fish_schools
-            .lock()
-            .expect("fish schools poisoned")
-            .clear();
-        tracing::info!("Initialising FishSchool Manager...");
+    pub(crate) fn track(&self, world: &WorldInstance, doodad: &DoodadRef) {
+        if !matches!(
+            doodad.data().template_id,
+            FRESHWATER_FISH_SCHOOL | SALTWATER_FISH_SCHOOL
+        ) {
+            return;
+        }
+        let mut schools = self.fish_schools.lock().expect("fish schools poisoned");
+        if world
+            .doodad(doodad.obj_id)
+            .is_some_and(|live| Arc::ptr_eq(&live, doodad))
+        {
+            schools
+                .entry(world.id)
+                .or_default()
+                .insert(doodad.obj_id, doodad.clone());
+        }
     }
 
-    /// `GetAllFishSchools()`.
-    pub fn all_fish_schools(&self) -> Vec<DoodadRef> {
-        let fs = self.fish_schools.lock().expect("fish schools poisoned");
-        let mut ids: Vec<&u32> = fs.keys().collect();
-        ids.sort();
-        ids.into_iter()
-            .flat_map(|id| fs[id].iter().cloned())
-            .collect()
+    pub(crate) fn untrack(&self, world_id: u32, doodad: &DoodadRef) {
+        let mut schools = self.fish_schools.lock().expect("fish schools poisoned");
+        if let Some(in_world) = schools.get_mut(&world_id) {
+            if in_world
+                .get(&doodad.obj_id)
+                .is_some_and(|live| Arc::ptr_eq(live, doodad))
+            {
+                in_world.remove(&doodad.obj_id);
+            }
+        }
     }
 
     /// Forgets the fish schools of a removed instance (`false` = it had none).
@@ -166,44 +186,9 @@ impl FishSchoolManager {
             .lock()
             .expect("fish schools poisoned")
             .get(&world_id)
-            .cloned()
+            .map(|schools| schools.values().cloned().collect())
             .unwrap_or_default()
     }
-}
-
-/// `FishSchoolManager.Load(world)` (called by `SpawnManager` after the world's doodads are
-/// spawned): collects the fresh / salt water fish school doodads of `world`.
-pub fn load_world(server: &GameServer, world: &Arc<WorldInstance>) {
-    tracing::info!("Loading FishSchool...");
-    let fish: Vec<DoodadRef> = world
-        .all_doodads()
-        .into_iter()
-        .filter(|d| {
-            let t = d.data().template_id;
-            t == FRESHWATER_FISH_SCHOOL || t == SALTWATER_FISH_SCHOOL
-        })
-        .collect();
-    let count = fish.len();
-    if count > 0 {
-        server
-            .systems
-            .npcs
-            .fish_schools
-            .fish_schools
-            .lock()
-            .expect("fish schools poisoned")
-            .entry(world.id)
-            .or_default()
-            .extend(fish);
-    }
-    tracing::info!("Loaded {count} FishSchool for world {} ...", world.id);
-}
-
-/// Startup: `Initialize()`. `Load(world)` runs at the end of each world's doodad spawn task
-/// (`SpawnManager.SpawnAll`), once the fish school doodads exist.
-pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
-    server.systems.npcs.fish_schools.initialize();
-    Ok(())
 }
 
 /// No C->S packets.
@@ -360,34 +345,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_world_collects_fish_schools() {
+    async fn live_index_collects_only_fish_schools_in_their_world() {
         let server = test_server();
         let world = server.world.world(0).unwrap();
-        let ctx = server.view_ctx();
         let mut ids = Vec::new();
         for (i, t) in [6447u32, 1000, 6448].into_iter().enumerate() {
             let mut d = Doodad::new(t);
             d.transform.set_xyz(100.0 + i as f32, 100.0, 50.0);
             let d = Entity::new(server.ids.object.get_next_id().unwrap(), d);
-            world.spawn(&d, &ctx);
+            super::super::doodad::manager::spawn(&server, &world, &d);
             ids.push(d.obj_id);
         }
-        server.systems.npcs.fish_schools.initialize();
-        load_world(&server, &world);
-        let mut got: Vec<u32> = server
-            .systems
-            .npcs
-            .fish_schools
-            .all_fish_schools()
-            .iter()
-            .map(|d| d.obj_id)
-            .collect();
-        got.sort();
-        assert_eq!(got, vec![ids[0], ids[2]]);
-        let unit = FishFinderUnit::of(
-            &world,
-            &server.systems.npcs.fish_schools.fish_schools_of(0)[0],
-        );
+        let schools = &server.systems.npcs.fish_schools;
+        let here = schools.fish_schools_of(world.id);
+        let got: Vec<u32> = here.iter().map(|d| d.obj_id).collect();
+        assert_eq!(got, [ids[0], ids[2]]);
+        assert!(schools.fish_schools_of(world.id + 1).is_empty());
+        let unit = FishFinderUnit::of(&world, &here[0]);
         assert_eq!(unit.z, 50.0);
     }
 

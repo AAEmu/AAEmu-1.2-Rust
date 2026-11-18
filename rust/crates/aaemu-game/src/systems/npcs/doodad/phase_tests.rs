@@ -17,6 +17,7 @@ use crate::systems::npcs::doodad::spawner::{
     parse_list, DoodadSpawner, DoodadSpawnerDef, SpawnerBase,
 };
 use crate::systems::npcs::doodad::templates::*;
+use crate::systems::npcs::fish_school::{FRESHWATER_FISH_SCHOOL, SALTWATER_FISH_SCHOOL};
 use crate::test_support::*;
 use crate::world::{PlayerRef, WorldInstance};
 
@@ -2741,6 +2742,81 @@ async fn final_deletes_now_or_after() {
     f.advance(5000);
     assert!(d.data().phase.deleted);
     assert!(f.world.doodad(0x500).is_none());
+}
+
+#[tokio::test]
+async fn fish_school_expires_clears_its_marker_and_reappears_after_its_cooldown() {
+    const ACTIVE_MS: i32 = 1_800_000;
+    const RESPAWN_MS: i32 = 1_800_000;
+    for (template, active, expired) in [
+        (FRESHWATER_FISH_SCHOOL, 17243, 17140),
+        (SALTWATER_FISH_SCHOOL, 17231, 17079),
+    ] {
+        let b = Builder::default()
+            .template(template, &[(active, 1), (expired, 2)])
+            .phase_func(active, timer(1, ACTIVE_MS, expired as i32))
+            .phase_func(
+                expired,
+                FuncTemplate::Final(DoodadFuncFinal {
+                    id: 2,
+                    respawn: false,
+                    min_time: RESPAWN_MS,
+                    max_time: RESPAWN_MS,
+                    ..Default::default()
+                }),
+            );
+        let mut f = fx(b);
+        let radar = &f.server.systems.services.radar;
+        radar.register_for_fish_school(&f.player, 1000.0);
+        let spawner = new_spawner(template, 123);
+        let first = spawner.spawn(&f.server, 0).unwrap();
+
+        radar.radar_tick(&f.server).await;
+        assert_school_snapshot(&mut f.client, Some(&first));
+        assert_eq!(f.advance(ACTIVE_MS as u64), 1);
+        assert!(first.data().phase.deleted);
+        assert!(f.world.doodad(first.obj_id).is_none());
+        assert!(f
+            .server
+            .systems
+            .npcs
+            .fish_schools
+            .fish_schools_of(0)
+            .is_empty());
+        radar.radar_tick(&f.server).await;
+        assert_school_snapshot(&mut f.client, None);
+
+        assert_eq!(f.advance(RESPAWN_MS as u64 - 1), 0);
+        assert!(spawner.last().is_none());
+        assert_eq!(f.advance(1), 1);
+        let replacement = spawner.last().unwrap();
+        assert!(!Arc::ptr_eq(&first, &replacement));
+        assert_eq!(group(&replacement), active);
+        assert_eq!(first.data().transform.x, replacement.data().transform.x);
+        radar.radar_tick(&f.server).await;
+        assert_school_snapshot(&mut f.client, Some(&replacement));
+
+        assert_eq!(f.advance(ACTIVE_MS as u64), 1);
+        assert!(replacement.data().phase.deleted);
+    }
+}
+
+fn assert_school_snapshot(client: &mut TestClient, school: Option<&DoodadRef>) {
+    let packets: Vec<_> = client
+        .drain()
+        .into_iter()
+        .filter(|packet| packet.0 == sc::SCSchoolOfFishDoodadsPacket)
+        .map(|packet| packet.1)
+        .collect();
+    assert_eq!(packets.len(), 1);
+    let packet = &packets[0];
+    if let Some(school) = school {
+        assert_eq!(&packet[..2], [1, 1]);
+        assert_eq!(&packet[2..5], &school.obj_id.to_le_bytes()[..3]);
+        assert_eq!(&packet[5..9], &school.data().template_id.to_le_bytes());
+    } else {
+        assert_eq!(packet, &[1, 0]);
+    }
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@ use super::tasks::{self, FuncTaskKind};
 use super::templates::*;
 use crate::data::world_templates::WorldSpawnPosition;
 use crate::systems::npcs::area_trigger::{self, AreaTrigger};
+use crate::systems::npcs::fish_school;
 use crate::world::{now_ms, WorldObject};
 
 /// `Random.Shared.Next(min, max)` (`max` exclusive, `min` when `min >= max`).
@@ -85,10 +86,14 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             false
         }
         FuncTemplate::Final(f) => {
+            let respawn = f.respawn || {
+                let doodad = ctx.doodad.data();
+                fish_school::is_school_expiry(doodad.template_id, doodad.func_group_id)
+            };
             tracing::trace!(
                 "DoodadFuncFinal: After {}, Respawn {}, MinTime {}, MaxTime {}",
                 f.after,
-                f.respawn,
+                respawn,
                 f.min_time,
                 f.max_time
             );
@@ -97,7 +102,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             let max_time = f.max_time.max(min_time);
             let delay = random_next(min_time, max_time);
             let kind = FuncTaskKind::Final {
-                respawn: f.respawn,
+                respawn,
                 delay,
                 respawn_stage: None,
             };
@@ -127,7 +132,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                     .spawns
                     .doodad_spawner_of(ctx.doodad.obj_id);
                 phase::despawn_or_delete(ctx);
-                if !f.respawn {
+                if !respawn {
                     return false;
                 }
                 let Some(spawner) = spawner else {

@@ -161,8 +161,6 @@ impl System {
         doodad::start(server).await?;
         npc::start(server).await?;
         gimmick::start(server).await?;
-        // FishSchoolManager.Initialize (its Load(world) runs at the end of each doodad spawn).
-        fish_school::start(server).await?;
         // `WorldManager.CreateStaticInstances`: SpawnManager.Load + SpawnAll for main_world.
         spawn_manager::start(server).await?;
         // `ScheduleItemManager.Load`: the saved account progress, then the accrual tick.
