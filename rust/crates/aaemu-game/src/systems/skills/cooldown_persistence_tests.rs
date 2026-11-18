@@ -283,8 +283,8 @@ async fn a_world_load_replaces_the_client_recall_timer_once() {
         panic!("expected a single Recall timer");
     };
     assert_eq!(*skill_id, RECALL);
-    assert_eq!(*total_ms, 1_800_000);
-    assert!((1..=*total_ms).contains(remaining_ms));
+    assert!((1..=1_800_000).contains(remaining_ms));
+    assert_eq!(total_ms, remaining_ms);
 
     crate::systems::instances::worlds::instance_loaded(&server, &player);
     assert!(cooldown_packet(&client.drain()).is_none());
