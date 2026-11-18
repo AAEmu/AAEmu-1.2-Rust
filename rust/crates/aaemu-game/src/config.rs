@@ -678,6 +678,12 @@ pub struct WorldConfig {
     pub motd: String,
     #[serde(rename = "logoutmessage")]
     pub logout_message: String,
+    /// `GameTimeOffset`: game seconds added to the wall-clock-derived game clock
+    /// (`(unix_seconds * 6 + offset) mod 86400`, `6` = one game minute per 10 real seconds).
+    /// The default `0` makes the mapping deterministic (Unix epoch); positive values move the
+    /// clock forward. Rust only: the C# clock started at 12:00 on every boot.
+    #[serde(rename = "gametimeoffset", deserialize_with = "lenient")]
+    pub game_time_offset: f64,
     /// Minutes.
     #[serde(rename = "autosaveinterval", deserialize_with = "lenient")]
     pub auto_save_interval: f64,
@@ -822,6 +828,7 @@ impl Default for WorldConfig {
             profile: ServerProfile::default(),
             motd: String::new(),
             logout_message: String::new(),
+            game_time_offset: 0.0,
             auto_save_interval: 5.0,
             exp_rate: 1.0,
             honor_rate: 1.0,

@@ -73,7 +73,12 @@ pub fn test_server_with_world_config(
         t.duration = 0;
         data.skills.buffs.insert(id, t);
     }
-    GameServer::new(config, db, data)
+    // Production derives the game clock from the wall clock (continuous across restarts). The
+    // flow tests pin the former C# noon start so fixtures that do not set a time stay
+    // deterministic; `TimeManager::set_test_clock` gives a test its own wall clock.
+    let server = GameServer::new(config, db, data);
+    server.time.set(12.0);
+    server
 }
 
 /// Marks every skill template of `data` as handed to players by the static data, so the

@@ -400,8 +400,9 @@ pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transf
     Some(mwp)
 }
 
-/// `CSInstanceLoadedPacket.Read`: `SCUnitStatePacket(ActiveChar)`, `SCDetailedTimeOfDayPacket(12)`
-/// and `DisabledSetPosition = false`.
+/// `CSInstanceLoadedPacket.Read`: `SCUnitStatePacket(ActiveChar)`, the detailed time of day and
+/// `DisabledSetPosition = false` (the C# sent the hard-coded `12`; the Rust sends the game time,
+/// so a zone load does not reset the client's clock and sky to noon).
 ///
 /// A zone load empties the client's world, so the character has to be re-filed in the instance
 /// it was moved to now: leave the old instance's region grid (the stale units / doodads there are
@@ -431,7 +432,9 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     // Writing the unit state can add the forced buffs (their start runs in the skills hooks).
     crate::systems::dispatch_buff_events(server, &WorldObject::from(p));
     p.send(packet);
-    p.send(SCDetailedTimeOfDayPacket { time: 12.0 });
+    p.send(SCDetailedTimeOfDayPacket {
+        time: server.time.get_time(),
+    });
     // A load the server sent locks the position; a repeated `CSInstanceLoaded` finds it unlocked.
     let load_pending = p.data().disabled_set_position;
     p.data().set_disabled_set_position(false);

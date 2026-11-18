@@ -1746,10 +1746,20 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
     assert_eq!(ev.count(&a.p, CharEvent::TeamLeave), 1);
 
     // ---- CSInstanceLoaded re-files A into the instance; the first move finds it filed.
+    server.time.set(17.0);
     a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
     let f = a.frames();
     assert_eq!(f.first().map(|(op, _)| *op), Some(sc::SCUnitStatePacket));
     assert!(f.iter().any(|(op, _)| *op == sc::SCDetailedTimeOfDayPacket));
+    let detailed = f
+        .iter()
+        .find(|(op, _)| *op == sc::SCDetailedTimeOfDayPacket)
+        .expect("detailed time of day");
+    // The game time, not the C# hard-coded noon.
+    assert_eq!(
+        f32::from_le_bytes(detailed.1[..4].try_into().unwrap()),
+        server.time.get_time()
+    );
     assert!(!a.p.data().disabled_set_position);
     let gone = removed_ids(&f);
     assert!(gone.contains(&b.p.obj_id) && gone.contains(&c.p.obj_id));

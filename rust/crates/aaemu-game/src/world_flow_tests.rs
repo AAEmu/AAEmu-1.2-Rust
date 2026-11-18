@@ -47,7 +47,11 @@ fn server() -> GameServer {
         t.duration = 0;
         data.skills.buffs.insert(id, t);
     }
-    GameServer::new(config, db, data)
+    // Production derives the clock from the wall clock; these packet fixtures pin the former
+    // C# noon start (as `test_support` does).
+    let server = GameServer::new(config, db, data);
+    server.time.set(12.0);
+    server
 }
 
 struct Client {
@@ -660,7 +664,9 @@ async fn time_of_day_subscription() {
     let f = a.drain();
     assert_eq!(f[0].0, sc::SCTimeOfDayPacket);
     let t = f32::from_le_bytes(f[0].1[..4].try_into().unwrap());
-    assert!((t - (12.0 + 3600.0 * 0.001_666_6 * 10.0 / 3600.0)).abs() < 1e-4);
+    // The tick pushes the wall-clock-derived game time (the test server pinned to 12:00);
+    // the clock no longer advances by a fixed step per tick.
+    assert_eq!(t, s.time.get_time());
     s.time.unsubscribe(id);
     s.time.tick();
     assert!(a.drain().is_empty());
