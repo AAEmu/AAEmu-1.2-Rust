@@ -61,5 +61,14 @@
             "Z": 126.076,
             "Yaw": -0.511
         }
+     },
+     {
+        "UnitId": 99, // Amed's Human Cannon (Watermist, "A Merchant's Tenacity" 3007, inferred position)
+        "Position": {
+            "X": 25468.0,
+            "Y": 9796.0,
+            "Z": 713.948,
+            "Yaw": -108.3
+        }
      }
 ]

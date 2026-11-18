@@ -29,8 +29,8 @@ use super::relation::{
     can_attack, filter_with_relation, owner_character, protected_from, relation_to,
 };
 use super::state::{
-    AutoAttackSlot, CancelToken, PlotCooldownSnapshot, SkillRef, SkillRun, SkillTaskKind,
-    SkillTaskSlot,
+    AutoAttackSlot, CancelToken, DirectCastEnd, PlotCooldownSnapshot, SkillRef, SkillRun,
+    SkillTaskKind, SkillTaskSlot,
 };
 use super::stats::{equip_slot, slot_type, stat, stats, StatKind};
 use super::types::{
@@ -1053,6 +1053,7 @@ fn use_skill_impl(
     {
         let mut state = skill.state();
         state.generation = state.generation.wrapping_add(1);
+        state.direct_cast_end = DirectCastEnd::Pending;
         state.cancelled = false;
         state.effect_cancelled = false;
         state.music_started_pending = false;
@@ -1948,6 +1949,12 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             ),
             true,
         );
+    }
+    if skill.id == 17_539 && caster.transform().instance_id == 0 {
+        if let Some(player) = caster.as_player() {
+            // Wind Sealstone's area-sphere requirement was validated before firing.
+            crate::world::move_guard::grant_quest_launch(server, player);
+        }
     }
     broadcast(server, caster, &fired, true);
     if total_delay > 0 {
@@ -3027,27 +3034,24 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
 
 /// `Skill.EndSkill(caster)`.
 pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
-    let tl = std::mem::take(&mut skill.state().tl_id);
-    if tl == 0 {
-        return;
-    }
     // The cast (completed, cancelled or interrupted) no longer holds a `once_one_*` doodad.
     // A seat occupation of the same unit keeps its own bond flag. Only a use that took the hold
     // visits the occupancy map: every other skill ends here, combat skills included.
-    let (target, holds_doodad) = {
+    let (tl, generation, target, holds_doodad) = {
         let mut state = skill.state();
+        if state.tl_id == 0 || state.direct_cast_end != DirectCastEnd::Pending {
+            return;
+        }
+        state.direct_cast_end = DirectCastEnd::Sending;
         (
+            state.tl_id,
+            state.generation,
             state.initial_target,
             std::mem::take(&mut state.holds_doodad),
         )
     };
     if holds_doodad && target != 0 {
         crate::systems::npcs::doodad::occupancy::end_cast(server, target, caster);
-    }
-    if !caster.is_unit() {
-        // Not a unit any more: release the id without the unit-side effects.
-        server.systems.skills.tl_ids.release(tl);
-        return;
     }
     let t = &skill.template;
     if let Some(p) = caster.as_player() {
@@ -3067,10 +3071,31 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
             );
         }
     }
-    skill.invoke_callback();
-    // Unit.OnSkillEnd: no-op for every ported kind (npc AI hooks it).
-    broadcast(server, caster, &SCSkillEndedPacket { tl }, true);
-    server.systems.skills.tl_ids.release(tl);
+    if caster.is_unit() {
+        broadcast(server, caster, &SCSkillEndedPacket { tl }, true);
+    }
+    // Cast and plot packets share this timeline. The last part to send its end also
+    // completes the skill callback and returns the id to the pool.
+    let released = {
+        let mut state = skill.state();
+        if state.generation == generation && state.tl_id == tl {
+            state.direct_cast_end = DirectCastEnd::Sent;
+            if state.active_plot.is_none() {
+                std::mem::take(&mut state.tl_id)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+    if released != 0 {
+        skill.invoke_callback();
+        server.systems.skills.tl_ids.release(released);
+    }
+    if !caster.is_unit() {
+        return;
+    }
     reset_cooldown_if_ignored(server, skill, caster);
     // USE_SKILL: one completed (not cancelled) cast.
     if let Some(p) = caster.as_player() {

@@ -18,6 +18,7 @@
 use crate::server::GameServer;
 
 use super::query::{mask, ray_flags};
+use super::terrain::INV_UNIT_SIZE;
 
 /// Height above the ground of the probe ray (m).
 pub const WALK_PROBE_HEIGHT: f32 = 0.5;
@@ -82,4 +83,38 @@ pub fn walk_blocked(
     to: [f32; 3],
 ) -> Option<bool> {
     wall_distance(server, instance_id, from, to).map(|d| d.is_some())
+}
+
+/// Prove that an NPC's short step has continuous terrain support. Inspect the full
+/// bounding rectangle of terrain cells, including cells the step only clips at a corner.
+/// Routes that rely on raised floors or bridge terrain holes use authored navigation.
+pub(crate) fn terrain_supports_step(
+    server: &GameServer,
+    instance_id: u32,
+    from: [f32; 3],
+    to: [f32; 3],
+) -> bool {
+    let Some(world) = super::phys_world(server, instance_id) else {
+        return false;
+    };
+    let Some(terrain) = world.terrain.as_ref() else {
+        return false;
+    };
+    let grid = |v: f32| (v * INV_UNIT_SIZE).floor() as i32;
+    let (x0, x1) = (grid(from[0].min(to[0])), grid(from[0].max(to[0])));
+    let (y0, y1) = (grid(from[1].min(to[1])), grid(from[1].max(to[1])));
+    let (nx, ny) = terrain.size();
+    if x0 < 0 || y0 < 0 || x1 >= nx || y1 >= ny {
+        return false;
+    }
+    // Terrain height is interpolated from the corners of each cell. Every corner
+    // must be in the same height band as the two nearby collision floor probes.
+    let heights = (from[2].min(to[2]) - 1.0)..=(from[2].max(to[2]) + 1.0);
+    (x0..=x1).all(|x| (y0..=y1).all(|y| !terrain.is_hole(x, y)))
+        && (x0..=x1 + 1).all(|x| {
+            (y0..=y1 + 1).all(|y| {
+                let z = terrain.sample(x, y);
+                z > 0.0 && heights.contains(&z)
+            })
+        })
 }

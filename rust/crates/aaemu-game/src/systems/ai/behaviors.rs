@@ -438,6 +438,16 @@ pub fn use_skill(
     if target_dist > skill.template.max_range as f32 {
         return skill_result::TOO_FAR_RANGE;
     }
+    // Wild Lightning's self-target plots project their strikes from the caster's heading.
+    let directional = matches!(skill.id, 15935 | 19980);
+    if !ai_skills::is_self_target(&skill.template) || directional {
+        if cast_path_blocked(c, &skill.template, target) {
+            return skill_result::OBSTACLE;
+        }
+        // Turn before constructing the aim point and before the skill validates its cone.
+        let position = npc::world_pos(c.server, target);
+        npc::look_towards(c.server, &c.npc, position, 4);
+    }
     c.st(k).next_time_to_delay = delay;
     let caster = SkillCaster::Unit(c.npc.obj_id);
     let mut cast_target = if ai_skills::is_pos_target(&skill.template) {
@@ -457,15 +467,29 @@ pub fn use_skill(
     } else {
         SkillCastTarget::Unit(target.obj_id())
     };
-    // Face the target before the skill validates its cone. Turning only after a
-    // successful cast would leave an NPC permanently unable to attack to its side.
-    if !ai_skills::is_self_target(&skill.template) {
-        let position = npc::world_pos(c.server, target);
-        npc::look_towards(c.server, &c.npc, position, 4);
-    }
     // skill.Callback = OnSkillEnded
     ai_skills::set_skill_ended_callback(c, &skill, k);
     ai_skills::use_skill(c, &skill, caster, &mut cast_target, false)
+}
+
+fn cast_path_blocked(
+    c: &AiCtx<'_>,
+    skill: &crate::systems::skills::data::SkillTemplate,
+    target: &WorldObject,
+) -> bool {
+    if !skill.check_obstacle || target.same(&c.obj) {
+        return false;
+    }
+    let from = owner_pos(c);
+    let to = npc::world_pos(c.server, target);
+    // Caster AI needs a clear casting position, including terrain between the two units.
+    // The cast validator can only see the caster's own position for a self/zone plot.
+    super::collision::line_of_sight(
+        c.server,
+        c.obj.transform().instance_id,
+        [from.x, from.y, from.z + 1.0],
+        [to.x, to.y, to.z + 1.0],
+    ) == Some(false)
 }
 
 /// `Behavior.OnSkillEnded()` (`_delayEnd = now + _nextTimeToDelay`).
@@ -1440,8 +1464,19 @@ fn move_in_range(c: &mut AiCtx<'_>, k: BehaviorKind, target: Option<&WorldObject
     };
     let target_pos = npc::world_pos(c.server, target);
     if distance_to_target <= range {
-        npc::stop_movement(c.server, &c.npc);
-        return;
+        let ranged_base = c
+            .server
+            .game_data
+            .systems
+            .skills
+            .skill(t.base_skill_id as u32);
+        let needs_line_of_sight = ranged_base.is_some_and(|skill| {
+            skill.max_range > MELEE_ATTACK_RANGE as i32 && cast_path_blocked(c, skill, target)
+        });
+        if !needs_line_of_sight {
+            npc::stop_movement(c.server, &c.npc);
+            return;
+        }
     }
     if geo_data_mode(c) && moves_freely(c) {
         // Flyers and swimmers chase in a straight 3D line; drop any route left over.
@@ -2852,7 +2887,7 @@ fn archer_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     let Some(skill) = ai_skills::new_skill(c, selected) else {
         return;
     };
-    let casting = skill.template.casting_time as f32;
+    let casting = skill.template.casting_time as f32 / 1000.0;
     let target = current_target(c);
     use_skill(c, k, skill, target.as_ref(), casting);
 }
