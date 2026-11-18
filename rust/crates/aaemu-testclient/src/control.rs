@@ -1224,15 +1224,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guarded_action_rejects_an_expired_output_budget_before_polling_gameplay() {
+    async fn guarded_action_polls_ready_gameplay_only_within_the_output_budget() {
         let (_terminal, status) = watch::channel(None);
         let now = Instant::now();
-        let action = async { panic!("gameplay was polled after stdout budget expired") };
+        let action = std::future::ready(Ok(Value::Null));
         tokio::pin!(action);
 
         let result =
             guarded_action(action.as_mut(), &status, now + CONNECT_TIMEOUT, Some(now)).await;
         assert!(matches!(result, Err(error) if error.to_string() == "stdout budget exhausted"));
+
+        // A Ready future can complete only once. It must still be ready after the refusal.
+        let result = guarded_action(action.as_mut(), &status, now + CONNECT_TIMEOUT, None)
+            .await
+            .unwrap();
+        assert!(matches!(result, Completion::Done(Ok(Value::Null))));
     }
 
     fn live_recorder() -> Recorder {
