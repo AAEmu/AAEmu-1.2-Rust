@@ -317,6 +317,19 @@ pub(super) fn check(
         // Native 1.2 x2game12.c:1983345: SkillResult 58 = ZONE_BANNED.
         return fail("SKILL_CANNOT_USE_HERE");
     }
+    // Tosare's portal skill casts a Return effect directly, so it never runs Doodad.Use.
+    // Require the machinery's open phase, where the client gets this skill.
+    if template.id == 17_292
+        && !target
+            .as_obj()
+            .and_then(WorldObject::as_doodad)
+            .is_some_and(|doodad| {
+                let d = doodad.data();
+                d.template_id == 4499 && d.func_group_id == 10_996
+            })
+    {
+        return fail("skill_invalid_target");
+    }
     if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
         {

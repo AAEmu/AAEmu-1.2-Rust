@@ -583,6 +583,7 @@
     },
     {
         "Id": 177,
+        "PreferLocalRespawn": true,
         "Name": "Respawn: Whitecap Beach",
         "X": 11340.90,
         "Y": 10572.80,
@@ -592,6 +593,7 @@
     },
     {
         "Id": 178,
+        "PreferLocalRespawn": true,
         "Name": "Respawn: Eastern Halcyona",
         "X": 10587.80,
         "Y": 10713.70,
@@ -1933,6 +1935,7 @@
     },
     {
         "Id": 441,
+        "PreferLocalRespawn": true,
         "Name": "Respawn: Whitecap Beach",
         "X": 11696.10,
         "Y": 10497.50,
@@ -1942,6 +1945,7 @@
     },
     {
         "Id": 442,
+        "PreferLocalRespawn": true,
         "Name": "Respawn: Eastern Halcyona",
         "X": 10339.80,
         "Y": 10390.40,

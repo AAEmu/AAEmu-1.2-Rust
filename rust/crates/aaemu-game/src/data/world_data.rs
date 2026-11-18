@@ -350,6 +350,8 @@ pub struct Portal {
     pub sub_zone_id: u32,
     pub owner: u32,
     pub world_id: u32,
+    /// Prefer this shrine for temple resurrection in its own zone.
+    pub prefer_local_respawn: bool,
 }
 
 /// `DistrictReturnPoints`.

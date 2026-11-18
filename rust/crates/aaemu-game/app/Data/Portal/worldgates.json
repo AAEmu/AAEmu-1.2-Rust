@@ -27,6 +27,17 @@
         "SubZoneId": 196 // 372
     },
     {
+        // Daru Experiments: the 1.2 quest marker on the hill above Tosare's machinery.
+        "Id": 400,
+        "Name": "Airship Laboratory Hill",
+        "ZoneId": 206,
+        "X": 8982.20,
+        "Y": 9920.52,
+        "Z": 232.50,
+        "Yaw": 0.0,
+        "SubZoneId": 400
+    },
+    {
         "Id": 402,
         "Name": "Respawn: Perinoor Ruins",
         "ZoneId": 139,
