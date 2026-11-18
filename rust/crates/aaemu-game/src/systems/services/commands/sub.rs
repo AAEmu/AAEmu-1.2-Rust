@@ -400,17 +400,22 @@ impl Default for TimeSetSubCommand {
             "Find out what time it is",
             &format!("{COMMAND_PREFIX}time set"),
         );
-        base.add_parameter(Box::new(NumericSubCommandParameter::<i32>::new(
-            "hour",
-            Some("hour"),
-            true,
-        )))
+        base.add_parameter(Box::new(
+            NumericSubCommandParameter::<i32>::with_range("hour", Some("hour"), true, None, 0, 23)
+                .expect("valid range"),
+        ))
         .expect("valid");
-        base.add_parameter(Box::new(NumericSubCommandParameter::<i32>::new(
-            "minute",
-            Some("minute"),
-            false,
-        )))
+        base.add_parameter(Box::new(
+            NumericSubCommandParameter::<i32>::with_range(
+                "minute",
+                Some("minute"),
+                false,
+                None,
+                0,
+                59,
+            )
+            .expect("valid range"),
+        ))
         .expect("valid");
         Self { base }
     }

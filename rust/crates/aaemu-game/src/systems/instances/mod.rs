@@ -18,6 +18,7 @@
 //! Tower defense: [`tower_def`] extends the C# data/packet port with a runtime that runs the
 //! 1.2 open-world events by default (`Dungeons.TowerDefense.Enabled: false` turns them off).
 
+pub mod clear_notice;
 pub mod config;
 pub mod data;
 pub mod dungeon;
@@ -59,6 +60,8 @@ pub struct Data {
     pub tower_defs: data::TowerDefData,
     /// `ZoneManager._zones` order (zone keys of a zone group).
     pub zone_order: data::ZoneOrder,
+    /// Dungeon clear notices (`Data/indun_clear_notices.json`; empty = feature off).
+    pub clear_notices: Vec<clear_notice::ClearNotice>,
 }
 
 impl Data {

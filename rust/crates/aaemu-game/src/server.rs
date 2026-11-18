@@ -110,7 +110,7 @@ impl GameServer {
             ids,
             items: Arc::new(ItemManager::default()),
             world,
-            time: TimeManager::default(),
+            time: TimeManager::new(config.world.game_time_offset),
             expeditions: ExpeditionManager::default(),
             friends: FriendManager::default(),
             save: SaveManager::default(),

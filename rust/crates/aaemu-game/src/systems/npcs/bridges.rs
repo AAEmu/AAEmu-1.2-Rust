@@ -1378,7 +1378,7 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
             return;
         };
         let caster = WorldObject::from(player);
-        // The doodad store checkout distance (`CSBuyItems`: 3 m); resolved here so the
+        // The store window's reach (the NPC interaction reach); resolved here so the
         // `blocked_child_doodads` refusal runs before any purchase side effect.
         let Some(world) = crate::systems::economy::store::parent_world(server, player) else {
             return;
@@ -1421,12 +1421,11 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
             );
             return;
         }
-        if crate::systems::economy::store::world_distance(
-            &world,
-            &caster,
+        if !crate::systems::npcs::npc::reach::within_interaction_reach(
+            server,
+            player,
             &WorldObject::from(doodad),
-        ) > crate::systems::economy::store::SHOP_RANGE
-        {
+        ) {
             player.send(super::doodad::packets::error_msg(
                 super::doodad::packets::error_message::TOO_FAR_AWAY,
             ));

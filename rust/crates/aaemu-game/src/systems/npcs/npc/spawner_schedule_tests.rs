@@ -562,7 +562,7 @@ async fn ordinary_and_single_spawner_lifecycles_are_unchanged() {
 
 #[tokio::test]
 async fn authored_game_clock_windows_still_gate_spawning_and_removal() {
-    // The test server's game clock sits at 12:00 (`TimeManager::default`).
+    // The test server pins its game clock at 12:00 (`test_support`).
     let server = test_server(data_with(
         &[SpawnerSpec {
             id: 6100,

@@ -190,3 +190,28 @@ fn idle_entries_are_pruned() {
     let _ = g.check(0, SEED, 2_000_000, flat(1.0), LIMITS, NO_KICK);
     assert_eq!(g.len(), 1);
 }
+
+/// A Tiger Strike leap (20 m over the 400 ms of `skill_controllers` 2278) is a normal move:
+/// from the full 90 m burst it passes, and even a bucket drained to 25 m still carries it.
+/// Only a budget already spent below the leap's reach refuses it, which is the guard's general
+/// rule for any move, so the leap gets no special credit.
+#[test]
+fn a_tiger_strike_leap_fits_a_normal_budget() {
+    let g = MoveGuard::default();
+    // 4 accepted steps of 5 m in 400 ms, the way the client moves itself.
+    for step in 0..4 {
+        assert!(ok(&g, i64::from(step) * 100, flat(5.0)), "step {step}");
+    }
+    // A 65 m sprint before the leap leaves 25 m of the 3 s burst: the 20 m leap still fits.
+    assert!(ok(&g, 2_000, flat(65.0)));
+    for step in 0..4 {
+        assert!(
+            ok(&g, 2_100 + i64::from(step) * 100, flat(5.0)),
+            "leap step {step}"
+        );
+    }
+    // At 20 m left a 40 m dash is refused.
+    let g = MoveGuard::default();
+    assert!(ok(&g, 0, flat(70.0)));
+    assert!(!ok(&g, 100, flat(40.0)));
+}
