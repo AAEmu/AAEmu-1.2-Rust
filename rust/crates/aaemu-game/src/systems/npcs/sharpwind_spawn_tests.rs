@@ -351,6 +351,13 @@ fn expected_npc_load(
                 out.event_rows += 1;
                 continue;
             }
+            if def.placement_schedule_id != 0 {
+                // An explicitly scheduled placement expands to one spawner.
+                out.rows_with_spawners += 1;
+                out.spawners += 1;
+                stored.entry(unit).or_default().push((p.x, p.y, p.z));
+                continue;
+            }
             let ids = data.get_spawner_ids(unit).unwrap_or_default();
             if ids.is_empty() {
                 // Generated ("fake") spawner from template 1.
