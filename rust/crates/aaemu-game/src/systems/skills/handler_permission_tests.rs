@@ -1471,6 +1471,65 @@ async fn fireplace_save_cannot_finish_on_a_replacement_with_the_same_object_id()
     assert_eq!(Inv::of(&player).items_count(MEMORY_INK, -1), 1);
 }
 
+#[tokio::test]
+async fn fireplace_save_effect_requires_a_live_fireplace_cast_target() {
+    use crate::systems::economy::inventory::Inv;
+
+    use super::effects::{special, EffectArgs, EffectSource};
+    use super::geometry::Target;
+    use super::state::SkillRun;
+    use super::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    let server = Arc::new(test_server_with(fireplace_data(0)));
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::bridges::install(&server);
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Hearth", 100.0, 100.0),
+        0x100,
+    );
+    give_test_item(&server, &player, 0x7008, MEMORY_INK, 1);
+    let caster = WorldObject::from(&player);
+    let template = server
+        .game_data
+        .systems
+        .skills
+        .skill(FIREPLACE_SKILL)
+        .unwrap();
+    let mut args = EffectArgs {
+        caster: Some(caster.clone()),
+        caster_caster: SkillCaster::Unit(player.obj_id),
+        target: Target::Obj(caster.clone()),
+        target_caster: SkillCastTarget::Unit(player.obj_id),
+        cast: CastAction::Skill {
+            skill_id: FIREPLACE_SKILL,
+            tl_id: 1,
+        },
+        source: EffectSource::from_skill(SkillRun::new(template.clone(), 1)),
+        skill_object: &SkillObject::SavePortalInfo {
+            id: 0,
+            name: "Hearth".into(),
+        },
+    };
+
+    let removed = WorldObject::from(spawn_fireplace(&server, 102.0));
+    server.world.world(0).unwrap().delete(removed.clone());
+    let fireplace = spawn_fireplace(&server, 102.0);
+    for bad_target in [None, Some(caster), Some(removed)] {
+        args.source.cast_target = bad_target;
+        special::execute(&server, 30, &args, [0; 4]);
+        assert!(player.data().portals.private_portals.is_empty());
+        assert_eq!(Inv::of(&player).items_count(MEMORY_INK, -1), 1);
+    }
+
+    args.source.cast_target = Some(WorldObject::from(&fireplace));
+    special::execute(&server, 30, &args, [0; 4]);
+    assert_eq!(player.data().portals.private_portals[0].name, "Hearth");
+    assert_eq!(Inv::of(&player).items_count(MEMORY_INK, -1), 0);
+}
+
 /// Plot-only skills bypass `apply_effects`; an Item caster must still own its source item.
 #[tokio::test]
 async fn plot_only_item_skill_requires_the_owned_item() {
