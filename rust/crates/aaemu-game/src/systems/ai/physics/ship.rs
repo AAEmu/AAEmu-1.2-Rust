@@ -16,6 +16,11 @@ use super::{SlaveKind, WindModel};
 /// `MathUtil.HalfPi`.
 pub const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
 
+/// Shared model of the 1.2 Harpoon and Adventurer's Clipper hulls.
+const CLIPPER_MODEL_ID: u32 = 128;
+/// The sail interaction applies Foresails Lowered to the hull once furling completes.
+pub(super) const FORESAILS_LOWERED_BUFF_ID: u32 = 592;
+
 /// `ReplicationSmoothing`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ReplicationSmoothing {
@@ -83,6 +88,7 @@ pub struct ShipGameView {
     pub whirlpool_buff: bool,
     /// `Buffs.CheckBuff(1917)` (storm cloud).
     pub storm_buff: bool,
+    pub foresails_lowered: bool,
 }
 
 impl Default for ShipGameView {
@@ -96,6 +102,7 @@ impl Default for ShipGameView {
             turn_speed: 1.0,
             whirlpool_buff: false,
             storm_buff: false,
+            foresails_lowered: false,
         }
     }
 }
@@ -596,7 +603,22 @@ pub fn apply_force_and_torque(ship: &mut PhysShip, dt_sec: f32, wind: WindModel,
 
     let wind_mul = wind_speed_mul(ship, slave_rot_rad, wind, game_time);
     let msm = ship.view.move_speed_mul;
-    let mut max_forward = model.velocity * msm / 2.0 * wind_mul;
+    let forward_model_velocity = if ship.spec.model_id == CLIPPER_MODEL_ID
+        && ship.spec.kind == SlaveKind::SPEEDBOAT
+        && !is_grounded_for_speed_caps
+    {
+        // In 1.2, a stock clipper reached 11.1 m/s raised and 9.1 m/s furled.
+        // The controller applies MoveSpeedMul in both the cap and propulsion.
+        // The stock multiplier is 2.0, or 1.8 with Foresails Lowered.
+        if ship.view.foresails_lowered {
+            9.1 * 8.0 / (1.8 * 1.8)
+        } else {
+            11.1 * 8.0 / (2.0 * 2.0)
+        }
+    } else {
+        model.velocity
+    };
+    let mut max_forward = forward_model_velocity * msm / 2.0 * wind_mul;
     let water_max_reverse_abs = model.reverse_velocity * msm / 2.0 * wind_mul;
     let mut max_backward = -water_max_reverse_abs;
     if is_grounded_for_speed_caps {
@@ -976,6 +998,43 @@ pub(crate) mod tests {
             apply_force_and_torque(&mut s, 0.04, WindModel::Official, 0.0);
         }
         assert!(s.speed < before && s.speed > 0.0);
+    }
+
+    #[test]
+    fn stock_clipper_reaches_the_raised_and_furled_sail_speeds() {
+        let mut hull = model();
+        hull.velocity = 13.0;
+        hull.accel = 1.0;
+        let cases = [
+            (CLIPPER_MODEL_ID, SlaveKind::SPEEDBOAT, false, 2.0, 11.1),
+            (CLIPPER_MODEL_ID, SlaveKind::SPEEDBOAT, true, 1.8, 9.1),
+            (129, SlaveKind::SMALL_SAILING_SHIP, false, 2.0, 6.5),
+        ];
+        for (model_id, kind, foresails_lowered, move_speed_mul, expected) in cases {
+            let mut spec = spec(1, 0.0, 0.0, 99.0, HALF_PI);
+            spec.model_id = model_id;
+            spec.kind = kind;
+            let view = ShipGameView {
+                foresails_lowered,
+                move_speed_mul,
+                ..ShipGameView::default()
+            };
+            let mut ship = PhysShip::new(spec, hull, view);
+            ship.cached_water_surface = 100.0;
+            ship.cached_floor_level = 50.0;
+            ship.has_driver = true;
+            ship.throttle_request = 127;
+            for _ in 0..4000 {
+                ship.boat_physics_tick();
+                apply_force_and_torque(&mut ship, 0.04, WindModel::Official, 0.0);
+            }
+            let velocity = ship.body.velocity;
+            let speed = velocity.x.hypot(velocity.z);
+            assert!(
+                (speed - expected).abs() < 0.02,
+                "model {model_id}, sails lowered {foresails_lowered}: {speed} m/s, expected {expected}"
+            );
+        }
     }
 
     #[test]
