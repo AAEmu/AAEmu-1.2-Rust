@@ -137,6 +137,41 @@ no test):
 That is the Defender / SmartScreen first-execution scan: it repeats after every rebuild of the
 executable. 98 x 1.7 s = ~165 s, which accounts for almost the whole gap.
 
+### Warm game-server builds on Windows
+
+Run from `rust/` in your lane:
+
+```sh
+cargo check --locked -p aaemu-game --bin aaemu-game
+cargo build --locked --profile live -p aaemu-game --bin aaemu-game
+```
+
+The check command gives compiler feedback without producing an executable. The `live` profile
+uses light optimization and incremental compilation for playtesting. The Windows
+[`BuildGameServer.bat`](../Scripts/BuildGameServer.bat) helper builds Release. Use Release for
+production builds.
+
+Measured on 2026-11-17 on Windows 11 with a Ryzen 7 255 and Rust 1.99.1 (MSVC), using revision
+`747d77976` in a disposable checkout. For each command, the target cache was populated before
+changing one string literal in `aaemu-game/src/config.rs` and then reverting it. Times are wall
+clock seconds with `--timings` enabled.
+
+| Command | Edit | Revert | Mean |
+|---|---:|---:|---:|
+| `cargo build --locked --release -p aaemu-game --bin aaemu-game` | 207.0 s | 190.6 s | 198.8 s |
+| `cargo build --locked --profile live -p aaemu-game --bin aaemu-game` | 46.7 s | 41.8 s | 44.2 s |
+| `cargo check --locked -p aaemu-game --bin aaemu-game` | 14.1 s | 14.1 s | 14.1 s |
+
+The first `live` build took 233 s with no `live` artifacts. Keep the target directory for
+that lane between edits. The resulting executable passed AAEmu's `compiler-check` smoke check.
+The warm `live` builds spent 39–43 s in the game library and 3 s in the binary target. In an
+isolated warm relink, `rust-lld` saved less than one second. These timings reflect one edit on
+one machine. Dependency and feature changes can invalidate more of the cache.
+
+To repeat the benchmark, run each command once to populate its cache, then time a small source
+edit and its revert with the same command and `--timings`. Cargo writes the report to
+`cargo-timings/cargo-timing.html` under the lane's target directory.
+
 ## 3. Findings and recommendations
 
 ### 3.1 One command shape per lane (feature variants)
