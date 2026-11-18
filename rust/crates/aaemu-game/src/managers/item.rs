@@ -2,6 +2,7 @@
 //! container and item is held in memory), `GetItemContainerForCharacter`, `Create`, `ReleaseId`
 //! and `Save` (dirty containers / items, deleted items).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use sqlx::mysql::{MySqlPool, MySqlRow};
@@ -556,6 +557,21 @@ impl ItemManager {
         item_ids: &IdManager,
     ) -> Result<()> {
         tracing::info!("Loading user items ...");
+        // Character load uses these capacities. Use them during startup placement as well,
+        // including when an item has to recover into a newly created bag or bank.
+        let capacities: HashMap<_, _> = sqlx::query_as::<_, (u32, u8, u16)>(
+            "SELECT id, num_inv_slot, num_bank_slot FROM characters",
+        )
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(owner, bag, bank)| (owner, (bag, bank)))
+        .collect();
+        let character_capacity = |owner, slot| match (slot, capacities.get(&owner)) {
+            (slot_type::INVENTORY, Some((bag, _))) => Some(i32::from(*bag)),
+            (slot_type::BANK, Some((_, bank))) => Some(i32::from(*bank)),
+            _ => None,
+        };
         let rows = sqlx::query(
             "SELECT CAST(container_id AS UNSIGNED) AS container_id, container_type, CAST(slot_type AS SIGNED) AS slot_type, \
              CAST(container_size AS SIGNED) AS container_size, CAST(owner_id AS UNSIGNED) AS owner_id, CAST(mate_id AS UNSIGNED) AS mate_id \
@@ -563,6 +579,7 @@ impl ItemManager {
         )
         .fetch_all(pool)
         .await?;
+        let mut container_sizes = HashMap::new();
         for r in rows {
             let ty: String = r.try_get("container_type")?;
             let mut c = ItemContainer::new(
@@ -571,15 +588,32 @@ impl ItemManager {
                 int(&r, "slot_type")? as u8,
                 r.try_get::<u64, _>("container_id")? as u32 as u64,
             );
-            c.set_container_size(int(&r, "container_size")? as i32);
+            let stored_size = int(&r, "container_size")? as i32;
+            let size = character_capacity(c.owner_id, c.slot_type).unwrap_or(stored_size);
+            c.set_container_size(size);
             c.mate_id = r.try_get::<u64, _>("mate_id")? as u32;
-            c.dirty = false;
+            c.dirty = size != stored_size;
+            container_sizes.insert(c.container_id, size);
             lock(&self.containers).push(c.into_ref());
         }
 
         let rows = sqlx::query(ITEM_SELECT).fetch_all(pool).await?;
-        for r in rows {
-            let row = item_row(&r)?;
+        let mut claimed_slots = HashSet::new();
+        let mut deferred = Vec::new();
+        let mut placements = Vec::new();
+        // Keep valid saved slots occupied before looking for room for misplaced items.
+        for row in rows {
+            let row = item_row(&row)?;
+            let valid = container_sizes
+                .get(&row.container_id)
+                .is_some_and(|size| row.slot >= 0 && (*size < 0 || row.slot < *size));
+            if valid && claimed_slots.insert((row.container_id, row.slot)) {
+                placements.push(row);
+            } else {
+                deferred.push(row);
+            }
+        }
+        for row in placements.into_iter().chain(deferred) {
             let container_id = row.container_id;
             let this_slot = row.slot;
             let template = data.template(row.template_id);
@@ -605,6 +639,8 @@ impl ItemManager {
                 Some(c) => {
                     let slot = item.slot;
                     let item_id = item.id;
+                    let saved_owner = item.owner_id;
+                    let saved_type = item.slot_type;
                     let (merged, res) = {
                         let mut g = c.lock().expect("container poisoned");
                         self.add_loaded_item(&mut g, item, slot, data)
@@ -620,10 +656,12 @@ impl ItemManager {
                             self.release_id(item_id, item_ids);
                         }
                         Ok(true) => {
-                            // `item.IsDirty = false` (placed as its own item).
+                            // Persist any correction made during placement.
                             let mut g = c.lock().expect("container poisoned");
                             if let Some(i) = g.items.iter_mut().find(|i| i.id == item_id) {
-                                i.dirty = false;
+                                i.dirty = i.slot != slot
+                                    || i.owner_id != saved_owner
+                                    || i.slot_type != saved_type;
                             }
                         }
                         Ok(false) => {
@@ -653,23 +691,23 @@ impl ItemManager {
                             container_ids,
                         );
                         let item_id = item.id;
-                        let mut g = c.lock().expect("container poisoned");
-                        let id = g.container_id;
-                        let (merged, res) = self.add_loaded_item(&mut g, item, this_slot, data);
+                        let (id, merged, res) = {
+                            let mut g = c.lock().expect("container poisoned");
+                            if let Some(size) = character_capacity(g.owner_id, g.slot_type) {
+                                g.set_container_size(size);
+                            }
+                            let (merged, res) = self.add_loaded_item(&mut g, item, this_slot, data);
+                            (g.container_id, merged, res)
+                        };
                         match res {
                             Ok(_) if merged => {
-                                drop(g);
                                 tracing::debug!(
                                     "Loaded item {item_id} was merged into an existing stack; queueing its row for deletion"
                                 );
                                 self.release_id(item_id, item_ids);
                             }
-                            Ok(_) => {
-                                if let Some(i) = g.items.first_mut() {
-                                    i.slot = this_slot;
-                                    i.dirty = true;
-                                }
-                            }
+                            // Placement already marked the recovered item dirty.
+                            Ok(_) => {}
                             Err(mut item) => {
                                 tracing::error!(
                                     "Failed to add owned item ({}) to new container (Id:{id}) !",
@@ -677,7 +715,6 @@ impl ItemManager {
                                 );
                                 item.slot = this_slot;
                                 item.dirty = false;
-                                drop(g);
                                 lock(&self.loose).push(item);
                             }
                         }
@@ -884,7 +921,7 @@ const ITEM_SELECT: &str = "SELECT `type`, CAST(id AS UNSIGNED) AS id, CAST(templ
      CAST(made_unit_id AS SIGNED) AS made_unit_id, CAST(crafter_id AS SIGNED) AS crafter_id, unsecure_time, unpack_time, created_at, CAST(`owner` AS UNSIGNED) AS owner, \
      CAST(flags AS SIGNED) AS flags, CAST(ucc AS SIGNED) AS ucc, details, CAST(grade AS SIGNED) AS grade, charge_time, \
      expire_time, (expire_online_minutes + 0E0) AS expire_online_minutes, CAST(charge_count AS SIGNED) AS charge_count \
-     FROM items";
+     FROM items ORDER BY items.id";
 
 fn item_row(r: &MySqlRow) -> Result<ItemRow> {
     Ok(ItemRow {

@@ -230,7 +230,7 @@ impl CSSplitBagItemPacket {
             return;
         }
         let mut txn = ItemTxn::begin(server);
-        inventory::split_or_move_item(
+        if !inventory::split_or_move_item(
             &mut txn,
             &inv,
             task_type::SWAP_ITEMS,
@@ -241,7 +241,9 @@ impl CSSplitBagItemPacket {
             a.to_slot_type,
             a.to_slot,
             self.count,
-        );
+        ) {
+            inventory::send_error_message_to(&mut txn.out(), &p, error_message::INVALID_SLOT);
+        }
     }
 }
 sync_client_packet!(CSSplitBagItemPacket);

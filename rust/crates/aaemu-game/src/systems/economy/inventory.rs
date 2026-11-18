@@ -1238,7 +1238,7 @@ pub fn split_or_move_item_ex(
                     from_item_id,
                     to_slot_type: to_type,
                     to_slot,
-                    to_item_id,
+                    to_item_id: t.id,
                 });
                 let src_type = s.slot_type;
                 if let Some(d) = d.as_deref_mut() {
@@ -1257,30 +1257,24 @@ pub fn split_or_move_item_ex(
             }
             SwapAction::DoSplit => {
                 let f = from_item.as_ref().expect("split source");
-                if let Some(fi) = s.get_item_by_id_mut(f.id) {
-                    fi.count -= count;
-                    fi.dirty = true;
-                    item_tasks.push(ItemTask::count_update(fi, -count));
-                }
-                match txn.env.create(f.template_id, count, f.grade) {
-                    Some(mut ni) => {
-                        ni.slot_type = to_type;
-                        ni.slot = i32::from(to_slot);
-                        let target = d.as_deref_mut().unwrap_or(&mut s);
-                        // The split item belongs to the container it is created in (C# never
-                        // assigned `ni.OwnerId`, so it stayed 0 and could be lost on relog).
-                        ni.owner_id = u64::from(target.owner_id);
-                        ni.dirty = true;
-                        item_tasks.push(ItemTask::add(&ni));
-                        target.items.push(ni);
-                        target.update_free_slot_count();
-                    }
-                    None => {
-                        // C#: NullReferenceException on `ni.SlotType`.
-                        tracing::error!("SplitOrMoveItem - failed to create the split item");
-                    }
-                }
-                s.update_free_slot_count();
+                let Some(fi) = s.get_item_by_id_mut(f.id) else {
+                    return false;
+                };
+                let Some(mut ni) = txn.env.create(f.template_id, count, f.grade) else {
+                    tracing::error!("SplitOrMoveItem - failed to create the split item");
+                    return false;
+                };
+                fi.count -= count;
+                fi.dirty = true;
+                item_tasks.push(ItemTask::count_update(fi, -count));
+                let target = d.as_deref_mut().unwrap_or(&mut s);
+                ni.slot_type = target.slot_type;
+                ni.slot = i32::from(to_slot);
+                ni.owner_id = u64::from(target.owner_id);
+                ni.dirty = true;
+                item_tasks.push(ItemTask::add(&ni));
+                target.items.push(ni);
+                target.update_free_slot_count();
             }
             SwapAction::DoMoveAllToEmpty => {
                 let f = from_item.as_ref().expect("move source");
@@ -1348,7 +1342,7 @@ pub fn split_or_move_item_ex(
                     from_item_id,
                     to_slot_type: to_type,
                     to_slot,
-                    to_item_id,
+                    to_item_id: t.id,
                 });
                 let s_type = s.slot_type;
                 match d.as_deref_mut() {

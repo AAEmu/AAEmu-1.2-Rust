@@ -849,6 +849,130 @@ async fn private_mysql_item_crafter_survives_save_and_load() {
     assert_eq!(reloaded.item_by_id(id).expect("reloaded").crafter_id, 777);
 }
 
+#[tokio::test]
+#[ignore = "requires private loopback MySQL via AAEMU_TEST_MYSQL"]
+async fn private_mysql_inventory_repairs_survive_save_and_reload() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let url = std::env::var("AAEMU_TEST_MYSQL").expect("AAEMU_TEST_MYSQL");
+    let options = MySqlConnectOptions::from_str(&url).unwrap();
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    assert_ne!(options.get_port(), 3306, "use a private MySQL port");
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in ["items", "item_containers"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "CREATE TEMPORARY TABLE characters (id INT UNSIGNED PRIMARY KEY, \
+         num_inv_slot TINYINT UNSIGNED NOT NULL, num_bank_slot SMALLINT UNSIGNED NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO characters VALUES (7,2,50), (8,2,50), (9,2,50), (10,2,50), (11,1,50)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO item_containers (container_id,slot_type,container_size,owner_id) \
+         VALUES (65537,2,4,7), (65538,2,2,8), (65539,2,2,9), (65540,2,1,11)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let first_id = 0x0100_0001u32;
+    let rows = [
+        (7, 65537, 3, 1001), // Outside the character's smaller bag.
+        (7, 65537, 0, 1000),
+        (8, 0, 0, 1001), // Recovery must leave the existing slot 0 alone.
+        (8, 65538, 0, 1000),
+        (9, 65539, 0, 1000),
+        (9, 65539, 0, 1001),  // Conflicting saved rows.
+        (10, 0, 3, 1001),     // Create a bounded bag for a missing container.
+        (11, 65540, 3, 1001), // A full bag must preserve this row for recovery.
+        (11, 65540, 0, 1000),
+    ];
+    for (index, (owner, bag, slot, template)) in rows.into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO items (id,`type`,template_id,container_id,slot_type,slot,`count`,lifespan_mins,owner,flags) \
+             VALUES (?, 'AAEmu.Game.Models.Game.Items.Item', ?, ?, 2, ?, 1, 0, ?, 0)",
+        )
+        .bind(first_id + index as u32)
+        .bind(template)
+        .bind(bag)
+        .bind(slot)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let data = data_with_templates(vec![
+        ItemTemplate::plain(1000, 20),
+        ItemTemplate::plain(1001, 20),
+    ]);
+    let container_ids = IdManager::new(crate::managers::id::CONTAINER_ID);
+    container_ids.initialize_with(&[65537, 65538, 65539, 65540]);
+    let item_ids = IdManager::new(ITEM_ID);
+    item_ids.initialize_with(&(first_id..first_id + rows.len() as u32).collect::<Vec<_>>());
+    let load = async |manager: &ItemManager| {
+        manager
+            .load_user_items(&pool, &data, 1, &container_ids, &item_ids)
+            .await
+            .unwrap();
+    };
+    let manager = create_item_manager();
+    load(&manager).await;
+    let inspect = |manager: &ItemManager| {
+        for (owner, occupants) in [
+            (7, vec![1, 0]),
+            (8, vec![3, 2]),
+            (9, vec![4, 5]),
+            (10, vec![6]),
+            (11, vec![8]),
+        ] {
+            let bag = manager
+                .find_container_for_character(owner, slot_type::INVENTORY, 0)
+                .unwrap();
+            let bag = bag.lock().unwrap();
+            assert_eq!(bag.size(), if owner == 11 { 1 } else { 2 });
+            assert_eq!(bag.items.len(), occupants.len());
+            for (slot, offset) in occupants.into_iter().enumerate() {
+                assert_eq!(
+                    bag.get_item_by_slot(slot as i32).unwrap().id,
+                    u64::from(first_id + offset)
+                );
+            }
+        }
+    };
+    inspect(&manager);
+    let mut tx = pool.begin().await.unwrap();
+    manager.save(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    manager.commit_save();
+    let saved_slots: Vec<i32> = sqlx::query_scalar("SELECT slot FROM items ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(saved_slots, [1, 0, 1, 0, 0, 1, 0, 3, 0]);
+
+    let reloaded = create_item_manager();
+    load(&reloaded).await;
+    inspect(&reloaded);
+    assert!(reloaded.prepare_save().item_ids().is_empty());
+}
+
 // ---- Character creation save (owner-scoped batch) ----
 
 /// The creation save writes only the new character's dirty containers and items, never another
