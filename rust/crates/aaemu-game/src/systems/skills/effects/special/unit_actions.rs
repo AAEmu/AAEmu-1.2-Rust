@@ -380,6 +380,17 @@ pub fn heal_pet(server: &GameServer, args: &EffectArgs<'_>, values: [i32; 4]) {
     let Some(unit) = args.target.as_obj().filter(|o| o.as_mate().is_some()) else {
         return;
     };
+    if let Some(mate) = unit.as_mate() {
+        let dead = mate.data().unit.is_dead();
+        if dead {
+            crate::systems::vehicles::mates::revive_mate_with_recovery(
+                server,
+                mate,
+                Some([values[0], values[1]]),
+            );
+            return;
+        }
+    }
     let Some(points) = unit
         .with_unit(|u| {
             let unit = u.unit_mut();

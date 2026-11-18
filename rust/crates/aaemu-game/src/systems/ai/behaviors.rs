@@ -975,29 +975,35 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             }
             continue;
         }
-        let was_engaged = other_npc
+        let already_helping = other_npc
             .data()
             .unit
             .skill_state
             .aggro_table
             .contains_key(&abuser.obj_id());
+        // Some helpers have no in-combat event skill, so is_in_battle can remain false
+        // while they chase. Repeated help calls must not restart that chase.
+        if already_helping {
+            continue;
+        }
         add_unit_aggro(c.server, &other, AggroKind::Damage, abuser, 1);
-        if (link_helps || group_link_helps) && !template_helps && !was_engaged {
-            let engaged = other_npc
-                .data()
-                .unit
-                .skill_state
-                .aggro_table
-                .contains_key(&abuser.obj_id());
-            if engaged {
-                tracing::debug!(
-                    helper = other_npc.obj_id,
-                    leader = c.npc.obj_id,
-                    abuser = abuser.obj_id(),
-                    group_link = group_link_helps,
-                    "aggro link: group member joined the fight"
-                );
-            }
+        if !other_npc
+            .data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&abuser.obj_id())
+        {
+            continue;
+        }
+        if (link_helps || group_link_helps) && !template_helps {
+            tracing::debug!(
+                helper = other_npc.obj_id,
+                leader = c.npc.obj_id,
+                abuser = abuser.obj_id(),
+                group_link = group_link_helps,
+                "aggro link: group member joined the fight"
+            );
         }
         super::manager::post(c.server, other_npc.obj_id, |o| o.on_aggro_target_changed());
     }

@@ -396,7 +396,16 @@ pub(super) fn check(
         .and_then(|o| o.with_unit(|u| u.unit().hp))
     {
         if target_hp <= 0 && template.target_alive && !template.target_dead {
-            return fail("skill_target_died");
+            let can_recover = matches!(
+                skill.id,
+                super::skill::PET_DUAL_RECOVERY | super::skill::PET_DUAL_RECOVERY_ALT
+            ) && target
+                .as_obj()
+                .and_then(WorldObject::as_mate)
+                .is_some_and(|mate| mate.data().can_revive());
+            if !can_recover {
+                return fail("skill_target_died");
+            }
         }
         if target_hp > 0 && template.target_dead && !template.target_alive {
             return fail("skill_target_alive");

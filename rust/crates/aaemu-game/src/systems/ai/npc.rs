@@ -12,7 +12,8 @@ use std::sync::Once;
 
 use crate::data::formulas::FormulaKind;
 use crate::models::movement::{
-    GameStanceType, MoveKind, MoveType, MoveTypeActorFlags, MoveTypeFlags, UnitMove,
+    GameStanceType, MoveKind, MoveType, MoveTypeActorFlags, MoveTypeAlertness, MoveTypeFlags,
+    UnitMove,
 };
 use crate::models::transform::PositionAndRotation;
 use crate::models::unit::UnitAttribute;
@@ -130,12 +131,14 @@ pub fn real_movement_flags(move_speed: f64) -> u8 {
 
 /// `Npc.BaseMoveSpeed` (`returning` = the current behavior is `ReturnStateBehavior`).
 pub fn base_move_speed(server: &GameServer, npc: &NpcRef, returning: bool) -> f32 {
-    let (template_id, stance, in_battle) = {
+    let (template_id, stance, running_in_combat) = {
         let n = npc.data();
         (
             n.unit.template_id,
             n.current_game_stance,
-            n.unit.is_in_battle,
+            // An NPC answering a call for help can start chasing before exchanging damage.
+            // Its movement alertness is already Combat even if the damage timer has expired.
+            n.unit.is_in_battle || n.current_alertness == MoveTypeAlertness::COMBAT,
         )
     };
     let Some(model_id) = server
@@ -157,7 +160,7 @@ pub fn base_move_speed(server: &GameServer, npc: &NpcRef, returning: bool) -> f3
     if returning {
         return stance.ai_move_speed_sprint;
     }
-    if in_battle {
+    if running_in_combat {
         return stance.ai_move_speed_run.min(stance.max_speed);
     }
     stance.ai_move_speed_walk.min(stance.max_speed)

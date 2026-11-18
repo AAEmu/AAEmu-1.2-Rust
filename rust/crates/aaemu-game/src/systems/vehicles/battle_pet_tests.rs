@@ -143,6 +143,18 @@ fn pet_data() -> GameData {
         POTION_EFFECT,
     )];
     s.add_skill(potion);
+    d.items.templates.insert(
+        27_387,
+        ItemTemplate {
+            use_skill_id: 21_628,
+            use_skill_as_reagent: true,
+            ..ItemTemplate::plain(27_387, 1)
+        },
+    );
+    let mut alternate = pet_skill(21_628, false);
+    alternate.target_type = 10; // Pet
+    alternate.target_alive = true;
+    s.add_skill(alternate);
     d
 }
 
@@ -460,9 +472,7 @@ async fn real_wolfhound_health_regen_heals_and_basic_attack_hits() {
 
 /// Item 18649 "Pet Dual-Recovery Potion" cast through the real item -> skill -> effect chain
 /// heals the owner's summoned mate (value1/value2 = 20 % of the pools), mounted or not, and
-/// broadcasts the mate's `SCUnitPoints`. A cast aimed at the owner itself is a valid use of the
-/// skill but has no mate to heal: the effect does nothing (the skill is Friendly / Target, and
-/// only the mate carries the HealPet effect's target kind).
+/// broadcasts the mate's `SCUnitPoints`, including when the client sends the owner as target.
 #[tokio::test(start_paused = true)]
 async fn pet_dual_recovery_potion_heals_the_summoned_mate() {
     let mut case = 0u64;
@@ -522,15 +532,6 @@ async fn pet_dual_recovery_potion_heals_the_summoned_mate() {
                 let m = o.mate.data();
                 (m.unit.hp, m.unit.mp)
             };
-            if target_self {
-                assert_eq!((hp, mp), (500, 500), "{case}: the owner is not a mate");
-                assert!(
-                    !ops(&frames).contains(&sc::SCUnitPointsPacket),
-                    "{case}: no mate points packet: {:x?}",
-                    ops(&frames)
-                );
-                continue;
-            }
             assert_eq!((hp, mp), (700, 700), "{case}");
             let expected = crate::packets::world::SCUnitPointsPacket {
                 obj_id: o.mate.obj_id,
@@ -543,5 +544,43 @@ async fn pet_dual_recovery_potion_heals_the_summoned_mate() {
                 "{case}: the mate's SCUnitPoints carries the healed pools"
             );
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pet_dual_recovery_variants_revive_the_downed_pets() {
+    for (item, skill) in [(POTION_ITEM, POTION_SKILL), (27_387, 21_628)] {
+        let server = server_with(pet_data());
+        crate::systems::skills::bind(&server);
+        crate::systems::economy::bridges::install(&server);
+        let mut owner = owner_with_pet(&server, 1, 100.0, 101.0, 5);
+        server
+            .items
+            .add_container(crate::systems::economy::inventory::Inv::of(&owner.player).bag());
+        {
+            let mut mate = owner.mate.data();
+            mate.unit.hp = 0;
+            mate.unit.mp = 500;
+            mate.unit.max_hp = 1_000;
+            mate.unit.max_mp = 1_000;
+        }
+        let potion = give_item(&server, &owner.player, 0x7200, item);
+        owner.client.drain();
+        let packet = pet_cast(
+            SkillCaster::Item {
+                obj_id: owner.player.obj_id,
+                item_id: potion,
+                item_template_id: item,
+                type1: 0,
+                type2: 0,
+            },
+            skill,
+            SkillCastTarget::Unit(owner.player.obj_id),
+        );
+        let (result, _) = cast(&server, &mut owner, packet).await;
+        settle().await;
+        assert_eq!(result, None, "item {item}");
+        let mate = owner.mate.data();
+        assert_eq!((mate.unit.hp, mate.unit.mp), (200, 200), "item {item}");
     }
 }

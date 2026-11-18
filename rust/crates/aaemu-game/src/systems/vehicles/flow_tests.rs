@@ -1014,6 +1014,7 @@ fn dead_mate() -> DeadMate {
         },
     );
     let server = server_with(d);
+    crate::systems::skills::bind(&server);
     server
         .systems
         .economy
@@ -1050,6 +1051,19 @@ fn dead_mate() -> DeadMate {
         mate,
         stabler,
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dead_mate_is_dismissed_when_its_recovery_window_expires() {
+    let mut t = dead_mate();
+    t.client.drain();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    assert!(mates::first_active_mate(&t.server, &t.player).is_none());
+    assert!(t.client.drain_ops().contains(&sc::SCUnitsRemovedPacket));
+    assert_eq!(t.item().details.mate_dead, 1);
+    assert_eq!(t.row().hp, 0);
 }
 
 impl DeadMate {
@@ -1148,6 +1162,29 @@ async fn a_killed_mate_flags_its_item_once_and_cannot_be_summoned_until_revived(
 /// The summon item of a dead, still-summoned mate dismisses its corpse: the toggle runs before
 /// the corpse refusal, so the owner can always put the corpse away. The item stays flagged, and
 /// with no mate out the same item is still refused until a stablehand revive.
+#[tokio::test]
+async fn a_mate_summoned_facing_an_obstacle_uses_a_clear_spot() {
+    use crate::systems::ai::collision::flow_tests::{add_wall_boxes, enable_collision};
+    let server = server_with(data());
+    enable_collision(&server, 100.0);
+    add_wall_boxes(
+        &server,
+        &[(
+            9123,
+            aaemu_physics::math::Vec3::new(300.0, 303.0, 101.5),
+            1.4,
+        )],
+    );
+    let client = TestClient::new(&server, 1, 1);
+    let (player, item_id) = player_with_item(&server, &client, 1, PA, (300.0, 300.0), MATE_ITEM);
+    player.data().unit.transform.set_xyz(300.0, 300.0, 100.0);
+    mates::spawn_mount(&server, &player, item_id);
+    let mate = mates::first_active_mate(&server, &player).expect("clear spot beside the owner");
+    let t = mate.data().unit.transform;
+    assert!((t.x - 300.0).hypot(t.y - 303.0) >= 2.0);
+    assert!((t.z - 100.0).abs() < 0.001);
+}
+
 #[tokio::test]
 async fn a_dead_mates_summon_item_dismisses_its_corpse() {
     let mut t = dead_mate();

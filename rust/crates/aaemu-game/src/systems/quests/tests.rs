@@ -3725,6 +3725,29 @@ fn level_gated_start(d: &mut QuestData, id: u32, component_id: u32, level: u32) 
 }
 
 #[tokio::test]
+async fn a_repeat_hallowtide_start_answers_the_quest_dialog() {
+    const QUEST: u32 = 8_000_004;
+    let (server, _) = server_with(|d| {
+        d.add_template(quest(QUEST));
+        d.add_component(component(8_000_009, QUEST, kind::START));
+    });
+    let mut c = test_character(1, "Hallowtide", 100.0, 100.0);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        ctx.set_completed_quest_flag(QUEST, true);
+        ctx.answer_start_refusals = true;
+        assert!(!ctx.add_quest(QUEST, false, acceptor::NPC, 10857));
+        let mut expected = PacketStream::new();
+        expected
+            .write_u32(QUEST)
+            .write_u8(quest_error::INVALID_QUEST_STATUS);
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, expected.into_bytes())]
+        );
+    });
+}
+
+#[tokio::test]
 async fn start_quest_context_reports_the_failed_level_requirement() {
     let (server, _) = server_with(|d| level_gated_start(d, 300, 3001, 10));
     let mut client = TestClient::new(&server, 1, 1001);

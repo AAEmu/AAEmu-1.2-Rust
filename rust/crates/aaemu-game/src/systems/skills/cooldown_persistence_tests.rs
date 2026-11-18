@@ -37,8 +37,8 @@ use skills::handlers::{start_skill, CSStartSkillPacket};
 use skills::packets::SCCooldownsPacket;
 use skills::types::skill_result;
 
-/// The 1.2 `Recall` (`귀환`, `special_effects` 3132 -> `return_`) and `Escape` (`탈출`) skills.
-const RECALL: u32 = 14849;
+/// The 1.2 Memory Tome Recall and Escape skills.
+const RECALL: u32 = skills::skill::RECALL_SKILL;
 const ESCAPE: u32 = 20297;
 /// A long-cooldown consumable and a member of a shared cooldown group (144).
 const POTION: u32 = 11717;
@@ -61,7 +61,7 @@ const BATTLEFIELD_TAG: u32 = 145;
 fn data() -> GameData {
     let mut data = GameData::empty();
     for (id, tag, duration, timing_id, toggle_buff_id, plot_only, plot_id) in [
-        (RECALL, 0, 2_000, 1, 0, false, None),
+        (RECALL, 0, 1_800_000, 1, 0, false, None),
         (ESCAPE, 0, 1_800_000, 1, 0, false, None),
         (POTION, 0, 43_200_000, 1, 0, false, None),
         (TAGGED_POTION, TAG as i32, 60_000, 1, 0, false, None),
@@ -267,6 +267,30 @@ async fn timing_zero_skill_sends_the_server_cooldown_packet() {
 }
 
 #[tokio::test]
+async fn a_world_load_replaces_the_client_recall_timer_once() {
+    let (server, mut client, player, npc) = fixture(data());
+    cast(&server, &mut client, RECALL, npc.obj_id);
+    client.drain();
+    player.data().set_disabled_set_position(true);
+    crate::systems::instances::worlds::instance_loaded(&server, &player);
+    let frames = client.drain();
+    let ops: Vec<_> = frames.iter().map(|(op, _)| *op).collect();
+    assert!(ops
+        .windows(2)
+        .any(|pair| { pair == [sc::SCSkillCooldownResetPacket, sc::SCCooldownsPacket] }));
+    let ui = cooldown_packet(&frames).unwrap();
+    let [(skill_id, total_ms, remaining_ms)] = ui.skills.as_slice() else {
+        panic!("expected a single Recall timer");
+    };
+    assert_eq!(*skill_id, RECALL);
+    assert_eq!(*total_ms, 1_800_000);
+    assert!((1..=*total_ms).contains(remaining_ms));
+
+    crate::systems::instances::worlds::instance_loaded(&server, &player);
+    assert!(cooldown_packet(&client.drain()).is_none());
+}
+
+#[tokio::test]
 async fn relog_restores_recall_and_login_sync_and_admission_see_it() {
     let (server, mut client, player, npc) = fixture(data());
     cast(&server, &mut client, RECALL, npc.obj_id);
@@ -469,7 +493,7 @@ fn real_compact_recall_escape_and_consumables_are_untagged() {
     let db =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    for (id, cooldown) in [(RECALL, 2_000), (21_586, 2_000), (ESCAPE, 1_800_000)] {
+    for (id, cooldown) in [(RECALL, 1_800_000), (21_586, 2_000), (ESCAPE, 1_800_000)] {
         let row: (i64, Option<i64>) = db
             .query_row(
                 "SELECT cooldown_time, cooldown_tag_id FROM skills WHERE id = ?1",

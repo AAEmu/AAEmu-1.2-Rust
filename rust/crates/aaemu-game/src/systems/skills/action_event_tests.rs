@@ -987,7 +987,32 @@ async fn ambient_buff_effects_still_obey_zero_and_full_probability() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+async fn sight_aggro_without_damage_still_sends_combat_cleared() {
+    let (server, mut client, player, npc) = fixture(GameData::empty());
+    let player_obj = WorldObject::from(&player);
+    client.drain();
+    super::combat::add_unit_aggro(
+        &server,
+        &WorldObject::from(&npc),
+        AggroKind::Etc,
+        &player_obj,
+        1,
+    );
+    assert!(client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCombatFirstHitPacket));
+    assert!(player.data().unit.is_in_battle);
+    player.data().unit.last_combat_activity_ms =
+        now_ms() - super::relation::DEFAULT_COMBAT_TIMEOUT_MS - 1;
+    super::combat::combat_tick(&server, &player_obj);
+    assert!(!player.data().unit.is_in_battle);
+    assert!(client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCombatClearedPacket));
+}
+
+#[tokio::test(start_paused = true)]
 async fn escape_timeout_uses_the_owners_return_point_and_return_preserves_radians() {
     use aaemu_commons::PacketStream;
     struct Portals;
@@ -1006,16 +1031,43 @@ async fn escape_timeout_uses_the_owners_return_point_and_return_preserves_radian
             })
         }
     }
-    let (server, mut client, player, npc) = fixture(GameData::empty());
+    let mut data = GameData::empty();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: 4840,
+        duration: 30_000,
+        kind: 1,
+        ..BuffTemplate::default()
+    });
+    data.systems.skills.add_effect(
+        EffectKind::MoveToRezPointEffect,
+        EffectTemplate::MoveToRezPoint { id: 1 },
+        26270,
+    );
+    data.systems.skills.buff_triggers.insert(
+        4840,
+        vec![BuffTriggerTemplate {
+            id: 3075,
+            kind: BuffEventTriggerKind::Timeout as u16,
+            effect_on_source: true,
+            effect: (EffectKind::MoveToRezPointEffect, 1),
+            use_damage_amount: false,
+            use_original_source: false,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            synergy: false,
+        }],
+    );
+    let (server, mut client, player, _) = fixture(data);
     server.systems.skills.ext.npcs.install(Arc::new(Portals));
     let owner = WorldObject::from(&player);
-    super::effects::apply(
-        &server,
-        EffectKind::MoveToRezPointEffect,
-        &EffectTemplate::MoveToRezPoint { id: 1 },
-        &args(&WorldObject::from(&npc), &owner),
-        None,
-    );
+    execute(&server, 74, &args(&owner, &owner), [0; 4]);
+    assert!(player.data().unit.buffs.check_buff(4840));
+    assert!(!client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCharacterResurrectedPacket));
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
     let body = client
         .drain()
         .into_iter()

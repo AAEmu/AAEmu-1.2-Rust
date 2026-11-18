@@ -42,6 +42,9 @@ use super::{broadcast, unit_reqs};
 
 /// `SkillsEnum.DigUpTreasureChestMarkedOnMap`.
 pub const DIG_UP_TREASURE_SKILL: u32 = 18_349;
+pub(crate) const RECALL_SKILL: u32 = 10_594;
+pub(super) const PET_DUAL_RECOVERY: u32 = 15_220;
+pub(super) const PET_DUAL_RECOVERY_ALT: u32 = 21_628;
 
 /// The NPC a `KillNpcWithoutCorpseEffect` removes. A matching caster removes itself.
 /// Other casts select the nearest matching NPC within the effect radius, when it has one.
@@ -655,6 +658,21 @@ fn initial_target(
             if target_caster.is_unit_or_doodad() {
                 target = lookup(target_caster);
             }
+            if skill.id == PET_DUAL_RECOVERY && skill_caster.is_item() {
+                // The potion button can send the owner as the friendly target. Apply it to
+                // the summoned mate, or refuse before consuming the potion.
+                if target.as_ref().is_some_and(|t| t.same(caster)) {
+                    let mate = crate::systems::vehicles::mates::first_active_mate(
+                        server,
+                        caster.as_player()?,
+                    )?;
+                    target_caster.set_obj_id(mate.obj_id);
+                    target = Some(WorldObject::from(&mate));
+                }
+                if target.as_ref().and_then(WorldObject::as_mate).is_none() {
+                    return None;
+                }
+            }
             if let Some(t) = &target {
                 let r = relation_to(server, &caster_t, &Target::Obj(t.clone()));
                 if r != RelationState::Friendly && r != RelationState::Neutral {
@@ -749,6 +767,12 @@ fn initial_target(
             ) {
                 return Some(set_initial_target(server, caster, target_caster));
             }
+        }
+        Some(T::Pet) if caster.as_player().is_some() => {
+            let mate =
+                crate::systems::vehicles::mates::first_active_mate(server, caster.as_player()?)?;
+            target_caster.set_obj_id(mate.obj_id);
+            target = Some(WorldObject::from(&mate));
         }
         Some(T::Party | T::Raid | T::Line | T::Pet | T::SourcePos | T::CursorPos) => {}
         None => {

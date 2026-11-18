@@ -16,7 +16,7 @@ use sqlx::Row;
 use crate::models::container::slot_type;
 use crate::models::item::ItemClass;
 use crate::models::mate::{Mate, MatePassengerInfo};
-use crate::models::transform::Transform;
+use crate::models::transform::{PositionAndRotation, Transform};
 use crate::packets::world::SCUnitPointsPacket;
 use crate::packets::world_objects::{SCTargetChangedPacket, SCUnitAttachedPacket};
 use crate::server::GameServer;
@@ -155,18 +155,27 @@ impl MateManager {
         std::mem::replace(&mut a[idx].1, vec![mate.clone()])
     }
 
-    fn remove(&self, owner_id: u32, obj_id: u32) {
+    fn remove(&self, owner_id: u32, mate: &MateRef) -> bool {
         let mut a = self.active();
-        if let Some(i) = a.iter().position(|(o, _)| *o == owner_id) {
-            a[i].1.retain(|m| m.obj_id != obj_id);
-            if a[i].1.is_empty() {
-                a.remove(i);
-            }
+        let Some(i) = a.iter().position(|(o, _)| *o == owner_id) else {
+            return false;
+        };
+        let Some(index) = a[i].1.iter().position(|live| Arc::ptr_eq(live, mate)) else {
+            return false;
+        };
+        a[i].1.remove(index);
+        if a[i].1.is_empty() {
+            a.remove(i);
         }
+        true
     }
 
-    fn remove_key(&self, key: u32) {
-        self.active().retain(|(o, _)| *o != key);
+    fn take_active_mates(&self, owner_id: u32) -> Vec<MateRef> {
+        let mut active = self.active();
+        let Some(index) = active.iter().position(|(owner, _)| *owner == owner_id) else {
+            return Vec::new();
+        };
+        active.remove(index).1
     }
 }
 
@@ -661,8 +670,10 @@ pub fn remove_active_mate_and_despawn(server: &GameServer, owner: &PlayerRef, tl
     let Some(mate) = manager.get_active_mate_by_tl_id(tl_id) else {
         return;
     };
-    manager.remove(owner.data().id, mate.obj_id);
-    despawn_mate_ref(server, owner, &mate);
+    let owner_id = owner.data().id;
+    if manager.remove(owner_id, &mate) {
+        despawn_mate_ref(server, owner, &mate);
+    }
 }
 
 /// The live `mates` row fields a despawn copies before the spawn is deleted.
@@ -758,7 +769,7 @@ pub fn remove_and_despawn_all_active_owned_mates(
     character_id: u32,
 ) {
     let manager = server.systems.vehicles.mates.get(instance_id);
-    for mate in manager.get_active_mates(character_id) {
+    for mate in manager.take_active_mates(character_id) {
         // The character is still in the world on every call that has a live session (teleport,
         // portal, logout, disconnect, dungeon entry); the select-character cleanup runs after
         // the new entry exists. Its obj id may differ from the old mate's owner, so only the
@@ -769,7 +780,6 @@ pub fn remove_and_despawn_all_active_owned_mates(
             .filter(|p| p.obj_id == mate.data().owner_obj_id);
         despawn_owned_mate(server, character_id, owner.as_ref(), &mate);
     }
-    manager.remove_key(character_id);
 }
 
 /// `Blink`: `if (character.IsRiding)` every active mate of the character is unmounted from the
@@ -919,6 +929,55 @@ fn sync_summon_item(
     item
 }
 
+/// Find a spot within three metres of the owner that has a floor and space for the mate.
+fn mate_spawn_position(
+    server: &GameServer,
+    instance: u32,
+    owner: PositionAndRotation,
+    model: u32,
+    scale: f32,
+) -> Option<PositionAndRotation> {
+    use crate::systems::ai::collision::{
+        box_obstacles, box_overlaps_terrain, ground_height_probe, living, phys_world, query::mask,
+        walk::walk_blocked,
+    };
+
+    let from = [owner.x, owner.y, owner.z];
+    let has_collision = phys_world(server, instance).is_some();
+    let body = living::dimensions(&living::unit_params(server, model));
+    let scale = scale.max(0.1);
+    let radius = body.size_collider.x * scale;
+    let half_height = body.height_collider * scale;
+    for angle in [0.0f32, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0] {
+        let (sin, cos) = (owner.rot_z + angle.to_radians()).sin_cos();
+        let x = owner.x - 3.0 * sin;
+        let y = owner.y + 3.0 * cos;
+        let mut pos = PositionAndRotation { x, y, ..owner };
+        if !has_collision {
+            return Some(pos);
+        }
+        let Some(Some(z)) = ground_height_probe(server, instance, x, y, owner.z, 1.5, 2.0) else {
+            continue;
+        };
+        if walk_blocked(server, instance, from, [x, y, z]) == Some(true) {
+            continue;
+        }
+        // Leave a little clearance beneath the envelope so a walkable slope does not
+        // intersect the bottom of a rectangular approximation of the mate.
+        let center = [x, y, z + half_height + 0.3];
+        let half = [radius, radius, half_height];
+        if box_overlaps_terrain(server, instance, center, half, owner.rot_z) == Some(true)
+            || box_obstacles(server, instance, center, half, owner.rot_z, mask::SOLID)
+                .is_some_and(|hits| !hits.is_empty())
+        {
+            continue;
+        }
+        pos.z = z;
+        return Some(pos);
+    }
+    None
+}
+
 /// `owner.Mates.SpawnMount(skillItem)`.
 pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     let owner_id = owner.data().id;
@@ -976,8 +1035,26 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         super::error(owner, error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE);
         return;
     }
-    // A different mate's item replaces the current one (as the C# did, so the owner is unmounted
-    // before the new mate's position is taken from the owner's transform); continue to spawn it.
+    let (owner_faction, owner_world) = {
+        let c = owner.data();
+        (c.unit.faction_id, c.unit.transform)
+    };
+    let owner_pos = server
+        .world
+        .world(owner_world.instance_id)
+        .map(|w| w.world_pos_rot(&WorldObject::from(owner)))
+        .unwrap_or_else(|| owner_world.local());
+    let Some(spawn_pos) = mate_spawn_position(
+        server,
+        owner_world.instance_id,
+        owner_pos,
+        template.model_id,
+        template.scale,
+    ) else {
+        super::error(owner, super::error::MATE_CANNOT_SPAWN_NO_SPACE);
+        return;
+    };
+    // Check placement before replacing the current mate so a refused summon keeps it.
     for old in &active {
         let tl = u32::from(old.data().unit.tl_id);
         despawn_mate(server, owner, tl);
@@ -999,15 +1076,6 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     // `DetailLevel` stayed at 0; the client and `QuestActObjMateLevel` read the item. Keep it in
     // sync with the mate row that is actually used for the spawn.
     let item = sync_summon_item(server, owner, item, &db);
-    let (owner_faction, owner_world) = {
-        let c = owner.data();
-        (c.unit.faction_id, c.unit.transform)
-    };
-    let owner_pos = server
-        .world
-        .world(owner_world.instance_id)
-        .map(|w| w.world_pos_rot(&WorldObject::from(owner)))
-        .unwrap_or_else(|| owner_world.local());
     let mut m = Mate::new(db.id, template.id);
     m.unit.tl_id = tl_id as u16;
     m.unit.owner_id = owner_id;
@@ -1067,12 +1135,12 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         ..Default::default()
     };
     m.unit.transform.set_position(
-        owner_pos.x,
-        owner_pos.y,
-        owner_pos.z,
-        owner_pos.rot_x,
-        owner_pos.rot_y,
-        owner_pos.rot_z,
+        spawn_pos.x,
+        spawn_pos.y,
+        spawn_pos.z,
+        spawn_pos.rot_x,
+        spawn_pos.rot_y,
+        spawn_pos.rot_z,
     );
     m.skills = server.game_data.systems.vehicles.mate_skills(npc_id);
     // Equipment = ItemManager.GetItemContainerForCharacter(Owner.Id, EquipmentMate, mount, Id)
@@ -1113,10 +1181,6 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         let mut d = mate.data();
         d.unit.hp = d.unit.hp.min(d.unit.max_hp);
         d.unit.mp = d.unit.mp.min(d.unit.max_mp);
-        // Transform.Local.AddDistanceToFront(3f)
-        let rz = d.unit.transform.rot_z;
-        d.unit.transform.x += -3.0 * rz.sin();
-        d.unit.transform.y += 3.0 * rz.cos();
     }
     let update = Some(super::packets::item_update(&item));
     add_active_mate_and_spawn(server, owner, &mate, update);
@@ -1141,8 +1205,10 @@ pub fn despawn_mate(server: &GameServer, owner: &PlayerRef, tl_id: u32) {
     if mate.data().owner_obj_id != owner.obj_id {
         return;
     }
-    manager.remove(owner.data().id, mate.obj_id);
-    despawn_mate_ref(server, owner, &mate);
+    let owner_id = owner.data().id;
+    if manager.remove(owner_id, &mate) {
+        despawn_mate_ref(server, owner, &mate);
+    }
 }
 
 /// Marks the mate of the summon item `item_id` dead: the `mates` row loses its HP, the item gets
@@ -1198,27 +1264,44 @@ fn record_mate_death(
 /// `RepairPets` item task and `SCUnitPointsPacket` to the observers); the live mate is brought
 /// back at its current pools. Returns `false` when the mate is not dead.
 pub fn revive_mate(server: &GameServer, mate: &MateRef) -> bool {
-    let (item_id, owner_obj, level, exp, hp) = {
-        let d = mate.data();
+    revive_mate_with_recovery(server, mate, None)
+}
+
+/// Recover a downed mate with the potion's authored proportions of the two pools.
+pub fn revive_mate_with_recovery(
+    server: &GameServer,
+    mate: &MateRef,
+    percent: Option<[i32; 2]>,
+) -> bool {
+    let (item_id, owner_obj, level, exp, hp, mp) = {
+        let mut d = mate.data();
+        if !d.can_revive() {
+            return false;
+        }
+        d.corpse_deadline = None;
+        d.unit.death_processed = false;
+        let [hp_percent, mp_percent] = percent.unwrap_or([100, 100]);
+        let portion = |max: i32, percent: i32| {
+            (i64::from(max.max(0)) * i64::from(percent.clamp(0, 100)) / 100) as i32
+        };
+        d.unit.hp = portion(d.unit.max_hp, hp_percent).max(1);
+        d.unit.mp = portion(d.unit.max_mp, mp_percent);
         (
             d.item_id,
             d.owner_obj_id,
             d.unit.level,
             d.experience,
             d.unit.hp,
+            d.unit.mp,
         )
     };
-    if hp > 0 {
-        return false;
-    }
     let owner = server.world.character_by_obj_id(owner_obj);
     let owner_id = owner.as_ref().map_or(0, |o| o.data().id);
     let now = chrono::Utc::now().naive_utc();
     if owner_id != 0 {
         server.systems.vehicles.mates.character(owner_id, |cm| {
             if let Some(db) = cm.get_mut(item_id) {
-                db.hp = MATE_FULL_POOL;
-                db.mp = MATE_FULL_POOL;
+                (db.hp, db.mp) = percent.map_or((MATE_FULL_POOL, MATE_FULL_POOL), |_| (hp, mp));
                 db.updated_at = now;
             }
         });
@@ -1232,12 +1315,6 @@ pub fn revive_mate(server: &GameServer, mate: &MateRef) -> bool {
         Some(super::packets::item_update(i))
     })
     .flatten();
-    let (hp, mp) = {
-        let mut d = mate.data();
-        d.unit.hp = d.unit.max_hp.max(1);
-        d.unit.mp = d.unit.max_mp.max(0);
-        (d.unit.hp, d.unit.mp)
-    };
     if let (Some(owner), Some(task)) = (&owner, task) {
         owner.send(SCItemTaskSuccessPacket {
             action: crate::models::item_task::task_type::REPAIR_PETS,
@@ -1261,13 +1338,21 @@ pub fn revive_mate(server: &GameServer, mate: &MateRef) -> bool {
     true
 }
 
-/// The death of a mate (`Unit.DoDie` event point, see `vehicles::on_death_event`): the summon
-/// item is flagged dead and the owner is told ([`record_mate_death`] + `MATE_DEAD`). The corpse
-/// stays in the world until the owner dismisses it.
+/// Give the owner time to use the field revive before dismissing the corpse.
 pub fn on_death(server: &GameServer, mate: &MateRef) {
-    let (item_id, owner_obj, level, exp) = {
-        let d = mate.data();
-        (d.item_id, d.owner_obj_id, d.unit.level, d.experience)
+    const CORPSE_LIFETIME_MS: i64 = 30_000;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(CORPSE_LIFETIME_MS as u64);
+    let (item_id, owner_obj, level, exp, instance) = {
+        let mut d = mate.data();
+        d.corpse_deadline = Some(deadline);
+        (
+            d.item_id,
+            d.owner_obj_id,
+            d.unit.level,
+            d.experience,
+            d.unit.transform.instance_id,
+        )
     };
     let Some(owner) = server.world.character_by_obj_id(owner_obj) else {
         return;
@@ -1275,6 +1360,24 @@ pub fn on_death(server: &GameServer, mate: &MateRef) {
     if record_mate_death(server, &owner, item_id, level, exp) {
         super::error(&owner, error_message::MATE_DEAD);
     }
+    let mate = mate.clone();
+    crate::systems::skills::tasks::schedule(server, CORPSE_LIFETIME_MS, move |server| {
+        let expired = {
+            let d = mate.data();
+            !d.deleted && d.unit.is_dead() && d.corpse_deadline == Some(deadline)
+        };
+        let owner_id = owner.character_id;
+        if expired
+            && server
+                .systems
+                .vehicles
+                .mates
+                .get(instance)
+                .remove(owner_id, &mate)
+        {
+            despawn_owned_mate(&server, owner_id, Some(&owner), &mate);
+        }
+    });
 }
 
 /// `CSRepairPetItemsPacket` (the stablehand revive): every dead summon mate item in the bag and

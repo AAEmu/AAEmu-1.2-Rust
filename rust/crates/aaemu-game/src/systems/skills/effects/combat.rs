@@ -869,8 +869,9 @@ pub(super) fn damage_with_aoe(
     }
     let now = now_ms();
     let trg_alive = trg.with_unit(|u| u.unit().hp > 0).unwrap_or(false);
-    unit_combat::set_in_battle(server, &trg, trg_alive);
-    trg.with_unit(|u| u.unit_mut().last_combat_activity_ms = now);
+    if trg_alive {
+        unit_combat::mark_combat_activity(&trg, now);
+    }
     if let (Some(tp), Some(_)) = (trg.as_player(), caster.as_player()) {
         let mut c = tp.data();
         let hp = &mut c.skill_char.hostile_players;
@@ -879,10 +880,8 @@ pub(super) fn damage_with_aoe(
             None => hp.push((caster.obj_id(), now)),
         }
     }
-    if caster.is_unit() {
-        let was = caster.with_unit(|u| u.unit().is_in_battle).unwrap_or(false);
-        unit_combat::set_in_battle(server, &caster, was | trg_alive);
-        caster.with_unit(|u| u.unit_mut().last_combat_activity_ms = now);
+    if trg_alive || caster.with_unit(|u| u.unit().is_in_battle).unwrap_or(false) {
+        unit_combat::mark_combat_activity(&caster, now);
     }
     // Item procs of the hit (attacker kinds 1-8, victim kinds 9-16), before the combat buffs as
     // in `DamageEffect.Apply`; a proc skill's own damage is guarded by `procs::proc_casting`.
@@ -988,6 +987,22 @@ pub fn heal(
     args: &EffectArgs<'_>,
     packets: Option<&mut CompressedGamePackets>,
 ) {
+    // The second Pet Dual-Recovery Potion (item 27387) is wired to a generic
+    // Pet Heal effect in the compact data, but the item describes the same HP/MP recovery.
+    if matches!(
+        args.caster_caster,
+        SkillCaster::Item {
+            item_template_id: 27_387,
+            ..
+        }
+    ) && args
+        .source
+        .skill()
+        .is_some_and(|skill| skill.id == super::super::skill::PET_DUAL_RECOVERY_ALT)
+    {
+        super::special::heal_pet(server, args, [20, 20, 0, 0]);
+        return;
+    }
     let Some(trg) = args.target.as_obj().filter(|o| o.is_unit()).cloned() else {
         return;
     };

@@ -438,6 +438,30 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     // A load the server sent locks the position; a repeated `CSInstanceLoaded` finds it unlocked.
     let load_pending = p.data().disabled_set_position;
     p.data().set_disabled_set_position(false);
+    if load_pending {
+        // Recall fires before SCLoadInstance. Reconcile its action-bar timer once the
+        // client is back in the world, replacing any entry its skill-fired event kept.
+        let recall = crate::systems::skills::skill::RECALL_SKILL;
+        let mut cooldowns = crate::models::unit::UnitCooldowns::default();
+        if let Some(entry) = p.data().unit.cooldowns.cooldowns.get(&recall).copied() {
+            cooldowns.cooldowns.insert(recall, entry);
+        }
+        let packet = crate::systems::skills::packets::SCCooldownsPacket::from_cooldowns(
+            &cooldowns,
+            crate::world::now_ms(),
+        );
+        if !packet.is_empty() {
+            p.send(
+                crate::systems::skills::packets::SCSkillCooldownResetPacket {
+                    obj_id: p.obj_id,
+                    skill_id: recall,
+                    tag_id: 0,
+                    gcd: false,
+                },
+            );
+            p.send(packet);
+        }
+    }
     let instance_id = p.data().unit.transform.instance_id;
     if let Some(world) = server.world.world(instance_id) {
         let reloaded_in_place =
