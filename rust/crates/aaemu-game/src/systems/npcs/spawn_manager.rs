@@ -1367,6 +1367,59 @@ impl SpawnManager {
             inner.tower_group_entries.push(def.clone());
             return Ok(AddedSpawners::default());
         }
+        if def.placement_schedule_id != 0 {
+            let schedule_id = def.placement_schedule_id;
+            let schedule = data
+                .get_npc_spawner_template(schedule_id)
+                .filter(|t| {
+                    (t.start_time > 0.0 || t.end_time > 0.0)
+                        && t.npcs
+                            .iter()
+                            .any(|n| n.member_id == b.unit_id && n.member_type == "Npc")
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "invalid placement schedule {schedule_id} for NPC {}",
+                        b.unit_id
+                    )
+                })?;
+            if !ids.is_empty() {
+                return Err(format!(
+                    "placement schedule {schedule_id} also lists event spawners"
+                ));
+            }
+            // The area template describes the whole area. Each authored point gets its own
+            // NPC and only inherits the area's clock window.
+            let mut template = NpcSpawnerTemplate::with_member(schedule_id, b.unit_id);
+            template.start_time = schedule.start_time;
+            template.end_time = schedule.end_time;
+            template.destroy_time = schedule.destroy_time;
+            template.min_population = def.count;
+            template.max_population = def.count;
+            let template = Arc::new(template);
+            let spawner = NpcSpawner::new(
+                init(
+                    inner.next_id,
+                    schedule_id,
+                    vec![schedule_id],
+                    Some(template.clone()),
+                ),
+                new_shared(),
+            );
+            spawner.mark_placement();
+            spawner.initialize_spawnable_npcs(Some(template.as_ref()));
+            inner.next_id += 1;
+            let key = inner.next_id;
+            inner
+                .npc_spawners
+                .entry(key)
+                .or_insert_with(|| vec![Arc::new(spawner)]);
+            self.invalidate_activation_index();
+            return Ok(AddedSpawners {
+                added: 1,
+                ..AddedSpawners::default()
+            });
+        }
         if ids.is_empty() {
             let game_data_ids = data.get_spawner_ids(b.unit_id).unwrap_or_default();
             let mut spawners = Vec::new();

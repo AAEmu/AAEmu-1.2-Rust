@@ -173,6 +173,7 @@ fn npc_def(unit_id: u32, x: f32, y: f32) -> NpcSpawnerDef {
         base,
         count: 1,
         npc_spawner_ids: Vec::new(),
+        placement_schedule_id: 0,
     }
 }
 
@@ -630,6 +631,57 @@ async fn authored_game_clock_windows_still_gate_spawning_and_removal() {
         0,
         "the closed window keeps the slot empty"
     );
+}
+
+#[tokio::test]
+async fn placement_schedule_spawns_only_its_own_npc_in_the_matching_window() {
+    let server = test_server(data_with(
+        &[
+            SpawnerSpec {
+                id: 5014,
+                category: npc_spawner_category::NORMAL,
+                window: Some((7.0, 18.5)),
+                unit_id: 10074,
+            },
+            SpawnerSpec {
+                id: 5015,
+                category: npc_spawner_category::NORMAL,
+                window: Some((19.0, 6.5)),
+                unit_id: 1350,
+            },
+        ],
+        &[],
+    ));
+    let m = manager(&server);
+    for (unit, schedule) in [(10074, 5014), (1350, 5015)] {
+        let mut def = npc_def(unit, 100.0, 100.0);
+        def.placement_schedule_id = schedule;
+        assert_eq!(m.add_npc_spawner(&server, def), Ok(1));
+    }
+    player(&server, 1, 100.0, 100.0);
+    let day = clones(&m, 10074).pop().unwrap();
+    let night = clones(&m, 1350).pop().unwrap();
+    day.update(&server);
+    night.update(&server);
+    assert_eq!(day.current_spawn_count(), 1);
+    assert_eq!(night.current_spawn_count(), 0);
+
+    server.time.set(22.0);
+    day.update(&server);
+    night.update(&server);
+    spawn_manager::advance_test_clock(Duration::from_secs(1));
+    day.update(&server);
+    m.check_respawns_tick(&server);
+    assert_eq!(day.current_spawn_count(), 0);
+    assert_eq!(night.current_spawn_count(), 1);
+
+    server.time.set(9.0);
+    night.update(&server);
+    day.update(&server);
+    spawn_manager::advance_test_clock(Duration::from_secs(1));
+    m.check_respawns_tick(&server);
+    assert_eq!(day.current_spawn_count(), 1);
+    assert_eq!(night.current_spawn_count(), 0);
 }
 
 #[test]

@@ -1385,6 +1385,52 @@ fn single_act_quest(d: &mut QuestData, qid: u32, count: i32, k: ActKind) {
 }
 
 /// Starts `qid` and runs it to its Progress step.
+#[tokio::test]
+async fn let_it_done_with_only_an_auto_complete_reward_finishes_at_full_progress() {
+    let (server, _) = server_with(|d| {
+        let id = 4967;
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(id)
+        });
+        d.add_component(component(1, id, kind::START));
+        d.add_act(1, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(2, id, kind::PROGRESS));
+        d.add_act(
+            2,
+            2,
+            2,
+            2,
+            ActKind::ObjInteraction {
+                wi_id: 19,
+                doodad_id: 5892,
+                use_alias: false,
+                team_share: false,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+                alias_id: 0,
+                phase: 0,
+            },
+        );
+        d.add_component(component(3, id, kind::REWARD));
+        d.add_act(3, 3, 3, 0, ActKind::ConAutoComplete);
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        start(ctx, 4967);
+        let interact = QuestEvent::Interaction {
+            doodad_id: 5892,
+            source_player_id: 1,
+        };
+        ctx.dispatch(&interact).unwrap();
+        drain(ctx);
+        assert!(ctx.has_quest(4967));
+        ctx.dispatch(&interact).unwrap();
+        drain(ctx);
+        assert!(!ctx.has_quest(4967));
+    });
+}
+
 fn start(ctx: &mut Ctx<'_>, qid: u32) -> QuestHandle {
     assert!(ctx.add_quest(qid, false, 0, 0), "quest {qid} added");
     drain(ctx);

@@ -6921,6 +6921,18 @@ See Docs/wiki/Quest-Audit.md and Docs/wiki/Mail-Audit.md.
 
 ### Spawn data import (October 17, 2026)
 
+**Perinoor Ruins tester reports (2026-11-17).** The r208022 client markers in
+`npc_map/e_ruins_of_hariharalaya.dat` supply the floor elevations for the Imperial Senior
+Executioner (10316), Unknown Man (10459), Naima's Understudy Jung Min (10539), and the Palace
+Ruins bats, spirits, and three generals' lieutenants. Stonehew's recall point (387) arrives at
+Z 574.5, just above the measured floor. In the wolf area, `PlacementScheduleId` uses the
+clock window from compact spawners 5014 and 5015 while applying each JSON point's own unit and
+count. Closing a clock window queues immediate removal of its living members and preserves
+the corpse timers.
+
+**Free the Shimmering Skyfin (4967).** This `LetItBeDone` quest has no Ready step, and its
+Reward step explicitly auto-completes. The server advances it once the full objective is met.
+
 | Area | Rust / data | Status | Notes |
 | --- | --- | --- | --- |
 | Quest NPCs / doodads missing from every `*_spawns.json` | `app/Data/Worlds/{main_world,instance_library,instance_prologue,instance_nachashgar,instance_burntcastle_armory,arche_mall_world}`, `rust/tools/spawn_import/` | data | Positions from the 10.x pak (per-zone `npc_spawners.g`, per-cell `doodad.g`), the 1.2 `npc_spawner_npcs` rows and the git history of upstream spawn JSON. A position is imported only when it sits on the 1.2 heightmap (`|dz| <= 5 m`, ignored test `dump_terrain_heights`), next to an existing spawn of the same world (`<= 40 m`, `|dz| <= 8 m`: interiors, caves, bridges) or on clipped ground (heights are `u16 / 64`, so ground above 1024 m reads 1024) of a zone/frame verified by its other candidates. Editor-tier positions win over git-only ones. Imported: main_world 181 NPC / 58 doodad entries, instance_library 131 doodads, instance_prologue 8, instance_nachashgar 2, instance_burntcastle_armory 1, arche_mall_world 3 NPC / 1 doodad. Entries carry a `Title` naming the basis (the loader ignores it). |

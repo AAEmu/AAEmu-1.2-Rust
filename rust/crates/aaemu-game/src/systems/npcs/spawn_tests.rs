@@ -180,6 +180,7 @@ fn npc_def(unit_id: u32, x: f32, y: f32) -> NpcSpawnerDef {
         base,
         count: 1,
         npc_spawner_ids: Vec::new(),
+        placement_schedule_id: 0,
     }
 }
 

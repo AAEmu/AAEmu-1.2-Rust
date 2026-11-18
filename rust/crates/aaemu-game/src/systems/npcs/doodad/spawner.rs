@@ -114,6 +114,8 @@ pub struct NpcSpawnerDef {
     pub count: u32,
     /// `NpcSpawnerIds` (event spawners list their spawner template ids here).
     pub npc_spawner_ids: Vec<u32>,
+    /// A scheduled area spawner whose clock window applies to this individual placement.
+    pub placement_schedule_id: u32,
 }
 
 impl NpcSpawnerDef {
@@ -122,6 +124,7 @@ impl NpcSpawnerDef {
             base: parse_spawner_base(obj)?,
             count: json::u32_or(obj, "Count", 1)?,
             npc_spawner_ids: json::u32_list(obj, "NpcSpawnerIds")?,
+            placement_schedule_id: json::u32_or(obj, "PlacementScheduleId", 0)?,
         })
     }
 }

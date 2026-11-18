@@ -1119,6 +1119,7 @@ pub fn add_runtime_npc_spawner(
                 },
                 count: 1,
                 npc_spawner_ids: Vec::new(),
+                placement_schedule_id: 0,
             },
         )
         .map_err(anyhow::Error::msg)?;

@@ -522,17 +522,22 @@ impl<'a> Ctx<'a> {
         };
         let mut res = self.run_components(h, si);
 
-        // HackFix: added to account for missing Ready step on Quests that use a Score + LetItBeDone
+        // A LetItBeDone quest normally waits for a report. When it has no Ready step, an
+        // authored auto-complete reward (e.g. Free the Shimmering Skyfin) also accepts full
+        // objective progress. Leave partial progress available for a manual early turn-in.
         let data = self.data;
         if let Some(q) = self.quest(h) {
             if let Some(t) = data.template(q.template_id) {
-                if q.step == kind::PROGRESS
-                    && t.score > 0
-                    && t.let_it_done
-                    && self.objective_percent(h) >= 1.0
-                    && q.step_index(kind::READY).is_none()
+                if q.step == kind::PROGRESS && t.let_it_done && q.step_index(kind::READY).is_none()
                 {
-                    res = true;
+                    let auto_complete = t
+                        .components_of(&data.components, kind::REWARD)
+                        .iter()
+                        .flat_map(|c| &c.acts)
+                        .any(|&a| matches!(data.acts[a].kind, ActKind::ConAutoComplete));
+                    res |= (t.score > 0 && self.objective_percent(h) >= 1.0)
+                        || (auto_complete
+                            && self.objective_status(h) >= ObjectiveStatus::QuestComplete);
                 }
             }
         }
