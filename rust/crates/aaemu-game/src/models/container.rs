@@ -285,7 +285,7 @@ impl ItemContainer {
             let highest = self.items.iter().map(|i| i.slot).max().unwrap_or(-1) + 1;
             return preferred.max(highest);
         }
-        if preferred >= 0 && self.get_item_by_slot(preferred).is_none() {
+        if (0..self.size).contains(&preferred) && self.get_item_by_slot(preferred).is_none() {
             return preferred;
         }
         // Every occupied slot counts, including `preferred`: leaving it out let the scan
@@ -495,6 +495,12 @@ impl ItemContainer {
     /// The placement decision of `AddOrMoveExistingItem` (slot choice + `CanAccept`):
     /// `(newSlot, canAddToSameSlot)`.
     pub fn place(&self, item: &Item, preferred_slot: i32, data: &ItemData) -> Option<(i32, bool)> {
+        let preferred_slot =
+            if !self.is_equipment() && self.size >= 0 && preferred_slot >= self.size {
+                -1
+            } else {
+                preferred_slot
+            };
         let template = data.template(item.template_id);
         let mut new_slot = -1;
         let mut can_add_to_same_slot = false;
@@ -1420,8 +1426,14 @@ mod unused_slot_tests {
         );
         bag.items.push(item(11, 1, &d));
         assert_eq!(bag.get_unused_slot(0), 2, "the lowest free slot is chosen");
+        assert_eq!(
+            bag.get_unused_slot(3),
+            2,
+            "ignore an out-of-range preference"
+        );
         bag.items.push(item(12, 2, &d));
         assert_eq!(bag.get_unused_slot(0), -1, "a full container has no slot");
         assert_eq!(bag.get_unused_slot(1), -1, "still full");
+        assert_eq!(bag.get_unused_slot(3), -1, "never return an invisible slot");
     }
 }

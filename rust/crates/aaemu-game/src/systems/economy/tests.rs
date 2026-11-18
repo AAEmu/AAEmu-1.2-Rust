@@ -999,6 +999,71 @@ async fn split_merge_and_move_in_bag() {
     assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
 }
 
+#[tokio::test]
+async fn rejected_split_reports_invalid_slot() {
+    let mut w = world();
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 10, 0);
+    w.a.drain();
+    let mut request = move_body(id, 0, 2, 1, 2, 2);
+    request.write_i32(4);
+    run::<CSSplitBagItemPacket>(&mut w, 0, request.as_bytes());
+    assert_eq!(item_at(&w.pa, 2, 0).unwrap().count, 10);
+    assert!(item_at(&w.pa, 2, 2).is_none());
+    assert_eq!(w.a.drain_ops(), vec![sc::SCErrorMsgPacket]);
+
+    // A persisted stack can outlive its item template. Failure to create the new
+    // stack must leave the old stack intact.
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .template_id = u32::MAX;
+    let mut request = move_body(id, 0, 2, 0, 2, 2);
+    request.write_i32(4);
+    run::<CSSplitBagItemPacket>(&mut w, 0, request.as_bytes());
+    assert_eq!(item_at(&w.pa, 2, 0).unwrap().count, 10);
+    assert!(item_at(&w.pa, 2, 2).is_none());
+    assert_eq!(w.a.drain_ops(), vec![sc::SCErrorMsgPacket]);
+}
+
+#[tokio::test]
+async fn stale_empty_destination_swap_reports_both_items() {
+    let mut w = world();
+    let first = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 1, 0);
+    let second = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 1, 1);
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(second)
+        .unwrap()
+        .grade = 1;
+    w.a.drain();
+    let request = move_body(first, 0, 2, 0, 2, 1);
+    run::<CSSwapItemsPacket>(&mut w, 0, request.as_bytes());
+    assert_eq!(item_at(&w.pa, 2, 0).unwrap().id, second);
+    assert_eq!(item_at(&w.pa, 2, 1).unwrap().id, first);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::SWAP_ITEMS,
+                vec![ItemTask::ItemMove {
+                    from_slot_type: 2,
+                    from_slot: 0,
+                    from_item_id: first,
+                    to_slot_type: 2,
+                    to_slot: 1,
+                    to_item_id: second,
+                }],
+            ),
+        )],
+    );
+}
+
 #[test]
 fn merging_from_another_container_releases_the_stack() {
     let game = test_data();
