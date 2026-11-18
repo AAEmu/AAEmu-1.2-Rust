@@ -1199,7 +1199,10 @@ const FIREPLACE_FUNC: u32 = 900;
 fn fireplace_data() -> GameData {
     use super::data::effects::SpecialEffect;
     use super::data::{EffectKind, EffectTemplate, SkillTemplate};
-    use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncUse, FuncTemplate};
+    use crate::systems::npcs::doodad::templates::{
+        doodad_func_group_kind, DoodadFunc, DoodadFuncGroups, DoodadFuncUse, DoodadTemplate,
+        FuncTemplate,
+    };
 
     let mut d = mate_cast_data();
     d.skills.add_client_sourced_skill(FIREPLACE_SKILL);
@@ -1233,7 +1236,8 @@ fn fireplace_data() -> GameData {
             EffectKind::InteractionEffect,
             EffectTemplate::Interaction {
                 id: 701,
-                world_interaction: 0,
+                world_interaction:
+                    crate::systems::npcs::doodad::interactions::world_interaction_type::USE as i32,
                 doodad_id: 0,
             },
             701,
@@ -1260,6 +1264,19 @@ fn fireplace_data() -> GameData {
         s.add_skill(skill);
     }
     let doodad_data = &mut d.systems.npcs.doodad;
+    doodad_data.templates.insert(
+        FIREPLACE_DOODAD,
+        DoodadTemplate {
+            id: FIREPLACE_DOODAD,
+            func_groups: vec![DoodadFuncGroups {
+                id: FIREPLACE_GROUP,
+                almighty: FIREPLACE_DOODAD,
+                group_kind_id: doodad_func_group_kind::NORMAL,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
     doodad_data.funcs_by_groups.insert(
         FIREPLACE_GROUP,
         vec![DoodadFunc {
@@ -1372,7 +1389,13 @@ async fn fireplace_save_portal_requires_its_doodad_and_memory_ink() {
             assert!(portals.is_empty(), "no ink must not save");
             assert_eq!(Inv::of(&a).items_count(MEMORY_INK, -1), 0);
         }
-        let _ = doodad;
+        assert!(server
+            .world
+            .world(0)
+            .unwrap()
+            .object(doodad.obj_id)
+            .is_some());
+        assert_eq!(doodad.data().func_group_id, FIREPLACE_GROUP);
     }
 }
 

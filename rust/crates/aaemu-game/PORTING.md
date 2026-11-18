@@ -7610,6 +7610,7 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   Ink, and 16387 pays an effect-level Memory Ink taken atomically by the effect and only when
   the cast targets a real fireplace doodad in range with its `DoodadFuncUse`. Skill 16387 applies
   the save effect to the caster, so its validation uses the original doodad cast target.
+  The fireplace stays lit after its terminal Use row so it can be used again.
   Neither the C# `PortalManager` / `CharacterPortals` nor the 1.2 data impose a portal-book
   cap. The client UI pages the list by `COUNT_PER_PAGE`.
 - **Vehicle bar caster.** A `Mount` caster must be a mate the player may use or a slave the
