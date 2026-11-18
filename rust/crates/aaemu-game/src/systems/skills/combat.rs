@@ -55,6 +55,17 @@ pub fn set_in_battle(server: &GameServer, obj: &WorldObject, value: bool) {
     }
 }
 
+/// Refreshes the timeout for a unit that the client sees enter combat.
+pub(super) fn mark_combat_activity(unit: &WorldObject, now: i64) {
+    unit.with_unit(|u| {
+        let u = u.unit_mut();
+        if !u.is_dead() {
+            u.is_in_battle = true;
+            u.last_combat_activity_ms = now;
+        }
+    });
+}
+
 /// `Character.ReduceCurrentHp` / `Unit.ReduceCurrentHp(attacker, value, killReason)`.
 ///
 /// Rust-only bounds: damage never heals. The C# applied `Hp = Max(Hp - value, 0)` to any value,
@@ -1471,6 +1482,14 @@ fn add_aggro_amounts(
                     .engage_combat_quest(server, p, quest, n.obj_id);
             }
         }
+        // The first-hit packet puts both player participants in combat on the client,
+        // even for sight aggro or a call for help that deals no damage.
+        let now = now_ms();
+        for participant in [owner, unit] {
+            if participant.as_player().is_some() {
+                mark_combat_activity(participant, now);
+            }
+        }
         send_to_players(
             server,
             &[owner.clone(), unit.clone()],
@@ -2022,13 +2041,26 @@ pub fn combat_tick(server: &GameServer, unit: &WorldObject) {
     let now = now_ms();
     let leave = unit
         .with_unit(|u| {
-            let u = u.unit();
-            u.is_in_battle
+            let u = u.unit_mut();
+            if u.is_in_battle
                 && u.last_combat_activity_ms + super::relation::DEFAULT_COMBAT_TIMEOUT_MS < now
+            {
+                u.is_in_battle = false;
+                true
+            } else {
+                false
+            }
         })
         .unwrap_or(false);
     if leave {
-        set_in_battle(server, unit, false);
+        broadcast(
+            server,
+            unit,
+            &SCCombatClearedPacket {
+                obj_id: unit.obj_id(),
+            },
+            true,
+        );
     }
     if let Some(p) = unit.as_player() {
         let mut c = p.data();

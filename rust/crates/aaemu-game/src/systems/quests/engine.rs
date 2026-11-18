@@ -1855,6 +1855,12 @@ impl<'a> Ctx<'a> {
             match refusal {
                 StartRefusal::Active => {
                     self.log_refusal("AddQuest", quest_id, "the quest is already active");
+                    if self.answer_start_refusals {
+                        self.send(SCQuestContextFailedPacket {
+                            quest_id,
+                            err: quest_error::ALREADY_HAVE,
+                        });
+                    }
                 }
                 StartRefusal::UnknownQuest => {
                     tracing::error!("Failed to start new Quest {quest_id}, invalid Id");
@@ -1900,7 +1906,14 @@ impl<'a> Ctx<'a> {
                 }
                 StartRefusal::Completed => {
                     self.log_refusal("AddQuest", quest_id, "already completed and not repeatable");
-                    self.send_error(error_msg::QUEST_DAILY_LIMIT);
+                    if self.answer_start_refusals {
+                        self.send(SCQuestContextFailedPacket {
+                            quest_id,
+                            err: quest_error::INVALID_QUEST_STATUS,
+                        });
+                    } else {
+                        self.send_error(error_msg::QUEST_DAILY_LIMIT);
+                    }
                 }
             }
             return false;

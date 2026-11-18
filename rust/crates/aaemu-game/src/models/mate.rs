@@ -37,11 +37,21 @@ pub struct Mate {
     pub mate_kind_id: i32,
     /// `MateXpUpdateTask` (generation of the pending task, 0 = none).
     pub xp_task: u64,
+    /// Expiry of the current corpse's recovery window, or none while alive.
+    pub corpse_deadline: Option<tokio::time::Instant>,
     /// `SusManager` / despawn bookkeeping: the mate was deleted (`Delete()` ran).
     pub deleted: bool,
 }
 
 impl Mate {
+    pub fn can_revive(&self) -> bool {
+        self.unit.is_dead()
+            && !self.deleted
+            && self
+                .corpse_deadline
+                .is_none_or(|deadline| tokio::time::Instant::now() < deadline)
+    }
+
     pub fn new(id: u32, template_id: u32) -> Self {
         Self {
             unit: UnitBase {
@@ -60,6 +70,7 @@ impl Mate {
             equipment: vec![None; UNIT_EQUIPMENT_SLOTS],
             mate_kind_id: 0,
             xp_task: 0,
+            corpse_deadline: None,
             deleted: false,
         }
     }

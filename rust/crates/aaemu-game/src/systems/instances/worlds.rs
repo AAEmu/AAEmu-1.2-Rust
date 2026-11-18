@@ -438,6 +438,9 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     // A load the server sent locks the position; a repeated `CSInstanceLoaded` finds it unlocked.
     let load_pending = p.data().disabled_set_position;
     p.data().set_disabled_set_position(false);
+    if load_pending {
+        crate::systems::skills::skill::send_recall_cooldown(p);
+    }
     let instance_id = p.data().unit.transform.instance_id;
     if let Some(world) = server.world.world(instance_id) {
         let reloaded_in_place =

@@ -18,6 +18,7 @@ pub mod items;
 pub mod misc;
 pub mod movement;
 mod unit_actions;
+pub(super) use unit_actions::heal_pet;
 
 use crate::server::GameServer;
 
@@ -345,7 +346,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         68 => items::apply_reagents(s, a, v),
         69 => misc::sextant_pos(s, a, v),
         73 => movement::move_to_ground(s, a, v),
-        74 => movement::escape(s, a, v),
+        74 => movement::begin_escape(s, a),
         75 => misc::report_bot(s, a, v),
         79 => items::fishing_loot(s, a, v),
         81 => combat::finish_channeling(s, a, v),

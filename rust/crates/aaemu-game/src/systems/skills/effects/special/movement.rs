@@ -442,23 +442,33 @@ pub fn move_to_ground(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     }
 }
 
-/// `Escape`: a character is "resurrected" (`SCCharacterResurrectedPacket`) at the instance's
-/// spawn position or, in the main world, at the closest return point.
-///
-pub fn escape(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
-    let Some(caster) = &args.caster else {
+/// Escape's 1.2 buff lasts 30 seconds and runs MoveToRezPoint on natural expiry.
+pub fn begin_escape(server: &GameServer, args: &EffectArgs<'_>) {
+    let Some(caster) = args.caster.as_ref().filter(|u| u.as_player().is_some()) else {
+        return;
+    };
+    let Some(template) = server.game_data.systems.skills.buff(4840) else {
+        tracing::warn!("Escape: the waiting buff 4840 is missing");
+        return;
+    };
+    crate::systems::skills::buffs::apply_template(
+        server,
+        template,
+        Some(caster),
+        &args.caster_caster,
+        caster,
+        None,
+    );
+}
+
+/// Moves the owner of the expired Escape buff to the instance spawn or the nearest shrine.
+pub fn move_to_rez_point(server: &GameServer, args: &EffectArgs<'_>) {
+    let Some(caster) = args.target.as_obj() else {
         return;
     };
     let Some(p) = caster.as_player() else {
         return;
     };
-    tracing::debug!(
-        "Special effects: Escape value1 {}, value2 {}, value3 {}, value4 {}",
-        v[0],
-        v[1],
-        v[2],
-        v[3]
-    );
     let instance_id = p.data().unit.transform.instance_id;
     let (zone_hint, x, y, z, z_rot) = if DEFAULT_INSTANCE_ID != instance_id {
         let Some(w) = world_of(server, caster) else {
@@ -508,16 +518,6 @@ pub fn escape(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             ..Default::default()
         },
     );
-}
-
-/// The Escape buff4840 Timeout trigger moves its owner to the closest resurrection point.
-pub fn move_to_rez_point(server: &GameServer, args: &EffectArgs<'_>) {
-    let Some(target) = args.target.as_obj().filter(|u| u.as_player().is_some()) else {
-        return;
-    };
-    let mut args = args.clone();
-    args.caster = Some(target.clone());
-    escape(server, &args, [0; 4]);
 }
 
 /// `PortalManager.GetRecallById(returnPointId)`.

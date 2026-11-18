@@ -122,6 +122,7 @@ impl Marshal for SCQuestContextResetPacket {
 /// codes: `FUN_3937a2d0` sends 2 when the quest is invalid and 0x14 after its can-interact
 /// check fails.
 pub mod quest_error {
+    pub const ALREADY_HAVE: u8 = 1;
     pub const INVALID_QUEST: u8 = 2;
     pub const INVALID_NPC_OR_QUEST: u8 = 7;
     pub const INVALID_QUEST_STATUS: u8 = 12;
