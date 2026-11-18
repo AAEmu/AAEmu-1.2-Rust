@@ -784,6 +784,8 @@ pub mod tags {
     pub const NO_FIGHT: u32 = 345;
     /// `BuffConstants.TagWanted`.
     pub const WANTED: u32 = 894;
+    /// Sport-fishing reel response skills (the only skills the hooked fish buffs accept).
+    pub const SPORT_FISHING: u32 = 1024;
 }
 
 /// `SkillResult` (1.2 numbering, `SkillResult.cs`).
