@@ -438,13 +438,17 @@ On this machine run these inside your lane (see "Sessions work in lanes"): focus
 checks while working, the full `cargo xtask ci` once through `Scripts/lane.sh check`.
 
 - Toolchain: stable Rust via rustup.
-- Filter example: `cargo test -p aaemu-game unit_state` (substring of the test path).
-- Build speed (measured, Windows): the crate `aaemu-game` is the critical path of every build. In the
-  edit loop prefer `cargo check -p aaemu-game --lib` (~20 s) and `cargo test -p aaemu-game --lib <filter>`
-  (~50 s) to the filter example above, which builds every target of the package (~4 min). `-p aaemu-game`
-  and `--workspace` are separate dependency variants: the first use of each in a lane costs an extra
-  full build. Numbers, the Windows Defender cost and proposed repository changes:
-  [`Docs/build-performance.md`](Docs/build-performance.md).
+- For game-server edits, run `cargo check --locked -p aaemu-game --bin aaemu-game` for compiler
+  feedback. For a playable build, run `cargo build --locked --profile live -p aaemu-game --bin aaemu-game`.
+  On one Windows machine a warm check took 14 s and a warm `live` rebuild took 44 s, compared with
+  199 s for Release. Use Release for production builds.
+- For a unit test, select its target with `cargo test --locked -p aaemu-game --lib unit_state`.
+  For an integration test, select the target with `--test <name>`. A test-name filter alone still
+  builds the package's other test targets.
+- Keep the lane's target directory warm. Package and workspace builds can resolve different
+  dependency features. Use a consistent package selection and profile for repeated playtest builds.
+  See [the build performance guide](Docs/build-performance.md#warm-game-server-builds-on-windows)
+  for timings and how to reproduce them.
 - Unit tests live in `#[cfg(test)]` modules / `*_tests.rs` next to the code; integration tests in each crate's `tests/`.
 - Game flow tests run whole packet flows without MySQL (`test_support::test_server()`, `TestClient`); see `object_flow_tests.rs`, `world_flow_tests.rs`.
 - Tests needing real data are `#[ignore]`d and gated by env vars: `AAEMU_COMPACT_DB=rust/crates/aaemu-game/app/Data/compact.sqlite3 cargo test -p aaemu-game -- --ignored`; MySQL tests by `AAEMU_TEST_MYSQL`. CI does not run them — run them locally when touching that code.
