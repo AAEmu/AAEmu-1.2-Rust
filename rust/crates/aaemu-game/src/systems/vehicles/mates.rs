@@ -470,39 +470,17 @@ pub fn unmount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, poin
     {
         return;
     }
-    unmount_mate_by(server, Some(instance), tl_id, point, reason);
+    unmount_mate_ref(server, &mate, point, reason);
 }
 
-/// `UnMountMate` in the instance of `instance_id` (or the mate found in any instance).
-fn unmount_mate_by(
-    server: &GameServer,
-    instance_id: Option<u32>,
-    tl_id: u32,
-    point: u8,
-    reason: u8,
-) {
-    let mate = match instance_id {
-        Some(i) => server
-            .systems
-            .vehicles
-            .mates
-            .get(i)
-            .get_active_mate_by_tl_id(tl_id),
-        None => server
-            .systems
-            .vehicles
-            .mates
-            .all()
-            .into_iter()
-            .find_map(|m| m.get_active_mate_by_tl_id(tl_id)),
-    };
-    let Some(mate) = mate else {
-        return;
-    };
-    stop_update_xp(&mate);
-    let target_id = {
+/// Releases a seat while the mate's world transform is still available. A despawn may
+/// already have removed the mate from the active list.
+fn unmount_mate_ref(server: &GameServer, mate: &MateRef, point: u8, reason: u8) {
+    stop_update_xp(mate);
+    let (target_id, tl_id) = {
         let mut d = mate.data();
-        match d.passenger_mut(point) {
+        let tl_id = d.unit.tl_id;
+        let target_id = match d.passenger_mut(point) {
             Some(seat) if seat.obj_id != 0 => {
                 let id = seat.obj_id;
                 seat.obj_id = 0;
@@ -510,7 +488,8 @@ fn unmount_mate_by(
                 Some(id)
             }
             _ => None,
-        }
+        };
+        (target_id, tl_id)
     };
     let target = target_id.and_then(|id| server.world.character_by_obj_id(id));
     let Some(target) = target else {
@@ -525,7 +504,7 @@ fn unmount_mate_by(
         .services
         .sus
         .reset_analyze_mount_delta_movement(mate_id);
-    let mate_obj = WorldObject::from(&mate);
+    let mate_obj = WorldObject::from(mate);
     let t = WorldObject::from(&target);
     let mate_world = world_of(server, &mate_obj);
     let mate_pos = mate_world
@@ -736,7 +715,6 @@ fn save_mate_live_state(server: &GameServer, owner_id: u32, mate: &MateRef) -> M
 fn despawn_owned_mate(
     server: &GameServer,
     owner_id: u32,
-    instance_id: u32,
     owner: Option<&PlayerRef>,
     mate: &MateRef,
 ) {
@@ -746,16 +724,10 @@ fn despawn_owned_mate(
             record_mate_death(server, owner, saved.item_id, saved.level, saved.experience);
         }
     }
-    let tl_id = u32::from(mate.data().unit.tl_id);
+    let tl_id = mate.data().unit.tl_id;
     let passengers = mate.data().passengers.clone();
     for (point, _) in &passengers {
-        unmount_mate_by(
-            server,
-            Some(instance_id),
-            tl_id,
-            *point,
-            attach_reason::SLAVE_BINDING,
-        );
+        unmount_mate_ref(server, mate, *point, attach_reason::SLAVE_BINDING);
     }
     delete_mate(server, mate);
     tracing::debug!(
@@ -772,11 +744,8 @@ fn despawn_mate_ref(server: &GameServer, owner: &PlayerRef, mate: &MateRef) {
     }
     // Copy the owner fields before the despawn: a `owner.data()` guard in argument position
     // would live until the end of the call and `world.delete` re-locks the same player data.
-    let (owner_id, instance) = {
-        let c = owner.data();
-        (c.id, c.unit.transform.instance_id)
-    };
-    despawn_owned_mate(server, owner_id, instance, Some(owner), mate);
+    let owner_id = owner.data().id;
+    despawn_owned_mate(server, owner_id, Some(owner), mate);
 }
 
 /// `RemoveAndDespawnAllActiveOwnedMates(character)` of one instance. The active list is keyed by
@@ -798,7 +767,7 @@ pub fn remove_and_despawn_all_active_owned_mates(
             .world
             .character_by_id(character_id)
             .filter(|p| p.obj_id == mate.data().owner_obj_id);
-        despawn_owned_mate(server, character_id, instance_id, owner.as_ref(), &mate);
+        despawn_owned_mate(server, character_id, owner.as_ref(), &mate);
     }
     manager.remove_key(character_id);
 }
@@ -1576,14 +1545,9 @@ pub fn stop_update_xp(mate: &MateRef) {
 /// `Mate.RegenTick(delta)`.
 pub fn regen_tick(server: &GameServer, mate: &MateRef) {
     let obj = WorldObject::from(mate);
-    let (needs, dead, tl, passengers) = {
+    let (needs, dead, passengers) = {
         let d = mate.data();
-        (
-            d.unit.needs_regen(),
-            d.unit.is_dead(),
-            u32::from(d.unit.tl_id),
-            d.passengers.clone(),
-        )
+        (d.unit.needs_regen(), d.unit.is_dead(), d.passengers.clone())
     };
     if !needs {
         return;
@@ -1591,7 +1555,7 @@ pub fn regen_tick(server: &GameServer, mate: &MateRef) {
     if dead {
         for (point, info) in passengers.iter().rev() {
             if server.world.character_by_obj_id(info.obj_id).is_some() {
-                unmount_mate_by(server, None, tl, *point, attach_reason::NONE);
+                unmount_mate_ref(server, mate, *point, attach_reason::NONE);
             }
         }
         return;
@@ -1637,9 +1601,9 @@ pub fn regen_tick(server: &GameServer, mate: &MateRef) {
 pub fn do_fall_damage(server: &GameServer, mate: &MateRef, fall_vel: u16) -> i32 {
     let obj = WorldObject::from(mate);
     let dmg = crate::systems::skills::combat::do_fall_damage(server, &obj, fall_vel);
-    let (hp, tl, riders) = {
+    let (hp, riders) = {
         let d = mate.data();
-        (d.unit.hp, u32::from(d.unit.tl_id), d.passengers.clone())
+        (d.unit.hp, d.passengers.clone())
     };
     if hp <= 0 {
         for (point, info) in riders.iter().rev() {
@@ -1652,14 +1616,7 @@ pub fn do_fall_damage(server: &GameServer, mate: &MateRef, fall_vel: u16) -> i32
                 fall_vel,
             );
             if rider.data().unit.hp <= 0 {
-                let instance = rider.data().unit.transform.instance_id;
-                unmount_mate_by(
-                    server,
-                    Some(instance),
-                    tl,
-                    *point,
-                    attach_reason::SLAVE_BINDING,
-                );
+                unmount_mate_ref(server, mate, *point, attach_reason::SLAVE_BINDING);
             }
         }
     }

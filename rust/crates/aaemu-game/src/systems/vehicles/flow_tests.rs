@@ -4944,6 +4944,84 @@ async fn kill_exp_death_despawn_and_force_dismount() {
 }
 
 #[tokio::test]
+async fn fatal_mounted_fall_preserves_the_riders_world_position_and_region() {
+    use crate::data::world_data::{Portal, Zone};
+    use crate::models::movement::{MoveTypeActorFlags, UnitMove};
+    use crate::systems::skills::resurrect::resurrect_character;
+
+    let mut game_data = data();
+    game_data.zones.zones.insert(TEST_ZONE, Zone::default());
+    game_data.systems.npcs.portal.respawns.portals = vec![
+        Portal {
+            id: 1,
+            x: 30.0,
+            y: 30.0,
+            z: 100.0,
+            ..Default::default()
+        },
+        Portal {
+            id: 2,
+            x: 305.0,
+            y: 245.0,
+            z: 41.0,
+            ..Default::default()
+        },
+    ];
+    let server = server_with(game_data);
+    let mut rider = TestClient::new(&server, 1, 1);
+    let (player, item_id) = player_with_item(&server, &rider, 1, PA, (300.0, 240.0), MATE_ITEM);
+    rider.conn.active_char = Some(player.clone());
+    player.data().unit.hp = 100;
+    player.data().unit.max_hp = 100;
+    mates::spawn_mount(&server, &player, item_id);
+    let mate = mates::first_active_mate(&server, &player).unwrap();
+    let tl = u32::from(mate.data().unit.tl_id);
+    mates::mount_mate(&server, &player, tl, attach_point::DRIVER, 0);
+    assert!(player.data().is_riding);
+    let region = player.region().unwrap();
+    rider.drain();
+
+    let impact = MoveType::new(MoveKind::Unit(UnitMove {
+        x: 300.0,
+        y: 243.0,
+        z: 40.0,
+        actor_flags: MoveTypeActorFlags::FLAG8,
+        fall_vel: 32_000,
+        ..Default::default()
+    }));
+    crate::world::session::move_unit(&server, &mut rider.conn, mate.obj_id, impact).await;
+
+    let world = server.world.world(0).unwrap();
+    assert!(world.mate(mate.obj_id).is_none());
+    {
+        let c = player.data();
+        let t = c.unit.transform;
+        assert_eq!(c.unit.hp, 0);
+        assert_eq!((t.x, t.y, t.z), (300.0, 243.0, 40.0));
+        assert_eq!(t.parent_obj_id, 0);
+        assert!(!c.is_riding);
+        assert_eq!(c.attached_point, attach_point::NONE);
+    }
+    assert_eq!(player.region(), Some(region));
+    assert_eq!(
+        mate.data().passenger(attach_point::DRIVER).unwrap().obj_id,
+        0
+    );
+    let frames = rider.drain();
+    let detached = body(&frames, sc::SCUnitDetachedPacket);
+    assert_eq!(PacketStream::from_bytes(detached).read_bc().unwrap(), PA);
+
+    resurrect_character(&server, &player, false);
+    assert!(player.data().unit.hp > 0);
+    assert_eq!(player.region(), Some(region));
+    let frames = rider.drain();
+    let mut packet = PacketStream::from_bytes(body(&frames, sc::SCCharacterResurrectedPacket));
+    assert_eq!(packet.read_bc().unwrap(), PA);
+    let (x, y, _) = packet.read_position().unwrap();
+    assert_eq!((x, y), (305.0, 245.0));
+}
+
+#[tokio::test]
 async fn self_attributed_npc_death_does_not_touch_unrelated_mates() {
     let server = server_with(data());
     let mut a = TestClient::new(&server, 1, 1);
