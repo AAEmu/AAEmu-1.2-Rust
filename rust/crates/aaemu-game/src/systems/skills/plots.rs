@@ -179,7 +179,17 @@ impl PlotTargetInfo {
 pub fn run_plot(server: &GameServer, plot_id: u32, ctx: CastCtx, skill: SkillRef) {
     let state = PlotState::new(skill.clone(), ctx);
     let caster = state.ctx.caster.clone();
-    caster.with_unit(|u| u.unit_mut().skill_state.active_plot = Some(PlotStateRef(state.clone())));
+    let previous = caster
+        .with_unit(|u| {
+            u.unit_mut()
+                .skill_state
+                .active_plot
+                .replace(PlotStateRef(state.clone()))
+        })
+        .flatten();
+    if let Some(previous) = previous {
+        supersede_sport_reel_plot(&previous.0, &state);
+    }
     skill.state().active_plot = Some(state.clone());
     if !crate::systems::housing::dominion::runtime::begin_plot(server, &state) {
         state.request_cancellation();
@@ -200,6 +210,32 @@ pub fn run_plot(server: &GameServer, plot_id: u32, ctx: CastCtx, skill: SkillRef
         execute_tree(&srv, plot_id, &state).await;
         finish_item_plot(&srv, plot_id, &state);
     });
+}
+
+/// The player sport-fishing reel response skills (r208022 `tagged_skills` tag 1024 also holds
+/// the initial cast 21578, the landing 21322 and the fish AI skills 21608 / 21616, which must
+/// never supersede or be superseded, so the tag is not used).
+const SPORT_REEL_RESPONSE_SKILLS: [u32; 5] = [21135, 21194, 21195, 21196, 21290];
+
+/// A player's sport-fishing reel response (one of [`SPORT_REEL_RESPONSE_SKILLS`]) replaces the
+/// previous one: the old reel plot repeats its conditions and its channel buffs for seconds, and
+/// `CSStopCasting` only reaches the newest plot, so the old one is cancelled here instead of
+/// running beside the replacement. Only these skills, only player casters: any other plot (or an
+/// NPC cast) that was active stays untouched.
+///
+/// The old plot's cooldown snapshot is dropped first, so its cancel cannot hand back the
+/// cooldowns the replacement just committed. The cancel's own end (`do_plot_end`) only releases
+/// the old plot's own timeline and only clears the active plot that is still the old one.
+fn supersede_sport_reel_plot(previous: &Arc<PlotState>, new: &Arc<PlotState>) {
+    if Arc::ptr_eq(previous, new) || new.caster().as_player().is_none() {
+        return;
+    }
+    let is_reel = |state: &PlotState| SPORT_REEL_RESPONSE_SKILLS.contains(&state.skill.template.id);
+    if !is_reel(previous) || !is_reel(new) {
+        return;
+    }
+    previous.skill.state().plot_cooldown_snapshot = None;
+    previous.request_cancellation();
 }
 
 /// The item part of `Plot.RunAsync` after the tree has run: for an item-cast plot of a
