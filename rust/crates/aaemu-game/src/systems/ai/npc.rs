@@ -14,6 +14,7 @@ use crate::data::formulas::FormulaKind;
 use crate::models::movement::{
     GameStanceType, MoveKind, MoveType, MoveTypeActorFlags, MoveTypeFlags, UnitMove,
 };
+use crate::models::transform::PositionAndRotation;
 use crate::models::unit::UnitAttribute;
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::packets::world_objects::SCTargetChangedPacket;
@@ -48,6 +49,11 @@ pub const BUFF_NPC_RETURN: u32 = 550;
 pub fn world_pos(server: &GameServer, obj: &WorldObject) -> Vec3 {
     let p = geometry::world_pos(server, &Target::Obj(obj.clone()));
     Vec3::new(p.x, p.y, p.z)
+}
+
+/// `Transform.World` of an object (position and rotation).
+pub fn world_pos_and_rot(server: &GameServer, obj: &WorldObject) -> PositionAndRotation {
+    geometry::world_pos(server, &Target::Obj(obj.clone()))
 }
 
 /// `Transform.Local.Position`.
@@ -391,6 +397,7 @@ fn stealth_formula_unavailable(kind: FormulaKind) {
 /// `CanDetect` formulas / unit attribute 94, so the server mirrors that (71 stealth buffs; 30
 /// lack tag 100, 10 tag-100 buffs are not stealth).
 pub fn can_see_target(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
+    let _profile = super::profile::step(super::profile::Step::CanSee);
     target.is_visible() && can_detect(server, observer, target)
 }
 
@@ -842,6 +849,22 @@ pub fn world_unit(server: &GameServer, owner: &WorldObject, obj_id: u32) -> Opti
     geometry::world_of(server, owner)?.unit(obj_id)
 }
 
+/// `WorldManager.GetAround<T>(obj, radius, useModelSize)` for every kind (callers filter), with
+/// the objects' world positions. The one timed scan path: [`around`] and [`units_around`] both
+/// go through it, so every region scan records exactly one [`super::profile::Step::Around`].
+fn scan_around(
+    server: &GameServer,
+    obj: &WorldObject,
+    radius: f32,
+    use_model_size: bool,
+) -> Vec<(WorldObject, PositionAndRotation)> {
+    let _profile = super::profile::step(super::profile::Step::Around);
+    if let Some(entries) = super::tick_view::around_entries(server, obj, radius, use_model_size) {
+        return entries;
+    }
+    geometry::around_radius_entries(server, &Target::Obj(obj.clone()), radius, use_model_size)
+}
+
 /// `WorldManager.GetAround<T>(obj, radius, useModelSize)` for every kind (callers filter).
 pub fn around(
     server: &GameServer,
@@ -849,7 +872,39 @@ pub fn around(
     radius: f32,
     use_model_size: bool,
 ) -> Vec<WorldObject> {
-    geometry::around_radius(server, &Target::Obj(obj.clone()), radius, use_model_size)
+    scan_around(server, obj, radius, use_model_size)
+        .into_iter()
+        .map(|(o, _)| o)
+        .collect()
+}
+
+/// `WorldManager.GetAround<Unit>(obj, radius, useModelSize)` with the units' world positions, so
+/// the perception scans do not read every unit's position a second time. Uses the AI tick view
+/// during a tick (see [`super::tick_view`]) and live positions outside it.
+pub fn units_around(
+    server: &GameServer,
+    obj: &WorldObject,
+    radius: f32,
+    use_model_size: bool,
+) -> Vec<(WorldObject, PositionAndRotation)> {
+    scan_around(server, obj, radius, use_model_size)
+        .into_iter()
+        .filter(|(o, _)| o.is_unit())
+        .collect()
+}
+
+/// `MathUtil.IsFront(a, b, fovScale)` with the already known world positions.
+pub fn is_front_at(a: &PositionAndRotation, b: &PositionAndRotation, fov_scale: f64) -> bool {
+    if fov_scale >= 2.0 {
+        return true;
+    }
+    if fov_scale <= 0.0 {
+        return false;
+    }
+    let angle =
+        f64::from(b.y - a.y).atan2(f64::from(b.x - a.x)) * 180.0 / std::f64::consts::PI % 360.0;
+    let deg = clamp_deg_angle(angle - 90.0 - f64::from(a.rot_z) * 180.0 / std::f64::consts::PI);
+    deg >= -90.0 * fov_scale && deg <= 90.0 * fov_scale
 }
 
 #[cfg(test)]
@@ -869,7 +924,9 @@ mod tests {
     use crate::systems::ai::collision::objects::{apply_doodads, collision_flags, DoodadInfo};
     use crate::systems::ai::collision::terrain::tests::Plane;
     use crate::systems::ai::data::ActorModel;
-    use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+    use crate::test_support::{
+        spawn_player, test_character, test_server, test_server_with, TestClient,
+    };
     use crate::world::Entity;
 
     #[test]
@@ -877,6 +934,47 @@ mod tests {
         assert_eq!(real_movement_flags(0.05), 3);
         assert_eq!(real_movement_flags(1.9), 5);
         assert_eq!(real_movement_flags(2.0), 4);
+    }
+
+    /// The enemy and greeting searches use `units_around`, so it must record the `Around` step
+    /// like `around` does, exactly once per scan (no double counting).
+    #[tokio::test]
+    async fn units_around_records_one_around_step() {
+        let server = test_server();
+        let world = server.world.world(0).expect("world");
+        let ctx = server.view_ctx();
+        let mut origin = Npc::new(1);
+        origin.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        origin.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+        let origin = Entity::new(0x700, origin);
+        world.spawn(&origin, &ctx);
+        let origin = WorldObject::from(&origin);
+        let mut other = Npc::new(1);
+        other.unit.transform.set_xyz(104.0, 100.0, 100.0);
+        other.unit.transform.zone_id = crate::test_support::TEST_ZONE;
+        let other = Entity::new(0x701, other);
+        world.spawn(&other, &ctx);
+
+        let around_step = super::super::profile::Step::Around as usize;
+        super::super::profile::force_enabled(true);
+        let before = super::super::profile::snapshot();
+        let found = super::units_around(&server, &origin, 10.0, false);
+        let after = super::super::profile::snapshot();
+        assert!(!found.is_empty(), "the other NPC is in range");
+        assert_eq!(
+            after.step_calls[around_step] - before.step_calls[around_step],
+            1,
+            "units_around times its region scan once"
+        );
+        let before = after;
+        let _ = super::around(&server, &origin, 10.0, false);
+        let after = super::super::profile::snapshot();
+        super::super::profile::force_enabled(false);
+        assert_eq!(
+            after.step_calls[around_step] - before.step_calls[around_step],
+            1,
+            "around is not double counted"
+        );
     }
 
     #[test]

@@ -140,27 +140,6 @@ struct TrackingState {
     fractions: HashMap<u32, f64>,
 }
 
-/// Account ids per `UPDATE ... IN (...)` statement of the divine clock batch.
-const CLOCK_UPDATE_CHUNK: usize = 500;
-
-/// Groups per-character `(account, seconds)` into `(seconds, account ids)`: the seconds of an
-/// account with several online characters add up (as the per-character C# writes did), zero
-/// totals are dropped, ids are sorted so output is deterministic.
-fn group_clock_deltas(entries: &[(u32, u32)]) -> Vec<(u32, Vec<u32>)> {
-    let mut per_account: std::collections::BTreeMap<u32, u32> = Default::default();
-    for &(account, delta) in entries {
-        let t = per_account.entry(account).or_insert(0);
-        *t = t.saturating_add(delta);
-    }
-    let mut groups: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
-    for (account, delta) in per_account {
-        if delta != 0 {
-            groups.entry(delta).or_default().push(account);
-        }
-    }
-    groups.into_iter().collect()
-}
-
 impl CharacterOnlineTrackingTask {
     pub fn new(server: &Arc<GameServer>) -> Arc<Self> {
         Arc::new(Self {
@@ -188,7 +167,6 @@ impl CharacterOnlineTrackingTask {
             st.last_check = now;
             d
         };
-        let mut clock_deltas: Vec<(u32, u32)> = Vec::new();
         for p in server.world.all_characters() {
             let (id, account) = (p.character_id, p.data().account_id);
             let (delta_seconds, hours) = {
@@ -219,12 +197,9 @@ impl CharacterOnlineTrackingTask {
                     },
                 );
             }
-            clock_deltas.push((account, delta_seconds));
-        }
-        for (delta, ids) in group_clock_deltas(&clock_deltas) {
-            for chunk in ids.chunks(CLOCK_UPDATE_CHUNK) {
-                super::accounts::add_divine_clock_time(server, chunk, delta).await;
-            }
+            // Queued for the next save: a separate UPDATE every 5 s waited for the account rows
+            // the periodic save holds (1-2.5 s on the 2026-11-11 cloud run).
+            server.save.add_divine_clock(account, delta_seconds);
         }
         self.inner.lock().expect("tracking poisoned").busy = false;
     }
@@ -279,16 +254,6 @@ pub async fn add_offline_crime_points(server: &GameServer, player_id: u32, point
 mod tests {
     use super::*;
     use crate::test_support::{spawn_player, test_character, test_server, TestClient};
-
-    #[test]
-    fn online_tracking_groups_clock_deltas_per_account() {
-        let g = group_clock_deltas(&[(3, 5), (1, 5), (2, 0), (3, 5), (4, 7), (5, 0)]);
-        assert_eq!(g, vec![(5, vec![1]), (7, vec![4]), (10, vec![3])]);
-        assert!(group_clock_deltas(&[(1, 0)]).is_empty());
-        let ids: Vec<u32> = (0..1200).collect();
-        let sizes: Vec<usize> = ids.chunks(CLOCK_UPDATE_CHUNK).map(<[u32]>::len).collect();
-        assert_eq!(sizes, vec![500, 500, 200]);
-    }
 
     #[test]
     fn dice_packet_is_byte_exact() {

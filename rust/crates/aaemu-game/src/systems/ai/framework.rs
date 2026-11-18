@@ -48,6 +48,38 @@ pub enum BehaviorKind {
 }
 
 impl BehaviorKind {
+    /// Every variant, in `as`-cast order (the AI profile keys its arrays by [`Self::index`]).
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Alert,
+        Self::AlmightyAttack,
+        Self::Attack,
+        Self::Dead,
+        Self::Despawning,
+        Self::DoNothing,
+        Self::Dummy,
+        Self::FollowPath,
+        Self::FollowUnit,
+        Self::HoldPosition,
+        Self::Idle,
+        Self::ReturnState,
+        Self::Roaming,
+        Self::RunCommandSet,
+        Self::Spawning,
+        Self::Talk,
+        Self::ArcherAttack,
+        Self::BigMonsterAttack,
+        Self::FlytrapAlert,
+        Self::FlytrapAttack,
+        Self::WildBoarAttack,
+    ];
+    /// Number of variants (`BehaviorKind::ALL.len()`, usable in const contexts).
+    pub const COUNT: usize = 21;
+
+    /// The variant's index (declaration order, the profile array key).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     /// A combat behavior: its tick clears stale targets and `OnNoAggroTarget` returns the NPC
     /// home (the 1.2 Flytrap trap attack clears its stale aggro without a return transition).
     fn is_combat(self) -> bool {
@@ -774,9 +806,11 @@ impl<'a> AiCtx<'a> {
             return;
         }
         if let Some(k) = self.ai.current {
+            let _profile = super::profile::step(super::profile::Step::Behavior);
             behaviors::tick(self, k, delta_ms);
         }
         // If aggro table is populated, check if current aggro targets need to be cleared
+        let _aggro = super::profile::step(super::profile::Step::AggroCleanup);
         let abusers: Vec<u32> = self
             .npc
             .data()

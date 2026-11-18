@@ -108,6 +108,7 @@ pub fn follower_tick(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
     if !group::is_follower(&c.npc) {
         return false;
     }
+    let _profile = super::profile::step(super::profile::Step::Follower);
     // The spawn settles in the shared `Idle` behavior, which has no `OnAggroTargetChanged`
     // transition; a follower must reach its own idle behavior (`HoldPosition` / `Roaming`) so
     // the normal combat transitions stay available. Only universal `Idle` AIs stay here.

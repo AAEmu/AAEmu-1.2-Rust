@@ -12,6 +12,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::models::movement::{GameStanceType, MoveTypeAlertness};
+use crate::models::transform::PositionAndRotation;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
 use crate::systems::npcs::npc::data::NpcTemplate;
@@ -482,17 +483,19 @@ fn on_enemy_seen(c: &mut AiCtx<'_>, target: &WorldObject) {
     c.go_to_combat();
 }
 
-/// The units sorted by 3D distance (`CheckAggression` / `CheckAlert`).
-fn units_by_distance(c: &AiCtx<'_>, radius: f32) -> Vec<(WorldObject, f32)> {
+/// The units sorted by 3D distance (`CheckAggression` / `CheckAlert`), with their positions.
+fn units_by_distance(c: &AiCtx<'_>, radius: f32) -> Vec<(WorldObject, f32, PositionAndRotation)> {
+    let _profile = super::profile::step(super::profile::Step::TargetSearch);
     let me = c.obj.clone();
-    let mut v: Vec<(WorldObject, f32)> = npc::around(c.server, &me, radius, false)
-        .into_iter()
-        .filter(WorldObject::is_unit)
-        .map(|u| {
-            let d = npc::distance_raw(c.server, &me, &u, true);
-            (u, d)
-        })
-        .collect();
+    let origin = npc::world_pos(c.server, &me);
+    let mut v: Vec<(WorldObject, f32, PositionAndRotation)> =
+        npc::units_around(c.server, &me, radius, false)
+            .into_iter()
+            .map(|(u, p)| {
+                let d = calculate_distance(origin, Vec3::new(p.x, p.y, p.z), true);
+                (u, d, p)
+            })
+            .collect();
     v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     v
 }
@@ -516,8 +519,9 @@ fn scan_for_enemy(
         (n.can_fly, n.unit.scale)
     };
     let model_size = npc::model_size(c.server, &c.obj);
-    let my_z = owner_pos(c).z;
-    for (unit, range) in units_by_distance(c, radius) {
+    let origin = npc::world_pos_and_rot(c.server, &c.obj);
+    let my_z = origin.z;
+    for (unit, range, pos) in units_by_distance(c, radius) {
         if unit_dead(&unit) {
             continue; // not counting dead Npc
         }
@@ -527,9 +531,9 @@ fn scan_for_enemy(
         } else {
             model_size * scale * gap_ground
         };
-        let uz = npc::world_pos(c.server, &unit).z;
+        let uz = pos.z;
         // Check if in front, and not too far up or down
-        if npc::is_front(c.server, &c.obj, &unit, f64::from(t.sight_fov_scale))
+        if npc::is_front_at(&origin, &pos, f64::from(t.sight_fov_scale))
             && (my_z - uz).abs() < max_height_gap
         {
             if can_attack(c.server, &c.obj, &unit) && npc::can_see_target(c.server, &c.obj, &unit) {
@@ -547,6 +551,7 @@ fn scan_for_enemy(
 
 /// `Behavior.CheckAggression()`.
 pub fn check_aggression(c: &mut AiCtx<'_>, _k: BehaviorKind) -> bool {
+    let _profile = super::profile::step(super::profile::Step::Aggression);
     let t = template_scalars(c);
     if !t.aggression {
         return false;
@@ -578,6 +583,7 @@ pub fn check_alert(c: &mut AiCtx<'_>, _k: BehaviorKind) -> bool {
     if c.npc.data().unit.is_in_battle {
         return false;
     }
+    let _profile = super::profile::step(super::profile::Step::Alert);
     let t = template_scalars(c);
     match scan_for_enemy(c, t.sight_range_scale * 15.0, 4.0, 1.75, 2.0) {
         Some(unit) => {
@@ -1608,15 +1614,17 @@ fn players_in_range(
     cooldown_ms: i64,
 ) -> Vec<WorldObject> {
     let now = now_ms();
-    npc::around(c.server, &c.obj, range, true)
+    let origin = npc::world_pos_and_rot(c.server, &c.obj);
+    npc::units_around(c.server, &c.obj, range, true)
         .into_iter()
-        .filter(|o| o.as_player().is_some())
-        .filter(|p| npc::is_front(c.server, &c.obj, p, fov))
-        .filter(|p| {
+        .filter(|(o, _)| o.as_player().is_some())
+        .filter(|(_, p)| npc::is_front_at(&origin, p, fov))
+        .filter(|(p, _)| {
             k_greeted
                 .get(&p.obj_id())
                 .is_none_or(|last| now - last >= cooldown_ms)
         })
+        .map(|(o, _)| o)
         .collect()
 }
 
@@ -1629,6 +1637,7 @@ fn check_for_talk(c: &mut AiCtx<'_>, k: BehaviorKind) {
     if c.ai.current_behavior() == Some(B::Talk) {
         return;
     }
+    let _profile = super::profile::step(super::profile::Step::Talk);
     let now = now_ms();
     let greeted = c.st(k).greeted.clone();
     let players = players_in_range(c, GREET_RANGE, GREET_FOV, &greeted, GREET_COOLDOWN_MS);
