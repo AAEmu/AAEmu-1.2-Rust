@@ -42,6 +42,7 @@ pub struct SkillRunState {
     pub tl_id: u16,
     /// Accepted casts of a reused SkillRun, independent of timeline ID release.
     pub generation: u64,
+    pub direct_cast_end: DirectCastEnd,
     pub cancelled: bool,
     /// An effect cancelled the cast itself (as opposed to a client / channel stop): its source
     /// item debit is refunded.
@@ -72,6 +73,14 @@ pub struct SkillRunState {
     /// The caster's cooldown state from just before a `plot_only` skill committed its GCD and
     /// cooldown at acceptance; restored when the plot is cancelled during its casting phase.
     pub plot_cooldown_snapshot: Option<PlotCooldownSnapshot>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum DirectCastEnd {
+    #[default]
+    Pending,
+    Sending,
+    Sent,
 }
 
 /// See [`SkillRunState::plot_cooldown_snapshot`].

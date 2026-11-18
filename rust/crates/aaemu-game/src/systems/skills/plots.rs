@@ -24,7 +24,7 @@ use super::packets::{
 };
 use super::relation::{filter_with_relation, is_relation_valid, relation_to};
 use super::skill::{apply_skill_modifiers, CastCtx};
-use super::state::{PlotStateRef, SkillRef};
+use super::state::{DirectCastEnd, PlotStateRef, SkillRef};
 use super::stats::{stat, StatKind};
 use super::types::{CastAction, PlotObject, RelationState, SkillTargetRelation};
 
@@ -505,16 +505,41 @@ fn end_plot_channel(server: &GameServer, state: &PlotState) {
 fn do_plot_end(server: &GameServer, state: &Arc<PlotState>) {
     let caster = state.caster().clone();
     let skill = &state.skill;
-    let tl = skill.tl_id();
-    broadcast(server, &caster, &SCPlotEndedPacket { tl }, true);
+    let tl = {
+        let run = skill.state();
+        run.active_plot
+            .as_ref()
+            .filter(|p| Arc::ptr_eq(p, state))
+            .map_or(0, |_| run.tl_id)
+    };
+    if tl != 0 {
+        broadcast(server, &caster, &SCPlotEndedPacket { tl }, true);
+    }
     end_plot_channel(server, state);
     // Cooldowns are committed at accepted plot-only use or successful cast, once.
     // Plot completion must not reapply raw durations, extend the tag, or send a second UI update.
     super::skill::reset_cooldown_if_ignored(server, skill, &caster);
-    // Release only what this call took: a concurrent `end_skill` (interrupt) takes the id the
-    // same way, so whichever comes second releases 0.
-    server.systems.skills.tl_ids.release(skill.take_tl_id());
-    skill.invoke_callback();
+    let released = {
+        let mut run = skill.state();
+        let active = run.active_plot.as_ref();
+        let matches = active.is_some_and(|p| Arc::ptr_eq(p, state));
+        // A plot-only skill owes no direct cast end. A combined cast keeps the id
+        // until both end packets have gone out. An older plot cannot clear a new one.
+        if matches {
+            run.active_plot = None;
+            if skill.template.plot_only || run.direct_cast_end == DirectCastEnd::Sent {
+                std::mem::take(&mut run.tl_id)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+    if released != 0 {
+        skill.invoke_callback();
+        server.systems.skills.tl_ids.release(released);
+    }
     caster.with_unit(|u| {
         let s = &mut u.unit_mut().skill_state;
         if s.active_plot
@@ -1314,7 +1339,9 @@ mod tests {
             target_caster: SkillCastTarget::Unit(target.obj_id()),
             skill_object: SkillObject::None,
         };
-        (PlotState::new(skill.clone(), ctx), skill)
+        let plot = PlotState::new(skill.clone(), ctx);
+        skill.state().active_plot = Some(plot.clone());
+        (plot, skill)
     }
 
     /// A step whose affected list is empty still checks its conditions (once, against its target): an NPC caster
@@ -1346,31 +1373,36 @@ mod tests {
         assert!(event_condition(&server, &two_handed(true), &state, &ti));
     }
 
-    /// `end_skill` takes the id first: the plot end that follows releases nothing.
+    /// Wild Lightning's direct cast ends before its final sequence of strikes.
     #[tokio::test]
-    async fn plot_end_after_end_skill_releases_nothing() {
+    async fn cast_end_preserves_the_timeline_until_the_plot_ends() {
         let (server, _client, player, npc) = fixture(GameData::empty());
         let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
         let (state, skill) = plot_state(&server, &caster, &target);
         let tl = skill.tl_id();
         assert!(server.systems.skills.tl_ids.is_assigned(tl));
         super::super::skill::end_skill(&server, &skill, &caster);
-        assert!(!server.systems.skills.tl_ids.is_assigned(tl));
+        assert_eq!(skill.tl_id(), tl);
+        assert!(server.systems.skills.tl_ids.is_assigned(tl));
         do_plot_end(&server, &state);
         assert_eq!(skill.tl_id(), 0);
+        assert!(!server.systems.skills.tl_ids.is_assigned(tl));
         assert_eq!(server.systems.skills.tl_ids.unused_releases(), 0);
     }
 
-    /// The plot end takes the id first: `end_skill` then returns without releasing.
+    /// An early plot end leaves the timeline to the direct cast.
     #[tokio::test]
-    async fn end_skill_after_plot_end_releases_nothing() {
+    async fn plot_end_preserves_the_timeline_until_the_cast_ends() {
         let (server, _client, player, npc) = fixture(GameData::empty());
         let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
         let (state, skill) = plot_state(&server, &caster, &target);
         let tl = skill.tl_id();
         do_plot_end(&server, &state);
-        assert!(!server.systems.skills.tl_ids.is_assigned(tl));
+        assert_eq!(skill.tl_id(), tl);
+        assert!(server.systems.skills.tl_ids.is_assigned(tl));
         super::super::skill::end_skill(&server, &skill, &caster);
+        assert_eq!(skill.tl_id(), 0);
+        assert!(!server.systems.skills.tl_ids.is_assigned(tl));
         assert_eq!(server.systems.skills.tl_ids.unused_releases(), 0);
     }
 
