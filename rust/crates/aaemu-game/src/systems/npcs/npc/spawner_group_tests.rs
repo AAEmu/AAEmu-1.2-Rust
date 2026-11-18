@@ -388,6 +388,7 @@ async fn placements_keep_selecting_the_autocreated_single_member() {
             },
             count: 1,
             npc_spawner_ids: Vec::new(),
+            placement_schedule_id: 0,
         };
         def.base.position = position(100.0, 100.0);
         assert_eq!(manager.add_npc_spawner(&server, def), Ok(1), "{label}");

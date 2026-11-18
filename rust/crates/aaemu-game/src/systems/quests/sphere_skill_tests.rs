@@ -402,6 +402,7 @@ fn event_spawner(spawner_id: u32, unit_id: u32, x: f32, y: f32, z: f32) -> NpcSp
         base,
         count: 1,
         npc_spawner_ids: vec![spawner_id],
+        placement_schedule_id: 0,
     }
 }
 

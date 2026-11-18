@@ -805,6 +805,7 @@ async fn direct_delete_reconciles_membership_and_refills_after_leave_return() {
         },
         count: 1,
         npc_spawner_ids: Vec::new(),
+        placement_schedule_id: 0,
     };
     def.base.position.x = 100.0;
     def.base.position.y = 100.0;

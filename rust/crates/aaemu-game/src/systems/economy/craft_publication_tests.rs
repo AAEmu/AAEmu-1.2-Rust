@@ -161,6 +161,7 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
                 base,
                 count: 1,
                 npc_spawner_ids: vec![10],
+                placement_schedule_id: 0,
             },
         )
         .unwrap();

@@ -149,6 +149,7 @@ fn fixture() -> Arc<GameServer> {
                     },
                     count: 1,
                     npc_spawner_ids: Vec::new(),
+                    placement_schedule_id: 0,
                 },
             )
             .unwrap();
@@ -312,6 +313,7 @@ fn halcyona_fixture() -> Arc<GameServer> {
                     },
                     count: 1,
                     npc_spawner_ids: Vec::new(),
+                    placement_schedule_id: 0,
                 },
             )
             .unwrap();
@@ -1296,6 +1298,7 @@ async fn tower_def_preflight_names_where_missing_controllers_stand() {
                 },
                 count: 1,
                 npc_spawner_ids: Vec::new(),
+                placement_schedule_id: 0,
             },
         )
         .unwrap();
@@ -1577,6 +1580,7 @@ async fn tower_def_wave_kill_target_starts_the_victory_followup() {
                 },
                 count: 1,
                 npc_spawner_ids: Vec::new(),
+                placement_schedule_id: 0,
             },
         )
         .unwrap();

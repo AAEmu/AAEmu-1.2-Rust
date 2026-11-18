@@ -527,7 +527,17 @@ impl NpcSpawner {
             return;
         }
         if let Some(npcs) = self.spawned_of(self.spawner_id) {
-            self.do_despawns(server, &npcs);
+            if self.has_spawning_time() {
+                // A clock change removes the living population on the next cleanup tick.
+                // Repeated schedule checks must not restart a delayed despawn or touch loot.
+                let living: Vec<_> = npcs
+                    .into_iter()
+                    .filter(|npc| !npc.data().unit.is_dead())
+                    .collect();
+                self.do_despawns_now(server, &living);
+            } else {
+                self.do_despawns(server, &npcs);
+            }
         }
     }
 

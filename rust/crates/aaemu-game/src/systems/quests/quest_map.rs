@@ -911,6 +911,7 @@ mod tests {
             base,
             count,
             npc_spawner_ids: Vec::new(),
+            placement_schedule_id: 0,
         }
     }
 
