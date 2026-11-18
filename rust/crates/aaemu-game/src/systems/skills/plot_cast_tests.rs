@@ -373,9 +373,17 @@ async fn replacement_sport_reel_cancels_previous_plot_without_clearing_the_repla
     let caster = WorldObject::from(&player);
     let old = plot_only(REEL_A, 9);
     use_plot_only(&server, &old, &caster, npc.obj_id);
+    let (old_skill_cooldown, old_tag_cooldown) = {
+        let p = player.data();
+        (
+            p.unit.cooldowns.cooldowns[&REEL_A],
+            p.unit.cooldowns.tag_cooldowns[&9],
+        )
+    };
     tokio::time::sleep(Duration::from_millis(300)).await;
     let old_plot = old.state().active_plot.clone().unwrap();
     assert!(!old_plot.cancellation_requested());
+    assert!(old_plot.inner().is_casting);
 
     let new = plot_only(REEL_B, 10);
     use_plot_only(&server, &new, &caster, npc.obj_id);
@@ -398,6 +406,16 @@ async fn replacement_sport_reel_cancels_previous_plot_without_clearing_the_repla
     assert_ne!(new.tl_id(), 0);
     assert_eq!(server.systems.skills.tl_ids.in_use(), 1);
     let p = player.data();
+    assert_eq!(
+        p.unit.cooldowns.cooldowns.get(&REEL_A),
+        Some(&old_skill_cooldown),
+        "replacing the reel keeps the old skill cooldown"
+    );
+    assert_eq!(
+        p.unit.cooldowns.tag_cooldowns.get(&9),
+        Some(&old_tag_cooldown),
+        "replacing the reel keeps the old tag cooldown"
+    );
     assert!(p.unit.cooldowns.cooldowns.contains_key(&REEL_B));
     assert!(p.unit.cooldowns.tag_cooldowns.contains_key(&10));
 }
