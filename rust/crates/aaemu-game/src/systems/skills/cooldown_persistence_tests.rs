@@ -9,7 +9,7 @@
 //! toggle skill when its buff is removed (`39389b70`), and applies the `Cooldown` special effect
 //! itself. The server therefore sends `SCCooldowns` per cast only for a cast that never sends
 //! `SCSkillFired` (`plot_only` with a plot) or a `timing_id == 0` skill. The end time is
-//! persisted as an absolute Unix-ms stamp and the select sync restores it after a relog.
+//! persisted as an absolute Unix-ms stamp and the in-game sync restores it after a relog.
 
 use std::sync::Arc;
 
@@ -312,19 +312,19 @@ async fn relog_restores_recall_and_login_sync_and_admission_see_it() {
     assert_eq!(restored.cooldowns.len(), 1);
     assert!(restored.cooldowns[&RECALL] > now);
 
-    // The select sync sends the restored timer (OnCooldowns appends it to the client manager).
-    let mut snapshot = player.data().clone();
-    snapshot.unit.cooldowns = restored.clone();
-    send_running_cooldowns(&mut client.conn, &snapshot, now);
+    // Sync after spawning the character, when the client can receive the restored timer.
+    player.data().unit.cooldowns = restored;
+    crate::world::session::notify_in_game(&server, &mut client.conn);
     let ui = cooldown_packet(&client.drain()).expect("login cooldown sync");
     assert_eq!(ui.skills.len(), 1);
     assert_eq!(ui.skills[0].0, RECALL);
     assert!(ui.skills[0].2 > 0);
     assert!(ui.tags.is_empty());
+    crate::world::session::notify_in_game(&server, &mut client.conn);
+    assert!(cooldown_packet(&client.drain()).is_none());
 
     // The live character now has the loaded store (as `load_character_details` leaves it): a
     // cast before the expiry is refused on the server, not merely hidden by the client.
-    player.data().unit.cooldowns = restored;
     cast(&server, &mut client, RECALL, npc.obj_id);
     assert_denied(&client.drain(), skill_result::COOLDOWN_TIME);
 }

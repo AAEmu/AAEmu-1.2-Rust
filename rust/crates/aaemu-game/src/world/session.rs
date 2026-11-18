@@ -911,8 +911,6 @@ pub fn select_loaded(
             end_time: conflict.next_state_time,
         });
     }
-    // Running skill / tag cooldowns restored from `character_cooldowns`.
-    send_running_cooldowns(conn, &snapshot, now_ms());
     // FactionManager.SendFactions / SendRelations
     if data.factions.factions.is_empty() {
         conn.send(&SCFactionListEmptyPacket);
@@ -1099,6 +1097,9 @@ pub fn notify_in_game(server: &GameServer, conn: &mut GameConnection) {
     }
     set_online(server, &p, true);
     spawn(server, &p);
+    // The client creates the local cooldown manager during spawn. The select-time
+    // packet arrived before that and the native client discarded the restored timers.
+    send_running_cooldowns(conn, &p.data(), now_ms());
     let (zone, race, faction, expedition, name, id) = {
         let c = p.data();
         (
