@@ -314,63 +314,6 @@ pub(crate) fn grant_quest_launch(server: &GameServer, player: &PlayerRef) {
     });
 }
 
-#[cfg(test)]
-mod quest_launch_tests {
-    use super::*;
-
-    #[test]
-    fn only_the_local_launch_spends_the_extra_upward_budget() {
-        let guard = MoveGuard::default();
-        let limits = Limits {
-            max_speed: 30.0,
-            max_up_speed: 30.0,
-            burst_seconds: 3.0,
-        };
-        let seed = Seed {
-            teleport_seq: 0,
-            instance_id: 0,
-        };
-        let mut state = State::new(seed, 0, limits);
-        state.up = 0.0;
-        state.launch = Some(NativeLaunch {
-            origin: PositionAndRotation::new(24948.19, 10596.52, 689.5, 0.0, 0.0, 0.0),
-            expires_ms: 5500,
-            remaining_up: 8.3,
-        });
-        guard.states.insert(1, state);
-        let kick = KickPolicy {
-            after: 0,
-            window_ms: 60_000,
-        };
-        let cost = Cost {
-            horizontal: 2.5,
-            up: 8.2,
-        };
-        let inside = Some((24948.19, 10624.68, 812.43));
-        assert_ne!(
-            guard.check_at(
-                1,
-                seed,
-                0,
-                cost,
-                limits,
-                kick,
-                Some((25200.0, 10624.68, 812.43))
-            ),
-            Verdict::Ok
-        );
-        assert_ne!(guard.check(1, seed, 0, cost, limits, kick), Verdict::Ok);
-        assert_eq!(
-            guard.check_at(1, seed, 0, cost, limits, kick, inside),
-            Verdict::Ok
-        );
-        assert_ne!(
-            guard.check_at(1, seed, 0, cost, limits, kick, inside),
-            Verdict::Ok
-        );
-    }
-}
-
 /// The cost of moving from `from` to `to` (world, or one shared local frame).
 pub fn cost_between(from: (f32, f32, f32), to: (f32, f32, f32)) -> Cost {
     Cost {
@@ -625,4 +568,61 @@ fn report(
         Some(me),
         &text,
     );
+}
+
+#[cfg(test)]
+mod quest_launch_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_local_launch_spends_the_extra_upward_budget() {
+        let guard = MoveGuard::default();
+        let limits = Limits {
+            max_speed: 30.0,
+            max_up_speed: 30.0,
+            burst_seconds: 3.0,
+        };
+        let seed = Seed {
+            teleport_seq: 0,
+            instance_id: 0,
+        };
+        let mut state = State::new(seed, 0, limits);
+        state.up = 0.0;
+        state.launch = Some(NativeLaunch {
+            origin: PositionAndRotation::new(24948.19, 10596.52, 689.5, 0.0, 0.0, 0.0),
+            expires_ms: 5500,
+            remaining_up: 8.3,
+        });
+        guard.states.insert(1, state);
+        let kick = KickPolicy {
+            after: 0,
+            window_ms: 60_000,
+        };
+        let cost = Cost {
+            horizontal: 2.5,
+            up: 8.2,
+        };
+        let inside = Some((24948.19, 10624.68, 812.43));
+        assert_ne!(
+            guard.check_at(
+                1,
+                seed,
+                0,
+                cost,
+                limits,
+                kick,
+                Some((25200.0, 10624.68, 812.43))
+            ),
+            Verdict::Ok
+        );
+        assert_ne!(guard.check(1, seed, 0, cost, limits, kick), Verdict::Ok);
+        assert_eq!(
+            guard.check_at(1, seed, 0, cost, limits, kick, inside),
+            Verdict::Ok
+        );
+        assert_ne!(
+            guard.check_at(1, seed, 0, cost, limits, kick, inside),
+            Verdict::Ok
+        );
+    }
 }
