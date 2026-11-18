@@ -2336,9 +2336,6 @@ impl SpawnManager {
             .persistence
             .natural
             .finish_initial_spawn(server, self.world.id, &self.world.template.name);
-        // You have to wait for all the doodads to spawn before trying to initialize the fish
-        // schools (FishSchoolManager.Load(World)).
-        crate::systems::npcs::fish_school::load_world(server, &self.world);
         // Link doodads seats to the trial system
         if self.world.id == crate::models::character::DEFAULT_INSTANCE_ID {
             self.link_trial_spawners(server);

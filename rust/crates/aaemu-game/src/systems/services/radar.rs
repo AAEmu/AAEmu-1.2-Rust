@@ -326,7 +326,6 @@ impl RadarManager {
             regs.values().cloned().collect()
         };
 
-        let all_fish = server.systems.npcs.fish_schools.all_fish_schools();
         // Shipyards are not part of `SCTelescopeUnits`: the 1.2 client has no shipyard list
         // format (its telescope carries transfers, fish schools and the slave/ship list only),
         // so the C# "Add Shipyards" TODO is closed as "no retail wire format".
@@ -405,19 +404,28 @@ impl RadarManager {
             if entry.fish_school_range() > 0.0 {
                 let range = entry.fish_school_range().max(gm_range);
                 let mut in_range = Vec::new();
-                for d in &all_fish {
-                    let o = WorldObject::from(d);
-                    if !same_place(&o) {
+                for d in server.systems.npcs.fish_schools.fish_schools_of(world.id) {
+                    let o = WorldObject::from(&d);
+                    if !o.is_visible() || !same_place(&o) {
                         continue;
                     }
-                    let Some(w) = server.world.world_of(&o) else {
+                    if !world
+                        .doodad(d.obj_id)
+                        .is_some_and(|live| Arc::ptr_eq(&live, &d))
+                    {
                         continue;
-                    };
-                    if distance(&o, &w) <= range {
-                        in_range.push(FishFinderUnit::of(&w, d));
+                    }
+                    if distance(&o, &world) <= range {
+                        in_range.push(FishFinderUnit::of(&world, &d));
                     }
                 }
-                for (last, chunk) in chunks(in_range) {
+                // Send a completed empty snapshot so the client can clear the last marker.
+                let snapshots = if in_range.is_empty() {
+                    vec![(true, in_range)]
+                } else {
+                    chunks(in_range)
+                };
+                for (last, chunk) in snapshots {
                     entry.player.send(SCSchoolOfFishDoodadsPacket {
                         last,
                         transfers: chunk,
