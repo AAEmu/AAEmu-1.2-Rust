@@ -298,10 +298,10 @@ pub(crate) fn transfer_gender(server: &GameServer, player: &crate::world::Player
 
 /// Whether the cast of `args` pays an item: a `skill_reagents` row or an effect-level
 /// `consume_item_id` / `consume_source_item`. Only such a cast may record a new book entry.
-fn save_portal_costs_reagent(server: &GameServer, args: &EffectArgs<'_>) -> bool {
-    let Some(skill) = args.source.skill() else {
-        return false;
-    };
+fn save_portal_costs_reagent(
+    server: &GameServer,
+    skill: &super::super::super::state::SkillRun,
+) -> bool {
     let data = &server.game_data.systems.skills;
     !data.reagents_for(skill.template.id).is_empty()
         || skill.template.effects.iter().any(|effect| {
@@ -329,27 +329,33 @@ fn save_portal_needs_doodad(
     })
 }
 
-/// The target of a doodad `SavePortal` must be a doodad within the skill's range whose current
-/// func group has a `DoodadFuncUse` for this exact skill.
-fn save_portal_targets_its_doodad(server: &GameServer, args: &EffectArgs<'_>) -> bool {
+/// The original cast must target a live doodad whose current phase offers this skill.
+/// The fireplace applies the save effect to the player who cast it.
+fn save_portal_targets_its_doodad(
+    server: &GameServer,
+    args: &EffectArgs<'_>,
+    player: &crate::world::PlayerRef,
+    skill: &super::super::super::state::SkillRun,
+) -> bool {
     use crate::systems::npcs::doodad::templates::FuncTemplate;
-    let Some(skill) = args.source.skill() else {
-        return false;
-    };
-    let Target::Obj(target) = &args.target else {
+    let caster = WorldObject::from(player);
+    let Some(target) = args.source.cast_target.as_ref() else {
         return false;
     };
     let Some(doodad) = target.as_doodad() else {
         return false;
     };
+    if !world_of(server, &caster)
+        .and_then(|world| world.object(target.obj_id()))
+        .is_some_and(|live| std::ptr::eq(live.core(), target.core()))
+    {
+        return false;
+    }
     let (group, owner_type, owner_db_id) = {
         let d = doodad.data();
         (d.func_group_id, d.owner_type, d.owner_db_id)
     };
     if owner_type == crate::models::doodad::doodad_owner_type::HOUSING && owner_db_id > 0 {
-        let Some(player) = args.caster.as_ref().and_then(WorldObject::as_player) else {
-            return false;
-        };
         let Some(house) = crate::systems::housing::house_by_id(server, owner_db_id) else {
             return false;
         };
@@ -369,11 +375,7 @@ fn save_portal_targets_its_doodad(server: &GameServer, args: &EffectArgs<'_>) ->
     {
         return false;
     }
-    let from = Target::Obj(
-        args.caster
-            .clone()
-            .unwrap_or_else(|| WorldObject::from(doodad.clone())),
-    );
+    let from = Target::Obj(caster);
     super::super::super::geometry::distance_to(server, &from, &Target::Obj(target.clone()), false)
         <= skill.template.max_range.max(0) as f32
 }
@@ -393,9 +395,12 @@ pub fn save_portal(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     };
     let npcs = server.systems.skills.ext.npcs();
     if *id == 0 {
+        let Some(skill) = args.source.skill() else {
+            return;
+        };
         // Only a cast that pays a reagent may record a new location. 16841 (rename) has no
         // reagent and must never create a book entry, whatever the skill object says.
-        if !save_portal_costs_reagent(server, args) {
+        if !save_portal_costs_reagent(server, skill) {
             tracing::warn!(
                 buff = args.source.buff.as_ref().map(|b| b.id),
                 skill = args.source.skill().map(|s| s.template.id).unwrap_or(0),
@@ -405,11 +410,8 @@ pub fn save_portal(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         }
         // A doodad skill (16387 "Save Location", the fireplace's DoodadFuncUse) is only a real
         // interaction when the packet targets that doodad, in range, with the same Use func.
-        if args
-            .source
-            .skill()
-            .is_some_and(|skill| save_portal_needs_doodad(server, skill))
-            && !save_portal_targets_its_doodad(server, args)
+        if save_portal_needs_doodad(server, skill)
+            && !save_portal_targets_its_doodad(server, args, p, skill)
         {
             tracing::warn!(
                 skill = args.source.skill().map(|s| s.template.id).unwrap_or(0),
@@ -422,9 +424,6 @@ pub fn save_portal(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         // allocated once the book is known not to be full. Take `skill_reagents` (11215) and
         // effect-level items (16387) atomically here; `skill.rs` skips its own reagent /
         // effect-item debit for SavePortal.
-        let Some(skill) = args.source.skill() else {
-            return;
-        };
         let items = server.systems.skills.ext.items();
         let reagents = server
             .game_data

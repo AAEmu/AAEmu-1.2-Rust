@@ -7608,10 +7608,11 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   `consume_source_item`). Skill 16841 "Editing Location in Teleport Book..." has no reagent and
   may only rename an existing portal of the character; 11215 pays its `skill_reagents` Memory
   Ink, and 16387 pays an effect-level Memory Ink taken atomically by the effect and only when
-  the cast targets a real fireplace doodad in range with its `DoodadFuncUse`. No portal-book cap
-  exists in the C# `PortalManager` /
-  `CharacterPortals` or in the 1.2 data (the client UI pages the list by `COUNT_PER_PAGE`); none
-  is invented here.
+  the cast targets a real fireplace doodad in range with its `DoodadFuncUse`. Skill 16387 applies
+  the save effect to the caster, so its validation uses the original doodad cast target.
+  The fireplace stays lit after its terminal Use row so it can be used again.
+  Neither the C# `PortalManager` / `CharacterPortals` nor the 1.2 data impose a portal-book
+  cap. The client UI pages the list by `COUNT_PER_PAGE`.
 - **Vehicle bar caster.** A `Mount` caster must be a mate the player may use or a slave the
   player owns / is attached to; the player itself is no longer accepted. The skill id must be on
   the vehicle bar: the mate's `Mate.skills` mount-skill ids, the slave template's
