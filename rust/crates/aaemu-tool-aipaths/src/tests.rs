@@ -285,6 +285,105 @@ fn real_data_generates_the_demanded_routes() {
 }
 
 #[test]
+fn exports_requested_routes_and_preserves_existing_files() {
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "aaemu_aipaths_fixture_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&path).unwrap();
+    let tmp = TempDir(path);
+    let pak10 = tmp.0.join("game10.pak");
+    let pak12 = tmp.0.join("game12.pak");
+    let compact = tmp.0.join("compact.sqlite3");
+    let out = tmp.0.join("routes");
+    let input = tmp.0.join("xml");
+    let world_xml =
+        r#"<World><ZoneList><Zone id="142" originX="12" originY="13"/></ZoneList></World>"#;
+    fs::write(&input, world_xml).unwrap();
+    let mut older = AAPak::create(&pak12).unwrap();
+    older
+        .add_file_from_file(&input, "game/worlds/fixture/world.xml", false)
+        .unwrap();
+    older.close().unwrap();
+
+    let mut newer = AAPak::create(&pak10).unwrap();
+    newer
+        .add_file_from_file(&input, "game/worlds/fixture/world.xml", false)
+        .unwrap();
+    fs::write(&input, XML).unwrap();
+    newer
+        .add_file_from_file(
+            &input,
+            "game/worlds/fixture/level_design/zone/142/editor/npc.xml",
+            false,
+        )
+        .unwrap();
+    fs::write(&input, "<broken").unwrap();
+    newer
+        .add_file_from_file(
+            &input,
+            "game/worlds/fixture/level_design/zone/143/editor/npc.xml",
+            false,
+        )
+        .unwrap();
+    newer.close().unwrap();
+
+    let conn = rusqlite::Connection::open(&compact).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE quest_components (ai_path_name TEXT);
+         CREATE TABLE ai_commands (cmd_id INTEGER, param2 TEXT);
+         CREATE TABLE npc_control_effects (category_id INTEGER, param_string TEXT);
+         INSERT INTO quest_components VALUES ('Quest_Route'), ('Missing_Route'), ('Turned');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let argv = [
+        "--pak10",
+        pak10.to_str().unwrap(),
+        "--pak12",
+        pak12.to_str().unwrap(),
+        "--compact",
+        compact.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--skip-rotated",
+        "--rotation",
+        "inverse",
+        "--dry-run",
+    ]
+    .map(str::to_owned);
+    let mut opts = parse_args(&argv).unwrap();
+    run(&opts).unwrap();
+    assert!(!out.exists());
+
+    opts.dry_run = false;
+    run(&opts).unwrap();
+    let route = out.join("Quest_Route.path");
+    assert_eq!(
+        fs::read_to_string(&route).unwrap(),
+        "|12388.000|13512.000|50.000|\n|12398.000|13512.000|51.000|\n|12398.000|13517.000|52.000|\n"
+    );
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+
+    let recorded = "|12390.000|13512.000|50.000|\n|12400.000|13512.000|51.000|\n";
+    fs::write(&route, recorded).unwrap();
+    run(&opts).unwrap();
+    assert_eq!(fs::read_to_string(&route).unwrap(), recorded);
+}
+
+#[test]
 fn demand_includes_follow_path_npc_control_effects() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
