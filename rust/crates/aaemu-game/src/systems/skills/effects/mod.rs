@@ -32,6 +32,8 @@ use super::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
 pub struct EffectSource {
     pub skill: Option<SkillRef>,
     pub buff: Option<Arc<BuffTemplate>>,
+    /// The original cast target, which can differ from a self-applied effect's recipient.
+    pub(super) cast_target: Option<WorldObject>,
     /// A buff tick's `Buff.range_damage_multiplier`: the close-range penalty of the applying
     /// skill was evaluated once when the buff was applied, so the tick does not use its own
     /// distance. `None` for direct effects and buff triggers.

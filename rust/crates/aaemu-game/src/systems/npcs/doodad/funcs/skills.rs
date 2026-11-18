@@ -16,6 +16,8 @@ use crate::systems::npcs::hooks::{DoodadSkillCaster, DoodadSkillTarget};
 use crate::systems::npcs::public_farm;
 use crate::world::{now_ms, WorldObject};
 
+const SAVE_LOCATION_SKILL_ID: u32 = 16_387;
+
 /// `DoodadFuncUse.Use`.
 pub fn use_(
     f: &DoodadFuncUse,
@@ -124,7 +126,9 @@ pub fn use_(
             true,
         );
     }
-    set_to_next_phase(ctx, skill_id > 0);
+    // The lit fireplace's terminal Use row saves a location without using up the fireplace.
+    let changes_phase = skill_id > 0 && (skill_id != SAVE_LOCATION_SKILL_ID || next_phase != -1);
+    set_to_next_phase(ctx, changes_phase);
 }
 
 /// `DoodadFuncFakeUse.Use`.

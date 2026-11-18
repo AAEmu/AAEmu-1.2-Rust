@@ -2299,6 +2299,7 @@ fn execute_trigger(
             EffectSource {
                 skill: None,
                 buff: Some(template.clone()),
+                cast_target: None,
                 range_multiplier: None,
                 height_multiplier: None,
                 amount,
@@ -2316,6 +2317,7 @@ fn execute_trigger(
             EffectSource {
                 skill: buff_skill(server, b),
                 buff: None,
+                cast_target: None,
                 range_multiplier: None,
                 height_multiplier: None,
                 amount: 0,
