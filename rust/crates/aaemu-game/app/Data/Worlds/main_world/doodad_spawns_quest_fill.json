@@ -638,5 +638,140 @@
       "Z": 190.201,
       "Yaw": -159.0
     }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7590.59,
+      "Y": 9342.618,
+      "Z": 186.67
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7622.658,
+      "Y": 9246.864,
+      "Z": 182.94
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7677.772,
+      "Y": 9385.548,
+      "Z": 185.29
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7758.862,
+      "Y": 9301.332,
+      "Z": 182.98
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7744.502,
+      "Y": 9224.774,
+      "Z": 182.98
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7785.058,
+      "Y": 9410.14,
+      "Z": 185.27
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7752.314,
+      "Y": 9375.996,
+      "Z": 184.97
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7692.384,
+      "Y": 9462.706,
+      "Z": 185.41
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7739.334,
+      "Y": 9440.502,
+      "Z": 185.29
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at Waterlogged Corpse",
+    "Position": {
+      "X": 7809.638,
+      "Y": 9248.068,
+      "Z": 183.04
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at dangerous bog",
+    "Position": {
+      "X": 7785.328,
+      "Y": 9179.866,
+      "Z": 182.96
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at dangerous bog",
+    "Position": {
+      "X": 7612.338,
+      "Y": 9400.296,
+      "Z": 186.73
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at dangerous bog",
+    "Position": {
+      "X": 7676.696,
+      "Y": 9426.734,
+      "Z": 185.25
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at dangerous bog",
+    "Position": {
+      "X": 7693.67,
+      "Y": 9346.506,
+      "Z": 185.29
+    }
+  },
+  {
+    "UnitId": 1442,
+    "Title": "Poison Bogs fumes at dangerous bog",
+    "Position": {
+      "X": 7719.72,
+      "Y": 9405.898,
+      "Z": 185.3
+    }
   }
 ]
