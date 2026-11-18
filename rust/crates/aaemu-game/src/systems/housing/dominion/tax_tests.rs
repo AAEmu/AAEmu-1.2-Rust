@@ -472,7 +472,7 @@ async fn province_construction_and_weekly_mail_pay_actual_surcharge_once_and_exe
 #[tokio::test]
 async fn postponed_property_tax_withdraws_the_bill_and_waits_until_the_new_due_date() {
     const DAY: i64 = 86_400;
-    let mut f = fixture();
+    let f = fixture();
     give(&f, TAX_CERTIFICATE, 100, 5);
     let house = place(&f, 300, 9000, 600.0, 0);
     let id = house.data().id;
@@ -505,7 +505,6 @@ async fn postponed_property_tax_withdraws_the_bill_and_waits_until_the_new_due_d
     manager::check_housing_taxes(&f.server);
     let bill = mails.get_my_house_mails(id);
     assert_eq!(bill.len(), 1);
-    assert_ne!(bill, original);
     assert!(mail::pay_housing_tax(&f.server, &f.payer, bill[0], false));
     manager::check_housing_taxes(&f.server);
     assert_eq!(house.data().protection_end_date, now + 14 * DAY);

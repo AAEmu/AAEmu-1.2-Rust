@@ -1,9 +1,9 @@
-//! Retail `/resend_house_tax_mail` (WP-SL6b): send a fresh tax bill for every taxable house
+//! Retail `/resend_house_tax_mail` (WP-SL6b): restore the current tax bill for taxable houses
 //! of a character (online or offline).
 //!
 //! The 1.2 client's GM console builds `ResendHouseTaxMail(%s)` (character name only, evidence
-//! `siege-social-2.md` section 1.5). The command reuses `HousingManager.new_tax_mail`, the
-//! same `MailForTax` built by the tax timer, and the housing economy hook that stores it.
+//! `siege-social-2.md` section 1.5). Reconcile through the same schedule and bill handling
+//! as the housing tax timer.
 
 use super::prelude::*;
 use super::retail;
@@ -51,6 +51,13 @@ impl Command for ResendHouseTaxMail {
             return Ok(());
         };
         let owner_name = retail::character_name(server, owner_id);
+        let _items = server.systems.economy.operation_scope();
+        let _operation = server
+            .systems
+            .housing
+            .operation_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let houses: Vec<HouseRef> = server
             .systems
             .housing
@@ -68,25 +75,22 @@ impl Command for ResendHouseTaxMail {
             return Ok(());
         }
 
-        let mut sent = 0u32;
-        for house in &houses {
-            let mail = crate::systems::housing::manager::new_tax_mail(server, house);
-            if server.systems.housing.hooks.get().send_mail(server, mail) {
-                sent += 1;
-            }
-        }
-        if sent == 0 {
+        let bills = houses
+            .iter()
+            .filter(|house| crate::systems::housing::manager::update_tax_info(server, house))
+            .count();
+        if bills == 0 {
             CommandManager::send_error_text(
                 self,
                 out,
-                &format!("Failed to send a tax mail to {owner_name}."),
+                &format!("No current tax bills to refresh for {owner_name}."),
             );
             return Ok(());
         }
         CommandManager::send_normal_text(
             self,
             out,
-            &format!("Resent {sent} tax mail(s) to {owner_name}."),
+            &format!("Refreshed {bills} current tax bill(s) for {owner_name}."),
         );
         Ok(())
     }
@@ -96,8 +100,8 @@ impl Command for ResendHouseTaxMail {
     }
 
     fn get_command_help_text(&self) -> String {
-        "Sends a new unpaid tax bill to the owner of every taxable house of an online or\n\
-         offline character, through the same MailForTax path as the housing tax timer."
+        "Refreshes the due tax bills of an online or offline character. Issues a bill if\n\
+         one is missing and updates the existing bill if it is already in the mailbox."
             .into()
     }
 }
@@ -135,18 +139,35 @@ mod tests {
         let server = harness::server_with(test_house::fixture::data());
         server.names.add_character(1, "Gm", 1001);
         server.names.add_character(2, "Owner", 1002);
-        let _house = offline_house(&server, 2, 1002);
+        let house = offline_house(&server, 2, 1002);
         let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
 
+        let (_, out) = harness::run(&server, &gm.p, "resend_house_tax_mail Owner").await;
+        assert_eq!(
+            out,
+            [harness::error(
+                "resend_house_tax_mail",
+                "No current tax bills to refresh for Owner."
+            )]
+        );
+        assert!(server
+            .systems
+            .economy
+            .mail
+            .get_my_house_mails(72)
+            .is_empty());
+
+        house.data().protection_end_date = housing::now() + 4 * 24 * 3600;
         let (handled, out) = harness::run(&server, &gm.p, "resend_house_tax_mail Owner").await;
         assert!(handled);
         assert_eq!(
             out,
             [harness::normal(
                 "resend_house_tax_mail",
-                "Resent 1 tax mail(s) to Owner."
+                "Refreshed 1 current tax bill(s) for Owner."
             )]
         );
+        harness::run(&server, &gm.p, "resend_house_tax_mail Owner").await;
         let mails: Vec<_> = server
             .systems
             .economy

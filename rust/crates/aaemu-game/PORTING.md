@@ -1298,6 +1298,10 @@ owner's statue through the same ordered path.
 
 Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::EconomyForHousing`. Housing API for others: `housing::{house_by_id, house_at_location, allowed_to_interact(_by_id), pay_weekly_tax (MailManager tax payment), act_ability_bonus_at (CharacterCraft), update_owned_housing_faction, demolish_by_player}`.
 
+**Tax bill reconciliation:** Postponing the due date withdraws outstanding bills while the property is paid up.
+The payment path rechecks the due date, and the resend command uses the same schedule as the timer.
+These are server-side changes to the C# behavior and preserve the client packet and grace period.
+
 ### systems::quests
 
 | Area (C#) | Rust | Status | Notes |
