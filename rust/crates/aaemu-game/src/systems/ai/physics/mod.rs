@@ -577,10 +577,11 @@ impl TickWorld for ServerTickWorld<'_> {
         use crate::models::unit::UnitAttribute as A;
         let obj = WorldObject::from(self.world.slave(obj_id)?);
         let t = obj.transform();
-        let (whirlpool_buff, storm_buff) = obj.with_base_unit(|b| {
+        let (whirlpool_buff, storm_buff, foresails_lowered) = obj.with_base_unit(|b| {
             (
                 b.buffs().check_buff(forces::whirlpool::BUFF_ID),
                 b.buffs().check_buff(forces::STORM_BUFF_ID),
+                b.buffs().check_buff(ship::FORESAILS_LOWERED_BUFF_ID),
             )
         });
         Some(ShipGameView {
@@ -592,6 +593,7 @@ impl TickWorld for ServerTickWorld<'_> {
             turn_speed: unit_attr(&obj, 100.0, A::TurnSpeed) / 100.0,
             whirlpool_buff,
             storm_buff,
+            foresails_lowered,
         })
     }
 
