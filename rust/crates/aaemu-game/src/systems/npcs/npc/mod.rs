@@ -1,6 +1,6 @@
 //! NPCs: `NpcManager` (templates, `Create`, stats), `NpcGameData` (spawner templates),
-//! `NpcSpawner` / `NpcSpawnerNpc`, NPC interaction packets, `Npc` attribute getters ([`stats`])
-//! and `Npc.DoDie` ([`death`]).
+//! `NpcSpawner` / `NpcSpawnerNpc`, NPC interaction packets, the interaction reach ([`reach`]),
+//! `Npc` attribute getters ([`stats`]) and `Npc.DoDie` ([`death`]).
 
 pub mod data;
 pub mod death;
@@ -8,6 +8,7 @@ pub mod group;
 pub mod group_data;
 pub mod manager;
 pub mod packets;
+pub mod reach;
 pub mod residency;
 pub mod spawner;
 pub mod spawner_data;
