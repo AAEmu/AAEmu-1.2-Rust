@@ -883,3 +883,101 @@ pub(super) async fn command(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::Recorder;
+    use aaemu_commons::net::FrameCodec;
+    use aaemu_game::net::packet::encode;
+    use aaemu_game::systems::services::music::{SCUserNoteLoadedPacket, SongData};
+    use aaemu_game::systems::skills::packets::SCBuffCreatedPacket;
+    use futures::{SinkExt, StreamExt};
+    use tokio_util::codec::Framed;
+
+    #[tokio::test]
+    async fn music_requests_check_notes_empty_replies_and_buff_only_responses() {
+        let (transport, peer) = tokio::io::duplex(4096);
+        let mut game = GameClient::from_io(transport, Recorder::new(false));
+        let player = 42;
+        game.state.self_obj = player;
+        let song = SongData {
+            id: 17,
+            author_id: player,
+            title: "Trial run".into(),
+            song: "t120o4c".into(),
+            source_item_id: 0,
+        };
+        let mut music = Music {
+            last_song: Some(u64::from(song.id)),
+            songs: HashMap::from([(u64::from(song.id), (song.title.clone(), song.song.clone()))]),
+            ..Music::default()
+        };
+        let cases = [
+            (
+                &["1", "0"][..],
+                u64::from(song.id),
+                true,
+                false,
+                encode(&SCUserNoteLoadedPacket {
+                    song: Some(song),
+                    is_tooltip: true,
+                }),
+            ),
+            (
+                &["0", "0", "unknown"][..],
+                4_000_000_000,
+                false,
+                false,
+                encode(&SCUserNoteLoadedPacket {
+                    song: None,
+                    is_tooltip: false,
+                }),
+            ),
+            (
+                &["0", "1", "17"][..],
+                17,
+                false,
+                true,
+                encode(&SCBuffCreatedPacket {
+                    skill_caster: SkillCaster::Unit(player),
+                    caster_id: player,
+                    owner_obj_id: player,
+                    index: 1,
+                    buff_id: 6010,
+                    caster_level: 1,
+                    ab_level: 0,
+                    skill_id: 0,
+                    charge: 0,
+                    duration: 1000,
+                    tick: 0.0,
+                }),
+            ),
+        ];
+        let mut framed = Framed::new(peer, FrameCodec);
+        let player_requests = async {
+            for (args, ..) in &cases {
+                let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+                command(&mut game, &mut music, "mrequest", &args)
+                    .await
+                    .unwrap();
+            }
+        };
+        let server_replies = async {
+            for (_, song_id, tooltip, buff_only, reply) in &cases {
+                let frame = framed.next().await.unwrap().unwrap();
+                assert_eq!(&frame[4..6], &cs::CSRequestMusicNotesPacket.to_le_bytes());
+                let mut request = PacketStream::from_bytes(frame[6..].to_vec());
+                assert_eq!(request.read_u64().unwrap(), *song_id);
+                assert_eq!(request.read_bool().unwrap(), *tooltip);
+                assert_eq!(request.read_bool().unwrap(), *buff_only);
+                framed.send(reply.clone()).await.unwrap();
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(player_requests, server_replies);
+        })
+        .await
+        .expect("music requests and replies must finish");
+    }
+}
