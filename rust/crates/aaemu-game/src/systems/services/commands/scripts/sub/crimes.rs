@@ -1632,7 +1632,7 @@ mod tests {
             ["|cFFFF0000[Crime Fake Trial] Character victim: nobody was not found.|r"]
         );
         let crimes = &server.systems.social.crimes;
-        assert!(matches!(fake_trial_evidence_kind(crimes), 0..=2));
+        assert!(matches!(super::fake_trial_evidence_kind(crimes), 0..=2));
         crimes.queue_fake_trial_rng(&[0, 1, 2]);
         let (_, out) = harness::run(&server, &gm.p, "crime fake crook victim evidence=3").await;
         assert_eq!(
