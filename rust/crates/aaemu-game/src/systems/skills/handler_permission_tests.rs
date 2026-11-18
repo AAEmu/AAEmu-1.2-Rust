@@ -1196,7 +1196,7 @@ const FIREPLACE_FUNC: u32 = 900;
 
 /// 16387 "Save Location" with the fireplace's `DoodadFuncUse`, its `InteractionEffect` and the
 /// effect-level Memory Ink (4053 x1). The doodad is 2 m in front of the player.
-fn fireplace_data() -> GameData {
+fn fireplace_data(casting_time: i32) -> GameData {
     use super::data::effects::SpecialEffect;
     use super::data::{EffectKind, EffectTemplate, SkillTemplate};
     use crate::systems::npcs::doodad::templates::{
@@ -1248,7 +1248,7 @@ fn fireplace_data() -> GameData {
             target_selection: 2,
             max_range: 4,
             damage_type_id: 0,
-            casting_time: 0,
+            casting_time,
             ..super::tests::skill_template(FIREPLACE_SKILL)
         };
         let mut consume = super::tests::skill_effect(700, EffectKind::SpecialEffect, 700);
@@ -1352,7 +1352,7 @@ async fn fireplace_save_portal_requires_its_doodad_and_memory_ink() {
     use crate::systems::economy::inventory::Inv;
 
     for (ink, item_cast) in [(true, true), (false, true), (true, false)] {
-        let server = Arc::new(test_server_with(fireplace_data()));
+        let server = Arc::new(test_server_with(fireplace_data(0)));
         server.set_self();
         super::bind(&server);
         crate::systems::economy::bridges::install(&server);
@@ -1403,7 +1403,7 @@ async fn fireplace_save_portal_requires_its_doodad_and_memory_ink() {
 async fn fireplace_save_portal_out_of_range_is_refused() {
     use crate::systems::economy::inventory::Inv;
 
-    let server = Arc::new(test_server_with(fireplace_data()));
+    let server = Arc::new(test_server_with(fireplace_data(0)));
     server.set_self();
     super::bind(&server);
     crate::systems::economy::bridges::install(&server);
@@ -1425,6 +1425,50 @@ async fn fireplace_save_portal_out_of_range_is_refused() {
     );
     assert!(a.data().portals.private_portals.is_empty());
     assert_eq!(Inv::of(&a).items_count(MEMORY_INK, -1), 1, "no ink spent");
+}
+
+#[tokio::test(start_paused = true)]
+async fn fireplace_save_cannot_finish_on_a_replacement_with_the_same_object_id() {
+    use std::time::Duration;
+
+    use crate::systems::economy::inventory::Inv;
+
+    let server = Arc::new(test_server_with(fireplace_data(5_000)));
+    server.set_self();
+    super::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Hearth", 100.0, 100.0),
+        0x100,
+    );
+    client.conn.active_char = Some(player.clone());
+    let fireplace = spawn_fireplace(&server, 102.0);
+    give_test_item(&server, &player, 0x7008, MEMORY_INK, 1);
+    super::handlers::start_skill(
+        &server,
+        &mut client.conn,
+        fireplace_packet(&player, 0, fireplace.obj_id),
+    );
+    assert!(player.data().unit.skill_state.skill_task.is_some());
+
+    let world = server.world.world(0).unwrap();
+    world.delete(WorldObject::from(&fireplace));
+    let replacement = spawn_fireplace(&server, 102.0);
+    assert_eq!(replacement.obj_id, fireplace.obj_id);
+
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while player.data().unit.skill_state.skill_task.is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fireplace cast finishes");
+    assert!(player.data().portals.private_portals.is_empty());
+    assert_eq!(Inv::of(&player).items_count(MEMORY_INK, -1), 1);
 }
 
 /// Plot-only skills bypass `apply_effects`; an Item caster must still own its source item.
