@@ -921,7 +921,7 @@ const ITEM_SELECT: &str = "SELECT `type`, CAST(id AS UNSIGNED) AS id, CAST(templ
      CAST(made_unit_id AS SIGNED) AS made_unit_id, CAST(crafter_id AS SIGNED) AS crafter_id, unsecure_time, unpack_time, created_at, CAST(`owner` AS UNSIGNED) AS owner, \
      CAST(flags AS SIGNED) AS flags, CAST(ucc AS SIGNED) AS ucc, details, CAST(grade AS SIGNED) AS grade, charge_time, \
      expire_time, (expire_online_minutes + 0E0) AS expire_online_minutes, CAST(charge_count AS SIGNED) AS charge_count \
-     FROM items ORDER BY id";
+     FROM items ORDER BY items.id";
 
 fn item_row(r: &MySqlRow) -> Result<ItemRow> {
     Ok(ItemRow {

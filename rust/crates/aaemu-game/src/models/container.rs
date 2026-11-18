@@ -508,7 +508,7 @@ impl ItemContainer {
         // An explicit equipment slot cannot fall back to an unrelated empty slot.
         if self.is_equipment()
             && preferred_slot >= 0
-            && self.get_item_by_slot(preferred_slot).is_some()
+            && (preferred_slot >= self.size || self.get_item_by_slot(preferred_slot).is_some())
         {
             return None;
         }
