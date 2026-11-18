@@ -43,16 +43,22 @@ use super::{broadcast, unit_reqs};
 /// `SkillsEnum.DigUpTreasureChestMarkedOnMap`.
 pub const DIG_UP_TREASURE_SKILL: u32 = 18_349;
 
-/// The NPC a `KillNpcWithoutCorpseEffect` removes: the matching-template NPC nearest the caster,
-/// restricted to the effect radius when it has one (`None` when none qualifies). Rust-only: the
-/// C# effect is a no-op for a character caster, so the port must not pick the first NPC of the
-/// template from the other side of the world for a player-cast quest skill.
+/// The NPC a `KillNpcWithoutCorpseEffect` removes. A matching caster removes itself.
+/// Other casts select the nearest matching NPC within the effect radius, when it has one.
 fn nearest_kill_npc(
     server: &GameServer,
     caster: &WorldObject,
     template_id: u32,
     radius: f32,
 ) -> Option<crate::world::NpcRef> {
+    if let Some(npc) = caster
+        .as_npc()
+        .filter(|npc| npc.data().unit.template_id == template_id)
+    {
+        // Summoned NPCs can share a position. A self-destruct must remove its own caster
+        // even when another matching NPC is exactly as close.
+        return Some(npc.clone());
+    }
     let world = world_of(server, caster)?;
     let from = Target::Obj(caster.clone());
     let mut best: Option<(f32, crate::world::NpcRef)> = None;
@@ -70,6 +76,108 @@ fn nearest_kill_npc(
         }
     }
     best.map(|(_, npc)| npc)
+}
+
+#[cfg(test)]
+mod self_despawn_tests {
+    use super::*;
+    use crate::data::world_data::SystemFaction;
+    use crate::models::npc::Npc;
+    use crate::opcodes::sc;
+    use crate::systems::skills::data::effects::KillNpcWithoutCorpseEffect;
+    use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
+    use crate::test_support::{spawn_player, test_character, TestClient};
+    use crate::world::Entity;
+
+    #[tokio::test]
+    async fn self_destruct_removes_only_its_caster_when_summons_overlap() {
+        let mut data = crate::data::GameData::empty();
+        data.factions.add(SystemFaction {
+            id: 115,
+            ..Default::default()
+        });
+        let skills = &mut data.systems.skills;
+        skills.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(damage_effect(2728, 10))),
+            15714,
+        );
+        skills.add_effect(
+            EffectKind::DamageEffect,
+            EffectTemplate::Damage(Box::new(damage_effect(2729, 1))),
+            15717,
+        );
+        skills.add_effect(
+            EffectKind::KillNpcWithoutCorpseEffect,
+            EffectTemplate::KillNpcWithoutCorpse(KillNpcWithoutCorpseEffect {
+                id: 647,
+                npc_id: 986,
+                radius: 0.0,
+                give_exp: false,
+                vanish: true,
+            }),
+            0,
+        );
+        let mut self_damage = skill_effect(15717, EffectKind::DamageEffect, 2729);
+        self_damage.application_method = ApplicationMethod::SourceOnce as u32;
+        self_damage.friendly = true;
+        let mut template = skill_template(16_444);
+        template.target_type = 0;
+        template.target_selection = SkillTargetSelection::Source as i32;
+        template.target_area_radius = 5;
+        let mut blast = skill_effect(15714, EffectKind::DamageEffect, 2728);
+        blast.non_friendly = true;
+        template.effects.push(blast);
+        template.effects.push(self_damage);
+        let skill = SkillRun::new(Arc::new(template), 1);
+        let server = crate::test_support::test_server_with(data);
+        crate::systems::npcs::install_hooks(&server);
+        let world = server.world.world(0).expect("test world");
+        let mut client = TestClient::new(&server, 1, 1001);
+        let mut character = test_character(1, "Observer", 101.0, 100.0);
+        character.unit.hp = 100;
+        character.unit.max_hp = 100;
+        let victim = spawn_player(&server, &client, character, 600);
+        let first = WorldObject::from(Entity::new(601, Npc::new(986)));
+        let second = WorldObject::from(Entity::new(602, Npc::new(986)));
+        for caster in [&first, &second] {
+            {
+                let mut npc = caster.as_npc().unwrap().data();
+                npc.unit.hp = 100;
+                npc.unit.faction_id = 115;
+                npc.unit.transform.set_xyz(100.0, 100.0, 100.0);
+            }
+            world.spawn(caster, &server.view_ctx());
+        }
+        for caster in [&first, &second] {
+            assert_eq!(
+                nearest_kill_npc(&server, caster, 986, 0.0).unwrap().obj_id,
+                caster.obj_id()
+            );
+        }
+        client.drain();
+        apply_effects(
+            &server,
+            &skill,
+            &CastCtx {
+                caster: second.clone(),
+                caster_caster: SkillCaster::Unit(second.obj_id()),
+                target: Target::Obj(second.clone()),
+                target_caster: SkillCastTarget::Unit(second.obj_id()),
+                skill_object: SkillObject::None,
+            },
+        );
+        assert!(world.object(first.obj_id()).is_some());
+        assert!(world.object(second.obj_id()).is_none());
+        assert!(victim.data().unit.hp < 100);
+        let [lo, hi] = sc::SCUnitDamagedPacket.to_le_bytes();
+        let hit = [0, 0, lo, hi];
+        assert!(client.drain().into_iter().any(|(opcode, body)| {
+            opcode == 0x8001
+                && super::super::packets::inflate_stored(&body)
+                    .is_some_and(|payload| payload.starts_with(&hit))
+        }));
+    }
 }
 
 /// The arguments a cast carries through its tasks.
@@ -2188,9 +2296,12 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 units.push(o.clone());
             }
         } else if selection == Some(SkillTargetSelection::Target) {
-            // Deviation from C#: `around_radius` excludes its origin, so a lone primary target
-            // of a target-selected area skill (Concussive Arrow 11933) was never hit.
-            if let Some(o) = target_self.as_obj().filter(|o| o.is_unit()) {
+            // `around_radius` excludes its origin. Keep the explicit target for
+            // Concussive Arrow (11933) and area interactions such as Set Bomb (15724).
+            if let Some(o) = target_self
+                .as_obj()
+                .filter(|o| o.is_unit() || o.as_doodad().is_some())
+            {
                 units.push(o.clone());
             }
         }
@@ -2684,6 +2795,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     let mut current_weight = 0;
     let mut packets = CompressedGamePackets::new();
+    let mut self_destruct_removal = None;
     let mut effect_source = EffectSource::from_skill(skill.clone());
     effect_source.source_item = source_item.clone();
     effect_source.source_item_debited = source_item_debited;
@@ -2706,6 +2818,22 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 effect.effect_id
             );
             continue;
+        };
+        // The Combuster actually casts Self-Destruct 16444. Its source-only damage (2729)
+        // can leave it alive, so use the corpse-free removal authored for the same NPC
+        // on Self-Destruct 15992. The explosion's damage and buff on nearby targets are
+        // separate effects.
+        let combuster_self_destruct = t.id == 16_444
+            && kind == EffectKind::DamageEffect
+            && id == 2729
+            && target.obj_id() == caster.obj_id()
+            && caster
+                .as_npc()
+                .is_some_and(|npc| npc.data().unit.template_id == 986);
+        let (kind, id) = if combuster_self_destruct {
+            (EffectKind::KillNpcWithoutCorpseEffect, 647)
+        } else {
+            (kind, id)
         };
         let Some(template) = data.effect(kind, id) else {
             tracing::debug!(
@@ -2799,7 +2927,12 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 if let Some(n) = npc {
                     args.caster = Some(WorldObject::from(n));
                 }
-                effects::apply(server, kind, template, &args, Some(&mut packets));
+                if combuster_self_destruct {
+                    // Broadcast the explosion from the caster's region before it disappears.
+                    self_destruct_removal = Some((kind, template, args));
+                } else {
+                    effects::apply(server, kind, template, &args, Some(&mut packets));
+                }
             }
         } else {
             effects::apply(server, kind, template, &args, Some(&mut packets));
@@ -2850,6 +2983,9 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     if !packets.is_empty() {
         broadcast(server, caster, &packets, true);
+    }
+    if let Some((kind, template, args)) = self_destruct_removal {
+        effects::apply(server, kind, template, &args, None);
     }
     // Hack to consume TreasureMap items (as the C#).
     if let Some(p) = player.as_ref().filter(|_| t.id == DIG_UP_TREASURE_SKILL) {

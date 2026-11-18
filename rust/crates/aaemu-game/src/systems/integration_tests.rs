@@ -46,6 +46,8 @@ const HIT_SKILL: u32 = 10_001;
 const KILL_SKILL: u32 = 10_002;
 /// `InteractionEffect` (`WorldInteractionType.Use`) on a doodad.
 const USE_SKILL: u32 = 10_003;
+/// The Set Bomb form of doodad use with a target-centred area.
+const AREA_USE_SKILL: u32 = 10_010;
 /// 50 damage with `CheckCrime`.
 const CRIME_SKILL: u32 = 10_004;
 /// `KillNpcWithoutCorpseEffect` of the villager (the scripted retreat).
@@ -243,6 +245,7 @@ fn game_data() -> GameData {
         (HIT_SKILL, 900_001, EffectKind::DamageEffect, 1, 4),
         (KILL_SKILL, 900_002, EffectKind::DamageEffect, 2, 4),
         (USE_SKILL, 900_003, EffectKind::InteractionEffect, 3, 8),
+        (AREA_USE_SKILL, 900_003, EffectKind::InteractionEffect, 3, 8),
         (CRIME_SKILL, 900_004, EffectKind::DamageEffect, 4, 4),
         (
             RETREAT_SKILL,
@@ -263,6 +266,12 @@ fn game_data() -> GameData {
         t.target_type = target_type;
         if target_type == 8 {
             t.damage_type_id = 0;
+        }
+        if skill_id == AREA_USE_SKILL {
+            t.target_area_radius = 5;
+            t.target_area_count = 20;
+            t.target_selection = 2;
+            t.target_alive = true;
         }
         t.effects.push(skill_effect(effect_type, kind, actual));
         s.add_skill(t);
@@ -1058,31 +1067,33 @@ async fn quest_reward_with_one_free_slot_gives_the_item_directly() {
 
 #[tokio::test]
 async fn interaction_skill_on_a_doodad_advances_the_interaction_quest() {
-    let server = server_with(false);
-    let mut a = pc(&server, 1, "User", 100.0);
-    accept(&server, &a.p, INTERACTION_QUEST);
-    let doodad = Entity::new(0x300, Doodad::new(DOODAD_TEMPLATE));
-    doodad.data().transform.set_xyz(102.0, 100.0, 100.0);
-    let world = server.world.world(0).expect("world");
-    world.spawn(&doodad, &server.view_ctx());
-    a.client.drain();
+    for skill_id in [USE_SKILL, AREA_USE_SKILL] {
+        let server = server_with(false);
+        let mut a = pc(&server, 1, "User", 100.0);
+        accept(&server, &a.p, INTERACTION_QUEST);
+        let doodad = Entity::new(0x300, Doodad::new(DOODAD_TEMPLATE));
+        doodad.data().transform.set_xyz(102.0, 100.0, 100.0);
+        let world = server.world.world(0).expect("world");
+        world.spawn(&doodad, &server.view_ctx());
+        a.client.drain();
 
-    cast(
-        &server,
-        &mut a,
-        USE_SKILL,
-        SkillCastTarget::Doodad(doodad.obj_id),
-    );
+        cast(
+            &server,
+            &mut a,
+            skill_id,
+            SkillCastTarget::Doodad(doodad.obj_id),
+        );
 
-    // InteractionEffect (npcs) -> QuestManager.DoDoodadInteractionEvents (quests).
-    assert_eq!(
-        quest_row(&server, &a.p, INTERACTION_QUEST),
-        Some((kind::READY, 1))
-    );
-    assert!(a
-        .client
-        .drain_ops()
-        .contains(&sc::SCQuestContextUpdatedPacket));
+        assert_eq!(
+            quest_row(&server, &a.p, INTERACTION_QUEST),
+            Some((kind::READY, 1)),
+            "skill {skill_id}"
+        );
+        assert!(a
+            .client
+            .drain_ops()
+            .contains(&sc::SCQuestContextUpdatedPacket));
+    }
 }
 
 #[tokio::test]

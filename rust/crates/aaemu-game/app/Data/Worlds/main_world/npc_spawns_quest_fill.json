@@ -3998,5 +3998,194 @@
       "Z": 84.423164,
       "Yaw": 0.0
     }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24034.990,
+      "Y": 7604.395,
+      "Z": 332.999
+    }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24005.170,
+      "Y": 7604.419,
+      "Z": 330.417
+    }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24025.230,
+      "Y": 7613.758,
+      "Z": 334.100
+    }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24006.040,
+      "Y": 7590.919,
+      "Z": 327.651
+    }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24016.270,
+      "Y": 7583.069,
+      "Z": 327.681
+    }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24013.330,
+      "Y": 7618.495,
+      "Z": 333.879
+    }
+  },
+  {
+    "UnitId": 969,
+    "Title": "Mottled Steppe Ostrich",
+    "Position": {
+      "X": 24027.690,
+      "Y": 7579.039,
+      "Z": 327.851
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24376.460,
+      "Y": 6889.535,
+      "Z": 309.985
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24346.630,
+      "Y": 6889.559,
+      "Z": 309.368
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24368.610,
+      "Y": 6869.396,
+      "Z": 310.668
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24366.020,
+      "Y": 6899.109,
+      "Z": 309.222
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24347.860,
+      "Y": 6875.452,
+      "Z": 309.994
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24354.790,
+      "Y": 6903.636,
+      "Z": 308.777
+    }
+  },
+  {
+    "UnitId": 1011,
+    "Title": "Golden Twinhead Viper",
+    "Position": {
+      "X": 24353.090,
+      "Y": 6864.527,
+      "Z": 311.143
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25684.860,
+      "Y": 6972.335,
+      "Z": 340.097
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25655.030,
+      "Y": 6972.359,
+      "Z": 342.834
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25677.010,
+      "Y": 6952.196,
+      "Z": 343.549
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25674.420,
+      "Y": 6981.909,
+      "Z": 339.740
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25656.260,
+      "Y": 6958.252,
+      "Z": 344.068
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25663.190,
+      "Y": 6986.435,
+      "Z": 339.988
+    }
+  },
+  {
+    "UnitId": 1012,
+    "Title": "Vicious Plains Water Buffalo",
+    "Position": {
+      "X": 25661.480,
+      "Y": 6947.327,
+      "Z": 344.401
+    }
   }
 ]
