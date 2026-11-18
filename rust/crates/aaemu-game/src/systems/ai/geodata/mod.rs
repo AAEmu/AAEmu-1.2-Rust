@@ -162,11 +162,11 @@ pub fn plan_route(c: &mut AiCtx<'_>, target: Vec3) -> Option<usize> {
     let geo = geo_of(c.server, &c.obj)?;
     let (start, end) = (c.ai.path_node.start_point_pos, c.ai.path_node.end_point_pos);
     // A local ground route can be shorter than the authored navmesh when the victim
-    // is outside its triangles. Keep forbidden areas and actual collision in the check.
+    // is outside its triangles. Require continuous terrain support and a wall-free route.
     if matches!(
         geo.line_passes_through_forbidden_area(start, end),
         Ok(false)
-    ) && direct_ground_route(c, start, end)
+    ) && direct_ground_route(c.server, c.obj.transform().instance_id, start, end)
     {
         c.ai.path_node.found_path.push_back(end);
         return Some(1);
@@ -194,25 +194,30 @@ pub fn plan_route(c: &mut AiCtx<'_>, target: Vec3) -> Option<usize> {
     Some(raw_steps)
 }
 
-fn direct_ground_route(c: &AiCtx<'_>, start: Vec3, end: Vec3) -> bool {
-    use super::collision::{ground_height_probe, walk::walk_blocked};
+fn direct_ground_route(server: &GameServer, instance_id: u32, start: Vec3, end: Vec3) -> bool {
+    use super::collision::{
+        ground_height_probe,
+        walk::{terrain_supports_step, walk_blocked},
+    };
 
     let distance = (end.x - start.x).hypot(end.y - start.y);
     if !(0.25..=24.0).contains(&distance) || (end.z - start.z).abs() > 4.0 {
         return false;
     }
     let segments = (distance / 3.0).ceil() as u32;
-    let instance = c.obj.transform().instance_id;
     let mut from = [start.x, start.y, start.z];
     for step in 1..=segments {
         let t = step as f32 / segments as f32;
         let x = start.x + t * (end.x - start.x);
         let y = start.y + t * (end.y - start.y);
-        let Some(Some(z)) = ground_height_probe(c.server, instance, x, y, from[2], 1.0, 1.0) else {
+        let Some(Some(z)) = ground_height_probe(server, instance_id, x, y, from[2], 1.0, 1.0)
+        else {
             return false;
         };
         let to = [x, y, z];
-        if walk_blocked(c.server, instance, from, to) != Some(false) {
+        if !terrain_supports_step(server, instance_id, from, to)
+            || walk_blocked(server, instance_id, from, to) != Some(false)
+        {
             return false;
         }
         from = to;
@@ -292,4 +297,71 @@ fn fallback_path(
         }
     }
     Some(res_list.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::systems::ai::collision::{
+        ground_height_probe, terrain::TerrainSource, walk::walk_blocked,
+    };
+
+    struct FlatTerrain {
+        hole: bool,
+    }
+
+    impl TerrainSource for FlatTerrain {
+        fn sample(&self, _: i32, _: i32) -> f32 {
+            100.0
+        }
+
+        fn size(&self) -> (i32, i32) {
+            (512, 512)
+        }
+
+        fn is_hole(&self, x: i32, y: i32) -> bool {
+            self.hole && (x, y) == (51, 50)
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_ground_route_rejects_a_hole_between_floor_probes() {
+        let start = Vec3::new(101.5, 101.0, 100.0);
+        let end = Vec3::new(104.5, 101.0, 100.0);
+        for hole in [false, true] {
+            let server = crate::test_support::test_server_with(crate::data::GameData::empty());
+            server
+                .systems
+                .ai
+                .collision
+                .test_files
+                .set(Arc::new(HashMap::new()))
+                .expect("test collision files");
+            server
+                .systems
+                .ai
+                .collision
+                .test_terrain
+                .set(Arc::new(FlatTerrain { hole }))
+                .unwrap_or_else(|_| panic!("terrain is already set"));
+            // A 2 m hole lies strictly inside this 3 m step. Both of the old
+            // sample positions still see the same floor, with no wall between them.
+            for point in [start, end] {
+                assert_eq!(
+                    ground_height_probe(&server, 0, point.x, point.y, point.z, 1.0, 1.0),
+                    Some(Some(100.0)),
+                );
+            }
+            assert_eq!(
+                walk_blocked(
+                    &server,
+                    0,
+                    [start.x, start.y, start.z],
+                    [end.x, end.y, end.z],
+                ),
+                Some(false)
+            );
+            assert_eq!(direct_ground_route(&server, 0, start, end), !hole);
+        }
+    }
 }
