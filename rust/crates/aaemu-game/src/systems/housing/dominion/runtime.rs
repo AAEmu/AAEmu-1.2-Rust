@@ -987,7 +987,8 @@ pub fn tick_once(server: &GameServer) {
 }
 
 /// The once-a-second participant sweep: the participant buffs, the siege-area snapshot, the
-/// participant seals and the eviction of non-participants. The order matters: the snapshot is
+/// participant seals, the eviction of non-participants and the closed-castle-zone exemption
+/// recheck (`Housing.OpenCastleZonesForParticipants`). The order matters: the snapshot is
 /// rebuilt before the eviction (and the hostility rule) read it. It touches item containers and
 /// the world, so it must never run while the economy operation scope or the housing operation
 /// lock is held; the spawned loop of [`start_tick`] is the only production caller.
@@ -996,6 +997,10 @@ pub fn participant_sweep(server: &GameServer) {
     super::siege_area::refresh(server);
     super::seals::reconcile(server);
     super::siege_area::evict_non_participants(server);
+    // `Housing.OpenCastleZonesForParticipants`: reuses this cadence instead of a second
+    // periodic pass to catch a siege ending or a roster entry being removed while a
+    // participant stands still inside the zone.
+    crate::world::session::recheck_siege_participants(server);
 }
 
 pub fn start_tick(server: &Arc<GameServer>) {

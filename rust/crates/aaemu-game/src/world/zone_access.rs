@@ -2,6 +2,12 @@
 //! `OnZoneChange` (five 2 s warnings, dismount/despawn, 200 ms grace, return portal).
 //! Unknown keys can be
 //! world.xml placeholders (e.g. main-world 202, o_temp_b), not necessarily closed zones.
+//!
+//! `Housing.OpenCastleZonesForParticipants` (default off) carves out one exemption: a
+//! registered participant of a castle's own active siege, in the siege's own tower world
+//! instance, is not evicted from that castle's authored-closed zones (`siege_participant_exempt`).
+//! Everything else here (other closed zones, nonparticipants, warmup, GM overrides, the
+//! open-zone safe-return rules) keeps the previous behaviour.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +40,56 @@ fn is_closed(server: &GameServer, zone: u32) -> bool {
         .is_some_and(|z| z.closed)
 }
 
+/// `Housing.OpenCastleZonesForParticipants`: whether `player` is, right now, an
+/// authoritatively registered participant of `zone`'s own castle siege, in the siege's own
+/// tower world instance, while that siege is active. Delegates the one meaning of
+/// "registered participant" to `dominion::participants::participant_side` (roster entry whose
+/// side's expedition is still the character's current one); a member who left or was kicked is
+/// not exempted. Nonparticipants, other closed zones, the warmup period before `starts_at` and
+/// GM overrides (handled separately, above this check) are unaffected.
+fn siege_participant_exempt(
+    server: &GameServer,
+    player: &PlayerRef,
+    instance: u32,
+    zone: u32,
+) -> bool {
+    if !server.config.housing.open_castle_zones_for_participants {
+        return false;
+    }
+    let Some(group) = server.game_data.zones.zone_by_key(zone).map(|z| z.group_id) else {
+        return false;
+    };
+    let Some(state) = server.systems.housing.dominions.get(group) else {
+        return false;
+    };
+    if state.tower.instance_id != instance {
+        return false;
+    }
+    let Some(siege) = state.siege.as_ref() else {
+        return false;
+    };
+    if !siege.active_at(chrono::Utc::now().timestamp()) {
+        return false;
+    }
+    let (character_id, expedition) = {
+        let c = player.data();
+        (player.character_id, c.unit.expedition_id)
+    };
+    crate::systems::housing::dominion::participants::participant_side(
+        server,
+        siege,
+        character_id,
+        expedition,
+    )
+    .is_some()
+}
+
+/// Whether `zone` is closed to `player` in `instance` right now: an authored closed zone,
+/// unless the siege participant exemption opens it.
+fn zone_closed_to(server: &GameServer, player: &PlayerRef, instance: u32, zone: u32) -> bool {
+    is_closed(server, zone) && !siege_participant_exempt(server, player, instance, zone)
+}
+
 /// Check both the saved zone and the actual destination sector before charging or moving.
 /// A missing static zone row alone is not evidence that a coordinate is forbidden.
 pub fn zone_access_allowed(
@@ -47,12 +103,10 @@ pub fn zone_access_allowed(
     if player.data().access_level >= 100 {
         return true;
     }
-    !is_closed(server, zone)
-        && !server
-            .world
-            .worlds()
-            .iter()
-            .any(|w| w.id == instance && is_closed(server, w.zone_id_at(x, y)))
+    !zone_closed_to(server, player, instance, zone)
+        && !server.world.worlds().iter().any(|w| {
+            w.id == instance && zone_closed_to(server, player, instance, w.zone_id_at(x, y))
+        })
 }
 
 pub(super) fn cancel(player: &PlayerRef) {
@@ -108,8 +162,30 @@ fn needs_return(server: &GameServer, player: &PlayerRef) -> bool {
             .world
             .character_by_obj_id(player.obj_id)
             .is_some_and(|p| Arc::ptr_eq(&p, player))
-        && (is_closed(server, t.zone_id)
-            || world_transform(server, player).is_some_and(|t| is_closed(server, t.zone_id)))
+        && (zone_closed_to(server, player, t.instance_id, t.zone_id)
+            || world_transform(server, player)
+                .is_some_and(|t| zone_closed_to(server, player, t.instance_id, t.zone_id)))
+}
+
+/// Recheck standing characters after a configuration reload or a siege state change.
+pub fn recheck_closed_zone_access(server: &GameServer) {
+    for player in server.world.all_characters() {
+        update(server, &player);
+    }
+}
+
+/// Re-evaluates every online character's closed-zone status after something the
+/// `Housing.OpenCastleZonesForParticipants` exemption depends on may have changed outside a
+/// move or portal/skill use: the siege ended (naturally or by a GM command) or a roster entry
+/// was removed. Called from the existing once-a-second participant sweep
+/// (`dominion::runtime::participant_sweep`) rather than a second periodic pass; a character
+/// still exempt is untouched, one no longer exempt starts the ordinary eviction timer exactly
+/// as if it had just walked in. A no-op scan while the switch is off.
+pub fn recheck_siege_participants(server: &GameServer) {
+    if !server.config.housing.open_castle_zones_for_participants {
+        return;
+    }
+    recheck_closed_zone_access(server);
 }
 
 pub(super) fn update(server: &GameServer, player: &PlayerRef) {

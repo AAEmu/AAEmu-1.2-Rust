@@ -6323,6 +6323,45 @@ and in NPC wandering / buff remaining times.
   the_calendar_clock_moves_the_siege_area_window,
   a_mounted_non_participant_is_dismounted_before_the_move}` and the config binder test
   `housing::config::tests::siege_evict_non_participants_defaults_on_and_binds_booleans_or_strings`.
+* world::zone_access / systems::housing (siege participant closed-zone access, 2026-11-18):
+  the owner decision flagged above ("whether the castle zones should open for the siege window
+  is an open owner decision") is now a switch, `Housing.OpenCastleZonesForParticipants`
+  (default **false**, keeping the prior behaviour: castle zones are `closed='t'` in the
+  r208022 data and `world/zone_access.rs` evicts every non-GM after 10 s regardless of siege
+  state or roster). When on, `zone_access::siege_participant_exempt` is asked by both
+  `zone_access_allowed` (the explicit-destination checks: portal use, teleport skills, worldgate
+  skills, open-portal skills) and `needs_return` (the walking/zone-change path) before either
+  treats a zone as closed; it exempts a character only while all of these hold at once: the
+  zone's own `zone_group_id` names a `DominionState` (`server.systems.housing.dominions`); that
+  state's `siege` is `Some` and `SiegeState::active_at(now)` (so registration alone during the
+  warmup period before `starts_at` does not exempt); the state's tower
+  `TowerIdentity.instance_id` equals the world instance the check is for (so a player in a
+  different instance of the same template, or a same-named zone key of an unrelated dominion,
+  is not exempted); and `dominion::participants::participant_side` accepts the character for
+  that siege (the one shared "registered participant" rule the buffs, the siege-area eviction
+  and the participant seals already use: a roster entry whose side's expedition is still the
+  character's current `unit.expedition_id`, so a member who left or was kicked is not exempted
+  even though the roster entry itself is never removed). GMs keep the unconditional
+  `access_level >= 100` bypass checked above this rule, unaffected by the switch either way.
+  Continued occupancy after entry is re-evaluated by the same two functions on every zone
+  change (walking, a portal, a forced move) and, for a siege that ends or a roster entry that is
+  removed while a participant stands still, by a new `zone_access::recheck_siege_participants`
+  called from the existing once-a-second participant sweep
+  (`dominion::runtime::participant_sweep`) rather than a second periodic pass; it is a no-op scan
+  while the switch is off. Tests: `world::session::zone_access_tests::siege_participant_exemption::{
+  default_off_still_evicts_a_registered_participant_during_battle,
+  registration_alone_during_warmup_does_not_exempt,
+  registered_attacker_and_defender_enter_and_stay_during_battle,
+  unrelated_nonparticipant_and_unrelated_closed_zone_are_unaffected,
+  expiry_ends_the_exemption_through_the_existing_participant_sweep,
+  roster_removal_ends_the_exemption_through_the_existing_participant_sweep,
+  gm_bypass_is_unaffected_by_the_switch}` and the config binder test
+  `housing::config::tests::open_castle_zones_for_participants_defaults_off_and_binds_booleans_or_strings`.
+  **Capture-pending:** there is still no 1.2 server evidence either way for opening the zones
+  themselves (only the 2014 period-guide wording cited above for the *eviction of
+  non-participants* from the open siege area, a separate rule); this switch only lets an owner
+  who wants the castle interior reachable during the siege turn it on without touching the
+  authored `closed` data.
 * systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's
   flow points were checked against the implementation and the 1.2 data. Auction scroll: the
   automatic camp-lot posting (WP-SD1c, `auction_post.rs`) matches "every 3 weeks, starting bid

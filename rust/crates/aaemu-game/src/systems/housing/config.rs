@@ -114,6 +114,21 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub siege_evict_non_participants: bool,
+    /// Let a registered siege participant enter and remain in the authored-closed castle
+    /// zones of its own siege's zone group while that siege is active, instead of the
+    /// ordinary closed-zone eviction (`world::zone_access`, native error 287). "Registered"
+    /// is [`dominion::participants::participant_side`]'s one meaning: a roster entry whose
+    /// side's expedition is still the character's current one. Scope is the siege's own tower
+    /// world instance only; other closed zones, nonparticipants, the warmup period, GM
+    /// overrides (always exempt) and the open-zone safe-return rules are unaffected. `false`
+    /// (default) keeps the previous behaviour: r208022 castle zones are authored closed to
+    /// everyone and `/joinsiege` from outside a zone does not open it.
+    /// `Housing.OpenCastleZonesForParticipants`.
+    #[serde(
+        rename = "opencastlezonesforparticipants",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub open_castle_zones_for_participants: bool,
     /// Apply the 1.2 client's place-skin terrain material rule to player doodad placements:
     /// the terrain material under the spot must be one of the template's
     /// `doodad_place_skins` kinds, else `DOODAD_SIM_AREA` (276). `false` (default) keeps the
@@ -255,6 +270,7 @@ impl Default for HousingConfig {
             defense_hq_offset: [0.0; 3],
             siege_shop_gate: false,
             siege_evict_non_participants: true,
+            open_castle_zones_for_participants: false,
             placement_strict_surface: false,
             abandoned_house_hits_to_break: default_abandoned_house_hits_to_break(),
             siege_declare_house_margin: 10.0,
@@ -370,6 +386,19 @@ mod tests {
             }))
             .unwrap();
             assert!(config.housing.siege_evict_non_participants);
+        }
+    }
+
+    #[test]
+    fn open_castle_zones_for_participants_defaults_off_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.open_castle_zones_for_participants);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "OpenCastleZonesForParticipants": value }
+            }))
+            .unwrap();
+            assert!(config.housing.open_castle_zones_for_participants);
         }
     }
 

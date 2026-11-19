@@ -823,3 +823,360 @@ async fn instance_movement_past_the_edge_keeps_its_zone_without_an_error() {
     assert!(!logged.contains("out of bounds"), "{logged}");
     assert_eq!(p.data().unit.transform.zone_id, 240);
 }
+
+// `Housing.OpenCastleZonesForParticipants`: a registered participant of an active siege may
+// enter and remain in that siege's own authored-closed castle zones. `CASTLE_ZONE` (cells
+// x 16..24, world x in [1024, 1536)) is the besieged dominion's own zone group; `OTHER_CLOSED`
+// (cells x 24..32) is a second closed zone of an unrelated dominion, left alone throughout.
+mod siege_participant_exemption {
+    use std::sync::Arc;
+
+    use crate::data::world_data::{SystemFaction, Zone};
+    use crate::data::world_templates::{WorldTemplate, WorldTemplates};
+    use crate::data::GameData;
+    use crate::models::house::House;
+    use crate::server::GameServer;
+    use crate::systems::housing::data::HousingTemplate;
+    use crate::systems::housing::dominion::{runtime, SiegeSide};
+    use crate::systems::social::expedition::{member_from_character, Expedition};
+    use crate::test_support::{
+        spawn_player, test_character, test_server_with, TestClient, TEST_ZONE,
+    };
+    use crate::world::{Entity, PlayerRef};
+
+    use super::{advance, walk, warning_count, zone_access};
+
+    const CASTLE_ZONE: u32 = 300;
+    const OTHER_CLOSED_ZONE: u32 = 301;
+    const GROUP: u32 = 55;
+    const OTHER_GROUP: u32 = 56;
+    const ATTACKER_EXPEDITION: u32 = 20;
+    const DEFENDER_EXPEDITION: u32 = 10;
+    /// Lands in the castle's own closed zone (region 21, cells 16..24).
+    const CASTLE_X: f32 = 1400.0;
+    /// Lands in the unrelated closed zone (region 28, cells 24..32).
+    const OTHER_X: f32 = 1800.0;
+
+    struct Fixture {
+        server: Arc<GameServer>,
+        attacker: PlayerRef,
+        defender: PlayerRef,
+        outsider: PlayerRef,
+        attacker_client: TestClient,
+        defender_client: TestClient,
+        outsider_client: TestClient,
+    }
+
+    /// `active`: the siege's battle window (`starts_at..ends_at`) covers the real clock.
+    /// `false` schedules it in the future (warmup): registered, but not yet active.
+    fn fixture(active: bool) -> Fixture {
+        let mut data = GameData::empty();
+        for (key, closed, group) in [
+            (0, false, 0),
+            (TEST_ZONE, false, GROUP),
+            (CASTLE_ZONE, true, GROUP),
+            (OTHER_CLOSED_ZONE, true, OTHER_GROUP),
+        ] {
+            data.zones.zones.insert(
+                key,
+                Zone {
+                    zone_key: key,
+                    closed,
+                    group_id: group,
+                    ..Default::default()
+                },
+            );
+        }
+        data.systems.housing.add_template(HousingTemplate {
+            id: 139,
+            guard_tower_setting_id: 6,
+            ..Default::default()
+        });
+        let mut server = test_server_with(data);
+        server.config.update(|c| c.world.move_guard_enabled = false);
+        let mut template = WorldTemplate::synthetic(0, "castle_world", 2, 2, TEST_ZONE);
+        for x in 16..32 {
+            for y in 0..32 {
+                template.set_zone_key_at(
+                    x,
+                    y,
+                    if x < 24 {
+                        CASTLE_ZONE
+                    } else {
+                        OTHER_CLOSED_ZONE
+                    },
+                );
+            }
+        }
+        Arc::get_mut(&mut server.game_data).unwrap().worlds =
+            WorldTemplates::from_templates(vec![template], vec![]).unwrap();
+        server.world = Arc::new(crate::world::WorldManager::default());
+        server.world.create_world_instance(
+            Arc::new(
+                server
+                    .game_data
+                    .worlds
+                    .get_world_template_by_name("castle_world")
+                    .unwrap()
+                    .clone(),
+            ),
+            0,
+        );
+        let server = Arc::new(server);
+        server.set_self();
+        crate::systems::npcs::install_hooks(&server);
+
+        let mut attacker_client = TestClient::new(&server, 1, 1001);
+        let mut defender_client = TestClient::new(&server, 2, 1002);
+        let mut outsider_client = TestClient::new(&server, 3, 1003);
+        let make = |id: u32, name: &str, expedition: u32, client: &TestClient| {
+            let mut c = test_character(id, name, 100.0, 100.0);
+            c.is_online = true;
+            c.unit.hp = 100;
+            c.unit.max_hp = 100;
+            c.unit.expedition_id = expedition;
+            spawn_player(&server, client, c, 0x100 + id)
+        };
+        let attacker = make(1, "Attacker", ATTACKER_EXPEDITION, &attacker_client);
+        let defender = make(2, "Defender", DEFENDER_EXPEDITION, &defender_client);
+        let outsider = make(3, "Outsider", 0, &outsider_client);
+        attacker_client.conn.active_char = Some(attacker.clone());
+        defender_client.conn.active_char = Some(defender.clone());
+        outsider_client.conn.active_char = Some(outsider.clone());
+        for (expedition, p) in [
+            (ATTACKER_EXPEDITION, &attacker),
+            (DEFENDER_EXPEDITION, &defender),
+        ] {
+            server.expeditions.add(Expedition {
+                faction: SystemFaction {
+                    id: expedition,
+                    owner_id: p.character_id,
+                    ..Default::default()
+                },
+                members: vec![member_from_character(&server, expedition, p, true)],
+                policies: Vec::new(),
+                removed_members: Vec::new(),
+                is_disbanded: false,
+            });
+        }
+
+        let mut house = House::new(61, 139);
+        house.current_step = -1;
+        house.unit.transform.zone_id = TEST_ZONE;
+        house.unit.transform.set_xyz(105.0, 100.0, 100.0);
+        let tower = Entity::new(0x200, house);
+        server.systems.housing.manager.insert(&tower);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&tower, &server.view_ctx());
+        let (_, identity) = runtime::tower_identity(&server, &tower).unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let authority = &server.systems.housing.dominions;
+        authority
+            .declare_unowned_with(GROUP, identity, DEFENDER_EXPEDITION, now - 1000, || true)
+            .unwrap();
+        let (starts_at, ends_at) = if active {
+            (now - 10, now + 3600)
+        } else {
+            (now + 600, now + 3600)
+        };
+        authority
+            .schedule_siege(GROUP, ATTACKER_EXPEDITION, starts_at, ends_at, now - 20)
+            .unwrap();
+        authority
+            .register_participant(GROUP, 1, ATTACKER_EXPEDITION, SiegeSide::Attacker, now - 10)
+            .unwrap();
+        authority
+            .register_participant(GROUP, 2, DEFENDER_EXPEDITION, SiegeSide::Defender, now - 10)
+            .unwrap();
+        attacker_client.drain();
+        defender_client.drain();
+        outsider_client.drain();
+        Fixture {
+            server,
+            attacker,
+            defender,
+            outsider,
+            attacker_client,
+            defender_client,
+            outsider_client,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_off_still_evicts_a_registered_participant_during_battle() {
+        let mut f = fixture(true);
+        walk(&f.server, &mut f.attacker_client, &f.attacker, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, CASTLE_X);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registration_alone_during_warmup_does_not_exempt() {
+        let mut f = fixture(false);
+        f.server
+            .config
+            .update(|c| c.housing.open_castle_zones_for_participants = true);
+        walk(&f.server, &mut f.attacker_client, &f.attacker, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, CASTLE_X);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registered_attacker_and_defender_enter_and_stay_during_battle() {
+        let mut f = fixture(true);
+        f.server
+            .config
+            .update(|c| c.housing.open_castle_zones_for_participants = true);
+        for (client, p) in [
+            (&mut f.attacker_client, &f.attacker),
+            (&mut f.defender_client, &f.defender),
+        ] {
+            walk(&f.server, client, p, CASTLE_X).await;
+            assert_eq!(warning_count(client), 0);
+            advance(10_000).await;
+            advance(200).await;
+            assert_eq!(p.data().unit.transform.x, CASTLE_X);
+            assert_eq!(p.data().unit.transform.zone_id, CASTLE_ZONE);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_nonparticipant_and_unrelated_closed_zone_are_unaffected() {
+        let mut f = fixture(true);
+        f.server
+            .config
+            .update(|c| c.housing.open_castle_zones_for_participants = true);
+        // A non-participant is still evicted from the castle's own closed zone.
+        walk(&f.server, &mut f.outsider_client, &f.outsider, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.outsider_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.outsider.data().unit.transform.x, CASTLE_X);
+        // A registered participant of this siege is still evicted from a different dominion's
+        // closed zone (no siege of its own zone group is active).
+        walk(&f.server, &mut f.attacker_client, &f.attacker, OTHER_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, OTHER_X);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reloading_with_participant_access_disabled_evicts_a_stationary_participant() {
+        let mut f = fixture(true);
+        let dir =
+            std::env::temp_dir().join(format!("aaemu-siege-access-reload-{}", std::process::id()));
+        let config_file = dir.join("Config.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &config_file,
+            r#"{ "Housing": { "OpenCastleZonesForParticipants": false } }"#,
+        )
+        .unwrap();
+        f.server.config.update(|c| {
+            c.app_path = dir.clone();
+            c.housing.open_castle_zones_for_participants = true;
+        });
+        walk(&f.server, &mut f.attacker_client, &f.attacker, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 0);
+
+        let reload =
+            crate::systems::services::commands::scripts::reload_configs::reload_configuration(
+                &f.server,
+            );
+        std::fs::remove_file(config_file).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+        reload.unwrap();
+        assert!(!f.server.config.housing.open_castle_zones_for_participants);
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, CASTLE_X);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expiry_ends_the_exemption_through_the_existing_participant_sweep() {
+        let mut f = fixture(true);
+        f.server
+            .config
+            .update(|c| c.housing.open_castle_zones_for_participants = true);
+        walk(&f.server, &mut f.attacker_client, &f.attacker, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 0);
+        advance(10_000).await;
+        advance(200).await;
+        assert_eq!(f.attacker.data().unit.transform.x, CASTLE_X);
+        // The battle ends while the attacker stands still inside the zone; nothing re-checks a
+        // standing character except the periodic sweep this feature hooks into.
+        let now = chrono::Utc::now().timestamp();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .cancel_siege(GROUP, now)
+            .unwrap();
+        f.attacker_client.drain();
+        crate::world::session::recheck_siege_participants(&f.server);
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, CASTLE_X);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn roster_removal_ends_the_exemption_through_the_existing_participant_sweep() {
+        let mut f = fixture(true);
+        f.server
+            .config
+            .update(|c| c.housing.open_castle_zones_for_participants = true);
+        walk(&f.server, &mut f.attacker_client, &f.attacker, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 0);
+        advance(10_000).await;
+        advance(200).await;
+        assert_eq!(f.attacker.data().unit.transform.x, CASTLE_X);
+        f.server
+            .systems
+            .housing
+            .dominions
+            .unregister_participant(GROUP, f.attacker.character_id)
+            .unwrap();
+        f.attacker_client.drain();
+        crate::world::session::recheck_siege_participants(&f.server);
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, CASTLE_X);
+    }
+
+    #[tokio::test]
+    async fn gm_bypass_is_unaffected_by_the_switch() {
+        let f = fixture(true);
+        f.server
+            .config
+            .update(|c| c.housing.open_castle_zones_for_participants = true);
+        f.outsider.data().access_level = 100;
+        assert!(zone_access::zone_access_allowed(
+            &f.server,
+            &f.outsider,
+            0,
+            CASTLE_ZONE,
+            CASTLE_X,
+            100.0
+        ));
+        assert!(zone_access::zone_access_allowed(
+            &f.server,
+            &f.outsider,
+            0,
+            OTHER_CLOSED_ZONE,
+            OTHER_X,
+            100.0
+        ));
+    }
+}
