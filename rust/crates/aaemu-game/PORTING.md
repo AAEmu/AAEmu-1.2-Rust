@@ -6372,7 +6372,10 @@ and in NPC wandering / buff remaining times.
   (accepted declaration): `declaration.attacker_expedition_id` is the character's guild, its
   cycle is the running one, and the character was already admitted on basis 1 for that same
   `(zone group, cycle)` (`ZoneAccessState::declarer_admitted`, recorded only by a *standing*
-  evaluation, never by a destination check) because the cast takes the item when it completes
+  evaluation whose actual world position (not a stale saved zone id) is in that zone and
+  instance, never by a destination check, and forgotten by `zone_access::update` as soon as
+  the actual position is no longer in a closed zone of that group in the tower's instance, so
+  walking back in needs the item again) because the cast takes the item when it completes
   (`skill.rs` source-item debit before effects) and `handle_camp_use` records the declaration
   right after; without basis 2 the captain would be evicted the moment the declaration is
   accepted. Basis 2 never admits (a destination check is basis 1 only; the declaration has no

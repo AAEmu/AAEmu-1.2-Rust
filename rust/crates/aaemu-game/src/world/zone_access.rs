@@ -119,10 +119,47 @@ fn siege_declarer_exempt(
     let Some(permit) = permit(server, player, instance, zone, admitted) else {
         return false;
     };
-    if standing && permit.basis == PermitBasis::CampItem {
+    // Only the actual position admits: a saved transform that still names the castle zone while
+    // the character really stands elsewhere is not an admission.
+    if standing
+        && permit.basis == PermitBasis::CampItem
+        && world_transform(server, player)
+            .is_some_and(|t| t.instance_id == instance && t.zone_id == zone)
+    {
         player.data().zone_access.declarer_admitted = Some((permit.zone_group_id, permit.cycle));
     }
     true
+}
+
+/// Forgets the declarer admission once the character's actual position is no longer inside a
+/// closed zone of the admitted zone group in that territory's own tower instance, so walking
+/// back in later needs the camp item again. A no-op (no world lookup) while the switch is off
+/// or nothing is recorded.
+fn invalidate_declarer_admission(server: &GameServer, player: &PlayerRef) {
+    if !server.config.housing.open_castle_zones_for_declarers {
+        return;
+    }
+    let admitted = player.data().zone_access.declarer_admitted;
+    let Some((group, _)) = admitted else {
+        return;
+    };
+    let inside = world_transform(server, player).is_some_and(|t| {
+        is_closed(server, t.zone_id)
+            && server
+                .game_data
+                .zones
+                .zone_by_key(t.zone_id)
+                .is_some_and(|z| z.group_id == group)
+            && server
+                .systems
+                .housing
+                .dominions
+                .get(group)
+                .is_some_and(|state| state.tower.instance_id == t.instance_id)
+    });
+    if !inside {
+        player.data().zone_access.declarer_admitted = None;
+    }
 }
 
 /// Whether `zone` is closed to `player` in `instance` right now: an authored closed zone,
@@ -237,6 +274,7 @@ pub fn recheck_siege_participants(server: &GameServer) {
 }
 
 pub(super) fn update(server: &GameServer, player: &PlayerRef) {
+    invalidate_declarer_admission(server, player);
     if !needs_return(server, player) {
         cancel(player);
         remember_open_position(server, player);

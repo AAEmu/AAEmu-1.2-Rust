@@ -702,3 +702,61 @@ async fn settle() {
     advance(10_000).await;
     advance(200).await;
 }
+
+/// Walking back after the camp was donated: the stay-only permit belongs to the captain who is
+/// standing in the zone, so leaving it (into a verified open zone) must forget the admission.
+#[tokio::test(start_paused = true)]
+async fn leaving_the_zone_forgets_the_admission_and_walking_back_is_evicted_on_schedule() {
+    let mut f = fixture(true);
+    let item = give_camp(&f, &f.captain);
+    // Accepted with the item: the full cast length plus the grace, still standing.
+    assert!(stays(&mut f).await);
+    take(&f.captain, item);
+    declare(&f, ATTACKER_EXPEDITION);
+    f.captain_client.drain();
+    crate::world::session::recheck_siege_participants(&f.server);
+    assert_eq!(warning_count(&mut f.captain_client), 0);
+    settle().await;
+    assert_eq!(f.captain.data().unit.transform.x, CASTLE_X);
+    // Walk out into the open zone and let the sweep run there.
+    walk(&f.server, &mut f.captain_client, &f.captain, 100.0).await;
+    assert_eq!(f.captain.data().unit.transform.zone_id, TEST_ZONE);
+    crate::world::session::recheck_siege_participants(&f.server);
+    assert_eq!(warning_count(&mut f.captain_client), 0);
+    // Walking back without the item: warned at once, evicted 10 s later plus the 200 ms grace.
+    walk(&f.server, &mut f.captain_client, &f.captain, CASTLE_X).await;
+    assert_eq!(warning_count(&mut f.captain_client), 1);
+    advance(9_000).await;
+    assert_eq!(
+        f.captain.data().unit.transform.x,
+        CASTLE_X,
+        "still inside at 9 s"
+    );
+    advance(1_000).await;
+    assert_eq!(
+        f.captain.data().unit.transform.x,
+        CASTLE_X,
+        "the dismount grace is pending at 10 s"
+    );
+    advance(200).await;
+    assert_ne!(
+        f.captain.data().unit.transform.x,
+        CASTLE_X,
+        "returned after the grace"
+    );
+}
+
+/// A saved transform that still names the castle zone while the real position is elsewhere
+/// must not record an admission: only the actual position can admit.
+#[tokio::test(start_paused = true)]
+async fn a_stale_saved_zone_cannot_record_an_admission() {
+    let mut f = fixture(true);
+    let item = give_camp(&f, &f.captain);
+    // Real position (x = 100) is in the open zone; the saved zone id is stale.
+    f.captain.data().unit.transform.zone_id = CASTLE_ZONE;
+    zone_access::update(&f.server, &f.captain);
+    f.captain_client.drain();
+    take(&f.captain, item);
+    declare(&f, ATTACKER_EXPEDITION);
+    assert!(is_evicted(&mut f).await);
+}
