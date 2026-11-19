@@ -49,6 +49,7 @@ pub fn reload_configuration(server: &GameServer) -> anyhow::Result<()> {
         server,
         server.config.specialty.trade_pack_mail_delay_in_minutes,
     );
+    crate::world::session::recheck_closed_zone_access(server);
     Ok(())
 }
 
