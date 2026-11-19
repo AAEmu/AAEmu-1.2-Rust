@@ -2175,7 +2175,7 @@ fn try_delete(
         }
     }
     unbind_child_riders(server, &slave, attach_reason::SLAVE_BINDING);
-    let (doodad_ids, slave_ids, portal_time, template_id) = {
+    let (doodad_ids, slave_ids, portal_time) = {
         let d = slave.data();
         let portal = server
             .game_data
@@ -2187,7 +2187,6 @@ fn try_delete(
             d.attached_doodads.clone(),
             d.attached_slaves.clone(),
             portal,
-            d.unit.template_id,
         )
     };
     let now = spawn_manager::now();
@@ -2222,21 +2221,7 @@ fn try_delete(
         }
     }
     super::ship_physics::remove_ship(server, &slave);
-    if let Some(o) = owner {
-        let me = WorldObject::from(o);
-        // The animation is for the hull's viewers. The owner can recall a ship from
-        // another region, where the owner's own visibility set does not include them.
-        broadcast(server, &slave_obj, &SCSlaveDespawnPacket { obj_id }, false);
-        broadcast(
-            server,
-            &me,
-            &SCSlaveRemovedPacket {
-                obj_id: o.obj_id,
-                tl_id: tl as u16,
-            },
-            true,
-        );
-    }
+    // Stop publishing active hull motion before the native despawn controller starts.
     world.remove_object(obj_id);
     // Leaving a deck changes the movement frame within the same world. Publish an
     // ordinary world-space move so the client can drop the frame without a loading screen.
@@ -2259,6 +2244,20 @@ fn try_delete(
             true,
         );
     }
+    if let Some(o) = owner {
+        // The hull stays in the visibility grid for the portal effect. Release the
+        // client's deck frame first so it cannot follow that retiring hull.
+        crate::world::broadcast(&world, &slave_obj, &SCSlaveDespawnPacket { obj_id }, false);
+        broadcast(
+            server,
+            &WorldObject::from(o),
+            &SCSlaveRemovedPacket {
+                obj_id: o.obj_id,
+                tl_id: tl as u16,
+            },
+            true,
+        );
+    }
     if let Some(s) = &spawns {
         s.add_despawn(
             server,
@@ -2266,7 +2265,6 @@ fn try_delete(
             Some(spawn_manager::add_secs(now, f64::from(portal_time + 0.5))),
         );
     }
-    let _ = template_id;
     true
 }
 

@@ -1951,13 +1951,17 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
-* systems::vehicles / skills (ship interactions, 2026-11-19): a deck rider gets a
-  world-space movement update on recall. The despawn effect goes to the hull's
-  viewers, and the owner still receives the removal notice. Repair points follow
-  the ship's exact HP bands. The repair skills refuse full health before resources
-  are taken. Anchor stun leaves the telescope and Owner's Mark available, and the
-  portable harpoon launch plots (355/356) can start on the living operator while
-  preserving their equipped-cannon requirements.
+* systems::vehicles / skills (ship interactions, 2026-11-19): recall stops publishing
+  hull motion and releases the deck rider into world-space before starting the
+  native portal effect. The hull's viewers receive the effect, and the owner
+  receives the removal notice. Dry terrain blocks steering and permits throttle
+  back toward the water. Repair points follow the ship's exact HP bands, and
+  repair skills refuse full health before taking resources. The server allows
+  the telescope and Owner's Mark through the two anchor statuses while continuing
+  to enforce ordinary combat stuns. The portable harpoon plots (355/356) start
+  on the living operator and keep their equipped-cannon requirements. The
+  [r208022 client data patch](../../LIVE-TESTING.md#r208022-ship-skill-data)
+  updates client prechecks for those skills and the cannon pickup.
 
 * systems::social (blocked users): `CharacterBlocked` was stored and sent at login but never
   read, so a blocked player could still whisper, invite (party / raid / area, expedition,

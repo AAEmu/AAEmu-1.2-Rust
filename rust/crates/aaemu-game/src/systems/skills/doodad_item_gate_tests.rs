@@ -456,7 +456,7 @@ async fn portable_harpoon_pickup_replaces_a_glider_and_enables_harpoon_bomb() {
         &f.server,
         &f.player,
         90_001,
-        15873,
+        23612,
         slot_type::EQUIPMENT,
         equip_slot::BACKPACK,
     );
@@ -468,6 +468,11 @@ async fn portable_harpoon_pickup_replaces_a_glider_and_enables_harpoon_bomb() {
 
     let mut request = store_cast(cannon.obj_id);
     request.skill_id = 15660;
+    // The client sees the equipment's "Backpack Slot Occupied" status even for
+    // a folded glider. The same authored requirement runs on the server.
+    let owner = WorldObject::from(&f.player);
+    super::buffs::add_buff_by_id(&f.server, &owner, 2224, &owner, 0);
+    assert!(f.player.data().unit.buffs.check_buff(2224));
     start_skill(&f.server, &mut f.client.conn, request);
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(4)).await;

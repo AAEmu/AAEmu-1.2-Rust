@@ -172,7 +172,7 @@ async fn portable_harpoon_launch_plots_can_start_on_their_living_operator() {
 #[tokio::test]
 async fn the_anchor_stun_only_allows_ship_utility_controls() {
     let mut data = GameData::empty();
-    for id in [1983, 5226] {
+    for id in [615, 1983, 5226] {
         data.systems.skills.add_buff(BuffTemplate {
             id,
             stun: true,
@@ -189,13 +189,14 @@ async fn the_anchor_stun_only_allows_ship_utility_controls() {
         .world(0)
         .unwrap()
         .spawn(&ship, &server.view_ctx());
+    super::buffs::add_buff_by_id(&server, &ship, 615, &ship, 0);
     super::buffs::add_buff_by_id(&server, &ship, 1983, &ship, 0);
     let target = Target::Obj(ship.clone());
     let stunned = Err((
         super::unit_reqs::skill_result_for_key("skill_cannot_cast_in_stun"),
         0,
     ));
-    for id in [13608, 14766, 20704, 13749] {
+    for id in [13608, 13609, 14766, 17649, 20704, 13749] {
         let skill = SkillRun::new(
             Arc::new(SkillTemplate {
                 source_stun: false,

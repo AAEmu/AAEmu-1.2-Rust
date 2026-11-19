@@ -443,6 +443,21 @@ its echo shown in the chat window and as a bubble), *Select Character* (`CSLeave
 `SCLeaveWorldGranted` after 10 s, back in the lobby with the saved character), *Exit Game*, and a
 second session entering the world again at the saved position. No server errors.
 
+### r208022 ship skill data
+
+Use a Windows dev-client copy with a loose `game/db/compact.sqlite3`. With that
+client closed, run this from the repository root and point the dev launcher at
+the copy's `bin32/archeage.exe`:
+
+```powershell
+.\Scripts\patch-r208022-ship-skills.ps1 -ClientDirectory 'C:\AAEmu-dev-client'
+```
+
+The script updates the client-side checks for portable harpoon pickup, its two
+launch skills, and anchored telescope and Owner's Mark casts. The game server
+still validates the backpack, stun status, and skill targets. Run the client
+with the updated server when checking these interactions.
+
 ## 7. Stopping
 
 Stop the servers (Ctrl+C, or `taskkill //IM aaemu-game.exe //IM aaemu-login.exe //IM

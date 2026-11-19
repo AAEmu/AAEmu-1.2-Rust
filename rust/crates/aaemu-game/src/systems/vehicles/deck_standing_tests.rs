@@ -222,7 +222,7 @@ async fn doodad_frame_move_without_its_doodad_uses_the_world_position() {
 }
 
 #[tokio::test]
-async fn a_despawned_hull_sends_its_deck_stander_a_world_space_move() {
+async fn recalling_a_hull_releases_the_deck_stander_before_the_portal_effect() {
     let (server, mut client, player, boat) = fixture();
     let world = server.world.world(0).unwrap();
     let me = WorldObject::from(&player);
@@ -238,11 +238,20 @@ async fn a_despawned_hull_sends_its_deck_stander_a_world_space_move() {
     let world_pose = world.world_pos_rot(&me);
     client.drain();
 
-    slaves::delete(&server, None, world.id, boat.obj_id, true);
+    boat.data().summoner_id = player.character_id;
+    slaves::delete(&server, Some(&player), world.id, boat.obj_id, true);
     assert!(world.slave(boat.obj_id).is_none());
     assert_eq!(me.transform().parent_obj_id, 0);
     let frames = client.drain();
     assert!(!frames.iter().any(|(op, _)| *op == sc::SCTeleportUnitPacket));
+    assert_eq!(
+        ops(&frames),
+        vec![
+            sc::SCOneUnitMovementPacket,
+            sc::SCSlaveDespawnPacket,
+            sc::SCSlaveRemovedPacket,
+        ]
+    );
     let body = super::body(&frames, sc::SCOneUnitMovementPacket);
     let mut s = PacketStream::from_bytes(body);
     assert_eq!(s.read_bc().unwrap(), player.obj_id);

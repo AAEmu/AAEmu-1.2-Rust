@@ -376,11 +376,11 @@ pub(super) fn check(
         let Some(buff) = server.game_data.systems.skills.buff(id) else {
             continue;
         };
-        // The 1.2 Anchor status uses the generic stun flag to stop the ship. Its
-        // utility controls still work while anchored, but real stuns still stop them.
-        let anchored_utility = id == 1983
+        // The ship's "Anchor Lowered" and "Anchor" statuses use the generic stun
+        // flag. Only the anchor and ship utilities can bypass these two statuses.
+        let anchored_utility = matches!(id, 615 | 1983)
             && caster.as_slave().is_some()
-            && matches!(skill.id, 13608 | 13609 | 14766 | 20704);
+            && matches!(skill.id, 13608 | 13609 | 14766 | 17649 | 20704);
         if !template.source_stun && !anchored_utility && (buff.stun || buff.sleep || buff.knockdown)
         {
             return fail("skill_cannot_cast_in_stun");
