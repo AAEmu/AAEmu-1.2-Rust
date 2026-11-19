@@ -6381,7 +6381,7 @@ async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
         t.rot_z
     );
     assert!(
-        !error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        !error_codes(&a.drain()).contains(&super::error::INVALID_SUMMON_LOCATION),
         "a valid placement must not send the invalid-area error"
     );
 }
@@ -6398,7 +6398,7 @@ async fn summon_pos_outside_the_valid_area_errors_without_spawning() {
         let mut frames = Vec::new();
         loop {
             frames.extend(a.drain());
-            if error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA) {
+            if error_codes(&frames).contains(&super::error::INVALID_SUMMON_LOCATION) {
                 break frames;
             }
             tokio::task::yield_now().await;
@@ -6407,7 +6407,7 @@ async fn summon_pos_outside_the_valid_area_errors_without_spawning() {
     .await
     .expect("invalid summon placement must be handled");
     assert!(
-        error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        error_codes(&frames).contains(&super::error::INVALID_SUMMON_LOCATION),
         "invalid placement must send SlaveSpawnErrorInvalidArea"
     );
     assert!(slaves::get_active_slave_by_owner_obj_id(&world, PA).is_none());
@@ -6456,12 +6456,12 @@ async fn boat_summon_point_slightly_above_the_sea_surface_is_accepted() {
         assert_eq!((t.x, t.y, t.z), (103.0, 104.0, 100.0), "z {z}");
     }
     assert!(
-        !error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        !error_codes(&a.drain()).contains(&super::error::INVALID_SUMMON_LOCATION),
         "accepted placements must not send the invalid-area error"
     );
     // Beyond the tolerance the point is in the air, not on the water.
     assert!(place(101.5).is_none());
-    assert!(error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+    assert!(error_codes(&a.drain()).contains(&super::error::INVALID_SUMMON_LOCATION));
 }
 
 #[tokio::test]

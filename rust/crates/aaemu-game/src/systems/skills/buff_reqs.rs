@@ -107,6 +107,17 @@ pub fn failed_requirement(
         let listed = req.skill_ids.contains(&template.id)
             || tags.is_some_and(|tags| tags.iter().any(|tag| req.skill_tags.contains(tag)));
         if listed == req.default_result {
+            // The portable cannon swaps a folded glider into the bag. Its old
+            // carry restrictions also match glider equipment buffs.
+            if template.id == super::glider::CARRY_PORTABLE_HARPOON_CANNON
+                && matches!(req.id, 13 | 35)
+                && caster.as_player().is_some_and(|player| {
+                    super::glider::equipped_glider(server, player).is_some()
+                        && !super::glider::is_gliding(server, caster)
+                })
+            {
+                continue;
+            }
             return Some(req.id);
         }
     }

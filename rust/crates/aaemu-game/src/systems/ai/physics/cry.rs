@@ -4,7 +4,8 @@
 //! hulls through CryPhysics' own contact solver. The ship controller of the C# port (helm,
 //! wind, storms, whirlpools, harpoon tow, replication) keeps driving the hull velocities; the
 //! Jitter2 integrator, the C# buoyancy force and the manual depenetration passes (shore,
-//! ship–ship, doodads, barriers, steep terrain) are replaced by the engine.
+//! ship–ship, doodads, barriers) are replaced by the engine. The steep shoreline guard
+//! also runs on this backend to keep the helm from driving hulls up emerged rock.
 //!
 //! **Entity** (`X2::ShipUnitModel::InitPhysicalEntity`, x2game `sub_39286C50`), from the
 //! `ship_models` row (the 10.x ship desc has the same fields; offsets noted):

@@ -506,9 +506,8 @@ pub fn wind_speed_mul(ship: &PhysShip, bow_rad: f32, model: WindModel, game_time
 pub fn apply_force_and_torque(ship: &mut PhysShip, dt_sec: f32, wind: WindModel, game_time: f32) {
     use motion::*;
     let model = ship.model;
-    // If not in water (grounded), keep limited control to let ships get unstuck.
-    let is_grounded =
-        (ship.cached_floor_level > ship.cached_water_surface) || ship.ground_contact_latched;
+    let is_on_dry_land = ship.cached_floor_level > ship.cached_water_surface;
+    let is_grounded = is_on_dry_land || ship.ground_contact_latched;
     let shallow_depth_for_caps = SHALLOW_WATER_DEPTH_FOR_GROUND_SPEED_CAPS.max(0.0);
     let water_depth = ship.cached_water_surface - ship.cached_floor_level;
     let is_shallow_for_caps = water_depth >= 0.0 && water_depth <= shallow_depth_for_caps;
@@ -560,7 +559,9 @@ pub fn apply_force_and_torque(ship: &mut PhysShip, dt_sec: f32, wind: WindModel,
                 ground_throttle_reverse_mul *= 0.20;
             }
         }
-        let grounded_throttle_input_mul = if ship.throttle_request >= 0 {
+        let grounded_throttle_input_mul = if is_on_dry_land && !is_escape_input_on_ground {
+            0.0
+        } else if ship.throttle_request >= 0 {
             ground_throttle_forward_mul
         } else {
             ground_throttle_reverse_mul
@@ -575,10 +576,18 @@ pub fn apply_force_and_torque(ship: &mut PhysShip, dt_sec: f32, wind: WindModel,
         }
         ship.throttle_smoothed = f32::from(ship.throttle);
 
-        let mut ground_steer_input_mul = if grounded_by_stern { 0.9 } else { 0.8f32 };
-        ground_steer_input_mul =
-            1f32.min(ground_steer_input_mul + 0.15 * ship.ground_escape_assist);
-        ship.steering = round_to_sbyte(f32::from(ship.steering_request) * ground_steer_input_mul);
+        if is_on_dry_land {
+            // A beached hull can back off along its heading. The helm can turn it
+            // again once the hull's centre reaches water.
+            ship.steering = 0;
+            ship.rot_speed = 0.0;
+        } else {
+            let ground_steer_input_mul = if grounded_by_stern { 0.9 } else { 0.8f32 };
+            let ground_steer_input_mul =
+                1f32.min(ground_steer_input_mul + 0.15 * ship.ground_escape_assist);
+            ship.steering =
+                round_to_sbyte(f32::from(ship.steering_request) * ground_steer_input_mul);
+        }
         ship.steering_smoothed = f32::from(ship.steering);
         ship.turn_speed_velocity_mul = 1.0;
     } else {
@@ -626,6 +635,7 @@ pub fn apply_force_and_torque(ship: &mut PhysShip, dt_sec: f32, wind: WindModel,
         max_backward = -water_max_reverse_abs * (rev_pct / 100.0);
     }
     let is_fallback_escape_on_ground = is_grounded_for_speed_caps
+        && !is_on_dry_land
         && !is_escape_input_on_ground
         && ship.throttle_request != 0
         && ship.ground_stuck_time > 0.35;
@@ -1062,6 +1072,36 @@ pub(crate) mod tests {
         );
         assert_eq!(s.body.angular_velocity.y, -s.rot_speed);
         assert!(s.turn_speed_velocity_mul < 1.0 && s.turn_speed_velocity_mul >= 0.9);
+    }
+
+    #[test]
+    fn fully_beached_hull_can_back_off_but_cannot_steer_or_drive_inland() {
+        let mut ship = PhysShip::new(
+            spec(1, 0.0, 0.0, 101.0, 0.0),
+            model(),
+            ShipGameView::default(),
+        );
+        ship.cached_water_surface = 100.0;
+        ship.cached_floor_level = 101.0;
+        ship.has_driver = true;
+        ship.throttle_request = 127;
+        ship.steering_request = 127;
+        ship.rot_speed = 0.03;
+
+        apply_force_and_torque(&mut ship, 0.04, WindModel::Official, 0.0);
+        assert_eq!(ship.throttle, 0);
+        assert_eq!(ship.steering, 0);
+        assert_eq!(ship.body.angular_velocity.y, 0.0);
+
+        ship.throttle_request = -127;
+        apply_force_and_torque(&mut ship, 0.04, WindModel::Official, 0.0);
+        assert!(ship.throttle < 0);
+        assert!(ship.speed < 0.0);
+        assert_eq!(ship.steering, 0);
+
+        ship.cached_floor_level = 99.8;
+        apply_force_and_torque(&mut ship, 0.04, WindModel::Official, 0.0);
+        assert!(ship.steering > 0);
     }
 
     #[test]

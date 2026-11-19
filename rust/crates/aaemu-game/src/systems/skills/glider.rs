@@ -28,6 +28,8 @@ use super::data::SkillTemplate;
 /// `skill_controllers` row 2687 exists, so the server never runs a controller for the player).
 pub const GLIDER_SKILL_CONTROLLER_ID: u32 = 2687;
 
+pub(crate) const CARRY_PORTABLE_HARPOON_CANNON: u32 = 15660;
+
 /// Whether `skill` is a glider skill: the deploy skill (`skill_controller_id` 2687) or one of
 /// the linked glider UI skills (`link_backpack_type_id` 2, e.g. 14901 use / 17657 fold).
 pub fn is_glider_skill(skill: &SkillTemplate) -> bool {

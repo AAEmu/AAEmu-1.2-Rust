@@ -216,7 +216,13 @@ pub fn post_update_current_hp(
     }) else {
         return;
     };
-    if !triggers.is_empty() && max_hp != 0 {
+    if target.as_slave().is_some() {
+        use crate::systems::vehicles::slaves::repair_point_health_band;
+        let new_band = repair_point_health_band(new_hp, max_hp);
+        if repair_point_health_band(old_hp, max_hp) != new_band {
+            crate::systems::vehicles::on_hp_change_trigger(server, target, new_band);
+        }
+    } else if !triggers.is_empty() && max_hp != 0 {
         let old_p = (old_hp as f32 * 100.0 / max_hp as f32).round_ties_even() as i32;
         let new_p = (new_hp as f32 * 100.0 / max_hp as f32).round_ties_even() as i32;
         // DoHpChangeTrigger: the vehicle overrides (slave repair points); npc AI hooks it.

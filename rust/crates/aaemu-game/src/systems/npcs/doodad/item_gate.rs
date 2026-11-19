@@ -10,8 +10,9 @@ use std::sync::PoisonError;
 
 use crate::models::container::{equip_slot, slot_type};
 use crate::server::GameServer;
-use crate::systems::economy::inventory::Inv;
+use crate::systems::economy::inventory::{can_replace_glider_in_backpack_slot, Inv};
 use crate::systems::skills::data::SkillTemplate;
+use crate::systems::skills::glider::{equipped_glider, CARRY_PORTABLE_HARPOON_CANNON};
 use crate::systems::skills::types::skill_result;
 use crate::world::{DoodadRef, WorldObject};
 
@@ -53,6 +54,16 @@ pub fn skill_item_refusal(
     let group = doodad.data().func_group_id;
     let func = data.func_for_skill(group, skill.id)?;
     let template = data.func_template(func.func_id, &func.func_type)?;
+    if skill.id == CARRY_PORTABLE_HARPOON_CANNON
+        && !can_replace_glider_in_backpack_slot(&server.game_data.items, &Inv::of(player))
+    {
+        let result = if equipped_glider(server, player).is_some() {
+            skill_result::BAG_FULL
+        } else {
+            crate::systems::skills::unit_reqs::skill_result_for_key("backpack_occupied")
+        };
+        return Some(SkillItemRefusal::new(result, 0, None));
+    }
     let need_reagent = |value, error| {
         Some(SkillItemRefusal::new(
             skill_result::NEED_REAGENT,
@@ -62,10 +73,9 @@ pub fn skill_item_refusal(
     };
     match template {
         FuncTemplate::ConsumeChanger(f) => {
-            // The 1.2 client turns a NEED_REAGENT value into an item name; use the first item
-            // the func accepts so the text never looks up an unrelated template.
+            // Storage accepts a set of equipped packs. The first accepted template is
+            // arbitrary and must not be presented as a required reagent.
             let accepted = data.consume_changer_items(f.id);
-            let value = accepted.first().copied().unwrap_or(0);
             let equipment = player.data().inventory.equipment().clone();
             let source = equipment
                 .lock()
@@ -73,10 +83,14 @@ pub fn skill_item_refusal(
                 .get_item_by_slot(f.slot_id as i32)
                 .cloned();
             let Some(source) = source else {
-                return need_reagent(value, Some(error_message::UNKNOWN_ITEM));
+                return Some(SkillItemRefusal::new(
+                    crate::systems::skills::unit_reqs::skill_result_for_key("skill_urk_equip_item"),
+                    0,
+                    None,
+                ));
             };
             if !accepted.contains(&source.template_id) {
-                return need_reagent(value, Some(error_message::STORE_INVALID_ITEM));
+                return Some(SkillItemRefusal::new(skill_result::INVALID_TARGET, 0, None));
             }
             None
         }
