@@ -700,13 +700,8 @@ pub fn create(
     lift_speed: f32,
     lift_duration: f32,
 ) -> Option<SkillControllerRef> {
-    if let Some(swim) = sport_fish_swim(server, template, owner, target) {
-        return Some(new_ref(
-            Some(template),
-            owner,
-            target,
-            Behavior::FishSwim(swim),
-        ));
+    if let Some(movement) = sport_fish_movement(server, template, owner, target) {
+        return Some(new_ref(Some(template), owner, target, movement));
     }
     match SkillControllerKind::from_u32(template.kind_id) {
         Some(SkillControllerKind::Floating) => Some(new_floating(
@@ -756,16 +751,7 @@ pub fn create(
                 && owner.transform().parent_obj_id == 0
                 && (matches!(target, Target::Pos(_)) || self_target)
             {
-                let animation_speed = owner
-                    .with_unit(|u| {
-                        u.unit().calculate_with_bonuses(
-                            1000.0,
-                            crate::models::unit::UnitAttribute::AttackAnimSpeedMul,
-                            now_ms(),
-                        ) as f32
-                            / 1000.0
-                    })
-                    .unwrap_or(1.0);
+                let animation_speed = leap_animation_speed(owner);
                 let forward = self_target.then(|| {
                     let v = world_pos(server, target)
                         .to_quaternion()
@@ -906,18 +892,32 @@ fn clip_linear_move(server: &GameServer, owner: &WorldObject, o: Vec3, m: &mut L
     m.calculated_speed = calculate_distance(o, m.end_position, true) / duration_sec(m.duration);
 }
 
+fn leap_animation_speed(owner: &WorldObject) -> f32 {
+    owner
+        .with_unit(|u| {
+            u.unit().calculate_with_bonuses(
+                1000.0,
+                crate::models::unit::UnitAttribute::AttackAnimSpeedMul,
+                now_ms(),
+            ) as f32
+                / 1000.0
+        })
+        .unwrap_or(1.0)
+}
+
 /// The 1.2 hooked-fish plots encode swims with Leap and reel pulls with a negative Dash
 /// offset. Resolve those motions in the angler's frame, with depth measured from the
 /// water surface instead of compounding a relative dive on every cue.
-fn sport_fish_swim(
+fn sport_fish_movement(
     server: &GameServer,
     template: &SkillControllerTemplate,
     fish: &WorldObject,
     target: &Target,
-) -> Option<LinearMove> {
+) -> Option<Behavior> {
     let id = template.id;
     let reel = matches!(id, 7064..=7065 | 7114..=7121);
-    if !reel && !matches!(id, 7008..=7011 | 7127..=7129) {
+    let jump = id == 7040;
+    if !reel && !jump && !matches!(id, 7008..=7011 | 7127..=7129) {
         return None;
     }
     let npc = fish.as_npc()?;
@@ -952,17 +952,19 @@ fn sport_fish_swim(
         -(range - 2.0)
             .max(0.0)
             .min(template.value[3].unsigned_abs() as f32 / 1000.0)
-    } else if matches!(id, 7011 | 7129) {
+    } else if jump || matches!(id, 7011 | 7129) {
         template.value[3].unsigned_abs() as f32 / 1000.0
     } else {
         calculate_distance(start, destination, false)
     };
     let (sin, cos) = side.sin_cos();
-    let mut end = Vec3::new(
-        start.x + (away.x * cos + away.y * sin) * distance,
-        start.y + (away.y * cos - away.x * sin) * distance,
-        start.z,
-    );
+    let (dx, dy) = if jump {
+        let yaw = world.world_pos_rot(fish).rot_z;
+        (-yaw.sin(), yaw.cos())
+    } else {
+        (away.x * cos + away.y * sin, away.y * cos - away.x * sin)
+    };
+    let mut end = Vec3::new(start.x + dx * distance, start.y + dy * distance, start.z);
     // Start casts can reach 30 m. A fish can use the line available to it without
     // extending it indefinitely. Keep existing slack if the angler has moved.
     let limit = range.max(30.0);
@@ -970,14 +972,17 @@ fn sport_fish_swim(
     if end_range > limit {
         end = add_distance_to_front_between(limit, end_range, origin, end);
     }
+    if jump && calculate_distance(start, end, false) < 0.01 {
+        // Leave room for an arc if an outward jump starts at the end of the line.
+        end.x -= away.x * distance;
+        end.y -= away.y * distance;
+    }
     let probe_z = npc.data().spawner_z.unwrap_or(start.z).max(start.z);
     let probe = Vec3::new(end.x, end.y, probe_z);
     let (surface, _) = crate::systems::ai::physics::water_surface(server, world.id, probe)?;
     let floor = crate::systems::npcs::heightmap::world_height(server, &world, end.x, end.y)
         .unwrap_or(f32::NEG_INFINITY);
-    if floor >= surface {
-        end = start;
-    } else {
+    if floor < surface {
         let depth = match id {
             7010 => 8.0,
             7008 | 7009 | 7127 | 7128 => 2.0,
@@ -985,15 +990,24 @@ fn sport_fish_swim(
             _ => 0.2,
         };
         end.z = (surface - depth).max((floor + 0.2).min(surface - 0.2));
+        if jump {
+            // The bounded destination already incorporates the authored offset.
+            let mut config = template.clone();
+            config.value[3] = 0;
+            let arc = LeapArc::new(&config, start, end, None, leap_animation_speed(fish))?;
+            return Some(Behavior::BallisticLeap(arc));
+        }
+    } else {
+        end = start;
     }
     let duration = template.value[2];
-    Some(LinearMove {
+    Some(Behavior::FishSwim(LinearMove {
         duration,
         distance_offset: template.value[3],
         direction: MoveDirection::Both,
         end_position: end,
         calculated_speed: calculate_distance(start, end, true) / duration_sec(duration),
-    })
+    }))
 }
 
 fn positions(server: &GameServer, owner: &WorldObject, target: &Target) -> (Vec3, Vec3) {

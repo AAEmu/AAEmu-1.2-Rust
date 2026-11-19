@@ -6904,8 +6904,9 @@ Additional world-side fixes from the same audit:
   moves are measured relative to the angler. Reel offsets pull toward the rod and raise the
   fish toward the surface. Side swims and dives use the 1.2 plot offsets of 2 m and 8 m as
   depths below the water surface. The 30 m cast range bounds additional line payout, with
-  existing slack preserved when the angler moves. These are server approximations of
-  hooked-fish motion. Swim packets include vertical velocity and the swimming stance.
+  existing slack preserved when the angler moves. Jumps use the same range limit and
+  finish near the surface. These are server approximations of hooked-fish motion.
+  Swim packets include vertical velocity and the swimming stance.
   Between controllers, FISH NPCs keep their position and heading. Landing retains its plot.
 * Freshwater and saltwater schools anchor their School of Fish clout to the school doodad.
   The 1.2 rows set `use_origin_source`, which previously let the server pick a nearby ship

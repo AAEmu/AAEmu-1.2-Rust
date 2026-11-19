@@ -244,6 +244,24 @@ async fn owned_fish_swims_in_the_anglers_frame_and_reels_toward_the_surface() {
     let reeled = end(7064, 4, &rod, -8000);
     assert_eq!(reeled.y, 117.0);
     assert!((reeled.z - 99.8).abs() < 0.001);
+
+    obj.with_transform(|t| t.set_position(100.0, 130.0, 92.0, 0.0, 0.0, 0.0));
+    let jump = controllers::create(
+        &server,
+        &self_jump(),
+        &obj,
+        &Target::Obj(obj.clone()),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    .unwrap();
+    let Behavior::BallisticLeap(arc) = jump.behavior() else {
+        panic!("expected a fish jump");
+    };
+    assert!(calculate_distance(origin, arc.end_position, false) <= 30.0);
+    assert!((arc.end_position.z - 99.8).abs() < 0.001);
 }
 
 #[test]
