@@ -625,9 +625,7 @@ async fn client_engraving_cast_reaches_the_runtime_only_for_a_registered_attacke
     );
     assert!(engraving_active(&server, 1));
 
-    // A guild member who never registered as an attacker passes the contextual gate (a live
-    // tower target) and is then refused by the runtime's own authority: INVALID_TARGET,
-    // not the source refusal NO_PERM, and no reservation.
+    // Losing guild membership prevents the cast even with an attacker roster entry.
     let (server, mut client, player, house, _) = base();
     player.data().unit.expedition_id = 0;
     let server = Arc::new(server);
@@ -668,6 +666,25 @@ async fn client_engraving_cast_reaches_the_runtime_only_for_a_registered_attacke
     assert_eq!(results, vec![skill_result::INVALID_TARGET]);
     assert!(!engraving_active(&server, 2));
     assert!(!engraving_active(&server, 1));
+}
+
+#[tokio::test]
+async fn client_engraving_cast_rejects_guild_member_outside_the_siege_roster() {
+    use crate::systems::skills::types::skill_result;
+    let (server, mut client, player, house, _) = base();
+    server
+        .systems
+        .housing
+        .dominions
+        .unregister_participant(25, player.character_id)
+        .unwrap();
+    let server = Arc::new(server);
+    crate::systems::skills::bind(&server);
+
+    let results = dispatch(&server, &mut client, &player, ENGRAVING_SKILL, house.obj_id);
+
+    assert_eq!(results, vec![skill_result::INVALID_TARGET]);
+    assert!(!engraving_active(&server, player.character_id));
 }
 
 #[tokio::test]
