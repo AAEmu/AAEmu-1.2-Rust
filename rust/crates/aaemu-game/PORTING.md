@@ -6370,6 +6370,56 @@ and in NPC wandering / buff remaining times.
   non-participants* from the open siege area, a separate rule); this switch only lets an owner
   who wants the castle interior reachable during the siege turn it on without touching the
   authored `closed` data.
+* world::zone_access / systems::housing::dominion::declarer_access (declarer closed-zone
+  access, 2026-11-18): the six castle zone groups are authored closed, so a non-GM captain is
+  evicted after 10 s, exactly the length of the genuine camp cast (skill 16918); the
+  participant switch above needs an active siege and cannot apply before one exists. New
+  default-**false** switch `Housing.OpenCastleZonesForDeclarers`. `zone_access::
+  siege_declarer_exempt` asks `declarer_access::permit` (same two call sites as the participant
+  exemption: `zone_access_allowed` for explicit destinations, `needs_return` for standing).
+  Gates, cheapest first: switch; the zone's group has an owned dominion and `tower.instance_id`
+  equals the world instance; guild alive, not the owner, character's current rank has the
+  siege-master policy and not pirate (`declare::{has_siege_master_rank, is_pirate_declarer}`,
+  extracted from `handle_camp_use`, which now calls the same functions); the weekly calendar is
+  enabled and `view_for_declaration` (the declaration's own cycle when one exists, GM clock
+  `calendar.now()`) reports `PERIOD_DECLARE`; the registered tower is live and still the
+  dominion's; only then the item scan. Basis 1 (camp item): no declaration, no unfinished
+  siege (`SiegeStatus != Finished`) on the territory, the guild in no other unfinished siege
+  (`declare::guild_in_unfinished_siege`, the 639 rule), and the character owns an unlocked,
+  not `expired_at` stack of `siege_zones[group].declare_item_id` whose template `use_skill_id`
+  is 16918, in the bag or equipment (what `take_cast_source_item` can take). Basis 2
+  (accepted declaration): `declaration.attacker_expedition_id` is the character's guild, its
+  cycle is the running one, and the character was already admitted on basis 1 for that same
+  `(zone group, cycle)` (`ZoneAccessState::declarer_admitted`, recorded only by a *standing*
+  evaluation whose actual world position (not a stale saved zone id) is in that zone and
+  instance, never by a destination check, and forgotten by `zone_access::update` as soon as
+  the actual position is no longer in a closed zone of that group in the tower's instance, so
+  walking back in needs the item again) because the cast takes the item when it completes
+  (`skill.rs` source-item debit before effects) and `handle_camp_use` records the declaration
+  right after; without basis 2 the captain would be evicted the moment the declaration is
+  accepted. Basis 2 never admits (a destination check is basis 1 only; the declaration has no
+  declarer character, so it cannot identify who cast). The permit ends, and the existing
+  participant sweep (`participant_sweep` -> `recheck_siege_participants`, now also gated by this
+  switch) starts the ordinary eviction timer, on: the declare period ending (the declaration
+  materialises into the warmup siege or is dropped), a GM cancel, item loss/expiry without a
+  declaration, a lost rank or membership, the territory changing hands, or a rival claim /
+  unfinished siege appearing. Warmup and siege are not covered here: from the siege start the
+  participant switch applies to registered members. Locks: the check takes only `dominions`,
+  `expeditions`, one container lock at a time and the player lock briefly (never held across
+  the permit); it takes neither the housing operation lock nor the economy scope, so it cannot
+  invert `handle_camp_use`'s economy -> housing order. A one-tick race remains: between the cast
+  taking the item and `declare` recording the declaration a sweep can start the eviction timer
+  (one stray 287 warning); the timer's next 2 s recheck cancels it. Tests: `world::session::
+  zone_access_tests::siege_declarer_exemption::*` (positive 10 s hold, default off, auction and
+  warmup phases, absent/other-zone/no-skill/expired/locked/banked items, wrong rank/owner/
+  pirate/no guild/left guild, rival declaration, unfinished siege here and elsewhere, stay after
+  the item is taken, loss of item/period/declaration/rank/roster through the sweep, declaration
+  alone and rival declaration, unrelated zone/instance/player, destination checks) and
+  `housing::config::tests::open_castle_zones_for_declarers_defaults_off_and_binds_booleans_or_strings`.
+  **Capture-pending:** no 1.2 server evidence for opening the zones; this is an opt-in
+  deviation. **Design decision to report:** the declaration stores no declaring character, so
+  basis 2 is bound to the character's own admission mark, not to the declaration; another
+  siege master of the declaring guild only stays if it was itself admitted on an item.
 * systems::housing (siege flow audit, 2026-11-10, owner's source vs the code): the owner's
   flow points were checked against the implementation and the 1.2 data. Auction scroll: the
   automatic camp-lot posting (WP-SD1c, `auction_post.rs`) matches "every 3 weeks, starting bid

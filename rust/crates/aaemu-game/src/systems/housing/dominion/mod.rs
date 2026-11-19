@@ -8,6 +8,7 @@ pub mod calendar;
 pub mod credit;
 pub mod db;
 pub mod declare;
+pub mod declarer_access;
 pub mod fort;
 pub mod headquarters;
 pub mod hostility;

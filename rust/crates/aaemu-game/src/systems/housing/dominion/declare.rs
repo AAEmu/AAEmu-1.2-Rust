@@ -458,6 +458,47 @@ fn obstacle_near(
     })
 }
 
+/// The character's current rank in its live guild carries the SiegeMaster policy (ui label
+/// 2385). Shared by the declaration and by `declarer_access`, so the two cannot disagree.
+pub(super) fn has_siege_master_rank(
+    server: &GameServer,
+    expedition: u32,
+    character_id: u32,
+) -> bool {
+    match server.expeditions.get(expedition) {
+        Some(guild) if !guild.is_disbanded => guild
+            .member(character_id)
+            .and_then(|member| guild.policy_by_role(member.role))
+            .is_some_and(|policy| policy.siege_master),
+        _ => false,
+    }
+}
+
+/// A pirate guild or a saved-faction pirate cannot declare (`SIEGE_DECLARE_PIRATE`).
+pub(super) fn is_pirate_declarer(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    expedition: u32,
+) -> bool {
+    let persisted_faction = crate::db_character::persisted_faction(&player.data());
+    server
+        .expeditions
+        .get(expedition)
+        .is_some_and(|guild| guild.faction.mother_id == crate::data::world_data::factions::PIRATE)
+        || persisted_faction == crate::data::world_data::factions::PIRATE
+}
+
+/// The guild already fights (attack or defense) in an unfinished siege of any territory (639).
+pub(super) fn guild_in_unfinished_siege(server: &GameServer, expedition: u32) -> bool {
+    server.systems.housing.dominions.all().iter().any(|other| {
+        other.siege.as_ref().is_some_and(|siege| {
+            siege.status != crate::systems::housing::dominion::SiegeStatus::Finished
+                && (siege.attacker_expedition_id == expedition
+                    || siege.defender_expedition_id == expedition)
+        })
+    })
+}
+
 /// Validate an item cast of skill 16918 and record the declaration (WP-SD2b).
 ///
 /// The skill's source item was already taken by the cast path; a refusal returns `Err` so
@@ -653,33 +694,14 @@ pub fn handle_camp_use(
     }
     // SiegeMaster rank policy (ui label 2385). 459 is the chosen text; 581 is the other
     // candidate (capture-pending).
-    let policy_allowed = match server.expeditions.get(expedition) {
-        Some(guild) if !guild.is_disbanded => guild
-            .member(player.character_id)
-            .and_then(|member| guild.policy_by_role(member.role))
-            .is_some_and(|policy| policy.siege_master),
-        _ => false,
-    };
-    if !policy_allowed {
+    if !has_siege_master_rank(server, expedition, player.character_id) {
         return refuse(player, error::SIEGE_MASTER_ONLY);
     }
-    let persisted_faction = crate::db_character::persisted_faction(&player.data());
-    let pirate =
-        server.expeditions.get(expedition).is_some_and(|guild| {
-            guild.faction.mother_id == crate::data::world_data::factions::PIRATE
-        }) || persisted_faction == crate::data::world_data::factions::PIRATE;
-    if pirate {
+    if is_pirate_declarer(server, player, expedition) {
         return refuse(player, error::SIEGE_DECLARE_PIRATE);
     }
     // A guild already fighting in another unfinished siege cannot declare (639).
-    let participating = server.systems.housing.dominions.all().iter().any(|other| {
-        other.siege.as_ref().is_some_and(|siege| {
-            siege.status != crate::systems::housing::dominion::SiegeStatus::Finished
-                && (siege.attacker_expedition_id == expedition
-                    || siege.defender_expedition_id == expedition)
-        })
-    });
-    if participating {
+    if guild_in_unfinished_siege(server, expedition) {
         return refuse(player, error::SIEGE_ALREADY_PARTICIPATING);
     }
     match server.systems.housing.dominions.declare(

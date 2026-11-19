@@ -6,6 +6,9 @@
 //! `Housing.OpenCastleZonesForParticipants` (default off) carves out one exemption: a
 //! registered participant of a castle's own active siege, in the siege's own tower world
 //! instance, is not evicted from that castle's authored-closed zones (`siege_participant_exempt`).
+//! `Housing.OpenCastleZonesForDeclarers` (default off) adds a second, narrower one for the
+//! declare period, when no siege exists yet (`siege_declarer_exempt`, decided by
+//! `dominion::declarer_access::permit`).
 //! Everything else here (other closed zones, nonparticipants, warmup, GM overrides, the
 //! open-zone safe-return rules) keeps the previous behaviour.
 
@@ -30,6 +33,10 @@ pub struct ZoneAccessState {
     // Retain a completed attempt until departure: a missing safe route must not start a loop.
     attempt: Option<CancellationToken>,
     safe_position: Option<Transform>,
+    /// `Housing.OpenCastleZonesForDeclarers`: `(zone group, calendar cycle)` this character was
+    /// last admitted to a closed castle zone for on a camp item. Runtime only; a stale value
+    /// names a finished cycle and opens nothing.
+    declarer_admitted: Option<(u32, i64)>,
 }
 
 fn is_closed(server: &GameServer, zone: u32) -> bool {
@@ -84,10 +91,90 @@ fn siege_participant_exempt(
     .is_some()
 }
 
-/// Whether `zone` is closed to `player` in `instance` right now: an authored closed zone,
-/// unless the siege participant exemption opens it.
+/// `Housing.OpenCastleZonesForDeclarers`: whether `player` holds a declarer permit for `zone`.
+/// `standing` is true when asking about a character that is already in the zone (walk, sweep,
+/// eviction timer) and false for an explicit destination (portal, teleport). Only a standing
+/// character can lean on its accepted declaration, and only after it was admitted on a camp
+/// item in the same cycle: the admitting evaluation records `(zone group, cycle)` here, because
+/// the cast takes the item when it completes. A destination check never records anything.
+fn siege_declarer_exempt(
+    server: &GameServer,
+    player: &PlayerRef,
+    instance: u32,
+    zone: u32,
+    standing: bool,
+) -> bool {
+    use crate::systems::housing::dominion::declarer_access::{permit, PermitBasis};
+
+    if !server.config.housing.open_castle_zones_for_declarers {
+        return false;
+    }
+    // Never hold the player lock across the permit: it reads the player, the guild, the
+    // calendar and the inventory itself.
+    let admitted = if standing {
+        player.data().zone_access.declarer_admitted
+    } else {
+        None
+    };
+    let Some(permit) = permit(server, player, instance, zone, admitted) else {
+        return false;
+    };
+    // Only the actual position admits: a saved transform that still names the castle zone while
+    // the character really stands elsewhere is not an admission.
+    if standing
+        && permit.basis == PermitBasis::CampItem
+        && world_transform(server, player)
+            .is_some_and(|t| t.instance_id == instance && t.zone_id == zone)
+    {
+        player.data().zone_access.declarer_admitted = Some((permit.zone_group_id, permit.cycle));
+    }
+    true
+}
+
+/// Forgets the declarer admission once the character's actual position is no longer inside a
+/// closed zone of the admitted zone group in that territory's own tower instance, so walking
+/// back in later needs the camp item again. Turning off the exemption clears any existing
+/// admission without a world lookup.
+fn invalidate_declarer_admission(server: &GameServer, player: &PlayerRef) {
+    let admitted = player.data().zone_access.declarer_admitted;
+    let Some((group, _)) = admitted else {
+        return;
+    };
+    let inside = server.config.housing.open_castle_zones_for_declarers
+        && world_transform(server, player).is_some_and(|t| {
+            is_closed(server, t.zone_id)
+                && server
+                    .game_data
+                    .zones
+                    .zone_by_key(t.zone_id)
+                    .is_some_and(|z| z.group_id == group)
+                && server
+                    .systems
+                    .housing
+                    .dominions
+                    .get(group)
+                    .is_some_and(|state| state.tower.instance_id == t.instance_id)
+        });
+    if !inside {
+        player.data().zone_access.declarer_admitted = None;
+    }
+}
+
+/// Whether the zone is closed after accounting for the siege participant exemption.
 fn zone_closed_to(server: &GameServer, player: &PlayerRef, instance: u32, zone: u32) -> bool {
     is_closed(server, zone) && !siege_participant_exempt(server, player, instance, zone)
+}
+
+/// Also account for the declarer exemption, including the permission to stay in the zone.
+fn zone_closed_to_with_declarer(
+    server: &GameServer,
+    player: &PlayerRef,
+    instance: u32,
+    zone: u32,
+    standing: bool,
+) -> bool {
+    zone_closed_to(server, player, instance, zone)
+        && !siege_declarer_exempt(server, player, instance, zone, standing)
 }
 
 /// Check both the saved zone and the actual destination sector before charging or moving.
@@ -103,9 +190,10 @@ pub fn zone_access_allowed(
     if player.data().access_level >= 100 {
         return true;
     }
-    !zone_closed_to(server, player, instance, zone)
+    !zone_closed_to_with_declarer(server, player, instance, zone, false)
         && !server.world.worlds().iter().any(|w| {
-            w.id == instance && zone_closed_to(server, player, instance, w.zone_id_at(x, y))
+            w.id == instance
+                && zone_closed_to_with_declarer(server, player, instance, w.zone_id_at(x, y), false)
         })
 }
 
@@ -162,9 +250,10 @@ fn needs_return(server: &GameServer, player: &PlayerRef) -> bool {
             .world
             .character_by_obj_id(player.obj_id)
             .is_some_and(|p| Arc::ptr_eq(&p, player))
-        && (zone_closed_to(server, player, t.instance_id, t.zone_id)
-            || world_transform(server, player)
-                .is_some_and(|t| zone_closed_to(server, player, t.instance_id, t.zone_id)))
+        && (zone_closed_to_with_declarer(server, player, t.instance_id, t.zone_id, true)
+            || world_transform(server, player).is_some_and(|t| {
+                zone_closed_to_with_declarer(server, player, t.instance_id, t.zone_id, true)
+            }))
 }
 
 /// Recheck standing characters after a configuration reload or a siege state change.
@@ -175,20 +264,24 @@ pub fn recheck_closed_zone_access(server: &GameServer) {
 }
 
 /// Re-evaluates every online character's closed-zone status after something the
-/// `Housing.OpenCastleZonesForParticipants` exemption depends on may have changed outside a
-/// move or portal/skill use: the siege ended (naturally or by a GM command) or a roster entry
-/// was removed. Called from the existing once-a-second participant sweep
-/// (`dominion::runtime::participant_sweep`) rather than a second periodic pass; a character
-/// still exempt is untouched, one no longer exempt starts the ordinary eviction timer exactly
-/// as if it had just walked in. A no-op scan while the switch is off.
+/// `Housing.OpenCastleZonesForParticipants` or `Housing.OpenCastleZonesForDeclarers`
+/// exemptions depend on may have changed outside a move or portal/skill use: the siege ended
+/// (naturally or by a GM command), a roster entry was removed, the declare period ended, the
+/// camp item or declaration or rank went away. Called from the existing once-a-second
+/// participant sweep (`dominion::runtime::participant_sweep`) rather than a second periodic
+/// pass; a character still exempt is untouched, one no longer exempt starts the ordinary
+/// eviction timer exactly as if it had just walked in. A no-op scan while both switches are
+/// off.
 pub fn recheck_siege_participants(server: &GameServer) {
-    if !server.config.housing.open_castle_zones_for_participants {
+    let housing = &server.config.housing;
+    if !housing.open_castle_zones_for_participants && !housing.open_castle_zones_for_declarers {
         return;
     }
     recheck_closed_zone_access(server);
 }
 
 pub(super) fn update(server: &GameServer, player: &PlayerRef) {
+    invalidate_declarer_admission(server, player);
     if !needs_return(server, player) {
         cancel(player);
         remember_open_position(server, player);
