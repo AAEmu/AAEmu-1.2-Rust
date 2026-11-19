@@ -25,6 +25,34 @@ pub const FRESHWATER_FISH_SCHOOL: u32 = 6447;
 /// `DoodadConstants.SaltwaterFishSchool`.
 pub const SALTWATER_FISH_SCHOOL: u32 = 6448;
 
+pub(crate) fn is_school_template(template_id: u32) -> bool {
+    matches!(template_id, FRESHWATER_FISH_SCHOOL | SALTWATER_FISH_SCHOOL)
+}
+
+/// Both the chummed and unchummed prefabs contain fish and birds. The startup and expiry
+/// phases instead use an invisible prefab, even while the server still has a doodad object.
+pub(crate) fn is_visible_school(
+    data: &super::doodad::data::DoodadData,
+    doodad: &DoodadRef,
+) -> bool {
+    let d = doodad.data();
+    let prefab = data
+        .func_group(d.func_group_id)
+        .filter(|phase| phase.almighty == d.template_id)
+        .and_then(|phase| phase.model.as_deref())
+        .and_then(|model| model.strip_prefix("prefab://prefabs/fish.xml/fish_school."));
+    matches!(
+        (d.template_id, prefab),
+        (
+            FRESHWATER_FISH_SCHOOL,
+            Some("water_active" | "water_inactive")
+        ) | (
+            SALTWATER_FISH_SCHOOL,
+            Some("ocean_active" | "ocean_inactive")
+        )
+    )
+}
+
 /// The client's school expiry phases. Their Final functions specify a respawn delay
 /// but leave the respawn flag off.
 pub(crate) fn is_school_expiry(template_id: u32, group_id: u32) -> bool {
@@ -141,10 +169,7 @@ pub struct FishSchoolManager {
 
 impl FishSchoolManager {
     pub(crate) fn track(&self, world: &WorldInstance, doodad: &DoodadRef) {
-        if !matches!(
-            doodad.data().template_id,
-            FRESHWATER_FISH_SCHOOL | SALTWATER_FISH_SCHOOL
-        ) {
+        if !is_school_template(doodad.data().template_id) {
             return;
         }
         let mut schools = self.fish_schools.lock().expect("fish schools poisoned");

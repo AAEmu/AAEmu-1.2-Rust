@@ -1488,6 +1488,13 @@ live acceptance remain pending.
 | `Models/Tasks/SaveTask/SaveTickStartTask` | `managers/save.rs` | done (by design) | The periodic save is a Tokio interval instead of a `TaskManager` task (not counted in `GetQueueCount`). |
 | `Utils/{MathUtil, NumericExtensions, Converters/*, DB/HoldablesSchemaCheck}` | `utils/` | done | `Utils/DB/SQLite*` = `data::sqlite`, `Utils/IdManager` = `managers::id`. `SphereCommandUtil` / `QuestCommandUtil`: `services::commands::scripts::{sphere, quest_cmd}`. |
 
+#### Fish finder phase visibility
+
+`DoodadData` retains `doodad_func_groups.model` for the freshwater and saltwater school
+templates (6447 and 6448). The finder checks each live school's current phase for a fish
+school prefab. The chummed and unchummed prefabs both contain fish and birds. The setup and
+expiry phases use an invisible prefab and are omitted from the snapshot.
+
 #### Character rename (`SCCharacterRenamed` 0x05a, WP-AC2)
 
 Rust only: the 1.2 client has no packet or UI that starts a character rename (the only client
@@ -5423,6 +5430,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `FUN_397c4570`/`FUN_397beb40`), not the seven `canXxx` flags. The server has no restriction
   store, so no sender is implemented; **capture-pending** for the moderation area
   (`ACCOUNT-SCRESTRICTINFO-1`).
+
+* systems::services (fish finder): The C# loader discarded the phase model and the finder
+  could report a live doodad still in its invisible setup phase. See
+  [fish finder phase visibility](#fish-finder-phase-visibility).
 
 ### Ranking boards (Rust only)
 

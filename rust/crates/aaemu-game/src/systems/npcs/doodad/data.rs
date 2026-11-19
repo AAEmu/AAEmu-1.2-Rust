@@ -9,7 +9,8 @@
 //! C# behaviour mirrored:
 //! * The first `doodad_func_groups` pass (`ORDER BY doodad_almighty_id, ...`) runs before any
 //!   template exists, so it adds nothing (its column reads still run). The groups come from the
-//!   second, unordered pass, which does not read `model` (`Model` stays null).
+//!   second, unordered pass. The server retains the model for fish school phases so the
+//!   fish finder can exclude invisible setup phases.
 //! * `doodad_funcs` and `doodad_phase_funcs` keep their
 //!   `ORDER BY doodad_func_group_id, actual_func_id` order (the C# order).
 //!   **Deviation (2026-11-11):** the C# order runs a `DoodadFuncPulseTrigger` (274) before the
@@ -1680,17 +1681,23 @@ impl DoodadData {
         Ok(())
     }
 
-    /// Second `doodad_func_groups` pass (`_allFuncGroups`, no `model` read).
+    /// Second `doodad_func_groups` pass (`_allFuncGroups`).
     fn load_all_func_groups(&mut self, conn: &Connection) -> Result<(), GameDataError> {
         for_each_row(conn, "SELECT * FROM doodad_func_groups", [], |r| {
+            let almighty = r.u32("doodad_almighty_id")?;
+            let model = if super::super::fish_school::is_school_template(almighty) {
+                Some(r.string_or("model", "")?)
+            } else {
+                None
+            };
             let group = DoodadFuncGroups {
                 id: r.u32("id")?,
-                almighty: r.u32("doodad_almighty_id")?,
+                almighty,
                 group_kind_id: r.u32("doodad_func_group_kind_id")?,
                 sound_id: r.u32_or("sound_id", 0)?,
                 phase_msg: r.string_or("phase_msg", "")?,
                 is_msg_to_zone: r.bool_str("is_msg_to_zone")?,
-                model: None,
+                model,
             };
             if self.all_func_groups_index.contains_key(&group.id) {
                 tracing::error!("Failed to add FuncGroups: {}", group.id);
@@ -2408,7 +2415,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE doodad_func_groups (id INT, model TEXT, doodad_almighty_id INT, doodad_func_group_kind_id INT, sound_id INT, phase_msg TEXT, is_msg_to_zone TEXT);
-             INSERT INTO doodad_func_groups VALUES (11, 'm', 2, 2, NULL, NULL, 'f'), (10, 'm', 2, 1, 5, 'door opened', 't'), (12, 'm', 1, 1, NULL, '  ', NULL), (10, 'dup', 1, 1, NULL, NULL, NULL);
+             INSERT INTO doodad_func_groups VALUES (11, 'm', 2, 2, NULL, NULL, 'f'), (10, 'm', 2, 1, 5, 'door opened', 't'), (12, 'm', 1, 1, NULL, '  ', NULL), (10, 'dup', 1, 1, NULL, NULL, NULL),
+                  (17231, 'prefab://prefabs/fish.xml/fish_school.ocean_inactive', 6448, 2, NULL, NULL, 'f');
              CREATE TABLE doodad_funcs (id INT, doodad_func_group_id INT, actual_func_id INT, actual_func_type TEXT, next_phase INT, sound_id INT, func_skill_id INT, perm_id INT, act_count INT);
              INSERT INTO doodad_funcs VALUES (2, 10, 9, 'DoodadFuncFakeUse', NULL, NULL, NULL, 1, NULL), (1, 10, 3, 'DoodadFuncCoffer', 11, 4, 77, 0, 2);
              CREATE TABLE doodad_func_coffers (id INT, capacity INT);
@@ -2481,11 +2489,15 @@ mod tests {
             (f.next_phase, f.sound_id, f.skill_id, f.count),
             (-1, 0, 0, 0)
         );
-        // Func groups: row order, duplicate id skipped, model never kept.
+        // Func groups: row order, duplicate id skipped, fish models kept.
         let ids: Vec<u32> = d.all_func_groups.iter().map(|g| g.id).collect();
-        assert_eq!(ids, [11, 10, 12]);
+        assert_eq!(ids, [11, 10, 12, 17231]);
         assert_eq!(d.func_groups_ids(2), [11, 10]);
         assert!(d.doodad_func_groups(2).iter().all(|g| g.model.is_none()));
+        assert_eq!(
+            d.func_group(17231).unwrap().model.as_deref(),
+            Some("prefab://prefabs/fish.xml/fish_school.ocean_inactive")
+        );
         assert_eq!(d.func_group(10).unwrap().sound_id, 5);
         // phase_msg / is_msg_to_zone: NULL tolerant, `'t'`/`'f'` decoded like the other text flags.
         let g10 = d.func_group(10).unwrap();

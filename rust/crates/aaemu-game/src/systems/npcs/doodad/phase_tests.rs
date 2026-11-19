@@ -2745,16 +2745,26 @@ async fn final_deletes_now_or_after() {
 }
 
 #[tokio::test]
-async fn fish_school_expires_clears_its_marker_and_reappears_after_its_cooldown() {
+async fn fish_finder_shows_only_rendered_phases_through_school_respawns() {
+    const SETUP_MS: i32 = 1000;
     const ACTIVE_MS: i32 = 1_800_000;
     const RESPAWN_MS: i32 = 1_800_000;
-    for (template, active, expired) in [
-        (FRESHWATER_FISH_SCHOOL, 17243, 17140),
-        (SALTWATER_FISH_SCHOOL, 17231, 17079),
+    for (template, setup, shown, expired, prefab) in [
+        (
+            FRESHWATER_FISH_SCHOOL,
+            16995,
+            17243,
+            17140,
+            "water_inactive",
+        ),
+        (FRESHWATER_FISH_SCHOOL, 16995, 17245, 17140, "water_active"),
+        (SALTWATER_FISH_SCHOOL, 16997, 17231, 17079, "ocean_inactive"),
+        (SALTWATER_FISH_SCHOOL, 16997, 17232, 17079, "ocean_active"),
     ] {
-        let b = Builder::default()
-            .template(template, &[(active, 1), (expired, 2)])
-            .phase_func(active, timer(1, ACTIVE_MS, expired as i32))
+        let mut b = Builder::default()
+            .template(template, &[(setup, 1), (shown, 2), (expired, 2)])
+            .phase_func(setup, timer(3, SETUP_MS, shown as i32))
+            .phase_func(shown, timer(1, ACTIVE_MS, expired as i32))
             .phase_func(
                 expired,
                 FuncTemplate::Final(DoodadFuncFinal {
@@ -2765,12 +2775,24 @@ async fn fish_school_expires_clears_its_marker_and_reappears_after_its_cooldown(
                     ..Default::default()
                 }),
             );
+        let visible_model = format!("prefab://prefabs/fish.xml/fish_school.{prefab}");
+        let hidden_model = "prefab://prefabs/interaction.xml/env.invisible";
+        for (group_id, model) in [(setup, hidden_model), (shown, &visible_model)] {
+            let index = b.data.all_func_groups_index[&group_id];
+            b.data.all_func_groups[index].model = Some(model.to_owned());
+        }
         let mut f = fx(b);
         let radar = &f.server.systems.services.radar;
         radar.register_for_fish_school(&f.player, 1000.0);
         let spawner = new_spawner(template, 123);
         let first = spawner.spawn(&f.server, 0).unwrap();
 
+        assert_eq!(group(&first), setup);
+        assert!(first.core().is_visible());
+        radar.radar_tick(&f.server).await;
+        assert_school_snapshot(&mut f.client, None);
+        assert_eq!(f.advance(SETUP_MS as u64), 1);
+        assert_eq!(group(&first), shown);
         radar.radar_tick(&f.server).await;
         assert_school_snapshot(&mut f.client, Some(&first));
         assert_eq!(f.advance(ACTIVE_MS as u64), 1);
@@ -2791,8 +2813,11 @@ async fn fish_school_expires_clears_its_marker_and_reappears_after_its_cooldown(
         assert_eq!(f.advance(1), 1);
         let replacement = spawner.last().unwrap();
         assert!(!Arc::ptr_eq(&first, &replacement));
-        assert_eq!(group(&replacement), active);
+        assert_eq!(group(&replacement), setup);
         assert_eq!(first.data().transform.x, replacement.data().transform.x);
+        radar.radar_tick(&f.server).await;
+        assert_school_snapshot(&mut f.client, None);
+        assert_eq!(f.advance(SETUP_MS as u64), 1);
         radar.radar_tick(&f.server).await;
         assert_school_snapshot(&mut f.client, Some(&replacement));
 

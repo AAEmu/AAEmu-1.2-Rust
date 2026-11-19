@@ -14,7 +14,8 @@ use crate::opcodes::sc;
 use crate::packets::packet_def;
 use crate::server::GameServer;
 use crate::systems::npcs::fish_school::{
-    FishFinderUnit, SCSchoolOfFishDoodadsPacket, SCSchoolOfFishFinderToggledPacket,
+    is_visible_school, FishFinderUnit, SCSchoolOfFishDoodadsPacket,
+    SCSchoolOfFishFinderToggledPacket,
 };
 use crate::systems::HookSlot;
 use crate::world::{ObjectKind, PlayerRef, SlaveRef, WorldInstance, WorldObject};
@@ -415,7 +416,9 @@ impl RadarManager {
                     {
                         continue;
                     }
-                    if distance(&o, &world) <= range {
+                    if distance(&o, &world) <= range
+                        && is_visible_school(&server.game_data.systems.npcs.doodad, &d)
+                    {
                         in_range.push(FishFinderUnit::of(&world, &d));
                     }
                 }
