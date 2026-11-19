@@ -1908,6 +1908,64 @@ fn clout_to(buff: u32, id: u32, duration: i32, next_phase: i32) -> FuncTemplate 
     })
 }
 
+#[tokio::test]
+async fn chummed_schools_keep_their_aura_at_the_school_when_the_boat_leaves_and_returns() {
+    const BUFF: u32 = 5767;
+    for school_template in [SALTWATER_FISH_SCHOOL, FRESHWATER_FISH_SCHOOL] {
+        let server = Builder::default()
+            .template(school_template, &[(10, 1), (11, 2), (12, 2)])
+            .template(TEMPLATE, &[(20, 1)])
+            .phase_func(11, clout(BUFF, 1, 0))
+            .clout_server(
+                BUFF,
+                AreaShape {
+                    id: 1,
+                    kind: crate::systems::npcs::area_trigger::AREA_SHAPE_SPHERE,
+                    value1: 50.0,
+                    value2: 0.0,
+                    value3: 0.0,
+                },
+            );
+        let world = server.world.world(0).unwrap();
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Angler", 100.0, 100.0),
+            0x400,
+        );
+        let me = WorldObject::from(&player);
+        let mut hull = crate::models::slave::Slave::new(1, 1);
+        hull.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let boat = crate::world::Entity::new(0x401, hull);
+        world.spawn(&boat, &server.view_ctx());
+        let boat_obj = WorldObject::from(&boat);
+        world.attach_child(&boat_obj, &me);
+        me.with_transform(|t| t.set_xyz(0.0, 0.0, 1.0));
+        let fitting = manager::create(&server, &world, 0x402, TEMPLATE, None, true).unwrap();
+        world.attach_child(&boat_obj, &WorldObject::from(&fitting));
+        manager::spawn(&server, &world, &fitting);
+        let school = manager::create(&server, &world, 0x403, school_template, None, true).unwrap();
+        school.data().transform.set_xyz(120.0, 100.0, 100.0);
+        manager::spawn(&server, &world, &school);
+        manager::do_change_phase(&server, &world, &school, Some(&me), 11);
+        let tick = || server.systems.npcs.area_triggers.tick(&server);
+        let has_buff = || player.data().unit.buffs.check_buff(BUFF);
+        tick();
+        assert!(has_buff());
+
+        for (x, expected) in [(300.0, false), (100.0, true)] {
+            boat.data().unit.transform.x = x;
+            crate::systems::ai::npc::check_moved_position(&server, &boat_obj);
+            tick();
+            assert_eq!(has_buff(), expected, "hull position {x}");
+        }
+        manager::do_change_phase(&server, &world, &school, None, 12);
+        tick();
+        assert!(!has_buff(), "school expiry removes the aura");
+    }
+}
+
 /// Summons `template` 15.49 m in front of `player` (`SummonDoodad` order: create, place,
 /// `InitDoodad`, spawn).
 fn summon_in_front(
