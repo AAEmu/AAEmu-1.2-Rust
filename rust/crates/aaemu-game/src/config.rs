@@ -746,6 +746,9 @@ pub struct WorldConfig {
     /// `GeoDataMode` (navmesh heights and A* paths, `systems::ai::geodata`).
     #[serde(rename = "geodatamode", deserialize_with = "lenient")]
     pub geo_data_mode: bool,
+    /// `PrewarmNavmesh`: warm path-block cells from player positions in the background.
+    #[serde(rename = "prewarmnavmesh", deserialize_with = "lenient")]
+    pub prewarm_navmesh: bool,
     /// `PreLoadTerrain`: load every heightmap cell at startup instead of on demand.
     #[serde(rename = "preloadterrain", deserialize_with = "lenient")]
     pub pre_load_terrain: bool,
@@ -850,6 +853,7 @@ impl Default for WorldConfig {
             move_guard_kick_after_violations: 0,
             move_guard_violation_window_seconds: 60.0,
             geo_data_mode: false,
+            prewarm_navmesh: false,
             pre_load_terrain: false,
             max_instances: 32,
             target_physics_tps: 25.0,
@@ -1961,6 +1965,7 @@ mod tests {
         assert_eq!(cfg.world.motd, "Welcome to AAEmu!");
         assert_eq!(cfg.world.days_for_tax_payment, 7);
         assert!(cfg.world.geo_data_mode);
+        assert!(!cfg.world.prewarm_navmesh);
         assert_eq!(cfg.world.max_instances, 32);
         assert_eq!(cfg.world.wind_model, WindModelType::Official);
         assert_eq!(cfg.world.exp_loss_rate_at_death, 0.05);
