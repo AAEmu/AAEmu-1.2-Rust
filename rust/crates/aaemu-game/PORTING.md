@@ -6900,11 +6900,18 @@ Additional world-side fixes from the same audit:
   the fish onto the seabed. Direct character damage to owned FISH NPCs requires the character
   owner and the loaded fishing exception tag; this conservative FISH-specific rule does not
   infer generic creator/skill-tag exception semantics. Buff caster identity remains the fish.
-* Sport-fish movement now uses its authored skill controllers exclusively. Between controllers,
-  FISH NPCs stop without changing position or heading. The former experimental C# override
-  added continuous movement toward global 10,000-metre offsets (including horizontal drift
-  for Dive), beyond the 1.2 Carp's bounded relative endpoints. Regular and real-data tests
-  cover cue pauses, controller ownership, subsequent heading and ordinary NPC movement.
+* Sport-fish movement uses its skill controllers. The hooked fish's side swims and slack
+  moves are measured relative to the angler. Reel offsets pull toward the rod and raise the
+  fish toward the surface. Side swims and dives use the 1.2 plot offsets of 2 m and 8 m as
+  depths below the water surface. The 30 m cast range bounds additional line payout, with
+  existing slack preserved when the angler moves. These are server approximations of
+  hooked-fish motion. Swim packets include vertical velocity and the swimming stance.
+  Between controllers, FISH NPCs keep their position and heading. Landing retains its plot.
+* Freshwater and saltwater schools anchor their School of Fish clout to the school doodad.
+  The 1.2 rows set `use_origin_source`, which previously let the server pick a nearby ship
+  fitting as the origin and attach the buff area to the moving ship. Phase cleanup now
+  removes the school-owned trigger on expiry. Tests cover chumming near a fitting, sailing
+  away and back, and expiry with the angler still inside.
 * Ship replication preserves the physical quaternion instead of rebuilding it through the
   legacy Euler conversion, including mixed yaw/tilt and positive-W packet reconstruction.
   Solid hull and bottom boxes use transformed authored collision-proxy bounds independently

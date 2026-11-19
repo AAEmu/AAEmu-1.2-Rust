@@ -545,7 +545,9 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .npcs
         .area_trigger
         .get_area_shape_by_id(f.aoe_shape_id);
-    let owner = if f.use_origin_source && ctx.doodad.core().is_visible() {
+    let is_fish_school =
+        super::super::fish_school::is_school_template(ctx.doodad.data().template_id);
+    let owner = if f.use_origin_source && !is_fish_school && ctx.doodad.core().is_visible() {
         // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
         // anchors the trigger. A doodad initialised before its `Spawn` (the summon path, also
         // a delayed `SpawnDoodad`) is not visible yet and keeps its own transform: the C#
@@ -566,6 +568,8 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
             })
             .unwrap_or_else(|| ctx.doodad.clone())
     } else {
+        // Chumming from a ship must not attach the school's aura to a nearby fitting.
+        // The school owns the area and releases it when its chummed phase expires.
         ctx.doodad.clone()
     };
     let trigger_caster = match caster {
