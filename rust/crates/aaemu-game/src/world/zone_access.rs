@@ -133,30 +133,28 @@ fn siege_declarer_exempt(
 
 /// Forgets the declarer admission once the character's actual position is no longer inside a
 /// closed zone of the admitted zone group in that territory's own tower instance, so walking
-/// back in later needs the camp item again. A no-op (no world lookup) while the switch is off
-/// or nothing is recorded.
+/// back in later needs the camp item again. Turning off the exemption clears any existing
+/// admission without a world lookup.
 fn invalidate_declarer_admission(server: &GameServer, player: &PlayerRef) {
-    if !server.config.housing.open_castle_zones_for_declarers {
-        return;
-    }
     let admitted = player.data().zone_access.declarer_admitted;
     let Some((group, _)) = admitted else {
         return;
     };
-    let inside = world_transform(server, player).is_some_and(|t| {
-        is_closed(server, t.zone_id)
-            && server
-                .game_data
-                .zones
-                .zone_by_key(t.zone_id)
-                .is_some_and(|z| z.group_id == group)
-            && server
-                .systems
-                .housing
-                .dominions
-                .get(group)
-                .is_some_and(|state| state.tower.instance_id == t.instance_id)
-    });
+    let inside = server.config.housing.open_castle_zones_for_declarers
+        && world_transform(server, player).is_some_and(|t| {
+            is_closed(server, t.zone_id)
+                && server
+                    .game_data
+                    .zones
+                    .zone_by_key(t.zone_id)
+                    .is_some_and(|z| z.group_id == group)
+                && server
+                    .systems
+                    .housing
+                    .dominions
+                    .get(group)
+                    .is_some_and(|state| state.tower.instance_id == t.instance_id)
+        });
     if !inside {
         player.data().zone_access.declarer_admitted = None;
     }

@@ -590,6 +590,29 @@ async fn the_accepted_declaration_lets_the_admitted_captain_stay_after_the_item_
 }
 
 #[tokio::test(start_paused = true)]
+async fn disabling_the_declarer_option_revokes_the_stay_only_admission() {
+    let mut f = fixture(true);
+    let item = give_camp(&f, &f.captain);
+    assert!(stays(&mut f).await);
+    take(&f.captain, item);
+    declare(&f, ATTACKER_EXPEDITION);
+
+    f.server
+        .config
+        .update(|c| c.housing.open_castle_zones_for_declarers = false);
+    crate::world::session::recheck_closed_zone_access(&f.server);
+    assert_eq!(warning_count(&mut f.captain_client), 1);
+
+    // Re-enabling before the grace ends cannot restore the old admission.
+    f.server
+        .config
+        .update(|c| c.housing.open_castle_zones_for_declarers = true);
+    crate::world::session::recheck_closed_zone_access(&f.server);
+    settle().await;
+    assert_ne!(f.captain.data().unit.transform.x, CASTLE_X);
+}
+
+#[tokio::test(start_paused = true)]
 async fn losing_the_item_without_a_declaration_ends_the_permit_through_the_sweep() {
     let mut f = fixture(true);
     let item = give_camp(&f, &f.captain);
