@@ -186,8 +186,7 @@ pub struct DoodadFuncGroups {
     /// `IsMsgToZone`: the message needs no local doodad, so the client accepts it without one
     /// and the server sends it to the whole zone (`SCDoodadPhaseMsg` handler `FUN_3902e0f0`).
     pub is_msg_to_zone: bool,
-    /// `Model`: always `None` (C# null). Only the first, discarded `doodad_func_groups` pass of
-    /// `DoodadManager.Load` reads the `model` column; the pass that keeps the groups does not.
+    /// `Model`: the client prefab retained for fish school phases.
     pub model: Option<String>,
 }
 
