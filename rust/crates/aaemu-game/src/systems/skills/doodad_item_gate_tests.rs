@@ -467,7 +467,7 @@ fn has_error(frames: &[(u16, Vec<u8>)], error: i16) -> bool {
         .any(|(op, body)| *op == sc::SCErrorMsgPacket && *body == error_body(error))
 }
 
-fn started_results(frames: &[(u16, Vec<u8>)], skill: u32) -> Vec<u8> {
+pub(crate) fn started_results(frames: &[(u16, Vec<u8>)], skill: u32) -> Vec<u8> {
     started_results_and_value(frames, skill)
         .into_iter()
         .map(|(result, _)| result)

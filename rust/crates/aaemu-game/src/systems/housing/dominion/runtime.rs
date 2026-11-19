@@ -107,6 +107,48 @@ fn same_world_and_range(server: &GameServer, caster: &WorldObject, tower: &House
     distance2.is_finite() && distance2 <= 30.0 * 30.0
 }
 
+/// Whether a plain client `CSStartSkill` is the game-issued guard-tower engraving cast.
+///
+/// Skill 20866 / plot 681 is named by no player source table (`doodad_funcs`, `crafts`, ...:
+/// only `skill_req_skills` mentions it), so `SkillData::is_client_sourced_skill` can never admit
+/// it. A plain cast can express the canonical tower interaction, so the generic client-source
+/// check admits this one skill in that context: the canonical
+/// template with its plot, a player casting as itself, and a live guard-tower house target in
+/// the caster's own world. Nothing else is decided here: role, range, tower state, plot and
+/// timing stay with [`check_skill`] / [`begin_plot`], which `use_skill` runs for the cast.
+pub fn is_engraving_cast(
+    server: &GameServer,
+    skill_id: u32,
+    caster: &WorldObject,
+    caster_caster: &SkillCaster,
+    target: &crate::systems::skills::types::SkillCastTarget,
+) -> bool {
+    if skill_id != ENGRAVING_SKILL {
+        return false;
+    }
+    let canonical = server.game_data.systems.skills.skill(ENGRAVING_SKILL);
+    if !canonical.is_some_and(|t| t.plot_id == Some(ENGRAVING_PLOT)) {
+        return false;
+    }
+    if caster.as_player().is_none()
+        || !matches!(caster_caster, SkillCaster::Unit(id) if *id == caster.obj_id())
+        || !target.is_unit_or_doodad()
+    {
+        return false;
+    }
+    let Some(tower) = server
+        .world
+        .world_of(caster)
+        .and_then(|world| world.object(target.obj_id()))
+        .and_then(|object| object.as_house().cloned())
+    else {
+        return false;
+    };
+    is_live_object(server, caster)
+        && is_live_object(server, &WorldObject::from(&tower))
+        && tower_identity(server, &tower).is_some()
+}
+
 /// Reject unauthorized engraving before the stock plot applies visual/channel buffs.
 pub fn check_skill(
     server: &GameServer,

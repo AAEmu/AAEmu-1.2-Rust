@@ -23,7 +23,8 @@ struct Fixture {
     handle: EngravingHandle,
 }
 
-fn fixture(start_offset_ms: i64) -> Fixture {
+/// The destroyed, engravable tower and a registered attacker, before any engraving begins.
+fn base() -> (GameServer, TestClient, PlayerRef, HouseRef, TowerIdentity) {
     let mut data = GameData::empty();
     data.zones.zones.insert(
         TEST_ZONE,
@@ -52,6 +53,19 @@ fn fixture(start_offset_ms: i64) -> Fixture {
             id: ENGRAVING_SKILL,
             plot_id: Some(ENGRAVING_PLOT),
             max_range: 30,
+            // r208022 `skills.target_type_id` 5 (AnyUnit), not Building.
+            target_type: 5,
+            ..Default::default()
+        }),
+    );
+    // An unsourced skill with the same shape: never admitted by the engraving gate.
+    data.systems.skills.skills.insert(
+        20_867,
+        Arc::new(SkillTemplate {
+            id: 20_867,
+            plot_id: Some(ENGRAVING_PLOT),
+            max_range: 30,
+            target_type: 5,
             ..Default::default()
         }),
     );
@@ -112,6 +126,13 @@ fn fixture(start_offset_ms: i64) -> Fixture {
         .register_participant(25, 1, 20, SiegeSide::Attacker, now - 500)
         .unwrap();
     manager.mark_tower_destroyed(25, identity, now).unwrap();
+    (server, client, player, house, identity)
+}
+
+fn fixture(start_offset_ms: i64) -> Fixture {
+    let (server, client, player, house, identity) = base();
+    let target = WorldObject::from(&house);
+    let manager = &server.systems.housing.dominions;
     let handle = manager
         .begin_engraving(
             25,
@@ -537,4 +558,179 @@ async fn tower_hp_is_rescaled_once_with_the_house_hp_basis() {
     assert_eq!(state.tower_hp, Some(2_000));
     apply_tower_state(&f.server, &state);
     assert_eq!(f.house.data().unit.hp, 2_000);
+}
+
+fn engraving_cast_packet(
+    skill: u32,
+    caster_obj: u32,
+    target_obj: u32,
+) -> crate::systems::skills::handlers::CSStartSkillPacket {
+    use aaemu_commons::PacketStream;
+    let mut body = PacketStream::new();
+    body.write_u32(skill)
+        .write_u8(crate::systems::skills::types::caster_type::UNIT)
+        .write_bc(caster_obj)
+        .write_u8(0)
+        .write_bc(target_obj)
+        .write_u8(0);
+    let mut body = PacketStream::from_bytes(body.into_bytes());
+    <crate::systems::skills::handlers::CSStartSkillPacket as crate::net::registry::ClientPacket>::read(&mut body).unwrap()
+}
+
+/// `(result byte of each failed SCSkillStarted for skill)` seen on the client after a dispatch.
+fn cast_results(client: &mut TestClient, skill: u32) -> Vec<u8> {
+    crate::systems::skills::doodad_item_gate_tests::started_results(&client.drain(), skill)
+}
+
+fn engraving_active(server: &GameServer, character_id: u32) -> bool {
+    server
+        .systems
+        .housing
+        .engraving_runtime
+        .active
+        .lock()
+        .unwrap()
+        .contains_key(&character_id)
+}
+
+fn dispatch(
+    server: &Arc<GameServer>,
+    client: &mut TestClient,
+    player: &PlayerRef,
+    skill: u32,
+    target_obj: u32,
+) -> Vec<u8> {
+    client.conn.active_char = Some(player.clone());
+    crate::systems::skills::handlers::start_skill(
+        server,
+        &mut client.conn,
+        engraving_cast_packet(skill, player.obj_id, target_obj),
+    );
+    cast_results(client, skill)
+}
+
+#[tokio::test]
+async fn client_engraving_cast_reaches_the_runtime_only_for_a_registered_attacker_on_the_tower() {
+    use crate::systems::skills::types::skill_result;
+    // The registered attacker's plain CSStartSkill is no longer refused for lacking a player
+    // source: it runs `use_skill` and `begin_plot` reserves the engraving.
+    let (server, mut client, player, house, _) = base();
+    let server = Arc::new(server);
+    crate::systems::skills::bind(&server);
+    let results = dispatch(&server, &mut client, &player, ENGRAVING_SKILL, house.obj_id);
+    assert!(
+        !results.contains(&skill_result::NO_PERM)
+            && !results.contains(&skill_result::INVALID_TARGET),
+        "{results:?}"
+    );
+    assert!(engraving_active(&server, 1));
+
+    // A guild member who never registered as an attacker passes the contextual gate (a live
+    // tower target) and is then refused by the runtime's own authority: INVALID_TARGET,
+    // not the source refusal NO_PERM, and no reservation.
+    let (server, mut client, player, house, _) = base();
+    player.data().unit.expedition_id = 0;
+    let server = Arc::new(server);
+    crate::systems::skills::bind(&server);
+    let results = dispatch(&server, &mut client, &player, ENGRAVING_SKILL, house.obj_id);
+    assert_eq!(results, vec![skill_result::INVALID_TARGET]);
+    assert!(!engraving_active(&server, 1));
+
+    let (server, mut client, _player, house, _) = base();
+    let other = test_character(2, "Foreign", 100.0, 100.0);
+    let mut other = other;
+    other.unit.hp = 500;
+    other.unit.max_hp = 500;
+    other.unit.expedition_id = 30;
+    other.is_online = true;
+    let foreign = spawn_player(&server, &client, other, 1002);
+    let member = member_from_character(&server, 30, &foreign, false);
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 30,
+            owner_id: 3,
+            ..Default::default()
+        },
+        members: vec![member],
+        policies: Vec::new(),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    let server = Arc::new(server);
+    crate::systems::skills::bind(&server);
+    let results = dispatch(
+        &server,
+        &mut client,
+        &foreign,
+        ENGRAVING_SKILL,
+        house.obj_id,
+    );
+    assert_eq!(results, vec![skill_result::INVALID_TARGET]);
+    assert!(!engraving_active(&server, 2));
+    assert!(!engraving_active(&server, 1));
+}
+
+#[tokio::test]
+async fn client_engraving_gate_is_exact_and_does_not_relax_other_skills_or_targets() {
+    use crate::systems::skills::types::skill_result;
+    let (server, mut client, player, house, _) = base();
+    let server = Arc::new(server);
+    crate::systems::skills::bind(&server);
+    // The same tower with another unsourced skill id keeps the generic refusal.
+    let results = dispatch(&server, &mut client, &player, 20_867, house.obj_id);
+    assert_eq!(results, vec![skill_result::NO_PERM]);
+    // Off-context: the engraving skill aimed at the caster itself, at nothing, or at a house
+    // that is not a guard tower never passes the source gate.
+    let results = dispatch(
+        &server,
+        &mut client,
+        &player,
+        ENGRAVING_SKILL,
+        player.obj_id,
+    );
+    assert_eq!(results, vec![skill_result::NO_PERM]);
+    let results = dispatch(&server, &mut client, &player, ENGRAVING_SKILL, 0x7fff);
+    assert_eq!(results, vec![skill_result::NO_PERM]);
+    let mut plain = House::new(62, 140);
+    plain.unit.transform.zone_id = TEST_ZONE;
+    plain.unit.transform.set_xyz(105.0, 101.0, 100.0);
+    let plain = Entity::new(2002, plain);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&plain, &server.view_ctx());
+    let results = dispatch(&server, &mut client, &player, ENGRAVING_SKILL, plain.obj_id);
+    assert_eq!(results, vec![skill_result::NO_PERM]);
+    assert!(!engraving_active(&server, 1));
+    // A caster that is not a player (the tower casting at itself) is not the gate's shape.
+    let tower = WorldObject::from(&house);
+    assert!(!is_engraving_cast(
+        &server,
+        ENGRAVING_SKILL,
+        &tower,
+        &SkillCaster::Unit(tower.obj_id()),
+        &crate::systems::skills::types::SkillCastTarget::Unit(house.obj_id),
+    ));
+    // A mount / doodad caster naming the tower is not the plain player cast either.
+    let me = WorldObject::from(&player);
+    for caster in [
+        SkillCaster::Doodad(player.obj_id),
+        SkillCaster::Unit(player.obj_id + 1),
+    ] {
+        assert!(!is_engraving_cast(
+            &server,
+            ENGRAVING_SKILL,
+            &me,
+            &caster,
+            &crate::systems::skills::types::SkillCastTarget::Unit(house.obj_id),
+        ));
+    }
+    assert!(is_engraving_cast(
+        &server,
+        ENGRAVING_SKILL,
+        &me,
+        &SkillCaster::Unit(player.obj_id),
+        &crate::systems::skills::types::SkillCastTarget::Unit(house.obj_id),
+    ));
 }
