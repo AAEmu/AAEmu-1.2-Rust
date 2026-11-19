@@ -160,18 +160,20 @@ fn invalidate_declarer_admission(server: &GameServer, player: &PlayerRef) {
     }
 }
 
-/// Whether `zone` is closed to `player` in `instance` right now: an authored closed zone,
-/// unless the siege participant or the declarer exemption opens it. The cheap closedness test
-/// runs first, so no exemption is evaluated for a character in an open zone.
-fn zone_closed_to(
+/// Whether the zone is closed after accounting for the siege participant exemption.
+fn zone_closed_to(server: &GameServer, player: &PlayerRef, instance: u32, zone: u32) -> bool {
+    is_closed(server, zone) && !siege_participant_exempt(server, player, instance, zone)
+}
+
+/// Also account for the declarer exemption, including the permission to stay in the zone.
+fn zone_closed_to_with_declarer(
     server: &GameServer,
     player: &PlayerRef,
     instance: u32,
     zone: u32,
     standing: bool,
 ) -> bool {
-    is_closed(server, zone)
-        && !siege_participant_exempt(server, player, instance, zone)
+    zone_closed_to(server, player, instance, zone)
         && !siege_declarer_exempt(server, player, instance, zone, standing)
 }
 
@@ -188,9 +190,10 @@ pub fn zone_access_allowed(
     if player.data().access_level >= 100 {
         return true;
     }
-    !zone_closed_to(server, player, instance, zone, false)
+    !zone_closed_to_with_declarer(server, player, instance, zone, false)
         && !server.world.worlds().iter().any(|w| {
-            w.id == instance && zone_closed_to(server, player, instance, w.zone_id_at(x, y), false)
+            w.id == instance
+                && zone_closed_to_with_declarer(server, player, instance, w.zone_id_at(x, y), false)
         })
 }
 
@@ -247,9 +250,10 @@ fn needs_return(server: &GameServer, player: &PlayerRef) -> bool {
             .world
             .character_by_obj_id(player.obj_id)
             .is_some_and(|p| Arc::ptr_eq(&p, player))
-        && (zone_closed_to(server, player, t.instance_id, t.zone_id, true)
-            || world_transform(server, player)
-                .is_some_and(|t| zone_closed_to(server, player, t.instance_id, t.zone_id, true)))
+        && (zone_closed_to_with_declarer(server, player, t.instance_id, t.zone_id, true)
+            || world_transform(server, player).is_some_and(|t| {
+                zone_closed_to_with_declarer(server, player, t.instance_id, t.zone_id, true)
+            }))
 }
 
 /// Recheck standing characters after a configuration reload or a siege state change.
