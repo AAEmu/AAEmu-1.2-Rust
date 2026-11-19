@@ -5424,13 +5424,6 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   store, so no sender is implemented; **capture-pending** for the moderation area
   (`ACCOUNT-SCRESTRICTINFO-1`).
 
-* systems::housing (guard-tower engraving): The r208022 client sends skill 20866
-  through `CSStartSkill` to start plot 681. The skill has no ordinary player-source row, so
-  the source gate accepts a player casting as itself on a live guard tower in the same
-  world. The dominion runtime checks roster, expedition, range, tower state and siege
-  timing before the cast starts and checks eligibility again when the plot begins.
-  The authored AnyUnit target type also uses this validation path.
-
 ### Ranking boards (Rust only)
 
 The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `CSRankSnapshotPacket` (0x130, unnamed in the opcode tables, `ranking_packets.rs`). The Rust server answers both from a global store (`systems::social::ranking_manager`, `server.systems.social.ranking`):
@@ -5446,6 +5439,14 @@ The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `
 - **`FamilyIdManager` and family 0.** `characters.family` is 0 for a character without a family. The C# `FamilyIdManager` passes `Exclude = []`, so every start logged "Object ID 0 in DB is less than 1". `IdManagerSpec` now carries the C# `_exclude` list (checked before the first-id warning, as in `IdManager.Initialize`) and `FAMILY_ID` excludes 0. Every other manager keeps an empty list and still warns about ids below its first id.
 - **Orphan tower defense waves.** The shipped `compact.sqlite3` has `tower_def_progs` rows for `tower_def_id` 9, 22 and 33 with no `tower_defs` parent (20 waves). The C# `return`s at the first one; the Rust loader skips them (see the instances section) and now logs one info summary with the count and the distinct parent ids; the per-row line is `debug`.
 - **Client sources not found.** `Configurations/ClientData.json` lists four default sources and array settings merge by index (as in Microsoft.Extensions.Configuration), so a `Config.Local.json` with two sources leaves the last two defaults in place. `ClientFileManager::from_sources` logs a source that does not exist at `info` while at least one source is valid, and at `warn` for each (plus the existing error) when none is. `add_source` itself only logs not-found at `debug`.
+
+### Guard-tower engraving
+
+* systems::housing: The r208022 client sends skill 20866 through `CSStartSkill` to start
+  plot 681. The skill has no ordinary player-source row, so the source gate accepts a player
+  casting as itself on a live guard tower in the same world. The dominion runtime checks
+  roster, expedition, range, tower state and siege timing before the cast starts and checks
+  eligibility again when the plot begins. The authored AnyUnit target type uses this path.
 
 ## Client FeatureSet configuration (Rust only, 2026-11-06)
 
