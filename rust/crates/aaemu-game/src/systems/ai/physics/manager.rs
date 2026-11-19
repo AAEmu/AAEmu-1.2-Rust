@@ -367,12 +367,18 @@ impl PhysState {
             }
         }
 
-        if !ships.is_empty() && !cry {
-            for s in ships.iter_mut() {
-                if s.view.instance_id == instance_id {
-                    contacts::resolve_ship_vs_steep_terrain(s, w);
+        for s in ships.iter_mut() {
+            if s.view.instance_id == instance_id {
+                // The rigid-body solver can redirect horizontal helm thrust up a steep
+                // shoreline. Apply the cliff guard without changing open-water velocity.
+                let before = s.body.position;
+                contacts::resolve_ship_vs_steep_terrain(s, w);
+                if cry && s.body.position != before {
+                    s.sync_speed_from_bow_velocity();
                 }
             }
+        }
+        if !cry {
             for s in ships.iter_mut() {
                 s.sync_speed_from_bow_velocity();
             }
@@ -381,7 +387,13 @@ impl PhysState {
         harpoon::apply_ship_pair_tow_impulses(&mut ships, dt);
 
         for s in ships.iter_mut() {
-            for _ in 0..shore::tick_static_obstacle_hull_damage(s, dt) {
+            // CryPhysics has its own collision event damage and per-pair cooldowns.
+            let hits = if cry {
+                0
+            } else {
+                shore::tick_static_obstacle_hull_damage(s, dt)
+            };
+            for _ in 0..hits {
                 out.damage.push(HullDamage {
                     target: s.spec.obj_id,
                     attacker: s.spec.obj_id,

@@ -24,7 +24,9 @@ use crate::world::{DoodadRef, Entity, PlayerRef, WorldObject};
 
 use super::data::{effects::EffectTemplate, EffectKind, SkillItemAmount};
 use super::handlers::{start_skill, CSStartSkillPacket};
-use super::types::{cast_target_type, caster_type, SkillCastTarget, SkillCaster, SkillObject};
+use super::types::{
+    cast_target_type, caster_type, skill_result, SkillCastTarget, SkillCaster, SkillObject,
+};
 
 const PLAYER_OBJ: u32 = 0x100;
 const RACK: u32 = 3446;
@@ -421,6 +423,91 @@ fn store_cast(doodad_obj: u32) -> CSStartSkillPacket {
     }
 }
 
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+async fn portable_harpoon_pickup_replaces_a_glider_and_enables_harpoon_bomb() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let mut data = GameData::empty();
+    data.items = crate::data::items::ItemData::load(&conn).unwrap();
+    data.skills = crate::data::skills::SkillData::load(&conn).unwrap();
+    data.systems.npcs.doodad =
+        crate::systems::npcs::doodad::data::DoodadData::load_from(&conn).unwrap();
+    let files =
+        crate::data::client_files::ClientFileManager::from_sources(&[], std::path::Path::new("."));
+    data.systems.skills = crate::systems::skills::Data::load(&crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: std::path::Path::new("."),
+        files: &files,
+        language: "en_us",
+    })
+    .unwrap();
+    let mut f = fixture_with_data(data);
+    {
+        let mut player = f.player.data();
+        player.unit.hp = 1000;
+        player.unit.max_hp = 1000;
+    }
+    let glider = give_at(
+        &f.server,
+        &f.player,
+        90_001,
+        23612,
+        slot_type::EQUIPMENT,
+        equip_slot::BACKPACK,
+    );
+    f.server.items.add_container(Inv::of(&f.player).bag());
+    let world = f.server.world.world(0).unwrap();
+    let cannon = manager::create(&f.server, &world, RACK_OBJ + 1, 4896, None, true).unwrap();
+    cannon.data().transform.set_xyz(101.0, 100.0, 100.0);
+    world.spawn(&cannon, &f.server.view_ctx());
+
+    let mut request = store_cast(cannon.obj_id);
+    request.skill_id = 15660;
+    // The client sees the equipment's "Backpack Slot Occupied" status even for
+    // a folded glider. The same authored requirement runs on the server.
+    let owner = WorldObject::from(&f.player);
+    super::buffs::add_buff_by_id(&f.server, &owner, 2224, &owner, 0);
+    assert!(f.player.data().unit.buffs.check_buff(2224));
+    start_skill(&f.server, &mut f.client.conn, request);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+
+    let backpack = Inv::of(&f.player).equipped(equip_slot::BACKPACK).unwrap();
+    assert_eq!(backpack.template_id, 23836, "{:x?}", f.client.drain());
+    assert_eq!(
+        f.server.items.item_by_id(glider).unwrap().slot_type,
+        slot_type::INVENTORY
+    );
+    let mut shot = store_cast(cannon.obj_id);
+    shot.skill_id = 17737;
+    shot.target = SkillCastTarget::Unit(f.player.obj_id);
+    {
+        let mut player = f.player.data();
+        player.unit.global_cooldown_ms = 0;
+        player.unit.skill_last_used_ms = 0;
+    }
+    f.client.drain();
+    start_skill(&f.server, &mut f.client.conn, shot);
+    let frames = f.client.drain();
+    assert!(started_results(&frames, 17737).is_empty(), "{frames:x?}");
+    assert_eq!(
+        f.player
+            .data()
+            .unit
+            .skill_state
+            .active_plot
+            .as_ref()
+            .map(|plot| plot.0.skill.id),
+        Some(17737)
+    );
+}
+
 /// A byte-exact failed `SCSkillStartedPacket` for a unit caster / doodad target (no skill
 /// object).
 fn expected_refused(skill: u32, doodad_obj: u32, result: u8, value: u32) -> Vec<u8> {
@@ -568,7 +655,7 @@ async fn storage_skill_without_a_pack_is_refused_at_cast_start() {
     let frames = f.client.drain();
     assert_eq!(
         started_results(&frames, STORE_SKILL),
-        vec![0x24],
+        vec![69],
         "{frames:x?}"
     );
     assert_eq!(
@@ -576,24 +663,9 @@ async fn storage_skill_without_a_pack_is_refused_at_cast_start() {
             .iter()
             .find(|(op, _)| *op == sc::SCSkillStartedPacket)
             .map(|(_, body)| body.clone()),
-        Some(expected_refused(STORE_SKILL, rack_obj, 0x24, PACK))
+        Some(expected_refused(STORE_SKILL, rack_obj, 69, 0))
     );
-    assert!(
-        has_error(&frames, error_message::UNKNOWN_ITEM),
-        "{frames:x?}"
-    );
-    let error_at = frames
-        .iter()
-        .position(|(op, _)| *op == sc::SCErrorMsgPacket)
-        .expect("SCErrorMsg");
-    let started_at = frames
-        .iter()
-        .position(|(op, _)| *op == sc::SCSkillStartedPacket)
-        .expect("SCSkillStarted");
-    assert!(
-        error_at < started_at,
-        "SCErrorMsg must precede SCSkillStarted"
-    );
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCErrorMsgPacket));
     assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
     let d = f.rack.data();
     assert_eq!(d.func_group_id, EMPTY);
@@ -650,14 +722,11 @@ async fn storage_skill_with_a_wrong_pack_is_refused_at_cast_start() {
     let frames = f.client.drain();
     assert_eq!(
         started_results(&frames, STORE_SKILL),
-        vec![0x24],
+        vec![skill_result::INVALID_TARGET],
         "{frames:x?}"
     );
-    assert!(
-        has_error(&frames, error_message::STORE_INVALID_ITEM),
-        "{frames:x?}"
-    );
-    assert_eq!(started_value(&frames, STORE_SKILL), Some(PACK));
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCErrorMsgPacket));
+    assert_eq!(started_value(&frames, STORE_SKILL), None);
     let d = f.rack.data();
     assert_eq!(d.func_group_id, EMPTY, "{frames:x?}");
     assert_eq!((d.item_id, d.item_template_id), (0, 0), "{frames:x?}");
@@ -749,10 +818,10 @@ async fn storage_pack_removed_during_the_cast_is_refused_at_cast_end() {
     let frames = f.client.drain();
     assert_eq!(
         started_results(&frames, STORE_SKILL),
-        vec![0x24],
+        vec![69],
         "{frames:x?}"
     );
-    assert_eq!(started_value(&frames, STORE_SKILL), Some(PACK));
+    assert_eq!(started_value(&frames, STORE_SKILL), None);
     assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
     let d = f.rack.data();
     assert_eq!(d.func_group_id, EMPTY);

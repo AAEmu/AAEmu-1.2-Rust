@@ -601,7 +601,7 @@ pub fn consume_changer(
         c.get_item_by_slot(f.slot_id as i32).cloned()
     };
     let Some(source) = source else {
-        send_error(player, err::UNKNOWN_ITEM);
+        send_error(player, err::NOT_ENOUGH_ITEM);
         return;
     };
     // doodad_func_consume_changer_items

@@ -139,6 +139,151 @@ async fn rejected_source_and_target_states_do_not_mutate_cast_resources() {
     }
 }
 
+#[tokio::test]
+async fn portable_harpoon_launch_plots_can_start_on_their_living_operator() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let me = WorldObject::from(&player);
+    for id in [17737, 17738, 17739] {
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                source_alive: true,
+                target_dead: true,
+                target_alive: false,
+                check_obstacle: true,
+                ..super::tests::skill_template(id)
+            }),
+            1,
+        );
+        let corpse_only = Err((
+            super::unit_reqs::skill_result_for_key("skill_target_alive"),
+            0,
+        ));
+        assert_eq!(
+            super::validation::check(&server, &skill, &me, &Target::Obj(me.clone())),
+            if id == 17739 { corpse_only } else { Ok(()) }
+        );
+        assert_eq!(
+            super::validation::check(&server, &skill, &me, &Target::Obj(WorldObject::from(&npc))),
+            corpse_only
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_anchor_stun_only_allows_ship_utility_controls() {
+    let mut data = GameData::empty();
+    for id in [615, 1983, 5226] {
+        data.systems.skills.add_buff(BuffTemplate {
+            id,
+            stun: true,
+            ..Default::default()
+        });
+    }
+    let (server, _client, _player, _npc) = fixture(data);
+    let mut slave = crate::models::slave::Slave::new(1, 14);
+    slave.unit.hp = 1000;
+    let slave = Entity::new(0x300, slave);
+    let ship = WorldObject::from(&slave);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&ship, &server.view_ctx());
+    super::buffs::add_buff_by_id(&server, &ship, 615, &ship, 0);
+    super::buffs::add_buff_by_id(&server, &ship, 1983, &ship, 0);
+    let target = Target::Obj(ship.clone());
+    let stunned = Err((
+        super::unit_reqs::skill_result_for_key("skill_cannot_cast_in_stun"),
+        0,
+    ));
+    for id in [13608, 13609, 14766, 17649, 20704, 13749] {
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                source_stun: false,
+                ..super::tests::skill_template(id)
+            }),
+            1,
+        );
+        assert_eq!(
+            super::validation::check(&server, &skill, &ship, &target),
+            if id == 13749 { stunned } else { Ok(()) }
+        );
+    }
+    super::buffs::add_buff_by_id(&server, &ship, 5226, &ship, 0);
+    let mark = SkillRun::new(
+        Arc::new(SkillTemplate {
+            source_stun: false,
+            ..super::tests::skill_template(20704)
+        }),
+        1,
+    );
+    assert_eq!(
+        super::validation::check(&server, &mark, &ship, &target),
+        stunned
+    );
+}
+
+#[tokio::test]
+async fn ship_repair_points_clear_only_when_the_hull_reaches_full_health() {
+    use crate::models::doodad::{doodad_owner_type, Doodad};
+    use crate::systems::vehicles::data::{attach_point, SlaveTemplate};
+    use crate::systems::vehicles::slaves::ship_repair_target_at_full_health;
+
+    let mut data = GameData::empty();
+    data.systems.vehicles.slave_templates.insert(
+        14,
+        SlaveTemplate {
+            id: 14,
+            hp75_doodad_count: 1,
+            ..Default::default()
+        },
+    );
+    let (server, _client, _, _) = fixture(data);
+    let world = server.world.world(0).unwrap();
+    let mut hull = crate::models::slave::Slave::new(1, 14);
+    hull.unit.hp = 9_999;
+    hull.unit.max_hp = 10_000;
+    let slave = Entity::new(0x300, hull);
+    let ship = WorldObject::from(&slave);
+    world.spawn(&ship, &server.view_ctx());
+
+    let mut repair_point = Doodad::new(1);
+    repair_point.attach_point = attach_point::HEAL_POINT0;
+    repair_point.owner_type = doodad_owner_type::SLAVE;
+    repair_point.parent_obj_id = slave.obj_id;
+    let repair_point = Entity::new(0x400, repair_point);
+    world.spawn(&repair_point, &server.view_ctx());
+    slave.data().attached_doodads.push(repair_point.obj_id);
+    let repair_target = Target::Obj(WorldObject::from(&repair_point));
+    assert!(!ship_repair_target_at_full_health(
+        &server,
+        13711,
+        &repair_target
+    ));
+
+    slave.data().unit.hp = 10_000;
+    assert!(ship_repair_target_at_full_health(
+        &server,
+        13711,
+        &repair_target
+    ));
+    assert!(!ship_repair_target_at_full_health(
+        &server,
+        2,
+        &repair_target
+    ));
+    super::combat::post_update_current_hp(
+        &server,
+        &ship,
+        None,
+        9_999,
+        10_000,
+        super::types::KillReason::Unknown,
+    );
+    assert!(world.doodad(repair_point.obj_id).is_none());
+    assert!(slave.data().attached_doodads.is_empty());
+}
+
 /// Quest 817 "Invasive Species": Muddy Sarracenia (NPC 5009) casts the `OnDeath` np_skill 11478
 /// (`source_dead 't'`, `source_alive 'f'`, `target_alive 't'`) at its own corpse. The corpse
 /// target is not held to `target_alive`; any other dead target still is.

@@ -119,7 +119,7 @@ pub fn create(
             "Shipyard {template_id}: placement ({x}, {y}, {z}) refused for character {}              (not finite or too far)",
             owner.character_id
         );
-        error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+        error(owner, error::INVALID_SUMMON_LOCATION);
         return None;
     }
     // The client names the design item it placed (`designItem`, a bag item object id). The

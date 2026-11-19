@@ -16,10 +16,11 @@ use crate::models::container::{slot_type, ContainerRef};
 use crate::models::doodad::doodad_owner_type;
 use crate::models::item::{Item, ItemClass};
 use crate::models::item_task::{task_type, ItemTask};
+use crate::models::movement::{convert_radian_to_direction, MoveKind, MoveType, UnitMove};
 use crate::models::slave::Slave;
 use crate::models::transform::{PositionAndRotation, Transform};
 use crate::models::unit::{BaseUnitType, Bonus};
-use crate::packets::world::SCUnitPointsPacket;
+use crate::packets::world::{SCOneUnitMovementPacket, SCUnitPointsPacket};
 use crate::packets::world_objects::SCUnitAttachedPacket;
 use crate::server::GameServer;
 use crate::systems::ai::collision::world::Owner;
@@ -33,9 +34,6 @@ use crate::systems::npcs::npc::packets::SCUnitModelPostureChangedPacket;
 use crate::systems::npcs::spawn_manager;
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::packets::SCUnitDeathPacket;
-use crate::systems::skills::packets_special::{
-    SCTeleportUnitPacket, TELEPORT_REASON_MOVE_TO_LOCATION,
-};
 use crate::systems::skills::types::{
     BuffEventTriggerKind, BuffRemoveOn, KillReason, SkillCastTarget, SkillCaster,
 };
@@ -2177,7 +2175,7 @@ fn try_delete(
         }
     }
     unbind_child_riders(server, &slave, attach_reason::SLAVE_BINDING);
-    let (doodad_ids, slave_ids, portal_time, template_id) = {
+    let (doodad_ids, slave_ids, portal_time) = {
         let d = slave.data();
         let portal = server
             .game_data
@@ -2189,7 +2187,6 @@ fn try_delete(
             d.attached_doodads.clone(),
             d.attached_slaves.clone(),
             portal,
-            d.unit.template_id,
         )
     };
     let now = spawn_manager::now();
@@ -2202,6 +2199,7 @@ fn try_delete(
     for child in slave_obj.core().take_children() {
         world.detach_child(&child);
         if let Some(player) = child.as_player() {
+            world.set_sticky_parent(&child, None);
             deck_standers.push((player.clone(), child.transform()));
         }
     }
@@ -2223,35 +2221,41 @@ fn try_delete(
         }
     }
     super::ship_physics::remove_ship(server, &slave);
-    if let Some(o) = owner {
-        let me = WorldObject::from(o);
-        broadcast(server, &me, &SCSlaveDespawnPacket { obj_id }, true);
+    // Stop publishing active hull motion before the native despawn controller starts.
+    world.remove_object(obj_id);
+    // Leaving a deck changes the movement frame within the same world. Publish an
+    // ordinary world-space move so the client can drop the frame without a loading screen.
+    for (player, t) in deck_standers {
         broadcast(
             server,
-            &me,
+            &WorldObject::from(&player),
+            &SCOneUnitMovementPacket {
+                obj_id: player.obj_id,
+                move_type: MoveType::new(MoveKind::Unit(UnitMove {
+                    x: t.x,
+                    y: t.y,
+                    z: t.z,
+                    rotation_x: convert_radian_to_direction(f64::from(t.rot_x)),
+                    rotation_y: convert_radian_to_direction(f64::from(t.rot_y)),
+                    rotation_z: convert_radian_to_direction(f64::from(t.rot_z)),
+                    ..Default::default()
+                })),
+            },
+            true,
+        );
+    }
+    if let Some(o) = owner {
+        // The hull stays in the visibility grid for the portal effect. Release the
+        // client's deck frame first so it cannot follow that retiring hull.
+        crate::world::broadcast(&world, &slave_obj, &SCSlaveDespawnPacket { obj_id }, false);
+        broadcast(
+            server,
+            &WorldObject::from(o),
             &SCSlaveRemovedPacket {
                 obj_id: o.obj_id,
                 tl_id: tl as u16,
             },
             true,
-        );
-    }
-    world.remove_object(obj_id);
-    // A deck stander is only a transform child of the hull, so no SCUnitDetached/attached
-    // state reaches its client. It kept its world pose above; tell its own client where that
-    // is, as every other server-forced move does (portal, recall, GM teleport).
-    for (player, t) in deck_standers {
-        crate::world::session::send_teleport_unit_ending_trade(
-            server,
-            &player,
-            SCTeleportUnitPacket {
-                reason: TELEPORT_REASON_MOVE_TO_LOCATION,
-                error_message: 0,
-                x: t.x,
-                y: t.y,
-                z: t.z,
-                z2: t.rot_z,
-            },
         );
     }
     if let Some(s) = &spawns {
@@ -2261,7 +2265,6 @@ fn try_delete(
             Some(spawn_manager::add_secs(now, f64::from(portal_time + 0.5))),
         );
     }
-    let _ = template_id;
     true
 }
 
@@ -2852,7 +2855,7 @@ pub fn create_from_skill(
 }
 
 /// The client-chosen `SummonPos` turned into a spawn transform, or `None` (with
-/// `SlaveSpawnErrorInvalidArea`) when the spot is too far, on the wrong surface or inside
+/// `InvalidLocation`) when the spot is too far, on the wrong surface or inside
 /// collision. `None` also means "no placement": the C# in-front placement is used.
 pub(super) fn validated_summon_placement(
     server: &GameServer,
@@ -2871,7 +2874,7 @@ pub(super) fn validated_summon_placement(
             p.y,
             p.z
         );
-        error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+        error(owner, error::INVALID_SUMMON_LOCATION);
         None
     };
     let owner_pos = world.world_pos_rot(&WorldObject::from(owner));
@@ -3035,7 +3038,7 @@ pub fn client_spawn_cast(
 
 /// The `CSSpawnSlave` position check: the same distance / surface / collision rules as
 /// [`validated_summon_placement`], keeping the client's yaw, plus the 1.2 land height rule.
-/// A spot the basic rules refuse gets `SlaveSpawnErrorInvalidArea` (583); a spot the full 1.2
+/// A spot the basic rules refuse gets `InvalidLocation` (215); a spot the full 1.2
 /// placement check refuses (line of sight / hull box) gets the placement path's
 /// `SLAVE_SPAWN_SHIP_NEED_MORE_SPACE` (100).
 #[allow(clippy::too_many_arguments)]
@@ -3057,7 +3060,7 @@ fn validated_client_spawn(
             y,
             z
         );
-        error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+        error(owner, error::INVALID_SUMMON_LOCATION);
         None
     };
     if [x, y, z, yaw].iter().any(|v| !v.is_finite()) {
@@ -3238,7 +3241,7 @@ async fn create_for_owner_job(
             max_range,
             client_placement,
         ) else {
-            // The placement was refused (error 583): the summon never happens, so do not leave
+            // The placement was refused (error 215): the summon never happens, so do not leave
             // the skill cooldown/GCD that the skill system started.
             refund_summon_cooldown(owner, cooldown);
             return None;
@@ -3556,7 +3559,7 @@ async fn create_with_placement(
                                 chosen.x,
                                 chosen.y
                             );
-                            error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+                            error(owner, error::INVALID_SUMMON_LOCATION);
                             refund_summon_cooldown(owner, cooldown);
                             return None;
                         }
@@ -4768,6 +4771,49 @@ fn finish_create(
 // Repair points
 // ---------------------------------------------------------------------------------------------
 
+/// The same exact HP bands govern both repair-point placement and refresh.
+pub(crate) fn repair_point_health_band(hp: i32, max_hp: i32) -> i32 {
+    if max_hp <= 0 {
+        return 0;
+    }
+    let percent = i64::from(hp.max(0)) * 100 / i64::from(max_hp);
+    match percent {
+        0..25 => 0,
+        25..50 => 25,
+        50..75 => 50,
+        75..100 => 75,
+        _ => 100,
+    }
+}
+
+/// Check both the direct heal and the repair-point interaction before charging
+/// the player for the repair.
+pub(crate) fn ship_repair_target_at_full_health(
+    server: &GameServer,
+    skill_id: u32,
+    target: &crate::systems::skills::geometry::Target,
+) -> bool {
+    if !matches!(skill_id, 13428 | 13429 | 13711 | 14912 | 14913 | 14914) {
+        return false;
+    }
+    let Some(target) = target.as_obj() else {
+        return false;
+    };
+    let slave = target.as_slave().cloned().or_else(|| {
+        let doodad = target.as_doodad()?.data();
+        if doodad.owner_type != doodad_owner_type::SLAVE {
+            return None;
+        }
+        let (instance, parent) = (doodad.transform.instance_id, doodad.parent_obj_id);
+        drop(doodad);
+        server.world.world(instance)?.slave(parent)
+    });
+    slave.is_some_and(|slave| {
+        let d = slave.data();
+        d.unit.max_hp > 0 && d.unit.hp >= d.unit.max_hp
+    })
+}
+
 /// `UpdateSlaveRepairPoints(slave)`.
 pub fn update_slave_repair_points(server: &GameServer, slave: &SlaveRef) {
     let Some(world) = server.world.world_of(&WorldObject::from(slave)) else {
@@ -4798,17 +4844,12 @@ pub fn update_slave_repair_points(server: &GameServer, slave: &SlaveRef) {
         tracing::error!("UpdateSlaveRepairPoints: MaxHp 0 (DivideByZeroException)");
         return;
     }
-    let hp_percent = hp * 100 / max_hp;
-    let repair_points = if (75..100).contains(&hp_percent) {
-        template.hp75_doodad_count
-    } else if (50..75).contains(&hp_percent) {
-        template.hp50_doodad_count
-    } else if (25..50).contains(&hp_percent) {
-        template.hp25_doodad_count
-    } else if hp_percent < 25 {
-        template.healing_point_doodads.len() as i32
-    } else {
-        0
+    let repair_points = match repair_point_health_band(hp, max_hp) {
+        0 => template.healing_point_doodads.len() as i32,
+        25 => template.hp25_doodad_count,
+        50 => template.hp50_doodad_count,
+        75 => template.hp75_doodad_count,
+        _ => 0,
     };
     let mut current = Vec::new();
     let mut unused: Vec<u8> = template
@@ -6762,8 +6803,8 @@ mod summon_hull_overlap_tests {
         assert_eq!(
             codes,
             vec![
-                super::error::SLAVE_SPAWN_ERROR_INVALID_AREA,
-                super::error::SLAVE_SPAWN_ERROR_INVALID_AREA
+                super::error::INVALID_SUMMON_LOCATION,
+                super::error::INVALID_SUMMON_LOCATION
             ]
         );
     }
@@ -7249,7 +7290,7 @@ mod summon_hull_overlap_tests {
 
     /// A spot beyond `spawn_valid_area_range`, terrain more than 10 m above the owner, and a
     /// land spot whose spawn surface is under water are refused with
-    /// `SlaveSpawnErrorInvalidArea`, and no item is committed.
+    /// `InvalidLocation`, and no item is committed.
     #[tokio::test]
     async fn csspawnslave_refuses_a_far_high_or_wrong_surface_spot() {
         let s = world_on(
@@ -7275,9 +7316,8 @@ mod summon_hull_overlap_tests {
             0x9110,
         )
         .await;
-        let frames =
-            wait_for_error(&mut client, &[super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]).await;
-        assert!(error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+        let frames = wait_for_error(&mut client, &[super::error::INVALID_SUMMON_LOCATION]).await;
+        assert!(error_codes(&frames).contains(&super::error::INVALID_SUMMON_LOCATION));
         assert!(super::all_slaves(&s.world.world(0).unwrap()).is_empty());
         assert_eq!(
             crate::systems::vehicles::mates::owned_item(&s, &p, 0x9110)
@@ -7312,9 +7352,8 @@ mod summon_hull_overlap_tests {
             0x9110,
         )
         .await;
-        let frames =
-            wait_for_error(&mut client, &[super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]).await;
-        assert!(error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+        let frames = wait_for_error(&mut client, &[super::error::INVALID_SUMMON_LOCATION]).await;
+        assert!(error_codes(&frames).contains(&super::error::INVALID_SUMMON_LOCATION));
         assert!(super::all_slaves(&high.world.world(0).unwrap()).is_empty());
 
         // The client z is above sea level, but the spawn surface (terrain 60) is the sea floor.
@@ -7341,9 +7380,8 @@ mod summon_hull_overlap_tests {
             0x9110,
         )
         .await;
-        let frames =
-            wait_for_error(&mut client, &[super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]).await;
-        assert!(error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+        let frames = wait_for_error(&mut client, &[super::error::INVALID_SUMMON_LOCATION]).await;
+        assert!(error_codes(&frames).contains(&super::error::INVALID_SUMMON_LOCATION));
         assert!(super::all_slaves(&wet.world.world(0).unwrap()).is_empty());
     }
 
@@ -7628,7 +7666,7 @@ mod summon_hull_overlap_tests {
             .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
             .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
             .collect();
-        assert_eq!(codes, vec![super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]);
+        assert_eq!(codes, vec![super::error::INVALID_SUMMON_LOCATION]);
     }
 
     /// GM / ownerless spawns pass no item and keep the old behaviour at a cliff.
@@ -7666,7 +7704,7 @@ mod summon_hull_overlap_tests {
     }
 
     /// A position override (no 1.2 search) whose land terrain is more than 10 m above the
-    /// owner is refused with `SlaveSpawnErrorInvalidArea` before the summon item is committed.
+    /// owner is refused with `InvalidLocation` before the summon item is committed.
     #[tokio::test]
     async fn a_land_position_override_11_m_above_the_owner_is_refused() {
         let s = world_on(
@@ -7698,7 +7736,7 @@ mod summon_hull_overlap_tests {
             .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
             .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
             .collect();
-        assert_eq!(codes, vec![super::error::SLAVE_SPAWN_ERROR_INVALID_AREA]);
+        assert_eq!(codes, vec![super::error::INVALID_SUMMON_LOCATION]);
         assert_eq!(
             crate::systems::vehicles::mates::owned_item(&s, &p, 0x9120)
                 .unwrap()
@@ -7867,7 +7905,7 @@ mod summon_hull_overlap_tests {
         assert_eq!(p.data().unit.global_cooldown_ms, 0);
     }
 
-    /// A SummonPos placement outside the data range fails with error 583 before any spawn; the
+    /// A SummonPos placement outside the data range fails with error 215 before any spawn; the
     /// skill cooldown/GCD must be refunded like the no-candidate refusal.
     #[tokio::test]
     async fn an_invalid_placement_refunds_the_cooldown() {
@@ -7930,7 +7968,10 @@ mod summon_hull_overlap_tests {
             .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
             .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
             .collect();
-        assert!(codes.contains(&583), "{codes:?}");
+        assert!(
+            codes.contains(&super::error::INVALID_SUMMON_LOCATION),
+            "{codes:?}"
+        );
         assert!(!p.data().unit.cooldowns.cooldowns.contains_key(&RULE_SKILL));
         assert_eq!(p.data().unit.global_cooldown_ms, 0);
     }
@@ -8067,7 +8108,10 @@ mod summon_hull_overlap_tests {
             .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
             .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
             .collect();
-        assert!(codes.contains(&583), "{codes:?}");
+        assert!(
+            codes.contains(&super::error::INVALID_SUMMON_LOCATION),
+            "{codes:?}"
+        );
         assert_eq!(
             p.data().unit.global_cooldown_ms,
             20_000,
