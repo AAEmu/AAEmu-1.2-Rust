@@ -284,7 +284,8 @@ pub mod error {
     pub const ITEM_NOT_FOR_PET: i16 = 204;
     pub const NOT_READY: i16 = 206;
     pub const SLAVE_SPAWN_ERROR_NEED_REPAIR_TIME: i16 = 540;
-    pub const SLAVE_SPAWN_ERROR_INVALID_AREA: i16 = 583;
+    pub const INVALID_SUMMON_LOCATION: i16 =
+        crate::systems::economy::error_message::INVALID_LOCATION;
     pub const SLAVE_EQUIPMENT_LOADED_ITEM: i16 = 801;
 }
 

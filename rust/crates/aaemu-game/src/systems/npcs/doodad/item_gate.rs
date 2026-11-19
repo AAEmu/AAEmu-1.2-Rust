@@ -62,10 +62,9 @@ pub fn skill_item_refusal(
     };
     match template {
         FuncTemplate::ConsumeChanger(f) => {
-            // The 1.2 client turns a NEED_REAGENT value into an item name; use the first item
-            // the func accepts so the text never looks up an unrelated template.
+            // Storage accepts a set of equipped packs. The first accepted template is
+            // arbitrary and must not be presented as a required reagent.
             let accepted = data.consume_changer_items(f.id);
-            let value = accepted.first().copied().unwrap_or(0);
             let equipment = player.data().inventory.equipment().clone();
             let source = equipment
                 .lock()
@@ -73,10 +72,14 @@ pub fn skill_item_refusal(
                 .get_item_by_slot(f.slot_id as i32)
                 .cloned();
             let Some(source) = source else {
-                return need_reagent(value, Some(error_message::UNKNOWN_ITEM));
+                return Some(SkillItemRefusal::new(
+                    crate::systems::skills::unit_reqs::skill_result_for_key("skill_urk_equip_item"),
+                    0,
+                    None,
+                ));
             };
             if !accepted.contains(&source.template_id) {
-                return need_reagent(value, Some(error_message::STORE_INVALID_ITEM));
+                return Some(SkillItemRefusal::new(skill_result::INVALID_TARGET, 0, None));
             }
             None
         }

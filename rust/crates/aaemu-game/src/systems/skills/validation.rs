@@ -376,7 +376,13 @@ pub(super) fn check(
         let Some(buff) = server.game_data.systems.skills.buff(id) else {
             continue;
         };
-        if !template.source_stun && (buff.stun || buff.sleep || buff.knockdown) {
+        // The 1.2 Anchor status uses the generic stun flag to stop the ship. Its
+        // utility controls still work while anchored, but real stuns still stop them.
+        let anchored_utility = id == 1983
+            && caster.as_slave().is_some()
+            && matches!(skill.id, 13608 | 13609 | 14766 | 20704);
+        if !template.source_stun && !anchored_utility && (buff.stun || buff.sleep || buff.knockdown)
+        {
             return fail("skill_cannot_cast_in_stun");
         }
         if buff.blank_minded && !template.source_stun {
@@ -386,13 +392,13 @@ pub(super) fn check(
     // A skill cast from a corpse (`source_dead`, e.g. an `OnDeath` np_skill such as Muddy
     // Sarracenia's seed plot 11478) is aimed at the dying caster itself; its `target_alive`
     // flag describes the plot's later targets, so the corpse target is not held to it.
-    let corpse_self_cast = template.source_dead
-        && target
-            .as_obj()
-            .is_some_and(|o| o.obj_id() == caster.obj_id());
+    // Harpoon Bomb and Deadly Toxin Shot start plots 355 and 356 on the living operator.
+    // Their corpse-only flag does not describe the initial self target.
+    let scripted_self_cast = (template.source_dead || matches!(skill.id, 17737 | 17738))
+        && target.as_obj().is_some_and(|o| o.same(caster));
     if let Some(target_hp) = target
         .as_obj()
-        .filter(|_| !corpse_self_cast)
+        .filter(|_| !scripted_self_cast)
         .and_then(|o| o.with_unit(|u| u.unit().hp))
     {
         if target_hp <= 0 && template.target_alive && !template.target_dead {
@@ -410,6 +416,10 @@ pub(super) fn check(
         if target_hp > 0 && template.target_dead && !template.target_alive {
             return fail("skill_target_alive");
         }
+    }
+    if crate::systems::vehicles::slaves::ship_repair_target_at_full_health(server, skill.id, target)
+    {
+        return fail("skill_urk_target_health_less_than");
     }
     if template.target_only_water && !target_in_water(server, target) {
         return fail("skill_invalid_location");
