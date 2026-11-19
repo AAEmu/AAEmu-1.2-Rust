@@ -755,7 +755,13 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
         };
-        if !data.skills.is_client_sourced_skill(skill_id) {
+        // The guard-tower engraving (20866) has no source table; it is admitted only on its
+        // exact contextual shape and then stays under the dominion runtime's own authority.
+        if !data.skills.is_client_sourced_skill(skill_id)
+            && !crate::systems::housing::dominion::runtime::is_engraving_cast(
+                server, skill_id, &me, &p.caster, &target,
+            )
+        {
             tracing::warn!(
                 character = %player.data().unit.name,
                 skill_id,

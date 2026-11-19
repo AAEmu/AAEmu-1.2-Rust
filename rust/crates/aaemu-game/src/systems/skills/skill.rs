@@ -923,7 +923,10 @@ fn use_skill_impl(
     } else {
         resolved_target
     };
-    let housing_target = (template.target_type == SkillTargetType::Building as i32)
+    // r208022 `skills` 20866 (guard-tower engraving) is target type 5 (AnyUnit), not Building:
+    // it still takes the dominion check before any cast state is touched (`begin_plot` repeats it).
+    let housing_target = (template.target_type == SkillTargetType::Building as i32
+        || template.id == crate::systems::housing::dominion::runtime::ENGRAVING_SKILL)
         .then(|| initial_target(server, skill, caster, &caster_caster, target_caster))
         .flatten();
     if owned_target
