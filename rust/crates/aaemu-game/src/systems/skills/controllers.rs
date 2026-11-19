@@ -970,12 +970,14 @@ fn sport_fish_movement(
     let limit = range.max(30.0);
     let end_range = calculate_distance(origin, end, false);
     if end_range > limit {
-        end = add_distance_to_front_between(limit, end_range, origin, end);
-    }
-    if jump && calculate_distance(start, end, false) < 0.01 {
-        // Leave room for an arc if an outward jump starts at the end of the line.
-        end.x -= away.x * distance;
-        end.y -= away.y * distance;
+        if jump {
+            // A jump clipped near the end of the line can be shorter than one tick.
+            // Turn back toward the angler to keep enough room to reach the surface.
+            end.x = start.x - away.x * distance;
+            end.y = start.y - away.y * distance;
+        } else {
+            end = add_distance_to_front_between(limit, end_range, origin, end);
+        }
     }
     let probe_z = npc.data().spawner_z.unwrap_or(start.z).max(start.z);
     let probe = Vec3::new(end.x, end.y, probe_z);
@@ -994,6 +996,8 @@ fn sport_fish_movement(
             // The bounded destination already incorporates the authored offset.
             let mut config = template.clone();
             config.value[3] = 0;
+            // Finish the last partial step at the bounded destination.
+            config.value[7] = 0;
             let arc = LeapArc::new(&config, start, end, None, leap_animation_speed(fish))?;
             return Some(Behavior::BallisticLeap(arc));
         }
@@ -1920,6 +1924,9 @@ mod leap_arc_tests;
 #[cfg(test)]
 #[path = "rotate_controller_tests.rs"]
 mod rotate_controller_tests;
+#[cfg(test)]
+#[path = "sport_fish_controller_tests.rs"]
+mod sport_fish_controller_tests;
 
 #[cfg(test)]
 mod tests {
