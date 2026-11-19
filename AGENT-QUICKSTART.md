@@ -11,12 +11,13 @@ Every session works in its own lane (rules: [`AGENTS.md`](AGENTS.md) → "Sessio
 
 ```bash
 Scripts/lane.sh gc                  # leftovers of old sessions (dry run; --apply deletes them)
-Scripts/lane.sh new <name> --type fix   # worktree D:/aaemu-wt/<name>, target D:/aaemu-target/<name>,
-                                    # runtime D:/aaemu-live-<name>, DBs lane_<name>_*, ports <prefix>xxx
-cd D:/aaemu-wt/<name>               # everything below runs from here
+git fetch aaemu12 main
+Scripts/lane.sh new <name> --type fix --base aaemu12/main
+cd "<worktree printed by lane.sh>"
 Scripts/lane.sh info                # this lane's paths and ports
-Scripts/lane.sh sync && Scripts/lane.sh check   # latest rust-rewrite merged in + cargo xtask ci
-Scripts/lane.sh land                # merge into rust-rewrite and delete the whole lane
+Scripts/lane.sh sync && Scripts/lane.sh check   # merge the lane's base and run local CI
+# Push the committed lane branch to aaemu12 and open a PR against main.
+Scripts/lane.sh done --keep-branch  # remove lane resources after publishing
 Scripts/lane.sh list                # what lanes exist (yours must be gone when you are done)
 ```
 
@@ -39,11 +40,18 @@ After a schema change or when the databases are in a bad state: `stop`, then `db
 integration checkout) the same commands drive the old shared stack in `D:\aaemu-live` on 21xxx;
 sessions do not use it.
 
-## Where things are (this machine)
+## Local paths
+
+The paths below are defaults or reference-machine examples. Use `lane.sh info`
+for the active worktree, target, runtime, and MySQL port. Set `AAEMU_LANES`,
+`AAEMU_WT_ROOT`, `AAEMU_TARGET_ROOT`, and `AAEMU_LIVE_PREFIX` consistently
+when using a different layout. For live testing, set `AAEMU_LIVE_TEMPLATE`,
+`AAEMU_MYSQL_BIN`, and `AAEMU_MYSQL_PORT` for the private instance and use
+`AAEMU_CLIENT`, `AAEMU_CLIENT_PAK`, and `AAEMU_COMPACT_DB` for local assets.
 
 | What | Path |
 |---|---|
-| Integration checkout (branch `rust-rewrite`, receives `lane.sh land` only) | `C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2` — pushed to the main repository `https://github.com/AAEmu/AAEmu-1.2-Rust` (`git push aaemu12 rust-rewrite:main`). Never push to `origin`/`upstream` (AAEmu/AAEmu); the `fork` remote is retired. |
+| Repository and PR base | `https://github.com/AAEmu/AAEmu-1.2-Rust`, remote `aaemu12`, branch `main`. See [AGENTS.md](AGENTS.md) for the integration checkout's rules. |
 | Lane worktrees / registry | `D:\aaemu-wt\<name>` / `D:\aaemu-lanes\<name>.env` |
 | Cargo build output | `D:\aaemu-target\<lane>` (lane's untracked `rust/.cargo/config.toml`; the integration checkout uses `D:\aaemu-target\main`) |
 | Lane runtime dirs (configs, binaries, logs, shots) | `D:\aaemu-live-<lane>\{rs-login,rs-game,bin,logs,shots}` |
@@ -98,11 +106,11 @@ sessions do not use it.
 - CryPhysics oracle tests need `AAEMU_PHYS_ORACLE` (the real DLL harness, see
   `rust/crates/aaemu-physics/README.md`); without it they replay checked-in goldens.
 
-## Known state (2026-10-11)
+## Reference verification
 
 - Rust port complete (C# removed in `a2ab80abd`); CryPhysics ported bit-exact and integrated
   (`Configurations/Physics.json`, see `rust/crates/aaemu-game/PORTING.md` → systems::ai collision).
 - Verified: real 1.2 client logs in, creates a character, walks, chats, logs out on the Rust
   servers; packet parity with the old C# servers on scripted scenarios.
-- Open: navmesh changes left 5/16 instance route tests finding routes (unverified); ship collision
-  damage thresholds are stand-ins; Linux/Docker only covered by CI; see `PORTING.md` deviations.
+- See [the feature backlog](FEATURE-GAP-TASKS.md) for open work and
+  [PORTING.md](rust/crates/aaemu-game/PORTING.md) for implementation limits.

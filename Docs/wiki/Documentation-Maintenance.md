@@ -1,12 +1,13 @@
 # Documentation Maintenance
 
 - Audience: Contributors
-- Last verified against: `develop` on February 28, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 ## Goal
 
-Keep the wiki aligned with merged behavior in `develop`.
+Keep the guides under `Docs/wiki/` aligned with merged behavior in `main`.
+The repository is the source for these guides.
 
 ## Update checklist after merged PRs
 
@@ -14,13 +15,16 @@ Keep the wiki aligned with merged behavior in `develop`.
    behavior changes.
 1. Update affected pages and cross-links.
 1. Add or adjust migration notes when old instructions become invalid.
-1. Run doc quality checks:
+1. Follow changed links and check commands against script help, configuration
+   against the shipped defaults and loaders, and feature descriptions against
+   current tests. Label historical audit results with their reference revision.
 1. Commit following the contributor guidelines.
 
 ## Writing conventions
 
 - Use page metadata at top (`Audience`, `Last verified against`).
-- Prefer relative Markdown links for internal wiki references.
+- Link to the `.md` file for neighboring pages. The optional manual wiki
+  workflow converts these links to wiki page names when publishing.
 - Add a short `Related` section on major pages.
 - Keep instructions path-based and explicit.
 - Prefer `Config.Local.json` examples for machine-specific values.
@@ -34,6 +38,6 @@ Keep the wiki aligned with merged behavior in `develop`.
 
 ## Related
 
-- [Home](Home)
-- [Developer Notes](Developer-Notes)
-- [Local Development Guide](Local-Development-Guide)
+- [Home](Home.md)
+- [Developer Notes](Developer-Notes.md)
+- [Local Development Guide](Local-Development-Guide.md)

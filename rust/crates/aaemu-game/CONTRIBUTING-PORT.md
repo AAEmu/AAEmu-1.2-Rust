@@ -3,12 +3,13 @@
 This crate is a faithful port of `AAEmu.Game` for the **1.2 client** (`client_12_r208022`).
 The reference is the C# code base, which was removed from the repository in `a2ab80abd`; read it
 from the git history (`git show a2ab80abd^:AAEmu.Game/<path>`, or a worktree of `a2ab80abd^`). Wire
-formats must match the 1.2 C# byte for byte. `PORTING.md` holds the status table, deviations and the C#
-bugs we mirror. This file explains *where code goes* and *how to use the shared object model*
+formats must match the 1.2 client. Use the C# implementation as a reference and document
+client-verified corrections in `PORTING.md`. This file explains *where code goes* and *how to use the shared object model*
 so several subsystems can be ported in parallel without merge conflicts.
 
-Build output goes to `D:` through `rust/.cargo/config.toml` (local, git-ignored). Never point
-`target-dir` back to `C:`.
+Keep build output in the lane's own target directory. `Scripts/lane.sh new` writes
+the target path to the gitignored `rust/.cargo/config.toml`. See
+[AGENT-QUICKSTART.md](../../../AGENT-QUICKSTART.md) for machine-specific paths.
 
 ## 1. Module layout
 

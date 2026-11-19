@@ -1,16 +1,16 @@
 # Asking for Help on Discord
 
 - Audience: Players, testers, and contributors
-- Last verified against: `develop` on February 28, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 Channel: [AAEmu Discord](https://discord.gg/aaemu)
 
 ## Before posting
 
-1. Read [Mini troubleshoot guide](Mini-troubleshoot-guide).
+1. Read [Mini troubleshoot guide](Mini-troubleshoot-guide.md).
 1. Search recent messages for the same error.
-1. Collect minimum context from [Help Us Help You](Help-Us-Help-You).
+1. Collect minimum context from [Help Us Help You](Help-Us-Help-You.md).
 
 ## How to ask a good Discord question
 
@@ -48,6 +48,6 @@ What I already tried: ...
 
 ## Related
 
-- [Getting Help](Getting-Help)
-- [Help Us Help You](Help-Us-Help-You)
-- [Asking for Help on GitHub Discussions](Asking-for-Help-on-GitHub-Discussions)
+- [Getting Help](Getting-Help.md)
+- [Help Us Help You](Help-Us-Help-You.md)
+- [Asking for Help on GitHub Discussions](Asking-for-Help-on-GitHub-Discussions.md)

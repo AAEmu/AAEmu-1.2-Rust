@@ -1,12 +1,15 @@
-When your code update needs any changes to the MySQL tables, you will need to put a update script here, and also apply it in the initial sql files one folder up from here.
-Files need to be named in the following format;
+Add each MySQL schema change here and apply the same change to the appropriate
+base schema in SQL/aaemu_login.sql or SQL/aaemu_game.sql.
 
-YYYY-MM-DD_aaemu_XXXX*.sql
+Use YYYY-MM-DD_aaemu_login_<description>.sql for login changes and
+YYYY-MM-DD_aaemu_game_<description>.sql for game changes. Each server matches
+its own files and processes them in filename order.
 
-Where YYYY-MM-DD is the date you introduced this change, and "XXXX" is either "login" or "game".
-These scripts will get executed only one time at the start of running the Login or Game server. Installed scripts get logged into a updates table to the relevant to the server it's running for.
-A server will only check and run scripts that are relevant to themselves, therefor the naming of the files is important.
+The server records installed scripts in its schema's updates table. If the
+updates table is missing, the server creates it and marks the matching scripts
+as installed, assuming the current base schema was used. Initialize new schemas
+from the current base SQL before starting either server.
 
-When running a server that supports this new update system for the first time, it will assume that all related scripts in this folder were already installed, and will be marked as such.
-
-The date part is technically not required, but it is used to handle update order, so please keep it consistent.
+For an existing updates table, Connections:AutoApplyUpdates=true applies
+pending scripts on startup. With it disabled, the server lists pending files
+and asks before applying them.

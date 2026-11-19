@@ -27,7 +27,7 @@ client only. The C# code is no longer in the tree, but it remains in the git his
 | | Notes |
 | --- | --- |
 | **Rust** (stable) | Install with [rustup](https://rustup.rs/). No .NET SDK is needed. |
-| **MySQL 8** | Docker runs it for you, or use one installed locally. |
+| **MySQL 8** | Docker runs it for you, or use one installed locally. The base schemas use syntax available as of MySQL 8.0.29. |
 | **ArcheAge 1.2 client** | The `game_pak` and `bin32/archeage.exe`. Not distributed here. |
 | **`compact.sqlite3`** | The 1.2 game database. Not distributed here. |
 
@@ -134,7 +134,8 @@ Each server reads its files from its application directory:
   if the game server runs on another host.
 - **`AAEMU_APP_PATH`** selects another application directory. The game server also accepts the
   directory as its first argument.
-- **Logging** goes to stdout and is controlled by `RUST_LOG` (default `info`).
+- **Logging** goes to the console and the application directory's `Logs/` folder.
+  Set `RUST_LOG` to change the default `info` filter.
 
 For more detail, see:
 - [Working with the Config.json files](Docs/wiki/Working-with-the-Config.json-files-and-server-listings.md)
@@ -147,7 +148,7 @@ For more detail, see:
 cd rust
 cargo build --release            # build everything
 cargo test --workspace           # unit and integration tests
-cargo xtask ci                   # fmt --check, clippy -D warnings, tests: exactly what CI runs
+cargo xtask ci                   # format, lint, tests and packet coverage checks (requires Python 3)
 cargo xtask publish --archive    # self-contained server folders in publish/
 ```
 
@@ -155,6 +156,8 @@ cargo xtask publish --archive    # self-contained server folders in publish/
   `AAEmu.Login/`, `AAEmu.Game/`, `Tools/` and `SQL/`. Start the binaries from their folders.
 - **Live testing:** [`rust/LIVE-TESTING.md`](rust/LIVE-TESTING.md) covers running the servers
   against real data with the headless `aaemu-testclient` bot (smoke, parity and load tests).
+- **Build times:** [Build performance](Docs/build-performance.md) records measured Windows build
+  times, the `live` profile, and commands for shorter edit-test cycles.
 - **Before changing game code,** read
   [`rust/crates/aaemu-game/CONTRIBUTING-PORT.md`](rust/crates/aaemu-game/CONTRIBUTING-PORT.md)
   (layout, locking rules, packet conventions).

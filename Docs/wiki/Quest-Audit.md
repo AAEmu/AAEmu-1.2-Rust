@@ -1,7 +1,7 @@
 # Quest Technical Audit
 
 - Audience: Contributors and testers
-- Last verified against: `rust-rewrite` working tree on October 13, 2026
+- Audit snapshot: `rust-rewrite` working tree on October 13, 2026
 - Target: ArcheAge 1.2 (`r208022`)
 
 ## Result and scope
@@ -131,7 +131,7 @@ playable.
 The targeted regressions cover timed reload and offline expiry, victim aggro
 credit, CheckSphere entry/exit, wrong acceptors, escort failure, single cleanup,
 full-bag reward mail, and quest/mail item ownership. Mail, auction and player
-wallet persistence are also covered by the [Mail Technical Audit](Mail-Audit).
+wallet persistence are also covered by the [Mail Technical Audit](Mail-Audit.md).
 See that report for the real-client and private MySQL evidence and limits.
 
 ## Reproduce and inspect
@@ -179,7 +179,7 @@ The real client read and claimed a mail fixture, then reconnected with an empty
 inbox, the original claimed item and exactly one wallet credit persisted. Timed
 quest 350 retained its original deadline through reconnect. With a past saved
 deadline, the final client/server build immediately displayed and saved Failed. The
-[Mail Technical Audit](Mail-Audit) describes fixture setup, evidence and limits.
+[Mail Technical Audit](Mail-Audit.md) describes fixture setup, evidence and limits.
 
 The quest suite and accounting checks establish representative packet/engine
 behavior and exhaustive data disposition. The old real-data test merely
@@ -195,6 +195,6 @@ This audit does not include a live playthrough of all quests.
 
 ## Related
 
-- [Developer Notes](Developer-Notes)
-- [Components](Components)
-- [Code Terminology](Code-Terminology)
+- [Developer Notes](Developer-Notes.md)
+- [Components](Components.md)
+- [Code Terminology](Code-Terminology.md)

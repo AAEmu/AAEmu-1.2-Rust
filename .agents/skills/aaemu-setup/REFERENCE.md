@@ -179,7 +179,7 @@ Path A often only needs `ClientData`. Path B needs DB + LoginNetwork + ClientDat
 
 Replace `REPO_ROOT` with the absolute repo path. Keep `SecretKey` identical on both sides.
 
-Game load order: `Config.json` → `Configurations/*.json` → **`Config.Local.json`** → environment variables (`Section__Key`) → command line (`--Section:Key=value`).
+Game load order: `Config.json` → `Configurations/**/*.json` → **`Config.Local.json`** → existing game user secrets → environment variables (`Section__Key`) → command line (`--Section:Key=value`).
 
 `Config.Local.json` is read from the application directory at startup (by default the crate `app/` folder; `AAEMU_APP_PATH` overrides it). No rebuild is needed after editing it.
 

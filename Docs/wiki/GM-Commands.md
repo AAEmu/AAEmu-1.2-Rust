@@ -309,7 +309,7 @@ assertion suite (a wedged server shows up as empty replies), and it changes serv
 (exprate, motd, time, snow, the cash shop, zone states, a nation, dominions and sieges, and at the
 end `despawnall`) and takes several minutes. That is why `Scripts/verify.sh` skips it in the
 default run: select it with `--only gm-commands` on a throw-away lane stack. See [Live
-Verification Suites](Verification) for the lane setup.
+Verification Suites](Verification.md) for the lane setup.
 
 This guide does not cover every registered command yet: `/quest`, `/ics` (`/ingamecashshop`),
 `/sphere`, `/register_portal`, `/packet` and `/settradepackmaildelay` have no entry; `/help` in
@@ -317,7 +317,7 @@ game lists everything your access level may run.
 
 ## Related
 
-- [Live Verification Suites](Verification)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
-- [Code Terminology](Code-Terminology)
-- [Home](Home)
+- [Live Verification Suites](Verification.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)
+- [Code Terminology](Code-Terminology.md)
+- [Home](Home.md)

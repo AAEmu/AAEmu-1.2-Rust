@@ -1,11 +1,8 @@
 name: Publish Wiki
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - Docs/wiki/**
+  # The guides are published in the repository. Run this manually if a
+  # GitHub Wiki has been initialized for this repository.
   workflow_dispatch:
 
 concurrency:
@@ -22,8 +19,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare wiki page links
+        run: |
+          mkdir -p wiki-publish
+          cp Docs/wiki/*.md wiki-publish/
+          sed -Ei 's/\]\(([[:alnum:]_.&-]+)\.md([#)])/](\1\2/g' wiki-publish/*.md
+
       - name: Publish docs wiki folder to GitHub Wiki
         uses: Andrew-Chen-Wang/github-wiki-action@v5.0.3
         with:
           token: ${{ github.token }}
-          path: Docs/wiki/
+          path: wiki-publish/

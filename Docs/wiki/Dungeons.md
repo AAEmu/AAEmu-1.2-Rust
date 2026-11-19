@@ -122,6 +122,6 @@ cargo test -p aaemu-game real_mentor_chest -- --ignored
 
 ## Related
 
-- [Components](Components)
-- [Developer Notes](Developer-Notes)
-- [Local Development Guide](Local-Development-Guide)
+- [Components](Components.md)
+- [Developer Notes](Developer-Notes.md)
+- [Local Development Guide](Local-Development-Guide.md)

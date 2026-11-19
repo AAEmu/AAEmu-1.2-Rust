@@ -9,7 +9,9 @@ them, and how to start the real 1.2 client against them (`aaemu-launcher`).
 > runtime dir ([`AGENT-QUICKSTART.md`](../AGENT-QUICKSTART.md)). This page documents the setup
 > underneath, for other machines and for debugging.
 
-Everything below uses the layout of the reference run (Windows, Git Bash). Paths are examples:
+Everything below uses the layout of the reference run (Windows, Git Bash). Paths
+are examples. The C# server, side-by-side parity steps, and timings describe a
+historical comparison. The Rust-only setup and headless tests can run from `main`.
 
 | What | Where (example) |
 |------|-----------------|

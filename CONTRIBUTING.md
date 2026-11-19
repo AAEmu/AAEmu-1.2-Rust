@@ -28,13 +28,13 @@ your extra branch(es).
 AAEmu is written in Rust (it was ported from C#; the C# projects have been removed and remain only
 in the git history). All code lives in the Cargo workspace in `rust/`. You need stable Rust installed via [rustup](https://rustup.rs/).
 
-Before opening a pull request, run the same checks as CI from the `rust/` directory:
+Before opening a pull request, run the local checks from the `rust/` directory:
 
 ```sh
 cargo fmt --all                                          # format (CI runs it with --check)
 cargo clippy --workspace --all-targets -- -D warnings   # lint, warnings are errors
 cargo test --workspace                                   # tests
-cargo xtask ci                                           # all three, exactly as CI runs them
+cargo xtask ci                                           # all three plus packet coverage (Python 3)
 ```
 
 - Follow `rustfmt` formatting and keep `clippy` clean; do not add `#[allow(...)]` without a reason.
@@ -42,7 +42,7 @@ cargo xtask ci                                           # all three, exactly as
 - Tests that need a live MySQL server or a `compact.sqlite3` are `#[ignore]`d and gated by the
   `AAEMU_TEST_MYSQL` / `AAEMU_COMPACT_DB` environment variables; CI does not run them, so run them
   locally when your change touches that code, for example
-  `AAEMU_COMPACT_DB=rust/crates/aaemu-game/app/Data/compact.sqlite3 cargo test -p aaemu-game -- --ignored`.
+  `AAEMU_COMPACT_DB=crates/aaemu-game/app/Data/compact.sqlite3 cargo test -p aaemu-game -- --ignored`.
 - `cargo xtask dev` starts MySQL (Docker), the login server and the game server for manual testing,
   see the [Local Development Guide](Docs/wiki/Local-Development-Guide.md).
 - [`rust/LIVE-TESTING.md`](rust/LIVE-TESTING.md) explains how to test against a running server with

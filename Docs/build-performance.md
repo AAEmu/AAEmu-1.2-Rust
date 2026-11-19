@@ -255,7 +255,7 @@ To verify: re-run `cargo test --workspace --no-run`, then time `target\debug\dep
 twice; the first launch should drop from ~2-11 s to ~0.05 s. A **Dev Drive** (ReFS volume with
 Defender performance mode, Windows 11) is the supported alternative; Microsoft reports up to ~30 %
 faster builds, and recommends putting `CARGO_HOME` and the source on it
-([Dev Drive](https://devblogs.microsoft.com/engineering-at-microsoft/dev-drive-and-copy-on-write-for-developer-performance/),
+([Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive),
 [performance mode](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-endpoint-antivirus-performance-mode)).
 That figure is Microsoft's, not measured here.
 
@@ -357,6 +357,6 @@ hack: `-Z` flags need nightly or this variable).
 - [The Rust Performance Book, compile times](https://nnethercote.github.io/perf-book/compile-times.html)
 - [cargo-hakari](https://docs.rs/cargo-hakari/) (workspace-hack crates)
 - [sccache](https://github.com/mozilla/sccache) (incremental builds are not cached; paths are part of the key)
-- Microsoft: [Dev Drive](https://devblogs.microsoft.com/engineering-at-microsoft/dev-drive-and-copy-on-write-for-developer-performance/),
+- Microsoft: [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive),
   [Defender performance mode](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-endpoint-antivirus-performance-mode)
 - [cargo-nextest, how it works](https://nexte.st/book/how-it-works.html)

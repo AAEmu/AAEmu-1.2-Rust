@@ -29,13 +29,17 @@ locks, ports or processes, so sessions cannot collide.
 
 ```sh
 Scripts/lane.sh gc                          # first: report leftovers of finished sessions
-Scripts/lane.sh new <name> --type fix       # D:/aaemu-wt/<name> on fix/<name>, from rust-rewrite
-cd D:/aaemu-wt/<name>                       # edit, build, test and run servers ONLY here
+Scripts/lane.sh new <name> --type fix       # uses AAEMU_LANE_BASE or rust-rewrite
+cd "<worktree printed by lane.sh>"          # edit, build, test and run servers ONLY here
 #   ...focused checks while working, commit (Conventional Commits)...
 Scripts/lane.sh sync                        # merge the latest rust-rewrite into the lane
 Scripts/lane.sh check                       # cargo xtask ci, once, in the lane's warm target dir
 Scripts/lane.sh land                        # merge into rust-rewrite, then delete the whole lane
 ```
+
+In a checkout that uses branches for PRs against the Rust repository, fetch
+`aaemu12/main` and create the lane with `--base aaemu12/main`. Push the feature
+branch and use `lane.sh done --keep-branch` after publishing.
 
 - **Never work in the integration checkout** (`C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2`,
   branch `rust-rewrite`): no edits, builds, tests or servers there. It only receives `lane.sh land`

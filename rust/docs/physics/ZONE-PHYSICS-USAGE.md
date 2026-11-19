@@ -131,15 +131,15 @@ The "Rust subsystem" column names where the equivalent belongs in `aaemu-game`.
 | game object | physics entity | where | notes / Rust owner |
 |---|---|---|---|
 | Terrain | heightfield (3D engine terrain) | cry3dengine terrain load (§2) | `npcs::heightmap` already has the heights. No physics heightfield is needed if queries go through it. |
-| Brushes, static objects | static (`PE_STATIC`), one per brush instance, CGF physics geometry | cry3dengine brush/statobj load (§2) | **missing in Rust**. Needed for LoS, sweeps and ship collision with piers or rocks. |
-| Vegetation | static parts (trunks), many unphysicalized | cry3dengine vegetation (§2); WZVegetationCutdown clears trunk collision | missing |
+| Brushes, static objects | static (`PE_STATIC`), one per brush instance, CGF physics geometry | cry3dengine brush/statobj load (§2) | Static brush collisions in `ai::collision` |
+| Vegetation | static parts (trunks), many unphysicalized | cry3dengine vegetation (§2); WZVegetationCutdown clears trunk collision | Static vegetation collisions in `ai::collision` |
 | Characters (players) | **living** entity, built from `actor_models.physics_living_*` (mass, gravity, air control, max climb/slide/fall angles, max ground velocity, collider material, time-impulse-recover) | `WZUnitState` (op 7) creates or updates the copy; `WZUnitMovement` (op 9) applies client moves via actor vt160 | used for move verification, fall and knockback/impulse. Rust: `world::session::move_unit` + `skills::on_moved`. |
 | NPCs | living entity (same model columns); AI-driven movement | zone AI / spawners (`npc_spawners.g`, `NpcSpawner::*`) | zone-side pathing (CryAI navigation, `MoveSkillController::RequestPathFinding`). Rust: `systems::ai` (+ `geodata` navmesh). |
 | Mates (mounts) | living | WZUnitState | as characters |
 | Ships (slaves, model kind 4) | **rigid** (`IEntity::Physicalize` type 2, mass from ship desc, `pe_params` 6/10/12 for buoyancy/flags/simulation) + per-part geometry (hull, buoy, keel, ballast; see `um_ship_draw_physics_geom` "1:all, c:collision, b:buoy, k:keel, a:ballast") | `X2::ShipUnitModel::InitPhysicalEntity`, `ShipUnitModel::ApplySubmergeDepth`, `SetAddedMass` | **the zone is the authoritative ship simulator** (§1.4). Rust: `systems::ai::physics` (Jitter2 port) + `vehicles::ship_physics`. |
 | Land vehicles (model kind 3: carts, tanks, siege) | **wheeled vehicle** (`VehicleUnitModel::InitWheels`, `UpdateCenterSpindle`, "failed to physicalize vehicle") | `X2::ServerVehicleSimulationController::UpdateWheeledVehicle` (log "failed to get car params") | **not modelled in Rust** (vehicles move by client MoveType only) |
-| Doodads | static or rigid from the model CGF; `_UpdateCollisionParams` toggles collision per phase; `PhysicalProxyScaler` for growing doodads | `WZCreateDoodad` / `WZRemoveDoodad` / `WZDoodadChangePhase` (ops 115–117), `X2::GameServer::ZdModelPrefab::Load`, `ZdModelVegetation::Load` | needed for placement and LoS. Rust: `npcs::doodad` (no collision). |
-| Houses | static from the house model; swapped at build done | `WZHouseState` (6), `WZHouseBuildDone` (77) | placement checks. Rust: `systems::housing`. |
+| Doodads | static or rigid from the model CGF; `_UpdateCollisionParams` toggles collision per phase; `PhysicalProxyScaler` for growing doodads | `WZCreateDoodad` / `WZRemoveDoodad` / `WZDoodadChangePhase` (ops 115–117), `X2::GameServer::ZdModelPrefab::Load`, `ZdModelVegetation::Load` | Rust loads model colliders through `ai::collision::objects`. |
+| Houses | static from the house model; swapped at build done | `WZHouseState` (6), `WZHouseBuildDone` (77) | Rust applies placement checks and synchronizes house model colliders through `ai::collision::objects`. |
 | Gimmicks (catapult balls, swinging logs, breakables) | static or **rigid** with joints (breakable) | `ServerGimmick::InitStaticEntity` / `InitDynamicEntity`, `WZGimmick*` (89–94); static ones come from the level entities (flag 0x100000) | Rust: `systems::ai::gimmick` (kinematic only) |
 | Ropes (harpoon, ballista, rope skill) | rope entities + launcher/anchor helpers | `X2::Physics::CreateRopeSet`, rope skill controller | Rust: `vehicles::harpoon` + `ai::physics::harpoon` (tow forces only) |
 | Area / water volumes | area entities (triggers and water) | level `object.dat`, `entities.xml`; `DoodadWaterVolumeData` (water-level doodads) | Rust: `ai::physics::water` (object.dat water bodies) |
@@ -154,9 +154,8 @@ The "Rust subsystem" column names where the equivalent belongs in `aaemu-game`.
   4. The world computes the damage.
 
   It also fires when a client move reports `fallVel > 20`. **Rust:** `skills::combat::do_fall_damage`
-  already takes the client `fallVel` (the C# behaviour). The zone's height-based cap
-  (`√(40·h)`) needs the terrain or ground height at the fall start and the landing point:
-  `npcs::heightmap` gives the terrain, and brushes are missing.
+  takes the client `fallVel`. With `Physics.FallDamageZoneCap` enabled, the
+  collision fall module also applies the height-based cap.
 * Move hack: `ZWReportMoveHackPacket` (op 57), verifier 0x3921E300 → sample builders
   0x39218810 (character) and 0x39219740 (vehicle), report 0x3921BD10.
   * It runs only when `movement_verify_enable` is on (default 0).
@@ -312,11 +311,11 @@ main_world is 35×38 cells, of which 1,225 exist in 10.x (1,205 in 1.2).
 | file | count | total size | content | zone loader / physics |
 |---|---|---|---|---|
 | `cells/X_Y/client/terrain/heightmap.dat` | 1,225 | 389 MB (1.2: 702 MB) | terrain heights (quadtree nodes) | `Seamless_LoadCellTerrain` 0x3015D4A0 → CryPhysics **terrain heightfield** (`ent_terrain`). Queries: `GetTerrainElevation` (I3DEngine vt+1064, 38 call sites), `GetTerrainZ` (+1080, housing). **Rust: `npcs::heightmap` reads it (done).** |
-| `cells/X_Y/client/terrain/cover.ctc` | 1,220 | 1.79 GB | terrain texture/cover (surface-type layer) | surface types for doodad/house placement (`CannotPlaceDoodad`, surface-hack). Rust: `visareas.dat` brushes, vegetation and voxel (cave) meshes are loaded by `ai::collision::cells::read_visareas` (2026-11-08); the rest is not read. `object.dat` type-2 vegetation (not in `vegetation.dat`) is read by `read_object_dat` and loaded with `Physics.ObjectVegetation` (default on; +48,023 instances in main_world, about 56 MB with every cell loaded). |
+| `cells/X_Y/client/terrain/cover.ctc` | 1,220 | 1.79 GB | terrain texture/cover (surface-type layer) | Surface types for placement in the reference zone server. Rust derives terrain height and holes from heightmap assets. The `cover.ctc` surface type layer remains unread. |
 | `cells/X_Y/client/statobjs.dat` | 1,225 | 7.7 MB | per-cell model name list (`u32 n; {u32; char[256]}`) | brush model table |
-| `cells/X_Y/client/object.dat` | 1,225 | 416 MB | the same model list + material table + octree object nodes (`SOcTreeNodeChunk`) | `PrecacheCGFFromCell` 0x301601C0 + octree loader. **Rust: `ai::physics::objects_file` reads the water areas; `ai::collision::cells::read_object_dat_voxels` the voxel (cave) meshes; its brushes duplicate `brush.dat`.** |
-| `cells/X_Y/client/brush.dat` | 1,225 | 34 MB | **244,297 brush instances**. Header `u32 ver=1; u32 off[256]; u32 size[256]` (16×16 sectors of 64 m). 128-byte `SBrushChunk` records: AABB, flags, sector-local `Matrix34` @67, material id @115, **statobj index @123** | loaders 0x3017CC30 → 0x3017BA50 → `_LoadBrush` 0x3021E840. `CBrush::Physicalize` 0x30111970 creates a **static entity** with the model's phys geoms 0x1000 (collide), 0x1001 (no-collide) and 0x1002 (obstruct). **Rust: missing.** |
-| `cells/X_Y/client/vegetation.dat` | 1,225 | 156 MB | **2,429,076 instances**. Header with 4×4 sectors of 256 m; 64-byte `SVegetationChunk` (sector-local pos @39, scale @51, `u16 group` @55, packed angles) | `CVegetation::Physicalize` 0x30103DC0. Static whenever the group model has physics (`e_on_demand_physics`). 85% of instances are physical. **Rust: missing.** |
+| `cells/X_Y/client/object.dat` | 1,225 | 416 MB | the same model list + material table + octree object nodes (`SOcTreeNodeChunk`) | `PrecacheCGFFromCell` 0x301601C0 + octree loader. Rust reads water areas via `ai::physics::objects_file`. `ai::collision::cells::read_object_dat` reads voxel meshes and type-2 vegetation. `Physics.ObjectVegetation` enables the latter by default. |
+| `cells/X_Y/client/brush.dat` | 1,225 | 34 MB | **244,297 brush instances**. Header `u32 ver=1; u32 off[256]; u32 size[256]` (16×16 sectors of 64 m). 128-byte `SBrushChunk` records: AABB, flags, sector-local `Matrix34` @67, material id @115, **statobj index @123** | loaders 0x3017CC30 → 0x3017BA50 → `_LoadBrush` 0x3021E840. `CBrush::Physicalize` 0x30111970 creates a static entity with model geoms 0x1000 (collide), 0x1001 (no-collide) and 0x1002 (obstruct). Rust loads these placements with `read_brushes`. |
+| `cells/X_Y/client/vegetation.dat` | 1,225 | 156 MB | **2,429,076 instances**. Header with 4×4 sectors of 256 m, 64-byte `SVegetationChunk` (sector-local pos @39, scale @51, `u16 group` @55, packed angles) | `CVegetation::Physicalize` 0x30103DC0. Static whenever the group model has physics (`e_on_demand_physics`). Rust loads collidable placements with `read_vegetation`. |
 | `world.xml` / `vegetation.xml` | 1 / 1 | 6.1 MB / 3.6 MB | zones, cells, sectors / 4,145 vegetation groups (`modelFileName`, …) | |
 | `cells/X_Y/client/visareas.dat`, `big_object.dat`, `entities.xml`, `leveldata.xml` | 1,225 each | 54 MB / 0.7 MB / 21 MB / 6 MB | indoor portals/areas; large objects; entity archetypes (areas, triggers, **static gimmicks** with flag 0x100000); level data | entity system (areas → ZWEnterArea; static gimmicks → ZWRequestSpawnStaticGimmick). Rust: not read. |
 | `paths/X_Y/{net,areas,verts}missionN.bai` | 9,359 sectors × 3 (+7,184 hide) | | CryAI navmesh per 256 m sector | cryaisystem (§2.5). **Rust: `ai::geodata` reads them.** |
@@ -399,15 +398,16 @@ ballistic projectiles. `PrimitiveWorldIntersection` (37 sites) is used for capsu
 sweeps: blink, resurrect/teleport positions, mount/unmount, and building.
 
 ### 2.7 Gap summary vs. the Rust server
-Rust already loads: static brush, vegetation, `visareas.dat` (instance halls) and voxel (cave) colliders (`ai::collision`), heightmaps (`npcs::heightmap`), water bodies from `object.dat`
-(`ai::physics::{objects_file,water}`), and the `.bai` navmesh (`ai::geodata`).
+Rust loads static brush and vegetation colliders, `visareas.dat` instance
+halls, voxel cave meshes, and model-based doodad and house colliders
+(`ai::collision`). It also loads heightmaps with hole flags
+(`npcs::heightmap`), water bodies from `object.dat`
+(`ai::physics::{objects_file,water}`), and `.bai` navmeshes (`ai::geodata`).
 
 Missing:
-* **doodad/house colliders** from their models;
 * terrain surface types (`cover.ctc`, `surface.xml`);
 * `visareas.dat` areas / portals as volumes (their brushes and voxels are loaded; the visibility areas themselves are not used);
-* level entities: areas and static gimmicks from `entities.xml`;
-* terrain holes.
+* level entities such as areas and static gimmicks from `entities.xml`.
 
 The 1.2 client pak (the data the Rust server targets today) has the same per-cell file set,
 so the loaders apply to both. Record versions must be checked per client (e.g. `.bai` areas

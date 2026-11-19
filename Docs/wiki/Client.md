@@ -60,7 +60,7 @@ MCP `client_launch` uses the same default; pass `sound: true` to enable audio.
 The built binary is `rust/target/release/aaemu-launcher.exe` (or in your Cargo
 target directory); a published build has it in `Tools/`. The ticket protocol is
 described in
-[`rust/LIVE-TESTING.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/LIVE-TESTING.md#6-the-real-12-client-aaemu-launcher).
+[`rust/LIVE-TESTING.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/LIVE-TESTING.md#6-the-real-12-client-aaemu-launcher).
 
 The public AAEmu Launcher (Trion 1.2 login type) also works as an alternative,
 but it is not needed.
@@ -118,10 +118,10 @@ Real 1.2 tests cover the Comet Speedster, Rowboat and Harpoon Clipper through th
 scroll summons, driver controls and dismissal. The server fixes include physics tick timing,
 clipper prefab buoyancy, ship passenger transforms and a dismissal deadlock. Reproduction
 steps and the limits of those tests are in the driver's
-[vehicle testing section](https://github.com/AAEmu/AAEmu/blob/develop/rust/docs/client/LUA-DRIVER.md#10-vehicle-tests-through-the-real-12-client).
+[vehicle testing section](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/docs/client/LUA-DRIVER.md#10-vehicle-tests-through-the-real-12-client).
 
 Build commands, MCP connection settings and the repeatable startup comparison
-are in [`rust/docs/client/LUA-DRIVER.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/docs/client/LUA-DRIVER.md#7-fast-startup-hidden-rendering-and-mcp).
+are in [`rust/docs/client/LUA-DRIVER.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/docs/client/LUA-DRIVER.md#7-fast-startup-hidden-rendering-and-mcp).
 
 ### Lossless compressed client packs
 
@@ -240,9 +240,9 @@ existing diagnostic build remains available without `-Player`.
 
 ## Related
 
-- [Home](Home)
-- [Installation & Setup](Installation-&-Setup)
-- [Local Development Guide](Local-Development-Guide)
+- [Home](Home.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Local Development Guide](Local-Development-Guide.md)
 
 [client-download-google]: https://drive.google.com/drive/folders/1_pIBVHIm1YFal-nteGaVuXjTv3Yrsv4Q
 [client-download-mega-patched]: https://mega.nz/folder/C3Q0WQjT#vRUethZLPiYSo2B4nE_etg/file/qyAVQY4I

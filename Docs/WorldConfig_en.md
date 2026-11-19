@@ -114,6 +114,10 @@ Example:
 - **Type**: `boolean`
 - **Description**: Enables loading GeoData/NavMesh (dungeons/navigation).
 
+### `PrewarmNavmesh`
+- **Type**: `boolean`
+- **Description**: Loads path-block navmesh cells near players in the background. Defaults to `false` and requires `GeoDataMode`. Cells remain cached until restart.
+
 ### `PreLoadTerrain`
 - **Type**: `boolean`
 - **Description**: When `true`, preloads terrain data (slower startup, lower runtime spikes, higher memory usage).

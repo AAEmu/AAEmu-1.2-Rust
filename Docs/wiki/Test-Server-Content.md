@@ -2,7 +2,7 @@
 
 - Audience: Operators and testers of a private test server
 - Last verified against: `main` on November 11, 2026
-- Prerequisites: a running game server and database ([Installation & Setup](Installation-&-Setup))
+- Prerequisites: a running game server and database ([Installation & Setup](Installation-&-Setup.md))
 
 This page is for a **private test server**: the goal is to make every system reachable quickly,
 not to balance an economy. It ships three things:
@@ -162,6 +162,6 @@ prints the item task result in the server log.
 
 ## Related
 
-- [Home](Home)
-- [Installation & Setup](Installation-&-Setup)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
+- [Home](Home.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)

@@ -1,7 +1,7 @@
 # Understanding AAEmu Components
 
 - Audience: Contributors, players, and testers
-- Last verified against: `develop` on October 10, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 Understanding the project components makes setup and debugging much easier.
@@ -51,7 +51,7 @@ Starts the ArcheAge client against a chosen login server. The 1.2 client does
 not ask for credentials itself: `aaemu-launcher` (`rust/crates/aaemu-launcher`)
 puts an encrypted login ticket (user name and SHA-256 password hash) into an
 inherited Windows file mapping and starts `bin32/archeage.exe` with the login
-server address and the mapping handle. See [Client](Client#launcher-aaemu-launcher).
+server address and the mapping handle. See [Client](Client.md#launcher-aaemu-launcher).
 
 ### Lua client driver (developers)
 
@@ -64,7 +64,7 @@ chat) without screenshot automation. Not needed to play.
 
 Playable client used for testing and gameplay.
 
-AAEmu `develop` targets client 1.2 (`r208022`).
+AAEmu 1.2 (Rust) targets client build `r208022`.
 
 ## How components interact
 
@@ -90,7 +90,7 @@ sequenceDiagram
 
 ## Related
 
-- [Home](Home)
-- [Local Development Guide](Local-Development-Guide)
-- [Installation & Setup](Installation-&-Setup)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
+- [Home](Home.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)

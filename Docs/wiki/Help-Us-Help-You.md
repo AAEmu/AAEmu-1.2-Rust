@@ -1,7 +1,7 @@
 # Help Us Help You
 
 - Audience: Players, testers, and contributors
-- Last verified against: `develop` on February 28, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 This page lists the minimum information needed for effective support.
@@ -48,6 +48,6 @@ Use numbered steps and keep them precise.
 
 ## Related
 
-- [Getting Help](Getting-Help)
-- [Asking for Help on Discord](Asking-for-Help-on-Discord)
-- [Asking for Help on GitHub Discussions](Asking-for-Help-on-GitHub-Discussions)
+- [Getting Help](Getting-Help.md)
+- [Asking for Help on Discord](Asking-for-Help-on-Discord.md)
+- [Asking for Help on GitHub Discussions](Asking-for-Help-on-GitHub-Discussions.md)

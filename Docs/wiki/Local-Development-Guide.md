@@ -1,7 +1,7 @@
 # Local Development Guide
 
 - Audience: Contributors
-- Last verified against: `develop` on October 10, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: stable Rust (rustup), Docker, and required downloaded
   dependencies
 
@@ -19,9 +19,9 @@ supported.
 1. Install stable Rust with [rustup](https://rustup.rs/) (provides `cargo`).
 1. Install Docker (Docker Desktop, or Docker Engine with the `docker compose`
    plugin) and make sure it is running.
-1. Clone the `AAEmu` repository (recommended branch: `develop`).
+1. Clone the `main` branch of [AAEmu 1.2 (Rust)](https://github.com/AAEmu/AAEmu-1.2-Rust).
 1. Download required files from
-   [Dependencies and Downloads](Dependencies-and-Downloads):
+   [Dependencies and Downloads](Dependencies-and-Downloads.md):
    - `compact.sqlite3`
    - ArcheAge 1.2 client
 1. Place `compact.sqlite3` in `rust/crates/aaemu-game/app/Data/`.
@@ -43,7 +43,8 @@ machine override wins over all other game config files:
 ```
 
 `Config.Local.json` is loaded after `Config.json` and `Configurations/*.json`.
-Only environment variables and command-line arguments override it. You can also
+Existing game user secrets, environment variables, and command-line arguments
+can override it. You can also
 put `game_pak` itself in `rust/crates/aaemu-game/app/ClientData/`.
 
 ## First run (preferred local workflow)
@@ -94,7 +95,8 @@ into MySQL.
 
 ## Logs and debugging
 
-Both servers log to the same console. Use `RUST_LOG` for more detail, for
+Both servers share the console and write separate `Logs/` folders in their
+application directories. Use `RUST_LOG` for more detail, for
 example `RUST_LOG=debug cargo xtask dev` or
 `RUST_LOG=aaemu_game=debug,info cargo xtask dev`.
 
@@ -106,7 +108,7 @@ Database inspection: `docker compose up -d adminer`, then open
 <http://localhost:8080>.
 
 For automated end-to-end checks against the running servers, see
-[`rust/LIVE-TESTING.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/LIVE-TESTING.md)
+[`rust/LIVE-TESTING.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/LIVE-TESTING.md)
 (the `aaemu-testclient` bot).
 
 ## Starting the client
@@ -122,7 +124,7 @@ cargo run --release -p aaemu-launcher -- --client "C:/ArcheAge/bin32/archeage.ex
 It asks for the password; `--password PW`, `--password-file FILE` or the
 `AAEMU_PASSWORD` environment variable avoid the prompt (handy for scripts).
 With `AutoAccount` (default) the account is created on the first login. See
-[Client](Client#launcher-aaemu-launcher) for all options.
+[Client](Client.md#launcher-aaemu-launcher) for all options.
 
 ## Driving the client from tools (Lua driver)
 
@@ -139,7 +141,7 @@ cargo run --release -p aaemu-clientdriver -- lua -t ui "return CheckLoginButtonA
 The in-client part is 32-bit C++ and needs MSVC with the x86 toolset
 (`rust/crates/aaemu-clientdriver/native/build.bat`). Build steps, commands and
 caveats:
-[`rust/docs/client/LUA-DRIVER.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/docs/client/LUA-DRIVER.md).
+[`rust/docs/client/LUA-DRIVER.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/docs/client/LUA-DRIVER.md).
 For headless protocol-level tests use `aaemu-testclient` instead (see
 `rust/LIVE-TESTING.md`).
 
@@ -150,7 +152,7 @@ zone cells from the client data around players. It is configured in
 `rust/crates/aaemu-game/app/Configurations/Physics.json`; for a faster start on
 small machines lower `Geometry` (`Terrain` / `Brushes`) or `LoadRadiusCells`,
 or set `Enable` to `false`. See
-[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings#physics-configurationsphysicsjson).
+[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings.md#physics-configurationsphysicsjson).
 
 ## Health and readiness
 
@@ -170,8 +172,8 @@ The login server can serve the health endpoints `/health/live` and
 
 ## Related
 
-- [Home](Home)
-- [Dependencies and Downloads](Dependencies-and-Downloads)
-- [Installation & Setup](Installation-&-Setup)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
-- [Mini troubleshoot guide](Mini-troubleshoot-guide)
+- [Home](Home.md)
+- [Dependencies and Downloads](Dependencies-and-Downloads.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)
+- [Mini troubleshoot guide](Mini-troubleshoot-guide.md)
