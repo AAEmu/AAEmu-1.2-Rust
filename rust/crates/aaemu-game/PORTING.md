@@ -5424,6 +5424,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   store, so no sender is implemented; **capture-pending** for the moderation area
   (`ACCOUNT-SCRESTRICTINFO-1`).
 
+* systems::housing (guard-tower engraving): The r208022 client sends skill 20866
+  through `CSStartSkill` to start plot 681. The skill has no ordinary player-source row, so
+  the source gate accepts a player casting as itself on a live guard tower in the same
+  world. The dominion runtime checks roster, expedition, range, tower state and siege
+  timing before the cast starts and checks eligibility again when the plot begins.
+  The authored AnyUnit target type also uses this validation path.
+
 ### Ranking boards (Rust only)
 
 The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `CSRankSnapshotPacket` (0x130, unnamed in the opcode tables, `ranking_packets.rs`). The Rust server answers both from a global store (`systems::social::ranking_manager`, `server.systems.social.ranking`):
