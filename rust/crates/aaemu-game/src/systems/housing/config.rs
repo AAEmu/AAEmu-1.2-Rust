@@ -129,6 +129,24 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub open_castle_zones_for_participants: bool,
+    /// Let a guild captain who is declaring a siege stand in the authored-closed castle zones
+    /// of the territory it is declaring on, so the 10 s "Siege Camp" cast (skill 16918) can
+    /// finish: `OpenCastleZonesForParticipants` cannot, because no siege exists yet. The
+    /// exemption is [`dominion::declarer_access::permit`]: the exact castle zone group, the
+    /// registered live tower's own world instance, the authored declare period only, a current
+    /// non-owner non-pirate member whose rank has the siege-master policy, and either the
+    /// unexpired matching camp item in the bag (no claim, no unfinished siege) or -- to stay
+    /// after the cast takes the item -- the guild's own accepted declaration for the running
+    /// cycle. Placement, time, cost, rank and one-claim checks of the declaration itself are
+    /// unchanged; the permit lapses (ordinary eviction timer) when the period ends or the
+    /// item, declaration, rank or membership is gone. Other zones, other players and other
+    /// periods are unaffected; GMs are always exempt. `false` (default) keeps the previous
+    /// behaviour. `Housing.OpenCastleZonesForDeclarers`.
+    #[serde(
+        rename = "opencastlezonesfordeclarers",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub open_castle_zones_for_declarers: bool,
     /// Apply the 1.2 client's place-skin terrain material rule to player doodad placements:
     /// the terrain material under the spot must be one of the template's
     /// `doodad_place_skins` kinds, else `DOODAD_SIM_AREA` (276). `false` (default) keeps the
@@ -271,6 +289,7 @@ impl Default for HousingConfig {
             siege_shop_gate: false,
             siege_evict_non_participants: true,
             open_castle_zones_for_participants: false,
+            open_castle_zones_for_declarers: false,
             placement_strict_surface: false,
             abandoned_house_hits_to_break: default_abandoned_house_hits_to_break(),
             siege_declare_house_margin: 10.0,
@@ -399,6 +418,19 @@ mod tests {
             }))
             .unwrap();
             assert!(config.housing.open_castle_zones_for_participants);
+        }
+    }
+
+    #[test]
+    fn open_castle_zones_for_declarers_defaults_off_and_binds_booleans_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.housing.open_castle_zones_for_declarers);
+        for value in [serde_json::json!(true), serde_json::json!("true")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "OpenCastleZonesForDeclarers": value }
+            }))
+            .unwrap();
+            assert!(config.housing.open_castle_zones_for_declarers);
         }
     }
 

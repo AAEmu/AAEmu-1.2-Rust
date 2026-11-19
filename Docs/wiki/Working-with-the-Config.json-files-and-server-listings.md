@@ -1099,6 +1099,38 @@ removed. The rule is **off** by default, keeping the previous behaviour. The imp
 the open question (whether retail opened these zones at all) are recorded in
 `rust/crates/aaemu-game/PORTING.md`.
 
+## Siege declaration: letting the declaring captain stand in the closed castle zone
+
+Declaring a siege means casting the Siege Camp (skill 16918, a 10-second cast) inside the
+territory's own zone group, outside the lodestone's declare radius. Because the castle zones are
+authored `closed`, the zone-access rule evicts a non-GM captain after 10 seconds, and
+`OpenCastleZonesForParticipants` cannot help because no siege exists yet. This separate switch
+admits only the captain who is doing that:
+
+```json
+{
+  "Housing": {
+    "OpenCastleZonesForDeclarers": true
+  }
+}
+```
+
+A character is admitted while all of these hold: the weekly siege calendar is on and the
+territory's declare period is running; the character is in that territory's own castle zone and
+tower world instance; its guild is a live, non-pirate guild that does not own the territory and
+its current rank has the siege-master policy; no unfinished siege exists on the territory and
+the guild fights in no other unfinished siege; no other guild has declared; and the character
+carries the unexpired, unlocked camp item of this territory (`siege_zones.declare_item_id`, an
+item whose use skill is 16918) in its bag or equipment. Once the cast has taken the item and the
+declaration is accepted, a captain that was admitted on the item stays for as long as the
+declaration is its own guild's for the running cycle. Entering by portal or teleport needs the
+item; an accepted declaration alone never opens the zone. The permit is dropped, and the usual
+warnings and return start without the character moving, when the declare period ends (the
+declaration becomes the warmup siege), the declaration is cancelled, the item is lost or expires
+without a declaration, the rank loses the policy, or the character leaves the guild. Placement,
+time, cost and rank checks of the declaration itself are unchanged. Other zones, other
+periods, other characters and game masters (always exempt) are unaffected. Off by default.
+
 ## Siege calendar and territory claim-window timezone
 
 `Housing.SiegeCalendarTimezone` is the wall-clock offset of the `siege_zones` weekday/hour

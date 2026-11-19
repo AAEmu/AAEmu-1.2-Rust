@@ -1147,3 +1147,6 @@ mod siege_participant_exemption {
         ));
     }
 }
+
+#[path = "zone_access_declarer_tests.rs"]
+mod siege_declarer_exemption;
