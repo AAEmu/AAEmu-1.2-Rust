@@ -81,6 +81,7 @@ standard gates (byte-exact packet tests, flow tests, `cargo xtask ci`, live-clie
   `SCItemDetailUpdated`, `SCItemAcquisition`, `SCItemTaskNotify`, `SCCraftItemUnlock`,
   `SCMateEquipmentExpired`, `SCMineAmount`, mail live updates
   (`SCMailReceiverOpened`/`SCMailRemoved`), `SCUnitLootingState`.
+  [Mailbox updates PR](https://github.com/AAEmu/AAEmu-1.2-Rust/pull/146)
 - [ ] **16. Housing live updates** (S–M): verify send paths for
   `SCHouseBuildPayChanged`, `SCHouseFarm`, and `SCHouseOwnerNameChanged`.
   The server already enforces the authored decoration limit.
