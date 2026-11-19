@@ -1070,6 +1070,39 @@ mod siege_participant_exemption {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn reloading_with_participant_access_disabled_evicts_a_stationary_participant() {
+        let mut f = fixture(true);
+        let dir =
+            std::env::temp_dir().join(format!("aaemu-siege-access-reload-{}", std::process::id()));
+        let config_file = dir.join("Config.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &config_file,
+            r#"{ "Housing": { "OpenCastleZonesForParticipants": false } }"#,
+        )
+        .unwrap();
+        f.server.config.update(|c| {
+            c.app_path = dir.clone();
+            c.housing.open_castle_zones_for_participants = true;
+        });
+        walk(&f.server, &mut f.attacker_client, &f.attacker, CASTLE_X).await;
+        assert_eq!(warning_count(&mut f.attacker_client), 0);
+
+        let reload =
+            crate::systems::services::commands::scripts::reload_configs::reload_configuration(
+                &f.server,
+            );
+        std::fs::remove_file(config_file).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+        reload.unwrap();
+        assert!(!f.server.config.housing.open_castle_zones_for_participants);
+        assert_eq!(warning_count(&mut f.attacker_client), 1);
+        advance(10_000).await;
+        advance(200).await;
+        assert_ne!(f.attacker.data().unit.transform.x, CASTLE_X);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn expiry_ends_the_exemption_through_the_existing_participant_sweep() {
         let mut f = fixture(true);
         f.server

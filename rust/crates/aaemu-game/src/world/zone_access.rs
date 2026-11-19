@@ -167,6 +167,13 @@ fn needs_return(server: &GameServer, player: &PlayerRef) -> bool {
                 .is_some_and(|t| zone_closed_to(server, player, t.instance_id, t.zone_id)))
 }
 
+/// Recheck standing characters after a configuration reload or a siege state change.
+pub fn recheck_closed_zone_access(server: &GameServer) {
+    for player in server.world.all_characters() {
+        update(server, &player);
+    }
+}
+
 /// Re-evaluates every online character's closed-zone status after something the
 /// `Housing.OpenCastleZonesForParticipants` exemption depends on may have changed outside a
 /// move or portal/skill use: the siege ended (naturally or by a GM command) or a roster entry
@@ -178,9 +185,7 @@ pub fn recheck_siege_participants(server: &GameServer) {
     if !server.config.housing.open_castle_zones_for_participants {
         return;
     }
-    for player in server.world.all_characters() {
-        update(server, &player);
-    }
+    recheck_closed_zone_access(server);
 }
 
 pub(super) fn update(server: &GameServer, player: &PlayerRef) {
