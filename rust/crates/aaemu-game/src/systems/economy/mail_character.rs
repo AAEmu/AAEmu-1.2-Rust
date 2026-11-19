@@ -80,20 +80,17 @@ pub fn read_mail(txn: &mut ItemTxn<'_>, player: &PlayerRef, is_sent: bool, id: i
     if owner != player.character_id {
         return;
     }
-    if mail::expire_mail_at(txn, id, mail::now()) {
+    let time = mail::now();
+    if mail::expire_mail_at(txn, id, time) {
         return;
     }
     let mut st = mails.state();
     let Some(m) = st.all.get_mut(id) else { return };
-    if !is_sent && (!m.is_delivered || m.body.recv_date > mail::now()) {
+    if !is_sent && (!m.is_delivered || m.body.recv_date > time) {
         return;
     }
-    if m.header.status == mail_status::UNREAD && !is_sent {
+    if !is_sent && m.mark_received_read(&mut txn.env.fx, time) {
         player.data().unread_mail.update_received(m.mail_type, -1);
-        m.open_date = mail::now();
-        m.is_dirty = true;
-        m.header.status = mail_status::READ;
-        m.is_delivered = true;
     }
     let count = player.data().unread_mail;
     let body = m.body_wire(server);
@@ -491,15 +488,10 @@ pub fn get_attached(
     // Mark mail as read in case we took at least one item from it
     let mark_read = mails
         .with_mail_mut(mail_id, |m| {
-            if m.header.status == mail_status::UNREAD && (took_money || !item_slot_list.is_empty())
+            // Claiming an attachment also starts the read retention window.
+            if (took_money || !item_slot_list.is_empty())
+                && m.mark_received_read(&mut txn.env.fx, mail::now())
             {
-                m.header.status = mail_status::READ;
-                // `mail_guide` keeps read mail for 5 days; claiming an attachment counts as
-                // reading it, so the read clock starts here when the body was never opened.
-                if m.open_date == 0 {
-                    m.open_date = mail::now();
-                }
-                m.is_dirty = true;
                 Some(m.mail_type)
             } else {
                 None
@@ -561,6 +553,7 @@ pub fn delete_mail(txn: &mut ItemTxn<'_>, player: &PlayerRef, id: i64, is_sent: 
             count,
         },
     );
+    m.notify_sent_copy_removed(&mut txn.env.fx);
     mail::delete_mail_in(server, &mut st, id);
 }
 

@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 67,
-    "never_sent": 51
+    "never_sent": 49
   },
   "typeless": [
     "SCAiDebugPacket",
@@ -100,8 +100,6 @@
     "SCItemDetailUpdatedPacket",
     "SCItemTaskNotifyPacket",
     "SCKnockBackUnitPacket",
-    "SCMailReceiverOpenedPacket",
-    "SCMailRemovedPacket",
     "SCMileageChangedPacket",
     "SCMineAmountPacket",
     "SCNotifyUIMessagePacket",

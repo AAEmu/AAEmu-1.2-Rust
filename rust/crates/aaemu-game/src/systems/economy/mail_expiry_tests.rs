@@ -178,6 +178,9 @@ async fn normal_read_mail_expires_five_days_after_reading() {
         "read mail is deleted after the client's 5 days, not after 14"
     );
     assert_eq!(w.b.drain_ops(), vec![sc::SCMailDeletedPacket]);
+    let mut removed = vec![1];
+    removed.extend(id.to_le_bytes());
+    assert_eq!(w.a.drain(), vec![(sc::SCMailRemovedPacket, removed)]);
 }
 
 #[tokio::test]
@@ -624,7 +627,10 @@ async fn expiry_receipt_boundary_returns_zero_one_ten_attachments_once() {
                 ),
                 (1, 0)
             );
-            assert_eq!(w.a.drain_ops(), vec![sc::SCGotMailPacket]);
+            assert_eq!(
+                w.a.drain_ops(),
+                vec![sc::SCMailRemovedPacket, sc::SCGotMailPacket]
+            );
             assert_eq!(
                 w.b.drain_ops(),
                 vec![sc::SCMailReturnedPacket, sc::SCCountUnreadMailPacket]

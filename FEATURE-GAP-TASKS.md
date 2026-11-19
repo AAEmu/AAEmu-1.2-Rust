@@ -108,8 +108,8 @@ standard gates (byte-exact packet tests, flow tests, `cargo xtask ci`, live-clie
 - [ ] **15. Economy feedback packets** (M): send `SCCraftFailedPacket` and verify the four
   "TODO not verified" craft error pairs against proj-aa12u; add/send
   `SCItemDetailUpdated`, `SCItemAcquisition`, `SCItemTaskNotify`, `SCCraftItemUnlock`,
-  `SCMateEquipmentExpired`, `SCMineAmount`, mail live updates
-  (`SCMailReceiverOpened`/`SCMailRemoved`), `SCUnitLootingState`.
+  `SCMateEquipmentExpired`, `SCMineAmount`, `SCUnitLootingState`.
+  - [x] Mail live updates (`SCMailReceiverOpened`/`SCMailRemoved`).
 - [ ] **16. Housing live updates** (S–M): send `SCHouseBuildPayChanged`, `SCHouseFarm`,
   `SCHouseOwnerNameChanged`; enforce `housing_deco_limits` (12).
 - [ ] **17. Racing / time trials** (L): implement from 1.2 data (`race_tracks` 2,
