@@ -753,6 +753,15 @@ directory.
 
 For contributor workflows, prefer `Config.Local.json`.
 
+## Navmesh prewarming (`World:PrewarmNavmesh`)
+
+`World.PrewarmNavmesh` defaults to `false` and requires `World.GeoDataMode`.
+It loads one path-block navmesh cell at a time on a background worker, starting
+with cells occupied by players and then the four adjacent cells. The loaded
+data stays in memory until restart. AI route lookups still load a cell on
+demand if they reach it before prewarming finishes. Worlds whose navmesh is
+loaded from zone files at startup already have their data and skip this pass.
+
 ## Physics (`Configurations/Physics.json`)
 
 The game server builds a collision world per zone from the client data

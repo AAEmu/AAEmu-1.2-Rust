@@ -129,6 +129,7 @@ impl System {
         hooks::install(server);
         manager::start_tick(server);
         collision::residency::start(server);
+        geodata::start_bai_prewarm(server);
         Ok(())
     }
 

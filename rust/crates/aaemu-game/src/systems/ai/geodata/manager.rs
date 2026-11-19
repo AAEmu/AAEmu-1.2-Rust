@@ -631,6 +631,26 @@ impl AiGeoData {
     pub fn loaded_cells(&self) -> usize {
         self.cells.iter().filter(|c| c.get().is_some()).count()
     }
+
+    /// Whether cell `(cx, cy)` should be prewarmed: geodata is enabled, the world uses
+    /// per-cell path blocks (not zone-bai, which is loaded at startup), the cell is in
+    /// bounds, and its `OnceLock` has not been populated yet.
+    ///
+    /// The check is advisory: the AI tick may start loading the cell before prewarming does.
+    pub(super) fn is_cell_prewarm_needed(&self, cx: i32, cy: i32) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        // Zone-bai worlds are fully loaded at startup via zone_bai(); no per-cell I/O.
+        if self.zone_bai.get().is_some_and(|v| !v.is_empty()) {
+            return false;
+        }
+        if cx < 0 || cy < 0 || cx >= self.cell_x || cy >= self.cell_y {
+            return false;
+        }
+        let idx = (cx * self.cell_y + cy) as usize;
+        self.cells[idx].get().is_none()
+    }
 }
 
 /// `IsInPolygon(point, polygon)` (2D, edges and vertices count as inside).
@@ -1031,5 +1051,71 @@ mod tests {
             triangle_center(v(0.0, 0.0), v(3.0, 0.0), v(0.0, 3.0)),
             v(1.0, 1.0)
         );
+    }
+
+    /// Prewarm predicate: `is_cell_prewarm_needed` returns `true` before loading and `false`
+    /// after. The loaded cell is returned identically on a second call (OnceLock idempotent).
+    /// No wall-clock assertions; exercises the flag logic only.
+    #[test]
+    fn prewarm_needed_before_load_not_after() {
+        let t = crate::data::world_templates::WorldTemplate::synthetic(0, "pw", 2, 2, 100);
+        // No `.bai` files: zone_bai() will be empty, so this is a path-block world.
+        let g = AiGeoData::new(
+            &t,
+            true,
+            Arc::new(MemFiles(HashMap::new())),
+            Arc::new(UsedAreaNames::default()),
+            None,
+        );
+        // Prime the zone_bai OnceLock with an empty vec (simulates a world without zone .bai
+        // files; geodata::start() calls zone_bai() on enabled worlds at startup).
+        let _ = g.zone_bai();
+
+        assert!(
+            g.is_cell_prewarm_needed(0, 0),
+            "unloaded cell should need prewarm"
+        );
+        assert!(
+            g.is_cell_prewarm_needed(1, 0),
+            "unloaded cell should need prewarm"
+        );
+
+        // Out-of-bounds and disabled: never needed.
+        assert!(!g.is_cell_prewarm_needed(-1, 0));
+        assert!(!g.is_cell_prewarm_needed(2, 0));
+
+        // Load cell (0, 0).
+        let bai_first = g.cell_bai(0, 0);
+
+        assert!(
+            !g.is_cell_prewarm_needed(0, 0),
+            "loaded cell must not need prewarm"
+        );
+        assert!(
+            g.is_cell_prewarm_needed(1, 0),
+            "unrelated cell is unchanged"
+        );
+
+        // OnceLock guarantees idempotency: second call returns the same reference.
+        let bai_second = g.cell_bai(0, 0);
+        assert!(
+            std::ptr::eq(
+                bai_first.expect("cell (0,0) must exist"),
+                bai_second.expect("cell (0,0) must exist"),
+            ),
+            "cell_bai must return the same allocation on every call"
+        );
+    }
+
+    /// Zone-bai worlds never need per-cell prewarm: zone data is loaded at startup.
+    #[test]
+    fn prewarm_not_needed_for_zone_bai_worlds() {
+        let g = zone_bai_geo();
+        // zone_bai() is called by zone_bai_geo() (via bai_by_pos_uses_the_position_zone).
+        // Force it in case the test runs standalone.
+        let _ = g.zone_bai();
+        // Both cells are in a zone-bai world; prewarm would be a no-op anyway.
+        assert!(!g.is_cell_prewarm_needed(0, 0));
+        assert!(!g.is_cell_prewarm_needed(1, 0));
     }
 }

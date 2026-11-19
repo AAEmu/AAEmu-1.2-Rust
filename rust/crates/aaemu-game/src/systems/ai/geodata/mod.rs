@@ -16,6 +16,7 @@ mod real_data;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use crate::data::client_files::ClientFileManager;
 use crate::server::GameServer;
@@ -134,6 +135,67 @@ pub fn start(server: &Arc<GameServer>) {
         all.get(&template_id)
             .map_or(0.0, |g| g.get_height(Vec3::new(x, y, z)))
     }));
+}
+
+/// The four cells sharing an edge with a player's current cell.
+const BAI_PREWARM_NEIGHBOURS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+/// Warm one cell per pass, independently of the AI and collision ticks. Await each load so a
+/// slow read cannot queue duplicate or stale requests. Route lookups can still race a prewarm
+/// and wait for the same cell to finish loading.
+pub(super) fn start_bai_prewarm(server: &Arc<GameServer>) {
+    if !(server.config.world.geo_data_mode && server.config.world.prewarm_navmesh) {
+        return;
+    }
+    let weak = Arc::downgrade(server);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_millis(500));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            iv.tick().await;
+            let Some(server) = weak.upgrade() else { return };
+            let candidate = bai_prewarm_candidate(&server);
+            drop(server);
+            let Some((geo, x, y)) = candidate else {
+                continue;
+            };
+            if tokio::task::spawn_blocking(move || {
+                geo.cell_bai(x, y);
+                tracing::debug!(world = %geo.world_name, cell = ?(x, y), "navmesh cell prewarmed");
+            })
+            .await
+            .is_err()
+            {
+                tracing::warn!(cell = ?(x, y), "navmesh prewarm task panicked");
+            }
+        }
+    });
+}
+
+fn bai_prewarm_candidate(server: &GameServer) -> Option<(Arc<AiGeoData>, i32, i32)> {
+    let mut focus = Vec::new();
+    for world in server.world.worlds() {
+        let Some(geo) = server.systems.ai.geodata.get(world.template.id) else {
+            continue;
+        };
+        for p in world.all_characters() {
+            let pos = world.world_pos_rot(&WorldObject::from(&p));
+            let (cx, cy) = manager::to_cell_index(Vec3::new(pos.x, pos.y, pos.z));
+            if geo.is_cell_prewarm_needed(cx, cy) {
+                return Some((geo, cx, cy));
+            }
+            focus.push((geo.clone(), cx, cy));
+        }
+    }
+    for (dx, dy) in BAI_PREWARM_NEIGHBOURS {
+        for (geo, cx, cy) in &focus {
+            let (x, y) = (cx + dx, cy + dy);
+            if geo.is_cell_prewarm_needed(x, y) {
+                return Some((geo.clone(), x, y));
+            }
+        }
+    }
+    None
 }
 
 /// The geodata of the world an object is in.
