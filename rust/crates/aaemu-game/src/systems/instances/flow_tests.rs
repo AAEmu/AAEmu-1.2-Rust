@@ -1656,6 +1656,7 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
     const SPAWNER: u32 = 314;
     const REWARD: u32 = 902;
     let mut data = dungeon_data();
+    data.formulas = crate::systems::npcs::npc::stats::tests::npc_formulas();
     data.systems
         .instances
         .indun
@@ -1683,6 +1684,10 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
         REWARD,
         NpcTemplate {
             id: REWARD,
+            level: 50,
+            npc_template_id: 9,
+            npc_kind_id: 1,
+            npc_grade_id: 1,
             ..Default::default()
         },
     );
