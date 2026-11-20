@@ -4,16 +4,19 @@
 //! character would have (ability active, skill learned, weapons per `unit_reqs`, mana). The
 //! outcome is classified, a table is printed, and the test fails on a skill that fires but
 //! deals no damage although its data says it should, and on a refusal nobody explained.
+//! Selected direct heals and buffs must also change the target's state.
 //!
 //! Gated by `AAEMU_COMPACT_DB` (path to `compact.sqlite3`):
 //! `AAEMU_COMPACT_DB=... cargo test -p aaemu-game player_skill_audit -- --ignored --nocapture`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
 use aaemu_commons::PacketStream;
 
+use crate::data::GameData;
 use crate::models::char_data::Skill;
 use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType};
 use crate::opcodes::sc;
@@ -33,6 +36,7 @@ const SHIELD: u32 = 18420;
 const INSTRUMENT: u32 = 20483;
 /// A hostile wild animal (the lizard of the quest 44 tests).
 const HOSTILE_NPC: u32 = 668;
+const LIGHT_FIREPLACE: u32 = 18025;
 /// No hit of a level 55 character with starter gear should come near this.
 const ABSURD_DAMAGE: i32 = 5_000_000;
 
@@ -87,7 +91,11 @@ enum Outcome {
     FiredDamaged,
     FiredDotDamaged,
     FiredNoDamageExpected,
+    Healed,
+    AppliedBuff,
+    LitFireplace,
     FiredButNoDamage,
+    MissingEffect(&'static str),
     Refused(u8),
     NeedsBuffCombo,
     NeedsSetup(String),
@@ -99,7 +107,11 @@ impl Outcome {
             Outcome::FiredDamaged => "FIRED_DAMAGED".into(),
             Outcome::FiredDotDamaged => "FIRED_DOT_DAMAGED".into(),
             Outcome::FiredNoDamageExpected => "FIRED_NO_DAMAGE_EXPECTED".into(),
+            Outcome::Healed => "HEALED".into(),
+            Outcome::AppliedBuff => "APPLIED_BUFF".into(),
+            Outcome::LitFireplace => "LIT_FIREPLACE".into(),
             Outcome::FiredButNoDamage => "FIRED_BUT_NO_DAMAGE".into(),
+            Outcome::MissingEffect(reason) => format!("MISSING_EFFECT({reason})"),
             Outcome::Refused(c) => format!("REFUSED({c})"),
             Outcome::NeedsBuffCombo => "NEEDS_BUFF/COMBO".into(),
             Outcome::NeedsSetup(r) => format!("NEEDS_SETUP({r})"),
@@ -112,6 +124,7 @@ struct Row {
     name: String,
     ability: u8,
     outcome: Outcome,
+    cast_path: &'static str,
     detail: String,
 }
 
@@ -290,6 +303,7 @@ struct Scene {
     /// Extra NPCs on a ring around the target for skills that scatter their hits randomly.
     ring: Vec<NpcRef>,
     _friend_client: TestClient,
+    friend: PlayerRef,
     target: SkillCastTarget,
     dist: f32,
     hp_before: i32,
@@ -300,6 +314,8 @@ struct Scene {
     result: u8,
     fired: bool,
     accepted: bool,
+    internal_cast: bool,
+    heal_target_hp: Option<i32>,
     attempts: u32,
     frames: Vec<(u16, Vec<u8>)>,
     early: Option<Outcome>,
@@ -372,6 +388,19 @@ fn setup(server: &Arc<crate::GameServer>, index: u32, t: &Arc<SkillTemplate>) ->
         Vec::new()
     };
     let (friend_client, friend) = make_player(server, 400 + n, (base.0 + 2.0, base.1), t, false);
+    // Direct healing can succeed at full HP without doing anything observable.
+    let heal_target_hp = match t.id {
+        10720 => Some(wound(&player)), // Mend
+        14929..=14933 => {
+            // Fervent Healing, all five ranks.
+            crate::systems::skills::stats::refresh_cached_stats(
+                server,
+                &WorldObject::from(&friend),
+            );
+            Some(wound(&friend))
+        }
+        _ => None,
+    };
     let mut early = None;
     let target = match t.target_type {
         0 => SkillCastTarget::Unit(player.obj_id),
@@ -403,6 +432,7 @@ fn setup(server: &Arc<crate::GameServer>, index: u32, t: &Arc<SkillTemplate>) ->
         npc,
         ring,
         _friend_client: friend_client,
+        friend,
         target,
         dist,
         hp_before,
@@ -413,10 +443,18 @@ fn setup(server: &Arc<crate::GameServer>, index: u32, t: &Arc<SkillTemplate>) ->
         result: 0,
         fired: false,
         accepted: false,
+        internal_cast: false,
+        heal_target_hp,
         attempts: 0,
         frames: Vec::new(),
         early,
     }
+}
+
+fn wound(player: &PlayerRef) -> i32 {
+    let mut player = player.data();
+    player.unit.hp = (player.unit.max_hp / 2).max(1);
+    player.unit.hp
 }
 
 /// Casts the scene's skill through the client path (or, for a row no client may cast, through
@@ -446,6 +484,7 @@ fn cast_scene(server: &Arc<crate::GameServer>, s: &mut Scene) {
         *op == sc::SCSkillStartedPacket && started_result(body, t.id) == Some(skill_result::NO_PERM)
     });
     if no_perm && !t.need_learn {
+        s.internal_cast = true;
         let me = WorldObject::from(&s.player);
         let skill = super::skill::new_skill_for(server, t.clone(), Some(&me));
         let mut target = s.target;
@@ -486,7 +525,9 @@ fn collect(s: &mut Scene, verbose: bool) {
             if let Some(r) = started_result(&body, s.t.id) {
                 s.result = r;
             }
-        } else if op == sc::SCSkillFiredPacket {
+        } else if op == sc::SCSkillFiredPacket
+            && PacketStream::from_bytes(body).read_u32().ok() == Some(s.t.id)
+        {
             s.fired = true;
         }
     }
@@ -521,6 +562,28 @@ fn classify(s: &Scene) -> (Outcome, String) {
     if s.result != 0 {
         return (Outcome::Refused(s.result), detail);
     }
+    if let Some(before) = s.heal_target_hp {
+        let target = if t.id == 10720 { &s.player } else { &s.friend };
+        let outcome = if target.data().unit.hp > before {
+            Outcome::Healed
+        } else {
+            Outcome::MissingEffect("target did not heal")
+        };
+        return (outcome, detail);
+    }
+    if t.id == 16004 {
+        // Aranzeb's Boon has variant buff rows. At least one must reach the friendly target.
+        let friend = s.friend.data();
+        let outcome = if [2955, 2956, 7661]
+            .iter()
+            .any(|&id| friend.unit.buffs.check_buff(id))
+        {
+            Outcome::AppliedBuff
+        } else {
+            Outcome::MissingEffect("Aranzeb's Boon did not apply")
+        };
+        return (outcome, detail);
+    }
     // Plausibility: a level 55 character with starter gear cannot out-damage the NPC's whole
     // pool by orders of magnitude (the NPC dies at most once).
     if damage > ABSURD_DAMAGE {
@@ -553,12 +616,82 @@ fn classify(s: &Scene) -> (Outcome, String) {
 /// every scene casts at once and the test waits once per round.
 const ROUND: Duration = Duration::from_secs(30);
 
+/// Exercise a real interactive skill outside the class trees, with both costs and phase.
+async fn fireplace_lighting(server: &Arc<crate::GameServer>) -> Row {
+    use crate::systems::npcs::doodad::manager;
+
+    const FIREPLACE: u32 = 4916;
+    const UNLIT: u32 = 12238;
+    const LIT: u32 = 12239;
+    const LOG: u32 = 8017;
+    let template = server
+        .game_data
+        .systems
+        .skills
+        .skill(LIGHT_FIREPLACE)
+        .unwrap();
+    let (mut client, player) = make_player(server, 1000, (100.0, 100.0), template, false);
+    let world = server.world.world(0).unwrap();
+    let fireplace = manager::create(server, &world, 0, FIREPLACE, None, true).unwrap();
+    fireplace.data().transform.set_xyz(102.0, 100.0, 100.0);
+    manager::spawn(server, &world, &fireplace);
+    assert_eq!(fireplace.data().func_group_id, UNLIT);
+    let packet = CSStartSkillPacket {
+        skill_id: LIGHT_FIREPLACE,
+        caster: SkillCaster::Unit(player.obj_id),
+        target: SkillCastTarget::Doodad(fireplace.obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    };
+    let bag = Inv::of(&player).bag();
+    let give_log = || {
+        let mut log = server
+            .items
+            .create(LOG, 1, 0, 1, &server.game_data.items, &server.ids.item, 0)
+            .expect("Log template");
+        log.owner_id = u64::from(player.character_id);
+        bag.lock()
+            .unwrap()
+            .add_new_item(log, -1, &server.game_data.items)
+            .expect("add Log");
+    };
+    give_log();
+    start_skill(server, &mut client.conn, packet.clone());
+    assert!(
+        client.drain().iter().any(|(op, body)| {
+            *op == sc::SCSkillStartedPacket
+                && started_result(body, LIGHT_FIREPLACE) == Some(skill_result::NEED_REAGENT)
+        }),
+        "the fireplace must refuse to light with only one Log"
+    );
+    assert_eq!(fireplace.data().func_group_id, UNLIT);
+    assert_eq!(Inv::of(&player).items_count(LOG, -1), 1);
+    give_log();
+    assert_eq!(Inv::of(&player).items_count(LOG, -1), 2);
+    start_skill(server, &mut client.conn, packet);
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while fireplace.data().func_group_id != LIT {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("two Logs should light the fireplace");
+    assert_eq!(Inv::of(&player).items_count(LOG, -1), 0);
+    Row {
+        id: LIGHT_FIREPLACE,
+        name: "Light Fireplace".into(),
+        ability: 0,
+        cast_path: "client",
+        outcome: Outcome::LitFireplace,
+        detail: "one Log refused; two Logs consumed; phase changed".into(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn player_skill_audit() {
-    let Some(data) = super::lizard_stun_flow_tests::real_data() else {
-        return;
-    };
+    let data = super::lizard_stun_flow_tests::real_data()
+        .expect("set AAEMU_COMPACT_DB to the r208022 compact.sqlite3");
     // Skill names for the table.
     let conn = rusqlite::Connection::open_with_flags(
         std::env::var("AAEMU_COMPACT_DB").unwrap(),
@@ -579,7 +712,21 @@ async fn player_skill_audit() {
         names.insert(id, name);
     }
     drop(stmt);
+    let mut stmt = conn.prepare("SELECT id FROM skills ORDER BY id").unwrap();
+    let authored_ids: BTreeSet<u32> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|id| id.expect("authored skill ID"))
+        .collect();
+    drop(stmt);
     drop(conn);
+    let loaded_ids: BTreeSet<_> = data.systems.skills.skills.keys().copied().collect();
+    assert!(
+        authored_ids == loaded_ids,
+        "missing loaded skills: {:?}; unexpected loaded skills: {:?}",
+        authored_ids.difference(&loaded_ids),
+        loaded_ids.difference(&authored_ids),
+    );
 
     // `AUDIT_LOG=debug` prints what the server logs while the skills run.
     let _log = std::env::var("AUDIT_LOG").ok().map(|level| {
@@ -617,8 +764,24 @@ async fn player_skill_audit() {
     skills.sort_by_key(|t| (t.ability_id, t.ability_level, t.id));
     assert_eq!(skills.len(), 170, "player class skill count");
     // `AUDIT_SKILLS=10670,11939` narrows the run while debugging.
-    let only: Vec<u32> = std::env::var("AUDIT_SKILLS")
-        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+    let only = std::env::var("AUDIT_SKILLS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(|id| {
+                    let id: u32 = id
+                        .trim()
+                        .parse()
+                        .expect("AUDIT_SKILLS must contain skill IDs");
+                    assert!(
+                        id == LIGHT_FIREPLACE || skills.iter().any(|skill| skill.id == id),
+                        "no audit fixture for skill {id}"
+                    );
+                    id
+                })
+                .collect::<BTreeSet<_>>()
+        })
         .unwrap_or_default();
 
     let mut scenes: Vec<Scene> = skills
@@ -650,19 +813,29 @@ async fn player_skill_audit() {
     }
 
     let mut rows = Vec::new();
+    if only.is_empty() || only.contains(&LIGHT_FIREPLACE) {
+        rows.push(fireplace_lighting(&server).await);
+    }
     for s in &scenes {
         let (outcome, detail) = classify(s);
         rows.push(Row {
             id: s.t.id,
             name: names.get(&s.t.id).cloned().unwrap_or_default(),
             ability: s.t.ability_id,
+            cast_path: if s.attempts == 0 {
+                "not_cast"
+            } else if s.internal_cast {
+                "internal_fallback"
+            } else {
+                "client"
+            },
             outcome,
             detail,
         });
     }
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    eprintln!("id\tname\tclass\toutcome\tdetail");
+    eprintln!("id\tname\tclass\tcast_path\toutcome\tdetail");
     for r in &rows {
         let key = match &r.outcome {
             Outcome::Refused(_) => "REFUSED".to_string(),
@@ -671,21 +844,31 @@ async fn player_skill_audit() {
         };
         *counts.entry(key).or_default() += 1;
         eprintln!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             r.id,
             r.name,
             CLASSES[r.ability as usize],
+            r.cast_path,
             r.outcome.label(),
             r.detail
         );
     }
     eprintln!("summary: {counts:?}");
+    if let Some(path) = std::env::var_os("AUDIT_SKILL_REPORT") {
+        write_catalog(
+            &server.game_data,
+            &names,
+            &rows,
+            std::path::Path::new(&path),
+        );
+    }
 
     let bad: Vec<String> = rows
         .iter()
         .filter(|r| {
-            matches!(r.outcome, Outcome::FiredButNoDamage | Outcome::Refused(_))
-                && !KNOWN.iter().any(|(id, _)| *id == r.id)
+            (matches!(r.outcome, Outcome::FiredButNoDamage)
+                && !KNOWN.iter().any(|(id, _)| *id == r.id))
+                || matches!(r.outcome, Outcome::Refused(_) | Outcome::MissingEffect(_))
         })
         .map(|r| format!("{} {} {}", r.id, r.name, r.outcome.label()))
         .collect();
@@ -702,7 +885,54 @@ async fn player_skill_audit() {
         .map(|r| format!("{} {} {}", r.id, r.name, r.outcome.label()))
         .collect();
     assert!(
-        unexplained.is_empty() || !only.is_empty(),
+        unexplained.is_empty(),
         "unexplained audit setup gaps: {unexplained:#?}"
     );
+}
+
+/// Every loaded skill appears in the report, including skills with no cast fixture.
+fn write_catalog(
+    data: &GameData,
+    names: &HashMap<u32, String>,
+    rows: &[Row],
+    path: &std::path::Path,
+) {
+    let by_id: HashMap<_, _> = rows.iter().map(|row| (row.id, row)).collect();
+    let mut skills: Vec<_> = data.systems.skills.skills.values().collect();
+    skills.sort_unstable_by_key(|skill| skill.id);
+    let mut report =
+        String::from("id\tname\tability_id\tsource\ttarget_type\tcast_path\toutcome\tdetail\n");
+    for skill in skills {
+        let source = if (1..=10).contains(&skill.ability_id) {
+            "class"
+        } else if data.skills.is_item_only_skill(skill.id) {
+            "item_only"
+        } else if data.skills.is_client_sourced_skill(skill.id) {
+            "client_sourced"
+        } else {
+            "other"
+        };
+        let (path, outcome, detail) = by_id.get(&skill.id).map_or_else(
+            || {
+                let reason = if source == "class" {
+                    "NOT_SELECTED"
+                } else {
+                    "NO_CLASS_FIXTURE"
+                };
+                ("not_cast", reason.to_string(), "")
+            },
+            |row| (row.cast_path, row.outcome.label(), row.detail.as_str()),
+        );
+        let name = names.get(&skill.id).map_or("", String::as_str);
+        writeln!(
+            report,
+            "{}\t{}\t{}\t{source}\t{}\t{path}\t{outcome}\t{detail}",
+            skill.id,
+            name.replace(['\t', '\r', '\n'], " "),
+            skill.ability_id,
+            skill.target_type,
+        )
+        .expect("write skill TSV row");
+    }
+    std::fs::write(path, report).expect("write AUDIT_SKILL_REPORT");
 }
