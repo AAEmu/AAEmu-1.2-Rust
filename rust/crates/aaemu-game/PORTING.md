@@ -5133,6 +5133,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_start_active_rule_counts_per_world` and
   `real_data_open_worlds_keep_inactive_at_start_npcs` (guards the mall vendors and the
   `main_world` quest givers).
+* Red Dragon's Egg (Karkasse Ridgelands): fake use 2583 on doodad 7056 starts
+  skill 23150. Compact skill effect 25658 consumes one Dancing Goddess's
+  Hunt (29301) and advances the egg from phase 18936 to 18937. Effect 26027
+  activates level spawner 120194. The main-world placement registers NPC
+  12411 under that event spawner at its existing position. The server checks
+  the ready egg and the bow when starting the cast and before applying its
+  effects, so only the first successful cast pays and starts the encounter.
+  Phase 18937 keeps its authored cooldown of about three days.
 * systems::npcs (Kroloal Cradle scripted data, 2026-11-12): the 1.2-era spawn files held only
   the start placements, so the dungeon's scripted waves never appeared (the skills'
   `NpcSpawnerSpawnEffect` / `NpcControlEffect` lookups found no spawner / tag target) and the

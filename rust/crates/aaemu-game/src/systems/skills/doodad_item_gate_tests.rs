@@ -645,6 +645,101 @@ fn started_results_and_value(frames: &[(u16, Vec<u8>)], skill: u32) -> Vec<(u8, 
         .collect()
 }
 
+#[tokio::test]
+async fn red_dragon_egg_requires_the_bow_and_charges_only_once() {
+    const EGG: u32 = 7056;
+    const READY: u32 = 18_936;
+    const CLOSED: u32 = 18_937;
+    const BOW: u32 = 29_301;
+    const SKILL: u32 = super::validation::RED_DRAGON_EGG_SKILL;
+
+    let mut data = doodad_data();
+    data.items
+        .templates
+        .insert(BOW, ItemTemplate::plain(BOW, 1));
+    let doodads = &mut data.systems.npcs.doodad;
+    doodads.templates.insert(
+        EGG,
+        DoodadTemplate {
+            id: EGG,
+            func_groups: vec![
+                DoodadFuncGroups {
+                    id: READY,
+                    almighty: EGG,
+                    group_kind_id: doodad_func_group_kind::START,
+                    ..Default::default()
+                },
+                DoodadFuncGroups {
+                    id: CLOSED,
+                    almighty: EGG,
+                    group_kind_id: doodad_func_group_kind::NORMAL,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    doodads.funcs_by_groups.insert(
+        READY,
+        vec![DoodadFunc {
+            group_id: READY,
+            func_id: 2583,
+            func_key: 15_645,
+            func_type: "DoodadFuncFakeUse".into(),
+            next_phase: CLOSED as i32,
+            ..Default::default()
+        }],
+    );
+    doodads
+        .func_templates
+        .entry("DoodadFuncFakeUse")
+        .or_default()
+        .insert(
+            2583,
+            FuncTemplate::FakeUse(DoodadFuncFakeUse {
+                id: 2583,
+                fake_skill_id: SKILL,
+                ..Default::default()
+            }),
+        );
+    let mut skill = super::tests::skill_template(SKILL);
+    skill.target_type = super::types::SkillTargetType::Doodad as i32;
+    skill.damage_type_id = 0;
+    let mut interaction =
+        super::tests::skill_effect(USE_EFFECT, EffectKind::InteractionEffect, USE_EFFECT);
+    interaction.consume_item_id = BOW;
+    interaction.consume_item_count = 1;
+    skill.effects.push(interaction);
+    data.systems.skills.add_skill(skill);
+    data.skills.add_client_sourced_skill(SKILL);
+
+    let mut f = fixture_with_data(data);
+    let world = f.server.world.world(0).unwrap();
+    let egg = manager::create(&f.server, &world, RACK_OBJ + 1, EGG, None, true).unwrap();
+    egg.data().transform.set_xyz(101.0, 100.0, 100.0);
+    world.spawn(&egg, &f.server.view_ctx());
+    let mut cast = store_cast(egg.obj_id);
+    cast.skill_id = SKILL;
+    start_skill(&f.server, &mut f.client.conn, cast.clone());
+    let frames = f.client.drain();
+    assert_eq!(started_value(&frames, SKILL), Some(BOW));
+    assert_eq!(egg.data().func_group_id, READY);
+
+    give_at(&f.server, &f.player, 5_001, BOW, slot_type::INVENTORY, 1);
+    give_at(&f.server, &f.player, 5_002, BOW, slot_type::INVENTORY, 2);
+    start_skill(&f.server, &mut f.client.conn, cast.clone());
+    assert_eq!(egg.data().func_group_id, CLOSED);
+    assert_eq!(Inv::of(&f.player).items_count(BOW, -1), 1);
+    f.client.drain();
+
+    start_skill(&f.server, &mut f.client.conn, cast);
+    assert_eq!(
+        started_results(&f.client.drain(), SKILL),
+        [skill_result::INVALID_TARGET]
+    );
+    assert_eq!(Inv::of(&f.player).items_count(BOW, -1), 1);
+}
+
 /// No trade pack on the back: the storage skill is refused before the cast instead of playing
 /// the bar and animation and failing in the effect.
 #[tokio::test]
