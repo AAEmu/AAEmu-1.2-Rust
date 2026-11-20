@@ -3502,6 +3502,72 @@ async fn battlefield_end_unbinds_kill_events_without_an_origin_faction() {
 // Real data (gated)
 // ---------------------------------------------------------------------------------------------
 
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_serpentis_duaxini_death_spawns_one_authored_chest() {
+    use crate::systems::npcs::spawn_manager::TemplateExists;
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let app_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = crate::data::client_files::ClientFileManager::from_sources(&[], &app_path);
+    let ctx = crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: &app_path,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.formulas = crate::data::formulas::FormulaManager::load(&conn).unwrap();
+    data.systems.npcs = crate::systems::npcs::Data::load(&ctx).unwrap();
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).unwrap();
+    data.systems.instances = super::Data::load(&ctx).unwrap();
+    let name = "instance_nachashgar";
+    let template = WorldTemplate::synthetic(11, name, 4, 4, 278);
+    let server = build_server(data, vec![template.clone()], vec![], Some(&app_path));
+    let world = server.world.create_world_instance(Arc::new(template), 100);
+    let npcs = &server.game_data.systems.npcs;
+    let exists = TemplateExists {
+        npc: &|id| npcs.npc.exist(id),
+        doodad: &|id| npcs.doodad.exist(id),
+        transfer: &|_| false,
+        gimmick: &|_| false,
+        slave: &|_| false,
+    };
+    server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&world)
+        .load_spawn_files(&server, &app_path.join("Data/Worlds").join(name), &exists)
+        .unwrap();
+    for event in server.game_data.systems.instances.indun.indun_events(55) {
+        events::subscribe(&server, event, &world);
+    }
+    let mut duaxini = Npc::new(12605);
+    duaxini.unit.transform.instance_id = world.id;
+    duaxini.unit.transform.set_xyz(1144.87, 387.006, 151.29);
+    let boss = WorldObject::Npc(Entity::new(0x7000, duaxini));
+    world.spawn(&boss, &server.view_ctx());
+    assert_eq!(world.all_npcs().len(), 1);
+    events::on_do_die(&server, &boss, None);
+    events::on_do_die(&server, &boss, None);
+    let chests: Vec<_> = world
+        .all_npcs()
+        .into_iter()
+        .filter(|npc| npc.data().unit.template_id == 13437)
+        .collect();
+    assert_eq!(chests.len(), 1);
+    assert!(!chests[0].data().unit.is_dead());
+    let chest = world.world_pos_rot(&WorldObject::from(&chests[0]));
+    assert!((chest.x - 1146.05).abs() < 0.01);
+    assert!((chest.y - 388.314).abs() < 0.01);
+}
+
 /// The real 1.2 tables + the real `instance_burntcastle_armory` spawn files
 /// (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_dungeon -- --ignored`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
