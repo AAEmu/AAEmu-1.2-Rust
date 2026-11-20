@@ -20,6 +20,9 @@ use super::state::{SkillRef, SkillRun, SkillTaskKind};
 use super::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
 use super::{broadcast, buffs, combat, progress, skill};
 
+const TELEPORT_BOOK: u32 = 4_045;
+const RECORD_TELEPORT_LOCATION: u32 = 11_215;
+
 /// `CSStartSkillPacket`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CSStartSkillPacket {
@@ -637,12 +640,19 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         let Some(skill) = template_skill(server, skill_id, 1) else {
             return;
         };
+        // The native Teleport Book's Record dialog uses the owned book as the caster,
+        // including when a lit fireplace opens the dialog. Its normal use opens a gate.
+        let records_teleport_location = template_id == TELEPORT_BOOK
+            && skill_id == RECORD_TELEPORT_LOCATION
+            && p.caster.obj_id() == player.obj_id
+            && (target == SkillCastTarget::Unit(0)
+                || target == SkillCastTarget::Unit(player.obj_id))
+            && matches!(p.skill_object, SkillObject::SavePortalInfo { id: 0, .. });
         if skill_id != use_skill_id
+            && !records_teleport_location
             && !(bind_on_pickup && bind_on_pickup_doodad_use(server, &player, &skill, target))
         {
-            // The item's own use skill is the only general authorization; item-only skills
-            // never take the legacy exception, and the exception itself is limited to the
-            // fireplace's real DoodadFuncUse interaction.
+            // Other item skills require their own matching item or the legacy doodad path.
             if should_log_item_cast_refusal(player.character_id, "not the use skill") {
                 tracing::warn!(
                     character = %player.data().unit.name,

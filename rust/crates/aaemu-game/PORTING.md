@@ -7771,8 +7771,11 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   `ItemSkillHooks::take_cast_source_item` (see the 2026-10-30 section below): the item is
   checked and taken under one container lock before the result, and a cancelled effect refunds
   it. Plot-only item skills verify the same owned item before the plot runs.
-- **SavePortal creation.** `SpecialEffect` 30 `SavePortal` only records a new book entry when the
-  casting skill pays a reagent (`skill_reagents` or an effect-level `consume_item_id` /
+  - **SavePortal creation.** The native r208022 Record dialog opened by a lit house fireplace
+    sends 11215 with the owned Teleport Book (4045) as its caster. The book's normal use
+    skill is 11216. The item-cast handler accepts 11215 for that book only on a self cast
+    with a new-entry `SavePortalInfo`. `SpecialEffect` 30 `SavePortal` only records a new
+    book entry when the casting skill pays a reagent (`skill_reagents` or an effect-level `consume_item_id` /
   `consume_source_item`). Skill 16841 "Editing Location in Teleport Book..." has no reagent and
   may only rename an existing portal of the character; 11215 pays its `skill_reagents` Memory
   Ink, and 16387 pays an effect-level Memory Ink taken atomically by the effect and only when
