@@ -560,7 +560,9 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
     buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
     tokio::time::sleep(strike_interval).await;
     buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
-    tokio::time::sleep(Duration::from_millis(18_500)).await;
+    // The buff checks expiry on its one-second ticks. Pass the first stack's original
+    // expiry tick at 25 seconds and stay short of the renewed expiry at 31.3 seconds.
+    tokio::time::sleep(Duration::from_millis(19_200)).await;
     assert_eq!(
         player.data().unit.buffs.buff_count_by_id(2407),
         2,
