@@ -1,7 +1,7 @@
 # Docker Installation Guide
 
 - Audience: Operators and contributors
-- Last verified against: `develop` on October 10, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: Docker runtime, Git, required AAEmu data files
 
 ## When to use this guide
@@ -9,7 +9,7 @@
 Use this guide when you want to run the AAEmu servers themselves in containers.
 
 If you want the preferred contributor startup flow (servers on the host, only
-MySQL in Docker), use [Local Development Guide](Local-Development-Guide).
+MySQL in Docker), use [Local Development Guide](Local-Development-Guide.md).
 
 ## Prerequisites
 
@@ -26,11 +26,11 @@ Rust does not need to be installed on the host: the images are built with
 
 ## Initial install
 
-1. Clone `https://github.com/AAEmu/AAEmu`.
+1. Clone `https://github.com/AAEmu/AAEmu-1.2-Rust.git`.
 1. Change directory to `Scripts`.
 1. Run:
-   - Windows: `docker-install-local.ps1`
-   - Linux: `docker-install-local.sh`
+   - Windows PowerShell: `.\docker-install-local.ps1`
+   - Linux: `./docker-install-local.sh`
 
 The install script creates `.env` from `.env.example`, generates a database
 password and a `SecretKey`, copies the default configuration from
@@ -42,8 +42,8 @@ containers at `/app`), and builds the images.
 
 1. Change directory to `Scripts`.
 1. Run:
-   - Windows: `docker-update-local.ps1`
-   - Linux: `docker-update-local.sh`
+   - Windows PowerShell: `.\docker-update-local.ps1`
+   - Linux: `./docker-update-local.sh`
 
 ## Launch
 
@@ -66,9 +66,11 @@ Exposed ports: login `1237`, game `1239` and `1250`, MySQL `DB_PORT` (default
 - `BUILD_PROFILE`: cargo profile of the server images (`release` or `dev`).
 - `DB_USER`, `DB_PASSWORD`, optional `DB_PORT`: MySQL container settings.
 
-Logging goes to the container output (`docker compose logs -f game`); set
-`RUST_LOG` (for example `RUST_LOG=debug`) in the environment of
-`docker compose up` to change the log level.
+Use `docker compose logs -f game` or `docker compose logs -f login` for console
+output. Each service also writes application logs to `/app/Logs/` inside
+its container. To copy the game logs to your machine, run
+`docker compose cp game:/app/Logs ./game-logs` from the project root.
+Set `RUST_LOG` in the Compose environment or `.env` to change the filter.
 
 ### Server listing source
 
@@ -94,7 +96,7 @@ Do not depend on MySQL `aaemu_login.game_servers` inserts.
 
 ## Related
 
-- [Home](Home)
-- [Local Development Guide](Local-Development-Guide)
-- [Installation & Setup](Installation-&-Setup)
-- [Mini troubleshoot guide](Mini-troubleshoot-guide)
+- [Home](Home.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Mini troubleshoot guide](Mini-troubleshoot-guide.md)

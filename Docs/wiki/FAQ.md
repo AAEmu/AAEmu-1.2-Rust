@@ -1,7 +1,7 @@
 # FAQ
 
 - Audience: Contributors, testers, and players
-- Last verified against: working tree on October 11, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 ## Project basics
@@ -26,15 +26,16 @@ Use both official support channels as needed:
 - Real-time troubleshooting:
   [Discord](https://discord.gg/aaemu)
 - Searchable long-form support:
-  [GitHub Discussions](https://github.com/AAEmu/AAEmu/discussions)
+  [upstream AAEmu GitHub Discussions](https://github.com/AAEmu/AAEmu/discussions).
+  Include that you are using AAEmu 1.2 (Rust).
 
-See [Getting Help](Getting-Help) and [Help Us Help You](Help-Us-Help-You).
+See [Getting Help](Getting-Help.md) and [Help Us Help You](Help-Us-Help-You.md).
 
 ## Setup and local development
 
 ### Preferred way to run locally
 
-Use [Local Development Guide](Local-Development-Guide) (`cargo xtask dev`).
+Use [Local Development Guide](Local-Development-Guide.md) (`cargo xtask dev`).
 
 ### Is AAEmu still written in C#
 
@@ -46,26 +47,26 @@ source, not the .NET SDK.
 
 Yes. Both are still supported:
 
-- [Installation & Setup](Installation-&-Setup)
-- [Docker Installation Guide](Docker-Installation-Guide)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Docker Installation Guide](Docker-Installation-Guide.md)
 
 ### Do I still insert game servers into MySQL `aaemu_login.game_servers`
 
 No. Server listings are now defined in login configuration (`GameServers`) via
 JSON and/or environment variables.
 
-### Config precedence after the recent PR wave
+### Which config values take precedence
 
 For game server config, `Config.Local.json` is loaded after `Config.json` and
-`Configurations/*.json` and overrides them. Environment variables
-(`Section__Key`) and command-line arguments (`--Section:Key=value`) override
-the JSON files.
+`Configurations/*.json` and overrides them. Existing user secrets, environment
+variables (`Section__Key`), and command-line arguments (`--Section:Key=value`)
+take precedence in that order.
 
 ### Where are the config files
 
 In a source checkout: `rust/crates/aaemu-login/app/` and
 `rust/crates/aaemu-game/app/`. In a published build: next to each binary. See
-[Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings).
+[Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md).
 
 ## Client and launcher
 
@@ -80,23 +81,23 @@ aaemu-launcher --client "C:\ArcheAge\bin32\archeage.exe" --login 127.0.0.1:1237 
 ```
 
 It asks for the password (or use `--password`, `--password-file` or
-`AAEMU_PASSWORD`). See [Client](Client#launcher-aaemu-launcher). The public AAEmu
+`AAEMU_PASSWORD`). See [Client](Client.md#launcher-aaemu-launcher). The public AAEmu
 Launcher also still works, but is not needed.
 
 Normal launches enable fast startup, smooth startup and optimized pak loading.
-Build the native driver first using [Client](Client#faster-startup-and-automated-client-tests);
+Build the native driver first using [Client](Client.md#faster-startup-and-automated-client-tests);
 the launcher finds it automatically. Individual opt-outs are `--no-fast-start`,
 `--no-smooth-start` and `--no-fast-pak`.
 
 ### Where can I find client downloads
 
-Use the client list on [Client](Client).
+Use the client list on [Client](Client.md).
 
 If you need a directory of many client versions, use:
 [MEGA client directory](https://mega.nz/folder/C3Q0WQjT#vRUethZLPiYSo2B4nE_etg).
 
 For the full dependency checklist (including `compact.sqlite3`),
-see [Dependencies and Downloads](Dependencies-and-Downloads).
+see [Dependencies and Downloads](Dependencies-and-Downloads.md).
 
 ## Configuration and networking
 
@@ -132,7 +133,7 @@ Check:
 
 ### First stop for common setup failures
 
-Use [Mini troubleshoot guide](Mini-troubleshoot-guide).
+Use [Mini troubleshoot guide](Mini-troubleshoot-guide.md).
 
 ### Why can NPCs float above the ground
 
@@ -148,7 +149,7 @@ reporting the issue; an incorrect spawn position needs a separate correction.
 
 ## Related
 
-- [Home](Home)
-- [Installation & Setup](Installation-&-Setup)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
-- [Getting Help](Getting-Help)
+- [Home](Home.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)
+- [Getting Help](Getting-Help.md)

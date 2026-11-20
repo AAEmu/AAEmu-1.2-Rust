@@ -1,8 +1,10 @@
 # aaemu-game porting status
 
 Reference: `AAEmu.Game` at upstream `develop` 6e2f40734 (1.2 client, `client_12_r208022`).
-Status: **done** = ported for its current C# scope, **partial** = only what the lobby / world
-entry / movement path needs, **todo** = not started.
+This file records port decisions and their follow-ups. In the original port tables, **done**
+means the C# scope was ported, **partial** means the port covered the lobby, world entry, or
+movement path, and **todo** means work had yet to start. For open work against the 1.2 client,
+see the [feature backlog](../../../FEATURE-GAP-TASKS.md).
 
 Layout rules, the object model API and testing conventions: `CONTRIBUTING-PORT.md`.
 

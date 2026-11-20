@@ -3,6 +3,9 @@
 - Scope: ArcheAge 1.2 server mail, quests, auction, player mail and persistence
 - Audited: October 13, 2026, rust-rewrite working tree
 
+The evidence and test counts below describe that audit run. Later fixes are
+recorded here for mail expiry and auction delivery.
+
 ## Corrected behavior
 
 Player mail rejects negative money, unsupported attached currencies, invalid mail
@@ -70,18 +73,21 @@ given a past saved deadline while offline. Reconnect immediately displayed
 Failed in the real client; disconnect persisted step Fail and status Failed. The
 fixture and screenshot are saved alongside the evidence.
 
-The full catalogue of quests remains subject to the [Quest Technical Audit](Quest-Audit).
-Absent quest areas/components are not repaired by mail fixes. Scheduled mail
-expiry/return policy is still unimplemented. Auction delivery failure handling
-still needs review: AuctionManager::send_mail ignores the mail hook's failure
-result, so settlement can remove a lot without delivering its item/refund and
-without retaining a delivery retry. Successful delivery tests do not cover this
-failure path.
-Failed-bid refunds use the offer-failed mail type instead of bid-failed; recipient
-name lookup is case-sensitive. These are recorded audit findings, not certified
-mail behavior.
-The successful nominal flows above do not certify every failure or every
-mailbox UI path.
+The [Quest Technical Audit](Quest-Audit.md) describes outstanding content and
+validation limits. The client test here used a delivered fixture to verify
+reading, claiming and reconnecting.
+
+## Follow-up behavior
+
+- Ordinary player mail expires after five days when read or 30 days unread.
+  Unclaimed attachments retain the unread window. The ordinary system-mail
+  unread window is 90 days. Returned and commercial mail have separate rules.
+  The lifecycle and retention settings are covered in
+  [`mail_expiry_tests.rs`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/crates/aaemu-game/src/systems/economy/mail_expiry_tests.rs).
+- Auction settlement keeps failed deliveries pending and retries them. Tests
+  cover partial settlement and cancelled listings, including duplicate
+  prevention. Failed bids use the client's dedicated bid-failure mail type.
+  See [`auction_tests.rs`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/crates/aaemu-game/src/systems/economy/auction_tests.rs).
 
 ## Local evidence and reproduction
 

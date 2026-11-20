@@ -1,7 +1,7 @@
 # Dependencies and Downloads
 
 - Audience: Contributors, players, and testers
-- Last verified against: `develop` on October 10, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 Use this page as the single source of truth for required downloads before setup.
@@ -10,8 +10,7 @@ Use this page as the single source of truth for required downloads before setup.
 
 ### AAEmu source code
 
-- Repository: [AAEmu](https://github.com/AAEmu/AAEmu)
-- Recommended branch: `develop`
+- Source on the `main` branch of [AAEmu 1.2 (Rust)](https://github.com/AAEmu/AAEmu-1.2-Rust).
 
 ### Rust toolchain (building from source)
 
@@ -30,7 +29,8 @@ Use this page as the single source of truth for required downloads before setup.
 
 ### Manual workflow
 
-- [MySQL Community Downloads](https://dev.mysql.com/downloads/mysql/)
+- Select MySQL 8.4 or an 8.0 release from 8.0.29 onward for the base SQL scripts.
+  [MySQL Community Downloads](https://dev.mysql.com/downloads/mysql/)
 
 ## Game data and client dependencies
 
@@ -60,7 +60,7 @@ Directory with many client versions:
 The client is started by `aaemu-launcher`, which is part of this repository
 (`rust/crates/aaemu-launcher`, Windows). Build it with
 `cargo build --release -p aaemu-launcher` from `rust/`; a published build
-contains it in `Tools/`. See [Client](Client#launcher-aaemu-launcher) for the
+contains it in `Tools/`. See [Client](Client.md#launcher-aaemu-launcher) for the
 command line. The public AAEmu Launcher also works as an alternative but is not
 required.
 
@@ -74,12 +74,12 @@ required.
    `rust/crates/aaemu-game/app/Configurations/ClientData.json`, or put
    `game_pak` in `rust/crates/aaemu-game/app/ClientData/`.
 1. Extract the client anywhere; pass its `bin32\archeage.exe` to
-   `aaemu-launcher --client` (see [Client](Client)). The client folder itself
+   `aaemu-launcher --client` (see [Client](Client.md)). The client folder itself
    is not modified.
 
 ## Related
 
-- [Installation & Setup](Installation-&-Setup)
-- [Local Development Guide](Local-Development-Guide)
-- [Client](Client)
-- [FAQ](FAQ)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Client](Client.md)
+- [FAQ](FAQ.md)

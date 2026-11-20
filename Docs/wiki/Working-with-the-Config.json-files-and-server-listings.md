@@ -350,7 +350,7 @@ a second example catalogue of EU 1.2-era marketplace items (129 SKUs, including 
 Loyalty tab); most of its prices are INFERRED and must be reviewed before importing.
 `SQL/examples/example-ics-test.sql` is a generated catalogue for private test servers
 (every item costs 0 or 1 credit); see
-[Test server content](Test-Server-Content) for loading it and for the bulk GM kits.
+[Test server content](Test-Server-Content.md) for loading it and for the bulk GM kits.
 Check each SKU's `currency` (credits,
 AA points, loyalty or coins) and price before importing. AA points are not
 supported: AA-priced SKUs (`currency = 1`) are refused with error 592 and nothing is
@@ -735,11 +735,12 @@ of dungeons that need an entry item:
 
 ## Logging
 
-Logging is not configured in `Config.json`. Both servers log to stdout; the
-level is set with the `RUST_LOG` environment variable (default `info`, for
-example `RUST_LOG=debug` or `RUST_LOG=aaemu_game=debug,info`). `NO_COLOR=1`
-disables colored output. `AAEMU_LOG_MS=1` adds six fractional digits to the time of every
-line (`HH:MM:SS.ffffff`); without it the format stays `HH:MM:SS`.
+Both servers log to the console and to `Logs/Server.log` and `Logs/Error.log`
+under their application directories. Existing files move to `Logs/Previous/`
+on restart. Set `RUST_LOG` to change the default `info` filter, for example
+`RUST_LOG=debug` or `RUST_LOG=aaemu_game=debug,info`. Set `NO_COLOR=1` to
+disable console colors or `AAEMU_LOG_MS=1` to include six fractional digits in
+each timestamp.
 
 ## `game_pak` configuration
 
@@ -764,7 +765,7 @@ loaded from zone files at startup already have their data and skip this pass.
 
 ## Physics (`Configurations/Physics.json`)
 
-The game server builds a collision world per zone from the client data
+The game server builds a collision world per world instance from the client data
 (terrain, brushes, vegetation, doodad colliders, water) on `aaemu-physics`, a
 port of the client's CryPhysics. It is used for line-of-sight, blink/teleport
 targets, falls, NPC movement and ships. Settings in the `Physics` section
@@ -774,6 +775,9 @@ targets, falls, NPC movement and ships. Settings in the `Physics` section
 | --- | --- | --- |
 | `Enable` | `true` | Collision worlds and queries; `false` answers from the heightmap only |
 | `Geometry` | `Full` | `Terrain`, `Brushes` (+ `brush.dat`) or `Full` (+ vegetation) |
+| `VisAreas` | `true` | Indoor and portal-building meshes from `visareas.dat` |
+| `Voxels` | `true` | Cave meshes from `visareas.dat` and `object.dat` |
+| `ObjectVegetation` | `true` | Additional vegetation from `object.dat` |
 | `LoadRadiusCells` | `1` | Cells (1024 m) kept loaded around players, ships and active NPCs (1 = 3x3) |
 | `LoadOnQuery` | `true` | A query in an unloaded cell loads it synchronously |
 | `UnloadAfterSeconds` | `600` | Unload cells nobody was near for this long (0 = never) |
@@ -787,7 +791,7 @@ targets, falls, NPC movement and ships. Settings in the `Physics` section
 Physics needs client data (`game_pak`); without it the server falls back to
 the heightmap. Lower `Geometry` or `LoadRadiusCells` to save memory on small
 machines. Background:
-[`rust/docs/physics/`](https://github.com/AAEmu/AAEmu/tree/develop/rust/docs/physics).
+[`rust/docs/physics/`](https://github.com/AAEmu/AAEmu-1.2-Rust/tree/main/rust/docs/physics).
 
 ## NPC interaction reach (`Configurations/Interaction.json`)
 
@@ -1202,7 +1206,7 @@ Use login `GameServers` configuration instead.
 
 ## Related
 
-- [Installation & Setup](Installation-&-Setup)
-- [Local Development Guide](Local-Development-Guide)
-- [Mini troubleshoot guide](Mini-troubleshoot-guide)
-- [FAQ](FAQ)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Mini troubleshoot guide](Mini-troubleshoot-guide.md)
+- [FAQ](FAQ.md)

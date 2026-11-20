@@ -1,10 +1,11 @@
 # Asking for Help on GitHub Discussions
 
 - Audience: Players, testers, and contributors
-- Last verified against: `develop` on February 28, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
-Channel: [AAEmu Discussions](https://github.com/AAEmu/AAEmu/discussions)
+Include the project name AAEmu 1.2 (Rust) and your server revision when posting.
+[Upstream AAEmu Discussions](https://github.com/AAEmu/AAEmu/discussions)
 
 ## When to use Discussions
 
@@ -14,8 +15,8 @@ This is ideal for setup edge cases, architecture questions, and workflows.
 ## Before posting
 
 1. Search existing discussions for your error or topic.
-1. Read [Mini troubleshoot guide](Mini-troubleshoot-guide).
-1. Gather context from [Help Us Help You](Help-Us-Help-You).
+1. Read [Mini troubleshoot guide](Mini-troubleshoot-guide.md).
+1. Gather context from [Help Us Help You](Help-Us-Help-You.md).
 
 ## How to structure your discussion
 
@@ -71,6 +72,6 @@ That helps future users and reduces repeated support load.
 
 ## Related
 
-- [Getting Help](Getting-Help)
-- [Help Us Help You](Help-Us-Help-You)
-- [Asking for Help on Discord](Asking-for-Help-on-Discord)
+- [Getting Help](Getting-Help.md)
+- [Help Us Help You](Help-Us-Help-You.md)
+- [Asking for Help on Discord](Asking-for-Help-on-Discord.md)

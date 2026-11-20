@@ -1,7 +1,7 @@
 # Installation & Setup
 
 - Audience: Contributors, players, and testers
-- Last verified against: `main` on November 6, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: stable Rust (rustup), required AAEmu dependencies/downloads,
   and Docker (Track A) or MySQL 8 (Track B)
 
@@ -22,8 +22,8 @@ Use this path if you want the fastest contributor onboarding.
 
 1. Install stable Rust with [rustup](https://rustup.rs/).
 1. Install Docker (Docker Desktop, or Docker Engine with `docker compose`).
-1. Clone [AAEmu](https://github.com/AAEmu/AAEmu) (`develop` branch recommended).
-1. Download required files from [Dependencies and Downloads](Dependencies-and-Downloads):
+1. Clone the `main` branch of [AAEmu 1.2 (Rust)](https://github.com/AAEmu/AAEmu-1.2-Rust).
+1. Download required files from [Dependencies and Downloads](Dependencies-and-Downloads.md):
    - `compact.sqlite3`
    - ArcheAge 1.2 client
 1. Place `compact.sqlite3` in `rust/crates/aaemu-game/app/Data/`.
@@ -51,7 +51,7 @@ Expected startup sequence:
 Then start the client with `aaemu-launcher` (see
 [Starting the client](#starting-the-client)).
 
-For full details, see [Local Development Guide](Local-Development-Guide).
+For full details, see [Local Development Guide](Local-Development-Guide.md).
 
 ## Track B: Manual setup workflow
 
@@ -59,10 +59,10 @@ Use this path if you do not want to use Docker.
 
 ### Manual requirements
 
-1. Install MySQL 8.x.
+1. Install MySQL 8.0.29 or newer for the base SQL scripts.
 1. Install stable Rust with [rustup](https://rustup.rs/).
-1. Clone [AAEmu](https://github.com/AAEmu/AAEmu) (`develop` branch recommended).
-1. Download required files from [Dependencies and Downloads](Dependencies-and-Downloads):
+1. Clone the `main` branch of [AAEmu 1.2 (Rust)](https://github.com/AAEmu/AAEmu-1.2-Rust).
+1. Download required files from [Dependencies and Downloads](Dependencies-and-Downloads.md):
    - `compact.sqlite3`
    - ArcheAge 1.2 client
 1. Place `compact.sqlite3` in `rust/crates/aaemu-game/app/Data/`.
@@ -86,8 +86,8 @@ Game server listing is configured via login server configuration
 Cash shop (ICS) content is operator policy. The base schema creates `ics_menu`,
 `ics_shop_items` and `ics_skus` without a catalogue;
 `SQL/examples/example-ics-default-en.sql` is an optional example data set. See
-[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings#cash-shop-ics-content-is-operator-policy).
-For a private test server, [Test server content](Test-Server-Content) describes the generated
+[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings.md#cash-shop-ics-content-is-operator-policy).
+For a private test server, [Test server content](Test-Server-Content.md) describes the generated
 0/1-credit catalogue and the bulk GM kits.
 
 ### Login server configuration (manual)
@@ -122,7 +122,7 @@ Example:
 
 Two-factor OTP works in-tree for accounts with a `user_2fa` row. ARS (phone
 callback) needs an operator provider; the default provider is disabled. See
-[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings#two-factor-authentication-twofactor).
+[Working with the Config.json files](Working-with-the-Config.json-files-and-server-listings.md#two-factor-authentication-twofactor).
 
 ### Game server configuration (manual)
 
@@ -154,8 +154,8 @@ cargo build --release
 1. Start game server in a second console: `cargo run --release -p aaemu-game`
    (or `Scripts/start_game.sh`, `Scripts/start AAEmu.Game.bat`).
 
-Start login before game. The servers log to the console; set `RUST_LOG=debug`
-for more detail.
+Start login before game. Logs are available on the console and in each
+application directory's `Logs/` folder. Set `RUST_LOG=debug` for more detail.
 
 ## Running a published build
 
@@ -197,18 +197,18 @@ In a published build, run `Tools/aaemu-launcher.exe` with the same arguments.
   variable.
 
 If auto-account creation is enabled (`AutoAccount`, default), accounts are
-created on first login. More options and details: [Client](Client#launcher-aaemu-launcher).
+created on first login. More options and details: [Client](Client.md#launcher-aaemu-launcher).
 The public AAEmu Launcher also works as an alternative.
 
 ## Docker workflow
 
 If you prefer to run the servers themselves in containers, see
-[Docker Installation Guide](Docker-Installation-Guide).
+[Docker Installation Guide](Docker-Installation-Guide.md).
 
 ## Related
 
-- [Home](Home)
-- [Dependencies and Downloads](Dependencies-and-Downloads)
-- [Local Development Guide](Local-Development-Guide)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
-- [Mini troubleshoot guide](Mini-troubleshoot-guide)
+- [Home](Home.md)
+- [Dependencies and Downloads](Dependencies-and-Downloads.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)
+- [Mini troubleshoot guide](Mini-troubleshoot-guide.md)

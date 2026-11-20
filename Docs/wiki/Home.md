@@ -5,53 +5,52 @@ Open source server software for ArcheAge written in Rust (originally written in 
 ## Start Here
 
 - Audience: Contributors, players, and testers
-- Last verified against: `develop` on October 10, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
-- Preferred local development: [Local Development Guide](Local-Development-Guide)
-- Manual setup fallback: [Installation & Setup](Installation-&-Setup)
-- Docker setup alternative: [Docker Installation Guide](Docker-Installation-Guide)
-- Troubleshooting first stop: [Mini troubleshoot guide](Mini-troubleshoot-guide)
-- Need help: [Getting Help](Getting-Help)
+- Preferred local development: [Local Development Guide](Local-Development-Guide.md)
+- Manual setup fallback: [Installation & Setup](Installation-&-Setup.md)
+- Docker setup alternative: [Docker Installation Guide](Docker-Installation-Guide.md)
+- Troubleshooting first stop: [Mini troubleshoot guide](Mini-troubleshoot-guide.md)
+- Need help: [Getting Help](Getting-Help.md)
 
 ## Documentation Map
 
 ### Getting Started
 
-- [Dependencies and Downloads](Dependencies-and-Downloads)
-- [Local Development Guide](Local-Development-Guide)
-- [Installation & Setup](Installation-&-Setup)
-- [Docker Installation Guide](Docker-Installation-Guide)
+- [Dependencies and Downloads](Dependencies-and-Downloads.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Docker Installation Guide](Docker-Installation-Guide.md)
 
 ### Configuration
 
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
-- [Test server content (Marketplace catalogue and GM kits)](Test-Server-Content)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)
+- [Test server content (Marketplace catalogue and GM kits)](Test-Server-Content.md)
 
 ### Operations and Troubleshooting
 
-- [Mini troubleshoot guide](Mini-troubleshoot-guide)
-- [FAQ](FAQ)
+- [Mini troubleshoot guide](Mini-troubleshoot-guide.md)
+- [FAQ](FAQ.md)
 
 ### Help and Support
 
-- [Getting Help](Getting-Help)
-- [Asking for Help on Discord](Asking-for-Help-on-Discord)
-- [Asking for Help on GitHub Discussions](Asking-for-Help-on-GitHub-Discussions)
-- [Help Us Help You](Help-Us-Help-You)
+- [Getting Help](Getting-Help.md)
+- [Asking for Help on Discord](Asking-for-Help-on-Discord.md)
+- [Asking for Help on GitHub Discussions](Asking-for-Help-on-GitHub-Discussions.md)
+- [Help Us Help You](Help-Us-Help-You.md)
 
 ### Project Reference
 
-- [Components](Components)
-- [Code Terminology](Code-Terminology)
-- [Developer Notes](Developer-Notes)
-- [GM Commands](GM-Commands)
-- [Dungeons and Mentoring](Dungeons)
-- [Live Verification Suites](Verification)
-- [Quest Technical Audit](Quest-Audit)
-- [Mail Technical Audit](Mail-Audit)
-- [Classes](Classes)
-- [Client](Client)
-- [Server](Server)
+- [Components](Components.md)
+- [Code Terminology](Code-Terminology.md)
+- [Developer Notes](Developer-Notes.md)
+- [GM Commands](GM-Commands.md)
+- [Dungeons and Mentoring](Dungeons.md)
+- [Live Verification Suites](Verification.md)
+- [Quest Technical Audit](Quest-Audit.md)
+- [Mail Technical Audit](Mail-Audit.md)
+- [Client](Client.md)
+- [Server](Server.md)
 
 ### Legacy Community Guides
 
@@ -60,9 +59,9 @@ Open source server software for ArcheAge written in Rust (originally written in 
 
 ### Contributing Docs
 
-- [Documentation Maintenance](Documentation-Maintenance)
+- [Documentation Maintenance](Documentation-Maintenance.md)
 
-## Recent Platform Changes
+## Current Platform
 
 - The servers have been ported from C# (.NET) to Rust. The Cargo workspace is
   in `rust/`; build with `cargo build --release`.
@@ -71,21 +70,22 @@ Open source server software for ArcheAge written in Rust (originally written in 
 - `cargo xtask dev` (MySQL in Docker + login + game) is the preferred
   contributor workflow.
 - The client is started with AAEmu's own `aaemu-launcher`; no third-party
-  launcher is needed (see [Client](Client)).
+  launcher is needed (see [Client](Client.md)).
 - Developer tooling: `aaemu-clientdriver` (Lua driver for the real client) and
   the CryPhysics port `aaemu-physics` (zone collision, configured in
   `Configurations/Physics.json`).
 - Runtime configuration and data live in the crates' application directories:
   `rust/crates/aaemu-login/app/` and `rust/crates/aaemu-game/app/`.
-- Logging goes to stdout and is controlled with `RUST_LOG`.
+- Both servers write console output and files under their application directory's
+  `Logs/` folder. Use `RUST_LOG` to change the log filter.
 - Login server game server listings are configured via `GameServers`
   configuration (not MySQL `game_servers`).
-- `Config.Local.json` is loaded last and overrides all other game server
-  configuration files.
+- `Config.Local.json` overrides the shipped game configuration files.
+  User secrets, environment variables, and command-line arguments have higher precedence.
 
 ## Related
 
-- [Local Development Guide](Local-Development-Guide)
-- [Dependencies and Downloads](Dependencies-and-Downloads)
-- [Installation & Setup](Installation-&-Setup)
-- [FAQ](FAQ)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Dependencies and Downloads](Dependencies-and-Downloads.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [FAQ](FAQ.md)

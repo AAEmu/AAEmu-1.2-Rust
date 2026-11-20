@@ -118,7 +118,7 @@ and management despawns still win. Casting, plots and skill controllers, persist
 leash protect an NPC from reclamation; the persistent-work check includes the same finite work
 (an active command after its queue drained, spawn settling, return home). A placement whose NPC
 a player streams only for the quest-map range option (`/questmap`, see
-[GM-Commands](GM-Commands)) is not cold while it is streamed, and the placements that option
+[GM-Commands](GM-Commands.md)) is not cold while it is streamed, and the placements that option
 prepares are tracked in the same registry, so the retention rules apply once streaming stops. The
 option keeps its own list of what it streamed, and the client can lose those units without the
 option hearing of it, so the list is corrected: the region visibility path logs every NPC unit it
@@ -290,18 +290,18 @@ What this means for contributors:
   orchestrator (PRs `#1363` / `#1366` in the C# code).
 - Game subsystems live in `aaemu-game/src/systems/<name>/` and talk to each
   other through hook traits; see
-  [`CONTRIBUTING-PORT.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/crates/aaemu-game/CONTRIBUTING-PORT.md).
-- [`rust/PORT-AUDIT.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/PORT-AUDIT.md)
+  [`CONTRIBUTING-PORT.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/crates/aaemu-game/CONTRIBUTING-PORT.md).
+- [`rust/PORT-AUDIT.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/PORT-AUDIT.md)
   tracks what has been ported from the C# code.
-- [`rust/LIVE-TESTING.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/LIVE-TESTING.md)
+- [`rust/LIVE-TESTING.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/LIVE-TESTING.md)
   explains running the servers against real data with `aaemu-testclient` and
   starting the real client with `aaemu-launcher`.
-- [`rust/docs/client/LUA-DRIVER.md`](https://github.com/AAEmu/AAEmu/blob/develop/rust/docs/client/LUA-DRIVER.md)
+- [`rust/docs/client/LUA-DRIVER.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/rust/docs/client/LUA-DRIVER.md)
   describes driving the real client through Lua (`aaemu-clientdriver`).
-- [`rust/docs/physics/`](https://github.com/AAEmu/AAEmu/tree/develop/rust/docs/physics)
+- [`rust/docs/physics/`](https://github.com/AAEmu/AAEmu-1.2-Rust/tree/main/rust/docs/physics)
   documents the CryPhysics port; the game crate's `PORTING.md` section
   "systems::ai collision" explains how the zone physics uses it.
-- [`Docs/networking.md`](https://github.com/AAEmu/AAEmu/blob/develop/Docs/networking.md)
+- [`Docs/networking.md`](https://github.com/AAEmu/AAEmu-1.2-Rust/blob/main/Docs/networking.md)
   describes the network layer (listeners, framing, connection tasks).
 
 Operational impact for setup docs:
@@ -309,7 +309,7 @@ Operational impact for setup docs:
 - No .NET SDK; install Rust via rustup.
 - Runtime files moved to `rust/crates/aaemu-login/app/` and
   `rust/crates/aaemu-game/app/`.
-- Logging is configured with `RUST_LOG` instead of `NLog.config`.
+- Set `RUST_LOG` to change the console and application log filters.
 
 The 1.2 feature audit in `rust/tools/port_audit/features.py` inventories supported inbound
 packets and database table usage separately from C# port coverage. Supply a read-only
@@ -411,6 +411,6 @@ the low-level test character; these are not production requirements.
 
 ## Related
 
-- [Home](Home)
-- [Local Development Guide](Local-Development-Guide)
-- [Components](Components)
+- [Home](Home.md)
+- [Local Development Guide](Local-Development-Guide.md)
+- [Components](Components.md)

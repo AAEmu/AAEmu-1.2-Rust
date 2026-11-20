@@ -27,7 +27,8 @@ order:
 
 ### Logging
 
-Logs go to stdout. The level is controlled by `RUST_LOG` (default `info`), for example
+Logs go to the console and `Logs/Server.log` and `Logs/Error.log` in the application directory.
+The level is controlled by `RUST_LOG` (default `info`), for example
 `RUST_LOG=debug` or `RUST_LOG=aaemu_login=debug`. Set `NO_COLOR=1` to disable ANSI colors.
 
 ## Setup instructions

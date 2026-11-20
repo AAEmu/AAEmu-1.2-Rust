@@ -1,9 +1,12 @@
 # C# → Rust port coverage audit
 
+> Historical comparison to the former C# server. The repository's
+> `FEATURE-GAP-TASKS.md` tracks the 1.2 client features still under review.
+
 Scope: every `.cs` file of `AAEmu.Commons`, `AAEmu.Login` and `AAEmu.Game` (2 498 files; the GM
 commands under `AAEmu.Game/Scripts/Commands` and `Scripts/SubCommands` and the C# unit tests in
 `AAEmu.UnitTests` are ported by other work streams and excluded here). Reference: the C# in this
-worktree (1.2 client, `client_12_r208022`).
+worktree before the C# source was removed (1.2 client, `client_12_r208022`).
 
 ## How the audit was built
 

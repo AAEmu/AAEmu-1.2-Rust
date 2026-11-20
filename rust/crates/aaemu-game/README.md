@@ -31,7 +31,8 @@ client `game_pak` in `app/ClientData/` (or point `Configurations/ClientData.json
 
 ### Logging
 
-Logs go to stdout. The level is controlled by `RUST_LOG` (default `info`), for example
+Logs go to the console and `Logs/Server.log` and `Logs/Error.log` in the application directory.
+The level is controlled by `RUST_LOG` (default `info`), for example
 `RUST_LOG=debug` or `RUST_LOG=aaemu_game=debug`. Set `NO_COLOR=1` to disable ANSI colors.
 
 ## Setup instructions
@@ -78,7 +79,7 @@ The configuration structure is as follows:
 },
 "CharacterNameRegex": "^[a-zA-Z0-9а-яА-Я]{1,18}$",
 "MaxConcurencyThreadPool": 8,
-"HeightMapsEnable": false
+"HeightMapsEnable": true
 ```
 
 ### Create Configuration File

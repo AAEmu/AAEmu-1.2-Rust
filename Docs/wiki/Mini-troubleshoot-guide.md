@@ -1,7 +1,7 @@
 # Mini Troubleshoot Guide
 
 - Audience: Contributors, players, and testers
-- Last verified against: `develop` on October 10, 2026
+- Reference revision: `e308e7461` on `main`
 - Prerequisites: None
 
 Use this page for common startup and connection problems.
@@ -61,6 +61,6 @@ Login server listings are configuration-driven now.
 
 ## Related
 
-- [FAQ](FAQ)
-- [Installation & Setup](Installation-&-Setup)
-- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings)
+- [FAQ](FAQ.md)
+- [Installation & Setup](Installation-&-Setup.md)
+- [Working with the Config.json files and server listings](Working-with-the-Config.json-files-and-server-listings.md)

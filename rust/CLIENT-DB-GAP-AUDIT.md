@@ -1,5 +1,9 @@
 # Feature-gap audit — Rust server vs. 1.2 client + databases (2026-10-14)
 
+> Historical results for the revision below. The [feature backlog](../FEATURE-GAP-TASKS.md)
+> tracks later implementations and current open work. The
+> [coverage baseline](tools/opcode_coverage/sc_baseline.json) lists current packet gaps.
+
 Independent audit (no OpenCode workers; direct inspection + fresh tool runs on `aa90a8c3e`
 plus the uncommitted battlefield/spawner work in the tree). It **supersedes the stale parts
 of `CLIENT-FEATURE-GAPS.md`** (2026-10-13): several of that document's headline gaps were

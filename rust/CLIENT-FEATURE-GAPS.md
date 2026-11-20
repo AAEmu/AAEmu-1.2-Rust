@@ -1,5 +1,8 @@
 # Client feature gaps — 1.2 client (`r208022`) vs. the Rust game server
 
+> Historical snapshot from October 13, 2026. See the [follow-up audit](CLIENT-DB-GAP-AUDIT.md)
+> for its findings and the [feature backlog](../FEATURE-GAP-TASKS.md) for current status.
+
 An audit of what the **ArcheAge 1.2 client supports** that the **Rust game server does not
 implement**. Written against the target client in `D:\AA1.2` and the servers in
 `rust/crates/aaemu-{game,login}`. Method, reproduction commands and caveats are at the end.
