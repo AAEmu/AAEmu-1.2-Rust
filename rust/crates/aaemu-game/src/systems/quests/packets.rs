@@ -19,6 +19,25 @@ use crate::server::GameServer;
 
 // ----- S->C -----
 
+/// `SCPlaySequencePacket` (0x13b). The r208022 reader accepts a sequence name of up to
+/// 30 bytes, followed by the house unit object id (zero for dungeon sequences).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SCPlaySequencePacket {
+    pub sequence_name: String,
+    pub house_unit_id: u32,
+}
+packet_def!(
+    SCPlaySequencePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCPlaySequencePacket
+);
+impl Marshal for SCPlaySequencePacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_str(&self.sequence_name)
+            .write_bc(self.house_unit_id);
+    }
+}
+
 /// `SCQuestContextStartedPacket(quest, componentId)`.
 #[derive(Debug, Clone)]
 pub struct SCQuestContextStartedPacket {

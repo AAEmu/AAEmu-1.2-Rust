@@ -184,12 +184,16 @@ impl QuestSkillHooks for QuestsForSkills {
                 true
             }
             EffectTemplate::Cinema { cinema_id, .. } => {
-                // `CinemalEffect.Apply` only traces. The client plays the cinema for the
-                // target; remember which one for its `CSStartedCinemaPacket`.
                 tracing::trace!("CinemalEffect");
                 if let Target::Obj(target) = &args.target {
                     if let Some(character) = target.as_player() {
-                        super::events::request_cinema(server, character, *cinema_id);
+                        // The Armory's final-room skill requires an explicit playback cue.
+                        const HIERONIMUS_ENTRANCE_CINEMA: u32 = 8;
+                        if *cinema_id == HIERONIMUS_ENTRANCE_CINEMA {
+                            super::events::play_cinema(server, character, *cinema_id);
+                        } else {
+                            super::events::request_cinema(server, character, *cinema_id);
+                        }
                     }
                 }
                 true
