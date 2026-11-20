@@ -281,10 +281,16 @@ fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
     };
     let mut data = GameData::empty();
     data.formulas = crate::data::formulas::FormulaManager::load(&conn).expect("formulas");
+    let localization = crate::data::world_data::Localization::load(&conn, "en_us").unwrap();
+    data.factions = crate::data::world_data::FactionData::load(&conn, &localization).unwrap();
+    data.items = crate::data::items::ItemData::load(&conn).expect("items");
+    data.systems.economy.loot =
+        crate::systems::economy::loot_data::LootData::load(&conn).expect("loot packs");
     data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
     data.systems.npcs = crate::systems::npcs::Data::load(&ctx).expect("npcs data");
     data.systems.quests = crate::systems::quests::Data::load(&ctx).expect("quests data");
     data.systems.ai = crate::systems::ai::Data::load(&ctx).expect("ai data");
+    data.systems.instances = crate::systems::instances::Data::load(&ctx).expect("instance data");
     let template = WorldTemplate::synthetic(0, WORLD, 32, 32, ZONE);
     let server = Arc::new(test_server_with_world(data, template));
     server.set_self();
@@ -300,6 +306,12 @@ fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
     crate::systems::skills::bind(&server);
     crate::systems::npcs::install_hooks(&server);
     crate::systems::ai::hooks::install(&server);
+    crate::systems::quests::bridges::install(&server);
+    crate::systems::economy::bridges::install(&server);
+    server
+        .systems
+        .ai
+        .set_paths_folder(app_path.join("Data/Path"));
     (server, world)
 }
 
@@ -385,6 +397,15 @@ async fn real_data_burnt_event_spawners_and_trigger_npcs_resolve() {
     assert_eq!(stats.npc_missing_templates, 0, "{stats:?}");
     assert_eq!(stats.doodad_missing_templates, 0, "{stats:?}");
     assert_eq!(stats.npc_event_spawners, 32, "{stats:?}");
+    let spawns = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
+    let ogres = spawns
+        .get_all_spawners()
+        .into_values()
+        .flatten()
+        .filter(|s| s.unit_id == 8841 && s.is_placement() && s.is_optimal_spawner(&server))
+        .count();
+    assert_eq!(ogres, 7, "every Armory ogre is an ordinary placement");
+    assert!(spawns.tower_def_spawners(9892).is_empty());
 
     // Event-only actors must not stand at start: the 3rd boss appears through 66033.
     for unit in [8962, 10473, 10503, 10534] {
@@ -517,6 +538,208 @@ fn sphere_areas(sphere_ids: &[u32]) -> Vec<SphereArea> {
         .into_iter()
         .filter(|a| a.world == WORLD)
         .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_player() {
+    use crate::systems::skills::{buffs, skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, _) = real_server(&db);
+    load_burnt(&server);
+    let sorvell = WorldObject::from(force_spawn_unit(&server, 8960));
+    let (_client, player) = place_player(&server, 1, 206.0, 180.4, 20.5);
+    let victim = WorldObject::from(&player);
+    for _ in 0..5 {
+        // Allow for the six-second cooldown plus the gap until the next AI tick.
+        player
+            .data()
+            .unit
+            .buffs
+            .effects
+            .iter_mut()
+            .filter(|buff| buff.template.id == 2407)
+            .for_each(|buff| buff.start_time_ms -= 6_300);
+        buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
+    }
+    assert_eq!(player.data().unit.buffs.buff_count_by_id(2407), 0);
+    assert_eq!(player.data().unit.buffs.buff_count_by_id(2409), 1);
+
+    assert_eq!(
+        skill::unit_use_skill(&server, &sorvell, 15592, &victim),
+        skill_result::SUCCESS
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(3_250)).await;
+    assert_eq!(player.data().unit.buffs.buff_count_by_id(2411), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_winters_places_hazards_with_one_player() {
+    use crate::systems::skills::{skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_burnt(&server);
+    let winters = WorldObject::from(force_spawn_unit(&server, 12190));
+    let (_client, player) = place_player(&server, 1, 283.0, 236.3, 23.6);
+    let target = WorldObject::from(player);
+    assert_eq!(
+        skill::unit_use_skill(&server, &winters, 15512, &target),
+        skill_result::SUCCESS
+    );
+    for _ in 0..60 {
+        if world
+            .all_doodads()
+            .iter()
+            .any(|d| d.data().template_id == 3602)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("Hell Lightning never placed its doodad on a lone target");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_on_death() {
+    use crate::systems::skills::{
+        combat, skill,
+        types::{skill_result, KillReason},
+    };
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_burnt(&server);
+    for template in [10499, 10518, 10528, 10574] {
+        force_spawn_unit(&server, template);
+    }
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let exit = doodad_of(&world, 4923);
+    assert_eq!(exit.data().func_group_id, 12256);
+    assert!(npcs_of(&world, 8962).is_empty());
+
+    server
+        .systems
+        .quests
+        .spheres
+        .set_areas(sphere_areas(&[1385]));
+    let (_client, player) = place_player(&server, 1, 241.174, 312.165, 20.5377);
+    server.systems.quests.spheres.tick_at(&server, 0);
+    for _ in 0..200 {
+        crate::systems::ai::manager::tick_all(&server, 100);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if !npcs_of(&world, 8962).is_empty() && npcs_of(&world, 10518).is_empty() {
+            break;
+        }
+    }
+    let bosses = npcs_of(&world, 8962);
+    assert_eq!(
+        bosses.len(),
+        1,
+        "the final-room sequence spawns one combat boss"
+    );
+    let boss = &bosses[0];
+    let hp = boss.data().unit.max_hp;
+    assert!(hp > 50_000, "combat boss health is {hp}");
+    assert!(npcs_of(&world, 10518).is_empty(), "staging actor retired");
+    assert_eq!(
+        player
+            .data()
+            .quest_state
+            .requested_cinema
+            .map(|c| c.cinema_id),
+        Some(8),
+        "the son requests the Armory cinematic for the player"
+    );
+
+    let boss_object = WorldObject::from(boss);
+    let (x, y, z) = {
+        let t = boss.data().unit.transform;
+        (t.x, t.y, t.z)
+    };
+    player.data().unit.transform.set_xyz(x + 2.0, y, z);
+    world.add_visible_object(&player, &server.view_ctx());
+    let spawns = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
+    let stale_add = spawns.get_npc_spawner(46640)[0]
+        .force_spawn(&server, 0)
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert_eq!(
+        skill::unit_use_skill(&server, &boss_object, 17670, &boss_object),
+        skill_result::SUCCESS
+    );
+    assert!(
+        world.npc(boss.obj_id).is_some(),
+        "combat cleanup leaves Hieronimus alive"
+    );
+    assert!(
+        world.npc(stale_add.obj_id).is_none(),
+        "the reset skill removes a stale add"
+    );
+
+    let add = spawns.get_npc_spawner(46629)[0]
+        .force_spawn(&server, 0)
+        .unwrap();
+    let add_hp = add.data().unit.hp;
+    combat::reduce_current_hp(
+        &server,
+        &WorldObject::from(&add),
+        Some(&WorldObject::from(&player)),
+        add_hp + 1,
+        KillReason::Damage,
+    );
+    for _ in 0..10 {
+        if world
+            .all_doodads()
+            .iter()
+            .any(|d| d.data().template_id == 3657)
+        {
+            break;
+        }
+        crate::systems::ai::manager::tick_all(&server, 100);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        world
+            .all_doodads()
+            .iter()
+            .any(|d| d.data().template_id == 3657),
+        "a dead Dominated add releases an Anima Orb"
+    );
+
+    combat::reduce_current_hp(
+        &server,
+        &boss_object,
+        Some(&WorldObject::from(&player)),
+        hp + 1,
+        KillReason::Damage,
+    );
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if exit.data().func_group_id == 12257 {
+            break;
+        }
+    }
+    assert_eq!(exit.data().func_group_id, 12257);
+    assert!(
+        boss.data().unit.has_loot_left,
+        "the combat boss is lootable"
+    );
 }
 
 /// The two souls the spheres bring in: sphere 1379 (intro) casts 17081, whose buff 3081 trigger

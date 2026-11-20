@@ -426,7 +426,15 @@ fn add_buff_inner(
         buff.skill_level,
         buff.ab_level,
     );
-    owner.with_base_unit(|b| b.buffs_mut().add_buff_with_duration(buff, index, now));
+    owner.with_base_unit(|b| {
+        let buffs = b.buffs_mut();
+        // Thundering Strike's 24-second stack window is the length of four authored
+        // cooldowns. Renew the window on a hit so the fifth one can petrify the target.
+        if template.id == 2407 && buffs.buff_count_by_id(template.id) + 1 < template.max_stack {
+            buffs.refresh_stack_timers(template.id, duration, now);
+        }
+        buffs.add_buff_with_duration(buff, index, now);
+    });
     crate::systems::dispatch_buff_events(server, owner);
     transform_at_max_stack(
         server,

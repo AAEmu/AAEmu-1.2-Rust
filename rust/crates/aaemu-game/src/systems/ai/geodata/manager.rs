@@ -12,7 +12,8 @@ use crate::data::world_templates::{WorldTemplate, CELL_SIZE, REGION_SIZE, SECTOR
 use crate::systems::skills::controllers::{calculate_distance, Vec3};
 
 use super::bai::{
-    length, sub, BaiFiles, BaiWorld, BaseBaiLoader, LinkDescriptor, NodeRef, UsedAreaNames,
+    length, sub, AreasMission, BaiFiles, BaiWorld, BaseBaiLoader, LinkDescriptor, NodeRef,
+    PolygonArea, UsedAreaNames,
 };
 use super::graph::NavGraph;
 
@@ -107,6 +108,7 @@ pub struct AiGeoData {
     used_names: Arc<UsedAreaNames>,
     /// `ZoneBaiLoader` (zone key -> loader), in `ZoneKeys` order.
     zone_bai: OnceLock<Vec<(u32, BaiRef)>>,
+    zone_designer_paths: Mutex<HashMap<u32, Vec<PolygonArea>>>,
     /// `WorldCell.BaiLoader[4, 4]` per loaded cell (`x * cell_y + y`).
     cells: Vec<OnceLock<[[Option<BaiRef>; 4]; 4]>>,
     /// `PathBaiLoader`.
@@ -165,6 +167,7 @@ impl AiGeoData {
             files,
             used_names,
             zone_bai: OnceLock::new(),
+            zone_designer_paths: Mutex::new(HashMap::new()),
             cells: (0..count).map(|_| OnceLock::new()).collect(),
             path_bai: Mutex::new(HashMap::new()),
             terrain,
@@ -206,6 +209,38 @@ impl AiGeoData {
             }
             out
         })
+    }
+
+    /// Read a named patrol from the client in the NPC's own zone. Explicit patrols are
+    /// independent of GeoDataMode, which controls navigation meshes and height lookups.
+    pub(crate) fn designer_path(&self, name: &str, near: Vec3) -> Vec<Vec3> {
+        let zone = self.zone_key_of(near);
+        let mut cache = self
+            .zone_designer_paths
+            .lock()
+            .expect("designer paths poisoned");
+        let paths = cache.entry(zone).or_insert_with(|| {
+            let file = format!(
+                "game/worlds/{}/zone/{zone}/areasmission0.bai",
+                self.world_name
+            );
+            let (x, y) = self.zone_origins.get(&zone).copied().unwrap_or_default();
+            let offset = Vec3::new(
+                x as f32 * CELL_SIZE as f32,
+                y as f32 * CELL_SIZE as f32,
+                0.0,
+            );
+            self.files
+                .read_file(&file)
+                .and_then(|data| {
+                    AreasMission::read(&data, zone, offset, &UsedAreaNames::default()).ok()
+                })
+                .map_or_else(Vec::new, |areas| areas.designer_paths)
+        });
+        paths
+            .iter()
+            .find(|path| path.name == name)
+            .map_or_else(Vec::new, |path| path.points.clone())
     }
 
     /// The merged navigation graph (read lock: do not call the loading functions —

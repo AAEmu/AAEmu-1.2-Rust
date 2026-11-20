@@ -31,6 +31,7 @@ use crate::world::{self, session, GimmickRef, WorldInstance, WorldObject};
 pub const TICK_DELAY: Duration = Duration::from_millis(50);
 /// The template id that gets `GimmickMovementFloatToSurface` (Recovered Treasure Chest).
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
+const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
 /// Contact radius of a gimmick for `GimmickTemplate.CollisionSkillId` hits. The `gimmicks`
 /// table has no size / radius column and a gimmick has no actor `model_id` (`ModelManager`'s
 /// radii are keyed by actor model ids, and `new_gimmick` never sets one), so the model radius
@@ -69,6 +70,8 @@ pub fn time_of_day_ms(now_ms: i64) -> u32 {
 pub struct GimmickState {
     /// Kinematic velocities supplied by a doodad's SpawnGimmick phase function.
     pub authored_motion: bool,
+    /// Floor under an Armory barrel, resolved when the barrel is created.
+    barrel_floor: Option<f32>,
     /// `Time`.
     pub time: u32,
     /// `MoveDown`.
@@ -254,8 +257,7 @@ fn add_active_gimmick(
     gimmick: GimmickRef,
     spawner: Arc<GimmickSpawner>,
     template: Option<GimmickTemplate>,
-    authored_motion: bool,
-    owner_character_id: u32,
+    mut state: GimmickState,
 ) -> Arc<ActiveGimmick> {
     let (template_id, entity_guid) = {
         let g = gimmick.data();
@@ -269,12 +271,7 @@ fn add_active_gimmick(
     } else {
         None
     };
-    let state = GimmickState {
-        authored_motion,
-        owner_character_id,
-        time: time_of_day_ms(world::now_ms()),
-        ..Default::default()
-    };
+    state.time = time_of_day_ms(world::now_ms());
     let active = Arc::new(ActiveGimmick {
         gimmick,
         world_id,
@@ -384,7 +381,12 @@ fn create(
     session::handle_zone_changes(server, changes);
     // A spawner gimmick (an elevator, a raft) belongs to nobody.
     Some(add_active_gimmick(
-        server, world.id, gimmick, spawner, template, false, 0,
+        server,
+        world.id,
+        gimmick,
+        spawner,
+        template,
+        GimmickState::default(),
     ))
 }
 
@@ -409,6 +411,7 @@ pub fn spawn_from_spawner(
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SpawnGimmickParams {
     pub gimmick_id: u32,
+    pub target_position: Option<PositionAndRotation>,
     pub offset_from_source: bool,
     pub offset_coordinate_id: i32,
     pub offset_x: f32,
@@ -482,15 +485,21 @@ fn spawn_effect_gimmick(
     // gimmick.Transform = caster.Transform.CloneDetached(gimmick)
     let caster_t = caster.transform();
     let caster_world = world.world_pos_rot(caster);
+    let falling_barrel = params.gimmick_id == SORVELL_BARREL_TEMPLATE_ID && !doodad_motion;
+    let origin = if falling_barrel && !params.offset_from_source {
+        params.target_position.unwrap_or(caster_world)
+    } else {
+        caster_world
+    };
     {
         let t = &mut g.unit.transform;
         t.instance_id = caster_t.instance_id;
         t.world_id = caster_t.world_id;
         t.zone_id = caster_t.zone_id;
         t.set_position(
-            caster_world.x,
-            caster_world.y,
-            caster_world.z,
+            origin.x,
+            origin.y,
+            origin.z,
             caster_world.rot_x,
             caster_world.rot_y,
             caster_world.rot_z,
@@ -505,6 +514,13 @@ fn spawn_effect_gimmick(
     // overrides it with the authored `faction_id`).
     g.unit.faction_id = caster.with_base_unit(|b| b.faction_id());
     match params.offset_coordinate_id {
+        1 if falling_barrel => {
+            g.unit.transform.set_xyz(
+                origin.x + params.offset_x,
+                origin.y + params.offset_y,
+                origin.z + params.offset_z,
+            );
+        }
         0 | 1 | 3 => {}
         2 => {
             // Transform.Local.AddDistance(OffsetX, OffsetY, OffsetZ): a plain translation
@@ -521,6 +537,28 @@ fn spawn_effect_gimmick(
         }
     }
     g.unit.scale = params.scale;
+    let barrel_floor = falling_barrel.then(|| {
+        use crate::systems::ai::collision;
+        let t = &mut g.unit.transform;
+        let floor = collision::ground_height_probe(server, world.id, t.x, t.y, origin.z, 0.5, 6.0)
+            .flatten()
+            .unwrap_or(origin.z);
+        // Keep the authored drop inside the room when the twenty-meter offset puts it
+        // above a solid ceiling.
+        if let Some(hit) = collision::raycast(
+            server,
+            world.id,
+            [t.x, t.y, floor + 0.5],
+            [t.x, t.y, t.z],
+            collision::query::mask::STATIC_TERRAIN,
+            collision::query::ray_flags::DEFAULT,
+        )
+        .flatten()
+        {
+            t.set_height((hit.pos.z - 0.25).max(floor));
+        }
+        floor
+    });
     // `SpawnGimmickEffect.Velocity*` / `AngVel*`: the C# `GimmickSpawner` constructor stored
     // them but never applied them, so effect-spawned gimmicks never moved.
     //
@@ -536,10 +574,8 @@ fn spawn_effect_gimmick(
     // coordinate 0 or 1 and are ignored. The doodad spawn path overrides both with its
     // world-space values (WZGimmickSetMovement semantics).
     //
-    // The linear velocity is applied only to a kinematic gimmick (`mass <= 0`). A dynamic one
-    // (`mass > 0`, gravity 9.8) would fly a straight line until its `life_time` or the 200 m cap,
-    // because there is no gravity or ground model: a siege shell would explode in mid air far
-    // from where it was thrown. It stays where it spawns until such a model exists. The angular
+    // Kinematic gimmicks use the authored velocity directly. Armory barrels also use their
+    // gravity and a floor probe. Other dynamic gimmicks need their own collision model. The angular
     // velocity is applied either way.
     let yaw = caster_world.rot_z;
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
@@ -551,7 +587,7 @@ fn spawn_effect_gimmick(
         ]
     };
     let mut authored_motion = doodad_motion;
-    if params.velocity_coordinate_id == 2 && template.mass <= 0.0 {
+    if params.velocity_coordinate_id == 2 && (template.mass <= 0.0 || falling_barrel) {
         g.vel = rotate_local([params.velocity_x, params.velocity_y, params.velocity_z]);
         authored_motion = true;
     }
@@ -572,8 +608,12 @@ fn spawn_effect_gimmick(
         gimmick.clone(),
         spawner,
         Some(template),
-        authored_motion,
-        owner_character_id,
+        GimmickState {
+            authored_motion,
+            owner_character_id,
+            barrel_floor,
+            ..Default::default()
+        },
     );
     Some(gimmick)
 }
@@ -957,13 +997,26 @@ pub fn gimmick_tick(
                     vel = [0.0; 3];
                     g.vel = vel;
                 }
+                let mut next_z = g.unit.transform.z + vel[2] * delta_time;
+                if let Some(floor) = st.barrel_floor {
+                    let gravity = active.template.as_ref().map_or(0.0, |t| t.gravity);
+                    next_z -= 0.5 * gravity * delta_time * delta_time;
+                    g.vel[2] -= gravity * delta_time;
+                    if next_z <= floor {
+                        next_z = floor;
+                        st.barrel_floor = None;
+                        vel = [0.0; 3];
+                        g.vel = vel;
+                        g.ang_vel = [0.0; 3];
+                    }
+                }
                 let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
                 st.authored_time += delta;
                 st.authored_distance += speed * delta_time;
                 let t = &mut g.unit.transform;
                 t.x += vel[0] * delta_time;
                 t.y += vel[1] * delta_time;
-                t.z += vel[2] * delta_time;
+                t.z = next_z;
                 t.rot_x += ang[0] * delta_time;
                 t.rot_y += ang[1] * delta_time;
                 t.rot_z += ang[2] * delta_time;
@@ -1510,6 +1563,49 @@ mod tests {
             "no north/south drift: y={}",
             t.y
         );
+    }
+
+    #[tokio::test]
+    async fn armory_barrage_barrel_falls_to_the_targets_floor() {
+        let f = contact_fixture(
+            GimmickTemplate {
+                id: SORVELL_BARREL_TEMPLATE_ID,
+                mass: 0.7,
+                gravity: 9.8,
+                life_time: 6_000,
+                ..Default::default()
+            },
+            (140.0, 120.0),
+        );
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 20.0));
+        let barrel = spawn_from_effect(
+            &f.server,
+            &f.world,
+            &SpawnGimmickParams {
+                gimmick_id: SORVELL_BARREL_TEMPLATE_ID,
+                target_position: Some(PositionAndRotation::new(140.0, 120.0, 21.0, 0.0, 0.0, 0.0)),
+                offset_coordinate_id: 1,
+                offset_x: 2.0,
+                offset_y: 2.0,
+                offset_z: 20.0,
+                scale: 1.0,
+                velocity_coordinate_id: 2,
+                velocity_z: -5.0,
+                ..Default::default()
+            },
+            &source,
+        )
+        .unwrap();
+        let start = barrel.data().unit.transform;
+        assert_eq!((start.x, start.y, start.z), (142.0, 122.0, 41.0));
+        let active = f.server.systems.npcs.gimmicks.find(barrel.obj_id).unwrap();
+        gimmick_tick(&f.server, &f.world, &active, Duration::from_secs(1), 1_000);
+        let midair = barrel.data().unit.transform.z;
+        assert!(midair > 21.0 && midair < 36.0, "barrel height {midair}");
+        gimmick_tick(&f.server, &f.world, &active, Duration::from_secs(1), 2_000);
+        let barrel_data = barrel.data();
+        assert_eq!(barrel_data.unit.transform.z, 21.0);
+        assert_eq!(barrel_data.vel, [0.0; 3]);
     }
 
     #[tokio::test]

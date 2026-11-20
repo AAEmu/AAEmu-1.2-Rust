@@ -68,6 +68,7 @@ impl SubCommand for GimmickSpawnSubCommand {
         let world = world_of_obj(server, &creator_unit).ok_or_else(nre)?;
         let params = SpawnGimmickParams {
             gimmick_id: e.gimmick_id,
+            target_position: None,
             offset_from_source: e.offset_from_source,
             offset_coordinate_id: e.offset_coordinate_id as i32,
             offset_x: e.offset[0],
