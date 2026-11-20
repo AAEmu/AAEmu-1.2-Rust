@@ -66,10 +66,11 @@ Exposed ports: login `1237`, game `1239` and `1250`, MySQL `DB_PORT` (default
 - `BUILD_PROFILE`: cargo profile of the server images (`release` or `dev`).
 - `DB_USER`, `DB_PASSWORD`, optional `DB_PORT`: MySQL container settings.
 
-Use `docker compose logs -f game` for console output. Each server also writes
-its application logs under `.server_files/AAEmu.Game/Logs/` or
-`.server_files/AAEmu.Login/Logs/`. Set `RUST_LOG` in the Compose environment
-or `.env` to change the filter.
+Use `docker compose logs -f game` or `docker compose logs -f login` for console
+output. Each service also writes application logs to `/app/Logs/` inside
+its container. To copy the game logs to your machine, run
+`docker compose cp game:/app/Logs ./game-logs` from the project root.
+Set `RUST_LOG` in the Compose environment or `.env` to change the filter.
 
 ### Server listing source
 
