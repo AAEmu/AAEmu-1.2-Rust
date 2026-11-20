@@ -2446,6 +2446,20 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
     }
     if t.target_area_count > 0 && possible.len() > t.target_area_count as usize {
+        if caster.as_npc().is_some()
+            && t.target_type == SkillTargetType::SelfTarget as i32
+            && t.target_area_radius > 0
+            && t.effects.is_empty()
+        {
+            // Encounter signals such as Raise Calleil's Water have no unit effects.
+            // Reserve their limited area slots for props that respond to the signal.
+            let npcs = server.systems.skills.ext.npcs();
+            possible.retain(|target| {
+                target
+                    .as_obj()
+                    .is_some_and(|object| npcs.accepts_doodad_skill_hit(server, object, t.id))
+            });
+        }
         let mut with_d: Vec<(f32, Target)> = possible
             .into_iter()
             .map(|p| (distance_to(server, &p, target_self, false), p))

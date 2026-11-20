@@ -104,7 +104,7 @@ pub enum IndunActionKind {
     RemoveTaggedNpcs { tag_id: u32 },
     /// `IndunActionSetRoomCleareds`.
     SetRoomCleareds { indun_room_id: u32 },
-    /// `IndunActionNpcSpawner` (`NpcSpawnerSpawnEffect`; logs only in C#).
+    /// `IndunActionNpcSpawner` (`NpcSpawnerSpawnEffect`).
     NpcSpawner,
 }
 
