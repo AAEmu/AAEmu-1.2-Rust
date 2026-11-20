@@ -3701,6 +3701,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     displayed the announcement for the final boss. The runtime converts its
     one-based wave number when sending the notice. The lifecycle test checks the
     wire indices for the first two waves.
+  * **Hasla wave placements.** Definition 12's controller skills call 36 world
+    placement IDs. They were missing at runtime because the existing scorpion
+    and Yaksa locations were registered as regular spawns. The five timed
+    combat waves now get 5, 5, 5, 5, and 10 strong scorpions through those IDs.
+    The six Yaksa sites produce two captains and two expedition leaders each,
+    using the compact Yaksa spawner population of four. The assignment of IDs
+    to sites within each wave is inferred from the matching placement counts
+    and NPC templates in the 1.2 data. The positions come from the shipped
+    spawn file. The real-data readiness test checks all 36 IDs and the Yaksa
+    population against the live event definitions.
   * **AI settling cancelled the wave plot.** The rift summoners (`AiKind::Flytrap`, ai file 18) cast their wave plot as their `OnSpawn` skill (every 2 s, 25 tickets, `SpawnEffect` of the wave monsters). The AI walks `Spawning` -> `RunCommandSet` -> `Idle` -> `HoldPosition` within that time and the C# `Idle`/`HoldPosition` `Enter` call `InterruptSkills` (the Rust behaviors mirror them), which cancels the plot before the first tick. `ai/behaviors.rs` `interrupt_unless_event_controller` skips the interrupt for NPCs the running event owns (`tower_def::owns_npc`); every other NPC is interrupted as before.
   * **`SpawnEffect` at a plot location.** The plots place the wave monsters through a plot `Location` target (`PlotTargetUpdateMethod` RandomArea, 15 m ring, 500 m above the landing point). The C# spawner reads the target's transform; the Rust bridge used the caster as stand-in for a position target, so the monsters appeared on the summoner. `npcs/bridges.rs` `spawn_effect` now spawns at the position (`SpawnManager::get_npc_spawner_at_pos`), on the ground below it for non-flying templates (`ground_level_for`).
   * **Rift flight speed.** `Data/Path/razlomPPZden1-3.path` (the rifts' fly-in, ai 17) had no `Speed` action, so the path walker used the 1.0 m/s default and a rift needed 14+ minutes for its ~800 m although the first wave starts after 170 s (`tower_defs.first_wave_after`). The three files now start with `Speed|x|y|z|5` (same x/y/z as the first point): about 155-165 s, so the target reaches its stand before wave 1. The retail speed is not in the data; 5 m/s is derived from path length / `first_wave_after`.
@@ -5146,7 +5156,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   12411 under that event spawner at its existing position. The server checks
   the ready egg and the bow when starting the cast and before applying its
   effects, so only the first successful cast pays and starts the encounter.
-  Phase 18937 keeps its authored cooldown of about three days.
+  Phase 18937 keeps its authored cooldown of about three real days while the
+  server runs. The final respawn timer is currently in memory. A restart
+  recreates the egg. The phase notice uses the nearby-object broadcast because
+  the 1.2 phase has `is_msg_to_zone=false`.
+  Trion's 2.9 Build 9.0 introduced fixed Wednesday and Saturday Karkasse spawns.
+  The publisher's 2022 schedule lists Red Dragon's Keep as a raid instance.
+  [Archived Trion patch notes](https://archeage.fandom.com/wiki/Updates#ArcheAge_Version_2.9_Build_9.0_-_Part_II_-_The_Blue_Salt_Festival)
+  [Publisher's 2022 schedule](https://store.steampowered.com/news/posts/?appids=304030&enddate=1652889645&feed=steam_community_announcements)
 * systems::npcs (Kroloal Cradle scripted data, 2026-11-12): the 1.2-era spawn files held only
   the start placements, so the dungeon's scripted waves never appeared (the skills'
   `NpcSpawnerSpawnEffect` / `NpcControlEffect` lookups found no spawner / tag target) and the

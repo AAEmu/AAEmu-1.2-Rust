@@ -1532,7 +1532,8 @@ impl SpawnManager {
         } else {
             // NPC spawns for events.
             let last = *ids.last().expect("non-empty");
-            let template = NpcSpawnerTemplate::with_member(last, b.unit_id);
+            let mut template = NpcSpawnerTemplate::with_member(last, b.unit_id);
+            template.max_population = def.count.max(1);
             let spawner = NpcSpawner::new(
                 init(last, b.spawner_id, ids, Some(Arc::new(template))),
                 new_shared(),

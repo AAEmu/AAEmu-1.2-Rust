@@ -1795,4 +1795,49 @@ async fn real_tower_def_event_readiness() {
         validate(&server, EventKey::from(event), event.zone_id)
             .unwrap_or_else(|error| panic!("default event {}: {error}", event.id));
     }
+
+    // The controller sites alone do not make Hasla playable. The controllers'
+    // OnSpawn skills also refer to level placements outside npc_spawners.
+    let mut hasla_wave_spawns = conn
+        .prepare(
+            "SELECT DISTINCT wave.id, spawn.spawner_id
+             FROM tower_def_progs wave
+             JOIN tower_def_prog_spawn_targets target ON target.tower_def_prog_id = wave.id
+             JOIN npc_spawner_npcs member ON member.npc_spawner_id = target.spawn_target_id
+             JOIN np_skills skill ON skill.owner_id = member.member_id
+                 AND skill.owner_type = 'Npc' AND skill.skill_use_condition_id = 5
+             JOIN skill_effects link ON link.skill_id = skill.skill_id
+             JOIN effects effect ON effect.id = link.effect_id
+                 AND effect.actual_type = 'NpcSpawnerSpawnEffect'
+             JOIN npc_spawner_spawn_effects spawn ON spawn.id = effect.actual_id
+             WHERE wave.tower_def_id = 12 AND target.spawn_target_type = 'NpcSpawner'",
+        )
+        .unwrap();
+    let called_placements: Vec<(u32, u32)> = hasla_wave_spawns
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(called_placements.len(), 36);
+    let mut yaksa = HashMap::<u32, u32>::new();
+    for (wave, placement_id) in called_placements {
+        let placements = spawns.get_npc_spawner(placement_id);
+        assert!(
+            !placements.is_empty(),
+            "Hasla wave skill calls missing placement {placement_id}"
+        );
+        for placement in placements {
+            let zone = server
+                .game_data
+                .zones
+                .zone_by_key(placement.position().zone_id)
+                .unwrap();
+            assert_eq!(zone.group_id, 23);
+            if wave == 85 {
+                *yaksa.entry(placement.unit_id).or_default() +=
+                    placement.template().unwrap().max_population;
+            }
+        }
+    }
+    assert_eq!(yaksa, HashMap::from([(9688, 12), (9689, 12)]));
 }
