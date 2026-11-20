@@ -1294,13 +1294,14 @@ fn portal_zone_check(
     c: &crate::world::PlayerRef,
     skill_object: Option<&SkillObject>,
 ) -> Option<u8> {
-    let (access, district, faction, instance) = {
+    let (access, district, faction, instance, zone_id) = {
         let d = c.data();
         (
             d.access_level,
             d.return_district_id,
             d.unit.faction_id,
             d.unit.transform.instance_id,
+            d.unit.transform.zone_id,
         )
     };
     if access >= 100 {
@@ -1315,6 +1316,14 @@ fn portal_zone_check(
         let destination = match data.effect(kind, id) {
             Some(EffectTemplate::Special(s)) if s.special_effect_type_id == 25 => {
                 if s.value1 > 0 {
+                    if crate::systems::instances::indun::is_armory_exit(
+                        template.id,
+                        s.value1 as u32,
+                        instance,
+                        zone_id,
+                    ) {
+                        destination_instance = crate::models::character::DEFAULT_INSTANCE_ID;
+                    }
                     crate::systems::npcs::portal::world_gates_by_id(server, s.value1 as u32)
                         .cloned()
                         .or_else(|| {

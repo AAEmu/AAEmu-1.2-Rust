@@ -4510,7 +4510,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
    `MainWorldPosition`: this is the C# `Return.cs` TODO behaviour and the single recorded
    deviation (retail's fallback rule is UNKNOWN). Retail resolves a Return gate in the caster's
    own world (instance worlds ship their own `return_point.g`) and never falls back to the main
-   world.
+   world. The 1.2 Armory's two interactive exits deliberately use skill 15667 and gate
+   320 to leave zone 236 for the exterior in zone 257. This cast requires one of the
+   authored interactive doodad phases and uses dungeon leave cleanup, with closed-zone
+   checks against the exterior before casting and moving.
    The C# closed-zone check of `Return` / `OpenPortal` (`Skill.cs`, inline) is ported as
    `portal_zone_check` (`systems/skills/skill.rs:928-1029`): for access level < 100 it resolves
    the same destination the effect would use (world gate, district return point or private

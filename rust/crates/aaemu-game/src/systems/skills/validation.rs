@@ -370,6 +370,22 @@ pub(super) fn check(
     {
         return fail("skill_invalid_target");
     }
+    // Leave Burnt Castle Armory also applies Return directly. It is offered on the
+    // entrance exit and on the rear exit only after skill 18024 reveals it.
+    if template.id == crate::systems::instances::indun::ARMORY_EXIT_SKILL
+        && !target
+            .as_obj()
+            .and_then(WorldObject::as_doodad)
+            .is_some_and(|doodad| {
+                let d = doodad.data();
+                matches!(
+                    (d.template_id, d.func_group_id),
+                    (3673, 8794) | (4923, 12257)
+                )
+            })
+    {
+        return fail("skill_invalid_target");
+    }
     if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
         {

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use crate::data::world_data::Portal;
 use crate::server::GameServer;
 use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::systems::social::team::Team;
@@ -618,7 +619,13 @@ fn unsubscribe(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef, event
 }
 
 /// `LeaveDungeonInstance(character)` / `LeaveSystemInstance(character)`.
-fn leave_instance(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef, system: bool) {
+fn leave_instance(
+    server: &GameServer,
+    dungeon: &Arc<Dungeon>,
+    p: &PlayerRef,
+    system: bool,
+    gate: Option<&Portal>,
+) {
     server.systems.instances.indun.note_entry_item_leave(
         p.character_id,
         dungeon.zone_group_id(),
@@ -650,6 +657,10 @@ fn leave_instance(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef, sy
         .leave_requests
         .retain(|(id, _)| *id != p.character_id);
     let _ = remove_player(server, dungeon, p);
+    if let Some(gate) = gate {
+        worlds::return_to_main_world_gate(server, p, gate);
+        return;
+    }
     if p.data().main_world_position.is_none() {
         let id = dungeon.world_id().unwrap_or(0);
         if system {
@@ -667,7 +678,12 @@ fn leave_instance(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef, sy
 }
 
 /// `OnDungeonLeave(sender, args)`.
-pub fn on_dungeon_leave(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) {
+pub(super) fn on_dungeon_leave(
+    server: &GameServer,
+    dungeon: &Arc<Dungeon>,
+    p: &PlayerRef,
+    gate: Option<&Portal>,
+) {
     tracing::info!(
         "Player {} ({}) has exited from dungeon {}!",
         p.data().unit.name,
@@ -682,7 +698,7 @@ pub fn on_dungeon_leave(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerR
     let Some(parent) = server.systems.instances.dungeon_of_world(instance) else {
         return;
     };
-    leave_instance(server, dungeon, p, parent.is_system);
+    leave_instance(server, dungeon, p, parent.is_system, gate);
 }
 
 /// `OnTeamJoin(sender, args)` (`team` is `args.Team`, the team the player just joined).
@@ -1006,7 +1022,7 @@ fn destroy_dungeon_inner(server: &GameServer, dungeon: &Arc<Dungeon>) -> bool {
         return true;
     };
     for p in world.all_characters() {
-        leave_instance(server, dungeon, &p, dungeon.is_system);
+        leave_instance(server, dungeon, &p, dungeon.is_system, None);
     }
     // Queued players never arrived: their charged ticket starts its restore window instead of
     // staying marked as an in-progress visit.

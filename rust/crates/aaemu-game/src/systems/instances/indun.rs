@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::config::ServerProfile;
-use crate::data::world_data::Zone;
+use crate::data::world_data::{Portal, Zone};
+use crate::models::character::DEFAULT_INSTANCE_ID;
 use crate::server::GameServer;
 use crate::systems::social::team::Team;
 use crate::world::{PlayerRef, WorldInstance};
@@ -928,6 +929,43 @@ pub fn request_leave_instance(server: &GameServer, p: &PlayerRef) -> bool {
         return false;
     }
     super::events::fire_dungeon_leave(server, p);
+    true
+}
+
+const ARMORY_ZONE: u32 = 236;
+const ARMORY_EXIT_GATE: u32 = 320;
+const ARMORY_EXIT_ZONE: u32 = 257;
+pub(crate) const ARMORY_EXIT_SKILL: u32 = 15667;
+
+/// Compact skill 15667 is shared by the two 1.2 Armory exit doodads (groups 8794 and 12257).
+pub(crate) fn is_armory_exit(skill_id: u32, gate_id: u32, instance_id: u32, zone_id: u32) -> bool {
+    skill_id == ARMORY_EXIT_SKILL
+        && gate_id == ARMORY_EXIT_GATE
+        && instance_id != DEFAULT_INSTANCE_ID
+        && zone_id == ARMORY_ZONE
+}
+
+/// Leave a live Armory run through its authored exterior gate, using the dungeon leave handler.
+pub(crate) fn leave_armory_at_gate(server: &GameServer, p: &PlayerRef, gate: &Portal) -> bool {
+    let t = p.data().unit.transform;
+    if t.zone_id != ARMORY_ZONE
+        || gate.id != ARMORY_EXIT_GATE
+        || gate.zone_id != ARMORY_EXIT_ZONE
+        || !server.world.has_world(DEFAULT_INSTANCE_ID)
+    {
+        return false;
+    }
+    let Some(dungeon) = server.systems.instances.dungeon_of_world(t.instance_id) else {
+        return false;
+    };
+    if dungeon.zone_instance_id.zone_id != ARMORY_ZONE
+        || !dungeon
+            .world(server)
+            .is_some_and(|world| worlds::has_character(&world, p.character_id))
+    {
+        return false;
+    }
+    dungeon::on_dungeon_leave(server, &dungeon, p, Some(gate));
     true
 }
 

@@ -15,7 +15,9 @@ use crate::packets::world::{SCErrorMsgPacket, SCOneUnitMovementPacket};
 use crate::server::GameServer;
 use crate::systems::ai::npc::WALKER_MAX_DROP;
 use crate::systems::economy::error_message as err;
+use crate::systems::instances::indun;
 use crate::systems::skills::ground_snap_rules as ground_snap;
+use crate::systems::skills::types::CastAction;
 use crate::world::{now_ms, NpcRef, PlayerRef, WorldObject};
 
 use super::super::super::broadcast;
@@ -685,6 +687,29 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         let trp = npcs.world_gate(server, v[0] as u32);
         if trp.is_none() {
             tracing::warn!("Cannot find return WorldGate with id {}", v[0]);
+        }
+        if let CastAction::Skill { skill_id, .. } = args.cast {
+            let zone_id = p.data().unit.transform.zone_id;
+            if indun::is_armory_exit(skill_id, v[0] as u32, instance_id, zone_id) {
+                let error = match &trp {
+                    Some(t)
+                        if !crate::world::session::zone_access_allowed(
+                            server,
+                            p,
+                            DEFAULT_INSTANCE_ID,
+                            t.zone_id,
+                            t.x,
+                            t.y,
+                        ) =>
+                    {
+                        crate::world::session::CLOSED_ZONE
+                    }
+                    Some(t) if indun::leave_armory_at_gate(server, p, t) => return,
+                    _ => err::NO_RETURN_POINT,
+                };
+                p.send(SCErrorMsgPacket::new(error, 0, true));
+                return;
+            }
         }
         // Deviation from C# (its Return.cs is a TODO placeholder that fell back to
         // `MainWorldPosition`): a gate is only used in the world its zone belongs to.
