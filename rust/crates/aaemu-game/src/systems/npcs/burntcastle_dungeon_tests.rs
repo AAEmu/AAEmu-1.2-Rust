@@ -540,9 +540,11 @@ fn sphere_areas(sphere_ids: &[u32]) -> Vec<SphereArea> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_player() {
+    use std::time::Duration;
+
     use crate::systems::skills::{buffs, skill, types::skill_result};
 
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
@@ -553,16 +555,28 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
     let sorvell = WorldObject::from(force_spawn_unit(&server, 8960));
     let (_client, player) = place_player(&server, 1, 206.0, 180.4, 20.5);
     let victim = WorldObject::from(&player);
-    for _ in 0..5 {
-        // Allow for the six-second cooldown plus the gap until the next AI tick.
-        player
-            .data()
-            .unit
-            .buffs
-            .effects
-            .iter_mut()
-            .filter(|buff| buff.template.id == 2407)
-            .for_each(|buff| buff.start_time_ms -= 6_300);
+    // The next hit arrives after the six-second cooldown and one AI scheduling gap.
+    let strike_interval = Duration::from_millis(6_300);
+    buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
+    tokio::time::sleep(strike_interval).await;
+    buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
+    tokio::time::sleep(Duration::from_millis(18_500)).await;
+    assert_eq!(
+        player.data().unit.buffs.buff_count_by_id(2407),
+        2,
+        "the first stack outlasts its original 24-second timer"
+    );
+    tokio::time::sleep(strike_interval).await;
+    assert_eq!(
+        player.data().unit.buffs.buff_count_by_id(2407),
+        0,
+        "both stacks expire when the renewed window ends"
+    );
+
+    for hit in 0..5 {
+        if hit > 0 {
+            tokio::time::sleep(strike_interval).await;
+        }
         buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
     }
     assert_eq!(player.data().unit.buffs.buff_count_by_id(2407), 0);
@@ -572,7 +586,7 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
         skill::unit_use_skill(&server, &sorvell, 15592, &victim),
         skill_result::SUCCESS
     );
-    tokio::time::sleep(std::time::Duration::from_millis(3_250)).await;
+    tokio::time::sleep(Duration::from_millis(3_250)).await;
     assert_eq!(player.data().unit.buffs.buff_count_by_id(2411), 1);
 }
 
