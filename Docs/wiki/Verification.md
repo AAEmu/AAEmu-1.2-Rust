@@ -4,6 +4,34 @@
 - Last verified against: `rust-rewrite` on October 20, 2026
 - Target: ArcheAge 1.2 (`r208022`)
 
+## Skill regression checks
+
+Run this from the repository root with the r208022 compact database and an output path:
+
+```bash
+bash Scripts/skill-regression.sh /path/to/compact.sqlite3 /path/to/skill-report.tsv
+```
+
+The script runs the in-process skills tests, then exercises the 170 class-skill rows
+with the same server handler used by `CSStartSkill`. It checks for missing casts,
+unexpected refusals, damage, selected healing spells and Aranzeb's Boon. It also
+checks the fireplace's Log cost and its transition from unlit to lit. The audit
+compares the loaded catalog against the authored skill IDs and writes one TSV row
+per skill. No MySQL or running game client is required.
+
+The checked-in baseline records the observed cast path and outcome for each
+exercised skill ID. The script exits with a diff when either changes. Inspect the
+affected skill's report row before updating the baseline. For focused debugging,
+set `AAEMU_COMPACT_DB` and `AUDIT_SKILLS` (comma-separated class skill IDs or
+`18025` for the fireplace), then run `cargo test -p aaemu-game --lib player_skill_audit -- --ignored --nocapture`
+from `rust/`.
+
+`internal_fallback` identifies a cast exercised through the server's skill API
+after the client path refused it. `not_cast` and `NO_CLASS_FIXTURE` identify
+unexercised rows in this sweep. Use the live suites below for scenarios that need
+actual network traffic or persisted state. Use the real client for interactions
+whose payload depends on its UI.
+
 ## Overview
 
 `Scripts/verify.sh` checks server fixes end to end on a live lane stack. It is optional tooling,
