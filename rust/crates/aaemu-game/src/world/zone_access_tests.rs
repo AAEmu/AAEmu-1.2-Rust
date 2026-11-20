@@ -29,6 +29,11 @@ const GATE: u32 = 10;
 
 fn data(respawn: bool) -> GameData {
     let mut data = GameData::empty();
+    data.systems
+        .ai
+        .ai
+        .ship_models
+        .insert(31, crate::systems::ai::physics::ship::tests::model());
     // Zone key 0 ("login") is an open row of the real zones table.
     for (key, closed) in [(0, false), (TEST_ZONE, false), (CLOSED, true), (201, true)] {
         data.zones.zones.insert(
@@ -248,6 +253,91 @@ async fn closed_zone_walk_warns_five_times_then_returns_and_refiles_visibility()
     assert_eq!(p.data().unit.transform.x, 130.0);
     advance(20000).await;
     assert_eq!(warning_count(&mut client), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closed_zone_physics_worker_keeps_ticking_and_returns_passenger() {
+    use crate::systems::ai::physics::{self, ship::ShipSpec, SlaveKind};
+    use crate::systems::skills::controllers::Vec3;
+
+    let server = server(true);
+    let (mut client, p) = player(&server, 1, 100.0);
+    let hull = flipped_hull(&server, 100.0, 100.0);
+    board(&server, &mut client, &p, &hull, (0.0, 0.0), (100.0, 100.0)).await;
+    assert_eq!(p.data().unit.transform.parent_obj_id, hull.obj_id);
+    client.drain();
+
+    // Start with an open-zone world transform. The first authoritative physics update moves
+    // the hull and its passenger across the border, through the normal zone-change callbacks.
+    server.systems.ai.physics.set_manual_ticks(true);
+    assert!(physics::add_ship(
+        &server,
+        0,
+        ShipSpec {
+            obj_id: hull.obj_id,
+            slave_id: 1,
+            model_id: 31,
+            kind: SlaveKind::BOAT,
+            scale: 1.0,
+            spawn_time_ms: 0,
+            portal_time: 0.0,
+            position: Vec3::new(1400.0, 100.0, 99.0),
+            yaw: 0.0,
+        },
+    ));
+    let worker_server = server.clone();
+    std::thread::Builder::new()
+        .name("Physics-0-test".into())
+        .spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let wp = worker_server.systems.ai.physics.world(0).unwrap();
+            physics::run_world_tick(&worker_server, &wp, 40);
+            assert_eq!(hull.data().unit.transform.zone_id, CLOSED);
+            let first_y = hull.data().unit.transform.y;
+            physics::set_ship_driver(&worker_server, hull.obj_id, true);
+            physics::set_ship_request(&worker_server, hull.obj_id, 127, 0);
+            for _ in 0..100 {
+                physics::run_world_tick(&worker_server, &wp, 40);
+            }
+            assert!(hull.data().unit.transform.y > first_y + 1.0);
+        })
+        .unwrap()
+        .join()
+        .expect("the physics worker survived the closed-zone crossing");
+
+    assert_eq!(warning_count(&mut client), 1);
+    tokio::task::yield_now().await;
+    for _ in 0..4 {
+        advance(2000).await;
+        assert_eq!(warning_count(&mut client), 1);
+    }
+    advance(2000).await;
+    advance(200).await;
+    let t = p.data().unit.transform;
+    assert_eq!((t.parent_obj_id, t.zone_id, t.x), (0, TEST_ZONE, 128.0));
+    assert!(client
+        .drain_ops()
+        .contains(&sc::SCCharacterResurrectedPacket));
+}
+
+#[tokio::test(start_paused = true)]
+async fn closed_zone_dispatch_to_stopped_runtime_releases_pending_attempt() {
+    let server = std::thread::spawn(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async { server(true) })
+    })
+    .join()
+    .unwrap();
+    let (mut client, p) = player(&server, 1, 1400.0);
+    for _ in 0..2 {
+        on_zone_change(&server, &p, TEST_ZONE, CLOSED);
+        assert_eq!(warning_count(&mut client), 1);
+    }
+    advance(12000).await;
+    assert_eq!(p.data().unit.transform.zone_id, CLOSED);
 }
 
 #[tokio::test(start_paused = true)]

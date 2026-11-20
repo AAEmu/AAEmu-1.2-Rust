@@ -56,6 +56,8 @@ pub struct GameServer {
     pub systems: crate::systems::Systems,
     /// A weak self reference for the timers that outlive a packet handler.
     self_ref: std::sync::OnceLock<std::sync::Weak<GameServer>>,
+    /// The server's async runtime, also used to schedule work from native simulation threads.
+    pub(crate) runtime: Option<tokio::runtime::Handle>,
     next_connection_id: AtomicU32,
     /// Monotonic order of the slot-occupancy reports sent to the login server's world queue.
     occupancy_sequence: std::sync::Mutex<u32>,
@@ -127,6 +129,7 @@ impl GameServer {
             streams: StreamManager::default(),
             login: LoginLink::default(),
             self_ref: std::sync::OnceLock::new(),
+            runtime: tokio::runtime::Handle::try_current().ok(),
             next_connection_id: AtomicU32::new(1),
             occupancy_sequence: std::sync::Mutex::new(0),
             shutting_down: AtomicBool::new(false),

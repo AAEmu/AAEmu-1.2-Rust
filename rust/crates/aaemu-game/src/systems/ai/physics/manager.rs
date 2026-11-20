@@ -444,6 +444,16 @@ pub struct WorldPhysics {
     running: AtomicBool,
 }
 
+struct RunningPhysics(Weak<WorldPhysics>);
+
+impl Drop for RunningPhysics {
+    fn drop(&mut self) {
+        if let Some(physics) = self.0.upgrade() {
+            physics.running.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 impl WorldPhysics {
     pub fn new(instance_id: u32) -> Self {
         Self {
@@ -505,9 +515,11 @@ impl WorldPhysics {
             return;
         }
         let me = Arc::downgrade(self);
+        let running = RunningPhysics(me.clone());
         let name = format!("Physics-{}", self.instance_id);
         let tps = if tps > 0.0 { tps } else { 25.0 };
         let spawned = std::thread::Builder::new().name(name).spawn(move || {
+            let _running = running;
             let target = Duration::from_secs_f32(1.0 / tps);
             let origin = Instant::now();
             let mut clock = TickClock {
@@ -545,7 +557,6 @@ impl WorldPhysics {
         });
         if let Err(e) = spawned {
             tracing::error!("failed to start the physics thread: {e}");
-            self.running.store(false, Ordering::SeqCst);
         }
     }
 }
