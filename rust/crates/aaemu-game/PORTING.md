@@ -3636,6 +3636,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   spawner 9859 because the same NPC template is used by test tower-defense spawner 9892.
   The two Bloodhand Warlock patrols use named routes from the 1.2 client. The associations
   between the placements and nearby routes are inferred.
+  The final-room trigger casts skill 17453, whose cinema effect sends
+  `SCPlaySequencePacket` (0x13b) to each player it reaches for sequence `id_236_01`.
+  The 1.2 client reads a length-prefixed sequence name and a three-byte house unit ID
+  (zero for this scene). The cinema start and completion replies use the existing quest
+  attribution and visible-object restoration.
   The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
   (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
   `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /

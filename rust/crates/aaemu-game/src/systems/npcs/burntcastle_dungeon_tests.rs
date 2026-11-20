@@ -654,7 +654,7 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
         .quests
         .spheres
         .set_areas(sphere_areas(&[1385]));
-    let (_client, player) = place_player(&server, 1, 241.174, 312.165, 20.5377);
+    let (mut client, player) = place_player(&server, 1, 241.174, 312.165, 20.5377);
     server.systems.quests.spheres.tick_at(&server, 0);
     for _ in 0..200 {
         crate::systems::ai::manager::tick_all(&server, 100);
@@ -681,6 +681,17 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
             .map(|c| c.cinema_id),
         Some(8),
         "the son requests the Armory cinematic for the player"
+    );
+    assert_eq!(
+        client
+            .drain()
+            .into_iter()
+            .filter(|(opcode, _)| *opcode == crate::opcodes::sc::SCPlaySequencePacket)
+            .collect::<Vec<_>>(),
+        vec![(
+            crate::opcodes::sc::SCPlaySequencePacket,
+            b"\x09\x00id_236_01\x00\x00\x00".to_vec()
+        )]
     );
 
     let boss_object = WorldObject::from(boss);

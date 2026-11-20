@@ -10,7 +10,9 @@ use std::cell::RefCell;
 
 use super::engine::{Ctx, Deferred, KillUnitInfo, QuestEnv, StartRefusal, UnitSnapshot};
 use super::model::acceptor;
-use super::packets::{quest_error, SCDoodadCompleteQuestPacket, SCQuestContextFailedPacket};
+use super::packets::{
+    quest_error, SCDoodadCompleteQuestPacket, SCPlaySequencePacket, SCQuestContextFailedPacket,
+};
 use super::spheres::SphereQuest;
 use super::state::{CinemaMark, EventKind};
 use crate::models::character::Character;
@@ -1199,6 +1201,36 @@ pub fn request_cinema(server: &GameServer, player: &PlayerRef, cinema_id: u32) {
     run_or_queue(server, player, move |ctx| {
         let at_ms = ctx.now_ms;
         ctx.st.requested_cinema = (cinema_id != 0).then_some(CinemaMark { cinema_id, at_ms });
+    });
+}
+
+/// Start a server-driven cinema and attribute the client's start and completion replies.
+pub(super) fn play_cinema(server: &GameServer, player: &PlayerRef, cinema_id: u32) {
+    run_or_queue(server, player, move |ctx| {
+        let Some(info) = ctx
+            .data
+            .cinema(cinema_id)
+            .filter(|info| !info.name.is_empty() && info.name.len() <= 30)
+        else {
+            return;
+        };
+        let now_ms = ctx.now_ms;
+        if ctx.st.playing_cinema.is_some()
+            || ctx.st.requested_cinema.is_some_and(|request| {
+                request.cinema_id == cinema_id
+                    && (now_ms - request.at_ms).abs() <= super::cinema::REQUEST_TTL_MS
+            })
+        {
+            return;
+        }
+        ctx.st.requested_cinema = Some(CinemaMark {
+            cinema_id,
+            at_ms: now_ms,
+        });
+        ctx.send(SCPlaySequencePacket {
+            sequence_name: info.name.clone(),
+            house_unit_id: 0,
+        });
     });
 }
 

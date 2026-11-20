@@ -292,6 +292,7 @@ fn cinema_data(d: &mut QuestData) {
         d.add_component(component(id, 50, kind::START, cinema_id));
     }
     for c in [
+        info(8, "id_236_01", Some(true)),
         info(80, "sl_plain", Some(false)),
         info(16, "fly_cut", Some(true)),
         info(99, "no_file", None),
@@ -584,7 +585,7 @@ async fn an_unannounced_cinema_completes_the_objective() {
 }
 
 #[tokio::test]
-async fn the_cinema_effect_names_the_cinema_for_a_character_target() {
+async fn cinema_effects_attribute_playback_and_start_the_armory_entrance_once() {
     use crate::systems::quests::bridges::QuestsForSkills;
     use crate::systems::skills::data::{EffectKind, EffectTemplate};
     use crate::systems::skills::effects::{EffectArgs, EffectSource};
@@ -593,16 +594,12 @@ async fn the_cinema_effect_names_the_cinema_for_a_character_target() {
     use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
 
     let mut s = scene();
-    let template = EffectTemplate::Cinema {
-        id: 1,
-        cinema_id: 16,
-    };
-    let apply = |s: &Scene, target: WorldObject| {
+    let apply = |s: &Scene, target: WorldObject, cinema_id| {
         let caster = WorldObject::from(s.player.clone());
         QuestsForSkills.apply_effect(
             &s.server,
             EffectKind::CinemaEffect,
-            &template,
+            &EffectTemplate::Cinema { id: 1, cinema_id },
             &EffectArgs {
                 caster: Some(caster.clone()),
                 caster_caster: SkillCaster::Unit(s.player.obj_id),
@@ -618,11 +615,29 @@ async fn the_cinema_effect_names_the_cinema_for_a_character_target() {
         )
     };
     // An NPC target is not a viewer.
-    assert!(apply(&s, WorldObject::from(&s.npc)));
+    assert!(apply(&s, WorldObject::from(&s.npc), 8));
     assert_eq!(s.requested(), None);
-    assert!(apply(&s, WorldObject::from(s.player.clone())));
+    assert!(s.client.drain().is_empty());
+
+    let player = WorldObject::from(&s.player);
+    assert!(apply(&s, player.clone(), 16));
     assert_eq!(s.requested(), Some(16));
+    assert!(s.client.drain().is_empty());
+
+    assert!(apply(&s, player.clone(), 8));
+    assert!(apply(&s, player.clone(), 8));
+    assert_eq!(s.requested(), Some(8));
+    assert_eq!(
+        s.client.drain(),
+        vec![(
+            sc::SCPlaySequencePacket,
+            b"\x09\x00id_236_01\x00\x00\x00".to_vec()
+        )]
+    );
     s.send(CSStartedCinemaPacket).await;
+    assert_eq!(s.playing(), Some(8));
+    assert!(apply(&s, player, 8));
+    assert!(s.client.drain().is_empty());
     s.send(CSCompletedCinemaPacket).await;
     assert_eq!(s.resent(), (true, true));
 }
