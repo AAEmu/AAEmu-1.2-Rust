@@ -17,12 +17,17 @@ use crate::server::GameServer;
 use crate::systems::economy::error_message;
 use crate::systems::economy::inventory::Inv;
 use crate::systems::npcs::doodad::manager;
+use crate::systems::npcs::doodad::spawner::{parse_list, NpcSpawnerDef};
 use crate::systems::npcs::doodad::templates::*;
+use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::vehicles::data::{attach_point, MountAttachedSkills, MountSkills};
 use crate::test_support::*;
 use crate::world::{DoodadRef, Entity, PlayerRef, WorldObject};
 
-use super::data::{effects::EffectTemplate, EffectKind, SkillItemAmount};
+use super::data::{
+    effects::{EffectTemplate, NpcSpawnerSpawnEffect},
+    EffectKind, SkillItemAmount,
+};
 use super::handlers::{start_skill, CSStartSkillPacket};
 use super::types::{
     cast_target_type, caster_type, skill_result, SkillCastTarget, SkillCaster, SkillObject,
@@ -651,9 +656,36 @@ async fn red_dragon_egg_requires_the_bow_and_charges_only_once() {
     const READY: u32 = 18_936;
     const CLOSED: u32 = 18_937;
     const BOW: u32 = 29_301;
+    const DRAGON: u32 = 12_411;
+    const SPAWNER: u32 = 120_194;
+    const SUMMON_EFFECT: u32 = 2_668;
     const SKILL: u32 = super::validation::RED_DRAGON_EGG_SKILL;
 
+    let placements = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/app/Data/Worlds/main_world/npc_spawns.json"
+    ))
+    .unwrap();
+    let mut placement = parse_list(&placements, NpcSpawnerDef::from_json)
+        .unwrap()
+        .into_iter()
+        .find(|spawn| spawn.base.unit_id == DRAGON)
+        .unwrap();
+    // Use the shipped binding at a position inside the small test world.
+    placement.base.position.x = 103.0;
+    placement.base.position.y = 100.0;
+    placement.base.position.z = 100.0;
+
     let mut data = doodad_data();
+    data.formulas = crate::systems::npcs::npc::stats::tests::npc_formulas();
+    data.systems.npcs.npc.templates.insert(
+        DRAGON,
+        NpcTemplate {
+            id: DRAGON,
+            level: 50,
+            ..Default::default()
+        },
+    );
     data.items
         .templates
         .insert(BOW, ItemTemplate::plain(BOW, 1));
@@ -710,11 +742,31 @@ async fn red_dragon_egg_requires_the_bow_and_charges_only_once() {
     interaction.consume_item_id = BOW;
     interaction.consume_item_count = 1;
     skill.effects.push(interaction);
+    skill.effects.push(super::tests::skill_effect(
+        SUMMON_EFFECT,
+        EffectKind::NpcSpawnerSpawnEffect,
+        SUMMON_EFFECT,
+    ));
+    data.systems.skills.add_effect(
+        EffectKind::NpcSpawnerSpawnEffect,
+        EffectTemplate::NpcSpawnerSpawn(NpcSpawnerSpawnEffect {
+            id: SUMMON_EFFECT,
+            spawner_id: SPAWNER,
+            life_time: 0.0,
+            despawn_on_creator_death: false,
+            use_summoner_aggro_target: false,
+            activation_state: false,
+        }),
+        SUMMON_EFFECT,
+    );
     data.systems.skills.add_skill(skill);
     data.skills.add_client_sourced_skill(SKILL);
 
     let mut f = fixture_with_data(data);
     let world = f.server.world.world(0).unwrap();
+    let spawns = f.server.systems.npcs.spawns.get_or_create(&world);
+    assert_eq!(spawns.add_npc_spawner(&f.server, placement), Ok(0));
+    let [dragon_spawner] = spawns.get_npc_spawner(SPAWNER).try_into().unwrap();
     let egg = manager::create(&f.server, &world, RACK_OBJ + 1, EGG, None, true).unwrap();
     egg.data().transform.set_xyz(101.0, 100.0, 100.0);
     world.spawn(&egg, &f.server.view_ctx());
@@ -722,14 +774,20 @@ async fn red_dragon_egg_requires_the_bow_and_charges_only_once() {
     cast.skill_id = SKILL;
     start_skill(&f.server, &mut f.client.conn, cast.clone());
     let frames = f.client.drain();
+    assert_eq!(
+        started_results(&frames, SKILL),
+        [skill_result::NEED_REAGENT]
+    );
     assert_eq!(started_value(&frames, SKILL), Some(BOW));
     assert_eq!(egg.data().func_group_id, READY);
+    assert_eq!(dragon_spawner.current_spawn_count(), 0);
 
     give_at(&f.server, &f.player, 5_001, BOW, slot_type::INVENTORY, 1);
     give_at(&f.server, &f.player, 5_002, BOW, slot_type::INVENTORY, 2);
     start_skill(&f.server, &mut f.client.conn, cast.clone());
     assert_eq!(egg.data().func_group_id, CLOSED);
     assert_eq!(Inv::of(&f.player).items_count(BOW, -1), 1);
+    assert_eq!(dragon_spawner.current_spawn_count(), 1);
     f.client.drain();
 
     start_skill(&f.server, &mut f.client.conn, cast);
@@ -738,6 +796,7 @@ async fn red_dragon_egg_requires_the_bow_and_charges_only_once() {
         [skill_result::INVALID_TARGET]
     );
     assert_eq!(Inv::of(&f.player).items_count(BOW, -1), 1);
+    assert_eq!(dragon_spawner.current_spawn_count(), 1);
 }
 
 /// No trade pack on the back: the storage skill is refused before the cast instead of playing

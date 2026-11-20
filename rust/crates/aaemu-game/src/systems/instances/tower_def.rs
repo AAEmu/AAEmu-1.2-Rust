@@ -762,7 +762,7 @@ pub fn next_wave(server: &GameServer, key: EventKey, step: u32) -> anyhow::Resul
         SCTowerDefWaveStartPacket {
             key: key.wire(),
             event_zone_id: zone_id,
-            step,
+            wave_index: step - 1,
         },
     );
     send_world_list(server, key.world_id);

@@ -559,6 +559,9 @@ async fn tower_def_lifecycle_broadcasts_progresses_and_cleans_up() {
     advance(3);
     tick(&server);
     assert_eq!(infos(&server, 0)[0].current_step, 1);
+    assert!(c1.drain().iter().any(|(op, body)| {
+        *op == sc::SCTowerDefWaveStartPacket && body.ends_with(&0u32.to_le_bytes())
+    }));
     let wave_npc = server
         .world
         .world(0)
@@ -609,6 +612,9 @@ async fn tower_def_lifecycle_broadcasts_progresses_and_cleans_up() {
     kill(&server, 8000, 700);
     tick(&server);
     assert_eq!(infos(&server, 0)[0].current_step, 2);
+    assert!(c1.drain().iter().any(|(op, body)| {
+        *op == sc::SCTowerDefWaveStartPacket && body.ends_with(&1u32.to_le_bytes())
+    }));
     assert!(server.world.object(wave_npc.obj_id).is_none());
     assert!(server.world.object(child.obj_id).is_none());
     assert!(server.world.object(summoned.obj_id).is_none());
