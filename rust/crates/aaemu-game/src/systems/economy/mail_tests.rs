@@ -711,6 +711,24 @@ async fn send_take_all_and_delete() {
     assert_eq!(w.pa.data().unread_mail.received, 0);
     assert_eq!(&fa[0].1[..1], &[1]);
 
+    // Viewing the sent copy does not open the recipient's copy.
+    let mut sent = PacketStream::new();
+    sent.write_bool(true).write_i64(id);
+    run::<CSReadMailPacket>(&mut w, 0, sent.as_bytes());
+    assert!(!ops(&w.a.drain()).contains(&sc::SCMailReceiverOpenedPacket));
+    assert!(w.b.drain().is_empty());
+    assert_eq!(
+        w.server
+            .systems
+            .economy
+            .mail
+            .get_mail_by_id(id)
+            .unwrap()
+            .header
+            .status,
+        mail_status::UNREAD
+    );
+
     // Bob reads it.
     let mut s = PacketStream::new();
     s.write_bool(false).write_i64(id);
@@ -727,6 +745,16 @@ async fn send_take_all_and_delete() {
     let m = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
     assert_eq!(m.header.status, mail_status::READ);
     assert!(m.open_date > 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCMailReceiverOpenedPacket,
+            body(&SCMailReceiverOpenedPacket {
+                mail_id: id,
+                open_date: m.open_date
+            })
+        )]
+    );
     let bw = m.body_wire(&w.server);
     assert_eq!(bw.items[0].as_ref().map(|i| i.id), Some(stack));
     assert_eq!(
@@ -738,6 +766,13 @@ async fn send_take_all_and_delete() {
             is_open_date_modified: true,
             count: count(0, 0, 0, 0)
         })
+    );
+
+    run::<CSReadMailPacket>(&mut w, 1, s.as_bytes());
+    w.b.drain();
+    assert!(
+        w.a.drain().is_empty(),
+        "a repeated read has no second receipt"
     );
 
     // Bob takes everything.
@@ -797,6 +832,16 @@ async fn send_take_all_and_delete() {
     );
     assert!(w.server.systems.economy.mail.get_mail_by_id(id).is_none());
     assert_eq!(w.server.systems.economy.mail.state().deleted, vec![id]);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCMailRemovedPacket,
+            body(&SCMailRemovedPacket {
+                is_sent: true,
+                mail_id: id
+            })
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1146,6 +1191,7 @@ async fn take_stacks_bag_full_and_single_item() {
         mail_result::SUCCESS
     );
     let id = bob_mail_ids(&w.server)[0];
+    w.a.drain();
     w.b.drain();
     // Bob: STACK x10 in slot 1, and only one free slot left in his bag.
     let own = give(&w, &w.pb.clone(), slot_type::INVENTORY, STACK, 10, 1);
@@ -1179,6 +1225,16 @@ async fn take_stacks_bag_full_and_single_item() {
         (1, vec![s2])
     );
     assert_eq!(m.header.status, mail_status::READ);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCMailReceiverOpenedPacket,
+            body(&SCMailReceiverOpenedPacket {
+                mail_id: id,
+                open_date: m.open_date
+            })
+        )]
+    );
     // The merged attachment is released: no loose copy, its row is queued for deletion.
     assert!(w.server.items.item_by_id(s1).is_none());
     assert!(w.server.items.removed_items().contains(&s1));
@@ -1200,6 +1256,7 @@ async fn take_stacks_bag_full_and_single_item() {
     s.write_i64(id).write_bool(false);
     run::<CSDeleteMailPacket>(&mut w, 1, s.as_bytes());
     assert!(w.b.drain().is_empty());
+    assert!(w.a.drain().is_empty());
     assert!(w.server.systems.economy.mail.get_mail_by_id(id).is_some());
 }
 
@@ -3089,7 +3146,18 @@ async fn native_return_mail_frame_checks_recipient_and_returns_attachments() {
         vec![sc::SCMailReturnedPacket, sc::SCCountUnreadMailPacket]
     );
     assert_eq!(&replies[0].1[..8], &id.to_le_bytes());
-    assert_eq!(w.a.drain_ops(), vec![sc::SCGotMailPacket]);
+    let sender = w.a.drain();
+    assert_eq!(
+        ops(&sender),
+        vec![sc::SCMailRemovedPacket, sc::SCGotMailPacket]
+    );
+    assert_eq!(
+        sender[0].1,
+        body(&SCMailRemovedPacket {
+            is_sent: true,
+            mail_id: id
+        })
+    );
 
     // Even the new recipient cannot return a letter that was already returned.
     w.server.handle_frame(&mut w.a.conn, &frame).await.unwrap();

@@ -32,7 +32,8 @@ use crate::world::PlayerRef;
 use super::error_message;
 use super::inventory::{self, Inv, ItemTxn};
 use super::mail_packets::{
-    SCChargeMoneyPaidPacket, SCGotMailPacket, SCMailDeletedPacket, SCMailReturnedPacket,
+    SCChargeMoneyPaidPacket, SCGotMailPacket, SCMailDeletedPacket, SCMailReceiverOpenedPacket,
+    SCMailRemovedPacket, SCMailReturnedPacket,
 };
 
 /// `MailType`.
@@ -363,6 +364,47 @@ impl BaseMail {
         self.body.money_amount2 = money2;
         self.is_dirty = true;
         self.header.attachments = self.get_total_attachment_count();
+    }
+
+    /// The sent copy belongs to a different character. Self-addressed mail is
+    /// listed in the inbox only, and system mail has no character sender.
+    fn sent_copy_owner(&self) -> Option<u32> {
+        let sender = self.header.sender_id;
+        (sender != 0 && sender != self.header.receiver_id).then_some(sender)
+    }
+
+    /// Record a first read and queue the sender's live receipt.
+    pub(super) fn mark_received_read(&mut self, fx: &mut ItemFxList, time: UnixTime) -> bool {
+        if self.header.status != mail_status::UNREAD {
+            return false;
+        }
+        self.header.status = mail_status::READ;
+        if self.open_date == 0 {
+            self.open_date = time;
+        }
+        self.is_dirty = true;
+        if let Some(sender) = self.sent_copy_owner() {
+            fx.send(
+                sender,
+                SCMailReceiverOpenedPacket {
+                    mail_id: self.id,
+                    open_date: self.open_date,
+                },
+            );
+        }
+        true
+    }
+
+    pub(super) fn notify_sent_copy_removed(&self, fx: &mut ItemFxList) {
+        if let Some(sender) = self.sent_copy_owner() {
+            fx.send(
+                sender,
+                SCMailRemovedPacket {
+                    is_sent: true,
+                    mail_id: self.id,
+                },
+            );
+        }
     }
 
     /// `CanReturnMail()`.
@@ -1836,19 +1878,7 @@ pub(super) fn expire_mail_at(txn: &mut ItemTxn<'_>, id: i64, time: UnixTime) -> 
             },
         );
     }
-    if mail.header.sender_id != mail.header.receiver_id {
-        if let Some(sender) = server.world.character_by_id(mail.header.sender_id) {
-            txn.env.fx.send(
-                sender.character_id,
-                SCMailDeletedPacket {
-                    is_sent: true,
-                    mail_id: id,
-                    is_unread_mail_count_modified: false,
-                    count: sender.data().unread_mail,
-                },
-            );
-        }
-    }
+    mail.notify_sent_copy_removed(&mut txn.env.fx);
     true
 }
 
@@ -2238,6 +2268,9 @@ fn return_to_sender_with(
         );
     }
     mails.with_mail_mut(mail_id, |m| *m = swapped);
+    // The original sender receives the same id in their inbox. Remove the old
+    // sent row before announcing the returned letter.
+    mail.notify_sent_copy_removed(&mut txn.env.fx);
     if mail.is_delivered && mail.header.status == mail_status::UNREAD {
         if let Some(receiver) = server.world.character_by_id(mail.header.receiver_id) {
             refresh_received_count(server, &receiver, time);

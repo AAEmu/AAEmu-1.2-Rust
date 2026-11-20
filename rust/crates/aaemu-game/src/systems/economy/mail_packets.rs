@@ -179,7 +179,7 @@ impl Marshal for SCMailBodyPacket {
     }
 }
 
-/// `SCMailReceiverOpenedPacket(mailId, openDate)` (unused in C#).
+/// `SCMailReceiverOpenedPacket(mailId, openDate)` updates the sender's sent mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCMailReceiverOpenedPacket {
     pub mail_id: i64,
@@ -314,7 +314,7 @@ impl Marshal for SCMailStatusUpdatedPacket {
     }
 }
 
-/// `SCMailRemovedPacket(isSent, mailId)` (unused in C#).
+/// `SCMailRemovedPacket(isSent, mailId)` removes a row from the selected mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCMailRemovedPacket {
     pub is_sent: bool,
