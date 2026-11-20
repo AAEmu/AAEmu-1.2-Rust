@@ -1186,6 +1186,76 @@ fn cs_coffer_interaction_decode() {
     );
 }
 
+#[tokio::test]
+async fn coffer_packet_ignores_only_zero_id_closes() {
+    let server = test_server();
+    let mut owner = TestClient::new(&server, 1, 1001);
+    let mut other = TestClient::new(&server, 2, 1002);
+    for (client, id, name) in [(&mut owner, 1, "Owner"), (&mut other, 2, "Other")] {
+        client.conn.active_char = Some(spawn_player(
+            &server,
+            client,
+            test_character(id, name, 100., 100.),
+            10 + id,
+        ));
+    }
+    let mut data = Doodad::new(100);
+    data.data = i32::from(crate::models::house::housing_permission::PUBLIC);
+    data.transform.set_xyz(100., 100., 100.);
+    data.coffer = Some(DoodadCofferState::default());
+    let coffer = Entity::new(20, data);
+    server.world.world(0).unwrap().add_object(&coffer);
+    owner.drain();
+    other.drain();
+
+    let interact = |client: &mut TestClient, id, opening| {
+        let mut body = PacketStream::new();
+        body.write_bc(id).write_bool(opening);
+        let frame = crate::net::packet::encode_raw(
+            crate::net::packet::LEVEL_PLAIN,
+            crate::opcodes::cs::CSCofferInteractionPacket,
+            body.as_bytes(),
+        );
+        capture_events(|| {
+            futures::executor::block_on(server.handle_frame(&mut client.conn, &frame)).unwrap();
+        })
+        .1
+    };
+    let opened_by = || coffer.data().coffer.as_ref().unwrap().opened_by;
+    let warns = |events: &[CapturedEvent]| {
+        events
+            .iter()
+            .any(|(level, _)| *level == tracing::Level::WARN)
+    };
+
+    assert!(!warns(&interact(&mut owner, 20, true)));
+    assert_eq!(opened_by(), Some(1));
+    assert!(!warns(&interact(&mut owner, 0, false)));
+    assert_eq!(opened_by(), Some(1));
+    assert!(warns(&interact(&mut other, 20, false)));
+    assert_eq!(opened_by(), Some(1));
+    assert!(!warns(&interact(&mut owner, 20, false)));
+    assert_eq!(opened_by(), None);
+    for _ in 0..2 {
+        assert!(!warns(&interact(&mut owner, 0, false)));
+        assert!(owner.drain().is_empty());
+    }
+    for (id, opening) in [(21, false), (21, true), (0, true)] {
+        let logs = interact(&mut owner, id, opening);
+        assert!(logs.iter().any(|(_, msg)| msg.starts_with("[Sus:Cheat]")));
+        assert_eq!(
+            owner.drain_ops(),
+            if opening {
+                vec![sc::SCErrorMsgPacket]
+            } else {
+                vec![]
+            }
+        );
+    }
+    assert!(!warns(&interact(&mut owner, 20, true)));
+    assert_eq!(opened_by(), Some(1));
+}
+
 /// With room for the item the refusal is not a full bag: the invalid-item error stays.
 #[tokio::test]
 async fn loot_item_failure_with_room_keeps_the_invalid_item_error() {

@@ -319,6 +319,10 @@ impl ClientPacket for CSCofferInteractionPacket {
                 self.coffer_obj_id,
                 self.opening
             );
+            // The native UI can send an empty close after closing a specific coffer.
+            if !self.opening && self.coffer_obj_id == 0 {
+                return Ok(());
+            }
             let Some(me) = conn.active_char.clone() else {
                 return Ok(());
             };
