@@ -549,8 +549,10 @@ fn started_result(client: &mut TestClient, skill: u32) -> Option<u8> {
         })
 }
 
-/// Like [`started_result`] for a packet whose caster is an `Item` and whose target is a unit.
+/// Like [`started_result`] for a packet with an item caster.
 fn item_started_result(client: &mut TestClient, skill: u32) -> Option<u8> {
+    use super::types::{caster_type, SkillCastTarget, SkillCaster, SkillObject};
+
     client
         .drain()
         .into_iter()
@@ -560,22 +562,19 @@ fn item_started_result(client: &mut TestClient, skill: u32) -> Option<u8> {
             if s.read_u32().ok() != Some(skill) {
                 return None;
             }
-            let _ = s.read_u16();
-            let caster_type = s.read_u8().ok()?;
-            if caster_type != super::types::caster_type::ITEM {
+            s.read_u16().ok()?;
+            let caster_kind = s.read_u8().ok()?;
+            if caster_kind != caster_type::ITEM {
                 return None;
             }
-            let _ = s.read_bc();
-            let _ = s.read_u64();
-            let _ = s.read_u32();
-            let _ = s.read_u8();
-            let _ = s.read_u32();
-            let _ = s.read_u8();
-            let _ = s.read_bc();
-            let _ = s.read_u8();
-            let _ = s.read_u16();
-            let _ = s.read_u16();
-            let _ = s.read_u8();
+            SkillCaster::read(caster_kind, &mut s).ok()?;
+            let target_type = s.read_u8().ok()?;
+            SkillCastTarget::read(target_type, &mut s).ok()?;
+            let object_type = s.read_u8().ok()?;
+            SkillObject::read(object_type, &mut s).ok()?;
+            s.read_u16().ok()?;
+            s.read_u16().ok()?;
+            s.read_u8().ok()?;
             let flags = s.read_u8().ok()?;
             if flags & 1 == 0 {
                 return None;
@@ -864,6 +863,7 @@ async fn item_and_doodad_skill_still_casts_as_a_plain_unit_skill() {
 const SAVE_PORTAL_SKILL: u32 = 11_215;
 const RENAME_PORTAL_SKILL: u32 = 16_841;
 const MEMORY_INK: u32 = 4_053;
+const TELEPORT_BOOK: u32 = 4_045;
 const SAVE_PORTAL_EFFECT: u32 = 900;
 
 /// Skill 11215 with the `SavePortal` special effect and its Memory Ink reagent.
@@ -900,6 +900,13 @@ fn save_portal_data() -> GameData {
     d.items.templates.insert(
         MEMORY_INK,
         crate::data::items::ItemTemplate::plain(MEMORY_INK, 10),
+    );
+    d.items.templates.insert(
+        TELEPORT_BOOK,
+        crate::data::items::ItemTemplate {
+            use_skill_id: 11_216,
+            ..crate::data::items::ItemTemplate::plain(TELEPORT_BOOK, 1)
+        },
     );
     d.systems.skills.skill_reagents.push(SkillItemAmount {
         id: 1,
@@ -959,6 +966,54 @@ async fn teleport_book_record_skill_is_accepted_and_consumes_memory_ink() {
     assert_eq!(portals[0].name, "Home");
     assert!(portals[0].id > 0);
     assert_eq!(Inv::of(&a).items_count(MEMORY_INK, -1), 1);
+}
+
+#[tokio::test]
+async fn native_teleport_book_record_cast_keeps_the_book_and_spends_memory_ink() {
+    use super::types::{skill_result, SkillCastTarget, SkillCaster};
+    use crate::systems::economy::inventory::Inv;
+
+    const BOOK_ID: u64 = 0x7001;
+    let server = Arc::new(test_server_with(save_portal_data()));
+    server.set_self();
+    super::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Traveller", 100.0, 100.0),
+        0x100,
+    );
+    client.conn.active_char = Some(player.clone());
+    give_test_item(&server, &player, BOOK_ID, TELEPORT_BOOK, 1);
+
+    let mut packet = save_portal_packet(&player);
+    packet.caster = SkillCaster::Item {
+        obj_id: player.obj_id,
+        item_id: BOOK_ID,
+        item_template_id: TELEPORT_BOOK,
+        type1: 0,
+        type2: 0,
+    };
+    packet.target = SkillCastTarget::Unit(0);
+    packet.flag = 2;
+
+    super::handlers::start_skill(&server, &mut client.conn, packet.clone());
+    assert!(player.data().portals.private_portals.is_empty());
+    assert_eq!(
+        item_started_result(&mut client, SAVE_PORTAL_SKILL),
+        Some(skill_result::NEED_REAGENT)
+    );
+
+    give_test_item(&server, &player, 0x7002, MEMORY_INK, 2);
+    super::handlers::start_skill(&server, &mut client.conn, packet);
+    let portals = player.data().portals.private_portals.clone();
+    assert_eq!(portals.len(), 1);
+    assert_eq!(portals[0].name, "Home");
+    assert_eq!(Inv::of(&player).items_count(MEMORY_INK, -1), 1);
+    assert_eq!(Inv::of(&player).items_count(TELEPORT_BOOK, -1), 1);
 }
 
 #[tokio::test]
@@ -1189,7 +1244,6 @@ async fn bind_on_pickup_item_does_not_authorize_npc_or_ability_skills() {
 }
 
 const FIREPLACE_SKILL: u32 = 16_387;
-const FIREPLACE_ITEM: u32 = 4_045;
 const FIREPLACE_DOODAD: u32 = 9_000;
 const FIREPLACE_GROUP: u32 = 5_000;
 const FIREPLACE_FUNC: u32 = 900;
@@ -1207,11 +1261,11 @@ fn fireplace_data(casting_time: i32) -> GameData {
     let mut d = mate_cast_data();
     d.skills.add_client_sourced_skill(FIREPLACE_SKILL);
     d.items.templates.insert(
-        FIREPLACE_ITEM,
+        TELEPORT_BOOK,
         crate::data::items::ItemTemplate {
             bind_type: crate::data::items::bind_type::BIND_ON_PICKUP,
             use_skill_id: 11_216,
-            ..crate::data::items::ItemTemplate::plain(FIREPLACE_ITEM, 1)
+            ..crate::data::items::ItemTemplate::plain(TELEPORT_BOOK, 1)
         },
     );
     d.items.templates.insert(
@@ -1367,7 +1421,7 @@ async fn fireplace_save_portal_requires_its_doodad_and_memory_ink() {
         client.conn.active_char = Some(a.clone());
         let doodad = spawn_fireplace(&server, 102.0);
         let item = if item_cast {
-            give_test_item(&server, &a, 0x7007, FIREPLACE_ITEM, 1);
+            give_test_item(&server, &a, 0x7007, TELEPORT_BOOK, 1);
             0x7007
         } else {
             0
