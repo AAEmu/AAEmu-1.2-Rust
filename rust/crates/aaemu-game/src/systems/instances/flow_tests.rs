@@ -3569,10 +3569,10 @@ async fn real_serpentis_duaxini_death_spawns_one_authored_chest() {
 }
 
 /// The real 1.2 tables + the real `instance_burntcastle_armory` spawn files
-/// (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_dungeon -- --ignored`).
+/// (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_armory -- --ignored`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
-async fn real_dungeon_spawns_load_and_leave_returns_to_main_world() {
+async fn real_armory_spawn_and_both_exit_doodad_flows() {
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
     };
@@ -3591,6 +3591,8 @@ async fn real_dungeon_spawns_load_and_leave_returns_to_main_world() {
     data.zones = ZoneData::load(&conn).expect("zones");
     data.systems.npcs = crate::systems::npcs::Data::load(&ctx).expect("npcs data");
     data.systems.instances = super::Data::load(&ctx).expect("instances data");
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
+    data.skills = crate::data::skills::SkillData::load(&conn).expect("player skill sources");
     let spawns_json =
         std::fs::read_to_string(app_path.join("Data/Worlds/world_spawns.json")).unwrap();
     let lookups: Vec<WorldSpawnLocation> = crate::data::world_templates::parse_world_spawns(
@@ -3616,6 +3618,8 @@ async fn real_dungeon_spawns_load_and_leave_returns_to_main_world() {
         lookups,
         Some(&app_path),
     );
+    crate::systems::npcs::install_hooks(&server);
+    crate::systems::skills::bind(&server);
     let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
     a.p.data().unit.level = 40;
     a.frames();
@@ -3665,6 +3669,127 @@ async fn real_dungeon_spawns_load_and_leave_returns_to_main_world() {
         .frames()
         .iter()
         .any(|(op, _)| *op == sc::SCLoadInstancePacket));
+
+    // Both real exit doodads cast skill 15667 -> effect 13825 -> Return 4018 -> gate 320.
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    let skills = &server.game_data.systems.skills;
+    let skill = skills
+        .skill(indun::ARMORY_EXIT_SKILL)
+        .expect("Armory exit skill");
+    assert_eq!(skill.effects.len(), 1);
+    assert_eq!(skill.effects[0].effect_id, 13825);
+    assert_eq!(
+        skill.effects[0].template,
+        Some((EffectKind::SpecialEffect, 4018))
+    );
+    assert!(matches!(
+        skills.effect(EffectKind::SpecialEffect, 4018),
+        Some(EffectTemplate::Special(s)) if s.special_effect_type_id == 25 && s.value1 == 320
+    ));
+    let gate = crate::systems::npcs::portal::world_gates_by_id(&server, 320).unwrap();
+    assert_eq!(gate.name, "grave_instance_armory");
+    assert_eq!(
+        (gate.zone_id, gate.x, gate.y, gate.z),
+        (257, 15682.3, 12586.8, 166.9)
+    );
+    for (id, template_id, group) in [(2, 3673, 8794), (3, 4923, 12257)] {
+        let mut player = Pc::new(&server, id, "Armory", 100.0, 100.0);
+        player.p.data().unit.level = 40;
+        use_enter_func(&server, &player.p, 168);
+        // Entry queues the player until the loader completes.
+        let dungeon = server
+            .systems
+            .instances
+            .all_dungeons()
+            .into_iter()
+            .find(|d| d.has_access(player.p.character_id))
+            .unwrap();
+        await_loader(&dungeon).await;
+        let instance = dungeon.world_id().unwrap();
+        assert_eq!(player.instance(), instance);
+        let world = server.world.world(instance).unwrap();
+        player.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+        let exit = world
+            .all_doodads()
+            .into_iter()
+            .find(|d| d.data().template_id == template_id)
+            .expect("authored exit doodad");
+        let position = world.world_pos_rot(&WorldObject::from(&exit));
+        worlds::apply_world_spawn_position(
+            &server,
+            &player.p,
+            &WorldSpawnPosition {
+                zone_id: DUNGEON_ZONE,
+                x: position.x,
+                y: position.y,
+                z: position.z,
+                ..Default::default()
+            },
+            instance,
+        );
+        player.frames();
+        if template_id == 4923 {
+            assert_eq!(exit.data().func_group_id, 12256);
+            cast_armory_exit(&server, &mut player, exit.obj_id).await;
+            assert!(!player.ops().contains(&sc::SCLoadInstancePacket));
+            assert_eq!(player.instance(), instance);
+            let ctx = DoodadCtx::of(&server, &exit).unwrap();
+            crate::systems::npcs::doodad::phase::on_skill_hit(
+                &ctx,
+                Some(&WorldObject::from(&player.p)),
+                18024,
+            );
+        }
+        assert_eq!(exit.data().func_group_id, group);
+        let data = &server.game_data.systems.npcs.doodad;
+        let func = data
+            .func_for_skill(group, indun::ARMORY_EXIT_SKILL)
+            .unwrap();
+        assert_eq!(func.skill_id, indun::ARMORY_EXIT_SKILL);
+        assert!(matches!(
+            data.func_template(func.func_id, &func.func_type),
+            Some(FuncTemplate::Use(_))
+        ));
+        cast_armory_exit(&server, &mut player, exit.obj_id).await;
+        let load = load_instance(
+            0,
+            gate.zone_id,
+            gate.x,
+            gate.y,
+            gate.z,
+            (0., 0., worlds::deg_to_rad(gate.yaw)),
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if player
+                    .frames()
+                    .contains(&(sc::SCLoadInstancePacket, load.clone()))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("exit {template_id} did not load gate 320"));
+        assert_eq!(player.instance(), 0);
+        assert!(world.object(player.p.obj_id).is_none());
+        assert!(server
+            .world
+            .world(0)
+            .unwrap()
+            .object(player.p.obj_id)
+            .is_some());
+        assert_eq!(
+            server
+                .systems
+                .instances
+                .events
+                .characters
+                .count(&player.p, CharEvent::DungeonLeave),
+            0
+        );
+    }
     // Destroy the run: with its real spawners, doodads and NPCs gone nothing may keep asking
     // for the instance (`GetWorld: No such World Instance 100` once per tick for hours).
     populate_instance_registries(&server, 100);
@@ -4191,6 +4316,18 @@ const RETURN_GATE_MAIN: u32 = 6002;
 const RETURN_GATE_DISTANT: u32 = 6003;
 const RETURN_SKILL: u32 = 24979;
 
+async fn cast_armory_exit(server: &GameServer, player: &mut Pc, doodad_id: u32) {
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster};
+    let mut cast = PacketStream::new();
+    cast.write_u32(indun::ARMORY_EXIT_SKILL);
+    SkillCaster::Unit(player.p.obj_id).write(&mut cast);
+    SkillCastTarget::Doodad(doodad_id).write(&mut cast);
+    cast.write_u8(0);
+    player
+        .frame(server, cs::CSStartSkillPacket, cast.as_bytes())
+        .await;
+}
+
 fn return_gate_data() -> GameData {
     use crate::systems::skills::data::{effects::SpecialEffect, EffectKind, EffectTemplate};
 
@@ -4212,6 +4349,7 @@ fn return_gate_data() -> GameData {
             gate(RETURN_GATE_INSTANCE, DUNGEON_ZONE, 220.0),
             gate(RETURN_GATE_MAIN, TEST_ZONE, 120.0),
             gate(RETURN_GATE_DISTANT, DUNGEON_ZONE, 1300.0),
+            gate(320, 257, 125.0),
         ],
         vec![],
         vec![],
@@ -4245,6 +4383,10 @@ fn return_gate_data() -> GameData {
 }
 
 fn cast_return(server: &GameServer, p: &PlayerRef, gate_id: i32) {
+    cast_return_with_skill(server, p, RETURN_SKILL, gate_id);
+}
+
+fn cast_return_with_skill(server: &GameServer, p: &PlayerRef, skill_id: u32, gate_id: i32) {
     use crate::systems::skills::effects::{EffectArgs, EffectSource};
     use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
     let caster = WorldObject::from(p);
@@ -4253,10 +4395,7 @@ fn cast_return(server: &GameServer, p: &PlayerRef, gate_id: i32) {
         caster_caster: SkillCaster::Unit(p.obj_id),
         target: crate::systems::skills::geometry::Target::Obj(caster),
         target_caster: SkillCastTarget::Unit(p.obj_id),
-        cast: CastAction::Skill {
-            skill_id: 24979,
-            tl_id: 1,
-        },
+        cast: CastAction::Skill { skill_id, tl_id: 1 },
         source: EffectSource::default(),
         skill_object: &SkillObject::None,
     };
@@ -4286,13 +4425,83 @@ async fn return_without_usable_gate_keeps_the_player_in_the_instance() {
     let before = a.p.data().unit.transform;
     assert!(a.p.data().main_world_position.is_some());
 
-    for gate in [7777, RETURN_GATE_MAIN as i32] {
+    for gate in [7777, RETURN_GATE_MAIN as i32, 320] {
         cast_return(&server, &a.p, gate);
         let ops = a.ops();
         assert!(!ops.contains(&sc::SCLoadInstancePacket), "gate {gate}");
         assert!(!ops.contains(&sc::SCTeleportUnitPacket), "gate {gate}");
         assert!(ops.contains(&sc::SCErrorMsgPacket), "gate {gate}");
         assert_eq!(a.p.data().unit.transform, before, "gate {gate}");
+    }
+}
+
+#[tokio::test]
+async fn armory_exit_cleans_up_dungeon_membership_only_for_an_open_gate() {
+    for closed in [true, false] {
+        let mut data = return_gate_data();
+        let mut exterior = zone(180, 257, 20);
+        exterior.closed = closed;
+        data.zones.zones.insert(257, exterior);
+        let server = dungeon_server_with(data);
+        crate::systems::npcs::install_hooks(&server);
+        let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+        enter_dungeon(&server, &mut a).await;
+        let dungeon = server.systems.instances.dungeon_of_world(100).unwrap();
+        let inside = dungeon.world(&server).unwrap();
+        let outside = server.world.world(0).unwrap();
+        let subscriptions = &server.systems.instances.events.characters;
+        let saved = a.p.data().main_world_position.unwrap();
+        dungeon
+            .st()
+            .leave_requests
+            .push((a.p.character_id, i64::MAX));
+
+        cast_return_with_skill(&server, &a.p, indun::ARMORY_EXIT_SKILL, 320);
+        let frames = a.frames();
+        if closed {
+            assert_eq!(
+                frames,
+                vec![(
+                    sc::SCErrorMsgPacket,
+                    body(&crate::packets::world::SCErrorMsgPacket::new(
+                        crate::world::session::CLOSED_ZONE,
+                        0,
+                        true,
+                    ))
+                )]
+            );
+            assert_eq!(a.instance(), 100);
+            assert!(inside.object(a.p.obj_id).is_some());
+            assert!(outside.object(a.p.obj_id).is_none());
+            assert_eq!(subscriptions.count(&a.p, CharEvent::DungeonLeave), 1);
+            assert_eq!(dungeon.st().leave_requests.len(), 1);
+            continue;
+        }
+        let yaw = std::f32::consts::FRAC_PI_2;
+        assert!(frames.contains(&(
+            sc::SCLoadInstancePacket,
+            load_instance(0, 257, 125.0, 210.0, 25.0, (0., 0., yaw))
+        )));
+        assert!(!frames
+            .iter()
+            .any(|(op, _)| matches!(*op, sc::SCErrorMsgPacket | sc::SCTeleportUnitPacket)));
+        let t = a.p.data().unit.transform;
+        assert_eq!(
+            (t.instance_id, t.zone_id, t.x, t.y, t.z, t.rot_z),
+            (0, 257, 125.0, 210.0, 25.0, yaw)
+        );
+        assert_eq!(a.p.data().main_world_position, Some(saved));
+        assert!(inside.object(a.p.obj_id).is_none());
+        assert!(outside.object(a.p.obj_id).is_some());
+        assert_eq!(subscriptions.count(&a.p, CharEvent::DungeonLeave), 0);
+        assert_eq!(subscriptions.count(&a.p, CharEvent::Disconnect), 0);
+        assert_eq!(subscriptions.count(&a.p, CharEvent::TeamLeave), 0);
+        assert!(dungeon.st().leave_requests.is_empty());
+        assert!(a.p.data().disabled_set_position);
+
+        a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+        assert!(!a.p.data().disabled_set_position);
+        assert_eq!(a.p.region().unwrap().0, 0);
     }
 }
 

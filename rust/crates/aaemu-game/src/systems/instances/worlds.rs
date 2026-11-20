@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
+use crate::data::world_data::Portal;
 use crate::data::world_templates::{WorldSpawnPosition, WorldTemplate};
 use crate::models::character::DEFAULT_INSTANCE_ID;
 use crate::models::transform::Transform;
@@ -371,33 +372,59 @@ pub fn apply_world_spawn_position(
 /// buff is removed (`PORTING.md`).
 pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transform> {
     let mwp = p.data().main_world_position?;
+    load_main_world(
+        server,
+        p,
+        mwp,
+        [
+            deg_to_rad(mwp.rot_x),
+            deg_to_rad(mwp.rot_y),
+            deg_to_rad(mwp.rot_z),
+        ],
+    );
+    Some(mwp)
+}
+
+/// An authored dungeon exit loads the main world at the gate, with its yaw in radians.
+pub(super) fn return_to_main_world_gate(server: &GameServer, p: &PlayerRef, gate: &Portal) {
+    let yaw = deg_to_rad(gate.yaw);
+    load_main_world(
+        server,
+        p,
+        Transform {
+            zone_id: gate.zone_id,
+            x: gate.x,
+            y: gate.y,
+            z: gate.z,
+            rot_z: yaw,
+            ..Default::default()
+        },
+        [0.0, 0.0, yaw],
+    );
+}
+
+fn load_main_world(server: &GameServer, p: &PlayerRef, destination: Transform, angles: [f32; 3]) {
     p.data().set_disabled_set_position(true);
     session::teleport_character(
         server,
         p,
         Transform {
             instance_id: DEFAULT_INSTANCE_ID,
-            zone_id: mwp.zone_id,
-            x: mwp.x,
-            y: mwp.y,
-            z: mwp.z,
-            rot_x: mwp.rot_x,
-            rot_y: mwp.rot_y,
-            rot_z: mwp.rot_z,
-            ..Default::default()
+            world_id: 0,
+            parent_obj_id: 0,
+            ..destination
         },
     );
     p.send(SCLoadInstancePacket {
-        instance_id: mwp.world_id,
-        zone_id: mwp.zone_id,
-        x: mwp.x,
-        y: mwp.y,
-        z: mwp.z,
-        ang_x: deg_to_rad(mwp.rot_x),
-        ang_y: deg_to_rad(mwp.rot_y),
-        ang_z: deg_to_rad(mwp.rot_z),
+        instance_id: destination.world_id,
+        zone_id: destination.zone_id,
+        x: destination.x,
+        y: destination.y,
+        z: destination.z,
+        ang_x: angles[0],
+        ang_y: angles[1],
+        ang_z: angles[2],
     });
-    Some(mwp)
 }
 
 /// `CSInstanceLoadedPacket.Read`: `SCUnitStatePacket(ActiveChar)`, the detailed time of day and

@@ -126,7 +126,7 @@ pub fn fire_dungeon_leave(server: &GameServer, p: &PlayerRef) {
         .handlers(p, CharEvent::DungeonLeave);
     for h in handlers {
         if let Handler::Dungeon(d) = h {
-            dungeon::on_dungeon_leave(server, &d, p);
+            dungeon::on_dungeon_leave(server, &d, p, None);
         }
     }
 }
