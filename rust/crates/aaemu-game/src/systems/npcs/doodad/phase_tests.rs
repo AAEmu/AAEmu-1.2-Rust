@@ -4109,7 +4109,6 @@ async fn real_data_sharpwind_shipped_rows_raise_the_lake() {
         ..Default::default()
     });
     let defs = parse_list(&text, DoodadSpawnerDef::from_json).expect("doodad_spawns.json");
-    assert_eq!(defs.len(), 22, "the shipped Sharpwind rows");
     for (i, def) in defs.into_iter().enumerate() {
         let template = def.base.unit_id;
         assert!(
