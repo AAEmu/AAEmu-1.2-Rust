@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::server::GameServer;
+use crate::systems::npcs::npc::spawner::schedule_npc_do_despawn;
+use crate::systems::skills::data::{EffectKind, EffectTemplate};
 use crate::systems::skills::geometry::{distance_to, Target};
 use crate::systems::social::team::Team;
 use crate::world::{DoodadRef, NpcRef, Player, PlayerRef, WorldInstance, WorldObject};
@@ -474,7 +476,48 @@ pub fn execute(server: &GameServer, action: &IndunAction, world: &Arc<WorldInsta
             fire_area_clear(server, world);
         }
         IndunActionKind::NpcSpawner => {
-            tracing::warn!("IndunActionNpcSpawner");
+            let effect = server
+                .game_data
+                .systems
+                .skills
+                .effect(EffectKind::NpcSpawnerSpawnEffect, action.detail_id);
+            let Some(EffectTemplate::NpcSpawnerSpawn(effect)) = effect else {
+                tracing::warn!(
+                    action_id = action.id,
+                    effect_id = action.detail_id,
+                    "Missing dungeon spawner effect"
+                );
+                return;
+            };
+            let _items = server.systems.economy.operation_scope();
+            let _serial = server.systems.npcs.spawns.spawn_lock();
+            let spawners = server
+                .systems
+                .npcs
+                .spawns
+                .get(world.id)
+                .map_or_else(Vec::new, |manager| {
+                    manager.get_npc_spawner(effect.spawner_id)
+                });
+            if spawners.is_empty() {
+                tracing::warn!(
+                    world_id = world.id,
+                    action_id = action.id,
+                    spawner_id = effect.spawner_id,
+                    "Dungeon event spawner has no placement"
+                );
+            }
+            for spawner in spawners {
+                let npc = spawner.force_spawn(server, 0);
+                // The spawn assigns the template's delay. Event rewards use the action again
+                // if they need to appear a second time.
+                spawner.set_respawn_time(0);
+                if let Some(npc) = npc {
+                    if effect.life_time > 0.0 {
+                        schedule_npc_do_despawn(server, &npc, effect.life_time);
+                    }
+                }
+            }
         }
     }
 }

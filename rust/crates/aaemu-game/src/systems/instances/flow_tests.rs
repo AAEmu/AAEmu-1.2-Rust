@@ -1648,7 +1648,50 @@ async fn instance_return_refiles_character_and_sends_main_world_objects_without_
 
 #[tokio::test]
 async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
-    let server = dungeon_server();
+    use crate::systems::npcs::doodad::spawner::{NpcSpawnerDef, SpawnerBase};
+    use crate::systems::npcs::npc::data::NpcTemplate;
+    use crate::systems::skills::data::effects::NpcSpawnerSpawnEffect;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+
+    const SPAWNER: u32 = 314;
+    const REWARD: u32 = 902;
+    let mut data = dungeon_data();
+    data.formulas = crate::systems::npcs::npc::stats::tests::npc_formulas();
+    data.systems
+        .instances
+        .indun
+        .actions
+        .get_mut(&11)
+        .unwrap()
+        .detail_id = 410;
+    data.systems
+        .skills
+        .effects
+        .entry(EffectKind::NpcSpawnerSpawnEffect)
+        .or_default()
+        .insert(
+            410,
+            EffectTemplate::NpcSpawnerSpawn(NpcSpawnerSpawnEffect {
+                id: 410,
+                spawner_id: SPAWNER,
+                life_time: 0.0,
+                despawn_on_creator_death: false,
+                use_summoner_aggro_target: false,
+                activation_state: false,
+            }),
+        );
+    data.systems.npcs.npc.templates.insert(
+        REWARD,
+        NpcTemplate {
+            id: REWARD,
+            level: 50,
+            npc_template_id: 9,
+            npc_kind_id: 1,
+            npc_grade_id: 1,
+            ..Default::default()
+        },
+    );
+    let server = dungeon_server_with(data);
     let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
     let mut b = Pc::new(&server, 2, "Beta", 110.0, 100.0);
     let mut c = Pc::new(&server, 3, "Gamma", 105.0, 100.0);
@@ -1796,14 +1839,67 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
         .any(|(op, body)| *op == sc::SCUnitStatePacket && bc(body) == b.p.obj_id));
     b.frames();
 
-    // ---- The boss dies: room 5 cleared through the action chain.
+    let placement = NpcSpawnerDef {
+        base: SpawnerBase {
+            unit_id: REWARD,
+            position: DUNGEON_SPAWN,
+            ..Default::default()
+        },
+        count: 1,
+        npc_spawner_ids: vec![SPAWNER],
+        placement_schedule_id: 0,
+    };
+    let main = server.world.world(0).unwrap();
+    for world in [&dworld, &main] {
+        server
+            .systems
+            .npcs
+            .spawns
+            .get_or_create(world)
+            .add_npc_spawner(&server, placement.clone())
+            .unwrap();
+    }
+    let rewards = |world: &crate::world::WorldInstance| {
+        world
+            .all_npcs()
+            .into_iter()
+            .filter(|npc| npc.data().unit.template_id == REWARD)
+            .count()
+    };
+
+    // ---- The boss dies: the action chain clears room 5 and spawns the instance's reward.
     assert!(!d.is_room_cleared(5));
+    assert_eq!(rewards(&dworld), 0);
+    events::on_kill_in_reduce_hp(&server, &WorldObject::from(&boss));
+    assert_eq!(rewards(&dworld), 1);
     events::on_do_die(
         &server,
         &WorldObject::from(&boss),
         Some(&WorldObject::from(&a.p)),
     );
     assert!(d.is_room_cleared(5));
+    assert_eq!(
+        rewards(&dworld),
+        1,
+        "the repeated death event must not duplicate the reward"
+    );
+    assert_eq!(rewards(&main), 0);
+    let reward = dworld
+        .all_npcs()
+        .into_iter()
+        .find(|npc| npc.data().unit.template_id == REWARD)
+        .unwrap();
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .spawns
+            .npc_spawner_of(reward.obj_id)
+            .unwrap()
+            .respawn_time(),
+        0,
+        "the event reward must stay gone once consumed"
+    );
 
     // ---- A leaves through the exit doodad: back to the main world return point.
     use_exit_func(&server, &a.p);
@@ -3405,6 +3501,72 @@ async fn battlefield_end_unbinds_kill_events_without_an_origin_faction() {
 // ---------------------------------------------------------------------------------------------
 // Real data (gated)
 // ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_serpentis_duaxini_death_spawns_one_authored_chest() {
+    use crate::systems::npcs::spawn_manager::TemplateExists;
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let app_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = crate::data::client_files::ClientFileManager::from_sources(&[], &app_path);
+    let ctx = crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: &app_path,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.formulas = crate::data::formulas::FormulaManager::load(&conn).unwrap();
+    data.systems.npcs = crate::systems::npcs::Data::load(&ctx).unwrap();
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).unwrap();
+    data.systems.instances = super::Data::load(&ctx).unwrap();
+    let name = "instance_nachashgar";
+    let template = WorldTemplate::synthetic(11, name, 4, 4, 278);
+    let server = build_server(data, vec![template.clone()], vec![], Some(&app_path));
+    let world = server.world.create_world_instance(Arc::new(template), 100);
+    let npcs = &server.game_data.systems.npcs;
+    let exists = TemplateExists {
+        npc: &|id| npcs.npc.exist(id),
+        doodad: &|id| npcs.doodad.exist(id),
+        transfer: &|_| false,
+        gimmick: &|_| false,
+        slave: &|_| false,
+    };
+    server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&world)
+        .load_spawn_files(&server, &app_path.join("Data/Worlds").join(name), &exists)
+        .unwrap();
+    for event in server.game_data.systems.instances.indun.indun_events(55) {
+        events::subscribe(&server, event, &world);
+    }
+    let mut duaxini = Npc::new(12605);
+    duaxini.unit.transform.instance_id = world.id;
+    duaxini.unit.transform.set_xyz(1144.87, 387.006, 151.29);
+    let boss = WorldObject::Npc(Entity::new(0x7000, duaxini));
+    world.spawn(&boss, &server.view_ctx());
+    assert_eq!(world.all_npcs().len(), 1);
+    events::on_do_die(&server, &boss, None);
+    events::on_do_die(&server, &boss, None);
+    let chests: Vec<_> = world
+        .all_npcs()
+        .into_iter()
+        .filter(|npc| npc.data().unit.template_id == 13437)
+        .collect();
+    assert_eq!(chests.len(), 1);
+    assert!(!chests[0].data().unit.is_dead());
+    let chest = world.world_pos_rot(&WorldObject::from(&chests[0]));
+    assert!((chest.x - 1146.05).abs() < 0.01);
+    assert!((chest.y - 388.314).abs() < 0.01);
+}
 
 /// The real 1.2 tables + the real `instance_burntcastle_armory` spawn files
 /// (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_dungeon -- --ignored`).

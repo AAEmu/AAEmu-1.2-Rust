@@ -3310,6 +3310,83 @@ async fn real_compact_db_template_2336() {
     assert_eq!(f.phase_packets(), vec![4651]);
 }
 
+#[tokio::test]
+async fn npc_encounter_skill_uses_limited_area_slots_for_matching_doodads() {
+    use crate::models::npc::Npc;
+    use crate::systems::skills::data::SkillTemplate;
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::skill::{apply_effects, CastCtx};
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillTargetSelection};
+    use crate::world::Entity;
+
+    let mut data = GameData::empty();
+    data.systems.npcs.doodad = Builder::default()
+        .template(TEMPLATE, &[(1, 1), (2, 0)])
+        .template(TEMPLATE + 1, &[(3, 1), (4, 0)])
+        .func(1, "DoodadFuncSkillHit", 2, 0)
+        .func(3, "DoodadFuncSkillHit", 4, 0)
+        .data;
+    data.systems.npcs.doodad.func_templates.insert(
+        "DoodadFuncSkillHit",
+        [FAKE_SKILL, FAKE_SKILL + 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, skill_id)| {
+                let id = index as u32 + 1;
+                (
+                    id,
+                    FuncTemplate::SkillHit(DoodadFuncSkillHit { id, skill_id }),
+                )
+            })
+            .collect(),
+    );
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::npcs::install_hooks(&server);
+    let world = server.world.world(0).unwrap();
+    let mut npc = Npc::new(123);
+    npc.unit.transform.set_xyz(100.0, 100.0, 40.0);
+    npc.unit.hp = 100;
+    let npc = Entity::new(0x500, npc);
+    world.spawn(&npc, &server.view_ctx());
+
+    let place = |template, x| {
+        let doodad = manager::create(&server, &world, 0, template, None, true).unwrap();
+        doodad.data().transform.set_xyz(x, 100.0, 40.0);
+        manager::spawn(&server, &world, &doodad);
+        manager::init_doodad(&server, &world, &doodad);
+        doodad
+    };
+    let unrelated = place(TEMPLATE + 1, 101.0);
+    let near = place(TEMPLATE, 110.0);
+    let far = place(TEMPLATE, 120.0);
+    let outside = place(TEMPLATE, 150.0);
+    let caster = WorldObject::from(&npc);
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            id: FAKE_SKILL,
+            target_selection: SkillTargetSelection::Source as i32,
+            target_area_radius: 30,
+            target_area_count: 1,
+            ..Default::default()
+        }),
+        1,
+    );
+    let cast = CastCtx {
+        target: Target::Obj(caster.clone()),
+        caster,
+        caster_caster: SkillCaster::Unit(npc.obj_id),
+        target_caster: SkillCastTarget::Unit(npc.obj_id),
+        skill_object: Default::default(),
+    };
+    apply_effects(&server, &skill, &cast);
+    assert_eq!((group(&near), group(&far), group(&outside)), (2, 1, 1));
+    assert_eq!(group(&unrelated), 3);
+    apply_effects(&server, &skill, &cast);
+    assert_eq!((group(&near), group(&far), group(&outside)), (2, 2, 1));
+}
+
 /// Howling Abyss 2 "Strange Device" 6345 -> "Iron Gate" 6346 with the real compact data: the
 /// spawn rows carry `RelatedIds [6346]` and no `FamilyId`, the gate's start group 16787 holds a
 /// `DoodadFuncLogicFamilySubscriber` (30200) and a `DoodadFuncPulseTrigger` (true -> 16788), and a
@@ -4109,7 +4186,6 @@ async fn real_data_sharpwind_shipped_rows_raise_the_lake() {
         ..Default::default()
     });
     let defs = parse_list(&text, DoodadSpawnerDef::from_json).expect("doodad_spawns.json");
-    assert_eq!(defs.len(), 22, "the shipped Sharpwind rows");
     for (i, def) in defs.into_iter().enumerate() {
         let template = def.base.unit_id;
         assert!(

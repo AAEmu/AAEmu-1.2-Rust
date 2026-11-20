@@ -5110,15 +5110,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Pavitra's Spirit 10393, Arcane Soul 13725, Century Root 7152, the three Alliance
   Quartermasters 13649/13652/13663 and the five capital Arena Managers 13792). A global rule
   emptied the two mall worlds and removed those `main_world` NPCs. `instance_library` is
-  excluded too: its activating indun action is `IndunActionNpcSpawner`, which only logs in the
-  C# and here, only 3 of its 49 'f' spawner ids carry a `game_schedule_spawners` binding, and
+  excluded too: only 3 of its 49 'f' spawner ids carry a `game_schedule_spawners` binding, and
   no `npc_spawner_spawn_effects` / `quest_components.npc_spawner_id` row names the other 46, so
   skipping would leave the whole dungeon without its 143 all-'f' rows. The `'f'` part of the
   rule is direct in Sharpwind (its event spawners are activated by `NpcSpawnerSpawnEffect`
   skills that name the spawner id, e.g. Vera's death effect 24094 -> 94694, which is tested);
-  the other instance worlds mark the skipped rows `비활성_...` ("inactive") but their indun
-  scripts are not implemented yet (`IndunActionNpcSpawner` only logs), so skipping keeps them
-  dormant instead of standing in the instance until those scripts arrive. That retail also
+  the other instance worlds mark the skipped rows `비활성_...` ("inactive"). Dungeon spawn actions
+  activate the placements named by their effects, such as the Sanctuary of Darkness chest in
+  Serpentis. The Library Defense boss-death action references spawner 136935, which has no shipped
+  placement. Other inactive rows stay dormant until their own triggers run. That retail also
   starts these spawners inactive is **Inferred** (no 1.2 server capture). Caveat for later:
   `instance_training_camp`'s Red/Blue Army Defense Cannons 13347/13348 (4 rows),
   `instance_burntcastle_armory`'s Bloodhand Watcher 3086, `instance_nachashgar`'s Jehsen 14413

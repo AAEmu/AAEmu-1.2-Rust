@@ -179,6 +179,16 @@ pub trait NpcSkillHooks: Send + Sync {
         0
     }
 
+    /// Whether this doodad's current phase accepts the skill hit.
+    fn accepts_doodad_skill_hit(
+        &self,
+        _server: &GameServer,
+        _doodad: &WorldObject,
+        _skill_id: u32,
+    ) -> bool {
+        false
+    }
+
     /// `Doodad.OnSkillHit(caster, skillId)`.
     fn doodad_skill_hit(
         &self,

@@ -1068,10 +1068,8 @@ pub(crate) enum SpawnerSkip {
 /// `arche_mall_world`'s vendors (Wardrobe Stylist, Fairmoon Clerks, Veroe Weapons Dealer, Premium
 /// Potion Merchant, ...) and `racing_test_world`'s NPCs are all 'f', and so are `main_world`'s
 /// quest givers (Liteia, Baron Alfonso, Bard Pagos, the Alliance Quartermasters, the five capital
-/// Arena Managers). `instance_library` is excluded too: its activating indun action
-/// (`IndunActionNpcSpawner`) only logs in the C# and here, only 3 of its 49 'f' spawner ids have
-/// a schedule binding and no spawn effect / quest component names the other 46, so the whole
-/// dungeon would stay empty.
+/// Arena Managers). `instance_library` is excluded too: only 3 of its 49 'f' spawner ids have
+/// a schedule binding and no spawn effect or quest component names the other 46.
 fn skips_inactive_at_start(world_name: &str) -> bool {
     world_name.starts_with("instance_") && world_name != "instance_library"
 }
