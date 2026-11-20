@@ -1067,6 +1067,16 @@ async fn fake_and_event_spawners() {
     evs[0].do_event_spawn(&server);
     assert_eq!(evs[0].current_spawn_count(), 1, "MaxPopulation");
 
+    let mut pair = npc_def(500, 60.0, 60.0);
+    pair.npc_spawner_ids = vec![7];
+    pair.count = 2;
+    assert_eq!(m.add_npc_spawner(&server, pair), Ok(0));
+    let evs = m.get_npc_spawner(7);
+    evs[0].force_spawn(&server, 0).unwrap();
+    assert_eq!(evs[0].current_spawn_count(), 2);
+    evs[0].force_spawn(&server, 0).unwrap();
+    assert_eq!(evs[0].current_spawn_count(), 2);
+
     // [0] is "no ids".
     let mut zero = npc_def(500, 700.0, 700.0);
     zero.npc_spawner_ids = vec![0];

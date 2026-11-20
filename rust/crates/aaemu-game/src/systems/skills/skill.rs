@@ -2324,6 +2324,14 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let player = caster.as_player().cloned();
     let caster_t = Target::Obj(caster.clone());
     let target_self = &ctx.target;
+    // Serialize the egg's readiness check, phase change, spawn and bow
+    // consumption. A second cast can finish after the egg has closed.
+    let egg_cast = t.id == super::validation::RED_DRAGON_EGG_SKILL;
+    let _egg_operation = egg_cast.then(|| server.systems.economy.operation_scope());
+    if egg_cast && super::validation::check_red_dragon_egg(server, caster, target_self).is_err() {
+        skill.state().cancelled = true;
+        return;
+    }
     let selection = SkillTargetSelection::from_raw(i64::from(t.target_selection));
     // Native 1.2 sub_398A01B0 attribute 3 / sub_39420B30: radius is in meters.
     let area_radius = apply_skill_modifiers(

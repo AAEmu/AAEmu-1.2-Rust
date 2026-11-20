@@ -13,6 +13,7 @@ use crate::systems::economy::inventory::Inv;
 pub(crate) const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
+pub(super) const RED_DRAGON_EGG_SKILL: u32 = 23_150;
 /// How far above the source and the destination the obstacle ray is cast. This was the Rust/C#-era
 /// height (`+ 1.0` at both ends); 28286101a (2026-10-27) dropped it to feet level to follow the
 /// client's "unit position height", and the feet-level ray then refused casts the 1.2 client
@@ -23,6 +24,42 @@ pub(crate) const OBSTACLE_RAY_HEIGHT: f32 = 1.0;
 
 fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))
+}
+
+/// The egg's authored skill uses Dancing Goddess's Hunt as an effect-level
+/// cost. The bow is required for the whole cast, including its spawn effect.
+pub(super) fn check_red_dragon_egg(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &Target,
+) -> Result<(), (u8, u32)> {
+    const RED_DRAGON_EGG: u32 = 7056;
+    const READY_PHASE: u32 = 18_936;
+    const DANCING_GODDESS_HUNT: u32 = 29_301;
+
+    let Some(player) = caster.as_player() else {
+        return fail("skill_invalid_source");
+    };
+    let ready = target
+        .as_obj()
+        .and_then(WorldObject::as_doodad)
+        .is_some_and(|egg| {
+            let egg = egg.data();
+            egg.template_id == RED_DRAGON_EGG && egg.func_group_id == READY_PHASE
+        });
+    if !ready {
+        return fail("skill_invalid_target");
+    }
+    let items = server.systems.skills.ext.items();
+    if items.item_count(server, player, DANCING_GODDESS_HUNT) > 0 {
+        return Ok(());
+    }
+    let result = if Inv::of(player).items_count(DANCING_GODDESS_HUNT, -1) > 0 {
+        skill_result::ITEM_LOCKED
+    } else {
+        skill_result_for_key("skill_need_reagent")
+    };
+    Err((result, DANCING_GODDESS_HUNT))
 }
 
 /// Item-caster tags belong to the owned item's server-side template, never the wire hint.
@@ -303,6 +340,9 @@ pub(super) fn check(
     target: &Target,
 ) -> Result<(), (u8, u32)> {
     let template = &skill.template;
+    if template.id == RED_DRAGON_EGG_SKILL {
+        check_red_dragon_egg(server, caster, target)?;
+    }
     // Like the other cast restrictions, this also applies to administrators. A GM's
     // cooldown override does not grant permission to use forbidden tags.
     if caster.as_player().is_some()

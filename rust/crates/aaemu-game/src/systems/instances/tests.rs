@@ -41,7 +41,7 @@ fn opcodes() {
         SCTowerDefWaveStartPacket {
             key: TowerDefKey::default(),
             event_zone_id: 0,
-            step: 0
+            wave_index: 0
         }
         .opcode(),
         sc::SCTowerDefWaveStartPacket
@@ -337,7 +337,7 @@ fn tower_def_packets_are_byte_exact() {
         body(&SCTowerDefWaveStartPacket {
             key,
             event_zone_id: 129,
-            step: 3
+            wave_index: 3
         }),
         vec![12, 0, 0, 0, 5, 0, 129, 0, 0, 0, 3, 0, 0, 0]
     );

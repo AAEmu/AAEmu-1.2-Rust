@@ -908,12 +908,13 @@ impl Marshal for SCTowerDefEndPacket {
     }
 }
 
-/// `SCTowerDefWaveStartPacket(key, eventZoneId, step)`.
+/// `SCTowerDefWaveStartPacket(key, eventZoneId, waveIndex)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCTowerDefWaveStartPacket {
     pub key: TowerDefKey,
     pub event_zone_id: u32,
-    pub step: u32,
+    /// The 1.2 client indexes the event's localized wave notices from zero.
+    pub wave_index: u32,
 }
 packet_def!(
     SCTowerDefWaveStartPacket,
@@ -923,7 +924,7 @@ packet_def!(
 impl Marshal for SCTowerDefWaveStartPacket {
     fn write(&self, s: &mut PacketStream) {
         self.key.write(s);
-        s.write_u32(self.event_zone_id).write_u32(self.step);
+        s.write_u32(self.event_zone_id).write_u32(self.wave_index);
     }
 }
 
