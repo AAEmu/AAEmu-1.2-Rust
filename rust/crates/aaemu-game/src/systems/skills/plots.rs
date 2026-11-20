@@ -1157,7 +1157,9 @@ fn update_random_unit_target(
     };
     let around = around_shape(server, &source, &shape).unwrap_or_default();
     let mut filtered = filter_targets(server, around, state, args, event.id);
-    if args.hit_once {
+    // Hell Lightning's initial target has only aimed the spell. Its placement step can
+    // pick that player, then the event's hit history excludes them on later ticks.
+    if args.hit_once && event.id != 1452 {
         let prev = ti.previous_target.as_ref().map_or(0, Target::obj_id);
         filtered.retain(|o| o.obj_id() != prev);
     }
@@ -1310,7 +1312,25 @@ fn apply_plot_effect(
         tracing::error!("PlotEventEffect: invalid source {}", eff.source_id);
         return;
     };
-    for new_target in &ti.effected {
+    let place_at_event_target = eff.target_id == 5
+        && matches!(
+            template,
+            Some(
+                EffectTemplate::Spawn(_)
+                    | EffectTemplate::Interaction {
+                        world_interaction: 31,
+                        ..
+                    }
+            )
+        );
+    // Meteor tracks place one hazard or summon at the chosen impact point. Victims in
+    // the damage radius neither gate the placement nor multiply it.
+    let targets = if place_at_event_target {
+        ti.target.as_slice()
+    } else {
+        &ti.effected
+    };
+    for new_target in targets {
         let Some(target) = plot_target(eff.target_id, state, ti, new_target) else {
             tracing::error!("PlotEventEffect: invalid target {}", eff.target_id);
             return;

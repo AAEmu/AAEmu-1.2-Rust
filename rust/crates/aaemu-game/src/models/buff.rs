@@ -382,6 +382,19 @@ impl Buffs {
         i
     }
 
+    pub(crate) fn refresh_stack_timers(&mut self, id: u32, duration: i32, now_ms: i64) {
+        for effect in self.effects.iter_mut().filter(|effect| {
+            effect.template.id == id && effect.in_use && effect.time_left(now_ms) > 0.0
+        }) {
+            effect.start_time_ms = now_ms;
+            effect.duration = duration;
+            self.events.push(BuffEvent::Refreshed {
+                buff: effect.clone(),
+                previous_caster_obj_id: effect.caster_obj_id,
+            });
+        }
+    }
+
     /// The stack-rule part of `AddBuff` for a buff whose `index` (0 = allocate) and `duration`
     /// were already decided by the caller (duration modifiers, tolerance, forced duration).
     pub fn add_buff_with_duration(&mut self, mut buff: Buff, index: u32, now_ms: i64) {

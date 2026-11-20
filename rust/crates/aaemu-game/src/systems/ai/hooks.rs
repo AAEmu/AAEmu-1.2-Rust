@@ -338,7 +338,18 @@ pub fn npc_control_effect(
             if cmds.is_empty() {
                 return;
             }
-            let queued = cmds.clone();
+            let mut queued = cmds.clone();
+            if e.param_int == 103 && target.data().unit.template_id == 10518 {
+                // Command set 103 uses the low-health staging actor for its opening lines.
+                // Finish with its authored vanish skill once the combat boss has appeared.
+                queued.push(super::params::AiCommands {
+                    id: 0,
+                    cmd_set_id: e.param_int,
+                    cmd_id: AiCommandCategory::UseSkill,
+                    param1: 17196,
+                    param2: String::new(),
+                });
+            }
             post(server, target.obj_id, move |c| {
                 c.enqueue_ai_commands(&queued, false)
             });

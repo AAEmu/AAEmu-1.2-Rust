@@ -2333,6 +2333,9 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let player = caster.as_player().cloned();
     let caster_t = Target::Obj(caster.clone());
     let target_self = &ctx.target;
+    // Earthen Grip is marked Others, which the area filter interprets as neutral only.
+    // Both it and Sorvell's barrel barrage select enemies that can receive their effects.
+    let sorvell_area = matches!(t.id, 15592 | 15668) && caster.as_npc().is_some();
     // Serialize the egg's readiness check, phase change, spawn and bow
     // consumption. A second cast can finish after the egg has closed.
     let egg_cast = t.id == super::validation::RED_DRAGON_EGG_SKILL;
@@ -2379,8 +2382,12 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 units.push(o.clone());
             }
         }
-        let relation = SkillTargetRelation::from_raw(i64::from(t.target_relation))
-            .unwrap_or(SkillTargetRelation::Any);
+        let relation = if sorvell_area {
+            SkillTargetRelation::Hostile
+        } else {
+            SkillTargetRelation::from_raw(i64::from(t.target_relation))
+                .unwrap_or(SkillTargetRelation::Any)
+        };
         let mut units = filter_with_relation(server, relation, &caster_t, units);
         // Corpses (or the living, for a resurrection) never take an area slot. A template with
         // neither flag set (57 radius skills) is left unfiltered rather than refusing everyone.
@@ -2453,6 +2460,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         if super::relation::is_relation_valid(server, relation, &caster_t, &caster_t) {
             possible.push(caster_t.clone());
         }
+    }
+    if sorvell_area {
+        possible.retain(|target| {
+            target
+                .as_obj()
+                .is_some_and(|object| object.is_unit() && object.obj_id() != caster.obj_id())
+        });
     }
     if t.target_area_count > 0 && possible.len() > t.target_area_count as usize {
         if caster.as_npc().is_some()
@@ -2527,32 +2541,36 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let mut to_apply: Vec<(Target, &SkillEffect)> = Vec::new();
     let mut last_applied: Option<&SkillEffect> = None;
     for effect in &t.effects {
-        let effected: Vec<Target> =
-            match ApplicationMethod::from_raw(i64::from(effect.application_method)) {
-                Some(ApplicationMethod::Target | ApplicationMethod::SourceToPos) => {
+        let method = if t.id == 17635 && effect.effect_id == 19275 {
+            // Hieronimus casts one Demon's Howl while the son brings up the ward.
+            // The ward's own effect still targets its marker across the room.
+            Some(ApplicationMethod::Source)
+        } else {
+            ApplicationMethod::from_raw(i64::from(effect.application_method))
+        };
+        let effected: Vec<Target> = match method {
+            Some(ApplicationMethod::Target | ApplicationMethod::SourceToPos) => possible.clone(),
+            Some(ApplicationMethod::Source) => vec![caster_t.clone()],
+            Some(ApplicationMethod::SourceOnce) => {
+                let mate_owner_mark = matches!(ctx.caster_caster, SkillCaster::Mount { .. })
+                    && target_self.as_obj().is_some_and(|o| o.as_mate().is_some());
+                let slave = target_self.as_obj().is_some_and(|o| o.as_slave().is_some());
+                if mate_owner_mark || slave {
                     possible.clone()
+                } else {
+                    vec![caster_t.clone()]
                 }
-                Some(ApplicationMethod::Source) => vec![caster_t.clone()],
-                Some(ApplicationMethod::SourceOnce) => {
-                    let mate_owner_mark = matches!(ctx.caster_caster, SkillCaster::Mount { .. })
-                        && target_self.as_obj().is_some_and(|o| o.as_mate().is_some());
-                    let slave = target_self.as_obj().is_some_and(|o| o.as_slave().is_some());
-                    if mate_owner_mark || slave {
-                        possible.clone()
-                    } else {
-                        vec![caster_t.clone()]
-                    }
-                }
-                None => {
-                    tracing::debug!(
-                        skill_id = t.id,
-                        effect_id = effect.effect_id,
-                        application_method = effect.application_method,
-                        "Skill effect skipped: unknown application method"
-                    );
-                    Vec::new()
-                }
-            };
+            }
+            None => {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    application_method = effect.application_method,
+                    "Skill effect skipped: unknown application method"
+                );
+                Vec::new()
+            }
+        };
         for target in effected {
             let relation = relation_to(server, &caster_t, &target);
             if effect.start_level > caster_level || effect.end_level < caster_level {

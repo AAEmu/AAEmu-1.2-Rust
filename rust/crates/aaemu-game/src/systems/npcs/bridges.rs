@@ -1047,8 +1047,7 @@ fn npc_spawner_spawn_effect(
     }
 }
 
-/// `KillNpcWithoutCorpseEffect.Apply` (mirrors the C#: the *caster* is removed for every
-/// matching NPC around).
+/// `KillNpcWithoutCorpseEffect.Apply`.
 fn kill_npc_without_corpse(
     server: &GameServer,
     e: &crate::systems::skills::data::effects::KillNpcWithoutCorpseEffect,
@@ -1067,15 +1066,29 @@ fn kill_npc_without_corpse(
         return; // does not apply to the character
     }
     if e.vanish {
-        // A vanishing scripted removal ends the life too (no quest credit, C# parity).
-        if let Some(npc) = caster.as_npc() {
-            if super::npc::death::claim_scripted_removal(npc)
-                && !remove_effects_and_delete(server, caster)
-            {
-                super::npc::death::unclaim_scripted_removal(npc);
-            }
+        // An area cast supplies one selected target at a time. Hieronimus's combat
+        // initialization (17670) names the six Dominated adds and must leave the boss alive.
+        let victim = if args
+            .source
+            .skill
+            .as_ref()
+            .is_some_and(|skill| skill.template.target_area_radius > 0)
+        {
+            args.target.as_obj()
         } else {
-            remove_effects_and_delete(server, caster);
+            Some(caster)
+        };
+        let Some((victim, npc)) = victim
+            .and_then(|victim| victim.as_npc().map(|npc| (victim, npc)))
+            .filter(|(_, npc)| npc.data().unit.template_id == e.npc_id)
+        else {
+            return;
+        };
+        // A vanishing scripted removal ends the life without awarding quest credit.
+        if super::npc::death::claim_scripted_removal(npc)
+            && !remove_effects_and_delete(server, victim)
+        {
+            super::npc::death::unclaim_scripted_removal(npc);
         }
         return;
     }
@@ -1159,6 +1172,10 @@ fn spawn_gimmick_effect(
     );
     let params = super::gimmick::manager::SpawnGimmickParams {
         gimmick_id: e.gimmick_id,
+        target_position: Some(crate::systems::skills::geometry::world_pos(
+            server,
+            &args.target,
+        )),
         offset_from_source: e.offset_from_source,
         offset_coordinate_id: e.offset_coordinate_id as i32,
         offset_x: e.offset[0],

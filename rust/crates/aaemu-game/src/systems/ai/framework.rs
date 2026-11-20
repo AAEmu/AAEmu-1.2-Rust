@@ -19,7 +19,7 @@ use crate::world::{now_ms, Entity, NpcRef, WorldObject};
 use super::behaviors;
 use super::geodata::astar::PathNode;
 use super::params::{AiCommands, AiParamType, AiParams, AiSkill};
-use super::path_handler::{AiPathHandler, AiPathPoint};
+use super::path_handler::{AiPathHandler, AiPathPoint, AiPathPointAction};
 
 /// `BehaviorKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -633,7 +633,18 @@ impl<'a> AiCtx<'a> {
 
     /// `OnAggroTargetChanged()`.
     pub fn on_aggro_target_changed(&mut self) {
+        if self.running_armory_boss_intro() {
+            return;
+        }
         self.transition(TransitionEvent::OnAggroTargetChanged);
+    }
+
+    pub(crate) fn running_armory_boss_intro(&self) -> bool {
+        self.ai
+            .current_command
+            .as_ref()
+            .or_else(|| self.ai.commands_queue.front())
+            .is_some_and(|command| matches!(command.cmd_set_id, 103 | 106 | 107))
     }
 
     // ---- GoToX (forced state changes; the AI characters override a few) ----
@@ -721,10 +732,11 @@ impl<'a> AiCtx<'a> {
     /// `LoadAiPathPoints(aiPathFileName, addToQueueOnly)`.
     pub fn load_ai_path_points(&mut self, name: &str, add_to_queue_only: bool) -> bool {
         // Routes shared by several zones are picked by the NPC's position (see `AiPathsManager`).
-        let near = Some(super::npc::world_pos(self.server, &self.obj));
-        let stem = self.server.systems.ai.paths.resolve_stem(name, near);
+        let near = super::npc::world_pos(self.server, &self.obj);
+        let stem = self.server.systems.ai.paths.resolve_stem(name, Some(near));
         let points = match &stem {
             Some(stem) => self.server.systems.ai.paths.load_ai_path_points(stem),
+            None if name.starts_with("AIPath_") => Arc::new(self.designer_patrol(name, near)),
             None => Arc::new(Vec::new()),
         };
         if points.is_empty() {
@@ -741,6 +753,36 @@ impl<'a> AiCtx<'a> {
             h.ai_path_points_remaining.extend(points.iter().cloned());
         }
         true
+    }
+
+    fn designer_patrol(&self, name: &str, near: Vec3) -> Vec<AiPathPoint> {
+        let Some(world) = self.server.world.world_of(&self.obj) else {
+            return Vec::new();
+        };
+        let Some(geodata) = self.server.systems.ai.geodata.get(world.template.id) else {
+            return Vec::new();
+        };
+        let mut points = geodata.designer_path(name, near);
+        let Some((start, _)) = points.iter().enumerate().min_by(|(_, a), (_, b)| {
+            let distance = |p: &Vec3| (p.x - near.x).hypot(p.y - near.y);
+            distance(a).total_cmp(&distance(b))
+        }) else {
+            return Vec::new();
+        };
+        points.rotate_left(start);
+        points
+            .into_iter()
+            .enumerate()
+            .map(|(i, position)| AiPathPoint {
+                position,
+                action: if i == 0 {
+                    AiPathPointAction::EnableLoop
+                } else {
+                    AiPathPointAction::None
+                },
+                param: String::new(),
+            })
+            .collect()
     }
 
     /// Queues a path point (`AiPathPointsRemaining.Enqueue`).

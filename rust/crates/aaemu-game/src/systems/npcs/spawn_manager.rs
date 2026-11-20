@@ -1317,6 +1317,17 @@ impl SpawnManager {
             .instances
             .tower_defs
             .npc_spawner_ids();
+        // An explicit ordinary spawner disambiguates NPC templates also used in tower waves.
+        let single_placement = (ids.is_empty() && b.spawner_id != 0)
+            .then(|| data.get_npc_spawner_template(b.spawner_id))
+            .flatten()
+            .filter(|t| {
+                t.npc_spawner_category_id == npc_spawner_category::AUTOCREATED
+                    && !tower_ids.contains(&t.id)
+                    && spawner_skip(&self.world.template.name, t).is_none()
+                    && matches!(t.npcs.as_slice(), [member]
+                        if member.member_type == "Npc" && member.member_id == b.unit_id)
+            });
         let controller_ids: Vec<_> = data
             .get_spawner_ids(b.unit_id)
             .unwrap_or_default()
@@ -1329,7 +1340,7 @@ impl SpawnManager {
                         .any(|n| n.member_id == b.unit_id && n.member_type == "Npc")
                 })
             })
-            .filter(|id| ids.is_empty() || ids.contains(id))
+            .filter(|id| single_placement.is_none() && (ids.is_empty() || ids.contains(id)))
             .collect();
         if !controller_ids.is_empty() {
             // The shipped JSON lists event controllers as ordinary NPCs. Retain their
@@ -1352,6 +1363,7 @@ impl SpawnManager {
         }
         if hold_group_members
             && ids.is_empty()
+            && single_placement.is_none()
             && server
                 .game_data
                 .systems
@@ -1405,7 +1417,9 @@ impl SpawnManager {
             template.destroy_time = schedule.destroy_time;
             Some(template)
         } else {
-            group_placement.map(|template| (*template).clone())
+            single_placement
+                .or(group_placement)
+                .map(|template| (*template).clone())
         };
         if let Some(mut template) = placement_template {
             // An area template can describe several packs. The placement count bounds

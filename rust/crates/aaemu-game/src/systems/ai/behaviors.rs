@@ -1911,6 +1911,12 @@ fn follow_path_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !c.st(k).enter {
         return;
     }
+    // A player who triggers the intro may already be within melee range. Let the boss
+    // finish the authored descent and follow-up commands before switching to combat.
+    if c.running_armory_boss_intro() {
+        run_current_path(c, delta_ms);
+        return;
+    }
     if !update_target(c) {
         set_target(c, None);
     }
@@ -2472,6 +2478,10 @@ fn run_command_set_tick(c: &mut AiCtx<'_>, delta_ms: i64) {
     // If everything is executed, and still time remaining, wait for it before going back
     if c.ai.current_command_run_time_ms > 0 {
         c.ai.current_command_run_time_ms -= delta_ms;
+        if c.ai.current_command_run_time_ms == 0 {
+            // A wait which expires exactly on a tick is complete too.
+            c.ai.current_command_run_time_ms = -1;
+        }
         return;
     }
     // If there are commands in the AI Command queue, execute those first
@@ -2603,7 +2613,12 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
         }
         Cmd::Timeout => {
             c.ai.ai_time_out = cmd.param1;
-            c.ai.current_command_run_time_ms = i64::from(c.ai.ai_time_out);
+            let wait = i64::from(c.ai.ai_time_out);
+            c.ai.current_command_run_time_ms = if matches!(cmd.cmd_set_id, 102 | 103 | 106 | 107) {
+                wait * 1000
+            } else {
+                wait
+            };
         }
         Cmd::Other(v) => {
             tracing::error!("AI command {v}: NotSupportedException");
@@ -3029,8 +3044,10 @@ fn big_monster_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
                 .skills
                 .skill(s.skill_type)
                 .is_some_and(|tpl| {
-                    (target_dist >= tpl.min_range as f32 && target_dist <= tpl.max_range as f32)
-                        || ai_skills::is_self_target(tpl)
+                    !tpl.source_dead
+                        && ((target_dist >= tpl.min_range as f32
+                            && target_dist <= tpl.max_range as f32)
+                            || ai_skills::is_self_target(tpl))
                 })
         })
         .cloned()

@@ -3629,7 +3629,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   stood on the 66033 event-spawner position (the loader's duplicate filter checks only plain
   rows, so ordering made the script spawner register but the boss also stand at t=0) - the
   killable 3rd boss now appears through the cutscene, and the 1.2-era start rows 8960 (Sorvell)
-  and 12190 (Winters) stay active as in the level, as does the 10518 Prince Hieronimus display.
+  and 12190 (Winters) stay active as in the level. The 10518 Prince Hieronimus display runs
+  command set 103, then uses its authored vanish skill 17196. Appending that final cue is
+  inferred from the staging actor and skill data. The idle reset skill 17670 clears the named
+  Dominated adds in its area. The seven Bloodwind Ogre placements explicitly select Armory
+  spawner 9859 because the same NPC template is used by test tower-defense spawner 9892.
+  The two Bloodhand Warlock patrols use named routes from the 1.2 client. The associations
+  between the placements and nearby routes are inferred.
   The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
   (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
   `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /
