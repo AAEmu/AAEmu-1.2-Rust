@@ -12,7 +12,7 @@
 //! Everything else here (other closed zones, nonparticipants, warmup, GM overrides, the
 //! open-zone safe-return rules) keeps the previous behaviour.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,7 @@ use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
 use crate::systems::npcs::portal;
 use crate::systems::skills::packets_special::{SCCharacterResurrectedPacket, SCLoadInstancePacket};
-use crate::world::{broadcast, PlayerRef, WorldObject};
+use crate::world::{broadcast, Player, PlayerRef, WorldObject};
 
 /// Native 1.2 `x2game12.c:1163240`, error-name switch case 287 = `closed_zone`.
 pub const CLOSED_ZONE: i16 = 287;
@@ -31,12 +31,47 @@ pub const CLOSED_ZONE: i16 = 287;
 #[derive(Debug, Clone, Default)]
 pub struct ZoneAccessState {
     // Retain a completed attempt until departure: a missing safe route must not start a loop.
-    attempt: Option<CancellationToken>,
+    attempt: Option<Arc<CancellationToken>>,
     safe_position: Option<Transform>,
     /// `Housing.OpenCastleZonesForDeclarers`: `(zone group, calendar cycle)` this character was
     /// last admitted to a closed castle zone for on a camp item. Runtime only; a stale value
     /// names a finished cycle and opens nothing.
     declarer_admitted: Option<(u32, i64)>,
+}
+
+struct EvictionAttempt {
+    player: Weak<Player>,
+    token: Arc<CancellationToken>,
+    keep_pending: bool,
+}
+
+impl EvictionAttempt {
+    fn is_current(&self, player: &Player) -> bool {
+        !self.token.is_cancelled()
+            && player
+                .data()
+                .zone_access
+                .attempt
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.token))
+    }
+}
+
+impl Drop for EvictionAttempt {
+    fn drop(&mut self) {
+        if !self.keep_pending {
+            if let Some(player) = self.player.upgrade() {
+                let mut c = player.data();
+                if c.zone_access
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &self.token))
+                {
+                    c.zone_access.attempt = None;
+                }
+            }
+        }
+    }
 }
 
 fn is_closed(server: &GameServer, zone: u32) -> bool {
@@ -290,76 +325,95 @@ pub(super) fn update(server: &GameServer, player: &PlayerRef) {
     let Some(server) = server.self_arc() else {
         return;
     };
-    let token = {
+    let Some(runtime) = &server.runtime else {
+        tracing::warn!(
+            character_id = player.character_id,
+            "Closed zone: server runtime unavailable"
+        );
+        return;
+    };
+    let attempt = {
         let mut c = player.data();
         if c.zone_access.attempt.is_some() {
             return;
         }
-        let token = CancellationToken::new();
+        let token = Arc::new(CancellationToken::new());
         c.zone_access.attempt = Some(token.clone());
-        token
+        EvictionAttempt {
+            player: Arc::downgrade(player),
+            token,
+            keep_pending: false,
+        }
     };
-    // Weak handles prevent a sleeping warning from retaining a departed session/server.
-    let weak_server = Arc::downgrade(&server);
-    let weak_player = Arc::downgrade(player);
-    let started = tokio::time::Instant::now();
+    // The warning deadline and its timer must use the same clock even on a native worker.
+    let started = {
+        let _runtime = runtime.enter();
+        tokio::time::Instant::now()
+    };
     player.send(SCErrorMsgPacket::new(CLOSED_ZONE, 0, false));
-    tokio::spawn(async move {
-        for tick in 1..=5 {
-            tokio::select! {
-                _ = token.cancelled() => return,
-                _ = tokio::time::sleep_until(started + Duration::from_secs(tick * 2)) => {}
-            }
-            let (Some(server), Some(player)) = (weak_server.upgrade(), weak_player.upgrade())
-            else {
-                return;
-            };
-            if token.is_cancelled() {
-                return;
-            }
-            if !needs_return(&server, &player) {
-                cancel(&player);
-                return;
-            }
-            if tick < 5 {
-                player.send(SCErrorMsgPacket::new(CLOSED_ZONE, 0, false));
-            }
-        }
-        let (Some(server), Some(player)) = (weak_server.upgrade(), weak_player.upgrade()) else {
-            return;
-        };
-        let Some(destination) = return_destination(&server, &player) else {
-            tracing::warn!(
-                character_id = player.character_id,
-                "Closed zone: no verified open return route"
-            );
-            return;
-        };
-        crate::systems::vehicles::force_dismount(
-            &server,
-            &player,
-            crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
-        );
-        let instance = player.data().unit.transform.instance_id;
-        crate::systems::vehicles::mates::remove_and_despawn_all_active_owned_mates(
-            &server,
-            instance,
-            player.character_id,
-        );
-        // Match the historical 200 ms dismount grace; recheck cancellation and identity after it.
+    // The guard is owned by the future before its first poll. If the runtime is shutting down
+    // and discards the task, dropping the future releases just this player's matching attempt.
+    runtime.spawn(evict(Arc::downgrade(&server), attempt, started));
+}
+
+async fn evict(
+    weak_server: Weak<GameServer>,
+    mut attempt: EvictionAttempt,
+    started: tokio::time::Instant,
+) {
+    for tick in 1..=5 {
         tokio::select! {
-            _ = token.cancelled() => return,
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            _ = attempt.token.cancelled() => return,
+            _ = tokio::time::sleep_until(started + Duration::from_secs(tick * 2)) => {}
         }
-        if token.is_cancelled() {
+        let (Some(server), Some(player)) = (weak_server.upgrade(), attempt.player.upgrade()) else {
+            return;
+        };
+        if !attempt.is_current(&player) || !needs_return(&server, &player) {
             return;
         }
-        if !needs_return(&server, &player) || !safe_destination(&server, &destination) {
-            cancel(&player);
-            return;
+        if tick < 5 {
+            player.send(SCErrorMsgPacket::new(CLOSED_ZONE, 0, false));
         }
-        transport(&server, &player, destination);
-    });
+    }
+    let (Some(server), Some(player)) = (weak_server.upgrade(), attempt.player.upgrade()) else {
+        return;
+    };
+    let Some(destination) = return_destination(&server, &player) else {
+        tracing::warn!(
+            character_id = player.character_id,
+            "Closed zone: no verified open return route"
+        );
+        attempt.keep_pending = true;
+        return;
+    };
+    if !attempt.is_current(&player) {
+        return;
+    }
+    crate::systems::vehicles::force_dismount(
+        &server,
+        &player,
+        crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+    );
+    let instance = player.data().unit.transform.instance_id;
+    crate::systems::vehicles::mates::remove_and_despawn_all_active_owned_mates(
+        &server,
+        instance,
+        player.character_id,
+    );
+    // Match the historical 200 ms dismount grace; recheck cancellation and identity after it.
+    tokio::select! {
+        _ = attempt.token.cancelled() => return,
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+    }
+    if !needs_return(&server, &player)
+        || !safe_destination(&server, &destination)
+        || !attempt.is_current(&player)
+    {
+        return;
+    }
+    transport(&server, &player, destination);
+    attempt.keep_pending = true;
 }
 
 fn return_destination(server: &GameServer, player: &PlayerRef) -> Option<Transform> {

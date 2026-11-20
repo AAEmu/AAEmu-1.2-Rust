@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 
-use super::engine::{Ctx, Deferred, KillUnitInfo, QuestEnv, UnitSnapshot};
+use super::engine::{Ctx, Deferred, KillUnitInfo, QuestEnv, StartRefusal, UnitSnapshot};
 use super::model::acceptor;
 use super::packets::{quest_error, SCDoodadCompleteQuestPacket, SCQuestContextFailedPacket};
 use super::spheres::SphereQuest;
@@ -1045,6 +1045,12 @@ pub fn on_level_up(server: &GameServer, player: &PlayerRef) {
             if ctx.c.unit.level >= level
                 && !ctx.has_quest_completed(quest_id)
                 && !ctx.has_quest(quest_id)
+                // These are background candidates. In particular, a faction-specific
+                // starter is reconsidered on every later level-up for the other faction.
+                && !matches!(
+                    ctx.start_refusal(quest_id, false),
+                    Some(StartRefusal::ComponentUnitReq(_))
+                )
             {
                 ctx.add_quest(quest_id, false, acceptor::UNKNOWN, 0);
             }

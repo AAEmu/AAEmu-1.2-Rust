@@ -135,7 +135,10 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
             return true;
         }
     };
-    tracing::debug!("LoginPacket: L->G {:?}", packet);
+    // The reconnect arm logs its outcome without the credential carried by the packet.
+    if !matches!(&packet, LoginInPacket::PlayerReconnect { .. }) {
+        tracing::debug!("LoginPacket: L->G {:?}", packet);
+    }
     match packet {
         LoginInPacket::RegisterGameServer {
             result,
@@ -233,13 +236,10 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
         }
         LoginInPacket::PlayerReconnect { token } => {
             if let Some(conn) = server.connections.get_by_reconnect_token(token) {
-                tracing::debug!(
-                    "LGPlayerReconnect: SCReconnectAuth to session {} (token {token})",
-                    conn.id
-                );
+                tracing::debug!("LGPlayerReconnect: SCReconnectAuth to session {}", conn.id);
                 conn.send(SCReconnectAuthPacket { token });
             } else {
-                tracing::warn!("LGPlayerReconnect for a token no live session owns: {token}");
+                tracing::warn!("LGPlayerReconnect: no matching live session");
             }
         }
         LoginInPacket::RequestInfo {
@@ -270,4 +270,60 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::login::packets::GLPlayerReconnectPacket;
+    use crate::opcodes::{lg, sc};
+    use crate::test_support::{capture_events, test_server, TestClient};
+
+    #[test]
+    fn reconnect_logs_outcomes_without_credentials() {
+        // Fixed, synthetic values so both diagnostic paths can be checked without real secrets.
+        let matched = 3_141_592_653u32;
+        let unmatched = 2_718_281_828u32;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_, events) = capture_events(|| {
+            runtime.block_on(async {
+                let server = Arc::new(test_server());
+                let mut client = TestClient::new(&server, 123, 1001);
+                client.conn.set_reconnect_token(matched);
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                server.login.set(Some(tx));
+                assert!(server.login.send(&GLPlayerReconnectPacket {
+                    gs_id: 1,
+                    account_id: 1001,
+                    token: matched,
+                }));
+                assert!(rx.try_recv().unwrap().ends_with(&matched.to_le_bytes()));
+                let ack = |token: u32| {
+                    let mut bytes = lg::LGPlayerReconnectPacket.to_le_bytes().to_vec();
+                    bytes.extend_from_slice(&token.to_le_bytes());
+                    bytes
+                };
+                assert!(handle(&server, &ack(matched)).await);
+                assert_eq!(
+                    client.drain(),
+                    vec![(sc::SCReconnectAuthPacket, matched.to_le_bytes().to_vec())]
+                );
+                assert!(handle(&server, &ack(unmatched)).await);
+                assert!(client.drain().is_empty());
+            });
+        });
+        assert!(events.iter().any(|(level, message)| {
+            *level == tracing::Level::DEBUG && message.contains("SCReconnectAuth to session 123")
+        }));
+        assert!(events.iter().any(|(level, message)| {
+            *level == tracing::Level::WARN && message.contains("no matching live session")
+        }));
+        for (_, message) in events {
+            assert!(!message.contains(&matched.to_string()));
+            assert!(!message.contains(&unmatched.to_string()));
+        }
+    }
 }

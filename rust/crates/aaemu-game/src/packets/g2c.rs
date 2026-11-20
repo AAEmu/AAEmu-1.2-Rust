@@ -43,7 +43,7 @@ impl Marshal for X2EnterWorldResponsePacket {
 }
 
 /// `SCReconnectAuthPacket(uint token)`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SCReconnectAuthPacket {
     pub token: u32,
 }
@@ -52,6 +52,13 @@ packet_def!(
     level = LEVEL_PLAIN,
     opcode = sc::SCReconnectAuthPacket
 );
+
+impl std::fmt::Debug for SCReconnectAuthPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SCReconnectAuthPacket")
+            .finish_non_exhaustive()
+    }
+}
 
 impl Marshal for SCReconnectAuthPacket {
     fn write(&self, s: &mut PacketStream) {

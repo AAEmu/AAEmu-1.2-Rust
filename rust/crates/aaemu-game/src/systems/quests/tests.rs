@@ -3829,7 +3829,15 @@ async fn automatic_level_up_start_does_not_report_a_requirement_failure() {
     player.data().unit.level = 10;
     client.conn.active_char = Some(player.clone());
 
-    events::on_level_up(&server, &player);
+    let (_, logs) = crate::test_support::capture_events(|| {
+        events::on_level_up(&server, &player);
+    });
+    assert!(
+        !logs
+            .iter()
+            .any(|(_, message)| message.contains("AddQuest refused")),
+        "an ineligible automatic candidate must not be logged as a refused request: {logs:?}"
+    );
     server.systems.quests.run_queued_evaluations(&server);
     let frames = client.drain();
     assert!(
@@ -3837,6 +3845,12 @@ async fn automatic_level_up_start_does_not_report_a_requirement_failure() {
         "an automatic starter must stay silent: {frames:?}"
     );
     assert!(!events::has_quest(&player, 301));
+    player.data().unit.level = 20;
+    events::on_level_up(&server, &player);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(client
+        .drain_ops()
+        .contains(&sc::SCQuestContextStartedPacket));
 }
 fn report_quest(d: &mut QuestData, id: u32, report: Option<ActKind>) {
     d.add_template(quest(id));
@@ -4614,6 +4628,50 @@ pub(super) fn real_db() -> Option<rusqlite::Connection> {
 fn real_data(conn: &rusqlite::Connection) -> QuestData {
     let files = crate::data::client_files::ClientFileManager::new();
     QuestData::load_from(conn, &files).expect("quest tables load without errors")
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_level_up_quest_offers_respect_mother_faction() {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let mut data = GameData::empty();
+    data.systems.quests = real_data(&conn);
+    data.factions = crate::data::world_data::FactionData::load(&conn, &Default::default()).unwrap();
+    let server = test_server_with(data);
+    for (id, faction, eligible, ineligible) in [(1, 101, 6280, 6282), (2, 108, 6282, 6280)] {
+        let mut character = test_character(id, "FactionTester", 100.0, 100.0);
+        character.unit.faction_id = faction;
+        let mut client = TestClient::new(&server, id, 1000 + id);
+        let player = spawn_player(&server, &client, character, 0x100 + id);
+        for level in [34, 35, 36, 37] {
+            player.data().unit.level = level;
+            let (_, logs) = crate::test_support::capture_events(|| {
+                events::on_level_up(&server, &player);
+                server.systems.quests.run_queued_evaluations(&server);
+            });
+            assert!(
+                logs.iter()
+                    .all(|(_, message)| !message.contains(&format!("Quest {ineligible}:"))),
+                "{logs:?}"
+            );
+            let frames = client.drain();
+            let started = |quest_id: u32| {
+                frames.iter().any(|(op, body)| {
+                    *op == sc::SCQuestContextStartedPacket
+                        && body.get(8..12) == Some(quest_id.to_le_bytes().as_slice())
+                })
+            };
+            assert_eq!(
+                started(eligible),
+                level == 35,
+                "quest {eligible}, faction {faction}, level {level}, logs {logs:?}"
+            );
+            assert!(!started(ineligible));
+            assert!(!frames
+                .iter()
+                .any(|(op, _)| *op == sc::SCQuestUnitReqFailedPacket));
+        }
+    }
 }
 
 #[tokio::test]
