@@ -508,6 +508,8 @@ pub fn execute(server: &GameServer, action: &IndunAction, world: &Arc<WorldInsta
                 );
             }
             for spawner in spawners {
+                // Event spawns only appear when the action runs, like skill-activated spawns.
+                spawner.set_respawn_time(0);
                 if let Some(npc) = spawner.force_spawn(server, 0) {
                     if effect.life_time > 0.0 {
                         schedule_npc_do_despawn(server, &npc, effect.life_time);

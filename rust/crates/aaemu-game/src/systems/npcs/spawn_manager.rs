@@ -1069,8 +1069,7 @@ pub(crate) enum SpawnerSkip {
 /// Potion Merchant, ...) and `racing_test_world`'s NPCs are all 'f', and so are `main_world`'s
 /// quest givers (Liteia, Baron Alfonso, Bard Pagos, the Alliance Quartermasters, the five capital
 /// Arena Managers). `instance_library` is excluded too: only 3 of its 49 'f' spawner ids have
-/// a schedule binding and no spawn effect or quest component names the other 46. Its boss-death
-/// action names spawner 136935, which has no placement in the shipped world.
+/// a schedule binding and no spawn effect or quest component names the other 46.
 fn skips_inactive_at_start(world_name: &str) -> bool {
     world_name.starts_with("instance_") && world_name != "instance_library"
 }

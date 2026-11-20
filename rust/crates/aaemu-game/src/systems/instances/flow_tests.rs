@@ -1879,6 +1879,22 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
         "the repeated death event must not duplicate the reward"
     );
     assert_eq!(rewards(&main), 0);
+    let reward = dworld
+        .all_npcs()
+        .into_iter()
+        .find(|npc| npc.data().unit.template_id == REWARD)
+        .unwrap();
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .spawns
+            .npc_spawner_of(reward.obj_id)
+            .unwrap()
+            .respawn_time(),
+        0,
+        "the event reward must stay gone once consumed"
+    );
 
     // ---- A leaves through the exit doodad: back to the main world return point.
     use_exit_func(&server, &a.p);
