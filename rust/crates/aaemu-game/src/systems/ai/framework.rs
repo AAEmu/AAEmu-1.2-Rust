@@ -220,6 +220,7 @@ pub struct BehaviorSlot {
     pub combat_start_time: i64,
     pub skill_queue: VecDeque<AiSkill>,
     pub starting_skill_already_used: bool,
+    pub armory_portal_cleared: bool,
     // ---- concrete classes ----
     /// `_enter` (most behaviors).
     pub enter: bool,
@@ -746,6 +747,7 @@ impl<'a> AiCtx<'a> {
         }
         let h = &mut self.ai.path_handler;
         h.path_name = stem.unwrap_or_else(|| name.to_string());
+        h.ai_path_actor_flags = None;
         if !add_to_queue_only {
             h.ai_path_points.clear();
             // Set to true to trigger initial loading, need to enable it again in the .path file

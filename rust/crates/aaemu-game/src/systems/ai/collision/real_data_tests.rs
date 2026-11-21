@@ -961,9 +961,17 @@ async fn real_burnt_winters_steps_off_his_plinth_without_sinking_through_it() {
     for _ in 0..16 {
         move_towards(&server, &winters, move_ai, target, 0.25, 0, 0.05);
     }
+    let platform_front = winters.data().unit.transform;
+    assert!((platform_front.x - 285.0).abs() < 0.1);
+    assert_eq!(platform_front.z, z);
+    let target = crate::systems::skills::controllers::Vec3::new(282.0, y, 20.54);
+    for _ in 0..16 {
+        move_towards(&server, &winters, move_ai, target, 0.25, 0, 0.05);
+    }
     let on_floor = winters.data().unit.transform;
-    assert!((on_floor.x - 285.0).abs() < 0.1);
-    assert!((on_floor.z - 20.54).abs() < 0.1);
+    assert!((on_floor.x - 282.0).abs() < 0.1);
+    let floor_z = super::ground_height(&server, 100, target.x, target.y, z).unwrap();
+    assert!((on_floor.z - floor_z).abs() < 0.1);
 }
 
 #[tokio::test]

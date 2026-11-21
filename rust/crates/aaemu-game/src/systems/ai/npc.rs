@@ -549,15 +549,15 @@ pub fn move_towards(
             zone_id,
         );
         // The Armory's prison mesh exposes the plinth's base to ground rays.
-        // Retain Winters's authored stage height while stepping over that base.
-        // Once he steps past the front edge he can descend to the room floor.
+        // The authored Winters path remains at platform height through x 284.724.
         if template_id == 12190
             && zone_id == 236
-            && (288.0..=291.5).contains(&new.x)
+            && (284.7..=291.5).contains(&new.x)
             && (233.0..=239.5).contains(&new.y)
-            && spawner_z.is_some_and(|stage| pos.z >= stage - 0.1 && target_z < stage)
         {
-            target_z = pos.z;
+            if let Some(stage) = spawner_z {
+                target_z = target_z.max(stage);
+            }
         }
         Vec3::new(new.x, new.y, target_z)
     };
@@ -588,7 +588,7 @@ pub fn move_towards(
         rotation_y: ry,
         rotation_z: rz,
         actor_flags: MoveTypeActorFlags(actor_flags),
-        delta_movement: [0, 127, 0],
+        delta_movement: [0, if actor_flags == 5 { 63 } else { 127 }, 0],
         stance,
         alertness,
         ..UnitMove::default()
