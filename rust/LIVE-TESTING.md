@@ -455,10 +455,16 @@ the copy's `bin32/archeage.exe`:
 .\Scripts\patch-r208022-ship-skills.ps1 -ClientDirectory 'C:\AAEmu-dev-client'
 ```
 
-The script updates the client-side checks for portable harpoon pickup, its two
-launch skills, and anchored telescope and Owner's Mark casts. The game server
-still validates the backpack, stun status, and skill targets. Run the client
-with the updated server when checking these interactions.
+Run the script on each r208022 client copy that connects to the updated server.
+It removes the pickup restriction that treated an equipped glider as cargo and
+enables the cannon's native impact-point selector. With quick skill placement
+disabled in the client, select Harpoon Bomb and confirm the aim point. The
+projectile should follow the arc and detonate when it hits.
+
+The script also updates the telescope, Hold Binoculars, and Owner's Mark
+prechecks. With the anchor lowered, try Owner's Mark at the helm and the radar
+at the telescope. The game server still validates the backpack, combat stuns,
+and skill targets.
 
 ## 7. Stopping
 

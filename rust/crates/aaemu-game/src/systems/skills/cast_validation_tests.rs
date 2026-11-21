@@ -196,10 +196,12 @@ async fn the_anchor_stun_only_allows_ship_utility_controls() {
         super::unit_reqs::skill_result_for_key("skill_cannot_cast_in_stun"),
         0,
     ));
-    for id in [13608, 13609, 14766, 17649, 20704, 13749] {
+    for id in [
+        13608, 13609, 14766, 17649, 17949, 17950, 17957, 17958, 20704, 13749,
+    ] {
         let skill = SkillRun::new(
             Arc::new(SkillTemplate {
-                source_stun: false,
+                source_stun: id != 13749,
                 ..super::tests::skill_template(id)
             }),
             1,
@@ -212,7 +214,7 @@ async fn the_anchor_stun_only_allows_ship_utility_controls() {
     super::buffs::add_buff_by_id(&server, &ship, 5226, &ship, 0);
     let mark = SkillRun::new(
         Arc::new(SkillTemplate {
-            source_stun: false,
+            source_stun: true,
             ..super::tests::skill_template(20704)
         }),
         1,

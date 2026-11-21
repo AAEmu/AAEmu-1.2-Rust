@@ -434,6 +434,17 @@ pub fn raycast_ignoring_objects(
         .filter_map(|key| match key.0 {
             // Living proxies are the units' colliders; they are not in `objects`.
             world::ObjKind::Unit => st.living.get(&key.1).copied(),
+            // CryPhysics hulls are managed by the ship thread, not the
+            // ordinary object collider cache.
+            world::ObjKind::Ship => st.objects.get(key).map(|c| c.ent).or_else(|| {
+                let ship = world::Owner::Object {
+                    kind: key.0,
+                    obj_id: key.1,
+                };
+                st.owners
+                    .iter()
+                    .find_map(|(id, owner)| (*owner == ship).then_some(*id))
+            }),
             _ => st.objects.get(key).map(|c| c.ent),
         })
         .collect();

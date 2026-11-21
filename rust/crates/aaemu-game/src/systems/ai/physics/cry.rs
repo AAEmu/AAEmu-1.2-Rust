@@ -5,7 +5,8 @@
 //! wind, storms, whirlpools, harpoon tow, replication) keeps driving the hull velocities; the
 //! Jitter2 integrator, the C# buoyancy force and the manual depenetration passes (shore,
 //! ship–ship, doodads, barriers) are replaced by the engine. The steep shoreline guard
-//! also runs on this backend to keep the helm from driving hulls up emerged rock.
+//! also runs on this backend. Side contacts with scenery keep the helm from
+//! redirecting thrust up a cliff brush that the heightmap cannot see.
 //!
 //! **Entity** (`X2::ShipUnitModel::InitPhysicalEntity`, x2game `sub_39286C50`), from the
 //! `ship_models` row (the 10.x ship desc has the same fields; offsets noted):
@@ -57,6 +58,7 @@ use crate::systems::ai::collision::{
     Files,
 };
 use crate::systems::ai::data::ShipModel;
+use crate::systems::ai::numerics::Vec3Ext;
 use crate::systems::skills::controllers::Vec3;
 
 use super::contacts::{pair, speed_scaled_hull_damage_percent, HullDamage};
@@ -428,6 +430,31 @@ pub struct PulledState {
     pub q: PQuat,
 }
 
+/// Side contacts can be intermittent as different parts of a hull touch the wall.
+const WALL_CONTACT_HOLD_MS: i64 = 150;
+
+#[derive(Debug)]
+struct WallContact {
+    outward: Vec3,
+    max_height: f32,
+    observed_at: i64,
+}
+
+fn is_wall_scenery(owner: Option<Owner>) -> bool {
+    matches!(
+        owner,
+        Some(
+            Owner::Terrain
+                | Owner::Brush { .. }
+                | Owner::Vegetation { .. }
+                | Owner::Object {
+                    kind: ObjKind::Doodad | ObjKind::House,
+                    ..
+                }
+        )
+    )
+}
+
 /// The CryPhysics side of the ships of one instance.
 #[derive(Debug, Default)]
 pub struct CryShips {
@@ -438,6 +465,7 @@ pub struct CryShips {
     pub events: Arc<Mutex<Vec<Event>>>,
     client_installed: bool,
     pub collisions: UnitCollisions,
+    wall_contacts: HashMap<u32, WallContact>,
     /// Collision events received (diagnostics).
     pub events_seen: u64,
 }
@@ -482,6 +510,7 @@ impl CryShips {
                 st.pending_deletes += 1;
             }
             self.pulled.remove(&id);
+            self.wall_contacts.remove(&id);
         }
         for s in ships {
             let id = s.spec.obj_id;
@@ -548,12 +577,14 @@ impl CryShips {
     pub fn collision_damage(
         &mut self,
         st: &WorldState,
-        ships: &[PhysShip],
+        ships: &mut [PhysShip],
         now_ms: i64,
     ) -> Vec<HullDamage> {
         let events: Vec<Event> =
             std::mem::take(&mut *self.events.lock().unwrap_or_else(|e| e.into_inner()));
         self.events_seen += events.len() as u64;
+        self.wall_contacts
+            .retain(|_, contact| now_ms - contact.observed_at <= WALL_CONTACT_HOLD_MS);
         let unit_of = |e: EntIdx| match st.owner(e) {
             Some(Owner::Object {
                 kind: ObjKind::Ship,
@@ -576,9 +607,56 @@ impl CryShips {
                 let dv = v[0] - v[1];
                 let speed = -dv.dot(n);
                 self.collisions.record(a, b, speed, pt, now_ms);
+                if n.z.abs() < 0.65 {
+                    // The contact normal points from ent[1] toward ent[0].
+                    let wall = if is_wall_scenery(st.owner(ent[1])) {
+                        a.map(|id| (id, n))
+                    } else if is_wall_scenery(st.owner(ent[0])) {
+                        b.map(|id| (id, -n))
+                    } else {
+                        None
+                    };
+                    if let Some((id, n)) = wall {
+                        if let Some(ship) = ships.iter().find(|s| s.spec.obj_id == id) {
+                            let horizontal = n.x.hypot(n.y);
+                            let outward = Vec3::new(n.x / horizontal, 0.0, n.y / horizontal);
+                            let contact = self.wall_contacts.entry(id).or_insert(WallContact {
+                                outward,
+                                // Use the preceding tick's height and leave room for buoyancy.
+                                max_height: ship.pos.z.max(ship.cached_water_surface + 0.45),
+                                observed_at: now_ms,
+                            });
+                            contact.outward = outward;
+                            contact.observed_at = now_ms;
+                        }
+                    }
+                }
+            }
+        }
+        for ship in ships.iter_mut() {
+            if let Some(contact) = self.wall_contacts.get(&ship.spec.obj_id) {
+                ship.body.position.y = ship.body.position.y.min(contact.max_height);
+                let (yaw, pitch, roll) = super::jitter::yaw_pitch_roll(ship.body.orientation);
+                if pitch.abs() > 0.1 || roll.abs() > 0.1 || !roll.is_finite() {
+                    ship.body.orientation = super::jitter::quat_rotation_y(yaw);
+                }
             }
         }
         self.collisions.flush(ships, now_ms)
+    }
+
+    /// Drop the component of helm motion into the wall. Sliding along the wall
+    /// and reversing away still work. Run after helm and tow update velocities.
+    pub fn constrain_wall_motion(&self, ship: &mut PhysShip) {
+        let Some(contact) = self.wall_contacts.get(&ship.spec.obj_id) else {
+            return;
+        };
+        let into_wall = ship.body.velocity.dot(contact.outward).min(0.0);
+        ship.body.velocity -= contact.outward * into_wall;
+        ship.body.velocity.y = ship.body.velocity.y.min(0.0);
+        ship.body.angular_velocity.x = 0.0;
+        ship.body.angular_velocity.z = 0.0;
+        ship.sync_speed_from_bow_velocity();
     }
 }
 

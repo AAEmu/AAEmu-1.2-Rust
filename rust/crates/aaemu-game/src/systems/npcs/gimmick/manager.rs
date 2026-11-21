@@ -39,6 +39,11 @@ const BARREL_REST_SPEED: f32 = 0.8;
 
 fn uses_ballistic_motion(template_id: u32) -> bool {
     matches!(template_id, PALACE_BOULDER_TEMPLATE_ID | 49 | 64 | 66)
+        || is_portable_cannon_projectile(template_id)
+}
+
+fn is_portable_cannon_projectile(template_id: u32) -> bool {
+    matches!(template_id, 45 | 46)
 }
 /// Contact radius of a gimmick for `GimmickTemplate.CollisionSkillId` hits. The `gimmicks`
 /// table has no size / radius column and a gimmick has no actor `model_id` (`ModelManager`'s
@@ -499,6 +504,13 @@ fn spawn_effect_gimmick(
     } else {
         caster_world
     };
+    let cannon_projectile = is_portable_cannon_projectile(template.id);
+    let cannon_aim = params
+        .target_position
+        .filter(|aim| cannon_projectile && (aim.x - origin.x).hypot(aim.y - origin.y) >= 4.0);
+    let yaw = cannon_aim.map_or(caster_world.rot_z, |aim| {
+        (origin.x - aim.x).atan2(aim.y - origin.y)
+    });
     {
         let t = &mut g.unit.transform;
         t.instance_id = caster_t.instance_id;
@@ -510,7 +522,7 @@ fn spawn_effect_gimmick(
             origin.z,
             caster_world.rot_x,
             caster_world.rot_y,
-            caster_world.rot_z,
+            yaw,
         );
     }
     g.entity_guid = 0;
@@ -545,8 +557,10 @@ fn spawn_effect_gimmick(
         }
     }
     g.unit.scale = params.scale;
-    if matches!(template.id, 49 | 64 | 66) && params.offset_coordinate_id == 2 {
-        let (sin_yaw, cos_yaw) = caster_world.rot_z.sin_cos();
+    if (cannon_projectile || matches!(template.id, 49 | 64 | 66))
+        && params.offset_coordinate_id == 2
+    {
+        let (sin_yaw, cos_yaw) = yaw.sin_cos();
         g.unit.transform.set_xyz(
             origin.x + params.offset_x * cos_yaw - params.offset_y * sin_yaw,
             origin.y + params.offset_x * sin_yaw + params.offset_y * cos_yaw,
@@ -590,7 +604,6 @@ fn spawn_effect_gimmick(
     // Kinematic gimmicks use the authored velocity directly. Armory barrels also use their
     // gravity and a floor probe. Other dynamic gimmicks need their own collision model. The angular
     // velocity is applied either way.
-    let yaw = caster_world.rot_z;
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     let rotate_local = |v: [f32; 3]| {
         [
@@ -604,6 +617,21 @@ fn spawn_effect_gimmick(
         && (template.mass <= 0.0 || falling_barrel || uses_ballistic_motion(template.id))
     {
         g.vel = rotate_local([params.velocity_x, params.velocity_y, params.velocity_z]);
+        if let Some(aim) = cannon_aim {
+            let t = &g.unit.transform;
+            let [dx, dy, dz] = [aim.x - t.x, aim.y - t.y, aim.z - t.z];
+            let launch_speed = params.velocity_x.hypot(params.velocity_y);
+            if launch_speed > 0.0 {
+                // Solve the same constant-gravity motion used by the tick, using
+                // the authored horizontal launch speed to set the flight time.
+                let flight_time = (dx.hypot(dy).hypot(dz) / launch_speed).max(0.05);
+                g.vel = [
+                    dx / flight_time,
+                    dy / flight_time,
+                    dz / flight_time + 0.5 * template.gravity * flight_time,
+                ];
+            }
+        }
         authored_motion = true;
     }
     if params.ang_vel_coordinate_id == 2 {
@@ -631,7 +659,11 @@ fn spawn_effect_gimmick(
             authored_motion,
             owner_character_id,
             barrel_floor,
-            last_pos: if uses_ballistic_motion(params.gimmick_id) {
+            last_pos: if cannon_projectile {
+                // Sweep the muzzle offset on the first tick as well, so a
+                // cannon held against a wall cannot start on its far side.
+                [origin.x, origin.y, origin.z + params.offset_z]
+            } else if uses_ballistic_motion(params.gimmick_id) {
                 initial_pos
             } else {
                 [0.0; 3]
@@ -1004,15 +1036,39 @@ fn tick_ballistic_motion(
         }
     }
     let mut end = to;
-    let hit = collision::raycast(
-        server,
-        world.id,
-        from,
-        to,
-        collision::query::mask::STATIC_TERRAIN,
-        collision::query::ray_flags::DEFAULT,
-    )
-    .flatten();
+    let hit = if is_portable_cannon_projectile(template.id) {
+        use collision::world::ObjKind;
+        let ray_start = active.state().last_pos;
+        let shooter_id = active.gimmick.data().spawner_unit_id;
+        let mut ignored = vec![(ObjKind::Unit, shooter_id)];
+        if let Some(ship) = world
+            .unit(shooter_id)
+            .and_then(|shooter| world.sticky_parent(&shooter))
+            .filter(|parent| parent.as_slave().is_some())
+        {
+            ignored.push((ObjKind::Ship, ship.obj_id()));
+        }
+        collision::raycast_ignoring_objects(
+            server,
+            world.id,
+            ray_start,
+            to,
+            collision::query::mask::SOLID_TERRAIN | collision::query::mask::WATER,
+            collision::query::ray_flags::DEFAULT,
+            &ignored,
+        )
+        .flatten()
+    } else {
+        collision::raycast(
+            server,
+            world.id,
+            from,
+            to,
+            collision::query::mask::STATIC_TERRAIN,
+            collision::query::ray_flags::DEFAULT,
+        )
+        .flatten()
+    };
     if let Some(hit) = hit {
         let normal = [hit.normal.x, hit.normal.y, hit.normal.z];
         end = [

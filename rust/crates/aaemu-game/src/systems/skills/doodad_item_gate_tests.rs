@@ -444,14 +444,37 @@ async fn portable_harpoon_pickup_replaces_a_glider_and_enables_harpoon_bomb() {
         crate::systems::npcs::doodad::data::DoodadData::load_from(&conn).unwrap();
     let files =
         crate::data::client_files::ClientFileManager::from_sources(&[], std::path::Path::new("."));
-    data.systems.skills = crate::systems::skills::Data::load(&crate::systems::DataLoadCtx {
+    let load_ctx = crate::systems::DataLoadCtx {
         conn: &conn,
         app_path: std::path::Path::new("."),
         files: &files,
         language: "en_us",
-    })
-    .unwrap();
+    };
+    data.systems.skills = crate::systems::skills::Data::load(&load_ctx).unwrap();
+    data.systems.npcs.gimmick =
+        crate::systems::npcs::gimmick::GimmickData::load(&load_ctx).unwrap();
     let mut f = fixture_with_data(data);
+    f.server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(std::collections::HashMap::new()))
+        .unwrap();
+    f.server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(
+            crate::systems::ai::collision::terrain::tests::Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+        ))
+        .unwrap_or_else(|_| panic!("terrain already configured"));
     {
         let mut player = f.player.data();
         player.unit.hp = 1000;
@@ -491,13 +514,30 @@ async fn portable_harpoon_pickup_replaces_a_glider_and_enables_harpoon_bomb() {
     );
     let mut shot = store_cast(cannon.obj_id);
     shot.skill_id = 17737;
-    shot.target = SkillCastTarget::Unit(f.player.obj_id);
+    let aim_at = |x| SkillCastTarget::Position {
+        obj_id: 0,
+        x,
+        y: 100.0,
+        z: 100.0,
+        rot: 0.0,
+        obj_id1: 0,
+        obj_id2: 0,
+    };
     {
         let mut player = f.player.data();
         player.unit.global_cooldown_ms = 0;
         player.unit.skill_last_used_ms = 0;
     }
     f.client.drain();
+    shot.target = aim_at(155.0);
+    start_skill(&f.server, &mut f.client.conn, shot.clone());
+    assert_eq!(
+        started_results(&f.client.drain(), 17737),
+        [super::unit_reqs::skill_result_for_key(
+            "skill_too_far_range"
+        )]
+    );
+    shot.target = aim_at(124.0);
     start_skill(&f.server, &mut f.client.conn, shot);
     let frames = f.client.drain();
     assert!(started_results(&frames, 17737).is_empty(), "{frames:x?}");
@@ -511,6 +551,46 @@ async fn portable_harpoon_pickup_replaces_a_glider_and_enables_harpoon_bomb() {
             .map(|plot| plot.0.skill.id),
         Some(17737)
     );
+    let gimmicks = f.server.systems.npcs.gimmicks.for_world(world.id);
+    // Plot deadlines use the world clock, while the pickup cast above uses
+    // Tokio timers. Let the real channel complete before inspecting the shot.
+    tokio::time::resume();
+    let shots = tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let shots = gimmicks.active();
+            if !shots.is_empty() {
+                break shots;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the completed harpoon plot launches a bomb");
+    assert_eq!(shots.len(), 1);
+    let bomb = &shots[0];
+    let x = {
+        let g = bomb.gimmick.data();
+        assert_eq!(g.unit.template_id, 45);
+        assert!(g.vel[0] > 20.0 && g.vel[1].abs() < 0.01, "{:?}", g.vel);
+        g.unit.transform.x
+    };
+    use crate::systems::npcs::gimmick::manager::gimmick_tick;
+    let tick = Duration::from_millis(50);
+    gimmick_tick(&f.server, &world, bomb, tick, 50);
+    assert!(bomb.gimmick.data().unit.transform.x > x + 1.0);
+    for n in 2..=32 {
+        if gimmicks.get(bomb.gimmick.obj_id).is_none() {
+            break;
+        }
+        gimmick_tick(&f.server, &world, bomb, tick, n * 50);
+    }
+    assert!(
+        gimmicks.get(bomb.gimmick.obj_id).is_none(),
+        "bomb hit the floor"
+    );
+    let impact = bomb.gimmick.data().unit.transform;
+    assert!((impact.x - 124.0).abs() < 0.2, "impact x {}", impact.x);
+    assert!((impact.z - 100.0).abs() < 0.2, "impact z {}", impact.z);
 }
 
 /// A byte-exact failed `SCSkillStartedPacket` for a unit caster / doodad target (no skill

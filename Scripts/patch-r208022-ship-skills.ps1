@@ -48,20 +48,25 @@ INSERT INTO skill_patch_check SELECT COUNT(*) = 1 FROM skills
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skill_reqs
   WHERE (id = 13 AND buff_tag_id = 306) OR (id = 35 AND buff_tag_id = 367);
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skills
-  WHERE id IN (17737, 17738) AND target_type_id = 0 AND plot_id > 0;
-INSERT INTO skill_patch_check SELECT COUNT(*) = 4 FROM skills
-  WHERE id IN (13608, 13609, 17649, 20704) AND source_stun IN ('t', 'f');
+  WHERE (id = 17737 AND plot_id = 355 OR id = 17738 AND plot_id = 356)
+    AND target_type_id IN (0, 11);
+INSERT INTO skill_patch_check SELECT COUNT(*) = 8 FROM skills
+  WHERE id IN (13608, 13609, 17649, 17949, 17950, 17957, 17958, 20704)
+    AND source_stun IN ('t', 'f');
 
 -- These requirements treat the glider's equipment buffs as a carried pack.
 -- The server checks the actual backpack slot before it equips the cannon.
 DELETE FROM skill_req_skills WHERE skill_id = 15660 AND skill_req_id IN (13, 35);
 
--- These actions cast on the operator. Their plots launch separate impact skills.
-UPDATE skills SET target_alive = 't', target_dead = 'f', check_obstacle = 'f'
+-- Select an impact point through the native cannon targeting UI. The projectile
+-- has its own collision checks, so a straight obstacle ray cannot reject the arc.
+UPDATE skills SET target_type_id = 11, target_selection_id = 2, min_range = 4, max_range = 45,
+                  target_alive = 't', target_dead = 'f', check_obstacle = 'f'
   WHERE id IN (17737, 17738);
 
 -- The server still rejects combat stuns and allows these skills under the anchor status.
-UPDATE skills SET source_stun = 't' WHERE id IN (13608, 13609, 17649, 20704);
+UPDATE skills SET source_stun = 't'
+  WHERE id IN (13608, 13609, 17649, 17949, 17950, 17957, 17958, 20704);
 
 COMMIT;
 '@)
