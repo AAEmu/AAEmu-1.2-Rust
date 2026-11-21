@@ -563,10 +563,14 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     let is_fish_school = super::super::fish_school::is_school_template(template_id);
     let howl_ward = template_id == 4626 && f.buff_id == 3615;
     let howling_hazard = matches!(template_id, 5170 | 5383 | 5706 | 5708 | 6261 | 6273);
+    // The poison puddles and tombstones are anchored at the encounter's
+    // summoned doodad. Timed phases can arrive without an explicit caster.
+    let hadir_hazard = matches!(template_id, 3874 | 3956);
     let owner = if f.use_origin_source
         && !is_fish_school
         && !howl_ward
         && !howling_hazard
+        && !hadir_hazard
         && ctx.doodad.core().is_visible()
     {
         // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
@@ -593,8 +597,17 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // The school owns the area and releases it when its chummed phase expires.
         ctx.doodad.clone()
     };
+    let caster = if hadir_hazard {
+        let owner_obj_id = ctx.doodad.data().owner_obj_id;
+        ctx.world
+            .object(owner_obj_id)
+            .filter(|o| o.as_npc().is_some())
+    } else {
+        caster.cloned()
+    };
     let trigger_caster = match caster {
-        Some(c) if c.as_player().is_some() || (howling_hazard && c.as_npc().is_some()) => c.clone(),
+        Some(c) if hadir_hazard => c,
+        Some(c) if c.as_player().is_some() || (howling_hazard && c.as_npc().is_some()) => c,
         _ => ctx.obj(),
     };
     let inside_buff_id = server
@@ -628,8 +641,10 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // beneficial buffs now reach the units inside (key 0, see `AreaTrigger::apply_effects`):
         // Lake Bubbles (4336) gives Air Bubble 3036 at the Soundless Lake sealstone. Its damage,
         // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
-        // Calleil's Hellfire has a damage effect and no inside buff.
-        None if matches!(f.id, 1415 | 1542) => HashMap::from([(0, f.effects.clone())]),
+        // These encounter clouts carry their payload without an inside buff.
+        None if hadir_hazard || matches!(f.id, 1415 | 1542) => {
+            HashMap::from([(0, f.effects.clone())])
+        }
         None => HashMap::from([(0, good_buff_effects(server, &f.effects))]),
     };
     trigger.tick_rate = f.tick;

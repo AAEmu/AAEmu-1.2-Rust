@@ -40,6 +40,7 @@ use crate::world::{now_ms, WorldObject};
 
 use super::data::{BuffTemplate, SkillControllerTemplate};
 use super::geometry::{world_of, world_pos, Target};
+use super::packets_special::SCBlinkUnitPacket;
 use super::stats::{stat, StatKind};
 use super::{broadcast, buffs};
 
@@ -1795,6 +1796,21 @@ impl SkillController {
                 self.owner.obj_id()
             );
             self.owner.with_transform(|t| t.set_height(ground_z));
+            if self.source_buff_id() == 2659 {
+                if let Some(player) = self.owner.as_player() {
+                    // The owning client does not receive its controller's movement
+                    // broadcasts. Correct its position when Slam finishes.
+                    let landed = world_pos(server, &Target::Obj(self.owner.clone()));
+                    player.send(SCBlinkUnitPacket {
+                        obj_id: player.obj_id,
+                        distance: 0.0,
+                        degree: 0.0,
+                        x: landed.x,
+                        y: landed.y,
+                        z: landed.z,
+                    });
+                }
+            }
             // End the controller before StopMovement (the Npc.MoveTowards guard).
             self.final_end(true);
             super::on_landed(server, &self.owner);

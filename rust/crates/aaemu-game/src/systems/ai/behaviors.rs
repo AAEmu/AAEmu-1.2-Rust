@@ -1932,9 +1932,9 @@ fn follow_path_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     if !c.st(k).enter {
         return;
     }
-    // A player who triggers the intro may already be within melee range. Let the boss
-    // finish the authored descent and follow-up commands before switching to combat.
-    if c.running_armory_boss_intro() {
+    // These paths lead into a boss spawn. Let the actor finish the route
+    // and run the remaining commands before responding to nearby combat.
+    if c.running_encounter_intro() {
         run_current_path(c, delta_ms);
         return;
     }

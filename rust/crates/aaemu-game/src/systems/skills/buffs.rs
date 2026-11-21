@@ -1247,9 +1247,9 @@ pub fn start(server: &GameServer, owner: &WorldObject, index: u32) {
         let p = buff_created_packet(server, owner, &b);
         broadcast(server, owner, &p, true);
     }
-    // Buff-driven SkillController for non-character owners (pull / lift / fear / leap / dash);
-    // characters move themselves from the buff payload.
-    let caster = (owner.is_unit() && owner.as_player().is_none())
+    // The Rotten Flesh Golem's Slam needs the server to finish its lift and
+    // fall. Other character controllers run from the client buff payload.
+    let caster = (owner.is_unit() && (owner.as_player().is_none() || template.id == 2659))
         .then(|| find_obj(server, b.caster_obj_id))
         .flatten();
     if let Some(caster) = caster {
@@ -2286,9 +2286,16 @@ fn execute_trigger(
             .as_ref()
             .and_then(WorldObject::as_doodad)
             .is_some_and(|doodad| matches!(doodad.data().template_id, 5516 | 5706 | 5708));
+    // The tombstone marks its victim, but Lady Velarre casts the follow-up
+    // skill that owns the hostile souls.
+    let velarre_tombstone = b.template.id == 2586
+        && caster
+            .as_ref()
+            .and_then(WorldObject::as_npc)
+            .is_some_and(|npc| npc.data().unit.template_id == 9792);
     let mut target = Some(owner.clone());
     let mut source = Some(owner.clone());
-    if t.use_original_source || floor_spear {
+    if t.use_original_source || floor_spear || velarre_tombstone {
         source = caster.clone();
     }
     if t.effect_on_source {
@@ -2350,6 +2357,8 @@ fn execute_trigger(
         caster: effect_caster,
         caster_caster: if floor_spear {
             SkillCaster::Doodad(b.caster_obj_id)
+        } else if velarre_tombstone {
+            SkillCaster::Unit(b.caster_obj_id)
         } else {
             SkillCaster::Unit(owner.obj_id())
         },
