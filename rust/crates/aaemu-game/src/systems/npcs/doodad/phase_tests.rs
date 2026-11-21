@@ -1442,12 +1442,22 @@ async fn ratio_change_by_roll() {
     let d = f.doodad(TEMPLATE);
     assert_eq!(group(&d), 10);
 
+    // Exact upper bound of `[0, 500)` misses.
     f.server
         .systems
         .npcs
         .doodads
         .set_forced_phase_ratio(Some(500));
-    let d2 = manager::create(&f.server, &f.world, 0x501, TEMPLATE, None, true).unwrap();
+    let d_edge = manager::create(&f.server, &f.world, 0x501, TEMPLATE, None, true).unwrap();
+    manager::init_doodad(&f.server, &f.world, &d_edge);
+    assert_eq!(group(&d_edge), 10);
+
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(499));
+    let d2 = manager::create(&f.server, &f.world, 0x502, TEMPLATE, None, true).unwrap();
     manager::init_doodad(&f.server, &f.world, &d2);
     assert_eq!(group(&d2), 21);
     assert_eq!(d2.data().phase.override_phase, 0);
@@ -1602,13 +1612,14 @@ async fn ratio_respawn_chance_cycle_ends_when_the_roll_fails() {
         .phase_func(20, ratio_respawn(2, 2_000, TEMPLATE))
         .phase_func(20, ratio_respawn(3, 2_000, TEMPLATE + 1));
     let f = fx(b);
-    // Per phase func: 10:RatioChange hits -> 20; 20:self-respawn hits -> new TEMPLATE, its 10 hits
-    // -> 20 again (the repeated source); self-respawn misses, the second hits -> TEMPLATE + 1.
+    // One roll per ratio phase: 10:RatioChange hits `[0, 500)` -> 20; 20:self-respawn hits
+    // `[0, 2000)` -> new TEMPLATE, its 10 hits -> 20 again (the repeated source); second 20 rolls
+    // 2500, missing `[0, 2000)` and hitting `[2000, 4000)` -> TEMPLATE + 1.
     f.server
         .systems
         .npcs
         .doodads
-        .queue_phase_ratios(&[100, 100, 100, 9000, 100]);
+        .queue_phase_ratios(&[100, 100, 100, 2500]);
     let spawner = new_spawner(TEMPLATE, 507);
     let first = spawner.spawn(&f.server, 0).expect("spawns the template");
     let last = spawner.last().expect("the replacement is tracked");
@@ -1711,13 +1722,9 @@ async fn ratio_respawn_tod_fan_out_picks_one_variant_or_keeps_the_board() {
         .phase_func(31, ratio_respawn(7, 10_000, TEMPLATE));
     let f = fx(b);
     f.server.time.set(21.0);
-    // One roll per phase func: the board's Tod, then the two respawns (first misses, second
-    // hits -> TEMPLATE + 2), then the variant's Tod.
-    f.server
-        .systems
-        .npcs
-        .doodads
-        .queue_phase_ratios(&[0, 9000, 100, 0]);
+    // One roll per ratio phase: Tod phases consume none; phase 11 rolls 2500, missing `[0, 2000)`
+    // and hitting `[2000, 4000)` -> TEMPLATE + 2.
+    f.server.systems.npcs.doodads.queue_phase_ratios(&[2500]);
     let hit = new_spawner(TEMPLATE, 522);
     hit.spawn(&f.server, 0).expect("spawns the board");
     let variant = hit.last().expect("the variant is tracked");
@@ -1726,13 +1733,9 @@ async fn ratio_respawn_tod_fan_out_picks_one_variant_or_keeps_the_board() {
     assert_eq!(hit.ratio_respawn_peak_depth(), 1);
     assert_eq!(hit.ratio_respawn_chain_depth(), 0);
 
-    // Both rolls miss: the board stays in its respawning phase, with no replacement and no
-    // rejected chain.
-    f.server
-        .systems
-        .npcs
-        .doodads
-        .queue_phase_ratios(&[0, 9000, 9000]);
+    // Roll misses both cumulative intervals `[0, 2000)` and `[2000, 4000)`: the board stays in its
+    // respawning phase, with no replacement and no rejected chain.
+    f.server.systems.npcs.doodads.queue_phase_ratios(&[9000]);
     let miss = new_spawner(TEMPLATE, 523);
     let board = miss.spawn(&f.server, 0).expect("spawns the board");
     assert_eq!(board.data().template_id, TEMPLATE);
@@ -1816,6 +1819,173 @@ async fn ratio_respawn_guard_cleans_up_for_a_later_independent_respawn() {
         .is_some_and(|d| Arc::ptr_eq(&d, &last)));
     assert_eq!(f.world.all_doodads().len(), 1);
     assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
+}
+
+#[tokio::test]
+async fn ratio_change_partitions_single_roll_across_fish_school_species_and_rare_procs() {
+    // Saltwater fish school 6448 phase 16998 shape: four RatioChange rows summing to 10000
+    // (4000/1500/1000/3500) plus a 1000 ms fallback Timer -> Bluefin Tuna (17231). Every roll in
+    // `0..10000` must match its authored cumulative interval and never fall through to the timer.
+    const SALT: u32 = 100;
+    const FRESH: u32 = 101;
+    const RARE: u32 = 102;
+    let b = Builder::default()
+        .template(SALT, &[(10, 1), (11, 2), (12, 2), (13, 2), (14, 2)])
+        .phase_func(10, ratio(1, 4_000, 11))
+        .phase_func(10, ratio(2, 1_500, 12))
+        .phase_func(10, ratio(3, 1_000, 13))
+        .phase_func(10, ratio(4, 3_500, 14))
+        .phase_func(10, timer(5, 1_000, 11))
+        .template(FRESH, &[(20, 1), (21, 2), (22, 2), (23, 2)])
+        .phase_func(20, ratio(6, 3_400, 21))
+        .phase_func(20, ratio(7, 3_300, 22))
+        .phase_func(20, ratio(8, 3_300, 23))
+        .phase_func(20, timer(9, 1_000, 21))
+        .template(RARE, &[(30, 1), (31, 2), (32, 2)])
+        .phase_func(30, ratio(10, 9_999, 31))
+        .phase_func(30, ratio(11, 1, 32));
+    let f = fx(b);
+
+    let mut next_id = 0x600u32;
+    for (roll, expected) in [
+        (0, 11),
+        (3_999, 11),
+        (4_000, 12),
+        (5_499, 12),
+        (5_500, 13),
+        (6_499, 13),
+        (6_500, 14),
+        (9_999, 14),
+    ] {
+        f.server
+            .systems
+            .npcs
+            .doodads
+            .set_forced_phase_ratio(Some(roll));
+        let d = manager::create(&f.server, &f.world, next_id, SALT, None, true).unwrap();
+        next_id += 1;
+        manager::init_doodad(&f.server, &f.world, &d);
+        assert_eq!(group(&d), expected, "saltwater roll {roll}");
+    }
+    assert_eq!(
+        f.advance(1_000),
+        0,
+        "fallback timer must never be armed when cumulative ratios cover 0..10000"
+    );
+
+    for (roll, expected) in [
+        (0, 21),
+        (3_399, 21),
+        (3_400, 22),
+        (6_699, 22),
+        (6_700, 23),
+        (9_999, 23),
+    ] {
+        f.server
+            .systems
+            .npcs
+            .doodads
+            .set_forced_phase_ratio(Some(roll));
+        let d = manager::create(&f.server, &f.world, next_id, FRESH, None, true).unwrap();
+        next_id += 1;
+        manager::init_doodad(&f.server, &f.world, &d);
+        assert_eq!(group(&d), expected, "freshwater roll {roll}");
+    }
+    assert_eq!(f.advance(1_000), 0);
+
+    // 9999 + 1 rare proc: `ratio = 9999` covers `[0, 9999)` so roll `9999` reaches the 0.01% row.
+    for (roll, expected) in [(9_998, 31), (9_999, 32)] {
+        f.server
+            .systems
+            .npcs
+            .doodads
+            .set_forced_phase_ratio(Some(roll));
+        let d = manager::create(&f.server, &f.world, next_id, RARE, None, true).unwrap();
+        next_id += 1;
+        manager::init_doodad(&f.server, &f.world, &d);
+        assert_eq!(group(&d), expected, "rare-proc roll {roll}");
+    }
+}
+
+#[tokio::test]
+async fn ratio_respawn_partitions_single_roll_and_does_not_leak_rejected_or_prior_phase_totals() {
+    const REJECT_SRC: u32 = TEMPLATE + 10;
+    const CHAIN_SRC: u32 = TEMPLATE + 20;
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .template(TEMPLATE + 1, &[(11, 1)])
+        .template(TEMPLATE + 2, &[(12, 1)])
+        .template(TEMPLATE + 3, &[(13, 1)])
+        .phase_func(10, ratio_respawn(1, 2_000, TEMPLATE + 1))
+        .phase_func(10, ratio_respawn(2, 3_000, TEMPLATE + 2))
+        .phase_func(10, ratio_respawn(3, 5_000, TEMPLATE + 3))
+        .template(REJECT_SRC, &[(20, 1)])
+        .phase_func(20, ratio_respawn(4, 2_000, 999_999))
+        .phase_func(20, ratio_respawn(5, 8_000, TEMPLATE + 1))
+        .template(CHAIN_SRC, &[(30, 1), (31, 2), (32, 2), (33, 2), (34, 2)])
+        .phase_func(30, ratio(6, 4_000, 31))
+        .phase_func(30, ratio(7, 6_000, 32))
+        .phase_func(32, ratio(8, 3_000, 33))
+        .phase_func(32, ratio(9, 7_000, 34));
+    let f = fx(b);
+
+    // Cumulative buckets `[0, 2000)`, `[2000, 5000)`, `[5000, 10000)`.
+    let mut spawner_id = 600u32;
+    for (roll, expected_template) in [
+        (0, TEMPLATE + 1),
+        (1_999, TEMPLATE + 1),
+        (2_000, TEMPLATE + 2),
+        (4_999, TEMPLATE + 2),
+        (5_000, TEMPLATE + 3),
+        (9_999, TEMPLATE + 3),
+    ] {
+        f.server
+            .systems
+            .npcs
+            .doodads
+            .set_forced_phase_ratio(Some(roll));
+        let spawner = new_spawner(TEMPLATE, spawner_id);
+        spawner_id += 1;
+        spawner.spawn(&f.server, 0).expect("spawns");
+        let live = spawner.last().expect("replacement tracked");
+        assert_eq!(live.data().template_id, expected_template, "roll {roll}");
+    }
+
+    // A rejected RatioRespawn (missing template) must not spill its roll into the next sibling.
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(500));
+    let spawner_miss = new_spawner(REJECT_SRC, spawner_id);
+    spawner_id += 1;
+    let kept = spawner_miss.spawn(&f.server, 0).expect("spawns");
+    assert_eq!(kept.data().template_id, REJECT_SRC);
+    assert!(!kept.data().phase.deleted);
+
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(2_000));
+    let spawner_hit = new_spawner(REJECT_SRC, spawner_id);
+    spawner_hit.spawn(&f.server, 0).expect("spawns");
+    assert_eq!(
+        spawner_hit.last().expect("replacement").data().template_id,
+        TEMPLATE + 1
+    );
+
+    // `cumulative_phase_ratio` must reset to 0 on every phase entry: 30 accumulates 10000 to
+    // select 32 (`5000 in [4000, 10000)`), and 32 must still match `1000 in [0, 3000)` -> 33.
+    f.server.systems.npcs.doodads.set_forced_phase_ratio(None);
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .queue_phase_ratios(&[5_000, 1_000]);
+    let chained = manager::create(&f.server, &f.world, 0x700, CHAIN_SRC, None, true).unwrap();
+    manager::init_doodad(&f.server, &f.world, &chained);
+    assert_eq!(group(&chained), 33);
 }
 
 #[tokio::test]
@@ -3436,13 +3606,15 @@ async fn real_compact_db_weather_marker_2768_chain_transitions() {
         data,
         ..Default::default()
     });
-    // One roll per phase func, in actual_func_id order. The first 2768: 7026 (RatioChange 186 @7000
-    // and 187 @2500 miss, 188 @500 hits) -> 7055, where 383 (self-respawn @2000) hits. The
-    // replacement 2768 does the same, then its 7055 misses 383 / 384 / 385 and hits 387 (-> 3225),
-    // which the guard used to reject as a repeated (2768, 7055) source.
+    // One roll per ratio phase, partitioned across sibling rows in `actual_func_id` order. The
+    // first 2768: 7026 rolls 9600 (misses 186 `[0, 7000)` and 187 `[7000, 9500)`, hits 188
+    // `[9500, 10000)`) -> 7055, where 100 hits 383 `[0, 2000)` (self-respawn -> 2768). The
+    // replacement 2768 does the same in 7026, then its 7055 rolls 6500 (misses 383/384/385
+    // `[0, 6000)` and hits 387 `[6000, 8000)` -> 3225), which the guard used to reject as a
+    // repeated (2768, 7055) source.
     f.server.systems.npcs.doodads.queue_phase_ratios(&[
-        8000, 8000, 100, 100, // first 2768: 7026 -> 7055, 383 -> 2768
-        8000, 8000, 100, 9000, 9000, 9000, 100, // replacement: 7026 -> 7055, 387 -> 3225
+        9600, 100, // first 2768: 7026 -> 7055, 383 -> 2768
+        9600, 6500, // replacement: 7026 -> 7055, 387 -> 3225
     ]);
     let spawner = new_spawner(2768, 508);
     let first = spawner.spawn(&f.server, 0).expect("spawns template 2768");
@@ -4250,4 +4422,231 @@ async fn real_data_sharpwind_shipped_rows_raise_the_lake() {
     assert_eq!(group(&lake), 13158, "the 5 s pre-roll ends");
     f.advance(22_000);
     assert_eq!(group(&lake), 13159, "the lake is raised");
+}
+
+/// Real compact.sqlite3 fish schools (saltwater 6448 and freshwater 6447): their species
+/// selection phases (`16998` and `16996`) partition `0..10000` across every authored species
+/// without falling through to the Bluefin Tuna / Carp fallback timers, and each species
+/// activates `5767: School of Fish Area` and its species-specific `DoodadFuncFishSchool` spawner
+/// when hit by its matching chum skill (and ignores mismatched chum).
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_compact_db_fish_schools_partition_all_species_and_activate_buff_with_matching_chum() {
+    const SCHOOL_BUFF: u32 = 5767;
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let files = crate::data::client_files::ClientFileManager::default();
+    let load_ctx = crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: std::path::Path::new("."),
+        files: &files,
+        language: "en_us",
+    };
+    let mut gd = GameData::empty();
+    gd.systems.npcs.doodad = DoodadData::load_from(&conn).unwrap();
+    gd.systems.npcs.area_trigger =
+        crate::systems::npcs::area_trigger::AreaTriggerData::load(&load_ctx).unwrap();
+    gd.systems
+        .skills
+        .add_buff(crate::systems::skills::data::BuffTemplate {
+            id: SCHOOL_BUFF,
+            kind: 1,
+            stack_rule: 1,
+            duration: 0,
+            ..Default::default()
+        });
+    gd.skills.buffs.insert(
+        SCHOOL_BUFF,
+        crate::data::skills::BuffTemplate::simple(SCHOOL_BUFF, crate::data::skills::BuffKind::Good),
+    );
+    let server = Arc::new(test_server_with(gd));
+    server.systems.npcs.doodads.tasks.set_manual(true);
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    crate::systems::npcs::bridges::install(&server);
+
+    let world = server.world.world(0).unwrap();
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Angler", 100.0, 100.0),
+        0x400,
+    );
+    let caster = WorldObject::from(&player);
+
+    let mut next_obj_id = 0x500u32;
+    let spawn_school = |template_id: u32, roll: i32, obj_id: u32| {
+        server
+            .systems
+            .npcs
+            .doodads
+            .set_forced_phase_ratio(Some(roll));
+        let school = manager::create(&server, &world, obj_id, template_id, None, true).unwrap();
+        school.data().transform.set_xyz(110.0, 100.0, 100.0);
+        manager::spawn(&server, &world, &school);
+        manager::init_doodad(&server, &world, &school);
+        // Start phase (16997 / 16995) arms a 1000 ms timer into the species selection phase.
+        server.systems.npcs.doodads.tasks.advance(&server, 1_000);
+        school
+    };
+
+    // Saltwater 6448: 4000 Tuna (17231), 1500 Sailfish (17233), 1000 Marlin (17235), 3500 Sturgeon (17237).
+    for (roll, expected_group) in [
+        (0, 17231),
+        (3_999, 17231),
+        (4_000, 17233),
+        (5_499, 17233),
+        (5_500, 17235),
+        (6_499, 17235),
+        (6_500, 17237),
+        (9_999, 17237),
+    ] {
+        let school = spawn_school(SALTWATER_FISH_SCHOOL, roll, next_obj_id);
+        next_obj_id += 1;
+        assert_eq!(group(&school), expected_group, "saltwater roll {roll}");
+        // Fallback Timer 7472 (1000 ms -> 17231) must never have been armed.
+        assert_eq!(
+            server.systems.npcs.doodads.tasks.advance(&server, 1_000),
+            0,
+            "saltwater roll {roll} should not fall through to fallback timer"
+        );
+        assert_eq!(group(&school), expected_group);
+        manager::delete(&server, &world, &school);
+    }
+
+    // Freshwater 6447: 3400 Carp (17243), 3300 Arowana (17246), 3300 Electric Eel (17248).
+    for (roll, expected_group) in [
+        (0, 17243),
+        (3_399, 17243),
+        (3_400, 17246),
+        (6_699, 17246),
+        (6_700, 17248),
+        (9_999, 17248),
+    ] {
+        let school = spawn_school(FRESHWATER_FISH_SCHOOL, roll, next_obj_id);
+        next_obj_id += 1;
+        assert_eq!(group(&school), expected_group, "freshwater roll {roll}");
+        assert_eq!(
+            server.systems.npcs.doodads.tasks.advance(&server, 1_000),
+            0,
+            "freshwater roll {roll} should not fall through to fallback timer"
+        );
+        assert_eq!(group(&school), expected_group);
+        manager::delete(&server, &world, &school);
+    }
+
+    // Verify wrong chum vs matching chum -> Feeding Frenzy + buff 5767 + species spawner.
+    // (school, roll, inactive phase, wrong chum skill, right chum skill, frenzy phase, spawner):
+    // Bluefin Tuna (Sardines), Sailfish (Pike), Blue Marlin (Mackerel), Sturgeon (Roosterfish),
+    // then Carp, Arowana and Electric Eel.
+    let species_cases = [
+        (SALTWATER_FISH_SCHOOL, 0, 17231, 21743, 21702, 17232, 14385),
+        (
+            SALTWATER_FISH_SCHOOL,
+            4_000,
+            17233,
+            21702,
+            21742,
+            17234,
+            14473,
+        ),
+        (
+            SALTWATER_FISH_SCHOOL,
+            5_500,
+            17235,
+            21702,
+            21743,
+            17236,
+            14474,
+        ),
+        (
+            SALTWATER_FISH_SCHOOL,
+            6_500,
+            17237,
+            21702,
+            21741,
+            17238,
+            14476,
+        ),
+        (FRESHWATER_FISH_SCHOOL, 0, 17243, 21744, 21693, 17245, 14475),
+        (
+            FRESHWATER_FISH_SCHOOL,
+            3_400,
+            17246,
+            21693,
+            21744,
+            17247,
+            14477,
+        ),
+        (
+            FRESHWATER_FISH_SCHOOL,
+            6_700,
+            17248,
+            21744,
+            21693,
+            17250,
+            14594,
+        ),
+    ];
+    for (template_id, roll, inactive, wrong_skill, right_skill, frenzy, expected_spawner) in
+        species_cases
+    {
+        let school = spawn_school(template_id, roll, next_obj_id);
+        next_obj_id += 1;
+        assert_eq!(group(&school), inactive);
+
+        let ctx = DoodadCtx::new(&server, world.clone(), school.clone());
+        on_skill_hit(&ctx, Some(&caster), wrong_skill);
+        server.systems.npcs.area_triggers.tick(&server);
+        assert_eq!(group(&school), inactive, "wrong chum {wrong_skill}");
+        assert!(
+            !player.data().unit.buffs.check_buff(SCHOOL_BUFF),
+            "wrong chum {wrong_skill} must not grant buff {SCHOOL_BUFF}"
+        );
+
+        on_skill_hit(&ctx, Some(&caster), right_skill);
+        assert_eq!(group(&school), frenzy, "right chum {right_skill}");
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(
+            player.data().unit.buffs.check_buff(SCHOOL_BUFF),
+            "right chum {right_skill} must activate buff {SCHOOL_BUFF}"
+        );
+
+        let spawner_id = server
+            .game_data
+            .systems
+            .npcs
+            .doodad
+            .phase_funcs(frenzy)
+            .iter()
+            .filter_map(|pf| {
+                server
+                    .game_data
+                    .systems
+                    .npcs
+                    .doodad
+                    .phase_func_template(pf.func_id, &pf.func_type)
+            })
+            .find_map(|t| match t {
+                FuncTemplate::FishSchool(f) => Some(f.npc_spawner_id),
+                _ => None,
+            });
+        assert_eq!(
+            spawner_id,
+            Some(expected_spawner),
+            "frenzy phase {frenzy} fish spawner"
+        );
+
+        manager::delete(&server, &world, &school);
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(
+            !player.data().unit.buffs.check_buff(SCHOOL_BUFF),
+            "deleting school must clear buff {SCHOOL_BUFF}"
+        );
+    }
 }

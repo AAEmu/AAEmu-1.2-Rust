@@ -7106,6 +7106,18 @@ Additional world-side fixes from the same audit:
   fitting as the origin and attach the buff area to the moving ship. Phase cleanup now
   removes the school-owned trigger on expiry. Tests cover chumming near a fitting, sailing
   away and back, and expiry with the angler still inside.
+* `Doodad.DoPhaseFuncs` rolls `phase_ratio` once per phase entry in `0..10000`, resets
+  `cumulative_phase_ratio` to `0`, and evaluates sibling `DoodadFuncRatioChange` and
+  `DoodadFuncRatioRespawn` rows against disjoint half-open intervals `[prev, prev + ratio)`.
+  The C# port re-rolled `phase_ratio` on every phase func, compared with `<=` (making `ratio
+  = 9999` always hit and starving `ratio = 1` rows), never accumulated `cumulative_phase_ratio`
+  in `RatioChange`, and decremented it without reading or resetting it in `RatioRespawn`. That
+  caused ~30% of saltwater fish school (`6448`, phase `16998`, weights `4000/1500/1000/3500`)
+  spawns to miss all four species rows and fall through to fallback `Timer 7472` (Bluefin Tuna
+  `17231`), skewing the ocean to ~70% Tuna and starving Sailfish, Blue Marlin, and Sturgeon
+  schools (and similarly skewing freshwater `6447` phase `16996` into Carp `17243`). Unit and
+  real-compact tests cover cumulative ratio partitioning and matching chum activation (`5767`)
+  across all saltwater and freshwater species.
 * Ship replication preserves the physical quaternion instead of rebuilding it through the
   legacy Euler conversion, including mixed yaw/tilt and positive-W packet reconstruction.
   Solid hull and bottom boxes use transformed authored collision-proxy bounds independently
