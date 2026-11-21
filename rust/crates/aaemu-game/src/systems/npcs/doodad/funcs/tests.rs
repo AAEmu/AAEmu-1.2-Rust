@@ -71,6 +71,7 @@ impl EconomyBridge for Rec {
         id: u32,
         skill: u32,
         task: u8,
+        _roll: &mut Option<Vec<crate::systems::economy::loot::GeneratedLoot>>,
     ) -> Option<bool> {
         self.push(format!("lootpack {id} {skill} {task}"));
         self.loot_pack

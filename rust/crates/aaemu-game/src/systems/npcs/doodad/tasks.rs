@@ -456,17 +456,29 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                 "[Doodad] DoodadFuncTimerTask: Doodad {}, TemplateId {template_id}. Using skill 0 with doodad phase {next_phase}",
                 ctx.doodad.obj_id
             );
-            ctx.doodad.data().phase.func_task = 0;
+            {
+                let mut doodad = ctx.doodad.data();
+                doodad.phase.func_task = 0;
+                // Some intermediate loot phases time out in under a second. Keep the
+                // rolled reward available when the opener needs to free inventory space.
+                if doodad.phase.pending_loot.is_some() {
+                    return;
+                }
+            }
             phase::do_change_phase(&ctx, caster, next_phase);
             // The phase state does not allow us to interact with the object, so we will
             // automatically get items from ID=6121 & ID=6125, "Treasure Chest" in Palace
             // Cellar Dungeon.
             let funcs = ctx.data().funcs_for_group(next_phase as u32);
-            for f in funcs.iter().filter(|f| {
-                f.func_type == "DoodadFuncLootItem" || f.func_type == "DoodadFuncLootPack"
-            }) {
-                if !phase::is_group_kind_start(&ctx, next_phase as u32) {
-                    phase::do_func(&ctx, caster, 0, Some(f));
+            if !phase::is_group_kind_start(&ctx, next_phase as u32) {
+                for f in funcs.iter().filter(|f| {
+                    f.func_type == "DoodadFuncLootItem" || f.func_type == "DoodadFuncLootPack"
+                }) {
+                    if ctx.doodad.data().func_group_id != next_phase as u32
+                        || phase::do_func(&ctx, caster, 0, Some(f))
+                    {
+                        break;
+                    }
                 }
             }
         }

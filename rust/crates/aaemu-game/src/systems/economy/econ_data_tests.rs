@@ -595,7 +595,7 @@ async fn taking_loot_releases_the_unused_allocated_item_id() {
 }
 
 #[tokio::test]
-async fn full_bag_fails_and_restores_the_entry() {
+async fn full_bag_fails_and_the_same_corpse_entry_can_be_retried() {
     let mut w = world_with(data());
     let npc = spawn_npc(&mut w);
     // Fill the bag with single-stack items
@@ -635,6 +635,29 @@ async fn full_bag_fails_and_restores_the_entry() {
         )]
     );
     assert_eq!(w.server.systems.economy.loot.item_count(NPC_OBJ), 3);
+
+    assert_eq!(
+        crate::systems::economy::inventory::consume_item(
+            &mut ItemTxn::begin(&w.server),
+            &Inv::of(&w.pa),
+            Some(&[slot_type::INVENTORY]),
+            task_type::LOOT,
+            super::tests::SINGLE,
+            1,
+            None,
+        ),
+        1
+    );
+    let mut retry = PacketStream::new();
+    retry
+        .write_u16(1)
+        .write_u16(1)
+        .write_bc(NPC_OBJ)
+        .write_u16(0)
+        .write_u16(0);
+    run::<CSLootItemPacket>(&mut w, 0, retry.as_bytes());
+    assert_eq!(Inv::of(&w.pa).items_count(super::tests::STACK, -1), 3);
+    assert_eq!(w.server.systems.economy.loot.item_count(NPC_OBJ), 2);
 }
 
 struct TeamOf(Vec<PlayerRef>);

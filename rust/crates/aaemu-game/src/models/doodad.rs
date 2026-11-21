@@ -362,6 +362,8 @@ pub struct DoodadPhaseState {
     pub to_next_phase: bool,
     /// A `DoodadFuncLootItem` row missed its percent roll during the current `Use` pass.
     pub loot_missed: bool,
+    /// A rolled reward that has not fit in a player's bag yet. It belongs to this phase.
+    pub(crate) pending_loot: Option<PendingDoodadLoot>,
     /// `OverridePhase`.
     pub override_phase: i32,
     /// `PhaseRatio` (0..10000, rolled once per phase entry when the phase has ratio funcs).
@@ -390,6 +392,28 @@ pub struct DoodadPhaseState {
     /// `DoodadFuncTod` funcs must not take the `curTime >= Tod` catch-up (see
     /// `phase_funcs::use_phase_func`).
     pub suppress_tod_catch_up: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingDoodadLoot {
+    Item {
+        func_id: u32,
+        count: i32,
+    },
+    Pack {
+        func_id: u32,
+        /// Quest drops and actability rolls are specific to the opener.
+        rolls: std::collections::HashMap<u32, Vec<crate::systems::economy::loot::GeneratedLoot>>,
+    },
+}
+
+impl PendingDoodadLoot {
+    pub(crate) fn matches(&self, func_type: &str, id: u32) -> bool {
+        match self {
+            Self::Item { func_id, .. } => func_type == "DoodadFuncLootItem" && *func_id == id,
+            Self::Pack { func_id, .. } => func_type == "DoodadFuncLootPack" && *func_id == id,
+        }
+    }
 }
 
 impl Doodad {

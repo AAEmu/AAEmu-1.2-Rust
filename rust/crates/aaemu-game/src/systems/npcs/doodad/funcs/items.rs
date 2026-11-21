@@ -6,7 +6,7 @@ use super::{
     set_to_next_phase, ITEM_COINS,
 };
 use crate::models::container::{equip_slot, slot_type};
-use crate::models::doodad::doodad_owner_type;
+use crate::models::doodad::{doodad_owner_type, PendingDoodadLoot};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::{
     doodad_func_group_kind, DoodadFuncBuyFish, DoodadFuncConsumeChanger, DoodadFuncLootItem,
@@ -126,23 +126,33 @@ pub fn loot_item(
     } else {
         tracing::trace!("{msg}");
     }
+    set_to_next_phase(ctx, false);
     // `(Character)caster` throws for other units; `character == null` returns.
     let Ok(Some(player)) = cast_character(caster) else {
         return;
     };
-    let chance = random_next(0, 10000).unwrap_or(0);
-    if chance > f.percent {
-        ctx.doodad.data().phase.loot_missed = true;
-        return;
-    }
-    let Some(count) = random_next(f.count_min, f.count_max) else {
-        tracing::error!(
-            "DoodadFuncLootItem {}: CountMin {} > CountMax {}",
-            f.id,
-            f.count_min,
-            f.count_max
-        );
-        return;
+    let pending_count = match ctx.doodad.data().phase.pending_loot {
+        Some(PendingDoodadLoot::Item { func_id, count }) if func_id == f.id => Some(count),
+        _ => None,
+    };
+    let count = if let Some(count) = pending_count {
+        count
+    } else {
+        let chance = random_next(0, 10000).unwrap_or(0);
+        if chance > f.percent {
+            ctx.doodad.data().phase.loot_missed = true;
+            return;
+        }
+        let Some(count) = random_next(f.count_min, f.count_max) else {
+            tracing::error!(
+                "DoodadFuncLootItem {}: CountMin {} > CountMax {}",
+                f.id,
+                f.count_min,
+                f.count_max
+            );
+            return;
+        };
+        count
     };
     let eco = economy(ctx.server);
     let res = if f.item_id == ITEM_COINS {
@@ -190,8 +200,12 @@ pub fn loot_item(
             },
         );
     }
-    // Move to next phase only when loot was actually granted.
-    set_to_next_phase(ctx, res);
+    let mut doodad = ctx.doodad.data();
+    doodad.phase.pending_loot = (!res).then_some(PendingDoodadLoot::Item {
+        func_id: f.id,
+        count,
+    });
+    doodad.phase.to_next_phase = res;
 }
 
 /// `DoodadFuncLootPack.Use`.
@@ -201,19 +215,36 @@ pub fn loot_pack(
     caster: Option<&WorldObject>,
     skill_id: u32,
 ) {
+    set_to_next_phase(ctx, false);
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
-    match economy(ctx.server).give_doodad_loot_pack(
+    let mut rolls = match ctx.doodad.data().phase.pending_loot.take() {
+        Some(PendingDoodadLoot::Pack { rolls, .. }) => rolls,
+        _ => Default::default(),
+    };
+    let mut roll = rolls.remove(&player.character_id);
+    let given = economy(ctx.server).give_doodad_loot_pack(
         ctx.server,
         player,
         f.loot_pack_id,
         skill_id,
         item_task::DOODAD_INTERACTION,
-    ) {
-        Some(true) => set_to_next_phase(ctx, true),
-        // TODO (C#): make sure the doodad is marked as loot-able when not enough inventory space
-        Some(false) => send_error(player, err::BAG_FULL),
+        &mut roll,
+    );
+    if given == Some(true) {
+        set_to_next_phase(ctx, true);
+        return;
+    }
+    if let Some(contents) = roll {
+        rolls.insert(player.character_id, contents);
+    }
+    ctx.doodad.data().phase.pending_loot = (!rolls.is_empty()).then_some(PendingDoodadLoot::Pack {
+        func_id: f.id,
+        rolls,
+    });
+    match given {
+        Some(_) => send_error(player, err::BAG_FULL),
         None => tracing::error!(
             "DoodadFuncLootPack {}: loot pack {} not found",
             f.id,
