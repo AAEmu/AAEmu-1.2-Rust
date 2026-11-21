@@ -457,7 +457,7 @@ the copy's `bin32/archeage.exe`:
 
 Run the script on each r208022 client copy that connects to the updated server.
 It removes the pickup restriction that treated an equipped glider as cargo and
-enables the cannon's native impact-point selector. With quick skill placement
+enables the native ground targeting indicator. With quick skill placement
 disabled in the client, select Harpoon Bomb and confirm the aim point. The
 projectile should follow the arc and detonate when it hits.
 

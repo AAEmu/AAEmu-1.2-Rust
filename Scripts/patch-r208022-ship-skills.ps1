@@ -49,7 +49,7 @@ INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skill_reqs
   WHERE (id = 13 AND buff_tag_id = 306) OR (id = 35 AND buff_tag_id = 367);
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skills
   WHERE (id = 17737 AND plot_id = 355 OR id = 17738 AND plot_id = 356)
-    AND target_type_id IN (0, 11);
+    AND target_type_id IN (0, 6, 11);
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM unit_reqs
   WHERE owner_type = 'Skill' AND owner_id IN (17737, 17738)
     AND (kind_id = 23 AND value1 = 396 OR kind_id = 15 AND value1 = 3661);
@@ -61,9 +61,11 @@ INSERT INTO skill_patch_check SELECT COUNT(*) = 8 FROM skills
 -- The server checks the actual backpack slot before it equips the cannon.
 DELETE FROM skill_req_skills WHERE skill_id = 15660 AND skill_req_id IN (13, 35);
 
--- Select an impact point through the native cannon targeting UI. The projectile
--- has its own collision checks, so a straight obstacle ray cannot reject the arc.
-UPDATE skills SET target_type_id = 11, target_selection_id = 2, min_range = 4, max_range = 45,
+-- Use the on-foot ground selector for the carried cannon. The mounted
+-- ballistic camera crashed in the r208022 on-foot test. The projectile
+-- handles collisions along its own path.
+UPDATE skills SET target_type_id = 6, target_selection_id = 2, min_range = 4, max_range = 45,
+                  target_area_radius = CASE id WHEN 17737 THEN 6 ELSE 7 END,
                   target_alive = 't', target_dead = 'f', check_obstacle = 'f'
   WHERE id IN (17737, 17738);
 
