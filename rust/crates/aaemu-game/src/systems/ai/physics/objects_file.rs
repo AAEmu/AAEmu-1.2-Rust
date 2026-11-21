@@ -37,6 +37,14 @@ impl WaterVolumeType {
 
 type V3 = [f32; 3];
 
+/// An octree object of type 11 uses the same layout in object.dat and visareas.dat.
+pub(crate) fn water_record(record: &[u8]) -> Option<WaterPrefab> {
+    match read_water(record, 0).ok()? {
+        (size, Prefab::Water(water)) if size == record.len() => Some(water),
+        _ => None,
+    }
+}
+
 /// `ObjectDataType11Water` (the fields the water bodies use).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaterPrefab {

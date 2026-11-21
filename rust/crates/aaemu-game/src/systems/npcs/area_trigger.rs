@@ -310,6 +310,10 @@ pub struct AreaTrigger {
     pub target_relation: u8,
     /// `InsideBuffTemplate?.BuffId` (`None` = no template).
     pub inside_buff_id: Option<u32>,
+    /// A contact effect lasts for its buff template's duration after leaving the shape.
+    pub contact_buff: bool,
+    /// A water hazard only affects units below the surface of an actual pool.
+    pub requires_submersion: bool,
     /// `EffectsPerBuff` (buff id → effect template ids).
     pub effects_per_buff: HashMap<u32, Vec<u32>>,
     /// `TickRate` (ms).
@@ -341,6 +345,16 @@ impl AreaTrigger {
         if !valid {
             return;
         }
+        if self.contact_buff {
+            let active = unit.with_base_unit(|base| base.buffs().check_buff(buff_id));
+            if !active {
+                let Some(h) = server.systems.npcs.hooks.skills.get() else {
+                    return;
+                };
+                h.apply_area_buff(server, caster, unit, buff_id);
+            }
+            return;
+        }
         let count = unit.with_unit(|u| {
             u.unit_mut().increment_trigger_count(buff_id);
             u.unit().trigger_count(buff_id)
@@ -354,7 +368,7 @@ impl AreaTrigger {
 
     /// `OnLeave(unit)`.
     fn on_leave(&self, server: &GameServer, unit: &WorldObject) {
-        if let Some(buff_id) = self.inside_buff_id {
+        if let Some(buff_id) = self.inside_buff_id.filter(|_| !self.contact_buff) {
             leave_unit(server, unit, buff_id);
         }
     }
@@ -387,7 +401,7 @@ impl AreaTrigger {
 
     /// The part of `OnDelete()` that works on the units that were inside.
     fn release(&self, server: &GameServer, units: Vec<WorldObject>) {
-        if let Some(buff_id) = self.inside_buff_id {
+        if let Some(buff_id) = self.inside_buff_id.filter(|_| !self.contact_buff) {
             for unit in &units {
                 leave_unit(server, unit, buff_id);
             }
@@ -444,9 +458,37 @@ impl AreaTrigger {
             return;
         };
         // Get units currently in the shape
-        let Some(current) = get_around_by_shape(server, &world, &owner_obj, shape) else {
+        let Some(mut current) = get_around_by_shape(server, &world, &owner_obj, shape) else {
             return;
         };
+        if self.requires_submersion {
+            let water = crate::systems::ai::physics::world_water(server, &world);
+            current.retain(|unit| {
+                // A boat's origin is at the waterline. Its hull and occupants
+                // are above the hazardous water even when that origin is wet.
+                let hull = unit
+                    .as_slave()
+                    .cloned()
+                    .or_else(|| world.slave(unit.transform().parent_obj_id));
+                if hull.is_some_and(|slave| {
+                    let template_id = slave.data().unit.template_id;
+                    server
+                        .game_data
+                        .systems
+                        .vehicles
+                        .slave_template(template_id)
+                        .is_some_and(|template| template.is_a_boat())
+                }) {
+                    return false;
+                }
+                let pos = world.world_pos_rot(unit);
+                water
+                    .is_water(crate::systems::skills::controllers::Vec3::new(
+                        pos.x, pos.y, pos.z,
+                    ))
+                    .is_some()
+            });
+        }
         let old = {
             let mut state = self.state();
             if state.removed {
@@ -468,7 +510,10 @@ impl AreaTrigger {
             .filter(|n| old.iter().all(|o| !std::ptr::eq(o.core(), n.core())))
             .cloned()
             .collect();
-        for unit in &new {
+        // A short contact debuff can expire while a unit remains in a fire jet.
+        // Reapply after expiry without resetting the buff's damage tick.
+        let entering = if self.contact_buff { &current } else { &new };
+        for unit in entering {
             self.on_enter(server, unit);
             debug!(
                 "AreaShape Enter {} {} with count {} unit in shape arround {}",

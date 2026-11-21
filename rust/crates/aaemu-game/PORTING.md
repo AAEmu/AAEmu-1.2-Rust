@@ -5222,6 +5222,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_cradle_statue_sphere_wakes_the_four_statues`,
   `real_data_cradle_sprigg_death_opens_the_gate_and_spawns_the_squad`,
   `real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad`).
+* Kroloal Cradle follow-up (2026-11-20). The r208022 compact defines the five mushroom
+  inputs 80000–80004 to controller 5406 and its output to stone gate 5395. The restored
+  doors use that chain. Four mushroom positions are from the earlier editor import and
+  the fifth is an existing 1.2 placement. The throw skill 20212 receives its cast from
+  buff 4788 after picking up the purifier. Its area target slots are reserved for the
+  doodads that respond. The secret branch uses device 5549 and gate 5547. Both
+  chest placements use template 5550, which grants the authored Arc Arrow item
+  25660. Template 5956's temporary skill depends on prerequisite buff 4797, for
+  which this compact has no source. Cast start and completion check the device and
+  each chest's phase. The boulders sit at passage height, including the statue-room
+  exit that counts the four statue death skills. The exact retail placements of
+  the added gates and floor jets are inferred from the r208022 cave layout.
+  [First-area gameplay reference](https://www.youtube.com/watch?v=VT33USPa1pY)
+
+  Indoor water contours come from the r208022 Cradle cell's `visareas.dat`. The rowboat
+  uses template 15 at the east landing of the first pool (surface 184.868 m).
+  The green and red water use their authored poison and lava clouts on submerged
+  units. Boats and their occupants are clear of those clouts at the waterline.
+  Placed traps with a sub-tick active phase check contact immediately.
+  Miasma and the spear injury retain their authored buff duration. The spear
+  supplies the damage source for the injury. Flame jets reapply their short damage
+  buff while the player remains in range. The corridor trash and four bosses use
+  single-member compact spawners to avoid loading unrelated SPAWN members.
 * systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
   (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
   has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->

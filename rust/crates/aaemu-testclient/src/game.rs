@@ -1442,6 +1442,31 @@ impl GameClient {
         self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
     }
 
+    /// `CSStartSkillPacket` for a skill aimed at a ground position.
+    pub async fn start_position_skill(
+        &mut self,
+        skill_id: u32,
+        (x, y, z): (f32, f32, f32),
+    ) -> anyhow::Result<()> {
+        use aaemu_game::systems::skills::types::{SkillCastTarget, SkillCaster};
+
+        let mut s = PacketStream::new();
+        s.write_u32(skill_id);
+        SkillCaster::Unit(self.state.self_obj).write(&mut s);
+        SkillCastTarget::Position {
+            obj_id: 0,
+            x,
+            y,
+            z,
+            rot: 0.0,
+            obj_id1: 0,
+            obj_id2: 0,
+        }
+        .write(&mut s);
+        s.write_u8(0);
+        self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
+    }
+
     /// `CSStartSkillPacket` from a vehicle bar entry: mount caster (the vehicle) on itself, the
     /// way the 1.2 client casts a slave / mate skill. `mount_skill_template_id` is the client's
     /// bar-row hint; the server resolves the mount row and rider skill from `skill_id`

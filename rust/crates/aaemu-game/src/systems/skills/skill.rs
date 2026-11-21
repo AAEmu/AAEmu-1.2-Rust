@@ -2336,11 +2336,15 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     // Earthen Grip is marked Others, which the area filter interprets as neutral only.
     // Both it and Sorvell's barrel barrage select enemies that can receive their effects.
     let sorvell_area = matches!(t.id, 15592 | 15668) && caster.as_npc().is_some();
-    // Serialize the egg's readiness check, phase change, spawn and bow
-    // consumption. A second cast can finish after the egg has closed.
+    // Serialize the readiness check, phase change and reward or spawn. A
+    // concurrent cast may finish after the first changed the doodad phase.
     let egg_cast = t.id == super::validation::RED_DRAGON_EGG_SKILL;
-    let _egg_operation = egg_cast.then(|| server.systems.economy.operation_scope());
-    if egg_cast && super::validation::check_red_dragon_egg(server, caster, target_self).is_err() {
+    let cradle_chest = t.id == super::validation::CRADLE_CHEST_SKILL;
+    let _doodad_operation =
+        (egg_cast || cradle_chest).then(|| server.systems.economy.operation_scope());
+    if (egg_cast && super::validation::check_red_dragon_egg(server, caster, target_self).is_err())
+        || (cradle_chest && super::validation::check_cradle_chest(server, target_self).is_err())
+    {
         skill.state().cancelled = true;
         return;
     }
@@ -2466,6 +2470,16 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             target
                 .as_obj()
                 .is_some_and(|object| object.is_unit() && object.obj_id() != caster.obj_id())
+        });
+    }
+    if t.id == 20212 {
+        // The thrown purifier destroys mushrooms via SkillHit. Nearby enemies and
+        // other props must not use up its five target slots.
+        let npcs = server.systems.skills.ext.npcs();
+        possible.retain(|target| {
+            target
+                .as_obj()
+                .is_some_and(|object| npcs.accepts_doodad_skill_hit(server, object, t.id))
         });
     }
     if t.target_area_count > 0 && possible.len() > t.target_area_count as usize {

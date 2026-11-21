@@ -62,6 +62,34 @@ pub(super) fn check_red_dragon_egg(
     Err((result, DANCING_GODDESS_HUNT))
 }
 
+pub(super) const CRADLE_CHEST_SKILL: u32 = 19691;
+
+/// The destruction device unlocks the hidden-room chests. Each can be used once.
+pub(super) fn check_cradle_chest(server: &GameServer, target: &Target) -> Result<(), (u8, u32)> {
+    let Some(chest) = target.as_obj().and_then(WorldObject::as_doodad) else {
+        return fail("skill_invalid_target");
+    };
+    let ready = {
+        let data = chest.data();
+        (data.template_id, data.func_group_id) == (5550, 14303)
+    };
+    let opened = ready
+        && server
+            .world
+            .world_of(&WorldObject::from(chest))
+            .is_some_and(|world| {
+                world.all_doodads().iter().any(|doodad| {
+                    let data = doodad.data();
+                    (data.template_id, data.func_group_id) == (5549, 14331)
+                })
+            });
+    if opened {
+        Ok(())
+    } else {
+        fail("skill_invalid_target")
+    }
+}
+
 /// Item-caster tags belong to the owned item's server-side template, never the wire hint.
 pub(super) fn check_item_zone(
     server: &GameServer,
@@ -385,6 +413,9 @@ pub(super) fn check(
             })
     {
         return fail("skill_invalid_target");
+    }
+    if template.id == CRADLE_CHEST_SKILL {
+        check_cradle_chest(server, target)?;
     }
     if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
