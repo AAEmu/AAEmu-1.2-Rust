@@ -45,6 +45,8 @@ fn sharpwind_scripted_doodad_spawn_placements() {
             "Guild Storage Door",
         ),
         ((5542, 50_010, 489.476, 323.844, 167.294), "Stone Lion"),
+        // Alistair opens this display chest during his warehouse route.
+        ((5600, 0, 398.5, 325.1, 168.537), "Nerta's warehouse chest"),
         // Items 6 and 9: the two powder-keg rock walls.
         ((5280, 0, 519.932, 365.755, 169.029), "Rock (ogre corridor)"),
         (

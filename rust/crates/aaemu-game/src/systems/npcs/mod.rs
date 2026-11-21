@@ -227,6 +227,8 @@ mod quest_spawn_tests;
 #[cfg(test)]
 mod schedule_item_session_tests;
 #[cfg(test)]
+mod sharpwind_combat_tests;
+#[cfg(test)]
 mod sharpwind_doodad_tests;
 #[cfg(test)]
 mod sharpwind_spawn_tests;

@@ -131,6 +131,14 @@ pub fn real_movement_flags(move_speed: f64) -> u8 {
 
 /// `Npc.BaseMoveSpeed` (`returning` = the current behavior is `ReturnStateBehavior`).
 pub fn base_move_speed(server: &GameServer, npc: &NpcRef, returning: bool) -> f32 {
+    movement_speed(server, npc, returning, false)
+}
+
+pub fn running_move_speed(server: &GameServer, npc: &NpcRef) -> f32 {
+    movement_speed(server, npc, false, true)
+}
+
+fn movement_speed(server: &GameServer, npc: &NpcRef, returning: bool, force_run: bool) -> f32 {
     let (template_id, stance, running_in_combat) = {
         let n = npc.data();
         (
@@ -160,7 +168,7 @@ pub fn base_move_speed(server: &GameServer, npc: &NpcRef, returning: bool) -> f3
     if returning {
         return stance.ai_move_speed_sprint;
     }
-    if running_in_combat {
+    if force_run || running_in_combat {
         return stance.ai_move_speed_run.min(stance.max_speed);
     }
     stance.ai_move_speed_walk.min(stance.max_speed)
@@ -548,6 +556,16 @@ pub fn move_towards(
             new.z,
             zone_id,
         );
+        if template_id == 11363
+            && zone_id == 262
+            && in_stonebrother_arena(Vec3::new(new.x, new.y, pos.z))
+        {
+            // Keep the large ground actor on the room's level if a ray hits the
+            // floor beneath the arena or the collision mesh above its feet.
+            if let Some(floor) = spawner_z.filter(|_| !(149.0..=156.0).contains(&target_z)) {
+                target_z = floor;
+            }
+        }
         // The Armory's prison mesh exposes the plinth's base to ground rays.
         // Retain Winters's authored stage height while stepping over that base.
         // Once he steps past the front edge he can descend to the room floor.
@@ -673,6 +691,11 @@ pub fn reference_height(
 /// (77 m) and others fell to that terrain with their first step. A floor deeper than this is not the
 /// ground under the walker.
 pub const WALKER_MAX_DROP: f32 = 12.0;
+
+/// The Colossus room around the authored spawn, above the passages underneath.
+pub(crate) fn in_stonebrother_arena(pos: Vec3) -> bool {
+    (pos.x - 614.4).hypot(pos.y - 423.4) <= 31.0 && (149.0..=160.0).contains(&pos.z)
+}
 
 /// The raised passages have another walkable floor only a few meters underneath.
 pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {

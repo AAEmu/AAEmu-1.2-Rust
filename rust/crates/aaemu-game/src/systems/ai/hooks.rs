@@ -164,6 +164,9 @@ pub fn spawned(server: &GameServer, npc: &NpcRef, follow_path: &str) {
     let template_id = npc.data().unit.template_id;
     post(server, npc.obj_id, move |c| {
         c.ai.has_simulation = true;
+        if matches!(template_id, 12014 | 12188) {
+            super::npc_events::on_spawn(c);
+        }
         if !path.trim().is_empty() && !c.load_ai_path_points(&path, false) {
             tracing::warn!("Failed to load {path} for NPC {template_id} ({id})");
         }

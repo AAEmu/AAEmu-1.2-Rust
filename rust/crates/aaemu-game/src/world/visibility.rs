@@ -20,6 +20,7 @@ use crate::packets::world_objects::{
     SCTargetChangedPacket, SCUnitAttachedPacket,
 };
 use crate::systems::npcs::npc::packets::SCNpcInteractionStatusChangedPacket;
+use crate::systems::skills::packets::SCUnitInvisiblePacket;
 
 /// `AttachUnitReason.None`.
 const ATTACH_UNIT_REASON_NONE: u8 = 0;
@@ -109,13 +110,24 @@ pub(crate) fn add_visible_object(
         }
         WorldObject::Npc(e) => {
             let name = owner_name(ctx, e.data().unit.owner_id);
-            let (state, points, interactable) = {
+            let (state, points, interactable, invisible) = {
                 let mut n = e.data();
                 let state = unit_state::npc_unit_state(e.obj_id, &mut n, &name, now);
-                (state, points_of(e.obj_id, &n.unit), n.interactable)
+                (
+                    state,
+                    points_of(e.obj_id, &n.unit),
+                    n.interactable,
+                    n.unit.invisible,
+                )
             };
             target.send(state);
             target.send(points);
+            if invisible {
+                target.send(SCUnitInvisiblePacket {
+                    obj_id: e.obj_id,
+                    invisible,
+                });
+            }
             // WP-5b: a player that enters sight later must learn the NPC's interaction state
             // (interactable is the default; only the `false` state is sent). INFERRED.
             if !interactable {

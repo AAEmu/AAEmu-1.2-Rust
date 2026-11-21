@@ -1073,14 +1073,23 @@ fn update_area_target(
 ) -> Option<Target> {
     let prev = ti.previous_target.clone()?;
     let mut pos: PosUnit = pos_unit_from(server, &prev);
+    let colossus = matches!(state.skill.template.id, 18374 | 18401 | 18406 | 19248)
+        && state.ctx.caster.transform().zone_id == 262;
+    // The near hand-smash circle covers the fist in front of the body. The
+    // second circle and outer impact remain distinct parts of the wind-up.
+    let distance = if colossus && matches!(event.id, 3199 | 3201) {
+        3500
+    } else {
+        args.distance
+    };
     if random {
         let deg: i32 = rand::thread_rng().gen_range(-180..180);
         pos.pos.rot_z = (deg as f32).to_radians();
         pos.add_distance_to_front(args.distance as f32 / 1000.0);
     } else {
         pos.rotate_z(-(args.angle as f32).to_radians());
-        if args.distance != 0 {
-            pos.add_distance_to_front(args.distance as f32 / 1000.0 - 0.01);
+        if distance != 0 {
+            pos.add_distance_to_front(distance as f32 / 1000.0 - 0.01);
         }
     }
     let prev_z = world_pos(server, &prev).z;
@@ -1128,6 +1137,19 @@ fn update_area_target(
         let mut launch = pos;
         launch.pos.z += args.height_offset as f32 / 1000.0;
         ti.source = Some(Target::Pos(launch));
+    } else if colossus {
+        pos.pos.z = crate::systems::ai::collision::ground_height_probe(
+            server,
+            pos.instance_id,
+            pos.pos.x,
+            pos.pos.y,
+            prev_z,
+            1.0,
+            1.5,
+        )
+        .flatten()
+        .unwrap_or(prev_z)
+            + args.height_offset as f32 / 1000.0;
     } else if !meteor_impact
         && !matches!(
             (state.skill.template.id, event.id),
@@ -1178,8 +1200,9 @@ fn update_area_target(
     let units: Vec<WorldObject> = filter_targets(server, around, state, args, event.id)
         .into_iter()
         .filter(|unit| {
-            !meteor_impact
-                || (world_pos(server, &Target::Obj(unit.clone())).z - prev_z).abs() <= shape.value1
+            let z = world_pos(server, &Target::Obj(unit.clone())).z;
+            (!meteor_impact || (z - prev_z).abs() <= shape.value1)
+                && (!colossus || (z - prev_z).abs() <= 3.0)
         })
         .take(args.max_targets.max(0) as usize)
         .collect();

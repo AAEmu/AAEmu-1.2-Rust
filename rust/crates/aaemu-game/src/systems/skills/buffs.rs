@@ -920,6 +920,9 @@ fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
         // 10x CancelTauntedBy, after Dispelled has run (10x-ONLY; see PORTING.md).
         combat::cancel_taunted_by(server, owner, b.caster_obj_id);
     }
+    if is_nerta_bomb_drop(owner, b.template.id) && !nerta_bomb_drop_active(owner) {
+        combat::set_invisible(server, owner, false);
+    }
     super::stats::refresh_cached_stats(server, owner);
 }
 
@@ -1066,6 +1069,19 @@ fn stop_effect_task(server: &GameServer, owner: &WorldObject, index: u32, timed_
     }
     owner.with_base_unit(|u| u.buffs_mut().remove_effect_by_index(index));
     crate::systems::dispatch_buff_events(server, owner);
+}
+
+fn is_nerta_bomb_drop(owner: &WorldObject, buff_id: u32) -> bool {
+    matches!(buff_id, 4099 | 4631)
+        && owner
+            .as_npc()
+            .is_some_and(|npc| npc.data().unit.template_id == 11362)
+}
+
+pub(super) fn nerta_bomb_drop_active(owner: &WorldObject) -> bool {
+    is_nerta_bomb_drop(owner, 4099)
+        && owner
+            .with_base_unit(|unit| unit.buffs().check_buff(4099) || unit.buffs().check_buff(4631))
 }
 
 /// `Buff.Exit(replace)`.
@@ -1251,6 +1267,9 @@ pub fn start(server: &GameServer, owner: &WorldObject, index: u32) {
     if !b.passive {
         let p = buff_created_packet(server, owner, &b);
         broadcast(server, owner, &p, true);
+    }
+    if is_nerta_bomb_drop(owner, template.id) {
+        combat::set_invisible(server, owner, true);
     }
     // The Rotten Flesh Golem's Slam needs the server to finish its lift and
     // fall. Other character controllers run from the client buff payload.
