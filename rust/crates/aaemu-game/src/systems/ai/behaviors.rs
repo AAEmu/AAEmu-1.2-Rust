@@ -2494,7 +2494,14 @@ fn run_command_set_tick(c: &mut AiCtx<'_>, delta_ms: i64) {
         return;
     }
     super::interaction::release(c);
-    c.go_to_idle();
+    // A summon can gain aggro during Spawning, before an aggro change has a
+    // transition. Honor it here before running the idle reset skills.
+    let has_aggro = !c.npc.data().unit.skill_state.aggro_table.is_empty();
+    if has_aggro && update_target(c) {
+        c.go_to_combat();
+    } else {
+        c.go_to_idle();
+    }
 }
 
 /// `FollowUnit`'s search radius for the fallback target (INFERRED from

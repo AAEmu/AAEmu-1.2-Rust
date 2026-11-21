@@ -348,7 +348,8 @@ pub struct VisAreaFile {
     pub brushes: Vec<BrushRecord>,
     pub vegetation: Vec<VegetationRecord>,
     pub voxels: Vec<VoxelRecord>,
-    /// Records of other types (decals, water volumes, …), walked and skipped.
+    pub water: Vec<crate::systems::ai::physics::objects_file::WaterPrefab>,
+    /// Records of other types (decals, roads, …), walked and skipped.
     pub other: usize,
 }
 
@@ -407,6 +408,9 @@ trait ObjectSink {
     fn vegetation(&mut self, rec: &[u8]);
     fn voxel(&mut self, rec: VoxelRecord);
     fn other(&mut self) {}
+    fn water(&mut self, _record: &[u8]) {
+        self.other();
+    }
 }
 
 fn walk_node(
@@ -489,7 +493,11 @@ fn walk_object(
             .checked_mul(12)
             .ok_or(OctreeError::Truncated(c.pos))?,
     )?;
-    sink.other();
+    if t == WATER_VOLUME {
+        sink.water(&c.d[at..c.pos]);
+    } else {
+        sink.other();
+    }
     Ok(())
 }
 
@@ -544,6 +552,11 @@ impl ObjectSink for VisAreaFile {
     }
     fn other(&mut self) {
         self.other += 1;
+    }
+    fn water(&mut self, record: &[u8]) {
+        if let Some(water) = crate::systems::ai::physics::objects_file::water_record(record) {
+            self.water.push(water);
+        }
     }
 }
 

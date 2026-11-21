@@ -614,7 +614,7 @@ impl WaterBodies {
             } else {
                 format!("Water_C{cell_x}-{cell_y}_{prefab_idx}")
             };
-            self.add_polygon_from_physics_contour(hm, water, offset, &name);
+            self.add_polygon_from_physics_contour(hm, water, offset, &name, true);
         }
         if !like_river {
             return;
@@ -678,6 +678,7 @@ impl WaterBodies {
         water: &WaterPrefab,
         offset: Vec3,
         name: &str,
+        filter_small: bool,
     ) {
         let mut lake = WaterBodyArea::new(name, WaterBodyAreaType::Polygon);
         lake.depth = water.depth;
@@ -707,7 +708,7 @@ impl WaterBodies {
                     * HEURISTIC_FLOW_SIGN_HACK;
             lake.speed = lake.flow_speed_signed;
         }
-        if footprint_too_small(&lake) {
+        if filter_small && footprint_too_small(&lake) {
             return;
         }
         Self::add_area(&mut self.lock(), lake);
@@ -722,6 +723,11 @@ impl WaterBodies {
         template_name: &str,
         template_ocean_level: f32,
     ) {
+        let cradle = template_name == "instance_cradle_of_destruction";
+        // The level boat spawns before the first player enters and loads the cell.
+        if cradle && !hm.is_cell_loaded(0, 0) {
+            let _ = hm.get_height(files, 0.0, 0.0);
+        }
         let loaded = hm.loaded_cell_count();
         if self.lock().ingested_cells.len() >= loaded {
             return;
@@ -737,22 +743,41 @@ impl WaterBodies {
                 if !hm.cell_has_height_map(cx, cy) {
                     continue;
                 }
-                let file =
-                    format!("game/worlds/{template_name}/cells/{cx:03}_{cy:03}/client/object.dat");
-                if !files.file_exists(&file) {
-                    continue;
+                let cell = format!("game/worlds/{template_name}/cells/{cx:03}_{cy:03}/client");
+                let file = format!("{cell}/object.dat");
+                if let Some(bytes) = files.read_file(&file) {
+                    let objects = ObjectsFile::read(&bytes);
+                    if !objects.ok && !objects.prefabs.is_empty() {
+                        tracing::error!(
+                            "Error loading objects from {file}, only {} prefabs read",
+                            objects.prefabs.len()
+                        );
+                    }
+                    self.add_from_cell_data(Some(hm), template_ocean_level, cx, cy, &objects);
                 }
-                let Some(bytes) = files.read_file(&file) else {
-                    continue;
-                };
-                let objects = ObjectsFile::read(&bytes);
-                if !objects.ok && !objects.prefabs.is_empty() {
-                    tracing::error!(
-                        "Error loading objects from {file}, only {} prefabs read",
-                        objects.prefabs.len()
-                    );
+                // Kroloal Cradle's elevated pools are indoor visarea objects.
+                // Ingest their closed contours for swimming and boat buoyancy.
+                if cradle {
+                    if let Some(areas) =
+                        files
+                            .read_file(&format!("{cell}/visareas.dat"))
+                            .and_then(|bytes| {
+                                crate::systems::ai::collision::cells::read_visareas(&bytes).ok()
+                            })
+                    {
+                        let offset =
+                            Vec3::new((cx * CELL_SIZE) as f32, (cy * CELL_SIZE) as f32, 0.0);
+                        for (index, volume) in areas.water.iter().enumerate() {
+                            self.add_polygon_from_physics_contour(
+                                Some(hm),
+                                volume,
+                                offset,
+                                &format!("IndoorWater_C{cx}-{cy}_{index}"),
+                                false,
+                            );
+                        }
+                    }
                 }
-                self.add_from_cell_data(Some(hm), template_ocean_level, cx, cy, &objects);
             }
         }
     }

@@ -1832,13 +1832,26 @@ impl NpcSpawner {
                 }
             }
             if effect.use_summoner_aggro_target && !effect.use_summoner_faction {
-                // npc.Ai.Owner.AddUnitAggro(Damage, target-or-caster, 1) +
-                // Ai.OnAggroTargetChanged() (systems::ai)
+                // A self-targeted summon, such as the Cradle test subject's 18409,
+                // should inherit its summoner's opponent. The plot's target is the
+                // summoner or an offset from it, so attacking it loses friendly aggro.
+                let summoner_target = caster.and_then(WorldObject::as_npc).and_then(|n| {
+                    let d = n.data();
+                    let id = d.current_aggro_target;
+                    (id != 0).then_some(id)
+                });
                 let unit = match target {
-                    Some(t) if t.as_npc().is_some() => Some(t),
-                    _ => caster,
+                    Some(t)
+                        if t.as_npc().is_some()
+                            && caster.is_none_or(|c| t.obj_id() != c.obj_id()) =>
+                    {
+                        Some(t.clone())
+                    }
+                    _ => summoner_target
+                        .and_then(|id| server.world.object(id))
+                        .or_else(|| caster.cloned()),
                 };
-                if let (Some(ai), Some(unit)) = (server.systems.hooks.ai.get(), unit) {
+                if let (Some(ai), Some(unit)) = (server.systems.hooks.ai.get(), unit.as_ref()) {
                     ai.npc_engage(server, npc, unit);
                 }
             }

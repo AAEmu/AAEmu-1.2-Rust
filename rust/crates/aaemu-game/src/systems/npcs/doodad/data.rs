@@ -1909,10 +1909,9 @@ impl DoodadData {
     }
 
     /// `GetFunc(funcGroupId, skillId)`: the first func of the group whose `SkillId` is the
-    /// skill, or whose `DoodadFuncFakeUse.FakeSkillId` / `DoodadFuncUse.SkillId` (> 0) is the
-    /// skill; else a matching legacy gathering compatibility skill; else the first func without
-    /// skill and with `NextPhase != -1`; else the first func
-    /// without skill.
+    /// skill, including the skill named by a FakeUse, Use or SkillHit template.
+    /// Falls back to a legacy gathering skill, then a skill-less func, preferring
+    /// one with `NextPhase != -1`.
     pub fn func_for_skill(&self, func_group_id: u32, skill_id: u32) -> Option<&DoodadFunc> {
         let funcs = self.funcs_by_groups.get(&func_group_id)?;
         for func in funcs {
@@ -1928,6 +1927,12 @@ impl DoodadData {
                 }
                 // Special handler for use (func) skill id
                 Some(FuncTemplate::Use(t)) if t.skill_id > 0 && t.skill_id == skill_id => {
+                    return Some(func)
+                }
+                // A phase can respond to several skills without a func_skill_id.
+                // Select the SkillHit row that names this spell before the fallback
+                // picks the first skill-less row (the Cradle mushroom accepts two).
+                Some(FuncTemplate::SkillHit(t)) if t.skill_id > 0 && t.skill_id == skill_id => {
                     return Some(func)
                 }
                 _ => {}
@@ -1950,6 +1955,15 @@ impl DoodadData {
         }
         // Then we search with NextPhase = -1
         funcs.iter().find(|f| f.skill_id == 0)
+    }
+
+    pub fn accepts_skill_hit(&self, func_group_id: u32, skill_id: u32) -> bool {
+        self.funcs_for_group(func_group_id).iter().any(|func| {
+            matches!(
+                self.func_template(func.func_id, &func.func_type),
+                Some(FuncTemplate::SkillHit(hit)) if hit.skill_id == skill_id
+            )
+        })
     }
 
     /// `GetFuncsForGroup` (empty when the group has no funcs).

@@ -11,6 +11,7 @@ use crate::models::movement::{
     convert_radian_to_direction, MoveKind, MoveType, MoveTypeFlags, UnitMove,
 };
 use crate::models::transform::PositionAndRotation;
+use crate::packets::g2c_misc::SCKnockBackUnitPacket;
 use crate::packets::world::{SCErrorMsgPacket, SCOneUnitMovementPacket};
 use crate::server::GameServer;
 use crate::systems::ai::npc::WALKER_MAX_DROP;
@@ -348,7 +349,8 @@ pub(crate) fn npc_non_pushable(server: &GameServer, target: &WorldObject) -> boo
 }
 
 /// `KnockBack`: pushes an NPC target `value1` mm (default 3 m) away from the caster, lifted by
-/// `value3` mm. Characters are left to the client (a server packet doubles the displacement).
+/// `value3` mm. Player skill knockbacks normally run on the client. Cinderhorn
+/// Boar's NPC charge needs a separate knockback packet for its player victim.
 pub fn knock_back(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     tracing::debug!(
         "Special effects: KnockBack caster={:?}, target={}, value1={}, value2={}, value3={}, value4={}",
@@ -386,7 +388,26 @@ pub fn knock_back(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         target_pos.y + dir.1 * knock_dist,
         target_pos.z + v[2] as f32 / 1000.0,
     );
-    if target.as_player().is_some() {
+    if let Some(player) = target.as_player() {
+        if args
+            .source
+            .skill()
+            .is_some_and(|skill| skill.template.id == 18462)
+        {
+            let [x, y, _] = crate::systems::ai::collision::displacement::clip_move(
+                server,
+                target.transform().instance_id,
+                [target_pos.x, target_pos.y, target_pos.z],
+                [end.0, end.1, target_pos.z],
+            )
+            .unwrap_or([end.0, end.1, target_pos.z]);
+            player.send(SCKnockBackUnitPacket {
+                obj_id: target.obj_id(),
+                x: x - target_pos.x,
+                y: y - target_pos.y,
+                z: end.2 - target_pos.z,
+            });
+        }
         return;
     }
 

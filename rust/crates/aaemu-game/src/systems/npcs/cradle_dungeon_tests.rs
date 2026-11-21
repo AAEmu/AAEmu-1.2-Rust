@@ -177,8 +177,8 @@ const DOODAD_ROWS: [(u32, u32, f32, f32, f32); 45] = [
     (5931, 0, 342.568, 508.714, 173.869),
     (5948, 0, 650.378, 433.429, 112.653),
     (5949, 0, 335.525, 508.775, 173.618),
-    (5956, 0, 297.226, 741.934, 184.691),
-    (5956, 0, 301.526, 742.803, 184.436),
+    (5550, 0, 297.226, 741.934, 184.691),
+    (5550, 0, 301.526, 742.803, 184.436),
 ];
 
 /// Every added doodad row is placed exactly once, at its authored level position and family.
@@ -232,7 +232,7 @@ fn cradle_added_doodad_rows_are_placed_once_each() {
     }
 
     // No decor row was added, and the skill-summoned doodads are never static placements.
-    for template in [5320, 5406, 5545, 5547, 6002, 6050] {
+    for template in [5320, 5545, 6002, 6050] {
         assert!(
             !rows.iter().any(|(t, _, _, _, _)| *t == template),
             "decor doodad {template} must not be placed"
@@ -395,7 +395,10 @@ fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
         language: "en_us",
     };
     let mut data = GameData::empty();
+    let localization = crate::data::Localization::load(&conn, "en_us").expect("localization");
+    data.factions = crate::data::FactionData::load(&conn, &localization).expect("factions");
     data.formulas = crate::data::formulas::FormulaManager::load(&conn).expect("formulas");
+    data.skills = crate::data::skills::SkillData::load(&conn).expect("buff data");
     data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
     data.systems.npcs = crate::systems::npcs::Data::load(&ctx).expect("npcs data");
     data.systems.quests = crate::systems::quests::Data::load(&ctx).expect("quests data");
@@ -532,10 +535,10 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
         "the 5 inactive spawners the existing plain rows already skip"
     );
     assert_eq!(stats.npc_cutscene_spawners_skipped, 0);
-    assert_eq!(stats.doodad_entries, 78, "33 kept + 45 added rows");
+    assert_eq!(stats.doodad_entries, 95);
     assert_eq!(stats.doodad_duplicates, 0);
     assert_eq!(stats.doodad_missing_templates, 0);
-    assert_eq!(stats.doodad_spawners, 78);
+    assert_eq!(stats.doodad_spawners, 95);
 
     // Every NpcSpawnerSpawnEffect target placed in this world's level resolves to its event row.
     let m = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
@@ -588,7 +591,7 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
 
     // The doodads spawn (their phase init is asynchronous but the placements are synchronous).
     m.spawn_doodads(&server);
-    assert_eq!(world.all_doodads().len(), 78);
+    assert_eq!(world.all_doodads().len(), 95);
     let gate = find_doodad(&world, 5726);
     assert_eq!(gate.data().func_group_id, 14677, "closed gate phase");
     let exit = find_doodad(&world, 5762);
@@ -663,7 +666,7 @@ fn real_compact_db_cradle_scripted_doodad_templates_and_funcs() {
         "5762 exit func"
     );
     // The interactive chest / destruction device / worldgate use their skills.
-    for (group, skill) in [(15343, 20229), (14351, 19698)] {
+    for (group, skill) in [(15343, 20229), (14303, 19691), (14351, 19698)] {
         assert!(
             data.funcs_for_group(group)
                 .iter()
@@ -840,6 +843,15 @@ async fn real_data_cradle_statue_sphere_wakes_the_four_statues() {
     };
     let (server, world) = real_server(&db);
     let _ = load_cradle(&server, &conn_of(&db));
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let gate = find_doodad(&world, 5038);
+    assert_eq!(gate.data().func_group_id, 13054);
 
     let areas: Vec<crate::systems::quests::spheres::SphereArea> =
         crate::systems::quests::spheres::load_sphere_areas(&app_root(), |id| id == 1546)
@@ -894,6 +906,26 @@ async fn real_data_cradle_statue_sphere_wakes_the_four_statues() {
         npcs_of(&world, 11268).is_empty(),
         "skill 18270 kills the invisible statue"
     );
+
+    let statues: Vec<_> = world
+        .all_npcs()
+        .into_iter()
+        .filter(|npc| matches!(npc.data().unit.template_id, 11163 | 11181 | 11183 | 11184))
+        .collect();
+    for (index, npc) in statues.iter().enumerate() {
+        npc.data().unit.hp = 0;
+        let statue = WorldObject::from(npc);
+        assert_eq!(
+            crate::systems::skills::skill::unit_use_skill(&server, &statue, 18263, &statue),
+            crate::systems::skills::types::skill_result::SUCCESS,
+        );
+        let expected = if index + 1 == statues.len() {
+            13055
+        } else {
+            13054
+        };
+        assert_eq!(gate.data().func_group_id, expected);
+    }
 }
 
 /// Sprigg's death skill 18670 opens the stone gate (doodad 5726 phase 14677 -> 14678) and
@@ -1000,4 +1032,124 @@ async fn real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad() {
     for unit in [12185, 12186, 12187] {
         assert_eq!(npcs_of(&world, unit).len(), 1, "Royal Stormer {unit}");
     }
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_cradle_mushroom_doors_require_all_five_mushrooms() {
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_cradle(&server, &conn_of(&db));
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let doodads = world.all_doodads();
+    let matching = |template_id| {
+        doodads
+            .iter()
+            .filter(move |d| d.data().template_id == template_id)
+    };
+    let mut mushrooms: Vec<_> = matching(5257).cloned().collect();
+    let gates: Vec<_> = matching(5395).cloned().collect();
+    assert_eq!(mushrooms.len(), 5);
+    assert_eq!(gates.len(), 2);
+    let last = mushrooms.pop().unwrap();
+    let at = last.data().transform;
+    let player = place_player(&server, &world, 1, at.x + 2.0, at.y, at.z);
+    let me = WorldObject::from(&player);
+    let npc_hooks = server.systems.skills.ext.npcs();
+    for mushroom in mushrooms {
+        npc_hooks.doodad_skill_hit(&server, &WorldObject::from(&mushroom), &me, 20212);
+        assert_eq!(mushroom.data().func_group_id, 13635);
+    }
+    assert!(gates.iter().all(|gate| gate.data().func_group_id == 13949));
+
+    // Other nearby objects must not fill the purifier's five targets.
+    for i in 0..6_u16 {
+        let clutter = super::doodad::manager::create(&server, &world, 0, 5252, None, true).unwrap();
+        clutter
+            .data()
+            .transform
+            .set_xyz(at.x + f32::from(i), at.y, at.z);
+        super::doodad::manager::spawn(&server, &world, &clutter);
+    }
+    let skill = |id| {
+        SkillRun::new(
+            server.game_data.systems.skills.skill(id).unwrap().clone(),
+            1,
+        )
+    };
+    let caster = SkillCaster::Unit(player.obj_id);
+    let (result, _) = crate::systems::skills::skill::use_skill(
+        &server,
+        &skill(20211),
+        &me,
+        caster,
+        &mut SkillCastTarget::Unit(player.obj_id),
+        None,
+        true,
+    );
+    assert_eq!(result, skill_result::SUCCESS);
+    assert!(player.data().unit.buffs.check_buff(4788));
+    let mut landing = SkillCastTarget::Position {
+        obj_id: player.obj_id,
+        x: at.x + 1.5,
+        y: at.y,
+        z: at.z,
+        rot: 0.0,
+        obj_id1: 0,
+        obj_id2: 0,
+    };
+    let (result, _) = crate::systems::skills::skill::use_skill(
+        &server,
+        &skill(20212),
+        &me,
+        caster,
+        &mut landing,
+        None,
+        true,
+    );
+    assert_eq!(result, skill_result::SUCCESS);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(last.data().func_group_id, 13635);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(gates.iter().all(|gate| gate.data().func_group_id == 13960));
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_cradle_spike_pulse_damages_and_leaves_the_injury() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_cradle(&server, &conn_of(&db));
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let spear = find_doodad(&world, 5516);
+    let pos = spear.data().transform;
+    let player = place_player(&server, &world, 1, pos.x, pos.y, pos.z);
+    super::doodad::manager::do_change_phase(&server, &world, &spear, None, 14141);
+    {
+        let data = player.data();
+        assert!(data.unit.hp < 10_000);
+        assert!(data.unit.buffs.check_buff(3999));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(spear.data().func_group_id, 14142);
+    assert!(player.data().unit.buffs.check_buff(3999));
 }

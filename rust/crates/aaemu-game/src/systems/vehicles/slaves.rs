@@ -3804,7 +3804,15 @@ fn apply_slave_bonuses(server: &GameServer, obj: &WorldObject, template: &SlaveT
             ),
         }
     }
+    let has_summoner = obj
+        .as_slave()
+        .is_some_and(|slave| slave.data().summoner_obj_id != 0);
     for buff_id in &template.initial_buffs {
+        // Authored level boats are public. The rowboat template also serves
+        // player summons, which have an owner for Owner's Mark to protect.
+        if *buff_id == buff::OWNERS_MARK && !has_summoner {
+            continue;
+        }
         crate::systems::skills::buffs::add_buff_by_id(server, obj, *buff_id, obj, 0);
     }
     obj.with_unit(|u| {
@@ -4042,7 +4050,7 @@ fn create_spawn_committed(
         }
         if let Some(sp) = spawner {
             let p = sp.def.base.position;
-            spawn_pos.instance_id = crate::models::character::DEFAULT_INSTANCE_ID;
+            spawn_pos.instance_id = world.id;
             spawn_pos.zone_id = p.zone_id;
             spawn_pos.set_position(p.x, p.y, p.z, p.roll, p.pitch, p.yaw);
         } else if let Some(o) = owner {
@@ -4064,7 +4072,7 @@ fn create_spawn_committed(
             }
             None => spawner.map_or(0.0, |s| s.def.base.position.yaw),
         };
-        if template.is_a_boat() {
+        if template.is_a_boat() && spawner.is_none() {
             let water = super::ship_physics::water_surface(
                 server,
                 world,
@@ -4249,7 +4257,7 @@ fn create_spawn_committed(
                 }
             }
             spawn_pos.z += offset_z;
-        } else {
+        } else if !template.is_a_boat() {
             // The 1.2 land rule's ground is the terrain heightfield only.
             let h = summon_terrain(server, world, spawn_pos.x, spawn_pos.y);
             if h > 0.0 {
@@ -4720,17 +4728,9 @@ fn finish_create(
     // hull carries.
     spawn_equipment_visuals_from_inventory(server, world, slave);
 
-    // If it's a boat, add it to boat physics
+    // Level boats have no summoner. Ship physics resolves the instance from
+    // the registered slave, the same way it does for a player-owned hull.
     if template.is_a_boat() {
-        if owner.is_none() {
-            // C#: `GetWorld(owner.Transform.InstanceId)` throws for an owner-less boat.
-            tracing::error!(
-                "Slave {} ({}): owner-less boat (NullReferenceException in C#)",
-                template.id,
-                slave.obj_id
-            );
-            return None;
-        }
         super::ship_physics::add_ship(server, slave);
     }
 

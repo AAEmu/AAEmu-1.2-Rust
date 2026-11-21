@@ -33,6 +33,7 @@
 //! expectattach <point>              fail unless SCUnitAttached for us at that point
 //! expecterror <code>                fail unless SCErrorMsg with that code
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
+//! pcast <skill> <x> <y> <z>           ground-target CSStartSkill
 //! buycoin <doodad template> <func>   CSBuyCoinItemPacket (DoodadFuncPurchase) and print the reply
 //! buycoinraw <doodad template> <func>  same without draining (the caller asserts the reply)
 //! goods <npc template>              walk to the NPC, CSListSpecialtyGoods and print SCSpecialtyGoods
@@ -1507,6 +1508,12 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
                 show(&got);
+            }
+            "pcast" => {
+                let skill = num(&parts, 0)?;
+                let position = (num(&parts, 1)?, num(&parts, 2)?, num(&parts, 3)?);
+                game.start_position_skill(skill, position).await?;
+                show(&pump(game, 2).await?);
             }
             c if c.starts_with('m') && super::music::is_command(c) => {
                 let args = split_quoted(rest)?;
