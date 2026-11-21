@@ -619,6 +619,29 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
         .find(|skill| skill.skill_type == 15592)
         .unwrap();
     assert_eq!((grip.health_range_min, grip.health_range_max), (0, 33));
+    let npc = sorvell.as_npc().unwrap();
+    let full_hp = npc.data().unit.max_hp;
+    npc.data().unit.hp = full_hp / 4;
+    assert_eq!(
+        skill::unit_use_skill(&server, &sorvell, 15592, &victim),
+        skill_result::NO_TARGET,
+        "a nearby player does not trigger Grip before Sorvell has aggro"
+    );
+    crate::systems::ai::npc::set_current_aggro_target(npc, Some(&victim));
+    crate::systems::skills::combat::add_unit_aggro(
+        &server,
+        &sorvell,
+        crate::systems::skills::state::AggroKind::Damage,
+        &victim,
+        1,
+    );
+    npc.data().unit.hp = full_hp;
+    assert_eq!(
+        skill::unit_use_skill(&server, &sorvell, 15592, &victim),
+        skill_result::NO_TARGET,
+        "Grip cannot bypass its health window through the basic attack fallback"
+    );
+    npc.data().unit.hp = full_hp / 4;
     assert_eq!(
         skill::unit_use_skill(&server, &sorvell, 15592, &victim),
         skill_result::SUCCESS
@@ -895,7 +918,7 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
     };
     {
         let mut p = player.data();
-        p.unit.transform.set_xyz(x + 12.0, y, z);
+        p.unit.transform.set_xyz(x - 32.0, y, z);
         p.unit.max_hp = 100_000;
         p.unit.hp = p.unit.max_hp;
     }
@@ -934,7 +957,13 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
         skill_result::SUCCESS
     );
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let wave: Vec<_> = [46651, 46642]
+    // Include the ranged add with its victim only a few meters from the west
+    // portal. It must advance toward the arena before starting its skill.
+    let ranged = spawns.get_npc_spawner(46631)[0]
+        .force_spawn(&server, 0)
+        .unwrap();
+    crate::systems::ai::hooks::engage(&server, &ranged, &victim);
+    let wave: Vec<_> = [46651, 46642, 46631]
         .into_iter()
         .flat_map(|id| spawns.get_npc_spawner(id))
         .flat_map(|s| s.spawned_npcs().into_values().flatten())
@@ -943,7 +972,7 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
             (add, start)
         })
         .collect();
-    assert_eq!(wave.len(), 2, "both portals supplied an add");
+    assert_eq!(wave.len(), 3);
     for (add, _) in &wave {
         assert!(
             add.data()
@@ -968,7 +997,8 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
         let n = add.data();
         assert_eq!(n.current_aggro_target, player.obj_id);
         assert!(
-            (n.unit.transform.x - start.x).hypot(n.unit.transform.y - start.y) > 1.0,
+            (n.unit.transform.x - 200.0).hypot(n.unit.transform.y - 312.0)
+                < (start.x - 200.0).hypot(start.y - 312.0) - 1.0,
             "add {} advanced beyond its portal",
             n.unit.template_id
         );

@@ -939,6 +939,70 @@ fn ai_command(cmd_id: AiCommandCategory, param1: u32, param2: &str) -> AiCommand
     }
 }
 
+#[tokio::test]
+async fn npc_control_path_sends_the_walking_animation_at_walking_speed() {
+    use crate::models::movement::{MoveKind, MoveType};
+    use aaemu_commons::PacketStream;
+
+    let mut data = data();
+    data.systems.ai.ai.commands.insert(
+        900,
+        vec![ai_command(
+            AiCommandCategory::FollowPath,
+            1,
+            "scripted_walk",
+        )],
+    );
+    let server = server_with_data(data);
+    let mut client = TestClient::new(&server, 1, 1);
+    let c = test_character(1, "Watcher", 101.0, 101.0);
+    let _player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    server
+        .systems
+        .ai
+        .paths
+        .insert("scripted_walk", vec![path_point(110.0, 100.0, 100.0)]);
+    super::hooks::spawned(&server, &npc, "");
+    super::hooks::npc_control_effect(
+        &server,
+        &crate::systems::skills::data::effects::NpcControlEffect {
+            id: 1,
+            category_id: 5,
+            param_string: String::new(),
+            param_int: 900,
+        },
+        &npc,
+    );
+    for _ in 0..10 {
+        tick_all(&server, 100);
+    }
+    let walking = client.drain().into_iter().any(|(opcode, bytes)| {
+        if opcode != sc::SCOneUnitMovementPacket {
+            return false;
+        }
+        let mut stream = PacketStream::from_bytes(bytes);
+        if stream.read_bc().unwrap() != NPC_OBJ {
+            return false;
+        }
+        let kind = stream.read_u8().unwrap();
+        matches!(
+            MoveType::read(kind, &mut stream).unwrap().kind,
+            MoveKind::Unit(step) if step.x > 100.0
+                && step.actor_flags.0 == 5
+                && step.delta_movement[1] == 63
+        )
+    });
+    assert!(walking, "the scripted step uses the client walk flags");
+}
+
 /// Retail command set 146 (`public_farm*`): the first FollowPath loads the route named by its
 /// own `param2` (the C# loaded the *previous* name, so the first command did nothing and the
 /// last route never loaded), every route point is visited in order even when its authored Z is
