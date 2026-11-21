@@ -1054,7 +1054,7 @@ fn tick_ballistic_motion(
             ray_start,
             to,
             collision::query::mask::SOLID_TERRAIN | collision::query::mask::WATER,
-            collision::query::ray_flags::DEFAULT,
+            collision::query::ray_flags::SHIP_PROJECTILE,
             &ignored,
         )
         .flatten()
@@ -1480,6 +1480,150 @@ mod tests {
                 server.world.create_world_instance(t, 0)
             }
         }
+    }
+
+    fn cannon_fixture() -> (GameServer, Arc<WorldInstance>, WorldObject) {
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+
+        let mut data = crate::data::GameData::empty();
+        data.systems.npcs.gimmick.templates.insert(
+            45,
+            GimmickTemplate {
+                id: 45,
+                life_time: 5000,
+                gravity: 9.8,
+                collision_skill_id: 17741,
+                disappear_by_collision: true,
+                ..Default::default()
+            },
+        );
+        let server = test_server_with(data);
+        crate::systems::ai::collision::flow_tests::enable_collision(&server, 90.0);
+        let world = test_world(&server);
+        let client = TestClient::new(&server, 1, 1);
+        let mut player = test_character(1, "Gunner", 100.0, 100.0);
+        player.unit.transform.set_height(102.0);
+        let shooter = WorldObject::from(spawn_player(&server, &client, player, 0x500));
+        (server, world, shooter)
+    }
+
+    fn fire_cannon(
+        server: &GameServer,
+        world: &Arc<WorldInstance>,
+        shooter: &WorldObject,
+        vertical_speed: f32,
+    ) -> Arc<ActiveGimmick> {
+        let shot = spawn_from_effect(
+            server,
+            world,
+            &SpawnGimmickParams {
+                gimmick_id: 45,
+                offset_coordinate_id: 2,
+                offset_y: 3.0,
+                scale: 1.0,
+                velocity_coordinate_id: 2,
+                velocity_y: 20.0,
+                velocity_z: vertical_speed,
+                ..Default::default()
+            },
+            shooter,
+        )
+        .unwrap();
+        server.systems.npcs.gimmicks.find(shot.obj_id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn portable_cannon_hits_a_wall_inside_the_muzzle_offset() {
+        use aaemu_physics::math::Vec3;
+
+        let (server, world, shooter) = cannon_fixture();
+        crate::systems::ai::collision::flow_tests::add_wall_boxes(
+            &server,
+            &[(0x600, Vec3::new(100.0, 101.5, 102.0), 0.25)],
+        );
+        let shot = fire_cannon(&server, &world, &shooter, 0.0);
+        assert_eq!(shot.gimmick.data().unit.transform.y, 103.0);
+
+        gimmick_tick(&server, &world, &shot, Duration::from_millis(50), 1000);
+
+        assert!(shot.state().skill_started);
+        assert!(world.gimmick(shot.gimmick.obj_id).is_none());
+        let y = shot.gimmick.data().unit.transform.y;
+        assert!((y - 101.22).abs() < 0.05, "impact y={y}");
+    }
+
+    #[tokio::test]
+    async fn portable_cannon_detonates_at_the_water_surface() {
+        let (server, world, shooter) = cannon_fixture();
+        let shot = fire_cannon(&server, &world, &shooter, -20.0);
+        gimmick_tick(&server, &world, &shot, Duration::from_millis(150), 1000);
+
+        assert!(shot.state().skill_started);
+        assert!(world.gimmick(shot.gimmick.obj_id).is_none());
+        let z = shot.gimmick.data().unit.transform.z;
+        assert!((z - 100.03).abs() < 0.05, "impact z={z}");
+    }
+
+    #[tokio::test]
+    async fn portable_cannon_passes_its_own_hull_and_hits_another_ship() {
+        use crate::systems::ai::collision::{
+            phys_world,
+            world::{ObjKind, Owner},
+        };
+        use aaemu_physics::entities::base::add_geometry;
+        use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
+        use aaemu_physics::math::Vec3;
+        use aaemu_physics::params::{GeomParams, ParamsPos};
+
+        let (server, world, shooter) = cannon_fixture();
+        let mut own_ship = crate::models::slave::Slave::new(1, 24);
+        own_ship.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let own_ship = WorldObject::from(Entity::new(0x600, own_ship));
+        world.spawn(&own_ship, &server.view_ctx());
+        world.set_sticky_parent(&shooter, Some(&own_ship));
+        {
+            let hulls = phys_world(&server, world.id).unwrap();
+            let mut state = hulls.lock();
+            let geom = state
+                .world
+                .geometry(&Primitive::Box(BoxPrim::aligned(
+                    Vec3::ZERO,
+                    Vec3::splat(0.5),
+                )))
+                .unwrap();
+            for (obj_id, y) in [(own_ship.obj_id(), 101.5), (0x601, 104.0)] {
+                let pose = ParamsPos {
+                    pos: Vec3::new(100.0, y, 102.0),
+                    ..Default::default()
+                };
+                let hull = state
+                    .world
+                    .create_physical_entity(2, 0.0, Some(&pose), 0, 0, -1)
+                    .unwrap();
+                let params = GeomParams {
+                    mass: 10.0,
+                    flags: 0x80,
+                    flags_collider: 0x80,
+                    ..Default::default()
+                };
+                add_geometry(&mut state.world, hull, &geom, &params, -1);
+                // Ship physics registers hulls by owner outside the normal object cache.
+                state.owners.insert(
+                    hull,
+                    Owner::Object {
+                        kind: ObjKind::Ship,
+                        obj_id,
+                    },
+                );
+            }
+        }
+        let shot = fire_cannon(&server, &world, &shooter, 0.0);
+        gimmick_tick(&server, &world, &shot, Duration::from_millis(100), 1000);
+
+        assert!(shot.state().skill_started);
+        assert!(world.gimmick(shot.gimmick.obj_id).is_none());
+        let y = shot.gimmick.data().unit.transform.y;
+        assert!((y - 103.47).abs() < 0.05, "impact y={y}");
     }
 
     #[tokio::test]

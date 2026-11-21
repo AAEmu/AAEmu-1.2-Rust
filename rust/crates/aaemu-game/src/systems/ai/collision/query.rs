@@ -40,8 +40,15 @@ pub mod mask {
 
 /// Ray flags.
 pub mod ray_flags {
+    use aaemu_physics::ids::{part_flags, rwi_flags};
+
     /// `rwi_stop_at_pierceable | rwi_ignore_back_faces` (0x8F): most x2game rays.
     pub const DEFAULT: u32 = 0x8F;
+    /// Include the two solid ship hull parts (0x80 and 0x100), which have no
+    /// default ray flag. The buoyancy and inertia shapes remain excluded.
+    pub const SHIP_PROJECTILE: u32 = DEFAULT
+        | rwi_flags::COLLTYPE_ANY
+        | ((part_flags::COLLTYPE_RAY | 0x180) << rwi_flags::COLLTYPE_SHIFT);
     /// Skill obstacle ray (`FUN_390B5540`, `x2game.dll.c:149930`): colltype-any with
     /// collision class 2, ignore back faces, pierceability 15.
     pub const SKILL_OBSTACLE: u32 = 0x0002_048F;
