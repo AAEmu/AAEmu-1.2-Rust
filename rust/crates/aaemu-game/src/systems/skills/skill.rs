@@ -2652,6 +2652,9 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 | (21423, 29284)
                 | (21426, 29291)
                 | (19442, 23953)
+                | (19535, 24195)
+                | (19019, 24232)
+                | (19022, 24231)
                 | (21477, 29402)
         ) {
             Some(ApplicationMethod::Source)

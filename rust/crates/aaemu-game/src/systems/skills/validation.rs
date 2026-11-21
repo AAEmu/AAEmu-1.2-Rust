@@ -375,6 +375,19 @@ pub(super) fn check(
     target: &Target,
 ) -> Result<(), (u8, u32)> {
     let template = &skill.template;
+    if target
+        .as_obj()
+        .is_some_and(|target| !target.same(caster) && super::buffs::nerta_bomb_drop_active(target))
+    {
+        return fail("skill_invalid_target");
+    }
+    if template.id == 18715
+        && caster.as_player().is_none_or(|player| {
+            crate::systems::npcs::doodad::interactions::equipped_powder_keg(player).is_none()
+        })
+    {
+        return fail("skill_need_reagent");
+    }
     if template.id == RED_DRAGON_EGG_SKILL {
         check_red_dragon_egg(server, caster, target)?;
     }

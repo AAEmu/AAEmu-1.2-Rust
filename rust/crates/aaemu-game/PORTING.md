@@ -5176,6 +5176,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   doodad.g`); the 1.2 templates and start groups are from `compact.sqlite3`. Tests:
   `npcs::sharpwind_doodad_tests::sharpwind_scripted_doodad_spawn_placements` and (gated by
   `AAEMU_COMPACT_DB`) `real_compact_db_sharpwind_scripted_doodad_spawn_templates`.
+* systems::npcs (Sharpwind encounters, 2026-11-21): Allistair runs his command-set paths using
+  his actor stance's run speed. The Sniper, Fortuneteller, and Illusionist use the range of their
+  base attack. Illusion (18485) takes priority at its authored half-health threshold. Frozen
+  Zone (5150) uses the summoner's faction for its clout. The healing and mana staff interactions
+  cast their area restoration skills from the player even though the staff despawns first.
+  Incidental help in Sharpwind and Hadir Farm checks the attacker's floor, distance, and line of
+  sight. Members of the same authored spawn batch still share their scripted aggro.
+  Nerta is untargetable through the two authored Bomb Drop buffs. The Colossus uses a room
+  leash, takes steps on the arena's floor, and faces the victim before directional casts.
+  Its hand-smash plots' near impacts are moved 1.5 m closer to cover the fist beside its body.
+  Okape plays sequence `id_262_01` for nearby players at the arena's height. His tornadoes
+  travel from their spawn points toward the arena and back during their authored hazard buff
+  (4225). Their referenced controller (3232) is missing from the 1.2 compact data.
+  Allistair's warehouse display chest (5600) is placed by the end of `aipath_alistair2_5`,
+  where his command set casts 19504 to open it. The existing Guild Storage Door and Stone
+  Lion guard that route. The rock barriers respond to the placed keg's authored explosion.
+  Dropping a keg takes the equipped pack once, and the five-second doodad timer detonates it.
+  **Inferred:** the display chest position, Colossus room and near-impact bounds, and the
+  tornado routes. See `npcs::sharpwind_combat_tests` for the real compact-data regressions.
 * systems::npcs (start-active spawners / Sharpwind NPC spawn data, 2026-11-11): a plain
   `npc_spawns.json` row (no `NpcSpawnerIds`) expands into **every** game-data spawner that lists
   the NPC as a member (`SpawnManager::AddNpcSpawner` / `get_spawner_ids`), and neither the C#

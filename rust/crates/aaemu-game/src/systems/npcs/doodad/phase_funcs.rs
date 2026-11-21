@@ -363,6 +363,18 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         // documented there (capture-pending).
         FuncTemplate::SiegePeriod(_) => false,
         FuncTemplate::SpawnGimmick(f) => {
+            if ctx.doodad.data().template_id == 5951 && f.gimmick_id == 56 {
+                if crate::systems::npcs::gimmick::manager::detonate_powder_keg(
+                    server,
+                    &ctx.world,
+                    &ctx.obj(),
+                    f,
+                ) {
+                    ctx.doodad.data().phase.override_phase = 15332;
+                    return true;
+                }
+                return false;
+            }
             if crate::systems::npcs::gimmick::manager::spawn_from_doodad(
                 server,
                 &ctx.world,
@@ -566,6 +578,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // The poison puddles and tombstones are anchored at the encounter's
     // summoned doodad. Timed phases can arrive without an explicit caster.
     let hadir_hazard = matches!(template_id, 3874 | 3956);
+    let frozen_zone = template_id == 5150 && f.id == 1152;
     // The Cellar flame follows the brazier's phase, even when the bucket is used
     // beside a different prop. Phase changes must remove the previous fire area.
     let palace_flame = matches!(template_id, 4109 | 4741) && f.buff_id == 2783;
@@ -601,7 +614,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // The school owns the area and releases it when its chummed phase expires.
         ctx.doodad.clone()
     };
-    let caster = if hadir_hazard {
+    let caster = if hadir_hazard || frozen_zone {
         let owner_obj_id = ctx.doodad.data().owner_obj_id;
         ctx.world
             .object(owner_obj_id)
@@ -609,8 +622,11 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     } else {
         caster.cloned()
     };
+    if frozen_zone && caster.is_none() {
+        return;
+    }
     let trigger_caster = match caster {
-        Some(c) if hadir_hazard => c,
+        Some(c) if hadir_hazard || frozen_zone => c,
         Some(c) if c.as_player().is_some() || (howling_hazard && c.as_npc().is_some()) => c,
         _ => ctx.obj(),
     };
@@ -646,7 +662,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // Lake Bubbles (4336) gives Air Bubble 3036 at the Soundless Lake sealstone. Its damage,
         // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
         // These encounter clouts carry their payload without an inside buff.
-        None if hadir_hazard || matches!(f.id, 1415 | 1542) => {
+        None if hadir_hazard || frozen_zone || matches!(f.id, 1415 | 1542) => {
             HashMap::from([(0, f.effects.clone())])
         }
         None => HashMap::from([(0, good_buff_effects(server, &f.effects))]),

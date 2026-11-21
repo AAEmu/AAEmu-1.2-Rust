@@ -186,8 +186,8 @@ impl QuestSkillHooks for QuestsForSkills {
             EffectTemplate::Cinema { cinema_id, .. } => {
                 tracing::trace!("CinemalEffect");
                 if let Target::Obj(target) = &args.target {
-                    if target.as_npc().is_some() && matches!(*cinema_id, 53 | 133) {
-                        // Howling Abyss casts its final-room cue on the invisible actor.
+                    if target.as_npc().is_some() && matches!(*cinema_id, 51 | 53 | 133) {
+                        // Sharpwind Mines and Howling Abyss cast their final-room cue on an NPC.
                         // Play it for characters in the same room on this instance.
                         if let Some(world) = server.world.world_of(target) {
                             let origin = world.world_pos_rot(target);

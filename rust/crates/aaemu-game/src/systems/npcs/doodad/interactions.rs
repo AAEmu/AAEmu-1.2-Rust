@@ -476,6 +476,18 @@ fn summon_doodad(
     let Some(target) = target else {
         return;
     };
+    if doodad_id == 5951 {
+        summon_doodad_at(
+            server,
+            caster,
+            &crate::systems::skills::geometry::pos_unit_from(
+                server,
+                &crate::systems::skills::geometry::Target::Obj(target.clone()),
+            ),
+            doodad_id,
+        );
+        return;
+    }
     let Some(doodad) = manager::create(server, &world, 0, doodad_id, Some(caster), true) else {
         return;
     };
@@ -494,9 +506,35 @@ pub fn summon_doodad_at(server: &GameServer, caster: &WorldObject, pos: &PosUnit
     let Some(world) = server.world.world_of(caster) else {
         return;
     };
+    // The powder keg is a worn pack. Its plot's Bag reagent effect cannot take it.
+    let _operation = (doodad_id == 5951).then(|| server.systems.economy.operation_scope());
+    let keg = if doodad_id == 5951 {
+        let Some(player) = caster.as_player() else {
+            return;
+        };
+        let Some(item_id) = equipped_powder_keg(player) else {
+            send_error(player, err::BAG_INVALID_ITEM);
+            return;
+        };
+        Some((player, item_id))
+    } else {
+        None
+    };
     let Some(doodad) = manager::create(server, &world, 0, doodad_id, Some(caster), true) else {
         return;
     };
+    if let Some((player, item_id)) = keg {
+        if !economy(server).remove_equipment_item(
+            server,
+            player,
+            crate::models::item_task::task_type::DROP_BACKPACK,
+            item_id,
+        ) {
+            manager::delete(server, &world, &doodad);
+            server.ids.object.release_id(doodad.obj_id);
+            return;
+        }
+    }
     // `target.Transform.CloneDetached(doodad)`: zone / instance of the position, no parent.
     let mut t = doodad.data().transform;
     t.instance_id = pos.instance_id;
@@ -513,4 +551,13 @@ pub fn summon_doodad_at(server: &GameServer, caster: &WorldObject, pos: &PosUnit
     doodad.data().transform = t;
     phase::init_doodad(&DoodadCtx::new(server, world.clone(), doodad.clone()));
     manager::spawn(server, &world, &doodad);
+}
+
+pub(crate) fn equipped_powder_keg(player: &crate::world::PlayerRef) -> Option<u64> {
+    let equipment = player.data().inventory.equipment().clone();
+    let equipment = equipment.lock().expect("container poisoned");
+    equipment
+        .get_item_by_slot(crate::models::container::equip_slot::BACKPACK)
+        .filter(|item| item.template_id == 25002)
+        .map(|item| item.id)
 }

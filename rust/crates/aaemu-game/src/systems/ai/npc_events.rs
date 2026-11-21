@@ -28,6 +28,11 @@ fn use_np_skills(c: &mut AiCtx<'_>, kind: K, target_obj_id: u32, bypass_gcd: boo
         let Some(skill) = ai_skills::np_skill(c, id, kind) else {
             continue;
         };
+        // The arena cue finds its audience and the tornado starts its hazard
+        // buff once the casting unit is registered in the world.
+        if matches!(skill.id, 18983 | 19535) && !c.obj.is_visible() {
+            continue;
+        }
         if ai_skills::on_cooldown(c, skill.id) {
             continue;
         }

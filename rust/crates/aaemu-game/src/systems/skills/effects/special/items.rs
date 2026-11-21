@@ -289,6 +289,10 @@ pub fn apply_reagents(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         tracing::error!("Special effects: ApplyReagents without a skill (NullReferenceException)");
         return;
     };
+    if skill.id == 18715 {
+        // The summon interaction consumes the actual equipped powder keg atomically.
+        return;
+    }
     let items = server.systems.skills.ext.items();
     let reagents = server
         .game_data

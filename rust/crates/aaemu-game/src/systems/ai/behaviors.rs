@@ -97,6 +97,35 @@ pub fn enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
 
 /// `behavior.Tick(delta)` (`delta_ms` = the AI manager's tick delta).
 pub fn tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
+    if let Some(start) = (k != B::Spawning
+        && c.npc.data().unit.template_id == 12014
+        && c.obj.transform().zone_id == 262)
+        .then(|| {
+            c.obj.with_base_unit(|unit| {
+                unit.buffs()
+                    .effects
+                    .iter()
+                    .find(|buff| buff.template.id == 4225 && !buff.is_ended())
+                    .map(|buff| buff.start_time_ms)
+            })
+        })
+        .flatten()
+    {
+        // The event spawners place each vortex on a different side of the arena.
+        // Traverse toward the center and back while its authored hazard buff is active.
+        let home = c.ai.idle_position;
+        let center = Vec3::new(613.275, 634.419, home.z);
+        let elapsed = (now_ms() - start).max(0) as f32 / 1000.0;
+        let phase = elapsed / 15.0;
+        let fraction = 1.0 - (phase.rem_euclid(2.0) - 1.0).abs();
+        let waypoint = Vec3::new(
+            home.x + (center.x - home.x) * fraction,
+            home.y + (center.y - home.y) * fraction,
+            home.z,
+        );
+        npc_move_towards(c, waypoint, 3.0 * delta_seconds(delta_ms) as f32, 4, 0.05);
+        return;
+    }
     match k {
         B::Alert => alert_tick(c, k),
         B::AlmightyAttack => almighty_attack_tick(c, k, delta_ms),
@@ -438,8 +467,8 @@ pub fn use_skill(
     if target_dist > skill.template.max_range as f32 {
         return skill_result::TOO_FAR_RANGE;
     }
-    // Wild Lightning's self-target plots project their strikes from the caster's heading.
-    let directional = matches!(skill.id, 15935 | 19980);
+    // These self-target plots project their strikes from the caster's heading.
+    let directional = matches!(skill.id, 15935 | 19980 | 18374 | 18401 | 18406 | 19248);
     if !ai_skills::is_self_target(&skill.template) || directional {
         if cast_path_blocked(c, &skill.template, target) {
             return skill_result::OBSTACLE;
@@ -878,6 +907,13 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         )
     };
     let link_data = &c.server.game_data.systems.npcs.npc.aggro_links;
+    let nearby_dungeon_help = c.server.world.world_of(&c.obj).is_some_and(|world| {
+        matches!(
+            world.template.name.as_str(),
+            "instance_cuttingwind_deadmine" | "instance_hadir_farm"
+        )
+    });
+    let attacker_pos = nearby_dungeon_help.then(|| npc::world_pos(c.server, abuser));
     let npcs: Vec<WorldObject> =
         npc::around(c.server, &c.obj, t.attack_start_range_scale * radius, false)
             .into_iter()
@@ -928,6 +964,22 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         };
         if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
             continue;
+        }
+        // Keep incidental assistance near the pull. Authored groups have their own rules.
+        if let Some(attacker) = attacker_pos.filter(|_| !group_link) {
+            let helper = npc::world_pos(c.server, &other);
+            if (helper.z - attacker.z).abs() > 4.0
+                || calculate_distance(helper, attacker, true) > help_dist.max(10.0)
+                || !npc::can_see_target(c.server, &other, abuser)
+                || super::collision::line_of_sight(
+                    c.server,
+                    other.transform().instance_id,
+                    [helper.x, helper.y, helper.z + 1.0],
+                    [attacker.x, attacker.y, attacker.z + 1.0],
+                ) == Some(false)
+            {
+                continue;
+            }
         }
         // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
         // special-rule branch requires `aggro_link_sight_check` to be enabled AND the abuser
@@ -1125,9 +1177,16 @@ fn should_return(c: &AiCtx<'_>) -> bool {
             |p: Vec3| (p.x - 200.0).hypot(p.y - 312.0) <= 50.0 && (18.0..=26.0).contains(&p.z);
         return !in_arena(me) || !in_arena(target_position);
     }
+    if is_stonebrother(c) {
+        return !npc::in_stonebrother_arena(me) || !npc::in_stonebrother_arena(target_position);
+    }
     let distance_to_target = calculate_distance(me, target_position, true);
     let distance_to_idle = calculate_distance(me, c.ai.idle_position, true);
     distance_to_target > return_distance || distance_to_idle > return_distance
+}
+
+fn is_stonebrother(c: &AiCtx<'_>) -> bool {
+    c.npc.data().unit.template_id == 11363 && c.obj.transform().zone_id == 262
 }
 
 /// The template's `(return_distance, absolute_return_distance)`, defaulting to 50 m / 200 m.
@@ -1504,6 +1563,12 @@ fn move_in_range(c: &mut AiCtx<'_>, k: BehaviorKind, target: Option<&WorldObject
             npc::stop_movement(c.server, &c.npc);
             return;
         }
+    }
+    if is_stonebrother(c) && npc::in_stonebrother_arena(target_pos) {
+        // The Colossus's footprint cannot use the small-NPC corridor route.
+        // Chase on the arena floor while the room leash permits it.
+        npc_move_towards(c, target_pos, speed as f32, move_flags, 1.0);
+        return;
     }
     if geo_data_mode(c) && moves_freely(c) {
         // Flyers and swimmers chase in a straight 3D line; drop any route left over.
@@ -2599,6 +2664,10 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
                 cmd.param2.clone()
             };
             c.load_ai_path_points(&name, cmd.param1 == 1);
+            if name.starts_with("aipath_alistair") {
+                c.ai.path_handler.ai_path_speed = npc::running_move_speed(c.server, &c.npc);
+                c.ai.path_handler.ai_path_actor_flags = 4;
+            }
             if cmd.param1 == 1 {
                 c.enqueue_path_point(AiPathPoint {
                     position: Vec3::default(),
@@ -3030,6 +3099,13 @@ fn big_monster_attack_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     set_in_battle(c.server, &c.obj, true);
     super::npc_events::on_combat_started(c);
     c.ai.param = template_ai_params(c);
+    let template_id = c.npc.data().unit.template_id;
+    if let Some(skill) = matches!(template_id, 11110 | 11111 | 11358 | 11363 | 11582)
+        .then(|| ai_skills::new_skill(c, template_scalars(c).base_skill_id as u32))
+        .flatten()
+    {
+        set_weapon_range(c, k, &skill);
+    }
     c.st(k).enter = true;
 }
 
@@ -3085,7 +3161,11 @@ fn big_monster_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
         .collect();
     // PickSkill
     let t = template_scalars(c);
-    let selected = if !available.is_empty() {
+    // At half health the Illusionist splits once the authored cooldown permits it.
+    let illusion = available.iter().find(|skill| skill.skill_type == 18485);
+    let selected = if let Some(illusion) = illusion {
+        Some(illusion.clone())
+    } else if !available.is_empty() {
         Some(available[rand::thread_rng().gen_range(0..available.len())].clone())
     } else if !ai_skills::on_cooldown(c, t.base_skill_id as u32) {
         Some(super::params::BigMonsterCombatSkill {

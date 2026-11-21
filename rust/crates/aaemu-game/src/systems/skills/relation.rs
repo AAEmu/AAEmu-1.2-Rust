@@ -358,6 +358,12 @@ pub fn ramming_protected(
 
 /// `BaseUnit.CanAttack(target)`.
 pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
+    if target
+        .as_obj()
+        .is_some_and(super::buffs::nerta_bomb_drop_active)
+    {
+        return false;
+    }
     if let Some(allowed) =
         crate::systems::housing::dominion::runtime::can_attack_tower(server, me, target)
     {
