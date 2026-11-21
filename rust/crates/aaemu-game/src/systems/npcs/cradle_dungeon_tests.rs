@@ -134,7 +134,7 @@ const CARNIVORE_EGG_SPAWNERS: &[u32] = &[
 /// The 45 scripted + interactive doodad rows: template, level family, position (Inferred).
 #[rustfmt::skip]
 const DOODAD_ROWS: [(u32, u32, f32, f32, f32); 45] = [
-    (5038, 0, 219.433, 504.340, 173.844),
+    (5038, 0, 219.433, 504.340, 178.0),
     (5252, 0, 684.907, 752.155, 173.000),
     (5252, 0, 700.698, 749.861, 172.679),
     (5257, 80001, 773.862, 841.167, 192.712),
@@ -886,32 +886,31 @@ async fn real_data_cradle_statue_sphere_wakes_the_four_statues() {
             break;
         }
     }
+    let spawn_manager = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
+    let mut statues = Vec::new();
     for (spawner, unit) in [
         (88999, 11163),
         (89000, 11181),
         (89001, 11183),
         (89002, 11184),
     ] {
-        assert_eq!(
-            spawned_count(&server, spawner),
-            1,
-            "statue spawner {spawner}"
-        );
-        assert!(
-            !npcs_of(&world, unit).is_empty(),
-            "statue {unit} from spawner {spawner}"
-        );
+        let spawners = spawn_manager.get_npc_spawner(spawner);
+        let event = spawners.first().expect("statue event spawner");
+        assert_eq!(event.current_spawn_count(), 1, "statue spawner {spawner}");
+        let statue = event
+            .spawned_npcs()
+            .into_values()
+            .flatten()
+            .next()
+            .expect("awakened statue");
+        assert_eq!(statue.data().unit.template_id, unit);
+        statues.push(statue);
     }
     assert!(
         npcs_of(&world, 11268).is_empty(),
         "skill 18270 kills the invisible statue"
     );
 
-    let statues: Vec<_> = world
-        .all_npcs()
-        .into_iter()
-        .filter(|npc| matches!(npc.data().unit.template_id, 11163 | 11181 | 11183 | 11184))
-        .collect();
     for (index, npc) in statues.iter().enumerate() {
         npc.data().unit.hp = 0;
         let statue = WorldObject::from(npc);

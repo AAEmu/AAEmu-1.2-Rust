@@ -464,6 +464,23 @@ impl AreaTrigger {
         if self.requires_submersion {
             let water = crate::systems::ai::physics::world_water(server, &world);
             current.retain(|unit| {
+                // A boat's origin is at the waterline. Its hull and occupants
+                // are above the hazardous water even when that origin is wet.
+                let hull = unit
+                    .as_slave()
+                    .cloned()
+                    .or_else(|| world.slave(unit.transform().parent_obj_id));
+                if hull.is_some_and(|slave| {
+                    let template_id = slave.data().unit.template_id;
+                    server
+                        .game_data
+                        .systems
+                        .vehicles
+                        .slave_template(template_id)
+                        .is_some_and(|template| template.is_a_boat())
+                }) {
+                    return false;
+                }
                 let pos = world.world_pos_rot(unit);
                 water
                     .is_water(crate::systems::skills::controllers::Vec3::new(

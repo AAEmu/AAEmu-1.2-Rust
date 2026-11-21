@@ -4022,6 +4022,8 @@ fn create_spawn_committed(
 
     let mut spawn_pos = position_override.unwrap_or_default();
     spawn_pos.instance_id = world.id;
+    // The ship controller also checks WorldId before ticking the hull.
+    spawn_pos.world_id = world.id;
     let mut db_id = 0u32;
     let mut slave_name = String::new();
     let (mut slave_hp, mut slave_mp) = (1, 1);
@@ -4050,7 +4052,6 @@ fn create_spawn_committed(
         }
         if let Some(sp) = spawner {
             let p = sp.def.base.position;
-            spawn_pos.instance_id = world.id;
             spawn_pos.zone_id = p.zone_id;
             spawn_pos.set_position(p.x, p.y, p.z, p.roll, p.pitch, p.yaw);
         } else if let Some(o) = owner {

@@ -5238,8 +5238,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
   Indoor water contours come from the r208022 Cradle cell's `visareas.dat`. The rowboat
   uses template 15 at the east landing of the first pool (surface 184.868 m).
-  The green and red water use their authored poison and lava clouts only while
-  submerged. Placed traps with a sub-tick active phase check contact immediately.
+  The green and red water use their authored poison and lava clouts on submerged
+  units. Boats and their occupants are clear of those clouts at the waterline.
+  Placed traps with a sub-tick active phase check contact immediately.
   Miasma and the spear injury retain their authored buff duration. The spear
   supplies the damage source for the injury. Flame jets reapply their short damage
   buff while the player remains in range. The corridor trash and four bosses use
