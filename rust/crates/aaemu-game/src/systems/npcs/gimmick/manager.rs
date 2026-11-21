@@ -33,9 +33,21 @@ pub const TICK_DELAY: Duration = Duration::from_millis(50);
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
 pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
 const PALACE_BOULDER_TEMPLATE_ID: u32 = 42;
+/// The Howling Abyss Bomber keg (`barrel_grape_e.cgf`).
+const HOWLING_KEG_TEMPLATE_ID: u32 = 49;
 // Barrel impacts retain a fraction of their speed, then settle before the fuse.
 const BARREL_RESTITUTION: f32 = 0.24;
 const BARREL_REST_SPEED: f32 = 0.8;
+/// Radius and half length of the `proxy` cylinder in r208022's
+/// `objects/env/01_nuia/001_ndeco/old/barrel_grape_e.cgf`, centred on the model origin with its
+/// axis along model Z. Used only when the client files are not loaded; otherwise the keg reads
+/// the proxy from its template's model.
+pub(in crate::systems::npcs) const KEG_PROXY_CYLINDER: (f32, f32) = (0.661, 0.916);
+/// Rolling resistance of a landed keg (m/s²). **Inferred (no 1.2 server evidence):** the
+/// `gimmicks` row has no rolling friction (`damping` 0). With this value a keg thrown at the
+/// authored 8 m/s rolls about 3 m after it settles, well inside its six-second fuse, so it
+/// still lands about where the previous sliding keg stopped.
+const KEG_ROLL_DECELERATION: f32 = 4.0;
 
 fn uses_ballistic_motion(template_id: u32) -> bool {
     matches!(template_id, PALACE_BOULDER_TEMPLATE_ID | 49 | 64 | 66)
@@ -85,6 +97,8 @@ pub struct GimmickState {
     pub authored_motion: bool,
     /// Floor under an Armory barrel, resolved when the barrel is created.
     barrel_floor: Option<f32>,
+    /// A Howling Abyss keg rolling on its side.
+    rolling_keg: Option<RollingKeg>,
     /// `Time`.
     pub time: u32,
     /// `MoveDown`.
@@ -129,6 +143,55 @@ pub struct GimmickState {
     /// through the live spawner unit, so a gimmick that outlived its thrower would be owner-less
     /// and skip every rule keyed on the character (Peace, no-PvP, siege hostility, tagging).
     pub owner_character_id: u32,
+}
+
+/// A keg lying on its side: its cylinder axis is horizontal and across its heading, and it
+/// turns about that axis by the distance it rolls.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct RollingKeg {
+    /// Scaled proxy radius: the centre rests this far above the floor.
+    radius: f32,
+    /// Yaw of the rolling direction (forward = `(-sin, cos)`, the unit convention).
+    heading: f32,
+    /// Turn about the cylinder axis (rad).
+    spin: f32,
+    /// Spin rate kept while the keg is airborne (rad/s).
+    spin_rate: f32,
+}
+
+impl RollingKeg {
+    /// Writes the orientation: roll 90° lays the model's Z axis along `-Y`, pitch then turns
+    /// about that axis, and yaw `heading + 90°` puts the axis across the heading.
+    fn apply(&self, t: &mut crate::models::transform::Transform) {
+        t.rot_x = std::f32::consts::FRAC_PI_2;
+        t.rot_y = self.spin;
+        t.rot_z = self.heading + std::f32::consts::FRAC_PI_2;
+    }
+
+    /// World angular velocity of the rolling motion (about the negative cross axis).
+    fn ang_vel(&self) -> [f32; 3] {
+        let (sin, cos) = self.heading.sin_cos();
+        [-cos * self.spin_rate, -sin * self.spin_rate, 0.0]
+    }
+}
+
+/// The scaled `(radius, half length)` of a rolling gimmick's cylinder proxy, read from its
+/// model when the client files are loaded ([`KEG_PROXY_CYLINDER`] otherwise).
+fn rolling_cylinder(server: &GameServer, template: &GimmickTemplate, scale: f32) -> (f32, f32) {
+    use crate::systems::ai::collision;
+    use aaemu_physics::geometry::primitives::Primitive;
+    let from_model = collision::files(server).and_then(|files| {
+        let path = collision::cells::normalize_model_path(&template.model_path);
+        let model = collision::model_cache(server, &files).get(&path)?;
+        let geom = model.slot(collision::models::phys_slot::DEFAULT)?;
+        match geom.geom.primitive(0)? {
+            Primitive::Cylinder(c) => Some((c.r, c.hh)),
+            _ => None,
+        }
+    });
+    let (r, hh) = from_model.unwrap_or(KEG_PROXY_CYLINDER);
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    (r * scale, hh * scale)
 }
 
 impl GimmickState {
@@ -645,6 +708,17 @@ fn spawn_effect_gimmick(
     // that spawns fragments is gone before they are). 0 for a doodad / NPC caster.
     let owner_character_id = crate::systems::skills::relation::owner_character(server, caster)
         .map_or(0, |owner| owner.character_id);
+    // The keg model is centred on its origin with the cylinder upright. It flies and rolls on
+    // its side, its centre one radius above the floor.
+    let rolling_keg = (template.id == HOWLING_KEG_TEMPLATE_ID && authored_motion).then(|| {
+        let keg = RollingKeg {
+            radius: rolling_cylinder(server, &template, params.scale).0,
+            heading: yaw,
+            ..RollingKeg::default()
+        };
+        keg.apply(&mut g.unit.transform);
+        keg
+    });
     let initial_pos = [g.unit.transform.x, g.unit.transform.y, g.unit.transform.z];
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
@@ -659,6 +733,7 @@ fn spawn_effect_gimmick(
             authored_motion,
             owner_character_id,
             barrel_floor,
+            rolling_keg,
             last_pos: if cannon_projectile {
                 // Sweep the muzzle offset on the first tick as well, so a
                 // cannon held against a wall cannot start on its far side.
@@ -1026,6 +1101,10 @@ fn tick_ballistic_motion(
     dt: f32,
 ) -> bool {
     use crate::systems::ai::collision;
+    let keg = active.state().rolling_keg;
+    if let Some(keg) = keg {
+        return tick_rolling_keg(server, world, active, template, keg, dt);
+    }
     let (from, mut velocity) = {
         let g = active.gimmick.data();
         let t = g.unit.transform;
@@ -1121,6 +1200,122 @@ fn tick_ballistic_motion(
     }
     g.vel = velocity;
     hit.is_some()
+}
+
+/// Moves a Howling Abyss keg and returns whether it struck scenery. The keg flies under its
+/// template gravity with its surface, not its centre, meeting walls and floors: the centre
+/// stays one proxy radius off them. Hard impacts bounce and lose speed like the other launched
+/// traps. Once an impact is too slow to bounce, the keg rolls with [`KEG_ROLL_DECELERATION`],
+/// turning about its axis by the distance it covers, until it stops.
+fn tick_rolling_keg(
+    server: &GameServer,
+    world: &WorldInstance,
+    active: &ActiveGimmick,
+    template: &GimmickTemplate,
+    mut keg: RollingKeg,
+    dt: f32,
+) -> bool {
+    use crate::systems::ai::collision;
+    let (from, mut v) = {
+        let g = active.gimmick.data();
+        let t = g.unit.transform;
+        ([t.x, t.y, t.z], g.vel)
+    };
+    if v == [0.0; 3] {
+        return false;
+    }
+    let r = keg.radius;
+    let mut to = [
+        from[0] + v[0] * dt,
+        from[1] + v[1] * dt,
+        from[2] + v[2] * dt - 0.5 * template.gravity * dt * dt,
+    ];
+    v[2] -= template.gravity * dt;
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let mut struck = false;
+    let step = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let len = dot(step, step).sqrt();
+    if len > 1e-4 {
+        let reach = std::array::from_fn(|i| to[i] + step[i] / len * r);
+        let hit = collision::raycast(
+            server,
+            world.id,
+            from,
+            reach,
+            collision::query::mask::STATIC_TERRAIN,
+            collision::query::ray_flags::DEFAULT,
+        )
+        .flatten();
+        if let Some(hit) = hit {
+            struck = true;
+            let n = [hit.normal.x, hit.normal.y, hit.normal.z];
+            to = [
+                hit.pos.x + n[0] * r,
+                hit.pos.y + n[1] * r,
+                hit.pos.z + n[2] * r,
+            ];
+            let approach = dot(v, n);
+            if approach < 0.0 {
+                if n[2] > 0.5 && -approach * BARREL_RESTITUTION < BARREL_REST_SPEED {
+                    // A slow landing keeps the speed along the floor.
+                    v = std::array::from_fn(|i| v[i] - approach * n[i]);
+                } else {
+                    v = std::array::from_fn(|i| {
+                        (v[i] - (1.0 + BARREL_RESTITUTION) * approach * n[i]) * 0.6
+                    });
+                }
+            }
+        }
+    }
+    // Rest on the floor under the centre (a ray along the path misses a floor the keg only
+    // grazes while it rolls).
+    let floor =
+        collision::ground_height_probe(server, world.id, to[0], to[1], to[2], 0.25, r + 1.0)
+            .flatten();
+    let mut on_floor = false;
+    if let Some(floor) = floor {
+        let support = floor + r;
+        if to[2] <= support + 0.02 {
+            to[2] = to[2].max(support);
+            if v[2] < 0.0 {
+                let rebound = -v[2] * BARREL_RESTITUTION;
+                if rebound >= BARREL_REST_SPEED {
+                    struck = true;
+                    v = [v[0] * 0.6, v[1] * 0.6, rebound];
+                } else {
+                    v[2] = 0.0;
+                }
+            }
+            on_floor = v[2] <= 0.0;
+        }
+    }
+    let speed = v[0].hypot(v[1]);
+    if speed > 0.05 {
+        keg.heading = (-v[0]).atan2(v[1]);
+    }
+    if on_floor {
+        let rolled = (speed - KEG_ROLL_DECELERATION * dt).max(0.0);
+        if rolled < 0.05 {
+            v = [0.0; 3];
+            keg.spin_rate = 0.0;
+        } else {
+            let k = rolled / speed;
+            v = [v[0] * k, v[1] * k, 0.0];
+            keg.spin_rate = rolled / r.max(0.01);
+        }
+    }
+    keg.spin = (keg.spin + keg.spin_rate * dt + std::f32::consts::PI)
+        .rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    {
+        let mut g = active.gimmick.data();
+        g.unit.transform.set_xyz(to[0], to[1], to[2]);
+        keg.apply(&mut g.unit.transform);
+        g.vel = v;
+        g.ang_vel = keg.ang_vel();
+    }
+    active.state().rolling_keg = Some(keg);
+    struck
 }
 
 /// `Gimmick.GimmickTick(delta)`.
@@ -2046,7 +2241,22 @@ mod tests {
         )
         .unwrap();
         let active = f.server.systems.npcs.gimmicks.find(barrel.obj_id).unwrap();
+        // No client files here: the keg uses the barrel_grape_e proxy at the authored scale.
+        let radius = KEG_PROXY_CYLINDER.0 * 0.7;
+        {
+            let t = barrel.data().unit.transform;
+            assert!(
+                (t.rot_x - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+                "lies on its side"
+            );
+            assert!(
+                (t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+                "axis across +Y"
+            );
+        }
         let mut bounced = false;
+        let mut rolled = false;
+        let mut last_spin = barrel.data().unit.transform.rot_y;
         for step in 1..=60 {
             gimmick_tick(
                 &f.server,
@@ -2056,13 +2266,28 @@ mod tests {
                 step * 50,
             );
             let data = barrel.data();
-            assert!(data.unit.transform.z >= 99.98);
+            assert!(data.unit.transform.z >= 100.0 + radius - 0.02);
             bounced |= data.vel[2] > 0.0;
+            if data.vel[2] == 0.0 && data.vel[1] > 0.1 {
+                // Rolling forward: the turn about the cross axis follows the distance.
+                rolled = true;
+                assert!((data.unit.transform.z - (100.0 + radius)).abs() < 0.02);
+                assert!(data.ang_vel[0] < 0.0, "angVel {:?}", data.ang_vel);
+                assert!(
+                    (data.ang_vel[0] + data.vel[1] / radius).abs() < 1e-3,
+                    "angVel {:?} vel {:?}",
+                    data.ang_vel,
+                    data.vel
+                );
+                assert_ne!(data.unit.transform.rot_y, last_spin);
+            }
+            last_spin = data.unit.transform.rot_y;
         }
         let data = barrel.data();
         assert!(bounced);
+        assert!(rolled);
         assert!(data.unit.transform.y > 105.0);
-        assert!(data.unit.transform.z < 100.2);
+        assert!((data.unit.transform.z - (100.0 + radius)).abs() < 0.02);
     }
 
     #[tokio::test]
