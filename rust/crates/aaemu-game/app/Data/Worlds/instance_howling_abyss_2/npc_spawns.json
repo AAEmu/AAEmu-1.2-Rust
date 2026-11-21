@@ -1331,7 +1331,6 @@
   },
   {
     "Id": 96390,
-    "NpcSpawnerIds": [110908],
     "UnitId": 12958,
     "Title": "Viboros's Egg",
     "NpcSpawnerIds": [
@@ -1349,7 +1348,6 @@
   },
   {
     "Id": 94077,
-    "NpcSpawnerIds": [110912],
     "UnitId": 12958,
     "Title": "Viboros's Egg",
     "NpcSpawnerIds": [
@@ -1367,11 +1365,10 @@
   },
   {
     "Id": 85434,
-    "NpcSpawnerIds": [110907],
     "UnitId": 12958,
     "Title": "Viboros's Egg",
     "NpcSpawnerIds": [
-      110906
+      110907
     ],
     "Position": {
       "X": 674.738,
@@ -1385,11 +1382,10 @@
   },
   {
     "Id": 82047,
-    "NpcSpawnerIds": [110906],
     "UnitId": 12958,
     "Title": "Viboros's Egg",
     "NpcSpawnerIds": [
-      110907
+      110906
     ],
     "Position": {
       "X": 656.428,
@@ -2852,7 +2848,6 @@
   },
   {
     "Id": 118868,
-    "NpcSpawnerIds": [110541],
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
@@ -2884,7 +2879,6 @@
   },
   {
     "Id": 129594,
-    "NpcSpawnerIds": [110548],
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
@@ -2902,7 +2896,6 @@
   },
   {
     "Id": 115474,
-    "NpcSpawnerIds": [110540],
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
@@ -2920,11 +2913,10 @@
   },
   {
     "Id": 38184,
-    "NpcSpawnerIds": [110545],
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
-      110544
+      110545
     ],
     "Position": {
       "X": 347.054,
@@ -2938,11 +2930,10 @@
   },
   {
     "Id": 62411,
-    "NpcSpawnerIds": [110544],
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
-      110545
+      110544
     ],
     "Position": {
       "X": 340.212,

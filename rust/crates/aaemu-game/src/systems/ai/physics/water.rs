@@ -540,6 +540,7 @@ impl WaterBodies {
                 (-13.796, 38.706, 0.244),
                 (-50.568, 22.119, 0.152),
                 (-36.012, -14.010, 0.030),
+                (0.0, 0.0, 0.0),
             ]
             .map(|(x, y, z)| {
                 Vec3::new(
@@ -861,6 +862,20 @@ impl WaterBodies {
 mod tests {
     use super::super::objects_file::tests::{object_dat, water_record};
     use super::*;
+
+    #[test]
+    fn calleil_water_is_contained_by_the_chamber_boundary() {
+        let water = WaterBodies::new(0.0);
+        water.set_calleil_level(
+            Vec3::new(100.0, 100.0, 170.0),
+            -std::f32::consts::PI,
+            0.7,
+            0.0,
+        );
+        // Both samples are in the bounding box. Only the first is in the chamber.
+        assert!(water.is_water(Vec3::new(70.0, 90.0, 169.5)).is_some());
+        assert!(water.is_water(Vec3::new(55.0, 90.0, 169.5)).is_none());
+    }
 
     fn lake(points: &[(f32, f32)], z: f32, depth: f32) -> WaterBodyArea {
         let mut a = WaterBodyArea::new("lake", WaterBodyAreaType::Polygon);
