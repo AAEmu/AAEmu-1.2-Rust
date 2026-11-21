@@ -137,6 +137,8 @@ pub struct PhysicsSystem {
     worlds: DashMap<u32, Arc<WorldPhysics>>,
     /// `WorldInstance.Water` (by template id).
     water: DashMap<u32, Arc<WaterBodies>>,
+    /// Howling Abyss changes the Calleil pool independently in each instance.
+    instance_water: DashMap<u32, Arc<WaterBodies>>,
     /// Tests: no physics threads (ticks are driven by [`run_world_tick`]).
     manual_ticks: std::sync::atomic::AtomicBool,
 }
@@ -150,6 +152,7 @@ impl PhysicsSystem {
     /// Drops the physics of a removed instance (`false` = it had none). Its thread holds only a
     /// weak handle and ends on its next pass.
     pub fn remove_world(&self, instance_id: u32) -> bool {
+        self.instance_water.remove(&instance_id);
         self.worlds.remove(&instance_id).is_some()
     }
 
@@ -187,9 +190,26 @@ pub fn water_of(server: &GameServer, template_id: u32, ocean_level: f32) -> Arc<
         .clone()
 }
 
+fn water_store(server: &GameServer, world: &WorldInstance) -> Arc<WaterBodies> {
+    if matches!(
+        world.template.name.as_str(),
+        "instance_howling_abyss" | "instance_howling_abyss_2"
+    ) {
+        return server
+            .systems
+            .ai
+            .physics
+            .instance_water
+            .entry(world.id)
+            .or_insert_with(|| Arc::new(WaterBodies::new(world.template.ocean_level)))
+            .clone();
+    }
+    water_of(server, world.template.id, world.template.ocean_level)
+}
+
 /// Ingests the water volumes of the cells loaded so far and returns the world's water.
 fn synced_water(server: &GameServer, world: &WorldInstance) -> Arc<WaterBodies> {
-    let w = water_of(server, world.template.id, world.template.ocean_level);
+    let w = water_store(server, world);
     if let Some(hm) = server.systems.npcs.heightmaps.get() {
         if let Some(t) = hm.template(world.template.id) {
             w.sync_loaded_cells(
@@ -206,7 +226,7 @@ fn synced_water(server: &GameServer, world: &WorldInstance) -> Arc<WaterBodies> 
 /// `WorldInstance.ReloadWaterFromLoadedCells()`: clears the ingested water areas and rebuilds
 /// them from the cells loaded so far.
 pub fn reload_water_from_loaded_cells(server: &GameServer, world: &WorldInstance) {
-    let w = water_of(server, world.template.id, world.template.ocean_level);
+    let w = water_store(server, world);
     w.clear_ingested_areas();
     synced_water(server, world);
 }

@@ -966,6 +966,70 @@ async fn real_burnt_winters_steps_off_his_plinth_without_sinking_through_it() {
     assert!((on_floor.z - 20.54).abs() < 0.1);
 }
 
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_howling_npc_movement_stays_on_the_raised_passages() {
+    use crate::models::npc::Npc;
+    use crate::systems::ai::npc::{move_towards, MoveAi};
+    use crate::systems::skills::controllers::Vec3 as SkillVec3;
+    use crate::world::Entity;
+
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    for (i, world_name) in ["instance_howling_abyss", "instance_howling_abyss_2"]
+        .into_iter()
+        .enumerate()
+    {
+        let template = server
+            .game_data
+            .worlds
+            .get_world_template_by_name(world_name)
+            .unwrap()
+            .clone();
+        let zone = template.zone_keys[0];
+        let instance = 100 + i as u32;
+        let world = server
+            .world
+            .create_world_instance(std::sync::Arc::new(template), instance);
+        // Upper corridor and the approach to the Wailing Ranch, from level placements.
+        for (j, (x, y, z)) in [(660.784, 645.674, 193.717), (655.366, 548.2, 197.05)]
+            .into_iter()
+            .enumerate()
+        {
+            let npc = Entity::new(0x400 + i as u32 * 2 + j as u32, {
+                let mut npc = Npc::new(11757);
+                npc.unit.hp = 1000;
+                npc.unit.transform.set_xyz(x, y, z);
+                npc.unit.transform.zone_id = zone;
+                npc.unit.transform.instance_id = instance;
+                npc.unit.transform.world_id = instance;
+                npc.spawner_z = Some(z);
+                npc
+            });
+            world.spawn(&npc, &server.view_ctx());
+            for _ in 0..18 {
+                move_towards(
+                    &server,
+                    &npc,
+                    Some(MoveAi {
+                        hold_or_idle: false,
+                    }),
+                    SkillVec3::new(x + 6.0, y, z - 8.0),
+                    0.25,
+                    0,
+                    0.05,
+                );
+                let t = npc.data().unit.transform;
+                assert!(t.z > z - 2.5, "{world_name} at ({}, {}, {})", t.x, t.y, t.z);
+            }
+            assert!(
+                npc.data().unit.transform.x > x,
+                "the NPC moved along the passage"
+            );
+        }
+    }
+}
+
 /// Every `visareas.dat` and `object.dat` of every world parses strictly (no leftover bytes) and
 /// the voxels inflate to a physics mesh.
 /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_visareas_parse -- --ignored --nocapture`

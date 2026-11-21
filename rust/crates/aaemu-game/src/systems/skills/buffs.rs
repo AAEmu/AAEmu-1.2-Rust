@@ -2285,7 +2285,7 @@ fn execute_trigger(
         && caster
             .as_ref()
             .and_then(WorldObject::as_doodad)
-            .is_some_and(|doodad| doodad.data().template_id == 5516);
+            .is_some_and(|doodad| matches!(doodad.data().template_id, 5516 | 5706 | 5708));
     let mut target = Some(owner.clone());
     let mut source = Some(owner.clone());
     if t.use_original_source || floor_spear {

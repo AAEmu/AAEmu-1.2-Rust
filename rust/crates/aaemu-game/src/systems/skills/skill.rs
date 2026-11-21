@@ -2555,9 +2555,20 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let mut to_apply: Vec<(Target, &SkillEffect)> = Vec::new();
     let mut last_applied: Option<&SkillEffect> = None;
     for effect in &t.effects {
-        let method = if t.id == 17635 && effect.effect_id == 19275 {
-            // Hieronimus casts one Demon's Howl while the son brings up the ward.
-            // The ward's own effect still targets its marker across the room.
+        // These scripted cues run once from the caster. Hieronimus casts Howl
+        // while a separate effect places the ward. Godfrey's timed dialogue
+        // continuation would multiply across his audience. The final-room
+        // cinematic timer belongs to the invisible cue actor.
+        let method = if matches!(
+            (t.id, effect.effect_id),
+            (17635, 19275)
+                | (19372, 23742)
+                | (21422, 29282)
+                | (21423, 29284)
+                | (21426, 29291)
+                | (19442, 23953)
+                | (21477, 29402)
+        ) {
             Some(ApplicationMethod::Source)
         } else {
             ApplicationMethod::from_raw(i64::from(effect.application_method))

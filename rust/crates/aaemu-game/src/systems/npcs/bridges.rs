@@ -755,6 +755,24 @@ fn spawn_effect(
         life_time: e.life_time,
     };
     spawner.do_spawn_effect(server, spawner.id, &params, Some(caster), Some(&target));
+    if matches!(e.sub_type, 11273 | 12959) {
+        // A hatchling inherits the encounter target before it reaches its idle
+        // self-despawn skill. The egg vanishes immediately after this effect.
+        let boss_id = if e.sub_type == 11273 { 11265 } else { 12762 };
+        let boss_target = world.around(caster, |unit| {
+            unit.as_npc()
+                .is_some_and(|n| n.data().unit.template_id == boss_id)
+                .then(|| npc_aggro_target(server, &world, unit))
+                .flatten()
+        });
+        if let Some(victim) =
+            npc_aggro_target(server, &world, caster).or_else(|| boss_target.into_iter().next())
+        {
+            for young in spawner.spawned_npcs().into_values().flatten() {
+                crate::systems::ai::hooks::engage(server, &young, &victim);
+            }
+        }
+    }
 }
 
 /// The position a summon at a plot location appears at: the location itself for a flying or
@@ -994,13 +1012,17 @@ fn npc_spawner_spawn_effect(
         return;
     }
     let world_id = caster.transform().world_id;
-    let wave_target = (e.use_summoner_aggro_target
-        && (46629..=46656).contains(&e.spawner_id)
-        && caster
-            .as_npc()
-            .is_some_and(|n| n.data().unit.template_id == 8962))
-    .then(|| npc_aggro_target(server, &world, caster))
-    .flatten();
+    let caster_template = caster.as_npc().map_or(0, |n| n.data().unit.template_id);
+    let encounter_add = match caster_template {
+        8962 => e.use_summoner_aggro_target && (46629..=46656).contains(&e.spawner_id),
+        11265 | 12762 => e.use_summoner_aggro_target,
+        11201 => matches!(e.spawner_id, 102334 | 102337 | 102340..=102342),
+        12759 => matches!(e.spawner_id, 110540..=110541 | 110544..=110545 | 110548),
+        _ => false,
+    };
+    let wave_target = encounter_add
+        .then(|| npc_aggro_target(server, &world, caster))
+        .flatten();
     for spawner in spawners {
         // spawn in the same world as for caster
         let mut position = spawner.position();
@@ -1021,7 +1043,7 @@ fn npc_spawner_spawn_effect(
             s.set_respawn_time(0);
         }
         if let Some(victim) = &wave_target {
-            // Hieronimus's waves join an active fight even with a zero lifetime.
+            // These encounter adds join an active fight even with a zero lifetime.
             for summoned in &spawned {
                 crate::systems::ai::hooks::engage(server, summoned, victim);
             }
