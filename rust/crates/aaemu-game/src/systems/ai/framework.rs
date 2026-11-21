@@ -633,18 +633,20 @@ impl<'a> AiCtx<'a> {
 
     /// `OnAggroTargetChanged()`.
     pub fn on_aggro_target_changed(&mut self) {
-        if self.running_armory_boss_intro() {
+        if self.running_encounter_intro() {
             return;
         }
         self.transition(TransitionEvent::OnAggroTargetChanged);
     }
 
-    pub(crate) fn running_armory_boss_intro(&self) -> bool {
+    pub(crate) fn running_encounter_intro(&self) -> bool {
         self.ai
             .current_command
             .as_ref()
             .or_else(|| self.ai.commands_queue.front())
-            .is_some_and(|command| matches!(command.cmd_set_id, 103 | 106 | 107))
+            .is_some_and(|command| {
+                matches!(command.cmd_set_id, 65 | 79..=81 | 103 | 106 | 107 | 126)
+            })
     }
 
     // ---- GoToX (forced state changes; the AI characters override a few) ----

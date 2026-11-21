@@ -26,7 +26,6 @@ use rusqlite::Connection;
 use sqlx::mysql::MySqlPoolOptions;
 
 use crate::config::AppConfig;
-use crate::data::client_files::ClientFileManager;
 use crate::data::world_templates::{WorldTemplate, WorldTemplates};
 use crate::data::GameData;
 use crate::models::npc::Npc;
@@ -37,9 +36,10 @@ use crate::systems::npcs::doodad::spawner::{parse_list, DoodadSpawnerDef, NpcSpa
 use crate::systems::npcs::npc::spawner_data::NpcSpawnerData;
 use crate::systems::npcs::spawn_manager::{backend::TestBackend, LoadStats, TemplateExists};
 use crate::systems::quests::spheres::{load_sphere_areas, SphereArea};
-use crate::systems::DataLoadCtx;
 use crate::test_support::{test_character, TestClient, TEST_ZONE};
 use crate::world::{Entity, NpcRef, PlayerRef, WorldInstance, WorldObject};
+
+use super::doodad::interactions::world_interaction_type::SUMMON_DOODAD;
 
 const WORLD: &str = "instance_hadir_farm";
 const ZONE: u32 = 241;
@@ -224,14 +224,14 @@ fn event_row_rows(defs: &[NpcSpawnerDef]) -> Vec<(u32, u32)> {
 
 /// Every level `NpcSpawnerSpawnEffect` spawner of the Hadir chains has exactly one event row
 /// (`NpcSpawnerIds` = the level spawner id) and every active-at-start trigger NPC is a plain
-/// row at its level placement. The 116 shipped 1.2-era rows are kept.
+/// row at its level placement. Encounter-only bosses and Hadir actors cannot start as plain rows.
 #[test]
 fn hadir_level_event_spawners_and_trigger_npcs_are_placed_once() {
     let defs = npc_defs();
     assert_eq!(
         defs.len(),
-        225,
-        "86 event + 12 trigger + 11 start-active + 116 kept rows"
+        177,
+        "86 event + 12 trigger + 11 start-active + 68 kept legacy rows"
     );
 
     let events = event_row_rows(&defs);
@@ -258,6 +258,10 @@ fn hadir_level_event_spawners_and_trigger_npcs_are_placed_once() {
     }
 
     let plain = &defs[first_plain..];
+    assert!(!plain.iter().any(|def| matches!(
+        def.base.unit_id,
+        9793 | 9798 | 10065 | 10166 | 10167 | 10887
+    )));
     for (unit, x, y, z, yaw, level_spawner) in TRIGGER_ROWS {
         let matches = plain
             .iter()
@@ -445,9 +449,8 @@ fn load_shipped(server: &Arc<GameServer>) -> LoadStats {
         .expect("shipped spawn files load")
 }
 
-/// The shipped files load on the real 1.2 data: 86 event spawners, 176 start-active spawner
-/// clones from the 125 plain rows (2 kept duplicate rows and 102 `activation_state = 'f'`
-/// expansions skipped), and every event spawner id resolves through `get_npc_spawner`.
+/// The shipped files load on the real 1.2 data and every event spawner id resolves
+/// through `get_npc_spawner`.
 /// `AAEMU_COMPACT_DB=... cargo test -p aaemu-game hadir_dungeon -- --ignored`
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
@@ -477,12 +480,10 @@ async fn real_compact_db_hadir_instance_loads_the_authored_spawns() {
     server.systems.npcs.spawns.get_or_create(&world);
     let stats = load_world(&server, &conn, INSTANCE_ID);
     eprintln!("hadir load: {stats:?}");
-    assert_eq!(stats.npc_entries, 225);
-    assert_eq!(stats.npc_duplicates, 2, "the two kept 1.2-era duplicates");
+    assert_eq!(stats.npc_entries, npc_defs().len());
+    assert_eq!(stats.npc_duplicates, 0);
     assert_eq!(stats.npc_missing_templates, 0);
     assert_eq!(stats.npc_event_spawners, 86);
-    assert_eq!(stats.npc_spawners, 188);
-    assert_eq!(stats.npc_event_only_spawners_skipped, 113);
     assert_eq!(stats.npc_cutscene_spawners_skipped, 0);
     assert_eq!(
         stats.doodad_entries, 21,
@@ -650,38 +651,8 @@ fn real_compact_db_hadir_annmit_chain_is_in_the_1_2_data() {
     assert_eq!(l50, 123729);
 }
 
-/// A server with the real skills / npcs / quests / AI tables and a synthetic Hadir world.
 fn real_server(db: &str) -> Arc<GameServer> {
-    let conn =
-        Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).expect("db");
-    let app_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
-    let files = ClientFileManager::from_sources(&[], &app_path);
-    let ctx = DataLoadCtx {
-        conn: &conn,
-        app_path: &app_path,
-        files: &files,
-        language: "en_us",
-    };
-    let mut data = GameData::empty();
-    data.formulas = crate::data::formulas::FormulaManager::load(&conn).expect("formulas");
-    data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
-    data.systems.npcs = crate::systems::npcs::Data::load(&ctx).expect("npcs data");
-    data.systems.quests = crate::systems::quests::Data::load(&ctx).expect("quests data");
-    data.systems.ai = crate::systems::ai::Data::load(&ctx).expect("ai data");
-    let world = WorldTemplate::synthetic(0, WORLD, 32, 32, ZONE);
-    let server = Arc::new(crate::test_support::test_server_with_world(data, world));
-    server.set_self();
-    let template = server
-        .game_data
-        .worlds
-        .get_world_template_by_name(WORLD)
-        .expect("Hadir world template")
-        .clone();
-    server.world.create_world_instance(Arc::new(template), 0);
-    crate::systems::skills::bind(&server);
-    crate::systems::npcs::install_hooks(&server);
-    crate::systems::ai::hooks::install(&server);
-    server
+    super::burntcastle_dungeon_tests::real_encounter_server(db, WORLD, ZONE).0
 }
 
 fn place_player(
@@ -759,6 +730,187 @@ fn tick_ai(server: &Arc<GameServer>, ticks: usize) {
     }
 }
 
+fn enter_hadir_spheres(server: &GameServer, ids: &[u32]) {
+    let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    server.systems.quests.spheres.set_areas(
+        load_sphere_areas(&app, |id| ids.contains(&id))
+            .into_iter()
+            .filter(|a| a.world == WORLD)
+            .collect(),
+    );
+}
+
+/// Runs the encounter ticks at the same rate as the asynchronous skill and doodad timers.
+async fn run_until(server: &Arc<GameServer>, seconds: u64, ready: impl Fn() -> bool) {
+    let start = std::time::Instant::now();
+    let end = start + Duration::from_secs(seconds);
+    while !ready() && std::time::Instant::now() < end {
+        tick_ai(server, 1);
+        server.systems.npcs.area_triggers.tick(server);
+        server
+            .systems
+            .quests
+            .spheres
+            .tick_at(server, start.elapsed().as_millis() as i64);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_golem_appears_once_at_the_pond() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    enter_hadir_spheres(&server, &[1331]);
+    let world = server.world.world(0).unwrap();
+    let _player = place_player(&server, &world, 1, 618.311, 601.262, 136.505);
+    for _ in 0..4 {
+        super::spawn_manager::active_region_tick(&server);
+    }
+    assert!(npcs_of(&world, 9793).is_empty());
+    server.systems.quests.spheres.tick_at(&server, 0);
+    run_until(&server, 30, || !npcs_of(&world, 9793).is_empty()).await;
+    assert_eq!(
+        npcs_of(&world, 9793).len(),
+        1,
+        "Velarre's staging actor: {:?}",
+        npcs_of(&world, 10070)
+            .iter()
+            .map(|npc| npc.data().unit.transform)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(spawned_count(&server, 58186), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_slam_lands_and_the_poison_pool_ticks() {
+    use crate::systems::skills::{controllers, skill::unit_use_skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    let world = server.world.world(0).unwrap();
+    let golem = WorldObject::from(spawner_force_spawn(&server, 58186).unwrap());
+    let player = place_player(&server, &world, 1, 623.4, 619.5, 135.0);
+    let victim = WorldObject::from(&player);
+    assert_eq!(
+        unit_use_skill(&server, &golem, 16038, &victim),
+        skill_result::SUCCESS
+    );
+    run_until(&server, 2, || victim.transform().z > 135.5).await;
+    assert!(victim.transform().z > 135.5, "Slam lifts the target");
+    run_until(&server, 3, || controllers::active(&victim).is_none()).await;
+    assert!(controllers::active(&victim).is_none());
+    assert!((victim.transform().z - 135.0).abs() < 0.1, "victim lands");
+
+    // Poisonous Explosion places the puddles through plot 234.
+    let puddles = || {
+        world
+            .all_doodads()
+            .into_iter()
+            .find(|doodad| doodad.data().template_id == 3956)
+    };
+    assert_eq!(
+        unit_use_skill(&server, &golem, 16204, &golem),
+        skill_result::SUCCESS
+    );
+    run_until(&server, 8, || puddles().is_some()).await;
+    let puddle = puddles().expect("Poisonous Explosion creates a puddle");
+    let pos = puddle.data().transform;
+    player.data().unit.transform.set_xyz(pos.x, pos.y, pos.z);
+    run_until(&server, 1, || player.data().unit.buffs.check_buff(2850)).await;
+    assert!(player.data().unit.buffs.check_buff(2850));
+    let hp = player.data().unit.hp;
+    run_until(&server, 3, || player.data().unit.hp < hp).await;
+    assert!(player.data().unit.hp < hp, "poison deals damage over time");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_velarre_tombstone_summons_hostile_souls() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    let world = server.world.world(0).unwrap();
+    let boss = spawner_force_spawn(&server, 62021).unwrap();
+    let player = place_player(&server, &world, 1, 789.0, 610.6, 136.6);
+    let target = WorldObject::from(&player);
+    crate::systems::ai::npc::set_current_aggro_target(&boss, Some(&target));
+    super::doodad::interactions::execute_interaction(
+        &server,
+        SUMMON_DOODAD,
+        &WorldObject::from(&boss),
+        Some(&target),
+        16084,
+        3874,
+        None,
+    );
+    assert!(npcs_of(&world, 9808).is_empty());
+    run_until(&server, 10, || !npcs_of(&world, 9808).is_empty()).await;
+    let souls = npcs_of(&world, 9808);
+    assert!(!souls.is_empty());
+    assert!(souls.iter().all(|n| n.data().unit.faction_id == 115));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_handoff_spawns_marmas_once() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    enter_hadir_spheres(&server, &[1457]);
+    let world = server.world.world(0).unwrap();
+    let player = place_player(&server, &world, 1, 787.0, 611.0, 136.8);
+    for _ in 0..4 {
+        super::spawn_manager::active_region_tick(&server);
+    }
+    assert!(npcs_of(&world, 10166).is_empty());
+    assert!(npcs_of(&world, 10167).is_empty());
+    assert!(npcs_of(&world, 9798).is_empty());
+
+    let boss = spawner_force_spawn(&server, 62021).expect("Lady Velarre");
+    tick_ai(&server, 2);
+    boss.data().unit.hp = 0;
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&boss),
+        None,
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    // The last sphere reaches Hadir once his route brings him to the rise
+    // above the mass grave. Players can walk into the sphere while he moves.
+    let hadir_approaching = || {
+        npcs_of(&world, 10166).iter().any(|npc| {
+            let t = npc.data().unit.transform;
+            (t.x - 761.721).hypot(t.y - 658.203) < 20.0
+        })
+    };
+    run_until(&server, 75, hadir_approaching).await;
+    assert!(
+        hadir_approaching(),
+        "Hadir reaches the approach to the final sphere"
+    );
+    player
+        .data()
+        .unit
+        .transform
+        .set_xyz(761.721, 658.203, 140.685);
+    server.systems.quests.spheres.tick_at(&server, 0);
+    run_until(&server, 30, || !npcs_of(&world, 9798).is_empty()).await;
+    assert_eq!(npcs_of(&world, 9798).len(), 1);
+    assert_eq!(spawned_count(&server, 61203), 1);
+}
+
 /// The shipped chains with the real 1.2 data:
 ///
 /// * sphere 1300 (area at 699.53, 580.65) casts skill 16748; its `BuffEffect` tag 469 reaches
@@ -807,6 +959,15 @@ async fn real_data_hadir_spheres_run_the_buff_trigger_chains() {
     }
     let slave1 = npc_near(&world, 10076, 696.076, 579.37).expect("trigger NPC 10076 near 61971");
     assert_eq!(npcs_of(&world, 10076).len(), 4, "four plain 10076 rows");
+    let in_camp = |npc: &NpcRef| {
+        let t = npc.data().unit.transform;
+        (680.0..=735.0).contains(&t.x) && (560.0..=596.0).contains(&t.y) && t.z < 139.0
+    };
+    assert_eq!(
+        npcs_of(&world, 9472).iter().filter(|n| in_camp(n)).count(),
+        0,
+        "the camp is empty before the sphere fires"
+    );
 
     server.systems.quests.spheres.tick_at(&server, 0);
     assert!(
@@ -824,6 +985,10 @@ async fn real_data_hadir_spheres_run_the_buff_trigger_chains() {
     assert!(
         npcs_at(&world, 9472, 688.126, 585.682) == 1,
         "a Restless Skeleton Peasant stands at spawner 61979's level placement"
+    );
+    assert_eq!(
+        npcs_of(&world, 9472).iter().filter(|n| in_camp(n)).count(),
+        10
     );
     assert!(
         server.world.object(slave1.obj_id).is_none(),

@@ -5296,11 +5296,23 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   rows at their level placements (Inferred); compact 10557/11113 are `activation_state = 't'`
   and the inactive 11225/11220 variants are skipped by the loader. The 10021 row also clones
   the NORMAL farm group spawner 13501, which stays idle without a schedule, as for the other
-  farm members. The 116 shipped 1.2-era rows are kept (two of them are within 2 m of each
-  other and stay skipped as before). **Event rows are listed first in the file:** the 10.x level
+  farm members. **Event rows are listed first in the file:** the 10.x level
   spawners 61148 and 68236 stand within 2 m of kept plain 9480/9481 rows, and the loader's
   duplicate filter keys on `(UnitId, position)`; event entries never feed that position table,
   so an event row after the plain row would be dropped before its spawner registration.
+  **Encounter follow-up:** the first and last combat bosses, both Hadir actors, and the
+  scripted Victim's Soul use their event placements. The legacy Velarre actor (10065)
+  could finish its cleanup during the golem's entrance and remove actor 10070 before
+  it reached the spawn command. The encounter paths finish before reacting to nearby
+  combat. Removed legacy placements overlapping
+  the working skeleton, roadside and farm waves. These pack boundaries are inferred from
+  the sphere and spawner coordinates. Entrance packs with inactive 1.2 spawn chains retain
+  their legacy placements.
+  The golem's Slam (2659) runs its lift and fall on the server and sends the victim the
+  landing position. Poison puddles (3956) apply their authored damage-over-time buff.
+  Velarre's tombstones (3874) run their timed clout effects and attribute the chained
+  soul summon to Velarre. These clouts stay on their own doodads and retain the boss
+  as the source through phase changes.
   `doodad_spawns.json` gained the 15 `5958` "Hadir_Rotten Flesh Golem_Unable to Attack" guards
   and the two `4143` Necromancer's Cauldrons (skill 16577 -> the farm manager's command set ->
   spawner 61613); the two farm exits 4289/4927 keep their 1.2-era rows. The quest chest 7661
@@ -5316,9 +5328,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_hadir_spheres_run_the_buff_trigger_chains` (sphere 1300 -> buff 2931 -> spawners
   61979-61988; sphere 1308 -> buff 2939 -> 68521-68523) and
   `real_data_hadir_golem_death_spawns_the_cleanup_slaves` (skill 17608 -> 68524/68525/62019).
-  The start-active conformance snapshot (`instance_hadir_farm`) is now 113 `'f'` skips / 0
-  cutscene / 1 row with only event spawners: the eleven new rows each skip one inactive variant;
-  the shared Sharpwind snapshot was updated deliberately.
+  The start-active conformance snapshot (`instance_hadir_farm`) after removing the legacy
+  placements is 68 inactive spawner skips, zero cutscene skips and zero plain rows with only
+  event spawners.
   **Open item (reported, not changed):** the 12 event rows for 60909-60911, 61146-61148 and
   68235-68240 (the sphere 1298/1299 camps via skills 16726/16727) have no 1.2 producer: their
   `npc_spawner_spawn_effects` rows exist, but the 1.2 `compact.sqlite3` has no `skill_effects`
