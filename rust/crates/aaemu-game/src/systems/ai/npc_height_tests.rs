@@ -145,6 +145,24 @@ fn walker(world_z: f32, spawner_z: f32) -> ReferenceHeightAi {
     }
 }
 
+#[tokio::test]
+async fn palace_cellar_walker_ignores_a_lower_corridor_floor() {
+    let server = crate::test_support::test_server();
+    crate::systems::ai::collision::flow_tests::enable_collision(&server, 142.0);
+    assert_eq!(
+        reference_height_in(
+            &server,
+            0,
+            Some(walker(147.0, 147.0)),
+            500.0,
+            500.0,
+            147.0,
+            240
+        ),
+        147.0
+    );
+}
+
 fn walker_towards_surface(server: &GameServer, world_z: f32) -> f32 {
     reference_height_in(
         server,

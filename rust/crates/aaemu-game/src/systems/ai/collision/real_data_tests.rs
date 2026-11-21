@@ -861,6 +861,68 @@ async fn real_instance_walkers_keep_the_floor_of_their_hall() {
     }
 }
 
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_palace_cellar_corridors_and_akmits_pool() {
+    use crate::systems::npcs::heightmap::ReferenceHeightAi;
+    use crate::systems::skills::controllers::Vec3 as UnitVec3;
+
+    let Some(e) = env_with(true) else { return };
+    let server = Arc::new(real_server_with(&e, true));
+    crate::systems::ai::geodata::start(&server);
+    let name = "instance_sal_temple";
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_name(name)
+        .unwrap()
+        .clone();
+    let world = server.world.create_world_instance(Arc::new(template), 100);
+    let _ = super::ground_height(&server, world.id, 615.5, 434.4, 148.8);
+    let water = crate::systems::ai::physics::world_water(&server, &world);
+    assert!(water
+        .is_water(UnitVec3::new(633.23, 451.13, 147.62))
+        .is_some());
+    assert!(water
+        .is_water(UnitVec3::new(615.54, 434.44, 148.84))
+        .is_none());
+    for (from, to) in [
+        ([510.8, 289.5, 148.22], [510.8, 286.5, 148.22]),
+        ([537.5, 300.0, 148.30], [540.5, 300.0, 148.30]),
+    ] {
+        let hit = super::raycast(
+            &server,
+            world.id,
+            from,
+            to,
+            mask::SOLID_TERRAIN,
+            ray_flags::SKILL_OBSTACLE,
+        );
+        assert_eq!(hit, Some(None), "corridor ray from {from:?} to {to:?}");
+    }
+    for (x, y, z, floor) in [
+        (510.8, 288.0, 149.1, 147.22),
+        (511.0, 267.9, 147.4, 147.0),
+        (541.5, 250.0, 144.0, 144.04),
+        (539.0, 298.0, 149.2, 147.30),
+        (557.7, 300.4, 150.0, 150.05),
+        (589.8, 331.3, 147.0, 147.03),
+    ] {
+        let ai = ReferenceHeightAi {
+            can_fly: false,
+            hold_or_idle: false,
+            spawner_z: Some(z),
+            world_z: z,
+        };
+        let height =
+            crate::systems::ai::npc::reference_height_in(&server, world.id, Some(ai), x, y, z, 240);
+        assert!(
+            (floor - height).abs() < 0.2,
+            "corridor ({x}, {y}, {z}) resolves to {height}"
+        );
+    }
+}
+
 /// The Profane Temple (`instance_sal_temple`) end boss Akmit (12189) knocked back in its hall: the
 /// ground probe only finds the terrain far under the hall, which testers saw the boss land on
 /// (2026-11-08). The displaced position must stay at the hall level.

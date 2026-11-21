@@ -676,7 +676,7 @@ pub const WALKER_MAX_DROP: f32 = 12.0;
 
 /// The raised passages have another walkable floor only a few meters underneath.
 pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {
-    if matches!(zone_id, 265 | 280) {
+    if matches!(zone_id, 240 | 265 | 280) {
         2.5
     } else {
         WALKER_MAX_DROP

@@ -799,6 +799,7 @@ impl WaterBodies {
         template_ocean_level: f32,
     ) {
         let cradle = template_name == "instance_cradle_of_destruction";
+        let has_indoor_pools = cradle || template_name == "instance_sal_temple";
         // The level boat spawns before the first player enters and loads the cell.
         if cradle && !hm.is_cell_loaded(0, 0) {
             let _ = hm.get_height(files, 0.0, 0.0);
@@ -830,9 +831,8 @@ impl WaterBodies {
                     }
                     self.add_from_cell_data(Some(hm), template_ocean_level, cx, cy, &objects);
                 }
-                // Kroloal Cradle's elevated pools are indoor visarea objects.
-                // Ingest their closed contours for swimming and boat buoyancy.
-                if cradle {
+                // Elevated dungeon pools are indoor visarea objects.
+                if has_indoor_pools {
                     if let Some(areas) =
                         files
                             .read_file(&format!("{cell}/visareas.dat"))

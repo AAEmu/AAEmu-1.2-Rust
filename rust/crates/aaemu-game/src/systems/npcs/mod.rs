@@ -221,6 +221,8 @@ mod howling_dungeon_tests;
 #[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
+mod palace_cellar_tests;
+#[cfg(test)]
 mod quest_spawn_tests;
 #[cfg(test)]
 mod schedule_item_session_tests;

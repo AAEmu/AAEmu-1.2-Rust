@@ -103,6 +103,14 @@ pub fn update_character_under_water(server: &GameServer, p: &PlayerRef) {
         }
         return;
     }
+    if world.template.name == "instance_sal_temple" {
+        // Akmit's roar leaves a burning damage-over-time effect. The pool puts it
+        // out on contact, even if the character's head is still above the surface.
+        const AKMIT_ROAR: u32 = 2574;
+        if p.data().unit.buffs.check_buff(AKMIT_ROAR) {
+            super::buffs::remove_buff(server, &obj, AKMIT_ROAR);
+        }
+    }
     let surface = crate::systems::ai::physics::water_surface(server, instance, probe)
         .map_or(world.template.ocean_level, |(s, _)| s);
     let enter = surface - SURFACE_BAND;
