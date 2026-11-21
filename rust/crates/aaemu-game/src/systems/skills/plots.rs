@@ -1103,7 +1103,30 @@ fn update_area_target(
         .flatten()
         .map_or(launch_z, |hit| (hit.pos.z - 0.5).max(floor));
         ti.source = Some(Target::Pos(launch));
-    } else if !meteor_impact {
+    } else if matches!(event.id, 4023 | 5919) && matches!(state.skill.template.id, 18976 | 21131) {
+        // Calleil's projectile effects use the raised location for the falling
+        // fireball. The damage cue that follows needs the floor under that marker.
+        let ground = crate::systems::ai::collision::ground_height_probe(
+            server,
+            pos.instance_id,
+            pos.pos.x,
+            pos.pos.y,
+            prev_z,
+            1.0,
+            3.0,
+        )
+        .flatten()
+        .unwrap_or(prev_z);
+        pos.pos.z = ground;
+        let mut launch = pos;
+        launch.pos.z += args.height_offset as f32 / 1000.0;
+        ti.source = Some(Target::Pos(launch));
+    } else if !meteor_impact
+        && !matches!(
+            (state.skill.template.id, event.id),
+            (18976, 4024) | (21131, 5920)
+        )
+    {
         // Max(previous Z + offset, WorldManager.GetHeight(posUnit.Transform)).
         // Prefer collision geometry and fall back to the authored heightmap.
         let ground = crate::systems::ai::collision::ground_height_or(

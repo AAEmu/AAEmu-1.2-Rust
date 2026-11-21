@@ -3662,6 +3662,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /
   2 cutscene skips instead of 2 / 3 (the removed 8962 plain row no longer skips its 11694
   cutscene spawner); that shared test table still has the old counts (open item).
+* systems::npcs (Howling Abyss encounters): the Godfrey dialogue's broad-area stages
+  19372, 21422, 21423 and 21426 schedule the next dialogue cast once. The receiver-specific
+  bubbles still use the authored target filters. Per-target scheduling multiplied the
+  continuation and repeatedly queued Greater Howling's command set 280.
+  Viboros's egg waves and Calleil's fire elementals use the compact database's event IDs
+  at existing spawn-file coordinates. The ID-to-position associations are inferred.
+  The adds inherit the boss's combat target before their idle cleanup can remove them.
+  The boss charges use the chosen opponent as their endpoint and the authored first
+  controller value as their travel time. Bomber kegs and Trieste bolts use authored
+  velocity and gravity, along with swept collision. Keg rebound and damping are inferred.
+  The water chamber footprint and baseline come from r208022's
+  `interaction_e.xml/howling_abyss.boss02_watervolume_01`. Its phase functions move the
+  server surface independently in each instance. Hellfire's effect-only clout runs its
+  authored damage pulse, and the floor spikes preserve their two-second injury.
+  The final-room invisible actors cue `id_265_01` or `id_280_01` for nearby players at
+  room height. Greater's approach sphere selects its own cinematic command, and the
+  actor stays alive through the scripted cue. The playback range and height cutoff are
+  inferred. The Greater vine
+  room takes missing facings from matching Normal placements.
 * systems::npcs (2026-10-13): corpse timers read the current despawn field, so fully looting
   an NPC applies the existing shorter deadline instead of retaining the five-minute loot
   extension captured at death. Only living NPCs count towards spawner population limits;

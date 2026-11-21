@@ -785,7 +785,22 @@ pub fn create(
         Some(SkillControllerKind::Dash) => {
             tracing::trace!("SkillController: create DashSkillController");
             let (o, t) = positions(server, owner, target);
-            let mut d = LinearMove::dash(template, o, t);
+            // These boss charge rows use value1 as travel time and no fixed displacement.
+            // The selected victim supplies the endpoint for that data shape.
+            let mut d = if matches!(template.id, 6640 | 6683 | 7130 | 7149) {
+                let end_position = Vec3::new(t.x, t.y, o.z);
+                let duration = template.value[0];
+                LinearMove {
+                    duration,
+                    distance_offset: 0,
+                    direction: MoveDirection::ForwardOnly,
+                    end_position,
+                    calculated_speed: calculate_distance(o, end_position, true)
+                        / duration_sec(duration),
+                }
+            } else {
+                LinearMove::dash(template, o, t)
+            };
             clip_linear_move(server, owner, o, &mut d);
             Some(new_ref(Some(template), owner, target, Behavior::Dash(d)))
         }
@@ -888,7 +903,15 @@ fn clip_linear_move(server: &GameServer, owner: &WorldObject, o: Vec3, m: &mut L
     ) else {
         return;
     };
-    m.end_position = Vec3::new(p[0], p[1], p[2]);
+    let zone = owner.transform().zone_id;
+    let z = if matches!(zone, 265 | 280)
+        && p[2] < o.z - crate::systems::ai::npc::walker_max_drop(zone)
+    {
+        o.z
+    } else {
+        p[2]
+    };
+    m.end_position = Vec3::new(p[0], p[1], z);
     m.calculated_speed = calculate_distance(o, m.end_position, true) / duration_sec(m.duration);
 }
 
@@ -1648,6 +1671,22 @@ impl SkillController {
         flags: MoveTypeFlags,
     ) {
         let mut new = next_step_position(travel, target_dist, cur, end);
+        let transform = self.owner.transform();
+        let howling_walker = matches!(transform.zone_id, 265 | 280)
+            && self.owner.as_npc().is_some_and(|npc| !npc.data().can_fly);
+        if howling_walker {
+            let supported = crate::systems::ai::collision::ground_height_probe(
+                server,
+                transform.instance_id,
+                new.x,
+                new.y,
+                cur.z,
+                1.0,
+                crate::systems::ai::npc::walker_max_drop(transform.zone_id),
+            )
+            .flatten();
+            new.z = supported.map_or(cur.z, |floor| new.z.max(floor));
+        }
         self.owner
             .with_transform(|t| t.set_xyz(new.x, new.y, new.z));
         // GeoData.GetHeight snap: |newZ - groundZ| < 1 m (wandering: ground > 0 and < 3 m).
@@ -1658,7 +1697,7 @@ impl SkillController {
         } else {
             (new.z - upd_z).abs() < 1.0
         };
-        if snap {
+        if snap && !howling_walker {
             new.z = upd_z;
         }
         let (yaw, vel_x, vel_y) = step_heading(cur, new, end);

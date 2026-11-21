@@ -122,7 +122,21 @@ pub(crate) fn move_npc(
         ) {
             physics_clipped = true;
             (x, y) = (p[0], p[1]);
-            if let Some(g) = bounded_ground_height(server, instance_id, x, y, start.z, z.max(p[2]))
+            let zone = obj.transform().zone_id;
+            if matches!(zone, 265 | 280) {
+                z = crate::systems::ai::collision::ground_height_probe(
+                    server,
+                    instance_id,
+                    x,
+                    y,
+                    start.z,
+                    1.0,
+                    crate::systems::ai::npc::walker_max_drop(zone),
+                )
+                .flatten()
+                .unwrap_or(start.z);
+            } else if let Some(g) =
+                bounded_ground_height(server, instance_id, x, y, start.z, z.max(p[2]))
             {
                 z = g;
             } else {

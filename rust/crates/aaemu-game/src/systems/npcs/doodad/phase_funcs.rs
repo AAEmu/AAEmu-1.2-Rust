@@ -433,6 +433,20 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             use_clout(ctx, caster, f);
             false
         }
+        FuncTemplate::WaterVolume(f)
+            if matches!(ctx.doodad.data().template_id, 5336 | 6288)
+                && matches!(f.id, 20 | 21 | 24 | 25) =>
+        {
+            let pos = ctx.world.world_pos_rot(&ctx.obj());
+            let water = crate::systems::ai::physics::world_water(server, &ctx.world);
+            water.set_calleil_level(
+                crate::systems::skills::controllers::Vec3::new(pos.x, pos.y, pos.z),
+                pos.rot_z,
+                f.level_change.max(0.0),
+                f.duration,
+            );
+            false
+        }
         // Phase funcs whose C# `Use` only logs (and returns false).
         FuncTemplate::Animate(_)
         | FuncTemplate::BuyFishItem(_)
@@ -545,37 +559,42 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .npcs
         .area_trigger
         .get_area_shape_by_id(f.aoe_shape_id);
-    let is_fish_school =
-        super::super::fish_school::is_school_template(ctx.doodad.data().template_id);
-    let howl_ward = ctx.doodad.data().template_id == 4626 && f.buff_id == 3615;
-    let owner =
-        if f.use_origin_source && !is_fish_school && !howl_ward && ctx.doodad.core().is_visible() {
-            // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
-            // anchors the trigger. A doodad initialised before its `Spawn` (the summon path, also
-            // a delayed `SpawnDoodad`) is not visible yet and keeps its own transform: the C#
-            // anchor moved the area away from the summon, which left the caster outside it when a
-            // planted doodad stood next to them (Comet's Boon 5017: caster 2.002 m off the clout's
-            // 2.0 m half-length).
-            caster
-                .and_then(|c| {
-                    let cpos = ctx.world.world_pos_rot(c);
-                    ctx.world
-                        .around(c, |o| o.as_doodad().cloned())
-                        .into_iter()
-                        .find(|d| {
-                            let p = ctx.world.world_pos_rot(&WorldObject::from(d));
-                            let (dx, dy) = (p.x - cpos.x, p.y - cpos.y);
-                            dx * dx + dy * dy <= 16.0
-                        })
-                })
-                .unwrap_or_else(|| ctx.doodad.clone())
-        } else {
-            // Chumming from a ship must not attach the school's aura to a nearby fitting.
-            // The school owns the area and releases it when its chummed phase expires.
-            ctx.doodad.clone()
-        };
+    let template_id = ctx.doodad.data().template_id;
+    let is_fish_school = super::super::fish_school::is_school_template(template_id);
+    let howl_ward = template_id == 4626 && f.buff_id == 3615;
+    let howling_hazard = matches!(template_id, 5170 | 5383 | 5706 | 5708 | 6261 | 6273);
+    let owner = if f.use_origin_source
+        && !is_fish_school
+        && !howl_ward
+        && !howling_hazard
+        && ctx.doodad.core().is_visible()
+    {
+        // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
+        // anchors the trigger. A doodad initialised before its `Spawn` (the summon path, also
+        // a delayed `SpawnDoodad`) is not visible yet and keeps its own transform: the C#
+        // anchor moved the area away from the summon, which left the caster outside it when a
+        // planted doodad stood next to them (Comet's Boon 5017: caster 2.002 m off the clout's
+        // 2.0 m half-length).
+        caster
+            .and_then(|c| {
+                let cpos = ctx.world.world_pos_rot(c);
+                ctx.world
+                    .around(c, |o| o.as_doodad().cloned())
+                    .into_iter()
+                    .find(|d| {
+                        let p = ctx.world.world_pos_rot(&WorldObject::from(d));
+                        let (dx, dy) = (p.x - cpos.x, p.y - cpos.y);
+                        dx * dx + dy * dy <= 16.0
+                    })
+            })
+            .unwrap_or_else(|| ctx.doodad.clone())
+    } else {
+        // Chumming from a ship must not attach the school's aura to a nearby fitting.
+        // The school owns the area and releases it when its chummed phase expires.
+        ctx.doodad.clone()
+    };
     let trigger_caster = match caster {
-        Some(c) if c.as_player().is_some() => c.clone(),
+        Some(c) if c.as_player().is_some() || (howling_hazard && c.as_npc().is_some()) => c.clone(),
         _ => ctx.obj(),
     };
     let inside_buff_id = server
@@ -599,7 +618,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     trigger.inside_buff_id = inside_buff_id;
     // Miasma and spear injuries last beyond the contact that applies them.
     // Fire Pillar expires between hits while a victim remains in the flame.
-    trigger.contact_buff = matches!(f.id, 1139 | 1295) || f.buff_id == 3996;
+    trigger.contact_buff = matches!(f.id, 1139 | 1295 | 1334 | 1336) || f.buff_id == 3996;
     trigger.requires_submersion = ctx.world.template.name == "instance_cradle_of_destruction"
         && matches!(f.buff_id, 4483 | 4683);
     trigger.effects_per_buff = match inside_buff_id {
@@ -609,6 +628,8 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // beneficial buffs now reach the units inside (key 0, see `AreaTrigger::apply_effects`):
         // Lake Bubbles (4336) gives Air Bubble 3036 at the Soundless Lake sealstone. Its damage,
         // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
+        // Calleil's Hellfire has a damage effect and no inside buff.
+        None if matches!(f.id, 1415 | 1542) => HashMap::from([(0, f.effects.clone())]),
         None => HashMap::from([(0, good_buff_effects(server, &f.effects))]),
     };
     trigger.tick_rate = f.tick;
@@ -617,7 +638,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // The spear's active window is 100 ms, shorter than the 200 ms area tick.
     // Test contact the instant a placed trap enters its active phase.
     if f.duration > 0
-        && (f.duration as u128) < area_trigger::TICK_DELAY.as_millis()
+        && (f.duration as u128) <= area_trigger::TICK_DELAY.as_millis()
         && ctx.doodad.core().is_visible()
     {
         trigger.tick(server);

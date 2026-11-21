@@ -538,16 +538,24 @@ fn scan_for_enemy(
     near_mul: f32,
 ) -> Option<WorldObject> {
     let t = template_scalars(c);
-    let (can_fly, scale) = {
+    let (can_fly, scale, separate_floors) = {
         let n = c.npc.data();
-        (n.can_fly, n.unit.scale)
+        (
+            n.can_fly,
+            n.unit.scale,
+            matches!(n.unit.transform.zone_id, 265 | 280)
+                && matches!(
+                    n.unit.template_id,
+                    11258 | 11264 | 11757 | 11759 | 12765 | 12784 | 12785
+                ),
+        )
     };
     let model_size = npc::model_size(c.server, &c.obj);
     let origin = npc::world_pos_and_rot(c.server, &c.obj);
     let my_z = origin.z;
     for (unit, range, pos) in units_by_distance(c, radius) {
-        if unit_dead(&unit) {
-            continue; // not counting dead Npc
+        if unit_dead(&unit) || (separate_floors && (my_z - pos.z).abs() > 3.0) {
+            continue;
         }
         // Arbitrary value
         let max_height_gap = if can_fly {
@@ -2634,11 +2642,14 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
         Cmd::Timeout => {
             c.ai.ai_time_out = cmd.param1;
             let wait = i64::from(c.ai.ai_time_out);
-            c.ai.current_command_run_time_ms = if matches!(cmd.cmd_set_id, 102 | 103 | 106 | 107) {
-                wait * 1000
-            } else {
-                wait
-            };
+            // The last-room cinematics give the actor three seconds to play
+            // its cue before the next command removes it.
+            c.ai.current_command_run_time_ms =
+                if matches!(cmd.cmd_set_id, 102 | 103 | 106 | 107 | 189 | 282) {
+                    wait * 1000
+                } else {
+                    wait
+                };
         }
         Cmd::Other(v) => {
             tracing::error!("AI command {v}: NotSupportedException");

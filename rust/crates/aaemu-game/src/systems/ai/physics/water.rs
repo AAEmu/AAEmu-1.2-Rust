@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::data::client_files::ClientFileManager;
 use crate::data::world_templates::CELL_SIZE;
@@ -434,6 +435,35 @@ struct Inner {
     areas: Vec<WaterBodyArea>,
     index: HashMap<(i32, i32), Vec<u32>>,
     ingested_cells: HashSet<(i32, i32)>,
+    calleil_level: Option<(u32, LevelChange)>,
+}
+
+impl Inner {
+    fn surface_offset(&self, area: u32) -> f32 {
+        self.calleil_level
+            .as_ref()
+            .filter(|(id, _)| *id == area)
+            .map_or(0.0, |(_, change)| change.offset())
+    }
+}
+
+#[derive(Debug)]
+struct LevelChange {
+    from: f32,
+    to: f32,
+    duration: f32,
+    start: Instant,
+}
+
+impl LevelChange {
+    fn offset(&self) -> f32 {
+        let progress = if self.duration > 0.0 {
+            (self.start.elapsed().as_secs_f32() / self.duration).min(1.0)
+        } else {
+            1.0
+        };
+        self.from + (self.to - self.from) * progress
+    }
 }
 
 /// `WaterBodies`.
@@ -486,11 +516,54 @@ impl WaterBodies {
         inner.areas.clear();
         inner.index.clear();
         inner.ingested_cells.clear();
+        inner.calleil_level = None;
     }
 
     /// Adds an area (tests / tools; `Areas.Add` + `RebuildSpatialIndex`).
     pub fn add(&self, area: WaterBodyArea) {
         Self::add_area(&mut self.lock(), area);
+    }
+
+    /// Raise or lower the chamber's server-side surface over the authored phase duration.
+    pub(crate) fn set_calleil_level(&self, anchor: Vec3, yaw: f32, offset: f32, duration: f32) {
+        let mut inner = self.lock();
+        let (id, from) = if let Some((id, change)) = &inner.calleil_level {
+            (*id, change.offset())
+        } else {
+            // r208022 boss02_watervolume_01 is relative to the doodad, not in the cell octree.
+            let (sin, cos) = (yaw + std::f32::consts::PI).sin_cos();
+            let mut area =
+                WaterBodyArea::new("Calleil's water chamber", WaterBodyAreaType::Polygon);
+            area.depth = 13.0;
+            area.points = [
+                (0.0, 0.0, 0.0),
+                (-13.796, 38.706, 0.244),
+                (-50.568, 22.119, 0.152),
+                (-36.012, -14.010, 0.030),
+                (0.0, 0.0, 0.0),
+            ]
+            .map(|(x, y, z)| {
+                Vec3::new(
+                    anchor.x + x * cos - y * sin,
+                    anchor.y + x * sin + y * cos,
+                    anchor.z + z - 0.9564,
+                )
+            })
+            .to_vec();
+            area.update_bounds();
+            let id = inner.areas.len() as u32;
+            Self::add_area(&mut inner, area);
+            (id, 0.0)
+        };
+        inner.calleil_level = Some((
+            id,
+            LevelChange {
+                from,
+                to: offset,
+                duration,
+                start: Instant::now(),
+            },
+        ));
     }
 
     /// `IsWater(point, out flowDirection)`: `Some(flow)` in water.
@@ -513,7 +586,8 @@ impl WaterBodies {
                 continue;
             }
             if let Some((surface, fd)) = area.get_surface(point) {
-                if point.z <= surface.z && point.z >= surface.z - area.depth {
+                let offset = inner.surface_offset(*id);
+                if point.z <= surface.z + offset && point.z >= surface.z - area.depth {
                     total += fd;
                     targets += 1;
                 }
@@ -551,10 +625,11 @@ impl WaterBodies {
                 if point.z < surface.z - area.depth {
                     continue;
                 }
-                let d = (surface.z - point.z).abs();
+                let z = surface.z + inner.surface_offset(*id);
+                let d = (z - point.z).abs();
                 if d < closest {
                     closest = d;
-                    chosen = surface.z;
+                    chosen = z;
                     flow = f;
                 }
             }
@@ -787,6 +862,20 @@ impl WaterBodies {
 mod tests {
     use super::super::objects_file::tests::{object_dat, water_record};
     use super::*;
+
+    #[test]
+    fn calleil_water_is_contained_by_the_chamber_boundary() {
+        let water = WaterBodies::new(0.0);
+        water.set_calleil_level(
+            Vec3::new(100.0, 100.0, 170.0),
+            -std::f32::consts::PI,
+            0.7,
+            0.0,
+        );
+        // Both samples are in the bounding box. Only the first is in the chamber.
+        assert!(water.is_water(Vec3::new(70.0, 90.0, 169.5)).is_some());
+        assert!(water.is_water(Vec3::new(55.0, 90.0, 169.5)).is_none());
+    }
 
     fn lake(points: &[(f32, f32)], z: f32, depth: f32) -> WaterBodyArea {
         let mut a = WaterBodyArea::new("lake", WaterBodyAreaType::Polygon);

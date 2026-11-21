@@ -268,6 +268,14 @@ fn burnt_scripted_rows_are_placed_once() {
 
 /// A server with the real skills / npcs / quests / AI tables and a synthetic Burnt world.
 fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
+    real_encounter_server(db, WORLD, ZONE)
+}
+
+pub(super) fn real_encounter_server(
+    db: &str,
+    world_name: &str,
+    zone: u32,
+) -> (Arc<GameServer>, Arc<WorldInstance>) {
     let conn =
         rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("compact db");
@@ -292,14 +300,14 @@ fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
     data.systems.quests = crate::systems::quests::Data::load(&ctx).expect("quests data");
     data.systems.ai = crate::systems::ai::Data::load(&ctx).expect("ai data");
     data.systems.instances = crate::systems::instances::Data::load(&ctx).expect("instance data");
-    let template = WorldTemplate::synthetic(0, WORLD, 32, 32, ZONE);
+    let template = WorldTemplate::synthetic(0, world_name, 32, 32, zone);
     let server = Arc::new(test_server_with_world(data, template));
     server.set_self();
     let template = server
         .game_data
         .worlds
-        .get_world_template_by_name(WORLD)
-        .expect("Burnt world template")
+        .get_world_template_by_name(world_name)
+        .expect("encounter world template")
         .clone();
     let world = server
         .world

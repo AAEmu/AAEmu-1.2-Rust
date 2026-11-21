@@ -186,7 +186,22 @@ impl QuestSkillHooks for QuestsForSkills {
             EffectTemplate::Cinema { cinema_id, .. } => {
                 tracing::trace!("CinemalEffect");
                 if let Target::Obj(target) = &args.target {
-                    if let Some(character) = target.as_player() {
+                    if target.as_npc().is_some() && matches!(*cinema_id, 53 | 133) {
+                        // Howling Abyss casts its final-room cue on the invisible actor.
+                        // Play it for characters in the same room on this instance.
+                        if let Some(world) = server.world.world_of(target) {
+                            let origin = world.world_pos_rot(target);
+                            for player in world.around(target, |object| object.as_player().cloned())
+                            {
+                                let pos = world.world_pos_rot(&WorldObject::from(&player));
+                                if (pos.x - origin.x).hypot(pos.y - origin.y) <= 60.0
+                                    && (pos.z - origin.z).abs() <= 8.0
+                                {
+                                    super::events::play_cinema(server, &player, *cinema_id);
+                                }
+                            }
+                        }
+                    } else if let Some(character) = target.as_player() {
                         // The Armory's final-room skill requires an explicit playback cue.
                         const HIERONIMUS_ENTRANCE_CINEMA: u32 = 8;
                         if *cinema_id == HIERONIMUS_ENTRANCE_CINEMA {

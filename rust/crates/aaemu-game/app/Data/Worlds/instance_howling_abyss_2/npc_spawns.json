@@ -1368,7 +1368,7 @@
     "UnitId": 12958,
     "Title": "Viboros's Egg",
     "NpcSpawnerIds": [
-      110906
+      110907
     ],
     "Position": {
       "X": 674.738,
@@ -1385,7 +1385,7 @@
     "UnitId": 12958,
     "Title": "Viboros's Egg",
     "NpcSpawnerIds": [
-      110907
+      110906
     ],
     "Position": {
       "X": 656.428,
@@ -2916,7 +2916,7 @@
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
-      110544
+      110545
     ],
     "Position": {
       "X": 347.054,
@@ -2933,7 +2933,7 @@
     "UnitId": 12760,
     "Title": "Calleil's Fire Elemental",
     "NpcSpawnerIds": [
-      110545
+      110544
     ],
     "Position": {
       "X": 340.212,

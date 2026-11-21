@@ -35,6 +35,10 @@ pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
 // Barrel impacts retain a fraction of their speed, then settle before the fuse.
 const BARREL_RESTITUTION: f32 = 0.24;
 const BARREL_REST_SPEED: f32 = 0.8;
+
+fn howling_ballistic(template_id: u32) -> bool {
+    matches!(template_id, 49 | 64 | 66)
+}
 /// Contact radius of a gimmick for `GimmickTemplate.CollisionSkillId` hits. The `gimmicks`
 /// table has no size / radius column and a gimmick has no actor `model_id` (`ModelManager`'s
 /// radii are keyed by actor model ids, and `new_gimmick` never sets one), so the model radius
@@ -540,6 +544,14 @@ fn spawn_effect_gimmick(
         }
     }
     g.unit.scale = params.scale;
+    if howling_ballistic(template.id) && params.offset_coordinate_id == 2 {
+        let (sin_yaw, cos_yaw) = caster_world.rot_z.sin_cos();
+        g.unit.transform.set_xyz(
+            origin.x + params.offset_x * cos_yaw - params.offset_y * sin_yaw,
+            origin.y + params.offset_x * sin_yaw + params.offset_y * cos_yaw,
+            origin.z + params.offset_z,
+        );
+    }
     let barrel_floor = falling_barrel.then(|| {
         use crate::systems::ai::collision;
         let t = &mut g.unit.transform;
@@ -588,7 +600,9 @@ fn spawn_effect_gimmick(
         ]
     };
     let mut authored_motion = doodad_motion;
-    if params.velocity_coordinate_id == 2 && (template.mass <= 0.0 || falling_barrel) {
+    if params.velocity_coordinate_id == 2
+        && (template.mass <= 0.0 || falling_barrel || howling_ballistic(template.id))
+    {
         g.vel = rotate_local([params.velocity_x, params.velocity_y, params.velocity_z]);
         authored_motion = true;
     }
@@ -603,6 +617,7 @@ fn spawn_effect_gimmick(
     // that spawns fragments is gone before they are). 0 for a doodad / NPC caster.
     let owner_character_id = crate::systems::skills::relation::owner_character(server, caster)
         .map_or(0, |owner| owner.character_id);
+    let initial_pos = [g.unit.transform.x, g.unit.transform.y, g.unit.transform.z];
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
     session::handle_zone_changes(server, changes);
@@ -616,6 +631,11 @@ fn spawn_effect_gimmick(
             authored_motion,
             owner_character_id,
             barrel_floor,
+            last_pos: if howling_ballistic(params.gimmick_id) {
+                initial_pos
+            } else {
+                [0.0; 3]
+            },
             ..Default::default()
         },
     );
@@ -778,11 +798,18 @@ fn collision_tick(
     template: &GimmickTemplate,
 ) -> bool {
     // Never call into the world while the gimmick's data lock is held.
-    let (origin, vel) = {
+    let (origin, vel, source_id) = {
         let g = active.gimmick.data();
         let t = g.unit.transform;
-        ([t.x, t.y, t.z], g.vel)
+        ([t.x, t.y, t.z], g.vel, g.spawner_unit_id)
     };
+    let segment_start = if howling_ballistic(template.id) {
+        active.state().last_pos
+    } else {
+        origin
+    };
+    let segment = std::array::from_fn::<_, 3, _>(|i| origin[i] - segment_start[i]);
+    let segment_len_sq = segment.iter().map(|v| v * v).sum::<f32>();
     let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
     if !speed.is_finite() || speed < template.collision_min_speed {
         return false;
@@ -821,7 +848,9 @@ fn collision_tick(
     let mut seen: Vec<([f32; 3], f32, u32)> = Vec::new();
     let mut contacts: Vec<(u32, WorldObject)> = Vec::new();
     for unit in candidates {
-        if !contact_unit(world, &unit) {
+        if !contact_unit(world, &unit)
+            || (howling_ballistic(template.id) && unit.obj_id() == source_id)
+        {
             continue;
         }
         let p = world.world_pos_rot(&unit);
@@ -829,9 +858,23 @@ fn collision_tick(
             server,
             &crate::systems::skills::geometry::Target::Obj(unit.clone()),
         );
-        let dx = p.x - origin[0];
-        let dy = p.y - origin[1];
-        let dz = p.z - origin[2];
+        let from_start = [
+            p.x - segment_start[0],
+            p.y - segment_start[1],
+            p.z - segment_start[2],
+        ];
+        let along = if segment_len_sq > 0.0 {
+            (from_start
+                .iter()
+                .zip(segment)
+                .map(|(a, b)| a * b)
+                .sum::<f32>()
+                / segment_len_sq)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let [dx, dy, dz] = std::array::from_fn(|i| from_start[i] - segment[i] * along);
         let reach = COLLISION_RADIUS + model;
         if dx * dx + dy * dy + dz * dz <= reach * reach {
             contacts.push((unit.obj_id(), unit.clone()));
@@ -922,6 +965,62 @@ fn collision_tick(
     false
 }
 
+/// Move a Howling Abyss keg or Trieste bolt and return whether it struck scenery.
+fn tick_howling_ballistic(
+    server: &GameServer,
+    world: &WorldInstance,
+    active: &ActiveGimmick,
+    template: &GimmickTemplate,
+    dt: f32,
+) -> bool {
+    use crate::systems::ai::collision;
+    let (from, mut velocity) = {
+        let g = active.gimmick.data();
+        let t = g.unit.transform;
+        ([t.x, t.y, t.z], g.vel)
+    };
+    if velocity == [0.0; 3] {
+        return false;
+    }
+    let to = [
+        from[0] + velocity[0] * dt,
+        from[1] + velocity[1] * dt,
+        from[2] + velocity[2] * dt - 0.5 * template.gravity * dt * dt,
+    ];
+    velocity[2] -= template.gravity * dt;
+    let mut end = to;
+    let hit = collision::raycast(
+        server,
+        world.id,
+        from,
+        to,
+        collision::query::mask::STATIC_TERRAIN,
+        collision::query::ray_flags::DEFAULT,
+    )
+    .flatten();
+    if let Some(hit) = hit {
+        let normal = [hit.normal.x, hit.normal.y, hit.normal.z];
+        end = [
+            hit.pos.x + normal[0] * 0.03,
+            hit.pos.y + normal[1] * 0.03,
+            hit.pos.z + normal[2] * 0.03,
+        ];
+        if !template.disappear_by_collision {
+            let approach = velocity.iter().zip(normal).map(|(a, b)| a * b).sum::<f32>();
+            for (v, n) in velocity.iter_mut().zip(normal) {
+                *v = (*v - (1.0 + BARREL_RESTITUTION) * approach * n) * 0.6;
+            }
+            if normal[2] > 0.5 && velocity.iter().map(|v| v * v).sum::<f32>() < 1.0 {
+                velocity = [0.0; 3];
+            }
+        }
+    }
+    let mut g = active.gimmick.data();
+    g.unit.transform.set_xyz(end[0], end[1], end[2]);
+    g.vel = velocity;
+    hit.is_some()
+}
+
 /// `Gimmick.GimmickTick(delta)`.
 pub fn gimmick_tick(
     server: &GameServer,
@@ -953,6 +1052,7 @@ pub fn gimmick_tick(
         last
     };
 
+    let mut scenery_hit = false;
     // MovementHandler?.Tick(delta)
     match active.handler {
         Some(MovementHandler::Elevator) => {
@@ -986,6 +1086,20 @@ pub fn gimmick_tick(
                 let z = g.unit.transform.z;
                 g.unit.transform.set_height(z + dz);
             }
+        }
+        None if active
+            .template
+            .as_ref()
+            .is_some_and(|t| howling_ballistic(t.id))
+            && active.state().authored_motion =>
+        {
+            scenery_hit = tick_howling_ballistic(
+                server,
+                world,
+                active,
+                active.template.as_ref().expect("checked template"),
+                delta_time,
+            );
         }
         None => {
             if active.state().authored_motion {
@@ -1067,6 +1181,12 @@ pub fn gimmick_tick(
     if let Some(t) = &active.template {
         if t.collision_skill_id != 0 && collision_tick(server, world, active, t) {
             return; // despawned by the collision
+        }
+        if scenery_hit && t.disappear_by_collision {
+            do_gimmick_skill(server, world, active, t.collision_skill_id);
+            active.state().despawned = true;
+            despawn(server, active);
+            return;
         }
     }
 
@@ -1629,6 +1749,118 @@ mod tests {
         let barrel_data = barrel.data();
         assert_eq!(barrel_data.unit.transform.z, 21.0);
         assert_eq!(barrel_data.vel, [0.0; 3]);
+    }
+
+    struct HowlingTestFloor;
+
+    impl crate::systems::ai::collision::terrain::TerrainSource for HowlingTestFloor {
+        fn sample(&self, _: i32, _: i32) -> f32 {
+            100.0
+        }
+
+        fn size(&self) -> (i32, i32) {
+            (512, 512)
+        }
+    }
+
+    #[tokio::test]
+    async fn howling_bomber_keg_falls_and_bounces_off_the_floor() {
+        let f = contact_fixture(
+            GimmickTemplate {
+                id: 49,
+                gravity: 9.8,
+                life_time: 6_150,
+                ..Default::default()
+            },
+            (150.0, 150.0),
+        );
+        let collision = &f.server.systems.ai.collision;
+        collision
+            .test_files
+            .set(Arc::new(Default::default()))
+            .unwrap();
+        assert!(collision
+            .test_terrain
+            .set(Arc::new(HowlingTestFloor))
+            .is_ok());
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let barrel = spawn_from_effect(
+            &f.server,
+            &f.world,
+            &SpawnGimmickParams {
+                gimmick_id: 49,
+                offset_coordinate_id: 2,
+                offset_z: 3.0,
+                velocity_coordinate_id: 2,
+                velocity_y: 8.0,
+                scale: 0.7,
+                ..Default::default()
+            },
+            &source,
+        )
+        .unwrap();
+        let active = f.server.systems.npcs.gimmicks.find(barrel.obj_id).unwrap();
+        let mut bounced = false;
+        for step in 1..=60 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                step * 50,
+            );
+            let data = barrel.data();
+            assert!(data.unit.transform.z >= 99.98);
+            bounced |= data.vel[2] > 0.0;
+        }
+        let data = barrel.data();
+        assert!(bounced);
+        assert!(data.unit.transform.y > 105.0);
+        assert!(data.unit.transform.z < 100.2);
+    }
+
+    #[tokio::test]
+    async fn howling_triestes_bolt_sweeps_through_units_between_ticks() {
+        let f = contact_fixture(
+            GimmickTemplate {
+                id: 66,
+                mass: 1.0,
+                gravity: 9.8,
+                life_time: 10_200,
+                ..contact_template(true)
+            },
+            (103.0, 100.0),
+        );
+        f.victim.data().unit.transform.set_height(100.0);
+        let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+        let bolt = spawn_from_effect(
+            &f.server,
+            &f.world,
+            &SpawnGimmickParams {
+                gimmick_id: 66,
+                offset_coordinate_id: 2,
+                velocity_coordinate_id: 2,
+                velocity_x: 25.0,
+                scale: 1.0,
+                ..Default::default()
+            },
+            &source,
+        )
+        .unwrap();
+        let active = f.server.systems.npcs.gimmicks.find(bolt.obj_id).unwrap();
+        gimmick_tick(
+            &f.server,
+            &f.world,
+            &active,
+            Duration::from_millis(240),
+            240,
+        );
+        assert!(bolt.data().unit.transform.x > 105.0);
+        assert!(
+            active.state().despawned,
+            "the bolt collided before its fuse"
+        );
+        assert!(f.victim.data().unit.hp < 500);
     }
 
     #[tokio::test]

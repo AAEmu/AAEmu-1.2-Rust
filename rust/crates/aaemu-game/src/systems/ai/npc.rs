@@ -674,6 +674,15 @@ pub fn reference_height(
 /// ground under the walker.
 pub const WALKER_MAX_DROP: f32 = 12.0;
 
+/// The raised passages have another walkable floor only a few meters underneath.
+pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {
+    if matches!(zone_id, 265 | 280) {
+        2.5
+    } else {
+        WALKER_MAX_DROP
+    }
+}
+
 /// [`reference_height`] with the zone's ground: an NPC that walks (not flying, not holding /
 /// idling at its spawner) stands on the physics ground (static geometry + terrain, the
 /// collision service) under its position, like the zone's NPC living entities; the C#
@@ -700,7 +709,7 @@ pub fn reference_height_in(
         return reference_height(server, Some(a), x, y, z, zone_id);
     }
     let step_limit = a.world_z + crate::systems::ai::collision::GROUND_PROBE_UP;
-    let drop_limit = a.world_z - WALKER_MAX_DROP;
+    let drop_limit = a.world_z - walker_max_drop(zone_id);
     // Prefer the actual collision floor below / within the step range: the probe starts at
     // the current level + 2 m, so a hit is always reachable, and a hit at Z = 0 is a valid
     // surface. A missed probe is not a floor; its terrain fallback (in a cave the surface
