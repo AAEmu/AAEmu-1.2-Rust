@@ -258,9 +258,10 @@ pub struct DoodadSpawner {
 /// or a runaway acyclic definition.
 const MAX_RATIO_RESPAWN_CHAIN_DEPTH: usize = 8;
 
-/// The `PhaseRatio` roll is `Random.Shared.Next(0, 10000)`, so a `DoodadFuncRatioRespawn` (or
-/// `DoodadFuncRatioChange`) with a ratio of at least this value always passes.
-const CERTAIN_RATIO: i32 = 9999;
+/// The `PhaseRatio` roll is `0..10000` with strict `<` interval checks, so a
+/// `DoodadFuncRatioRespawn` (or `DoodadFuncRatioChange`) with a ratio of at least this value
+/// always passes on its own.
+const CERTAIN_RATIO: i32 = 10_000;
 
 /// A `DoodadFuncRatioRespawn` replacement rejected by the active-chain guard
 /// ([`DoodadSpawner::enter_ratio_respawn`]).

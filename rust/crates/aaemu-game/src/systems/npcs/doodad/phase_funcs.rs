@@ -201,7 +201,10 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         }
         FuncTemplate::RatioChange(f) => {
             let mut d = ctx.doodad.data();
-            if d.phase.phase_ratio + d.phase.cumulative_phase_ratio <= f.ratio {
+            let prev = d.phase.cumulative_phase_ratio;
+            let cumulative = prev.saturating_add(f.ratio.max(0));
+            d.phase.cumulative_phase_ratio = cumulative;
+            if d.phase.phase_ratio >= prev && d.phase.phase_ratio < cumulative {
                 d.phase.override_phase = f.next_phase;
                 return true; // interrupt the phase functions and switch to NextPhase
             }
@@ -214,15 +217,20 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 .spawns
                 .doodad_spawner_of(ctx.doodad.obj_id)
                 .filter(|s| s.id > 0);
-            let phase_ratio = ctx.doodad.data().phase.phase_ratio;
-            if let (true, Some(spawner)) = (phase_ratio <= f.ratio, spawner) {
+            let hit = {
+                let mut d = ctx.doodad.data();
+                let prev = d.phase.cumulative_phase_ratio;
+                let cumulative = prev.saturating_add(f.ratio.max(0));
+                d.phase.cumulative_phase_ratio = cumulative;
+                d.phase.phase_ratio >= prev && d.phase.phase_ratio < cumulative
+            };
+            if let (true, Some(spawner)) = (hit, spawner) {
                 if !ctx.data().exist(f.spawn_doodad_id) {
                     tracing::error!(
                         "DoodadFuncRatioRespawn: Spawn template {} does not exist (spawner={}).",
                         f.spawn_doodad_id,
                         spawner.id
                     );
-                    ctx.doodad.data().phase.cumulative_phase_ratio -= f.ratio;
                     return false;
                 }
                 let (template_id, func_group_id) = {
@@ -249,7 +257,6 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                             limit = reject.limit,
                             "DoodadFuncRatioRespawn: replacement chain rejected; keeping the current doodad"
                         );
-                        ctx.doodad.data().phase.cumulative_phase_ratio -= f.ratio;
                         return false;
                     }
                 };
@@ -264,7 +271,6 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 }
                 return true; // Interrupt the PhaseFunc because we swapped the doodad
             }
-            ctx.doodad.data().phase.cumulative_phase_ratio -= f.ratio;
             false
         }
         FuncTemplate::RequireItem(f) => match DoodadCtx::as_player(caster) {

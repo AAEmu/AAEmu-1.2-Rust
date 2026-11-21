@@ -876,9 +876,31 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
 
     let mut stop = false;
     let manager = &ctx.server.systems.npcs.doodads;
-    // A `DoodadFuncPulseTrigger` fires on the pulse this entry's own `DoodadFuncPulse` sent
-    // (`phase_funcs::use_phase_func`); a pulse of an earlier entry does not count.
-    ctx.doodad.data().phase.pulsed = None;
+    let has_ratio_func = phase_funcs.iter().any(|pf| {
+        matches!(
+            pf.func_type.as_str(),
+            "DoodadFuncRatioChange" | "DoodadFuncRatioRespawn"
+        )
+    });
+    let phase_ratio = if has_ratio_func {
+        manager
+            .forced_phase_ratio()
+            .unwrap_or_else(|| rand::thread_rng().gen_range(0..10000))
+    } else {
+        0
+    };
+    {
+        let mut d = ctx.doodad.data();
+        // A `DoodadFuncPulseTrigger` fires on the pulse this entry's own `DoodadFuncPulse` sent
+        // (`phase_funcs::use_phase_func`); a pulse of an earlier entry does not count.
+        d.phase.pulsed = None;
+        // Deviation from the C#: roll once per phase entry and reset the cumulative weight cursor
+        // so sibling `DoodadFuncRatioChange` / `DoodadFuncRatioRespawn` rows partition `0..10000`
+        // instead of rolling independently and falling through to fallback timers (e.g. saltwater
+        // fish school 6448 phase 16998 falling through into Timer 7472 -> Bluefin Tuna 17231).
+        d.phase.phase_ratio = phase_ratio;
+        d.phase.cumulative_phase_ratio = 0;
+    }
     // The trigger rows run after the group's other phase funcs, so the pulse is sent before the
     // trigger looks for it: the shipped `doodad_phase_funcs.actual_func_id` order runs the
     // trigger first (Sharpwind 13161: 274 before 287), which would stop the group before its
@@ -887,10 +909,6 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");
     for pf in others.into_iter().chain(triggers) {
-        let ratio = manager
-            .forced_phase_ratio()
-            .unwrap_or_else(|| rand::thread_rng().gen_range(0..10000));
-        ctx.doodad.data().phase.phase_ratio = ratio;
         // DoodadPhaseFunc.Use: template != null && template.Use(caster, owner)
         stop = match ctx.data().phase_func_template(pf.func_id, &pf.func_type) {
             Some(t) => phase_funcs::use_phase_func(t, ctx, caster),

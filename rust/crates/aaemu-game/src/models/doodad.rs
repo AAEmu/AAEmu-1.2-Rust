@@ -364,9 +364,10 @@ pub struct DoodadPhaseState {
     pub loot_missed: bool,
     /// `OverridePhase`.
     pub override_phase: i32,
-    /// `PhaseRatio` (0..10000, rolled per phase func).
+    /// `PhaseRatio` (0..10000, rolled once per phase entry when the phase has ratio funcs).
     pub phase_ratio: i32,
-    /// `CumulativePhaseRatio`.
+    /// `CumulativePhaseRatio` (running upper bound of checked `RatioChange` / `RatioRespawn` rows
+    /// within the current phase entry; reset to 0 on each phase entry).
     pub cumulative_phase_ratio: i32,
     /// `OverridePhaseTime` (unix ms, 0 = MinValue).
     pub override_phase_time_ms: i64,

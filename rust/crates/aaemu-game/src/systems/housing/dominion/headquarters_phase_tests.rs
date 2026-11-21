@@ -150,7 +150,7 @@ async fn separate_phase_entries_do_not_reuse_the_previous_recursion_path() {
     data.phase_funcs.clear();
     let function = FuncTemplate::RatioChange(DoodadFuncRatioChange {
         id: 1,
-        ratio: 0,
+        ratio: 1,
         next_phase: 8238,
     });
     data.phase_func_templates
