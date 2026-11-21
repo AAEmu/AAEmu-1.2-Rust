@@ -942,17 +942,10 @@ pub fn do_change_phase(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_p
     stop
 }
 
-/// `OnSkillHit(caster, skillId)`: `Use(caster, skillId)` once per `DoodadFuncSkillHit` of the
-/// current phase.
+/// `OnSkillHit(caster, skillId)`: a matching skill contributes one hit to the current phase.
 pub fn on_skill_hit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, skill_id: u32) {
     let group = ctx.doodad.data().func_group_id;
-    let n = ctx
-        .data()
-        .funcs_for_group(group)
-        .iter()
-        .filter(|f| f.func_type == "DoodadFuncSkillHit")
-        .count();
-    for _ in 0..n {
+    if ctx.data().accepts_skill_hit(group, skill_id) {
         use_doodad_with_gate(ctx, caster, skill_id, 0, false);
     }
 }

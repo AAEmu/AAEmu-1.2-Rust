@@ -226,19 +226,16 @@ impl NpcSkillHooks for NpcSkills {
         doodad: &WorldObject,
         skill_id: u32,
     ) -> bool {
-        use super::doodad::templates::FuncTemplate;
-
         let Some(doodad) = doodad.as_doodad() else {
             return false;
         };
         let phase = doodad.data().func_group_id;
-        let data = &server.game_data.systems.npcs.doodad;
-        data.funcs_for_group(phase).iter().any(|func| {
-            matches!(
-                data.func_template(func.func_id, &func.func_type),
-                Some(FuncTemplate::SkillHit(hit)) if hit.skill_id == skill_id
-            )
-        })
+        server
+            .game_data
+            .systems
+            .npcs
+            .doodad
+            .accepts_skill_hit(phase, skill_id)
     }
 
     fn doodad_skill_hit(

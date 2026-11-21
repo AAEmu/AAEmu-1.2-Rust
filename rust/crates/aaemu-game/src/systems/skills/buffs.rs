@@ -2278,9 +2278,17 @@ fn execute_trigger(
     };
     let t = &s.template;
     let caster = find_obj(server, b.caster_obj_id);
+    // The floor spear's Injured trigger is authored with the victim as its
+    // source. Use the trap that applied it so self-attack rules do not stop
+    // the environmental damage.
+    let floor_spear = b.template.id == 3999
+        && caster
+            .as_ref()
+            .and_then(WorldObject::as_doodad)
+            .is_some_and(|doodad| doodad.data().template_id == 5516);
     let mut target = Some(owner.clone());
     let mut source = Some(owner.clone());
-    if t.use_original_source {
+    if t.use_original_source || floor_spear {
         source = caster.clone();
     }
     if t.effect_on_source {
@@ -2340,7 +2348,11 @@ fn execute_trigger(
     };
     let args = EffectArgs {
         caster: effect_caster,
-        caster_caster: SkillCaster::Unit(owner.obj_id()),
+        caster_caster: if floor_spear {
+            SkillCaster::Doodad(b.caster_obj_id)
+        } else {
+            SkillCaster::Unit(owner.obj_id())
+        },
         target: Target::Obj(target.clone()),
         target_caster: SkillCastTarget::Unit(target.obj_id()),
         cast: CastAction::Buff {

@@ -597,6 +597,11 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     };
     trigger.player_sphere = howl_ward;
     trigger.inside_buff_id = inside_buff_id;
+    // Miasma and spear injuries last beyond the contact that applies them.
+    // Fire Pillar expires between hits while a victim remains in the flame.
+    trigger.contact_buff = matches!(f.id, 1139 | 1295) || f.buff_id == 3996;
+    trigger.requires_submersion = ctx.world.template.name == "instance_cradle_of_destruction"
+        && matches!(f.buff_id, 4483 | 4683);
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
         // Deviation: a clout without an inside buff (401 of the 447 clouts with effects) never
@@ -609,6 +614,14 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     trigger.tick_rate = f.tick;
     let trigger = Arc::new(trigger);
     area_trigger::add_area_trigger(server, trigger.clone());
+    // The spear's active window is 100 ms, shorter than the 200 ms area tick.
+    // Test contact the instant a placed trap enters its active phase.
+    if f.duration > 0
+        && (f.duration as u128) < area_trigger::TICK_DELAY.as_millis()
+        && ctx.doodad.core().is_visible()
+    {
+        trigger.tick(server);
+    }
     if f.duration > 0 {
         // Deviation: the C# task (`new DoodadFuncCloutTask(areaTrigger.Caster,
         // areaTrigger.Owner, ...)`) acts on the trigger owner, which with UseOriginSource is any
