@@ -280,6 +280,7 @@ fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
         language: "en_us",
     };
     let mut data = GameData::empty();
+    data.skills = crate::data::SkillData::load(&conn).expect("buff and skill metadata");
     data.formulas = crate::data::formulas::FormulaManager::load(&conn).expect("formulas");
     let localization = crate::data::world_data::Localization::load(&conn, "en_us").unwrap();
     data.factions = crate::data::world_data::FactionData::load(&conn, &localization).unwrap();
