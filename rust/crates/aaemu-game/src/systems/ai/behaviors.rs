@@ -2664,10 +2664,6 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
                 cmd.param2.clone()
             };
             c.load_ai_path_points(&name, cmd.param1 == 1);
-            if name.starts_with("aipath_alistair") {
-                c.ai.path_handler.ai_path_speed = npc::running_move_speed(c.server, &c.npc);
-                c.ai.path_handler.ai_path_actor_flags = 4;
-            }
             if cmd.param1 == 1 {
                 c.enqueue_path_point(AiPathPoint {
                     position: Vec3::default(),
@@ -2676,6 +2672,10 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
                 });
             }
             c.go_to_follow_path();
+            if name.starts_with("aipath_alistair") {
+                c.ai.path_handler.ai_path_speed = npc::running_move_speed(c.server, &c.npc);
+                c.ai.path_handler.ai_path_actor_flags = 4;
+            }
             if cmd.param1 == 1 {
                 // An empty Param2 walked the current route (see above): keep its name.
                 if !cmd.param2.trim().is_empty() {

@@ -227,37 +227,51 @@ async fn real_data_sharpwind_okape_plays_the_cinema_and_tornadoes_travel() {
     assert!((after.x - before.x).hypot(after.y - before.y) > 0.1);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_sharpwind_allistair_runs_and_opens_the_warehouse_chest() {
     let (server, world) = fixture();
-    let (_client, _player) = place_player(&server, 1, 514.0, 316.0, 166.0);
-    let allistair = place_npc(&server, &world, 12111, 512.107, 315.263, 165.938);
-    let position = allistair.transform();
+    let (_client, _player) = place_player(&server, 1, 455.0, 330.0, 167.0);
+    let allistair = place_npc(&server, &world, 12111, 491.038, 325.178, 165.931);
+    let chest = place_doodad(&server, &world, 5600, 398.5, 325.1, 168.537);
     let npc = allistair.as_npc().unwrap();
+    let run_speed = crate::systems::ai::npc::running_move_speed(&server, npc);
+    let run_step = run_speed * crate::systems::ai::npc::move_speed_mul(&allistair) * 0.1;
+    assert!(run_step > 0.2, "the authored run speed is {run_speed} m/s");
     hooks::npc_control_effect(
         &server,
         &NpcControlEffect {
             id: 0,
             category_id: 5,
-            param_int: 198,
+            param_int: 199,
             param_string: String::new(),
         },
         npc,
     );
-    for _ in 0..40 {
+    let mut peak_step = 0.0f32;
+    let mut ticks = tokio::time::interval(Duration::from_millis(100));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    for _ in 0..900 {
+        ticks.tick().await;
+        let before = allistair.transform();
         ai::tick_all(&server, 100);
+        let after = allistair.transform();
+        peak_step = peak_step.max((after.x - before.x).hypot(after.y - before.y));
+        if chest.as_doodad().unwrap().data().func_group_id != 14412 {
+            break;
+        }
     }
-    assert!((allistair.transform().x - position.x).abs() > 1.0);
-    let chest = place_doodad(&server, &world, 5600, 398.5, 325.1, 168.537);
-    allistair.with_transform(|t| t.set_xyz(399.282, 325.742, 168.537));
-    world.add_visible_object(&allistair, &server.view_ctx());
-    assert_eq!(
-        skill::unit_use_skill(&server, &allistair, 19504, &allistair),
-        skill_result::SUCCESS
+    assert!(
+        (run_step - peak_step).abs() < 0.02,
+        "observed step {peak_step:.3} m, expected run step {run_step:.3} m"
     );
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_ne!(chest.as_doodad().unwrap().data().func_group_id, 14412);
+    let pos = allistair.transform();
+    assert!((pos.x - 399.282).hypot(pos.y - 325.742) < 1.5);
+    assert_ne!(
+        chest.as_doodad().unwrap().data().func_group_id,
+        14412,
+        "the command set must walk the route and open the chest"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
