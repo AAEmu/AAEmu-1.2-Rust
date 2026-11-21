@@ -598,8 +598,9 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         ctx.doodad.clone()
     };
     let caster = if hadir_hazard {
+        let owner_obj_id = ctx.doodad.data().owner_obj_id;
         ctx.world
-            .object(ctx.doodad.data().owner_obj_id)
+            .object(owner_obj_id)
             .filter(|o| o.as_npc().is_some())
     } else {
         caster.cloned()
