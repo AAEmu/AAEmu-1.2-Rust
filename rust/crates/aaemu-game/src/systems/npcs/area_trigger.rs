@@ -308,6 +308,8 @@ pub struct AreaTrigger {
     pub tl_id: u32,
     /// `SkillTargetRelation`.
     pub target_relation: u8,
+    /// A faction-independent refuge for characters within a three-dimensional sphere.
+    pub player_sphere: bool,
     /// `InsideBuffTemplate?.BuffId` (`None` = no template).
     pub inside_buff_id: Option<u32>,
     /// `EffectsPerBuff` (buff id → effect template ids).
@@ -444,9 +446,20 @@ impl AreaTrigger {
             return;
         };
         // Get units currently in the shape
-        let Some(current) = get_around_by_shape(server, &world, &owner_obj, shape) else {
+        let Some(mut current) = get_around_by_shape(server, &world, &owner_obj, shape) else {
             return;
         };
+        if self.player_sphere {
+            let origin = world.world_pos_rot(&owner_obj);
+            current.retain(|unit| {
+                let p = world.world_pos_rot(unit);
+                unit.as_player().is_some()
+                    && (p.x - origin.x).powi(2)
+                        + (p.y - origin.y).powi(2)
+                        + (p.z - origin.z).powi(2)
+                        <= shape.value1.powi(2)
+            });
+        }
         let old = {
             let mut state = self.state();
             if state.removed {

@@ -3641,6 +3641,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   The 1.2 client reads a length-prefixed sequence name and a three-byte house unit ID
   (zero for this scene). The cinema start and completion replies use the existing quest
   attribution and visible-object restoration.
+  In the follow-up, Sorvell's barrel casts 15649 and 15668 aim at the current victim or the
+  player selected by the effect. The 1.2 rows supply a 20 m drop, gravity, angular velocity,
+  and the original fuse. A damped bounce on the room floor is inferred. Thundering Strike
+  15587 still transforms the fifth live stack (2407) into Petrify (2409). Earthen Grip 15592
+  is a 0–33% health skill in NPC AI parameters 1255, with no minimum target count.
+  Winters spawns at Z 23.6 above the `sc_prison_d.cgf` plinth. A downward collision probe there
+  reaches its base at Z 21.09. The inferred plinth bounds keep him at the authored elevation
+  until he steps onto the arena floor.
+  Dominated waves inherit the boss's live combat target even when their spawn has no
+  expiration. They enter combat after their authored spawn skills finish. Their leash
+  covers the final arena because a player across the room can be more than the authored
+  50 m from a portal. The son's ward (4626) centers buff 3615
+  on the doodad and admits players of either faction. Its inferred nine-second duration
+  covers the eight-second Howl cast.
+  Meteor Shower 15629 places fire circle 4874 and the damage at the same ground point.
+  The client projectile launches above the circle, below any solid ceiling in the drop path.
   The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
   (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
   `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /

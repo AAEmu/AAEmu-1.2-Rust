@@ -997,6 +997,13 @@ fn npc_spawner_spawn_effect(
         return;
     }
     let world_id = caster.transform().world_id;
+    let wave_target = (e.use_summoner_aggro_target
+        && (46629..=46656).contains(&e.spawner_id)
+        && caster
+            .as_npc()
+            .is_some_and(|n| n.data().unit.template_id == 8962))
+    .then(|| npc_aggro_target(server, &world, caster))
+    .flatten();
     for spawner in spawners {
         // spawn in the same world as for caster
         let mut position = spawner.position();
@@ -1016,19 +1023,21 @@ fn npc_spawner_spawn_effect(
         if let Some(s) = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id) {
             s.set_respawn_time(0);
         }
-        if e.use_summoner_aggro_target && e.life_time != 0.0 {
-            // Npc attacks the character (or the targeted NPC). `Ai.OnAggroTargetChanged` and
-            // the `LifeTime == 0` NPC-vs-NPC branch (sight range) are the AI's.
-            let npc_obj = WorldObject::from(&npc);
+        if let Some(victim) = &wave_target {
+            // Hieronimus's waves join an active fight even with a zero lifetime.
+            for summoned in &spawned {
+                crate::systems::ai::hooks::engage(server, summoned, victim);
+            }
+        } else if e.use_summoner_aggro_target && e.life_time != 0.0 {
             let victim = match &args.target {
-                Target::Obj(o) if o.as_npc().is_some() => o.clone(),
-                _ => caster.clone(),
+                Target::Obj(o) if o.as_npc().is_some() => o,
+                _ => caster,
             };
             crate::systems::skills::combat::add_unit_aggro(
                 server,
-                &npc_obj,
+                &WorldObject::from(&npc),
                 crate::systems::skills::state::AggroKind::Damage,
-                &victim,
+                victim,
                 1,
             );
         }
@@ -1045,6 +1054,23 @@ fn npc_spawner_spawn_effect(
             }
         }
     }
+}
+
+fn npc_aggro_target(
+    server: &GameServer,
+    world: &crate::world::WorldInstance,
+    caster: &WorldObject,
+) -> Option<WorldObject> {
+    let target_id = caster.as_npc()?.data().current_aggro_target;
+    world.object(target_id).filter(|target| {
+        target.is_visible()
+            && target.with_unit(|u| u.unit().hp > 0).unwrap_or(false)
+            && crate::systems::skills::relation::relation_to(
+                server,
+                &Target::Obj(caster.clone()),
+                &Target::Obj(target.clone()),
+            ) == crate::systems::skills::types::RelationState::Hostile
+    })
 }
 
 /// `KillNpcWithoutCorpseEffect.Apply`.
@@ -1170,7 +1196,7 @@ fn spawn_gimmick_effect(
         e.gimmick_id,
         e.scale
     );
-    let params = super::gimmick::manager::SpawnGimmickParams {
+    let mut params = super::gimmick::manager::SpawnGimmickParams {
         gimmick_id: e.gimmick_id,
         target_position: Some(crate::systems::skills::geometry::world_pos(
             server,
@@ -1191,6 +1217,27 @@ fn spawn_gimmick_effect(
         ang_vel_y: e.ang_vel[1],
         ang_vel_z: e.ang_vel[2],
     };
+    // Sorvell's high-health barrel is a self-cast. Its fixed eight-meter
+    // offset has no relation to where he's fighting. Use his current victim
+    // for that cast and the selected victim for the low-health barrage.
+    if e.gimmick_id == super::gimmick::manager::SORVELL_BARREL_TEMPLATE_ID
+        && caster
+            .as_npc()
+            .is_some_and(|n| n.data().unit.template_id == 8960)
+    {
+        let target = args
+            .target
+            .as_obj()
+            .filter(|o| o.obj_id() != caster.obj_id() && o.is_unit())
+            .cloned()
+            .or_else(|| npc_aggro_target(server, &world, caster));
+        if let Some(target) = target {
+            params.target_position = Some(world.world_pos_rot(&target));
+            params.offset_from_source = false;
+            params.offset_x = 0.0;
+            params.offset_y = 0.0;
+        }
+    }
     super::gimmick::manager::spawn_from_effect(server, &world, &params, caster);
 }
 

@@ -547,31 +547,33 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .get_area_shape_by_id(f.aoe_shape_id);
     let is_fish_school =
         super::super::fish_school::is_school_template(ctx.doodad.data().template_id);
-    let owner = if f.use_origin_source && !is_fish_school && ctx.doodad.core().is_visible() {
-        // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
-        // anchors the trigger. A doodad initialised before its `Spawn` (the summon path, also
-        // a delayed `SpawnDoodad`) is not visible yet and keeps its own transform: the C#
-        // anchor moved the area away from the summon, which left the caster outside it when a
-        // planted doodad stood next to them (Comet's Boon 5017: caster 2.002 m off the clout's
-        // 2.0 m half-length).
-        caster
-            .and_then(|c| {
-                let cpos = ctx.world.world_pos_rot(c);
-                ctx.world
-                    .around(c, |o| o.as_doodad().cloned())
-                    .into_iter()
-                    .find(|d| {
-                        let p = ctx.world.world_pos_rot(&WorldObject::from(d));
-                        let (dx, dy) = (p.x - cpos.x, p.y - cpos.y);
-                        dx * dx + dy * dy <= 16.0
-                    })
-            })
-            .unwrap_or_else(|| ctx.doodad.clone())
-    } else {
-        // Chumming from a ship must not attach the school's aura to a nearby fitting.
-        // The school owns the area and releases it when its chummed phase expires.
-        ctx.doodad.clone()
-    };
+    let howl_ward = ctx.doodad.data().template_id == 4626 && f.buff_id == 3615;
+    let owner =
+        if f.use_origin_source && !is_fish_school && !howl_ward && ctx.doodad.core().is_visible() {
+            // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
+            // anchors the trigger. A doodad initialised before its `Spawn` (the summon path, also
+            // a delayed `SpawnDoodad`) is not visible yet and keeps its own transform: the C#
+            // anchor moved the area away from the summon, which left the caster outside it when a
+            // planted doodad stood next to them (Comet's Boon 5017: caster 2.002 m off the clout's
+            // 2.0 m half-length).
+            caster
+                .and_then(|c| {
+                    let cpos = ctx.world.world_pos_rot(c);
+                    ctx.world
+                        .around(c, |o| o.as_doodad().cloned())
+                        .into_iter()
+                        .find(|d| {
+                            let p = ctx.world.world_pos_rot(&WorldObject::from(d));
+                            let (dx, dy) = (p.x - cpos.x, p.y - cpos.y);
+                            dx * dx + dy * dy <= 16.0
+                        })
+                })
+                .unwrap_or_else(|| ctx.doodad.clone())
+        } else {
+            // Chumming from a ship must not attach the school's aura to a nearby fitting.
+            // The school owns the area and releases it when its chummed phase expires.
+            ctx.doodad.clone()
+        };
     let trigger_caster = match caster {
         Some(c) if c.as_player().is_some() => c.clone(),
         _ => ctx.obj(),
@@ -588,7 +590,12 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     trigger.owner = Some(owner.clone());
     trigger.caster = Some(trigger_caster.clone());
     trigger.func_group_id = func_group_id;
-    trigger.target_relation = f.target_relation;
+    trigger.target_relation = if howl_ward {
+        area_trigger::skill_target_relation::ANY
+    } else {
+        f.target_relation
+    };
+    trigger.player_sphere = howl_ward;
     trigger.inside_buff_id = inside_buff_id;
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
@@ -617,7 +624,13 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
                 next_phase: f.next_phase,
                 trigger,
             },
-            tasks::ms(f64::from(f.duration)),
+            // Howl takes eight seconds to cast. Keep the ward through the
+            // impact even if the auxiliary spawn runs at the start of the cast.
+            tasks::ms(f64::from(if howl_ward {
+                f.duration.max(9_000)
+            } else {
+                f.duration
+            })),
         );
     }
 }

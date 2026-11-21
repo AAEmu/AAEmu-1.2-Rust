@@ -920,6 +920,52 @@ async fn real_sal_temple_boss_knockback_stays_on_the_hall_floor() {
     server.systems.ai.collision.remove(100);
 }
 
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_burnt_winters_steps_off_his_plinth_without_sinking_through_it() {
+    use crate::models::npc::Npc;
+    use crate::systems::ai::npc::{move_towards, MoveAi};
+    use crate::world::Entity;
+
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_name("instance_burntcastle_armory")
+        .unwrap()
+        .clone();
+    let zone = template.zone_keys[0];
+    let world = server.world.create_world_instance(Arc::new(template), 100);
+    let (x, y, z) = (288.5, 236.3, 23.6);
+    assert!(super::ground_height(&server, 100, x, y, z).is_some_and(|h| (h - 21.09).abs() < 0.1));
+    let winters = Entity::new(0x400, {
+        let mut npc = Npc::new(12190);
+        npc.unit.hp = 1000;
+        npc.unit.transform.set_xyz(x, y, z);
+        npc.unit.transform.zone_id = zone;
+        npc.unit.transform.instance_id = 100;
+        npc.unit.transform.world_id = 100;
+        npc.spawner_z = Some(z);
+        npc
+    });
+    world.spawn(&winters, &server.view_ctx());
+    let target = crate::systems::skills::controllers::Vec3::new(285.0, y, 20.54);
+    let move_ai = Some(MoveAi {
+        hold_or_idle: false,
+    });
+    move_towards(&server, &winters, move_ai, target, 0.25, 0, 0.05);
+    let still_on_stage = winters.data().unit.transform;
+    assert!(still_on_stage.x < x);
+    assert_eq!(still_on_stage.z, z);
+    for _ in 0..16 {
+        move_towards(&server, &winters, move_ai, target, 0.25, 0, 0.05);
+    }
+    let on_floor = winters.data().unit.transform;
+    assert!((on_floor.x - 285.0).abs() < 0.1);
+    assert!((on_floor.z - 20.54).abs() < 0.1);
+}
+
 /// Every `visareas.dat` and `object.dat` of every world parses strictly (no leftover bytes) and
 /// the voxels inflate to a physics mesh.
 /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_visareas_parse -- --ignored --nocapture`
