@@ -280,6 +280,7 @@ fn real_server(db: &str) -> (Arc<GameServer>, Arc<WorldInstance>) {
         language: "en_us",
     };
     let mut data = GameData::empty();
+    data.skills = crate::data::SkillData::load(&conn).expect("buff and skill metadata");
     data.formulas = crate::data::formulas::FormulaManager::load(&conn).expect("formulas");
     let localization = crate::data::world_data::Localization::load(&conn, "en_us").unwrap();
     data.factions = crate::data::world_data::FactionData::load(&conn, &localization).unwrap();
@@ -553,7 +554,8 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
     let (server, _) = real_server(&db);
     load_burnt(&server);
     let sorvell = WorldObject::from(force_spawn_unit(&server, 8960));
-    let (_client, player) = place_player(&server, 1, 206.0, 180.4, 20.5);
+    let (_client, player) = place_player(&server, 1, 203.0, 180.4, 20.5);
+    player.data().unit.hp = 30_000;
     let victim = WorldObject::from(&player);
     // The next hit arrives after the six-second cooldown and one AI scheduling gap.
     let strike_interval = Duration::from_millis(6_300);
@@ -575,21 +577,205 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
         "both stacks expire when the renewed window ends"
     );
 
-    for hit in 0..5 {
-        if hit > 0 {
+    for cast in 0..20 {
+        if cast > 0 {
             tokio::time::sleep(strike_interval).await;
         }
-        buffs::add_buff_by_id(&server, &victim, 2407, &sorvell, 0);
+        let previous = player.data().unit.buffs.buff_count_by_id(2407);
+        assert_eq!(
+            skill::unit_use_skill(&server, &sorvell, 15587, &victim),
+            skill_result::SUCCESS
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if player.data().unit.buffs.check_buff(2409) {
+            assert_eq!(previous, 4, "petrify starts on the fifth landed strike");
+            break;
+        }
     }
     assert_eq!(player.data().unit.buffs.buff_count_by_id(2407), 0);
     assert_eq!(player.data().unit.buffs.buff_count_by_id(2409), 1);
 
+    let params = server
+        .game_data
+        .systems
+        .ai
+        .ai
+        .ai_params_for_id(1255)
+        .unwrap();
+    let crate::systems::ai::params::AiParamsKind::BigMonster { combat_skills } = &params.kind
+    else {
+        panic!("Sorvell must use his boss AI parameters");
+    };
+    let grip = combat_skills
+        .iter()
+        .find(|skill| skill.skill_type == 15592)
+        .unwrap();
+    assert_eq!((grip.health_range_min, grip.health_range_max), (0, 33));
     assert_eq!(
         skill::unit_use_skill(&server, &sorvell, 15592, &victim),
         skill_result::SUCCESS
     );
     tokio::time::sleep(Duration::from_millis(3_250)).await;
     assert_eq!(player.data().unit.buffs.buff_count_by_id(2411), 1);
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_sorvell_drops_both_barrels_over_his_victim() {
+    use std::time::Duration;
+
+    use crate::systems::skills::{skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, _) = real_server(&db);
+    load_burnt(&server);
+    let sorvell = force_spawn_unit(&server, 8960);
+    let boss = WorldObject::from(&sorvell);
+    let (_client, player) = place_player(&server, 1, 203.0, 180.4, 20.5);
+    let victim = WorldObject::from(&player);
+    crate::systems::ai::npc::set_current_aggro_target(&sorvell, Some(&victim));
+
+    for (count, id) in [(1, 15649), (2, 15668)] {
+        assert_eq!(
+            skill::unit_use_skill(&server, &boss, id, &victim),
+            skill_result::SUCCESS
+        );
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let barrels = server.systems.npcs.gimmicks.for_world(INSTANCE_ID).active();
+        assert_eq!(barrels.len(), count);
+        for barrel in barrels {
+            let t = barrel.gimmick.data().unit.transform;
+            assert!(close(t.x, 203.0) && close(t.y, 180.4) && t.z > 20.5);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_howl_kills_only_players_outside_the_ward() {
+    use std::time::Duration;
+
+    use crate::systems::skills::{
+        geometry::{pos_unit_from, Target},
+        skill,
+        types::skill_result,
+    };
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_burnt(&server);
+    let boss = server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&world)
+        .get_npc_spawner(66033)[0]
+        .force_spawn(&server, 0)
+        .unwrap();
+    let marker = WorldObject::from(force_spawn_unit(&server, 10815));
+    let ward = pos_unit_from(&server, &Target::Obj(marker.clone()));
+    let (x, y, z) = (ward.pos.x, ward.pos.y, ward.pos.z);
+    let (_client, safe) = place_player(&server, 1, x, y, z);
+    let (_outside_client, outside) = place_player(&server, 2, x - 7.0, y, z);
+    let boss_obj = WorldObject::from(&boss);
+    // Start the actual clout and cast in isolation. The live replay exercises the
+    // auxiliary son spawn while this test compares two victims of the same Howl.
+    super::doodad::interactions::summon_doodad_at(&server, &marker, &ward, 4626);
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(
+        safe.data().unit.buffs.check_buff(3615),
+        "the ward grants protection"
+    );
+    assert_eq!(
+        skill::unit_use_skill(&server, &boss_obj, 17588, &boss_obj),
+        skill_result::SUCCESS
+    );
+    for _ in 0..120 {
+        server.systems.npcs.area_triggers.tick(&server);
+        if outside.data().unit.hp == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        outside.data().unit.hp,
+        0,
+        "unprotected players take Howl damage"
+    );
+    assert_eq!(safe.data().unit.hp, 1000, "the ward blocks the same cast");
+    assert!(safe.data().unit.buffs.check_buff(3615));
+    safe.data().unit.transform.set_xyz(x, y + 7.0, z);
+    world.add_visible_object(&safe, &server.view_ctx());
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(
+        !safe.data().unit.buffs.check_buff(3615),
+        "leaving the ward removes protection"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_meteor_damages_a_player_in_its_ground_marker() {
+    use std::time::Duration;
+
+    use crate::systems::skills::{skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_burnt(&server);
+    let boss = server
+        .systems
+        .npcs
+        .spawns
+        .get_or_create(&world)
+        .get_npc_spawner(66033)[0]
+        .force_spawn(&server, 0)
+        .unwrap();
+    let (_client, player) = place_player(&server, 1, 208.0, 312.0, 20.52);
+    assert_eq!(
+        skill::unit_use_skill(
+            &server,
+            &WorldObject::from(&boss),
+            15629,
+            &WorldObject::from(&player)
+        ),
+        skill_result::SUCCESS
+    );
+    let marker = 'wait: {
+        for _ in 0..60 {
+            if let Some(marker) = world
+                .all_doodads()
+                .into_iter()
+                .find(|d| d.data().template_id == 4874)
+            {
+                break 'wait marker;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("Meteor Shower must place a warning circle");
+    };
+    let marker_pos = world.world_pos_rot(&WorldObject::from(&marker));
+    assert!(
+        (marker_pos.z - 20.52).abs() < 0.1,
+        "warning circle is on the arena floor"
+    );
+    player
+        .data()
+        .unit
+        .transform
+        .set_xyz(marker_pos.x, marker_pos.y, marker_pos.z);
+    world.add_visible_object(&player, &server.view_ctx());
+    tokio::time::sleep(Duration::from_millis(1_750)).await;
+    assert!(
+        player.data().unit.hp < 1000,
+        "the meteor hits the marked area"
+    );
 }
 
 #[tokio::test]
@@ -699,7 +885,12 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
         let t = boss.data().unit.transform;
         (t.x, t.y, t.z)
     };
-    player.data().unit.transform.set_xyz(x + 2.0, y, z);
+    {
+        let mut p = player.data();
+        p.unit.transform.set_xyz(x + 12.0, y, z);
+        p.unit.max_hp = 100_000;
+        p.unit.hp = p.unit.max_hp;
+    }
     world.add_visible_object(&player, &server.view_ctx());
     let spawns = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
     let stale_add = spawns.get_npc_spawner(46640)[0]
@@ -718,6 +909,62 @@ async fn real_data_burnt_final_room_runs_the_son_sequence_and_reveals_the_exit_o
         world.npc(stale_add.obj_id).is_none(),
         "the reset skill removes a stale add"
     );
+
+    // The real wave has no lifetime. It must still aggro and move out of its portals.
+    let victim = WorldObject::from(&player);
+    crate::systems::ai::npc::set_current_aggro_target(boss, Some(&victim));
+    combat::add_unit_aggro(
+        &server,
+        &boss_object,
+        crate::systems::skills::state::AggroKind::Damage,
+        &victim,
+        1,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert_eq!(
+        skill::unit_use_skill(&server, &boss_object, 15604, &boss_object),
+        skill_result::SUCCESS
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let wave: Vec<_> = [46651, 46642]
+        .into_iter()
+        .flat_map(|id| spawns.get_npc_spawner(id))
+        .flat_map(|s| s.spawned_npcs().into_values().flatten())
+        .map(|add| {
+            let start = add.data().unit.transform;
+            (add, start)
+        })
+        .collect();
+    assert_eq!(wave.len(), 2, "both portals supplied an add");
+    for (add, _) in &wave {
+        assert!(
+            add.data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id),
+            "add {} inherited the boss's current combat target",
+            add.data().unit.template_id
+        );
+    }
+    // Only tick this wave. The separate idle cleanup above deliberately makes
+    // the boss remove living adds when its own AI is out of combat.
+    for _ in 0..30 {
+        for (add, _) in &wave {
+            crate::systems::ai::manager::run_now(&server, add.obj_id, |ai| ai.tick(100, true))
+                .expect("a living wave member with combat AI");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    for (add, start) in wave {
+        let n = add.data();
+        assert_eq!(n.current_aggro_target, player.obj_id);
+        assert!(
+            (n.unit.transform.x - start.x).hypot(n.unit.transform.y - start.y) > 1.0,
+            "add {} advanced beyond its portal",
+            n.unit.template_id
+        );
+    }
 
     let add = spawns.get_npc_spawner(46629)[0]
         .force_spawn(&server, 0)

@@ -1087,6 +1087,11 @@ fn can_use_skill(c: &mut AiCtx<'_>, k: BehaviorKind) -> bool {
     now >= delay_end && gcd <= now
 }
 
+fn is_armory_wave_add(c: &AiCtx<'_>) -> bool {
+    let npc = c.npc.data();
+    npc.unit.transform.zone_id == 236 && (8964..=8969).contains(&npc.unit.template_id)
+}
+
 /// `BaseCombatBehavior.ShouldReturn`.
 ///
 /// Deviation: the C# returned only while the NPC was within `absolute_return_distance` of its
@@ -1104,7 +1109,15 @@ fn should_return(c: &AiCtx<'_>) -> bool {
         return true; // no target, returning
     };
     let me = owner_pos(c);
-    let distance_to_target = calculate_distance(me, npc::world_pos(c.server, &target), true);
+    let target_position = npc::world_pos(c.server, &target);
+    if is_armory_wave_add(c) {
+        // Hieronimus's wave portals sit on the edge of the room. A 50 m
+        // leash measured from a portal rejects players on the far side.
+        let in_arena =
+            |p: Vec3| (p.x - 200.0).hypot(p.y - 312.0) <= 50.0 && (18.0..=26.0).contains(&p.z);
+        return !in_arena(me) || !in_arena(target_position);
+    }
+    let distance_to_target = calculate_distance(me, target_position, true);
     let distance_to_idle = calculate_distance(me, c.ai.idle_position, true);
     distance_to_target > return_distance || distance_to_idle > return_distance
 }

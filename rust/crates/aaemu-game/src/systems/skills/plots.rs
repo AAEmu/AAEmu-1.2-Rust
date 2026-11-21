@@ -1076,27 +1076,54 @@ fn update_area_target(
             pos.add_distance_to_front(args.distance as f32 / 1000.0 - 0.01);
         }
     }
-    // Max(previous Z + offset, WorldManager.GetHeight(posUnit.Transform))
     let prev_z = world_pos(server, &prev).z;
-    // zone: the ground (static + terrain) under the target position (collision service);
-    // without it the C# heightmap height.
-    let ground = crate::systems::ai::collision::ground_height_or(
-        server,
-        pos.instance_id,
-        pos.pos.x,
-        pos.pos.y,
-        pos.pos.z,
-        || {
-            crate::systems::npcs::heightmap::get_height(
-                server,
-                pos.zone_id,
-                pos.pos.x,
-                pos.pos.y,
-                pos.pos.z,
-            )
-        },
-    );
-    pos.pos.z = (prev_z + args.height_offset as f32 / 1000.0).max(ground);
+    let hieronimus_meteor = state.skill.template.id == 15629;
+    let meteor_impact = hieronimus_meteor && event.id == 1508;
+    if event.id == 2668 && hieronimus_meteor {
+        use crate::systems::ai::collision;
+        let arena_z = world_pos(server, &Target::Obj(state.ctx.caster.clone())).z;
+        let [x, y] = [pos.pos.x, pos.pos.y];
+        let floor =
+            collision::ground_height_probe(server, pos.instance_id, x, y, arena_z, 1.0, 4.0)
+                .flatten()
+                .unwrap_or(arena_z);
+        pos.pos.z = floor;
+        let mut launch = pos;
+        let launch_z = floor + args.height_offset as f32 / 1000.0;
+        // The fire circle and damage share the ground target. The projectile
+        // inherits a separate launch point below the room's solid ceiling.
+        launch.pos.z = collision::raycast(
+            server,
+            pos.instance_id,
+            [x, y, floor + 0.5],
+            [x, y, launch_z],
+            collision::query::mask::STATIC_TERRAIN,
+            collision::query::ray_flags::WITH_BACK_FACES,
+        )
+        .flatten()
+        .map_or(launch_z, |hit| (hit.pos.z - 0.5).max(floor));
+        ti.source = Some(Target::Pos(launch));
+    } else if !meteor_impact {
+        // Max(previous Z + offset, WorldManager.GetHeight(posUnit.Transform)).
+        // Prefer collision geometry and fall back to the authored heightmap.
+        let ground = crate::systems::ai::collision::ground_height_or(
+            server,
+            pos.instance_id,
+            pos.pos.x,
+            pos.pos.y,
+            pos.pos.z,
+            || {
+                crate::systems::npcs::heightmap::get_height(
+                    server,
+                    pos.zone_id,
+                    pos.pos.x,
+                    pos.pos.y,
+                    pos.pos.z,
+                )
+            },
+        );
+        pos.pos.z = (prev_z + args.height_offset as f32 / 1000.0).max(ground);
+    }
     let pos_t = Target::Pos(pos);
     if args.max_targets == 0 {
         ti.effected.push(pos_t.clone());
@@ -1120,6 +1147,10 @@ fn update_area_target(
     let around = around_shape(server, &pos_t, &shape).unwrap_or_default();
     let units: Vec<WorldObject> = filter_targets(server, around, state, args, event.id)
         .into_iter()
+        .filter(|unit| {
+            !meteor_impact
+                || (world_pos(server, &Target::Obj(unit.clone())).z - prev_z).abs() <= shape.value1
+        })
         .take(args.max_targets.max(0) as usize)
         .collect();
     state

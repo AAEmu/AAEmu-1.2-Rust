@@ -31,7 +31,10 @@ use crate::world::{self, session, GimmickRef, WorldInstance, WorldObject};
 pub const TICK_DELAY: Duration = Duration::from_millis(50);
 /// The template id that gets `GimmickMovementFloatToSurface` (Recovered Treasure Chest).
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
-const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
+pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
+// Barrel impacts retain a fraction of their speed, then settle before the fuse.
+const BARREL_RESTITUTION: f32 = 0.24;
+const BARREL_REST_SPEED: f32 = 0.8;
 /// Contact radius of a gimmick for `GimmickTemplate.CollisionSkillId` hits. The `gimmicks`
 /// table has no size / radius column and a gimmick has no actor `model_id` (`ModelManager`'s
 /// radii are keyed by actor model ids, and `new_gimmick` never sets one), so the model radius
@@ -569,10 +572,8 @@ fn spawn_effect_gimmick(
     // rotated: a caster that does not face +Y sees the gimmick appear on the world axes and
     // travel along its facing. Which frame retail used for either is not evidenced.
     //
-    // Only coordinate type 2 is applied. All 65 nonzero linear-velocity rows use it, but 8 of the
-    // 32 nonzero angular-velocity rows (ids 105, 140, 141, 142, 159, 181, 182, 183) use
-    // coordinate 0 or 1 and are ignored. The doodad spawn path overrides both with its
-    // world-space values (WZGimmickSetMovement semantics).
+    // Coordinate type 2 supplies the authored local velocity. Sorvell's barrage (type 1)
+    // supplies world-axis spin. The doodad spawn path overrides both with its own world values.
     //
     // Kinematic gimmicks use the authored velocity directly. Armory barrels also use their
     // gravity and a floor probe. Other dynamic gimmicks need their own collision model. The angular
@@ -593,6 +594,9 @@ fn spawn_effect_gimmick(
     }
     if params.ang_vel_coordinate_id == 2 {
         g.ang_vel = rotate_local([params.ang_vel_x, params.ang_vel_y, params.ang_vel_z]);
+        authored_motion = true;
+    } else if falling_barrel && params.ang_vel_coordinate_id == 1 {
+        g.ang_vel = [params.ang_vel_x, params.ang_vel_y, params.ang_vel_z];
         authored_motion = true;
     }
     // The character the caster acts for, resolved now while the spawner chain is alive (a bomb
@@ -990,7 +994,6 @@ pub fn gimmick_tick(
                     || st.authored_distance >= RUNAWAY_CAP_DISTANCE;
                 let mut g = active.gimmick.data();
                 let mut vel = g.vel;
-                let ang = g.ang_vel;
                 if capped {
                     // Stop the linear motion; the angular velocity keeps a mine spinning in
                     // place, which is all a capped gimmick may still do.
@@ -1004,15 +1007,22 @@ pub fn gimmick_tick(
                     g.vel[2] -= gravity * delta_time;
                     if next_z <= floor {
                         next_z = floor;
-                        st.barrel_floor = None;
-                        vel = [0.0; 3];
-                        g.vel = vel;
-                        g.ang_vel = [0.0; 3];
+                        let rebound = -g.vel[2] * BARREL_RESTITUTION;
+                        if rebound >= BARREL_REST_SPEED {
+                            g.vel[2] = rebound;
+                            g.ang_vel = g.ang_vel.map(|w| w * 0.5);
+                        } else {
+                            st.barrel_floor = None;
+                            vel = [0.0; 3];
+                            g.vel = vel;
+                            g.ang_vel = [0.0; 3];
+                        }
                     }
                 }
                 let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
                 st.authored_time += delta;
                 st.authored_distance += speed * delta_time;
+                let ang = g.ang_vel;
                 let t = &mut g.unit.transform;
                 t.x += vel[0] * delta_time;
                 t.y += vel[1] * delta_time;
@@ -1599,10 +1609,23 @@ mod tests {
         let start = barrel.data().unit.transform;
         assert_eq!((start.x, start.y, start.z), (142.0, 122.0, 41.0));
         let active = f.server.systems.npcs.gimmicks.find(barrel.obj_id).unwrap();
-        gimmick_tick(&f.server, &f.world, &active, Duration::from_secs(1), 1_000);
-        let midair = barrel.data().unit.transform.z;
-        assert!(midair > 21.0 && midair < 36.0, "barrel height {midair}");
-        gimmick_tick(&f.server, &f.world, &active, Duration::from_secs(1), 2_000);
+        let mut bounced = false;
+        for timestep in 1..=100 {
+            gimmick_tick(
+                &f.server,
+                &f.world,
+                &active,
+                Duration::from_millis(50),
+                timestep * 50,
+            );
+            let data = barrel.data();
+            assert!(
+                data.unit.transform.z >= 21.0,
+                "barrel cannot sink into the floor"
+            );
+            bounced |= data.vel[2] > 0.0;
+        }
+        assert!(bounced, "the first impact rebounds");
         let barrel_data = barrel.data();
         assert_eq!(barrel_data.unit.transform.z, 21.0);
         assert_eq!(barrel_data.vel, [0.0; 3]);

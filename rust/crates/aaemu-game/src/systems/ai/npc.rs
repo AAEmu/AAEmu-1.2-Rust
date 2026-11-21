@@ -495,7 +495,7 @@ pub fn move_towards(
     if is_shackled_or_snared(server, &obj) {
         return false;
     }
-    let (pos, zone_id, can_fly, spawner_z, stance, alertness, model_id) = {
+    let (pos, zone_id, can_fly, spawner_z, stance, alertness, model_id, template_id) = {
         let n = npc.data();
         let t = n.unit.transform;
         (
@@ -506,6 +506,7 @@ pub fn move_towards(
             n.current_game_stance,
             n.current_alertness,
             n.unit.model_id,
+            n.unit.template_id,
         )
     };
     let underwater = server
@@ -533,7 +534,7 @@ pub fn move_towards(
         // or descent that `AddDistanceToFrontBetween` just computed.
         new
     } else {
-        let target_z = reference_height_in(
+        let mut target_z = reference_height_in(
             server,
             obj.transform().instance_id,
             ai.map(|a| ReferenceHeightAi {
@@ -547,6 +548,17 @@ pub fn move_towards(
             new.z,
             zone_id,
         );
+        // The Armory's prison mesh exposes the plinth's base to ground rays.
+        // Retain Winters's authored stage height while stepping over that base.
+        // Once he steps past the front edge he can descend to the room floor.
+        if template_id == 12190
+            && zone_id == 236
+            && (288.0..=291.5).contains(&new.x)
+            && (233.0..=239.5).contains(&new.y)
+            && spawner_z.is_some_and(|stage| pos.z >= stage - 0.1 && target_z < stage)
+        {
+            target_z = pos.z;
+        }
         Vec3::new(new.x, new.y, target_z)
     };
     // Keep the travelled heading when a step lands exactly on a waypoint. Computing
