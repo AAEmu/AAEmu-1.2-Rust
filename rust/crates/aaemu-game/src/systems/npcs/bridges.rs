@@ -755,10 +755,18 @@ fn spawn_effect(
         life_time: e.life_time,
     };
     spawner.do_spawn_effect(server, spawner.id, &params, Some(caster), Some(&target));
-    if matches!(e.sub_type, 11273 | 12959) {
-        // A hatchling inherits the encounter target before it reaches its idle
-        // self-despawn skill. The egg vanishes immediately after this effect.
-        let boss_id = if e.sub_type == 11273 { 11265 } else { 12762 };
+    // A hatchling inherits the encounter target before it reaches its idle
+    // self-despawn skill. The egg vanishes immediately after this effect.
+    // Calleil's lightning elementals (21116-21118, 20106-20108) have the same idle
+    // KillNpcWithoutCorpse skill (21114, 20111). Their summon is cast by the boss itself.
+    let encounter_boss = match e.sub_type {
+        11273 => Some(11265),
+        12959 => Some(12762),
+        12384 => Some(11201),
+        12912 => Some(12759),
+        _ => None,
+    };
+    if let Some(boss_id) = encounter_boss {
         let boss_target = world.around(caster, |unit| {
             unit.as_npc()
                 .is_some_and(|n| n.data().unit.template_id == boss_id)
@@ -768,8 +776,8 @@ fn spawn_effect(
         if let Some(victim) =
             npc_aggro_target(server, &world, caster).or_else(|| boss_target.into_iter().next())
         {
-            for young in spawner.spawned_npcs().into_values().flatten() {
-                crate::systems::ai::hooks::engage(server, &young, &victim);
+            for summoned in spawner.spawned_npcs().into_values().flatten() {
+                crate::systems::ai::hooks::engage(server, &summoned, &victim);
             }
         }
     }

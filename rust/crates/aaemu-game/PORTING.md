@@ -3690,6 +3690,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   actor stays alive through the scripted cue. The playback range and height cutoff are
   inferred. The Greater vine
   room takes missing facings from matching Normal placements.
+  **Boss follow-up:** Calleil's lightning elementals (12384, 12912) come from a plain
+  `SpawnEffect`, which has no summoner-target column. Their idle skill (20111, 21114) is a
+  `KillNpcWithoutCorpse` of their own template. They now join the boss's live combat
+  target, as the hatchlings do. Musperosa's orbs (clouts 1253/1254, 1537/1538) pulse their
+  own inside buff, Unknown Power (stack rule 4, 20 stacks). The C# skipped a `BuffEffect`
+  whose buff the unit already had. That let the inside buff block every pulse, and the
+  only stack left with the orb. A stacking inside buff now gains a stack per pulse. Each
+  pulse stack keeps its authored 60 s, and only the inside stack leaves with the area.
+  A gimmick's self-targeted skill starts on the gimmick itself. The Trieste bolt's
+  detonation 21126 was refused as `skill_target_died` because gimmicks have no health.
+  Its `target_alive` flag now applies to the units in the area only, so the bolt stuns
+  the frenzied spirit (5366) and dispels Frenzy (tag 754). The Hellfire clouts (1415, 1542)
+  have no inside buff. Their damage packets named skill 0, so they now name the Hellfire
+  skill that places the doodad (18963, 21082). The combat-log effect of skill 0 is
+  inferred.
 * systems::npcs / data (Howling Abyss world data, 2026-11-21, tests in
   `npcs::howling_world_tests`):
   - **One NPC per recorded spawn.** Plain `npc_spawns.json` rows that share an `Id` were one

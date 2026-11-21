@@ -217,6 +217,8 @@ mod flow_tests;
 #[cfg(test)]
 mod hadir_dungeon_tests;
 #[cfg(test)]
+mod howling_boss_tests;
+#[cfg(test)]
 mod howling_dungeon_tests;
 #[cfg(test)]
 mod howling_world_tests;
