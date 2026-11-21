@@ -3690,6 +3690,34 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   actor stays alive through the scripted cue. The playback range and height cutoff are
   inferred. The Greater vine
   room takes missing facings from matching Normal placements.
+* systems::npcs / data (Howling Abyss world data, 2026-11-21, tests in
+  `npcs::howling_world_tests`):
+  - **One NPC per recorded spawn.** Plain `npc_spawns.json` rows that share an `Id` were one
+    NPC recorded at several points. The Gluttons roam (Glutton spawner 13724's comment ends
+    `로머임`, "is a roamer"). Greater's Gluttons and a few pulled NPCs appeared up to seven
+    times, so Gluttons stood in pairs where Normal's identical pack has one. The first row of
+    each `Id` is kept. Its
+    pack partners match Normal's placements; the dropped rows mostly do not (3 of 30 within
+    1.5 m, against 182 of 211 unique rows). Removed 30 Greater rows and 6 Normal rows. Event
+    rows (`NpcSpawnerIds`) are untouched.
+  - **Greater doodad facings.** 90 Greater placements with `Yaw` 0 that share a position and
+    model with a Normal placement take Normal's exact yaw. They include the Weeping Charnel
+    House gate (6360), the battle doors (6332, with their extra rows on each door's width
+    line), and the iron gates of the next rooms, which were 70-162° off. The client collision
+    confirms the restored facings: each gate's width axis now meets the doorway walls. The
+    Rising Water doodad 6288 also takes Normal's -1°, which turns Calleil's chamber polygon
+    with it.
+  - **Lion Gate helper.** Greater's Lion Gate 6364 has the model path
+    `경로: cgf://.../ndeco_do_invisible.cgf`, so the client draws its placeholder. Its placement
+    now uses Normal's identical invisible logic gate 5603 (function group 14424). Neither
+    gate's logic family (30115 / 30040) has a subscriber. That this is the reported white
+    prop "at the vines" needs a live check.
+  - **Bomber keg (gimmick 49) rolls.** `barrel_grape_e.cgf` is centred on its origin: its
+    `proxy` cylinder (r 0.661, half length 0.916, read from the client model, or these values
+    without client files) is upright. The keg now lies on its side across its heading and keeps
+    its centre one scaled radius off floors and walls. Hard impacts bounce as before. After a
+    slow landing it rolls with a 4 m/s² rolling resistance, and its pitch and angular velocity
+    (`v / r` about the cross axis) follow the distance. The resistance is inferred.
 * Palace Cellar (zone 240, `instance_sal_temple`)
   - **Entrance barrier** — Melkina's scripted departure (16600) sends Salphira's Barrier
     4580 to its authored final phase 12282. The existing 20-second timer also clears it

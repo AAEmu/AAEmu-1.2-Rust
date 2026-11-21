@@ -219,6 +219,8 @@ mod hadir_dungeon_tests;
 #[cfg(test)]
 mod howling_dungeon_tests;
 #[cfg(test)]
+mod howling_world_tests;
+#[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
 mod palace_cellar_tests;
