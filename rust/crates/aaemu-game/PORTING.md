@@ -3708,7 +3708,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   - **Akmit's entrance** — sphere 1291 starts the monk's command set 72 and the
     cinematic cue sends playback for `id_240_01`.
   - **Akmit's fire** — the indoor pool puts out the damaging roar buff 2574 on water
-    contact, including while the character's head remains above water.
+    contact and prevents it from starting on players already in the pool. Contact
+    counts even while the character's head remains above water.
 * systems::npcs (2026-10-13): corpse timers read the current despawn field, so fully looting
   an NPC applies the existing shorter deadline instead of retaining the five-minute loot
   extension captured at death. Only living NPCs count towards spawner population limits;

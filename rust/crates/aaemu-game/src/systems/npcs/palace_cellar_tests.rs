@@ -264,6 +264,11 @@ async fn real_palace_cellar_akmits_fire_goes_out_in_shallow_water() {
         !player.data().unit.buffs.check_buff(2574),
         "shallow water puts out the fire"
     );
+    buffs::add_buff_by_id(&server, &victim, 2574, &akmit, 0);
+    assert!(
+        !player.data().unit.buffs.check_buff(2574),
+        "Akmit cannot ignite a player already standing in shallow water"
+    );
 }
 
 #[tokio::test]
