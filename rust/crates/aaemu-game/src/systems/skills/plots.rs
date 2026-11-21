@@ -931,6 +931,13 @@ fn update_target_info(
         SkillTargetRelation::from_raw(i64::from(state.skill.template.target_relation))
             .unwrap_or(SkillTargetRelation::Any);
     let caster_t = Target::Obj(state.ctx.caster.clone());
+    if state.skill.template.id == 20615 && event.id == 5347 {
+        // Tushan's reward is tied to his death. Require neither another unit within
+        // the 2 m plot shape nor a height lookup that can place it beneath the floor.
+        ti.target = Some(caster_t.clone());
+        ti.effected.push(caster_t);
+        return;
+    }
     let add_if_allowed = |ti: &mut PlotTargetInfo, t: Option<Target>| {
         if let Some(t) = t {
             if is_relation_valid(server, template_relation, &caster_t, &t) {

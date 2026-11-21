@@ -566,11 +566,15 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // The poison puddles and tombstones are anchored at the encounter's
     // summoned doodad. Timed phases can arrive without an explicit caster.
     let hadir_hazard = matches!(template_id, 3874 | 3956);
+    // The Cellar flame follows the brazier's phase, even when the bucket is used
+    // beside a different prop. Phase changes must remove the previous fire area.
+    let palace_flame = matches!(template_id, 4109 | 4741) && f.buff_id == 2783;
     let owner = if f.use_origin_source
         && !is_fish_school
         && !howl_ward
         && !howling_hazard
         && !hadir_hazard
+        && !palace_flame
         && ctx.doodad.core().is_visible()
     {
         // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster

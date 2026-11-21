@@ -1389,20 +1389,6 @@
     "Scale": 1.0
   },
   {
-    "Id": 98818,
-    "UnitId": 9810,
-    "Title": "Giant Fire Elemental",
-    "Position": {
-      "X": 576.16,
-      "Y": 251.532,
-      "Z": 144.0429,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": 0.0
-    },
-    "Scale": 1.0
-  },
-  {
     "Id": 78909,
     "UnitId": 10661,
     "Title": "Rotten Rat",

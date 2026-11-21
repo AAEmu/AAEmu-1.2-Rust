@@ -14,6 +14,8 @@ const DECK_PROBE_FRACTION: f32 = 0.35;
 /// `surfaceBand` / `hysteresis` of `Character.SetPosition`.
 const SURFACE_BAND: f32 = 2.0;
 const HYSTERESIS: f32 = 0.35;
+const PALACE_CELLAR: &str = "instance_sal_temple";
+pub(super) const AKMIT_ROAR_BUFF: u32 = 2574;
 
 /// `Character.IsUnderWater = value`: on a change, leaving the water refills the breath
 /// (`Breath = LungCapacity`) and the client gets `SCUnderWaterPacket(value)`.
@@ -66,19 +68,12 @@ fn attached_slave(world: &WorldInstance, obj: &WorldObject) -> Option<WorldObjec
     walk(parent).or_else(|| walk(world.sticky_parent(obj)))
 }
 
-/// The underwater part of `Character.SetPosition` (after the position is applied).
-pub fn update_character_under_water(server: &GameServer, p: &PlayerRef) {
-    let obj = WorldObject::from(p);
-    let world = crate::systems::skills::geometry::world_of(server, &obj);
-    let Some(world) = world else {
-        set_player_under_water(server, p, false);
-        return;
-    };
-    let w = world.world_pos_rot(&obj);
+fn character_water_probe(server: &GameServer, world: &WorldInstance, obj: &WorldObject) -> Vec3 {
+    let w = world.world_pos_rot(obj);
     let mut probe = Vec3::new(w.x, w.y, w.z);
     // Probe slightly above the character "feet" position to avoid false drowning when standing
     // on a ship deck (server-side Z for attached characters can be lower).
-    if let Some(slave) = attached_slave(&world, &obj) {
+    if let Some(slave) = attached_slave(world, obj) {
         let model_id = slave.as_slave().map_or(0, |s| s.data().unit.model_id);
         let ship = server
             .game_data
@@ -95,6 +90,31 @@ pub fn update_character_under_water(server: &GameServer, p: &PlayerRef) {
             }
         }
     }
+    probe
+}
+
+/// Contact with the pool puts out Akmit's fire even while the player's head is above water.
+pub(super) fn water_extinguishes_akmit_roar(server: &GameServer, obj: &WorldObject) -> bool {
+    obj.as_player().is_some()
+        && super::geometry::world_of(server, obj).is_some_and(|world| {
+            world.template.name == PALACE_CELLAR
+                && crate::systems::ai::physics::is_water(
+                    server,
+                    world.id,
+                    character_water_probe(server, &world, obj),
+                )
+                .is_some()
+        })
+}
+
+/// The underwater part of `Character.SetPosition` (after the position is applied).
+pub fn update_character_under_water(server: &GameServer, p: &PlayerRef) {
+    let obj = WorldObject::from(p);
+    let Some(world) = super::geometry::world_of(server, &obj) else {
+        set_player_under_water(server, p, false);
+        return;
+    };
+    let probe = character_water_probe(server, &world, &obj);
     let instance = world.id;
     let under = p.data().unit.is_under_water;
     if crate::systems::ai::physics::is_water(server, instance, probe).is_none() {
@@ -102,6 +122,9 @@ pub fn update_character_under_water(server: &GameServer, p: &PlayerRef) {
             set_player_under_water(server, p, false);
         }
         return;
+    }
+    if world.template.name == PALACE_CELLAR && p.data().unit.buffs.check_buff(AKMIT_ROAR_BUFF) {
+        super::buffs::remove_buff(server, &obj, AKMIT_ROAR_BUFF);
     }
     let surface = crate::systems::ai::physics::water_surface(server, instance, probe)
         .map_or(world.template.ocean_level, |(s, _)| s);

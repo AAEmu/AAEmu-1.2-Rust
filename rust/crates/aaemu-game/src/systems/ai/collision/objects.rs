@@ -514,7 +514,16 @@ pub fn collect_doodads(
             // an equipment collider overlaps the hull and CryPhysics ejects the freshly spawned
             // hull (a summoned cutter launched ~55 m up). Other objects never collide with a
             // ship's own gear anyway.
-            if is_slave_equipment(owner_type) {
+            // The Palace Cellar doors reuse the closed mesh for the open animation.
+            if is_slave_equipment(owner_type)
+                || matches!(
+                    (template_id, func_group),
+                    (4104, 9965 | 10027)
+                        | (4106, 10005 | 10006)
+                        | (4128, 10018 | 10019)
+                        | (4577, 11228)
+                )
+            {
                 continue;
             }
             let Some(model) = models.func_group_model(func_group) else {

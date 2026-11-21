@@ -32,12 +32,13 @@ pub const TICK_DELAY: Duration = Duration::from_millis(50);
 /// The template id that gets `GimmickMovementFloatToSurface` (Recovered Treasure Chest).
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
 pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
+const PALACE_BOULDER_TEMPLATE_ID: u32 = 42;
 // Barrel impacts retain a fraction of their speed, then settle before the fuse.
 const BARREL_RESTITUTION: f32 = 0.24;
 const BARREL_REST_SPEED: f32 = 0.8;
 
-fn howling_ballistic(template_id: u32) -> bool {
-    matches!(template_id, 49 | 64 | 66)
+fn uses_ballistic_motion(template_id: u32) -> bool {
+    matches!(template_id, PALACE_BOULDER_TEMPLATE_ID | 49 | 64 | 66)
 }
 /// Contact radius of a gimmick for `GimmickTemplate.CollisionSkillId` hits. The `gimmicks`
 /// table has no size / radius column and a gimmick has no actor `model_id` (`ModelManager`'s
@@ -544,7 +545,7 @@ fn spawn_effect_gimmick(
         }
     }
     g.unit.scale = params.scale;
-    if howling_ballistic(template.id) && params.offset_coordinate_id == 2 {
+    if matches!(template.id, 49 | 64 | 66) && params.offset_coordinate_id == 2 {
         let (sin_yaw, cos_yaw) = caster_world.rot_z.sin_cos();
         g.unit.transform.set_xyz(
             origin.x + params.offset_x * cos_yaw - params.offset_y * sin_yaw,
@@ -579,10 +580,9 @@ fn spawn_effect_gimmick(
     //
     // **Inferred (no 1.2 server evidence):** the frame of the shipped rows. They look authored in
     // the caster's local frame (forward +Y, right +X, up +Z: (0,25,6) and (0,4,0) are forward /
-    // up launches), so they are rotated by the caster's world yaw. The offset above, of the same
-    // coordinate type 2, is the C# `AddDistance` translation on the world axes and is not
-    // rotated: a caster that does not face +Y sees the gimmick appear on the world axes and
-    // travel along its facing. Which frame retail used for either is not evidenced.
+    // up launches), so they are rotated by the caster's world yaw. Howling Abyss projectiles
+    // also rotate their launch offset. The Palace Cellar boulder starts on the landing above
+    // its ramp, using the C# `AddDistance` translation on the world axes.
     //
     // Coordinate type 2 supplies the authored local velocity. Sorvell's barrage (type 1)
     // supplies world-axis spin. The doodad spawn path overrides both with its own world values.
@@ -601,7 +601,7 @@ fn spawn_effect_gimmick(
     };
     let mut authored_motion = doodad_motion;
     if params.velocity_coordinate_id == 2
-        && (template.mass <= 0.0 || falling_barrel || howling_ballistic(template.id))
+        && (template.mass <= 0.0 || falling_barrel || uses_ballistic_motion(template.id))
     {
         g.vel = rotate_local([params.velocity_x, params.velocity_y, params.velocity_z]);
         authored_motion = true;
@@ -631,7 +631,7 @@ fn spawn_effect_gimmick(
             authored_motion,
             owner_character_id,
             barrel_floor,
-            last_pos: if howling_ballistic(params.gimmick_id) {
+            last_pos: if uses_ballistic_motion(params.gimmick_id) {
                 initial_pos
             } else {
                 [0.0; 3]
@@ -803,7 +803,7 @@ fn collision_tick(
         let t = g.unit.transform;
         ([t.x, t.y, t.z], g.vel, g.spawner_unit_id)
     };
-    let segment_start = if howling_ballistic(template.id) {
+    let segment_start = if uses_ballistic_motion(template.id) {
         active.state().last_pos
     } else {
         origin
@@ -849,7 +849,7 @@ fn collision_tick(
     let mut contacts: Vec<(u32, WorldObject)> = Vec::new();
     for unit in candidates {
         if !contact_unit(world, &unit)
-            || (howling_ballistic(template.id) && unit.obj_id() == source_id)
+            || (uses_ballistic_motion(template.id) && unit.obj_id() == source_id)
         {
             continue;
         }
@@ -965,8 +965,8 @@ fn collision_tick(
     false
 }
 
-/// Move a Howling Abyss keg or Trieste bolt and return whether it struck scenery.
-fn tick_howling_ballistic(
+/// Move a launched trap or projectile and return whether it struck scenery.
+fn tick_ballistic_motion(
     server: &GameServer,
     world: &WorldInstance,
     active: &ActiveGimmick,
@@ -982,12 +982,27 @@ fn tick_howling_ballistic(
     if velocity == [0.0; 3] {
         return false;
     }
-    let to = [
+    let mut to = [
         from[0] + velocity[0] * dt,
         from[1] + velocity[1] * dt,
         from[2] + velocity[2] * dt - 0.5 * template.gravity * dt * dt,
     ];
     velocity[2] -= template.gravity * dt;
+    let rolling = template.id == PALACE_BOULDER_TEMPLATE_ID;
+    if rolling {
+        // The boulder's centre rides above the corridor floor. Landing retains
+        // the authored forward speed so the trap rolls down the passage.
+        if let Some(floor) =
+            collision::ground_height_probe(server, world.id, to[0], to[1], from[2], 0.25, 4.0)
+                .flatten()
+        {
+            let support = floor + COLLISION_RADIUS;
+            if to[2] <= support {
+                to[2] = support;
+                velocity[2] = 0.0;
+            }
+        }
+    }
     let mut end = to;
     let hit = collision::raycast(
         server,
@@ -1005,7 +1020,9 @@ fn tick_howling_ballistic(
             hit.pos.y + normal[1] * 0.03,
             hit.pos.z + normal[2] * 0.03,
         ];
-        if !template.disappear_by_collision {
+        if rolling {
+            velocity = [0.0; 3];
+        } else if !template.disappear_by_collision {
             let approach = velocity.iter().zip(normal).map(|(a, b)| a * b).sum::<f32>();
             for (v, n) in velocity.iter_mut().zip(normal) {
                 *v = (*v - (1.0 + BARREL_RESTITUTION) * approach * n) * 0.6;
@@ -1017,6 +1034,15 @@ fn tick_howling_ballistic(
     }
     let mut g = active.gimmick.data();
     g.unit.transform.set_xyz(end[0], end[1], end[2]);
+    if rolling {
+        g.ang_vel = [
+            -velocity[1] / COLLISION_RADIUS,
+            velocity[0] / COLLISION_RADIUS,
+            0.0,
+        ];
+        g.unit.transform.rot_x -= (end[1] - from[1]) / COLLISION_RADIUS;
+        g.unit.transform.rot_y += (end[0] - from[0]) / COLLISION_RADIUS;
+    }
     g.vel = velocity;
     hit.is_some()
 }
@@ -1090,10 +1116,10 @@ pub fn gimmick_tick(
         None if active
             .template
             .as_ref()
-            .is_some_and(|t| howling_ballistic(t.id))
+            .is_some_and(|t| uses_ballistic_motion(t.id))
             && active.state().authored_motion =>
         {
-            scenery_hit = tick_howling_ballistic(
+            scenery_hit = tick_ballistic_motion(
                 server,
                 world,
                 active,

@@ -288,6 +288,11 @@ fn add_buff_inner(
     forced_duration: i32,
     transform_chain: &mut Vec<u32>,
 ) {
+    if buff.template.id == super::water::AKMIT_ROAR_BUFF
+        && super::water::water_extinguishes_akmit_roar(server, owner)
+    {
+        return;
+    }
     let data = &server.game_data.systems.skills;
     let now = now_ms();
     let template = full_template(server, &buff.template);

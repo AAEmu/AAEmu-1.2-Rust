@@ -3681,6 +3681,35 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   actor stays alive through the scripted cue. The playback range and height cutoff are
   inferred. The Greater vine
   room takes missing facings from matching Normal placements.
+* Palace Cellar (zone 240, `instance_sal_temple`)
+  - **Entrance barrier** — Melkina's scripted departure (16600) sends Salphira's Barrier
+    4580 to its authored final phase 12282. The existing 20-second timer also clears it
+    if the actor's path or dialogue is interrupted.
+  - **First and second corridors** — the 2.5 m limit on a walker finding a lower floor
+    also applies to the Cellar's stacked passages. Open Chapel, Locked Gate and Hall
+    doors drop their server colliders when the client plays the open animation. Their
+    compact func groups reuse the closed model.
+  - **Western Ishvara Palace Cellar Machine** — the underwater lever's false pulse
+    reaches the Crimson Flame through family 30012, inferred from its provider row.
+  - **Door fire** — the brazier's own phase owns the damage clout. Bucket hits advance
+    11715 through 12709 and 12710 to the inactive 12711. Each phase releases its
+    previous clout, including when a different prop is near the bucket's caster.
+  - **Profane Temple** — Giant Fire Elemental 9810 comes from Melkina's combat skill
+    16219. Its start-active placement was removed.
+  - **Melkina's gate** — the boss's open and close skills target its arena door and
+    the paired no-attack area at their authored locations. Nearby props previously
+    filled the death skill's target slots. The death cue reopens the gate from the
+    sunken floor and leaves Tushan's arena alone.
+  - **Postulants' Nave** — Tushan's on-death plot 653 places treasure chest 6125 and
+    its Hall of Retribution Key (20046) at the corpse.
+  - **Burning Stone** — gimmick 42 starts on the landing above the ramp and uses the
+    authored launch velocity, gravity, lifetime and collision skill. The floor
+    support and rolling radius are inferred from the existing gimmick contact radius.
+  - **Akmit's entrance** — sphere 1291 starts the monk's command set 72 and the
+    cinematic cue sends playback for `id_240_01`.
+  - **Akmit's fire** — the indoor pool puts out the damaging roar buff 2574 on water
+    contact and prevents it from starting on players already in the pool. Contact
+    counts even while the character's head remains above water.
 * systems::npcs (2026-10-13): corpse timers read the current despawn field, so fully looting
   an NPC applies the existing shorter deadline instead of retaining the five-minute loot
   extension captured at death. Only living NPCs count towards spawner population limits;
