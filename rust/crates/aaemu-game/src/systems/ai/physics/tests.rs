@@ -611,6 +611,91 @@ fn cryphysics_ship_runs_aground_on_the_terrain() {
 }
 
 #[test]
+fn cryphysics_helm_cannot_push_a_hull_up_a_coastal_brush() {
+    use std::sync::Arc;
+
+    use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
+    use aaemu_physics::math::{Quat, Vec3 as PhysVec};
+
+    use crate::systems::ai::collision::models::{phys_slot, ModelPart, ModelPhys};
+    use crate::systems::ai::collision::world::{Owner, StaticInstance};
+
+    let w = cry_world(100.0, 40.0);
+    {
+        // The terrain below the brush is flat and submerged. Tilt the face
+        // away from the hull so the solver can turn helm thrust into lift.
+        let mut st = w.cry.as_ref().unwrap().lock();
+        let geom = st
+            .world
+            .geometry(&Primitive::Box(BoxPrim::aligned(
+                PhysVec::ZERO,
+                PhysVec::new(18.0, 2.0, 18.0),
+            )))
+            .unwrap();
+        st.add_static_instance(
+            &StaticInstance {
+                model: Arc::new(ModelPhys {
+                    path: "coastal_cliff.cgf".into(),
+                    parts: vec![ModelPart {
+                        slot: phys_slot::DEFAULT,
+                        geom,
+                    }],
+                    blob_bytes: 0,
+                }),
+                pos: PhysVec::new(500.0, 524.0, 103.0),
+                q: Quat::new(-0.173_648_18, 0.0, 0.0, 0.984_807_7),
+                scale: 1.0,
+                flags_default: 0x1fff,
+                density: 0.0,
+                ent_flags_or: 0,
+                vegetation: false,
+            },
+            Owner::Brush { cell: (0, 0) },
+        )
+        .unwrap();
+    }
+    let wp = WorldPhysics::new(0);
+    add(&wp, 1, 500.0, 500.0, 100.0, 0.0);
+    wp.enqueue(Pending::Driver {
+        obj_id: 1,
+        has_driver: true,
+    });
+    wp.enqueue(Pending::Request {
+        obj_id: 1,
+        throttle: 127,
+        steering: 0,
+    });
+    let mut now = 0;
+    for _ in 0..350 {
+        now += 40;
+        wp.tick(&w, 40, now, cry_cfg());
+    }
+    let blocked = wp.snapshot(1).unwrap();
+    assert!(wp.inspect(|s| s.cry.events_seen) > 0, "must hit the brush");
+    assert!(
+        blocked.position.y > 505.0 && blocked.position.y < 522.0,
+        "{blocked:?}"
+    );
+    assert!((blocked.position.z - 100.0).abs() < 1.5, "{blocked:?}");
+    assert!(blocked.speed.abs() < 0.5, "{blocked:?}");
+
+    wp.enqueue(Pending::Request {
+        obj_id: 1,
+        throttle: -127,
+        steering: 0,
+    });
+    for _ in 0..175 {
+        now += 40;
+        wp.tick(&w, 40, now, cry_cfg());
+    }
+    let backed_off = wp.snapshot(1).unwrap();
+    assert!(
+        backed_off.position.y < blocked.position.y - 2.0,
+        "blocked={blocked:?}, backed off={backed_off:?}"
+    );
+}
+
+#[test]
 fn cryphysics_ship_floats_on_a_lake_above_the_ocean() {
     use crate::systems::ai::physics::water::{WaterBodyArea, WaterBodyAreaType};
     // terrain at 140, ocean at 100, a 200 × 200 m lake at 150 (10 m deep)

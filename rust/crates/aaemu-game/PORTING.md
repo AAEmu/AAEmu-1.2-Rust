@@ -1964,6 +1964,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   on the living operator and keep their equipped-cannon requirements. The
   [r208022 client data patch](../../LIVE-TESTING.md#r208022-ship-skill-data)
   updates client prechecks for those skills and the cannon pickup.
+* systems::vehicles / skills (ship interaction retest, 2026-11-21): the
+  CryPhysics hull uses scenery side contacts to remove thrust into a cliff
+  brush and limit lift while in contact. Along-wall steering and reverse
+  thrust can still move the hull away. Harpoon plots 355/356 accept an aim
+  point up to 45 m away (from the plot distance), with 4 m of muzzle clearance
+  inferred from the authored muzzle offsets. Gimmicks 45/46 use their authored
+  launch speed and gravity, sweeping through scenery, ship hulls, and water.
+  Older client self-casts retain the forward launch. The client data patch
+  enables the aiming selector and the telescope's Hold Binoculars variants.
 
 * systems::social (blocked users): `CharacterBlocked` was stored and sent at login but never
   read, so a blocked player could still whisper, invite (party / raid / area, expedition,

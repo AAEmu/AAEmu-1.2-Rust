@@ -48,20 +48,36 @@ INSERT INTO skill_patch_check SELECT COUNT(*) = 1 FROM skills
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skill_reqs
   WHERE (id = 13 AND buff_tag_id = 306) OR (id = 35 AND buff_tag_id = 367);
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skills
-  WHERE id IN (17737, 17738) AND target_type_id = 0 AND plot_id > 0;
-INSERT INTO skill_patch_check SELECT COUNT(*) = 4 FROM skills
-  WHERE id IN (13608, 13609, 17649, 20704) AND source_stun IN ('t', 'f');
+  WHERE (id = 17737 AND plot_id = 355 OR id = 17738 AND plot_id = 356)
+    AND target_type_id IN (0, 6, 11);
+INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM unit_reqs
+  WHERE owner_type = 'Skill' AND owner_id IN (17737, 17738)
+    AND (kind_id = 23 AND value1 = 396 OR kind_id = 15 AND value1 = 3661);
+INSERT INTO skill_patch_check SELECT COUNT(*) = 8 FROM skills
+  WHERE id IN (13608, 13609, 17649, 17949, 17950, 17957, 17958, 20704)
+    AND source_stun IN ('t', 'f');
 
 -- These requirements treat the glider's equipment buffs as a carried pack.
 -- The server checks the actual backpack slot before it equips the cannon.
 DELETE FROM skill_req_skills WHERE skill_id = 15660 AND skill_req_id IN (13, 35);
 
--- These actions cast on the operator. Their plots launch separate impact skills.
-UPDATE skills SET target_alive = 't', target_dead = 'f', check_obstacle = 'f'
+-- Use the on-foot ground selector for the carried cannon. The mounted
+-- ballistic camera crashed in the r208022 on-foot test. The projectile
+-- handles collisions along its own path.
+UPDATE skills SET target_type_id = 6, target_selection_id = 2, min_range = 4, max_range = 45,
+                  target_area_radius = CASE id WHEN 17737 THEN 6 ELSE 7 END,
+                  target_alive = 't', target_dead = 'f', check_obstacle = 'f'
   WHERE id IN (17737, 17738);
 
+-- The old self cast required a buff tag on its target. For a position cast,
+-- check the operator's equipped Portable Harpoon Cannon buff instead.
+UPDATE unit_reqs SET kind_id = 15, value1 = 3661
+  WHERE owner_type = 'Skill' AND owner_id IN (17737, 17738)
+    AND kind_id = 23 AND value1 = 396;
+
 -- The server still rejects combat stuns and allows these skills under the anchor status.
-UPDATE skills SET source_stun = 't' WHERE id IN (13608, 13609, 17649, 20704);
+UPDATE skills SET source_stun = 't'
+  WHERE id IN (13608, 13609, 17649, 17949, 17950, 17957, 17958, 20704);
 
 COMMIT;
 '@)

@@ -247,7 +247,7 @@ impl PhysState {
                 st.world.step(dt);
                 self.cry.pull(&st, &mut self.ships);
                 out.damage
-                    .extend(self.cry.collision_damage(&st, &self.ships, now_ms));
+                    .extend(self.cry.collision_damage(&st, &mut self.ships, now_ms));
             } else {
                 let mut bodies: Vec<&mut super::jitter::RigidBody> =
                     self.ships.iter_mut().map(|s| &mut s.body).collect();
@@ -385,6 +385,11 @@ impl PhysState {
         }
 
         harpoon::apply_ship_pair_tow_impulses(&mut ships, dt);
+        if cry {
+            for s in ships.iter_mut() {
+                self.cry.constrain_wall_motion(s);
+            }
+        }
 
         for s in ships.iter_mut() {
             // CryPhysics has its own collision event damage and per-pair cooldowns.

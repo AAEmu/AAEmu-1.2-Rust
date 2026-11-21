@@ -650,6 +650,18 @@ fn initial_target(
     if !caster.is_unit() {
         return None;
     }
+    // The updated cannon UI sends its confirmed impact point. The shipped
+    // self-targeted data still supports the forward shot from older clients.
+    if super::validation::is_portable_harpoon_shot(skill.id)
+        && matches!(
+            target_caster,
+            SkillCastTarget::Position { .. }
+                | SkillCastTarget::Position2 { .. }
+                | SkillCastTarget::Position3 { .. }
+        )
+    {
+        return Some(set_initial_target(server, caster, target_caster));
+    }
     let mut target: Option<WorldObject> = Some(caster.clone());
     if matches!(
         skill_caster,
@@ -657,7 +669,11 @@ fn initial_target(
     ) {
         target = world_of(server, caster).and_then(|w| w.unit(skill_caster.obj_id()));
     }
-    let tt = SkillTargetType::from_raw(i64::from(skill.template.target_type));
+    let tt = if super::validation::is_portable_harpoon_shot(skill.id) {
+        Some(SkillTargetType::SelfTarget)
+    } else {
+        SkillTargetType::from_raw(i64::from(skill.template.target_type))
+    };
     let caster_t = Target::Obj(caster.clone());
     let lookup = |tc: &mut SkillCastTarget| -> Option<WorldObject> {
         let found = if tc.obj_id() > 0 {

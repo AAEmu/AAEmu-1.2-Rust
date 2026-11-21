@@ -14,6 +14,13 @@ pub(crate) const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
 pub(super) const RED_DRAGON_EGG_SKILL: u32 = 23_150;
+pub(super) const PORTABLE_HARPOON_MIN_RANGE: f64 = 4.0;
+pub(super) const PORTABLE_HARPOON_MAX_RANGE: f64 = 45.0;
+
+pub(super) fn is_portable_harpoon_shot(skill_id: u32) -> bool {
+    matches!(skill_id, 17737 | 17738)
+}
+
 /// How far above the source and the destination the obstacle ray is cast. This was the Rust/C#-era
 /// height (`+ 1.0` at both ends); 28286101a (2026-10-27) dropped it to feet level to follow the
 /// client's "unit position height", and the feet-level ray then refused casts the 1.2 client
@@ -465,14 +472,21 @@ pub(super) fn check(
         };
         // The ship's "Anchor Lowered" and "Anchor" statuses use the generic stun
         // flag. Only the anchor and ship utilities can bypass these two statuses.
+        let ship_utility = matches!(
+            skill.id,
+            13608 | 13609 | 17649 | 17949 | 17950 | 17957 | 17958 | 20704
+        );
         let anchored_utility = matches!(id, 615 | 1983)
             && caster.as_slave().is_some()
-            && matches!(skill.id, 13608 | 13609 | 14766 | 17649 | 20704);
-        if !template.source_stun && !anchored_utility && (buff.stun || buff.sleep || buff.knockdown)
-        {
+            && (ship_utility || skill.id == 14766);
+        // The client data permits these utility casts so the client will send
+        // them while anchored. Keep the server's ordinary stun check even if
+        // somebody uses that same compact database for their local server.
+        let permits_stun = template.source_stun && !ship_utility;
+        if !permits_stun && !anchored_utility && (buff.stun || buff.sleep || buff.knockdown) {
             return fail("skill_cannot_cast_in_stun");
         }
-        if buff.blank_minded && !template.source_stun {
+        if buff.blank_minded && !permits_stun {
             return fail("skill_blank_minded");
         }
     }
@@ -481,7 +495,8 @@ pub(super) fn check(
     // flag describes the plot's later targets, so the corpse target is not held to it.
     // Harpoon Bomb and Deadly Toxin Shot start plots 355 and 356 on the living operator.
     // Their corpse-only flag does not describe the initial self target.
-    let scripted_self_cast = (template.source_dead || matches!(skill.id, 17737 | 17738))
+    let portable_harpoon = is_portable_harpoon_shot(skill.id);
+    let scripted_self_cast = (template.source_dead || portable_harpoon)
         && target.as_obj().is_some_and(|o| o.same(caster));
     if let Some(target_hp) = target
         .as_obj()
@@ -545,6 +560,18 @@ pub(super) fn check(
         crate::models::unit::SkillAttribute::Range,
         f64::from(template.max_range),
     );
+    let aimed_harpoon = portable_harpoon && matches!(target, Target::Pos(_));
+    if aimed_harpoon {
+        // The self-targeted data uses zero for both ranges. A confirmed aim
+        // has a real muzzle clearance and the 45 m range from the launch plot.
+        let horizontal = (destination.x - source.x).hypot(destination.y - source.y);
+        if f64::from(horizontal) < PORTABLE_HARPOON_MIN_RANGE {
+            return fail("skill_too_close_range");
+        }
+        max_range = PORTABLE_HARPOON_MAX_RANGE;
+    } else if portable_harpoon {
+        min_range = 0.0;
+    }
     if template.target_type == super::types::SkillTargetType::Doodad as i32
         && template.min_range >= 100
     {
@@ -569,7 +596,8 @@ pub(super) fn check(
     // A position-targeted skill is cast at a spot on the ground; its template may carry
     // max_range 0 because the client decides where the placement is legal (10.x
     // `unboundedPlacement`; summon skill 15802 rejected every boat at 3.4 m without it).
-    let unbounded_placement = matches!(target, Target::Pos(_)) && template.max_range <= 0;
+    let unbounded_placement =
+        matches!(target, Target::Pos(_)) && template.max_range <= 0 && !aimed_harpoon;
     // Doodads have no model radius and a ship's origin is far from its hull, so these targets
     // get an allowance on top of the skill's range (C# exempted them entirely).
     let extent = target.as_obj().map_or(0.0, |o| {
@@ -592,7 +620,10 @@ pub(super) fn check(
     // geometry (workbench stalls, house fixtures, objects baked into a brush), so the ray
     // always hit that geometry and refused the interaction ("Too far from target"). The
     // retail zone does not check obstacles either and the C# tree had no check at all.
+    // A harpoon bomb follows an arc and explodes on the first collision. A
+    // straight ray from the operator to the selected surface rejects valid aim.
     if !gimmick_source
+        && !aimed_harpoon
         && template.check_obstacle
         && !target
             .as_obj()
