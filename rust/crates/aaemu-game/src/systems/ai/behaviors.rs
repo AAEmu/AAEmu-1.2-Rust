@@ -1171,6 +1171,34 @@ fn is_armory_wave_add(c: &AiCtx<'_>) -> bool {
     npc.unit.transform.zone_id == 236 && (8964..=8969).contains(&npc.unit.template_id)
 }
 
+fn advance_armory_wave_from_portal(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) -> bool {
+    if !is_armory_wave_add(c) || c.st(k).armory_portal_cleared {
+        return false;
+    }
+    let pos = owner_pos(c);
+    let center = Vec3::new(200.0, 312.0, pos.z);
+    if calculate_distance(pos, center, false) <= 34.0 {
+        c.st(k).armory_portal_cleared = true;
+        return false;
+    }
+    // Ranged adds can otherwise begin their attacks from the portal recess.
+    // All three entrances have a clear approach toward the center.
+    if !is_using_skill(c)
+        && !npc::is_shackled_or_snared(c.server, &c.obj)
+        && !npc::skill_controller_running(&c.obj)
+    {
+        let speed = npc::real_movement_speed(&c.obj, f64::from(base_move_speed(c)));
+        npc_move_towards(
+            c,
+            center,
+            (speed * delta_seconds(delta_ms)) as f32,
+            npc::real_movement_flags(speed),
+            1.0,
+        );
+    }
+    true
+}
+
 /// `BaseCombatBehavior.ShouldReturn`.
 ///
 /// Deviation: the C# returned only while the NPC was within `absolute_return_distance` of its
@@ -2018,6 +2046,9 @@ fn attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     let Some(target) = current_target(c) else {
         return;
     };
+    if advance_armory_wave_from_portal(c, k, delta_ms) {
+        return;
+    }
     if can_strafe(c, k) && !is_using_skill(c) {
         move_in_range(c, k, Some(&target), delta_ms);
     }
@@ -2155,8 +2186,9 @@ fn run_current_path(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
             actor_flags,
             result,
         } => {
-            let mut move_speed = npc::real_movement_speed(&c.obj, f64::from(speed));
-            move_speed *= delta_seconds(delta_ms);
+            let pace = npc::real_movement_speed(&c.obj, f64::from(speed));
+            let actor_flags = actor_flags.unwrap_or_else(|| npc::real_movement_flags(pace));
+            let move_speed = pace * delta_seconds(delta_ms);
             // Stop within the same radius that counts as an arrival (`Template.Scale`, at least
             // the movement default 1 m); a smaller tolerance kept the NPC short of the point.
             npc_move_towards(c, target, move_speed as f32, actor_flags, scale.max(1.0));

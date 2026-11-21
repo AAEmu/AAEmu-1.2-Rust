@@ -3667,6 +3667,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   covers the eight-second Howl cast.
   Meteor Shower 15629 places fire circle 4874 and the damage at the same ground point.
   The client projectile launches above the circle, below any solid ceiling in the drop path.
+  Earthen Grip requires a live, visible combat target in its authored health window.
+  The cast and its impact check sight so it does not grab from outside the fight or
+  through a wall. Dominated adds first move inward from the portals before using
+  their regular combat ranges. The 34 m approach radius is inferred from the three
+  portal positions. Winters keeps his authored elevation through the raised part
+  of `8843_move_00.path`, including the west end near X 284.7. A scripted route
+  without explicit actor flags now uses the movement pace to select walk or run.
   The stray Sharpwind Mines exit 5723 at the entrance doorway was replaced by the real 3673
   (same doorway, 3 m apart); the secret chests 7659 are owned by the quest-spawns lane. The
   `real_data_start_active_rule_counts_per_world` snapshot for this world becomes 2 `'f'` /
