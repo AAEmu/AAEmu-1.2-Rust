@@ -50,6 +50,9 @@ INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skill_reqs
 INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM skills
   WHERE (id = 17737 AND plot_id = 355 OR id = 17738 AND plot_id = 356)
     AND target_type_id IN (0, 11);
+INSERT INTO skill_patch_check SELECT COUNT(*) = 2 FROM unit_reqs
+  WHERE owner_type = 'Skill' AND owner_id IN (17737, 17738)
+    AND (kind_id = 23 AND value1 = 396 OR kind_id = 15 AND value1 = 3661);
 INSERT INTO skill_patch_check SELECT COUNT(*) = 8 FROM skills
   WHERE id IN (13608, 13609, 17649, 17949, 17950, 17957, 17958, 20704)
     AND source_stun IN ('t', 'f');
@@ -63,6 +66,12 @@ DELETE FROM skill_req_skills WHERE skill_id = 15660 AND skill_req_id IN (13, 35)
 UPDATE skills SET target_type_id = 11, target_selection_id = 2, min_range = 4, max_range = 45,
                   target_alive = 't', target_dead = 'f', check_obstacle = 'f'
   WHERE id IN (17737, 17738);
+
+-- The old self cast required a buff tag on its target. For a position cast,
+-- check the operator's equipped Portable Harpoon Cannon buff instead.
+UPDATE unit_reqs SET kind_id = 15, value1 = 3661
+  WHERE owner_type = 'Skill' AND owner_id IN (17737, 17738)
+    AND kind_id = 23 AND value1 = 396;
 
 -- The server still rejects combat stuns and allows these skills under the anchor status.
 UPDATE skills SET source_stun = 't'
