@@ -3748,6 +3748,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     its centre one scaled radius off floors and walls. Hard impacts bounce as before. After a
     slow landing it rolls with a 4 m/s² rolling resistance, and its pitch and angular velocity
     (`v / r` about the cross axis) follow the distance. The resistance is inferred.
+* systems::npcs (gimmick barrel proxies, 2026-11-22, tests in `gimmick::manager` and the
+  `real_barrel_proxies_match_the_client_models` /
+  `real_data_burnt_sorvell_barrels_land_on_their_model_not_in_the_floor` real-data tests):
+  - **Proxies in model space.** A gimmick's cylinder proxy is read with its node's rotation
+    applied, as the collision applies it to placed models. The `barrel_grape_e.cgf` proxy node
+    is turned so the cylinder lies along model X; the render mesh is long along X too
+    (x ±0.911, y ±0.634, z ±0.640). The keg rule above read the raw axis (node Z), so its
+    roll 90° pointed the keg's length along its heading: it tumbled end over end, and at each
+    quarter turn it stood on its end up to 0.25 m in the floor. The keg now lies with model X
+    across its heading and rolls about it. Without client files the known proxies of
+    `barrel_grape_e.cgf` and `barrel_oak_b.cgf` are used, keyed by model file, not template id.
+  - **Rolling by data.** Any launched trap whose model has a cylinder proxy rolls (only the
+    keg 49 in 1.2: the cannon shells and the Trieste bolts are prefabs, and the Palace Cellar
+    boulder keeps its sphere motion).
+  - **Sorvell's barrel (gimmick 39) lands on its model.** `barrel_oak_b.cgf` stands on its
+    origin (proxy r 0.474, half length 0.529, centre z 0.529). The barrage rows 99 / 105 spin
+    it at (5, 10, 5) rad/s, and the floor used to stop the origin, so a barrel that came down
+    tilted sank up to its radius on its side and its full 1.06 m upside down. The floor now
+    stops the tumbling proxy's lowest point. When the last bounce is too slow, the barrel
+    settles on whichever is nearer: an end (axis within 45° of vertical, upright or upside
+    down) or its side. The settle rule is inferred: retail simulated the 0.7 mass barrel in
+    its zone physics. The drop has no horizontal velocity, so the barrel neither glides nor
+    rolls.
 * systems::npcs (Howling Abyss follow-up, 2026-11-21): the event, water and breath fixes below.
   Their tests are in `howling_event_tests.rs`.
   * A `SphereSkill` area counts once per sphere id. Moving from one circle of a sphere into

@@ -33,16 +33,30 @@ pub const TICK_DELAY: Duration = Duration::from_millis(50);
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
 pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
 const PALACE_BOULDER_TEMPLATE_ID: u32 = 42;
-/// The Howling Abyss Bomber keg (`barrel_grape_e.cgf`).
-const HOWLING_KEG_TEMPLATE_ID: u32 = 49;
 // Barrel impacts retain a fraction of their speed, then settle before the fuse.
 const BARREL_RESTITUTION: f32 = 0.24;
 const BARREL_REST_SPEED: f32 = 0.8;
-/// Radius and half length of the `proxy` cylinder in r208022's
-/// `objects/env/01_nuia/001_ndeco/old/barrel_grape_e.cgf`, centred on the model origin with its
-/// axis along model Z. Used only when the client files are not loaded; otherwise the keg reads
-/// the proxy from its template's model.
-pub(in crate::systems::npcs) const KEG_PROXY_CYLINDER: (f32, f32) = (0.661, 0.916);
+/// The `proxy` cylinder of r208022's `objects/env/01_nuia/001_ndeco/old/barrel_grape_e.cgf`
+/// (the Howling Abyss Bomber keg 49 and the other `폭발통` / `폭약통` gimmicks) in model space.
+/// The raw primitive's axis is its node's Z, but the proxy node is turned so that the axis is
+/// model X, the long axis of the render mesh (x ±0.911, y ±0.634, z ±0.640): the model already
+/// lies on its side. Centred on the origin. Used only when the client files are not loaded.
+pub(in crate::systems::npcs) const KEG_PROXY_CYLINDER: CylinderProxy = CylinderProxy {
+    center: [0.0; 3],
+    axis: [1.0, 0.0, 0.0],
+    r: 0.661,
+    hh: 0.916,
+};
+/// The `proxy` cylinder of r208022's `Objects/Env/01_nuia/001_ndeco/old/barrel_oak_b.cgf`
+/// (Sorvell's Armory barrel 39): upright along model Z with its base on the origin (centre
+/// z 0.529; render mesh z -0.006..1.095, x/y ±0.488). Used only when the client files are not
+/// loaded.
+pub(in crate::systems::npcs) const OAK_BARREL_PROXY_CYLINDER: CylinderProxy = CylinderProxy {
+    center: [0.0, 0.0, 0.529],
+    axis: [0.0, 0.0, 1.0],
+    r: 0.474,
+    hh: 0.529,
+};
 /// Rolling resistance of a landed keg (m/s²). **Inferred (no 1.2 server evidence):** the
 /// `gimmicks` row has no rolling friction (`damping` 0). With this value a keg thrown at the
 /// authored 8 m/s rolls about 3 m after it settles, well inside its six-second fuse, so it
@@ -97,7 +111,9 @@ pub struct GimmickState {
     pub authored_motion: bool,
     /// Floor under an Armory barrel, resolved when the barrel is created.
     barrel_floor: Option<f32>,
-    /// A Howling Abyss keg rolling on its side.
+    /// The falling barrel's model proxy: the floor stops its lowest point, not its origin.
+    barrel_proxy: Option<CylinderProxy>,
+    /// A thrown keg rolling on its side.
     rolling_keg: Option<RollingKeg>,
     /// `Time`.
     pub time: u32,
@@ -145,12 +161,91 @@ pub struct GimmickState {
     pub owner_character_id: u32,
 }
 
+/// A gimmick's cylinder physics proxy in model space (the proxy node's rotation applied, as the
+/// collision applies it), scaled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::systems::npcs) struct CylinderProxy {
+    pub center: [f32; 3],
+    /// Unit axis.
+    pub axis: [f32; 3],
+    pub r: f32,
+    pub hh: f32,
+}
+
+impl CylinderProxy {
+    fn scaled(self, scale: f32) -> Self {
+        let s = if scale > 0.0 { scale } else { 1.0 };
+        Self {
+            center: self.center.map(|c| c * s),
+            r: self.r * s,
+            hh: self.hh * s,
+            ..self
+        }
+    }
+
+    /// How far the origin sits above the floor when the proxy's lowest point rests on it, with
+    /// the gimmick turned by `rot` (roll, pitch, yaw).
+    pub(in crate::systems::npcs) fn floor_clearance(&self, rot: [f32; 3]) -> f32 {
+        let q = PositionAndRotation::new(0.0, 0.0, 0.0, rot[0], rot[1], rot[2]).to_quaternion();
+        let c = q.rotate(self.center);
+        let az = q.rotate(self.axis)[2].abs().min(1.0);
+        self.hh * az + self.r * (1.0 - az * az).sqrt() - c[2]
+    }
+
+    /// The model axis (0 = X, 1 = Y, 2 = Z) closest to the cylinder axis.
+    fn model_axis(&self) -> usize {
+        let a = self.axis.map(f32::abs);
+        if a[0] >= a[1] && a[0] >= a[2] {
+            0
+        } else if a[1] >= a[2] {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// The orientation (roll, pitch, yaw) that lays the cylinder axis horizontal along
+    /// `(cos heading, sin heading)`, turned by `spin` about it the way a body rolling towards
+    /// `(-sin heading, cos heading)` turns (angular velocity along the negative axis). The
+    /// spin is a single Euler angle for every model axis, so it never meets a gimbal lock.
+    fn lying(&self, heading: f32, spin: f32) -> [f32; 3] {
+        use std::f32::consts::FRAC_PI_2;
+        match self.model_axis() {
+            0 => [-spin, 0.0, heading],
+            1 => [0.0, -spin, heading - FRAC_PI_2],
+            // Roll 90° lays model Z along -Y; pitch then turns about that axis.
+            _ => [FRAC_PI_2, spin, heading + FRAC_PI_2],
+        }
+    }
+
+    /// The stable pose nearest `rot`: on an end when the axis is within 45° of vertical
+    /// (upright or upside down), otherwise on its side along the axis's current heading.
+    fn rest_pose(&self, rot: [f32; 3]) -> [f32; 3] {
+        use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
+        let q = PositionAndRotation::new(0.0, 0.0, 0.0, rot[0], rot[1], rot[2]).to_quaternion();
+        let a = q.rotate(self.axis);
+        if a[2].abs() < FRAC_1_SQRT_2 {
+            return self.lying(a[1].atan2(a[0]), 0.0);
+        }
+        // The model axis turned to world +Z (or -Z when the other end is down).
+        let up = (a[2] > 0.0) == (self.axis[self.model_axis()] > 0.0);
+        match (self.model_axis(), up) {
+            (0, true) => [0.0, -FRAC_PI_2, rot[2]],
+            (0, false) => [0.0, FRAC_PI_2, rot[2]],
+            (1, true) => [FRAC_PI_2, 0.0, rot[2]],
+            (1, false) => [-FRAC_PI_2, 0.0, rot[2]],
+            (_, true) => [0.0, 0.0, rot[2]],
+            (_, false) => [PI, 0.0, rot[2]],
+        }
+    }
+}
+
 /// A keg lying on its side: its cylinder axis is horizontal and across its heading, and it
 /// turns about that axis by the distance it rolls.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct RollingKeg {
-    /// Scaled proxy radius: the centre rests this far above the floor.
-    radius: f32,
+    /// Scaled model proxy.
+    proxy: CylinderProxy,
     /// Yaw of the rolling direction (forward = `(-sin, cos)`, the unit convention).
     heading: f32,
     /// Turn about the cylinder axis (rad).
@@ -160,12 +255,24 @@ struct RollingKeg {
 }
 
 impl RollingKeg {
-    /// Writes the orientation: roll 90° lays the model's Z axis along `-Y`, pitch then turns
-    /// about that axis, and yaw `heading + 90°` puts the axis across the heading.
+    fn new(proxy: CylinderProxy, heading: f32) -> Self {
+        Self {
+            proxy,
+            heading,
+            spin: 0.0,
+            spin_rate: 0.0,
+        }
+    }
+
+    /// Writes the orientation: the cylinder axis across the heading, turned by the spin.
     fn apply(&self, t: &mut crate::models::transform::Transform) {
-        t.rot_x = std::f32::consts::FRAC_PI_2;
-        t.rot_y = self.spin;
-        t.rot_z = self.heading + std::f32::consts::FRAC_PI_2;
+        [t.rot_x, t.rot_y, t.rot_z] = self.proxy.lying(self.heading, self.spin);
+    }
+
+    /// Height of the origin above the floor it rolls on.
+    fn clearance(&self) -> f32 {
+        self.proxy
+            .floor_clearance(self.proxy.lying(self.heading, self.spin))
     }
 
     /// World angular velocity of the rolling motion (about the negative cross axis).
@@ -175,23 +282,46 @@ impl RollingKeg {
     }
 }
 
-/// The scaled `(radius, half length)` of a rolling gimmick's cylinder proxy, read from its
-/// model when the client files are loaded ([`KEG_PROXY_CYLINDER`] otherwise).
-fn rolling_cylinder(server: &GameServer, template: &GimmickTemplate, scale: f32) -> (f32, f32) {
+/// The scaled cylinder proxy of a gimmick's model: read from the model when the client files
+/// are loaded, else the known proxy of that model file ([`KEG_PROXY_CYLINDER`],
+/// [`OAK_BARREL_PROXY_CYLINDER`]). `None` for a model without a cylinder proxy (prefabs).
+pub(in crate::systems::npcs) fn cylinder_proxy(
+    server: &GameServer,
+    template: &GimmickTemplate,
+    scale: f32,
+) -> Option<CylinderProxy> {
     use crate::systems::ai::collision;
     use aaemu_physics::geometry::primitives::Primitive;
+    use aaemu_physics::math::Vec3;
+    let path = collision::cells::normalize_model_path(&template.model_path);
     let from_model = collision::files(server).and_then(|files| {
-        let path = collision::cells::normalize_model_path(&template.model_path);
         let model = collision::model_cache(server, &files).get(&path)?;
-        let geom = model.slot(collision::models::phys_slot::DEFAULT)?;
-        match geom.geom.primitive(0)? {
-            Primitive::Cylinder(c) => Some((c.r, c.hh)),
-            _ => None,
-        }
+        let part = model
+            .parts
+            .iter()
+            .find(|p| p.slot == collision::models::phys_slot::DEFAULT)?;
+        let Primitive::Cylinder(c) = part.geom.geom.primitive(0)? else {
+            return None;
+        };
+        let turn = |v: Vec3| {
+            let v = part.frame.map_or(v, |f| f.q.rotate(v));
+            [v.x, v.y, v.z]
+        };
+        Some(CylinderProxy {
+            center: turn(c.center),
+            axis: turn(c.axis),
+            r: c.r,
+            hh: c.hh,
+        })
     });
-    let (r, hh) = from_model.unwrap_or(KEG_PROXY_CYLINDER);
-    let scale = if scale > 0.0 { scale } else { 1.0 };
-    (r * scale, hh * scale)
+    let file = path.rsplit('/').next().unwrap_or_default();
+    from_model
+        .or(match file {
+            "barrel_grape_e.cgf" => Some(KEG_PROXY_CYLINDER),
+            "barrel_oak_b.cgf" => Some(OAK_BARREL_PROXY_CYLINDER),
+            _ => None,
+        })
+        .map(|p| p.scaled(scale))
 }
 
 impl GimmickState {
@@ -708,17 +838,24 @@ fn spawn_effect_gimmick(
     // that spawns fragments is gone before they are). 0 for a doodad / NPC caster.
     let owner_character_id = crate::systems::skills::relation::owner_character(server, caster)
         .map_or(0, |owner| owner.character_id);
-    // The keg model is centred on its origin with the cylinder upright. It flies and rolls on
-    // its side, its centre one radius above the floor.
-    let rolling_keg = (template.id == HOWLING_KEG_TEMPLATE_ID && authored_motion).then(|| {
-        let keg = RollingKeg {
-            radius: rolling_cylinder(server, &template, params.scale).0,
-            heading: yaw,
-            ..RollingKeg::default()
-        };
-        keg.apply(&mut g.unit.transform);
-        keg
-    });
+    // A thrown trap whose model has a cylinder proxy (the Howling Abyss keg 49; the cannon
+    // shells and Trieste bolts are prefabs without one, the boulder has its own sphere motion)
+    // flies and rolls on its side with its surface, not its origin, on the floor.
+    let rolling_keg = (authored_motion
+        && uses_ballistic_motion(template.id)
+        && template.id != PALACE_BOULDER_TEMPLATE_ID
+        && !cannon_projectile)
+        .then(|| cylinder_proxy(server, &template, params.scale))
+        .flatten()
+        .map(|proxy| {
+            let keg = RollingKeg::new(proxy, yaw);
+            keg.apply(&mut g.unit.transform);
+            keg
+        });
+    // A falling barrel lands on the lowest point of its model proxy.
+    let barrel_proxy = falling_barrel
+        .then(|| cylinder_proxy(server, &template, params.scale))
+        .flatten();
     let initial_pos = [g.unit.transform.x, g.unit.transform.y, g.unit.transform.z];
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
@@ -733,6 +870,7 @@ fn spawn_effect_gimmick(
             authored_motion,
             owner_character_id,
             barrel_floor,
+            barrel_proxy,
             rolling_keg,
             last_pos: if cannon_projectile {
                 // Sweep the muzzle offset on the first tick as well, so a
@@ -1202,7 +1340,7 @@ fn tick_ballistic_motion(
     hit.is_some()
 }
 
-/// Moves a Howling Abyss keg and returns whether it struck scenery. The keg flies under its
+/// Moves a thrown keg and returns whether it struck scenery. The keg flies under its
 /// template gravity with its surface, not its centre, meeting walls and floors: the centre
 /// stays one proxy radius off them. Hard impacts bounce and lose speed like the other launched
 /// traps. Once an impact is too slow to bounce, the keg rolls with [`KEG_ROLL_DECELERATION`],
@@ -1224,7 +1362,7 @@ fn tick_rolling_keg(
     if v == [0.0; 3] {
         return false;
     }
-    let r = keg.radius;
+    let r = keg.proxy.r;
     let mut to = [
         from[0] + v[0] * dt,
         from[1] + v[1] * dt,
@@ -1274,7 +1412,7 @@ fn tick_rolling_keg(
             .flatten();
     let mut on_floor = false;
     if let Some(floor) = floor {
-        let support = floor + r;
+        let support = floor + keg.clearance();
         if to[2] <= support + 0.02 {
             to[2] = to[2].max(support);
             if v[2] < 0.0 {
@@ -1412,17 +1550,35 @@ pub fn gimmick_tick(
                     g.vel = vel;
                 }
                 let mut next_z = g.unit.transform.z + vel[2] * delta_time;
+                let mut rot = {
+                    let (t, ang) = (&g.unit.transform, g.ang_vel);
+                    [
+                        t.rot_x + ang[0] * delta_time,
+                        t.rot_y + ang[1] * delta_time,
+                        t.rot_z + ang[2] * delta_time,
+                    ]
+                };
                 if let Some(floor) = st.barrel_floor {
                     let gravity = active.template.as_ref().map_or(0.0, |t| t.gravity);
                     next_z -= 0.5 * gravity * delta_time * delta_time;
                     g.vel[2] -= gravity * delta_time;
-                    if next_z <= floor {
-                        next_z = floor;
+                    // The tumbling proxy's lowest point meets the floor, not the origin
+                    // (`barrel_oak_b` stands on its origin, so on its side or upside down the
+                    // origin is up to one barrel height above the floor).
+                    let clearance = |rot| st.barrel_proxy.map_or(0.0, |p| p.floor_clearance(rot));
+                    let support = floor + clearance(rot);
+                    if next_z <= support {
+                        next_z = support;
                         let rebound = -g.vel[2] * BARREL_RESTITUTION;
                         if rebound >= BARREL_REST_SPEED {
                             g.vel[2] = rebound;
                             g.ang_vel = g.ang_vel.map(|w| w * 0.5);
                         } else {
+                            // Settle on an end or on the side, whichever is nearer.
+                            if let Some(proxy) = st.barrel_proxy {
+                                rot = proxy.rest_pose(rot);
+                                next_z = floor + proxy.floor_clearance(rot);
+                            }
                             st.barrel_floor = None;
                             vel = [0.0; 3];
                             g.vel = vel;
@@ -1433,14 +1589,11 @@ pub fn gimmick_tick(
                 let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
                 st.authored_time += delta;
                 st.authored_distance += speed * delta_time;
-                let ang = g.ang_vel;
                 let t = &mut g.unit.transform;
                 t.x += vel[0] * delta_time;
                 t.y += vel[1] * delta_time;
                 t.z = next_z;
-                t.rot_x += ang[0] * delta_time;
-                t.rot_y += ang[1] * delta_time;
-                t.rot_z += ang[2] * delta_time;
+                [t.rot_x, t.rot_y, t.rot_z] = rot;
             }
         }
     }
@@ -2136,11 +2289,17 @@ mod tests {
         );
     }
 
+    /// The world direction of a proxy's cylinder axis under a transform's rotation.
+    fn world_axis(t: &crate::models::transform::Transform, proxy: &CylinderProxy) -> [f32; 3] {
+        t.local().to_quaternion().rotate(proxy.axis)
+    }
+
     #[tokio::test]
     async fn armory_barrage_barrel_falls_to_the_targets_floor() {
         let f = contact_fixture(
             GimmickTemplate {
                 id: SORVELL_BARREL_TEMPLATE_ID,
+                model_path: r"Objects\Env\01_nuia\001_ndeco\old\barrel_oak_b.cgf".into(),
                 mass: 0.7,
                 gravity: 9.8,
                 life_time: 6_000,
@@ -2149,6 +2308,7 @@ mod tests {
             (140.0, 120.0),
         );
         let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 20.0));
+        // `spawn_gimmick_effects` 105: a world-offset drop that tumbles about all three axes.
         let barrel = spawn_from_effect(
             &f.server,
             &f.world,
@@ -2162,6 +2322,10 @@ mod tests {
                 scale: 1.0,
                 velocity_coordinate_id: 2,
                 velocity_z: -5.0,
+                ang_vel_coordinate_id: 1,
+                ang_vel_x: 5.0,
+                ang_vel_y: 10.0,
+                ang_vel_z: 5.0,
                 ..Default::default()
             },
             &source,
@@ -2170,7 +2334,11 @@ mod tests {
         let start = barrel.data().unit.transform;
         assert_eq!((start.x, start.y, start.z), (142.0, 122.0, 41.0));
         let active = f.server.systems.npcs.gimmicks.find(barrel.obj_id).unwrap();
+        // No client files: the barrel_oak_b proxy, standing on the model origin.
+        let proxy = OAK_BARREL_PROXY_CYLINDER;
         let mut bounced = false;
+        let mut contact_clearance: f32 = 0.0;
+        let mut was_falling = false;
         for timestep in 1..=100 {
             gimmick_tick(
                 &f.server,
@@ -2180,16 +2348,85 @@ mod tests {
                 timestep * 50,
             );
             let data = barrel.data();
+            let t = data.unit.transform;
+            let lowest = t.z - proxy.floor_clearance([t.rot_x, t.rot_y, t.rot_z]);
             assert!(
-                data.unit.transform.z >= 21.0,
-                "barrel cannot sink into the floor"
+                lowest >= 21.0 - 1e-3,
+                "the barrel's lowest point stays on the floor: {lowest} at {t:?}"
             );
-            bounced |= data.vel[2] > 0.0;
+            if was_falling && data.vel[2] > 0.0 {
+                // A bounce: the tilted proxy touched the floor with the origin this high.
+                bounced = true;
+                contact_clearance = contact_clearance.max(t.z - 21.0);
+            }
+            was_falling = data.vel[2] < 0.0;
+            assert_eq!((t.x, t.y), (142.0, 122.0), "a vertical drop does not glide");
         }
         assert!(bounced, "the first impact rebounds");
-        let barrel_data = barrel.data();
-        assert_eq!(barrel_data.unit.transform.z, 21.0);
-        assert_eq!(barrel_data.vel, [0.0; 3]);
+        assert!(
+            contact_clearance > 0.1,
+            "the tumbling barrel touches down on its rim or side, origin {contact_clearance} up"
+        );
+        let data = barrel.data();
+        let t = data.unit.transform;
+        assert_eq!(data.vel, [0.0; 3]);
+        assert_eq!(data.ang_vel, [0.0; 3]);
+        // At rest on an end or on its side, with that face on the floor.
+        let axis = world_axis(&t, &proxy);
+        let clearance = proxy.floor_clearance([t.rot_x, t.rot_y, t.rot_z]);
+        assert!(
+            axis[2].abs() > 0.999 || axis[2].abs() < 1e-3,
+            "stable pose, axis {axis:?}"
+        );
+        assert!((t.z - (21.0 + clearance)).abs() < 1e-4, "{t:?}");
+        let expected = if axis[2] > 0.999 {
+            0.0 // upright on its base
+        } else if axis[2] < -0.999 {
+            2.0 * proxy.hh // upside down
+        } else {
+            proxy.r // on its side
+        };
+        assert!((clearance - expected).abs() < 1e-4, "{clearance} {axis:?}");
+    }
+
+    /// Every stable pose of the Armory barrel rests its proxy on the floor.
+    #[test]
+    fn barrel_rest_poses_rest_their_proxy_on_the_floor() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let p = OAK_BARREL_PROXY_CYLINDER;
+        // Upright: base on the floor.
+        assert!(p.floor_clearance([0.0, 0.0, 1.0]).abs() < 1e-5);
+        // Tipped 45°: the base rim is lowest, r·sin 45° below the origin.
+        let tipped = p.floor_clearance([FRAC_PI_4, 0.0, 0.0]);
+        assert!((tipped - p.r * FRAC_PI_4.sin()).abs() < 1e-4, "{tipped}");
+        for (rot, pose, clearance) in [
+            ([0.3, -0.2, 1.0], Some([0.0, 0.0, 1.0]), 0.0),
+            ([PI - 0.3, 0.2, 1.0], Some([PI, 0.0, 1.0]), 2.0 * p.hh),
+            ([FRAC_PI_2 - 0.2, 0.1, 1.0], None, p.r),
+        ] {
+            let rest = p.rest_pose(rot);
+            if let Some(pose) = pose {
+                assert_eq!(rest, pose);
+            }
+            let q = PositionAndRotation::new(0.0, 0.0, 0.0, rest[0], rest[1], rest[2]);
+            let axis = q.to_quaternion().rotate(p.axis);
+            assert!(axis[2].abs() > 0.999 || axis[2].abs() < 1e-4, "{axis:?}");
+            assert!(
+                (p.floor_clearance(rest) - clearance).abs() < 1e-4,
+                "{rest:?}"
+            );
+        }
+        // A keg lying across its heading rests one radius up for every spin.
+        for spin in [0.0, 0.7, FRAC_PI_2, 2.5] {
+            let keg = RollingKeg {
+                spin,
+                ..RollingKeg::new(KEG_PROXY_CYLINDER, 0.4)
+            };
+            assert!(
+                (keg.clearance() - KEG_PROXY_CYLINDER.r).abs() < 1e-4,
+                "{spin}"
+            );
+        }
     }
 
     struct HowlingTestFloor;
@@ -2209,6 +2446,7 @@ mod tests {
         let f = contact_fixture(
             GimmickTemplate {
                 id: 49,
+                model_path: "objects/env/01_nuia/001_ndeco/old/barrel_grape_e.cgf ".into(),
                 gravity: 9.8,
                 life_time: 6_150,
                 ..Default::default()
@@ -2242,21 +2480,20 @@ mod tests {
         .unwrap();
         let active = f.server.systems.npcs.gimmicks.find(barrel.obj_id).unwrap();
         // No client files here: the keg uses the barrel_grape_e proxy at the authored scale.
-        let radius = KEG_PROXY_CYLINDER.0 * 0.7;
-        {
-            let t = barrel.data().unit.transform;
+        let proxy = KEG_PROXY_CYLINDER.scaled(0.7);
+        let radius = proxy.r;
+        let across = |t: &crate::models::transform::Transform| {
+            let axis = world_axis(t, &proxy);
+            assert!(axis[2].abs() < 1e-5, "lies on its side: {axis:?}");
             assert!(
-                (t.rot_x - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
-                "lies on its side"
+                (axis[0].abs() - 1.0).abs() < 1e-5,
+                "axis across +Y: {axis:?}"
             );
-            assert!(
-                (t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
-                "axis across +Y"
-            );
-        }
+        };
+        across(&barrel.data().unit.transform);
         let mut bounced = false;
         let mut rolled = false;
-        let mut last_spin = barrel.data().unit.transform.rot_y;
+        let mut last_spin = barrel.data().unit.transform.local().to_quaternion();
         for step in 1..=60 {
             gimmick_tick(
                 &f.server,
@@ -2266,6 +2503,7 @@ mod tests {
                 step * 50,
             );
             let data = barrel.data();
+            across(&data.unit.transform);
             assert!(data.unit.transform.z >= 100.0 + radius - 0.02);
             bounced |= data.vel[2] > 0.0;
             if data.vel[2] == 0.0 && data.vel[1] > 0.1 {
@@ -2279,9 +2517,21 @@ mod tests {
                     data.ang_vel,
                     data.vel
                 );
-                assert_ne!(data.unit.transform.rot_y, last_spin);
+                // The turn since the last tick is about the negative cross axis (-X), the way
+                // a body rolling towards +Y turns: the sent quaternion rolls the keg forward.
+                let now = data.unit.transform.local().to_quaternion();
+                let d = now
+                    * Quaternion {
+                        x: -last_spin.x,
+                        y: -last_spin.y,
+                        z: -last_spin.z,
+                        w: last_spin.w,
+                    };
+                let s = d.w.signum();
+                assert!(d.x * s < -1e-4, "turn {d:?}");
+                assert!(d.y.abs() + d.z.abs() < 0.1 * d.x.abs(), "turn {d:?}");
             }
-            last_spin = data.unit.transform.rot_y;
+            last_spin = data.unit.transform.local().to_quaternion();
         }
         let data = barrel.data();
         assert!(bounced);
