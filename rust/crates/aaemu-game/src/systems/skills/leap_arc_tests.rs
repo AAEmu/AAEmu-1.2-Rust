@@ -337,6 +337,7 @@ async fn arc_clears_low_obstacle_and_stops_at_high_solid_contact() {
             parts: vec![ModelPart {
                 slot: 0,
                 geom: geometry,
+                frame: None,
             }],
             blob_bytes: 0,
         });

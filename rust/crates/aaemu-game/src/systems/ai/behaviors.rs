@@ -558,6 +558,21 @@ fn unit_dead(u: &WorldObject) -> bool {
         .unwrap_or(false)
 }
 
+/// Howling Abyss NPCs whose rooms sit under a raised walkway: the Medusa packs, their
+/// Guardians and the Knights on the ledges above them (Normal 265 and Greater 280). They only
+/// notice, or answer a help call against, a unit on their own floor.
+fn howling_floor_bound(zone_id: u32, template_id: u32) -> bool {
+    matches!(zone_id, 265 | 280)
+        && matches!(
+            template_id,
+            11258 | 11264 | 11757 | 11759 | 12765 | 12784 | 12785
+        )
+}
+
+/// The height difference (m) at which [`howling_floor_bound`] NPCs treat a unit as being on
+/// another floor.
+const HOWLING_FLOOR_GAP: f32 = 3.0;
+
 /// The shared scan of `CheckAggression` / `CheckAlert`.
 fn scan_for_enemy(
     c: &AiCtx<'_>,
@@ -572,18 +587,14 @@ fn scan_for_enemy(
         (
             n.can_fly,
             n.unit.scale,
-            matches!(n.unit.transform.zone_id, 265 | 280)
-                && matches!(
-                    n.unit.template_id,
-                    11258 | 11264 | 11757 | 11759 | 12765 | 12784 | 12785
-                ),
+            howling_floor_bound(n.unit.transform.zone_id, n.unit.template_id),
         )
     };
     let model_size = npc::model_size(c.server, &c.obj);
     let origin = npc::world_pos_and_rot(c.server, &c.obj);
     let my_z = origin.z;
     for (unit, range, pos) in units_by_distance(c, radius) {
-        if unit_dead(&unit) || (separate_floors && (my_z - pos.z).abs() > 3.0) {
+        if unit_dead(&unit) || (separate_floors && (my_z - pos.z).abs() > HOWLING_FLOOR_GAP) {
             continue;
         }
         // Arbitrary value
@@ -963,6 +974,14 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             ot.aggro_link_help_dist
         };
         if npc::distance_to(c.server, &other, &c.obj, false) > help_dist {
+            continue;
+        }
+        // The help distance is horizontal: the Howling Abyss Medusa packs (30 m) answered the
+        // Knights fighting on the walkway 15 m above their room.
+        if howling_floor_bound(other.transform().zone_id, ot.id)
+            && (npc::world_pos(c.server, &other).z - npc::world_pos(c.server, abuser).z).abs()
+                > HOWLING_FLOOR_GAP
+        {
             continue;
         }
         // Keep incidental assistance near the pull. Authored groups have their own rules.
@@ -1599,14 +1618,86 @@ fn move_in_range(c: &mut AiCtx<'_>, k: BehaviorKind, target: Option<&WorldObject
         const WAYPOINT_TOLERANCE: f32 = 0.25;
         while let Some(next) = c.ai.path_node.found_path.front().copied() {
             if calculate_distance(pos, next, false) > WAYPOINT_TOLERANCE {
-                npc_move_towards(c, next, speed as f32, move_flags, WAYPOINT_TOLERANCE);
+                chase_move(
+                    c,
+                    target,
+                    next,
+                    speed as f32,
+                    move_flags,
+                    WAYPOINT_TOLERANCE,
+                );
                 return;
             }
             c.ai.path_node.current_target_pos = next;
             c.ai.path_node.found_path.pop_front();
         }
     }
-    npc_move_towards(c, target_pos, speed as f32, move_flags, 1.0);
+    chase_move(c, target, target_pos, speed as f32, move_flags, 1.0);
+}
+
+/// How long (ms) a chaser may stand at a ledge it cannot step off before it gives up the
+/// victim below.
+const LEDGE_GIVE_UP_MS: i64 = 3_000;
+
+/// A chase step towards `goal` (the victim or a route corner). A walker does not step off a
+/// ledge ([`npc::step_leaves_ledge`]): it waits at the edge and, once that has lasted
+/// [`LEDGE_GIVE_UP_MS`], drops the victim it cannot reach (deviation from the C#, which walked
+/// it on at its own height through the air, see `PORTING.md`).
+fn chase_move(
+    c: &mut AiCtx<'_>,
+    victim: &WorldObject,
+    goal: Vec3,
+    distance: f32,
+    flags: u8,
+    tolerance: f32,
+) {
+    if chase_step_leaves_ledge(c, goal, distance) {
+        let now = now_ms();
+        let since = *c.ai.ledge_blocked_since.get_or_insert(now);
+        if c.npc.data().last_move_ms != 0 {
+            npc::stop_movement(c.server, &c.npc);
+        }
+        if now - since >= LEDGE_GIVE_UP_MS {
+            tracing::debug!(
+                npc = c.npc.obj_id,
+                victim = victim.obj_id(),
+                "chase: victim below a ledge, giving up"
+            );
+            c.ai.ledge_blocked_since = None;
+            reset_chase_path(c);
+            clear_aggro_of_unit(c.server, &c.obj, victim);
+        }
+        return;
+    }
+    c.ai.ledge_blocked_since = None;
+    npc_move_towards(c, goal, distance, flags, tolerance);
+}
+
+/// Whether the next chase step towards `goal` would take a walker off a ledge.
+fn chase_step_leaves_ledge(c: &AiCtx<'_>, goal: Vec3, distance: f32) -> bool {
+    if moves_freely(c) {
+        return false;
+    }
+    let pos = owner_pos(c);
+    let remaining = calculate_distance(pos, goal, false);
+    let step = distance * npc::move_speed_mul(&c.obj);
+    if remaining < 0.01 || step < 0.01 {
+        return false;
+    }
+    // Look at least half a metre ahead so a short step cannot creep over the edge.
+    let t = step.max(0.5).min(remaining) / remaining;
+    let (instance_id, zone_id) = {
+        let tr = c.obj.transform();
+        (tr.instance_id, tr.zone_id)
+    };
+    npc::step_leaves_ledge(
+        c.server,
+        instance_id,
+        zone_id,
+        pos.z,
+        pos.x + t * (goal.x - pos.x),
+        pos.y + t * (goal.y - pos.y),
+    )
 }
 
 /// `RequestAvailableAiSkillList` / `RequestAvailableSkillList` (same filter on both list kinds).
@@ -3180,7 +3271,17 @@ fn big_monster_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     let Some(selected) = selected else {
         // If skill list is empty, get Base skill
         if let Some(target) = target {
+            // The fallback pick sets the weapon range from whatever template skill it chose.
+            // A big monster's chase range must not follow it: Viboros kept the 30 m of a
+            // ranged pick and stood 15 m from the party for the rest of the fight.
+            let (min_range, max_range) = {
+                let s = c.st(k);
+                (s.min_weapon_range, s.max_weapon_range)
+            };
             pick_skill_and_use_it(c, k, SkillUseConditionKind::InCombat, &target, target_dist);
+            let s = c.st(k);
+            s.min_weapon_range = min_range;
+            s.max_weapon_range = max_range;
         }
         return;
     };

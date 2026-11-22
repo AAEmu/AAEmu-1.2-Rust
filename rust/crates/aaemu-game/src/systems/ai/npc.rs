@@ -706,6 +706,32 @@ pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {
     }
 }
 
+/// Whether a walker at level `world_z` would step off a ledge at `(x, y)`: the collision floor
+/// there lies deeper below it than [`walker_max_drop`]. [`reference_height_in`] keeps such a
+/// walker at its level (or takes a navigation height), so a chaser following its victim over
+/// the edge walked through the air. `false` without the collision service or without any floor.
+pub fn step_leaves_ledge(
+    server: &GameServer,
+    instance_id: u32,
+    zone_id: u32,
+    world_z: f32,
+    x: f32,
+    y: f32,
+) -> bool {
+    matches!(
+        crate::systems::ai::collision::ground_height_probe(
+            server,
+            instance_id,
+            x,
+            y,
+            world_z,
+            crate::systems::ai::collision::GROUND_PROBE_UP,
+            crate::systems::ai::collision::GROUND_PROBE_DOWN,
+        ),
+        Some(Some(g)) if g < world_z - walker_max_drop(zone_id)
+    )
+}
+
 /// [`reference_height`] with the zone's ground: an NPC that walks (not flying, not holding /
 /// idling at its spawner) stands on the physics ground (static geometry + terrain, the
 /// collision service) under its position, like the zone's NPC living entities; the C#

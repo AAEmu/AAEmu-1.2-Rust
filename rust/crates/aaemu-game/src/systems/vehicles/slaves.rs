@@ -6095,7 +6095,11 @@ mod summon_hull_overlap_tests {
         StaticInstance {
             model: Arc::new(ModelPhys {
                 path: "test/box.cgf".into(),
-                parts: vec![ModelPart { slot: 0, geom: g }],
+                parts: vec![ModelPart {
+                    slot: 0,
+                    geom: g,
+                    frame: None,
+                }],
                 blob_bytes: 0,
             }),
             pos: center,

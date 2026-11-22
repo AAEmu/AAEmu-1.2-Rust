@@ -348,6 +348,11 @@ fn fallback_path(
     if res_list.last() != Some(&target) {
         res_list.push(target);
     }
+    let instance_id = c.obj.transform().instance_id;
+    if let Some(r) = walkable_reduction(c.server, instance_id, &res_list, 10) {
+        c.ai.path_node.found_path = r;
+        return Some(res_list.len());
+    }
     match geo.reduce_path(&res_list, 10) {
         Ok(r) => c.ai.path_node.found_path = r,
         Err(GeoError) => {
@@ -359,6 +364,71 @@ fn fallback_path(
         }
     }
     Some(res_list.len())
+}
+
+/// `ReducePath` for a server with the collision service: from each kept node, skip ahead to the
+/// farthest of the next `max_node_skip` nodes that a walker reaches in a straight line
+/// ([`straight_walk_is_clear`]). The C# skip only tested the slope and the forbidden areas, so
+/// in the indoor waypoint graphs (Howling Abyss) the 10-node skip cut the stairs from a
+/// corridor up to a platform and the chaser walked into the wall under the platform (deviation,
+/// see `PORTING.md`). `None` without the collision service (the caller keeps `ReducePath`).
+fn walkable_reduction(
+    server: &GameServer,
+    instance_id: u32,
+    found: &[Vec3],
+    max_node_skip: usize,
+) -> Option<std::collections::VecDeque<Vec3>> {
+    super::collision::phys_world(server, instance_id)?;
+    let mut res = std::collections::VecDeque::new();
+    let mut start = 0usize;
+    while start < found.len() {
+        res.push_back(found[start]);
+        let last = (start + max_node_skip).min(found.len() - 1);
+        let next = (start + 1..=last)
+            .rev()
+            .find(|&end| {
+                end == start + 1
+                    || straight_walk_is_clear(server, instance_id, found[start], found[end])
+            })
+            .unwrap_or(start + 1);
+        start = next;
+    }
+    Some(res)
+}
+
+/// Whether a walker gets from `a` to `b` in a straight line: no wall in the way and a floor
+/// every metre that is neither a step up beyond the probe's reach nor a drop deeper than one
+/// (stairs and ramps pass, a ledge or a wall under a platform does not).
+fn straight_walk_is_clear(server: &GameServer, instance_id: u32, a: Vec3, b: Vec3) -> bool {
+    use super::collision::{ground_height_probe, walk::walk_blocked, GROUND_PROBE_UP};
+
+    let distance = (b.x - a.x).hypot(b.y - a.y);
+    let samples = distance.ceil().max(1.0) as u32;
+    let mut z = a.z;
+    let mut from = [a.x, a.y, a.z];
+    for i in 1..=samples {
+        let t = i as f32 / samples as f32;
+        let (x, y) = (a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+        match ground_height_probe(
+            server,
+            instance_id,
+            x,
+            y,
+            z,
+            GROUND_PROBE_UP,
+            GROUND_PROBE_UP,
+        ) {
+            Some(Some(h)) => z = h,
+            Some(None) => return false,
+            None => return true,
+        }
+        let to = [x, y, z];
+        if walk_blocked(server, instance_id, from, to) == Some(true) {
+            return false;
+        }
+        from = to;
+    }
+    (z - b.z).abs() <= GROUND_PROBE_UP
 }
 
 #[cfg(test)]

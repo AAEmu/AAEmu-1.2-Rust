@@ -1083,6 +1083,7 @@ mod tests {
             parts: vec![ModelPart {
                 slot: phys_slot::DEFAULT,
                 geom: geom.clone(),
+                frame: None,
             }],
             blob_bytes: 0,
         });

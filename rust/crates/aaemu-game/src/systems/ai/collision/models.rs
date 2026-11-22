@@ -36,6 +36,58 @@ pub struct ModelPart {
     /// [`phys_slot`].
     pub slot: usize,
     pub geom: Arc<PhysGeometry>,
+    /// The orientation of the part in the model frame (`pe_geomparams.q`) when its node chain
+    /// turns it ([`node_frame`]).
+    pub frame: Option<PartFrame>,
+}
+
+/// A part's orientation in the model frame (`pe_geomparams.q`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartFrame {
+    pub q: aaemu_physics::math::Quat,
+}
+
+/// The rotation of a CGF node transform composed with its parents' (`tm[4][4]`, row vectors;
+/// [`cgf::node_world_tm`]); `None` when it does not turn the node.
+///
+/// Only the rotation is applied. The node translations and scales of the 1.2 models are
+/// exporter leftovers: LOD nodes sit 36 m beside the root, proxies are offset in centimetres,
+/// `mari_oscarprop02.cgf` scales its proxy to 0.54, and applying them moved those proxies off
+/// their models (spawn floors lost in main_world). The rotation is needed: Howling Abyss's
+/// `sal_temple_brige02.cgf` keeps its physics proxy under a root node turned by 90 degrees, and
+/// only the turned proxy matches the dungeon's navigation graph (2 180 of its 2 198 walkable
+/// points on a floor, 2 114 without) and its NPC spawns (`real_spawn_floor_audit`: all 253
+/// Greater and 213 Normal Howling spawns and all 125 Sal Temple spawns on a floor, from
+/// 247 / 210 / 111).
+pub fn node_frame(tm: &[f32; 16]) -> Option<PartFrame> {
+    use aaemu_physics::math::{Mat33, Quat, Vec3};
+    let row = |i: usize| Vec3::new(tm[4 * i], tm[4 * i + 1], tm[4 * i + 2]);
+    let len = |v: Vec3| (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+    let scale = [len(row(0)), len(row(1)), len(row(2))];
+    if scale.iter().any(|s| *s <= f32::EPSILON) {
+        return None;
+    }
+    // Row vectors (`v' = v * M`): the column-vector rotation is the transpose of the
+    // normalised rows.
+    let m = |r: usize, c: usize| tm[4 * r + c] / scale[r];
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    if (0..3).all(|r| (0..3).all(|c| near(m(r, c), f32::from(r == c)))) {
+        return None;
+    }
+    let r = Mat33::from_array([
+        m(0, 0),
+        m(1, 0),
+        m(2, 0),
+        m(0, 1),
+        m(1, 1),
+        m(2, 1),
+        m(0, 2),
+        m(1, 2),
+        m(2, 2),
+    ]);
+    Some(PartFrame {
+        q: Quat::from_mat33(&r),
+    })
 }
 
 /// The physics of one model file.
@@ -86,6 +138,7 @@ pub fn load_model(path: &str, data: &[u8]) -> Result<Option<ModelPhys>, String> 
         bytes += b.blob.len();
         parts.push(ModelPart {
             slot: b.slot,
+            frame: node_frame(&b.node_world_tm),
             geom: Arc::new(PhysGeometry {
                 geom: l.geom.into_arc(),
                 inertia: l.header.inertia,

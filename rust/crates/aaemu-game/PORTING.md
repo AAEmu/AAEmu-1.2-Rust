@@ -1625,7 +1625,8 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   of the trees sit on the terrain with it, 23 % with y-major).
 * **Models** (`collision::{cgf,models}`): every `MeshPhysicsData` slot of a node's mesh through
   `LoadPhysGeometry` (blobs that share the render mesh get its positions / u16 indices / subset
-  material ids); node transforms are not applied (`AddPhysGeom` 0x300400D0 does not). Material
+  material ids). `AddPhysGeom` 0x300400D0 applies no node transform; the server turns a part
+  by its node chain's rotation (deviation, see the Howling Abyss follow-up entry). Material
   mappings / surface types are not loaded (hits report surface −1 / 0).
 * **Doodads** (`collision::objects`): model class by prefix (`sub_39451CE0`: `cgf://`,
   `vegetation://`, `cga://`, `prefab://` = the Brush objects of the prefab library; else no geometry)
@@ -3758,6 +3759,49 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     184.6 m surface), Godfrey's room and the Wailing Ranch approach under water, so players got
     a breath meter and could drown there. Other worlds keep the heuristic.
   * `NpcControlEffect` logs at debug, since area-wide scripts apply it to every matching NPC.
+* systems::npcs / ai (Howling Abyss follow-up, 2026-11-21): five tester reports after #157.
+  - **Bridge collision (first corridor stairs).** `sal_temple_brige02.cgf` keeps its physics
+    proxy under a root node turned by 90 degrees. The loader ignored node transforms, so the
+    stairs from the first corridor up to the entrance platform and the platform itself had no
+    collision. Walkers took the floor underneath and went inside the platform.
+    **Deviation:** `collision::models::node_frame` turns each static brush / vegetation part
+    by the rotation of its node chain (`cgf::node_world_tm`), applied as `pe_geomparams.q`.
+    Node translations and scales stay unapplied. The 1.2 models carry exporter leftovers
+    there: LOD nodes 36 m beside the root, proxies offset in centimetres, and
+    `mari_oscarprop02.cgf` scales its proxy to 0.54. Applying them cost 60 main_world spawn
+    floors and broke `real_client_floor_fixes_stand_on_a_collision_floor`. Doodad and house
+    shapes are unchanged. Measured with the gated `real_spawn_floor_audit`: 27 149 to 27 174
+    of 29 147 spawns on a floor. Both Howling Abyss worlds and Sal Temple are now 100 %, and
+    main_world goes from 23 623 to 23 625. 2 180 of the 2 198 Greater Howling waypoints stand
+    on the collision floor, against 2 114 before.
+  - **Indoor routes.** The bai forbidden areas are 2D outlines of the outdoor triangulation.
+    Every indoor waypoint (navType 4) of the Howling Abyss lies inside the outline of the
+    terrain under the dungeon, so `CheckImpossibleWalk` rejected all of them and A* found no
+    indoor route. **Deviation:** A* tests only triangle nodes against forbidden areas. With the
+    collision service, `geodata::fallback_path` skips ahead only to route nodes a walker
+    reaches in a straight line (`walkable_reduction`: no wall, a floor every metre within the
+    2 m probe). The C# `ReducePath` skip (10 nodes, slope and forbidden-area test only) cut the
+    stairs and sent the corridor mobs into the wall under the platform. Without collision the
+    C# `ReducePath` remains.
+  - **Chasers at a ledge.** A chasing walker whose next step lands on a floor deeper than
+    `walker_max_drop` below it (`npc::step_leaves_ledge`) stays at the edge. After 3 s it drops
+    the victim from its aggro table and returns. **Deviation:** the C# kept such a walker at its
+    height (or took a navigation height) and it walked through the air. The Knights on the
+    walkway above the Medusa room followed players who jumped down that way.
+  - **Medusa pack help calls.** `aggro_link_help_dist` is horizontal. The Medusa pack (30 m)
+    answered the Knights fighting on the walkway 15 m above its room. The #157 floor rule for
+    these templates (3 m, `howling_floor_bound`) now applies to help calls as well.
+  - **Viboros's chase range.** `BigMonsterAttack` falls back to `PickSkillAndUseIt` when no
+    combat skill is ready, and that sets the weapon range from the skill it picked. Viboros
+    kept the 30 m of a ranged pick and stood 15 m from the party for the rest of the fight.
+    **Deviation:** the big-monster fallback no longer changes the chase range.
+  - **Single-ticket self loops.** The C# ticket check limits only events with more than one
+    ticket. Six authored events repeat themselves with a single ticket (Musperosa's Hellfire
+    Breath 5793, plots 125, 184, 552, 558 and 1430), so the plot never ended and Musperosa
+    stood casting in the centre of her room. **Deviation:** a single-ticket event does not
+    schedule itself again.
+  Tests: `npcs::howling_nav_tests::*` (gated by `AAEMU_COMPACT_DB`; the ground tests also by
+  `AAEMU_GAME_PAK`) and `ai::collision::cgf::tests::physics_node_takes_the_rotation_of_its_parent_chain`.
 * Palace Cellar (zone 240, `instance_sal_temple`)
   - **Entrance barrier** — Melkina's scripted departure (16600) sends Salphira's Barrier
     4580 to its authored final phase 12282. The existing 20-second timer also clears it

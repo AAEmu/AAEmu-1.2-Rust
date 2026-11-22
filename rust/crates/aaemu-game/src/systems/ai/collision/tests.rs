@@ -26,9 +26,14 @@ pub(crate) fn box_model(half: Vec3, no_collide_slot: bool) -> Arc<ModelPhys> {
     let mut parts = vec![ModelPart {
         slot: 0,
         geom: g.clone(),
+        frame: None,
     }];
     if no_collide_slot {
-        parts.push(ModelPart { slot: 1, geom: g });
+        parts.push(ModelPart {
+            slot: 1,
+            geom: g,
+            frame: None,
+        });
     }
     Arc::new(ModelPhys {
         path: "test/box.cgf".into(),

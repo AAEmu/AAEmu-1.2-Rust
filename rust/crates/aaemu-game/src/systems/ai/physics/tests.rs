@@ -639,6 +639,7 @@ fn cryphysics_helm_cannot_push_a_hull_up_a_coastal_brush() {
                     parts: vec![ModelPart {
                         slot: phys_slot::DEFAULT,
                         geom,
+                        frame: None,
                     }],
                     blob_bytes: 0,
                 }),
