@@ -561,6 +561,23 @@ pub(crate) fn good_buff_effects(server: &crate::server::GameServer, effects: &[u
         .collect()
 }
 
+/// A `use_origin_source` clout of a doodad that an NPC's skill summoned (its owner unit), run
+/// with that NPC as the caster. The NPC is the origin source: the area's target relation and
+/// its effects' source are the NPC's, not the faction-less doodad's. With the doodad as the
+/// caster a Hostile area hit every unit, the summoner included (Miasma's 3884 on the Putrid
+/// Demon itself), and a damage effect scaled by the doodad's zero DPS. Such an area also stays
+/// at its own doodad: the 4 m doodad lookup around the caster could move a Poison Belch
+/// placed under the victim back to whatever prop stood beside the NPC.
+pub(crate) fn npc_origin_clout(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    f: &DoodadFuncClout,
+) -> bool {
+    f.use_origin_source
+        && caster
+            .is_some_and(|c| c.as_npc().is_some() && c.obj_id() == ctx.doodad.data().owner_obj_id)
+}
+
 fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncClout) {
     tracing::trace!(
         "DoodadFuncClout : Duration {}, Tick {}, BuffId {}, NextPhase {}, AoeShapeId {}",
@@ -588,7 +605,20 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // The Cellar flame follows the brazier's phase, even when the bucket is used
     // beside a different prop. Phase changes must remove the previous fire area.
     let palace_flame = matches!(template_id, 4109 | 4741) && f.buff_id == 2783;
+    // An NPC skill summoned this doodad, and the clout uses that NPC as its source
+    // (Kroloal Cradle's Miasma, Poison Belch and Toxic Globe). See `npc_origin_clout`.
+    // The encounter areas handled above keep their own caster and payload rules (the
+    // Burnt Castle Howl ward is summoned by its marker NPC, and its protection runs as
+    // the doodad).
+    let npc_origin = !(is_fish_school
+        || howl_ward
+        || howling_hazard
+        || hadir_hazard
+        || frozen_zone
+        || palace_flame)
+        && npc_origin_clout(ctx, caster, f);
     let owner = if f.use_origin_source
+        && !npc_origin
         && !is_fish_school
         && !howl_ward
         && !howling_hazard
@@ -633,7 +663,13 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     }
     let trigger_caster = match caster {
         Some(c) if hadir_hazard || frozen_zone => c,
-        Some(c) if c.as_player().is_some() || (howling_hazard && c.as_npc().is_some()) => c,
+        Some(c)
+            if c.as_player().is_some()
+                || npc_origin
+                || (howling_hazard && c.as_npc().is_some()) =>
+        {
+            c
+        }
         _ => ctx.obj(),
     };
     let inside_buff_id = server
@@ -655,11 +691,17 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     };
     trigger.player_sphere = howl_ward;
     trigger.inside_buff_id = inside_buff_id;
-    // Miasma and spear injuries last beyond the contact that applies them.
-    // Fire Pillar expires between hits while a victim remains in the flame.
-    trigger.contact_buff = matches!(f.id, 1139 | 1295 | 1334 | 1336) || f.buff_id == 3996;
+    // Miasma and spear injuries last beyond the contact that applies them, and so
+    // does a Fire Pillar hit. A unit inside Miasma or a spear window keeps its buff.
+    // Fire Pillar (300 ms) hits once per entry, as in the C#: each flame phase of a
+    // jet is a new trigger, so a player who stays on the grate is hit once per burst.
+    let reapplied_contact = matches!(f.id, 1139 | 1295 | 1334 | 1336);
+    trigger.contact_buff = reapplied_contact || f.buff_id == 3996;
+    trigger.reapply_while_inside = reapplied_contact;
+    // The Cradle pool hazards: Toxicity (green pool), Cursed Blood (red pools),
+    // Poison (stepping stone pools) and Lava (Arkanis's room).
     trigger.requires_submersion = ctx.world.template.name == "instance_cradle_of_destruction"
-        && matches!(f.buff_id, 4483 | 4683);
+        && matches!(f.buff_id, 3813 | 4362 | 4483 | 4683);
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
         // Deviation: a clout without an inside buff (401 of the 447 clouts with effects) never
@@ -669,6 +711,18 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
         // These encounter clouts carry their payload without an inside buff.
         None if hadir_hazard || frozen_zone || matches!(f.id, 1415 | 1542) => {
+            HashMap::from([(0, f.effects.clone())])
+        }
+        // An NPC's hazard picks its side through the relation, so its damage and debuffs
+        // reach the NPC's enemies (a Friendly one its allies). An Any / Others area would
+        // also take the NPC and its allies and stays limited to its beneficial buffs.
+        None if npc_origin
+            && matches!(
+                f.target_relation,
+                area_trigger::skill_target_relation::FRIENDLY
+                    | area_trigger::skill_target_relation::HOSTILE
+            ) =>
+        {
             HashMap::from([(0, f.effects.clone())])
         }
         None => HashMap::from([(0, good_buff_effects(server, &f.effects))]),

@@ -314,6 +314,10 @@ pub struct AreaTrigger {
     pub inside_buff_id: Option<u32>,
     /// A contact effect lasts for its buff template's duration after leaving the shape.
     pub contact_buff: bool,
+    /// A contact buff that expired is applied again while the unit is still inside. Without
+    /// it a contact buff hits once per entry (and again on the next trigger the doodad's
+    /// phase cycle creates).
+    pub reapply_while_inside: bool,
     /// A water hazard only affects units below the surface of an actual pool.
     pub requires_submersion: bool,
     /// `EffectsPerBuff` (buff id → effect template ids).
@@ -540,9 +544,13 @@ impl AreaTrigger {
             .filter(|n| old.iter().all(|o| !std::ptr::eq(o.core(), n.core())))
             .cloned()
             .collect();
-        // A short contact debuff can expire while a unit remains in a fire jet.
-        // Reapply after expiry without resetting the buff's damage tick.
-        let entering = if self.contact_buff { &current } else { &new };
+        // A contact debuff that expires while a unit remains inside is reapplied only for
+        // the triggers that ask for it. The others act on entry.
+        let entering = if self.contact_buff && self.reapply_while_inside {
+            &current
+        } else {
+            &new
+        };
         for unit in entering {
             self.on_enter(server, unit);
             debug!(

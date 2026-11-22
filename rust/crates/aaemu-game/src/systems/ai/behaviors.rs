@@ -2873,6 +2873,11 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
             if name.starts_with("aipath_alistair") {
                 c.ai.path_handler.ai_path_speed = npc::running_move_speed(c.server, &c.npc);
                 c.ai.path_handler.ai_path_actor_flags = Some(4);
+            } else if walks_scene_routes(cmd.cmd_set_id) {
+                // The route files carry no `Speed` point, so the C# default of 1 m/s applied:
+                // well below the actor's own walk (1.8 m/s for the human model 18), which
+                // the client showed as a slow, sliding walk. A `Speed` point still overrides.
+                c.ai.path_handler.ai_path_speed = npc::walking_move_speed(c.server, &c.npc);
             }
             if cmd.param1 == 1 {
                 // An empty Param2 walked the current route (see above): keep its name.
@@ -2909,14 +2914,11 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
         Cmd::Timeout => {
             c.ai.ai_time_out = cmd.param1;
             let wait = i64::from(c.ai.ai_time_out);
-            // The last-room cinematics give the actor three seconds to play
-            // its cue before the next command removes it.
-            c.ai.current_command_run_time_ms =
-                if matches!(cmd.cmd_set_id, 102 | 103 | 106 | 107 | 189 | 282) {
-                    wait * 1000
-                } else {
-                    wait
-                };
+            c.ai.current_command_run_time_ms = if timeout_in_seconds(cmd.cmd_set_id) {
+                wait * 1000
+            } else {
+                wait
+            };
         }
         Cmd::Other(v) => {
             tracing::error!("AI command {v}: NotSupportedException");
@@ -2926,6 +2928,30 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
     if c.ai.current_command_run_time_ms == 0 {
         c.ai.current_command_run_time_ms = -1000;
     }
+}
+
+/// Command sets whose `Timeout` rows are seconds, not the C#'s milliseconds. The authored
+/// values are dialogue and cue pauses (3, 10, 12.5, 27; other rows even read "5 sec"); as
+/// milliseconds a scripted actor ran its whole scene at once, or was removed before its cue.
+fn timeout_in_seconds(cmd_set_id: u32) -> bool {
+    matches!(
+        cmd_set_id,
+        // Burnt Castle Armory and Howling Abyss final-room cinematics.
+        102 | 103 | 106 | 107 | 189 | 282
+        // Kroloal Cradle: Metamoze's cut-scene trigger (207), Kuwon's squads in Sprigg's,
+        // Siranus's and Metamoze's rooms with Princess Surya (222-237), Karim's lines (240)
+        // and the statue barriers (260, 263).
+        | 207 | 222..=237 | 240 | 260 | 263
+    )
+}
+
+/// Command sets whose `FollowPath` routes are walked at the actor's own walking pace: the
+/// Kroloal Cradle scenes of Kuwon's squads (human model 18) and Princess Surya (model 19) in
+/// Sprigg's, Siranus's and Metamoze's rooms. In Siranus's room the authored pauses (cast
+/// times aside) bring the commander and both soldiers to their vanish (19652) together at
+/// 1.8-1.9 m/s, the human walk. Siranus's shards (231-233, model 315) keep the default.
+fn walks_scene_routes(cmd_set_id: u32) -> bool {
+    matches!(cmd_set_id, 222..=224 | 228..=230 | 234..=237)
 }
 
 fn spawning_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
@@ -3297,14 +3323,30 @@ fn big_monster_attack_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     set_in_battle(c.server, &c.obj, true);
     super::npc_events::on_combat_started(c);
     c.ai.param = template_ai_params(c);
-    let template_id = c.npc.data().unit.template_id;
-    if let Some(skill) = matches!(template_id, 11110 | 11111 | 11358 | 11363 | 11582)
-        .then(|| ai_skills::new_skill(c, template_scalars(c).base_skill_id as u32))
-        .flatten()
+    // A big monster's chase range is that of its base attack when the attack reaches beyond
+    // melee. The combat-skill picks never set it, and the fallback pick keeps the range it
+    // found (see `big_monster_attack_tick`), so a ranged monster otherwise closed to
+    // `attack_start_range_scale` metres: Element Fanatic Blangar's bow (10431, 15 m) and the
+    // Maddened Shaman's Flame Cluster (19981, 20 m) were used from melee range in Kroloal
+    // Cradle, like Sharpwind's Sniper, Fortuneteller, Illusionist and Colossus before them.
+    // Dungeon bosses keep closing in: Calleil (21084, 15 m) follows his victim through the
+    // north gate and Musperosa round her room.
+    let boss = npc::template(c.server, &c.npc).is_some_and(|t| t.npc_grade_id == BOSS_GRADE);
+    if let Some(skill) = ai_skills::new_skill(c, template_scalars(c).base_skill_id as u32)
+        .filter(|skill| !boss && ranged_base_attack(&skill.template))
     {
         set_weapon_range(c, k, &skill);
     }
     c.st(k).enter = true;
+}
+
+/// `npcs.npc_grade_id` of the dungeon bosses (Hieronimus, Sorvell, Velarre, Calleil,
+/// Musperosa, Viboros).
+const BOSS_GRADE: u8 = 5;
+
+/// A base attack whose range does not come from a weapon and reaches beyond melee range.
+fn ranged_base_attack(t: &crate::systems::skills::data::SkillTemplate) -> bool {
+    t.id != 2 && t.weapon_slot_for_range_id <= 0 && t.max_range as f32 > MELEE_ATTACK_RANGE
 }
 
 fn big_monster_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
@@ -3688,6 +3730,24 @@ mod tests {
                 assert_eq!(yaw, 0.0);
             }
         }
+    }
+
+    #[test]
+    fn big_monster_chase_range_follows_only_a_ranged_base_attack() {
+        use crate::systems::skills::data::SkillTemplate;
+        let skill = |id, max_range, weapon_slot_for_range_id| SkillTemplate {
+            id,
+            max_range,
+            weapon_slot_for_range_id,
+            ..Default::default()
+        };
+        // Blangar's bow and the Maddened Shaman's Flame Cluster.
+        assert!(ranged_base_attack(&skill(10431, 15, -1)));
+        assert!(ranged_base_attack(&skill(19981, 20, -1)));
+        // Melee skill 2 (25 m in the data) takes its range from the weapon.
+        assert!(!ranged_base_attack(&skill(2, 25, 15)));
+        assert!(!ranged_base_attack(&skill(100, 20, 1)));
+        assert!(!ranged_base_attack(&skill(101, 4, -1)));
     }
 
     #[test]

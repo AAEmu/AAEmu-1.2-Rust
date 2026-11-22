@@ -578,19 +578,22 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
     let stats = load_cradle(&server, &conn);
     eprintln!("cradle load: {stats:?}");
 
-    assert_eq!(stats.npc_entries, 124, "77 kept + 36 event + 11 plain rows");
+    assert_eq!(stats.npc_entries, 118, "71 kept + 36 event + 11 plain rows");
     assert_eq!(stats.npc_duplicates, 0);
     assert_eq!(stats.npc_missing_templates, 0);
     assert_eq!(stats.npc_event_spawners, 36);
     assert_eq!(
-        stats.npc_event_only_spawners_skipped, 5,
-        "the 5 inactive spawners the existing plain rows already skip"
+        stats.npc_event_only_spawners_skipped, 0,
+        "no plain statue row reaches an inactive statue spawner"
     );
     assert_eq!(stats.npc_cutscene_spawners_skipped, 0);
-    assert_eq!(stats.doodad_entries, 95);
+    assert_eq!(
+        stats.doodad_entries, 201,
+        "78 + 114 fire jets + 9 pool hazards"
+    );
     assert_eq!(stats.doodad_duplicates, 0);
     assert_eq!(stats.doodad_missing_templates, 0);
-    assert_eq!(stats.doodad_spawners, 95);
+    assert_eq!(stats.doodad_spawners, 201);
 
     // Every NpcSpawnerSpawnEffect target placed in this world's level resolves to its event row.
     let m = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
@@ -643,7 +646,7 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
 
     // The doodads spawn (their phase init is asynchronous but the placements are synchronous).
     m.spawn_doodads(&server);
-    assert_eq!(world.all_doodads().len(), 95);
+    assert_eq!(world.all_doodads().len(), 201);
     let gate = find_doodad(&world, 5726);
     assert_eq!(gate.data().func_group_id, 14677, "closed gate phase");
     let exit = find_doodad(&world, 5762);
@@ -914,9 +917,20 @@ async fn real_data_cradle_statue_sphere_wakes_the_four_statues() {
     server.systems.quests.spheres.set_areas(areas);
 
     let _player = place_player(&server, &world, 1, 179.866, 593.683, 174.052);
+    // A second player waits in the statue room. Before the sphere wakes them, no statue
+    // stands there: the level has only the four inactive statue spawners, so the four
+    // death skills the gate counts all come from the awakened statues.
+    let _waiting = place_player(&server, &world, 2, 185.0, 510.0, 173.3);
     for _ in 0..6 {
         crate::systems::npcs::spawn_manager::active_region_tick(&server);
     }
+    let statue_count = || {
+        [11163, 11181, 11183, 11184]
+            .into_iter()
+            .map(|unit| npcs_of(&world, unit).len())
+            .sum::<usize>()
+    };
+    assert_eq!(statue_count(), 0, "no statue stands before the sphere");
     let trigger = npcs_of(&world, 11268);
     assert_eq!(trigger.len(), 1, "the plain trigger row places 11268");
 
@@ -962,6 +976,7 @@ async fn real_data_cradle_statue_sphere_wakes_the_four_statues() {
         npcs_of(&world, 11268).is_empty(),
         "skill 18270 kills the invisible statue"
     );
+    assert_eq!(statue_count(), 4, "only the four awakened statues");
 
     for (index, npc) in statues.iter().enumerate() {
         npc.data().unit.hp = 0;
@@ -1203,4 +1218,233 @@ async fn real_data_cradle_spike_pulse_damages_and_leaves_the_injury() {
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     assert_eq!(spear.data().func_group_id, 14142);
     assert!(player.data().unit.buffs.check_buff(3999));
+}
+
+#[path = "cradle_event_tests.rs"]
+mod events;
+
+/// A placed fire jet's flame phase (5250: timer 13551 -> clout 13552, 7 s each) applies Fire
+/// Pillar 3996 (300 ms, fixed fire damage 1500-2000 per tick) once to a player who steps into
+/// it. Standing on the grate does not renew it: the next hit comes with the jet's next flame
+/// phase, which is a new area trigger. A player 4 m away is never hit.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_cradle_fire_jet_flame_hits_once_per_entry() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_cradle(&server, &conn_of(&db));
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let jet = find_doodad(&world, 5250);
+    let pos = jet.data().transform;
+    let player = place_player(&server, &world, 1, pos.x + 0.3, pos.y, pos.z);
+    let bystander = place_player(&server, &world, 2, pos.x + 4.0, pos.y, pos.z);
+    super::doodad::manager::do_change_phase(&server, &world, &jet, None, 13552);
+    assert_eq!(jet.data().func_group_id, 13552, "flame phase");
+    let tick = |n: usize| {
+        let server = server.clone();
+        async move {
+            for _ in 0..n {
+                server.systems.npcs.area_triggers.tick(&server);
+                tokio::time::sleep(std::time::Duration::from_millis(210)).await;
+            }
+        }
+    };
+    // Entry: one application of the 300 ms Fire Pillar.
+    tick(3).await;
+    let after_entry = player.data().unit.hp;
+    assert!(after_entry < 10_000, "the flame burns on entry");
+    assert!(
+        !player.data().unit.buffs.check_buff(3996),
+        "the hit has expired"
+    );
+    // About 2 s more on the grate, still in the same flame phase: no further hit.
+    tick(10).await;
+    assert_eq!(jet.data().func_group_id, 13552, "still the same flame");
+    assert_eq!(
+        player.data().unit.hp,
+        after_entry,
+        "no second hit while standing"
+    );
+    assert_eq!(bystander.data().unit.hp, 10_000, "4 m away is safe");
+}
+// ---------------------------------------------------------------------------------------------
+// World and hazards (tester follow-up 2026-11-22)
+// ---------------------------------------------------------------------------------------------
+
+/// The Kitchen of Fearful Tastes has one Putrid Demon: the level spawner 88939 (compact
+/// 12784, NPC 11552 "placed in the Kitchen") with its patrol `AIPath_264_nopeople_496`. The
+/// 1.2-era 11357 row 0.7 m away was a second demon on the same spot.
+#[test]
+fn cradle_kitchen_has_one_patrolling_putrid_demon() {
+    let defs = npc_spawn_defs();
+    let demons: Vec<_> = defs
+        .iter()
+        .filter(|d| {
+            let p = &d.base.position;
+            matches!(d.base.unit_id, 11357 | 11552 | 12389)
+                && d.npc_spawner_ids.is_empty()
+                && (p.x - 710.0).hypot(p.y - 744.0) < 10.0
+        })
+        .collect();
+    assert_eq!(demons.len(), 1, "one demon in the Kitchen");
+    assert_eq!(demons[0].base.unit_id, 11552);
+    assert_eq!(demons[0].base.follow_path, KITCHEN_DEMON_PATH);
+}
+
+const KITCHEN_DEMON_PATH: &str = "AIPath_264_nopeople_496";
+
+/// The statue room's gate counts four statue death skills (18263, `act_count` 4). The level
+/// has only the four inactive statue spawners 88999-89002 that sphere 1546 wakes, so no
+/// statue may start as a plain row: the five 1.2-era 11163 rows let the gate open after any
+/// four of nine statues.
+#[test]
+fn cradle_statue_room_has_only_the_four_awakened_statues() {
+    let defs = npc_spawn_defs();
+    for unit in [11163, 11181, 11183, 11184] {
+        let rows: Vec<_> = defs.iter().filter(|d| d.base.unit_id == unit).collect();
+        assert_eq!(rows.len(), 1, "statue {unit}");
+        assert_eq!(
+            rows[0].npc_spawner_ids.len(),
+            1,
+            "statue {unit} is an event row"
+        );
+    }
+}
+
+/// The fire jets, pool hazards and rowboats are the level placements of the Kroloal Cradle
+/// editor data (`level_design/cells/000_000/doodad.g`, `zone/264/editor/slave.xml`). Each jet
+/// sits on the r208022 floor (see the collision real-data test). The jets PR #155 inferred
+/// before the Dreadkiss Sitting Room, and the area fire trap 5271, are not in the level.
+#[test]
+fn cradle_level_jets_hazards_and_boats_are_the_authored_placements() {
+    let defs = doodad_spawn_defs();
+    let count = |template: u32| defs.iter().filter(|d| d.base.unit_id == template).count();
+    assert_eq!(count(5246), 30, "Fire Pillar (3 s)");
+    assert_eq!(count(5249), 37, "Fire Pillar (5 s)");
+    assert_eq!(count(5250), 47, "Fire Pillar (7 s)");
+    assert_eq!(count(5271), 0, "no area fire trap in the level");
+    let jets: Vec<_> = defs
+        .iter()
+        .filter(|d| matches!(d.base.unit_id, 5246 | 5249 | 5250))
+        .map(|d| d.base.position)
+        .collect();
+    let in_box = |p: &crate::data::world_templates::WorldSpawnPosition,
+                  (x0, y0, x1, y1): (f32, f32, f32, f32)| {
+        p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1
+    };
+    // The four jet fields: the tunnel to Bedlam Quarters, the passage after the Kitchen, and
+    // the two fields of the northern passage.
+    for (field, area, expected) in [
+        ("Bedlam tunnel", (180.0, 780.0, 230.0, 840.0), 41),
+        ("after the Kitchen", (595.0, 740.0, 650.0, 800.0), 42),
+        ("northern passage", (750.0, 880.0, 795.0, 930.0), 27),
+        ("northern passage west", (730.0, 920.0, 745.0, 932.0), 4),
+    ] {
+        let n = jets.iter().filter(|p| in_box(p, area)).count();
+        assert_eq!(n, expected, "{field} jets");
+    }
+    assert!(
+        !jets.iter().any(|p| in_box(p, (540.0, 830.0, 575.0, 850.0))),
+        "no jet before the Dreadkiss Sitting Room"
+    );
+
+    // Pool hazards: template, authored position, and the buff the clout applies.
+    for (template, x, y, z) in [
+        (5055, 409.576, 835.929, 169.642), // Toxicity 3813, Dreadkiss pool
+        (5439, 561.262, 510.808, 169.128), // Cursed Blood 4362, corridor before the stairs
+        (5439, 654.728, 550.134, 101.63),  // Cursed Blood 4362, stair room
+        (5889, 652.027, 516.924, 89.891),  // Cursed Blood 4362, stair room
+        (5875, 183.417, 614.619, 163.462), // Poison 4483, stepping stones
+        (5877, 180.969, 567.052, 161.476), // Poison 4483, stepping stones
+        (5878, 319.915, 508.742, 161.476), // Poison 4483, Soulscour Bathroom
+        (5885, 316.32, 825.412, 142.59),   // Poison 4483, Death's Door
+        (5893, 656.929, 391.709, 21.8444), // Lava 4683, Arkanis's room
+    ] {
+        let n = defs
+            .iter()
+            .filter(|d| {
+                let p = &d.base.position;
+                d.base.unit_id == template
+                    && near(p.x, x, 0.001)
+                    && near(p.y, y, 0.001)
+                    && near(p.z, z, 0.001)
+            })
+            .count();
+        assert_eq!(n, 1, "hazard {template} at ({x}, {y}, {z})");
+    }
+    for template in [5885, 5893] {
+        assert_eq!(count(template), 1, "one {template} placement");
+    }
+
+    // Rowboats: the Dreadkiss pool and the red-water corridor before the stair room.
+    let text =
+        std::fs::read_to_string(world_dir().join("slave_spawns.json")).expect("slave_spawns");
+    let boats = parse_list(
+        &text,
+        crate::systems::npcs::doodad::spawner::SimpleSpawnerDef::from_json,
+    )
+    .expect("slave_spawns parses");
+    let boats: Vec<_> = boats
+        .iter()
+        .map(|b| (b.base.unit_id, b.base.position))
+        .collect();
+    assert_eq!(boats.len(), 2);
+    for (x, y, yaw) in [(430.083, 843.409, 87.0), (550.424, 510.19, -82.0)] {
+        assert!(
+            boats.iter().any(|(unit, p)| *unit == 15
+                && near(p.x, x, 0.001)
+                && near(p.y, y, 0.001)
+                && near(p.yaw, yaw, 0.1)),
+            "rowboat at ({x}, {y})"
+        );
+    }
+}
+
+/// The Kitchen demon's patrol is a designer path of the r208022 client's zone 264
+/// `areasmission0.bai`: a closed loop through the Kitchen that starts at the spawn.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_client_cradle_kitchen_demon_patrol_is_a_loop_from_its_spawn() {
+    let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+        return;
+    };
+    let files = ClientFileManager::from_sources(&[pak], &app_root());
+    let data = files
+        .read_file(&format!("game/worlds/{WORLD}/zone/264/areasmission0.bai"))
+        .expect("zone 264 areasmission0.bai");
+    let areas = crate::systems::ai::geodata::bai::AreasMission::read(
+        &data,
+        264,
+        crate::systems::skills::controllers::Vec3::new(0.0, 0.0, 0.0),
+        &Default::default(),
+    )
+    .expect("areas parse");
+    let path = areas
+        .designer_paths
+        .iter()
+        .find(|p| p.name == KITCHEN_DEMON_PATH)
+        .expect("the Kitchen demon's designer path");
+    assert_eq!(path.points.len(), 27);
+    let first = path.points[0];
+    let last = path.points[path.points.len() - 1];
+    assert!(
+        (first.x - 709.579).hypot(first.y - 744.144) < 1.0,
+        "{first:?}"
+    );
+    assert!((first.x - last.x).hypot(first.y - last.y) < 1.5, "a loop");
+    for p in &path.points {
+        assert!(
+            (p.x - 695.0).hypot(p.y - 744.0) < 25.0,
+            "{p:?} in the Kitchen"
+        );
+        assert!((p.z - 173.0).abs() < 1.0, "{p:?} on the Kitchen floor");
+    }
 }

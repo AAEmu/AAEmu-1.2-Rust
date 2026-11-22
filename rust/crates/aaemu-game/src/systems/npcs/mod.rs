@@ -213,6 +213,8 @@ mod burntcastle_dungeon_tests;
 #[cfg(test)]
 mod cradle_dungeon_tests;
 #[cfg(test)]
+mod cradle_skills_tests;
+#[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
 mod hadir_dungeon_tests;

@@ -791,7 +791,9 @@ async fn real_data_start_active_rule_counts_per_world() {
         vec![
             ("arche_mall_world".into(), 0, 0, 0),
             ("instance_burntcastle_armory".into(), 2, 2, 1),
-            ("instance_cradle_of_destruction".into(), 5, 0, 0),
+            // The five 'f' rows were the 1.2-era plain statue rows 11163, removed when the statue
+            // room kept only the four statues its sphere wakes (Kroloal Cradle follow-up).
+            ("instance_cradle_of_destruction".into(), 0, 0, 0),
             ("instance_cuttingwind_deadmine".into(), 0, 9, 0),
             ("instance_hadir_farm".into(), 68, 0, 0),
             ("instance_howling_abyss".into(), 0, 0, 0),

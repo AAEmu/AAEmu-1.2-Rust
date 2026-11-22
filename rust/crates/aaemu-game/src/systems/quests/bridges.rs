@@ -202,8 +202,9 @@ impl QuestSkillHooks for QuestsForSkills {
                             }
                         }
                     } else if let Some(character) = target.as_player() {
-                        // Hieronimus and Akmit's final-room skills require a playback cue.
-                        if matches!(*cinema_id, 8 | 9) {
+                        // Hieronimus, Akmit and Metamoze (Kroloal Cradle, `id_264_01`) reach the
+                        // players of their room through area skills that need a playback cue.
+                        if matches!(*cinema_id, 8 | 9 | 52) {
                             super::events::play_cinema(server, character, *cinema_id);
                         } else {
                             super::events::request_cinema(server, character, *cinema_id);

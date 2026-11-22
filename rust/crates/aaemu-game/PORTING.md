@@ -5532,6 +5532,122 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   supplies the damage source for the injury. Flame jets reapply their short damage
   buff while the player remains in range. The corridor trash and four bosses use
   single-member compact spawners to avoid loading unrelated SPAWN members.
+* systems::npcs / ai (Kroloal Cradle skills and caster AI, 2026-11-22): tester items 2, 19,
+  20, 21 and 22 after #155.
+  - **NPC-summoned origin clouts.** Miasma (18431), Poison Belch (18451, plot 405) and Toxic
+    Globe (18425, plot 397) summon doodads 5115, 5151 and 5929 with `SummonDoodad`. Their
+    clouts 1139, 1151 and 1428 have `use_origin_source`. The C# area trigger casts as the
+    doodad unless the caster is a character. The doodad has no faction, so a Hostile area
+    took every unit, the Putrid Demon included (Miasma's 3884 on the demon). Poison Belch and
+    Toxic Globe have no inside buff. Their damage effects (4065, 4166) are DPS-scaled, so the
+    burst played and did nothing. The Rust port kept only beneficial buffs from such clouts.
+    **Deviation:** `doodad::phase_funcs::npc_origin_clout` covers a `use_origin_source` clout
+    whose caster is the NPC that owns the doodad (`owner_obj_id`, set by the summon). The NPC
+    is the trigger caster, so its relation and its damage source apply. The clout stays at its
+    own doodad. The 4 m lookup around the caster could move a belch from under the victim to
+    a prop beside the demon. A Friendly or Hostile clout of this kind applies all its effects.
+    An Any / Others one keeps only beneficial buffs, because it would take the NPC and its
+    allies. The encounter areas that already have their own rules keep them: the Howling and
+    Hadir hazards, Frozen Zone, the fish schools, the Cellar flame and the Burnt Castle Howl
+    ward (summoned by its marker NPC 10815, it still runs as the doodad). Outside those, the
+    r208022 compact has 101 `use_origin_source` clouts on doodads that NPC skills summon. Of
+    the 48 without an inside buff, 46 are Friendly or Hostile and now apply their damage,
+    heal, debuff and mana-burn effects, such as Lucius's Lightning Cloud (doodad 1231) and the
+    Unstable Healing Tree (1704, heals the summoner's allies). Flame Breath (3025, damage) and
+    Anima Orb (3657, mana) are Any and stay off. The 42 clouts with an inside buff now take
+    their relation from the NPC as well. The 1.2 data gives Poison Belch no debuff. Its
+    description says the damage dealt is reduced, but plot 405 and clout 1151 carry only
+    damage effect 4065.
+  - **Ranged big monsters.** Element Fanatic Blangar (11354, bow 10431, 15 m) and the
+    Maddened Shaman (11370, Flame Cluster 19981, 20 m) use `big_monster_hold_position`. A big
+    monster's combat-skill picks never set the chase range. Since #165 the base-skill fallback
+    does not set it either. `MoveInRange` therefore stopped at `attack_start_range_scale` (0.5
+    m), and the casters came to melee range before every shot. **Deviation:**
+    `big_monster_attack_enter` sets the weapon range from the base skill when that skill is a
+    ranged attack (not skill 2, no weapon range slot, `max_range` above 4 m) and the NPC is
+    not a dungeon boss (`npc_grade_id` 5). This replaces the Sharpwind template list (11110,
+    11111, 11358, 11363, 11582), all of which meet it. The bosses keep closing in: Calleil
+    (21084, 15 m) follows a victim through his north gate and Musperosa round her room. 191
+    of 920 big-monster templates qualify, the Academy Apprentice (19981) among them.
+  Tests: `npcs::cradle_skills_tests` (gated by `AAEMU_COMPACT_DB`:
+  `real_cradle_miasma_spares_the_putrid_demon`, `real_cradle_poison_belch_bursts_on_its_victim`,
+  `real_cradle_toxic_globe_damages_its_target`,
+  `real_cradle_element_fanatic_blangar_keeps_his_bow_range`,
+  `real_cradle_maddened_shaman_casts_from_range`),
+  `doodad::phase::tests::{npc_summoned_origin_clout_casts_as_its_npc_at_its_own_doodad,
+  origin_clout_of_a_doodad_the_npc_did_not_summon_keeps_the_doodad_as_caster}` and
+  `ai::behaviors::tests::big_monster_chase_range_follows_only_a_ranged_base_attack`.
+* Kroloal Cradle events (2026-11-22, tester items 24 and 25). **Metamoze's cut scene:**
+  sphere 1969 at the boss room's entrance casts 19565. Its `NpcControlEffect` (tag 830)
+  runs command set 207 on the invisible NPC 12157: 19566 gives it the 0.5 s buff 4526,
+  whose Timeout trigger casts 19562, and the cinema effect of 19562 reaches the players
+  within 50 m with cinema 52 `id_264_01` (a 22 s scene of Metamoze and Surya in the
+  r208022 world folder `cinemas/id_264_01.xml`). Two gaps stopped it. The set's
+  `Timeout 3` before 19567 removes the NPC ran as 3 ms, so the buff died with its owner
+  before it timed out. Cinema 52 was also only recorded, like a quest cinema, so no
+  `SCPlaySequencePacket` was sent. The set's pause is now seconds and cinema 52 plays for
+  each player the skill reaches, as the Armory and Palace Cellar cues do. **The squad after
+  the kill:** 19236 spawns Kuwon (12185) and
+  two Royal Stormers (12186/12187), whose command sets 234-236 walk route files without a
+  `Speed` point. The C# default of 1 m/s is 55% of the human walk (model 18: 1.8 m/s,
+  `ai_move_speed_walk`), which the client showed as a slow, sliding walk; before #159 the
+  same pace also played the run animation. Their pauses (10, 12.5, 23.5, 27 s) also ran as
+  milliseconds, so the lines and moves ran back to back. The Cradle scene sets (Kuwon's
+  squads in Sprigg's, Siranus's and Metamoze's rooms and Princess Surya: 222-224, 228-230,
+  234-237) now walk at the actor's stance walk speed with the walk flags, and every Cradle
+  set's `Timeout` (207, 222-237, 240, 260, 263) counts seconds. **Inferred:** the walk
+  rather than the run comes from Siranus's room, where the authored pauses (cast times
+  aside) bring the commander and both soldiers to their shared vanish (19652) together at
+  1.8-1.9 m/s. Fractional pauses (6.4, 12.5, 23.5) are truncated to whole seconds because
+  `ai_commands.param1` is read as an integer. Whether every 1.2 `Timeout` row is seconds
+  (some rows read "5 sec") is open; the rule stays per command set. Tests (gated by
+  `AAEMU_COMPACT_DB`): `npcs::cradle_dungeon_tests::events::{
+  real_data_cradle_metamoze_sphere_plays_the_boss_room_cinema,
+  real_data_cradle_metamoze_squad_walks_its_scene_at_its_own_pace}`.
+* Kroloal Cradle world follow-up (2026-11-22, tests in `npcs::cradle_dungeon_tests` and
+  `ai::collision::real_data_tests::real_cradle_jets_stand_on_the_floor_and_the_rowboats_in_their_pools`).
+  The placements below are the Cradle editor files of a later client (ArcheAge Returns
+  r575 `game_pak`: `level_design/cells/000_000/doodad.g`, `zone/264/editor/slave.xml`,
+  `npc_spawners.g`), checked against the r208022 data. They replace PR #155's inferred
+  jets, pool hazards and rowboat.
+  - **Fire jets.** The level has 114 jets: 30 of 5246, 37 of 5249 and 47 of 5250, in the
+    tunnel to Bedlam Quarters (41), the passage after the Kitchen of Fearful Tastes (42)
+    and the northern passage (31). Each authored Z is the r208022 collision floor to
+    0.05 m. The inferred jets before the Dreadkiss Sitting Room and both area traps 5271
+    are not in the level and are removed. Two of them sat 1.0 to 1.2 m under the floor.
+    The 1.2 jets do damage: Fire Pillar 3996 ticks fixed fire damage 1500 to 2000.
+    A jet cycles a timer phase (fire_ground, 3/5/7 s) and a flame phase (clout 1182-1184,
+    3/5/7 s, tick 0), then the timer again. Fire Pillar now hits once per entry, as in the
+    C#. A player who stays on the grate is hit again only by the next flame phase, which
+    is a new area trigger. This replaces PR #155's rule, which reapplied the 300 ms buff
+    on every 200 ms area tick. Live, standing on a 5250 then killed an 8896 HP character
+    in about 2 s. The reapply now applies only to Miasma (clout 1139) and the spear windows
+    (1295, 1334, 1336). Their buffs (5 s, 2 s) outlast those clouts, so it never fired.
+    The Cradle pool hazards use inside buffs and are unchanged.
+  - **Pool hazards.** Each pool has its authored clout doodad. Each box top is within 2.5 m
+    of the `visareas.dat` water surface (eight of nine within 1.2 m). 5055 (Toxicity 3813)
+    is in the Dreadkiss pool. 5439 (Cursed
+    Blood 4362) is in the red-water corridor before the stair room and in the stair room
+    with 5889. 5875, 5877, 5878 and 5885 (Poison 4483) are in the stepping-stone pools.
+    5893 (Lava 4683) is in Arkanis's room. The corridor had no hazard before, so its red
+    water did nothing. All four buffs need a submerged unit, so boats and their crews are
+    clear.
+  - **Rowboats.** There are two level boats (template 15): the Dreadkiss pool landing
+    (430.083, 843.409, yaw 87°) and the red-water corridor (550.424, 510.19, yaw -82°).
+    The level Z is the pool floor. A spawner boat now keeps its X/Y and yaw and rides at
+    the water surface plus the summon keel offset (`summon_offset_z`, -0.6 m for this
+    model). Before, the boat kept its authored Z and sat on the landing rock, 0.85 m
+    above the floor, which looked like it was floating.
+  - **Kitchen Putrid Demon.** Level spawner 88939 places 11552, whose compact note is
+    "placed in the Kitchen of Fearful Tastes", with path `AIPath_264_nopeople_496`. The
+    1.2-era 11357 row 0.7 m away was a second demon. It is removed, and 11552 follows
+    that path. It is a 27-point loop in the r208022 zone 264 `areasmission0.bai` (the
+    designer patrol the server already reads for `AIPath_` names).
+  - **Statue room.** Gate 5038 opens after four Moving Stone Statue death skills (SkillHit
+    18263, `act_count` 4). The level has only the four inactive statue spawners that
+    sphere 1546 wakes (88999 to 89002). The five 1.2-era plain 11163 rows started as more
+    statues with the same death skill, so any four of nine kills opened the gate. Those
+    rows are removed.
 * systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
   (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
   has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->

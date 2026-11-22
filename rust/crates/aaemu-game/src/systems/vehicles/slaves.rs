@@ -71,6 +71,10 @@ pub mod buff {
 const BASE_WATER_DENSITY: f32 = 1.025;
 const SHIP_WATER_DENSITY_MUL: f32 = 3.0;
 
+/// How far (metres) a level boat's authored Z may be from the water surface it is put on.
+/// Further away, no pool is under the spawn and the authored height is kept.
+const LEVEL_BOAT_SURFACE_SEARCH: f32 = 5.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SummonKey {
     Owner(u32),
@@ -4258,7 +4262,22 @@ fn create_spawn_committed(
                 }
             }
             spawn_pos.z += offset_z;
-        } else if !template.is_a_boat() {
+        } else if template.is_a_boat() {
+            // A level boat keeps its authored X/Y and yaw. Its hull rides at the
+            // water surface with the same keel offset as a summoned boat. The authored
+            // Z only selects the pool: the level editor puts Kroloal Cradle's rowboats
+            // on the pool floor.
+            let water = super::ship_physics::water_surface(
+                server,
+                world,
+                [spawn_pos.x, spawn_pos.y, spawn_pos.z],
+            );
+            if let Some(ship) = data.ship_model(template.model_id) {
+                if (water - spawn_pos.z).abs() <= LEVEL_BOAT_SURFACE_SEARCH {
+                    spawn_pos.set_height(water + summon_offset_z(ship));
+                }
+            }
+        } else {
             // The 1.2 land rule's ground is the terrain heightfield only.
             let h = summon_terrain(server, world, spawn_pos.x, spawn_pos.y);
             if h > 0.0 {
