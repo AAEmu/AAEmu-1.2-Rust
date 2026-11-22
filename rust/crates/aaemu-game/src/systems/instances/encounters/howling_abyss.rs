@@ -33,3 +33,9 @@ pub const HOWLING_FLOOR_GAP: f32 = 3.0;
 pub(super) fn raised_floor_drop(zone_id: u32) -> Option<f32> {
     matches!(zone_id, 265 | 280).then_some(2.5)
 }
+
+/// Howling Abyss casts its final-room cue (cinemas 53 `id_265_01` and 133 `id_280_01`) on an
+/// NPC. Play it for characters in the same room on this instance.
+pub(super) fn broadcasts_room_cinema(cinema_id: u32) -> bool {
+    matches!(cinema_id, 53 | 133)
+}

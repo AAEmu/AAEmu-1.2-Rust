@@ -175,3 +175,23 @@ fn raised_floor_drop() {
         assert_eq!(r::raised_floor_drop(zone), None, "zone {zone}");
     }
 }
+
+// ---- cinemas
+
+#[test]
+fn broadcasts_room_cinema() {
+    table(
+        r::broadcasts_room_cinema,
+        &[51, 53, 133],
+        &[0, 8, 9, 50, 52, 54, 132, 134],
+    );
+}
+
+#[test]
+fn plays_cinema_directly() {
+    table(
+        r::plays_cinema_directly,
+        &[8, 9, 52],
+        &[0, 7, 10, 51, 53, 133],
+    );
+}

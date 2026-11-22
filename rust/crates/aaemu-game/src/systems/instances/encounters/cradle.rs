@@ -17,3 +17,9 @@ pub const ZONE: u32 = 264;
 pub(super) fn walks_scene_routes(cmd_set_id: u32) -> bool {
     matches!(cmd_set_id, 222..=224 | 228..=230 | 234..=237)
 }
+
+/// Metamoze (cinema 52, `id_264_01`) reaches the players of his room through an area skill
+/// that needs a playback cue.
+pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
+    cinema_id == 52
+}

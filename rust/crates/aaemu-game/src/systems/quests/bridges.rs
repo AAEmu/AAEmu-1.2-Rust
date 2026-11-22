@@ -19,6 +19,7 @@ use std::sync::Arc;
 use crate::models::character::Character;
 use crate::models::item::Item;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::hooks::QuestsBridge;
 use crate::systems::npcs::sphere_quest::{QuestComponentInfo, SphereQuest as NpcSphereQuest};
 use crate::systems::skills::data::{EffectKind, EffectTemplate};
@@ -186,7 +187,7 @@ impl QuestSkillHooks for QuestsForSkills {
             EffectTemplate::Cinema { cinema_id, .. } => {
                 tracing::trace!("CinemalEffect");
                 if let Target::Obj(target) = &args.target {
-                    if target.as_npc().is_some() && matches!(*cinema_id, 51 | 53 | 133) {
+                    if target.as_npc().is_some() && encounters::broadcasts_room_cinema(*cinema_id) {
                         // Sharpwind Mines and Howling Abyss cast their final-room cue on an NPC.
                         // Play it for characters in the same room on this instance.
                         if let Some(world) = server.world.world_of(target) {
@@ -204,7 +205,7 @@ impl QuestSkillHooks for QuestsForSkills {
                     } else if let Some(character) = target.as_player() {
                         // Hieronimus, Akmit and Metamoze (Kroloal Cradle, `id_264_01`) reach the
                         // players of their room through area skills that need a playback cue.
-                        if matches!(*cinema_id, 8 | 9 | 52) {
+                        if encounters::plays_cinema_directly(*cinema_id) {
                             super::events::play_cinema(server, character, *cinema_id);
                         } else {
                             super::events::request_cinema(server, character, *cinema_id);

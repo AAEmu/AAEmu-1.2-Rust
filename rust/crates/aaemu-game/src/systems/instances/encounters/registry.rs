@@ -79,3 +79,19 @@ pub fn is_wave_add(zone_id: u32, template_id: u32) -> bool {
 pub fn raised_floor_drop(zone_id: u32) -> Option<f32> {
     palace_cellar::raised_floor_drop(zone_id).or_else(|| howling_abyss::raised_floor_drop(zone_id))
 }
+
+// ---- cinemas
+
+/// Final-room cinemas cast on an NPC and played for the characters in the same room of the
+/// instance (Sharpwind Mines, Howling Abyss).
+pub fn broadcasts_room_cinema(cinema_id: u32) -> bool {
+    sharpwind::broadcasts_room_cinema(cinema_id) || howling_abyss::broadcasts_room_cinema(cinema_id)
+}
+
+/// Cinemas a `CinemaEffect` plays for the character it hits instead of only remembering them
+/// for the quests (Burnt Castle Armory, Palace Cellar, Kroloal Cradle).
+pub fn plays_cinema_directly(cinema_id: u32) -> bool {
+    armory::plays_cinema_directly(cinema_id)
+        || palace_cellar::plays_cinema_directly(cinema_id)
+        || cradle::plays_cinema_directly(cinema_id)
+}

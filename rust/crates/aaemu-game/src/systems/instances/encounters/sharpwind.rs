@@ -40,3 +40,9 @@ pub(super) fn runs_spawn_events_on_spawn(template_id: u32) -> bool {
 pub(super) fn waits_for_visible_caster(skill_id: u32) -> bool {
     matches!(skill_id, 18983 | 19535)
 }
+
+/// Sharpwind Mines casts its final-room cue (cinema 51, `id_262_01`) on an NPC.
+/// Play it for characters in the same room on this instance.
+pub(super) fn broadcasts_room_cinema(cinema_id: u32) -> bool {
+    cinema_id == 51
+}

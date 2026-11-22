@@ -29,3 +29,9 @@ pub(super) fn appended_intro_skill(
 ) -> Option<u32> {
     (cmd_set_id == 103 && template_id() == 10518).then_some(17196)
 }
+
+/// Hieronimus (cinema 8, `id_236_01`) reaches the players of his room through an area skill
+/// that needs a playback cue.
+pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
+    cinema_id == 8
+}

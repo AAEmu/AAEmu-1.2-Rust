@@ -13,3 +13,9 @@ pub const ZONE: u32 = 240;
 pub(super) fn raised_floor_drop(zone_id: u32) -> Option<f32> {
     (zone_id == 240).then_some(2.5)
 }
+
+/// Akmit (cinema 9, `id_240_01`) reaches the players of the room through an area skill that
+/// needs a playback cue.
+pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
+    cinema_id == 9
+}
