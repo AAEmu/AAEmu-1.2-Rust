@@ -221,6 +221,8 @@ mod howling_boss_tests;
 #[cfg(test)]
 mod howling_dungeon_tests;
 #[cfg(test)]
+mod howling_event_tests;
+#[cfg(test)]
 mod howling_world_tests;
 #[cfg(test)]
 mod manager_tests;

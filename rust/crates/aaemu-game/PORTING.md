@@ -3733,6 +3733,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     its centre one scaled radius off floors and walls. Hard impacts bounce as before. After a
     slow landing it rolls with a 4 m/s² rolling resistance, and its pitch and angular velocity
     (`v / r` about the cross axis) follow the distance. The resistance is inferred.
+* systems::npcs (Howling Abyss follow-up, 2026-11-21): the event, water and breath fixes below.
+  Their tests are in `howling_event_tests.rs`.
+  * A `SphereSkill` area counts once per sphere id. Moving from one circle of a sphere into
+    an overlapping circle of the same sphere is not a new entry, and a refused cast is still
+    owed. Godfrey's approach sphere (1946 / 2184) is a chain of fifteen circles, so each player
+    restarted his event script several times on the walk in. The rule is inferred; the
+    authored `trigger_condition_time` is still not used as a period.
+  * An NPC's `DamageEffect` row with a `target_npc_tag_id` skips the relation check for the
+    tagged NPCs. Godfrey's finale (19394 / 21438) gives 999999 damage to his own invisible
+    event trigger (12133 / 12787, faction 1), which the friendly relation had kept alive. Every
+    later entry into the sphere then respawned Godfrey and his boss form. Hieronimus's pet
+    removal and the other tagged scripted kills follow the same rule. Player casters are
+    unchanged.
+  * Encounter signals (an NPC self-target area skill with no unit effects, such as Raise
+    Calleil's Water 18938 / 21092) reach every doodad that accepts the skill hit. The ten-target
+    area count no longer applies to them. Sixteen props answer Calleil's signal. The water
+    volume's anchor is a corner of the pool, so when she fought on the far side the closest-ten
+    cut dropped it, and the client never received the rising phase.
+  * In both Howling Abyss worlds a river water record is only its physics contour. Each 1.2
+    river sector is a quad whose shape and contour are the same four corners. The open-world
+    river heuristic dropped those contours as too small, and it added a 40 m corridor around
+    the corners instead. That put the first corridor past the entrance (181.9 m floor under a
+    184.6 m surface), Godfrey's room and the Wailing Ranch approach under water, so players got
+    a breath meter and could drown there. Other worlds keep the heuristic.
+  * `NpcControlEffect` logs at debug, since area-wide scripts apply it to every matching NPC.
 * Palace Cellar (zone 240, `instance_sal_temple`)
   - **Entrance barrier** — Melkina's scripted departure (16600) sends Salphira's Barrier
     4580 to its authored final phase 12282. The existing 20-second timer also clears it

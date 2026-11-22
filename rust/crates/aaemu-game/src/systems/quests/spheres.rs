@@ -745,6 +745,9 @@ impl SphereQuestManager {
         let mut next: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut inside_players: Vec<(PlayerRef, Vec<usize>)> = Vec::new();
         let mut events: Vec<(PlayerRef, usize, bool)> = Vec::new();
+        // The spheres each character stood in on the previous tick, by sphere id: one
+        // `SphereSkill` row is often authored as a chain of overlapping circles.
+        let mut previous_spheres: HashSet<(u32, u32)> = HashSet::new();
         for player in server.world.all_characters() {
             if player.region().is_none() {
                 continue;
@@ -760,13 +763,20 @@ impl SphereQuestManager {
                 .filter(|(_, a)| a.world == world.template.name && a.contains(pos))
                 .map(|(i, _)| i)
                 .collect();
-            let previous = self
+            let (previous, pending_skill) = self
                 .area_state
                 .lock()
                 .expect("area state poisoned")
                 .get(&player.character_id)
-                .map(|st| st.inside.clone())
+                .map(|st| (st.inside.clone(), st.pending_skill.clone()))
                 .unwrap_or_default();
+            // A refused cast is still owed, so it does not count as having entered.
+            previous_spheres.extend(
+                previous
+                    .iter()
+                    .filter(|i| !pending_skill.contains(i))
+                    .map(|&i| (player.character_id, areas[i].sphere_id)),
+            );
             for &i in &inside {
                 if !previous.contains(&i) {
                     events.push((player.clone(), i, true));
@@ -826,7 +836,15 @@ impl SphereQuestManager {
             if enter && sphere.sphere_detail_type == "SphereDoodadInteract" {
                 interact.push((player.clone(), area));
             }
-            if enter && sphere.sphere_detail_type == "SphereSkill" {
+            // Walking from one circle of a sphere into the next is not a new entry. Each
+            // extra cast of the Howling Abyss approach sphere restarted Godfrey's event.
+            if enter
+                && sphere.sphere_detail_type == "SphereSkill"
+                && !previous_spheres.contains(&(player.character_id, sphere.id))
+                && !skill.iter().any(|(p, a)| {
+                    p.character_id == player.character_id && areas[*a].sphere_id == sphere.id
+                })
+            {
                 skill.push((player.clone(), area));
             }
         }

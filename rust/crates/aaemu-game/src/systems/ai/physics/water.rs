@@ -649,6 +649,19 @@ impl WaterBodies {
         cell_y: i32,
         objects: &ObjectsFile,
     ) {
+        self.add_cell_objects(hm, template_ocean_level, (cell_x, cell_y), objects, false);
+    }
+
+    /// [`Self::add_from_cell_data`]. With `river_sectors`, a river record is only the quad of
+    /// its physics contour (see [`Self::add_water`]).
+    pub(crate) fn add_cell_objects(
+        &self,
+        hm: Option<&WorldHeightmap>,
+        template_ocean_level: f32,
+        (cell_x, cell_y): (i32, i32),
+        objects: &ObjectsFile,
+        river_sectors: bool,
+    ) {
         let offset = Vec3::new(
             (cell_x * CELL_SIZE) as f32,
             (cell_y * CELL_SIZE) as f32,
@@ -656,7 +669,15 @@ impl WaterBodies {
         );
         for (i, prefab) in objects.prefabs.iter().enumerate() {
             if let Prefab::Water(w) = prefab {
-                self.add_water(hm, template_ocean_level, cell_x, cell_y, offset, w, i + 1);
+                self.add_water(
+                    hm,
+                    template_ocean_level,
+                    (cell_x, cell_y),
+                    offset,
+                    w,
+                    i + 1,
+                    river_sectors,
+                );
             }
         }
     }
@@ -666,12 +687,23 @@ impl WaterBodies {
         &self,
         hm: Option<&WorldHeightmap>,
         template_ocean_level: f32,
-        cell_x: i32,
-        cell_y: i32,
+        (cell_x, cell_y): (i32, i32),
         offset: Vec3,
         water: &WaterPrefab,
         prefab_idx: usize,
+        river_sectors: bool,
     ) {
+        if river_sectors
+            && water.volume_type == WaterVolumeType::River
+            && water.physics_contour_points.len() >= 3
+        {
+            // Each record of a level river is one sector quad. Its physics contour is the
+            // water the client builds, so the 40 m river corridor heuristic below would flood
+            // the dry passages next to small dungeon pools.
+            let name = format!("WaterContour_C{cell_x}-{cell_y}_{prefab_idx}");
+            self.add_polygon_from_physics_contour(hm, water, offset, &name, false);
+            return;
+        }
         if water.volume_type == WaterVolumeType::Ocean
             && water.surface_height
                 <= template_ocean_level + TEMPLATE_SEA_DUPLICATE_SURFACE_MARGIN_METERS
@@ -800,6 +832,11 @@ impl WaterBodies {
     ) {
         let cradle = template_name == "instance_cradle_of_destruction";
         let has_indoor_pools = cradle || template_name == "instance_sal_temple";
+        // The Howling Abyss pools are small river sectors beside dry passages.
+        let river_sectors = matches!(
+            template_name,
+            "instance_howling_abyss" | "instance_howling_abyss_2"
+        );
         // The level boat spawns before the first player enters and loads the cell.
         if cradle && !hm.is_cell_loaded(0, 0) {
             let _ = hm.get_height(files, 0.0, 0.0);
@@ -829,7 +866,13 @@ impl WaterBodies {
                             objects.prefabs.len()
                         );
                     }
-                    self.add_from_cell_data(Some(hm), template_ocean_level, cx, cy, &objects);
+                    self.add_cell_objects(
+                        Some(hm),
+                        template_ocean_level,
+                        (cx, cy),
+                        &objects,
+                        river_sectors,
+                    );
                 }
                 // Elevated dungeon pools are indoor visarea objects.
                 if has_indoor_pools {

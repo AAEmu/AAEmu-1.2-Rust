@@ -2561,21 +2561,25 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 .is_some_and(|object| npcs.accepts_doodad_skill_hit(server, object, t.id))
         });
     }
-    if t.target_area_count > 0 && possible.len() > t.target_area_count as usize {
-        if caster.as_npc().is_some()
-            && t.target_type == SkillTargetType::SelfTarget as i32
-            && t.target_area_radius > 0
-            && t.effects.is_empty()
-        {
-            // Encounter signals such as Raise Calleil's Water have no unit effects.
-            // Reserve their limited area slots for props that respond to the signal.
-            let npcs = server.systems.skills.ext.npcs();
-            possible.retain(|target| {
-                target
-                    .as_obj()
-                    .is_some_and(|object| npcs.accepts_doodad_skill_hit(server, object, t.id))
-            });
-        }
+    let mut over_count = t.target_area_count > 0 && possible.len() > t.target_area_count as usize;
+    if over_count
+        && caster.as_npc().is_some()
+        && t.target_type == SkillTargetType::SelfTarget as i32
+        && t.target_area_radius > 0
+        && t.effects.is_empty()
+    {
+        // Encounter signals such as Raise Calleil's Water have no unit effects. Every prop
+        // that responds to the signal receives it, and the area count does not apply: sixteen
+        // props answer Calleil's ten-target cue.
+        let npcs = server.systems.skills.ext.npcs();
+        possible.retain(|target| {
+            target
+                .as_obj()
+                .is_some_and(|object| npcs.accepts_doodad_skill_hit(server, object, t.id))
+        });
+        over_count = false;
+    }
+    if over_count {
         let mut with_d: Vec<(f32, Target)> = possible
             .into_iter()
             .map(|p| (distance_to(server, &p, target_self, false), p))

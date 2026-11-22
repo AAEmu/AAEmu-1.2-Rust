@@ -3481,7 +3481,7 @@ async fn real_compact_db_template_2336() {
 }
 
 #[tokio::test]
-async fn npc_encounter_skill_uses_limited_area_slots_for_matching_doodads() {
+async fn npc_encounter_skill_reaches_every_matching_doodad_in_its_area() {
     use crate::models::npc::Npc;
     use crate::systems::skills::data::SkillTemplate;
     use crate::systems::skills::geometry::Target;
@@ -3550,11 +3550,11 @@ async fn npc_encounter_skill_uses_limited_area_slots_for_matching_doodads() {
         target_caster: SkillCastTarget::Unit(npc.obj_id),
         skill_object: Default::default(),
     };
-    apply_effects(&server, &skill, &cast);
-    assert_eq!((group(&near), group(&far), group(&outside)), (2, 1, 1));
-    assert_eq!(group(&unrelated), 3);
+    // The area count (1) does not cut the props that answer the signal (PORTING.md, Howling
+    // Abyss follow-up): both doodads inside the radius change phase on the first cast.
     apply_effects(&server, &skill, &cast);
     assert_eq!((group(&near), group(&far), group(&outside)), (2, 2, 1));
+    assert_eq!(group(&unrelated), 3);
 }
 
 /// Howling Abyss 2 "Strange Device" 6345 -> "Iron Gate" 6346 with the real compact data: the
