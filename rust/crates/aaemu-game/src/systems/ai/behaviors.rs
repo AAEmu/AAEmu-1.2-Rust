@@ -15,6 +15,7 @@ use crate::models::movement::{GameStanceType, MoveTypeAlertness};
 use crate::models::transform::PositionAndRotation;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::npcs::npc::packets::{
@@ -293,7 +294,7 @@ fn template_ai_params(c: &AiCtx<'_>) -> Option<Arc<AiParams>> {
     c.server.game_data.systems.ai.ai.ai_params_for_id(id as u32)
 }
 
-fn delta_seconds(delta_ms: i64) -> f64 {
+pub(crate) fn delta_seconds(delta_ms: i64) -> f64 {
     // `delta.Milliseconds / 1000.0`: the millisecond component of the TimeSpan.
     (delta_ms.rem_euclid(1000)) as f64 / 1000.0
 }
@@ -324,7 +325,7 @@ pub fn npc_move_towards(
 }
 
 /// `Ai.Owner.BaseMoveSpeed`.
-fn base_move_speed(c: &AiCtx<'_>) -> f32 {
+pub(crate) fn base_move_speed(c: &AiCtx<'_>) -> f32 {
     npc::base_move_speed(
         c.server,
         &c.npc,
@@ -353,7 +354,7 @@ fn current_target(c: &AiCtx<'_>) -> Option<WorldObject> {
     c.server.world.object(id)
 }
 
-fn owner_pos(c: &AiCtx<'_>) -> Vec3 {
+pub(crate) fn owner_pos(c: &AiCtx<'_>) -> Vec3 {
     npc::world_pos(c.server, &c.obj)
 }
 
@@ -1134,7 +1135,7 @@ fn can_strafe(c: &mut AiCtx<'_>, k: BehaviorKind) -> bool {
 }
 
 /// `BaseCombatBehavior.IsUsingSkill`.
-fn is_using_skill(c: &AiCtx<'_>) -> bool {
+pub(crate) fn is_using_skill(c: &AiCtx<'_>) -> bool {
     let n = c.npc.data();
     n.unit.skill_state.skill_task.is_some() || n.unit.skill_state.active_plot.is_some()
 }
@@ -1157,39 +1158,6 @@ fn can_use_skill(c: &mut AiCtx<'_>, k: BehaviorKind) -> bool {
     now >= delay_end && gcd <= now
 }
 
-fn is_armory_wave_add(c: &AiCtx<'_>) -> bool {
-    let npc = c.npc.data();
-    encounters::is_wave_add(npc.unit.transform.zone_id, npc.unit.template_id)
-}
-
-fn advance_armory_wave_from_portal(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) -> bool {
-    if !is_armory_wave_add(c) || c.st(k).armory_portal_cleared {
-        return false;
-    }
-    let pos = owner_pos(c);
-    let center = Vec3::new(200.0, 312.0, pos.z);
-    if calculate_distance(pos, center, false) <= 34.0 {
-        c.st(k).armory_portal_cleared = true;
-        return false;
-    }
-    // Ranged adds can otherwise begin their attacks from the portal recess.
-    // All three entrances have a clear approach toward the center.
-    if !is_using_skill(c)
-        && !npc::is_shackled_or_snared(c.server, &c.obj)
-        && !npc::skill_controller_running(&c.obj)
-    {
-        let speed = npc::real_movement_speed(&c.obj, f64::from(base_move_speed(c)));
-        npc_move_towards(
-            c,
-            center,
-            (speed * delta_seconds(delta_ms)) as f32,
-            npc::real_movement_flags(speed),
-            1.0,
-        );
-    }
-    true
-}
-
 /// `BaseCombatBehavior.ShouldReturn`.
 ///
 /// Deviation: the C# returned only while the NPC was within `absolute_return_distance` of its
@@ -1208,12 +1176,10 @@ fn should_return(c: &AiCtx<'_>) -> bool {
     };
     let me = owner_pos(c);
     let target_position = npc::world_pos(c.server, &target);
-    if is_armory_wave_add(c) {
-        // Hieronimus's wave portals sit on the edge of the room. A 50 m
-        // leash measured from a portal rejects players on the far side.
-        let in_arena =
-            |p: Vec3| (p.x - 200.0).hypot(p.y - 312.0) <= 50.0 && (18.0..=26.0).contains(&p.z);
-        return !in_arena(me) || !in_arena(target_position);
+    if let Some(leash) =
+        encounter_hooks::for_zone(c.obj.transform().zone_id).leash(c, me, target_position)
+    {
+        return leash;
     }
     if is_stonebrother(c) {
         return !npc::in_stonebrother_arena(me) || !npc::in_stonebrother_arena(target_position);
@@ -2113,7 +2079,7 @@ fn attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     let Some(target) = current_target(c) else {
         return;
     };
-    if advance_armory_wave_from_portal(c, k, delta_ms) {
+    if encounter_hooks::for_zone(c.obj.transform().zone_id).combat_step(c, k, delta_ms) {
         return;
     }
     if can_strafe(c, k) && !is_using_skill(c) {

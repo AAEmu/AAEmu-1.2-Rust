@@ -20,6 +20,7 @@ use crate::models::unit::UnitAttribute;
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::packets::world_objects::SCTargetChangedPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::heightmap::ReferenceHeightAi;
 use crate::systems::npcs::npc::data::NpcTemplate;
@@ -589,17 +590,14 @@ pub fn move_towards(
                 target_z = floor;
             }
         }
-        // The Armory's prison mesh exposes the plinth's base to ground rays.
-        // The authored Winters path remains at platform height through x 284.724.
-        if template_id == 12190
-            && zone_id == 236
-            && (284.7..=291.5).contains(&new.x)
-            && (233.0..=239.5).contains(&new.y)
-        {
-            if let Some(stage) = spawner_z {
-                target_z = target_z.max(stage);
-            }
-        }
+        target_z = encounter_hooks::for_zone(zone_id).walker_floor(
+            template_id,
+            zone_id,
+            pos,
+            new,
+            spawner_z,
+            target_z,
+        );
         Vec3::new(new.x, new.y, target_z)
     };
     // Keep the travelled heading when a step lands exactly on a waypoint. Computing

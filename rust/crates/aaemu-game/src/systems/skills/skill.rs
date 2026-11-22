@@ -11,6 +11,7 @@ use rand::Rng;
 use crate::models::transform::PositionAndRotation;
 use crate::models::unit::{SkillAttribute, UnitAttribute, UnitCooldowns};
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
@@ -880,61 +881,6 @@ pub fn use_triggered_skill(
     )
 }
 
-fn sorvell_earthen_grip(skill_id: u32, caster: &WorldObject) -> bool {
-    skill_id == 15592
-        && caster
-            .as_npc()
-            .is_some_and(|npc| npc.data().unit.template_id == 8960)
-}
-
-fn earthen_grip_line_of_sight(
-    server: &GameServer,
-    caster: &WorldObject,
-    target: &WorldObject,
-) -> bool {
-    let from = world_pos(server, &Target::Obj(caster.clone()));
-    let to = world_pos(server, &Target::Obj(target.clone()));
-    crate::systems::ai::collision::line_of_sight(
-        server,
-        caster.transform().instance_id,
-        [from.x, from.y, from.z + 1.0],
-        [to.x, to.y, to.z + 1.0],
-    ) != Some(false)
-}
-
-fn earthen_grip_has_aggro(server: &GameServer, caster: &WorldObject) -> bool {
-    let Some(npc) = caster.as_npc() else {
-        return false;
-    };
-    let target_id = {
-        let n = npc.data();
-        let target_id = n.current_aggro_target;
-        // The basic-attack fallback can pick a self-targeted combat skill
-        // without consulting the boss's authored health window.
-        if n.unit.max_hp <= 0
-            || n.unit.hp <= 0
-            || i64::from(n.unit.hp) * 100 >= i64::from(n.unit.max_hp) * 34
-            || !n.unit.skill_state.aggro_table.contains_key(&target_id)
-        {
-            return false;
-        }
-        target_id
-    };
-    world_of(server, caster)
-        .and_then(|world| world.unit(target_id))
-        .is_some_and(|target| {
-            crate::systems::ai::npc::can_see_target(server, caster, &target)
-                && target.with_unit(|unit| unit.unit().hp > 0) == Some(true)
-                && crate::systems::ai::npc::distance_to(server, caster, &target, false) <= 30.0
-                && can_attack(
-                    server,
-                    &Target::Obj(caster.clone()),
-                    &Target::Obj(target.clone()),
-                )
-                && earthen_grip_line_of_sight(server, caster, &target)
-        })
-}
-
 /// [`use_skill`] with a check-only mode: every refusal is returned exactly as a real use would
 /// return it, but a passing check stops before the first cast-state mutation. `triggered`:
 /// see [`use_triggered_skill`].
@@ -957,8 +903,11 @@ fn use_skill_impl(
         );
         return (skill_result::INVALID_SOURCE, 0);
     }
-    if sorvell_earthen_grip(skill.id, caster) && !earthen_grip_has_aggro(server, caster) {
-        return (skill_result::NO_TARGET, 0);
+    if let Some(result) = encounter_hooks::all()
+        .iter()
+        .find_map(|encounter| encounter.cast_gate(server, skill, caster))
+    {
+        return result;
     }
     if let Err(result) = super::validation::check_item_zone(server, caster, &caster_caster) {
         tracing::debug!(
@@ -2511,8 +2460,10 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     // Earthen Grip is marked Others, which the area filter interprets as neutral only.
     // Both it and Sorvell's barrel barrage select enemies that can receive their effects.
     let sorvell_area = encounters::hostile_area_skill(t.id) && caster.as_npc().is_some();
-    let earthen_grip = sorvell_earthen_grip(t.id, caster);
-    if earthen_grip && !earthen_grip_has_aggro(server, caster) {
+    if encounter_hooks::all()
+        .iter()
+        .any(|encounter| encounter.on_apply_effects(server, &t, caster))
+    {
         return;
     }
     // Serialize the readiness check, phase change and reward or spawn. A
@@ -2597,8 +2548,8 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             });
         }
         route_palace_cellar_gate(server, caster, t.id, &mut units);
-        if earthen_grip {
-            units.retain(|unit| earthen_grip_line_of_sight(server, caster, unit));
+        for encounter in encounter_hooks::all() {
+            encounter.area_targets(server, caster, &t, &mut units);
         }
         possible.extend(units.into_iter().map(Target::Obj));
         if selection == Some(SkillTargetSelection::Source) && target_self.as_obj().is_none() {

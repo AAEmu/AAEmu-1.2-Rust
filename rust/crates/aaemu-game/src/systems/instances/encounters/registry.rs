@@ -71,7 +71,7 @@ pub fn helps_only_near_the_pull(world: &str) -> bool {
 
 /// Hieronimus's portal adds (Burnt Castle Armory).
 pub fn is_wave_add(zone_id: u32, template_id: u32) -> bool {
-    armory::is_armory_wave_add(zone_id, template_id)
+    armory::is_wave_add(zone_id, template_id)
 }
 
 /// The deepest floor (m) under a walker in a zone with raised passages (Palace Cellar, Howling
