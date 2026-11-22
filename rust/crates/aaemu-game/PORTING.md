@@ -5532,6 +5532,51 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   supplies the damage source for the injury. Flame jets reapply their short damage
   buff while the player remains in range. The corridor trash and four bosses use
   single-member compact spawners to avoid loading unrelated SPAWN members.
+* systems::npcs / ai (Kroloal Cradle skills and caster AI, 2026-11-22): tester items 2, 19,
+  20, 21 and 22 after #155.
+  - **NPC-summoned origin clouts.** Miasma (18431), Poison Belch (18451, plot 405) and Toxic
+    Globe (18425, plot 397) summon doodads 5115, 5151 and 5929 with `SummonDoodad`. Their
+    clouts 1139, 1151 and 1428 have `use_origin_source`. The C# area trigger casts as the
+    doodad unless the caster is a character. The doodad has no faction, so a Hostile area
+    took every unit, the Putrid Demon included (Miasma's 3884 on the demon). Poison Belch and
+    Toxic Globe have no inside buff. Their damage effects (4065, 4166) are DPS-scaled, so the
+    burst played and did nothing. The Rust port kept only beneficial buffs from such clouts.
+    **Deviation:** `doodad::phase_funcs::npc_origin_clout` covers a `use_origin_source` clout
+    whose caster is the NPC that owns the doodad (`owner_obj_id`, set by the summon). The NPC
+    is the trigger caster, so its relation and its damage source apply. The clout stays at its
+    own doodad. The 4 m lookup around the caster could move a belch from under the victim to
+    a prop beside the demon. A Friendly or Hostile clout of this kind applies all its effects.
+    An Any / Others one keeps only beneficial buffs, because it would take the NPC and its
+    allies. The encounter areas that already have their own rules keep them: the Howling and
+    Hadir hazards, Frozen Zone, the fish schools, the Cellar flame and the Burnt Castle Howl
+    ward (summoned by its marker NPC 10815, it still runs as the doodad). Outside those, the
+    r208022 compact has 101 `use_origin_source` clouts on doodads that NPC skills summon. Of
+    the 48 without an inside buff, 46 are Friendly or Hostile and now apply their damage,
+    heal, debuff and mana-burn effects, such as Lucius's Lightning Cloud (doodad 1231) and the
+    Unstable Healing Tree (1704, heals the summoner's allies). Flame Breath (3025, damage) and
+    Anima Orb (3657, mana) are Any and stay off. The 42 clouts with an inside buff now take
+    their relation from the NPC as well. The 1.2 data gives Poison Belch no debuff. Its
+    description says the damage dealt is reduced, but plot 405 and clout 1151 carry only
+    damage effect 4065.
+  - **Ranged big monsters.** Element Fanatic Blangar (11354, bow 10431, 15 m) and the
+    Maddened Shaman (11370, Flame Cluster 19981, 20 m) use `big_monster_hold_position`. A big
+    monster's combat-skill picks never set the chase range. Since #165 the base-skill fallback
+    does not set it either. `MoveInRange` therefore stopped at `attack_start_range_scale` (0.5
+    m), and the casters came to melee range before every shot. **Deviation:**
+    `big_monster_attack_enter` sets the weapon range from the base skill when that skill is a
+    ranged attack (not skill 2, no weapon range slot, `max_range` above 4 m) and the NPC is
+    not a dungeon boss (`npc_grade_id` 5). This replaces the Sharpwind template list (11110,
+    11111, 11358, 11363, 11582), all of which meet it. The bosses keep closing in: Calleil
+    (21084, 15 m) follows a victim through his north gate and Musperosa round her room. 191
+    of 920 big-monster templates qualify, the Academy Apprentice (19981) among them.
+  Tests: `npcs::cradle_skills_tests` (gated by `AAEMU_COMPACT_DB`:
+  `real_cradle_miasma_spares_the_putrid_demon`, `real_cradle_poison_belch_bursts_on_its_victim`,
+  `real_cradle_toxic_globe_damages_its_target`,
+  `real_cradle_element_fanatic_blangar_keeps_his_bow_range`,
+  `real_cradle_maddened_shaman_casts_from_range`),
+  `doodad::phase::tests::{npc_summoned_origin_clout_casts_as_its_npc_at_its_own_doodad,
+  origin_clout_of_a_doodad_the_npc_did_not_summon_keeps_the_doodad_as_caster}` and
+  `ai::behaviors::tests::big_monster_chase_range_follows_only_a_ranged_base_attack`.
 * systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
   (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
   has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->

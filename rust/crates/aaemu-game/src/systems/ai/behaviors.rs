@@ -3297,14 +3297,30 @@ fn big_monster_attack_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     set_in_battle(c.server, &c.obj, true);
     super::npc_events::on_combat_started(c);
     c.ai.param = template_ai_params(c);
-    let template_id = c.npc.data().unit.template_id;
-    if let Some(skill) = matches!(template_id, 11110 | 11111 | 11358 | 11363 | 11582)
-        .then(|| ai_skills::new_skill(c, template_scalars(c).base_skill_id as u32))
-        .flatten()
+    // A big monster's chase range is that of its base attack when the attack reaches beyond
+    // melee. The combat-skill picks never set it, and the fallback pick keeps the range it
+    // found (see `big_monster_attack_tick`), so a ranged monster otherwise closed to
+    // `attack_start_range_scale` metres: Element Fanatic Blangar's bow (10431, 15 m) and the
+    // Maddened Shaman's Flame Cluster (19981, 20 m) were used from melee range in Kroloal
+    // Cradle, like Sharpwind's Sniper, Fortuneteller, Illusionist and Colossus before them.
+    // Dungeon bosses keep closing in: Calleil (21084, 15 m) follows his victim through the
+    // north gate and Musperosa round her room.
+    let boss = npc::template(c.server, &c.npc).is_some_and(|t| t.npc_grade_id == BOSS_GRADE);
+    if let Some(skill) = ai_skills::new_skill(c, template_scalars(c).base_skill_id as u32)
+        .filter(|skill| !boss && ranged_base_attack(&skill.template))
     {
         set_weapon_range(c, k, &skill);
     }
     c.st(k).enter = true;
+}
+
+/// `npcs.npc_grade_id` of the dungeon bosses (Hieronimus, Sorvell, Velarre, Calleil,
+/// Musperosa, Viboros).
+const BOSS_GRADE: u8 = 5;
+
+/// A base attack whose range does not come from a weapon and reaches beyond melee range.
+fn ranged_base_attack(t: &crate::systems::skills::data::SkillTemplate) -> bool {
+    t.id != 2 && t.weapon_slot_for_range_id <= 0 && t.max_range as f32 > MELEE_ATTACK_RANGE
 }
 
 fn big_monster_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
@@ -3688,6 +3704,24 @@ mod tests {
                 assert_eq!(yaw, 0.0);
             }
         }
+    }
+
+    #[test]
+    fn big_monster_chase_range_follows_only_a_ranged_base_attack() {
+        use crate::systems::skills::data::SkillTemplate;
+        let skill = |id, max_range, weapon_slot_for_range_id| SkillTemplate {
+            id,
+            max_range,
+            weapon_slot_for_range_id,
+            ..Default::default()
+        };
+        // Blangar's bow and the Maddened Shaman's Flame Cluster.
+        assert!(ranged_base_attack(&skill(10431, 15, -1)));
+        assert!(ranged_base_attack(&skill(19981, 20, -1)));
+        // Melee skill 2 (25 m in the data) takes its range from the weapon.
+        assert!(!ranged_base_attack(&skill(2, 25, 15)));
+        assert!(!ranged_base_attack(&skill(100, 20, 1)));
+        assert!(!ranged_base_attack(&skill(101, 4, -1)));
     }
 
     #[test]
