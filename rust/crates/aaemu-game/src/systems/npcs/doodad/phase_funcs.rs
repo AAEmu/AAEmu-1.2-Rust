@@ -648,14 +648,6 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     trigger.owner = Some(owner.clone());
     trigger.caster = Some(trigger_caster.clone());
     trigger.func_group_id = func_group_id;
-    // Calleil's Hellfire explosions (doodads 5170 and 6273) are effect-only clouts. Their
-    // damage packets named skill 0, which the combat log has no entry for (inferred). Name
-    // the Hellfire skills (18963, 21082) that place these doodads.
-    trigger.skill_id = match f.id {
-        1415 => 18963,
-        1542 => 21082,
-        _ => 0,
-    };
     trigger.target_relation = if howl_ward {
         area_trigger::skill_target_relation::ANY
     } else {

@@ -255,7 +255,17 @@ async fn real_howling_musperosa_ai_selects_lasso_below_44_percent() {
     crate::systems::ai::hooks::engage(&server, &boss, &WorldObject::from(&player));
     for _ in 0..40 {
         tick_ai(&server, &boss);
-        if player.data().unit.buffs.check_buff(5338) {
+        let lasso_caster = player
+            .data()
+            .unit
+            .buffs
+            .effects
+            .iter()
+            .find(|e| e.template.id == 5338)
+            .map(|e| crate::systems::skills::buffs::buff_skill_caster(e).obj_id());
+        if let Some(caster) = lasso_caster {
+            // The client's own Leap (controller 6999) pulls toward the buff's skill caster.
+            assert_eq!(caster, boss.obj_id);
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,6 +331,7 @@ fn parse_damage(body: &[u8]) -> Option<DamageLog> {
         0 => 7,
         1 => 15,
         2 => 12,
+        4 => 8,
         _ => return None,
     };
     let caster = body.get(o..o + 10)?;
@@ -364,7 +375,8 @@ fn drain_damage(client: &mut TestClient) -> Vec<DamageLog> {
 }
 
 /// #11: Calleil's Hellfire explosion (21082, doodad 6273, clout 1542) reports its damage
-/// to the victim's combat log, attributed to Calleil and named by the Hellfire skill.
+/// to the victim's combat log, attributed to Calleil. The r208022 client drops a skill cast
+/// action whose timeline it does not know, so the clout casts as its doodad (kind 4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_howling_hellfire_damage_reaches_the_combat_log() {
@@ -390,7 +402,70 @@ async fn real_howling_hellfire_damage_reaches_the_combat_log() {
     assert!(!hits.is_empty(), "the victim receives the damage packet");
     assert!(
         hits.iter()
-            .all(|log| (log.0, log.1, log.4) == (0, 21082, boss.obj_id)),
+            .all(|log| (log.0, log.1, log.4) == (4, 6273, boss.obj_id)),
         "{hits:?}"
     );
+}
+
+/// PR #165 review: crossing the orb's edge again must not take a pulse stack. The second
+/// entry adds no inside stack while pulse stacks remain, so its exit removes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_howling_orb_reentry_keeps_the_pulse_stacks() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = load_greater(&db);
+    let boss = WorldObject::from(npc_at(&server, &world, 12758, [463.4, 679.2, 167.0]));
+    let (_client, player) = player_at(&server, 1, [467.2, 679.2, 167.0]);
+    assert_eq!(
+        skill::unit_use_skill(&server, &boss, 21055, &boss),
+        skill_result::SUCCESS
+    );
+    let mut orb = None;
+    for _ in 0..60 {
+        orb = world
+            .all_doodads()
+            .into_iter()
+            .find(|doodad| doodad.data().template_id == 6261);
+        if orb.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let orb = orb.expect("Musperosa's petrifying orb");
+    let at = orb.data().transform;
+    let move_to = |x: f32| {
+        player.data().unit.transform.set_xyz(x, at.y, at.z);
+        world.add_visible_object(&player, &server.view_ctx());
+        server.systems.npcs.area_triggers.tick(&server);
+    };
+    let stacks = || player.data().unit.buffs.buff_count_by_id(5328);
+    move_to(at.x);
+    for _ in 0..10 {
+        if stacks() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server.systems.npcs.area_triggers.tick(&server);
+    }
+    assert!(stacks() >= 3, "each orb pulse adds a stack");
+    move_to(at.x + 10.0);
+    let pulse_stacks = stacks();
+    assert!(
+        pulse_stacks >= 2,
+        "the first exit takes only its inside stack"
+    );
+    // Cross the edge again: in, then straight back out.
+    move_to(at.x);
+    let inside = stacks();
+    move_to(at.x + 10.0);
+    assert_eq!(stacks(), inside, "the second exit removes no pulse stack");
+    assert!(stacks() >= pulse_stacks);
+    for _ in 0..30 {
+        server.systems.npcs.area_triggers.tick(&server);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(world.doodad(orb.obj_id).is_none(), "the orb finished");
+    assert!(stacks() >= pulse_stacks, "the pulse stacks keep their 60 s");
 }

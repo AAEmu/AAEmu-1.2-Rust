@@ -3699,13 +3699,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   whose buff the unit already had. That let the inside buff block every pulse, and the
   only stack left with the orb. A stacking inside buff now gains a stack per pulse. Each
   pulse stack keeps its authored 60 s, and only the inside stack leaves with the area.
+  The unit records the index of the stack its first entry added (`trigger_stack_index`).
+  The last exit removes that stack only. A re-entry while pulse stacks remain adds no
+  inside stack, so its exit removes none.
   A gimmick's self-targeted skill starts on the gimmick itself. The Trieste bolt's
   detonation 21126 was refused as `skill_target_died` because gimmicks have no health.
   Its `target_alive` flag now applies to the units in the area only, so the bolt stuns
-  the frenzied spirit (5366) and dispels Frenzy (tag 754). The Hellfire clouts (1415, 1542)
-  have no inside buff. Their damage packets named skill 0, so they now name the Hellfire
-  skill that places the doodad (18963, 21082). The combat-log effect of skill 0 is
-  inferred.
+  the frenzied spirit (5366) and dispels Frenzy (tag 754). A clout without an inside buff
+  (Hellfire 1415/1542) cast its effects as `CastSkill(0, tl 0)`. The r208022 client's
+  `SCUnitDamagedPacket` handler (x2game `0x39398c80`) looks the skill up by its timeline
+  and drops the hit (`damage: invalid skill id`). Live, Hellfire's damage appeared in
+  neither the combat log nor the floating text. Such a doodad-owned trigger now casts as
+  cast-action kind 4 (`CastAction::Doodad`, formerly the unused `CastUnk3`): u32 doodad
+  template id and bc doodad object id. The client names the hit after the doodad template
+  (`damage: invalid doodad type`).
 * systems::npcs / data (Howling Abyss world data, 2026-11-21, tests in
   `npcs::howling_world_tests`):
   - **One NPC per recorded spawn.** Plain `npc_spawns.json` rows that share an `Id` were one

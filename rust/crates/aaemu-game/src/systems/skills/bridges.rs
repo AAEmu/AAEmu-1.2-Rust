@@ -202,10 +202,21 @@ impl SkillsBridge for SkillsForNpcs {
         unit: &WorldObject,
         buff_id: u32,
         skill_id: u32,
+        source_doodad: Option<(u32, u32)>,
         effect_ids: &[u32],
     ) {
         let data = &server.game_data.systems.skills;
         let skill_object = SkillObject::default();
+        // The r208022 client drops a hit cast as an unknown skill timeline (`damage: invalid
+        // skill id`), so tl id 0 never reached the combat log. A doodad's clout casts as the
+        // doodad (kind 4), which the client names after the doodad template.
+        let fallback = match source_doodad {
+            Some((template_id, obj_id)) if skill_id == 0 => CastAction::Doodad {
+                template_id,
+                obj_id,
+            },
+            _ => CastAction::Skill { skill_id, tl_id: 0 },
+        };
         for &id in effect_ids {
             let Some((kind, template)) = data.effect_by_type_id(id) else {
                 continue;
@@ -234,12 +245,10 @@ impl SkillsBridge for SkillsForNpcs {
                         .find(|e| e.template.id == buff_id)
                         .map(|e| e.index)
                 })
-                .map_or(CastAction::Skill { skill_id, tl_id: 0 }, |index| {
-                    CastAction::Buff {
-                        buff_id,
-                        owner_obj_id: unit.obj_id(),
-                        index,
-                    }
+                .map_or(fallback, |index| CastAction::Buff {
+                    buff_id,
+                    owner_obj_id: unit.obj_id(),
+                    index,
                 });
             let args = EffectArgs {
                 caster: Some(caster.clone()),
