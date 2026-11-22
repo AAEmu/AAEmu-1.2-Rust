@@ -426,7 +426,8 @@ pub(crate) fn receive(
             ctx.data().phase_func_template(pf.func_id, &pf.func_type)
         {
             if f.flag == value && f.next_phase > 0 {
-                phase::do_change_phase(&ctx, caster.or(Some(&source.obj())), f.next_phase);
+                let next = phase::pulse_trigger_next_phase(&ctx, group, f.next_phase);
+                phase::do_change_phase(&ctx, caster.or(Some(&source.obj())), next);
                 return;
             }
         }

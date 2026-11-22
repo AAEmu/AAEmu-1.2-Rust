@@ -258,7 +258,7 @@ async fn real_howling_greater_gluttons_spawn_once_per_recorded_npc() {
 }
 
 /// The r208022 client files and a server whose collision loads them.
-fn pak_server() -> Option<Arc<GameServer>> {
+pub(super) fn pak_server() -> Option<Arc<GameServer>> {
     use crate::data::client_files::ClientFileManager;
     use crate::data::world_templates::WorldTemplates;
     use crate::systems::npcs::heightmap::{HeightmapConfig, HeightmapWorlds};

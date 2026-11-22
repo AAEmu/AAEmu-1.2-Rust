@@ -845,6 +845,37 @@ pub fn use_skill(
         skill_object,
         bypass_gcd,
         false,
+        false,
+    )
+}
+
+/// [`use_skill`] for a skill that an effect starts on its caster's behalf (the `SkillUse`
+/// special effect: a buff trigger, a plot or a doodad chaining a follow-up skill). It bypasses
+/// the global cooldown, as that effect always did.
+///
+/// An instant follow-up (no cast or channel time) also goes through while the caster runs a
+/// timed cast of another skill. Such a skill never takes the caster's task slot, so the cast
+/// in progress completes as before. Refusing it with `skill_on_casting` silently dropped the
+/// chained skill: Lady Velarre's Hellfire Flower (16020, 2 s cast) is her basic attack, and a
+/// Bound Soul mark (buff 2586) that timed out during that cast summoned no souls (16442).
+pub fn use_triggered_skill(
+    server: &GameServer,
+    skill: &SkillRef,
+    caster: &WorldObject,
+    caster_caster: SkillCaster,
+    target_caster: &mut SkillCastTarget,
+    skill_object: Option<SkillObject>,
+) -> (u8, u32) {
+    use_skill_impl(
+        server,
+        skill,
+        caster,
+        caster_caster,
+        target_caster,
+        skill_object,
+        true,
+        false,
+        true,
     )
 }
 
@@ -904,7 +935,8 @@ fn earthen_grip_has_aggro(server: &GameServer, caster: &WorldObject) -> bool {
 }
 
 /// [`use_skill`] with a check-only mode: every refusal is returned exactly as a real use would
-/// return it, but a passing check stops before the first cast-state mutation.
+/// return it, but a passing check stops before the first cast-state mutation. `triggered`:
+/// see [`use_triggered_skill`].
 #[allow(clippy::too_many_arguments)]
 fn use_skill_impl(
     server: &GameServer,
@@ -915,6 +947,7 @@ fn use_skill_impl(
     skill_object: Option<SkillObject>,
     bypass_gcd: bool,
     dry_run: bool,
+    triggered: bool,
 ) -> (u8, u32) {
     if !caster.is_unit() {
         tracing::debug!(
@@ -1068,7 +1101,10 @@ fn use_skill_impl(
         .flatten();
     if let Some(task) = &active_task {
         match task.kind {
-            SkillTaskKind::Cast => {
+            // An instant triggered skill leaves the task slot to the cast in progress.
+            SkillTaskKind::Cast
+                if !(triggered && template.casting_time <= 0 && template.channeling_time <= 0) =>
+            {
                 tracing::debug!(
                     skill_id = skill.id,
                     active_skill = task.skill.template.id,
@@ -3702,6 +3738,7 @@ fn unit_use_skill_impl(
         None,
         true,
         dry_run,
+        false,
     )
 }
 

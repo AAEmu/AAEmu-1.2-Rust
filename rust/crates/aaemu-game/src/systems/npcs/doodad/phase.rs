@@ -926,11 +926,15 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
 
     let mut stop = false;
     let manager = &ctx.server.systems.npcs.doodads;
-    let has_ratio_func = phase_funcs.iter().any(|pf| {
-        matches!(
-            pf.func_type.as_str(),
-            "DoodadFuncRatioChange" | "DoodadFuncRatioRespawn"
-        )
+    // A group's `DoodadFuncRatioChange` rows wait for its `DoodadFuncPulseTrigger`, see
+    // [`pulse_trigger_next_phase`].
+    let deferred_ratio = phase_funcs
+        .iter()
+        .any(|pf| pf.func_type == "DoodadFuncPulseTrigger");
+    let has_ratio_func = phase_funcs.iter().any(|pf| match pf.func_type.as_str() {
+        "DoodadFuncRatioChange" => !deferred_ratio,
+        "DoodadFuncRatioRespawn" => true,
+        _ => false,
     });
     let phase_ratio = if has_ratio_func {
         manager
@@ -959,6 +963,9 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");
     for pf in others.into_iter().chain(triggers) {
+        if deferred_ratio && pf.func_type == "DoodadFuncRatioChange" {
+            continue;
+        }
         // DoodadPhaseFunc.Use: template != null && template.Use(caster, owner)
         stop = match ctx.data().phase_func_template(pf.func_id, &pf.func_type) {
             Some(t) => phase_funcs::use_phase_func(t, ctx, caster),
@@ -982,6 +989,49 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
         db::save(ctx.server, &ctx.doodad); // let's save the doodad in the database
     }
     stop
+}
+
+/// The phase a fired `DoodadFuncPulseTrigger` enters. When the trigger's group also has
+/// `DoodadFuncRatioChange` rows, one roll over them picks the phase (falling back to the
+/// trigger's `next_phase` when no row is hit); those rows do not run on phase entry.
+///
+/// **Inferred (no 1.2 server evidence):** only Kroloal Cradle's Poison Cloud Gate 6002 has
+/// both in one group (15491: `PulseTrigger(t -> 15657)`, `RatioChange` 5000 -> 15657 and
+/// 5000 -> 15658). Run on entry, the ratio rows moved the gate at spawn, before the mushroom
+/// controller's pulse, and the room's poison walls never opened. The two target phases pulse
+/// `t` and `f` to the two walls (5545 opens on `t`, 6050 on `f`), so the roll picks which exit
+/// of the mushroom room opens.
+pub(crate) fn pulse_trigger_next_phase(ctx: &DoodadCtx<'_>, group: u32, next_phase: i32) -> i32 {
+    let rows: Vec<(i32, i32)> = ctx
+        .data()
+        .phase_funcs(group)
+        .iter()
+        .filter_map(
+            |pf| match ctx.data().phase_func_template(pf.func_id, &pf.func_type) {
+                Some(FuncTemplate::RatioChange(f)) => Some((f.ratio.max(0), f.next_phase)),
+                _ => None,
+            },
+        )
+        .collect();
+    if rows.is_empty() {
+        return next_phase;
+    }
+    let roll = ctx
+        .server
+        .systems
+        .npcs
+        .doodads
+        .forced_phase_ratio()
+        .unwrap_or_else(|| rand::thread_rng().gen_range(0..10000));
+    let mut cumulative = 0;
+    for (ratio, phase) in rows {
+        let prev = cumulative;
+        cumulative += ratio;
+        if roll >= prev && roll < cumulative && phase > 0 {
+            return phase;
+        }
+    }
+    next_phase
 }
 
 /// `DoChangePhase(caster, nextPhase)`: phase funcs of `next_phase`, then

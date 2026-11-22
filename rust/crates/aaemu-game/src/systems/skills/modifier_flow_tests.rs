@@ -983,3 +983,84 @@ async fn auto_attack_stops_dealing_damage_when_the_zone_enters_peace() {
     assert!(super::auto_attack_tick(&server, &a, &skill, &cancel).is_some());
     assert_eq!(b.data().unit.hp, hp, "the tick must not damage in Peace");
 }
+
+/// PR #169 review: an instant `SkillUse` follow-up during a real timed cast (Lady Velarre's
+/// Bound Soul summon 16442 during Hellfire Flower 16020) applies at once, and the cast in
+/// progress still completes on its own timer and applies its effects afterwards.
+#[tokio::test(start_paused = true)]
+async fn an_instant_triggered_skill_and_the_timed_cast_it_interrupts_both_apply() {
+    let mut data = data();
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(skills::tests::damage_effect(1, 10))),
+        1,
+    );
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(skills::tests::damage_effect(2, 25))),
+        2,
+    );
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(data);
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 2_000,
+            effects: vec![skills::tests::skill_effect(1, EffectKind::DamageEffect, 1)],
+            ..skills::tests::skill_template(9101)
+        }),
+        1,
+    );
+    let instant = SkillRun::new(
+        Arc::new(SkillTemplate {
+            effects: vec![skills::tests::skill_effect(2, EffectKind::DamageEffect, 2)],
+            ..skills::tests::skill_template(9102)
+        }),
+        1,
+    );
+    let is_timed_cast = || {
+        player
+            .data()
+            .unit
+            .skill_state
+            .skill_task
+            .as_ref()
+            .is_some_and(|task| Arc::ptr_eq(&task.skill, &timed))
+    };
+    let hp = || npc.data().unit.hp;
+    client.drain();
+    cast(&server, &player, npc.obj_id, &timed);
+    tokio::task::yield_now().await;
+    assert!(is_timed_cast(), "the timed cast is running");
+    let before = hp();
+
+    let (result, _) = skills::skill::use_triggered_skill(
+        &server,
+        &instant,
+        &WorldObject::from(&player),
+        SkillCaster::Unit(player.obj_id),
+        &mut SkillCastTarget::Unit(npc.obj_id),
+        Some(SkillObject::None),
+    );
+    assert_eq!(result, 0);
+    tokio::task::yield_now().await;
+    assert_eq!(hp(), before - 25, "the follow-up applies at once");
+    assert!(is_timed_cast(), "the timed cast keeps its task slot");
+
+    // Visit the cast's deadline in small steps; nothing lands before it.
+    for _ in 0..19 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(hp(), before - 25, "the timed cast has not finished yet");
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        player.data().unit.skill_state.skill_task.is_none(),
+        "the timed cast completes and clears its task"
+    );
+    assert_eq!(hp(), before - 25 - 10, "the timed cast applies its effects");
+    let packets = effects(&mut client);
+    assert!(packets.contains(&(npc.obj_id, 25)), "{packets:?}");
+    assert!(packets.contains(&(npc.obj_id, 10)), "{packets:?}");
+}

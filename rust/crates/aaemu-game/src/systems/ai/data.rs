@@ -179,11 +179,14 @@ impl AiData {
             if !seen.insert(id) {
                 return Ok(()); // The table contains duplicates.
             }
+            let param1 = r.u32("param1")?;
             let c = AiCommands {
                 id,
                 cmd_set_id: r.u32("cmd_set_id")?,
                 cmd_id: AiCommandCategory::from_u32(r.u32("cmd_id")?),
-                param1: r.u32("param1")?,
+                param1,
+                // A REAL keeps its fraction; a text row ("5 sec") is its leading number.
+                param1_exact: r.f32_opt("param1")?.map_or(f64::from(param1), f64::from),
                 param2: r.string("param2")?,
             };
             self.commands.entry(c.cmd_set_id).or_default().push(c);
@@ -453,6 +456,67 @@ mod tests {
             .filter(|m| !m.stances.is_empty())
             .count();
         assert!(with_stances > 500, "{with_stances}");
+    }
+
+    /// Gated: every `Timeout` row of the real compact is a scene pause of 1-60 s under
+    /// `params::timeout_ms`. 453 rows are seconds (1-60, 19 with a fraction, six written as
+    /// text such as "5 sec") and one is milliseconds (set 167, 1500). The sets the server used
+    /// to list by hand (the Armory, Howling Abyss and Kroloal Cradle scenes) keep their seconds,
+    /// and Calleil's intro (281) now has them too.
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn real_compact_db_timeouts_are_scene_pauses() {
+        use crate::systems::ai::params::{AiCommandCategory, TIMEOUT_MILLISECONDS_FROM};
+        let Some(c) = conn() else {
+            return;
+        };
+        let d = AiData::load_from(&c).expect("ai data");
+        let mut timeouts: Vec<&AiCommands> = d
+            .commands
+            .values()
+            .flatten()
+            .filter(|cmd| cmd.cmd_id == AiCommandCategory::Timeout)
+            .collect();
+        timeouts.sort_by_key(|cmd| cmd.id);
+        assert_eq!(timeouts.len(), 454);
+        let mut milliseconds = Vec::new();
+        for t in &timeouts {
+            let ms = t.timeout_ms();
+            assert!(
+                (1_000..=60_000).contains(&ms),
+                "set {} row {}: {} -> {ms} ms",
+                t.cmd_set_id,
+                t.id,
+                t.param1_exact
+            );
+            if t.param1_exact >= TIMEOUT_MILLISECONDS_FROM {
+                milliseconds.push((t.cmd_set_id, t.id, ms));
+            } else {
+                assert_eq!(ms, (t.param1_exact * 1000.0).round() as i64);
+            }
+        }
+        assert_eq!(
+            milliseconds,
+            [(167, 2361, 1_500)],
+            "the one millisecond row"
+        );
+        let fractional = timeouts.iter().filter(|t| t.param1_exact.fract() != 0.0);
+        assert_eq!(fractional.count(), 19);
+        let row = |id: u32| timeouts.iter().find(|t| t.id == id).unwrap().timeout_ms();
+        assert_eq!(row(398), 5_000, "set 42's \"5 sec\"");
+        assert_eq!(row(454), 2_000, "set 52's \"2sec\"");
+        assert_eq!(row(3338), 6_400, "Kuwon's 6.4 s in Sprigg's room");
+        let set = |id: u32| -> Vec<i64> {
+            d.commands[&id]
+                .iter()
+                .filter(|cmd| cmd.cmd_id == AiCommandCategory::Timeout)
+                .map(AiCommands::timeout_ms)
+                .collect()
+        };
+        assert_eq!(set(281), [3_000, 2_000, 3_000, 3_000, 3_000, 3_000]);
+        assert_eq!(set(282), [3_000], "Godfrey's finale");
+        assert_eq!(set(207), [3_000], "Metamoze's cut-scene trigger");
+        assert_eq!(set(102), [3_000, 7_000, 3_000], "the Armory's opening");
     }
 
     #[test]

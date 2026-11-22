@@ -244,3 +244,123 @@ async fn real_cradle_maddened_shaman_casts_from_range() {
     );
     assert!(used, "the Shaman casts");
 }
+
+/// The Academy Test Subject (11284, AI param 1836) and the Faceless Butchers it summons are
+/// authored to keep coming while it fights. Its 18409 (cooldown 30 s, skillDelay 8, plot 398)
+/// summons two butchers (SpawnEffect 1539 / 1540, 4 s and 8 s into the plot) with no life time
+/// and no despawn on the creator's death; a butcher's own InIdle skill 20066 (KillNpcWithout-
+/// Corpse 11160, radius 0, vanish) removes it when its fight ends. In a 15 s fight one subject
+/// therefore summons exactly two, and the two vanish once their victim is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_cradle_test_subject_summons_two_butchers_per_cooldown() {
+    use crate::systems::skills::{combat, types::KillReason};
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_encounter_server(&db, WORLD, ZONE);
+    let mut config = server.systems.skills.config();
+    config.god_mode = true;
+    server.systems.skills.set_config(config);
+    let subject = npc_at(&server, &world, 11284, AT);
+    let (_client, player) = player_at(&server, 1, offset(AT, 3.0));
+    let victim = WorldObject::from(&player);
+    crate::systems::ai::hooks::spawn_positioned(&server, &subject);
+    let butchers = || {
+        world
+            .all_npcs()
+            .into_iter()
+            .filter(|n| n.data().unit.template_id == 11160)
+            .collect::<Vec<_>>()
+    };
+    let tick_all = || {
+        for npc in world.all_npcs() {
+            crate::systems::ai::manager::run_now(&server, npc.obj_id, |ai| ai.tick(100, true));
+        }
+    };
+    tick_all();
+    crate::systems::ai::hooks::engage(&server, &subject, &victim);
+    let mut most = 0;
+    for _ in 0..150 {
+        tick_all();
+        player.data().unit.hp = 100_000;
+        most = most.max(butchers().len());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        subject
+            .data()
+            .unit
+            .cooldowns
+            .check_cooldown(18409, now_ms()),
+        "18409 is on its 30 s cooldown"
+    );
+    assert_eq!(most, 2, "one 18409 in 15 s summons two butchers");
+    let summoned = butchers();
+    assert_eq!(summoned.len(), 2);
+    for b in &summoned {
+        assert_eq!(
+            b.data().current_aggro_target,
+            player.obj_id,
+            "a butcher takes its summoner's victim"
+        );
+    }
+    // The victim dies: the butchers' fight ends and their idle skill removes them.
+    let hp = player.data().unit.hp;
+    let mut config = server.systems.skills.config();
+    config.god_mode = false;
+    server.systems.skills.set_config(config);
+    combat::reduce_current_hp(&server, &victim, None, hp, KillReason::Damage);
+    for _ in 0..60 {
+        tick_all();
+        if butchers().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(butchers().is_empty(), "20066 vanishes the idle butchers");
+}
+
+/// The Putrid Demon by the Academy room (11357 at (813.2, 840.2), yaw 165.9) is as aggressive
+/// as the Academy pack (aggression, `attack_start_range_scale` 0.5, `sight_range_scale` 0.8,
+/// faction 115, AI param 1846 alertToAttack). `CheckAggression` / `CheckAlert` only notice a
+/// unit in the front half (`sight_fov_scale` 1.0) within 5 / 12 m, or one within 1.2 / 1.6 m
+/// all round. In the live pass the player stood 4.3 m east of it, 104 degrees off its facing,
+/// for 40 s without aggro; the same distance in front of it pulls it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_cradle_putrid_demon_notices_a_player_in_front_or_close() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_encounter_server(&db, WORLD, ZONE);
+    let mut config = server.systems.skills.config();
+    config.god_mode = true;
+    server.systems.skills.set_config(config);
+    let spot = [813.2, 840.2, 192.9];
+    let demon = npc_at(&server, &world, PUTRID_DEMON, spot);
+    demon.data().unit.transform.rot_z = 165.9_f32.to_radians();
+    let (_client, player) = player_at(&server, 1, offset(spot, 4.3));
+    crate::systems::ai::hooks::spawn_positioned(&server, &demon);
+    let aggro = |demon: &NpcRef| !demon.data().unit.skill_state.aggro_table.is_empty();
+    for _ in 0..40 {
+        tick(&server, &demon, &player).await;
+    }
+    assert!(!aggro(&demon), "4.3 m east, behind its side: no aggro");
+    // 4.3 m along its facing (90 + 165.9 degrees from the x axis).
+    let facing = (90.0_f32 + 165.9).to_radians();
+    player.data().unit.transform.set_xyz(
+        spot[0] + 4.3 * facing.cos(),
+        spot[1] + 4.3 * facing.sin(),
+        spot[2],
+    );
+    let mut noticed = false;
+    for _ in 0..10 {
+        tick(&server, &demon, &player).await;
+        if aggro(&demon) {
+            noticed = true;
+            break;
+        }
+    }
+    assert!(noticed, "4.3 m in front: aggro");
+}

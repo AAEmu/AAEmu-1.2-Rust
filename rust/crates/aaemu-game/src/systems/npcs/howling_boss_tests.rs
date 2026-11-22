@@ -117,22 +117,7 @@ async fn real_howling_unknown_power_outlasts_the_petrifying_orb() {
     let (server, world) = load_greater(&db);
     let boss = WorldObject::from(npc_at(&server, &world, 12758, [463.4, 679.2, 167.0]));
     let (_client, player) = player_at(&server, 1, [467.2, 679.2, 167.0]);
-    assert_eq!(
-        skill::unit_use_skill(&server, &boss, 21055, &boss),
-        skill_result::SUCCESS
-    );
-    let mut orb = None;
-    for _ in 0..60 {
-        orb = world
-            .all_doodads()
-            .into_iter()
-            .find(|doodad| doodad.data().template_id == 6261);
-        if orb.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let orb = orb.expect("Musperosa's petrifying orb");
+    let orb = summon_orb(&server, &boss, &player);
     let at = orb.data().transform;
     let move_to = |x: f32| {
         player.data().unit.transform.set_xyz(x, at.y, at.z);
@@ -140,28 +125,82 @@ async fn real_howling_unknown_power_outlasts_the_petrifying_orb() {
     };
     move_to(at.x);
     let stacks = || player.data().unit.buffs.buff_count_by_id(5328);
-    for _ in 0..10 {
-        server.systems.npcs.area_triggers.tick(&server);
-        if stacks() >= 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(stacks() >= 3, "each orb pulse adds a stack");
+    await_pulse_stacks(&server, stacks).await;
     // Step out before the orb's explosion.
     move_to(at.x + 10.0);
     server.systems.npcs.area_triggers.tick(&server);
     assert!(stacks() >= 2, "only the inside stack leaves with the area");
-    for _ in 0..30 {
-        server.systems.npcs.area_triggers.tick(&server);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(world.doodad(orb.obj_id).is_none(), "the orb finished");
+    run_orb_to_its_end(&server, &world, &orb);
     assert!(
         stacks() >= 2,
         "Unknown Power stays after the orb ends, {} stacks",
         stacks()
     );
+}
+
+/// Summons one petrifying orb (6261) on `player`, owned by Musperosa (`boss`), with the doodad
+/// tasks on the virtual clock.
+///
+/// Her skill 21055 is not cast: plot 713 loops its random-area event (5807) and summons an
+/// orb at a random spot near a random target on each pass, through this same interaction
+/// (effect 3592, SummonDoodad). On real time those orbs kept landing on the player at the
+/// "outside" spot as well. Under load the test stepped out later, more orbs exploded on
+/// the player (damage 4423), and the death removed every Unknown Power stack (`remove_on_death`).
+fn summon_orb(
+    server: &Arc<GameServer>,
+    boss: &WorldObject,
+    player: &PlayerRef,
+) -> crate::world::DoodadRef {
+    server.systems.npcs.doodads.tasks.set_manual(true);
+    super::doodad::interactions::execute_interaction(
+        server,
+        super::doodad::interactions::world_interaction_type::SUMMON_DOODAD,
+        boss,
+        Some(&WorldObject::from(player)),
+        21055,
+        6261,
+        None,
+    );
+    let world = server.world.world_of(boss).expect("Musperosa's world");
+    let orbs: Vec<_> = world
+        .all_doodads()
+        .into_iter()
+        .filter(|doodad| doodad.data().template_id == 6261)
+        .collect();
+    assert_eq!(orbs.len(), 1, "one petrifying orb");
+    let orb = orbs.into_iter().next().unwrap();
+    assert_eq!(orb.data().func_group_id, 16583, "the pulsing phase");
+    orb
+}
+
+/// The orb's pulsing clout (1537) stays up on the virtual clock; its 700 ms pulses run on the
+/// area triggers' real-time tick. Waits for the inside stack and two pulses.
+async fn await_pulse_stacks(server: &Arc<GameServer>, stacks: impl Fn() -> i32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while stacks() < 3 && std::time::Instant::now() < deadline {
+        server.systems.npcs.area_triggers.tick(server);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(stacks() >= 3, "each orb pulse adds a stack");
+}
+
+/// Runs the orb's remaining phases: the pulsing clout (1537, 2100 ms), the explosion clout
+/// (1538, 200 ms) and its Final (3143, `after` 3000 ms), which deletes it.
+fn run_orb_to_its_end(
+    server: &Arc<GameServer>,
+    world: &WorldInstance,
+    orb: &crate::world::DoodadRef,
+) {
+    let tasks = &server.systems.npcs.doodads.tasks;
+    tasks.advance(server, 2_100);
+    assert_eq!(orb.data().func_group_id, 16584, "the explosion phase");
+    server.systems.npcs.area_triggers.tick(server);
+    tasks.advance(server, 200);
+    assert_eq!(orb.data().func_group_id, 16585, "the final phase");
+    server.systems.npcs.area_triggers.tick(server);
+    tasks.advance(server, 3_000);
+    server.systems.npcs.area_triggers.tick(server);
+    assert!(world.doodad(orb.obj_id).is_none(), "the orb finished");
 }
 
 /// #12: Trieste's secret weapon detonation (21126) stuns the frenzied spirit and removes
@@ -418,22 +457,7 @@ async fn real_howling_orb_reentry_keeps_the_pulse_stacks() {
     let (server, world) = load_greater(&db);
     let boss = WorldObject::from(npc_at(&server, &world, 12758, [463.4, 679.2, 167.0]));
     let (_client, player) = player_at(&server, 1, [467.2, 679.2, 167.0]);
-    assert_eq!(
-        skill::unit_use_skill(&server, &boss, 21055, &boss),
-        skill_result::SUCCESS
-    );
-    let mut orb = None;
-    for _ in 0..60 {
-        orb = world
-            .all_doodads()
-            .into_iter()
-            .find(|doodad| doodad.data().template_id == 6261);
-        if orb.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let orb = orb.expect("Musperosa's petrifying orb");
+    let orb = summon_orb(&server, &boss, &player);
     let at = orb.data().transform;
     let move_to = |x: f32| {
         player.data().unit.transform.set_xyz(x, at.y, at.z);
@@ -442,14 +466,7 @@ async fn real_howling_orb_reentry_keeps_the_pulse_stacks() {
     };
     let stacks = || player.data().unit.buffs.buff_count_by_id(5328);
     move_to(at.x);
-    for _ in 0..10 {
-        if stacks() >= 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        server.systems.npcs.area_triggers.tick(&server);
-    }
-    assert!(stacks() >= 3, "each orb pulse adds a stack");
+    await_pulse_stacks(&server, stacks).await;
     move_to(at.x + 10.0);
     let pulse_stacks = stacks();
     assert!(
@@ -462,10 +479,6 @@ async fn real_howling_orb_reentry_keeps_the_pulse_stacks() {
     move_to(at.x + 10.0);
     assert_eq!(stacks(), inside, "the second exit removes no pulse stack");
     assert!(stacks() >= pulse_stacks);
-    for _ in 0..30 {
-        server.systems.npcs.area_triggers.tick(&server);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(world.doodad(orb.obj_id).is_none(), "the orb finished");
+    run_orb_to_its_end(&server, &world, &orb);
     assert!(stacks() >= pulse_stacks, "the pulse stacks keep their 60 s");
 }

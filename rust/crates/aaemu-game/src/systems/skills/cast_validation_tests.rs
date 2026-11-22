@@ -2339,3 +2339,59 @@ async fn gimmick_source_exemptions_do_not_apply_to_players_and_npcs() {
     assert!(check(&alive, &gimmick).is_ok(), "a gimmick has no health");
     assert!(check(&alive, &WorldObject::from(&player)).is_ok());
 }
+
+/// A `SkillUse` follow-up starts while the caster runs a timed cast of another skill, when it
+/// is instant itself (Lady Velarre's Bound Soul summon 16442 during Hellfire Flower 16020).
+/// The cast in progress keeps the caster's task slot. A direct use, and a follow-up with a cast
+/// time of its own, are still refused.
+#[tokio::test]
+async fn an_instant_triggered_skill_goes_through_a_timed_cast_in_progress() {
+    use super::skill::use_triggered_skill;
+    use super::state::{CancelToken, SkillTaskKind, SkillTaskSlot};
+
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let caster = WorldObject::from(&player);
+    let casting = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 2_000,
+            ..super::tests::skill_template(1)
+        }),
+        1,
+    );
+    player.data().unit.skill_state.skill_task = Some(SkillTaskSlot {
+        kind: SkillTaskKind::Cast,
+        skill: casting.clone(),
+        cancel: CancelToken::new(),
+        extend_ms: 0,
+    });
+    let instant = SkillRun::new(Arc::new(super::tests::skill_template(2)), 1);
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 1_000,
+            ..super::tests::skill_template(3)
+        }),
+        1,
+    );
+    let on_casting = super::unit_reqs::skill_result_for_key("skill_on_casting");
+    let triggered = |skill: &SkillRef| {
+        use_triggered_skill(
+            &server,
+            skill,
+            &caster,
+            SkillCaster::Unit(player.obj_id),
+            &mut SkillCastTarget::Unit(npc.obj_id),
+            Some(SkillObject::None),
+        )
+        .0
+    };
+    assert_eq!(cast(&server, &instant, &player, &npc).0, on_casting);
+    assert_eq!(triggered(&timed), on_casting);
+    assert_eq!(triggered(&instant), skill_result::SUCCESS);
+    let task = player.data().unit.skill_state.skill_task.clone();
+    assert!(
+        task.is_some_and(
+            |task| task.kind == SkillTaskKind::Cast && Arc::ptr_eq(&task.skill, &casting)
+        ),
+        "the timed cast keeps its task slot"
+    );
+}

@@ -834,27 +834,80 @@ async fn real_data_hadir_slam_lands_and_the_poison_pool_ticks() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
 async fn real_data_hadir_velarre_tombstone_summons_hostile_souls() {
+    use crate::systems::skills::{
+        skill::unit_use_skill, state::SkillTaskKind, types::skill_result,
+    };
+
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
     };
     let server = real_server(&db);
     load_shipped(&server);
+    // The tombstone's phases run on the virtual clock. On real time the ticked boss AI picked
+    // her skills at random, and the souls were missing (about 2% of runs) whenever the mark
+    // timed out during her 2 s Hellfire Flower cast. That case is now set up on purpose.
+    let doodad_tasks = &server.systems.npcs.doodads.tasks;
+    doodad_tasks.set_manual(true);
     let world = server.world.world(0).unwrap();
     let boss = spawner_force_spawn(&server, 62021).unwrap();
+    let boss_obj = WorldObject::from(&boss);
     let player = place_player(&server, &world, 1, 789.0, 610.6, 136.6);
     let target = WorldObject::from(&player);
     crate::systems::ai::npc::set_current_aggro_target(&boss, Some(&target));
     super::doodad::interactions::execute_interaction(
         &server,
         SUMMON_DOODAD,
-        &WorldObject::from(&boss),
+        &boss_obj,
         Some(&target),
         16084,
         3874,
         None,
     );
+    let tombstone = world
+        .all_doodads()
+        .into_iter()
+        .find(|doodad| doodad.data().template_id == 3874)
+        .expect("the tombstone is summoned");
+    let phase = || tombstone.data().func_group_id;
+    let marked = || player.data().unit.buffs.check_buff(2586);
+    // Timers 3017 and 3018 (1 s each), the damage clout 1038 (100 ms), then Timer 4308 (5 s)
+    // ends one millisecond after this.
+    assert_eq!(phase(), 9374);
+    for (delay, expected) in [(1_000, 9428), (1_000, 11008), (100, 11390), (4_999, 11390)] {
+        doodad_tasks.advance(&server, delay);
+        assert_eq!(phase(), expected);
+    }
+    assert!(!marked());
     assert!(npcs_of(&world, 9808).is_empty());
-    run_until(&server, 10, || !npcs_of(&world, 9808).is_empty()).await;
+    // Lady Velarre starts her basic attack, the 2 s Hellfire Flower cast. The Bound Soul mark
+    // (clout 852, buff 2586, 100 ms) times out during that cast and must still summon.
+    assert_eq!(
+        unit_use_skill(&server, &boss_obj, 16020, &target),
+        skill_result::SUCCESS
+    );
+    let casting = || {
+        boss.data()
+            .unit
+            .skill_state
+            .skill_task
+            .as_ref()
+            .is_some_and(|task| task.kind == SkillTaskKind::Cast && task.skill.template.id == 16020)
+    };
+    assert!(casting(), "Velarre is casting Hellfire Flower");
+    doodad_tasks.advance(&server, 1);
+    assert_eq!(phase(), 9431);
+    assert!(marked(), "the tombstone marks the player");
+    assert!(casting(), "the cast is still running when the mark lands");
+    // The 110 ms clout ends; its area has no inside buff, so the mark stays, and the area
+    // cannot mark the player again while the souls are awaited.
+    doodad_tasks.advance(&server, 110);
+    assert_eq!(phase(), 9435);
+    // The mark's timeout and the summon run on real time. The AI is not ticked here: entering
+    // its combat behaviour would interrupt the cast.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while npcs_of(&world, 9808).is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let souls = npcs_of(&world, 9808);
     assert!(!souls.is_empty());
     assert!(souls.iter().all(|n| n.data().unit.faction_id == 115));

@@ -494,8 +494,12 @@ pub struct MoveAi {
 }
 
 /// `Npc.MoveTowards(other, distance, actorFlags, rangeTolerance)`: one movement step of at most
-/// `distance` metres (before `MoveSpeedMul`) towards `other`, broadcast as
-/// `SCOneUnitMovementPacket`. Returns true when already within `range_tolerance`.
+/// `distance` metres towards `other`, broadcast as `SCOneUnitMovementPacket`. Returns true when
+/// already within `range_tolerance`.
+///
+/// `distance` already carries `MoveSpeedMul`: every AI caller takes its pace from
+/// [`real_movement_speed`]. The C# multiplied by `MoveSpeedMul` here as well, so a slowed or
+/// hasted NPC moved at the square of its modifier (deviation, see PORTING.md).
 pub fn move_towards(
     server: &GameServer,
     npc: &NpcRef,
@@ -512,7 +516,6 @@ pub fn move_towards(
     if is_displaced(&obj) {
         return false;
     }
-    let distance = distance * move_speed_mul(&obj); // Apply speed modifier
     if distance < 0.01 {
         return false;
     }
@@ -1257,6 +1260,51 @@ mod tests {
         let position = fish.data().unit.transform;
         assert!(position.x > 500.0 && position.x < 504.0, "{position:?}");
         assert!((position.z - 113.7).abs() < 0.001);
+    }
+
+    /// The AI's pace already carries `MoveSpeedMul` (`real_movement_speed`); the step does not
+    /// apply it a second time. With the C#'s second multiplication the Cradle squad's Stealth
+    /// 4566 (MoveSpeedMul -300) walked its last leg at 0.88 m/s (1.8 x 0.7 x 0.7).
+    #[tokio::test]
+    async fn a_speed_modifier_scales_an_ai_step_once() {
+        use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType};
+        let server = water_server();
+        let fish = water_npc(&server, 0x200, 1373, false);
+        let template = BonusTemplate {
+            attribute: UnitAttribute::MoveSpeedMul,
+            modifier_type: UnitModifierType::Value,
+            value: -300,
+            linear_level_bonus: 0,
+        };
+        fish.data().unit.bonuses.add_bonus(
+            1,
+            Bonus {
+                template,
+                value: -300,
+            },
+        );
+        let obj = WorldObject::from(&fish);
+        let pace = real_movement_speed(&obj, 1.8);
+        assert!(
+            (pace - 1.26).abs() < 1e-4,
+            "the walk under the slow: {pace}"
+        );
+        move_towards(
+            &server,
+            &fish,
+            Some(MoveAi {
+                hold_or_idle: false,
+            }),
+            Vec3::new(520.0, 500.0, 113.7),
+            pace as f32,
+            5,
+            0.0,
+        );
+        let x = fish.data().unit.transform.x;
+        assert!(
+            (x - 501.26).abs() < 1e-3,
+            "one second at 1.26 m/s, moved to {x}"
+        );
     }
 }
 
