@@ -234,3 +234,99 @@ async fn real_data_cradle_metamoze_squad_walks_its_scene_at_its_own_pace() {
         t.y
     );
 }
+
+/// Sprigg's room after the kill: 18670 spawns Kuwon (12165) and his OnSpawn set 222 calls the
+/// two Royal Stormers (12166 / 12170, sets 223 / 224). Before the last leg (`soldier_move_
+/// sprigun_3` / `_4`, `commander_move_sprigun_4`) each casts 19652 "Hidden Suicide Team":
+/// buff 4566 Stealth (20 s, MoveSpeedMul -300). The leg is the 1.8 m/s walk slowed by 30 %,
+/// 0.126 m per 100 ms tick. The C# applied the modifier in the pace and again in the step, so
+/// the live squad crept 0.8-0.9 m/s (0.088 m per tick) before it vanished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_cradle_sprigg_squad_stealth_leg_is_the_walk_slowed_once() {
+    use crate::systems::skills::types::skill_result;
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    crate::systems::quests::bridges::install(&server);
+    server
+        .systems
+        .ai
+        .set_paths_folder(app_root().join("Data").join("Path"));
+    let _ = load_cradle(&server, &conn_of(&db));
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let player = place_player(&server, &world, 1, 176.1, 723.5, 182.4);
+    for _ in 0..8 {
+        crate::systems::npcs::spawn_manager::active_region_tick(&server);
+    }
+    let sprigg = npcs_of(&world, 11169);
+    assert_eq!(sprigg.len(), 1);
+    // The scene soldiers are hostile: stay out of their sight so their sets run.
+    player.data().unit.transform.set_xyz(176.1, 790.0, 182.4);
+    let sprigg = WorldObject::from(&sprigg[0]);
+    sprigg.with_unit(|u| u.unit_mut().hp = 0);
+    assert_eq!(
+        crate::systems::skills::skill::unit_use_skill(&server, &sprigg, 18670, &sprigg),
+        skill_result::SUCCESS
+    );
+    let stealthed =
+        |npc: &NpcRef| WorldObject::from(npc).with_base_unit(|b| b.buffs().check_buff(4566));
+    // Soldier 1's set 223: line 19656, `soldier_move_sprigun_1` (18 m), 19652 (1 s cast),
+    // `soldier_move_sprigun_3` (5.5 m south). The casts run on the clock: tick in real time.
+    let mut soldier = None;
+    let mut walk_steps = Vec::new();
+    let mut stealth_steps = Vec::new();
+    for _ in 0..400 {
+        let before = soldier.as_ref().map(|s: &NpcRef| s.data().unit.transform);
+        tick_ai(&server, 1);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if soldier.is_none() {
+            soldier = npcs_of(&world, 12166).pop();
+            continue;
+        }
+        let s = soldier.as_ref().unwrap();
+        let (Some(a), b) = (before, s.data().unit.transform) else {
+            continue;
+        };
+        let step = (b.x - a.x).hypot(b.y - a.y);
+        if step < 0.01 {
+            if !stealth_steps.is_empty() && stealth_steps.len() > 20 {
+                break;
+            }
+            continue;
+        }
+        if stealthed(s) {
+            stealth_steps.push(step);
+        } else {
+            walk_steps.push(step);
+        }
+    }
+    let longest = |v: &[f32]| v.iter().copied().fold(0.0_f32, f32::max);
+    assert!(
+        walk_steps.len() > 50,
+        "the first leg: {} steps",
+        walk_steps.len()
+    );
+    assert!(
+        (0.17..=0.19).contains(&longest(&walk_steps)),
+        "the first leg is the 1.8 m/s walk: {}",
+        longest(&walk_steps)
+    );
+    assert!(
+        stealth_steps.len() > 20,
+        "the stealth leg: {} steps",
+        stealth_steps.len()
+    );
+    let stealth = longest(&stealth_steps);
+    assert!(
+        (0.12..=0.13).contains(&stealth),
+        "Stealth slows the walk once (0.126 m per tick, 0.088 when applied twice): {stealth}"
+    );
+}

@@ -1319,13 +1319,7 @@ mod tests {
 
         post(&server, 0x220, |c| {
             c.enqueue_ai_commands(
-                &[AiCommands {
-                    id: 0,
-                    cmd_set_id: 0,
-                    cmd_id: AiCommandCategory::Timeout,
-                    param1: 250,
-                    param2: String::new(),
-                }],
+                &[AiCommands::new(0, 0, AiCommandCategory::Timeout, 250, "")],
                 false,
             );
         });
@@ -1472,13 +1466,7 @@ mod tests {
         let queued = spawn_npc(&server, 0x221, 1, 1600.0, 1500.0, AiKind::Default);
         post(&server, 0x221, |c| {
             c.enqueue_ai_commands(
-                &[AiCommands {
-                    id: 0,
-                    cmd_set_id: 0,
-                    cmd_id: AiCommandCategory::UseSkill,
-                    param1: 0,
-                    param2: String::new(),
-                }],
+                &[AiCommands::new(0, 0, AiCommandCategory::UseSkill, 0, "")],
                 true,
             );
         });

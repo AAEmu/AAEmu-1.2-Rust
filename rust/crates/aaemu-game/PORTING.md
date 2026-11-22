@@ -5600,10 +5600,57 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   aside) bring the commander and both soldiers to their shared vanish (19652) together at
   1.8-1.9 m/s. Fractional pauses (6.4, 12.5, 23.5) are truncated to whole seconds because
   `ai_commands.param1` is read as an integer. Whether every 1.2 `Timeout` row is seconds
-  (some rows read "5 sec") is open; the rule stays per command set. Tests (gated by
+  (some rows read "5 sec") was open. The AI follow-up below replaced the per-set rule
+  with a data rule and keeps the fractions. Tests (gated by
   `AAEMU_COMPACT_DB`): `npcs::cradle_dungeon_tests::events::{
   real_data_cradle_metamoze_sphere_plays_the_boss_room_cinema,
   real_data_cradle_metamoze_squad_walks_its_scene_at_its_own_pace}`.
+* Kroloal Cradle and Howling Abyss AI follow-up (2026-11-22, the combined live passes).
+  - **Command-set pauses (deviation, replaces the per-set list).** The r208022 `ai_commands`
+    has 454 `Timeout` rows in 212 command sets. 453 are 1-60 (19 with a fraction such as
+    6.4, 12.5 or 23.5, and six written as text: "5 sec", "3 sec", "2 sec", "2sec", "10 sec").
+    One is 1500 (set 167, a sphere's Clan Ambusher dialogue line). The C# read every value as
+    milliseconds (`TimeSpan.FromMilliseconds`), so scripted scenes ran their lines back to back.
+    The server listed 20 sets by hand (Armory, Howling Abyss finale, Kroloal Cradle). Calleil's
+    intro (set 281 on Marius 12795, sphere 2186 -> 21448) was not on the list. Its six pauses
+    of 3, 2, 3, 3, 3 and 3 s ran as milliseconds, so the lines 21449-21455 ran within about 7 s
+    in the live pass. The rule is now `params::timeout_ms`: a value below 100 is seconds and a
+    value from 100 is milliseconds. Below 100 ms is shorter than one AI tick, and 100 s or more
+    is longer than any authored pause, so the data has no value in between. 1500 stays 1.5 s,
+    not 25 min. `AiCommands::param1_exact` keeps the fraction that the integer read truncated, so
+    Kuwon's 6.4 s is no longer 6 s. The other 192 sets (399 rows) now pause in seconds as well:
+    quest and event scenes, farmers and patrols with pauses between routes. **Inferred:** the unit
+    comes from the data alone (text rows and fractions), with no 1.2 server evidence.
+  - **Speed modifiers (deviation, C# bug fixed).** Every AI movement takes its pace from
+    `NpcAi.GetRealMovementSpeed`, which already multiplies by `MoveSpeedMul`. `Npc.MoveTowards`
+    multiplied by it again, so an NPC moved at the square of its modifier. The Sprigg squad casts
+    19652 "Hidden Suicide Team" before its last leg. That skill gives buff 4566 Stealth (20 s,
+    MoveSpeedMul -300), so the leg should be 1.8 x 0.7 = 1.26 m/s. Live it was about
+    0.8-0.9 m/s (1.8 x 0.7 x 0.7 = 0.88). `npc::move_towards` no longer applies the modifier.
+    The ledge probe of the chase and the Sharpwind vortex (12014) take the same single step. This
+    affects every NPC under one of the 533 MoveSpeedMul buffs (332 slows, 199 hastes): slows and
+    hastes now apply once. The spawner path simulation already applied it once.
+  - **Not changed, as authored.** The Academy Test Subject (11284, AI param 1836) casts 18409
+    (cooldown 30 s, skillDelay 8, plot 398). Two `SpawnEffect`s (1539 / 1540, 4 s and 8 s into
+    the plot) summon two Faceless Butchers (11160). They have no life time, do not despawn on
+    the creator's death, and take the summoner's victim. A butcher's InIdle skill 20066
+    (`KillNpcWithoutCorpse` 11160, radius 0, vanish) removes it when its fight ends. No
+    data row limits the number of live summons. Two subjects in the Academy room give about
+    eight butchers per minute while they fight. In the live pass each cast about every 47 s,
+    the cooldown held, and six butchers vanished when the player left. The Putrid Demon by the
+    Academy room (11357 at (813.2, 840.2), yaw 165.9) has the Academy pack's aggression settings:
+    aggressive, attack start 0.5 (5 m), sight 0.8 (12 m), fov 1.0, faction 115 and alertToAttack.
+    `CheckAggression` / `CheckAlert` notice a unit in the front half within 5 / 12 m, or within
+    1.2 / 1.6 m all round. The live player stood 4.3 m east, 104 degrees off its facing, so the
+    demon did not notice it. It has no path, so PR #168's patrol change does not apply.
+  Tests (gated by `AAEMU_COMPACT_DB`): `ai::data::tests::real_compact_db_timeouts_are_scene_pauses`
+  (every row 1-60 s, the single millisecond row, the fractions, the text rows, sets 281 / 282 /
+  207 / 102), `npcs::howling_event_tests::real_howling_calleil_intro_lines_keep_their_pauses`,
+  `npcs::cradle_dungeon_tests::events::real_data_cradle_sprigg_squad_stealth_leg_is_the_walk_slowed_once`,
+  `npcs::cradle_skills_tests::{real_cradle_test_subject_summons_two_butchers_per_cooldown,
+  real_cradle_putrid_demon_notices_a_player_in_front_or_close}`; unit tests
+  `ai::params::tests::timeout_values_below_one_hundred_are_seconds` and
+  `ai::npc::tests::a_speed_modifier_scales_an_ai_step_once`.
 * Kroloal Cradle world follow-up (2026-11-22, tests in `npcs::cradle_dungeon_tests` and
   `ai::collision::real_data_tests::real_cradle_jets_stand_on_the_floor_and_the_rowboats_in_their_pools`).
   The placements below are the Cradle editor files of a later client (ArcheAge Returns

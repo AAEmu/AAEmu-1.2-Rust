@@ -1037,13 +1037,13 @@ mod tests {
         }
 
         a.current = Some(B::DoNothing);
-        a.current_command = Some(AiCommands {
-            id: 0,
-            cmd_set_id: 0,
-            cmd_id: crate::systems::ai::params::AiCommandCategory::Timeout,
-            param1: 100,
-            param2: String::new(),
-        });
+        a.current_command = Some(AiCommands::new(
+            0,
+            0,
+            crate::systems::ai::params::AiCommandCategory::Timeout,
+            100,
+            "",
+        ));
         assert!(a.has_persistent_ai(), "an in-progress command");
         a.current_command = None;
 

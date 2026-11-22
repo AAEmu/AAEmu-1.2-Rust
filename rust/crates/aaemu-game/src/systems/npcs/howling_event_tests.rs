@@ -458,3 +458,68 @@ async fn real_howling_sphere_retry_survives_moving_between_its_circles() {
         "no new entry inside the sphere"
     );
 }
+
+/// Calleil's intro (event 2): sphere 2186's skill 21448 runs command set 281 on Marius (12795,
+/// tag 818): the lines 21449-21454 with `Timeout`s of 3, 2, 3, 3, 3 and 3 s between them, then
+/// 21455 opens the portal. The set was not on the server's seconds list, so the pauses ran as
+/// milliseconds and the whole dialogue took about 7 s live (ha3: 02:53:17-02:53:24) where
+/// Godfrey's lines (set 282) were 3 s apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_howling_calleil_intro_lines_keep_their_pauses() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = load_greater(&db);
+    let marius = npc_at(&server, &world, 12795, [321.054, 504.582, 170.3761]);
+    let calleil = npc_at(&server, &world, 12793, [319.86, 499.45, 170.4031]);
+    for npc in [&marius, &calleil] {
+        crate::systems::ai::hooks::spawn_positioned(&server, npc);
+    }
+    let (mut client, player) = player_at(&server, 1, [322.524, 500.468, 170.321]);
+    let tick_all = |server: &Arc<GameServer>, world: &WorldInstance| {
+        for npc in world.all_npcs() {
+            crate::systems::ai::manager::run_now(server, npc.obj_id, |ai| ai.tick(100, true));
+        }
+    };
+    for _ in 0..5 {
+        tick_all(&server, &world);
+    }
+    client.drain();
+    let caster = WorldObject::from(&player);
+    assert_eq!(
+        skill::unit_use_skill(&server, &caster, 21448, &caster),
+        skill_result::SUCCESS,
+        "sphere 2186's skill"
+    );
+    let lines = [21449_u32, 21450, 21451, 21452, 21453, 21454, 21455];
+    let mut fired_at = BTreeMap::new();
+    for tick in 0..400_usize {
+        tick_all(&server, &world);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        for (opcode, body) in client.drain() {
+            if opcode == crate::opcodes::sc::SCSkillFiredPacket && body.len() >= 4 {
+                let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                fired_at.entry(id).or_insert(tick);
+            }
+        }
+        if fired_at.contains_key(&21455) {
+            break;
+        }
+    }
+    let at: Vec<usize> = lines
+        .iter()
+        .map(|id| {
+            *fired_at
+                .get(id)
+                .unwrap_or_else(|| panic!("line {id} fired: {fired_at:?}"))
+        })
+        .collect();
+    let gaps: Vec<usize> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    for (gap, seconds) in gaps.iter().zip([3_usize, 2, 3, 3, 3, 3]) {
+        assert!(
+            (seconds * 10..=seconds * 10 + 5).contains(gap),
+            "the authored pauses are seconds (100 ms ticks between lines): {gaps:?}"
+        );
+    }
+}

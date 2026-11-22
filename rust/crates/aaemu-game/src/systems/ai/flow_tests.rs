@@ -930,13 +930,7 @@ fn path_point(x: f32, y: f32, z: f32) -> AiPathPoint {
 }
 
 fn ai_command(cmd_id: AiCommandCategory, param1: u32, param2: &str) -> AiCommands {
-    AiCommands {
-        id: 0,
-        cmd_set_id: 0,
-        cmd_id,
-        param1,
-        param2: param2.to_string(),
-    }
+    AiCommands::new(0, 0, cmd_id, param1, param2)
 }
 
 #[tokio::test]
@@ -1924,13 +1918,13 @@ async fn run_command_set_effect_does_not_start_the_simulation_mover_for_an_ai_np
     let mut game_data = data();
     game_data.systems.ai.ai.commands.insert(
         900,
-        vec![AiCommands {
-            id: 1,
-            cmd_set_id: 900,
-            cmd_id: AiCommandCategory::FollowPath,
-            param1: 1,
-            param2: "public_farm".to_string(),
-        }],
+        vec![AiCommands::new(
+            1,
+            900,
+            AiCommandCategory::FollowPath,
+            1,
+            "public_farm",
+        )],
     );
     let server = server_with_data(game_data);
     let npc = spawn_npc(
@@ -2964,13 +2958,7 @@ async fn stealth_detection_broken_formula_keeps_target_visible() {
 // ===========================================================================================
 
 fn set_command(cmd_set_id: u32, cmd_id: AiCommandCategory, param1: u32) -> AiCommands {
-    AiCommands {
-        id: 0,
-        cmd_set_id,
-        cmd_id,
-        param1,
-        param2: String::new(),
-    }
+    AiCommands::new(0, cmd_set_id, cmd_id, param1, "")
 }
 
 /// The bodies of the frames of one opcode (level-2 frames keep the `0x8000` tag).

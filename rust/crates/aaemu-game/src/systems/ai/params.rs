@@ -97,7 +97,55 @@ pub struct AiCommands {
     pub cmd_set_id: u32,
     pub cmd_id: AiCommandCategory,
     pub param1: u32,
+    /// `param1` as authored. The integer column stores 19 fractional `Timeout` rows (6.4,
+    /// 12.5, 23.5) as REAL, which [`Self::param1`] truncates, and six as text ("5 sec",
+    /// "2sec"), which both read as their leading number.
+    pub param1_exact: f64,
     pub param2: String,
+}
+
+/// Authored `Timeout` values below this are seconds, values from it on milliseconds.
+///
+/// The r208022 `ai_commands` has 454 `Timeout` rows: 453 are 1-60 (six of them text such as
+/// "5 sec" / "2sec", 19 fractional such as 12.5 or 23.5) and one is 1500 (set 167, a sphere's
+/// dialogue line). Under 100 ms is shorter than one AI tick, so no small value can be a
+/// millisecond pause; 100 s or more is longer than any authored scene pause, so 1500 is the
+/// one millisecond row (1.5 s, not 25 min). The C# read every value as milliseconds.
+pub const TIMEOUT_MILLISECONDS_FROM: f64 = 100.0;
+
+/// The pause of an authored `Timeout` value (see [`TIMEOUT_MILLISECONDS_FROM`]).
+pub fn timeout_ms(value: f64) -> i64 {
+    let value = value.max(0.0);
+    if value < TIMEOUT_MILLISECONDS_FROM {
+        (value * 1000.0).round() as i64
+    } else {
+        value.round() as i64
+    }
+}
+
+impl AiCommands {
+    /// A command whose `param1` is the whole number `param1` (tests, synthetic sets).
+    pub fn new(
+        id: u32,
+        cmd_set_id: u32,
+        cmd_id: AiCommandCategory,
+        param1: u32,
+        param2: &str,
+    ) -> Self {
+        Self {
+            id,
+            cmd_set_id,
+            cmd_id,
+            param1,
+            param1_exact: f64::from(param1),
+            param2: param2.to_string(),
+        }
+    }
+
+    /// How long this command's `Timeout` pauses the set, in milliseconds.
+    pub fn timeout_ms(&self) -> i64 {
+        timeout_ms(self.param1_exact)
+    }
 }
 
 /// `AiCommandSets` (`ai_command_sets` row).
@@ -690,6 +738,29 @@ impl FlytrapCombatSkill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_values_below_one_hundred_are_seconds() {
+        // The authored pauses: Godfrey's 3, Kuwon's 12.5 and 23.5, the 60 s maximum.
+        assert_eq!(timeout_ms(3.0), 3_000);
+        assert_eq!(timeout_ms(12.5), 12_500);
+        assert_eq!(timeout_ms(23.5), 23_500);
+        assert_eq!(timeout_ms(60.0), 60_000);
+        assert_eq!(timeout_ms(99.0), 99_000);
+        // Set 167's 1500 and the synthetic test sets' values are milliseconds.
+        assert_eq!(timeout_ms(1500.0), 1_500);
+        assert_eq!(timeout_ms(100.0), 100);
+        assert_eq!(timeout_ms(100_000.0), 100_000);
+        assert_eq!(timeout_ms(0.0), 0);
+        assert_eq!(timeout_ms(-1.0), 0);
+        let mut row = AiCommands::new(1, 222, AiCommandCategory::Timeout, 6, "");
+        row.param1_exact = 6.4;
+        assert_eq!(
+            row.timeout_ms(),
+            6_400,
+            "the fraction the integer read drops"
+        );
+    }
 
     #[test]
     fn archer_params_from_the_real_1001_row() {

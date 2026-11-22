@@ -295,13 +295,13 @@ impl Command for TestAI {
 
                 run_now(server, id, move |c| {
                     c.enqueue_ai_commands(
-                        &[AiCommands {
-                            id: 0,
-                            cmd_set_id: 0,
-                            cmd_id: AiCommandCategory::UseSkill,
-                            param1: skill_id,
-                            param2: String::new(),
-                        }],
+                        &[AiCommands::new(
+                            0,
+                            0,
+                            AiCommandCategory::UseSkill,
+                            skill_id,
+                            "",
+                        )],
                         false,
                     )
                 })

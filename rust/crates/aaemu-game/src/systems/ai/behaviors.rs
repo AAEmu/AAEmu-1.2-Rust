@@ -123,7 +123,14 @@ pub fn tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
             home.y + (center.y - home.y) * fraction,
             home.z,
         );
-        npc_move_towards(c, waypoint, 3.0 * delta_seconds(delta_ms) as f32, 4, 0.05);
+        let pace = npc::real_movement_speed(&c.obj, 3.0);
+        npc_move_towards(
+            c,
+            waypoint,
+            (pace * delta_seconds(delta_ms)) as f32,
+            4,
+            0.05,
+        );
         return;
     }
     match k {
@@ -1782,7 +1789,8 @@ fn chase_step_leaves_ledge(c: &AiCtx<'_>, goal: Vec3, distance: f32) -> bool {
     }
     let pos = owner_pos(c);
     let remaining = calculate_distance(pos, goal, false);
-    let step = distance * npc::move_speed_mul(&c.obj);
+    // The step `npc::move_towards` takes: `distance` already carries `MoveSpeedMul`.
+    let step = distance;
     if remaining < 0.01 || step < 0.01 {
         return false;
     }
@@ -2912,13 +2920,11 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
             }
         }
         Cmd::Timeout => {
+            // The authored pauses are seconds (the one 1500 row is milliseconds, see
+            // `params::timeout_ms`); the C# read every value as milliseconds, so a scripted
+            // scene ran its lines back to back.
             c.ai.ai_time_out = cmd.param1;
-            let wait = i64::from(c.ai.ai_time_out);
-            c.ai.current_command_run_time_ms = if timeout_in_seconds(cmd.cmd_set_id) {
-                wait * 1000
-            } else {
-                wait
-            };
+            c.ai.current_command_run_time_ms = cmd.timeout_ms();
         }
         Cmd::Other(v) => {
             tracing::error!("AI command {v}: NotSupportedException");
@@ -2928,21 +2934,6 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
     if c.ai.current_command_run_time_ms == 0 {
         c.ai.current_command_run_time_ms = -1000;
     }
-}
-
-/// Command sets whose `Timeout` rows are seconds, not the C#'s milliseconds. The authored
-/// values are dialogue and cue pauses (3, 10, 12.5, 27; other rows even read "5 sec"); as
-/// milliseconds a scripted actor ran its whole scene at once, or was removed before its cue.
-fn timeout_in_seconds(cmd_set_id: u32) -> bool {
-    matches!(
-        cmd_set_id,
-        // Burnt Castle Armory and Howling Abyss final-room cinematics.
-        102 | 103 | 106 | 107 | 189 | 282
-        // Kroloal Cradle: Metamoze's cut-scene trigger (207), Kuwon's squads in Sprigg's,
-        // Siranus's and Metamoze's rooms with Princess Surya (222-237), Karim's lines (240)
-        // and the statue barriers (260, 263).
-        | 207 | 222..=237 | 240 | 260 | 263
-    )
 }
 
 /// Command sets whose `FollowPath` routes are walked at the actor's own walking pace: the
