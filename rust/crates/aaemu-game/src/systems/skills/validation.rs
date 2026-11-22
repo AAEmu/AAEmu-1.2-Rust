@@ -1,6 +1,7 @@
 //! Server-side cast restrictions, checked before GCD, buffs, plots or resources change.
 
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::WorldObject;
 
 use super::geometry::{world_pos, Target};
@@ -69,7 +70,7 @@ pub(super) fn check_red_dragon_egg(
     Err((result, DANCING_GODDESS_HUNT))
 }
 
-pub(super) const CRADLE_CHEST_SKILL: u32 = 19691;
+pub(super) const CRADLE_CHEST_SKILL: u32 = encounters::CRADLE_CHEST_SKILL;
 
 /// The destruction device unlocks the hidden-room chests. Each can be used once.
 pub(super) fn check_cradle_chest(
@@ -392,7 +393,7 @@ pub(super) fn check(
     {
         return fail("skill_invalid_target");
     }
-    if template.id == 18715
+    if template.id == encounters::POWDER_KEG_SKILL
         && caster.as_player().is_none_or(|player| {
             crate::systems::npcs::doodad::interactions::equipped_powder_keg(player).is_none()
         })
@@ -431,16 +432,13 @@ pub(super) fn check(
     }
     // Leave Burnt Castle Armory also applies Return directly. It is offered on the
     // entrance exit and on the rear exit only after skill 18024 reveals it.
-    if template.id == crate::systems::instances::indun::ARMORY_EXIT_SKILL
+    if template.id == encounters::ARMORY_EXIT_SKILL
         && !target
             .as_obj()
             .and_then(WorldObject::as_doodad)
             .is_some_and(|doodad| {
                 let d = doodad.data();
-                matches!(
-                    (d.template_id, d.func_group_id),
-                    (3673, 8794) | (4923, 12257)
-                )
+                encounters::is_armory_exit_doodad(d.template_id, d.func_group_id)
             })
     {
         return fail("skill_invalid_target");

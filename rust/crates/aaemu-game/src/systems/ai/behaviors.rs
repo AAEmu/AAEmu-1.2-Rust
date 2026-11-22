@@ -15,6 +15,7 @@ use crate::models::movement::{GameStanceType, MoveTypeAlertness};
 use crate::models::transform::PositionAndRotation;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::npcs::npc::packets::{
     SCAggroTargetChangedPacket, SCNpcChatMessagePacket, SCUnitModelPostureChangedPacket,
@@ -475,7 +476,7 @@ pub fn use_skill(
         return skill_result::TOO_FAR_RANGE;
     }
     // These self-target plots project their strikes from the caster's heading.
-    let directional = matches!(skill.id, 15935 | 19980 | 18374 | 18401 | 18406 | 19248);
+    let directional = encounters::is_directional_self_skill(skill.id);
     if !ai_skills::is_self_target(&skill.template) || directional {
         if cast_path_blocked(c, &skill.template, target) {
             return skill_result::OBSTACLE;
@@ -565,21 +566,6 @@ fn unit_dead(u: &WorldObject) -> bool {
         .unwrap_or(false)
 }
 
-/// Howling Abyss NPCs whose rooms sit under a raised walkway: the Medusa packs, their
-/// Guardians and the Knights on the ledges above them (Normal 265 and Greater 280). They only
-/// notice, or answer a help call against, a unit on their own floor.
-fn howling_floor_bound(zone_id: u32, template_id: u32) -> bool {
-    matches!(zone_id, 265 | 280)
-        && matches!(
-            template_id,
-            11258 | 11264 | 11757 | 11759 | 12765 | 12784 | 12785
-        )
-}
-
-/// The height difference (m) at which [`howling_floor_bound`] NPCs treat a unit as being on
-/// another floor.
-const HOWLING_FLOOR_GAP: f32 = 3.0;
-
 /// The shared scan of `CheckAggression` / `CheckAlert`.
 fn scan_for_enemy(
     c: &AiCtx<'_>,
@@ -594,14 +580,14 @@ fn scan_for_enemy(
         (
             n.can_fly,
             n.unit.scale,
-            howling_floor_bound(n.unit.transform.zone_id, n.unit.template_id),
+            encounters::floor_bound(n.unit.transform.zone_id, n.unit.template_id),
         )
     };
     let model_size = npc::model_size(c.server, &c.obj);
     let origin = npc::world_pos_and_rot(c.server, &c.obj);
     let my_z = origin.z;
     for (unit, range, pos) in units_by_distance(c, radius) {
-        if unit_dead(&unit) || (separate_floors && (my_z - pos.z).abs() > HOWLING_FLOOR_GAP) {
+        if unit_dead(&unit) || (separate_floors && (my_z - pos.z).abs() > encounters::FLOOR_GAP) {
             continue;
         }
         // Arbitrary value
@@ -925,12 +911,10 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         )
     };
     let link_data = &c.server.game_data.systems.npcs.npc.aggro_links;
-    let nearby_dungeon_help = c.server.world.world_of(&c.obj).is_some_and(|world| {
-        matches!(
-            world.template.name.as_str(),
-            "instance_cuttingwind_deadmine" | "instance_hadir_farm"
-        )
-    });
+    let nearby_dungeon_help =
+        c.server.world.world_of(&c.obj).is_some_and(|world| {
+            encounters::helps_only_near_the_pull(world.template.name.as_str())
+        });
     let attacker_pos = nearby_dungeon_help.then(|| npc::world_pos(c.server, abuser));
     let npcs: Vec<WorldObject> =
         npc::around(c.server, &c.obj, t.attack_start_range_scale * radius, false)
@@ -985,9 +969,9 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         }
         // The help distance is horizontal: the Howling Abyss Medusa packs (30 m) answered the
         // Knights fighting on the walkway 15 m above their room.
-        if howling_floor_bound(other.transform().zone_id, ot.id)
+        if encounters::floor_bound(other.transform().zone_id, ot.id)
             && (npc::world_pos(c.server, &other).z - npc::world_pos(c.server, abuser).z).abs()
-                > HOWLING_FLOOR_GAP
+                > encounters::FLOOR_GAP
         {
             continue;
         }
@@ -1175,7 +1159,7 @@ fn can_use_skill(c: &mut AiCtx<'_>, k: BehaviorKind) -> bool {
 
 fn is_armory_wave_add(c: &AiCtx<'_>) -> bool {
     let npc = c.npc.data();
-    npc.unit.transform.zone_id == 236 && (8964..=8969).contains(&npc.unit.template_id)
+    encounters::is_wave_add(npc.unit.transform.zone_id, npc.unit.template_id)
 }
 
 fn advance_armory_wave_from_portal(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) -> bool {
@@ -2878,10 +2862,10 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
                 });
             }
             c.go_to_follow_path();
-            if name.starts_with("aipath_alistair") {
+            if let Some(flags) = encounters::route_runs_with_flags(&name) {
                 c.ai.path_handler.ai_path_speed = npc::running_move_speed(c.server, &c.npc);
-                c.ai.path_handler.ai_path_actor_flags = Some(4);
-            } else if walks_scene_routes(cmd.cmd_set_id) {
+                c.ai.path_handler.ai_path_actor_flags = Some(flags);
+            } else if encounters::walks_scene_routes(cmd.cmd_set_id) {
                 // The route files carry no `Speed` point, so the C# default of 1 m/s applied:
                 // well below the actor's own walk (1.8 m/s for the human model 18), which
                 // the client showed as a slow, sliding walk. A `Speed` point still overrides.
@@ -2934,15 +2918,6 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
     if c.ai.current_command_run_time_ms == 0 {
         c.ai.current_command_run_time_ms = -1000;
     }
-}
-
-/// Command sets whose `FollowPath` routes are walked at the actor's own walking pace: the
-/// Kroloal Cradle scenes of Kuwon's squads (human model 18) and Princess Surya (model 19) in
-/// Sprigg's, Siranus's and Metamoze's rooms. In Siranus's room the authored pauses (cast
-/// times aside) bring the commander and both soldiers to their vanish (19652) together at
-/// 1.8-1.9 m/s, the human walk. Siranus's shards (231-233, model 315) keep the default.
-fn walks_scene_routes(cmd_set_id: u32) -> bool {
-    matches!(cmd_set_id, 222..=224 | 228..=230 | 234..=237)
 }
 
 fn spawning_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
@@ -3393,7 +3368,9 @@ fn big_monster_attack_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     // PickSkill
     let t = template_scalars(c);
     // At half health the Illusionist splits once the authored cooldown permits it.
-    let illusion = available.iter().find(|skill| skill.skill_type == 18485);
+    let illusion = available
+        .iter()
+        .find(|skill| encounters::is_priority_combat_skill(skill.skill_type));
     let selected = if let Some(illusion) = illusion {
         Some(illusion.clone())
     } else if !available.is_empty() {

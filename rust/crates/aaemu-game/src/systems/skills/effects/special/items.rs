@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{PlayerRef, WorldObject};
 
 use super::super::super::broadcast;
@@ -289,7 +290,7 @@ pub fn apply_reagents(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         tracing::error!("Special effects: ApplyReagents without a skill (NullReferenceException)");
         return;
     };
-    if skill.id == 18715 {
+    if skill.id == encounters::POWDER_KEG_SKILL {
         // The summon interaction consumes the actual equipped powder keg atomically.
         return;
     }

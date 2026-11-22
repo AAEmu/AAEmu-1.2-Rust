@@ -13,6 +13,7 @@ use std::sync::{Arc, Weak};
 
 use crate::models::npc::Npc;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::skills::controllers::Vec3;
 use crate::world::{now_ms, Entity, NpcRef, WorldObject};
 
@@ -661,9 +662,7 @@ impl<'a> AiCtx<'a> {
             .current_command
             .as_ref()
             .or_else(|| self.ai.commands_queue.front())
-            .is_some_and(|command| {
-                matches!(command.cmd_set_id, 65 | 79..=81 | 103 | 106 | 107 | 126)
-            })
+            .is_some_and(|command| encounters::is_encounter_intro(command.cmd_set_id))
     }
 
     // ---- GoToX (forced state changes; the AI characters override a few) ----

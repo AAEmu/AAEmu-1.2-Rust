@@ -16,6 +16,7 @@ use crate::packets::world::{SCErrorMsgPacket, SCOneUnitMovementPacket};
 use crate::server::GameServer;
 use crate::systems::ai::npc::WALKER_MAX_DROP;
 use crate::systems::economy::error_message as err;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::instances::indun;
 use crate::systems::skills::ground_snap_rules as ground_snap;
 use crate::systems::skills::types::CastAction;
@@ -123,7 +124,7 @@ pub(crate) fn move_npc(
             physics_clipped = true;
             (x, y) = (p[0], p[1]);
             let zone = obj.transform().zone_id;
-            if matches!(zone, 265 | 280) {
+            if encounters::probes_raised_floors(zone) {
                 z = crate::systems::ai::collision::ground_height_probe(
                     server,
                     instance_id,

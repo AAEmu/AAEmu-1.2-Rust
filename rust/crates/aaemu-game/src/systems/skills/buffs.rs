@@ -17,6 +17,7 @@ use crate::data::skills::BuffTemplate as NetBuffTemplate;
 use crate::models::buff::{effect_state, Buff, BuffEvent, SkillCaster as NetSkillCaster};
 use crate::models::unit::{Bonus, BuffAttribute, DynamicBonus, UnitAttribute};
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry::{self as encounters, TriggerCaster};
 use crate::world::{now_ms, WorldObject};
 
 use super::data::{BuffTemplate, BuffTriggerTemplate};
@@ -435,7 +436,9 @@ fn add_buff_inner(
         let buffs = b.buffs_mut();
         // Thundering Strike's 24-second stack window is the length of four authored
         // cooldowns. Renew the window on a hit so the fifth one can petrify the target.
-        if template.id == 2407 && buffs.buff_count_by_id(template.id) + 1 < template.max_stack {
+        if encounters::refreshes_stack_window(template.id)
+            && buffs.buff_count_by_id(template.id) + 1 < template.max_stack
+        {
             buffs.refresh_stack_timers(template.id, duration, now);
         }
         buffs.add_buff_with_duration(buff, index, now);
@@ -1072,16 +1075,17 @@ fn stop_effect_task(server: &GameServer, owner: &WorldObject, index: u32, timed_
 }
 
 fn is_nerta_bomb_drop(owner: &WorldObject, buff_id: u32) -> bool {
-    matches!(buff_id, 4099 | 4631)
-        && owner
-            .as_npc()
-            .is_some_and(|npc| npc.data().unit.template_id == 11362)
+    encounters::is_nerta_bomb_drop(buff_id, || {
+        owner.as_npc().map(|npc| npc.data().unit.template_id)
+    })
 }
 
 pub(super) fn nerta_bomb_drop_active(owner: &WorldObject) -> bool {
-    is_nerta_bomb_drop(owner, 4099)
-        && owner
-            .with_base_unit(|unit| unit.buffs().check_buff(4099) || unit.buffs().check_buff(4631))
+    is_nerta_bomb_drop(owner, encounters::NERTA_BOMB_BUFF)
+        && owner.with_base_unit(|unit| {
+            unit.buffs().check_buff(encounters::NERTA_BOMB_BUFF)
+                || unit.buffs().check_buff(encounters::NERTA_BOMB_BUFF_2)
+        })
 }
 
 /// `Buff.Exit(replace)`.
@@ -1273,9 +1277,10 @@ pub fn start(server: &GameServer, owner: &WorldObject, index: u32) {
     }
     // The Rotten Flesh Golem's Slam needs the server to finish its lift and
     // fall. Other character controllers run from the client buff payload.
-    let caster = (owner.is_unit() && (owner.as_player().is_none() || template.id == 2659))
-        .then(|| find_obj(server, b.caster_obj_id))
-        .flatten();
+    let caster = (owner.is_unit()
+        && (owner.as_player().is_none() || encounters::server_runs_buff_controller(template.id)))
+    .then(|| find_obj(server, b.caster_obj_id))
+    .flatten();
     if let Some(caster) = caster {
         start_skill_controller(server, &template, owner, &caster);
     }
@@ -2302,21 +2307,28 @@ fn execute_trigger(
     };
     let t = &s.template;
     let caster = find_obj(server, b.caster_obj_id);
+    let caster_source = encounters::trigger_source_is_caster(
+        b.template.id,
+        || {
+            caster
+                .as_ref()
+                .and_then(WorldObject::as_doodad)
+                .map(|doodad| doodad.data().template_id)
+        },
+        || {
+            caster
+                .as_ref()
+                .and_then(WorldObject::as_npc)
+                .map(|npc| npc.data().unit.template_id)
+        },
+    );
     // The floor spear's Injured trigger is authored with the victim as its
     // source. Use the trap that applied it so self-attack rules do not stop
     // the environmental damage.
-    let floor_spear = b.template.id == 3999
-        && caster
-            .as_ref()
-            .and_then(WorldObject::as_doodad)
-            .is_some_and(|doodad| matches!(doodad.data().template_id, 5516 | 5706 | 5708));
+    let floor_spear = caster_source == Some(TriggerCaster::FloorSpear);
     // The tombstone marks its victim, but Lady Velarre casts the follow-up
     // skill that owns the hostile souls.
-    let velarre_tombstone = b.template.id == 2586
-        && caster
-            .as_ref()
-            .and_then(WorldObject::as_npc)
-            .is_some_and(|npc| npc.data().unit.template_id == 9792);
+    let velarre_tombstone = caster_source == Some(TriggerCaster::VelarreTombstone);
     let mut target = Some(owner.clone());
     let mut source = Some(owner.clone());
     if t.use_original_source || floor_spear || velarre_tombstone {

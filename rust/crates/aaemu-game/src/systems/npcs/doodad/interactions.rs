@@ -13,6 +13,7 @@ use crate::net::packet::LEVEL_PLAIN;
 use crate::opcodes::sc;
 use crate::packets::packet_def;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::public_farm;
 use crate::systems::skills::geometry::PosUnit;
 use crate::world::{now_ms, DoodadRef, WorldObject};
@@ -476,7 +477,7 @@ fn summon_doodad(
     let Some(target) = target else {
         return;
     };
-    if doodad_id == 5951 {
+    if doodad_id == encounters::POWDER_KEG_DOODAD {
         summon_doodad_at(
             server,
             caster,
@@ -558,6 +559,6 @@ pub(crate) fn equipped_powder_keg(player: &crate::world::PlayerRef) -> Option<u6
     let equipment = equipment.lock().expect("container poisoned");
     equipment
         .get_item_by_slot(crate::models::container::equip_slot::BACKPACK)
-        .filter(|item| item.template_id == 25002)
+        .filter(|item| item.template_id == encounters::POWDER_KEG_ITEM)
         .map(|item| item.id)
 }
