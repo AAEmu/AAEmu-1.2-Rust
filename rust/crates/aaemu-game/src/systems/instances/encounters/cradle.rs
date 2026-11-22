@@ -52,3 +52,13 @@ pub(super) fn hits_only_accepting_doodads(skill_id: u32) -> bool {
 
 /// The destruction device skill that unlocks the hidden-room chests.
 pub const CRADLE_CHEST_SKILL: u32 = 19691;
+
+/// Kroloal Cradle's pools are indoor water volumes.
+pub(super) fn has_indoor_pools(template_name: &str) -> bool {
+    template_name == WORLD
+}
+
+/// The level boat spawns before the first player enters and loads the cell (0, 0).
+pub(super) fn preloads_origin_cell(template_name: &str) -> bool {
+    template_name == WORLD
+}

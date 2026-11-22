@@ -140,3 +140,17 @@ pub(super) fn is_wave_spawn(
         _ => false,
     }
 }
+
+/// Both Howling Abyss worlds keep their water per instance: Calleil's chamber level changes
+/// in one run only.
+pub(super) fn instance_scoped_water(world: &str) -> bool {
+    matches!(world, "instance_howling_abyss" | "instance_howling_abyss_2")
+}
+
+/// The Howling Abyss pools are small river sectors beside dry passages.
+pub(super) fn has_river_sectors(template_name: &str) -> bool {
+    matches!(
+        template_name,
+        "instance_howling_abyss" | "instance_howling_abyss_2"
+    )
+}

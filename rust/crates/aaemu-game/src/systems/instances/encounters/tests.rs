@@ -633,3 +633,75 @@ fn is_wave_spawn() {
         assert!(!r::is_wave_spawn(caster, 110540, true), "caster {caster}");
     }
 }
+
+// ---- physics and collision
+
+#[test]
+fn instance_scoped_water() {
+    table(
+        r::instance_scoped_water,
+        &["instance_howling_abyss", "instance_howling_abyss_2"],
+        &[
+            "",
+            "main_world",
+            "instance_howling_abyss_3",
+            "instance_howling",
+            "instance_cradle_of_destruction",
+            "instance_sal_temple",
+        ],
+    );
+}
+
+#[test]
+fn water_cells() {
+    let cells = |indoor_pools, river_sectors, preload_origin| r::WaterCells {
+        indoor_pools,
+        river_sectors,
+        preload_origin,
+    };
+    let cases = [
+        ("instance_cradle_of_destruction", cells(true, false, true)),
+        ("instance_sal_temple", cells(true, false, false)),
+        ("instance_howling_abyss", cells(false, true, false)),
+        ("instance_howling_abyss_2", cells(false, true, false)),
+        ("", cells(false, false, false)),
+        ("main_world", cells(false, false, false)),
+        ("instance_cuttingwind_deadmine", cells(false, false, false)),
+        ("instance_hadir_farm", cells(false, false, false)),
+        ("instance_burntcastle_armory", cells(false, false, false)),
+        ("instance_sal_temple_2", cells(false, false, false)),
+    ];
+    for (world, expected) in cases {
+        assert_eq!(r::water_cells(world), expected, "{world}");
+    }
+}
+
+#[test]
+fn door_reuses_closed_mesh() {
+    table(
+        |(t, g)| r::door_reuses_closed_mesh(t, g),
+        &[
+            (4104, 9965),
+            (4104, 10027),
+            (4106, 10005),
+            (4106, 10006),
+            (4128, 10018),
+            (4128, 10019),
+            (4577, 11228),
+        ],
+        &[
+            (0, 0),
+            (4104, 9964),
+            (4104, 9966),
+            (4104, 10005),
+            (4106, 9965),
+            (4106, 10007),
+            (4128, 10017),
+            (4128, 10020),
+            (4577, 11227),
+            (4577, 11229),
+            (4105, 9965),
+            (4578, 11228),
+        ],
+    );
+}

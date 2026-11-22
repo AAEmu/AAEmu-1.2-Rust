@@ -50,6 +50,7 @@ use dashmap::DashMap;
 
 use crate::server::GameServer;
 use crate::systems::ai::geodata::manager::BaiRef;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::heightmap::{HeightmapWorlds, CELL_HMAP_RESOLUTION};
 use crate::systems::skills::controllers::Vec3;
 use crate::world::{WorldInstance, WorldObject};
@@ -191,10 +192,7 @@ pub fn water_of(server: &GameServer, template_id: u32, ocean_level: f32) -> Arc<
 }
 
 fn water_store(server: &GameServer, world: &WorldInstance) -> Arc<WaterBodies> {
-    if matches!(
-        world.template.name.as_str(),
-        "instance_howling_abyss" | "instance_howling_abyss_2"
-    ) {
+    if encounters::instance_scoped_water(world.template.name.as_str()) {
         return server
             .systems
             .ai

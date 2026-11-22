@@ -327,3 +327,38 @@ pub fn is_wave_spawn(
     armory::is_wave_spawn(caster_template, spawner_id, use_summoner_aggro_target)
         || howling_abyss::is_wave_spawn(caster_template, spawner_id, use_summoner_aggro_target)
 }
+
+// ---- physics and collision
+
+/// Worlds whose water bodies are kept per instance instead of per world template (Howling
+/// Abyss).
+pub fn instance_scoped_water(world: &str) -> bool {
+    howling_abyss::instance_scoped_water(world)
+}
+
+/// How a world's water volumes are read from its cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaterCells {
+    /// Indoor pools are kept (Kroloal Cradle, Palace Cellar).
+    pub indoor_pools: bool,
+    /// The pools are river sectors (Howling Abyss).
+    pub river_sectors: bool,
+    /// The heightmap cell (0, 0) is loaded before any player enters (Kroloal Cradle).
+    pub preload_origin: bool,
+}
+
+/// The water cell rules of a world template.
+pub fn water_cells(template_name: &str) -> WaterCells {
+    WaterCells {
+        indoor_pools: cradle::has_indoor_pools(template_name)
+            || palace_cellar::has_indoor_pools(template_name),
+        river_sectors: howling_abyss::has_river_sectors(template_name),
+        preload_origin: cradle::preloads_origin_cell(template_name),
+    }
+}
+
+/// Doodads `(template, func group)` that are not world colliders because they reuse their
+/// closed mesh for the open animation (Palace Cellar).
+pub fn door_reuses_closed_mesh(template_id: u32, func_group: u32) -> bool {
+    palace_cellar::door_reuses_closed_mesh(template_id, func_group)
+}

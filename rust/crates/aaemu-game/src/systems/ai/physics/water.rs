@@ -16,6 +16,7 @@ use std::time::Instant;
 use crate::data::client_files::ClientFileManager;
 use crate::data::world_templates::CELL_SIZE;
 use crate::systems::ai::numerics::Vec3Ext;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::heightmap::WorldHeightmap;
 use crate::systems::skills::controllers::Vec3;
 
@@ -830,15 +831,12 @@ impl WaterBodies {
         template_name: &str,
         template_ocean_level: f32,
     ) {
-        let cradle = template_name == "instance_cradle_of_destruction";
-        let has_indoor_pools = cradle || template_name == "instance_sal_temple";
+        let cells = encounters::water_cells(template_name);
+        let has_indoor_pools = cells.indoor_pools;
         // The Howling Abyss pools are small river sectors beside dry passages.
-        let river_sectors = matches!(
-            template_name,
-            "instance_howling_abyss" | "instance_howling_abyss_2"
-        );
+        let river_sectors = cells.river_sectors;
         // The level boat spawns before the first player enters and loads the cell.
-        if cradle && !hm.is_cell_loaded(0, 0) {
+        if cells.preload_origin && !hm.is_cell_loaded(0, 0) {
             let _ = hm.get_height(files, 0.0, 0.0);
         }
         let loaded = hm.loaded_cell_count();

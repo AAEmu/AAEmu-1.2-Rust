@@ -27,6 +27,7 @@ use aaemu_physics::geometry::primitives::BoxPrim;
 use aaemu_physics::math::{Mat33, Quat, Vec3};
 
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{WorldInstance, WorldObject};
 
 use super::cells::normalize_model_path;
@@ -516,13 +517,7 @@ pub fn collect_doodads(
             // ship's own gear anyway.
             // The Palace Cellar doors reuse the closed mesh for the open animation.
             if is_slave_equipment(owner_type)
-                || matches!(
-                    (template_id, func_group),
-                    (4104, 9965 | 10027)
-                        | (4106, 10005 | 10006)
-                        | (4128, 10018 | 10019)
-                        | (4577, 11228)
-                )
+                || encounters::door_reuses_closed_mesh(template_id, func_group)
             {
                 continue;
             }

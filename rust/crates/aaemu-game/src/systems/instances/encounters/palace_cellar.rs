@@ -42,3 +42,16 @@ pub(super) fn doodad_hit_skill(
 pub(super) fn plot_targets_caster(skill_id: u32, event_id: u32) -> bool {
     skill_id == 20615 && event_id == 5347
 }
+
+/// The Sal temple's pools are indoor water volumes.
+pub(super) fn has_indoor_pools(template_name: &str) -> bool {
+    template_name == WORLD
+}
+
+/// The Palace Cellar doors reuse the closed mesh for the open animation.
+pub(super) fn door_reuses_closed_mesh(template_id: u32, func_group: u32) -> bool {
+    matches!(
+        (template_id, func_group),
+        (4104, 9965 | 10027) | (4106, 10005 | 10006) | (4128, 10018 | 10019) | (4577, 11228)
+    )
+}
