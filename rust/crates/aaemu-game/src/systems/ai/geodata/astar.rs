@@ -67,6 +67,29 @@ pub struct Route {
     pub goal: Vec3,
 }
 
+impl Route {
+    /// Whether following the route brings an agent closer to the goal: a complete route, or a
+    /// cut one whose last node is nearer the goal (2D, like the search heuristic) than its
+    /// first.
+    ///
+    /// Deviation from the C#, which followed a cut route wherever it ended. The search is cut
+    /// after a number of iterations that grows with the distance to the goal, so when the goal
+    /// lies in a part of the graph the start cannot reach (a room below a walkway), a short
+    /// distance cuts the search early and the last node is whichever node the search was
+    /// expanding then. In the Greater Howling Abyss that was a node 106 m from a victim 12 m
+    /// below the walkway, 550 m along the graph, so the walkway Knight walked off along the
+    /// walkway away from the victim.
+    pub fn approaches_goal(&self) -> bool {
+        if self.complete {
+            return true;
+        }
+        match (self.positions.first(), self.positions.last()) {
+            (Some(first), Some(last)) => dist2d(*last, self.goal) < dist2d(*first, self.goal),
+            _ => false,
+        }
+    }
+}
+
 /// A smoothed route (see [`PathNode::find_smooth_path`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmoothPath {
@@ -154,6 +177,9 @@ impl PathNode {
         let Some(route) = self.find_route(geo, start, goal, agent_radius)? else {
             return Ok(Vec::new());
         };
+        if !route.approaches_goal() {
+            return Ok(Vec::new());
+        }
         let mut result = route.positions;
         result.push(self.end_point_pos);
         let result = douglas_peucker_reduction(&result, 2.0);
@@ -537,6 +563,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reduced.len(), 2);
+    }
+
+    /// A 30 x 30 grid of nodes 2 m apart (x and y 20..78) and one node at (10, 50) that no link
+    /// reaches.
+    fn grid_with_island() -> AiGeoData {
+        let t = WorldTemplate::synthetic(0, "main_world", 2, 2, 100);
+        const N: i32 = 30;
+        let idx = |x: i32, y: i32| (x * N + y + 1) as u32;
+        let mut nodes = Vec::new();
+        let mut links = Vec::new();
+        for x in 0..N {
+            for y in 0..N {
+                nodes.push((
+                    idx(x, y) as i32,
+                    [20.0 + x as f32 * 2.0, 20.0 + y as f32 * 2.0, 5.0],
+                ));
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if (0..N).contains(&nx) && (0..N).contains(&ny) {
+                        links.push((idx(x, y), idx(nx, ny)));
+                    }
+                }
+            }
+        }
+        nodes.push((N * N + 1, [10.0, 50.0, 5.0]));
+        let mut files = HashMap::new();
+        files.insert(
+            "game/worlds/main_world/paths/000_000/netmission0.bai".to_string(),
+            net_mission(&nodes, &links),
+        );
+        AiGeoData::new(
+            &t,
+            true,
+            Arc::new(MemFiles(files)),
+            Arc::new(UsedAreaNames::default()),
+            None,
+        )
+    }
+
+    /// A goal the start cannot reach and only 14 m away cuts the search after 780 iterations,
+    /// inside the 900-node grid. The node it ends on lies farther from the goal than the
+    /// start, so there is no route (the C# followed it, away from the victim).
+    #[test]
+    fn a_cut_search_that_ends_farther_from_the_goal_is_no_route() {
+        let g = grid_with_island();
+        let (start, goal) = (Vec3::new(24.0, 50.0, 5.0), Vec3::new(10.0, 50.0, 5.0));
+        let mut pn = PathNode::default();
+        let route = pn
+            .find_route(&g, start, goal, DEFAULT_AGENT_RADIUS)
+            .unwrap()
+            .expect("the cut search returns its last node");
+        assert!(!route.complete);
+        let last = *route.positions.last().unwrap();
+        assert!(
+            dist2d(last, goal) > dist2d(start, goal),
+            "the search ends at {last:?}"
+        );
+        assert!(!route.approaches_goal());
+        assert!(pn.find_path(&g, start, goal).unwrap().is_empty());
+        // A reachable goal across the grid is still found.
+        let path = pn.find_path(&g, start, Vec3::new(76.0, 76.0, 5.0)).unwrap();
+        assert_eq!(path.last(), Some(&Vec3::new(76.0, 76.0, 5.0)));
     }
 
     /// Column x positions of a strip of 10 m squares (y 10..20) across the cell border at

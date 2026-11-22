@@ -290,6 +290,77 @@ async fn walker_steps_down_a_ledge_but_not_to_a_floor_beyond_the_drop_limit() {
     assert_eq!(z, 100.0 + drop + 0.5);
 }
 
+/// 2 x 2 x 2 m CGF boxes whose tops are at `top_z`, centred on the given points, added as
+/// static doodad colliders.
+fn add_floor_boxes(server: &GameServer, top_z: f32, centres: &[(f32, f32)]) {
+    let box_g = BoxGeom::new(&BoxPrim::aligned(
+        PhysicsVec3::ZERO,
+        PhysicsVec3::splat(1.0),
+    ));
+    let header = PhysGeomHeader {
+        inertia: PhysicsVec3::splat(1.0),
+        q: Quat::IDENTITY,
+        origin: PhysicsVec3::ZERO,
+        volume: 8.0,
+        unk52: 1,
+        surface_idx: 0,
+    };
+    let mut blob = Vec::new();
+    save_phys_geometry(&header, &box_g, &mut blob);
+    let files = HashMap::from([(
+        "game/objects/test/floor_box.cgf".into(),
+        crate::systems::ai::collision::cgf::tests::synthetic_cgf(&blob),
+    )]);
+    assert!(server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(files))
+        .is_ok());
+    let pw = crate::systems::ai::collision::phys_world(server, 0).expect("physics world");
+    let files = crate::systems::ai::collision::files(server).expect("files");
+    let models = crate::systems::ai::collision::model_cache(server, &files);
+    let boxes: Vec<DoodadInfo> = centres
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| DoodadInfo {
+            obj_id: 10 + i as u32,
+            model: "cgf://objects/test/floor_box.cgf".into(),
+            pos: PhysicsVec3::new(*x, *y, top_z - 1.0),
+            q: Quat::IDENTITY,
+            scale: 1.0,
+            flags: collision_flags(false, false, false),
+        })
+        .collect();
+    let mut shapes = HashMap::new();
+    assert_eq!(
+        apply_doodads(&pw, &files, &models, &mut shapes, &boxes),
+        (boxes.len(), 0)
+    );
+}
+
+/// A chaser stops at a ledge, the end of its floor with only a floor deeper than the drop
+/// limit beyond. A strip of missing floor no wider than `LEDGE_GAP_REACH` with the floor
+/// going on at its level behind it (the groove along Calleil's north gate in the Greater
+/// Howling Abyss) is not a ledge.
+#[tokio::test]
+async fn a_narrow_gap_in_the_floor_is_not_a_ledge() {
+    // Floor tops at 130 m over terrain at 100 m: box A covers x 499..501, box B x 502..504.
+    let server = cave_server(100.0);
+    add_floor_boxes(&server, 130.0, &[(500.0, 500.0), (503.0, 500.0)]);
+    let ledge = |at: (f32, f32), dir: (f32, f32)| {
+        super::step_leaves_ledge(&server, 0, TEST_ZONE, 130.0, at, dir)
+    };
+    assert!(!ledge((500.5, 500.0), (1.0, 0.0)), "on the floor");
+    // In the 1 m gap between the boxes, heading on to box B.
+    assert!(!ledge((501.5, 500.0), (1.0, 0.0)), "a gap");
+    // The same spot heading north: no floor within reach at that level.
+    assert!(ledge((501.5, 500.0), (0.0, 1.0)), "a ledge along the gap");
+    // Past box B's far edge there is only the terrain 30 m below.
+    assert!(ledge((504.5, 500.0), (1.0, 0.0)), "the end of the floor");
+}
+
 /// The navigation height (`GeoDataMode`) is the floor of an instance hall: with the physics
 /// terrain far below, the walker takes the navmesh height next to it.
 #[tokio::test]

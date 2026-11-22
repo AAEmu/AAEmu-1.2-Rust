@@ -1,5 +1,5 @@
 //! Howling Abyss world data: one NPC per recorded spawn, the Greater doodad facings, the Lion
-//! Gate helper and the Bomber keg's model proxy.
+//! Gate helper and the barrel models' proxies (the Bomber keg, Sorvell's Armory barrel).
 //!
 //! The data tests read only the shipped spawn files. The `real_` tests need
 //! `AAEMU_COMPACT_DB` (spawn loading, doodad models) or `AAEMU_GAME_PAK` (the r208022 client
@@ -372,28 +372,161 @@ async fn real_howling_greater_gates_span_their_doorways() {
     }
 }
 
-/// The keg's fallback proxy is the client model's: `barrel_grape_e.cgf` has a `proxy` cylinder
-/// on its origin, upright along model Z, so the server must lift the keg's centre off the floor.
-#[test]
+/// The fallback proxies are the client models' `proxy` cylinders in model space (the proxy
+/// node's rotation applied), and the server reads the same ones from the client files.
+/// `barrel_grape_e.cgf` (the Bomber keg): the raw primitive's axis is its node's Z, but the node
+/// is turned so the cylinder lies along model X, centred on the origin: the model already lies
+/// on its side. `barrel_oak_b.cgf` (Sorvell's barrel 39): upright along model Z with its base on
+/// the origin, so the server must lift the origin off the floor whenever the barrel tilts.
+#[tokio::test]
 #[ignore = "needs AAEMU_GAME_PAK"]
-fn real_howling_keg_proxy_matches_the_client_model() {
-    use crate::systems::ai::collision::{cells, models};
+async fn real_barrel_proxies_match_the_client_models() {
+    use super::gimmick::manager::{cylinder_proxy, KEG_PROXY_CYLINDER, OAK_BARREL_PROXY_CYLINDER};
+    use super::gimmick::GimmickTemplate;
+    use crate::systems::ai::collision::{self, cells, models};
     use aaemu_physics::geometry::primitives::Primitive;
-    let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+    let Some(server) = pak_server() else {
         return;
     };
-    let files = crate::data::client_files::ClientFileManager::from_sources(&[pak], &app_path());
-    let path = cells::normalize_model_path("objects/env/01_nuia/001_ndeco/old/barrel_grape_e.cgf ");
-    let bytes = files.read_file(&path).expect("keg model");
-    let model = models::load_model(&path, &bytes)
-        .unwrap()
-        .expect("keg physics");
-    let geom = model.slot(models::phys_slot::DEFAULT).expect("proxy");
-    let Some(Primitive::Cylinder(c)) = geom.geom.primitive(0) else {
-        panic!("keg proxy is not a cylinder");
+    let files = collision::files(&server).expect("client files");
+    for (model_path, fallback) in [
+        // Trailing space as in the `gimmicks` row.
+        (
+            "objects/env/01_nuia/001_ndeco/old/barrel_grape_e.cgf ",
+            KEG_PROXY_CYLINDER,
+        ),
+        (
+            r"Objects\Env\01_nuia\001_ndeco\old\barrel_oak_b.cgf",
+            OAK_BARREL_PROXY_CYLINDER,
+        ),
+    ] {
+        let path = cells::normalize_model_path(model_path);
+        let bytes = files.read(&path).expect("barrel model");
+        let model = models::load_model(&path, &bytes)
+            .unwrap()
+            .expect("barrel physics");
+        let part = model
+            .parts
+            .iter()
+            .find(|p| p.slot == models::phys_slot::DEFAULT)
+            .expect("proxy");
+        let Some(Primitive::Cylinder(c)) = part.geom.geom.primitive(0) else {
+            panic!("{path}: proxy is not a cylinder");
+        };
+        let turn = |v| part.frame.map_or(v, |f| f.q.rotate(v));
+        let (center, axis) = (turn(c.center), turn(c.axis));
+        // Within 5 mm: the keg proxy sits 3 mm off its origin.
+        let near = |a: f32, b: f32| (a - b).abs() < 5e-3;
+        assert!(
+            near(c.r, fallback.r) && near(c.hh, fallback.hh),
+            "{path}: {c:?}"
+        );
+        // The axis sign is free (a cylinder is symmetric along it).
+        let dot = axis.x * fallback.axis[0] + axis.y * fallback.axis[1] + axis.z * fallback.axis[2];
+        assert!(dot.abs() > 0.999, "{path}: axis {axis:?}");
+        assert!(
+            near(center.x, fallback.center[0])
+                && near(center.y, fallback.center[1])
+                && near(center.z, fallback.center[2]),
+            "{path}: centre {center:?}"
+        );
+        let template = GimmickTemplate {
+            model_path: model_path.into(),
+            ..Default::default()
+        };
+        let read = cylinder_proxy(&server, &template, 1.0).expect("server proxy");
+        assert!(
+            near(read.r, fallback.r) && near(read.hh, fallback.hh),
+            "{read:?}"
+        );
+        assert!(near(read.center[2], fallback.center[2]), "{read:?}");
+    }
+}
+
+/// Greater carried two Normal mobs in the pack at (502, 506): Blackscale Corps Archer 11261
+/// (level 44) and Combatant 11754 (level 41). The C# spawn file recorded them at Normal's
+/// placements of the same pack (Normal has 11261 at the same point and 11938 where Greater
+/// had 11754). Both come from Normal's group spawners (`울부짖는 구렁텅이_상위 그룹` 13197 and
+/// `_하위 그룹` 13195). Greater's own groups (`영던_...` 14442 and 14453) list the Greater
+/// template of every member in the same order: 11261 -> 12768 and 11754 -> 12773.
+///
+/// Every hostile Greater spawn is a Greater template: level 45 or more (Greater's mobs are
+/// 45-50, Normal's 40-44) and no template Normal places. Normal's bosses are level 45, so the
+/// level alone would not tell them apart.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_howling_greater_hostile_spawns_are_greater_templates() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
     };
-    let (r, hh) = super::gimmick::manager::KEG_PROXY_CYLINDER;
-    assert!((c.r - r).abs() < 1e-3 && (c.hh - hh).abs() < 1e-3, "{c:?}");
-    assert!(c.axis.z.abs() > 0.999, "{c:?}");
-    assert!(c.center.x.abs() < 0.01 && c.center.y.abs() < 0.01 && c.center.z.abs() < 0.01);
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let template = |id: u64| -> (i64, i64) {
+        conn.query_row(
+            "SELECT level, faction_id FROM npcs WHERE id = ?1",
+            [id as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or_else(|_| panic!("npc template {id}"))
+    };
+    let normal: std::collections::HashSet<u64> = spawn_rows(NORMAL, "npc_spawns.json")
+        .iter()
+        .map(|r| r["UnitId"].as_u64().unwrap())
+        .collect();
+    let mut hostile = 0;
+    for row in spawn_rows(GREATER, "npc_spawns.json") {
+        let unit = row["UnitId"].as_u64().unwrap();
+        let (level, faction) = template(unit);
+        // Faction 1 is the friendly faction of the event NPCs (Godfrey's staging actor, the
+        // captives, the cut-scene helpers).
+        if faction == 1 {
+            continue;
+        }
+        hostile += 1;
+        assert!(
+            level >= 45,
+            "Greater {} {unit} at {:?} is level {level}",
+            row["Title"],
+            pos(&row)
+        );
+        assert!(
+            !normal.contains(&unit),
+            "Greater {} {unit} at {:?} is a Normal template",
+            row["Title"],
+            pos(&row)
+        );
+    }
+    assert!(hostile > 150, "{hostile} hostile rows");
+    let members = |spawner: i64| -> Vec<i64> {
+        let mut s = conn
+            .prepare("SELECT member_id FROM npc_spawner_npcs WHERE npc_spawner_id = ?1 ORDER BY member_id")
+            .unwrap();
+        s.query_map([spawner], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    for (normal_group, greater_group, normal_unit, greater_unit, at) in [
+        (13197, 14442, 11261, 12768, [502.514, 507.952]),
+        (13195, 14453, 11754, 12773, [500.986, 510.412]),
+    ] {
+        let n = members(normal_group);
+        let g = members(greater_group);
+        let i = n.iter().position(|m| *m == normal_unit).unwrap();
+        assert_eq!(g[i], greater_unit, "group {greater_group} member {i}");
+        let name = |id: i64| -> String {
+            conn.query_row("SELECT name FROM npcs WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(name(normal_unit), name(greater_unit), "the same mob");
+        let row = spawn_rows(GREATER, "npc_spawns.json")
+            .into_iter()
+            .find(|r| {
+                let p = pos(r);
+                (p[0] - at[0]).abs() < 0.01 && (p[1] - at[1]).abs() < 0.01
+            })
+            .expect("the pack row");
+        assert_eq!(row["UnitId"].as_u64(), Some(greater_unit as u64));
+    }
 }

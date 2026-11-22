@@ -706,30 +706,56 @@ pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {
     }
 }
 
-/// Whether a walker at level `world_z` would step off a ledge at `(x, y)`: the collision floor
-/// there lies deeper below it than [`walker_max_drop`]. [`reference_height_in`] keeps such a
-/// walker at its level (or takes a navigation height), so a chaser following its victim over
-/// the edge walked through the air. `false` without the collision service or without any floor.
+/// How far (m) past a missing floor [`step_leaves_ledge`] looks for the walker's floor going on.
+pub const LEDGE_GAP_REACH: f32 = 1.5;
+
+/// How far (m) above or below the walker the floor past a gap may lie.
+const LEDGE_GAP_LEVEL: f32 = 1.0;
+
+/// Whether a walker at level `world_z` stepping in direction `dir` (a horizontal unit vector)
+/// would step off a ledge at `at`: the collision floor there lies deeper below it than
+/// [`walker_max_drop`], and its floor does not go on at its level within [`LEDGE_GAP_REACH`]
+/// beyond. [`reference_height_in`] keeps such a walker at its level (or takes a navigation
+/// height), so a chaser following its victim over the edge walked through the air. `false`
+/// without the collision service or without any floor.
+///
+/// A narrow gap is not a ledge: Calleil's north gate (Greater Howling Abyss, gate 6360 at
+/// (329.5, 523.9)) has a strip about a metre wide with no collision floor along the gate line,
+/// which the players and the waypoint graph cross. Calleil stopped there and gave up a victim
+/// standing in the corridor behind it.
 pub fn step_leaves_ledge(
     server: &GameServer,
     instance_id: u32,
     zone_id: u32,
     world_z: f32,
-    x: f32,
-    y: f32,
+    at: (f32, f32),
+    dir: (f32, f32),
 ) -> bool {
-    matches!(
-        crate::systems::ai::collision::ground_height_probe(
+    use crate::systems::ai::collision::{ground_height_probe, GROUND_PROBE_DOWN, GROUND_PROBE_UP};
+    let drop = walker_max_drop(zone_id);
+    let floor = |x: f32, y: f32| {
+        ground_height_probe(
             server,
             instance_id,
             x,
             y,
             world_z,
-            crate::systems::ai::collision::GROUND_PROBE_UP,
-            crate::systems::ai::collision::GROUND_PROBE_DOWN,
-        ),
-        Some(Some(g)) if g < world_z - walker_max_drop(zone_id)
-    )
+            GROUND_PROBE_UP,
+            GROUND_PROBE_DOWN,
+        )
+    };
+    if !matches!(floor(at.0, at.1), Some(Some(g)) if g < world_z - drop) {
+        return false;
+    }
+    let mut reach = 0.5;
+    while reach <= LEDGE_GAP_REACH {
+        let (x, y) = (at.0 + dir.0 * reach, at.1 + dir.1 * reach);
+        if matches!(floor(x, y), Some(Some(g)) if (g - world_z).abs() <= LEDGE_GAP_LEVEL) {
+            return false;
+        }
+        reach += 0.5;
+    }
+    true
 }
 
 /// [`reference_height`] with the zone's ground: an NPC that walks (not flying, not holding /

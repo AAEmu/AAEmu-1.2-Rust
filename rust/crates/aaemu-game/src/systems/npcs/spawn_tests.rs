@@ -4570,7 +4570,7 @@ fn quest_fill_points_keep_eight_metres_from_each_other_and_the_authored_points()
 }
 
 /// The authored Mistfiend (NPC 4227) cave placements of the shipped `main_world` files with the
-/// real compact DB: all six load (template 4323, 55 s delay), a player at the first authored
+/// real compact DB: all eight load (template 4323, 55 s delay), a player at the first authored
 /// point activates them through the normal `active_region_tick`, they spawn at their authored Z,
 /// and a killed one respawns after 55 s at the same cave position. NPCs are created by the test
 /// backend (the managers are stubs); activation is the real runtime path.
@@ -4616,7 +4616,10 @@ async fn real_data_mistfiend_cave_activation_and_respawn() {
     };
     m.load_spawn_files(&server, &world_path, &exists).unwrap();
 
-    // Exactly the six authored Mistfiend placements survive the load.
+    // Exactly the eight authored Mistfiend placements survive the load: the six 1.2 rows of
+    // `npc_spawns.json` and the two 10.x rows that `npc_spawns_10x.json` (007a40d1b, added
+    // after this test was written) backports. Each 10.x row is more than 2 m from every 1.2
+    // row, so the loader's duplicate filter keeps it.
     let authored = [
         (22932.89f32, 9428.54f32, 556.25f32),
         (22948.07, 9426.05, 557.12),
@@ -4624,6 +4627,8 @@ async fn real_data_mistfiend_cave_activation_and_respawn() {
         (22905.03, 9428.53, 572.36),
         (22883.19, 9434.90, 585.6),
         (22859.00, 9434.70, 591.6),
+        (22920.46, 9429.53, 562.285),
+        (22937.59, 9438.55, 550.375),
     ];
     let mistfiends: Vec<_> = m
         .get_all_spawners()
@@ -4631,7 +4636,7 @@ async fn real_data_mistfiend_cave_activation_and_respawn() {
         .flatten()
         .filter(|s| s.unit_id == 4227)
         .collect();
-    assert_eq!(mistfiends.len(), 6, "six authored Mistfiend placements");
+    assert_eq!(mistfiends.len(), 8, "eight authored Mistfiend placements");
     let mut loaded: Vec<(f32, f32, f32)> = mistfiends
         .iter()
         .map(|s| {

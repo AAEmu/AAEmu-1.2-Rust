@@ -550,3 +550,35 @@ async fn melee_base_skill_chase_range_is_capped_by_the_attack_start_scale() {
         );
     }
 }
+
+/// A wait at a ledge ends with progress only. Greptile review of #166: a victim that climbed
+/// back up to the walker's floor and keeps its distance on a direct route (no route corner, never
+/// 1 m closer) used to be dropped after 3 s although the chaser could follow it.
+#[test]
+fn a_ledge_wait_ends_when_the_victim_is_back_on_the_walkers_floor() {
+    use super::super::framework::LedgeBlock;
+    use super::{ledge_wait_over, ChaseStep};
+    let block = LedgeBlock {
+        since_ms: 0,
+        victim: 1,
+        distance: 13.0,
+    };
+    let direct = ChaseStep {
+        distance: 1.0,
+        flags: 0,
+        tolerance: 1.0,
+        route_corner: false,
+    };
+    let corner = ChaseStep {
+        route_corner: true,
+        ..direct
+    };
+    // Still below: a step sideways along the edge, or towards a victim moving about below,
+    // does not end the wait; getting a metre closer or a route corner does.
+    assert!(!ledge_wait_over(&block, &direct, 13.0, true));
+    assert!(!ledge_wait_over(&block, &direct, 12.5, true));
+    assert!(ledge_wait_over(&block, &direct, 11.9, true));
+    assert!(ledge_wait_over(&block, &corner, 14.0, true));
+    // Back on the walker's floor and running away on a direct route: a chase again.
+    assert!(ledge_wait_over(&block, &direct, 15.0, false));
+}

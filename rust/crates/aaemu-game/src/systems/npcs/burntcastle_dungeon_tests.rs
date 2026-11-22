@@ -795,6 +795,102 @@ async fn real_data_burnt_sorvell_drops_both_barrels_over_his_victim() {
     }
 }
 
+/// Sorvell's barrels (gimmick 39, `barrel_oak_b.cgf`, `spawn_gimmick_effects` 99 / 105) tumble
+/// down at the authored (5, 10, 5) rad/s. The model stands on its origin, so the floor must
+/// stop the tumbling proxy's lowest point: with the origin on the floor a barrel landing on its
+/// side was half in the floor, and one landing upside down was buried. Each barrel settles on
+/// an end or on its side with that face on the floor and does not slide.
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_sorvell_barrels_land_on_their_model_not_in_the_floor() {
+    use std::time::Duration;
+
+    use super::gimmick::manager::{gimmick_tick, OAK_BARREL_PROXY_CYLINDER};
+    use crate::systems::skills::{skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_burnt(&server);
+    let template = server
+        .game_data
+        .systems
+        .npcs
+        .gimmick
+        .get_gimmick_template(39)
+        .unwrap();
+    assert!(template.model_path.ends_with("barrel_oak_b.cgf"));
+    assert_eq!((template.mass, template.gravity), (0.7, 9.8));
+    let sorvell = force_spawn_unit(&server, 8960);
+    let boss = WorldObject::from(&sorvell);
+    let floor = 20.5;
+    let (_client, player) = place_player(&server, 1, 203.0, 180.4, floor);
+    let victim = WorldObject::from(&player);
+    crate::systems::ai::npc::set_current_aggro_target(&sorvell, Some(&victim));
+    for id in [15649, 15668] {
+        assert_eq!(
+            skill::unit_use_skill(&server, &boss, id, &victim),
+            skill_result::SUCCESS
+        );
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+    }
+    let barrels = server.systems.npcs.gimmicks.for_world(INSTANCE_ID).active();
+    assert_eq!(barrels.len(), 2);
+    // No client files here: the barrel_oak_b proxy (checked against the model by
+    // `howling_world_tests::real_barrel_proxies_match_the_client_models`).
+    let proxy = OAK_BARREL_PROXY_CYLINDER;
+    let start: Vec<_> = barrels
+        .iter()
+        .map(|b| {
+            let t = b.gimmick.data().unit.transform;
+            (t.x, t.y)
+        })
+        .collect();
+    let mut deepest_old_sink: f32 = 0.0;
+    // 4 s of 50 ms ticks: every barrel lands and settles well before its 5.9 s fuse.
+    for step in 1..=80 {
+        for (barrel, &(x, y)) in barrels.iter().zip(&start) {
+            gimmick_tick(
+                &server,
+                &world,
+                barrel,
+                Duration::from_millis(50),
+                1_000 + step * 50,
+            );
+            let t = barrel.gimmick.data().unit.transform;
+            let clearance = proxy.floor_clearance([t.rot_x, t.rot_y, t.rot_z]);
+            assert!(
+                t.z - clearance >= floor - 1e-3,
+                "barrel {} sinks: lowest point {} at {t:?}",
+                barrel.gimmick.obj_id,
+                t.z - clearance
+            );
+            assert_eq!((t.x, t.y), (x, y), "a vertical drop does not slide");
+            if (t.z - (floor + clearance)).abs() < 1e-4 {
+                // In contact: the origin-on-floor rule would have sunk it this far.
+                deepest_old_sink = deepest_old_sink.max(clearance);
+            }
+        }
+    }
+    assert!(
+        deepest_old_sink > 0.2,
+        "the barrels touch down tilted ({deepest_old_sink} m)"
+    );
+    for barrel in &barrels {
+        let data = barrel.gimmick.data();
+        let t = data.unit.transform;
+        assert_eq!((data.vel, data.ang_vel), ([0.0; 3], [0.0; 3]), "at rest");
+        let axis = t.local().to_quaternion().rotate(proxy.axis);
+        assert!(
+            axis[2].abs() > 0.999 || axis[2].abs() < 1e-3,
+            "on an end or its side: axis {axis:?}"
+        );
+        let clearance = proxy.floor_clearance([t.rot_x, t.rot_y, t.rot_z]);
+        assert!((t.z - (floor + clearance)).abs() < 1e-4, "{t:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_burnt_howl_kills_only_players_outside_the_ward() {

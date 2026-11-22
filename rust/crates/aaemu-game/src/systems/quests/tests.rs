@@ -5257,7 +5257,51 @@ async fn start_doodad_quests_supplying_item_bag_and_back_full_should_not_start()
     }
 }
 
-/// `Start_ActCheckTimer_ShouldStartSchedulerAndSendCharacterMessage` (enabled: passes).
+/// Targets the Start component's NPC (the C# tests' `CurrentTarget`) and records the starting
+/// NPC or doodad as the quest's acceptor, as `add_quest` does for a client start from that
+/// object. The C# `StartQuest` only checked for a Start step; the port's `start_quest` also runs
+/// `starter_accepts` (5ae8100be, after these tests were ported), which refuses a non-forced start
+/// whose acceptor matches none of the Start acts. The tests created the quest with no acceptor,
+/// so every quest whose Start step has a `ConAccept*` act was refused.
+///
+/// Returns whether the Start components' `unit_reqs` admit the test's fresh character. The
+/// port refuses a start whose every Start component fails its requirements (`starter_accepts`
+/// runs `can_component_run`; the C# `StartQuest` ignored them), e.g. quest 11 needs quest 10
+/// completed (`unit_reqs` kind 31) and 592 needs level 28 and quest 578.
+fn accept_from_start_object(ctx: &mut Ctx<'_>, h: QuestHandle, qid: u32) -> bool {
+    let data = ctx.data;
+    let Some(template) = data.template(qid) else {
+        return true;
+    };
+    let Some(start) = template.first_component(&data.components, kind::START) else {
+        return true;
+    };
+    let acceptor = start.acts.iter().find_map(|&a| match data.acts[a].kind {
+        ActKind::ConAcceptNpc { npc_id } => Some((acceptor::NPC, npc_id)),
+        ActKind::ConAcceptDoodad { doodad_id } => Some((acceptor::DOODAD, doodad_id)),
+        _ => None,
+    });
+    if let Some((acceptor_type, acceptor_id)) = acceptor {
+        if acceptor_type == acceptor::NPC {
+            ctx.env.target = Some(UnitSnapshot {
+                npc_template_id: Some(acceptor_id),
+                is_unit: true,
+                ..UnitSnapshot::default()
+            });
+        }
+        let q = ctx.st.quest_mut(h).unwrap();
+        q.acceptor_type = acceptor_type;
+        q.acceptor_id = acceptor_id;
+    }
+    template
+        .components_of(&data.components, kind::START)
+        .iter()
+        .any(|c| ctx.can_component_run(c.id))
+}
+
+/// `Start_ActCheckTimer_ShouldStartSchedulerAndSendCharacterMessage`. A quest whose Start
+/// requirements admit the fresh test character starts and gets its timer; one they refuse does
+/// not start (see [`accept_from_start_object`]).
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn start_act_check_timer_should_start_scheduler() {
@@ -5267,30 +5311,19 @@ async fn start_act_check_timer_should_start_scheduler() {
     let ids = quest_ids_with(&conn, &[(kind::START, "QuestActCheckTimer", None, None)]);
     let ids = remove_sphere_and_not_implemented(&conn, ids);
     assert!(!ids.is_empty());
+    let (mut started, mut refused) = (0, 0);
     for qid in ids {
         let char_id = 1 + qid;
         setup_quest(&server, qid, |ctx, h| {
             let data = ctx.data;
-            if let Some(a) = data
-                .template(qid)
-                .and_then(|t| t.first_component(&data.components, kind::START))
-                .and_then(|c| {
-                    c.acts
-                        .iter()
-                        .copied()
-                        .find(|&a| matches!(data.acts[a].kind, ActKind::ConAcceptNpc { .. }))
-                })
-            {
-                let ActKind::ConAcceptNpc { npc_id } = data.acts[a].kind else {
-                    unreachable!()
-                };
-                ctx.env.target = Some(UnitSnapshot {
-                    npc_template_id: Some(npc_id),
-                    is_unit: true,
-                    ..UnitSnapshot::default()
-                });
-            }
+            let admitted = accept_from_start_object(ctx, h, qid);
             let r = ctx.start_quest(h);
+            assert_eq!(r, admitted, "quest {qid}");
+            if !admitted {
+                refused += 1;
+                return;
+            }
+            started += 1;
             let has_timer = data
                 .template(qid)
                 .and_then(|t| t.first_component(&data.components, kind::START))
@@ -5305,12 +5338,15 @@ async fn start_act_check_timer_should_start_scheduler() {
                     "quest {qid}"
                 );
             }
-            assert!(r, "quest {qid}");
         });
     }
+    eprintln!("CheckTimer starters: {started} started, {refused} refused by unit_reqs");
+    // 1.2 data: 3 of the 18 start for the level-1 test character (most need a prior quest).
+    assert!(started > 0, "{started} started, {refused} refused");
 }
 
-/// `Start_ActConAcceptNpcWhenTargetingCorrectNpc_ShouldStartQuestSuccessfully` (enabled).
+/// `Start_ActConAcceptNpcWhenTargetingCorrectNpc_ShouldStartQuestSuccessfully`. As above: a
+/// quest whose Start requirements admit the fresh character starts from its NPC.
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn start_act_con_accept_npc_targeting_correct_npc_should_start() {
@@ -5320,6 +5356,7 @@ async fn start_act_con_accept_npc_targeting_correct_npc_should_start() {
     let ids = quest_ids_with(&conn, &[(kind::START, "QuestActConAcceptNpc", None, None)]);
     let ids = remove_sphere_and_not_implemented(&conn, ids);
     assert!(ids.len() > 1000);
+    let (mut started, mut refused) = (0, 0);
     for qid in ids {
         let char_id = 1 + qid;
         setup_quest(&server, qid, |ctx, h| {
@@ -5327,22 +5364,14 @@ async fn start_act_con_accept_npc_targeting_correct_npc_should_start() {
             let start = data
                 .template(qid)
                 .and_then(|t| t.first_component(&data.components, kind::START));
-            if let Some(a) = start.and_then(|c| {
-                c.acts
-                    .iter()
-                    .copied()
-                    .find(|&a| matches!(data.acts[a].kind, ActKind::ConAcceptNpc { .. }))
-            }) {
-                let ActKind::ConAcceptNpc { npc_id } = data.acts[a].kind else {
-                    unreachable!()
-                };
-                ctx.env.target = Some(UnitSnapshot {
-                    npc_template_id: Some(npc_id),
-                    is_unit: true,
-                    ..UnitSnapshot::default()
-                });
-            }
+            let admitted = accept_from_start_object(ctx, h, qid);
             let r = ctx.start_quest(h);
+            assert_eq!(r, admitted, "quest {qid}");
+            if !admitted {
+                refused += 1;
+                return;
+            }
+            started += 1;
             if start.is_some_and(|c| {
                 c.acts
                     .iter()
@@ -5353,9 +5382,12 @@ async fn start_act_con_accept_npc_targeting_correct_npc_should_start() {
                     "quest {qid}"
                 );
             }
-            assert!(r, "quest {qid}");
         });
     }
+    eprintln!("ConAcceptNpc starters: {started} started, {refused} refused by unit_reqs");
+    // 1.2 data: 173 of 2 653 start for the level-1 test character; 2 026 Start components
+    // need a completed quest (`unit_reqs` kind 31) and 2 152 a level.
+    assert!(started > 100, "{started} started, {refused} refused");
 }
 
 /// `UseSkillAndBuff_MockedWorldManager_WhenQuestUseSkill_ShouldUseOnSelfOrTargetNpc`. Skipped
