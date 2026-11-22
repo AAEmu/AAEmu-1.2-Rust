@@ -1222,11 +1222,14 @@ async fn real_data_cradle_spike_pulse_damages_and_leaves_the_injury() {
 
 #[path = "cradle_event_tests.rs"]
 mod events;
-/// A placed fire jet's flame phase (5246: timer 13547 -> clout 13548, 3 s each) applies Fire
-/// Pillar 3996 to a player standing in it. Its tick effect is fixed fire damage 1500-2000.
+
+/// A placed fire jet's flame phase (5250: timer 13551 -> clout 13552, 7 s each) applies Fire
+/// Pillar 3996 (300 ms, fixed fire damage 1500-2000 per tick) once to a player who steps into
+/// it. Standing on the grate does not renew it: the next hit comes with the jet's next flame
+/// phase, which is a new area trigger. A player 4 m away is never hit.
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
-async fn real_data_cradle_fire_jet_flame_burns_a_player_on_it() {
+async fn real_data_cradle_fire_jet_flame_hits_once_per_entry() {
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
     };
@@ -1239,20 +1242,39 @@ async fn real_data_cradle_fire_jet_flame_burns_a_player_on_it() {
         .get(INSTANCE_ID)
         .unwrap()
         .spawn_doodads(&server);
-    let jet = find_doodad(&world, 5246);
+    let jet = find_doodad(&world, 5250);
     let pos = jet.data().transform;
     let player = place_player(&server, &world, 1, pos.x + 0.3, pos.y, pos.z);
     let bystander = place_player(&server, &world, 2, pos.x + 4.0, pos.y, pos.z);
-    super::doodad::manager::do_change_phase(&server, &world, &jet, None, 13548);
-    assert_eq!(jet.data().func_group_id, 13548, "flame phase");
-    for _ in 0..8 {
-        server.systems.npcs.area_triggers.tick(&server);
-        tokio::time::sleep(std::time::Duration::from_millis(210)).await;
-    }
-    assert!(player.data().unit.hp < 10_000, "the flame burns");
+    super::doodad::manager::do_change_phase(&server, &world, &jet, None, 13552);
+    assert_eq!(jet.data().func_group_id, 13552, "flame phase");
+    let tick = |n: usize| {
+        let server = server.clone();
+        async move {
+            for _ in 0..n {
+                server.systems.npcs.area_triggers.tick(&server);
+                tokio::time::sleep(std::time::Duration::from_millis(210)).await;
+            }
+        }
+    };
+    // Entry: one application of the 300 ms Fire Pillar.
+    tick(3).await;
+    let after_entry = player.data().unit.hp;
+    assert!(after_entry < 10_000, "the flame burns on entry");
+    assert!(
+        !player.data().unit.buffs.check_buff(3996),
+        "the hit has expired"
+    );
+    // About 2 s more on the grate, still in the same flame phase: no further hit.
+    tick(10).await;
+    assert_eq!(jet.data().func_group_id, 13552, "still the same flame");
+    assert_eq!(
+        player.data().unit.hp,
+        after_entry,
+        "no second hit while standing"
+    );
     assert_eq!(bystander.data().unit.hp, 10_000, "4 m away is safe");
 }
-
 // ---------------------------------------------------------------------------------------------
 // World and hazards (tester follow-up 2026-11-22)
 // ---------------------------------------------------------------------------------------------

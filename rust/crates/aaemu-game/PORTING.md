@@ -5616,6 +5616,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     0.05 m. The inferred jets before the Dreadkiss Sitting Room and both area traps 5271
     are not in the level and are removed. Two of them sat 1.0 to 1.2 m under the floor.
     The 1.2 jets do damage: Fire Pillar 3996 ticks fixed fire damage 1500 to 2000.
+    A jet cycles a timer phase (fire_ground, 3/5/7 s) and a flame phase (clout 1182-1184,
+    3/5/7 s, tick 0), then the timer again. Fire Pillar now hits once per entry, as in the
+    C#. A player who stays on the grate is hit again only by the next flame phase, which
+    is a new area trigger. This replaces PR #155's rule, which reapplied the 300 ms buff
+    on every 200 ms area tick. Live, standing on a 5250 then killed an 8896 HP character
+    in about 2 s. The reapply now applies only to Miasma (clout 1139) and the spear windows
+    (1295, 1334, 1336). Their buffs (5 s, 2 s) outlast those clouts, so it never fired.
+    The Cradle pool hazards use inside buffs and are unchanged.
   - **Pool hazards.** Each pool has its authored clout doodad. Each box top is within 2.5 m
     of the `visareas.dat` water surface (eight of nine within 1.2 m). 5055 (Toxicity 3813)
     is in the Dreadkiss pool. 5439 (Cursed

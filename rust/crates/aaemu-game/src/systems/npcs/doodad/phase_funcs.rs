@@ -691,9 +691,13 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     };
     trigger.player_sphere = howl_ward;
     trigger.inside_buff_id = inside_buff_id;
-    // Miasma and spear injuries last beyond the contact that applies them.
-    // Fire Pillar expires between hits while a victim remains in the flame.
-    trigger.contact_buff = matches!(f.id, 1139 | 1295 | 1334 | 1336) || f.buff_id == 3996;
+    // Miasma and spear injuries last beyond the contact that applies them, and so
+    // does a Fire Pillar hit. A unit inside Miasma or a spear window keeps its buff.
+    // Fire Pillar (300 ms) hits once per entry, as in the C#: each flame phase of a
+    // jet is a new trigger, so a player who stays on the grate is hit once per burst.
+    let reapplied_contact = matches!(f.id, 1139 | 1295 | 1334 | 1336);
+    trigger.contact_buff = reapplied_contact || f.buff_id == 3996;
+    trigger.reapply_while_inside = reapplied_contact;
     // The Cradle pool hazards: Toxicity (green pool), Cursed Blood (red pools),
     // Poison (stepping stone pools) and Lava (Arkanis's room).
     trigger.requires_submersion = ctx.world.template.name == "instance_cradle_of_destruction"
