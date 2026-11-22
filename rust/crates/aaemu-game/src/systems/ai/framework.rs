@@ -258,6 +258,19 @@ pub enum NpcIntervalSite {
     AlmightyAttackBehavior,
 }
 
+/// A chase that stopped at a ledge (`behaviors::chase_move`): when it started and how far the
+/// victim was then. Only progress ends it: a step along a planned route, or the chaser getting
+/// clearly closer to the victim. A possible step sideways or away does not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LedgeBlock {
+    /// Unix ms of the first blocked step.
+    pub since_ms: i64,
+    /// Object id of the victim the chaser was blocked chasing.
+    pub victim: u32,
+    /// 3D distance (m) from the chaser to the victim at the first blocked step.
+    pub distance: f32,
+}
+
 /// Bookkeeping of the last chase route (`behaviors::move_in_range` / `update_target`); the C#
 /// code only compared the victim position with `PathNode.EndPointPos`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,8 +302,8 @@ pub struct NpcAi {
     pub path_node: PathNode,
     /// The last chase route (`None` = no route yet / reset on entering or leaving combat).
     pub chase_path: Option<ChasePath>,
-    /// Since when (unix ms) every chase step has stopped at a ledge (`None` = not blocked).
-    pub ledge_blocked_since: Option<i64>,
+    /// The chase is waiting at a ledge (`None` = not blocked), see [`LedgeBlock`].
+    pub ledge_block: Option<LedgeBlock>,
     behaviors: BTreeMap<BehaviorKind, BehaviorSlot>,
     transitions: BTreeMap<BehaviorKind, Vec<(TransitionEvent, BehaviorKind)>>,
     current: Option<BehaviorKind>,
@@ -348,7 +361,7 @@ impl NpcAi {
             param: None,
             path_node: PathNode::default(),
             chase_path: None,
-            ledge_blocked_since: None,
+            ledge_block: None,
             behaviors: BTreeMap::new(),
             transitions: BTreeMap::new(),
             current: None,

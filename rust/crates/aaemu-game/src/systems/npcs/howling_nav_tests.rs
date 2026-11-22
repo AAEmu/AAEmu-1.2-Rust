@@ -511,3 +511,143 @@ async fn real_howling_nav_corridor_mob_route_up_takes_the_stairs() {
         pos(&combatant)
     );
 }
+
+/// The chase's ledge wait (`ai::framework::LedgeBlock`) of the NPC.
+fn ledge_wait(server: &GameServer, npc: &NpcRef) -> bool {
+    crate::systems::ai::manager::run_now(server, npc.obj_id, |c| c.ai.ledge_block.is_some())
+        .unwrap_or(false)
+}
+
+/// #20 live follow-up: a walkway Knight that stopped at the ledge turned back after about a
+/// second, not three. When the victim landed in the room below, the chase planned a new route.
+/// The room is not reachable from the walkway, and the search, cut after a number of
+/// iterations, ended on a node 106 m from the victim. The Knight followed that route back
+/// along the walkway, and its first possible step ended the wait. It then walked until the
+/// 50 m leash. Now a cut route that leads away is no route, so the Knight waits at the edge
+/// and gives the victim up 3 s after it stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB and AAEMU_GAME_PAK"]
+async fn real_howling_nav_walkway_knight_waits_three_seconds_at_the_ledge() {
+    let Some((server, world)) = ground_server() else {
+        return;
+    };
+    let knight = npc_at(&server, &world, 12765, [433.1, 593.8, 170.1]);
+    let (_client, player) = player_at(&server, 1, [437.8, 592.5, 170.2]);
+    crate::systems::ai::hooks::engage(&server, &knight, &WorldObject::from(&player));
+    // The live walk off the east end of the walkway (ha2-walkway-track.txt), 0.3 s apart.
+    let landing = floor(&server, 456.92, 594.06, 158.0).expect("the room floor");
+    let track: Vec<[f32; 3]> = [
+        [438.79, 592.77, 170.2],
+        [439.42, 593.15, 170.2],
+        [440.51, 593.43, 170.2],
+        [441.88, 593.56, 170.2],
+        [443.05, 593.92, 170.2],
+        [444.23, 594.28, 170.2],
+        [445.40, 594.64, 170.2],
+        [447.16, 595.17, 170.2],
+        [448.50, 595.57, 170.2],
+        [449.78, 595.69, 170.2],
+        [451.34, 595.38, 170.2],
+        [452.90, 595.01, 169.0],
+        [454.47, 594.64, 165.5],
+        [456.04, 594.27, 160.2],
+        [456.92, 594.06, landing],
+    ]
+    .to_vec();
+    for _ in 0..20 {
+        tick(&server, &knight, &player).await;
+    }
+    let mut stop: Option<(std::time::Instant, [f32; 3])> = None;
+    for i in 0..150 {
+        if i % 3 == 0 {
+            if let Some(p) = track.get(i / 3) {
+                move_player(&server, &world, &player, *p);
+            }
+        }
+        tick(&server, &knight, &player).await;
+        let p = pos(&knight);
+        if stop.is_none() && ledge_wait(&server, &knight) {
+            stop = Some((std::time::Instant::now(), p));
+        }
+        let Some((since, at)) = stop else {
+            continue;
+        };
+        if !aggro_on(&knight, &player) {
+            let waited = since.elapsed().as_secs_f32();
+            assert!(
+                (2.8..=3.8).contains(&waited),
+                "the knight gave up {waited} s after it stopped"
+            );
+            return;
+        }
+        assert!(
+            dist_2d(p, at) < 1.0,
+            "the knight waits at the edge {at:?}, not at {p:?}"
+        );
+    }
+    panic!(
+        "the knight should stop at the edge and give up: {:?}, stop {stop:?}",
+        pos(&knight)
+    );
+}
+
+/// Calleil the Cursed (12759) followed a victim who left his room to the north only to the
+/// gate (6360 at (329.5, 523.9)). Along the gate line the collision has a strip about a metre
+/// wide without floor, so his chase took it for a ledge, though the players and the waypoint
+/// graph cross it. He now follows the victim into the corridor behind the gate, and once the
+/// victim is out of his 40 m leash he returns home and drops the victim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB and AAEMU_GAME_PAK"]
+async fn real_howling_nav_calleil_follows_a_victim_out_through_the_north_gate() {
+    let Some((server, world)) = ground_server() else {
+        return;
+    };
+    let mut skills = server.systems.skills.config();
+    skills.god_mode = true;
+    server.systems.skills.set_config(skills);
+    let home = [322.4f32, 500.4, 170.8];
+    let boss = npc_at(&server, &world, 12759, home);
+    let (_client, player) = player_at(&server, 1, [322.0, 508.0, 170.4]);
+    crate::systems::ai::hooks::engage(&server, &boss, &WorldObject::from(&player));
+    for _ in 0..20 {
+        tick(&server, &boss, &player).await;
+    }
+    let corridor = [327.0f32, 531.0];
+    let z = floor(&server, corridor[0], corridor[1], 171.4).expect("the corridor floor");
+    let corridor = [corridor[0], corridor[1], z];
+    move_player(&server, &world, &player, corridor);
+    let mut followed = false;
+    for _ in 0..250 {
+        tick(&server, &boss, &player).await;
+        assert!(
+            aggro_on(&boss, &player),
+            "Calleil keeps the victim behind the gate: at {:?}",
+            pos(&boss)
+        );
+        let p = pos(&boss);
+        if p[1] > 526.0 && dist_2d(p, corridor) < 4.0 {
+            followed = true;
+            break;
+        }
+    }
+    assert!(
+        followed,
+        "Calleil follows through the gate: at {:?}",
+        pos(&boss)
+    );
+    // The hall north of the corridor lies beyond his leash.
+    let hall = [310.0f32, 556.0];
+    let z = floor(&server, hall[0], hall[1], 171.4).expect("the hall floor");
+    move_player(&server, &world, &player, [hall[0], hall[1], z]);
+    for _ in 0..400 {
+        tick(&server, &boss, &player).await;
+        if !aggro_on(&boss, &player) && dist_2d(pos(&boss), home) < 3.0 {
+            return;
+        }
+    }
+    panic!(
+        "Calleil should return home: at {:?}, aggro {}",
+        pos(&boss),
+        aggro_on(&boss, &player)
+    );
+}

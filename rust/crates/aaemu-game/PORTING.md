@@ -3828,6 +3828,38 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     schedule itself again.
   Tests: `npcs::howling_nav_tests::*` (gated by `AAEMU_COMPACT_DB`; the ground tests also by
   `AAEMU_GAME_PAK`) and `ai::collision::cgf::tests::physics_node_takes_the_rotation_of_its_parent_chain`.
+* systems::ai / data (Howling Abyss aggro follow-up, 2026-11-22): leftovers of the second live pass.
+  - **Cut A\* routes.** `PathNode::find_route` stops after `20 x distance + 500` iterations and
+    returns the node it reached; the C# followed such a cut route as well. When the goal lies
+    in a part of the graph the start cannot reach, a short distance cuts the search early, and
+    the last node is wherever the search was expanding. The Greater walkway Knight's victim fell
+    12 m into the Medusa room: the cut route ended 106 m from the victim, 550 m along the
+    walkway, and the Knight left the ledge after about 1 s and walked off until its 50 m leash.
+    **Deviation:** a cut route counts only when its last node is nearer the goal (2D) than its
+    first (`Route::approaches_goal`); otherwise `find_path_with_radius` returns no route.
+  - **Ledge wait.** The 3 s wait of a chaser at a ledge (#165) ended at the first step it could
+    take. Now only progress ends it: a step to a route corner, or getting 1 m closer to the
+    victim than at the edge (`framework::LedgeBlock`). A wait without progress ends after 3 s
+    even if steps sideways or away were possible in between. Reaching the victim or a state
+    change clears it, so a later fight does not inherit an old wait.
+  - **Gaps are not ledges.** `npc::step_leaves_ledge` takes the step direction. A missing floor
+    with the walker's floor going on (within 1 m of its level) no more than 1.5 m beyond is a
+    gap, not a ledge. Calleil's north gate (6360 at (329.5, 523.9)) has a strip about a metre
+    wide without collision floor along the gate line. Players and the waypoint graph cross it,
+    but Calleil stopped there and gave up a victim standing in the corridor behind it. He
+    now follows the victim through, and his 40 m leash still sends him home.
+  - **Greater pack data.** The pack at (502, 506) in Greater had Normal's Blackscale Corps
+    Archer 11261 (level 44) and Combatant 11754 (level 41), recorded at Normal's placements of
+    that pack. They are now Greater's 12768 and 12773, the members at the same place in
+    Greater's group spawners (14442 / 14453 for Normal's 13197 / 13195, same names).
+  - **Unchanged:** a GM `/move` of 37 m from Viboros (`return_distance` 33) sends him home. That
+    is the C# `ShouldReturn` rule. 21039 is the shared idle "open the door" skill, not a combat
+    end.
+  Tests: `ai::geodata::astar::tests::a_cut_search_that_ends_farther_from_the_goal_is_no_route`,
+  `ai::npc::npc_height_tests::a_narrow_gap_in_the_floor_is_not_a_ledge`, gated
+  `npcs::howling_nav_tests::{real_howling_nav_walkway_knight_waits_three_seconds_at_the_ledge,
+  real_howling_nav_calleil_follows_a_victim_out_through_the_north_gate}` and
+  `npcs::howling_world_tests::real_howling_greater_hostile_spawns_are_greater_templates`.
 * Palace Cellar (zone 240, `instance_sal_temple`)
   - **Entrance barrier** — Melkina's scripted departure (16600) sends Salphira's Barrier
     4580 to its authored final phase 12282. The existing 20-second timer also clears it
