@@ -324,7 +324,15 @@ fn server() -> Arc<GameServer> {
 
 /// [`data`]'s server setup (shared by [`server`]).
 fn server_with_data(data: GameData) -> Arc<GameServer> {
-    let server = Arc::new(test_server_with(data));
+    server_with_data_in_zone(data, TEST_ZONE)
+}
+
+/// [`server_with_data`] on a synthetic `main_world` whose cells all belong to `zone`.
+fn server_with_data_in_zone(data: GameData, zone: u32) -> Arc<GameServer> {
+    let server = Arc::new(test_server_with_world(
+        data,
+        crate::data::world_templates::WorldTemplate::synthetic(0, "main_world", 2, 2, zone),
+    ));
     server.set_self();
     // The command-set interaction lock is opt-in; these flow tests exercise it.
     server
@@ -371,6 +379,18 @@ fn spawn_npc(
     y: f32,
     kind: AiKind,
 ) -> NpcRef {
+    spawn_npc_at(server, obj_id, template, [x, y, 100.0], TEST_ZONE, kind)
+}
+
+/// [`spawn_npc`] at a given height and zone.
+fn spawn_npc_at(
+    server: &Arc<GameServer>,
+    obj_id: u32,
+    template: u32,
+    xyz: [f32; 3],
+    zone: u32,
+    kind: AiKind,
+) -> NpcRef {
     let mut n = Npc::new(template);
     n.unit.name = "Wolf".into();
     n.unit.level = 10;
@@ -380,8 +400,8 @@ fn spawn_npc(
     n.unit.max_mp = 100;
     n.unit.model_id = MODEL;
     n.unit.scale = 1.0;
-    n.unit.transform.set_xyz(x, y, 100.0);
-    n.unit.transform.zone_id = TEST_ZONE;
+    n.unit.transform.set_xyz(xyz[0], xyz[1], xyz[2]);
+    n.unit.transform.zone_id = zone;
     // `NpcManager.Create` adds the template's `unit_modifiers` (`owner_type='Npc'`).
     if let Some(t) = server.game_data.systems.npcs.npc.template(template) {
         for bt in &t.bonuses {
@@ -3734,4 +3754,263 @@ async fn a_guard_aggroes_a_hostile_pirate() {
         .skill_state
         .aggro_table
         .contains_key(&PLAYER_OBJ));
+}
+
+// ===========================================================================================
+// Dungeon special cases of the shared AI (characterization before the encounter registry)
+// ===========================================================================================
+
+/// A queued command of an encounter intro set (Hadir 79, Armory 103) keeps the actor in its
+/// behavior when it gains an aggro target, so it finishes the route into the boss room
+/// (`NpcAi::running_encounter_intro`). A queued command of a neighbouring set does not.
+#[tokio::test]
+async fn encounter_intro_command_sets_ignore_a_new_aggro_target() {
+    for (set, intro) in [
+        (79, true),
+        (103, true),
+        (78, false),
+        (82, false),
+        (104, false),
+    ] {
+        let server = server();
+        spawn_npc(
+            &server,
+            NPC_OBJ,
+            PASSIVE_TEMPLATE,
+            100.0,
+            100.0,
+            AiKind::HoldPosition,
+        );
+        post(&server, NPC_OBJ, |c| c.go_to_idle());
+        post(&server, NPC_OBJ, |c| c.go_to_default_behavior());
+        assert_eq!(behavior(&server, NPC_OBJ), Some(B::HoldPosition));
+        post(&server, NPC_OBJ, move |c| {
+            c.ai.commands_queue
+                .push_back(set_command(set, AiCommandCategory::Timeout, 5_000));
+        });
+        post(&server, NPC_OBJ, |c| c.on_aggro_target_changed());
+        let expected = if intro { B::HoldPosition } else { B::Attack };
+        assert_eq!(
+            behavior(&server, NPC_OBJ),
+            Some(expected),
+            "a queued command of set {set}"
+        );
+    }
+}
+
+fn distance_2d(a: Vec3, b: Vec3) -> f32 {
+    (a.x - b.x).hypot(a.y - b.y)
+}
+
+fn place_player_at(server: &GameServer, p: &PlayerRef, xyz: [f32; 3]) {
+    p.data().unit.transform.set_xyz(xyz[0], xyz[1], xyz[2]);
+    let world = server.world.world(0).expect("world");
+    world.add_visible_object(p, &server.view_ctx());
+}
+
+/// Ticks the AI manager (250 ms per tick, a short real pause for the skill delays) until
+/// `done`, at most `max` ticks. The victim is kept alive.
+async fn tick_victim_until(
+    server: &Arc<GameServer>,
+    victim: &PlayerRef,
+    max: usize,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    for _ in 0..max {
+        tick_all(server, 250);
+        victim.data().unit.hp = 1_000_000;
+        if done() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
+}
+
+/// Hieronimus's wave adds (templates 8964-8969 in the Armory, zone 236) first walk out of
+/// their portal recess to within 34 m of the room centre (200, 312) before they fight, and
+/// they leash to the 50 m arena around it (z 18-26) instead of their spawn point. Template
+/// 8970 in the same zone is an ordinary NPC: it fights at the portal and leashes to its spawn.
+#[tokio::test]
+async fn armory_wave_adds_leave_their_portal_and_leash_to_the_arena() {
+    const ARMORY_ZONE: u32 = 236;
+    let centre = Vec3::new(200.0, 312.0, 20.0);
+    let home = Vec3::new(240.0, 312.0, 20.0);
+    for (template, wave_add) in [(8964, true), (8969, true), (8970, false)] {
+        let mut data = data();
+        let base = data.systems.npcs.npc.templates[&NPC_TEMPLATE].clone();
+        data.systems.npcs.npc.templates.insert(
+            template,
+            NpcTemplate {
+                id: template,
+                ..base
+            },
+        );
+        let server = server_with_data_in_zone(data, ARMORY_ZONE);
+        let client = TestClient::new(&server, 1, 1);
+        let mut c = test_character(1, "Raider", 236.0, 300.0);
+        c.unit.hp = 1_000_000;
+        c.unit.max_hp = 1_000_000;
+        c.unit.transform.set_xyz(236.0, 300.0, 20.0);
+        c.unit.transform.zone_id = ARMORY_ZONE;
+        let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+        let npc = spawn_npc_at(
+            &server,
+            NPC_OBJ,
+            template,
+            [home.x, home.y, home.z],
+            ARMORY_ZONE,
+            AiKind::HoldPosition,
+        );
+        post(&server, NPC_OBJ, |c| c.go_to_idle());
+        post(&server, NPC_OBJ, |c| c.go_to_default_behavior());
+        let attacker = WorldObject::from(&player);
+        super::combat::add_unit_aggro(
+            &server,
+            &WorldObject::from(&npc),
+            AggroKind::Damage,
+            &attacker,
+            50,
+        );
+        server
+            .systems
+            .skills
+            .ext
+            .npcs()
+            .npc_damage_received(&server, &npc, &attacker, 50);
+        assert_eq!(behavior(&server, NPC_OBJ), Some(B::Attack), "{template}");
+
+        // The victim stands 12.6 m from the portal and 37.9 m from the centre.
+        let mut closest = f32::MAX;
+        tick_victim_until(&server, &player, 40, || {
+            closest = closest.min(distance_2d(npc_pos(&npc), centre));
+            false
+        })
+        .await;
+        if wave_add {
+            assert!(
+                closest <= 34.0,
+                "wave add {template} never left its portal: {closest} m from the centre"
+            );
+        } else {
+            assert!(
+                closest > 36.0,
+                "NPC {template} walked to the centre ({closest} m) instead of its victim"
+            );
+        }
+
+        // The victim runs to the far side of the arena, 75 m from the portal.
+        place_player_at(&server, &player, [165.0, 312.0, 20.0]);
+        if wave_add {
+            let mut fought_on = true;
+            let dragged = tick_victim_until(&server, &player, 120, || {
+                fought_on &= behavior(&server, NPC_OBJ) == Some(B::Attack);
+                distance_2d(npc_pos(&npc), home) > 55.0
+            })
+            .await;
+            assert!(
+                fought_on && dragged,
+                "wave add {template} gave up a victim inside the arena: {:?} at {:?}",
+                behavior(&server, NPC_OBJ),
+                npc_pos(&npc)
+            );
+            // Out of the arena (above its floor band): the add returns.
+            place_player_at(&server, &player, [165.0, 312.0, 30.0]);
+        }
+        let gave_up = tick_victim_until(&server, &player, 40, || {
+            behavior(&server, NPC_OBJ) != Some(B::Attack)
+        })
+        .await;
+        assert!(
+            gave_up,
+            "NPC {template} should leave its victim: {:?} at {:?}",
+            behavior(&server, NPC_OBJ),
+            npc_pos(&npc)
+        );
+    }
+}
+
+/// The Sharpwind tornado spawn (18983) and arena cinema cue (19535) `OnSpawn` skills wait
+/// until their caster is in the world. Another `OnSpawn` skill is used at once.
+#[tokio::test]
+async fn sharpwind_spawn_cues_wait_until_the_caster_is_visible() {
+    use super::framework::{AiCtx, NpcAi};
+    use crate::systems::npcs::npc::data::NpcSkill;
+
+    const CUE_TEMPLATE: u32 = 7_010;
+    const ARENA_CUE: u32 = 19_535;
+    const TORNADO: u32 = 18_983;
+    const OTHER: u32 = 18_984;
+    let mut data = data();
+    for id in [TORNADO, ARENA_CUE, OTHER] {
+        // No cooldown: the handler blocks the skill (`AddCooldown(id, uint.MaxValue)`) when
+        // it uses it, whatever the cast does.
+        data.systems.skills.add_skill(SkillTemplate {
+            id,
+            target_type: 0,
+            ..SkillTemplate::default()
+        });
+    }
+    let base = data.systems.npcs.npc.templates[&NPC_TEMPLATE].clone();
+    let skills = [TORNADO, ARENA_CUE, OTHER]
+        .into_iter()
+        .map(|skill_id| NpcSkill {
+            id: skill_id,
+            owner_id: CUE_TEMPLATE,
+            owner_type: "Npc".into(),
+            skill_id,
+            skill_use_condition: 5, // OnSpawn
+            skill_use_param1: 0.0,
+            skill_use_param2: 0.0,
+        })
+        .collect();
+    data.systems.npcs.npc.templates.insert(
+        CUE_TEMPLATE,
+        NpcTemplate {
+            id: CUE_TEMPLATE,
+            skills: vec![(5, skills)],
+            ..base
+        },
+    );
+    let server = server_with_data(data);
+    let mut n = Npc::new(CUE_TEMPLATE);
+    n.unit.hp = 1000;
+    n.unit.max_hp = 1000;
+    n.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    n.unit.transform.zone_id = TEST_ZONE;
+    let npc = Entity::new(NPC_OBJ, n);
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+    ai.events_registered = true;
+    let used = |id: u32| {
+        npc.data()
+            .unit
+            .cooldowns
+            .check_cooldown(id, crate::world::now_ms())
+    };
+    {
+        let mut c = AiCtx {
+            server: &server,
+            npc: npc.clone(),
+            obj: WorldObject::from(&npc),
+            ai: &mut ai,
+        };
+        super::npc_events::on_spawn(&mut c);
+    }
+    assert!(used(OTHER), "an ordinary OnSpawn skill is used at once");
+    assert!(!used(TORNADO), "the tornado spawn waits for its caster");
+    assert!(!used(ARENA_CUE), "the arena cue waits for its caster");
+
+    let world = server.world.world(0).expect("world");
+    world.spawn(&npc, &server.view_ctx());
+    {
+        let mut c = AiCtx {
+            server: &server,
+            npc: npc.clone(),
+            obj: WorldObject::from(&npc),
+            ai: &mut ai,
+        };
+        super::npc_events::on_spawn(&mut c);
+    }
+    assert!(used(TORNADO), "the visible tornado starts its hazard");
+    assert!(used(ARENA_CUE), "the visible cue finds its audience");
 }

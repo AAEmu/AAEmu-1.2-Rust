@@ -2274,6 +2274,81 @@ mod tests {
         assert_eq!(body[8], MoveTypeFlags::MOVING.0);
     }
 
+    /// S26: an NPC of the Howling Abyss (Normal zone 265, Greater 280) leaping at a victim 8 m
+    /// below keeps its level when no floor supports a step within the 2.5 m walker drop. With
+    /// no collision service here the leap's end point keeps the victim's height (z 100) and no
+    /// step finds a floor. Elsewhere the steps descend to the victim's height.
+    #[tokio::test]
+    async fn howling_leap_without_a_floor_keeps_its_level() {
+        use crate::data::world_templates::WorldTemplate;
+
+        for (zone, keeps_level) in [(265, true), (280, true), (100, false)] {
+            let server = Arc::new(test_server_with_world(
+                GameData::empty(),
+                WorldTemplate::synthetic(0, "main_world", 2, 2, zone),
+            ));
+            super::super::bind(&server);
+            let client = TestClient::new(&server, 1, 1);
+            let mut c = test_character(1, "Victim", 510.0, 500.0);
+            c.unit.transform.set_xyz(510.0, 500.0, 100.0);
+            c.unit.transform.zone_id = zone;
+            let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+            let mut n = Npc::new(1234);
+            n.unit.hp = 100;
+            n.unit.max_hp = 100;
+            n.unit.transform.set_xyz(502.0, 500.0, 108.0);
+            n.unit.transform.zone_id = zone;
+            let npc = Entity::new(NPC_OBJ, n);
+            server
+                .world
+                .world(0)
+                .expect("world")
+                .spawn(&npc, &server.view_ctx());
+            let owner = WorldObject::from(&npc);
+            let t = sc_template(SkillControllerKind::Leap, &[(2, 500), (3, -1000)]);
+            let sc = create(
+                &server,
+                &t,
+                &owner,
+                &Target::Obj(WorldObject::from(&player)),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            )
+            .expect("leap controller");
+            let Behavior::Leap(l) = sc.behavior() else {
+                panic!("not a linear leap");
+            };
+            assert!((l.end_position.z - 100.0).abs() < 0.01, "zone {zone}");
+            activate(&server, &sc);
+            // A leap that keeps its level never closes the 3D distance to its end point, so
+            // wait for the horizontal arrival (end x 509) and end it.
+            wait_until(|| sc.state() == ScState::Ended || npc.data().unit.transform.x > 508.5)
+                .await;
+            let tr = npc.data().unit.transform;
+            sc.end(&server, false);
+            assert!(
+                tr.x > 508.5,
+                "zone {zone}: the leap moves the NPC: {}",
+                tr.x
+            );
+            if keeps_level {
+                assert!(
+                    (tr.z - 108.0).abs() < 0.01,
+                    "zone {zone}: the leap keeps its level: {}",
+                    tr.z
+                );
+            } else {
+                assert!(
+                    tr.z < 101.0,
+                    "zone {zone}: the leap descends to the victim: {}",
+                    tr.z
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn replacing_ends_the_previous_controller() {
         let (server, _client, player, npc) = setup();

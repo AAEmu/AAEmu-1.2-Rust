@@ -163,6 +163,27 @@ async fn palace_cellar_walker_ignores_a_lower_corridor_floor() {
     );
 }
 
+/// A22: the Howling Abyss raised passages (Normal zone 265, Greater 280) have another floor
+/// only metres underneath, so a walker there keeps its level over a floor 5 m below (walker
+/// drop 2.5 m). In an ordinary zone (12 m drop) it steps down onto that floor.
+#[tokio::test]
+async fn howling_walker_ignores_a_floor_5_m_below() {
+    let server = crate::test_support::test_server();
+    crate::systems::ai::collision::flow_tests::enable_collision(&server, 142.0);
+    for (zone, expected) in [(265, 147.0), (280, 147.0), (TEST_ZONE, 142.0)] {
+        let z = reference_height_in(
+            &server,
+            0,
+            Some(walker(147.0, 147.0)),
+            500.0,
+            500.0,
+            147.0,
+            zone,
+        );
+        assert!((z - expected).abs() < 0.1, "zone {zone}: {z}");
+    }
+}
+
 fn walker_towards_surface(server: &GameServer, world_z: f32) -> f32 {
     reference_height_in(
         server,

@@ -912,4 +912,60 @@ mod tests {
         add_distance_to_front(&mut p, 5.0);
         assert!(p.x.abs() < 1e-6 && (p.y - 5.0).abs() < 1e-6);
     }
+
+    /// S26: an NPC knocked off a raised floor of the Howling Abyss (Normal zone 265, Greater
+    /// 280) keeps its level where no floor lies within the 2.5 m walker drop. Elsewhere it lands
+    /// on the floor 8 m below (within the 12 m `WALKER_MAX_DROP`). The floor is an 8 m synthetic
+    /// box (top z 108, x 496 to 504) on a terrain plane at z 100.
+    #[tokio::test]
+    async fn howling_knockback_off_a_raised_floor_keeps_its_level() {
+        use crate::data::world_templates::WorldTemplate;
+        use crate::models::npc::Npc;
+        use crate::systems::ai::collision::flow_tests::{add_wall_boxes, enable_collision};
+        use crate::world::Entity;
+
+        for (zone, keeps_level) in [(265, true), (280, true), (100, false)] {
+            let server = crate::test_support::test_server_with_world(
+                crate::data::GameData::empty(),
+                WorldTemplate::synthetic(0, "main_world", 2, 2, zone),
+            );
+            enable_collision(&server, 100.0);
+            add_wall_boxes(
+                &server,
+                &[(
+                    0xB0,
+                    aaemu_physics::math::Vec3::new(500.0, 500.0, 104.0),
+                    4.0,
+                )],
+            );
+            let mut n = Npc::new(1);
+            n.unit.hp = 100;
+            n.unit.max_hp = 100;
+            n.unit.transform.set_xyz(502.0, 500.0, 108.0);
+            n.unit.transform.zone_id = zone;
+            let npc = Entity::new(0x200, n);
+            server
+                .world
+                .world(0)
+                .expect("world")
+                .spawn(&npc, &server.view_ctx());
+            move_npc(&server, &npc, (507.0, 500.0, 108.0), None, true);
+            let t = npc.data().unit.transform;
+            println!("zone {zone}: knocked to ({}, {}, {})", t.x, t.y, t.z);
+            assert!(t.x > 504.5, "zone {zone}: pushed off the floor: {}", t.x);
+            if keeps_level {
+                assert!(
+                    (t.z - 108.0).abs() < 0.01,
+                    "zone {zone}: keeps its level: {}",
+                    t.z
+                );
+            } else {
+                assert!(
+                    (t.z - 100.0).abs() < 0.3,
+                    "zone {zone}: lands on the floor below: {}",
+                    t.z
+                );
+            }
+        }
+    }
 }

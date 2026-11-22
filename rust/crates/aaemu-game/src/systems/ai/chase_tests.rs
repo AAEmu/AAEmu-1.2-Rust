@@ -582,3 +582,74 @@ fn a_ledge_wait_ends_when_the_victim_is_back_on_the_walkers_floor() {
     // Back on the walker's floor and running away on a direct route: a chase again.
     assert!(ledge_wait_over(&block, &direct, 15.0, false));
 }
+
+/// The Sharpwind self-target plots that strike along the caster's heading (Rough Lightning
+/// 15935 / 19980 and the Colossus's smashes 18374 / 18401 / 18406 / 19248) turn the NPC
+/// towards its victim before the cast. Another self-target skill keeps the NPC's heading.
+#[tokio::test]
+async fn directional_self_skills_turn_the_caster_towards_its_victim() {
+    use crate::systems::skills::data::SkillTemplate;
+    use crate::systems::skills::state::SkillRun;
+
+    let mut data = GameData::empty();
+    data.systems.npcs.npc.templates.insert(
+        1,
+        NpcTemplate {
+            id: 1,
+            ..NpcTemplate::default()
+        },
+    );
+    let directional = [15935, 19980, 18374, 18401, 18406, 19248];
+    for id in directional.into_iter().chain([15934, 15936, 19981]) {
+        data.systems.skills.add_skill(SkillTemplate {
+            id,
+            target_type: 0, // SelfTarget
+            max_range: 30,
+            ..SkillTemplate::default()
+        });
+    }
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    let mut n = Npc::new(1);
+    n.unit.hp = 1000;
+    n.unit.max_hp = 1000;
+    n.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let npc = Entity::new(0x300, n);
+    let mut victim = Npc::new(2);
+    victim.unit.hp = 1000;
+    victim.unit.transform.set_xyz(100.0, 120.0, 100.0);
+    let victim = WorldObject::from(Entity::new(0x301, victim));
+    let world = server.world.world(0).unwrap();
+    world.spawn(&npc, &server.view_ctx());
+    world.spawn(&victim, &server.view_ctx());
+
+    const AWAY: f32 = 1.0;
+    let mut facing = None;
+    for id in directional.into_iter().chain([15934, 15936, 19981]) {
+        npc.data().unit.transform.rot_z = AWAY;
+        let skill = SkillRun::new(
+            server.game_data.systems.skills.skill(id).unwrap().clone(),
+            1,
+        );
+        let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+        let mut c = AiCtx {
+            server: &server,
+            npc: npc.clone(),
+            obj: WorldObject::from(&npc),
+            ai: &mut ai,
+        };
+        super::use_skill(&mut c, BehaviorKind::Attack, skill, Some(&victim), 0.0);
+        let rot = npc.data().unit.transform.rot_z;
+        if directional.contains(&id) {
+            assert!((rot - AWAY).abs() > 0.1, "skill {id} keeps the old heading");
+            assert_eq!(
+                *facing.get_or_insert(rot),
+                rot,
+                "skill {id} faces the victim"
+            );
+        } else {
+            assert_eq!(rot, AWAY, "self-target skill {id} turns the caster");
+        }
+    }
+}

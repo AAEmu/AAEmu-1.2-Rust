@@ -364,3 +364,73 @@ async fn real_cradle_putrid_demon_notices_a_player_in_front_or_close() {
     }
     assert!(noticed, "4.3 m in front: aggro");
 }
+
+/// The `(x, y, z)` offsets of the `SCKnockBackUnitPacket`s a client received since the last
+/// drain.
+fn knock_backs(client: &mut TestClient) -> Vec<[f32; 3]> {
+    let f = |b: &[u8], i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    client
+        .drain()
+        .into_iter()
+        .filter(|(op, body)| *op == crate::opcodes::sc::SCKnockBackUnitPacket && body.len() >= 15)
+        .map(|(_, b)| [f(&b, 3), f(&b, 7), f(&b, 11)])
+        .collect()
+}
+
+/// S27: the Tooth of Appetite's charge (18462, KnockBack value1 1000) sends its player victim
+/// an `SCKnockBackUnitPacket`, cut short by a wall behind the victim. Player knockbacks of
+/// other skills stay with the client.
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_cradle_tooth_charge_knocks_the_player_back_to_the_wall() {
+    use crate::systems::ai::collision::flow_tests::{add_wall_boxes, enable_collision};
+    use aaemu_physics::math::Vec3;
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_encounter_server(&db, WORLD, ZONE);
+    enable_collision(&server, AT[2]);
+    let tooth = WorldObject::from(&npc_at(&server, &world, 11365, AT));
+    let at = offset(AT, 3.0);
+    let (mut client, player) = player_at(&server, 1, at);
+    let victim = WorldObject::from(&player);
+    // A 1 m wall cube whose near face is 0.5 m behind the victim, or none.
+    let wall = [(0xC1A, Vec3::new(at[0] + 1.0, at[1], at[2] + 0.5), 0.5)];
+    for walled in [false, true] {
+        add_wall_boxes(&server, if walled { &wall } else { &[] });
+        player.data().unit.transform.set_xyz(at[0], at[1], at[2]);
+        tooth.with_unit(|u| {
+            u.unit_mut().cooldowns = Default::default();
+            u.unit_mut().global_cooldown_ms = 0;
+        });
+        client.drain();
+        assert_eq!(
+            skill::unit_use_skill(&server, &tooth, 18462, &victim),
+            skill_result::SUCCESS
+        );
+        let mut seen = Vec::new();
+        for _ in 0..30 {
+            seen.extend(knock_backs(&mut client));
+            if !seen.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let [x, y, z] = *seen.first().expect("the charge knocks the player back");
+        assert!(y.abs() < 0.01 && z.abs() < 0.01, "{seen:?}");
+        if walled {
+            assert!(
+                (0.0..0.55).contains(&x),
+                "the wall stops the knockback: {seen:?}"
+            );
+        } else {
+            assert!(
+                (0.85..=1.0).contains(&x),
+                "a free 1 m knockback (less the clip margin): {seen:?}"
+            );
+        }
+        player.data().unit.hp = 100_000;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
