@@ -8,6 +8,7 @@
 //! multicast delegate); the events are registered only for NPCs spawned by a spawner
 //! (`NpcSpawnerNpc.Spawn`, before `GoToSpawn`, so `SpawningBehavior.Enter`'s `OnSpawn` fires).
 
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::skills::types::{SkillCastTarget, SkillCaster};
 use crate::world::now_ms;
 
@@ -30,7 +31,7 @@ fn use_np_skills(c: &mut AiCtx<'_>, kind: K, target_obj_id: u32, bypass_gcd: boo
         };
         // The arena cue finds its audience and the tornado starts its hazard
         // buff once the casting unit is registered in the world.
-        if matches!(skill.id, 18983 | 19535) && !c.obj.is_visible() {
+        if encounters::waits_for_visible_caster(skill.id) && !c.obj.is_visible() {
             continue;
         }
         if ai_skills::on_cooldown(c, skill.id) {

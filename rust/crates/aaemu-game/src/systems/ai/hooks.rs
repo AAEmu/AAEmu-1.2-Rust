@@ -12,6 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::skills::state::AggroKind;
 use crate::world::{NpcRef, PlayerRef, WorldObject};
 
@@ -164,7 +165,7 @@ pub fn spawned(server: &GameServer, npc: &NpcRef, follow_path: &str) {
     let template_id = npc.data().unit.template_id;
     post(server, npc.obj_id, move |c| {
         c.ai.has_simulation = true;
-        if matches!(template_id, 12014 | 12188) {
+        if encounters::runs_spawn_events_on_spawn(template_id) {
             super::npc_events::on_spawn(c);
         }
         if !path.trim().is_empty() && !c.load_ai_path_points(&path, false) {
@@ -344,14 +345,16 @@ pub fn npc_control_effect(
                 return;
             }
             let mut queued = cmds.clone();
-            if e.param_int == 103 && target.data().unit.template_id == 10518 {
+            if let Some(skill_id) =
+                encounters::appended_intro_skill(e.param_int, || target.data().unit.template_id)
+            {
                 // Command set 103 uses the low-health staging actor for its opening lines.
                 // Finish with its authored vanish skill once the combat boss has appeared.
                 queued.push(super::params::AiCommands::new(
                     0,
                     e.param_int,
                     AiCommandCategory::UseSkill,
-                    17196,
+                    skill_id,
                     "",
                 ));
             }

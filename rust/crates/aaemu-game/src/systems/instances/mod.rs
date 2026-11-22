@@ -13,7 +13,8 @@
 //! Module layout: [`data`] (game data), [`worlds`] (instance creation / removal, transforms),
 //! [`dungeon`] (`Dungeon`, `DungeonLoaderTask`), [`indun`] (`IndunManager`), [`events`]
 //! (character / world events, indun events and actions), [`instant_game`]
-//! (`InstantGameManager`, `InstantGame`), [`packets`], [`config`] (`Dungeons` section).
+//! (`InstantGameManager`, `InstantGame`), [`packets`], [`config`] (`Dungeons` section),
+//! [`encounters`] (dungeon encounter id tables behind [`encounters::registry`]).
 //!
 //! Tower defense: [`tower_def`] extends the C# data/packet port with a runtime that runs the
 //! 1.2 open-world events by default (`Dungeons.TowerDefense.Enabled: false` turns them off).
@@ -22,6 +23,7 @@ pub mod clear_notice;
 pub mod config;
 pub mod data;
 pub mod dungeon;
+pub mod encounters;
 pub mod events;
 pub mod indun;
 pub mod instant_game;

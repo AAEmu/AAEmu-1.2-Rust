@@ -20,6 +20,7 @@ use crate::models::unit::UnitAttribute;
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::packets::world_objects::SCTargetChangedPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::heightmap::ReferenceHeightAi;
 use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::npcs::npc::packets::SCAggroTargetChangedPacket;
@@ -721,11 +722,7 @@ pub(crate) fn in_stonebrother_arena(pos: Vec3) -> bool {
 
 /// The raised passages have another walkable floor only a few meters underneath.
 pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {
-    if matches!(zone_id, 240 | 265 | 280) {
-        2.5
-    } else {
-        WALKER_MAX_DROP
-    }
+    encounters::raised_floor_drop(zone_id).unwrap_or(WALKER_MAX_DROP)
 }
 
 /// How far (m) past a missing floor [`step_leaves_ledge`] looks for the walker's floor going on.
