@@ -14,6 +14,7 @@ use crate::data::world_data::Portal;
 use crate::models::npc::Npc;
 use crate::models::transform::{PositionAndRotation, Transform};
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::skills::data::{EffectKind, EffectTemplate};
 use crate::systems::skills::effects::special::movement::{add_distance_to_front_deg, deg_to_rad};
 use crate::systems::skills::effects::EffectArgs;
@@ -759,13 +760,7 @@ fn spawn_effect(
     // self-despawn skill. The egg vanishes immediately after this effect.
     // Calleil's lightning elementals (21116-21118, 20106-20108) have the same idle
     // KillNpcWithoutCorpse skill (21114, 20111). Their summon is cast by the boss itself.
-    let encounter_boss = match e.sub_type {
-        11273 => Some(11265),
-        12959 => Some(12762),
-        12384 => Some(11201),
-        12912 => Some(12759),
-        _ => None,
-    };
+    let encounter_boss = encounters::summon_boss(e.sub_type);
     if let Some(boss_id) = encounter_boss {
         let boss_target = world.around(caster, |unit| {
             unit.as_npc()
@@ -1021,13 +1016,8 @@ fn npc_spawner_spawn_effect(
     }
     let world_id = caster.transform().world_id;
     let caster_template = caster.as_npc().map_or(0, |n| n.data().unit.template_id);
-    let encounter_add = match caster_template {
-        8962 => e.use_summoner_aggro_target && (46629..=46656).contains(&e.spawner_id),
-        11265 | 12762 => e.use_summoner_aggro_target,
-        11201 => matches!(e.spawner_id, 102334 | 102337 | 102340..=102342),
-        12759 => matches!(e.spawner_id, 110540..=110541 | 110544..=110545 | 110548),
-        _ => false,
-    };
+    let encounter_add =
+        encounters::is_wave_spawn(caster_template, e.spawner_id, e.use_summoner_aggro_target);
     let wave_target = encounter_add
         .then(|| npc_aggro_target(server, &world, caster))
         .flatten();

@@ -109,3 +109,34 @@ pub(super) fn plot_ground(skill_id: u32, event_id: u32) -> Option<PlotGround> {
         None
     }
 }
+
+/// A hatchling inherits the encounter target before it reaches its idle
+/// self-despawn skill. The egg vanishes immediately after this effect.
+/// Calleil's lightning elementals (21116-21118, 20106-20108) have the same idle
+/// KillNpcWithoutCorpse skill (21114, 20111). Their summon is cast by the boss itself.
+///
+/// The boss (Viboros, Calleil) whose aggro target a summoned template takes.
+pub(super) fn summon_boss(sub_type: u32) -> Option<u32> {
+    match sub_type {
+        11273 => Some(11265),
+        12959 => Some(12762),
+        12384 => Some(11201),
+        12912 => Some(12759),
+        _ => None,
+    }
+}
+
+/// The spawners of Viboros (11265, 12762) and Calleil (11201, 12759) that aim their adds at
+/// the boss's aggro target.
+pub(super) fn is_wave_spawn(
+    caster_template: u32,
+    spawner_id: u32,
+    use_summoner_aggro_target: bool,
+) -> bool {
+    match caster_template {
+        11265 | 12762 => use_summoner_aggro_target,
+        11201 => matches!(spawner_id, 102334 | 102337 | 102340..=102342),
+        12759 => matches!(spawner_id, 110540..=110541 | 110544..=110545 | 110548),
+        _ => false,
+    }
+}

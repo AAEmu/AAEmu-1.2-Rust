@@ -308,3 +308,22 @@ pub fn plot_ground(
         .or_else(|| howling_abyss::plot_ground(skill_id, event_id))
         .or_else(|| sharpwind::plot_ground(skill_id, event_id, zone_id))
 }
+
+// ---- spawn effects
+
+/// The boss whose aggro target a `SpawnEffect` summon of this template inherits (Howling
+/// Abyss).
+pub fn summon_boss(sub_type: u32) -> Option<u32> {
+    howling_abyss::summon_boss(sub_type)
+}
+
+/// `NpcSpawnerSpawnEffect`s whose adds attack the caster's aggro target (Burnt Castle Armory,
+/// Howling Abyss).
+pub fn is_wave_spawn(
+    caster_template: u32,
+    spawner_id: u32,
+    use_summoner_aggro_target: bool,
+) -> bool {
+    armory::is_wave_spawn(caster_template, spawner_id, use_summoner_aggro_target)
+        || howling_abyss::is_wave_spawn(caster_template, spawner_id, use_summoner_aggro_target)
+}
