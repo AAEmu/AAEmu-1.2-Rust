@@ -452,17 +452,10 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             false
         }
         FuncTemplate::WaterVolume(f)
-            if matches!(ctx.doodad.data().template_id, 5336 | 6288)
-                && matches!(f.id, 20 | 21 | 24 | 25) =>
+            if encounter_hooks::all()
+                .iter()
+                .any(|encounter| encounter.water_volume(server, ctx, f)) =>
         {
-            let pos = ctx.world.world_pos_rot(&ctx.obj());
-            let water = crate::systems::ai::physics::world_water(server, &ctx.world);
-            water.set_calleil_level(
-                crate::systems::skills::controllers::Vec3::new(pos.x, pos.y, pos.z),
-                pos.rot_z,
-                f.level_change.max(0.0),
-                f.duration,
-            );
             false
         }
         // Phase funcs whose C# `Use` only logs (and returns false).
