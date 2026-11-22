@@ -290,7 +290,9 @@ pub fn npc_control_effect(
     e: &crate::systems::skills::data::effects::NpcControlEffect,
     target: &NpcRef,
 ) {
-    tracing::info!(
+    // Area-wide encounter scripts apply this to every matching NPC (routine, not info).
+    tracing::debug!(
+        npc = target.obj_id,
         "NpcControllEffect: CategoryId={}, ParamString={}, ParamInt={}",
         e.category_id,
         e.param_string,

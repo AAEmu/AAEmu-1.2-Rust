@@ -388,6 +388,32 @@ pub fn damage(
     damage_with_aoe(server, e, args, packets, None);
 }
 
+/// An NPC's damage row that names its NPC targets by `target_npc_tag_id` is a scripted removal:
+/// Howling Abyss's Godfrey kills his prisoners and the event trigger, Hieronimus removes his
+/// pets. Those targets are often friendly to the caster, so the relation check would leave them
+/// standing and the script would run again.
+fn scripted_npc_removal(
+    server: &GameServer,
+    e: &DamageEffect,
+    args: &EffectArgs<'_>,
+    caster: &WorldObject,
+    target: &WorldObject,
+) -> bool {
+    let (Some(_), Some(npc), Some(skill)) = (caster.as_npc(), target.as_npc(), args.source.skill())
+    else {
+        return false;
+    };
+    let template_id = npc.data().unit.template_id;
+    let data = &server.game_data.systems.skills;
+    skill.template.effects.iter().any(|effect| {
+        effect.target_npc_tag_id > 0
+            && effect.template == Some((EffectKind::DamageEffect, e.id))
+            && data
+                .npcs_by_tag(effect.target_npc_tag_id)
+                .contains(&template_id)
+    })
+}
+
 pub(super) fn damage_with_aoe(
     server: &GameServer,
     e: &DamageEffect,
@@ -781,7 +807,11 @@ pub(super) fn damage_with_aoe(
     let test_drive = matches!(args.cast, CastAction::Buff { buff_id: 6151, .. });
     let house_removal =
         crate::systems::housing::is_abandoned_house_removal_damage(server, e.id, args);
-    if !test_drive && !house_removal && !can_attack(server, &caster_t, &trg_t) {
+    if !test_drive
+        && !house_removal
+        && !scripted_npc_removal(server, e, args, &caster, &trg)
+        && !can_attack(server, &caster_t, &trg_t)
+    {
         return;
     }
     // `buffs.immune_damage` threshold immunity: a flagged buff such as Physical Resist Potion

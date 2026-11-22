@@ -1625,7 +1625,8 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   of the trees sit on the terrain with it, 23 % with y-major).
 * **Models** (`collision::{cgf,models}`): every `MeshPhysicsData` slot of a node's mesh through
   `LoadPhysGeometry` (blobs that share the render mesh get its positions / u16 indices / subset
-  material ids); node transforms are not applied (`AddPhysGeom` 0x300400D0 does not). Material
+  material ids). `AddPhysGeom` 0x300400D0 applies no node transform; the server turns a part
+  by its node chain's rotation (deviation, see the Howling Abyss follow-up entry). Material
   mappings / surface types are not loaded (hits report surface −1 / 0).
 * **Doodads** (`collision::objects`): model class by prefix (`sub_39451CE0`: `cgf://`,
   `vegetation://`, `cga://`, `prefab://` = the Brush objects of the prefab library; else no geometry)
@@ -3690,6 +3691,136 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   actor stays alive through the scripted cue. The playback range and height cutoff are
   inferred. The Greater vine
   room takes missing facings from matching Normal placements.
+  **Boss follow-up:** Calleil's lightning elementals (12384, 12912) come from a plain
+  `SpawnEffect`, which has no summoner-target column. Their idle skill (20111, 21114) is a
+  `KillNpcWithoutCorpse` of their own template. They now join the boss's live combat
+  target, as the hatchlings do. Musperosa's orbs (clouts 1253/1254, 1537/1538) pulse their
+  own inside buff, Unknown Power (stack rule 4, 20 stacks). The C# skipped a `BuffEffect`
+  whose buff the unit already had. That let the inside buff block every pulse, and the
+  only stack left with the orb. A stacking inside buff now gains a stack per pulse. Each
+  pulse stack keeps its authored 60 s, and only the inside stack leaves with the area.
+  The unit records the index of the stack its first entry added (`trigger_stack_index`).
+  The last exit removes that stack only. A re-entry while pulse stacks remain adds no
+  inside stack, so its exit removes none.
+  A gimmick's self-targeted skill starts on the gimmick itself. The Trieste bolt's
+  detonation 21126 was refused as `skill_target_died` because gimmicks have no health.
+  Its `target_alive` flag now applies to the units in the area only, so the bolt stuns
+  the frenzied spirit (5366) and dispels Frenzy (tag 754). A clout without an inside buff
+  (Hellfire 1415/1542) cast its effects as `CastSkill(0, tl 0)`. The r208022 client's
+  `SCUnitDamagedPacket` handler (x2game `0x39398c80`) looks the skill up by its timeline
+  and drops the hit (`damage: invalid skill id`). Live, Hellfire's damage appeared in
+  neither the combat log nor the floating text. Such a doodad-owned trigger now casts as
+  cast-action kind 4 (`CastAction::Doodad`, formerly the unused `CastUnk3`): u32 doodad
+  template id and bc doodad object id. The client names the hit after the doodad template
+  (`damage: invalid doodad type`).
+* systems::npcs / data (Howling Abyss world data, 2026-11-21, tests in
+  `npcs::howling_world_tests`):
+  - **One NPC per recorded spawn.** Plain `npc_spawns.json` rows that share an `Id` were one
+    NPC recorded at several points. The Gluttons roam (Glutton spawner 13724's comment ends
+    `로머임`, "is a roamer"). Greater's Gluttons and a few pulled NPCs appeared up to seven
+    times, so Gluttons stood in pairs where Normal's identical pack has one. The first row of
+    each `Id` is kept. Its
+    pack partners match Normal's placements; the dropped rows mostly do not (3 of 30 within
+    1.5 m, against 182 of 211 unique rows). Removed 30 Greater rows and 6 Normal rows. Event
+    rows (`NpcSpawnerIds`) are untouched.
+  - **Greater doodad facings.** 90 Greater placements with `Yaw` 0 that share a position and
+    model with a Normal placement take Normal's exact yaw. They include the Weeping Charnel
+    House gate (6360), the battle doors (6332, with their extra rows on each door's width
+    line), and the iron gates of the next rooms, which were 70-162° off. The client collision
+    confirms the restored facings: each gate's width axis now meets the doorway walls. The
+    Rising Water doodad 6288 also takes Normal's -1°, which turns Calleil's chamber polygon
+    with it.
+  - **Lion Gate helper.** Greater's Lion Gate 6364 has the model path
+    `경로: cgf://.../ndeco_do_invisible.cgf`, so the client draws its placeholder. Its placement
+    now uses Normal's identical invisible logic gate 5603 (function group 14424). Neither
+    gate's logic family (30115 / 30040) has a subscriber. That this is the reported white
+    prop "at the vines" needs a live check.
+  - **Bomber keg (gimmick 49) rolls.** `barrel_grape_e.cgf` is centred on its origin: its
+    `proxy` cylinder (r 0.661, half length 0.916, read from the client model, or these values
+    without client files) is upright. The keg now lies on its side across its heading and keeps
+    its centre one scaled radius off floors and walls. Hard impacts bounce as before. After a
+    slow landing it rolls with a 4 m/s² rolling resistance, and its pitch and angular velocity
+    (`v / r` about the cross axis) follow the distance. The resistance is inferred.
+* systems::npcs (Howling Abyss follow-up, 2026-11-21): the event, water and breath fixes below.
+  Their tests are in `howling_event_tests.rs`.
+  * A `SphereSkill` area counts once per sphere id. Moving from one circle of a sphere into
+    an overlapping circle of the same sphere is not a new entry. A refused cast (for example
+    while the trigger NPC has not spawned) stays owed while the character is inside any
+    circle of the sphere. Godfrey's approach sphere (1946 / 2184) is a chain of fifteen circles, so each player
+    restarted his event script several times on the walk in. The rule is inferred; the
+    authored `trigger_condition_time` is still not used as a period.
+  * An NPC's `DamageEffect` row with a `target_npc_tag_id` skips the relation check for the
+    tagged NPCs. Godfrey's finale (19394 / 21438) gives 999999 damage to his own invisible
+    event trigger (12133 / 12787, faction 1), which the friendly relation had kept alive. Every
+    later entry into the sphere then respawned Godfrey and his boss form. Hieronimus's pet
+    removal and the other tagged scripted kills follow the same rule. Player casters are
+    unchanged.
+  * Encounter signals (an NPC self-target area skill with no unit effects, such as Raise
+    Calleil's Water 18938 / 21092) reach every doodad that accepts the skill hit. The ten-target
+    area count no longer applies to them. Sixteen props answer Calleil's signal. The water
+    volume's anchor is a corner of the pool, so when she fought on the far side the closest-ten
+    cut dropped it, and the client never received the rising phase.
+  * In both Howling Abyss worlds a river water record is only its physics contour. Each 1.2
+    river sector is a quad whose shape and contour are the same four corners. The open-world
+    river heuristic dropped those contours as too small, and it added a 40 m corridor around
+    the corners instead. That put the first corridor past the entrance (181.9 m floor under a
+    184.6 m surface), Godfrey's room and the Wailing Ranch approach under water, so players got
+    a breath meter and could drown there. Other worlds keep the heuristic.
+  * Greater's spawn file no longer places Normal's ghost Godfrey 12134 at the boss spawn
+    (530.9, 478.75). 12134 is the friendly "Ghost State" quest giver for Normal's level 44
+    "Ancient Titan Musperosa" (4893). Greater has no ghost or quest equivalent, so it stood
+    beside Greater's boss for the whole run. Greater keeps Normal's event trigger 12133,
+    which tag 815 lists with Greater's 12787.
+  * `NpcControlEffect` logs at debug, since area-wide scripts apply it to every matching NPC.
+* systems::npcs / ai (Howling Abyss follow-up, 2026-11-21): five tester reports after #157.
+  - **Bridge collision (first corridor stairs).** `sal_temple_brige02.cgf` keeps its physics
+    proxy under a root node turned by 90 degrees. The loader ignored node transforms, so the
+    stairs from the first corridor up to the entrance platform and the platform itself had no
+    collision. Walkers took the floor underneath and went inside the platform.
+    **Deviation:** `collision::models::node_frame` turns each static brush / vegetation part
+    by the rotation of its node chain (`cgf::node_world_tm`), applied as `pe_geomparams.q`.
+    Node translations and scales stay unapplied. The 1.2 models carry exporter leftovers
+    there: LOD nodes 36 m beside the root, proxies offset in centimetres, and
+    `mari_oscarprop02.cgf` scales its proxy to 0.54. Applying them cost 60 main_world spawn
+    floors and broke `real_client_floor_fixes_stand_on_a_collision_floor`. Doodad and house
+    shapes are unchanged. Measured with the gated `real_spawn_floor_audit`: 27 149 to 27 174
+    of 29 147 spawns on a floor. Both Howling Abyss worlds and Sal Temple are now 100 %, and
+    main_world goes from 23 623 to 23 625. 2 180 of the 2 198 Greater Howling waypoints stand
+    on the collision floor, against 2 114 before.
+  - **Indoor routes.** The bai forbidden areas are 2D outlines of the outdoor triangulation.
+    Every indoor waypoint (navType 4) of the Howling Abyss lies inside the outline of the
+    terrain under the dungeon, so `CheckImpossibleWalk` rejected all of them and A* found no
+    indoor route. **Deviation:** A* tests only triangle nodes against forbidden areas. With the
+    collision service, `geodata::fallback_path` skips ahead only to route nodes a walker
+    reaches in a straight line (`walkable_reduction`): no wall, a floor every metre within the
+    2 m probe, and no climb steeper than 1 m per metre plus 0.25 m. The C# `ReducePath` skip
+    (10 nodes, slope and forbidden-area test only) cut the stairs and sent the corridor mobs
+    into the wall under the platform. The climb limit came from the live check: going up, the
+    probe climbed the platform's 56-degree side lip (180.1 to 184.75 m over 3 m) one sample at
+    a time, so the route skipped the stair waypoint and the mobs rose 4.4 m in 3.8 m beside
+    the stairs. A shortcut still has to clear the forbidden areas, forbidden boundaries and
+    designer forbidden areas, as in `ReducePath`, unless both of its ends are indoor (nearest
+    navigation node not a triangle, `AiGeoData::is_indoor`). Without collision the C#
+    `ReducePath` remains.
+  - **Chasers at a ledge.** A chasing walker whose next step lands on a floor deeper than
+    `walker_max_drop` below it (`npc::step_leaves_ledge`) stays at the edge. After 3 s it drops
+    the victim from its aggro table and returns. **Deviation:** the C# kept such a walker at its
+    height (or took a navigation height) and it walked through the air. The Knights on the
+    walkway above the Medusa room followed players who jumped down that way.
+  - **Medusa pack help calls.** `aggro_link_help_dist` is horizontal. The Medusa pack (30 m)
+    answered the Knights fighting on the walkway 15 m above its room. The #157 floor rule for
+    these templates (3 m, `howling_floor_bound`) now applies to help calls as well.
+  - **Viboros's chase range.** `BigMonsterAttack` falls back to `PickSkillAndUseIt` when no
+    combat skill is ready, and that sets the weapon range from the skill it picked. Viboros
+    kept the 30 m of a ranged pick and stood 15 m from the party for the rest of the fight.
+    **Deviation:** the big-monster fallback no longer changes the chase range.
+  - **Single-ticket self loops.** The C# ticket check limits only events with more than one
+    ticket. Six authored events repeat themselves with a single ticket (Musperosa's Hellfire
+    Breath 5793, plots 125, 184, 552, 558 and 1430), so the plot never ended and Musperosa
+    stood casting in the centre of her room. **Deviation:** a single-ticket event does not
+    schedule itself again.
+  Tests: `npcs::howling_nav_tests::*` (gated by `AAEMU_COMPACT_DB`; the ground tests also by
+  `AAEMU_GAME_PAK`) and `ai::collision::cgf::tests::physics_node_takes_the_rotation_of_its_parent_chain`.
 * Palace Cellar (zone 240, `instance_sal_temple`)
   - **Entrance barrier** — Melkina's scripted departure (16600) sends Salphira's Barrier
     4580 to its authored final phase 12282. The existing 20-second timer also clears it

@@ -13,8 +13,10 @@
 //! | `LoadPhysicsDataChunk` (`data[0] == 0xCCCC0018 && data[1] == 0x800`, size at +16, blob at +40) | 0x301D1FD0 |
 //! | compiled physics → `LoadPhysGeometry(stream, positions (stride 12), indices (stride 2), per-face mats)` → `AddPhysGeom(0x1000 + slot)` | 0x30047F40 / 0x300400D0 |
 //!
-//! `AddPhysGeom` (0x300400D0) stores the geometry in the stat object's frame: no node transform
-//! is applied (the compiled models keep physics nodes at identity; see the real-data test).
+//! `AddPhysGeom` (0x300400D0) stores the geometry in the stat object's frame. The server turns a
+//! physics node by the rotation of its node chain (`models::node_frame`, deviation:
+//! the 1.2 Howling Abyss bridge proxy sits under a root turned by 90 degrees); node
+//! translations and scales are not applied.
 
 use aaemu_physics::math::Vec3;
 
@@ -163,8 +165,11 @@ pub struct PhysBlob {
     pub blob: Vec<u8>,
     /// The node that references the mesh (name, for diagnostics).
     pub node: String,
-    /// The node's transform is not the identity (the engine ignores it; counted by tests).
+    /// The node's own transform is the identity.
     pub node_tm_identity: bool,
+    /// The node's transform composed with its parents' (`tm[4][4]` rows, translation in the
+    /// last row; see [`node_world_tm`]).
+    pub node_world_tm: [f32; 16],
     /// Render arrays of the mesh, filled only when the blob uses them
     /// ([`blob_shares_render_mesh`]).
     pub render: Option<RenderMesh>,
@@ -244,12 +249,56 @@ pub fn physics_blobs(data: &[u8]) -> Result<Vec<PhysBlob>, CgfError> {
                 blob,
                 node: name.clone(),
                 node_tm_identity: identity,
+                node_world_tm: node_world_tm(&f, node.id),
                 render,
             });
         }
     }
     Ok(out)
 }
+
+/// A node's `tm[4][4]` (row vectors, translation in the last row).
+fn node_tm(f: &CgfFile<'_>, id: i32) -> Option<([f32; 16], i32)> {
+    let c = f.chunk(id).filter(|c| c.ctype == chunk_type::NODE)?;
+    let b = f.body(c).ok()?;
+    if b.len() < 148 {
+        return None;
+    }
+    let mut tm = [0f32; 16];
+    for (i, v) in tm.iter_mut().enumerate() {
+        *v = f32_at(b, 84 + 4 * i).ok()?;
+    }
+    Some((tm, i32_at(b, 68).ok()?))
+}
+
+fn mul44(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0f32; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            r[i * 4 + j] = (0..4).map(|k| a[i * 4 + k] * b[k * 4 + j]).sum();
+        }
+    }
+    r
+}
+
+/// The node's transform composed with its parents' (row vectors: `v * local * parent`).
+pub fn node_world_tm(f: &CgfFile<'_>, id: i32) -> [f32; 16] {
+    let mut world = IDENTITY_TM;
+    let mut next = Some(id);
+    for _ in 0..32 {
+        let Some((tm, parent)) = next.and_then(|id| node_tm(f, id)) else {
+            break;
+        };
+        world = mul44(&world, &tm);
+        next = (parent >= 0).then_some(parent);
+    }
+    world
+}
+
+/// The 4x4 identity.
+pub const IDENTITY_TM: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
 
 /// A trimesh blob (type 1) whose vertices and indices come from the render mesh:
 /// `hasForeignIdx` set and mesh flag 0x400000 clear (`CTriMesh::Load` 0x351D83B0).
@@ -382,17 +431,33 @@ pub(crate) mod tests {
 
     /// A minimal 0x745 file: one node → one mesh → one box physics blob.
     pub(crate) fn synthetic_cgf(blob: &[u8]) -> Vec<u8> {
+        synthetic_cgf_under(blob, None)
+    }
+
+    /// [`synthetic_cgf`] with the physics node under a mesh-less root node (id 4) whose
+    /// transform is `root_tm`.
+    fn synthetic_cgf_under(blob: &[u8], root_tm: Option<[f32; 16]>) -> Vec<u8> {
         let mut chunks: Vec<(u32, u32, i32, Vec<u8>)> = Vec::new();
         // node (id 1) -> mesh 2
         let mut node = vec![0u8; 204];
         node[..5].copy_from_slice(b"proxy");
         node[64..68].copy_from_slice(&2i32.to_le_bytes());
-        node[68..72].copy_from_slice(&(-1i32).to_le_bytes());
+        let parent: i32 = if root_tm.is_some() { 4 } else { -1 };
+        node[68..72].copy_from_slice(&parent.to_le_bytes());
         for i in 0..4 {
             let o = 84 + 4 * (i * 5);
             node[o..o + 4].copy_from_slice(&1f32.to_le_bytes());
         }
         chunks.push((chunk_type::NODE, 0x823, 1, node));
+        if let Some(tm) = root_tm {
+            let mut root = vec![0u8; 204];
+            root[..4].copy_from_slice(b"root");
+            root[68..72].copy_from_slice(&(-1i32).to_le_bytes());
+            for (i, v) in tm.iter().enumerate() {
+                root[84 + 4 * i..88 + 4 * i].copy_from_slice(&v.to_le_bytes());
+            }
+            chunks.push((chunk_type::NODE, 0x823, 4, root));
+        }
         // mesh (id 2): physicsDataChunkId[0] = 3
         let mut mesh = vec![0u8; 140];
         mesh[92..96].copy_from_slice(&3i32.to_le_bytes());
@@ -444,6 +509,32 @@ pub(crate) mod tests {
         assert_eq!(blobs[0].node, "proxy");
         assert!(blobs[0].node_tm_identity);
         assert!(blobs[0].render.is_none());
+    }
+
+    /// A proxy under a root turned by 90 degrees about Z (`sal_temple_brige02.cgf`): the blob
+    /// carries the composed transform and its part is turned (x -> y) and not moved.
+    #[test]
+    fn physics_node_takes_the_rotation_of_its_parent_chain() {
+        let blob = vec![1u8, 0, 0, 0, 9, 9, 9];
+        let turned = [
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 226.0, 378.0, 939.0, 1.0,
+        ];
+        let blobs = physics_blobs(&synthetic_cgf_under(&blob, Some(turned))).unwrap();
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].node_world_tm, turned);
+        let frame = super::super::models::node_frame(&blobs[0].node_world_tm).unwrap();
+        let x = frame.q.rotate(Vec3::new(1.0, 0.0, 0.0));
+        assert!((x.x).abs() < 1e-5 && (x.y - 1.0).abs() < 1e-5 && x.z.abs() < 1e-5);
+        // A translated or scaled but unturned node keeps the model frame.
+        let mut moved = IDENTITY_TM;
+        moved[12..15].copy_from_slice(&[226.0, 378.0, 939.0]);
+        for i in [0, 5, 10] {
+            moved[i] = 0.5416;
+        }
+        let blobs = physics_blobs(&synthetic_cgf_under(&blob, Some(moved))).unwrap();
+        assert!(super::super::models::node_frame(&blobs[0].node_world_tm).is_none());
+        let blobs = physics_blobs(&synthetic_cgf(&blob)).unwrap();
+        assert_eq!(blobs[0].node_world_tm, IDENTITY_TM);
     }
 
     #[test]

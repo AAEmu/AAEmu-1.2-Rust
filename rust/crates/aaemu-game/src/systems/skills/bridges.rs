@@ -65,6 +65,9 @@ pub fn use_skill_with(
     )
 }
 
+/// `BuffStackRule.Add`: each application is its own stack, up to `max_stack`.
+const ADD_STACK_RULE: u32 = 4;
+
 fn relation(raw: u8) -> SkillTargetRelation {
     SkillTargetRelation::from_raw(i64::from(raw)).unwrap_or(SkillTargetRelation::Any)
 }
@@ -199,17 +202,37 @@ impl SkillsBridge for SkillsForNpcs {
         unit: &WorldObject,
         buff_id: u32,
         skill_id: u32,
+        source_doodad: Option<(u32, u32)>,
         effect_ids: &[u32],
     ) {
         let data = &server.game_data.systems.skills;
         let skill_object = SkillObject::default();
+        // The r208022 client drops a hit cast as an unknown skill timeline (`damage: invalid
+        // skill id`), so tl id 0 never reached the combat log. A doodad's clout casts as the
+        // doodad (kind 4), which the client names after the doodad template.
+        let fallback = match source_doodad {
+            Some((template_id, obj_id)) if skill_id == 0 => CastAction::Doodad {
+                template_id,
+                obj_id,
+            },
+            _ => CastAction::Skill { skill_id, tl_id: 0 },
+        };
         for &id in effect_ids {
             let Some((kind, template)) = data.effect_by_type_id(id) else {
                 continue;
             };
             if let super::data::EffectTemplate::Buff(b) = template {
-                if b.buff_id
-                    .is_some_and(|id| unit.with_base_unit(|u| u.buffs().check_buff(id)))
+                // Musperosa's orbs (clouts 1253/1254, 1537/1538) pulse their own inside
+                // buff, Unknown Power (stack rule 4, 20 stacks, then Petrification). The
+                // inside buff is one stack and leaves with the orb. Each pulse adds a stack
+                // that keeps its 60 s duration.
+                let stacking_inside_buff = b.buff_id == Some(buff_id)
+                    && data
+                        .buff(buff_id)
+                        .is_some_and(|t| t.stack_rule == ADD_STACK_RULE && t.max_stack > 1);
+                if !stacking_inside_buff
+                    && b.buff_id
+                        .is_some_and(|id| unit.with_base_unit(|u| u.buffs().check_buff(id)))
                 {
                     continue;
                 }
@@ -222,12 +245,10 @@ impl SkillsBridge for SkillsForNpcs {
                         .find(|e| e.template.id == buff_id)
                         .map(|e| e.index)
                 })
-                .map_or(CastAction::Skill { skill_id, tl_id: 0 }, |index| {
-                    CastAction::Buff {
-                        buff_id,
-                        owner_obj_id: unit.obj_id(),
-                        index,
-                    }
+                .map_or(fallback, |index| CastAction::Buff {
+                    buff_id,
+                    owner_obj_id: unit.obj_id(),
+                    index,
                 });
             let args = EffectArgs {
                 caster: Some(caster.clone()),

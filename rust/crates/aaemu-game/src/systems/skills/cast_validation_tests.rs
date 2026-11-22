@@ -1294,6 +1294,7 @@ async fn obstacle_checks_reject_a_physical_wall_before_any_cast_mutation() {
                 parts: vec![ModelPart {
                     slot: 0,
                     geom: geometry,
+                    frame: None,
                 }],
                 blob_bytes: 0,
             }),
@@ -1418,6 +1419,7 @@ async fn obstacle_ray_is_not_cast_at_doodad_targets() {
                 parts: vec![ModelPart {
                     slot: 0,
                     geom: geometry,
+                    frame: None,
                 }],
                 blob_bytes: 0,
             }),
@@ -1517,6 +1519,7 @@ async fn obstacle_ray_is_raised_1m_and_uses_the_retail_mask_and_collision_class(
                     parts: vec![ModelPart {
                         slot: 0,
                         geom: geometry,
+                        frame: None,
                     }],
                     blob_bytes: 0,
                 }),
@@ -1670,6 +1673,7 @@ async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
                     parts: vec![ModelPart {
                         slot: 0,
                         geom: geometry,
+                        frame: None,
                     }],
                     blob_bytes: 0,
                 }),
@@ -1850,6 +1854,7 @@ async fn obstacle_ray_clears_low_terrain_swells_but_not_walls_or_high_ground() {
                         parts: vec![ModelPart {
                             slot: 0,
                             geom: geometry,
+                            frame: None,
                         }],
                         blob_bytes: 0,
                     }),

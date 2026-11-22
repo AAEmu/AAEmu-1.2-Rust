@@ -509,6 +509,16 @@ fn flush_execution_queue(
             let Some(next) = data.plots.parent_next_event(tree, child) else {
                 continue;
             };
+            // An event that repeats itself is bounded by its tickets. The C# ticket check only
+            // limits events with more than one ticket, so the six authored self-loops with a
+            // single ticket (Musperosa's Hellfire Breath 5793 among them) repeated until the
+            // plot was cancelled and kept their caster busy (deviation, see `PORTING.md`).
+            let event_id = tree.nodes[node].event_id;
+            if tree.nodes[child].event_id == event_id
+                && data.plots.event(event_id).is_some_and(|e| e.tickets <= 1)
+            {
+                continue;
+            }
             if condition != next.fail {
                 if next.per_target {
                     for t in &ti.effected {

@@ -508,8 +508,10 @@ pub(super) fn check(
     // flag describes the plot's later targets, so the corpse target is not held to it.
     // Harpoon Bomb and Deadly Toxin Shot start plots 355 and 356 on the living operator.
     // Their corpse-only flag does not describe the initial self target.
+    // A self-targeted gimmick skill (the Trieste bolt's detonation 21126) starts on the
+    // health-less gimmick. Its `target_alive` flag applies to the units in the area.
     let portable_harpoon = is_portable_harpoon_shot(skill.id);
-    let scripted_self_cast = (template.source_dead || portable_harpoon)
+    let scripted_self_cast = (template.source_dead || portable_harpoon || gimmick_source)
         && target.as_obj().is_some_and(|o| o.same(caster));
     if let Some(target_hp) = target
         .as_obj()

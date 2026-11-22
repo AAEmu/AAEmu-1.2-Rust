@@ -114,7 +114,10 @@ pub trait SkillsBridge: Send + Sync {
 
     /// `AreaTrigger.ApplyEffects` for one unit inside: for every effect template of
     /// `effect_ids` (skipping `BuffEffect`s whose buff the unit has) `effect.Apply(caster, ...,
-    /// CastBuff(unit's effect of buff_id) ?? CastSkill(skill_id, 0), ...)`. Default: nothing.
+    /// CastBuff(unit's effect of buff_id) ?? CastSkill(skill_id, 0), ...)`. A doodad-owned trigger
+    /// casts as its doodad instead of skill 0, `source_doodad` = (template id, obj id).
+    /// Default: nothing.
+    #[allow(clippy::too_many_arguments)]
     fn apply_area_effects(
         &self,
         _server: &GameServer,
@@ -122,6 +125,7 @@ pub trait SkillsBridge: Send + Sync {
         _unit: &WorldObject,
         _buff_id: u32,
         _skill_id: u32,
+        _source_doodad: Option<(u32, u32)>,
         _effect_ids: &[u32],
     ) {
     }

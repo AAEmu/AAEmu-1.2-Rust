@@ -362,8 +362,25 @@ impl AreaTrigger {
             u.unit().trigger_count(buff_id)
         });
         if count == Some(1) {
+            let stacking = stacking_inside_buff(server, buff_id);
+            let before = stacking.then(|| buff_indices(unit, buff_id));
             if let Some(h) = server.systems.npcs.hooks.skills.get() {
                 h.apply_area_buff(server, caster, unit, buff_id);
+            }
+            if let Some(before) = before {
+                // Remember the stack this entry added. A unit that still carries pulse
+                // stacks gets none, and its exit must not take one of those.
+                let added = buff_indices(unit, buff_id)
+                    .into_iter()
+                    .find(|index| !before.contains(index));
+                unit.with_unit(|u| match added {
+                    Some(index) => {
+                        u.unit_mut().trigger_stack_index.insert(buff_id, index);
+                    }
+                    None => {
+                        u.unit_mut().trigger_stack_index.remove(&buff_id);
+                    }
+                });
             }
         }
     }
@@ -582,8 +599,20 @@ impl AreaTrigger {
             None => default_filter_with_relation(self.target_relation, caster, units),
         };
         if let Some(h) = hook {
+            let source_doodad = self
+                .owner
+                .as_ref()
+                .map(|d| (d.data().template_id, d.obj_id));
             for unit in &to_apply {
-                h.apply_area_effects(server, caster, unit, buff_id, self.skill_id, effects);
+                h.apply_area_effects(
+                    server,
+                    caster,
+                    unit,
+                    buff_id,
+                    self.skill_id,
+                    source_doodad,
+                    effects,
+                );
             }
         }
     }
@@ -611,9 +640,42 @@ fn leave_unit(server: &GameServer, unit: &WorldObject, buff_id: u32) {
         u.unit().trigger_count(buff_id)
     });
     if count == Some(0) {
-        unit.with_base_unit(|b| b.buffs_mut().remove_buff(buff_id));
+        if stacking_inside_buff(server, buff_id) {
+            // Musperosa's orbs: only the stack the entry added leaves with the area. The
+            // pulse stacks keep their own duration.
+            let index = unit
+                .with_unit(|u| u.unit_mut().trigger_stack_index.remove(&buff_id))
+                .flatten();
+            if let Some(index) = index {
+                unit.with_base_unit(|b| b.buffs_mut().remove_effect_by_index(index));
+            }
+        } else {
+            unit.with_base_unit(|b| b.buffs_mut().remove_buff(buff_id));
+        }
         crate::systems::dispatch_buff_events(server, unit);
     }
+}
+
+/// An inside buff that adds a stack per application (stack rule 4 with several stacks).
+fn stacking_inside_buff(server: &GameServer, buff_id: u32) -> bool {
+    server
+        .game_data
+        .skills
+        .buffs
+        .get(&buff_id)
+        .is_some_and(|t| t.stack_rule == 4 && t.max_stack > 1)
+}
+
+/// The buff indices of `buff_id`'s stacks on `unit`.
+fn buff_indices(unit: &WorldObject, buff_id: u32) -> Vec<u32> {
+    unit.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| e.template.id == buff_id)
+            .map(|e| e.index)
+            .collect()
+    })
 }
 
 /// `SkillTargetingUtil.IsRelationValid` for the relations that need no faction / team logic

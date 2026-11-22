@@ -522,8 +522,10 @@ pub enum CastAction {
     },
     /// `CastUnk2`.
     BuffTarget,
-    /// `CastUnk3`.
-    DestroyTarget,
+    /// `CastUnk3`, kind 4: a doodad as the damage source. The r208022 client
+    /// (`0x39398c80`, `damage: invalid doodad type`) names the hit after the doodad
+    /// template and looks up the doodad object.
+    Doodad { template_id: u32, obj_id: u32 },
 }
 
 impl CastAction {
@@ -560,8 +562,11 @@ impl CastAction {
             CastAction::BuffTarget => {
                 s.write_u8(3).write_i32(0).write_i32(0).write_bc(0);
             }
-            CastAction::DestroyTarget => {
-                s.write_u8(4).write_i32(0).write_bc(0);
+            CastAction::Doodad {
+                template_id,
+                obj_id,
+            } => {
+                s.write_u8(4).write_u32(template_id).write_bc(obj_id);
             }
         }
     }

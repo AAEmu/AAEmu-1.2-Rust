@@ -298,25 +298,31 @@ impl PathNode {
         }
         // the neighbouring cells' copies of a border triangle carry its cross-border links
         geo.ensure_node_cells(node);
-        let candidates: Vec<(u32, Vec3, f32)> = {
+        let candidates: Vec<(u32, Vec3, f32, bool)> = {
             let graph = geo.graph();
             graph.nodes[node as usize]
                 .links
                 .iter()
                 .filter(|l| l.passable(agent_radius))
                 .map(|l| {
+                    let target = &graph.nodes[l.target as usize];
                     (
                         l.target,
-                        graph.nodes[l.target as usize].pos,
+                        target.pos,
                         step_cost(&graph, node, l.target),
+                        target.nav_type == super::manager::NAV_TRIANGULAR,
                     )
                 })
                 .collect()
         };
         let mut result = Vec::new();
-        for (target, target_pos, step) in candidates {
-            // Checking that the point falls within the forbidden area where it is not allowed
-            if geo.check_impossible_walk(target_pos) {
+        for (target, target_pos, step, triangular) in candidates {
+            // Checking that the point falls within the forbidden area where it is not allowed.
+            // The forbidden areas are 2D outlines of the outdoor triangulation: the indoor
+            // waypoints (navType 4) of an instance hall lie inside the outline of the terrain
+            // under it (every Howling Abyss waypoint does), so only triangle nodes are tested
+            // (deviation from the C#, which then found no indoor route at all).
+            if triangular && geo.check_impossible_walk(target_pos) {
                 continue;
             }
             result.push((target, step, dist2d(target_pos, goal)));

@@ -533,7 +533,14 @@ impl WorldState {
                 phys_slot::OBSTRUCT => 0x4000,
                 _ => continue,
             };
-            add_part(&mut self.world, e, &part.geom, flags, inst.density);
+            add_part_at(
+                &mut self.world,
+                e,
+                &part.geom,
+                flags,
+                inst.density,
+                part.frame,
+            );
         }
         if inst.ent_flags_or != 0 {
             let f = ParamsFlags {
@@ -808,6 +815,29 @@ impl WorldState {
         }
         self.owners.get(&e).copied()
     }
+}
+
+/// [`add_part`] turned in the model frame (a CGF node transform, [`super::models::node_frame`]).
+pub fn add_part_at(
+    w: &mut World,
+    e: EntIdx,
+    geom: &Arc<PhysGeometry>,
+    flags: u32,
+    density: f32,
+    frame: Option<super::models::PartFrame>,
+) {
+    let Some(frame) = frame else {
+        return add_part(w, e, geom, flags, density);
+    };
+    let gp = GeomParams {
+        density,
+        mass: 0.0,
+        q: frame.q,
+        flags,
+        flags_collider: 1,
+        ..GeomParams::default()
+    };
+    add_geometry(w, e, geom, &gp, -1);
 }
 
 /// `AddGeometry` with `pe_geomparams` as the engine fills it for static parts.

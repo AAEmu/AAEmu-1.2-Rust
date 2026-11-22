@@ -759,6 +759,9 @@ pub struct UnitBase {
     pub hp_trigger_points_percent: Vec<i32>,
     /// `IncrementTriggerCount` / `GetTriggerCount` (buff id -> count).
     pub trigger_counts: HashMap<u32, i32>,
+    /// Rust-only: the buff index the first area entry added for a stacking inside buff
+    /// (buff id -> index). The last exit removes only that stack.
+    pub trigger_stack_index: HashMap<u32, u32>,
     // ---- phase 3 / skills: add this subsystem's per-unit fields below ----
     /// Skill / combat runtime state (`SkillTask`, `ActivePlotState`, `AggroTable`, ...).
     pub skill_state: crate::systems::skills::state::UnitSkillState,
@@ -837,6 +840,7 @@ impl Default for UnitBase {
             bonuses: Bonuses::default(),
             hp_trigger_points_percent: Vec::new(),
             trigger_counts: HashMap::new(),
+            trigger_stack_index: HashMap::new(),
             // ---- phase 3 / skills ----
             skill_state: Default::default(),
             death_processed: false,

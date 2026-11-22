@@ -1344,20 +1344,6 @@
     "Scale": 0.5
   },
   {
-    "Id": 38889,
-    "UnitId": 11260,
-    "Title": "Blackscale Corps Glutton",
-    "Position": {
-      "X": 503.322,
-      "Y": 484.432,
-      "Z": 203.332,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": 8.4375
-    },
-    "Scale": 1.0
-  },
-  {
     "Id": 57051,
     "UnitId": 11753,
     "Title": "Newborn Two-Headed Snake",
@@ -1396,20 +1382,6 @@
       "Roll": 0.0,
       "Pitch": 0.0,
       "Yaw": 16.875
-    },
-    "Scale": 1.0
-  },
-  {
-    "Id": 38889,
-    "UnitId": 11260,
-    "Title": "Blackscale Corps Glutton",
-    "Position": {
-      "X": 499.498,
-      "Y": 472.146,
-      "Z": 203.345,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": -45.0
     },
     "Scale": 1.0
   },
@@ -2947,62 +2919,6 @@
       "Roll": 0.0,
       "Pitch": 0.0,
       "Yaw": 0.0
-    },
-    "Scale": 1.0
-  },
-  {
-    "Id": 98832,
-    "UnitId": 11750,
-    "Title": "Blackscale Corps Soldier",
-    "Position": {
-      "X": 613.192,
-      "Y": 682.718,
-      "Z": 178.4293,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": 112.5
-    },
-    "Scale": 1.0
-  },
-  {
-    "Id": 125105,
-    "UnitId": 11750,
-    "Title": "Blackscale Corps Soldier",
-    "Position": {
-      "X": 626.728,
-      "Y": 656.912,
-      "Z": 178.4333,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": -59.0625
-    },
-    "Scale": 1.0
-  },
-  {
-    "Id": 42626,
-    "UnitId": 11260,
-    "Title": "Blackscale Corps Glutton",
-    "Position": {
-      "X": 438.516,
-      "Y": 508.456,
-      "Z": 184.0395,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": 36.5625
-    },
-    "Scale": 1.0
-  },
-  {
-    "Id": 38889,
-    "UnitId": 11260,
-    "Title": "Blackscale Corps Glutton",
-    "Position": {
-      "X": 509.226,
-      "Y": 504.254,
-      "Z": 202.6197,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": -67.5
     },
     "Scale": 1.0
   },

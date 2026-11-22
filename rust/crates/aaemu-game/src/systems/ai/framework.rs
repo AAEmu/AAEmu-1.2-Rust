@@ -288,6 +288,8 @@ pub struct NpcAi {
     pub path_node: PathNode,
     /// The last chase route (`None` = no route yet / reset on entering or leaving combat).
     pub chase_path: Option<ChasePath>,
+    /// Since when (unix ms) every chase step has stopped at a ledge (`None` = not blocked).
+    pub ledge_blocked_since: Option<i64>,
     behaviors: BTreeMap<BehaviorKind, BehaviorSlot>,
     transitions: BTreeMap<BehaviorKind, Vec<(TransitionEvent, BehaviorKind)>>,
     current: Option<BehaviorKind>,
@@ -345,6 +347,7 @@ impl NpcAi {
             param: None,
             path_node: PathNode::default(),
             chase_path: None,
+            ledge_blocked_since: None,
             behaviors: BTreeMap::new(),
             transitions: BTreeMap::new(),
             current: None,
