@@ -65,7 +65,118 @@ pub(super) fn preloads_origin_cell(template_name: &str) -> bool {
 
 // ---- hooks
 
+use crate::models::transform::PositionAndRotation;
+use crate::packets::g2c_misc::SCKnockBackUnitPacket;
+use crate::server::GameServer;
+use crate::systems::economy::inventory::Inv;
+use crate::systems::skills::data::SkillTemplate;
+use crate::systems::skills::effects::EffectArgs;
+use crate::systems::skills::geometry::Target;
+use crate::systems::skills::validation::fail;
+use crate::world::{PlayerRef, WorldObject};
+
+/// The destruction device unlocks the hidden-room chests. Each can be used once.
+pub(super) fn check_cradle_chest(
+    server: &GameServer,
+    caster: &WorldObject,
+    target: &Target,
+) -> Result<(), (u8, u32)> {
+    let Some(player) = caster.as_player() else {
+        return fail("skill_invalid_source");
+    };
+    let Some(chest) = target.as_obj().and_then(WorldObject::as_doodad) else {
+        return fail("skill_invalid_target");
+    };
+    let ready = {
+        let data = chest.data();
+        (data.template_id, data.func_group_id) == (5550, 14303)
+    };
+    let opened = ready
+        && server
+            .world
+            .world_of(&WorldObject::from(chest))
+            .is_some_and(|world| {
+                world.all_doodads().iter().any(|doodad| {
+                    let data = doodad.data();
+                    (data.template_id, data.func_group_id) == (5549, 14331)
+                })
+            });
+    if !opened {
+        return fail("skill_invalid_target");
+    }
+    // Skill 19691 opens the chest before its GainItem effect grants the one
+    // non-stackable reward (25660). Reserve room before either effect runs.
+    if Inv::of(player).free_slot_count(crate::models::container::slot_type::INVENTORY) <= 0 {
+        return fail("skill_bag_full");
+    }
+    Ok(())
+}
+
+/// The destruction device's readiness: the chest check.
+pub(super) fn effects_ready(
+    server: &GameServer,
+    t: &SkillTemplate,
+    caster: &WorldObject,
+    target: &Target,
+) -> Option<Result<(), (u8, u32)>> {
+    (t.id == CRADLE_CHEST_SKILL).then(|| check_cradle_chest(server, caster, target))
+}
+
+/// The Tooth charge (18462) knocks a player back to the wall.
+pub(super) fn knock_back_player(
+    server: &GameServer,
+    args: &EffectArgs<'_>,
+    player: &PlayerRef,
+    target: &WorldObject,
+    target_pos: PositionAndRotation,
+    end: (f32, f32, f32),
+) -> bool {
+    if args
+        .source
+        .skill()
+        .is_some_and(|skill| skill.template.id == 18462)
+    {
+        let [x, y, _] = crate::systems::ai::collision::displacement::clip_move(
+            server,
+            target.transform().instance_id,
+            [target_pos.x, target_pos.y, target_pos.z],
+            [end.0, end.1, target_pos.z],
+        )
+        .unwrap_or([end.0, end.1, target_pos.z]);
+        player.send(SCKnockBackUnitPacket {
+            obj_id: target.obj_id(),
+            x: x - target_pos.x,
+            y: y - target_pos.y,
+            z: end.2 - target_pos.z,
+        });
+        return true;
+    }
+    false
+}
+
 /// Kroloal Cradle's encounter hooks.
 pub struct KroloalCradle;
 
-impl super::hooks::Encounter for KroloalCradle {}
+impl super::hooks::Encounter for KroloalCradle {
+    fn effects_ready(
+        &self,
+        server: &GameServer,
+        t: &SkillTemplate,
+        caster: &WorldObject,
+        target: &Target,
+    ) -> Option<Result<(), (u8, u32)>> {
+        effects_ready(server, t, caster, target)
+    }
+
+    fn knock_back_player(
+        &self,
+        server: &GameServer,
+        args: &EffectArgs<'_>,
+        player: &PlayerRef,
+        target: &WorldObject,
+        target_pos: PositionAndRotation,
+        end: (f32, f32, f32),
+    ) -> bool {
+        knock_back_player(server, args, player, target, target_pos, end)
+    }
+}

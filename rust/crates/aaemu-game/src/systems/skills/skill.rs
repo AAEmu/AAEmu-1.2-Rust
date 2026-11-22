@@ -2412,8 +2412,11 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         (egg_cast || cradle_chest).then(|| server.systems.economy.operation_scope());
     let ready = if egg_cast {
         super::validation::check_red_dragon_egg(server, caster, target_self)
-    } else if cradle_chest {
-        super::validation::check_cradle_chest(server, caster, target_self)
+    } else if let Some(ready) = encounter_hooks::all()
+        .iter()
+        .find_map(|encounter| encounter.effects_ready(server, &t, caster, target_self))
+    {
+        ready
     } else {
         Ok(())
     };

@@ -11,11 +11,11 @@ use crate::models::movement::{
     convert_radian_to_direction, MoveKind, MoveType, MoveTypeFlags, UnitMove,
 };
 use crate::models::transform::PositionAndRotation;
-use crate::packets::g2c_misc::SCKnockBackUnitPacket;
 use crate::packets::world::{SCErrorMsgPacket, SCOneUnitMovementPacket};
 use crate::server::GameServer;
 use crate::systems::ai::npc::WALKER_MAX_DROP;
 use crate::systems::economy::error_message as err;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::instances::indun;
 use crate::systems::skills::ground_snap_rules as ground_snap;
@@ -404,24 +404,10 @@ pub fn knock_back(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         target_pos.z + v[2] as f32 / 1000.0,
     );
     if let Some(player) = target.as_player() {
-        if args
-            .source
-            .skill()
-            .is_some_and(|skill| skill.template.id == 18462)
-        {
-            let [x, y, _] = crate::systems::ai::collision::displacement::clip_move(
-                server,
-                target.transform().instance_id,
-                [target_pos.x, target_pos.y, target_pos.z],
-                [end.0, end.1, target_pos.z],
-            )
-            .unwrap_or([end.0, end.1, target_pos.z]);
-            player.send(SCKnockBackUnitPacket {
-                obj_id: target.obj_id(),
-                x: x - target_pos.x,
-                y: y - target_pos.y,
-                z: end.2 - target_pos.z,
-            });
+        for encounter in encounter_hooks::all() {
+            if encounter.knock_back_player(server, args, player, target, target_pos, end) {
+                break;
+            }
         }
         return;
     }
