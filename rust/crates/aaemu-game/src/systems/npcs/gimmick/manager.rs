@@ -24,6 +24,7 @@ use crate::models::gimmick::Gimmick;
 use crate::models::transform::{PositionAndRotation, Quaternion};
 use crate::packets::world::SCChatMessagePacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::object::Entity;
 use crate::world::{self, session, GimmickRef, WorldInstance, WorldObject};
 
@@ -31,8 +32,8 @@ use crate::world::{self, session, GimmickRef, WorldInstance, WorldObject};
 pub const TICK_DELAY: Duration = Duration::from_millis(50);
 /// The template id that gets `GimmickMovementFloatToSurface` (Recovered Treasure Chest).
 pub const FLOAT_TO_SURFACE_TEMPLATE_ID: u32 = 37;
-pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = 39;
-const PALACE_BOULDER_TEMPLATE_ID: u32 = 42;
+pub(in crate::systems::npcs) const SORVELL_BARREL_TEMPLATE_ID: u32 = encounters::FALLING_BARREL;
+const PALACE_BOULDER_TEMPLATE_ID: u32 = encounters::ROLLING_BOULDER;
 // Barrel impacts retain a fraction of their speed, then settle before the fuse.
 const BARREL_RESTITUTION: f32 = 0.24;
 const BARREL_REST_SPEED: f32 = 0.8;
@@ -64,7 +65,8 @@ pub(in crate::systems::npcs) const OAK_BARREL_PROXY_CYLINDER: CylinderProxy = Cy
 const KEG_ROLL_DECELERATION: f32 = 4.0;
 
 fn uses_ballistic_motion(template_id: u32) -> bool {
-    matches!(template_id, PALACE_BOULDER_TEMPLATE_ID | 49 | 64 | 66)
+    template_id == PALACE_BOULDER_TEMPLATE_ID
+        || encounters::is_thrown_trap(template_id)
         || is_portable_cannon_projectile(template_id)
 }
 
@@ -750,7 +752,7 @@ fn spawn_effect_gimmick(
         }
     }
     g.unit.scale = params.scale;
-    if (cannon_projectile || matches!(template.id, 49 | 64 | 66))
+    if (cannon_projectile || encounters::is_thrown_trap(template.id))
         && params.offset_coordinate_id == 2
     {
         let (sin_yaw, cos_yaw) = yaw.sin_cos();

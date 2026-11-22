@@ -156,3 +156,15 @@ pub fn clout_payload_without_inside_buff(clout_id: u32) -> bool {
 pub use super::sharpwind::POWDER_KEG_DOODAD;
 /// The powder keg item (Sharpwind Mines).
 pub use super::sharpwind::POWDER_KEG_ITEM;
+
+// ---- gimmicks
+
+/// Sorvell's barrel, the gimmick that falls from the ceiling (Burnt Castle Armory).
+pub use super::armory::FALLING_BARREL;
+/// The rolling boulder (Palace Cellar).
+pub use super::palace_cellar::ROLLING_BOULDER;
+
+/// Thrown trap gimmicks: ballistic, with an offset that turns with the thrower (Howling Abyss).
+pub fn is_thrown_trap(template_id: u32) -> bool {
+    howling_abyss::is_thrown_trap(template_id)
+}

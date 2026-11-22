@@ -25,3 +25,6 @@ pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
 pub(super) fn is_flame_clout(template_id: u32, buff_id: u32) -> bool {
     matches!(template_id, 4109 | 4741) && buff_id == 2783
 }
+
+/// The burning boulder that rolls down the Cellar ramp.
+pub const ROLLING_BOULDER: u32 = 42;

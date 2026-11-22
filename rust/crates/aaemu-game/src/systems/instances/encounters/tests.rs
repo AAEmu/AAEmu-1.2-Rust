@@ -290,3 +290,20 @@ fn powder_keg_ids() {
     assert_eq!(r::POWDER_KEG_DOODAD, 5951);
     assert_eq!(r::POWDER_KEG_ITEM, 25002);
 }
+
+// ---- gimmicks
+
+#[test]
+fn gimmick_ids() {
+    assert_eq!(r::FALLING_BARREL, 39);
+    assert_eq!(r::ROLLING_BOULDER, 42);
+}
+
+#[test]
+fn is_thrown_trap() {
+    table(
+        r::is_thrown_trap,
+        &[49, 64, 66],
+        &[0, 39, 42, 45, 46, 48, 50, 56, 63, 65, 67],
+    );
+}
