@@ -593,3 +593,75 @@ async fn slave_equipment_doodads_get_no_ship_collider() {
         "the free doodad still blocks ships"
     );
 }
+
+/// The Palace Cellar doors whose open phase reuses the closed mesh get no collider in those
+/// phases: `(4104, 9965 | 10027)`, `(4106, 10005 | 10006)`, `(4128, 10018 | 10019)` and
+/// `(4577, 11228)`. The same templates in another func group, and another template in one of
+/// those func groups, keep theirs.
+#[tokio::test]
+async fn palace_cellar_open_doors_get_no_collider() {
+    use crate::data::GameData;
+    use crate::models::doodad::{doodad_owner_type, Doodad};
+    use crate::systems::npcs::doodad::templates::DoodadTemplate;
+    use crate::world::Entity;
+
+    let skipped = [
+        (4104, 9965),
+        (4104, 10027),
+        (4106, 10005),
+        (4106, 10006),
+        (4128, 10018),
+        (4128, 10019),
+        (4577, 11228),
+    ];
+    let kept = [
+        (4104, 9964),
+        (4104, 10005),
+        (4106, 10007),
+        (4128, 10017),
+        (4577, 11227),
+        (4105, 9965),
+        (4127, 10018),
+    ];
+    let mut data = GameData::empty();
+    for &(template, func_group) in skipped.iter().chain(&kept) {
+        data.systems.npcs.doodad.templates.insert(
+            template,
+            DoodadTemplate {
+                id: template,
+                ..Default::default()
+            },
+        );
+        data.systems
+            .ai
+            .collision
+            .func_group_models
+            .insert(func_group, "cgf://objects/test/box.cgf".into());
+    }
+    let s = crate::test_support::test_server_with(data);
+    let world = s.world.world(0).unwrap();
+    let ctx = s.view_ctx();
+    let mut expected = Vec::new();
+    for (i, &(template, func_group)) in skipped.iter().chain(&kept).enumerate() {
+        let obj_id = 50 + i as u32;
+        let mut d = Doodad::new(obj_id);
+        d.template_id = template;
+        d.func_group_id = func_group;
+        d.owner_type = doodad_owner_type::SYSTEM;
+        d.transform
+            .set_position(500.0 + i as f32, 500.0, 101.0, 0.0, 0.0, 0.0);
+        world.spawn(Entity::new(obj_id, d), &ctx);
+        if i >= skipped.len() {
+            expected.push(obj_id);
+        }
+    }
+    let mut infos: Vec<u32> = super::objects::collect_doodads(&s, &world, &[(0, 0)])
+        .into_iter()
+        .map(|i| i.obj_id)
+        .collect();
+    infos.sort_unstable();
+    assert_eq!(
+        infos, expected,
+        "only the doors outside their reused-mesh phases become colliders"
+    );
+}

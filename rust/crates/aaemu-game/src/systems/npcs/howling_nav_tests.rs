@@ -651,3 +651,78 @@ async fn real_howling_nav_calleil_follows_a_victim_out_through_the_north_gate() 
         aggro_on(&boss, &player)
     );
 }
+
+// Normal Howling Abyss (`instance_howling_abyss`, zone 265): the same rooms with the Normal
+// templates (Knight 11258, Guardian 11757 and Medusa 11759 for Greater's 12765 / 12785 /
+// 12784).
+
+const NORMAL: &str = "instance_howling_abyss";
+const NORMAL_ZONE: u32 = 265;
+
+fn normal_server() -> Option<(Arc<GameServer>, Arc<WorldInstance>)> {
+    let db = std::env::var("AAEMU_COMPACT_DB").ok()?;
+    Some(super::burntcastle_dungeon_tests::real_encounter_server(
+        &db,
+        NORMAL,
+        NORMAL_ZONE,
+    ))
+}
+
+fn normal_npc_at(
+    server: &GameServer,
+    world: &WorldInstance,
+    template: u32,
+    xyz: [f32; 3],
+) -> NpcRef {
+    let npc =
+        super::npc::manager::create(server, server.ids.object.get_next_id().unwrap(), template)
+            .expect("Howling NPC template");
+    {
+        let mut data = npc.data();
+        data.unit.transform.set_xyz(xyz[0], xyz[1], xyz[2]);
+        data.unit.transform.zone_id = NORMAL_ZONE;
+        data.unit.transform.instance_id = world.id;
+        data.unit.transform.world_id = world.id;
+    }
+    world.spawn(&npc, &server.view_ctx());
+    crate::systems::ai::hooks::spawn_positioned(server, &npc);
+    npc.data().spawner_z = Some(xyz[2]);
+    npc
+}
+
+fn normal_player_at(server: &Arc<GameServer>, id: u32, xyz: [f32; 3]) -> (TestClient, PlayerRef) {
+    let client = TestClient::new(server, id, id);
+    let mut ch = test_character(id, "Tester", xyz[0], xyz[1]);
+    ch.unit.level = 50;
+    ch.unit.hp = 1_000_000;
+    ch.unit.max_hp = 1_000_000;
+    ch.unit.transform.set_xyz(xyz[0], xyz[1], xyz[2]);
+    ch.unit.transform.zone_id = NORMAL_ZONE;
+    let player = spawn_player(server, &client, ch, 0x10_0000 + id);
+    (client, player)
+}
+
+/// A3 on Normal: the Medusa pack under the walkway does not answer the Knight fighting 15 m
+/// above its room. A Guardian on the walkway's floor does.
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_howling_nav_normal_medusa_pack_ignores_the_fight_on_the_walkway() {
+    let Some((server, world)) = normal_server() else {
+        return;
+    };
+    let knight = normal_npc_at(&server, &world, 11258, [435.7, 592.5, 170.2]);
+    let guardian = normal_npc_at(&server, &world, 11757, [461.7, 587.3, 154.9]);
+    let medusa = normal_npc_at(&server, &world, 11759, [466.1, 585.6, 154.9]);
+    let walkway_guardian = normal_npc_at(&server, &world, 11757, [455.0, 600.0, 170.2]);
+    let (_client, player) = normal_player_at(&server, 1, [438.0, 593.0, 170.2]);
+    crate::systems::ai::hooks::engage(&server, &knight, &WorldObject::from(&player));
+    for _ in 0..10 {
+        tick(&server, &knight, &player).await;
+    }
+    assert!(
+        aggro_on(&walkway_guardian, &player),
+        "a Guardian on the player's floor answers the Knight"
+    );
+    assert!(!aggro_on(&guardian, &player), "the room's Guardian stays");
+    assert!(!aggro_on(&medusa, &player), "Medusa stays");
+}

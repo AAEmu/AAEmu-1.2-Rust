@@ -1104,3 +1104,47 @@ async fn real_data_hadir_golem_death_spawns_the_cleanup_slaves() {
         );
     }
 }
+
+/// A Hadir mob placed like a spawner would (AI positioned and its spawn hooks run).
+fn place_npc(server: &GameServer, world: &WorldInstance, template: u32, xyz: [f32; 3]) -> NpcRef {
+    let npc = super::npc::manager::create(server, 0, template).expect("NPC template");
+    {
+        let mut data = npc.data();
+        data.unit.transform.set_xyz(xyz[0], xyz[1], xyz[2]);
+        data.unit.transform.zone_id = ZONE;
+    }
+    crate::systems::ai::hooks::spawn_positioned(server, &npc);
+    world.spawn(&npc, &server.view_ctx());
+    crate::systems::ai::hooks::spawned(server, &npc, "");
+    npc
+}
+
+/// A4: in Hadir (as in Sharpwind) incidental aggro help stays near the pull: a skeleton serf
+/// within its 15 m help distance but 5 m above the fight does not join. One on the floor of
+/// the fight does.
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_aggro_help_stays_near_the_pull() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = super::burntcastle_dungeon_tests::real_encounter_server(&db, WORLD, ZONE);
+    let player = place_player(&server, &world, 1, 720.0, 582.0, 136.8);
+    let victim = WorldObject::from(&player);
+    let leader = place_npc(&server, &world, 9473, [721.0, 582.0, 136.8]);
+    let ally = place_npc(&server, &world, 9472, [726.0, 582.0, 136.8]);
+    let upstairs = place_npc(&server, &world, 9472, [726.0, 582.0, 141.8]);
+    let has_aggro = |npc: &NpcRef| {
+        npc.data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&victim.obj_id())
+    };
+    crate::systems::ai::manager::run_now(&server, leader.obj_id, |context| {
+        crate::systems::ai::behaviors::update_aggro_help(context, &victim, 200.0)
+    })
+    .unwrap();
+    assert!(has_aggro(&ally), "the nearby skeleton joins");
+    assert!(!has_aggro(&upstairs), "the skeleton 5 m above stays idle");
+}
