@@ -65,6 +65,7 @@ not the item template id. The template id is the number in the item database
 | `/resetcd` | Clears your skill cooldowns. | `/resetcd` |
 | `/failskill <skill result> [ushort] [uint]` | Forces a skill failure with the given result code (packet testing). | `/failskill 1` |
 | `/useskill [target\|area] <skillId>` | Forces a skill cast (target or area form). | `/useskill 11285` |
+| `/skilldebug` | Toggles private system chat for skill casts within 100 meters in your world instance, including your own. Each line shows the skill ID, timeline ID, caster, target, and cast time or plot ID. The feed starts off each session and requires access level 100 by default. | `/skilldebug` |
 | `/godmode <true\|false>` | Makes you immortal to other players. | `/godmode true` |
 | `/invisible <true\|false>` | Hides you from other players. | `/invisible true` |
 

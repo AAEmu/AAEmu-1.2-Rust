@@ -97,6 +97,7 @@ pub mod set_trade_pack_mail_delay;
 pub mod ship_barrier_cmd;
 pub mod show_inventory;
 pub mod siege_alias;
+mod skill_debug;
 pub mod snow;
 pub mod solo_party;
 pub mod spawn;
@@ -161,6 +162,7 @@ pub mod prelude {
 pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Command>)> {
     vec![
         (&["dungeon"], Arc::new(dungeon::DungeonCommand)),
+        (&["skilldebug"], Arc::new(skill_debug::SkillDebug)),
         // AddBadges.cs
         (
             &["vocation", "vocationpoints", "add_vp", "add_vb"],

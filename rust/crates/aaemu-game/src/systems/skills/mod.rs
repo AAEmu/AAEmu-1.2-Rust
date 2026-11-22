@@ -25,6 +25,7 @@ pub mod buffs;
 pub mod combat;
 pub mod controllers;
 pub mod data;
+pub(crate) mod debug_casts;
 pub mod effects;
 pub(crate) mod explode_buff_rules;
 pub mod ext;
@@ -157,6 +158,7 @@ pub struct System {
     pub ext: ext::ExtHooks,
     /// `SkillTlIdManager`.
     pub tl_ids: tasks::TlIdManager,
+    pub(crate) debug_casts: debug_casts::CastDebug,
     /// Subscribed buff triggers (`BuffTriggersHandler`).
     pub triggers: Mutex<Vec<buffs::TriggerSub>>,
     /// Abuser obj id -> obj ids of the units that have it in their aggro table

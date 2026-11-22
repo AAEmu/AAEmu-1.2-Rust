@@ -1304,6 +1304,7 @@ fn use_skill_impl(
             skill.state().plot_cooldown_snapshot = snapshot;
             start_global_cooldown(server, skill, caster, now);
             start_skill_cooldown(server, skill, caster, now);
+            super::debug_casts::report(server, skill, &ctx, tl, 0);
         }
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
@@ -1318,6 +1319,7 @@ fn use_skill_impl(
     let mut cast_time = cast_time_ms(server, skill, caster);
     let ctm = skill.state().cast_time_multiplier;
     cast_time = (f64::from(cast_time) * f64::from(ctm)).round_ties_even() as i32;
+    super::debug_casts::report(server, skill, &ctx, tl, cast_time.max(0));
     if cast_time > 0 {
         // The 1.2 client measures a player's global cooldown from the cast start, so start it
         // now; `cast` would only start it at the cast end, refusing a skill the client already

@@ -999,6 +999,7 @@ async fn timed_buff_expires_by_itself() {
 async fn plot_skill_runs_its_tree() {
     let mut f = fixture();
     let server = f.server.clone();
+    assert!(server.systems.skills.debug_casts.toggle(&f.player));
     start_skill(
         &server,
         &mut f.client.conn,
@@ -1013,9 +1014,18 @@ async fn plot_skill_runs_its_tree() {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(f.npc.data().unit.hp, 900);
-    let ops: Vec<u16> = frames(&mut f.client).into_iter().map(|f| f.0).collect();
-    assert!(ops.contains(&sc::SCUnitDamagedPacket), "{ops:x?}");
-    assert!(ops.contains(&sc::SCPlotEndedPacket), "{ops:x?}");
+    let frames = frames(&mut f.client);
+    assert!(frames.iter().any(|(op, _)| *op == sc::SCUnitDamagedPacket));
+    assert!(frames.iter().any(|(op, _)| *op == sc::SCPlotEndedPacket));
+    let messages: Vec<_> = frames
+        .iter()
+        .filter(|(op, _)| *op == sc::SCChatMessagePacket)
+        .map(|(_, body)| crate::systems::services::commands::scripts::harness::chat_text(body))
+        .filter(|text| text.starts_with("[SkillDebug] Skill "))
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].starts_with(&format!("[SkillDebug] Skill {PLOT_SKILL} (TL ")));
+    assert!(messages[0].contains(", plot 77)"));
     // the plot released its TlId and cleared ActivePlotState
     assert!(f.player.data().unit.skill_state.active_plot.is_none());
 }

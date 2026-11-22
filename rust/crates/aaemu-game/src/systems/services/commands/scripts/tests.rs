@@ -366,6 +366,7 @@ fn registered_commands_match_the_csharp_scripts() {
                     | ["set_dominion_non_pvp"]
                     | ["set_dominion_limit"]
                     | ["questmap"]
+                    | ["skilldebug"]
             )
         })
         .collect();
