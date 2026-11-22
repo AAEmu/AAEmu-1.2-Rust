@@ -80,8 +80,8 @@ pub struct AiPathHandler {
     pub ai_path_looping: bool,
     /// Speed multiplier when moving on the path.
     pub ai_path_speed: f32,
-    /// Stance to use when moving on the path; 5-walk, 4-run, 3-stand still.
-    pub ai_path_actor_flags: u8,
+    /// Authored stance override. Without one, the pace determines the animation.
+    pub ai_path_actor_flags: Option<u8>,
     /// Currently targeted position for path movement (`Vector3.Zero` = none).
     pub target_position: Vec3,
     /// Route file stem of the loaded points (diagnostics, e.g. the stall warning).
@@ -99,7 +99,7 @@ impl Default for AiPathHandler {
             ai_path_points_remaining: VecDeque::new(),
             ai_path_looping: true,
             ai_path_speed: 1.0,
-            ai_path_actor_flags: 4,
+            ai_path_actor_flags: None,
             target_position: Vec3::default(),
             path_name: String::new(),
             target_best_distance: f32::INFINITY,
@@ -118,7 +118,7 @@ pub enum PathStep {
     Move {
         target: Vec3,
         speed: f32,
-        actor_flags: u8,
+        actor_flags: Option<u8>,
         result: bool,
     },
     /// Nothing to move; the bool is the return value (`HasUnhandledPathMovementData()`).
@@ -211,7 +211,7 @@ impl AiPathHandler {
                     }
                     AiPathPointAction::ActorFlags => {
                         if let Ok(f) = next.param.trim().parse::<u8>() {
-                            self.ai_path_actor_flags = f;
+                            self.ai_path_actor_flags = Some(f);
                         }
                     }
                     AiPathPointAction::ReturnToCommandSet => return PathStep::ReturnToCommandSet,
@@ -544,7 +544,7 @@ mod tests {
             PathStep::Move {
                 target: Vec3::new(10.0, 0.0, 0.0),
                 speed: 2.5,
-                actor_flags: 4,
+                actor_flags: None,
                 result: true
             }
         );
