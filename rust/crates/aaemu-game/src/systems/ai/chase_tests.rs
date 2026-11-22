@@ -619,37 +619,52 @@ async fn directional_self_skills_turn_the_caster_towards_its_victim() {
     let mut victim = Npc::new(2);
     victim.unit.hp = 1000;
     victim.unit.transform.set_xyz(100.0, 120.0, 100.0);
-    let victim = WorldObject::from(Entity::new(0x301, victim));
+    let victim_npc = Entity::new(0x301, victim);
+    let victim = WorldObject::from(&victim_npc);
     let world = server.world.world(0).unwrap();
     world.spawn(&npc, &server.view_ctx());
     world.spawn(&victim, &server.view_ctx());
 
+    // Headings: rot_z 0 faces +y and -pi/2 faces +x (see `ai::flow_tests`). The victim is put
+    // due north and then due east of the caster, so every directional skill must reach the
+    // exact heading towards it each time: a shared wrong heading cannot pass.
     const AWAY: f32 = 1.0;
-    let mut facing = None;
-    for id in directional.into_iter().chain([15934, 15936, 19981]) {
-        npc.data().unit.transform.rot_z = AWAY;
-        let skill = SkillRun::new(
-            server.game_data.systems.skills.skill(id).unwrap().clone(),
-            1,
-        );
-        let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
-        let mut c = AiCtx {
-            server: &server,
-            npc: npc.clone(),
-            obj: WorldObject::from(&npc),
-            ai: &mut ai,
-        };
-        super::use_skill(&mut c, BehaviorKind::Attack, skill, Some(&victim), 0.0);
-        let rot = npc.data().unit.transform.rot_z;
-        if directional.contains(&id) {
-            assert!((rot - AWAY).abs() > 0.1, "skill {id} keeps the old heading");
-            assert_eq!(
-                *facing.get_or_insert(rot),
-                rot,
-                "skill {id} faces the victim"
+    let angle_gap = |a: f32, b: f32| {
+        let d = (a - b).rem_euclid(std::f32::consts::TAU);
+        d.min(std::f32::consts::TAU - d)
+    };
+    for (victim_xy, towards, side) in [
+        ((100.0, 120.0), 0.0, "north"),
+        ((120.0, 100.0), -std::f32::consts::FRAC_PI_2, "east"),
+    ] {
+        victim_npc
+            .data()
+            .unit
+            .transform
+            .set_xyz(victim_xy.0, victim_xy.1, 100.0);
+        for id in directional.into_iter().chain([15934, 15936, 19981]) {
+            npc.data().unit.transform.rot_z = AWAY;
+            let skill = SkillRun::new(
+                server.game_data.systems.skills.skill(id).unwrap().clone(),
+                1,
             );
-        } else {
-            assert_eq!(rot, AWAY, "self-target skill {id} turns the caster");
+            let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+            let mut c = AiCtx {
+                server: &server,
+                npc: npc.clone(),
+                obj: WorldObject::from(&npc),
+                ai: &mut ai,
+            };
+            super::use_skill(&mut c, BehaviorKind::Attack, skill, Some(&victim), 0.0);
+            let rot = npc.data().unit.transform.rot_z;
+            if directional.contains(&id) {
+                assert!(
+                    angle_gap(rot, towards) < 0.01,
+                    "skill {id} faces the victim to the {side}: rot_z {rot}, expected {towards}"
+                );
+            } else {
+                assert_eq!(rot, AWAY, "self-target skill {id} turns the caster");
+            }
         }
     }
 }
