@@ -397,3 +397,91 @@ fn real_howling_keg_proxy_matches_the_client_model() {
     assert!(c.axis.z.abs() > 0.999, "{c:?}");
     assert!(c.center.x.abs() < 0.01 && c.center.y.abs() < 0.01 && c.center.z.abs() < 0.01);
 }
+
+/// Greater carried two Normal mobs in the pack at (502, 506): Blackscale Corps Archer 11261
+/// (level 44) and Combatant 11754 (level 41). The C# spawn file recorded them at Normal's
+/// placements of the same pack (Normal has 11261 at the same point and 11938 where Greater
+/// had 11754). Both come from Normal's group spawners (`울부짖는 구렁텅이_상위 그룹` 13197 and
+/// `_하위 그룹` 13195). Greater's own groups (`영던_...` 14442 and 14453) list the Greater
+/// template of every member in the same order: 11261 -> 12768 and 11754 -> 12773.
+///
+/// Every hostile Greater spawn is a Greater template: level 45 or more (Greater's mobs are
+/// 45-50, Normal's 40-44) and no template Normal places. Normal's bosses are level 45, so the
+/// level alone would not tell them apart.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_howling_greater_hostile_spawns_are_greater_templates() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let template = |id: u64| -> (i64, i64) {
+        conn.query_row(
+            "SELECT level, faction_id FROM npcs WHERE id = ?1",
+            [id as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or_else(|_| panic!("npc template {id}"))
+    };
+    let normal: std::collections::HashSet<u64> = spawn_rows(NORMAL, "npc_spawns.json")
+        .iter()
+        .map(|r| r["UnitId"].as_u64().unwrap())
+        .collect();
+    let mut hostile = 0;
+    for row in spawn_rows(GREATER, "npc_spawns.json") {
+        let unit = row["UnitId"].as_u64().unwrap();
+        let (level, faction) = template(unit);
+        // Faction 1 is the friendly faction of the event NPCs (Godfrey's staging actor, the
+        // captives, the cut-scene helpers).
+        if faction == 1 {
+            continue;
+        }
+        hostile += 1;
+        assert!(
+            level >= 45,
+            "Greater {} {unit} at {:?} is level {level}",
+            row["Title"],
+            pos(&row)
+        );
+        assert!(
+            !normal.contains(&unit),
+            "Greater {} {unit} at {:?} is a Normal template",
+            row["Title"],
+            pos(&row)
+        );
+    }
+    assert!(hostile > 150, "{hostile} hostile rows");
+    let members = |spawner: i64| -> Vec<i64> {
+        let mut s = conn
+            .prepare("SELECT member_id FROM npc_spawner_npcs WHERE npc_spawner_id = ?1 ORDER BY member_id")
+            .unwrap();
+        s.query_map([spawner], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    for (normal_group, greater_group, normal_unit, greater_unit, at) in [
+        (13197, 14442, 11261, 12768, [502.514, 507.952]),
+        (13195, 14453, 11754, 12773, [500.986, 510.412]),
+    ] {
+        let n = members(normal_group);
+        let g = members(greater_group);
+        let i = n.iter().position(|m| *m == normal_unit).unwrap();
+        assert_eq!(g[i], greater_unit, "group {greater_group} member {i}");
+        let name = |id: i64| -> String {
+            conn.query_row("SELECT name FROM npcs WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(name(normal_unit), name(greater_unit), "the same mob");
+        let row = spawn_rows(GREATER, "npc_spawns.json")
+            .into_iter()
+            .find(|r| {
+                let p = pos(r);
+                (p[0] - at[0]).abs() < 0.01 && (p[1] - at[1]).abs() < 0.01
+            })
+            .expect("the pack row");
+        assert_eq!(row["UnitId"].as_u64(), Some(greater_unit as u64));
+    }
+}
