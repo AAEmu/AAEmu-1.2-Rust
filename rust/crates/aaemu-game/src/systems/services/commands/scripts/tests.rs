@@ -419,9 +419,9 @@ fn load_resolves_collisions_like_csharp() {
     // the Rust-only `/premium` / `/mail` admin commands, the seven
     // retail tax / crime / social commands of WP-SL6b, the retail chat mute of WP-SL4b, the
     // retail auction GM keys, the seven siege / dominion commands of WP-SL6a, the two
-    // guild rename controls, the Rust-only `/stackednpcs` and the driver's `/questmap`
+    // guild rename controls, the Rust-only `/stackednpcs` and the driver's `/questmap`, plus `/skilldebug`
     // (`off_siege` is an alias key).
-    assert_eq!(keys.len(), 122);
+    assert_eq!(keys.len(), 123);
     // `GoldCmd` (registered after `AddGold`) owns `gold`, and `AddGold`'s aliases lead to it.
     for alias in ["gold", "addgold", "add_gold"] {
         let c = m.get_command_interface_by_name(alias).expect(alias);
