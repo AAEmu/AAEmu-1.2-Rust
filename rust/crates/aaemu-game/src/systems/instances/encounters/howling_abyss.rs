@@ -154,3 +154,10 @@ pub(super) fn has_river_sectors(template_name: &str) -> bool {
         "instance_howling_abyss" | "instance_howling_abyss_2"
     )
 }
+
+// ---- hooks
+
+/// Howling Abyss's encounter hooks.
+pub struct HowlingAbyss;
+
+impl super::hooks::Encounter for HowlingAbyss {}

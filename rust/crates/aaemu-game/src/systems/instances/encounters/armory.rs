@@ -100,3 +100,10 @@ pub(super) fn is_wave_spawn(
 ) -> bool {
     caster_template == 8962 && use_summoner_aggro_target && (46629..=46656).contains(&spawner_id)
 }
+
+// ---- hooks
+
+/// Burnt Castle Armory's encounter hooks.
+pub struct Armory;
+
+impl super::hooks::Encounter for Armory {}

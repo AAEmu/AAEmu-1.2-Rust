@@ -55,3 +55,10 @@ pub(super) fn door_reuses_closed_mesh(template_id: u32, func_group: u32) -> bool
         (4104, 9965 | 10027) | (4106, 10005 | 10006) | (4128, 10018 | 10019) | (4577, 11228)
     )
 }
+
+// ---- hooks
+
+/// Palace Cellar's encounter hooks.
+pub struct PalaceCellar;
+
+impl super::hooks::Encounter for PalaceCellar {}

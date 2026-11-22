@@ -98,3 +98,10 @@ pub(super) fn plot_ground(
         near: matches!(event_id, 3199 | 3201),
     })
 }
+
+// ---- hooks
+
+/// Sharpwind Mines' encounter hooks.
+pub struct SharpwindMines;
+
+impl super::hooks::Encounter for SharpwindMines {}

@@ -62,3 +62,10 @@ pub(super) fn has_indoor_pools(template_name: &str) -> bool {
 pub(super) fn preloads_origin_cell(template_name: &str) -> bool {
     template_name == WORLD
 }
+
+// ---- hooks
+
+/// Kroloal Cradle's encounter hooks.
+pub struct KroloalCradle;
+
+impl super::hooks::Encounter for KroloalCradle {}
