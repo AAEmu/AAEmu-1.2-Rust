@@ -1509,7 +1509,10 @@ pub(crate) mod tests {
         assert_eq!(tower.steps[&1].num_walls, 33);
         assert_eq!(tower.initial_buff_id, 4771);
         assert_eq!(data.guard_tower_settings[&11].max_walls, 100);
-        assert_eq!(data.siege_items.len(), 2);
+        // The 1.2 table has 13 rows (WP-SD3, 5023b7e74: mines, HQ items and escape scrolls);
+        // the 2 here was copied from `castle_sample`'s two-row fixture and never held.
+        assert_eq!(data.siege_items.len(), count("siege_items"));
+        assert_eq!(data.siege_items.len(), 13);
         let mine = &data.siege_items[&26_397];
         assert!(mine.siege_circle_during_siege && !mine.outside_siege_zone);
         let scroll = &data.siege_items[&34_018];

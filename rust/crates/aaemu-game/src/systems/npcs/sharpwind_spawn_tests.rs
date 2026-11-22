@@ -358,6 +358,25 @@ fn expected_npc_load(
                 stored.entry(unit).or_default().push((p.x, p.y, p.z));
                 continue;
             }
+            // A row naming its own AUTOCREATED single-NPC spawner (`SpawnerId`) expands to that
+            // spawner only (9f8de7f89 / #153: the Armory's seven Bloodwind Ogre 8841 rows name
+            // 9859, so the test-dungeon 9875, tower-defence 9892 and group 11928 spawners that
+            // also list 8841 no longer clone at each Ogre point). No tower waves exist here.
+            let single_placement = (def.base.spawner_id != 0)
+                .then(|| data.get_npc_spawner_template(def.base.spawner_id))
+                .flatten()
+                .is_some_and(|t| {
+                    t.npc_spawner_category_id == npc_spawner_category::AUTOCREATED
+                        && spawner_skip(world, &t).is_none()
+                        && matches!(t.npcs.as_slice(), [member]
+                            if member.member_type == "Npc" && member.member_id == unit)
+                });
+            if single_placement {
+                out.rows_with_spawners += 1;
+                out.spawners += 1;
+                stored.entry(unit).or_default().push((p.x, p.y, p.z));
+                continue;
+            }
             let ids = data.get_spawner_ids(unit).unwrap_or_default();
             if ids.is_empty() {
                 // Generated ("fake") spawner from template 1.
