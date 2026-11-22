@@ -328,11 +328,15 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         // reading is backed by the 1.2 server; this one is the narrowest that reaches the
         // Sharpwind `Final` and leaves the chains that work on `main` alone.
         FuncTemplate::PulseTrigger(f) => {
-            let mut d = ctx.doodad.data();
-            if f.next_phase <= 0 || d.phase.pulsed != Some(f.flag) {
+            let (pulsed, group) = {
+                let d = ctx.doodad.data();
+                (d.phase.pulsed, d.func_group_id)
+            };
+            if f.next_phase <= 0 || pulsed != Some(f.flag) {
                 return false;
             }
-            d.phase.override_phase = f.next_phase;
+            let next = super::phase::pulse_trigger_next_phase(ctx, group, f.next_phase);
+            ctx.doodad.data().phase.override_phase = next;
             true
         }
         // These describe routing/operations; the logic runs on a received signal.
@@ -695,7 +699,9 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // does a Fire Pillar hit. A unit inside Miasma or a spear window keeps its buff.
     // Fire Pillar (300 ms) hits once per entry, as in the C#: each flame phase of a
     // jet is a new trigger, so a player who stays on the grate is hit once per burst.
-    let reapplied_contact = matches!(f.id, 1139 | 1295 | 1334 | 1336);
+    // The Cradle stair barriers 5423 / 5424 (clouts 1266 / 1267, 200 ms) root with
+    // Impaled 4351 for its 2 s like the spears' Injury.
+    let reapplied_contact = matches!(f.id, 1139 | 1266 | 1267 | 1295 | 1334 | 1336);
     trigger.contact_buff = reapplied_contact || f.buff_id == 3996;
     trigger.reapply_while_inside = reapplied_contact;
     // The Cradle pool hazards: Toxicity (green pool), Cursed Blood (red pools),

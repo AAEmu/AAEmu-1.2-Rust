@@ -5648,6 +5648,79 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     sphere 1546 wakes (88999 to 89002). The five 1.2-era plain 11163 rows started as more
     statues with the same death skill, so any four of nine kills opened the gate. Those
     rows are removed.
+* Kroloal Cradle layout follow-up (2026-11-22, tests in `npcs::cradle_dungeon_tests`). The
+  rest of the level differences the world follow-up listed, from the same Returns r575 files,
+  checked against the r208022 compact DB (templates, funcs, phases) and collision.
+  - **Patrols.** 44 of the level's 122 spawners have a designer path. All 44 are in the
+    r208022 zone 264 `areasmission0.bai`, and each path's first point is within 1.6 m of its
+    spawn (Z within 0.4 m). Each now has one start row at the level spawn and yaw with its
+    `FollowPath`. 36 rows were the 1.2-era rows of the same NPC in the same room: 14 Putrid
+    Demons 11357 (with the Kitchen demon 11552, 15 demon patrols), 11 Cinderhorn Boars 11365,
+    4 Broken Toys 12160, 4 Guardian Golems 11164, the Nightmare Waker 11557 and one Academy
+    Apprentice 11156 (the pack spawner 88915). 31 of those rows sat within 30 m of the spawn,
+    mostly along their path. Eight patrols had no row and are added: four boars
+    (92487, 92488, 92494, 98025), three toys (92939, 92940, 92942) and the Venomous Marksman
+    11155 at 88945. The level spawns are on the floor or up to 0.6 m above it.
+    **Inferred:** the row for each spawner is the same NPC's nearest 1.2-era row in its room.
+    Where the level has as many spawners of an NPC as the file has rows, every row is one of
+    them. So three rows moved far: the demon at (637.5, 930.2) became 98023 (92 m), the toy at
+    (153.9, 830.2) became 92943 (77 m) and the demon at (268.1, 842.4) became 94649 (47 m).
+    21 paths are loops. The other 23 end 8.1 to 38.5 m from their start. The route handler
+    walked straight from the last point back to the first, and for `_172` and `_210` that line
+    crosses rock. **Inferred:** a designer path whose ends are more than 5 m apart
+    is walked out and back along its points (`ai::framework::designer_patrol_cycle`). The
+    Armory's two patrols are loops and do not change.
+  - **Mushroom room.** PR #155's two stone gates 5395 are replaced by the level's chain. The
+    five mushrooms 5257 (families 80000 to 80004) feed controller 5406 (80010, AND, 1 s, now
+    at the level spot (813.06, 844.0)). The controller pulses Poison Cloud Gate 6002 (80013),
+    and the gate pulses the two Poison Cloud walls 5545 (south, (789.1, 807.1)) and 6050
+    (north, (787.8, 873.6)), both family 80012. A wall is a `poison_wall` particle with no
+    collision. Its clout 1314 / 1462 gives Poison Cloud 4465, a 200 ms tick of 999999 damage.
+    The gate's start group 15491 has `PulseTrigger(t -> 15657)` and two `RatioChange` rows
+    (5000 -> 15657, 5000 -> 15658). 15657 pulses `t`, which opens 5545 (14252 -> 15493), and
+    15658 pulses `f`, which opens 6050 (15656 -> 15659). Run on entry, the ratio rows moved
+    the gate at spawn, so the walls would never open. **Inferred:** in a group with a
+    `PulseTrigger`, the `RatioChange` rows wait for the trigger. When it fires, one roll over
+    them picks the phase (`phase::pulse_trigger_next_phase`). 15491 is the only 1.2 group
+    with both. So all five mushrooms open one of the two exits, at random. On the r208022
+    collision the room leads on only through a wall, and either wall alone reaches the
+    Carnivore's Egg room (590, 845). Through the north wall the Kitchen is reached too, and
+    through the south wall the north room (690, 930), so the two routes join.
+  - **Secret room.** Boulder 5547 is at the level spot (301.536, 778.214, 184.777) at scale
+    1, not at (302, 758.5) at scale 0.55. Its model (`stone_door_2`, a cave rock about
+    35 x 31 x 51 m) fills the passage north of the room. A walk over the r208022 collision
+    from the passage below reaches the chests without it and does not with it. The level
+    gives the boulder family 80022, and device 5549 "Open Secret Room" (skill 19699, phase
+    14331 `Pulse(t)` to 80022) would break it (14281 -> 14287). The 2014 videos and the
+    tester show the room sealed. **Deviation from the level:** the boulder row has no family,
+    so the device's pulse reaches nothing.
+  - **Stair barriers.** The five Howling Abyss gate traps 5516 (invisible model) are replaced
+    by the level's twelve Impaling Barriers: eight 5423 (timer 1.5 s) and four 5424 (2 s).
+    Five of them stand within 1 m of the old rows. Their pulse (clout 1266 / 1267, 200 ms,
+    fixed physical 1500-2500) roots with Impaled 4351 for 2 s. Like the spears' Injury, the
+    buff now outlasts the pulse (contact buff). Each sits on the r208022 floor to 0.05 m.
+  - **Stepping stones.** The 18 rows of 5880 are replaced by the level's 22: 13 in the west
+    pools, 7 in the Soulscour Bathroom pool and 2 in the Death's Door pool, which had none.
+    A stone's top is 10.87 m above its origin (`stop_rock`). The level stones stand 0.21 to
+    0.76 m above their pool's water. The old Soulscour stones (Z 162.0) were 4 cm under it.
+    Under 14 of the 22 the r208022 collision has no pool floor, so the check is against
+    the water surface.
+  - **Not changed (reported):** the level's Metal Gate 5147 (a Howling Abyss trap) at the
+    5423 spot (684.345, 494.456); the level's Hidden Treasure Chest 5956 where the file
+    places 5550; three 5252 rows near the level's three; Moving Statue's Restricted Attack
+    Area 5950, Lava Runs 5320, Electric Connection 5955 x6, boulder 5569 at (324.3, 865.4),
+    device 5549's 1.8 m offset and the fifth mushroom's 0.4 m offset; patrol-less level
+    spawners with no row (boar 92492, golem 92900); and 1.2-era rows the level does not
+    explain (demon (508.1, 496.3, 191.0), next to the patrol-less level 92901 at Z 181.0; two
+    extra Academy rows; four extra Kitchen pack rows, one at (883, 728.8)).
+  - Tests: CI `cradle_level_patrols_are_placed_once_each_with_their_path`,
+    `cradle_level_gates_boulder_spikes_and_stones_are_the_authored_rows`,
+    `ai::framework::tests::designer_patrol_cycle_walks_an_open_route_back_along_its_points`;
+    gated `real_client_cradle_level_patrols_start_at_their_spawns`,
+    `real_client_cradle_layout_rows_stand_on_the_r208022_floor` (`AAEMU_GAME_PAK`),
+    `real_data_cradle_mushroom_doors_require_all_five_mushrooms` (both rolls),
+    `real_data_cradle_spike_pulse_damages_and_leaves_the_injury` (5423 and 5424),
+    `real_data_cradle_secret_room_boulder_ignores_the_device` (`AAEMU_COMPACT_DB`).
 * systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
   (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
   has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->

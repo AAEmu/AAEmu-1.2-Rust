@@ -782,7 +782,7 @@ impl<'a> AiCtx<'a> {
         let Some(geodata) = self.server.systems.ai.geodata.get(world.template.id) else {
             return Vec::new();
         };
-        let mut points = geodata.designer_path(name, near);
+        let mut points = designer_patrol_cycle(geodata.designer_path(name, near));
         let Some((start, _)) = points.iter().enumerate().min_by(|(_, a), (_, b)| {
             let distance = |p: &Vec3| (p.x - near.x).hypot(p.y - near.y);
             distance(a).total_cmp(&distance(b))
@@ -918,6 +918,28 @@ impl<'a> AiCtx<'a> {
     }
 }
 
+/// The gap between a designer path's ends above which the path is a one-way route rather than
+/// a loop. The closed Kroloal Cradle and Burnt Castle Armory patrols end 0.6-3.2 m from their
+/// start, the open Cradle routes 8.1-38.5 m.
+pub(crate) const DESIGNER_PATH_OPEN_GAP: f32 = 5.0;
+
+/// The point cycle a designer patrol loops over. A closed path is its own loop. An open path
+/// (ends more than [`DESIGNER_PATH_OPEN_GAP`] apart) is walked out and back along its own
+/// points. **Inferred (no 1.2 server evidence):** the looping route handler would otherwise
+/// walk straight from the last point to the first, and that line crosses rock for two of the
+/// 23 open Cradle routes (`AIPath_264_nopeople_172` and `_210`). Pairs such as `_220` / `_221`
+/// run the same corridor in opposite directions, which also reads as out-and-back patrols.
+pub(crate) fn designer_patrol_cycle(mut points: Vec<Vec3>) -> Vec<Vec3> {
+    let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) else {
+        return points;
+    };
+    if points.len() > 2 && (first.x - last.x).hypot(first.y - last.y) > DESIGNER_PATH_OPEN_GAP {
+        let back: Vec<Vec3> = points[1..points.len() - 1].iter().rev().copied().collect();
+        points.extend(back);
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1045,5 +1067,28 @@ mod tests {
             !a.has_persistent_ai(),
             "opponent-less combat is dormant again"
         );
+    }
+
+    /// A closed designer path is its own loop; an open one is walked out and back along its
+    /// points, so the return never cuts the straight line from its last point to its first.
+    #[test]
+    fn designer_patrol_cycle_walks_an_open_route_back_along_its_points() {
+        let p = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        let closed = vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(1.0, 1.0)];
+        assert_eq!(designer_patrol_cycle(closed.clone()), closed);
+        let open = vec![p(0.0, 0.0), p(10.0, 0.0), p(20.0, 5.0), p(30.0, 0.0)];
+        assert_eq!(
+            designer_patrol_cycle(open),
+            vec![
+                p(0.0, 0.0),
+                p(10.0, 0.0),
+                p(20.0, 5.0),
+                p(30.0, 0.0),
+                p(20.0, 5.0),
+                p(10.0, 0.0),
+            ]
+        );
+        let short = vec![p(0.0, 0.0), p(30.0, 0.0)];
+        assert_eq!(designer_patrol_cycle(short.clone()), short);
     }
 }

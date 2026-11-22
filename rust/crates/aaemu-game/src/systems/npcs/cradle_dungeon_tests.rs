@@ -231,13 +231,13 @@ fn cradle_added_doodad_rows_are_placed_once_each() {
         );
     }
 
-    // No decor row was added, and the skill-summoned doodads are never static placements.
-    for template in [5320, 5545, 6002, 6050] {
-        assert!(
-            !rows.iter().any(|(t, _, _, _, _)| *t == template),
-            "decor doodad {template} must not be placed"
-        );
-    }
+    // No decor row was added, and the skill-summoned doodads are never static placements. The
+    // mushroom room's Poison Cloud Gate 6002 and walls 5545 / 6050 are placed since the layout
+    // follow-up (see `cradle_level_gates_boulder_spikes_and_stones_are_the_authored_rows`).
+    assert!(
+        !rows.iter().any(|(t, _, _, _, _)| *t == 5320),
+        "decor doodad 5320 must not be placed"
+    );
     for (template, name) in [
         (4914, "Hadir_Mob Spawn_Medium"),
         (5060, "Carnivore's Exploding Egg"),
@@ -578,7 +578,10 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
     let stats = load_cradle(&server, &conn);
     eprintln!("cradle load: {stats:?}");
 
-    assert_eq!(stats.npc_entries, 118, "71 kept + 36 event + 11 plain rows");
+    assert_eq!(
+        stats.npc_entries, 126,
+        "71 kept + 36 event + 11 plain rows + 8 level patrol rows"
+    );
     assert_eq!(stats.npc_duplicates, 0);
     assert_eq!(stats.npc_missing_templates, 0);
     assert_eq!(stats.npc_event_spawners, 36);
@@ -588,12 +591,13 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
     );
     assert_eq!(stats.npc_cutscene_spawners_skipped, 0);
     assert_eq!(
-        stats.doodad_entries, 201,
-        "78 + 114 fire jets + 9 pool hazards"
+        stats.doodad_entries, 213,
+        "78 + 114 fire jets + 9 pool hazards + 12 from the layout follow-up (gate 6002 and two \
+         walls for two 5395, 12 barriers for five 5516, 22 stones for 18)"
     );
     assert_eq!(stats.doodad_duplicates, 0);
     assert_eq!(stats.doodad_missing_templates, 0);
-    assert_eq!(stats.doodad_spawners, 201);
+    assert_eq!(stats.doodad_spawners, 213);
 
     // Every NpcSpawnerSpawnEffect target placed in this world's level resolves to its event row.
     let m = server.systems.npcs.spawns.get(INSTANCE_ID).unwrap();
@@ -646,7 +650,7 @@ async fn real_data_cradle_spawn_files_load_and_resolve_every_skill_spawner() {
 
     // The doodads spawn (their phase init is asynchronous but the placements are synchronous).
     m.spawn_doodads(&server);
-    assert_eq!(world.all_doodads().len(), 201);
+    assert_eq!(world.all_doodads().len(), 213);
     let gate = find_doodad(&world, 5726);
     assert_eq!(gate.data().func_group_id, 14677, "closed gate phase");
     let exit = find_doodad(&world, 5762);
@@ -1100,17 +1104,39 @@ async fn real_data_cradle_arkanis_death_opens_the_exit_and_spawns_the_squad() {
     }
 }
 
+/// The mushroom room (Deathspice Lab) is the level's chain: the five Poisonous Mushrooms 5257
+/// (families 80000-80004) feed controller 5406 (family 80010, `DoodadFuncLogic` AND, 1 s),
+/// which pulses Poison Cloud Gate 6002 (family 80013). The gate's roll picks the exit: phase
+/// 15657 pulses `t` and clears the south wall 5545 (14252 -> 15493), 15658 pulses `f` and
+/// clears the north wall 6050 (15656 -> 15659); both walls are family 80012. Four mushrooms
+/// open nothing, and the wall that stays keeps its deadly Poison Cloud 4465.
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_cradle_mushroom_doors_require_all_five_mushrooms() {
-    use crate::systems::skills::state::SkillRun;
-    use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster};
-
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
     };
-    let (server, world) = real_server(&db);
-    load_cradle(&server, &conn_of(&db));
+    // (forced roll, wall that opens and its open phase, wall that stays and its phase, gate)
+    for (roll, opened, kept, gate_phase) in [
+        (0, (5545, 15493), (6050, 15656), 15657),
+        (5000, (6050, 15659), (5545, 14252), 15658),
+    ] {
+        mushroom_room_opens_one_wall(&db, roll, opened, kept, gate_phase).await;
+    }
+}
+
+async fn mushroom_room_opens_one_wall(
+    db: &str,
+    roll: i32,
+    (opened, open_phase): (u32, u32),
+    (kept, kept_phase): (u32, u32),
+    gate_phase: u32,
+) {
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster};
+
+    let (server, world) = real_server(db);
+    load_cradle(&server, &conn_of(db));
     server
         .systems
         .npcs
@@ -1125,9 +1151,30 @@ async fn real_data_cradle_mushroom_doors_require_all_five_mushrooms() {
             .filter(move |d| d.data().template_id == template_id)
     };
     let mut mushrooms: Vec<_> = matching(5257).cloned().collect();
-    let gates: Vec<_> = matching(5395).cloned().collect();
     assert_eq!(mushrooms.len(), 5);
-    assert_eq!(gates.len(), 2);
+    assert_eq!(matching(5395).count(), 0, "no inferred stone gate");
+    let gate = find_doodad(&world, 6002);
+    let opened = find_doodad(&world, opened);
+    let kept = find_doodad(&world, kept);
+    assert_eq!(gate.data().family_id, 80013);
+    assert_eq!(opened.data().family_id, 80012);
+    assert_eq!(kept.data().family_id, 80012);
+    let walls_closed = || {
+        gate.data().func_group_id == 15491
+            && matching(5545).all(|d| d.data().func_group_id == 14252)
+            && matching(6050).all(|d| d.data().func_group_id == 15656)
+    };
+    assert!(
+        walls_closed(),
+        "the gate's ratio rows do not move it at spawn"
+    );
+    // The roll the gate makes when the controller's pulse arrives (forced after spawning).
+    server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(roll));
+
     let last = mushrooms.pop().unwrap();
     let at = last.data().transform;
     let player = place_player(&server, &world, 1, at.x + 2.0, at.y, at.z);
@@ -1137,7 +1184,8 @@ async fn real_data_cradle_mushroom_doors_require_all_five_mushrooms() {
         npc_hooks.doodad_skill_hit(&server, &WorldObject::from(&mushroom), &me, 20212);
         assert_eq!(mushroom.data().func_group_id, 13635);
     }
-    assert!(gates.iter().all(|gate| gate.data().func_group_id == 13949));
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    assert!(walls_closed(), "four mushrooms open nothing");
 
     // Other nearby objects must not fill the purifier's five targets.
     for i in 0..6_u16 {
@@ -1188,9 +1236,32 @@ async fn real_data_cradle_mushroom_doors_require_all_five_mushrooms() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(last.data().func_group_id, 13635);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    assert!(gates.iter().all(|gate| gate.data().func_group_id == 13960));
+    assert_eq!(gate.data().func_group_id, gate_phase, "roll {roll}");
+    assert_eq!(opened.data().func_group_id, open_phase, "roll {roll}");
+    assert_eq!(kept.data().func_group_id, kept_phase, "roll {roll}");
+
+    // The open wall lets a player through; the other one still kills.
+    let open_at = opened.data().transform;
+    let kept_at = kept.data().transform;
+    let through = place_player(&server, &world, 2, open_at.x, open_at.y, open_at.z);
+    let blocked = place_player(&server, &world, 3, kept_at.x, kept_at.y, kept_at.z);
+    for _ in 0..3 {
+        server.systems.npcs.area_triggers.tick(&server);
+        tokio::time::sleep(std::time::Duration::from_millis(210)).await;
+    }
+    assert!(!through.data().unit.buffs.check_buff(4465), "roll {roll}");
+    assert_eq!(through.data().unit.hp, 10_000, "roll {roll}");
+    let poisoned = {
+        let d = blocked.data();
+        d.unit.buffs.check_buff(4465) || d.unit.hp == 0
+    };
+    assert!(poisoned, "roll {roll}: the closed wall still poisons");
 }
 
+/// The stair room's Impaling Barriers 5423 (1.5 s) and 5424 (2 s) are the level's twelve
+/// placements. Each pulse (clout 1266 / 1267, 200 ms, fixed physical 1500-2500) damages a
+/// player on it and roots them with Impaled 4351 for its full 2 s; the barrier then rests in
+/// its timer phase again.
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_cradle_spike_pulse_damages_and_leaves_the_injury() {
@@ -1206,18 +1277,76 @@ async fn real_data_cradle_spike_pulse_damages_and_leaves_the_injury() {
         .get(INSTANCE_ID)
         .unwrap()
         .spawn_doodads(&server);
-    let spear = find_doodad(&world, 5516);
-    let pos = spear.data().transform;
-    let player = place_player(&server, &world, 1, pos.x, pos.y, pos.z);
-    super::doodad::manager::do_change_phase(&server, &world, &spear, None, 14141);
+    assert!(
+        !world
+            .all_doodads()
+            .iter()
+            .any(|d| d.data().template_id == 5516),
+        "no Howling Abyss gate trap in the Cradle"
+    );
+    for (pid, (template, pulse, rest)) in [(5423, 14014, 14013), (5424, 14016, 14015)]
+        .into_iter()
+        .enumerate()
     {
-        let data = player.data();
-        assert!(data.unit.hp < 10_000);
-        assert!(data.unit.buffs.check_buff(3999));
+        let spike = find_doodad(&world, template);
+        assert_eq!(spike.data().func_group_id, rest, "{template} rests");
+        let pos = spike.data().transform;
+        let player = place_player(&server, &world, pid as u32 + 1, pos.x, pos.y, pos.z);
+        super::doodad::manager::do_change_phase(&server, &world, &spike, None, pulse);
+        {
+            let data = player.data();
+            assert!(data.unit.hp < 10_000, "{template} pulse damages");
+            assert!(data.unit.buffs.check_buff(4351), "{template} impales");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            spike.data().func_group_id,
+            rest,
+            "{template} back to its timer"
+        );
+        assert!(
+            player.data().unit.buffs.check_buff(4351),
+            "{template}: Impaled outlasts the 200 ms pulse"
+        );
     }
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    assert_eq!(spear.data().func_group_id, 14142);
-    assert!(player.data().unit.buffs.check_buff(3999));
+}
+
+/// The secret room stays sealed, as the 2014 videos show. Its boulder 5547 has no family: the
+/// level's family 80022 would wire it to the Destruction Device 5549, whose "Open Secret Room"
+/// use (phase 14331: `Pulse(t)` to family 80022) breaks it (14281 -> 14287).
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_cradle_secret_room_boulder_ignores_the_device() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = real_server(&db);
+    load_cradle(&server, &conn_of(&db));
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(INSTANCE_ID)
+        .unwrap()
+        .spawn_doodads(&server);
+    let boulder = find_doodad(&world, 5547);
+    let device = find_doodad(&world, 5549);
+    assert_eq!(boulder.data().func_group_id, 14281, "closed");
+    assert_eq!(boulder.data().family_id, 0);
+    assert_eq!(device.data().family_id, 80020);
+    let at = device.data().transform;
+    let player = place_player(&server, &world, 1, at.x + 1.0, at.y, at.z);
+    let me = WorldObject::from(&player);
+    super::doodad::manager::do_change_phase(&server, &world, &device, Some(&me), 14331);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(boulder.data().func_group_id, 14281, "the room stays sealed");
+
+    // With the level's family the same pulse opens it: the missing family is what seals it.
+    boulder.data().family_id = 80022;
+    super::doodad::manager::do_change_phase(&server, &world, &device, Some(&me), 14304);
+    super::doodad::manager::do_change_phase(&server, &world, &device, Some(&me), 14331);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(boulder.data().func_group_id, 14287, "the device's chain");
 }
 
 #[path = "cradle_event_tests.rs"]
@@ -1408,11 +1537,101 @@ fn cradle_level_jets_hazards_and_boats_are_the_authored_placements() {
     }
 }
 
-/// The Kitchen demon's patrol is a designer path of the r208022 client's zone 264
-/// `areasmission0.bai`: a closed loop through the Kitchen that starts at the spawn.
+// ---------------------------------------------------------------------------------------------
+// Layout follow-up (2026-11-22): patrols, mushroom-room walls, secret boulder, barriers, stones
+// ---------------------------------------------------------------------------------------------
+
+/// The 44 level spawners with a designer patrol (`zone/264/editor/npc_spawners.g` of the
+/// ArcheAge Returns r575 level): level spawner, the row's NPC (the compact spawner's member),
+/// the level spawn and yaw, and the number of `AIPath_264_nopeople_<n>`. 36 rows were the
+/// 1.2-era rows of the same NPC in the same room, eight are added (four Cinderhorn Boars,
+/// three Broken Toys, the Venomous Marksman 88945).
+#[rustfmt::skip]
+const PATROL_ROWS: [(u32, u32, f32, f32, f32, f32, u32); 44] = [
+    (88922, 11357, 807.042, 842.292, 192.504, -94.0, 1),
+    (88973, 11557, 590.053, 845.057, 182.688, -142.0, 22),
+    (92937, 12160, 168.485, 748.184, 180.188, 0.0, 82),
+    (92938, 12160, 159.653, 745.58, 179.49, 0.0, 83),
+    (92939, 12160, 154.557, 739.158, 180.067, 0.0, 84),
+    (92943, 12160, 178.195, 757.619, 179.168, 0.0, 85),
+    (92940, 12160, 191.952, 748.427, 179.514, 0.0, 86),
+    (92942, 12160, 197.362, 750.317, 178.834, 0.0, 87),
+    (92941, 12160, 197.335, 744.567, 179.362, 0.0, 88),
+    (94649, 11357, 308.613, 867.066, 163.748, -117.0, 172),
+    (92508, 11357, 287.899, 869.337, 165.965, 98.0, 173),
+    (92493, 11357, 279.328, 795.247, 181.8, 51.0, 174),
+    (88924, 11357, 768.424, 911.242, 198.487, -153.0, 206),
+    (92488, 11365, 763.249, 915.39, 200.0, -115.0, 207),
+    (92487, 11365, 760.714, 920.465, 201.461, -134.0, 208),
+    (88925, 11365, 752.782, 922.789, 201.135, -122.0, 209),
+    (88947, 11365, 766.747, 761.979, 184.179, -43.0, 210),
+    (88946, 11357, 764.242, 761.216, 183.304, -43.0, 211),
+    (88948, 11365, 749.291, 750.792, 178.537, -55.0, 212),
+    (92490, 11365, 621.576, 759.516, 181.27, 0.0, 213),
+    (92491, 11365, 611.967, 769.308, 181.824, -142.0, 214),
+    (88942, 11365, 599.48, 790.531, 182.666, -166.0, 215),
+    (88945, 11155, 612.772, 914.777, 197.976, -38.0, 216),
+    (88944, 11365, 615.271, 914.929, 197.233, -56.0, 217),
+    (92489, 11365, 597.579, 889.024, 189.06, 0.0, 218),
+    (88992, 11357, 214.185, 826.343, 180.674, -71.0, 219),
+    (92497, 11365, 193.669, 804.856, 180.981, -35.0, 220),
+    (88993, 11357, 183.92, 782.626, 179.449, -59.0, 221),
+    (92494, 11365, 191.195, 804.077, 181.097, 0.0, 222),
+    (98020, 11357, 646.329, 747.943, 176.204, 0.0, 290),
+    (98021, 11357, 613.165, 773.722, 180.25, 0.0, 291),
+    (98022, 11365, 787.801, 887.98, 194.181, 0.0, 292),
+    (98023, 11357, 729.887, 930.329, 200.954, 0.0, 293),
+    (98025, 11365, 206.784, 814.883, 180.141, 0.0, 294),
+    (98026, 11365, 196.967, 808.982, 181.27, 0.0, 352),
+    (88915, 11156, 792.6, 846.579, 192.534, 11.0, 427),
+    (102900, 11357, 767.199, 839.485, 192.687, 0.0, 492),
+    (92705, 11357, 706.792, 929.671, 199.783, 0.0, 493),
+    (88939, 11552, 709.579, 744.144, 173.076, -46.0, 496),
+    (89004, 11164, 248.289, 487.329, 172.948, 66.0, 497),
+    (89005, 11164, 248.396, 517.807, 173.439, 90.0, 498),
+    (92904, 11164, 493.997, 521.91, 181.018, 75.0, 499),
+    (92898, 11164, 500.264, 492.827, 180.895, 0.0, 500),
+    (92897, 11357, 487.898, 504.139, 180.663, 0.0, 501),
+];
+
+fn patrol_path(n: u32) -> String {
+    format!("AIPath_264_nopeople_{n}")
+}
+
+/// Every level patrol has exactly one start row at its level spawn, with its path, and no
+/// other row patrols.
+#[test]
+fn cradle_level_patrols_are_placed_once_each_with_their_path() {
+    let defs = npc_spawn_defs();
+    for (spawner, unit, x, y, z, yaw, n) in PATROL_ROWS {
+        let path = patrol_path(n);
+        let rows: Vec<_> = defs.iter().filter(|d| d.base.follow_path == path).collect();
+        assert_eq!(rows.len(), 1, "{path} (level {spawner})");
+        let d = rows[0];
+        let p = &d.base.position;
+        assert!(d.npc_spawner_ids.is_empty(), "{path}: a start row");
+        assert_eq!(d.base.unit_id, unit, "{path}");
+        assert!(
+            near(p.x, x, 0.001) && near(p.y, y, 0.001) && near(p.z, z, 0.001),
+            "{path}: {p:?}"
+        );
+        assert!(near(p.yaw, yaw, 0.01), "{path}: yaw {}", p.yaw);
+    }
+    assert_eq!(
+        defs.iter()
+            .filter(|d| !d.base.follow_path.is_empty())
+            .count(),
+        PATROL_ROWS.len()
+    );
+}
+
+/// The patrols are designer paths of the r208022 client's zone 264 `areasmission0.bai`, and
+/// each starts at its row (the level spawn is the path's first point). 21 are closed loops
+/// (the Kitchen demon's among them), 23 are one-way routes the server walks out and back.
 #[test]
 #[ignore = "needs AAEMU_GAME_PAK"]
-fn real_client_cradle_kitchen_demon_patrol_is_a_loop_from_its_spawn() {
+fn real_client_cradle_level_patrols_start_at_their_spawns() {
+    use crate::systems::ai::framework::{designer_patrol_cycle, DESIGNER_PATH_OPEN_GAP};
     let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
         return;
     };
@@ -1427,24 +1646,341 @@ fn real_client_cradle_kitchen_demon_patrol_is_a_loop_from_its_spawn() {
         &Default::default(),
     )
     .expect("areas parse");
-    let path = areas
+    let mut open = 0;
+    for (spawner, _, x, y, z, _, n) in PATROL_ROWS {
+        let name = patrol_path(n);
+        let path = areas
+            .designer_paths
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} (level {spawner}) is in the r208022 client"));
+        let first = path.points[0];
+        let last = path.points[path.points.len() - 1];
+        assert!(path.points.len() >= 4, "{name}");
+        assert!(
+            (first.x - x).hypot(first.y - y) < 2.0,
+            "{name} starts at its spawn: {first:?}"
+        );
+        assert!((first.z - z).abs() < 0.5, "{name}: {first:?} vs Z {z}");
+        if (first.x - last.x).hypot(first.y - last.y) > DESIGNER_PATH_OPEN_GAP {
+            open += 1;
+            let cycle = designer_patrol_cycle(path.points.clone());
+            assert_eq!(
+                cycle.len(),
+                2 * path.points.len() - 2,
+                "{name} out and back"
+            );
+        }
+    }
+    assert_eq!(open, 23, "one-way routes");
+
+    // The Kitchen demon's loop stays in the Kitchen, on its floor.
+    let kitchen = areas
         .designer_paths
         .iter()
         .find(|p| p.name == KITCHEN_DEMON_PATH)
         .expect("the Kitchen demon's designer path");
-    assert_eq!(path.points.len(), 27);
-    let first = path.points[0];
-    let last = path.points[path.points.len() - 1];
-    assert!(
-        (first.x - 709.579).hypot(first.y - 744.144) < 1.0,
-        "{first:?}"
-    );
+    assert_eq!(kitchen.points.len(), 27);
+    let first = kitchen.points[0];
+    let last = kitchen.points[kitchen.points.len() - 1];
     assert!((first.x - last.x).hypot(first.y - last.y) < 1.5, "a loop");
-    for p in &path.points {
+    for p in &kitchen.points {
         assert!(
             (p.x - 695.0).hypot(p.y - 744.0) < 25.0,
             "{p:?} in the Kitchen"
         );
         assert!((p.z - 173.0).abs() < 1.0, "{p:?} on the Kitchen floor");
     }
+}
+
+/// The level's mushroom-room chain, secret boulder, stair barriers and stepping stones replace
+/// PR #155's guesses: the gate 6002 and the walls 5545 / 6050 for the two stone gates 5395, the
+/// boulder 20 m further north at full scale, twelve barriers 5423 / 5424 for five Howling Abyss
+/// gate traps 5516, and 22 stones for 18.
+#[test]
+fn cradle_level_gates_boulder_spikes_and_stones_are_the_authored_rows() {
+    let defs = doodad_spawn_defs();
+    let rows =
+        |template: u32| -> Vec<_> { defs.iter().filter(|d| d.base.unit_id == template).collect() };
+    for template in [5395, 5516] {
+        assert!(rows(template).is_empty(), "no {template}");
+    }
+    // Template, family, level position (yaw 0, scale 1).
+    for (template, family, x, y, z) in [
+        (5406, 80010, 813.06, 844.007, 192.896),
+        (6002, 80013, 812.817, 840.877, 192.904),
+        (5545, 80012, 789.123, 807.109, 193.024),
+        (6050, 80012, 787.802, 873.579, 192.201),
+        // The level's family 80022 is left out: it would let device 5549 open the room.
+        (5547, 0, 301.536, 778.214, 184.777),
+    ] {
+        let r = rows(template);
+        assert_eq!(r.len(), 1, "{template}");
+        let p = &r[0].base.position;
+        assert_eq!(r[0].family_id, family, "{template}");
+        assert!(
+            near(p.x, x, 0.001) && near(p.y, y, 0.001) && near(p.z, z, 0.001),
+            "{template}: {p:?}"
+        );
+        assert!(near(r[0].scale, 1.0, 1e-6), "{template} at scale 1");
+    }
+    assert_eq!(rows(5423).len(), 8, "Impaling Barrier (1.5 s)");
+    assert_eq!(rows(5424).len(), 4, "Impaling Barrier (2 s)");
+    let stones = rows(5880);
+    assert_eq!(stones.len(), 22);
+    let in_box = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
+        stones
+            .iter()
+            .filter(|d| {
+                let p = &d.base.position;
+                p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1
+            })
+            .count()
+    };
+    assert_eq!(in_box((170.0, 545.0, 190.0, 625.0)), 13, "the west pools");
+    assert_eq!(
+        in_box((300.0, 495.0, 340.0, 515.0)),
+        7,
+        "Soulscour Bathroom"
+    );
+    assert_eq!(in_box((305.0, 810.0, 320.0, 830.0)), 2, "Death's Door");
+}
+
+/// The r208022 collision under the layout rows. The patrol spawns, the mushroom-room chain and
+/// the twelve barriers stand on the floor. The secret room (chests at (297, 742)) is reachable
+/// from the passage below it without the boulder, and sealed with the boulder's model
+/// (`stone_door_2`, a 35 x 31 x 51 m cave rock) at its row. The mushroom room leads on only
+/// through an open Poison Cloud wall, and either wall alone is a way through. Each stepping
+/// stone (`stop_rock`, its top 10.87 m above the origin) stands out of its pool's water.
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_client_cradle_layout_rows_stand_on_the_r208022_floor() {
+    use crate::systems::ai::collision::{self, objects, world::ObjKind};
+    use crate::systems::skills::controllers::Vec3 as UnitVec3;
+    use aaemu_physics::math::{Quat, Vec3};
+    let Some(server) = super::howling_world_tests::pak_server() else {
+        return;
+    };
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_name(WORLD)
+        .unwrap()
+        .clone();
+    let world = server.world.create_world_instance(Arc::new(template), 100);
+    let id = world.id;
+    let pw = collision::phys_world(&server, id).expect("collision");
+    collision::ensure_box(
+        &server,
+        &pw,
+        Vec3::new(120.0, 450.0, 60.0),
+        Vec3::new(900.0, 960.0, 260.0),
+    );
+    let water = crate::systems::ai::physics::world_water(&server, &world);
+    let floor = |x: f32, y: f32, z: f32| {
+        collision::ground_height_probe(&server, id, x, y, z, 0.5, 5.0)
+            .flatten()
+            .unwrap_or(f32::NAN)
+    };
+
+    // The level spawns sit on the floor or up to 0.6 m above it (the walkers are grounded on
+    // spawn), never below it.
+    for (spawner, _, x, y, z, _, n) in PATROL_ROWS {
+        let f = floor(x, y, z);
+        assert!(
+            z - f > -0.05 && z - f < 0.6,
+            "patrol {n} (level {spawner}): floor {f} vs {z}"
+        );
+    }
+    let defs = doodad_spawn_defs();
+    for d in defs
+        .iter()
+        .filter(|d| matches!(d.base.unit_id, 5406 | 6002 | 5545 | 6050 | 5423 | 5424))
+    {
+        let p = &d.base.position;
+        let f = floor(p.x, p.y, p.z);
+        assert!(
+            (f - p.z).abs() < 0.05,
+            "{} at ({}, {}, {}): floor {f}",
+            d.base.unit_id,
+            p.x,
+            p.y,
+            p.z
+        );
+    }
+
+    let files = collision::files(&server).expect("client files");
+    let models = collision::model_cache(&server, &files);
+    let shape = |model: &str| {
+        objects::resolve_shape(
+            &files,
+            &models,
+            &mut Default::default(),
+            &objects::parse_model_ref(model),
+        )
+        .expect(model)
+    };
+    let mut next_id = 990_000;
+    let mut place = |model: &str, p: &crate::data::world_templates::WorldSpawnPosition| {
+        let key = objects::shape_key(
+            model,
+            Vec3::new(p.x, p.y, p.z),
+            Quat::IDENTITY,
+            1.0,
+            objects::collision_flags(false, false, false),
+        );
+        next_id += 1;
+        pw.lock()
+            .set_object_shape(ObjKind::Doodad, next_id, key, Some(&shape(model)), false);
+    };
+
+    // The secret room: a walk from the patrol spawn of `AIPath_264_nopeople_174` (the passage
+    // north of the room) reaches the chests only while the boulder is absent.
+    let boulder = defs.iter().find(|d| d.base.unit_id == 5547).unwrap();
+    let bp = &boulder.base.position;
+    let f = floor(bp.x, bp.y, bp.z + 1.0);
+    assert!((f - bp.z).abs() < 1.5, "boulder on its ledge: floor {f}");
+    let start = [279.328, 795.247, 181.8];
+    let chests = [297.226, 741.934];
+    assert!(
+        walks_to(&server, id, start, chests, SECRET_AREA, &[]),
+        "the room without the boulder"
+    );
+    place(
+        "prefab://prefabs/interaction_d.xml/cradle_of_destruction.stone_door_2",
+        bp,
+    );
+    assert!(
+        !walks_to(&server, id, start, chests, SECRET_AREA, &[]),
+        "the boulder seals the room"
+    );
+
+    // The mushroom room: with both Poison Cloud walls standing (their clouts' 14 x 4 m box,
+    // taken as 7 x 2 m half sizes) nothing leads on to the Carnivore's Egg room. Either wall
+    // alone opens a way there, so the gate's roll never strands a party.
+    let wall = |template: u32| {
+        let p = defs
+            .iter()
+            .find(|d| d.base.unit_id == template)
+            .unwrap()
+            .base
+            .position;
+        [p.x, p.y, 7.0, 2.0]
+    };
+    let (south, north) = (wall(5545), wall(6050));
+    let lab = [795.0, 840.0, 192.6];
+    let eggs = [590.0, 845.0];
+    let east = [540.0, 680.0, 900.0, 980.0];
+    assert!(
+        !walks_to(&server, id, lab, eggs, east, &[south, north]),
+        "both walls close the room"
+    );
+    assert!(
+        walks_to(&server, id, lab, eggs, east, &[north]),
+        "the south exit"
+    );
+    assert!(
+        walks_to(&server, id, lab, eggs, east, &[south]),
+        "the north exit"
+    );
+
+    // Stepping stones: the top of each stone is above its pool's surface, below a step up.
+    for d in defs.iter().filter(|d| d.base.unit_id == 5880) {
+        let p = d.base.position;
+        place(
+            "prefab://prefabs/interaction_d.xml/cradle_of_destruction.stop_rock",
+            &p,
+        );
+        let (surface, _) = water.get_water_surface(UnitVec3::new(p.x, p.y, p.z));
+        assert!(
+            water.is_water(UnitVec3::new(p.x, p.y, p.z)).is_some(),
+            "{p:?} in a pool"
+        );
+        let top = collision::ground_height_probe(&server, id, p.x, p.y, surface + 3.0, 0.0, 3.0)
+            .flatten()
+            .unwrap_or(f32::NAN);
+        eprintln!(
+            "stone ({}, {}): top {top}, {:.2} m above the surface",
+            p.x,
+            p.y,
+            top - surface
+        );
+        assert!(
+            top - surface > 0.15 && top - surface < 1.5,
+            "stone ({}, {}, {}): top {top}, surface {surface}",
+            p.x,
+            p.y,
+            p.z
+        );
+    }
+}
+
+/// The secret room and the passages around it: `[x0, y0, x1, y1]`.
+const SECRET_AREA: [f32; 4] = [120.0, 650.0, 380.0, 900.0];
+
+/// Whether a walker on the r208022 collision gets from `start` to within 2 m of `goal` inside
+/// `area` (`[x0, y0, x1, y1]`): a flood over a 1 m grid, each step at most 1 m up or 2.5 m
+/// down, with the straight line between the two floor points clear at knee and head height,
+/// and never into a `closed` box (`[centre x, centre y, half x, half y]`).
+fn walks_to(
+    server: &GameServer,
+    id: u32,
+    start: [f32; 3],
+    goal: [f32; 2],
+    area: [f32; 4],
+    closed: &[[f32; 4]],
+) -> bool {
+    use crate::systems::ai::collision::{self, query};
+    let mut seen = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    let Some(Some(z)) =
+        collision::ground_height_probe(server, id, start[0], start[1], start[2], 1.0, 3.0)
+    else {
+        return false;
+    };
+    queue.push_back([start[0], start[1], z]);
+    while let Some([x, y, z]) = queue.pop_front() {
+        if (x - goal[0]).hypot(y - goal[1]) < 2.0 {
+            return true;
+        }
+        if seen.len() > 150_000 {
+            return false;
+        }
+        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            let (nx, ny) = (x + dx, y + dy);
+            if !(area[0]..area[2]).contains(&nx)
+                || !(area[1]..area[3]).contains(&ny)
+                || closed
+                    .iter()
+                    .any(|b| (nx - b[0]).abs() < b[2] && (ny - b[1]).abs() < b[3])
+            {
+                continue;
+            }
+            let Some(Some(nz)) = collision::ground_height_probe(server, id, nx, ny, z, 1.0, 2.5)
+            else {
+                continue;
+            };
+            let key = (nx as i32, ny as i32, (nz * 2.0).round() as i32);
+            if seen.contains(&key) {
+                continue;
+            }
+            let blocked = [0.9_f32, 1.7].iter().any(|h| {
+                collision::raycast(
+                    server,
+                    id,
+                    [x, y, z + h],
+                    [nx, ny, nz + h],
+                    query::mask::STATIC_TERRAIN,
+                    query::ray_flags::DEFAULT,
+                )
+                .flatten()
+                .is_some()
+            });
+            if !blocked {
+                seen.insert(key);
+                queue.push_back([nx, ny, nz]);
+            }
+        }
+    }
+    false
 }
