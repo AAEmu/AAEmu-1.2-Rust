@@ -99,40 +99,7 @@ pub fn enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
 
 /// `behavior.Tick(delta)` (`delta_ms` = the AI manager's tick delta).
 pub fn tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
-    if let Some(start) = (k != B::Spawning
-        && c.npc.data().unit.template_id == 12014
-        && c.obj.transform().zone_id == 262)
-        .then(|| {
-            c.obj.with_base_unit(|unit| {
-                unit.buffs()
-                    .effects
-                    .iter()
-                    .find(|buff| buff.template.id == 4225 && !buff.is_ended())
-                    .map(|buff| buff.start_time_ms)
-            })
-        })
-        .flatten()
-    {
-        // The event spawners place each vortex on a different side of the arena.
-        // Traverse toward the center and back while its authored hazard buff is active.
-        let home = c.ai.idle_position;
-        let center = Vec3::new(613.275, 634.419, home.z);
-        let elapsed = (now_ms() - start).max(0) as f32 / 1000.0;
-        let phase = elapsed / 15.0;
-        let fraction = 1.0 - (phase.rem_euclid(2.0) - 1.0).abs();
-        let waypoint = Vec3::new(
-            home.x + (center.x - home.x) * fraction,
-            home.y + (center.y - home.y) * fraction,
-            home.z,
-        );
-        let pace = npc::real_movement_speed(&c.obj, 3.0);
-        npc_move_towards(
-            c,
-            waypoint,
-            (pace * delta_seconds(delta_ms)) as f32,
-            4,
-            0.05,
-        );
+    if encounter_hooks::for_zone(c.obj.transform().zone_id).ai_tick(c, k, delta_ms) {
         return;
     }
     match k {
@@ -1181,16 +1148,9 @@ fn should_return(c: &AiCtx<'_>) -> bool {
     {
         return leash;
     }
-    if is_stonebrother(c) {
-        return !npc::in_stonebrother_arena(me) || !npc::in_stonebrother_arena(target_position);
-    }
     let distance_to_target = calculate_distance(me, target_position, true);
     let distance_to_idle = calculate_distance(me, c.ai.idle_position, true);
     distance_to_target > return_distance || distance_to_idle > return_distance
-}
-
-fn is_stonebrother(c: &AiCtx<'_>) -> bool {
-    c.npc.data().unit.template_id == 11363 && c.obj.transform().zone_id == 262
 }
 
 /// The template's `(return_distance, absolute_return_distance)`, defaulting to 50 m / 200 m.
@@ -1572,10 +1532,8 @@ fn move_in_range(c: &mut AiCtx<'_>, k: BehaviorKind, target: Option<&WorldObject
             return;
         }
     }
-    if is_stonebrother(c) && npc::in_stonebrother_arena(target_pos) {
-        // The Colossus's footprint cannot use the small-NPC corridor route.
-        // Chase on the arena floor while the room leash permits it.
-        npc_move_towards(c, target_pos, speed as f32, move_flags, 1.0);
+    if encounter_hooks::for_zone(c.obj.transform().zone_id).chase(c, target_pos, speed, move_flags)
+    {
         return;
     }
     if geo_data_mode(c) && moves_freely(c) {

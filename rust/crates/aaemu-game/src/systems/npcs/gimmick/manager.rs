@@ -917,26 +917,6 @@ pub fn spawn_from_doodad(
     Some(gimmick)
 }
 
-/// The placed keg's five-second fuse has fired. Gimmick 56 carries the explosion
-/// as its contact skill, but a stationary keg does not make a physics contact.
-pub(crate) fn detonate_powder_keg(
-    server: &GameServer,
-    world: &Arc<WorldInstance>,
-    source: &WorldObject,
-    template: &crate::systems::npcs::doodad::templates::DoodadFuncSpawnGimmick,
-) -> bool {
-    let Some(gimmick) = spawn_from_doodad(server, world, source, template) else {
-        return false;
-    };
-    let Some(active) = server.systems.npcs.gimmicks.find(gimmick.obj_id) else {
-        return false;
-    };
-    do_gimmick_skill(server, world, &active, 18717);
-    active.state().despawned = true;
-    despawn(server, &active);
-    true
-}
-
 /// `GimmickSpawner.Despawn(gimmick)`: removes it from the manager and the world; releases its
 /// ids unless a respawn is pending.
 pub fn despawn(server: &GameServer, active: &ActiveGimmick) {
@@ -960,7 +940,7 @@ pub fn despawn(server: &GameServer, active: &ActiveGimmick) {
 /// `Gimmick.DoGimmickSkill(skillId)`: runs the skill once through the skills hook (caster =
 /// the spawner unit, a `SkillDoodad` caster of the gimmick, cast at the gimmick's position) and
 /// announces it in the system chat around the gimmick.
-fn do_gimmick_skill(
+pub(crate) fn do_gimmick_skill(
     server: &GameServer,
     world: &WorldInstance,
     active: &ActiveGimmick,

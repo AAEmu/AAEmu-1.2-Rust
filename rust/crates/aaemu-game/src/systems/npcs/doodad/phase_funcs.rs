@@ -15,6 +15,7 @@ use super::spawner::{DoodadSpawner, DoodadSpawnerDef, SpawnerBase};
 use super::tasks::{self, FuncTaskKind};
 use super::templates::*;
 use crate::data::world_templates::WorldSpawnPosition;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry::{self as encounters, CloutClass};
 use crate::systems::npcs::area_trigger::{self, AreaTrigger};
 use crate::systems::npcs::fish_school;
@@ -374,17 +375,11 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         // documented there (capture-pending).
         FuncTemplate::SiegePeriod(_) => false,
         FuncTemplate::SpawnGimmick(f) => {
-            if ctx.doodad.data().template_id == 5951 && f.gimmick_id == 56 {
-                if crate::systems::npcs::gimmick::manager::detonate_powder_keg(
-                    server,
-                    &ctx.world,
-                    &ctx.obj(),
-                    f,
-                ) {
-                    ctx.doodad.data().phase.override_phase = 15332;
-                    return true;
-                }
-                return false;
+            if let Some(used) = encounter_hooks::all()
+                .iter()
+                .find_map(|encounter| encounter.spawn_gimmick(server, ctx, f))
+            {
+                return used;
             }
             if crate::systems::npcs::gimmick::manager::spawn_from_doodad(
                 server,

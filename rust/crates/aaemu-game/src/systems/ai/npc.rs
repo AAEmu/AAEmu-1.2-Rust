@@ -580,16 +580,6 @@ pub fn move_towards(
             new.z,
             zone_id,
         );
-        if template_id == 11363
-            && zone_id == 262
-            && in_stonebrother_arena(Vec3::new(new.x, new.y, pos.z))
-        {
-            // Keep the large ground actor on the room's level if a ray hits the
-            // floor beneath the arena or the collision mesh above its feet.
-            if let Some(floor) = spawner_z.filter(|_| !(149.0..=156.0).contains(&target_z)) {
-                target_z = floor;
-            }
-        }
         target_z = encounter_hooks::for_zone(zone_id).walker_floor(
             template_id,
             zone_id,
@@ -713,10 +703,7 @@ pub fn reference_height(
 /// ground under the walker.
 pub const WALKER_MAX_DROP: f32 = 12.0;
 
-/// The Colossus room around the authored spawn, above the passages underneath.
-pub(crate) fn in_stonebrother_arena(pos: Vec3) -> bool {
-    (pos.x - 614.4).hypot(pos.y - 423.4) <= 31.0 && (149.0..=160.0).contains(&pos.z)
-}
+pub(crate) use crate::systems::instances::encounters::sharpwind::in_stonebrother_arena;
 
 /// The raised passages have another walkable floor only a few meters underneath.
 pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {
