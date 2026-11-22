@@ -376,3 +376,85 @@ async fn real_howling_godfrey_event_runs_once_and_the_boss_stays_dead() {
     assert_eq!(alive(&world, 12788), 0);
     assert_eq!(alive(&world, 12761), 0, "the killed boss stays dead");
 }
+
+/// Greater keeps Normal's event trigger 12133 (tag 815 lists it with 12787 and the finale
+/// removes it), but not Normal's ghost Godfrey 12134: the friendly quest giver for Normal's
+/// "Ancient Titan Musperosa" (level 44) stood beside Greater's boss spawn the whole run.
+#[test]
+fn greater_places_no_normal_ghost_godfrey() {
+    let units = |world: &str| {
+        let path = app_path().join(format!("Data/Worlds/{world}/npc_spawns.json"));
+        let text = std::fs::read_to_string(path).expect("spawn file");
+        regex::Regex::new(r#""UnitId"\s*:\s*([0-9]+)"#)
+            .unwrap()
+            .captures_iter(&text)
+            .map(|c| c[1].parse::<u32>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let greater = units(GREATER);
+    assert!(!greater.contains(&12134), "no friendly Godfrey in Greater");
+    assert_eq!(greater.iter().filter(|&&u| u == 12133).count(), 1);
+    assert_eq!(
+        units("instance_howling_abyss")
+            .iter()
+            .filter(|&&u| u == 12134)
+            .count(),
+        1,
+        "Normal keeps its quest giver"
+    );
+}
+
+/// A refused sphere cast stays owed for the whole sphere, not for the circle it was tried in.
+/// The player arrives in the overlap of two approach circles before Godfrey's trigger NPC has
+/// spawned, so the cast waits. Leaving the first circle while still inside the second keeps the
+/// retry, and the trigger's arrival fires the cast exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_howling_sphere_retry_survives_moving_between_its_circles() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = load_greater(&db);
+    let (mut client, player) = player_at(&server, 1, [505.0, 478.0, 187.6]);
+    let areas = crate::systems::quests::spheres::load_sphere_areas(&app_path(), |id| id == 2184);
+    let (a, b) = ((512.841, 483.94, 187.6), (514.93, 476.863, 187.6));
+    let circle = |c: (f32, f32, f32)| {
+        areas
+            .iter()
+            .find(|s| (s.xyz.0 - c.0).abs() < 0.01 && (s.xyz.1 - c.1).abs() < 0.01)
+            .expect("approach circle")
+            .clone()
+    };
+    let (circle_a, circle_b) = (circle(a), circle(b));
+    let overlap = (513.885, 480.4, 187.6);
+    assert!(circle_a.contains(overlap) && circle_b.contains(overlap));
+    assert!(!circle_a.contains(b) && circle_b.contains(b));
+    server.systems.quests.spheres.set_areas(areas);
+    let spheres = &server.systems.quests.spheres;
+    let mut casts = 0;
+    let mut tick = |at: (f32, f32, f32), now: i64, client: &mut TestClient| {
+        player.data().unit.transform.set_xyz(at.0, at.1, at.2);
+        spheres.tick_at(&server, now);
+        casts += client
+            .drain()
+            .iter()
+            .filter(|(opcode, body)| {
+                *opcode == crate::opcodes::sc::SCSkillFiredPacket
+                    && body.starts_with(&21413u32.to_le_bytes())
+            })
+            .count();
+        casts
+    };
+    tick((505.0, 478.0, 187.6), 0, &mut client);
+    assert_eq!(tick(overlap, 500, &mut client), 0, "no trigger NPC yet");
+    assert_eq!(tick(b, 1_000, &mut client), 0, "still waiting in circle B");
+    let trigger = npc_at(&server, &world, 12133, [566.856, 450.396, 201.5743]);
+    crate::systems::ai::hooks::spawn_positioned(&server, &trigger);
+    assert_eq!(tick(b, 1_500, &mut client), 1, "the owed cast fires");
+    assert_eq!(tick(b, 2_000, &mut client), 1);
+    assert_eq!(
+        tick(overlap, 2_500, &mut client),
+        1,
+        "no new entry inside the sphere"
+    );
+}

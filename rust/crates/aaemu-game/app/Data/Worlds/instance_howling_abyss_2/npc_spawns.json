@@ -2802,20 +2802,6 @@
     "Scale": 1.0
   },
   {
-    "Id": 103149,
-    "UnitId": 12134,
-    "Title": "Ironblade Knight Captain Travis Godfrey",
-    "Position": {
-      "X": 530.9,
-      "Y": 478.752,
-      "Z": 187.7099,
-      "Roll": 0.0,
-      "Pitch": 0.0,
-      "Yaw": 104.0625
-    },
-    "Scale": 1.5
-  },
-  {
     "Id": 104958,
     "UnitId": 12759,
     "Title": "Calleil the Cursed",

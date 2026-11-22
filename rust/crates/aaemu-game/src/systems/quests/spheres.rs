@@ -383,10 +383,11 @@ struct AreaState {
     /// settled yet: tried again on every tick until it acts or the character leaves the area
     /// (see [`dispatch_doodad_interact`]).
     pending_interact: Vec<usize>,
-    /// `SphereSkill` areas (indexes) the character is inside whose enter-edge cast was refused
-    /// (e.g. it was casting or channeling): tried again on every tick until a cast is accepted
-    /// or the character leaves the area (see [`dispatch_sphere_skill`]).
-    pending_skill: Vec<usize>,
+    /// `SphereSkill` spheres (ids) the character is inside whose enter-edge cast was refused
+    /// (e.g. it was casting or channeling, or the trigger NPC has not spawned yet): tried again
+    /// on every tick until a cast is accepted or the character leaves every circle of the
+    /// sphere (see [`dispatch_sphere_skill`]).
+    pending_skill: Vec<u32>,
 }
 
 /// Minimum interval between two `SCQuestAcceptConditional` offers of the same sphere to the
@@ -745,9 +746,11 @@ impl SphereQuestManager {
         let mut next: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut inside_players: Vec<(PlayerRef, Vec<usize>)> = Vec::new();
         let mut events: Vec<(PlayerRef, usize, bool)> = Vec::new();
-        // The spheres each character stood in on the previous tick, by sphere id: one
-        // `SphereSkill` row is often authored as a chain of overlapping circles.
-        let mut previous_spheres: HashSet<(u32, u32)> = HashSet::new();
+        // `SphereSkill` entries by sphere id: one row is often authored as a chain of
+        // overlapping circles, and walking from one circle into the next is not a new entry.
+        // Each extra cast of the Howling Abyss approach sphere restarted Godfrey's event.
+        let mut skill: Vec<(PlayerRef, u32)> = Vec::new();
+        let mut inside_spheres: HashMap<u32, HashSet<u32>> = HashMap::new();
         for player in server.world.all_characters() {
             if player.region().is_none() {
                 continue;
@@ -763,20 +766,29 @@ impl SphereQuestManager {
                 .filter(|(_, a)| a.world == world.template.name && a.contains(pos))
                 .map(|(i, _)| i)
                 .collect();
-            let (previous, pending_skill) = self
+            let previous = self
                 .area_state
                 .lock()
                 .expect("area state poisoned")
                 .get(&player.character_id)
-                .map(|st| (st.inside.clone(), st.pending_skill.clone()))
+                .map(|st| st.inside.clone())
                 .unwrap_or_default();
-            // A refused cast is still owed, so it does not count as having entered.
-            previous_spheres.extend(
-                previous
-                    .iter()
-                    .filter(|i| !pending_skill.contains(i))
-                    .map(|&i| (player.character_id, areas[i].sphere_id)),
-            );
+            let sphere_ids = |list: &[usize]| -> HashSet<u32> {
+                list.iter().map(|&i| areas[i].sphere_id).collect()
+            };
+            let (before, now) = (sphere_ids(&previous), sphere_ids(&inside));
+            let mut entered_ids: Vec<u32> = now.difference(&before).copied().collect();
+            entered_ids.sort_unstable();
+            for id in entered_ids {
+                if data
+                    .spheres
+                    .get(&id)
+                    .is_some_and(|s| s.sphere_detail_type == "SphereSkill")
+                {
+                    skill.push((player.clone(), id));
+                }
+            }
+            inside_spheres.insert(player.character_id, now);
             for &i in &inside {
                 if !previous.contains(&i) {
                     events.push((player.clone(), i, true));
@@ -798,8 +810,9 @@ impl SphereQuestManager {
                 let st = states.entry(id).or_default();
                 st.pending_interact
                     .retain(|area| inside.binary_search(area).is_ok());
+                let spheres = inside_spheres.get(&id);
                 st.pending_skill
-                    .retain(|area| inside.binary_search(area).is_ok());
+                    .retain(|sphere| spheres.is_some_and(|s| s.contains(sphere)));
                 st.inside = inside;
             }
         }
@@ -811,8 +824,7 @@ impl SphereQuestManager {
         // `SphereDoodadInteract` areas to try this tick: the ones entered now and the ones a
         // character stands in whose interaction has not settled yet.
         let mut interact: Vec<(PlayerRef, usize)> = Vec::new();
-        // The same for `SphereSkill`: the enter edge, plus a refused cast while inside.
-        let mut skill: Vec<(PlayerRef, usize)> = Vec::new();
+        // `skill` holds the `SphereSkill` enter edges; refused casts are added below.
         for (player, area, enter) in events {
             let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
                 continue;
@@ -836,17 +848,6 @@ impl SphereQuestManager {
             if enter && sphere.sphere_detail_type == "SphereDoodadInteract" {
                 interact.push((player.clone(), area));
             }
-            // Walking from one circle of a sphere into the next is not a new entry. Each
-            // extra cast of the Howling Abyss approach sphere restarted Godfrey's event.
-            if enter
-                && sphere.sphere_detail_type == "SphereSkill"
-                && !previous_spheres.contains(&(player.character_id, sphere.id))
-                && !skill.iter().any(|(p, a)| {
-                    p.character_id == player.character_id && areas[*a].sphere_id == sphere.id
-                })
-            {
-                skill.push((player.clone(), area));
-            }
         }
         {
             let states = self.area_state.lock().expect("area state poisoned");
@@ -862,12 +863,12 @@ impl SphereQuestManager {
                         interact.push((player.clone(), area));
                     }
                 }
-                for &area in &st.pending_skill {
+                for &sphere_id in &st.pending_skill {
                     if !skill
                         .iter()
-                        .any(|(p, a)| *a == area && p.character_id == player.character_id)
+                        .any(|(p, s)| *s == sphere_id && p.character_id == player.character_id)
                     {
-                        skill.push((player.clone(), area));
+                        skill.push((player.clone(), sphere_id));
                     }
                 }
             }
@@ -885,17 +886,17 @@ impl SphereQuestManager {
                 st.pending_interact.push(area);
             }
         }
-        for (player, area) in skill {
-            let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
+        for (player, sphere_id) in skill {
+            let Some(sphere) = data.spheres.get(&sphere_id) else {
                 continue;
             };
             // No lock is held across the cast (it takes the character's and the targets').
             let cast = dispatch_sphere_skill(server, &player, sphere);
             let mut states = self.area_state.lock().expect("area state poisoned");
             let st = states.entry(player.character_id).or_default();
-            st.pending_skill.retain(|a| *a != area);
+            st.pending_skill.retain(|s| *s != sphere_id);
             if !cast {
-                st.pending_skill.push(area);
+                st.pending_skill.push(sphere_id);
             }
         }
         // `SphereAcceptQuest` offers: on entry and when a character already inside becomes

@@ -3737,8 +3737,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::npcs (Howling Abyss follow-up, 2026-11-21): the event, water and breath fixes below.
   Their tests are in `howling_event_tests.rs`.
   * A `SphereSkill` area counts once per sphere id. Moving from one circle of a sphere into
-    an overlapping circle of the same sphere is not a new entry, and a refused cast is still
-    owed. Godfrey's approach sphere (1946 / 2184) is a chain of fifteen circles, so each player
+    an overlapping circle of the same sphere is not a new entry. A refused cast (for example
+    while the trigger NPC has not spawned) stays owed while the character is inside any
+    circle of the sphere. Godfrey's approach sphere (1946 / 2184) is a chain of fifteen circles, so each player
     restarted his event script several times on the walk in. The rule is inferred; the
     authored `trigger_condition_time` is still not used as a period.
   * An NPC's `DamageEffect` row with a `target_npc_tag_id` skips the relation check for the
@@ -3758,6 +3759,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     the corners instead. That put the first corridor past the entrance (181.9 m floor under a
     184.6 m surface), Godfrey's room and the Wailing Ranch approach under water, so players got
     a breath meter and could drown there. Other worlds keep the heuristic.
+  * Greater's spawn file no longer places Normal's ghost Godfrey 12134 at the boss spawn
+    (530.9, 478.75). 12134 is the friendly "Ghost State" quest giver for Normal's level 44
+    "Ancient Titan Musperosa" (4893). Greater has no ghost or quest equivalent, so it stood
+    beside Greater's boss for the whole run. Greater keeps Normal's event trigger 12133,
+    which tag 815 lists with Greater's 12787.
   * `NpcControlEffect` logs at debug, since area-wide scripts apply it to every matching NPC.
 * systems::npcs / ai (Howling Abyss follow-up, 2026-11-21): five tester reports after #157.
   - **Bridge collision (first corridor stairs).** `sal_temple_brige02.cgf` keeps its physics
