@@ -1707,8 +1707,9 @@ struct ChaseStep {
 /// ledge ([`npc::step_leaves_ledge`]): it waits at the edge (deviation from the C#, which
 /// walked it on at its own height through the air, see `PORTING.md`).
 ///
-/// The wait ends only with progress: a step along the planned route, or the chaser getting
-/// [`LEDGE_PROGRESS`] closer to the victim than it was at the edge. A chaser that has made no
+/// The wait ends only with progress: a step along the planned route, the chaser getting
+/// [`LEDGE_PROGRESS`] closer to the victim than it was at the edge, or the victim coming back
+/// within the walker's drop limit (a reachable chase again). A chaser that has made no
 /// progress for [`LEDGE_GIVE_UP_MS`] drops the victim it cannot reach, even when some steps
 /// in between were possible: a step sideways along the edge, or towards a victim that moves
 /// about below, used to restart the wait, so it could pace the edge for the whole fight.
@@ -1718,7 +1719,9 @@ fn chase_move(c: &mut AiCtx<'_>, victim: &WorldObject, goal: Vec3, step: ChaseSt
     if c.ai.ledge_block.is_some_and(|b| b.victim != victim_id) {
         c.ai.ledge_block = None;
     }
-    let to_victim = calculate_distance(owner_pos(c), npc::world_pos(c.server, victim), true);
+    let own = owner_pos(c);
+    let victim_pos = npc::world_pos(c.server, victim);
+    let to_victim = calculate_distance(own, victim_pos, true);
     if chase_step_leaves_ledge(c, goal, step.distance) {
         let block = *c.ai.ledge_block.get_or_insert(LedgeBlock {
             since_ms: now,
@@ -1734,7 +1737,9 @@ fn chase_move(c: &mut AiCtx<'_>, victim: &WorldObject, goal: Vec3, step: ChaseSt
         return;
     }
     if let Some(block) = c.ai.ledge_block {
-        if step.route_corner || to_victim < block.distance - LEDGE_PROGRESS {
+        let zone_id = c.obj.transform().zone_id;
+        let victim_below = victim_pos.z < own.z - npc::walker_max_drop(zone_id);
+        if ledge_wait_over(&block, &step, to_victim, victim_below) {
             c.ai.ledge_block = None;
         } else if now - block.since_ms >= LEDGE_GIVE_UP_MS {
             give_up_unreachable_victim(c, victim);
@@ -1742,6 +1747,20 @@ fn chase_move(c: &mut AiCtx<'_>, victim: &WorldObject, goal: Vec3, step: ChaseSt
         }
     }
     npc_move_towards(c, goal, step.distance, step.flags, step.tolerance);
+}
+
+/// Whether a possible chase `step` ends the wait at a ledge `block`: a step along the planned
+/// route, getting [`LEDGE_PROGRESS`] closer to the victim (`to_victim`, 3D), or a victim no
+/// longer below the walker's drop limit (`victim_below` false: it climbed back up to the
+/// walker's floor, so this is a reachable chase again, even when the victim keeps its
+/// distance on a direct route). A step sideways towards a victim still below does not end it.
+fn ledge_wait_over(
+    block: &LedgeBlock,
+    step: &ChaseStep,
+    to_victim: f32,
+    victim_below: bool,
+) -> bool {
+    step.route_corner || !victim_below || to_victim < block.distance - LEDGE_PROGRESS
 }
 
 /// The end of a wait at a ledge: the victim leaves the aggro table and the route is dropped.

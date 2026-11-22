@@ -3862,7 +3862,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     first (`Route::approaches_goal`); otherwise `find_path_with_radius` returns no route.
   - **Ledge wait.** The 3 s wait of a chaser at a ledge (#165) ended at the first step it could
     take. Now only progress ends it: a step to a route corner, or getting 1 m closer to the
-    victim than at the edge (`framework::LedgeBlock`). A wait without progress ends after 3 s
+    victim than at the edge (`framework::LedgeBlock`), or the victim coming back within the
+    walker's drop limit (it climbed back up, so a direct chase that never gains a metre on it
+    still keeps it; `behaviors::ledge_wait_over`). A wait without progress ends after 3 s
     even if steps sideways or away were possible in between. Reaching the victim or a state
     change clears it, so a later fight does not inherit an old wait.
   - **Gaps are not ledges.** `npc::step_leaves_ledge` takes the step direction. A missing floor
