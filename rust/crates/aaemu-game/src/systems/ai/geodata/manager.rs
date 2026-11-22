@@ -488,6 +488,13 @@ impl AiGeoData {
         Some((n, graph.nodes[n as usize].pos))
     }
 
+    /// Whether the navigation node nearest to `pos` (as [`Self::resolve_nav_node`] picks it) is
+    /// an indoor waypoint rather than a triangle of the outdoor navmesh.
+    pub fn is_indoor(&self, zone_key: u32, pos: Vec3) -> bool {
+        self.find_closest_to_the_current(zone_key, pos)
+            .is_some_and(|(bai, r)| bai.node(r).nav_type() != NAV_TRIANGULAR)
+    }
+
     /// The navmesh height at a point: the plane of the enclosing triangle (`GetEnclosing`).
     /// Only looks at loaded data.
     pub fn enclosing_height(&self, pos: Vec3) -> Option<f32> {

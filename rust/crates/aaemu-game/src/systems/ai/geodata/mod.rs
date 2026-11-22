@@ -349,7 +349,8 @@ fn fallback_path(
         res_list.push(target);
     }
     let instance_id = c.obj.transform().instance_id;
-    if let Some(r) = walkable_reduction(c.server, instance_id, &res_list, 10) {
+    let zone_key = c.obj.transform().zone_id;
+    if let Some(r) = walkable_reduction(c.server, geo, zone_key, instance_id, &res_list, 10) {
         c.ai.path_node.found_path = r;
         return Some(res_list.len());
     }
@@ -372,13 +373,30 @@ fn fallback_path(
 /// in the indoor waypoint graphs (Howling Abyss) the 10-node skip cut the stairs from a
 /// corridor up to a platform and the chaser walked into the wall under the platform (deviation,
 /// see `PORTING.md`). `None` without the collision service (the caller keeps `ReducePath`).
+///
+/// A shortcut must also stay clear of the bai's forbidden areas, boundaries and designer
+/// forbidden areas, as in `ReducePath`, unless both of its ends are indoor (their nearest
+/// navigation node is a waypoint, [`AiGeoData::is_indoor`]): the forbidden areas are 2D
+/// outlines of the outdoor triangulation, and an instance hall lies inside the outline of the
+/// terrain under it.
 fn walkable_reduction(
     server: &GameServer,
+    geo: &AiGeoData,
+    zone_key: u32,
     instance_id: u32,
     found: &[Vec3],
     max_node_skip: usize,
 ) -> Option<std::collections::VecDeque<Vec3>> {
     super::collision::phys_world(server, instance_id)?;
+    let indoor: Vec<bool> = found.iter().map(|p| geo.is_indoor(zone_key, *p)).collect();
+    let shortcut = |from: usize, to: usize| {
+        (indoor[from] && indoor[to]
+            || matches!(
+                geo.line_passes_through_forbidden_area(found[from], found[to]),
+                Ok(false)
+            ))
+            && straight_walk_is_clear(server, instance_id, found[from], found[to])
+    };
     let mut res = std::collections::VecDeque::new();
     let mut start = 0usize;
     while start < found.len() {
@@ -386,19 +404,27 @@ fn walkable_reduction(
         let last = (start + max_node_skip).min(found.len() - 1);
         let next = (start + 1..=last)
             .rev()
-            .find(|&end| {
-                end == start + 1
-                    || straight_walk_is_clear(server, instance_id, found[start], found[end])
-            })
+            .find(|&end| end == start + 1 || shortcut(start, end))
             .unwrap_or(start + 1);
         start = next;
     }
     Some(res)
 }
 
+/// The steepest climb (metres per horizontal metre, 45 degrees) of [`straight_walk_is_clear`].
+/// The first corridor's stairs rise at most 0.6 m per metre.
+const MAX_WALK_CLIMB: f32 = 1.0;
+/// Allowance (m) for a stair tread edge between two samples.
+const WALK_CLIMB_SLACK: f32 = 0.25;
+
 /// Whether a walker gets from `a` to `b` in a straight line: no wall in the way and a floor
-/// every metre that is neither a step up beyond the probe's reach nor a drop deeper than one
-/// (stairs and ramps pass, a ledge or a wall under a platform does not).
+/// every metre that is neither steeper than [`MAX_WALK_CLIMB`] upwards nor a drop deeper than
+/// the probe's reach (stairs and ramps pass, a ledge or a wall under a platform does not).
+///
+/// The climb has to be limited per metre, not only by the 2 m probe: the side of the Howling
+/// Abyss entrance platform is a steep lip (180.1 -> 181.5 -> 183.2 -> 184.75 over 3 m, about
+/// 56 degrees) that the probe climbs step by step, so the route up from the first corridor
+/// went straight over it instead of the stairs beside it (live check of #2).
 fn straight_walk_is_clear(server: &GameServer, instance_id: u32, a: Vec3, b: Vec3) -> bool {
     use super::collision::{ground_height_probe, walk::walk_blocked, GROUND_PROBE_UP};
 
@@ -418,7 +444,12 @@ fn straight_walk_is_clear(server: &GameServer, instance_id: u32, a: Vec3, b: Vec
             GROUND_PROBE_UP,
             GROUND_PROBE_UP,
         ) {
-            Some(Some(h)) => z = h,
+            Some(Some(h)) => {
+                if h - z > MAX_WALK_CLIMB * distance / samples as f32 + WALK_CLIMB_SLACK {
+                    return false;
+                }
+                z = h;
+            }
             Some(None) => return false,
             None => return true,
         }
@@ -495,5 +526,130 @@ mod tests {
             );
             assert_eq!(direct_ground_route(&server, 0, start, end), !hole);
         }
+    }
+
+    /// Client files in memory.
+    struct MemBai(HashMap<String, Vec<u8>>);
+
+    impl BaiFiles for MemBai {
+        fn files_in_directory(&self, dir: &str, _pattern: &str) -> Vec<String> {
+            let mut v: Vec<String> = self
+                .0
+                .keys()
+                .filter(|k| k.starts_with(dir))
+                .cloned()
+                .collect();
+            v.sort();
+            v
+        }
+
+        fn file_exists(&self, name: &str) -> bool {
+            self.0.contains_key(name)
+        }
+
+        fn read_file(&self, name: &str) -> Option<Vec<u8>> {
+            self.0.get(name).cloned()
+        }
+    }
+
+    /// A route around a forbidden square at (20, 20) over flat ground: the three route nodes
+    /// are navigation nodes of `nav_type` (2 = outdoor triangles, 4 = indoor waypoints).
+    fn forbidden_square_geo(nav_type: u16, forbidden: bool) -> manager::AiGeoData {
+        use self::bai::test_files::{areas_mission, net_mission_versioned, TLink, TNode};
+        let t = crate::data::world_templates::WorldTemplate::synthetic(0, "main_world", 2, 2, 100);
+        let nodes: Vec<TNode> = [
+            [20.0, 10.0, 100.0],
+            [10.0, 20.0, 100.0],
+            [20.0, 30.0, 100.0],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, pos)| TNode {
+            id: i as i32 + 1,
+            pos,
+            tri: [-1, -1, -1],
+            nav_type,
+            flags: 0,
+        })
+        .collect();
+        let links = [
+            TLink::new(1, 2, 3.0),
+            TLink::new(2, 1, 3.0),
+            TLink::new(2, 3, 3.0),
+            TLink::new(3, 2, 3.0),
+        ];
+        let dir = "game/worlds/main_world/paths/000_000";
+        let mut files = HashMap::new();
+        files.insert(
+            format!("{dir}/netmission0.bai"),
+            net_mission_versioned(55, &nodes, &links),
+        );
+        if forbidden {
+            files.insert(
+                format!("{dir}/areasmission0.bai"),
+                areas_mission(&[(
+                    "block",
+                    vec![
+                        [18.0, 18.0, 0.0],
+                        [22.0, 18.0, 0.0],
+                        [22.0, 22.0, 0.0],
+                        [18.0, 22.0, 0.0],
+                    ],
+                )]),
+            );
+        }
+        manager::AiGeoData::new(
+            &t,
+            true,
+            Arc::new(MemBai(files)),
+            Arc::new(UsedAreaNames::default()),
+            None,
+        )
+    }
+
+    /// The collision shortcut of a fallback route keeps `ReducePath`'s forbidden-area test
+    /// outdoors: the straight walk (20, 10) -> (20, 30) is clear ground but crosses the
+    /// forbidden square, so the detour node stays. Indoors the forbidden outlines belong to the
+    /// terrain under the hall and the shortcut is taken.
+    #[tokio::test]
+    async fn walkable_reduction_keeps_outdoor_routes_out_of_forbidden_areas() {
+        let server = crate::test_support::test_server_with(crate::data::GameData::empty());
+        server
+            .systems
+            .ai
+            .collision
+            .test_files
+            .set(Arc::new(HashMap::new()))
+            .expect("test collision files");
+        server
+            .systems
+            .ai
+            .collision
+            .test_terrain
+            .set(Arc::new(FlatTerrain { hole: false }))
+            .unwrap_or_else(|_| panic!("terrain is already set"));
+        let route = [
+            Vec3::new(20.0, 10.0, 100.0),
+            Vec3::new(10.0, 20.0, 100.0),
+            Vec3::new(20.0, 30.0, 100.0),
+        ];
+        let shortcut = vec![route[0], route[2]];
+        let reduce = |nav_type: u16, forbidden: bool| -> Vec<Vec3> {
+            let geo = forbidden_square_geo(nav_type, forbidden);
+            assert_eq!(
+                geo.is_indoor(100, route[1]),
+                nav_type != manager::NAV_TRIANGULAR
+            );
+            walkable_reduction(&server, &geo, 100, 0, &route, 10)
+                .expect("collision service")
+                .into_iter()
+                .collect()
+        };
+        // Clear ground without forbidden areas: the walk itself allows the shortcut.
+        assert_eq!(reduce(manager::NAV_TRIANGULAR, false), shortcut);
+        // Outdoors the forbidden square keeps the detour.
+        assert_eq!(reduce(manager::NAV_TRIANGULAR, true), route.to_vec());
+        // Indoor waypoints are exempt.
+        assert_eq!(reduce(4, true), shortcut);
     }
 }

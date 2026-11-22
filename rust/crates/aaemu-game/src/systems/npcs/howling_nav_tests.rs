@@ -452,3 +452,62 @@ async fn real_howling_nav_dump_floors() {
     }
     std::fs::write(out, text).unwrap();
 }
+
+/// #2 live follow-up: the route up from the spot where the corridor mobs stand to a player
+/// on the platform beside the entrance gate goes over the stairs (y 730-733), not along the
+/// trench beside them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB and AAEMU_GAME_PAK"]
+async fn real_howling_nav_corridor_mob_route_up_takes_the_stairs() {
+    let Some((server, world)) = ground_server() else {
+        return;
+    };
+    // The player's spot of the live check; the corridor mobs' spawns and where they stood.
+    let target = [668.0, 738.0, 185.5];
+    let goal = crate::systems::skills::controllers::Vec3::new(target[0], target[1], target[2]);
+    for from in [
+        [638.9, 732.5, 181.8],
+        [641.5, 732.7, 181.9],
+        [639.8, 735.0, 181.9],
+        [641.08, 733.92, 181.85],
+        [646.0, 735.5, 181.85],
+    ] {
+        let mob = npc_at(&server, &world, 12773, from);
+        let route = crate::systems::ai::manager::run_now(&server, mob.obj_id, |c| {
+            crate::systems::ai::geodata::plan_route(c, goal);
+            c.ai.path_node
+                .found_path
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+        assert!(
+            route
+                .iter()
+                .any(|p| (650.0..=659.0).contains(&p.x) && p.y < 733.6),
+            "the route from {from:?} climbs the stairs: {route:?}"
+        );
+        world.delete(&mob);
+    }
+    let start = [639.5, 733.7, 181.85];
+    let combatant = npc_at(&server, &world, 12773, start);
+    let (_client, player) = player_at(&server, 1, target);
+    crate::systems::ai::hooks::engage(&server, &combatant, &WorldObject::from(&player));
+    for _ in 0..120 {
+        tick(&server, &combatant, &player).await;
+        let p = pos(&combatant);
+        assert!(p[2] > 181.0, "the combatant stays out of the trench: {p:?}");
+        if (655.0..=659.0).contains(&p[0]) {
+            assert!(p[1] < 734.0, "the combatant is on the stairs: {p:?}");
+        }
+        if dist_2d(p, target) < 3.0 {
+            assert!(p[2] > 184.3, "the combatant is on the platform: {p:?}");
+            return;
+        }
+    }
+    panic!(
+        "the combatant should reach the platform: {:?}",
+        pos(&combatant)
+    );
+}

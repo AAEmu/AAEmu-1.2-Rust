@@ -3785,10 +3785,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     terrain under the dungeon, so `CheckImpossibleWalk` rejected all of them and A* found no
     indoor route. **Deviation:** A* tests only triangle nodes against forbidden areas. With the
     collision service, `geodata::fallback_path` skips ahead only to route nodes a walker
-    reaches in a straight line (`walkable_reduction`: no wall, a floor every metre within the
-    2 m probe). The C# `ReducePath` skip (10 nodes, slope and forbidden-area test only) cut the
-    stairs and sent the corridor mobs into the wall under the platform. Without collision the
-    C# `ReducePath` remains.
+    reaches in a straight line (`walkable_reduction`): no wall, a floor every metre within the
+    2 m probe, and no climb steeper than 1 m per metre plus 0.25 m. The C# `ReducePath` skip
+    (10 nodes, slope and forbidden-area test only) cut the stairs and sent the corridor mobs
+    into the wall under the platform. The climb limit came from the live check: going up, the
+    probe climbed the platform's 56-degree side lip (180.1 to 184.75 m over 3 m) one sample at
+    a time, so the route skipped the stair waypoint and the mobs rose 4.4 m in 3.8 m beside
+    the stairs. A shortcut still has to clear the forbidden areas, forbidden boundaries and
+    designer forbidden areas, as in `ReducePath`, unless both of its ends are indoor (nearest
+    navigation node not a triangle, `AiGeoData::is_indoor`). Without collision the C#
+    `ReducePath` remains.
   - **Chasers at a ledge.** A chasing walker whose next step lands on a floor deeper than
     `walker_max_drop` below it (`npc::step_leaves_ledge`) stays at the edge. After 3 s it drops
     the victim from its aggro table and returns. **Deviation:** the C# kept such a walker at its
