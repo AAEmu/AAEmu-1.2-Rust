@@ -9956,3 +9956,20 @@ Follow-up of the 2026-11-08 bot combat run (`D:/aaemu-audits/bot-combat-2026-11-
   one-mob cast has no bounce event 119, a two-mob cast bounces onto the other mob; a 250 ms
   stall injected into the leap's flush still leaves the full delay). The stall test fails with
   the dequeue-time base (`damage 170 ms after the leap`).
+
+## An instant SkillUse follow-up runs during a timed cast (Rust only, 2026-11-22)
+
+- `use_skill` refuses a skill with `skill_on_casting` while the caster holds a `Cast` task. The
+  `SkillUse` special effect (33) started its follow-up through the same check, so a buff
+  trigger, plot or doodad chain was dropped whenever its caster was in a timed cast of another
+  skill. Lady Velarre's Bound Soul mark (tombstone clout 852, buff 2586, 100 ms) ends in a
+  Timeout trigger whose `SkillUse` makes her cast 16442, which summons a hostile soul 9808. Her
+  basic attack Hellfire Flower (16020) has a 2 s cast, so the souls were missing when the mark
+  ran out during it.
+- The effect now calls `skill::use_triggered_skill`: an instant follow-up (no cast or channel
+  time) goes through a `Cast` task of another skill. It never takes the caster's task slot
+  (`cast` clears only its own slot), so the cast in progress completes. Follow-ups with a cast or
+  channel time, and every direct use, are refused as before. Channels keep their own rule.
+- Tests: `systems::skills::cast_validation_tests::an_instant_triggered_skill_goes_through_a_timed_cast_in_progress`,
+  `systems::npcs::hadir_dungeon_tests::real_data_hadir_velarre_tombstone_summons_hostile_souls`
+  (the mark times out during a forced 16020 cast; it fails every run without the change).

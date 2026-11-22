@@ -14,7 +14,7 @@ use super::super::super::packets_special::SCNotifyResurrectionPacket;
 use super::super::super::progress;
 use super::super::super::skill::{
     apply_skill_modifiers, delay_cast, level_and_inc, mana_level_scale, skips_level_mana,
-    start_auto_skill, use_skill,
+    start_auto_skill, use_triggered_skill,
 };
 use super::super::super::state::{SkillRun, SkillTaskKind};
 use super::super::super::stats::{stat, StatKind};
@@ -243,14 +243,13 @@ pub fn skill_use(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             return;
         }
         let mut tc = target_caster;
-        use_skill(
+        use_triggered_skill(
             &srv,
             &skill,
             &caster,
             caster_caster,
             &mut tc,
             Some(skill_object),
-            true,
         );
     });
 }

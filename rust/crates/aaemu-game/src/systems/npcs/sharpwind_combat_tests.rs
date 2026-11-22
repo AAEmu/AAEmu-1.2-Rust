@@ -278,6 +278,11 @@ async fn real_data_sharpwind_allistair_runs_and_opens_the_warehouse_chest() {
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_sharpwind_powder_keg_consumes_the_pack_then_breaks_the_wall() {
     let (server, world) = fixture();
+    // The keg's fuse (Timer 6543, 5000 ms) and its Final (2918, after 1000 ms) end exactly
+    // 6 s after it is placed. A real 6 s sleep raced that, so the doodad tasks run on the
+    // virtual clock here.
+    let doodad_tasks = &server.systems.npcs.doodads.tasks;
+    doodad_tasks.set_manual(true);
     let (_client, player) = place_player(&server, 1, 519.932, 362.755, 169.029);
     let rock = place_doodad(&server, &world, 5280, 519.932, 365.755, 169.029);
     let objects = || {
@@ -300,11 +305,12 @@ async fn real_data_sharpwind_powder_keg_consumes_the_pack_then_breaks_the_wall()
         skill::unit_use_skill(&server, &caster, 18715, &caster),
         skill_result::SUCCESS
     );
-    for _ in 0..40 {
-        if super::hooks::backpack_slot_empty(&player) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // The cast's plot runs on real time: poll with a generous deadline.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !(super::hooks::backpack_slot_empty(&player) && objects() == 1)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(super::hooks::backpack_slot_empty(&player));
     assert_eq!(objects(), 1);
@@ -312,9 +318,23 @@ async fn real_data_sharpwind_powder_keg_consumes_the_pack_then_breaks_the_wall()
         skill::unit_use_skill(&server, &caster, 18715, &caster),
         skill_result::SUCCESS
     );
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    let rock_intact = || rock.as_doodad().unwrap().data().func_group_id == 13665;
+    // One millisecond before the fuse fires, the keg and the wall still stand.
+    doodad_tasks.advance(&server, 4_999);
+    assert_eq!(objects(), 1, "the keg waits for its five-second fuse");
+    assert!(rock_intact());
+    // The fuse detonates the keg; its invisible Final phase stays one more second.
+    doodad_tasks.advance(&server, 1);
+    assert_eq!(objects(), 1, "the detonated keg waits for its Final");
+    doodad_tasks.advance(&server, 1_000);
     assert_eq!(objects(), 0);
-    assert_ne!(rock.as_doodad().unwrap().data().func_group_id, 13665);
+    // The explosion skill's hit on the wall may still be in flight on real time.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while rock_intact() && std::time::Instant::now() < deadline {
+        doodad_tasks.advance(&server, 100);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!rock_intact(), "the explosion breaks the wall");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
