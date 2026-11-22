@@ -650,6 +650,118 @@ async fn real_data_burnt_sorvell_stacks_petrify_and_earthen_grip_holds_the_playe
     assert_eq!(player.data().unit.buffs.buff_count_by_id(2411), 1);
 }
 
+/// Sorvell (at his placement, 199.8 / 180.4 / 20.5) inside his Earthen Grip health window
+/// with `victim` as his aggro target, on a synthetic collision floor at his height.
+fn sorvell_gripping(server: &Arc<GameServer>, victim: &WorldObject) -> WorldObject {
+    let sorvell = force_spawn_unit(server, 8960);
+    crate::systems::ai::collision::flow_tests::enable_collision(
+        server,
+        sorvell.data().unit.transform.z,
+    );
+    let boss = WorldObject::from(&sorvell);
+    crate::systems::ai::npc::set_current_aggro_target(&sorvell, Some(victim));
+    crate::systems::skills::combat::add_unit_aggro(
+        server,
+        &boss,
+        crate::systems::skills::state::AggroKind::Damage,
+        victim,
+        1,
+    );
+    let max_hp = sorvell.data().unit.max_hp;
+    sorvell.data().unit.hp = max_hp / 4;
+    boss
+}
+
+/// A 3 m wall cube standing on the Armory floor west of Sorvell (x 195.5-198.5,
+/// y 178.9-181.9), or none.
+fn sorvell_west_wall(server: &Arc<GameServer>, wall: bool) {
+    let boxes = [(
+        0xA11,
+        aaemu_physics::math::Vec3::new(197.0, 180.4, 22.0),
+        1.5,
+    )];
+    crate::systems::ai::collision::flow_tests::add_wall_boxes(
+        server,
+        if wall { &boxes } else { &[] },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_sorvell_earthen_grip_needs_sight_of_its_aggro_target() {
+    use std::time::Duration;
+
+    use crate::systems::skills::{skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, _) = real_server(&db);
+    load_burnt(&server);
+    let (_client, player) = place_player(&server, 1, 193.5, 180.4, 20.5);
+    player.data().unit.hp = 30_000;
+    let victim = WorldObject::from(&player);
+    let sorvell = sorvell_gripping(&server, &victim);
+    sorvell_west_wall(&server, true);
+    assert_eq!(
+        skill::unit_use_skill(&server, &sorvell, 15592, &victim),
+        skill_result::NO_TARGET,
+        "a wall between Sorvell and his aggro target refuses the cast"
+    );
+    tokio::time::sleep(Duration::from_millis(3_250)).await;
+    assert_eq!(player.data().unit.buffs.buff_count_by_id(2411), 0);
+
+    sorvell_west_wall(&server, false);
+    assert_eq!(
+        skill::unit_use_skill(&server, &sorvell, 15592, &victim),
+        skill_result::SUCCESS,
+        "the same target in the open is gripped"
+    );
+    tokio::time::sleep(Duration::from_millis(3_250)).await;
+    assert_eq!(player.data().unit.buffs.buff_count_by_id(2411), 1);
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_burnt_sorvell_earthen_grip_skips_players_behind_a_wall() {
+    use std::time::Duration;
+
+    use crate::systems::skills::{skill, types::skill_result};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, _) = real_server(&db);
+    load_burnt(&server);
+    // The aggro target east of Sorvell, a second visible player north of him and a hidden
+    // player behind the wall to the west, all well inside the 30 m radius.
+    let (_target_client, target) = place_player(&server, 1, 203.0, 180.4, 20.5);
+    let (_open_client, open) = place_player(&server, 2, 199.8, 185.4, 20.5);
+    let (_hidden_client, hidden) = place_player(&server, 3, 193.5, 180.4, 20.5);
+    for p in [&target, &open, &hidden] {
+        p.data().unit.hp = 30_000;
+    }
+    let victim = WorldObject::from(&target);
+    let sorvell = sorvell_gripping(&server, &victim);
+    sorvell_west_wall(&server, true);
+    assert_eq!(
+        skill::unit_use_skill(&server, &sorvell, 15592, &victim),
+        skill_result::SUCCESS
+    );
+    tokio::time::sleep(Duration::from_millis(3_250)).await;
+    assert_eq!(target.data().unit.buffs.buff_count_by_id(2411), 1);
+    assert_eq!(
+        open.data().unit.buffs.buff_count_by_id(2411),
+        1,
+        "a visible player beside the aggro target is still gripped"
+    );
+    assert_eq!(
+        hidden.data().unit.buffs.buff_count_by_id(2411),
+        0,
+        "the wall shields the player behind it"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_burnt_sorvell_drops_both_barrels_over_his_victim() {
