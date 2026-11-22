@@ -1946,3 +1946,74 @@ async fn real_bloodhand_cannons_stand_on_the_rampart_in_range_of_the_docks() {
         );
     }
 }
+
+/// Kroloal Cradle's level fire jets and rowboats against the r208022 collision and indoor
+/// water (`visareas.dat`). Every jet of the level data stands on the floor, which is where
+/// the client draws its grate. Both rowboats are in their pool, and the level boat height
+/// rule puts the hull at the surface instead of on the pool floor.
+/// `AAEMU_GAME_PAK=C:\AA1.2\game_pak cargo test -p aaemu-game real_cradle_jets -- --ignored`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_cradle_jets_stand_on_the_floor_and_the_rowboats_in_their_pools() {
+    use crate::systems::npcs::json;
+    use crate::systems::skills::controllers::Vec3 as UnitVec3;
+    let Some(e) = env_with(true) else { return };
+    let server = Arc::new(real_server_with(&e, true));
+    crate::systems::ai::geodata::start(&server);
+    let name = "instance_cradle_of_destruction";
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_name(name)
+        .unwrap()
+        .clone();
+    let world = server.world.create_world_instance(Arc::new(template), 100);
+    let _ = super::ground_height(&server, world.id, 431.5, 840.5, 190.0);
+    let water = crate::systems::ai::physics::world_water(&server, &world);
+    let rows = |file: &str| -> Vec<(u32, [f32; 3])> {
+        let path = app_path().join(format!("Data/Worlds/{name}/{file}"));
+        let doc = json::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        json::array(&doc)
+            .unwrap()
+            .iter()
+            .filter_map(|entry| {
+                let o = entry.as_object()?;
+                let p = json::prop(o, "Position")?.as_object()?;
+                let f = |k: &str| json::f32_or(p, k, 0.0).unwrap_or(0.0);
+                Some((
+                    json::u32_or(o, "UnitId", 0).unwrap_or(0),
+                    [f("X"), f("Y"), f("Z")],
+                ))
+            })
+            .collect()
+    };
+    let jets: Vec<_> = rows("doodad_spawns.json")
+        .into_iter()
+        .filter(|(unit, _)| matches!(unit, 5246 | 5249 | 5250))
+        .collect();
+    assert_eq!(jets.len(), 114);
+    for (unit, [x, y, z]) in &jets {
+        let floor = super::ground_height_probe(&server, world.id, *x, *y, *z, 3.0, 50.0)
+            .flatten()
+            .unwrap_or(f32::NAN);
+        assert!(
+            (floor - z).abs() < 0.1,
+            "jet {unit} at ({x}, {y}, {z}): floor {floor}"
+        );
+    }
+    let boats = rows("slave_spawns.json");
+    assert_eq!(boats.len(), 2);
+    for (_, [x, y, z]) in boats {
+        let (surface, _) = water.get_water_surface(UnitVec3::new(x, y, z));
+        assert!((surface - z).abs() < 0.01, "({x}, {y}) on its pool surface");
+        let floor = super::ground_height_probe(&server, world.id, x, y, surface, 0.0, 50.0)
+            .flatten()
+            .unwrap();
+        // The hull rides 0.6 m below the surface (keel height of ship model 4).
+        assert!(surface - 0.6 > floor, "({x}, {y}): floor {floor}");
+        assert!(water.is_water(UnitVec3::new(x, y, surface - 0.6)).is_some());
+    }
+    // The red-water corridor before the stair room is a pool with its own boat and hazard.
+    let corridor = UnitVec3::new(552.0, 510.0, 181.0);
+    assert!(water.is_water(corridor).is_some());
+}

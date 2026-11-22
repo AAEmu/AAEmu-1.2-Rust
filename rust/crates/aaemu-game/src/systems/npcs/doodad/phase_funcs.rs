@@ -694,8 +694,10 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // Miasma and spear injuries last beyond the contact that applies them.
     // Fire Pillar expires between hits while a victim remains in the flame.
     trigger.contact_buff = matches!(f.id, 1139 | 1295 | 1334 | 1336) || f.buff_id == 3996;
+    // The Cradle pool hazards: Toxicity (green pool), Cursed Blood (red pools),
+    // Poison (stepping stone pools) and Lava (Arkanis's room).
     trigger.requires_submersion = ctx.world.template.name == "instance_cradle_of_destruction"
-        && matches!(f.buff_id, 4483 | 4683);
+        && matches!(f.buff_id, 3813 | 4362 | 4483 | 4683);
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
         // Deviation: a clout without an inside buff (401 of the 447 clouts with effects) never

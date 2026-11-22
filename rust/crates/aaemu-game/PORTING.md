@@ -5604,6 +5604,42 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `AAEMU_COMPACT_DB`): `npcs::cradle_dungeon_tests::events::{
   real_data_cradle_metamoze_sphere_plays_the_boss_room_cinema,
   real_data_cradle_metamoze_squad_walks_its_scene_at_its_own_pace}`.
+* Kroloal Cradle world follow-up (2026-11-22, tests in `npcs::cradle_dungeon_tests` and
+  `ai::collision::real_data_tests::real_cradle_jets_stand_on_the_floor_and_the_rowboats_in_their_pools`).
+  The placements below are the Cradle editor files of a later client (ArcheAge Returns
+  r575 `game_pak`: `level_design/cells/000_000/doodad.g`, `zone/264/editor/slave.xml`,
+  `npc_spawners.g`), checked against the r208022 data. They replace PR #155's inferred
+  jets, pool hazards and rowboat.
+  - **Fire jets.** The level has 114 jets: 30 of 5246, 37 of 5249 and 47 of 5250, in the
+    tunnel to Bedlam Quarters (41), the passage after the Kitchen of Fearful Tastes (42)
+    and the northern passage (31). Each authored Z is the r208022 collision floor to
+    0.05 m. The inferred jets before the Dreadkiss Sitting Room and both area traps 5271
+    are not in the level and are removed. Two of them sat 1.0 to 1.2 m under the floor.
+    The 1.2 jets do damage: Fire Pillar 3996 ticks fixed fire damage 1500 to 2000.
+  - **Pool hazards.** Each pool has its authored clout doodad. Each box top is within 2.5 m
+    of the `visareas.dat` water surface (eight of nine within 1.2 m). 5055 (Toxicity 3813)
+    is in the Dreadkiss pool. 5439 (Cursed
+    Blood 4362) is in the red-water corridor before the stair room and in the stair room
+    with 5889. 5875, 5877, 5878 and 5885 (Poison 4483) are in the stepping-stone pools.
+    5893 (Lava 4683) is in Arkanis's room. The corridor had no hazard before, so its red
+    water did nothing. All four buffs need a submerged unit, so boats and their crews are
+    clear.
+  - **Rowboats.** There are two level boats (template 15): the Dreadkiss pool landing
+    (430.083, 843.409, yaw 87°) and the red-water corridor (550.424, 510.19, yaw -82°).
+    The level Z is the pool floor. A spawner boat now keeps its X/Y and yaw and rides at
+    the water surface plus the summon keel offset (`summon_offset_z`, -0.6 m for this
+    model). Before, the boat kept its authored Z and sat on the landing rock, 0.85 m
+    above the floor, which looked like it was floating.
+  - **Kitchen Putrid Demon.** Level spawner 88939 places 11552, whose compact note is
+    "placed in the Kitchen of Fearful Tastes", with path `AIPath_264_nopeople_496`. The
+    1.2-era 11357 row 0.7 m away was a second demon. It is removed, and 11552 follows
+    that path. It is a 27-point loop in the r208022 zone 264 `areasmission0.bai` (the
+    designer patrol the server already reads for `AIPath_` names).
+  - **Statue room.** Gate 5038 opens after four Moving Stone Statue death skills (SkillHit
+    18263, `act_count` 4). The level has only the four inactive statue spawners that
+    sphere 1546 wakes (88999 to 89002). The five 1.2-era plain 11163 rows started as more
+    statues with the same death skill, so any four of nine kills opened the gate. Those
+    rows are removed.
 * systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
   (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
   has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->
