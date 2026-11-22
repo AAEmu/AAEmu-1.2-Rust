@@ -61,3 +61,37 @@ pub(super) fn clout_payload_without_inside_buff(clout_id: u32) -> bool {
 pub(super) fn is_thrown_trap(template_id: u32) -> bool {
     matches!(template_id, 49 | 64 | 66)
 }
+
+/// Godfrey's timed dialogue continuation would multiply across his audience, and the
+/// final-room cinematic timer belongs to the invisible cue actor: these cues run once from the
+/// caster.
+pub(super) fn applies_to_source(skill_id: u32, effect_id: u32) -> bool {
+    matches!(
+        (skill_id, effect_id),
+        (19372, 23742)
+            | (21422, 29282)
+            | (21423, 29284)
+            | (21426, 29291)
+            | (19442, 23953)
+            | (21477, 29402)
+    )
+}
+
+/// The floor spear's Injured trigger is authored with the victim as its
+/// source. Use the trap that applied it so self-attack rules do not stop
+/// the environmental damage. Kroloal Cradle's gate traps reuse spear 5516.
+pub(super) fn floor_spear(buff_id: u32, caster_doodad: impl FnOnce() -> Option<u32>) -> bool {
+    buff_id == 3999 && caster_doodad().is_some_and(|id| matches!(id, 5516 | 5706 | 5708))
+}
+
+/// These boss charge rows use value1 as travel time and no fixed displacement.
+/// The selected victim supplies the endpoint for that data shape.
+pub(super) fn dashes_to_victim(controller_id: u32) -> bool {
+    matches!(controller_id, 6640 | 6683 | 7130 | 7149)
+}
+
+/// The zones whose ground probes stay within the walker drop, so a raised floor is not left
+/// for the floor underneath.
+pub(super) fn probes_raised_floors(zone_id: u32) -> bool {
+    matches!(zone_id, 265 | 280)
+}

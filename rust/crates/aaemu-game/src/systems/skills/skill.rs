@@ -11,6 +11,7 @@ use rand::Rng;
 use crate::models::transform::PositionAndRotation;
 use crate::models::unit::{SkillAttribute, UnitAttribute, UnitCooldowns};
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{now_ms, PlayerRef, WorldObject};
@@ -2509,7 +2510,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     // Earthen Grip is marked Others, which the area filter interprets as neutral only.
     // Both it and Sorvell's barrel barrage select enemies that can receive their effects.
-    let sorvell_area = matches!(t.id, 15592 | 15668) && caster.as_npc().is_some();
+    let sorvell_area = encounters::hostile_area_skill(t.id) && caster.as_npc().is_some();
     let earthen_grip = sorvell_earthen_grip(t.id, caster);
     if earthen_grip && !earthen_grip_has_aggro(server, caster) {
         return;
@@ -2666,7 +2667,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 .is_some_and(|object| object.is_unit() && object.obj_id() != caster.obj_id())
         });
     }
-    if t.id == 20212 {
+    if encounters::hits_only_accepting_doodads(t.id) {
         // The thrown purifier destroys mushrooms via SkillHit. Nearby enemies and
         // other props must not use up its five target slots.
         let npcs = server.systems.skills.ext.npcs();
@@ -2738,12 +2739,9 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 }
             }
         } else if let Some(doodad) = o.as_doodad() {
-            let hit_skill = if t.id == 20615 && doodad.data().template_id == 5947 {
-                // Both rooms' no-attack areas accept Melkina's original open cue.
-                17422
-            } else {
-                t.id
-            };
+            // Both rooms' no-attack areas accept Melkina's original open cue.
+            let hit_skill =
+                encounters::doodad_hit_skill(t.id, || doodad.data().template_id).unwrap_or(t.id);
             server
                 .systems
                 .skills
@@ -2763,19 +2761,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         // while a separate effect places the ward. Godfrey's timed dialogue
         // continuation would multiply across his audience. The final-room
         // cinematic timer belongs to the invisible cue actor.
-        let method = if matches!(
-            (t.id, effect.effect_id),
-            (17635, 19275)
-                | (19372, 23742)
-                | (21422, 29282)
-                | (21423, 29284)
-                | (21426, 29291)
-                | (19442, 23953)
-                | (19535, 24195)
-                | (19019, 24232)
-                | (19022, 24231)
-                | (21477, 29402)
-        ) {
+        let method = if encounters::applies_to_source(t.id, effect.effect_id) {
             Some(ApplicationMethod::Source)
         } else {
             ApplicationMethod::from_raw(i64::from(effect.application_method))

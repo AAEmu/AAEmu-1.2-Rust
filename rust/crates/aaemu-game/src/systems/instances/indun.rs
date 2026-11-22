@@ -935,7 +935,8 @@ pub fn request_leave_instance(server: &GameServer, p: &PlayerRef) -> bool {
 const ARMORY_ZONE: u32 = 236;
 const ARMORY_EXIT_GATE: u32 = 320;
 const ARMORY_EXIT_ZONE: u32 = 257;
-pub(crate) const ARMORY_EXIT_SKILL: u32 = 15667;
+pub(crate) const ARMORY_EXIT_SKILL: u32 =
+    crate::systems::instances::encounters::registry::ARMORY_EXIT_SKILL;
 
 /// Compact skill 15667 is shared by the two 1.2 Armory exit doodads (groups 8794 and 12257).
 pub(crate) fn is_armory_exit(skill_id: u32, gate_id: u32, instance_id: u32, zone_id: u32) -> bool {

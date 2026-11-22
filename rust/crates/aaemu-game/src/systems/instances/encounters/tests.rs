@@ -307,3 +307,208 @@ fn is_thrown_trap() {
         &[0, 39, 42, 45, 46, 48, 50, 56, 63, 65, 67],
     );
 }
+
+// ---- skills, plots, buffs and controllers
+
+#[test]
+fn applies_to_source() {
+    let pairs = [
+        (17635, 19275),
+        (19372, 23742),
+        (21422, 29282),
+        (21423, 29284),
+        (21426, 29291),
+        (19442, 23953),
+        (19535, 24195),
+        (19019, 24232),
+        (19022, 24231),
+        (21477, 29402),
+    ];
+    table(
+        |(s, e)| r::applies_to_source(s, e),
+        &pairs,
+        &[
+            (0, 0),
+            (17635, 19276),
+            (17635, 23742),
+            (19372, 19275),
+            (21422, 29284),
+            (19019, 24231),
+            (19022, 24232),
+            (19535, 24194),
+            (21477, 29403),
+            (17636, 19275),
+        ],
+    );
+}
+
+#[test]
+fn doodad_hit_skill() {
+    assert_eq!(r::doodad_hit_skill(20615, || 5947), Some(17422));
+    assert_eq!(r::doodad_hit_skill(20615, || 5946), None);
+    assert_eq!(r::doodad_hit_skill(20615, || 4577), None);
+    for skill in [0, 17422, 20614, 20616] {
+        // The doodad is not asked for another skill.
+        assert_eq!(
+            r::doodad_hit_skill(skill, || panic!("doodad read for {skill}")),
+            None
+        );
+    }
+}
+
+#[test]
+fn hostile_area_skill() {
+    table(
+        r::hostile_area_skill,
+        &[15592, 15668],
+        &[0, 15591, 15593, 15667, 15669, 15629],
+    );
+}
+
+#[test]
+fn hits_only_accepting_doodads() {
+    table(r::hits_only_accepting_doodads, &[20212], &[0, 20211, 20213]);
+}
+
+#[test]
+fn plot_targets_caster() {
+    table(
+        |(s, e)| r::plot_targets_caster(s, e),
+        &[(20615, 5347)],
+        &[
+            (20615, 5346),
+            (20615, 5348),
+            (20614, 5347),
+            (20616, 5347),
+            (0, 0),
+        ],
+    );
+}
+
+#[test]
+fn keeps_first_random_target() {
+    table(
+        r::keeps_first_random_target,
+        &[1452],
+        &[0, 1451, 1453, 1508],
+    );
+}
+
+#[test]
+fn refreshes_stack_window() {
+    table(r::refreshes_stack_window, &[2407], &[0, 2406, 2408, 2409]);
+}
+
+#[test]
+fn is_nerta_bomb_drop() {
+    for buff in [4099, 4631] {
+        assert!(r::is_nerta_bomb_drop(buff, || Some(11362)), "buff {buff}");
+        assert!(!r::is_nerta_bomb_drop(buff, || Some(11361)), "buff {buff}");
+        assert!(!r::is_nerta_bomb_drop(buff, || Some(11363)), "buff {buff}");
+        assert!(!r::is_nerta_bomb_drop(buff, || None), "buff {buff}");
+    }
+    for buff in [0, 4098, 4100, 4630, 4632] {
+        // The owner is not asked for another buff.
+        assert!(!r::is_nerta_bomb_drop(buff, || panic!(
+            "owner read for {buff}"
+        )));
+    }
+    assert_eq!((r::NERTA_BOMB_BUFF, r::NERTA_BOMB_BUFF_2), (4099, 4631));
+}
+
+#[test]
+fn server_runs_buff_controller() {
+    table(r::server_runs_buff_controller, &[2659], &[0, 2658, 2660]);
+}
+
+#[test]
+fn trigger_source_is_caster() {
+    use r::TriggerCaster::*;
+    let no_npc = || -> Option<u32> { panic!("caster NPC read for a spear") };
+    let no_doodad = || -> Option<u32> { None };
+    for doodad in [5516, 5706, 5708] {
+        assert_eq!(
+            r::trigger_source_is_caster(3999, || Some(doodad), no_npc),
+            Some(FloorSpear),
+            "doodad {doodad}"
+        );
+    }
+    for doodad in [5515, 5517, 5705, 5707, 5709] {
+        assert_eq!(
+            r::trigger_source_is_caster(3999, || Some(doodad), || None),
+            None,
+            "doodad {doodad}"
+        );
+    }
+    assert_eq!(
+        r::trigger_source_is_caster(3999, || None, || Some(9792)),
+        None
+    );
+    assert_eq!(
+        r::trigger_source_is_caster(2586, no_doodad, || Some(9792)),
+        Some(VelarreTombstone)
+    );
+    for npc in [9791, 9793] {
+        assert_eq!(
+            r::trigger_source_is_caster(2586, no_doodad, || Some(npc)),
+            None
+        );
+    }
+    assert_eq!(
+        r::trigger_source_is_caster(2586, || Some(5516), || None),
+        None
+    );
+    for buff in [0, 2585, 2587, 3998, 4000] {
+        // Neither caster is asked for another buff.
+        assert_eq!(
+            r::trigger_source_is_caster(
+                buff,
+                || panic!("caster doodad read for {buff}"),
+                || panic!("caster NPC read for {buff}")
+            ),
+            None
+        );
+    }
+}
+
+#[test]
+fn dashes_to_victim() {
+    table(
+        r::dashes_to_victim,
+        &[6640, 6683, 7130, 7149],
+        &[0, 6639, 6641, 6682, 6684, 7129, 7131, 7148, 7150],
+    );
+}
+
+#[test]
+fn probes_raised_floors() {
+    table(
+        r::probes_raised_floors,
+        &[265, 280],
+        &[0, 240, 262, 264, 266, 279, 281],
+    );
+}
+
+#[test]
+fn skill_ids() {
+    assert_eq!(r::POWDER_KEG_SKILL, 18715);
+    assert_eq!(r::ARMORY_EXIT_SKILL, 15667);
+    assert_eq!(crate::systems::instances::indun::ARMORY_EXIT_SKILL, 15667);
+    assert_eq!(r::CRADLE_CHEST_SKILL, 19691);
+}
+
+#[test]
+fn is_armory_exit_doodad() {
+    table(
+        |(t, g)| r::is_armory_exit_doodad(t, g),
+        &[(3673, 8794), (4923, 12257)],
+        &[
+            (3673, 12257),
+            (4923, 8794),
+            (3672, 8794),
+            (3673, 8793),
+            (4923, 12258),
+            (0, 0),
+        ],
+    );
+}

@@ -56,3 +56,29 @@ pub(super) fn is_frozen_zone(template_id: u32, clout_id: u32) -> bool {
 pub const POWDER_KEG_DOODAD: u32 = 5951;
 /// The powder keg item (equipped in the backpack slot).
 pub const POWDER_KEG_ITEM: u32 = 25002;
+
+/// The final-room cinematic timer belongs to the invisible cue actor, and the bandits' staff
+/// pickups run once from the caster.
+pub(super) fn applies_to_source(skill_id: u32, effect_id: u32) -> bool {
+    matches!(
+        (skill_id, effect_id),
+        (19535, 24195) | (19019, 24232) | (19022, 24231)
+    )
+}
+
+/// Nerta's Bomb Drop buff.
+pub const NERTA_BOMB_BUFF: u32 = 4099;
+/// The second Bomb Drop buff of the same name.
+pub const NERTA_BOMB_BUFF_2: u32 = 4631;
+
+/// Nerta (11362) under one of her Bomb Drop buffs. `npc_template_id` (the buff owner's NPC
+/// template, `None` for another unit) is only asked for those buffs.
+pub(super) fn is_nerta_bomb_drop(
+    buff_id: u32,
+    npc_template_id: impl FnOnce() -> Option<u32>,
+) -> bool {
+    matches!(buff_id, 4099 | 4631) && npc_template_id().is_some_and(|id| id == 11362)
+}
+
+/// The powder keg skill: the summon interaction consumes the actual equipped powder keg.
+pub const POWDER_KEG_SKILL: u32 = 18715;

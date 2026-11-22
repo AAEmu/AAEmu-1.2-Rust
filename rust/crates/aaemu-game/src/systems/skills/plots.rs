@@ -13,6 +13,7 @@ use rand::Rng;
 
 use crate::models::unit::SkillAttribute;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{now_ms, WorldObject};
 
 use super::broadcast;
@@ -941,7 +942,7 @@ fn update_target_info(
         SkillTargetRelation::from_raw(i64::from(state.skill.template.target_relation))
             .unwrap_or(SkillTargetRelation::Any);
     let caster_t = Target::Obj(state.ctx.caster.clone());
-    if state.skill.template.id == 20615 && event.id == 5347 {
+    if encounters::plot_targets_caster(state.skill.template.id, event.id) {
         // Tushan's reward is tied to his death. Require neither another unit within
         // the 2 m plot shape nor a height lookup that can place it beneath the floor.
         ti.target = Some(caster_t.clone());
@@ -1253,7 +1254,7 @@ fn update_random_unit_target(
     let mut filtered = filter_targets(server, around, state, args, event.id);
     // Hell Lightning's initial target has only aimed the spell. Its placement step can
     // pick that player, then the event's hit history excludes them on later ticks.
-    if args.hit_once && event.id != 1452 {
+    if args.hit_once && !encounters::keeps_first_random_target(event.id) {
         let prev = ti.previous_target.as_ref().map_or(0, Target::obj_id);
         filtered.retain(|o| o.obj_id() != prev);
     }

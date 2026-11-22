@@ -36,6 +36,7 @@ use crate::models::movement::{
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::packets::world_objects::SCTargetChangedPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{now_ms, WorldObject};
 
 use super::data::{BuffTemplate, SkillControllerTemplate};
@@ -788,7 +789,7 @@ pub fn create(
             let (o, t) = positions(server, owner, target);
             // These boss charge rows use value1 as travel time and no fixed displacement.
             // The selected victim supplies the endpoint for that data shape.
-            let mut d = if matches!(template.id, 6640 | 6683 | 7130 | 7149) {
+            let mut d = if encounters::dashes_to_victim(template.id) {
                 let end_position = Vec3::new(t.x, t.y, o.z);
                 let duration = template.value[0];
                 LinearMove {
@@ -905,7 +906,7 @@ fn clip_linear_move(server: &GameServer, owner: &WorldObject, o: Vec3, m: &mut L
         return;
     };
     let zone = owner.transform().zone_id;
-    let z = if matches!(zone, 265 | 280)
+    let z = if encounters::probes_raised_floors(zone)
         && p[2] < o.z - crate::systems::ai::npc::walker_max_drop(zone)
     {
         o.z
@@ -1673,7 +1674,7 @@ impl SkillController {
     ) {
         let mut new = next_step_position(travel, target_dist, cur, end);
         let transform = self.owner.transform();
-        let howling_walker = matches!(transform.zone_id, 265 | 280)
+        let howling_walker = encounters::probes_raised_floors(transform.zone_id)
             && self.owner.as_npc().is_some_and(|npc| !npc.data().can_fly);
         if howling_walker {
             let supported = crate::systems::ai::collision::ground_height_probe(
@@ -1796,7 +1797,7 @@ impl SkillController {
                 self.owner.obj_id()
             );
             self.owner.with_transform(|t| t.set_height(ground_z));
-            if self.source_buff_id() == 2659 {
+            if encounters::server_runs_buff_controller(self.source_buff_id()) {
                 if let Some(player) = self.owner.as_player() {
                     // The owning client does not receive its controller's movement
                     // broadcasts. Correct its position when Slam finishes.

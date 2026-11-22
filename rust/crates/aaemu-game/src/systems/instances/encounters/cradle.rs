@@ -43,3 +43,12 @@ pub(super) fn is_contact_buff(buff_id: u32) -> bool {
 pub(super) fn clout_requires_submersion(world: &str, buff_id: u32) -> bool {
     world == WORLD && matches!(buff_id, 3813 | 4362 | 4483 | 4683)
 }
+
+/// The thrown purifier destroys mushrooms via SkillHit. Nearby enemies and
+/// other props must not use up its five target slots.
+pub(super) fn hits_only_accepting_doodads(skill_id: u32) -> bool {
+    skill_id == 20212
+}
+
+/// The destruction device skill that unlocks the hidden-room chests.
+pub const CRADLE_CHEST_SKILL: u32 = 19691;

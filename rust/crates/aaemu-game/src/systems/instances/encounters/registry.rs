@@ -168,3 +168,113 @@ pub use super::palace_cellar::ROLLING_BOULDER;
 pub fn is_thrown_trap(template_id: u32) -> bool {
     howling_abyss::is_thrown_trap(template_id)
 }
+
+// ---- skills, plots, buffs and controllers
+
+/// `(skill, effect)` pairs applied to the caster whatever their authored application method:
+/// scripted cues that run once from the caster (Burnt Castle Armory, Howling Abyss, Sharpwind
+/// Mines).
+pub fn applies_to_source(skill_id: u32, effect_id: u32) -> bool {
+    armory::applies_to_source(skill_id, effect_id)
+        || howling_abyss::applies_to_source(skill_id, effect_id)
+        || sharpwind::applies_to_source(skill_id, effect_id)
+}
+
+/// The skill a doodad's `SkillHit` receives instead of the cast skill (Palace Cellar).
+/// `doodad_template_id` is only asked for a skill that has one.
+pub fn doodad_hit_skill(skill_id: u32, doodad_template_id: impl FnOnce() -> u32) -> Option<u32> {
+    palace_cellar::doodad_hit_skill(skill_id, doodad_template_id)
+}
+
+/// NPC area skills that select hostile units whatever their authored relation (Burnt Castle
+/// Armory).
+pub fn hostile_area_skill(skill_id: u32) -> bool {
+    armory::hostile_area_skill(skill_id)
+}
+
+/// Skills whose targets are only the doodads that accept their `SkillHit` (Kroloal Cradle).
+pub fn hits_only_accepting_doodads(skill_id: u32) -> bool {
+    cradle::hits_only_accepting_doodads(skill_id)
+}
+
+/// Plot events that target and affect their caster alone (Palace Cellar).
+pub fn plot_targets_caster(skill_id: u32, event_id: u32) -> bool {
+    palace_cellar::plot_targets_caster(skill_id, event_id)
+}
+
+/// `hit_once` plot events that may pick their previous target again (Burnt Castle Armory).
+pub fn keeps_first_random_target(event_id: u32) -> bool {
+    armory::keeps_first_random_target(event_id)
+}
+
+/// Buffs whose stack timers are renewed by a new stack (Burnt Castle Armory).
+pub fn refreshes_stack_window(buff_id: u32) -> bool {
+    armory::refreshes_stack_window(buff_id)
+}
+
+/// A Nerta Bomb Drop buff on Nerta herself (Sharpwind Mines). `npc_template_id` (the buff
+/// owner's NPC template, `None` for another unit) is only asked for a Bomb Drop buff.
+pub fn is_nerta_bomb_drop(buff_id: u32, npc_template_id: impl FnOnce() -> Option<u32>) -> bool {
+    sharpwind::is_nerta_bomb_drop(buff_id, npc_template_id)
+}
+
+/// Nerta's Bomb Drop buffs (Sharpwind Mines).
+pub use super::sharpwind::{NERTA_BOMB_BUFF, NERTA_BOMB_BUFF_2};
+
+/// Buffs whose skill controller the server runs on a character too (Hadir Farm).
+pub fn server_runs_buff_controller(buff_id: u32) -> bool {
+    hadir::server_runs_buff_controller(buff_id)
+}
+
+/// The caster a buff trigger takes as its source instead of the buff's owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerCaster {
+    /// A floor spear doodad applied the Injured buff (Howling Abyss; Kroloal Cradle's gate
+    /// traps reuse spear 5516).
+    FloorSpear,
+    /// Lady Velarre applied the tombstone buff (Hadir Farm).
+    VelarreTombstone,
+}
+
+/// Buff triggers whose source is the caster that applied the buff, not its owner (Howling
+/// Abyss floor spears, Hadir Farm's Velarre). The caster's doodad and NPC templates (`None`
+/// for another kind) are only asked for those buffs. The two have different buffs, so at
+/// most one applies.
+pub fn trigger_source_is_caster(
+    buff_id: u32,
+    caster_doodad: impl FnOnce() -> Option<u32>,
+    caster_npc: impl FnOnce() -> Option<u32>,
+) -> Option<TriggerCaster> {
+    if howling_abyss::floor_spear(buff_id, caster_doodad) {
+        Some(TriggerCaster::FloorSpear)
+    } else if hadir::velarre_tombstone(buff_id, caster_npc) {
+        Some(TriggerCaster::VelarreTombstone)
+    } else {
+        None
+    }
+}
+
+/// Dash controllers that charge to the selected victim (Howling Abyss).
+pub fn dashes_to_victim(controller_id: u32) -> bool {
+    howling_abyss::dashes_to_victim(controller_id)
+}
+
+/// Zones whose controller and knock-back ground probes are bounded by the walker drop
+/// (Howling Abyss).
+pub fn probes_raised_floors(zone_id: u32) -> bool {
+    howling_abyss::probes_raised_floors(zone_id)
+}
+
+/// Leave Burnt Castle Armory, the skill of both exit doodads.
+pub use super::armory::ARMORY_EXIT_SKILL;
+/// The powder keg skill (Sharpwind Mines).
+pub use super::sharpwind::POWDER_KEG_SKILL;
+
+/// The two Burnt Castle Armory exit doodads `(template, func group)` that offer
+/// [`ARMORY_EXIT_SKILL`].
+pub fn is_armory_exit_doodad(template_id: u32, func_group_id: u32) -> bool {
+    armory::is_exit_doodad(template_id, func_group_id)
+}
+
+/// The Kroloal Cradle destruction device skill that unlocks the hidden-room chests.
+pub use super::cradle::CRADLE_CHEST_SKILL;

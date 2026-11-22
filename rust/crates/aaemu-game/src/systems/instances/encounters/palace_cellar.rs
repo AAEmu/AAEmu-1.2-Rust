@@ -28,3 +28,17 @@ pub(super) fn is_flame_clout(template_id: u32, buff_id: u32) -> bool {
 
 /// The burning boulder that rolls down the Cellar ramp.
 pub const ROLLING_BOULDER: u32 = 42;
+
+/// Both rooms' no-attack areas accept Melkina's original open cue.
+pub(super) fn doodad_hit_skill(
+    skill_id: u32,
+    doodad_template_id: impl FnOnce() -> u32,
+) -> Option<u32> {
+    (skill_id == 20615 && doodad_template_id() == 5947).then_some(17422)
+}
+
+/// Tushan's reward is tied to his death. Require neither another unit within
+/// the 2 m plot shape nor a height lookup that can place it beneath the floor.
+pub(super) fn plot_targets_caster(skill_id: u32, event_id: u32) -> bool {
+    skill_id == 20615 && event_id == 5347
+}

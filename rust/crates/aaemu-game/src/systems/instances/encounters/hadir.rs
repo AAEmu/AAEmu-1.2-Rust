@@ -24,3 +24,15 @@ pub(super) fn helps_only_near_the_pull(world: &str) -> bool {
 pub(super) fn is_hazard_clout(template_id: u32) -> bool {
     matches!(template_id, 3874 | 3956)
 }
+
+/// The Rotten Flesh Golem's Slam needs the server to finish its lift and
+/// fall. Other character controllers run from the client buff payload.
+pub(super) fn server_runs_buff_controller(buff_id: u32) -> bool {
+    buff_id == 2659
+}
+
+/// The tombstone marks its victim, but Lady Velarre casts the follow-up
+/// skill that owns the hostile souls.
+pub(super) fn velarre_tombstone(buff_id: u32, caster_npc: impl FnOnce() -> Option<u32>) -> bool {
+    buff_id == 2586 && caster_npc().is_some_and(|id| id == 9792)
+}
