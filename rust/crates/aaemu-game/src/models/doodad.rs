@@ -364,6 +364,10 @@ pub struct DoodadPhaseState {
     pub loot_missed: bool,
     /// A rolled reward that has not fit in a player's bag yet. It belongs to this phase.
     pub(crate) pending_loot: Option<PendingDoodadLoot>,
+    /// `pending_loot` was held while the doodad was opened as a loot bag (`CSLootOpenBag`), so
+    /// its claim ends with that open's `DoodadDeleteTask`. A reward held by a gathering skill
+    /// or a timer finishes that interaction instead (`manager::loot_open_bag_doodad`).
+    pub(crate) pending_loot_from_bag: bool,
     /// `OverridePhase`.
     pub override_phase: i32,
     /// `PhaseRatio` (0..10000, rolled once per phase entry when the phase has ratio funcs).

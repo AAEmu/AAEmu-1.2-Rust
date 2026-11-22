@@ -482,6 +482,39 @@ async fn full_bag_keeps_the_gathered_reward_past_the_intermediate_timer() {
 }
 
 #[tokio::test]
+async fn full_bag_keeps_the_loot_phase_until_every_reward_of_the_group_is_claimed() {
+    // Two rewards in one loot group: the first row's grant moves the doodad to the depleted
+    // phase before the second row runs. A bag with room for only the first must leave the
+    // second claimable in the loot phase, and claiming it must still start the regrowth.
+    let mut data = game_data();
+    data.systems.npcs.doodad = DoodadBuilder {
+        data: data.systems.npcs.doodad,
+    }
+    .func(VEIN_LOOT, loot(60, WOOL), VEIN_DEPLETED as i32)
+    .data;
+    let mut fx = fx_with(data);
+    let vein = fx.doodad(VEIN);
+    fx.bag_size(1);
+
+    let frames = fx.cast_and_wait(ORE_MINE_SKILL, &vein).await;
+    assert!(has_bag_full(&frames));
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 0);
+    assert_eq!(vein.data().func_group_id, VEIN_LOOT);
+    assert!(vein.data().phase.pending_loot.is_some());
+
+    fx.bag_size(2);
+    assert!(!has_bag_full(&fx.open_loot(&vein).await));
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 1);
+    assert_eq!(vein.data().func_group_id, VEIN_DEPLETED);
+    assert!(vein.data().phase.pending_loot.is_none());
+
+    assert_eq!(fx.advance(REGROW_MS as u64), 1);
+    assert_eq!(vein.data().func_group_id, VEIN_START);
+}
+
+#[tokio::test]
 async fn full_bag_keeps_a_rolled_loot_pack_without_giving_a_partial_reward() {
     use crate::systems::economy::loot_data::{Loot, LootPack};
 
@@ -576,6 +609,10 @@ async fn full_bag_keeps_a_rolled_loot_pack_without_giving_a_partial_reward() {
     fx.open_loot(&chest).await;
     assert_eq!(fx.count(ORE), 1);
     assert_eq!(fx.count(WOOL), 101);
+    // The held reward came from a loot-bag open, so its claim still ends with the open's
+    // `DoodadDeleteTask`.
+    fx.advance(0);
+    assert!(chest.data().phase.deleted);
 }
 
 fn body(p: &dyn Marshal) -> Vec<u8> {

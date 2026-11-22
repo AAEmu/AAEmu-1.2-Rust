@@ -372,15 +372,31 @@ async fn leader_death_returns_followers_to_their_own_idle_behaviour() {
     );
 
     f.leader.data().unit.hp = 0;
-    for _ in 0..40 {
-        tick_all(&f.server, 100);
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    tick_all(&f.server, 100);
     assert_eq!(
         behavior(&f.server, FOLLOWER_OBJ),
         Some(B::Roaming),
         "without a live leader the follower runs its own default behavior"
     );
+    // The first roaming tick without a leader starts a roam cycle of its own: it either holds
+    // a target or, when the random target was within the 1 m arrival tolerance, already
+    // finished the leg and waits 3-6 s (wall clock) for the next one.
+    let roamed = super::manager::run_now(&f.server, FOLLOWER_OBJ, |c| {
+        let s = c.st(B::Roaming);
+        let target = s.roam_target;
+        target.x != 0.0 || target.y != 0.0 || target.z != 0.0 || s.next_roaming > 0
+    });
+    assert_eq!(roamed, Some(true), "the follower picks its own roam target");
+    // The random target can lie within that tolerance of the follower, which then does not
+    // move at all. Walk a fixed leg so the movement check does not depend on the roll.
+    super::manager::run_now(&f.server, FOLLOWER_OBJ, |c| {
+        c.st(B::Roaming).roam_target = Vec3::new(start.x - 4.0, start.y, start.z);
+    });
+    for _ in 0..40 {
+        tick_all(&f.server, 100);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(behavior(&f.server, FOLLOWER_OBJ), Some(B::Roaming));
     assert!(
         xy_dist(npc_pos(&f.follower), start) > 0.2,
         "the roaming follower moves again"

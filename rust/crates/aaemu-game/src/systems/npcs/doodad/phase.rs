@@ -106,6 +106,7 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         d.func_group_id = value;
         d.phase.interaction_counts.clear();
         d.phase.pending_loot = None;
+        d.phase.pending_loot_from_bag = false;
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
@@ -581,6 +582,7 @@ fn use_doodad_with_gate(
                     }
                 }
                 if do_func(ctx, Some(caster), started_skill_id, Some(f)) {
+                    keep_pending_loot_in(ctx, current);
                     ctx.doodad.data().phase.list_group_id.clear();
                     return;
                 }
@@ -640,6 +642,28 @@ fn use_doodad_with_gate(
         skill_id = 0;
         chained = true;
     }
+}
+
+/// A loot group's rows all run in one `Use` pass, but the first granted row already moves the
+/// doodad to its next phase. When a later row's reward does not fit, return to the loot group
+/// that owns the row: the reward stays claimable there, and the claim starts the next phase
+/// (and its regrowth timer) through the normal `DoChangePhase` after the loop. The next phase
+/// was never entered (its phase funcs did not run and no `SCDoodadPhaseChanged` was sent), so
+/// only the group is restored.
+fn keep_pending_loot_in(ctx: &DoodadCtx<'_>, loot_group: u32) {
+    let pending = {
+        let mut d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id == loot_group {
+            return;
+        }
+        let Some(pending) = d.phase.pending_loot.take() else {
+            return;
+        };
+        (pending, d.phase.pending_loot_from_bag)
+    };
+    set_func_group_id(ctx.server, &ctx.doodad, loot_group);
+    let mut d = ctx.doodad.data();
+    (d.phase.pending_loot, d.phase.pending_loot_from_bag) = (Some(pending.0), pending.1);
 }
 
 /// The theft-evidence part of `Use` (`GenerateTheftEvidence` via the skills hook).
