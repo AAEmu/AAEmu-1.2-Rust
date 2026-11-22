@@ -9,6 +9,8 @@ pub const ZONE: u32 = 236;
 
 // ---- tables
 
+use super::registry::PlotGround;
+
 /// Hieronimus's portal adds (8964..=8969) in the Armory.
 pub(super) fn is_armory_wave_add(zone_id: u32, template_id: u32) -> bool {
     zone_id == 236 && (8964..=8969).contains(&template_id)
@@ -75,4 +77,17 @@ pub(super) fn keeps_first_random_target(event_id: u32) -> bool {
 /// cooldowns. Renew the window on a hit so the fifth one can petrify the target.
 pub(super) fn refreshes_stack_window(buff_id: u32) -> bool {
     buff_id == 2407
+}
+
+/// Hieronimus's meteor shower (15629): its launch event (2668) and its impact event (1508).
+pub(super) fn plot_ground(skill_id: u32, event_id: u32) -> Option<PlotGround> {
+    let hieronimus_meteor = skill_id == 15629;
+    let meteor_impact = hieronimus_meteor && event_id == 1508;
+    if event_id == 2668 && hieronimus_meteor {
+        Some(PlotGround::MeteorLaunch)
+    } else if meteor_impact {
+        Some(PlotGround::MeteorImpact)
+    } else {
+        None
+    }
 }

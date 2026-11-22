@@ -14,6 +14,8 @@ pub const GREATER_ZONE: u32 = 280;
 
 // ---- tables
 
+use super::registry::PlotGround;
+
 /// Howling Abyss NPCs whose rooms sit under a raised walkway: the Medusa packs, their
 /// Guardians and the Knights on the ledges above them (Normal 265 and Greater 280). They only
 /// notice, or answer a help call against, a unit on their own floor.
@@ -94,4 +96,16 @@ pub(super) fn dashes_to_victim(controller_id: u32) -> bool {
 /// for the floor underneath.
 pub(super) fn probes_raised_floors(zone_id: u32) -> bool {
     matches!(zone_id, 265 | 280)
+}
+
+/// Calleil's fireball (18976, 21131): the falling fireball's marker events (4023, 5919) and
+/// its impact events.
+pub(super) fn plot_ground(skill_id: u32, event_id: u32) -> Option<PlotGround> {
+    if matches!(event_id, 4023 | 5919) && matches!(skill_id, 18976 | 21131) {
+        Some(PlotGround::CalleilFireball)
+    } else if matches!((skill_id, event_id), (18976, 4024) | (21131, 5920)) {
+        Some(PlotGround::CalleilImpact)
+    } else {
+        None
+    }
 }

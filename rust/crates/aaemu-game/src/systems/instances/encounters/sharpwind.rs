@@ -10,6 +10,8 @@ pub const ZONE: u32 = 262;
 
 // ---- tables
 
+use super::registry::PlotGround;
+
 /// These self-target plots project their strikes from the caster's heading.
 pub(super) fn is_directional_self_skill(skill_id: u32) -> bool {
     matches!(skill_id, 15935 | 19980 | 18374 | 18401 | 18406 | 19248)
@@ -82,3 +84,17 @@ pub(super) fn is_nerta_bomb_drop(
 
 /// The powder keg skill: the summon interaction consumes the actual equipped powder keg.
 pub const POWDER_KEG_SKILL: u32 = 18715;
+
+/// The Colossus's hand smashes in Sharpwind Mines. The near hand-smash circle (events 3199,
+/// 3201) covers the fist in front of the body. The second circle and outer impact remain
+/// distinct parts of the wind-up. `zone_id` is only asked for those skills.
+pub(super) fn plot_ground(
+    skill_id: u32,
+    event_id: u32,
+    zone_id: impl FnOnce() -> u32,
+) -> Option<PlotGround> {
+    let colossus = matches!(skill_id, 18374 | 18401 | 18406 | 19248) && zone_id() == 262;
+    colossus.then_some(PlotGround::ColossusFist {
+        near: matches!(event_id, 3199 | 3201),
+    })
+}

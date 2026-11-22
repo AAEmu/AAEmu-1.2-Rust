@@ -512,3 +512,59 @@ fn is_armory_exit_doodad() {
         ],
     );
 }
+
+// ---- plots
+
+#[test]
+fn plot_ground() {
+    use r::PlotGround::*;
+    let no_zone = || -> u32 { panic!("zone read for a skill that is not the Colossus's") };
+    let cases = [
+        ((15629, 2668), Some(MeteorLaunch)),
+        ((15629, 1508), Some(MeteorImpact)),
+        ((15629, 2667), None),
+        ((15629, 1509), None),
+        ((15628, 2668), None),
+        ((15630, 1508), None),
+        ((18976, 4023), Some(CalleilFireball)),
+        ((18976, 5919), Some(CalleilFireball)),
+        ((21131, 4023), Some(CalleilFireball)),
+        ((21131, 5919), Some(CalleilFireball)),
+        ((18976, 4024), Some(CalleilImpact)),
+        ((21131, 5920), Some(CalleilImpact)),
+        ((18976, 5920), None),
+        ((21131, 4024), None),
+        ((18975, 4023), None),
+        ((21132, 5919), None),
+        ((18976, 4022), None),
+        ((0, 2668), None),
+        ((0, 4023), None),
+    ];
+    for ((skill, event), ground) in cases {
+        assert_eq!(
+            r::plot_ground(skill, event, no_zone),
+            ground,
+            "skill {skill}, event {event}"
+        );
+    }
+    for skill in [18374, 18401, 18406, 19248] {
+        for event in [3199, 3201] {
+            assert_eq!(
+                r::plot_ground(skill, event, || 262),
+                Some(ColossusFist { near: true })
+            );
+        }
+        for event in [0, 3198, 3200, 3202] {
+            assert_eq!(
+                r::plot_ground(skill, event, || 262),
+                Some(ColossusFist { near: false })
+            );
+        }
+        for zone in [0, 261, 263, 265] {
+            assert_eq!(r::plot_ground(skill, 3199, || zone), None, "zone {zone}");
+        }
+    }
+    for skill in [18373, 18375, 18400, 18402, 18405, 18407, 19247, 19249] {
+        assert_eq!(r::plot_ground(skill, 3199, no_zone), None, "skill {skill}");
+    }
+}

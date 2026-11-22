@@ -13,7 +13,7 @@ use rand::Rng;
 
 use crate::models::unit::SkillAttribute;
 use crate::server::GameServer;
-use crate::systems::instances::encounters::registry as encounters;
+use crate::systems::instances::encounters::registry::{self as encounters, PlotGround};
 use crate::world::{now_ms, WorldObject};
 
 use super::broadcast;
@@ -1084,11 +1084,13 @@ fn update_area_target(
 ) -> Option<Target> {
     let prev = ti.previous_target.clone()?;
     let mut pos: PosUnit = pos_unit_from(server, &prev);
-    let colossus = matches!(state.skill.template.id, 18374 | 18401 | 18406 | 19248)
-        && state.ctx.caster.transform().zone_id == 262;
+    let encounter_ground = encounters::plot_ground(state.skill.template.id, event.id, || {
+        state.ctx.caster.transform().zone_id
+    });
+    let colossus = matches!(encounter_ground, Some(PlotGround::ColossusFist { .. }));
     // The near hand-smash circle covers the fist in front of the body. The
     // second circle and outer impact remain distinct parts of the wind-up.
-    let distance = if colossus && matches!(event.id, 3199 | 3201) {
+    let distance = if encounter_ground == Some(PlotGround::ColossusFist { near: true }) {
         3500
     } else {
         args.distance
@@ -1104,9 +1106,8 @@ fn update_area_target(
         }
     }
     let prev_z = world_pos(server, &prev).z;
-    let hieronimus_meteor = state.skill.template.id == 15629;
-    let meteor_impact = hieronimus_meteor && event.id == 1508;
-    if event.id == 2668 && hieronimus_meteor {
+    let meteor_impact = encounter_ground == Some(PlotGround::MeteorImpact);
+    if encounter_ground == Some(PlotGround::MeteorLaunch) {
         use crate::systems::ai::collision;
         let arena_z = world_pos(server, &Target::Obj(state.ctx.caster.clone())).z;
         let [x, y] = [pos.pos.x, pos.pos.y];
@@ -1130,7 +1131,7 @@ fn update_area_target(
         .flatten()
         .map_or(launch_z, |hit| (hit.pos.z - 0.5).max(floor));
         ti.source = Some(Target::Pos(launch));
-    } else if matches!(event.id, 4023 | 5919) && matches!(state.skill.template.id, 18976 | 21131) {
+    } else if encounter_ground == Some(PlotGround::CalleilFireball) {
         // Calleil's projectile effects use the raised location for the falling
         // fireball. The damage cue that follows needs the floor under that marker.
         let ground = crate::systems::ai::collision::ground_height_probe(
@@ -1161,12 +1162,7 @@ fn update_area_target(
         .flatten()
         .unwrap_or(prev_z)
             + args.height_offset as f32 / 1000.0;
-    } else if !meteor_impact
-        && !matches!(
-            (state.skill.template.id, event.id),
-            (18976, 4024) | (21131, 5920)
-        )
-    {
+    } else if !meteor_impact && encounter_ground != Some(PlotGround::CalleilImpact) {
         // Max(previous Z + offset, WorldManager.GetHeight(posUnit.Transform)).
         // Prefer collision geometry and fall back to the authored heightmap.
         let ground = crate::systems::ai::collision::ground_height_or(

@@ -278,3 +278,33 @@ pub fn is_armory_exit_doodad(template_id: u32, func_group_id: u32) -> bool {
 
 /// The Kroloal Cradle destruction device skill that unlocks the hidden-room chests.
 pub use super::cradle::CRADLE_CHEST_SKILL;
+
+// ---- plots
+
+/// How a plot event's area target finds its ground, for the encounter events that do not use
+/// the generic `Max(previous Z + offset, ground)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotGround {
+    /// The Colossus's hand smash (Sharpwind Mines); `near` for the near circle's events.
+    ColossusFist { near: bool },
+    /// Hieronimus's meteor launch event (Burnt Castle Armory).
+    MeteorLaunch,
+    /// Hieronimus's meteor impact event (Burnt Castle Armory).
+    MeteorImpact,
+    /// Calleil's falling fireball marker events (Howling Abyss).
+    CalleilFireball,
+    /// Calleil's fireball impact events (Howling Abyss).
+    CalleilImpact,
+}
+
+/// The encounter ground rule of a plot event. The caster's `zone_id` is only asked for the
+/// Colossus skills. The dungeons' skills differ, so at most one rule applies.
+pub fn plot_ground(
+    skill_id: u32,
+    event_id: u32,
+    zone_id: impl FnOnce() -> u32,
+) -> Option<PlotGround> {
+    armory::plot_ground(skill_id, event_id)
+        .or_else(|| howling_abyss::plot_ground(skill_id, event_id))
+        .or_else(|| sharpwind::plot_ground(skill_id, event_id, zone_id))
+}
