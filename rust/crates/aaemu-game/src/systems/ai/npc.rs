@@ -131,14 +131,33 @@ pub fn real_movement_flags(move_speed: f64) -> u8 {
 
 /// `Npc.BaseMoveSpeed` (`returning` = the current behavior is `ReturnStateBehavior`).
 pub fn base_move_speed(server: &GameServer, npc: &NpcRef, returning: bool) -> f32 {
-    movement_speed(server, npc, returning, false)
+    movement_speed(
+        server,
+        npc,
+        if returning { Pace::Sprint } else { Pace::Base },
+    )
 }
 
 pub fn running_move_speed(server: &GameServer, npc: &NpcRef) -> f32 {
-    movement_speed(server, npc, false, true)
+    movement_speed(server, npc, Pace::Run)
 }
 
-fn movement_speed(server: &GameServer, npc: &NpcRef, returning: bool, force_run: bool) -> f32 {
+/// The actor stance's walking pace (`ai_move_speed_walk`, capped by `max_speed`), also while
+/// the NPC is in battle.
+pub fn walking_move_speed(server: &GameServer, npc: &NpcRef) -> f32 {
+    movement_speed(server, npc, Pace::Walk)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pace {
+    /// Walk, or run while in battle.
+    Base,
+    Sprint,
+    Run,
+    Walk,
+}
+
+fn movement_speed(server: &GameServer, npc: &NpcRef, pace: Pace) -> f32 {
     let (template_id, stance, running_in_combat) = {
         let n = npc.data();
         (
@@ -165,10 +184,10 @@ fn movement_speed(server: &GameServer, npc: &NpcRef, returning: bool, force_run:
     let Some(stance) = model.stance(stance) else {
         return 1.0;
     };
-    if returning {
+    if pace == Pace::Sprint {
         return stance.ai_move_speed_sprint;
     }
-    if force_run || running_in_combat {
+    if pace == Pace::Run || (pace == Pace::Base && running_in_combat) {
         return stance.ai_move_speed_run.min(stance.max_speed);
     }
     stance.ai_move_speed_walk.min(stance.max_speed)

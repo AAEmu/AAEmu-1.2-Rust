@@ -5577,6 +5577,33 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `doodad::phase::tests::{npc_summoned_origin_clout_casts_as_its_npc_at_its_own_doodad,
   origin_clout_of_a_doodad_the_npc_did_not_summon_keeps_the_doodad_as_caster}` and
   `ai::behaviors::tests::big_monster_chase_range_follows_only_a_ranged_base_attack`.
+* Kroloal Cradle events (2026-11-22, tester items 24 and 25). **Metamoze's cut scene:**
+  sphere 1969 at the boss room's entrance casts 19565. Its `NpcControlEffect` (tag 830)
+  runs command set 207 on the invisible NPC 12157: 19566 gives it the 0.5 s buff 4526,
+  whose Timeout trigger casts 19562, and the cinema effect of 19562 reaches the players
+  within 50 m with cinema 52 `id_264_01` (a 22 s scene of Metamoze and Surya in the
+  r208022 world folder `cinemas/id_264_01.xml`). Two gaps stopped it. The set's
+  `Timeout 3` before 19567 removes the NPC ran as 3 ms, so the buff died with its owner
+  before it timed out. Cinema 52 was also only recorded, like a quest cinema, so no
+  `SCPlaySequencePacket` was sent. The set's pause is now seconds and cinema 52 plays for
+  each player the skill reaches, as the Armory and Palace Cellar cues do. **The squad after
+  the kill:** 19236 spawns Kuwon (12185) and
+  two Royal Stormers (12186/12187), whose command sets 234-236 walk route files without a
+  `Speed` point. The C# default of 1 m/s is 55% of the human walk (model 18: 1.8 m/s,
+  `ai_move_speed_walk`), which the client showed as a slow, sliding walk; before #159 the
+  same pace also played the run animation. Their pauses (10, 12.5, 23.5, 27 s) also ran as
+  milliseconds, so the lines and moves ran back to back. The Cradle scene sets (Kuwon's
+  squads in Sprigg's, Siranus's and Metamoze's rooms and Princess Surya: 222-224, 228-230,
+  234-237) now walk at the actor's stance walk speed with the walk flags, and every Cradle
+  set's `Timeout` (207, 222-237, 240, 260, 263) counts seconds. **Inferred:** the walk
+  rather than the run comes from Siranus's room, where the authored pauses (cast times
+  aside) bring the commander and both soldiers to their shared vanish (19652) together at
+  1.8-1.9 m/s. Fractional pauses (6.4, 12.5, 23.5) are truncated to whole seconds because
+  `ai_commands.param1` is read as an integer. Whether every 1.2 `Timeout` row is seconds
+  (some rows read "5 sec") is open; the rule stays per command set. Tests (gated by
+  `AAEMU_COMPACT_DB`): `npcs::cradle_dungeon_tests::events::{
+  real_data_cradle_metamoze_sphere_plays_the_boss_room_cinema,
+  real_data_cradle_metamoze_squad_walks_its_scene_at_its_own_pace}`.
 * systems::npcs (Hadir Farm scripted data, 2026-11-12): the Hadir Farm instance
   (`instance_hadir_farm`, zone 241) now carries the level's scripted spawn data. The 1.2 compact
   has the whole activation chain (the `SphereSkill` spheres 1284/1285/1298-1312/1331/1457/2246 ->

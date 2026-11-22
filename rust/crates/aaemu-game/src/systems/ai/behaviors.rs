@@ -2873,6 +2873,11 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
             if name.starts_with("aipath_alistair") {
                 c.ai.path_handler.ai_path_speed = npc::running_move_speed(c.server, &c.npc);
                 c.ai.path_handler.ai_path_actor_flags = Some(4);
+            } else if walks_scene_routes(cmd.cmd_set_id) {
+                // The route files carry no `Speed` point, so the C# default of 1 m/s applied:
+                // well below the actor's own walk (1.8 m/s for the human model 18), which
+                // the client showed as a slow, sliding walk. A `Speed` point still overrides.
+                c.ai.path_handler.ai_path_speed = npc::walking_move_speed(c.server, &c.npc);
             }
             if cmd.param1 == 1 {
                 // An empty Param2 walked the current route (see above): keep its name.
@@ -2909,14 +2914,11 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
         Cmd::Timeout => {
             c.ai.ai_time_out = cmd.param1;
             let wait = i64::from(c.ai.ai_time_out);
-            // The last-room cinematics give the actor three seconds to play
-            // its cue before the next command removes it.
-            c.ai.current_command_run_time_ms =
-                if matches!(cmd.cmd_set_id, 102 | 103 | 106 | 107 | 189 | 282) {
-                    wait * 1000
-                } else {
-                    wait
-                };
+            c.ai.current_command_run_time_ms = if timeout_in_seconds(cmd.cmd_set_id) {
+                wait * 1000
+            } else {
+                wait
+            };
         }
         Cmd::Other(v) => {
             tracing::error!("AI command {v}: NotSupportedException");
@@ -2926,6 +2928,30 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
     if c.ai.current_command_run_time_ms == 0 {
         c.ai.current_command_run_time_ms = -1000;
     }
+}
+
+/// Command sets whose `Timeout` rows are seconds, not the C#'s milliseconds. The authored
+/// values are dialogue and cue pauses (3, 10, 12.5, 27; other rows even read "5 sec"); as
+/// milliseconds a scripted actor ran its whole scene at once, or was removed before its cue.
+fn timeout_in_seconds(cmd_set_id: u32) -> bool {
+    matches!(
+        cmd_set_id,
+        // Burnt Castle Armory and Howling Abyss final-room cinematics.
+        102 | 103 | 106 | 107 | 189 | 282
+        // Kroloal Cradle: Metamoze's cut-scene trigger (207), Kuwon's squads in Sprigg's,
+        // Siranus's and Metamoze's rooms with Princess Surya (222-237), Karim's lines (240)
+        // and the statue barriers (260, 263).
+        | 207 | 222..=237 | 240 | 260 | 263
+    )
+}
+
+/// Command sets whose `FollowPath` routes are walked at the actor's own walking pace: the
+/// Kroloal Cradle scenes of Kuwon's squads (human model 18) and Princess Surya (model 19) in
+/// Sprigg's, Siranus's and Metamoze's rooms. In Siranus's room the authored pauses (cast
+/// times aside) bring the commander and both soldiers to their vanish (19652) together at
+/// 1.8-1.9 m/s, the human walk. Siranus's shards (231-233, model 315) keep the default.
+fn walks_scene_routes(cmd_set_id: u32) -> bool {
+    matches!(cmd_set_id, 222..=224 | 228..=230 | 234..=237)
 }
 
 fn spawning_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {

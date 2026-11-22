@@ -1204,3 +1204,6 @@ async fn real_data_cradle_spike_pulse_damages_and_leaves_the_injury() {
     assert_eq!(spear.data().func_group_id, 14142);
     assert!(player.data().unit.buffs.check_buff(3999));
 }
+
+#[path = "cradle_event_tests.rs"]
+mod events;
