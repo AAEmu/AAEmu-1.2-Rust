@@ -2378,44 +2378,6 @@ pub fn npc_tag_targets(data: &super::Data, template: &SkillTemplate) -> Option<V
     tagged.then_some(ids)
 }
 
-/// Route scripted door hits to the boss's own gate, even if it died in the sunken part
-/// of the room. The gates and their no-attack areas share templates. Melkina's
-/// pair is at Y 250, and Tushan's is at Y 328–331.
-fn route_palace_cellar_gate(
-    server: &GameServer,
-    caster: &WorldObject,
-    skill_id: u32,
-    units: &mut Vec<WorldObject>,
-) {
-    if !matches!(skill_id, 17421..=17423 | 20615) {
-        return;
-    }
-    let Some(npc) = caster.as_npc() else { return };
-    let north = match npc.data().unit.template_id {
-        9809 => false, // Melkina
-        9796 => true,  // Tushan
-        _ => return,
-    };
-    let Some(world) = world_of(server, caster).filter(|w| w.template.name == "instance_sal_temple")
-    else {
-        return;
-    };
-    // Door cues have ten target slots. Nearby jars, NPCs and other props can
-    // fill them before the gate, especially when the boss dies far inside.
-    // Melkina's chest effect targets the caster once and needs no area targets.
-    units.clear();
-    units.extend(
-        world
-            .all_doodads()
-            .into_iter()
-            .filter(|doodad| {
-                let d = doodad.data();
-                matches!(d.template_id, 4577 | 5947) && (d.transform.y > 300.0) == north
-            })
-            .map(WorldObject::from),
-    )
-}
-
 /// `Skill.ApplyEffects(caster, casterCaster, targetSelf, targetCaster, skillObject)`.
 pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster = &ctx.caster;
@@ -2433,30 +2395,6 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let player = caster.as_player().cloned();
     let caster_t = Target::Obj(caster.clone());
     let target_self = &ctx.target;
-    if t.id == 16600
-        && caster
-            .as_npc()
-            .is_some_and(|n| n.data().unit.template_id == 10073)
-    {
-        if let Some(world) =
-            world_of(server, caster).filter(|w| w.template.name == "instance_sal_temple")
-        {
-            if let Some(barrier) = world
-                .all_doodads()
-                .into_iter()
-                .find(|d| d.data().template_id == 4580)
-            {
-                // Melkina's exit completes the barrier's timed sequence immediately.
-                crate::systems::npcs::doodad::manager::do_change_phase(
-                    server,
-                    &world,
-                    &barrier,
-                    Some(caster),
-                    12282,
-                );
-            }
-        }
-    }
     // Earthen Grip is marked Others, which the area filter interprets as neutral only.
     // Both it and Sorvell's barrel barrage select enemies that can receive their effects.
     let sorvell_area = encounters::hostile_area_skill(t.id) && caster.as_npc().is_some();
@@ -2547,7 +2485,6 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     )
             });
         }
-        route_palace_cellar_gate(server, caster, t.id, &mut units);
         for encounter in encounter_hooks::all() {
             encounter.area_targets(server, caster, &t, &mut units);
         }
