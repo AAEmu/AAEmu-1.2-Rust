@@ -35,3 +35,8 @@ pub(super) fn appended_intro_skill(
 pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
     cinema_id == 8
 }
+
+/// The Burnt Castle Howl ward: summoned by its marker NPC, its protection runs as the doodad.
+pub(super) fn is_howl_ward(template_id: u32, buff_id: u32) -> bool {
+    template_id == 4626 && buff_id == 3615
+}

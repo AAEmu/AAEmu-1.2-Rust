@@ -23,3 +23,23 @@ pub(super) fn walks_scene_routes(cmd_set_id: u32) -> bool {
 pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
     cinema_id == 52
 }
+
+/// Miasma injuries last beyond the contact that applies them. A unit inside Miasma keeps its
+/// buff. The Cradle stair barriers 5423 / 5424 (clouts 1266 / 1267, 200 ms) root with
+/// Impaled 4351 for its 2 s like the spears' Injury.
+pub(super) fn clout_reapplies_contact(clout_id: u32) -> bool {
+    matches!(clout_id, 1139 | 1266 | 1267)
+}
+
+/// A Fire Pillar hit lasts beyond the contact that applies it. Fire Pillar (300 ms) hits once
+/// per entry, as in the C#: each flame phase of a jet is a new trigger, so a player who stays
+/// on the grate is hit once per burst.
+pub(super) fn is_contact_buff(buff_id: u32) -> bool {
+    buff_id == 3996
+}
+
+/// The Cradle pool hazards: Toxicity (green pool), Cursed Blood (red pools),
+/// Poison (stepping stone pools) and Lava (Arkanis's room).
+pub(super) fn clout_requires_submersion(world: &str, buff_id: u32) -> bool {
+    world == WORLD && matches!(buff_id, 3813 | 4362 | 4483 | 4683)
+}

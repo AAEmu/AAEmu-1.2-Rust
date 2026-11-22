@@ -195,3 +195,98 @@ fn plays_cinema_directly() {
         &[0, 7, 10, 51, 53, 133],
     );
 }
+
+// ---- doodads and clouts
+
+#[test]
+fn clout_class() {
+    use r::CloutClass::*;
+    let cases = [
+        ((4626, 0, 3615), Some(HowlWard)),
+        ((4626, 0, 3614), None),
+        ((4625, 0, 3615), None),
+        ((4627, 0, 3615), None),
+        ((5170, 0, 0), Some(HowlingHazard)),
+        ((5383, 0, 0), Some(HowlingHazard)),
+        ((5706, 0, 0), Some(HowlingHazard)),
+        ((5708, 7, 9), Some(HowlingHazard)),
+        ((6261, 0, 0), Some(HowlingHazard)),
+        ((6273, 0, 0), Some(HowlingHazard)),
+        ((5169, 0, 0), None),
+        ((5707, 0, 0), None),
+        ((6262, 0, 0), None),
+        ((6274, 0, 0), None),
+        ((3874, 0, 0), Some(HadirHazard)),
+        ((3956, 1, 2), Some(HadirHazard)),
+        ((3873, 0, 0), None),
+        ((3955, 0, 0), None),
+        ((5150, 1152, 0), Some(FrozenZone)),
+        ((5150, 1151, 0), None),
+        ((5150, 1153, 0), None),
+        ((5149, 1152, 0), None),
+        ((4109, 0, 2783), Some(PalaceFlame)),
+        ((4741, 5, 2783), Some(PalaceFlame)),
+        ((4109, 0, 2782), None),
+        ((4741, 0, 2784), None),
+        ((4110, 0, 2783), None),
+        ((4740, 0, 2783), None),
+        ((0, 0, 0), None),
+        ((5516, 1295, 3999), None),
+    ];
+    for ((template, clout, buff), class) in cases {
+        assert_eq!(
+            r::clout_class(template, clout, buff),
+            class,
+            "doodad {template}, clout {clout}, buff {buff}"
+        );
+    }
+}
+
+#[test]
+fn clout_reapplies_contact() {
+    table(
+        r::clout_reapplies_contact,
+        &[1139, 1266, 1267, 1295, 1334, 1336],
+        &[
+            0, 1138, 1140, 1265, 1268, 1294, 1296, 1333, 1335, 1337, 1182, 1415,
+        ],
+    );
+}
+
+#[test]
+fn is_contact_buff() {
+    table(r::is_contact_buff, &[3996], &[0, 3995, 3997, 3999]);
+}
+
+#[test]
+fn clout_requires_submersion() {
+    let buffs = [3813, 4362, 4483, 4683];
+    table(
+        |b| r::clout_requires_submersion("instance_cradle_of_destruction", b),
+        &buffs,
+        &[0, 3812, 3814, 4361, 4363, 4482, 4484, 4682, 4684, 3996],
+    );
+    for world in [
+        "",
+        "main_world",
+        "instance_howling_abyss",
+        "instance_cradle",
+    ] {
+        table(|b| r::clout_requires_submersion(world, b), &[], &buffs);
+    }
+}
+
+#[test]
+fn clout_payload_without_inside_buff() {
+    table(
+        r::clout_payload_without_inside_buff,
+        &[1415, 1542],
+        &[0, 1414, 1416, 1541, 1543, 1152],
+    );
+}
+
+#[test]
+fn powder_keg_ids() {
+    assert_eq!(r::POWDER_KEG_DOODAD, 5951);
+    assert_eq!(r::POWDER_KEG_ITEM, 25002);
+}

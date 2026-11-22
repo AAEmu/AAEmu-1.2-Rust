@@ -46,3 +46,13 @@ pub(super) fn waits_for_visible_caster(skill_id: u32) -> bool {
 pub(super) fn broadcasts_room_cinema(cinema_id: u32) -> bool {
     cinema_id == 51
 }
+
+/// The Illusionist's frozen zone: its clout is cast by the NPC that summoned the doodad.
+pub(super) fn is_frozen_zone(template_id: u32, clout_id: u32) -> bool {
+    template_id == 5150 && clout_id == 1152
+}
+
+/// The powder keg, a worn pack, and the doodad it is dropped as.
+pub const POWDER_KEG_DOODAD: u32 = 5951;
+/// The powder keg item (equipped in the backpack slot).
+pub const POWDER_KEG_ITEM: u32 = 25002;

@@ -39,3 +39,19 @@ pub(super) fn raised_floor_drop(zone_id: u32) -> Option<f32> {
 pub(super) fn broadcasts_room_cinema(cinema_id: u32) -> bool {
     matches!(cinema_id, 53 | 133)
 }
+
+/// The Howling Abyss hazard doodads: their clouts take a casting NPC as the trigger caster.
+pub(super) fn is_hazard_clout(template_id: u32) -> bool {
+    matches!(template_id, 5170 | 5383 | 5706 | 5708 | 6261 | 6273)
+}
+
+/// The floor spear windows. Their injuries last beyond the contact that applies them, and a
+/// unit inside a spear window keeps its buff.
+pub(super) fn clout_reapplies_contact(clout_id: u32) -> bool {
+    matches!(clout_id, 1295 | 1334 | 1336)
+}
+
+/// Calleil's Hellfire clouts carry their payload without an inside buff.
+pub(super) fn clout_payload_without_inside_buff(clout_id: u32) -> bool {
+    matches!(clout_id, 1415 | 1542)
+}

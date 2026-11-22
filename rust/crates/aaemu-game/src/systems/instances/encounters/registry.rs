@@ -95,3 +95,64 @@ pub fn plays_cinema_directly(cinema_id: u32) -> bool {
         || palace_cellar::plays_cinema_directly(cinema_id)
         || cradle::plays_cinema_directly(cinema_id)
 }
+
+// ---- doodads and clouts
+
+/// The encounter areas of a doodad's clout that keep their own caster and payload rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloutClass {
+    /// The Burnt Castle Howl ward (Armory).
+    HowlWard,
+    /// A Howling Abyss hazard doodad.
+    HowlingHazard,
+    /// A Hadir Farm poison puddle or tombstone.
+    HadirHazard,
+    /// The Illusionist's frozen zone (Sharpwind Mines).
+    FrozenZone,
+    /// The Palace Cellar brazier flame.
+    PalaceFlame,
+}
+
+/// The encounter class of a doodad's clout, from the doodad template, the clout id and its
+/// buff. The classes have no template in common, so at most one applies.
+pub fn clout_class(template_id: u32, clout_id: u32, buff_id: u32) -> Option<CloutClass> {
+    if armory::is_howl_ward(template_id, buff_id) {
+        Some(CloutClass::HowlWard)
+    } else if howling_abyss::is_hazard_clout(template_id) {
+        Some(CloutClass::HowlingHazard)
+    } else if hadir::is_hazard_clout(template_id) {
+        Some(CloutClass::HadirHazard)
+    } else if sharpwind::is_frozen_zone(template_id, clout_id) {
+        Some(CloutClass::FrozenZone)
+    } else if palace_cellar::is_flame_clout(template_id, buff_id) {
+        Some(CloutClass::PalaceFlame)
+    } else {
+        None
+    }
+}
+
+/// Clouts that keep applying their contact buff while a unit stays inside (Kroloal Cradle,
+/// Howling Abyss).
+pub fn clout_reapplies_contact(clout_id: u32) -> bool {
+    cradle::clout_reapplies_contact(clout_id) || howling_abyss::clout_reapplies_contact(clout_id)
+}
+
+/// Clout buffs that are a contact hit: not removed when the unit leaves (Kroloal Cradle).
+pub fn is_contact_buff(buff_id: u32) -> bool {
+    cradle::is_contact_buff(buff_id)
+}
+
+/// Clout buffs that only reach a unit under the water surface in this world (Kroloal Cradle).
+pub fn clout_requires_submersion(world: &str, buff_id: u32) -> bool {
+    cradle::clout_requires_submersion(world, buff_id)
+}
+
+/// Clouts without an inside buff that still apply all their effects (Howling Abyss).
+pub fn clout_payload_without_inside_buff(clout_id: u32) -> bool {
+    howling_abyss::clout_payload_without_inside_buff(clout_id)
+}
+
+/// The powder keg doodad (Sharpwind Mines).
+pub use super::sharpwind::POWDER_KEG_DOODAD;
+/// The powder keg item (Sharpwind Mines).
+pub use super::sharpwind::POWDER_KEG_ITEM;

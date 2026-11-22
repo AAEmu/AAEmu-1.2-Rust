@@ -19,3 +19,9 @@ pub(super) fn raised_floor_drop(zone_id: u32) -> Option<f32> {
 pub(super) fn plays_cinema_directly(cinema_id: u32) -> bool {
     cinema_id == 9
 }
+
+/// The Cellar flame follows the brazier's phase, even when the bucket is used
+/// beside a different prop. Phase changes must remove the previous fire area.
+pub(super) fn is_flame_clout(template_id: u32, buff_id: u32) -> bool {
+    matches!(template_id, 4109 | 4741) && buff_id == 2783
+}

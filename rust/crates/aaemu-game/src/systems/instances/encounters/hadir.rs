@@ -18,3 +18,9 @@ pub(super) fn is_encounter_intro(cmd_set_id: u32) -> bool {
 pub(super) fn helps_only_near_the_pull(world: &str) -> bool {
     world == WORLD
 }
+
+/// The poison puddles and tombstones are anchored at the encounter's
+/// summoned doodad. Timed phases can arrive without an explicit caster.
+pub(super) fn is_hazard_clout(template_id: u32) -> bool {
+    matches!(template_id, 3874 | 3956)
+}

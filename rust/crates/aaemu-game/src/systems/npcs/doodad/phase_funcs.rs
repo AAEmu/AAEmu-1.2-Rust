@@ -15,6 +15,7 @@ use super::spawner::{DoodadSpawner, DoodadSpawnerDef, SpawnerBase};
 use super::tasks::{self, FuncTaskKind};
 use super::templates::*;
 use crate::data::world_templates::WorldSpawnPosition;
+use crate::systems::instances::encounters::registry::{self as encounters, CloutClass};
 use crate::systems::npcs::area_trigger::{self, AreaTrigger};
 use crate::systems::npcs::fish_school;
 use crate::world::{now_ms, WorldObject};
@@ -600,15 +601,16 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .get_area_shape_by_id(f.aoe_shape_id);
     let template_id = ctx.doodad.data().template_id;
     let is_fish_school = super::super::fish_school::is_school_template(template_id);
-    let howl_ward = template_id == 4626 && f.buff_id == 3615;
-    let howling_hazard = matches!(template_id, 5170 | 5383 | 5706 | 5708 | 6261 | 6273);
+    let clout = encounters::clout_class(template_id, f.id, f.buff_id);
+    let howl_ward = clout == Some(CloutClass::HowlWard);
+    let howling_hazard = clout == Some(CloutClass::HowlingHazard);
     // The poison puddles and tombstones are anchored at the encounter's
     // summoned doodad. Timed phases can arrive without an explicit caster.
-    let hadir_hazard = matches!(template_id, 3874 | 3956);
-    let frozen_zone = template_id == 5150 && f.id == 1152;
+    let hadir_hazard = clout == Some(CloutClass::HadirHazard);
+    let frozen_zone = clout == Some(CloutClass::FrozenZone);
     // The Cellar flame follows the brazier's phase, even when the bucket is used
     // beside a different prop. Phase changes must remove the previous fire area.
-    let palace_flame = matches!(template_id, 4109 | 4741) && f.buff_id == 2783;
+    let palace_flame = clout == Some(CloutClass::PalaceFlame);
     // An NPC skill summoned this doodad, and the clout uses that NPC as its source
     // (Kroloal Cradle's Miasma, Poison Belch and Toxic Globe). See `npc_origin_clout`.
     // The encounter areas handled above keep their own caster and payload rules (the
@@ -701,13 +703,13 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // jet is a new trigger, so a player who stays on the grate is hit once per burst.
     // The Cradle stair barriers 5423 / 5424 (clouts 1266 / 1267, 200 ms) root with
     // Impaled 4351 for its 2 s like the spears' Injury.
-    let reapplied_contact = matches!(f.id, 1139 | 1266 | 1267 | 1295 | 1334 | 1336);
-    trigger.contact_buff = reapplied_contact || f.buff_id == 3996;
+    let reapplied_contact = encounters::clout_reapplies_contact(f.id);
+    trigger.contact_buff = reapplied_contact || encounters::is_contact_buff(f.buff_id);
     trigger.reapply_while_inside = reapplied_contact;
     // The Cradle pool hazards: Toxicity (green pool), Cursed Blood (red pools),
     // Poison (stepping stone pools) and Lava (Arkanis's room).
-    trigger.requires_submersion = ctx.world.template.name == "instance_cradle_of_destruction"
-        && matches!(f.buff_id, 3813 | 4362 | 4483 | 4683);
+    trigger.requires_submersion =
+        encounters::clout_requires_submersion(&ctx.world.template.name, f.buff_id);
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
         // Deviation: a clout without an inside buff (401 of the 447 clouts with effects) never
@@ -716,7 +718,10 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         // Lake Bubbles (4336) gives Air Bubble 3036 at the Soundless Lake sealstone. Its damage,
         // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
         // These encounter clouts carry their payload without an inside buff.
-        None if hadir_hazard || frozen_zone || matches!(f.id, 1415 | 1542) => {
+        None if hadir_hazard
+            || frozen_zone
+            || encounters::clout_payload_without_inside_buff(f.id) =>
+        {
             HashMap::from([(0, f.effects.clone())])
         }
         // An NPC's hazard picks its side through the relation, so its damage and debuffs
