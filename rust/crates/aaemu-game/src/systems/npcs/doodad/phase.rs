@@ -105,6 +105,8 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         let previous = d.func_group_id;
         d.func_group_id = value;
         d.phase.interaction_counts.clear();
+        d.phase.pending_loot = None;
+        d.phase.pending_loot_from_bag = false;
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
@@ -548,6 +550,16 @@ fn use_doodad_with_gate(
                     "DoodadFuncLootItem" | "DoodadFuncLootPack" | "DoodadFuncCutdowning"
                 )
             }) {
+                if ctx
+                    .doodad
+                    .data()
+                    .phase
+                    .pending_loot
+                    .as_ref()
+                    .is_some_and(|loot| !loot.matches(&f.func_type, f.func_id))
+                {
+                    continue;
+                }
                 // The client builds this list with the func's `perm` filter (`FUN_393bd290`);
                 // a direct `CSLootOpenBag` must not run a row the client would have hidden.
                 if let Some(player) = player {
@@ -570,6 +582,7 @@ fn use_doodad_with_gate(
                     }
                 }
                 if do_func(ctx, Some(caster), started_skill_id, Some(f)) {
+                    keep_pending_loot_in(ctx, current);
                     ctx.doodad.data().phase.list_group_id.clear();
                     return;
                 }
@@ -629,6 +642,28 @@ fn use_doodad_with_gate(
         skill_id = 0;
         chained = true;
     }
+}
+
+/// A loot group's rows all run in one `Use` pass, but the first granted row already moves the
+/// doodad to its next phase. When a later row's reward does not fit, return to the loot group
+/// that owns the row: the reward stays claimable there, and the claim starts the next phase
+/// (and its regrowth timer) through the normal `DoChangePhase` after the loop. The next phase
+/// was never entered (its phase funcs did not run and no `SCDoodadPhaseChanged` was sent), so
+/// only the group is restored.
+fn keep_pending_loot_in(ctx: &DoodadCtx<'_>, loot_group: u32) {
+    let pending = {
+        let mut d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id == loot_group {
+            return;
+        }
+        let Some(pending) = d.phase.pending_loot.take() else {
+            return;
+        };
+        (pending, d.phase.pending_loot_from_bag)
+    };
+    set_func_group_id(ctx.server, &ctx.doodad, loot_group);
+    let mut d = ctx.doodad.data();
+    (d.phase.pending_loot, d.phase.pending_loot_from_bag) = (Some(pending.0), pending.1);
 }
 
 /// The theft-evidence part of `Use` (`GenerateTheftEvidence` via the skills hook).
@@ -712,6 +747,17 @@ pub fn do_func(
     if !super::gathering::allows_func(ctx.server, func, skill_id, caster) {
         return true;
     }
+    if ctx
+        .doodad
+        .data()
+        .phase
+        .pending_loot
+        .as_ref()
+        .is_some_and(|loot| !loot.matches(&func.func_type, func.func_id))
+    {
+        // Retry the selected reward without rerolling earlier rows in the group.
+        return false;
+    }
 
     // then perform the function (DoodadFunc.Use -> template?.Use)
     if let Some(t) = ctx.data().func_template(func.func_id, &func.func_type) {
@@ -727,14 +773,18 @@ pub fn do_func(
         });
     }
 
-    let (to_next_phase, override_phase) = {
+    let (to_next_phase, override_phase, pending_loot) = {
         let d = ctx.doodad.data();
-        (d.phase.to_next_phase, d.phase.override_phase)
+        (
+            d.phase.to_next_phase,
+            d.phase.override_phase,
+            d.phase.pending_loot.is_some(),
+        )
     };
     if !to_next_phase {
         tracing::trace!("DoFunc Finished execution without ToNextPhase");
-        // DoodadFuncLootItem sets ToNextPhase=false when loot fails; let Use() try the next one.
-        return func.func_type != "DoodadFuncLootItem";
+        // A miss can fall through to another roll. A blocked reward must remain claimable.
+        return pending_loot || func.func_type != "DoodadFuncLootItem";
     }
     crate::systems::instances::mentoring::succeeded(ctx, caster);
     if func.count > 1 {

@@ -915,12 +915,20 @@ pub fn unbond_doodad(
 /// doodad without `DoodadFuncRecoverItem` (the loot container / `RecoverItem` checks are the
 /// caller's): `doodad.Use(character, 0)`, then a `DoodadDeleteTask` when the phase is no longer
 /// loot-driven.
+///
+/// A reward that a gathering skill or a timer held for a full bag is claimed here too. That
+/// claim finishes the earlier interaction, which never opened a loot bag: its next phase keeps
+/// its own funcs (a vein's regrowth timer) instead of being deleted.
 pub fn loot_open_bag_doodad(
     server: &GameServer,
     world: &Arc<WorldInstance>,
     player: &PlayerRef,
     doodad: &DoodadRef,
 ) {
+    let bag_open = {
+        let d = doodad.data();
+        d.phase.pending_loot.is_none() || d.phase.pending_loot_from_bag
+    };
     use_doodad(
         server,
         world,
@@ -929,7 +937,12 @@ pub fn loot_open_bag_doodad(
         0,
         0,
     );
-    if !doodad.data().has_loot_item() {
+    let delete = {
+        let mut d = doodad.data();
+        d.phase.pending_loot_from_bag = bag_open && d.phase.pending_loot.is_some();
+        bag_open && !d.has_loot_item()
+    };
+    if delete {
         tasks::schedule_delete(server, doodad);
     }
 }

@@ -512,6 +512,58 @@ fn find_doodad(world: &Arc<WorldInstance>, template_id: u32) -> crate::world::Do
         .unwrap_or_else(|| panic!("doodad {template_id} placed"))
 }
 
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_cradle_treasure_chest_keeps_its_reward_when_the_bag_fills() {
+    use crate::models::item_task::task_type;
+    use crate::systems::economy::inventory::Inv;
+    use crate::systems::npcs::doodad::{manager, phase};
+    use crate::systems::skills::{skill, types::skill_result};
+    use std::time::Duration;
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = super::burntcastle_dungeon_tests::real_encounter_server(&db, WORLD, ZONE);
+    let chest = manager::create(&server, &world, 0, 5550, None, true).unwrap();
+    chest.data().transform.set_xyz(297.0, 743.0, 185.0);
+    manager::spawn(&server, &world, &chest);
+    let entrance = manager::create(&server, &world, 0, 5549, None, true).unwrap();
+    entrance.data().transform.set_xyz(294.0, 743.0, 185.0);
+    manager::spawn(&server, &world, &entrance);
+    phase::set_func_group_id(&server, &entrance, 14331);
+    let player = place_player(&server, &world, 1, 297.0, 742.0, 185.0);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&chest);
+    let economy = server.systems.npcs.hooks.economy.get().unwrap();
+    Inv::of(&player).bag().lock().unwrap().set_container_size(1);
+    let fill = || assert!(economy.acquire_item(&server, &player, task_type::LOOT, 15694, 1, -1));
+    let empty = || {
+        assert_eq!(
+            economy.bag_consume_item(&server, &player, task_type::LOOT, 15694, 1),
+            1
+        )
+    };
+    let open = || skill::unit_use_skill(&server, &caster, 19691, &target);
+
+    fill();
+    assert_eq!(open(), skill_result::BAG_FULL);
+    assert_eq!(chest.data().func_group_id, 14303);
+    empty();
+
+    assert_eq!(open(), skill_result::SUCCESS);
+    fill();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(chest.data().func_group_id, 14303);
+    assert_eq!(economy.item_count(&server, &player, 25660), 0);
+    empty();
+
+    assert_eq!(open(), skill_result::SUCCESS);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_ne!(chest.data().func_group_id, 14303);
+    assert_eq!(economy.item_count(&server, &player, 25660), 1);
+}
+
 /// The shipped files load cleanly: every start-active placement and every event row the
 /// dungeon's skills name is present, and the blockers' doodads exist.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

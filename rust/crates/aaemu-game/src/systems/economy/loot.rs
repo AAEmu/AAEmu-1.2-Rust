@@ -7,8 +7,9 @@
 
 use crate::config::WorldConfig;
 use crate::data::items::{ItemData, ITEM_COINS};
-use crate::models::container::slot_type;
+use crate::models::container::{slot_type, ItemContainer};
 use crate::models::item::{Item, ItemClass, ItemDetails};
+use crate::models::item_task::ItemFx;
 use crate::models::unit::UnitAttribute;
 use crate::server::GameServer;
 use crate::systems::social::achievement::char_record_kind;
@@ -410,7 +411,7 @@ pub fn generate_pack_for_player(
 }
 
 /// `LootPack.GiveLootPack(character, actabilityType, taskType, generatedList, inheritedGrade)`.
-/// Runs inside `txn`. As in C#, a failure after some items were added keeps them.
+/// Runs inside `txn`. A refused pack leaves all of its rewards unclaimed.
 #[allow(clippy::too_many_arguments)]
 pub fn give_loot_pack(
     txn: &mut ItemTxn<'_>,
@@ -444,53 +445,109 @@ pub fn give_loot_pack(
     // A generated list from another caller may still name a missing item template: skip that
     // row instead of failing the whole pack (C# 10.x PR #1488).
     let list = retain_known_items(txn.data(), pack.id, list);
+    give_generated_pack(txn, player, task, &list)
+}
+
+/// Grant a rolled pack under the item operation lock. Use the normal acquisition path so
+/// stack grades, expiry, and auto-equipped backpacks follow the same rules as single rewards.
+pub(crate) fn give_generated_pack(
+    txn: &mut ItemTxn<'_>,
+    player: &PlayerRef,
+    task: u8,
+    list: &[GeneratedLoot],
+) -> bool {
+    let server = txn.server;
     let inv = Inv::of(player);
-    let money = player.data().money;
-    // First check for room
-    {
-        let bag = inv.bag();
-        let bag = bag.lock().expect("container poisoned");
-        for g in &list {
-            if g.item_id == ITEM_COINS {
+    let bag_ref = inv.bag();
+    let mut rewards = list
+        .iter()
+        .filter(|entry| entry.item_id != ITEM_COINS)
+        .peekable();
+    let mut coins = 0i32;
+    if rewards.peek().is_some() {
+        let bag_before = bag_ref.lock().expect("container poisoned").clone();
+        let equipment_ref = inv.equipment();
+        let equip_before = list
+            .iter()
+            .any(|entry| inventory::is_auto_equip_trade_pack(txn.data(), entry.item_id))
+            .then(|| {
+                (
+                    equipment_ref.lock().expect("container poisoned").clone(),
+                    server
+                        .systems
+                        .economy
+                        .previous_backpack(player.character_id),
+                )
+            });
+        let effects_before = txn.env.fx.len();
+        for reward in rewards {
+            let Some(template) = txn.data().template(reward.item_id) else {
+                continue;
+            };
+            let grade = if template.fixed_grade > 0 {
+                template.fixed_grade
+            } else if reward.grade > 1 {
+                i32::from(reward.grade)
+            } else {
+                -1
+            };
+            if inventory::try_add_new_item(txn, &inv, task, reward.item_id, reward.count, grade, 0)
+            {
                 continue;
             }
-            if bag.space_left_for_template(g.item_id, txn.data(), money) < g.count {
-                return false;
+            let current_bag = std::mem::replace(
+                &mut *bag_ref.lock().expect("container poisoned"),
+                bag_before.clone(),
+            );
+            let mut new_ids = Vec::new();
+            let existed = |id| {
+                bag_before.get_item_by_id(id).is_some()
+                    || equip_before
+                        .as_ref()
+                        .is_some_and(|(equipment, _)| equipment.get_item_by_id(id).is_some())
+            };
+            let added = |container: &ItemContainer| {
+                container
+                    .items
+                    .iter()
+                    .map(|item| item.id)
+                    .filter(|&id| !existed(id))
+                    .collect::<Vec<_>>()
+            };
+            new_ids.extend(added(&current_bag));
+            if let Some((equipment, previous)) = &equip_before {
+                let current = std::mem::replace(
+                    &mut *equipment_ref.lock().expect("container poisoned"),
+                    equipment.clone(),
+                );
+                new_ids.extend(added(&current));
+                server
+                    .systems
+                    .economy
+                    .restore_previous_backpack(player.character_id, *previous);
             }
+            for effect in txn.env.fx.0.drain(effects_before..) {
+                if let ItemFx::ReleaseId(id) = effect {
+                    if !existed(id) {
+                        new_ids.push(id);
+                    }
+                }
+            }
+            new_ids.sort_unstable();
+            new_ids.dedup();
+            for id in new_ids {
+                txn.env.fx.push(ItemFx::ReleaseId(id));
+            }
+            return false;
         }
     }
-    let mut coins = 0i32;
-    for g in &list {
+    for g in list {
         if g.item_id == ITEM_COINS {
             coins = coins.wrapping_add(g.count);
             continue;
         }
-        let Some(t) = txn.data().template(g.item_id) else {
-            // The list was filtered above; a template that disappeared since then is skipped
-            // like any other unknown row.
-            tracing::debug!(
-                "GiveLootPack {}: skipping unknown item template {}",
-                pack.id,
-                g.item_id
-            );
+        if txn.data().template(g.item_id).is_none() {
             continue;
-        };
-        let grade = if t.fixed_grade > 0 {
-            t.fixed_grade
-        } else if g.grade > 1 {
-            i32::from(g.grade)
-        } else {
-            -1
-        };
-        if !inventory::try_add_new_item(txn, &inv, task, g.item_id, g.count, grade, 0) {
-            tracing::error!(
-                "Unable to give loot to {} - ItemId: {} x {} at grade {grade} (loot grade {})",
-                player.data().unit.name,
-                g.item_id,
-                g.count,
-                g.grade
-            );
-            return false;
         }
         // GET_LOOTITEM: an item actually handed over by a loot roll (deferred until the item
         // transaction is released).

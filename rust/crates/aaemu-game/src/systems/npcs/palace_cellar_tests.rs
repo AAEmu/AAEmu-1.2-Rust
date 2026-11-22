@@ -156,6 +156,11 @@ async fn real_palace_cellar_barrier_and_both_ways_to_extinguish_the_door_fire() 
 #[tokio::test(start_paused = true)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_palace_cellar_boss_deaths_open_their_own_gates_and_drop_keys() {
+    use crate::models::item_task::task_type;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::economy::{inventory::Inv, looting::CSLootOpenBagPacket};
+
+    const WATER: u32 = 15694;
     let Some((server, world)) = setup() else {
         return;
     };
@@ -165,8 +170,11 @@ async fn real_palace_cellar_boss_deaths_open_their_own_gates_and_drop_keys() {
         .into_values()
         .flatten()
         .any(|s| s.unit_id == 9810 && s.is_placement()));
-    let (_client, player) = place_player(&server, 1, 577.0, 250.0, 144.0);
+    let (mut client, player) = place_player(&server, 1, 577.0, 250.0, 144.0);
     let victim = WorldObject::from(&player);
+    client.conn.active_char = Some(player.clone());
+    let inventory = server.systems.npcs.hooks.economy.get().unwrap();
+    Inv::of(&player).bag().lock().unwrap().set_container_size(1);
     for (boss_id, north, chest_id, open_skill, key_id) in [
         (9809, false, 6121, 20613, 20045),
         (9796, true, 6125, 20616, 20046),
@@ -220,11 +228,29 @@ async fn real_palace_cellar_boss_deaths_open_their_own_gates_and_drop_keys() {
         assert_eq!(chest.data().transform.x, p.x + 12.0);
         victim.with_transform(|t| t.set_xyz(p.x + 12.0, p.y + 8.0, p.z - 3.0));
         ai::npc::check_moved_position(&server, &victim);
+        assert!(inventory.acquire_item(&server, &player, task_type::LOOT, WATER, 1, -1));
         doodad::use_doodad(&server, &world, &chest, Some(&victim), open_skill, 0);
         tokio::time::sleep(Duration::from_secs(2)).await;
-        doodad::use_doodad(&server, &world, &chest, Some(&victim), 0, 0);
-        let inventory = server.systems.npcs.hooks.economy.get().unwrap();
+        assert_eq!(inventory.item_count(&server, &player, key_id), 0);
+        assert!(chest.data().has_loot_item());
+        assert!(chest.data().phase.pending_loot.is_some());
+        assert_eq!(
+            inventory.bag_consume_item(&server, &player, task_type::LOOT, WATER, 1),
+            1
+        );
+        CSLootOpenBagPacket {
+            obj_id: chest.obj_id,
+            obj2_id: 0,
+            loot_all: true,
+        }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
         assert_eq!(inventory.item_count(&server, &player, key_id), 1);
+        assert_eq!(
+            inventory.bag_consume_item(&server, &player, task_type::LOOT, key_id, 1),
+            1
+        );
     }
 }
 

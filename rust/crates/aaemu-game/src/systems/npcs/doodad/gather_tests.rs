@@ -12,6 +12,7 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{GradeTemplate, ItemTemplate};
 use crate::data::GameData;
+use crate::models::item_task::task_type;
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -356,6 +357,29 @@ impl Fx {
             .advance(&self.server, ms)
     }
 
+    async fn open_loot(&mut self, doodad: &DoodadRef) -> Vec<(u16, Vec<u8>)> {
+        use crate::systems::economy::looting::CSLootOpenBagPacket;
+
+        self.client.drain();
+        CSLootOpenBagPacket {
+            obj_id: doodad.obj_id,
+            obj2_id: 0,
+            loot_all: true,
+        }
+        .handle(&self.server, &mut self.client.conn)
+        .await
+        .unwrap();
+        self.client.drain()
+    }
+
+    fn bag_size(&self, slots: i32) {
+        Inv::of(&self.player)
+            .bag()
+            .lock()
+            .unwrap()
+            .set_container_size(slots);
+    }
+
     async fn cast_and_wait(&mut self, skill: u32, d: &DoodadRef) -> Vec<(u16, Vec<u8>)> {
         let mut frames = self.cast(skill, d);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -371,6 +395,224 @@ impl Fx {
         frames.extend(self.client.drain());
         frames
     }
+}
+
+fn has_bag_full(frames: &[(u16, Vec<u8>)]) -> bool {
+    use crate::packets::world::SCErrorMsgPacket;
+    use crate::systems::economy::error_message::BAG_FULL;
+
+    frames.contains(&(
+        sc::SCErrorMsgPacket,
+        body(&SCErrorMsgPacket::new(BAG_FULL, 0, true)),
+    ))
+}
+
+#[tokio::test]
+async fn full_bag_keeps_the_gathered_reward_past_the_intermediate_timer() {
+    let mut data = game_data();
+    let doodads = &mut data.systems.npcs.doodad;
+    let mut miss = doodads.funcs_by_groups[&VEIN_LOOT][0].clone();
+    miss.func_id = 50;
+    miss.func_key = 50;
+    doodads
+        .funcs_by_groups
+        .get_mut(&VEIN_LOOT)
+        .unwrap()
+        .insert(0, miss);
+    doodads
+        .func_templates
+        .get_mut("DoodadFuncLootItem")
+        .unwrap()
+        .insert(
+            50,
+            FuncTemplate::LootItem(DoodadFuncLootItem {
+                id: 50,
+                item_id: ORE,
+                count_min: 1,
+                count_max: 1,
+                percent: -1,
+                ..Default::default()
+            }),
+        );
+    doodads.phase_funcs.insert(
+        VEIN_LOOT,
+        vec![DoodadPhaseFunc {
+            group_id: VEIN_LOOT,
+            func_id: 51,
+            func_type: "DoodadFuncTimer".into(),
+        }],
+    );
+    doodads
+        .phase_func_templates
+        .entry("DoodadFuncTimer")
+        .or_default()
+        .insert(
+            51,
+            FuncTemplate::Timer(DoodadFuncTimer {
+                id: 51,
+                delay: 500,
+                next_phase: VEIN_DEPLETED as i32,
+                ..Default::default()
+            }),
+        );
+    let mut fx = fx_with(data);
+    let vein = fx.doodad(VEIN);
+    fx.bag_size(1);
+    let eco = fx.server.systems.npcs.hooks.economy.get().unwrap();
+    assert!(eco.acquire_item(&fx.server, &fx.player, task_type::LOOT, WOOL, 1, -1));
+
+    let frames = fx.cast_and_wait(ORE_MINE_SKILL, &vein).await;
+    assert!(has_bag_full(&frames));
+    assert_eq!(vein.data().func_group_id, VEIN_LOOT);
+    assert_eq!(fx.count(ORE), 0);
+    fx.advance(1000);
+    assert_eq!(vein.data().func_group_id, VEIN_LOOT);
+
+    assert_eq!(
+        eco.bag_consume_item(&fx.server, &fx.player, task_type::LOOT, WOOL, 1),
+        1
+    );
+    assert!(!has_bag_full(&fx.open_loot(&vein).await));
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(vein.data().func_group_id, VEIN_DEPLETED);
+    assert_eq!(
+        i32::from(fx.player.data().labor_power),
+        LABOR_BASE - MINING_LABOR
+    );
+}
+
+#[tokio::test]
+async fn full_bag_keeps_the_loot_phase_until_every_reward_of_the_group_is_claimed() {
+    // Two rewards in one loot group: the first row's grant moves the doodad to the depleted
+    // phase before the second row runs. A bag with room for only the first must leave the
+    // second claimable in the loot phase, and claiming it must still start the regrowth.
+    let mut data = game_data();
+    data.systems.npcs.doodad = DoodadBuilder {
+        data: data.systems.npcs.doodad,
+    }
+    .func(VEIN_LOOT, loot(60, WOOL), VEIN_DEPLETED as i32)
+    .data;
+    let mut fx = fx_with(data);
+    let vein = fx.doodad(VEIN);
+    fx.bag_size(1);
+
+    let frames = fx.cast_and_wait(ORE_MINE_SKILL, &vein).await;
+    assert!(has_bag_full(&frames));
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 0);
+    assert_eq!(vein.data().func_group_id, VEIN_LOOT);
+    assert!(vein.data().phase.pending_loot.is_some());
+
+    fx.bag_size(2);
+    assert!(!has_bag_full(&fx.open_loot(&vein).await));
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 1);
+    assert_eq!(vein.data().func_group_id, VEIN_DEPLETED);
+    assert!(vein.data().phase.pending_loot.is_none());
+
+    assert_eq!(fx.advance(REGROW_MS as u64), 1);
+    assert_eq!(vein.data().func_group_id, VEIN_START);
+}
+
+#[tokio::test]
+async fn full_bag_keeps_a_rolled_loot_pack_without_giving_a_partial_reward() {
+    use crate::systems::economy::loot_data::{Loot, LootPack};
+
+    const CHEST: u32 = 104;
+    const CLOSED: u32 = 40;
+    const OPEN: u32 = 41;
+    const PACK: u32 = 77;
+    let mut data = game_data();
+    let rolls: Vec<_> = [(ORE, 1), (WOOL, 101)]
+        .into_iter()
+        .map(|(item_id, count)| Loot {
+            item_id,
+            min_amount: count,
+            max_amount: count,
+            always_drop: true,
+            ..Default::default()
+        })
+        .collect();
+    data.systems.economy.loot.packs.insert(
+        PACK,
+        LootPack {
+            id: PACK,
+            loots: rolls.clone(),
+            loots_by_group_no: vec![(0, rolls)],
+            ..Default::default()
+        },
+    );
+    data.systems.npcs.doodad = DoodadBuilder::default()
+        .template(CHEST, &[(CLOSED, 1), (OPEN, 2)])
+        .func(
+            CLOSED,
+            FuncTemplate::LootPack(DoodadFuncLootPack {
+                id: 1,
+                loot_pack_id: PACK,
+            }),
+            OPEN as i32,
+        )
+        .data;
+    let mut fx = fx_with(data);
+    let chest = fx.doodad(CHEST);
+    fx.bag_size(2);
+
+    let frames = fx.open_loot(&chest).await;
+    assert!(has_bag_full(&frames));
+    assert!(!frames
+        .iter()
+        .any(|frame| frame.0 == sc::SCItemTaskSuccessPacket));
+    assert_eq!(fx.count(ORE), 0);
+    assert_eq!(fx.count(WOOL), 0);
+    assert_eq!(chest.data().func_group_id, CLOSED);
+    assert!(chest.data().phase.pending_loot.is_some());
+
+    // A second player has a separate roll because packs can include personal quest drops.
+    let mut other = TestClient::new(&fx.server, 2, 1002);
+    let other_player = spawn_player(
+        &fx.server,
+        &other,
+        test_character(2, "Other miner", 100.0, 100.0),
+        0x101,
+    );
+    Inv::of(&other_player)
+        .bag()
+        .lock()
+        .unwrap()
+        .set_container_size(2);
+    other.conn.active_char = Some(other_player);
+    crate::systems::economy::looting::CSLootOpenBagPacket {
+        obj_id: chest.obj_id,
+        obj2_id: 0,
+        loot_all: true,
+    }
+    .handle(&fx.server, &mut other.conn)
+    .await
+    .unwrap();
+    assert!(has_bag_full(&other.drain()));
+    {
+        let data = chest.data();
+        let Some(crate::models::doodad::PendingDoodadLoot::Pack { rolls, .. }) =
+            data.phase.pending_loot.as_ref()
+        else {
+            panic!("expected blocked loot-pack rolls");
+        };
+        assert!(rolls.contains_key(&1) && rolls.contains_key(&2));
+    }
+
+    fx.bag_size(3);
+    assert!(!has_bag_full(&fx.open_loot(&chest).await));
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 101);
+    assert_eq!(chest.data().func_group_id, OPEN);
+    assert!(chest.data().phase.pending_loot.is_none());
+    fx.open_loot(&chest).await;
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 101);
+    // The held reward came from a loot-bag open, so its claim still ends with the open's
+    // `DoodadDeleteTask`.
+    fx.advance(0);
+    assert!(chest.data().phase.deleted);
 }
 
 fn body(p: &dyn Marshal) -> Vec<u8> {

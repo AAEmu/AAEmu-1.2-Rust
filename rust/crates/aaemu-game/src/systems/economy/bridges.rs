@@ -35,7 +35,7 @@ use super::error_message;
 use super::inventory::{self, send_error_message_to, Inv, ItemTxn, Out};
 use super::item_effects::{self, Outcome, SkillItem};
 use super::item_packets::SCItemTaskSuccessPacket;
-use super::loot::SharedRandom;
+use super::loot::{GeneratedLoot, SharedRandom};
 
 /// Locks a container. In a function that owns an [`ItemTxn`], never leave the guard as a
 /// temporary of the tail expression: it would be dropped after the transaction, whose drop runs
@@ -2944,6 +2944,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         loot_pack_id: u32,
         skill_id: u32,
         task: u8,
+        roll: &mut Option<Vec<GeneratedLoot>>,
     ) -> Option<bool> {
         let pack = server.game_data.systems.economy.loot.pack(loot_pack_id)?;
         // SkillManager.GetSkillActAbility(skillId)
@@ -2953,24 +2954,21 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
             .skills
             .skill(skill_id)
             .map_or(0, |s| s.actability_group_id.max(0) as u8);
-        let mut rng = SharedRandom;
-        let contents =
-            super::loot::generate_pack_for_player(server, pack, player, act, None, &mut rng)
-                .ok()?;
-        if lock(&Inv::of(player).bag()).free_slot_count() < contents.len() as i32 {
-            return Some(false);
+        if roll.is_none() {
+            *roll = Some(
+                super::loot::generate_pack_for_player(
+                    server,
+                    pack,
+                    player,
+                    act,
+                    None,
+                    &mut SharedRandom,
+                )
+                .ok()?,
+            );
         }
         let mut txn = ItemTxn::begin(server);
-        let given = super::loot::give_loot_pack(
-            &mut txn,
-            player,
-            pack,
-            act,
-            task,
-            Some(contents),
-            None,
-            &mut rng,
-        );
+        let given = super::loot::give_generated_pack(&mut txn, player, task, roll.as_deref()?);
         if given {
             // GET_LOOTPACK (deferred until the item transaction is released).
             crate::systems::report_achievement(
@@ -2983,7 +2981,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 },
             );
         }
-        Some(true)
+        Some(given)
     }
 
     fn try_sell_equipped_fish(

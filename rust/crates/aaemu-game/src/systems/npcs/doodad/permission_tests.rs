@@ -268,6 +268,7 @@ impl EconomyBridge for LootRec {
         loot_pack_id: u32,
         _skill_id: u32,
         _task: u8,
+        _roll: &mut Option<Vec<crate::systems::economy::loot::GeneratedLoot>>,
     ) -> Option<bool> {
         self.packs.lock().unwrap().push(loot_pack_id);
         Some(true)

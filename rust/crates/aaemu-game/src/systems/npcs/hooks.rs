@@ -527,6 +527,7 @@ pub trait EconomyBridge: Send + Sync {
         _loot_pack_id: u32,
         _skill_id: u32,
         _task: u8,
+        _roll: &mut Option<Vec<crate::systems::economy::loot::GeneratedLoot>>,
     ) -> Option<bool> {
         None
     }
