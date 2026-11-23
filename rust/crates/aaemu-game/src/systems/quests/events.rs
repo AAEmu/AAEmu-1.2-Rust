@@ -89,6 +89,7 @@ pub enum QuestEvent {
     },
     ZoneKill {
         zone_group_id: u32,
+        credited_character_id: u32,
         killer: KillUnit,
         victim: KillUnit,
     },
@@ -944,6 +945,7 @@ fn dispatch_monster_hunt_events(
         ctx,
         &QuestEvent::ZoneKill {
             zone_group_id,
+            credited_character_id: ctx.c.id,
             killer,
             victim,
         },
@@ -952,6 +954,15 @@ fn dispatch_monster_hunt_events(
 
 /// `DoOnMonsterHuntEvents(owner, npc)` (`Npc.DoDie` for every eligible character).
 pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+    on_npc_killed_by(server, player, npc, Some(&WorldObject::from(player)));
+}
+
+pub fn on_npc_killed_by(
+    server: &GameServer,
+    player: &PlayerRef,
+    npc: &NpcRef,
+    killer: Option<&WorldObject>,
+) {
     let (npc_id, zone_key) = {
         let d = npc.data();
         (d.unit.template_id, d.unit.transform.zone_id)
@@ -961,7 +972,14 @@ pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
         .zones
         .zone_by_key(zone_key)
         .map_or(0, |z| z.group_id);
-    let killer = kill_unit(server, &WorldObject::from(player.clone()), None);
+    // NPC loot/tag credit determines the recipient. Self-only zone objectives use
+    // the actor that landed the kill, with ownership for controlled units.
+    let killer = killer.map_or_else(KillUnit::default, |object| {
+        let mut unit = kill_unit(server, object, None);
+        unit.character_id = crate::systems::skills::relation::credited_player(server, object)
+            .map(|owner| owner.character_id);
+        unit
+    });
     let victim = kill_unit(server, &WorldObject::from(npc.clone()), Some(player.obj_id));
     run_or_queue(server, player, move |ctx| {
         dispatch_monster_hunt_events(ctx, npc_id, zone_group_id, killer, victim, true);

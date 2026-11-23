@@ -999,6 +999,7 @@ impl<'a> Run<'a> {
                         events::with_quests(server, &pl, None, |ctx| {
                             let _ = ctx.dispatch(&QuestEvent::ZoneKill {
                                 zone_group_id: group,
+                                credited_character_id: killer_id,
                                 killer: events::KillUnit {
                                     obj_id: killer_obj,
                                     character_id: Some(killer_id),

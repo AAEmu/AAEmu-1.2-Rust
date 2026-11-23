@@ -773,6 +773,16 @@ pub trait QuestsBridge: Send + Sync {
     /// `QuestManager` kill objective counting (`Npc.DoDie` → `OnKill`).
     fn on_npc_killed(&self, _server: &GameServer, _player: &PlayerRef, _npc: &NpcRef) {}
 
+    fn on_npc_killed_by(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        npc: &NpcRef,
+        _killer: Option<&WorldObject>,
+    ) {
+        self.on_npc_killed(server, player, npc);
+    }
+
     /// `QuestManager.DoOnMonsterHuntEvents` for a scripted removal (`KillNpcWithoutCorpseEffect`,
     /// C# 10.x PR #1792): the monster hunt / monster group hunt / zone kill quest events only,
     /// with no `OnKill` (there is no killer). Defaults to the full kill event for bridges that

@@ -263,14 +263,8 @@ impl Ctx<'_> {
             }
             ObjMateLevel { .. } => self.mate_level_objective(h, a) > 0,
             ObjSphere { .. } | ObjTalkNpcGroup { .. } | ObjTalk { .. } => count > 0,
-            ObjZoneKill {
-                count_player_kill,
-                count_npc,
-                ..
-            } => {
-                (*count_npc > 0 && count >= *count_npc)
-                    || (*count_player_kill > 0 && count >= *count_player_kill)
-            }
+            // Use the r208022 objective total (RVA 0x7e3440) with the shared progress counter.
+            ObjZoneKill { .. } => at.count > 0 && count >= at.count,
             ObjZoneMonsterHunt { .. } => {
                 if t.score > 0 {
                     count.wrapping_mul(at.count) >= t.score
@@ -1056,6 +1050,7 @@ impl Ctx<'_> {
                 },
                 QuestEvent::ZoneKill {
                     zone_group_id,
+                    credited_character_id,
                     killer,
                     victim,
                 },
@@ -1105,7 +1100,7 @@ impl Ctx<'_> {
                     // victim and act, and not at all when `Npc.DoDie` already handed this
                     // character the kill directly (Rust only: the C# counted both, and once
                     // per eligible member's share).
-                    if killer.character_id != Some(self.c.id)
+                    if self.c.id != *credited_character_id
                         && !self.c.skill_char.claim_shared_kill_credit(
                             victim.obj_id,
                             h,
@@ -1116,10 +1111,10 @@ impl Ctx<'_> {
                         return Ok(());
                     }
                     self.add_objective(h, a, 1)?;
-                    // Only the original killer shares with the team: the shared event reaches the
-                    // members with the killer unchanged, so they must not share it again
+                    // Only the original credit recipient shares with the team: the event reaches the
+                    // members with the credited character unchanged, so they must not share again
                     // (the C# `OnZoneKill` re-delegated without bound).
-                    if *team_share && killer.character_id == Some(self.c.id) {
+                    if *team_share && self.c.id == *credited_character_id {
                         self.deferred
                             .push(Deferred::TeamEvent { event: ev.clone() });
                     }

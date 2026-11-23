@@ -288,8 +288,14 @@ impl QuestsBridge for QuestsForNpcs {
         }
     }
 
-    fn on_npc_killed(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
-        super::events::on_npc_killed(server, player, npc);
+    fn on_npc_killed_by(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        npc: &NpcRef,
+        killer: Option<&WorldObject>,
+    ) {
+        super::events::on_npc_killed_by(server, player, npc, killer);
     }
 
     fn on_npc_scripted_kill(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
