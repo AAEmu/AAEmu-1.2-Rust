@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::data::formulas::FormulaKind;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{now_ms, WorldObject};
 
 use super::super::buffs;
@@ -1565,7 +1566,7 @@ pub fn skill_controller(server: &GameServer, t: &SkillControllerTemplate, args: 
     if let Some(player) = caster.as_player() {
         // Amed's cannon starts the player's native launch with its first floating
         // controller. Release the cannon seat so the subsequent flight can replicate.
-        if t.id == 6678 {
+        if encounters::is_amed_cannon_controller(t.id) {
             let seated_in_cannon = super::super::geometry::world_of(server, caster)
                 .and_then(|world| {
                     crate::systems::vehicles::slaves::get_is_mounted(&world, player.obj_id)

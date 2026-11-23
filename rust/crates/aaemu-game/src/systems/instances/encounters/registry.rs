@@ -395,3 +395,8 @@ pub fn is_tosare_portal_skill(skill_id: u32) -> bool {
 pub fn is_combuster_self_destruct_skill(skill_id: u32) -> bool {
     super::windscour::is_combuster_self_destruct_skill(skill_id)
 }
+
+/// Whether a controller starts Amed's cannon launch.
+pub fn is_amed_cannon_controller(controller_id: u32) -> bool {
+    super::rookborne::is_amed_cannon_controller(controller_id)
+}

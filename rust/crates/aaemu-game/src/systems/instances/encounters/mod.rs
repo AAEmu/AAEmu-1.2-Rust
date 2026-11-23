@@ -19,6 +19,7 @@ pub mod palace_cellar;
 mod plateau;
 mod red_dragon;
 pub mod registry;
+mod rookborne;
 pub mod sharpwind;
 mod windscour;
 
