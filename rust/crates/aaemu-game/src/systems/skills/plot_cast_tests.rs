@@ -99,7 +99,7 @@ fn next_event(id: u32, event_id: u32, casting: bool, delay: i32) -> PlotNextEven
     }
 }
 
-fn synthetic_plot(data: &mut GameData) {
+pub(crate) fn synthetic_plot(data: &mut GameData) {
     let root = PlotEventTemplate {
         id: 1,
         plot_id: 1,

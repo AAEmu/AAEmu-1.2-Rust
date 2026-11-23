@@ -35,7 +35,7 @@ mod aoe_tests;
 
 #[cfg(test)]
 #[path = "plot_cast_tests.rs"]
-mod cast_tests;
+pub(crate) mod cast_tests;
 
 #[cfg(test)]
 #[path = "tiger_strike_tests.rs"]
