@@ -1016,10 +1016,11 @@ fn npc_spawner_spawn_effect(
         return;
     }
     let world_id = caster.transform().world_id;
-    let caster_template = caster.as_npc().map_or(0, |n| n.data().unit.template_id);
-    let encounter_add =
-        encounters::is_wave_spawn(caster_template, e.spawner_id, e.use_summoner_aggro_target);
-    let summoner_target = (e.use_summoner_aggro_target || encounter_add)
+    let inherit_target = e.use_summoner_aggro_target
+        || caster.as_npc().is_some_and(|npc| {
+            encounters::forces_spawner_aggro(npc.data().unit.template_id, e.spawner_id)
+        });
+    let summoner_target = inherit_target
         .then(|| npc_aggro_target(server, &world, caster))
         .flatten();
     for spawner in spawners {
