@@ -555,6 +555,7 @@ fn use_respawn(ctx: &DoodadCtx<'_>, player: &crate::world::PlayerRef) {
         related_ids: None,
         family_id: 0,
         respawn_doodad_template_id: 0,
+        initial_func_group_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(ctx.world.id)));
     spawner.spawn(server, 0);

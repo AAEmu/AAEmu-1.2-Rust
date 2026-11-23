@@ -350,6 +350,7 @@ fn new_spawner_with(
             related_ids,
             family_id,
             respawn_doodad_template_id: 0,
+            initial_func_group_id: 0,
         },
         Some(0),
     ))
@@ -5019,4 +5020,55 @@ async fn real_data_doodad_insert_counter_debits_and_restores_progress() {
     assert_eq!(group(&d), 19755);
     assert_eq!(contributions.0.load(Ordering::Relaxed), 0);
     assert!(d.data().phase.interaction_counts.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_placement_mall_workbench_initial_group() {
+    let mut f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let text = include_str!("../../../../app/Data/Worlds/arche_mall_world/doodad_spawns.json");
+    let mut def = parse_list(text, DoodadSpawnerDef::from_json)
+        .unwrap()
+        .into_iter()
+        .find(|def| def.base.id == 1399)
+        .expect("Fellowship Workbench placement");
+    assert_eq!(def.base.unit_id, 7701);
+    def.base.position = WorldSpawnPosition {
+        x: 120.0,
+        y: 130.0,
+        z: 100.0,
+        ..Default::default()
+    };
+    let spawner = Arc::new(DoodadSpawner::new(def, Some(0)));
+    let d = spawner.spawn(&f.server, 0).expect("spawns");
+    assert_eq!(group(&d), 22066);
+    let (_, body) = f
+        .client
+        .drain()
+        .into_iter()
+        .find(|(opcode, _)| *opcode == sc::SCDoodadCreatedPacket)
+        .expect("first creation packet");
+    assert_eq!(u32::from_le_bytes(body[34..38].try_into().unwrap()), 22066);
+    spawner.despawn(&f.server, &d);
+    let d = spawner.spawn(&f.server, 0).expect("respawns");
+    assert_eq!(group(&d), 22066);
+
+    spawner.despawn(&f.server, &d);
+    let d = spawner
+        .event_copy(0)
+        .spawn(&f.server, 0)
+        .expect("fresh event placement");
+    assert_eq!(group(&d), 22066);
+
+    let foreign = r#"[{"UnitId":7701,"funcGroupId":1490,"Position":{"X":120,"Y":130,"Z":100}}]"#;
+    let def = parse_list(foreign, DoodadSpawnerDef::from_json)
+        .unwrap()
+        .remove(0);
+    let d = Arc::new(DoodadSpawner::new(def, Some(0)))
+        .spawn(&f.server, 0)
+        .expect("spawns with fallback group");
+    assert_eq!(group(&d), 21218);
 }

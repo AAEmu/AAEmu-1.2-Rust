@@ -1208,6 +1208,7 @@ pub fn new_doodad_spawner(
             related_ids: None,
             family_id: 0,
             respawn_doodad_template_id: 0,
+            initial_func_group_id: 0,
         },
         Some(world_id),
     ))
