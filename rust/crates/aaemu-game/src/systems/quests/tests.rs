@@ -921,8 +921,8 @@ async fn full_quest_lifecycle_on_data() {
         assert_eq!(
             rec.take(),
             vec![
-                "exp 300 true",
                 "item 38 9000 1 1",
+                "exp 300 true",
                 "money 50",
                 // DropQuest after the reward: QuestCleanup (cleanup) and QuestDropped
                 // (destroy_when_drop) both consume the supply item
@@ -980,6 +980,7 @@ async fn reward_supply_acts_replace_level_supplies() {
         d.add_act(1122, 1122, 1122, 0, ActKind::SupplyExp { exp: 300 });
         d.add_act(1132, 1132, 1132, 0, ActKind::SupplyCopper { amount: 50 });
     });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         for id in [110u32, 111, 112, 113] {
@@ -1043,9 +1044,9 @@ async fn reward_scaling_off_pays_the_unscaled_supply() {
                 copper: 152,
             },
         );
-        // Degree 2, player level 10: the flag off keeps today's unscaled payout.
         fallback_reward_quest(d, 120, 10, 2);
     });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         assert!(ctx.add_quest(120, false, 0, 0));
@@ -2858,7 +2859,8 @@ async fn let_it_done_and_score() {
         // 12 >= 10: completed (no Ready / Reward step)
         assert!(!ctx.has_quest(21));
     });
-    assert_eq!(rec.take(), vec!["exp 10 true"]);
+    // At level 10 a level-zero quest pays half base XP, then the 120% overdone ratio.
+    assert_eq!(rec.take(), vec!["exp 6 true"]);
 }
 
 #[tokio::test]
@@ -3946,8 +3948,8 @@ async fn npc_quest_flow_through_packets_and_events() {
     assert_eq!(
         rec.take(),
         vec![
-            "exp 300 true",
             "item 38 9000 1 1",
+            "exp 300 true",
             "money 50",
             "consume 39 7000 1"
         ]
@@ -5254,7 +5256,7 @@ async fn real_compact_db_reward_acts_replace_level_supplies() {
         return;
     };
     let d = real_data(&conn);
-    // The two oracle examples: an act XP that differs from the level supply.
+    // Each explicit XP act differs from its fallback level supply.
     for (quest_id, act_exp, supply_exp) in [(2785u32, 8400, 3224), (1213, 110, 420)] {
         let t = d.template(quest_id).expect("quest template");
         let supply = d.supplies(t.level).expect("level supply");
@@ -5276,6 +5278,7 @@ async fn real_compact_db_reward_acts_replace_level_supplies() {
     let server = test_server_with(gd);
     let rec = Arc::new(Rec::default());
     server.systems.quests.hooks.install(rec.clone());
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         for (quest_id, act_exp, supply_exp, supply_copper) in
@@ -6145,7 +6148,8 @@ mod engine_fixes {
                 );
                 match id {
                     301 => assert!(calls.contains(&"money 50".to_string()), "{calls:?}"),
-                    303 => assert!(calls.contains(&"exp 10 true".to_string()), "{calls:?}"),
+                    // Level-gap scaling halves 10 XP before the early-completion ratio.
+                    303 => assert!(calls.contains(&"exp 2 true".to_string()), "{calls:?}"),
                     _ => {}
                 }
             }
@@ -6196,7 +6200,7 @@ mod engine_fixes {
     }
 
     #[tokio::test]
-    async fn selective_reward_defaults_to_first_item_and_honours_the_choice() {
+    async fn selective_reward_requires_a_choice_and_honours_valid_indices() {
         let (server, rec) = server_with(|d| {
             selective_quest(d, 310, None);
             selective_quest(d, 311, Some(7));
@@ -6204,15 +6208,13 @@ mod engine_fixes {
         });
         let mut c = character();
         with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
-            // No report act: the selected index stays 0, the first item is delivered.
+            // A reward step reached without a choice must wait before granting anything.
             start(ctx, 310);
             rec.take();
             ctx.dispatch(&QuestEvent::Craft { craft_id: 310 }).unwrap();
             drain(ctx);
-            assert!(!ctx.has_quest(310));
-            let calls = rec.take();
-            assert_eq!(calls.iter().filter(|l| l.starts_with("item")).count(), 1);
-            assert!(calls.iter().any(|l| l.contains(" 9001 ")), "{calls:?}");
+            assert!(ctx.has_quest(310));
+            assert!(rec.take().is_empty());
 
             // The client sends the 1-based index of the chosen item.
             for (id, selected, item) in [(311u32, 2, "9002"), (312, 1, "9001")] {
@@ -6239,7 +6241,7 @@ mod engine_fixes {
     }
 
     #[tokio::test]
-    async fn out_of_range_selective_index_gives_the_first_item() {
+    async fn quest_reward_refuses_out_of_range_choice() {
         let (server, rec) = server_with(|d| selective_quest(d, 313, Some(7)));
         let mut c = character();
         with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
@@ -6254,8 +6256,8 @@ mod engine_fixes {
             })
             .unwrap();
             drain(ctx);
-            let calls = rec.take();
-            assert!(calls.iter().any(|l| l.contains(" 9001 ")), "{calls:?}");
+            assert!(ctx.has_quest(313));
+            assert!(rec.take().is_empty());
         });
     }
 
