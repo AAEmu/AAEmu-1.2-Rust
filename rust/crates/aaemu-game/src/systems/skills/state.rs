@@ -314,6 +314,8 @@ pub struct UnitSkillState {
     pub aggro_table: BTreeMap<u32, Aggro>,
     /// `CharacterTagging`.
     pub tagging: Tagging,
+    /// Buff instances this unit sourced that expire when it dies, by instance id.
+    pub(super) source_death_buffs: BTreeMap<u64, u32>,
     /// `Buffs._toleranceCounters` (by tolerance id).
     pub tolerance_counters: HashMap<u32, ToleranceCounter>,
     /// `ActiveSkillController` (the running controller; compares by pointer).

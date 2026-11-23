@@ -1,5 +1,5 @@
 use crate::data::skills::BuffTemplate as NetBuffTemplate;
-use crate::models::buff::effect_state;
+use crate::models::buff::{effect_state, Buff};
 use crate::server::GameServer;
 use crate::world::WorldObject;
 
@@ -7,7 +7,7 @@ use super::super::effects::EffectArgs;
 use super::super::types::{BuffEventTriggerKind, BuffRemoveOn, CastAction, DamageType};
 use super::lifecycle::stop_effect_task;
 use super::triggers::fire_buff_trigger;
-use super::{exit, full_template, set_buff};
+use super::{exit, find_obj, full_template, set_buff};
 
 // ------------------------------------------------------------------ Buffs removal helpers
 
@@ -318,9 +318,86 @@ pub(in crate::systems::skills) fn remove_on_damage(
     trigger_remove_on(server, owner, if incoming { damaged } else { damage }, 0);
 }
 
+pub(super) fn track_source_death(server: &GameServer, owner: &WorldObject, buff: &Buff) {
+    if let Some(source) = source_death_caster(server, owner, buff.template.id, buff.caster_obj_id) {
+        source.with_unit(|u| {
+            u.unit_mut()
+                .skill_state
+                .source_death_buffs
+                .insert(buff.instance_id, owner.obj_id());
+        });
+    }
+}
+
+pub(super) fn untrack_source_death(
+    server: &GameServer,
+    owner: &WorldObject,
+    buff: &Buff,
+    caster_id: u32,
+) {
+    if let Some(source) = source_death_caster(server, owner, buff.template.id, caster_id) {
+        source.with_unit(|u| {
+            u.unit_mut()
+                .skill_state
+                .source_death_buffs
+                .remove(&buff.instance_id);
+        });
+    }
+}
+
+fn source_death_caster(
+    server: &GameServer,
+    owner: &WorldObject,
+    buff_id: u32,
+    caster_id: u32,
+) -> Option<WorldObject> {
+    if !server
+        .game_data
+        .systems
+        .skills
+        .buff(buff_id)
+        .is_some_and(|t| t.remove_on_source_dead)
+    {
+        return None;
+    }
+    if caster_id == owner.obj_id() {
+        Some(owner.clone())
+    } else {
+        find_obj(server, caster_id)
+    }
+}
+
+pub(in crate::systems::skills) fn remove_on_source_death(
+    server: &GameServer,
+    source: &WorldObject,
+) {
+    // Take the subscriptions before any callback can remove or reapply a buff. The
+    // index lives on the caster handle, so recycling its object id cannot inherit it.
+    let holders = source
+        .with_unit(|u| std::mem::take(&mut u.unit_mut().skill_state.source_death_buffs))
+        .unwrap_or_default();
+    for (instance_id, owner_id) in holders {
+        let owner = if owner_id == source.obj_id() {
+            Some(source.clone())
+        } else {
+            find_obj(server, owner_id)
+        };
+        if let Some(owner) = owner {
+            trigger_remove_on_inner(
+                server,
+                &owner,
+                BuffRemoveOn::SourceDead,
+                source.obj_id(),
+                false,
+                |b| b.instance_id == instance_id && b.caster_obj_id == source.obj_id(),
+            );
+        }
+    }
+}
+
 /// `Buffs.TriggerRemoveOn(on, value)`.
 pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemoveOn, value: u32) {
-    trigger_remove_on_inner(server, owner, on, value, false)
+    trigger_remove_on_inner(server, owner, on, value, false, |_| true)
 }
 
 /// `Buffs.TriggerRemoveOn` from a skill whose template keeps stealth (`skills.keep_stealth`):
@@ -333,7 +410,7 @@ pub fn trigger_remove_on_keep_stealth(
     on: BuffRemoveOn,
     value: u32,
 ) {
-    trigger_remove_on_inner(server, owner, on, value, true)
+    trigger_remove_on_inner(server, owner, on, value, true, |_| true)
 }
 
 fn trigger_remove_on_inner(
@@ -342,17 +419,23 @@ fn trigger_remove_on_inner(
     on: BuffRemoveOn,
     value: u32,
     keep_stealth: bool,
+    filter: impl Fn(&Buff) -> bool,
 ) {
     let data = &server.game_data.systems.skills;
-    let effects: Vec<(u32, u32, u32)> = owner.with_base_unit(|b| {
+    let effects: Vec<_> = owner.with_base_unit(|b| {
         b.buffs()
             .effects
             .iter()
-            .map(|e| (e.index, e.template.id, e.caster_obj_id))
+            .filter(|e| filter(e))
+            .map(|e| (e.index, e.template.id, e.caster_obj_id, e.instance_id))
             .collect()
     });
     use BuffRemoveOn as R;
-    for (index, id, caster) in effects {
+    for (index, id, caster, instance_id) in effects {
+        let is_current = || {
+            super::get_buff(owner, index)
+                .is_some_and(|b| b.instance_id == instance_id && filter(&b) && !b.is_ended())
+        };
         let Some(t) = data.buff(id) else { continue };
         let exit_now = (t.remove_on_attack_buff_trigger && on == R::AttackBuffTrigger)
             || (t.remove_on_attacked_buff_trigger && on == R::AttackedBuffTrigger)
@@ -378,7 +461,7 @@ fn trigger_remove_on_inner(
             || (t.remove_on_mount && on == R::Mount)
             || (t.remove_on_move && on == R::Move)
             || (t.remove_on_source_dead && on == R::SourceDead && value == caster);
-        if exit_now {
+        if exit_now && is_current() {
             let event = match on {
                 R::Move => Some(BuffEventTriggerKind::RemoveOnMove),
                 R::DamagedEtc
@@ -394,7 +477,9 @@ fn trigger_remove_on_inner(
             if let Some(event) = event {
                 fire_buff_trigger(server, owner, index, event);
             }
-            exit(server, owner, index, false);
+            if is_current() {
+                exit(server, owner, index, false);
+            }
             continue;
         }
         // `skills.keep_stealth`: the skill keeps the caster's stealth buffs through its own

@@ -419,3 +419,57 @@ async fn npc_owned_buff_still_subscribes_and_fires_its_triggers() {
     assert_eq!(server.systems.skills.triggers.lock().unwrap().len(), 1);
     assert!(npc.data().unit.buffs.check_buff(TIMEOUT_MARKER));
 }
+
+fn removal_compact_data() -> Option<(rusqlite::Connection, GameData)> {
+    let path = std::env::var("AAEMU_COMPACT_DB").ok()?;
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut data = GameData::empty();
+    data.systems.skills = crate::systems::skills::data::Data::load_from(
+        &db,
+        &crate::data::client_files::ClientFileManager::new(),
+    )
+    .unwrap();
+    Some((db, data))
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn buff_removal_source_death_reaches_every_holder_and_preserves_other_sources() {
+    let Some((_db, data)) = removal_compact_data() else {
+        return;
+    };
+    let (server, _client, player, npc) =
+        crate::systems::skills::cast_validation_tests::fixture(data);
+    let source = WorldObject::from(&npc);
+    let holder = WorldObject::from(&player);
+    let world = server.world.world(0).unwrap();
+    let distant = WorldObject::from(Entity::new(0x6100, Npc::new(1)));
+    distant.with_transform(|t| {
+        t.instance_id = 1;
+        t.set_xyz(5000.0, 5000.0, 100.0);
+    });
+    let other_world = server
+        .world
+        .create_world_instance(world.template.clone(), 1);
+    other_world.spawn(&distant, &server.view_ctx());
+    super::add_buff_by_id(&server, &holder, 59, &source, 0);
+    super::add_buff_by_id(&server, &distant, 69, &source, 0);
+    super::add_buff_by_id(&server, &holder, 69, &holder, 0);
+    super::add_buff_by_id(&server, &distant, 59, &source, 0);
+    super::add_buff_by_id(&server, &distant, 59, &distant, 61_000);
+    assert!(holder.with_base_unit(|u| u.buffs().check_buff(59)));
+    assert!(distant.with_base_unit(|u| u.buffs().check_buff(69)));
+
+    crate::systems::skills::combat::do_die(
+        &server,
+        &source,
+        Some(&holder),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    assert!(!holder.with_base_unit(|u| u.buffs().check_buff(59)));
+    assert!(!distant.with_base_unit(|u| u.buffs().check_buff(69)));
+    assert!(distant.with_base_unit(|u| u.buffs().check_buff(59)));
+    assert!(holder.with_base_unit(|u| u.buffs().check_buff(69)));
+}

@@ -51,7 +51,7 @@ pub use self::removal::{
     remove_buffs_by_tag, remove_effect_by_skill, remove_effects_on_death, remove_stealth,
     take_resurrection_buff, trigger_remove_on, trigger_remove_on_keep_stealth,
 };
-pub(super) use self::removal::{remove_on_attack, remove_on_damage};
+pub(super) use self::removal::{remove_on_attack, remove_on_damage, remove_on_source_death};
 pub use self::triggers::{fire_unit_event, TriggerSub};
 
 /// The full template of a buff (`SkillManager.GetBuffTemplate`); buffs created from a phase-2
@@ -386,6 +386,7 @@ fn remove_broken_buffs(server: &GameServer, owner: &WorldObject) {
 fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let data = &server.game_data.systems.skills;
     let template = full_template(server, &b.template);
+    removal::track_source_death(server, owner, b);
     // Triggers.SubscribeEvents + Events.OnBuffStarted
     subscribe_triggers(server, owner, b);
     fire_buff_trigger(server, owner, b.index, BuffEventTriggerKind::Started);
@@ -455,6 +456,10 @@ fn resume_started_buff(server: &GameServer, owner: &WorldObject, b: &Buff) -> Op
 }
 
 fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff, previous_caster_obj_id: u32) {
+    if b.caster_obj_id != previous_caster_obj_id {
+        removal::untrack_source_death(server, owner, b, previous_caster_obj_id);
+        removal::track_source_death(server, owner, b);
+    }
     // SetInUse(true, true) -> UpdateEffect
     let template = full_template(server, &b.template);
     start(server, owner, b.index);
@@ -512,6 +517,7 @@ fn remove_modifiers(server: &GameServer, owner: &WorldObject, buff_id: u32) {
 }
 
 fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    removal::untrack_source_death(server, owner, b, b.caster_obj_id);
     // An aura / crowd source unregisters and strips what it applied before the rest of the
     // removal behaviour runs (AURA-3 / AURA-6 / CROWD-4).
     super::aura::on_buff_removed(server, owner, b);

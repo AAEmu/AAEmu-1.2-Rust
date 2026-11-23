@@ -53,6 +53,7 @@ pub(super) fn do_die_after_claim(
     killer: Option<&WorldObject>,
     kill_reason: KillReason,
 ) {
+    buffs::remove_on_source_death(server, victim);
     // `DespawnOnCreatorDeath`: the dying unit's skill summons go with it (systems::npcs). This
     // runs before the Slave / house override returns below so every death path handles them.
     server
