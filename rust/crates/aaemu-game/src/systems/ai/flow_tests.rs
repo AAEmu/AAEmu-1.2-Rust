@@ -701,50 +701,41 @@ async fn ai_state_machine_events_and_go_tos() {
     assert_eq!(behavior(&server, NPC_OBJ), Some(B::Dead));
 }
 
-/// A tower defense controller casts its wave plot (`OnSpawn`: seconds of projectile steps) while
-/// its AI settles from Spawning into Idle / HoldPosition. Those behaviors interrupt the skills
-/// of every other NPC, but must not cancel the plot of the event's own controllers, or no wave
-/// ever appears.
+/// The compact gives tower defense controller 8828 skill 15311 through its OnSpawn row.
 #[tokio::test]
 async fn event_controller_keeps_its_wave_plot_while_the_ai_settles() {
     use crate::systems::instances::tower_def::{adopt_for_test, EventKey};
-    use crate::systems::skills::geometry::Target;
-    use crate::systems::skills::plots::PlotState;
-    use crate::systems::skills::skill::CastCtx;
-    use crate::systems::skills::state::{PlotStateRef, SkillRun};
-    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::systems::npcs::npc::data::NpcSkill;
 
-    let server = server();
-    let plot_of = |npc: &NpcRef| {
-        let skill = SkillRun::new(
-            Arc::new(SkillTemplate {
-                id: 15311,
-                ..SkillTemplate::default()
-            }),
-            1,
-        );
-        let caster = WorldObject::from(npc);
-        let plot = PlotState::new(
-            skill,
-            CastCtx {
-                caster: caster.clone(),
-                caster_caster: SkillCaster::Unit(npc.obj_id),
-                target: Target::Obj(caster),
-                target_caster: SkillCastTarget::Unit(npc.obj_id),
-                skill_object: SkillObject::None,
-            },
-        );
-        npc.data().unit.skill_state.active_plot = Some(PlotStateRef(plot.clone()));
-        plot
-    };
-    let ordinary = spawn_npc(
-        &server,
-        NPC_OBJ,
-        PASSIVE_TEMPLATE,
-        100.0,
-        100.0,
-        AiKind::HoldPosition,
-    );
+    const WAVE: u32 = 15_311;
+    let mut data = data();
+    crate::systems::skills::plots::cast_tests::synthetic_plot(&mut data);
+    data.systems.skills.add_skill(SkillTemplate {
+        id: WAVE,
+        plot_id: Some(1),
+        plot_only: true,
+        ..SkillTemplate::default()
+    });
+    let on_spawn = super::skills::SkillUseConditionKind::OnSpawn.raw();
+    data.systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&HELPER_TEMPLATE)
+        .unwrap()
+        .skills = vec![(
+        on_spawn,
+        vec![NpcSkill {
+            id: 1,
+            owner_id: HELPER_TEMPLATE,
+            owner_type: "Npc".into(),
+            skill_id: WAVE,
+            skill_use_condition: on_spawn,
+            skill_use_param1: 0.0,
+            skill_use_param2: 0.0,
+        }],
+    )];
+    let server = server_with_data(data);
     let controller = spawn_npc(
         &server,
         HELPER_OBJ,
@@ -762,27 +753,167 @@ async fn event_controller_keeps_its_wave_plot_while_the_ai_settles() {
         },
         &controller,
     );
-    let ordinary_plot = plot_of(&ordinary);
-    let controller_plot = plot_of(&controller);
-    for obj in [NPC_OBJ, HELPER_OBJ] {
-        post(&server, obj, |c| c.go_to_idle());
-    }
+    let plot = controller
+        .data()
+        .unit
+        .skill_state
+        .active_plot
+        .clone()
+        .expect("OnSpawn started the wave plot")
+        .0;
+    assert_eq!(plot.skill.id, WAVE);
+    post(&server, HELPER_OBJ, |c| c.go_to_idle());
     assert_eq!(behavior(&server, HELPER_OBJ), Some(B::Idle));
-    assert!(
-        ordinary_plot.cancellation_requested(),
-        "Idle interrupts the skills of an ordinary NPC"
-    );
-    assert!(
-        !controller_plot.cancellation_requested(),
-        "Idle must not cancel the wave plot of an event controller"
-    );
-    for obj in [NPC_OBJ, HELPER_OBJ] {
-        post(&server, obj, |c| c.go_to_default_behavior());
-    }
+    assert!(!plot.cancellation_requested());
+    post(&server, HELPER_OBJ, |c| c.go_to_default_behavior());
     assert_eq!(behavior(&server, HELPER_OBJ), Some(B::HoldPosition));
+    assert!(!plot.cancellation_requested());
+}
+
+#[tokio::test]
+async fn returning_to_idle_interrupts_an_ai_chosen_combat_cast() {
+    use crate::systems::skills::types::skill_result;
+
+    let mut data = data();
+    let mut hit = data
+        .systems
+        .skills
+        .skill(HIT_SKILL)
+        .unwrap()
+        .as_ref()
+        .clone();
+    hit.casting_time = 3000;
+    data.systems.skills.add_skill(hit);
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut character = test_character(1, "Target", 103.0, 100.0);
+    character.unit.hp = 1000;
+    character.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, character, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let target = WorldObject::from(&player);
+    post(&server, NPC_OBJ, move |c| {
+        c.go_to_combat();
+        assert_eq!(c.ai.current_behavior(), Some(B::Attack));
+        assert_eq!(
+            super::behaviors::pick_skill_and_use_it(
+                c,
+                B::Attack,
+                super::skills::SkillUseConditionKind::InCombat,
+                &target,
+                3.0,
+            ),
+            skill_result::SUCCESS
+        );
+    });
+    let task = npc
+        .data()
+        .unit
+        .skill_state
+        .skill_task
+        .clone()
+        .expect("timed cast");
+    post(&server, NPC_OBJ, |c| c.on_no_aggro_target());
+    assert_eq!(behavior(&server, NPC_OBJ), Some(B::ReturnState));
+    assert!(!task.cancel.is_cancelled());
+
+    // The caster fought from its home position, so its first return tick settles it.
+    post(&server, NPC_OBJ, |c| {
+        super::behaviors::tick(c, B::ReturnState, 100)
+    });
+    assert_eq!(behavior(&server, NPC_OBJ), Some(B::Idle));
+    assert!(task.cancel.is_cancelled());
+    assert!(npc.data().unit.skill_state.skill_task.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn buff_triggered_plot_survives_an_ordinary_npc_settling() {
+    use crate::systems::skills::data::effects::SpecialEffect;
+
+    const BUFF: u32 = 700;
+    const SKILL: u32 = 702;
+    let mut data = data();
+    crate::systems::skills::plots::cast_tests::synthetic_plot(&mut data);
+    let skills = &mut data.systems.skills;
+    skills.add_skill(SkillTemplate {
+        id: SKILL,
+        plot_id: Some(1),
+        plot_only: true,
+        ..SkillTemplate::default()
+    });
+    skills.add_buff(BuffTemplate {
+        id: BUFF,
+        kind: 1,
+        duration: 100,
+        ..BuffTemplate::default()
+    });
+    skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: 1,
+            special_effect_type_id: 33, // SkillUse
+            value1: SKILL as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        1,
+    );
+    skills.buff_triggers.insert(
+        BUFF,
+        vec![BuffTriggerTemplate {
+            id: 1,
+            kind: BuffEventTriggerKind::Started as u16,
+            effect_on_source: false,
+            effect: (EffectKind::SpecialEffect, 1),
+            use_damage_amount: false,
+            use_original_source: false,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            synergy: false,
+        }],
+    );
+    let server = server_with_data(data);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let obj = WorldObject::from(&npc);
+    crate::systems::skills::buffs::add_buff_by_id(&server, &obj, BUFF, &obj, 0);
+    // SkillUse runs in a scheduled task. Wait until it publishes the plot, whose next event
+    // is still several seconds away.
+    let plot = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(plot) = npc.data().unit.skill_state.active_plot.clone() {
+                break plot.0;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("buff trigger started its plot");
+    assert_eq!(plot.skill.id, SKILL);
+    post(&server, NPC_OBJ, |c| c.go_to_idle());
+    assert_eq!(behavior(&server, NPC_OBJ), Some(B::Idle));
+    assert!(!plot.cancellation_requested());
+    post(&server, NPC_OBJ, |c| c.go_to_default_behavior());
+    assert_eq!(behavior(&server, NPC_OBJ), Some(B::HoldPosition));
+    assert!(!plot.cancellation_requested());
+    post(&server, NPC_OBJ, |c| c.go_to_dead());
     assert!(
-        !controller_plot.cancellation_requested(),
-        "HoldPosition must not cancel the wave plot of an event controller"
+        plot.cancellation_requested(),
+        "death still interrupts a scripted plot"
     );
 }
 

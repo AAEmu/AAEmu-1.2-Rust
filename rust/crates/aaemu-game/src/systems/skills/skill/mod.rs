@@ -41,6 +41,7 @@ pub use self::auto_attack::{attack_delay, start_auto_skill};
 pub(super) use self::casting::is_player_music_skill;
 pub use self::casting::{cast, delay_cast, schedule_effects};
 pub use self::channeling::{end_channeling, start_channeling};
+pub(crate) use self::completion::interrupt_ai_skills;
 pub use self::completion::{end_skill, interrupt_skills, stop, stop_skill};
 pub(super) use self::completion::{refund_cancelled_plot_cooldown, reset_cooldown_if_ignored};
 pub(crate) use self::cooldowns::send_recall_cooldown;

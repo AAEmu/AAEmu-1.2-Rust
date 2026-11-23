@@ -1,9 +1,10 @@
 use crate::models::movement::{GameStanceType, MoveTypeAlertness};
 use crate::systems::npcs::npc::packets::SCAggroTargetChangedPacket;
+use crate::systems::skills::skill::interrupt_ai_skills;
 use crate::world::now_ms;
 
 use super::super::framework::{AiCtx, BehaviorKind};
-use super::super::skills::{self as ai_skills, SkillUseConditionKind};
+use super::super::skills::SkillUseConditionKind;
 
 use super::npc;
 use super::paths::check_follow_path;
@@ -13,21 +14,10 @@ use super::support::throttle;
 use super::talk::check_for_talk;
 use super::targeting::{current_target, set_target};
 
-/// `Ai.Owner.InterruptSkills()` of the settling behaviors (`Idle`, `HoldPosition`). Deviation: a
-/// tower defense controller keeps the wave plot it cast on spawn (`OnSpawn` `np_skills`), which
-/// runs for seconds while the AI settles from `Spawning` through `RunCommandSet` into
-/// `Idle`/`HoldPosition`; the C# interrupts it there too, so no wave ever appeared (PORTING.md,
-/// tower defense).
-fn interrupt_unless_event_controller(c: &AiCtx<'_>) {
-    if !crate::systems::instances::tower_def::owns_npc(c.server, &c.npc) {
-        ai_skills::interrupt_skills(c);
-    }
-}
-
 pub(super) fn hold_position_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     npc::set_game_stance(&c.npc, GameStanceType::RELAXED);
     npc::set_alertness(&c.npc, MoveTypeAlertness::IDLE);
-    interrupt_unless_event_controller(c);
+    interrupt_ai_skills(c.server, &c.obj);
     npc::stop_movement(c.server, &c.npc);
     // Ai.Owner.CurrentTarget = Ai.Owner (no packet)
     c.npc.data().unit.current_target = c.npc.obj_id;
@@ -80,10 +70,10 @@ pub(super) fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i
 }
 
 pub(super) fn idle_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
-    // Stop all actions and reset state
+    // Reset the AI for idle activity.
     npc::set_game_stance(&c.npc, GameStanceType::RELAXED);
     npc::set_alertness(&c.npc, MoveTypeAlertness::IDLE);
-    interrupt_unless_event_controller(c);
+    interrupt_ai_skills(c.server, &c.obj);
     npc::stop_movement(c.server, &c.npc);
     set_target(c, None);
     if let Some(t) = current_target(c) {

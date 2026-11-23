@@ -97,6 +97,8 @@ pub struct SkillRun {
     pub id: u32,
     pub template: Arc<SkillTemplate>,
     pub level: u8,
+    /// Selected by an AI behavior. Authored events and triggered follow-up casts use `new`.
+    pub(crate) ai_chosen: bool,
     state: Mutex<SkillRunState>,
     /// `Callback` (an arbitrary action run at the end of the skill).
     pub callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -118,10 +120,19 @@ impl SkillRun {
     /// `new Skill(template)` (level 1) or `new Skill(template, owner)` (`level` computed by the
     /// caller from the owner's ability level).
     pub fn new(template: Arc<SkillTemplate>, level: u8) -> SkillRef {
+        Self::with_origin(template, level, false)
+    }
+
+    pub(crate) fn new_ai_chosen(template: Arc<SkillTemplate>) -> SkillRef {
+        Self::with_origin(template, 1, true)
+    }
+
+    fn with_origin(template: Arc<SkillTemplate>, level: u8, ai_chosen: bool) -> SkillRef {
         Arc::new(Self {
             id: template.id,
             template,
             level,
+            ai_chosen,
             state: Mutex::new(SkillRunState {
                 cast_time_multiplier: 1.0,
                 ..SkillRunState::default()

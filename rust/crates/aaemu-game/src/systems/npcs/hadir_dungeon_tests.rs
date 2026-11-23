@@ -3,9 +3,9 @@
 //! The 1.2 compact data carries the level chain: the `SphereSkill` spheres 1284/1285/
 //! 1298-1312/1331/1457/2246 cast their `sphere_skills` rows, the 13 `tags` rows select the
 //! invisible "Spawn Slave" / captive trigger NPCs, and the buff-trigger / command-set / NPC
-//! event skills name 74 of the 86 level spawner ids (the sphere 1298/1299 camps 60909-60911,
-//! 61146-61148 and 68235-68240 are 10.x-only effects; see `PORTING.md`). The shipped `npc_spawns.json` therefore needs the
-//! level's event rows (one per referenced spawner id, `NpcSpawnerIds`), the trigger NPCs whose
+//! event skills and timed skill plots name the level spawner ids. In particular, spheres
+//! 1298 and 1299 use plots 276 and 282 for the two entrance camps. The shipped
+//! `npc_spawns.json` needs the level's event rows (one per referenced spawner id, `NpcSpawnerIds`), the trigger NPCs whose
 //! level spawner is active at start as plain rows, the start-active skeleton camp (9473 x10) and
 //! Bloodmage (10021) rows the 1.2-era file misses, and the scripted doodads of the golem and
 //! cauldron chains. The event rows are listed first in the file: the loader's duplicate filter
@@ -1084,6 +1084,57 @@ async fn real_data_hadir_spheres_run_the_buff_trigger_chains() {
         server.world.object(slave3.obj_id).is_none(),
         "the chain's KillNpcWithoutCorpseEffect consumes the trigger NPC"
     );
+}
+
+/// The entrance waves use timeout-triggered skill plots instead of direct skill effects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_entrance_plots_spawn_both_camps() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    enter_hadir_spheres(&server, &[1298, 1299]);
+    let world = server.world.world(0).unwrap();
+    let player = place_player(&server, &world, 1, 572.226, 516.605, 135.933);
+    for _ in 0..4 {
+        super::spawn_manager::active_region_tick(&server);
+    }
+
+    for (position, trigger, trigger_xy, buff, spawners) in [
+        (
+            (572.226, 516.605, 135.933),
+            10076,
+            (575.956, 519.605),
+            2929,
+            [60909, 60910, 60911, 61148, 61146, 61147],
+        ),
+        (
+            (588.693, 539.544, 135.076),
+            10164,
+            (579.607, 540.513),
+            2930,
+            [68235, 68236, 68237, 68238, 68239, 68240],
+        ),
+    ] {
+        let trigger = npc_near(&world, trigger, trigger_xy.0, trigger_xy.1)
+            .expect("start-active entrance trigger");
+        let (x, y, z) = position;
+        player.data().unit.transform.set_xyz(x, y, z);
+        assert!(spawners.iter().all(|&id| spawned_count(&server, id) == 0));
+        server.systems.quests.spheres.tick_at(&server, 0);
+        assert!(trigger.data().unit.buffs.check_buff(buff));
+        run_until(&server, 10, || {
+            server.world.object(trigger.obj_id).is_none()
+                && spawners.iter().all(|&id| spawned_count(&server, id) == 1)
+        })
+        .await;
+        for id in spawners {
+            assert_eq!(spawned_count(&server, id), 1, "entrance spawner {id}");
+        }
+        assert!(server.world.object(trigger.obj_id).is_none());
+    }
 }
 
 /// The Rotten Flesh Golem's `OnDeath` skill 17608 spawns the cleanup slaves 10805, 10806 and

@@ -974,28 +974,8 @@ pub fn on_spawn(server: &GameServer, npc: &NpcRef) {
     }
 }
 
-/// Whether `npc` is a controller (or summon) of a running event. The summoner controllers cast
-/// their wave plot (`np_skills` `OnSpawn`: seconds of projectile steps) while the AI is still
-/// settling into its default behavior; that behavior must not cancel it, or the wave never
-/// appears (the C# `HoldPositionBehavior.Enter` calls `InterruptSkills` and would cancel it too).
-pub fn owns_npc(server: &GameServer, npc: &NpcRef) -> bool {
-    manager(server)
-        .state
-        .lock()
-        .expect("tower defense poisoned")
-        .active
-        .values()
-        .any(|e| {
-            e.owned
-                .get(&npc.obj_id)
-                .is_some_and(|n| Arc::ptr_eq(&n.npc, npc))
-        })
-}
-
-/// Registers `npc` as owned by a bare running event (tests of the subsystems that ask
-/// [`owns_npc`] without starting a whole event).
+/// Registers an owned NPC without starting a whole tower defense event.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn adopt_for_test(server: &GameServer, key: EventKey, npc: &NpcRef) {
     let now = spawn_manager::now();
     let mut state = manager(server)
