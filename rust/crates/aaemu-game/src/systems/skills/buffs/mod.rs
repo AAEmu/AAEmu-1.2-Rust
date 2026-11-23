@@ -51,6 +51,7 @@ pub use self::removal::{
     remove_buffs_by_tag, remove_effect_by_skill, remove_effects_on_death, remove_stealth,
     take_resurrection_buff, trigger_remove_on, trigger_remove_on_keep_stealth,
 };
+pub(super) use self::removal::{remove_on_attack, remove_on_damage, remove_on_source_death};
 pub use self::triggers::{fire_unit_event, TriggerSub};
 
 /// The full template of a buff (`SkillManager.GetBuffTemplate`); buffs created from a phase-2
@@ -385,6 +386,7 @@ fn remove_broken_buffs(server: &GameServer, owner: &WorldObject) {
 fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let data = &server.game_data.systems.skills;
     let template = full_template(server, &b.template);
+    removal::track_source_death(server, owner, b);
     // Triggers.SubscribeEvents + Events.OnBuffStarted
     subscribe_triggers(server, owner, b);
     fire_buff_trigger(server, owner, b.index, BuffEventTriggerKind::Started);
@@ -394,6 +396,14 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let Some(b) = resume_started_buff(server, owner, b) else {
         return;
     };
+    // Exemption is a transition on applying the grant. The active grant can itself
+    // be marked remove_on_exempt, so only other instances receive this event.
+    if template.exempt {
+        removal::remove_on_exempt(server, owner, &b);
+        if resume_started_buff(server, owner, &b).is_none() {
+            return;
+        }
+    }
     if template.id > 0 {
         let skill_mods = data.skill_modifiers_by_owner(template.id).to_vec();
         let buff_mods = data.buff_modifiers_for_buff(template.id).to_vec();
@@ -422,7 +432,10 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     };
     // 10.x NpcAggroTable::TauntedBy on buff creation (10x-ONLY; see PORTING.md).
     combat::on_taunt_buff_applied(server, owner, &b);
-    if b.duration > 0 || !template.tick_effects.is_empty() {
+    if b.duration > 0
+        || !template.tick_effects.is_empty()
+        || (template.on_action_time() && template.tick_mana_cost > 0)
+    {
         // SetInUse(true, false) -> ScheduleEffect(false)
         schedule_effect(server, owner, b.index, false);
     } else {
@@ -454,6 +467,10 @@ fn resume_started_buff(server: &GameServer, owner: &WorldObject, b: &Buff) -> Op
 }
 
 fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff, previous_caster_obj_id: u32) {
+    if b.caster_obj_id != previous_caster_obj_id {
+        removal::untrack_source_death(server, owner, b, previous_caster_obj_id);
+        removal::track_source_death(server, owner, b);
+    }
     // SetInUse(true, true) -> UpdateEffect
     let template = full_template(server, &b.template);
     start(server, owner, b.index);
@@ -511,6 +528,7 @@ fn remove_modifiers(server: &GameServer, owner: &WorldObject, buff_id: u32) {
 }
 
 fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    removal::untrack_source_death(server, owner, b, b.caster_obj_id);
     // An aura / crowd source unregisters and strips what it applied before the rest of the
     // removal behaviour runs (AURA-3 / AURA-6 / CROWD-4).
     super::aura::on_buff_removed(server, owner, b);

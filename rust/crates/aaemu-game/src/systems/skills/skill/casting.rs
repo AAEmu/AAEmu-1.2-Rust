@@ -314,6 +314,9 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             );
         }
     }
+    if matches!(t.id, 2..=4) {
+        buffs::trigger_remove_on(server, caster, super::types::BuffRemoveOn::AutoAttack, 0);
+    }
     let weapon_anim = weapon_attack_anim_id(server, skill, caster);
     let mut fired = SCSkillFiredPacket {
         id: skill.id,
