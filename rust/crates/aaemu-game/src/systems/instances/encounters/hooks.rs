@@ -92,6 +92,9 @@ pub trait Encounter: Sync {
         None
     }
 
+    /// A validated cast is about to broadcast its fire packet.
+    fn on_skill_fired(&self, _server: &GameServer, _skill: &SkillRef, _caster: &WorldObject) {}
+
     /// The start of `ApplyEffects`: `true` skips the cast's effects.
     fn on_apply_effects(
         &self,

@@ -2071,10 +2071,9 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             true,
         );
     }
-    if encounters::is_wind_sealstone_launch_skill(skill.id) && caster.transform().instance_id == 0 {
-        if let Some(player) = caster.as_player() {
-            // Wind Sealstone's area-sphere requirement was validated before firing.
-            crate::world::move_guard::grant_quest_launch(server, player);
+    if encounters::is_wind_sealstone_launch_skill(skill.id) {
+        for encounter in encounter_hooks::all() {
+            encounter.on_skill_fired(server, skill, caster);
         }
     }
     broadcast(server, caster, &fired, true);
