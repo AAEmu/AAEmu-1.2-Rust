@@ -545,6 +545,15 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             );
             false
         }
+        FuncTemplate::WaterVolume(f) => {
+            let p = ctx.world.world_pos_rot(&ctx.obj());
+            crate::systems::ai::physics::world_water(server, &ctx.world).shift_phase_surface(
+                crate::systems::skills::controllers::Vec3::new(p.x, p.y, p.z),
+                f.level_change,
+                f.duration,
+            );
+            false
+        }
         // Phase funcs whose C# `Use` only logs (and returns false).
         FuncTemplate::Animate(_)
         | FuncTemplate::BuyFishItem(_)
@@ -559,8 +568,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         | FuncTemplate::FishSchool(_)
         | FuncTemplate::HouseFarm(_)
         | FuncTemplate::Parrot(_)
-        | FuncTemplate::Sign(_)
-        | FuncTemplate::WaterVolume(_) => {
+        | FuncTemplate::Sign(_) => {
             tracing::trace!("{}", t.func_type());
             false
         }

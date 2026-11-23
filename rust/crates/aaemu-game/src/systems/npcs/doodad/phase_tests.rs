@@ -1536,6 +1536,40 @@ async fn audit_navi_removal_only_fires_in_its_phase() {
 }
 
 #[tokio::test]
+async fn audit_water_phase_shifts_the_local_volume() {
+    use crate::systems::ai::physics::water::{WaterBodyArea, WaterBodyAreaType};
+    use crate::systems::skills::controllers::Vec3;
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_func(
+            11,
+            FuncTemplate::WaterVolume(DoodadFuncWaterVolume {
+                id: 1,
+                level_change: -5.0,
+                duration: 0.0,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    let water = crate::systems::ai::physics::world_water(&f.server, &f.world);
+    let mut area = WaterBodyArea::new("test", WaterBodyAreaType::Polygon);
+    area.depth = 30.0;
+    area.points = vec![
+        Vec3::new(110.0, 120.0, 110.0),
+        Vec3::new(130.0, 120.0, 110.0),
+        Vec3::new(130.0, 140.0, 110.0),
+        Vec3::new(110.0, 140.0, 110.0),
+    ];
+    area.update_bounds();
+    water.add(area);
+    let probe = Vec3::new(120.0, 130.0, 112.0);
+    assert_eq!(water.get_water_surface(probe).0, 110.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d);
+    do_change_phase(&ctx, None, 11);
+    assert_eq!(water.get_water_surface(probe).0, 105.0);
+}
+
+#[tokio::test]
 async fn phase_change_cancels_pending_timer() {
     let b = Builder::default()
         .template(TEMPLATE, &[(10, 1), (11, 2)])
