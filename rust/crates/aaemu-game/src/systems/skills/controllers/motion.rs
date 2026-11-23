@@ -410,7 +410,7 @@ pub struct FloatingMove {
     pub is_falling: bool,
     pub fall_speed: f32,
     pub start_z: f32,
-    pub lift_start: Option<Instant>,
+    pub lift_start: Option<tokio::time::Instant>,
 }
 
 pub(super) const GRAVITY: f32 = 9.81;

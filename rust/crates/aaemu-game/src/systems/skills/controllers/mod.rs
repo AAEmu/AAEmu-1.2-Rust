@@ -27,6 +27,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use tokio::time::Instant as TickInstant;
+
 use crate::models::movement::{
     GameStanceType, MoveKind, MoveType, MoveTypeActorFlags, MoveTypeAlertness, MoveTypeFlags,
     UnitMove,
@@ -511,7 +513,7 @@ impl SkillControllerRef {
                 let z = self.owner.transform().z;
                 if let Behavior::Floating(f) = &mut self.lock().behavior {
                     f.start_z = z;
-                    f.lift_start = Some(Instant::now());
+                    f.lift_start = Some(TickInstant::now());
                 }
                 tracing::debug!(
                     "FloatingSC.Execute [LIFT]: owner={} startZ={z:.1} targetZ={:.1}",
@@ -567,22 +569,32 @@ impl SkillControllerRef {
     fn end_impl(&self, server: &GameServer, force: bool, owner_present: bool) {
         let behavior = self.lock().behavior;
         if let Behavior::Floating(f) = behavior {
-            if !force && f.is_lift_mode && !f.is_falling && owner_present && !self.owner_dead() {
+            if !force && f.is_lift_mode && owner_present && !self.owner_dead() {
                 let ground_z = ground_height(server, &self.owner, f.start_z);
                 let z = self.owner.transform().z;
-                if ground_z > 0.0 && z > ground_z + 0.5 {
-                    tracing::debug!(
-                        "FloatingSC.End [LIFT→FALL]: owner={} starting fall from Z={z:.1} to ground={ground_z:.1}",
-                        self.owner.obj_id()
-                    );
-                    let mut inner = self.lock();
-                    if let Behavior::Floating(f) = &mut inner.behavior {
-                        f.is_falling = true;
-                        f.fall_speed = 0.0;
-                    }
-                    inner.state = ScState::Running;
+                let mut inner = self.lock();
+                if inner.state == ScState::Ended {
                     return;
                 }
+                if let Behavior::Floating(f) = &mut inner.behavior {
+                    // The lift timer and buff removal can both request descent. Check the
+                    // current phase under the lock so a second request leaves the fall running.
+                    if f.is_falling {
+                        return;
+                    }
+                    if ground_z > 0.0 && z > ground_z + 0.5 {
+                        tracing::debug!(
+                            "FloatingSC.End [LIFT→FALL]: owner={} starting fall from Z={z:.1} to ground={ground_z:.1}",
+                            self.owner.obj_id()
+                        );
+                        f.is_falling = true;
+                        f.fall_speed = 0.0;
+                        inner.state = ScState::Running;
+                        return;
+                    }
+                }
+                // Claim the end before releasing the lock. base_end clears the owner's slot.
+                inner.state = ScState::Ended;
             }
         }
         self.base_end(owner_present);
@@ -741,13 +753,13 @@ impl SkillControllerRef {
         };
         let me = self.clone();
         handle.spawn(async move {
-            let mut last = Instant::now();
+            let mut last = TickInstant::now();
             loop {
                 tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
                 if me.state() == ScState::Ended {
                     break;
                 }
-                let now = Instant::now();
+                let now = TickInstant::now();
                 let delta = now - last;
                 last = now;
                 me.tick(&srv, delta);

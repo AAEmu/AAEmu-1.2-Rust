@@ -785,10 +785,17 @@ async fn real_data_hadir_golem_appears_once_at_the_pond() {
     assert_eq!(spawned_count(&server, 58186), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 #[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
 async fn real_data_hadir_slam_lands_and_the_poison_pool_ticks() {
     use crate::systems::skills::{controllers, skill::unit_use_skill, types::skill_result};
+
+    async fn wait_for(seconds: u64, ready: impl Fn() -> bool) {
+        let end = tokio::time::Instant::now() + Duration::from_secs(seconds);
+        while !ready() && tokio::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
 
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
@@ -803,31 +810,36 @@ async fn real_data_hadir_slam_lands_and_the_poison_pool_ticks() {
         unit_use_skill(&server, &golem, 16038, &victim),
         skill_result::SUCCESS
     );
-    run_until(&server, 2, || victim.transform().z > 135.5).await;
+    // Let the real skill and controller tasks run on Tokio's paused clock.
+    wait_for(2, || victim.transform().z > 135.5).await;
     assert!(victim.transform().z > 135.5, "Slam lifts the target");
-    run_until(&server, 3, || controllers::active(&victim).is_none()).await;
+    wait_for(3, || controllers::active(&victim).is_none()).await;
     assert!(controllers::active(&victim).is_none());
     assert!((victim.transform().z - 135.0).abs() < 0.1, "victim lands");
 
-    // Poisonous Explosion places the puddles through plot 234.
+    // Plot 234 uses wall time for projectile arrivals. Keep the spawned puddle on the
+    // manual doodad clock so it cannot expire before we move the player into it.
+    server.systems.npcs.doodads.tasks.set_manual(true);
     let puddles = || {
         world
             .all_doodads()
             .into_iter()
             .find(|doodad| doodad.data().template_id == 3956)
     };
+    tokio::time::resume();
     assert_eq!(
         unit_use_skill(&server, &golem, 16204, &golem),
         skill_result::SUCCESS
     );
-    run_until(&server, 8, || puddles().is_some()).await;
+    wait_for(20, || puddles().is_some()).await;
+    tokio::time::pause();
     let puddle = puddles().expect("Poisonous Explosion creates a puddle");
     let pos = puddle.data().transform;
     player.data().unit.transform.set_xyz(pos.x, pos.y, pos.z);
-    run_until(&server, 1, || player.data().unit.buffs.check_buff(2850)).await;
+    server.systems.npcs.area_triggers.tick(&server);
     assert!(player.data().unit.buffs.check_buff(2850));
     let hp = player.data().unit.hp;
-    run_until(&server, 3, || player.data().unit.hp < hp).await;
+    wait_for(3, || player.data().unit.hp < hp).await;
     assert!(player.data().unit.hp < hp, "poison deals damage over time");
 }
 
