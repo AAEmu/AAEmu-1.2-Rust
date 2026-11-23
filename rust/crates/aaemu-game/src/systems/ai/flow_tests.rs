@@ -668,30 +668,22 @@ async fn silent_damage_does_not_engage_after_command_set_or_call_help() {
     assert_eq!(behavior(&f.server, HELPER_OBJ), Some(B::Attack));
 }
 
+/// Silent damage only withholds the fight that this damage would start. A sight-aggressive NPC
+/// still notices the attacker in its sight range exactly as it would without the hit: the
+/// silent entry must not hide the player from perception.
 #[tokio::test]
-async fn silent_damage_does_not_engage_through_perception() {
+async fn silent_damage_leaves_sight_perception_unchanged() {
     let f = fixture(103.0);
     f.npc.data().unit.transform.rot_z = FACE_PLUS_X;
-    // This player would ordinarily be a valid sight target.
+    hit_with_engage_flag(&f, false, 1.0);
+    assert!(f.npc.data().unit.skill_state.aggro_table[&PLAYER_OBJ].combat_notice_pending);
+    assert!(!f.npc.data().unit.is_in_battle);
+
     post(&f.server, NPC_OBJ, |c| {
         c.go_to_idle();
         super::behaviors::check_alert(c, B::Idle);
     });
     assert_eq!(behavior(&f.server, NPC_OBJ), Some(B::Alert));
-    post(&f.server, NPC_OBJ, |c| {
-        c.go_to_idle();
-        c.ai.next_alert_check_time = 0;
-    });
-
-    hit_with_engage_flag(&f, false, 1.0);
-    post(&f.server, NPC_OBJ, |c| {
-        super::behaviors::check_alert(c, B::Idle);
-    });
-    assert_eq!(behavior(&f.server, NPC_OBJ), Some(B::Idle));
-    post(&f.server, NPC_OBJ, |c| {
-        super::behaviors::check_aggression(c, B::Alert);
-    });
-    assert_eq!(behavior(&f.server, NPC_OBJ), Some(B::Idle));
     assert_eq!(
         f.npc.data().unit.skill_state.aggro_table[&PLAYER_OBJ].damage_aggro,
         HIT_DAMAGE
