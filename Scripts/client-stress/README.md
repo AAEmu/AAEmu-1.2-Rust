@@ -1,4 +1,4 @@
-﻿# r208022 client stress benchmark
+# r208022 client stress benchmark
 
 The current harness exercises an experimental dev-client route. The workload and capture coverage below describe what this draft can measure. See the local benchmark report for measured results and failure logs.
 
@@ -35,4 +35,36 @@ The dev launcher sets 1024×768, spec 1 or 4, VSync off and the explicit frame c
 
 Each attempt has a separate result directory. Present frame durations come from the dev DLL's 240-entry ring. A frame counter delta larger than the returned history increments `missed_frames`. Treat runs with gaps or an incomplete route as incomplete captures. Hitch timestamps are estimates in the client uptime domain. The collector anchors each continuous segment to the age of the most recent Present and accumulates the recorded durations from that anchor. `summary.json` reports nearest-rank percentiles across the captured frames. Failed attempts retain partial results and a failure message. The series report lists the attempts and gives the median and range across complete captures. The script retains process CPU counters before and after the route, client thread CPU counters, an asynchronous main-thread sampling profile, game file read statistics, sampled memory and handle counts, and the dev crash summaries. Login timing begins at launcher invocation and ends at the first successful in-world check.
 
-The stock launcher path still needs an automated observer route and a passive D3D Present and I/O collector. ArcheNova additionally needs an isolated revision-compatible NativeAbility game server and an account with the matching character fixture. Main-thread aggregate sampling cannot assign an individual hitch to another thread. Per-hitch attribution, automated hang dumps and zone transition timing remain open.
+The stock path uses the full native aadriver build. Set `AADRIVER_OUT` to
+`C:\aa-re\lanes\targets\perf-bench\aadriver` and run
+`rust\crates\aaemu-clientdriver\native\build.bat`, or supply the DLL path
+with `-StockDriver`. The stock route uses the original launcher and client,
+the driver’s Lua and input commands, frame-only Present records and pak
+I/O counters. Its Present records carry Unix microseconds. The stock
+client uses the Windows account’s shared ArcheAge Documents directory.
+The dev path uses its separate profile. ArcheNova needs an isolated
+NativeAbility server and matching character fixture.
+
+The farming fixture uses the isolated server’s authenticated loopback
+Web API to place mixed r208022 grids and advance one crop group. It
+requires 200 newly observed object IDs. The run retains object IDs and
+phases, a client-side recognition count and a screenshot when available.
+Per-hitch attribution, automatic hang dumps and zone transition timing
+remain open.
+
+### Scene tracing
+
+Add `-TraceEtw` to a dev run from a Windows session authorized to record
+kernel profiles. The harness starts WPR CPU, FileIO and GPU profiles before
+the scene teleport and saves the ETL locally. Each attempt uses a distinct
+WPR instance. An attempted trace that fails to start or stop is reported
+separately from a successful trace.
+
+Use `trace-markers.tsv` for the client PID and scene phase boundaries.
+Each row in `present-clock.tsv` brackets a stats request with host UTC
+timestamps and records the client clock and Present age returned by the
+request. To place a hitch in the trace, estimate the client clock offset
+from an anchor with a short round trip. The hitch begins one frame interval
+before its reported Present timestamp. Check the clock uncertainty against
+the hitch duration before interpreting CPU stacks, thread waits, file I/O
+or GPU activity.
