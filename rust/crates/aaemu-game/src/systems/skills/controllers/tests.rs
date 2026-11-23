@@ -379,7 +379,7 @@ async fn replacing_ends_the_previous_controller() {
     assert_eq!(active(&owner), None);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lift_then_fall_back_to_start_height() {
     let (server, _client, player, npc) = setup();
     let owner = WorldObject::from(&npc);
@@ -400,6 +400,9 @@ async fn lift_then_fall_back_to_start_height() {
     sc.end(&server, false);
     assert_eq!(sc.state(), ScState::Running);
     assert!(matches!(sc.behavior(), Behavior::Floating(f) if f.is_falling));
+    assert_eq!(active(&owner), Some(sc.clone()));
+    // Buff expiry and the controller's own lift deadline can both call End().
+    sc.end(&server, false);
     assert_eq!(active(&owner), Some(sc.clone()));
     wait_until(|| sc.state() == ScState::Ended).await;
     assert_eq!(sc.state(), ScState::Ended);
