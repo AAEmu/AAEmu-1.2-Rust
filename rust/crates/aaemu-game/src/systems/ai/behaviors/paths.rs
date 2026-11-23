@@ -69,14 +69,11 @@ pub(super) fn follow_path_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64
         return;
     }
     // If still aggro, go back to combat
-    let (in_battle, aggro_empty) = {
+    let (in_battle, has_aggro) = {
         let n = c.npc.data();
-        (
-            n.unit.is_in_battle,
-            n.unit.skill_state.aggro_table.is_empty(),
-        )
+        (n.unit.is_in_battle, n.unit.skill_state.has_engaged_aggro())
     };
-    if in_battle && !aggro_empty {
+    if in_battle && has_aggro {
         c.go_to_combat();
         return;
     }

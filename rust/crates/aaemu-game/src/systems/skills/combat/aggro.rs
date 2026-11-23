@@ -111,7 +111,7 @@ pub fn add_unit_aggro(
     unit: &WorldObject,
     amount: i32,
 ) -> bool {
-    add_aggro_amounts(server, owner, kind, unit, amount, None)
+    add_aggro_amounts(server, owner, kind, unit, amount, None, true)
 }
 
 /// Damage effects award actual damage credit independently of their authored threat.
@@ -123,6 +123,18 @@ pub fn add_damage_aggro(
     damage: i32,
     threat: i32,
 ) -> bool {
+    add_damage_aggro_with_combat(server, owner, unit, damage, threat, true)
+}
+
+/// Records damage threat even when the hit does not announce combat.
+pub(in crate::systems::skills) fn add_damage_aggro_with_combat(
+    server: &GameServer,
+    owner: &WorldObject,
+    unit: &WorldObject,
+    damage: i32,
+    threat: i32,
+    engage_combat: bool,
+) -> bool {
     add_aggro_amounts(
         server,
         owner,
@@ -130,6 +142,7 @@ pub fn add_damage_aggro(
         unit,
         threat.max(0),
         Some(damage.max(0)),
+        engage_combat,
     )
 }
 
@@ -156,6 +169,7 @@ fn add_aggro_amounts(
     unit: &WorldObject,
     amount: i32,
     damage_credit: Option<i32>,
+    engage_combat: bool,
 ) -> bool {
     if refuses_foreign_aggro(server, owner, unit) {
         return false;
@@ -180,33 +194,39 @@ fn add_aggro_amounts(
     let amount = (amount as f32 * (aggro_mul as f32 / 100.0)) as i32;
     let amount = (amount as f32 * (incoming as f32 / 100.0)) as i32;
     let unit_id = unit.obj_id();
-    if damage_credit.is_some() && amount <= 0 {
-        // A zero-threat hit still earns damage credit, but creates no aggro/watch.
-        return owner
-            .with_unit(|u| u.unit().skill_state.aggro_table.contains_key(&unit_id))
-            .unwrap_or(false);
-    }
-    let existed = owner
+    // Zero-threat damage earns credit without creating an entry, but it can engage existing
+    // threat. Other aggro sources retain their zero/negative amount semantics.
+    let credit_only = damage_credit.is_some() && amount <= 0;
+    let (existed, announce_combat) = owner
         .with_unit(|u| {
             let table = &mut u.unit_mut().skill_state.aggro_table;
             match table.get_mut(&unit_id) {
                 Some(a) => {
-                    if damage_credit.is_some() {
-                        a.damage_aggro = a.damage_aggro.saturating_add(amount);
-                    } else {
+                    if damage_credit.is_none() {
                         a.add(kind, amount);
+                    } else if !credit_only {
+                        a.damage_aggro = a.damage_aggro.saturating_add(amount);
                     }
-                    true
+                    let announce_combat =
+                        engage_combat && std::mem::take(&mut a.combat_notice_pending);
+                    (true, announce_combat)
                 }
+                None if credit_only => (false, false),
                 None => {
-                    let mut a = Aggro::default();
+                    let mut a = Aggro {
+                        combat_notice_pending: !engage_combat,
+                        ..Aggro::default()
+                    };
                     a.add(kind, amount);
                     table.insert(unit_id, a);
-                    false
+                    (false, engage_combat)
                 }
             }
         })
-        .unwrap_or(false);
+        .unwrap_or((false, engage_combat && !credit_only));
+    if credit_only && !announce_combat {
+        return existed;
+    }
     let player = unit.as_player().cloned();
     if !existed {
         server
@@ -237,6 +257,8 @@ fn add_aggro_amounts(
                     .engage_combat_quest(server, p, quest, n.obj_id);
             }
         }
+    }
+    if announce_combat {
         // The first-hit packet puts both player participants in combat on the client,
         // even for sight aggro or a call for help that deals no damage.
         let now = now_ms();

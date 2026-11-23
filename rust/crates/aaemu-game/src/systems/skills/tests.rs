@@ -81,7 +81,8 @@ pub(crate) fn damage_effect(id: u32, amount: i32) -> DamageEffect {
         target_health_max: 0,
         target_health_mul: 0.0,
         target_health_add: 0,
-        fire_proc: false,
+        // Ordinary fixture hits can fire procs, including the recursive-proc guard test.
+        fire_proc: true,
         bonuses: Vec::new(),
     }
 }

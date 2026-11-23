@@ -516,6 +516,121 @@ fn real_compact_db_separates_threshold_and_full_damage_immunity() {
     );
 }
 
+fn compact_damage(effect_id: u32) -> Option<Box<DamageEffect>> {
+    let path = std::env::var("AAEMU_COMPACT_DB").ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut tables = std::collections::HashMap::new();
+    skills::data::effects::load_effect_tables(&conn, &|_| true, &mut tables).unwrap();
+    let registry = skills::data::effects::load_effect_types(&conn).unwrap();
+    let link = &registry[&effect_id];
+    assert_eq!(link.actual_type, "DamageEffect");
+    let kind = skills::data::EffectKind::DamageEffect;
+    let Some(skills::data::EffectTemplate::Damage(effect)) =
+        tables.get_mut(&kind).unwrap().remove(&link.actual_id)
+    else {
+        panic!("missing damage descriptor for effect {effect_id}");
+    };
+    Some(effect)
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_compact_db_damage_engage_combat_gates_battle_but_keeps_threat() {
+    // Buff 1053's damage tick is global effect 5083 (descriptor 699).
+    let Some(mut effect) = compact_damage(5083) else {
+        return;
+    };
+    assert_eq!(effect.id, 699);
+    assert!(!effect.engage_combat);
+    check_damage_engage_combat(&mut effect);
+}
+
+#[tokio::test]
+async fn damage_pipeline_engage_combat_flag_keeps_threat_without_battle() {
+    let mut effect = skills::tests::damage_effect(1, 100);
+    effect.engage_combat = false;
+    check_damage_engage_combat(&mut effect);
+}
+
+fn check_damage_engage_combat(effect: &mut DamageEffect) {
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    // Model an idle NPC whose damage notification transitions it into combat immediately.
+    struct StartsCombat;
+    impl skills::ext::NpcSkillHooks for StartsCombat {
+        fn npc_damage_received(
+            &self,
+            server: &GameServer,
+            npc: &crate::world::NpcRef,
+            _: &WorldObject,
+            _: i32,
+        ) {
+            unit_combat::set_in_battle(server, &npc.into(), true);
+        }
+    }
+    server
+        .systems
+        .skills
+        .ext
+        .npcs
+        .install(Arc::new(StartsCombat));
+    {
+        let mut n = npc.data();
+        n.unit.hp = 10_000;
+        n.unit.max_hp = 10_000;
+    }
+    let args = args((&player).into(), (&npc).into(), 1);
+    client.drain();
+
+    damage(&server, effect, &args, None);
+
+    let dealt = {
+        let n = npc.data();
+        let dealt = 10_000 - n.unit.hp;
+        assert!(dealt > 0);
+        assert_eq!(
+            n.unit.skill_state.aggro_table[&player.obj_id].damage_aggro,
+            dealt
+        );
+        assert_eq!(n.unit.skill_state.tagging.taggers, [(player.obj_id, dealt)]);
+        assert!(!n.unit.is_in_battle, "disabled engage entered NPC combat");
+        assert_eq!(n.unit.last_combat_activity_ms, 0);
+        dealt
+    };
+    assert!(
+        !player.data().unit.is_in_battle,
+        "NPC threat started player combat"
+    );
+    assert_eq!(player.data().unit.last_combat_activity_ms, 0);
+    let ops = client.drain_ops();
+    assert!(ops.contains(&sc::SCUnitDamagedPacket));
+    assert!(ops.contains(&sc::SCAiAggroPacket));
+    assert!(!ops.contains(&sc::SCCombatFirstHitPacket));
+
+    // The next engaging hit still announces combat for the existing threat entry.
+    effect.engage_combat = true;
+    damage(&server, effect, &args, None);
+    assert!(player.data().unit.is_in_battle);
+    assert!(npc.data().unit.is_in_battle);
+    assert!(npc.data().unit.skill_state.aggro_table[&player.obj_id].damage_aggro > dealt);
+    assert!(client.drain_ops().contains(&sc::SCCombatFirstHitPacket));
+    damage(&server, effect, &args, None);
+    assert!(!client.drain_ops().contains(&sc::SCCombatFirstHitPacket));
+
+    // A disabled hit keeps the existing battle state and does not refresh either timer.
+    player.data().unit.last_combat_activity_ms = 1;
+    npc.data().unit.last_combat_activity_ms = 1;
+    effect.engage_combat = false;
+    damage(&server, effect, &args, None);
+    for obj in [WorldObject::from(&player), WorldObject::from(&npc)] {
+        obj.with_unit(|u| {
+            assert!(u.unit().is_in_battle);
+            assert_eq!(u.unit().last_combat_activity_ms, 1);
+        });
+    }
+}
+
 #[tokio::test]
 async fn damage_pipeline_nonunit_sources_and_hostile_target_authority() {
     let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
@@ -619,6 +734,103 @@ async fn damage_pipeline_npc_percent_attacks_select_pre_hit_player_hp() {
         assert_eq!(packet(&mut client, npc.obj_id, player.obj_id).0, expected);
         assert_eq!(player.data().unit.hp, 1001 - expected);
     }
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_compact_db_damage_fire_proc_gates_both_item_proc_families() {
+    // Skill 22151 deals damage through global effect 30696 (descriptor 4818).
+    let Some(mut effect) = compact_damage(30696) else {
+        return;
+    };
+    assert_eq!(effect.id, 4818);
+    assert!(!effect.fire_proc);
+    assert!(effect.engage_combat);
+    check_damage_fire_proc(&mut effect);
+}
+
+#[tokio::test]
+async fn damage_pipeline_fire_proc_flag_gates_both_item_proc_families() {
+    let mut effect = skills::tests::damage_effect(1, 100);
+    effect.fire_proc = false;
+    check_damage_fire_proc(&mut effect);
+}
+
+fn check_damage_fire_proc(effect: &mut DamageEffect) {
+    use crate::data::items::ItemProcTemplate;
+    use crate::systems::economy::procs::chance_kind;
+    use skills::data::{BuffTemplate, EffectKind, EffectTemplate, SkillTemplate};
+
+    const PROC_BUFF: u32 = 700;
+    const PROC_SKILL: u32 = 800;
+    let mut data = fixture_data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: PROC_BUFF,
+        kind: 1,
+        duration: 60_000,
+        ..Default::default()
+    });
+    data.systems.skills.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(BuffEffect {
+            id: 1800,
+            buff_id: Some(PROC_BUFF),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        0,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        target_type: 0, // SelfTarget
+        effects: vec![skills::tests::skill_effect(
+            1800,
+            EffectKind::BuffEffect,
+            1800,
+        )],
+        ..skills::tests::skill_template(PROC_SKILL)
+    });
+    for (id, chance_kind) in [(7, chance_kind::HIT_ANY), (8, chance_kind::TAKE_DAMAGE_ANY)] {
+        data.items.item_procs.insert(
+            id,
+            ItemProcTemplate {
+                id,
+                skill_id: PROC_SKILL,
+                chance_kind,
+                chance_rate: 100,
+                ..Default::default()
+            },
+        );
+    }
+    let (server, _client, attacker, victim) = skills::cast_validation_tests::fixture(data);
+    {
+        let mut attacker = attacker.data();
+        attacker
+            .unit
+            .item_procs
+            .set_active(&server.game_data.items, [7]);
+    }
+    {
+        let mut victim = victim.data();
+        victim.unit.hp = 100_000;
+        victim.unit.max_hp = 100_000;
+        victim
+            .unit
+            .item_procs
+            .set_active(&server.game_data.items, [8]);
+    }
+    let args = args((&attacker).into(), (&victim).into(), 1);
+
+    damage(&server, effect, &args, None);
+    assert!(victim.data().unit.hp < 100_000);
+    assert!(attacker.data().unit.is_in_battle);
+    assert!(!attacker.data().unit.buffs.check_buff(PROC_BUFF));
+    assert!(!victim.data().unit.buffs.check_buff(PROC_BUFF));
+
+    effect.fire_proc = true;
+    damage(&server, effect, &args, None);
+    assert!(attacker.data().unit.buffs.check_buff(PROC_BUFF));
+    assert!(victim.data().unit.buffs.check_buff(PROC_BUFF));
 }
 
 #[tokio::test]

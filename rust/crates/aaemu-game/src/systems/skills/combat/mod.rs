@@ -24,6 +24,7 @@ mod death;
 mod fall_damage;
 mod pvp;
 
+pub(super) use self::aggro::add_damage_aggro_with_combat;
 pub use self::aggro::{
     add_damage_aggro, add_unit_aggro, cancel_taunted_by, clear_aggro_of_unit, clear_all_aggro,
     drop_aggro_table, on_taunt_buff_applied, on_taunt_buff_refreshed, taunted_by,

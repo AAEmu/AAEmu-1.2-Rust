@@ -253,6 +253,8 @@ pub struct Aggro {
     /// (`systems::ai::behaviors::sorted_abusers`). 10.x-only (`NpcAggroTable` entry `+24`):
     /// the 1.2 client and the C# have no taunt logic.
     pub taunt_time: u64,
+    /// Threat recorded before a combat-engaging action. AI skips it when choosing opponents.
+    pub(crate) combat_notice_pending: bool,
 }
 
 impl Aggro {
@@ -324,6 +326,26 @@ pub struct UnitSkillState {
     /// `Unit.DisplacedUntil` (unix ms, 0 = `null`): set by knock back / impulse / blink effects
     /// so the NPC AI does not walk the unit back while the client plays the displacement.
     pub displaced_until_ms: i64,
+}
+
+impl UnitSkillState {
+    pub(crate) fn has_engaged_aggro(&self) -> bool {
+        self.aggro_table
+            .values()
+            .any(|entry| !entry.combat_notice_pending)
+    }
+
+    pub(crate) fn has_engaged_aggro_on(&self, obj_id: u32) -> bool {
+        self.aggro_table
+            .get(&obj_id)
+            .is_some_and(|entry| !entry.combat_notice_pending)
+    }
+
+    pub(crate) fn has_pending_aggro_on(&self, obj_id: u32) -> bool {
+        self.aggro_table
+            .get(&obj_id)
+            .is_some_and(|entry| entry.combat_notice_pending)
+    }
 }
 
 /// `ActivePlotState` handle (compares by pointer).

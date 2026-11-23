@@ -265,7 +265,12 @@ pub fn aggro_copy(server: &GameServer, args: &EffectArgs<'_>, _values: [i32; 4])
         entry.taunt_time = 0;
         combat::add_unit_aggro(server, target, AggroKind::Etc, &unit, 0);
         target.with_unit(|owner| {
-            owner.unit_mut().skill_state.aggro_table.insert(id, entry);
+            let table = &mut owner.unit_mut().skill_state.aggro_table;
+            // Keep the state set when the destination's first hit was announced.
+            if let Some(registered) = table.get(&id) {
+                entry.combat_notice_pending = registered.combat_notice_pending;
+            }
+            table.insert(id, entry);
         });
         if entry.total() > 0 {
             if let Some(player) = unit.as_player() {
