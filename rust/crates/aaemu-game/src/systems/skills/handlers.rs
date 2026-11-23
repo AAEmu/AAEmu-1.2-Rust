@@ -1108,13 +1108,16 @@ fn stop_casting(server: &GameServer, conn: &mut GameConnection, p: CSStopCasting
         }
         return;
     }
-    let template = &task.skill.template;
+    // A matching player stop always ends the direct stage. `casting_cancelable` /
+    // `channeling_cancelable` are not a permission for it: the r208022 senders (x2game
+    // 0x3a66d0 / 0x3a67c0, one per direct timeline slot, called from the movement, input and
+    // target-change paths) send 0x054 and then end their own timeline (0x3a6000) without
+    // reading either flag, so the cast bar is already gone. Only ~70 of ~6,900 timed 1.2
+    // skills set the flag (not Meteor Strike 15117, Mine Vein 10199 or any craft/regrade),
+    // and refusing the stop let those casts finish after the player had moved away.
     let channel_doodad = match task.kind {
-        SkillTaskKind::Cast if template.casting_cancelable => 0,
-        SkillTaskKind::EndChanneling { channel_doodad } if template.channeling_cancelable => {
-            channel_doodad
-        }
-        _ => return,
+        SkillTaskKind::Cast => 0,
+        SkillTaskKind::EndChanneling { channel_doodad } => channel_doodad,
     };
     let task = slot.take().expect("matched the active skill task");
     task.cancel.cancel();
