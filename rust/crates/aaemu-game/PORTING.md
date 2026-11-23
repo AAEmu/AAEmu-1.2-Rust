@@ -5795,8 +5795,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   it reached the spawn command. The encounter paths finish before reacting to nearby
   combat. Removed legacy placements overlapping
   the working skeleton, roadside and farm waves. These pack boundaries are inferred from
-  the sphere and spawner coordinates. Entrance packs with inactive 1.2 spawn chains retain
-  their legacy placements.
+  the sphere and spawner coordinates. The entrance area still has legacy plain placements.
   The golem's Slam (2659) runs its lift and fall on the server and sends the victim the
   landing position. Poison puddles (3956) apply their authored damage-over-time buff.
   Velarre's tombstones (3874) run their timed clout effects and attribute the chained
@@ -5820,11 +5819,18 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   The start-active conformance snapshot (`instance_hadir_farm`) after removing the legacy
   placements is 68 inactive spawner skips, zero cutscene skips and zero plain rows with only
   event spawners.
-  **Open item (reported, not changed):** the 12 event rows for 60909-60911, 61146-61148 and
-  68235-68240 (the sphere 1298/1299 camps via skills 16726/16727) have no 1.2 producer: their
-  `npc_spawner_spawn_effects` rows exist, but the 1.2 `compact.sqlite3` has no `skill_effects`
-  rows for 16726/16727 (the 10.x data has them), so those camps stay dormant until the effect
-  rows exist. The other 74 rows are referenced by 1.2 rows.
+  **Entrance chain audit:** in the 1.2 compact, spheres 1298/1299 cast 16746/16747, applying
+  buffs 2929/2930 to NPC tags 469/496. The 100 ms timeout triggers 1572/1586 use
+  `SpecialEffect` 5352/5454 (type 33, `SkillUse`) to cast 16726/16727 on the trigger NPCs.
+  These skills use plots 276/282. Their `plot_effects` spawn 60909-60911 and 61146-61148,
+  or 68235-68240, respectively, at offsets of 0, 1500, 2250, 2750, 3250 and 3500 ms,
+  then remove trigger NPC 10076 or 10164. Neither wave skill has direct `skill_effects`.
+  On a fresh instance,
+  the trigger NPC's transition into Idle or HoldPosition interrupted the active plot
+  before its second spawn. Those transitions now interrupt only skills chosen by AI behavior.
+  `real_data_hadir_entrance_plots_spawn_both_camps` enters both areas, observes all
+  twelve spawns and checks removal of both trigger NPCs. The overlap between these wave
+  positions and some legacy entrance placements is still provisional.
 * systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
   logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
   1.2 client sends the packet itself once its own bubble / paper UI finishes, with body

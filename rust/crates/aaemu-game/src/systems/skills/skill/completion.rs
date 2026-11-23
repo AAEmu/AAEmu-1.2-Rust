@@ -254,9 +254,24 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
 
 /// `Unit.InterruptSkills()`.
 pub fn interrupt_skills(server: &GameServer, unit: &WorldObject) {
+    interrupt_matching_skills(server, unit, |_| true);
+}
+
+/// A settling AI abandons casts it chose for its previous behavior.
+pub(crate) fn interrupt_ai_skills(server: &GameServer, unit: &WorldObject) {
+    interrupt_matching_skills(server, unit, |skill| skill.ai_chosen);
+}
+
+fn interrupt_matching_skills(
+    server: &GameServer,
+    unit: &WorldObject,
+    matches: impl Fn(&SkillRun) -> bool,
+) {
     let Some((plot, task)) = unit.with_unit(|u| {
         let s = &u.unit().skill_state;
-        (s.active_plot.clone(), s.skill_task.clone())
+        let plot = s.active_plot.as_ref().filter(|p| matches(&p.0.skill));
+        let task = s.skill_task.as_ref().filter(|t| matches(&t.skill));
+        (plot.cloned(), task.cloned())
     }) else {
         return;
     };

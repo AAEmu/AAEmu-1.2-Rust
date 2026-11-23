@@ -13,14 +13,11 @@ use super::support::throttle;
 use super::talk::check_for_talk;
 use super::targeting::{current_target, set_target};
 
-/// `Ai.Owner.InterruptSkills()` of the settling behaviors (`Idle`, `HoldPosition`). Deviation: a
-/// tower defense controller keeps the wave plot it cast on spawn (`OnSpawn` `np_skills`), which
-/// runs for seconds while the AI settles from `Spawning` through `RunCommandSet` into
-/// `Idle`/`HoldPosition`; the C# interrupts it there too, so no wave ever appeared (PORTING.md,
-/// tower defense).
+/// Settling abandons the AI's previous skill choice. Authored events can still be running their
+/// timed plots after the NPC enters its default behavior.
 fn interrupt_unless_event_controller(c: &AiCtx<'_>) {
     if !crate::systems::instances::tower_def::owns_npc(c.server, &c.npc) {
-        ai_skills::interrupt_skills(c);
+        crate::systems::skills::skill::interrupt_ai_skills(c.server, &c.obj);
     }
 }
 
@@ -80,7 +77,7 @@ pub(super) fn hold_position_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i
 }
 
 pub(super) fn idle_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
-    // Stop all actions and reset state
+    // Reset the AI for idle activity.
     npc::set_game_stance(&c.npc, GameStanceType::RELAXED);
     npc::set_alertness(&c.npc, MoveTypeAlertness::IDLE);
     interrupt_unless_event_controller(c);

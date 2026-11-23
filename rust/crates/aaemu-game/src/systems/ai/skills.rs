@@ -63,11 +63,10 @@ pub fn on_cooldown(c: &AiCtx<'_>, skill_id: u32) -> bool {
     c.npc.data().unit.cooldowns.check_cooldown(skill_id, now)
 }
 
-/// `new Skill(SkillManager.GetSkillTemplate(id))` (`None` when the template is missing; the C#
-/// would throw a `NullReferenceException` in the constructor).
+/// Constructs a skill picked by an AI behavior (`None` when its template is missing).
 pub fn new_skill(c: &AiCtx<'_>, skill_id: u32) -> Option<SkillRef> {
     let t = c.server.game_data.systems.skills.skill(skill_id)?.clone();
-    Some(SkillRun::new(t, 1))
+    Some(SkillRun::new_ai_chosen(t))
 }
 
 /// `SkillManager.GetNpSkillTemplate(npcSkill)`: `InCombat` skills must ignore the global

@@ -201,7 +201,7 @@ pub(super) fn spawning_tick(c: &mut AiCtx<'_>, k: BehaviorKind) {
         if let Some(skills) = skills {
             c.st(k).used_spawn_skills = true;
             for id in skills {
-                let Some(skill) = ai_skills::new_skill(c, id) else {
+                let Some(skill) = ai_skills::np_skill(c, id, SkillUseConditionKind::OnSpawn) else {
                     tracing::error!("Spawning: OnSpawn skill {id} has no template");
                     continue;
                 };
