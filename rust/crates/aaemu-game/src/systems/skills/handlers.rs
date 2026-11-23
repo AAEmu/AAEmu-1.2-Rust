@@ -1061,8 +1061,12 @@ fn stop_casting(server: &GameServer, conn: &mut GameConnection, p: CSStopCasting
             }
         }
     }
-    let task = player.data().unit.skill_state.skill_task.clone();
-    let Some(task) = task else {
+    if p.tl_id == 0 && plot_cancel {
+        return;
+    }
+    let mut character = player.data();
+    let slot = &mut character.unit.skill_state.skill_task;
+    let Some(task) = slot.as_ref() else {
         if !plot_cancel {
             if p.tl_id == 0 && p.plot_tl_id != 0 {
                 // The client repeats a cancel for a plot that has already ended (a burst of
@@ -1084,26 +1088,28 @@ fn stop_casting(server: &GameServer, conn: &mut GameConnection, p: CSStopCasting
         return;
     };
     let active = task.skill.tl_id();
-    let matches = if p.tl_id != 0 {
-        active == p.tl_id || active == p.plot_tl_id
-    } else {
-        p.plot_tl_id != 0 && active == p.plot_tl_id
-    };
-    if !matches {
-        tracing::warn!(
-            "Stop requested for another skill? Tl: {}, Pid: {}, ActiveTl: {active}",
-            p.tl_id,
-            p.plot_tl_id
-        );
+    if p.tl_id == 0 || active != p.tl_id {
+        if p.tl_id != 0 {
+            tracing::warn!(
+                "Stop requested for another skill? Tl: {}, Pid: {}, ActiveTl: {active}",
+                p.tl_id,
+                p.plot_tl_id
+            );
+        }
         return;
     }
-    task.cancel.cancel();
-    match task.kind {
-        SkillTaskKind::EndChanneling { channel_doodad } => {
-            skill::stop(server, &task.skill, &me, channel_doodad)
+    let template = &task.skill.template;
+    let channel_doodad = match task.kind {
+        SkillTaskKind::Cast if template.casting_cancelable => 0,
+        SkillTaskKind::EndChanneling { channel_doodad } if template.channeling_cancelable => {
+            channel_doodad
         }
-        SkillTaskKind::Cast => skill::stop(server, &task.skill, &me, 0),
-    }
+        _ => return,
+    };
+    let task = slot.take().expect("matched the active skill task");
+    task.cancel.cancel();
+    drop(character);
+    skill::stop(server, &task.skill, &me, channel_doodad);
 }
 
 /// `CSRemoveBuffPacket`.

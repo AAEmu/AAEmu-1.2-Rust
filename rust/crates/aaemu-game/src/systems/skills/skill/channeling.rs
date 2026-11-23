@@ -19,7 +19,7 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster = &ctx.caster;
     let t = &skill.template;
     // Native 1.2 sub_398A01B0, attribute 11: milliseconds, independent of CastTime.
-    // The fired packet encodes duration as signed i16 (ms / 10 + 10).
+    // Keep the server timer in milliseconds; the fired packet clamps its own wire field.
     let channeling_time = apply_skill_modifiers(
         server,
         skill,
@@ -27,8 +27,7 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         SkillAttribute::ChannelingTime,
         f64::from(t.channeling_time),
     )
-    .max(0.0)
-    .min(f64::from((i32::from(i16::MAX) - 10) * 10)) as i32;
+    .max(0.0) as i32;
     let data = &server.game_data.systems.skills;
     if t.channeling_buff_id != 0 {
         if let Some(b) = data.buff(t.channeling_buff_id).cloned() {

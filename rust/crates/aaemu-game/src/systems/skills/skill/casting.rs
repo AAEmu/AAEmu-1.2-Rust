@@ -290,13 +290,14 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     if t.effect_speed > 0.0 {
         let d = distance_to(server, &Target::Obj(caster.clone()), &ctx.target, false);
-        total_delay += (d / t.effect_speed * 1000.0) as i32;
+        total_delay = total_delay.saturating_add((d / t.effect_speed * 1000.0) as i32);
     }
     let fire_anim_id = fire_anim_for(t, super::plots::weapon_wield_kind(server, caster));
     if fire_anim_id != 0 && t.use_anim_time {
         if let Some(anim) = data.anims.get(fire_anim_id) {
             let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
-            total_delay += (anim.combat_sync_time as f32 * (mul / 100.0)) as i32;
+            total_delay =
+                total_delay.saturating_add((anim.combat_sync_time as f32 * (mul / 100.0)) as i32);
         }
     }
     // The cast slot is already cleared, and the interaction effect of a skill that holds a
@@ -320,7 +321,7 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         caster: ctx.caster_caster,
         target: ctx.target_caster,
         skill_object: ctx.skill_object.clone(),
-        computed_delay: total_delay as i16,
+        computed_delay: total_delay,
         channeling_time: t.channeling_time,
         fire_anim_id,
     };
@@ -435,19 +436,22 @@ fn weapon_attack_anim_id(server: &GameServer, skill: &SkillRun, caster: &WorldOb
 
 /// Extends a running direct cast's end by `delay_ms` (`DisturbCasting` with a delay, WP-1:
 /// the 1.2 client adds the delay to the cast bar when it receives `SCCastingDelayed`). Returns
-/// the cast skill's id, or `None` when the unit is not in a direct `Cast` task (a plot or a
-/// channel is not extended), the task is being cancelled, or it is already completing.
-pub fn delay_cast(unit: &WorldObject, delay_ms: i64) -> Option<u32> {
+/// the active cast timeline, or `None` when there is no extendable direct cast task.
+pub fn delay_cast(unit: &WorldObject, delay_ms: i64) -> Option<u16> {
     if delay_ms <= 0 {
         return None;
     }
     unit.with_unit(|u| {
         let task = u.unit_mut().skill_state.skill_task.as_mut()?;
-        if task.kind != SkillTaskKind::Cast || task.skill.cancelled() {
+        if task.kind != SkillTaskKind::Cast || !task.skill.template.casting_delayable {
+            return None;
+        }
+        let run = task.skill.state();
+        if run.cancelled || run.tl_id == 0 {
             return None;
         }
         task.extend_ms = task.extend_ms.saturating_add(delay_ms);
-        Some(task.skill.id)
+        Some(run.tl_id)
     })
     .flatten()
 }
