@@ -21,6 +21,9 @@ $client = 'C:\aa-re\testclients\perf-dev'
 $ports = @(3417,28537,28534,28539,28550,28580)
 $source = 'C:\AA1.2'
 $center = if ($Scenario -eq 'water') { @(15458,10366,100.5) } else { @(15562,15354,128.0) }
+# r208022's client scene uses a cell-relative origin. The land route showed
+# (4298, 4090) after a server teleport to (15562, 15354).
+$localCenter = if ($Scenario -eq 'water') { @(4194,4222) } else { @(4298,4090) }
 $spec = if ($Preset -eq 'high') { 4 } else { 1 }
 $lease = New-Object Threading.Mutex($false, 'Local\AAEmuLiveAuditStressBench')
 
@@ -338,10 +341,12 @@ try {
                 $position | Set-Content "$run\scene-position.txt"
                 $coords = $position.Trim('"') -split ' '
                 if ($coords.Count -ne 3) { return $false }
-                $dx = $center[0] - [double]$coords[0]
-                $dy = $center[1] - [double]$coords[1]
+                $x = [double]$coords[0]
+                $y = [double]$coords[1]
+                $dx = $center[0] - $x
+                $dy = $center[1] - $y
                 ([Math]::Abs($dx) -lt 5 -and [Math]::Abs($dy) -lt 5) -or
-                    ([Math]::Abs($dx - 1024) -lt 5 -and [Math]::Abs($dy - 1024) -lt 5)
+                    ([Math]::Abs($localCenter[0] - $x) -lt 5 -and [Math]::Abs($localCenter[1] - $y) -lt 5)
             }
             Measure-Route
             $result = Get-Content "$run\summary.json" -Raw | ConvertFrom-Json
