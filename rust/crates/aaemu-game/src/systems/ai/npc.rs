@@ -20,6 +20,7 @@ use crate::models::unit::UnitAttribute;
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::packets::world_objects::SCTargetChangedPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::heightmap::ReferenceHeightAi;
 use crate::systems::npcs::npc::data::NpcTemplate;
@@ -579,27 +580,14 @@ pub fn move_towards(
             new.z,
             zone_id,
         );
-        if template_id == 11363
-            && zone_id == 262
-            && in_stonebrother_arena(Vec3::new(new.x, new.y, pos.z))
-        {
-            // Keep the large ground actor on the room's level if a ray hits the
-            // floor beneath the arena or the collision mesh above its feet.
-            if let Some(floor) = spawner_z.filter(|_| !(149.0..=156.0).contains(&target_z)) {
-                target_z = floor;
-            }
-        }
-        // The Armory's prison mesh exposes the plinth's base to ground rays.
-        // The authored Winters path remains at platform height through x 284.724.
-        if template_id == 12190
-            && zone_id == 236
-            && (284.7..=291.5).contains(&new.x)
-            && (233.0..=239.5).contains(&new.y)
-        {
-            if let Some(stage) = spawner_z {
-                target_z = target_z.max(stage);
-            }
-        }
+        target_z = encounter_hooks::for_zone(zone_id).walker_floor(
+            template_id,
+            zone_id,
+            pos,
+            new,
+            spawner_z,
+            target_z,
+        );
         Vec3::new(new.x, new.y, target_z)
     };
     // Keep the travelled heading when a step lands exactly on a waypoint. Computing
@@ -715,10 +703,7 @@ pub fn reference_height(
 /// ground under the walker.
 pub const WALKER_MAX_DROP: f32 = 12.0;
 
-/// The Colossus room around the authored spawn, above the passages underneath.
-pub(crate) fn in_stonebrother_arena(pos: Vec3) -> bool {
-    (pos.x - 614.4).hypot(pos.y - 423.4) <= 31.0 && (149.0..=160.0).contains(&pos.z)
-}
+pub(crate) use crate::systems::instances::encounters::sharpwind::in_stonebrother_arena;
 
 /// The raised passages have another walkable floor only a few meters underneath.
 pub(crate) fn walker_max_drop(zone_id: u32) -> f32 {

@@ -17,6 +17,7 @@ use crate::data::skills::BuffTemplate as NetBuffTemplate;
 use crate::models::buff::{effect_state, Buff, BuffEvent, SkillCaster as NetSkillCaster};
 use crate::models::unit::{Bonus, BuffAttribute, DynamicBonus, UnitAttribute};
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry::{self as encounters, TriggerCaster};
 use crate::world::{now_ms, WorldObject};
 
@@ -289,8 +290,9 @@ fn add_buff_inner(
     forced_duration: i32,
     transform_chain: &mut Vec<u32>,
 ) {
-    if buff.template.id == super::water::AKMIT_ROAR_BUFF
-        && super::water::water_extinguishes_akmit_roar(server, owner)
+    if encounter_hooks::all()
+        .iter()
+        .any(|encounter| encounter.blocks_buff(server, owner, &buff))
     {
         return;
     }

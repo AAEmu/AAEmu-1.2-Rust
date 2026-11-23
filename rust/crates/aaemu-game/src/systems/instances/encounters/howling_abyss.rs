@@ -154,3 +154,70 @@ pub(super) fn has_river_sectors(template_name: &str) -> bool {
         "instance_howling_abyss" | "instance_howling_abyss_2"
     )
 }
+
+// ---- hooks
+
+use crate::server::GameServer;
+use crate::systems::ai::physics::water::{WaterBodyArea, WaterBodyAreaType};
+use crate::systems::npcs::doodad::runtime::DoodadCtx;
+use crate::systems::npcs::doodad::templates::DoodadFuncWaterVolume;
+use crate::systems::skills::controllers::Vec3;
+
+/// Calleil's water doodads (5336, 6288) raise or lower his chamber's water level.
+pub(super) fn water_volume(
+    server: &GameServer,
+    ctx: &DoodadCtx<'_>,
+    f: &DoodadFuncWaterVolume,
+) -> bool {
+    if matches!(ctx.doodad.data().template_id, 5336 | 6288) && matches!(f.id, 20 | 21 | 24 | 25) {
+        let pos = ctx.world.world_pos_rot(&ctx.obj());
+        let water = crate::systems::ai::physics::world_water(server, &ctx.world);
+        water.set_calleil_level(
+            crate::systems::skills::controllers::Vec3::new(pos.x, pos.y, pos.z),
+            pos.rot_z,
+            f.level_change.max(0.0),
+            f.duration,
+        );
+        return true;
+    }
+    false
+}
+
+/// Calleil's water chamber around the water doodad at `anchor`, turned by its `yaw`.
+pub(crate) fn calleil_chamber(anchor: Vec3, yaw: f32) -> WaterBodyArea {
+    // r208022 boss02_watervolume_01 is relative to the doodad, not in the cell octree.
+    let (sin, cos) = (yaw + std::f32::consts::PI).sin_cos();
+    let mut area = WaterBodyArea::new("Calleil's water chamber", WaterBodyAreaType::Polygon);
+    area.depth = 13.0;
+    area.points = [
+        (0.0, 0.0, 0.0),
+        (-13.796, 38.706, 0.244),
+        (-50.568, 22.119, 0.152),
+        (-36.012, -14.010, 0.030),
+        (0.0, 0.0, 0.0),
+    ]
+    .map(|(x, y, z)| {
+        Vec3::new(
+            anchor.x + x * cos - y * sin,
+            anchor.y + x * sin + y * cos,
+            anchor.z + z - 0.9564,
+        )
+    })
+    .to_vec();
+    area.update_bounds();
+    area
+}
+
+/// Howling Abyss's encounter hooks.
+pub struct HowlingAbyss;
+
+impl super::hooks::Encounter for HowlingAbyss {
+    fn water_volume(
+        &self,
+        server: &GameServer,
+        ctx: &DoodadCtx<'_>,
+        f: &DoodadFuncWaterVolume,
+    ) -> bool {
+        water_volume(server, ctx, f)
+    }
+}

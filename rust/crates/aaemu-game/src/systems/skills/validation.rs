@@ -1,6 +1,7 @@
 //! Server-side cast restrictions, checked before GCD, buffs, plots or resources change.
 
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::world::WorldObject;
 
@@ -30,7 +31,7 @@ pub(super) fn is_portable_harpoon_shot(skill_id: u32) -> bool {
 /// verified.
 pub(crate) const OBSTACLE_RAY_HEIGHT: f32 = 1.0;
 
-fn fail(key: &str) -> Result<(), (u8, u32)> {
+pub(crate) fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))
 }
 
@@ -71,43 +72,6 @@ pub(super) fn check_red_dragon_egg(
 }
 
 pub(super) const CRADLE_CHEST_SKILL: u32 = encounters::CRADLE_CHEST_SKILL;
-
-/// The destruction device unlocks the hidden-room chests. Each can be used once.
-pub(super) fn check_cradle_chest(
-    server: &GameServer,
-    caster: &WorldObject,
-    target: &Target,
-) -> Result<(), (u8, u32)> {
-    let Some(player) = caster.as_player() else {
-        return fail("skill_invalid_source");
-    };
-    let Some(chest) = target.as_obj().and_then(WorldObject::as_doodad) else {
-        return fail("skill_invalid_target");
-    };
-    let ready = {
-        let data = chest.data();
-        (data.template_id, data.func_group_id) == (5550, 14303)
-    };
-    let opened = ready
-        && server
-            .world
-            .world_of(&WorldObject::from(chest))
-            .is_some_and(|world| {
-                world.all_doodads().iter().any(|doodad| {
-                    let data = doodad.data();
-                    (data.template_id, data.func_group_id) == (5549, 14331)
-                })
-            });
-    if !opened {
-        return fail("skill_invalid_target");
-    }
-    // Skill 19691 opens the chest before its GainItem effect grants the one
-    // non-stackable reward (25660). Reserve room before either effect runs.
-    if Inv::of(player).free_slot_count(crate::models::container::slot_type::INVENTORY) <= 0 {
-        return fail("skill_bag_full");
-    }
-    Ok(())
-}
 
 /// Item-caster tags belong to the owned item's server-side template, never the wire hint.
 pub(super) fn check_item_zone(
@@ -443,8 +407,11 @@ pub(super) fn check(
     {
         return fail("skill_invalid_target");
     }
-    if template.id == CRADLE_CHEST_SKILL {
-        check_cradle_chest(server, caster, target)?;
+    if let Some(ready) = encounter_hooks::all()
+        .iter()
+        .find_map(|encounter| encounter.effects_ready(server, template, caster, target))
+    {
+        ready?;
     }
     if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)

@@ -14,6 +14,7 @@ use crate::data::world_data::Portal;
 use crate::models::npc::Npc;
 use crate::models::transform::{PositionAndRotation, Transform};
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::skills::data::{EffectKind, EffectTemplate};
 use crate::systems::skills::effects::special::movement::{add_distance_to_front_deg, deg_to_rad};
@@ -1073,7 +1074,7 @@ fn npc_spawner_spawn_effect(
     }
 }
 
-fn npc_aggro_target(
+pub(crate) fn npc_aggro_target(
     server: &GameServer,
     world: &crate::world::WorldInstance,
     caster: &WorldObject,
@@ -1234,26 +1235,8 @@ fn spawn_gimmick_effect(
         ang_vel_y: e.ang_vel[1],
         ang_vel_z: e.ang_vel[2],
     };
-    // Sorvell's high-health barrel is a self-cast. Its fixed eight-meter
-    // offset has no relation to where he's fighting. Use his current victim
-    // for that cast and the selected victim for the low-health barrage.
-    if e.gimmick_id == super::gimmick::manager::SORVELL_BARREL_TEMPLATE_ID
-        && caster
-            .as_npc()
-            .is_some_and(|n| n.data().unit.template_id == 8960)
-    {
-        let target = args
-            .target
-            .as_obj()
-            .filter(|o| o.obj_id() != caster.obj_id() && o.is_unit())
-            .cloned()
-            .or_else(|| npc_aggro_target(server, &world, caster));
-        if let Some(target) = target {
-            params.target_position = Some(world.world_pos_rot(&target));
-            params.offset_from_source = false;
-            params.offset_x = 0.0;
-            params.offset_y = 0.0;
-        }
+    for encounter in encounter_hooks::all() {
+        encounter.gimmick_spawn_target(server, e, args, caster, &world, &mut params);
     }
     super::gimmick::manager::spawn_from_effect(server, &world, &params, caster);
 }

@@ -36,3 +36,10 @@ pub(super) fn server_runs_buff_controller(buff_id: u32) -> bool {
 pub(super) fn velarre_tombstone(buff_id: u32, caster_npc: impl FnOnce() -> Option<u32>) -> bool {
     buff_id == 2586 && caster_npc().is_some_and(|id| id == 9792)
 }
+
+// ---- hooks
+
+/// Hadir Farm's encounter hooks.
+pub struct HadirFarm;
+
+impl super::hooks::Encounter for HadirFarm {}

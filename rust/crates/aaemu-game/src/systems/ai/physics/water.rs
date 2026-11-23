@@ -16,6 +16,7 @@ use std::time::Instant;
 use crate::data::client_files::ClientFileManager;
 use crate::data::world_templates::CELL_SIZE;
 use crate::systems::ai::numerics::Vec3Ext;
+use crate::systems::instances::encounters::howling_abyss;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::heightmap::WorldHeightmap;
 use crate::systems::skills::controllers::Vec3;
@@ -531,27 +532,7 @@ impl WaterBodies {
         let (id, from) = if let Some((id, change)) = &inner.calleil_level {
             (*id, change.offset())
         } else {
-            // r208022 boss02_watervolume_01 is relative to the doodad, not in the cell octree.
-            let (sin, cos) = (yaw + std::f32::consts::PI).sin_cos();
-            let mut area =
-                WaterBodyArea::new("Calleil's water chamber", WaterBodyAreaType::Polygon);
-            area.depth = 13.0;
-            area.points = [
-                (0.0, 0.0, 0.0),
-                (-13.796, 38.706, 0.244),
-                (-50.568, 22.119, 0.152),
-                (-36.012, -14.010, 0.030),
-                (0.0, 0.0, 0.0),
-            ]
-            .map(|(x, y, z)| {
-                Vec3::new(
-                    anchor.x + x * cos - y * sin,
-                    anchor.y + x * sin + y * cos,
-                    anchor.z + z - 0.9564,
-                )
-            })
-            .to_vec();
-            area.update_bounds();
+            let area = howling_abyss::calleil_chamber(anchor, yaw);
             let id = inner.areas.len() as u32;
             Self::add_area(&mut inner, area);
             (id, 0.0)
