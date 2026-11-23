@@ -220,8 +220,7 @@ pub fn share_aggro_with_group(c: &mut AiCtx<'_>, abuser: &WorldObject) {
             .data()
             .unit
             .skill_state
-            .aggro_table
-            .contains_key(&abuser.obj_id());
+            .has_engaged_aggro_on(abuser.obj_id());
         if was_engaged {
             continue;
         }

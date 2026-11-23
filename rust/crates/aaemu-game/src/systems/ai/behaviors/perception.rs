@@ -73,16 +73,17 @@ fn scan_for_enemy(
             model_size * scale * gap_ground
         };
         let uz = pos.z;
-        // Check if in front, and not too far up or down
-        if npc::is_front_at(&origin, &pos, f64::from(t.sight_fov_scale))
-            && (my_z - uz).abs() < max_height_gap
-        {
-            if can_attack(c.server, &c.obj, &unit) && npc::can_see_target(c.server, &c.obj, &unit) {
-                return Some(unit);
-            }
-        } else if range < near_mul * t.sight_range_scale
+        let in_front = npc::is_front_at(&origin, &pos, f64::from(t.sight_fov_scale))
+            && (my_z - uz).abs() < max_height_gap;
+        if (in_front || range < near_mul * t.sight_range_scale)
             && can_attack(c.server, &c.obj, &unit)
             && npc::can_see_target(c.server, &c.obj, &unit)
+            && !c
+                .npc
+                .data()
+                .unit
+                .skill_state
+                .has_pending_aggro_on(unit.obj_id())
         {
             return Some(unit);
         }

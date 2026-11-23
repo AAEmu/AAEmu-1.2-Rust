@@ -194,26 +194,24 @@ fn add_aggro_amounts(
     let amount = (amount as f32 * (aggro_mul as f32 / 100.0)) as i32;
     let amount = (amount as f32 * (incoming as f32 / 100.0)) as i32;
     let unit_id = unit.obj_id();
-    if damage_credit.is_some() && amount <= 0 {
-        // A zero-threat hit still earns damage credit, but creates no aggro/watch.
-        return owner
-            .with_unit(|u| u.unit().skill_state.aggro_table.contains_key(&unit_id))
-            .unwrap_or(false);
-    }
+    // Zero-threat damage earns credit without creating an entry, but it can engage existing
+    // threat. Other aggro sources retain their zero/negative amount semantics.
+    let credit_only = damage_credit.is_some() && amount <= 0;
     let (existed, announce_combat) = owner
         .with_unit(|u| {
             let table = &mut u.unit_mut().skill_state.aggro_table;
             match table.get_mut(&unit_id) {
                 Some(a) => {
-                    if damage_credit.is_some() {
-                        a.damage_aggro = a.damage_aggro.saturating_add(amount);
-                    } else {
+                    if damage_credit.is_none() {
                         a.add(kind, amount);
+                    } else if !credit_only {
+                        a.damage_aggro = a.damage_aggro.saturating_add(amount);
                     }
                     let announce_combat =
                         engage_combat && std::mem::take(&mut a.combat_notice_pending);
                     (true, announce_combat)
                 }
+                None if credit_only => (false, false),
                 None => {
                     let mut a = Aggro {
                         combat_notice_pending: !engage_combat,
@@ -225,7 +223,10 @@ fn add_aggro_amounts(
                 }
             }
         })
-        .unwrap_or((false, engage_combat));
+        .unwrap_or((false, engage_combat && !credit_only));
+    if credit_only && !announce_combat {
+        return existed;
+    }
     let player = unit.as_player().cloned();
     if !existed {
         server
