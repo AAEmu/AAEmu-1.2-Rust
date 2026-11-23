@@ -7,6 +7,7 @@ param(
     [ValidateSet(1,100,200,300,500)][int]$Bots = 200,
     [ValidateRange(10,300)][int]$Seconds = 30,
     [switch]$TraceEtw,
+    [switch]$StageObserverFirst,
     [string]$StockDriver = 'C:\aa-re\lanes\targets\perf-bench\aadriver\aadriver.dll',
     [string]$Target = 'C:\aa-re\lanes\targets\perf-bench\debug',
     [string]$Output = 'C:\aa-re\lanes\client-perf\bench\runs'
@@ -157,6 +158,27 @@ function Assert-BotsActive {
         throw 'A bot ended before the measurement finished. See bots.out and bots.err.'
     }
 }
+function Start-BotFixture($Root) {
+    $botConfig = "$runtime\bot.json"
+    [IO.File]::WriteAllText($botConfig, (@{
+        login='127.0.0.1:28537';user='unused';password=$env:AAEMU_STRESS_PASSWORD
+        character='unused';busy_center=$center;busy_secs=($Seconds + 420)
+        busy_skip_boat=($Scenario -ne 'water')
+    } | ConvertTo-Json))
+    $botsProcess = Start-Owned bots "$Target\aaemu-testclient.exe" $Root @(
+        'load','--config',"`"$botConfig`"",'--prefix','perfbot','--bots',$n,'--ramp-ms','50','--scenario','busy'
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds(240)
+    do {
+        Assert-BotsActive
+        $ready = @(Select-String -LiteralPath "$run\bots.out" -Pattern '^busy ready perfbot[0-9]+$').Count
+        if ($ready -eq $n) { break }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($ready -ne $n) { throw "Only $ready of $n bots became ready." }
+    $botsProcess
+}
+
 function Wait-Dev([string]$Description, [int]$TimeoutSeconds, [scriptblock]$Check) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
@@ -319,6 +341,7 @@ function Measure-Route {
         Save-Json @{
             config=$Config; scenario=$Scenario; preset=$Preset; bots=$n; start_utc=$start.ToString('o')
             complete=$completed; frames=$frames.Count; missed_frames=$gap
+            staged_observer=[bool]$StageObserverFirst
             p50_ms=(Percentile $sorted 0.50); p95_ms=(Percentile $sorted 0.95)
             p99_ms=(Percentile $sorted 0.99); max_ms=(Percentile $sorted 1.0)
             hitches_over_50_ms=$hitches.Count
@@ -399,6 +422,7 @@ function Measure-StockRoute {
         Save-Json @{
             config=$Config; scenario=$Scenario; preset=$Preset; bots=$n; start_utc=$start.ToString('o')
             complete=($complete -and $null -ne $dropped -and $ioCaptured); frames=$frames.Count; missed_frames=$dropped
+            staged_observer=[bool]$StageObserverFirst
             p50_ms=(Percentile $sorted 0.50); p95_ms=(Percentile $sorted 0.95)
             p99_ms=(Percentile $sorted 0.99); max_ms=(Percentile $sorted 1.0)
             hitches_over_50_ms=$hitches.Count; login_to_world_ms=$worldMs
@@ -488,25 +512,7 @@ try {
                 -not (Select-String -LiteralPath "$run\observer.out" -Pattern '^\[run\] ok\s+game.quit\s' -Quiet)) {
                 throw 'Observer setup failed, see observer.out and observer.err'
             }
-            if ($n) {
-                $botConfig = "$runtime\bot.json"
-                [IO.File]::WriteAllText($botConfig, (@{
-                    login='127.0.0.1:28537';user='unused';password=$env:AAEMU_STRESS_PASSWORD
-                    character='unused';busy_center=$center;busy_secs=($Seconds + 420)
-                    busy_skip_boat=($Scenario -ne 'water')
-                } | ConvertTo-Json))
-                $botsProcess = Start-Owned bots "$Target\aaemu-testclient.exe" $root @(
-                    'load','--config',"`"$botConfig`"",'--prefix','perfbot','--bots',$n,'--ramp-ms','50','--scenario','busy'
-                )
-                $deadline = [DateTime]::UtcNow.AddSeconds(240)
-                do {
-                    Assert-BotsActive
-                    $ready = @(Select-String -LiteralPath "$run\bots.out" -Pattern '^busy ready perfbot[0-9]+$').Count
-                    if ($ready -eq $n) { break }
-                    Start-Sleep -Milliseconds 500
-                } while ([DateTime]::UtcNow -lt $deadline)
-                if ($ready -ne $n) { throw "Only $ready of $n bots became ready." }
-            }
+            if ($n -and -not $StageObserverFirst) { $botsProcess = Start-BotFixture $root }
             $loginStart = [Diagnostics.Stopwatch]::StartNew()
             if ($Config -eq 'stock') {
                 $passwordFile = "$runtime\stock-password.txt"
@@ -583,7 +589,12 @@ try {
                 Wait-Dev 'world entry' 100 { (Lua 'return X2:IsEnteredWorld()') -eq 'true' }
             }
             $worldMs = $loginStart.ElapsedMilliseconds
-            if ($Scenario -eq 'farming') { Seed-Farm }
+            if ($n -and $StageObserverFirst) {
+                # Hold the observer outside the crowd's visibility radius while the bots join.
+                Send-Gm '/move 11041 15622 246'
+                Start-Sleep -Seconds 3
+                $botsProcess = Start-BotFixture $root
+            }
             if ($TraceEtw) {
                 $traceName = "AAEmuStress-$stamp"
                 $startTrace = & wpr.exe -start CPU -start FileIO -start GPU -filemode -instancename $traceName
@@ -594,8 +605,13 @@ try {
                 "utc`tevent" | Set-Content "$run\trace-markers.tsv"
                 Write-TraceMarker "client-pid=$($gameClient.Id)"
             }
-            Write-TraceMarker 'scene-teleport-request'
-            Send-Gm "/move $($center -join ' ')"
+            if ($Scenario -eq 'farming') {
+                Write-TraceMarker 'farm-fixture-start'
+                Seed-Farm
+            } else {
+                Write-TraceMarker 'scene-teleport-request'
+                Send-Gm "/move $($center -join ' ')"
+            }
             Wait-Dev 'scene entry' 30 {
                 $position = Lua "local id=X2Unit:GetUnitId('player'); local x,y,z=X2Unit:GetUnitWorldPosition(id); return string.format('%.2f %.2f %.2f',x,y,z)"
                 $position | Set-Content "$run\scene-position.txt"
@@ -609,6 +625,7 @@ try {
                     ([Math]::Abs($localCenter[0] - $x) -lt 5 -and [Math]::Abs($localCenter[1] - $y) -lt 5)
             }
             Write-TraceMarker 'scene-position-confirmed'
+            if ($Config -eq 'stock') { Measure-StockRoute } else { Measure-Route }
             if ($Scenario -eq 'farming') {
                 try {
                     $doodads = Get-Content "$run\farm-doodads.json" -Raw | ConvertFrom-Json
@@ -626,7 +643,6 @@ try {
                     Write-Warning "Farm scene screenshot failed: $($_.Exception.Message)"
                 }
             }
-            if ($Config -eq 'stock') { Measure-StockRoute } else { Measure-Route }
             $result = Get-Content "$run\summary.json" -Raw | ConvertFrom-Json
             if (-not $result.complete -or -not $result.frames -or $result.missed_frames) {
                 throw 'The route did not produce a complete frame capture. See summary.json.'
@@ -703,14 +719,14 @@ try {
         if (Test-Path -LiteralPath "$run\summary.json") {
             $result = Get-Content "$run\summary.json" -Raw | ConvertFrom-Json
         } else {
-            $result = [pscustomobject]@{config=$Config;scenario=$Scenario;preset=$Preset;bots=$n;complete=$false}
+            $result = [pscustomobject]@{config=$Config;scenario=$Scenario;preset=$Preset;bots=$n;staged_observer=[bool]$StageObserverFirst;complete=$false}
         }
         $result | Add-Member -NotePropertyName run -NotePropertyValue (Split-Path -Leaf $run)
         $result | Add-Member -NotePropertyName failure -NotePropertyValue $failure
         $results.Add($result)
         $failure = $null
     }
-    $results.ToArray() | Select-Object run,config,scenario,preset,bots,complete,frames,missed_frames,
+    $results.ToArray() | Select-Object run,config,scenario,preset,bots,staged_observer,complete,frames,missed_frames,
         p50_ms,p95_ms,p99_ms,max_ms,hitches_over_50_ms,login_to_world_ms,peak_virtual_bytes,peak_private_bytes,
         smallest_free_block_mib,failure |
         Export-Csv (Join-Path $Output "series-$series.tsv") -Delimiter "`t" -NoTypeInformation

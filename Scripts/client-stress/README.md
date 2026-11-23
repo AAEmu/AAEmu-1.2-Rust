@@ -68,3 +68,10 @@ from an anchor with a short round trip. The hitch begins one frame interval
 before its reported Present timestamp. Check the clock uncertainty against
 the hitch duration before interpreting CPU stacks, thread waits, file I/O
 or GPU activity.
+
+If observer startup is unreliable with a fully active crowd, use
+`-StageObserverFirst` for a separate capture. It opens the observer world
+session first, moves the observer away from the scene, waits for the full
+fixture, and then takes the usual scene route. The series records the
+flag. Launcher-to-world time for a staged run measures an empty fixture
+and is recorded separately from crowded startup.
