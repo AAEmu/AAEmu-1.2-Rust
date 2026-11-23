@@ -347,18 +347,10 @@ pub(super) fn check(
         // Native 1.2 x2game12.c:1983345: SkillResult 58 = ZONE_BANNED.
         return fail("SKILL_CANNOT_USE_HERE");
     }
-    // Tosare's portal skill casts a Return effect directly, so it never runs Doodad.Use.
-    // Require the machinery's open phase, where the client gets this skill.
-    if encounters::is_tosare_portal_skill(template.id)
-        && !target
-            .as_obj()
-            .and_then(WorldObject::as_doodad)
-            .is_some_and(|doodad| {
-                let d = doodad.data();
-                d.template_id == 4499 && d.func_group_id == 10_996
-            })
-    {
-        return fail("skill_invalid_target");
+    if encounters::is_tosare_portal_skill(template.id) {
+        encounter_hooks::all()
+            .iter()
+            .try_for_each(|encounter| encounter.cast_target_ready(template, target))?;
     }
     // Leave Burnt Castle Armory also applies Return directly. It is offered on the
     // entrance exit and on the rear exit only after skill 18024 reveals it.

@@ -112,6 +112,15 @@ pub trait Encounter: Sync {
     ) {
     }
 
+    /// Content-specific target validation after zone bans and before effect readiness.
+    fn cast_target_ready(
+        &self,
+        _template: &SkillTemplate,
+        _target: &Target,
+    ) -> Result<(), (u8, u32)> {
+        Ok(())
+    }
+
     /// The readiness check of a cast's effects: `Some` is the check of this skill.
     fn effects_ready(
         &self,
