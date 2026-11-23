@@ -147,11 +147,6 @@ pub fn clout_requires_submersion(world: &str, buff_id: u32) -> bool {
     cradle::clout_requires_submersion(world, buff_id)
 }
 
-/// Clouts without an inside buff that still apply all their effects (Howling Abyss).
-pub fn clout_payload_without_inside_buff(clout_id: u32) -> bool {
-    howling_abyss::clout_payload_without_inside_buff(clout_id)
-}
-
 /// The powder keg doodad (Sharpwind Mines).
 pub use super::sharpwind::POWDER_KEG_DOODAD;
 /// The powder keg item (Sharpwind Mines).

@@ -720,9 +720,6 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     let lost_unit_source = supplied_unit_id.is_some_and(|id| id != trigger_caster.obj_id());
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
-        None if encounters::clout_payload_without_inside_buff(f.id) => {
-            HashMap::from([(0, f.effects.clone())])
-        }
         // An NPC's hazard picks its side through the relation, so its damage and debuffs
         // reach the NPC's enemies (a Friendly one its allies). An Any / Others area would
         // also take the NPC and its allies and stays limited to its beneficial buffs.
