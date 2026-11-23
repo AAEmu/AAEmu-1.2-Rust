@@ -1046,6 +1046,23 @@ fn npc_spawner_spawn_effect(
             for summoned in &spawned {
                 crate::systems::ai::hooks::engage(server, summoned, victim);
             }
+        } else if e.use_summoner_aggro_target && caster.as_player().is_some() {
+            // A player summoner has no aggro table. The 16 item skills that reach this path
+            // (quest summons such as 21684 / 23291) aim the add at the player's NPC target, or
+            // else at the player, as before.
+            let victim = match &args.target {
+                Target::Obj(o) if o.as_npc().is_some() => o,
+                _ => caster,
+            };
+            for summoned in &spawned {
+                crate::systems::skills::combat::add_unit_aggro(
+                    server,
+                    &WorldObject::from(summoned),
+                    crate::systems::skills::state::AggroKind::Damage,
+                    victim,
+                    1,
+                );
+            }
         }
         if e.life_time > 0.0 {
             super::npc::spawner::schedule_npc_do_despawn(server, &npc, e.life_time);

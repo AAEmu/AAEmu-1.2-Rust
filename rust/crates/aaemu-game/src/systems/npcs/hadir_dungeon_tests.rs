@@ -730,6 +730,15 @@ fn spawn_hadir_zero_lifetime_add(
     world: &Arc<WorldInstance>,
     summoner: &NpcRef,
 ) -> NpcRef {
+    spawn_hadir_zero_lifetime_add_by(server, world, WorldObject::from(summoner))
+}
+
+/// Applies Hadir spawn effect 273 (spawner 60909) with `caster` as the summoner.
+fn spawn_hadir_zero_lifetime_add_by(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    caster: WorldObject,
+) -> NpcRef {
     use crate::systems::npcs::bridges::NpcSkills;
     use crate::systems::skills::data::{EffectKind, EffectTemplate};
     use crate::systems::skills::effects::{EffectArgs, EffectSource};
@@ -751,12 +760,12 @@ fn spawn_hadir_zero_lifetime_add(
     assert_eq!(effect.life_time, 0.0);
     assert!(effect.use_summoner_aggro_target);
 
-    let caster = WorldObject::from(summoner);
+    let caster_id = caster.obj_id();
     let args = EffectArgs {
         caster: Some(caster.clone()),
-        caster_caster: SkillCaster::Unit(summoner.obj_id),
+        caster_caster: SkillCaster::Unit(caster_id),
         target: Target::Obj(caster),
-        target_caster: SkillCastTarget::Unit(summoner.obj_id),
+        target_caster: SkillCastTarget::Unit(caster_id),
         cast: CastAction::Skill {
             skill_id: 16726,
             tl_id: 0,
@@ -808,6 +817,28 @@ async fn real_data_hadir_zero_lifetime_add_stays_idle_without_a_summoner_target(
     let add = add.data();
     assert!(add.unit.skill_state.aggro_table.is_empty());
     assert!(!add.unit.is_in_battle);
+}
+
+/// A player summoner has no aggro table. An inheriting add aims at the player, as the
+/// quest-item summons (item skills 21684, 23291) did before the lifetime gate was dropped.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_inheriting_add_of_a_player_summoner_targets_the_player() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    let world = server.world.world(0).unwrap();
+    let player = place_player(&server, &world, 1, 700.0, 580.0, 136.0);
+
+    let add = spawn_hadir_zero_lifetime_add_by(&server, &world, WorldObject::from(&player));
+    let add = add.data();
+    assert!(add
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&player.obj_id));
 }
 
 fn tick_ai(server: &Arc<GameServer>, ticks: usize) {
