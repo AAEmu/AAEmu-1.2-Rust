@@ -186,7 +186,7 @@ impl AttributeModifiers {
 pub struct ItemProcTemplate {
     pub id: u32,
     pub skill_id: u32,
-    /// `ProcChanceKind` (see [`proc_chance_kind`]).
+    /// `ProcChanceKind` (see [`proc_chance_kind`](super::proc_chance_kind)).
     pub chance_kind: u32,
     pub chance_rate: u32,
     pub chance_param: u32,
