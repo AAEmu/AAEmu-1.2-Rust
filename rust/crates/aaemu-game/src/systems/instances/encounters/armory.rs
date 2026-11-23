@@ -103,15 +103,12 @@ pub(super) fn is_wave_spawn(
 
 // ---- hooks
 
-use crate::data::world_data::Portal;
-use crate::models::character::DEFAULT_INSTANCE_ID;
 use crate::server::GameServer;
 use crate::systems::ai::behaviors::{
     base_move_speed, delta_seconds, is_using_skill, npc_move_towards, owner_pos,
 };
 use crate::systems::ai::framework::{AiCtx, BehaviorKind};
 use crate::systems::ai::npc;
-use crate::systems::instances::{dungeon, worlds};
 use crate::systems::npcs::bridges::npc_aggro_target;
 use crate::systems::npcs::gimmick::manager::SpawnGimmickParams;
 use crate::systems::skills::controllers::{calculate_distance, Vec3};
@@ -122,7 +119,7 @@ use crate::systems::skills::geometry::{world_of, world_pos, Target};
 use crate::systems::skills::relation::can_attack;
 use crate::systems::skills::state::SkillRef;
 use crate::systems::skills::types::skill_result;
-use crate::world::{PlayerRef, WorldInstance, WorldObject};
+use crate::world::{WorldInstance, WorldObject};
 
 use super::registry as encounters;
 
@@ -323,42 +320,6 @@ pub(super) fn gimmick_spawn_target(
             params.offset_y = 0.0;
         }
     }
-}
-
-const ARMORY_ZONE: u32 = 236;
-const ARMORY_EXIT_GATE: u32 = 320;
-const ARMORY_EXIT_ZONE: u32 = 257;
-
-/// Compact skill 15667 is shared by the two 1.2 Armory exit doodads (groups 8794 and 12257).
-pub(crate) fn is_armory_exit(skill_id: u32, gate_id: u32, instance_id: u32, zone_id: u32) -> bool {
-    skill_id == ARMORY_EXIT_SKILL
-        && gate_id == ARMORY_EXIT_GATE
-        && instance_id != DEFAULT_INSTANCE_ID
-        && zone_id == ARMORY_ZONE
-}
-
-/// Leave a live Armory run through its authored exterior gate, using the dungeon leave handler.
-pub(crate) fn leave_armory_at_gate(server: &GameServer, p: &PlayerRef, gate: &Portal) -> bool {
-    let t = p.data().unit.transform;
-    if t.zone_id != ARMORY_ZONE
-        || gate.id != ARMORY_EXIT_GATE
-        || gate.zone_id != ARMORY_EXIT_ZONE
-        || !server.world.has_world(DEFAULT_INSTANCE_ID)
-    {
-        return false;
-    }
-    let Some(dungeon) = server.systems.instances.dungeon_of_world(t.instance_id) else {
-        return false;
-    };
-    if dungeon.zone_instance_id.zone_id != ARMORY_ZONE
-        || !dungeon
-            .world(server)
-            .is_some_and(|world| worlds::has_character(&world, p.character_id))
-    {
-        return false;
-    }
-    dungeon::on_dungeon_leave(server, &dungeon, p, Some(gate));
-    true
 }
 
 /// Burnt Castle Armory's encounter hooks.

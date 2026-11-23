@@ -19,7 +19,6 @@ use crate::systems::instances::encounters::hooks as encounter_hooks;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::instances::indun;
 use crate::systems::skills::ground_snap_rules as ground_snap;
-use crate::systems::skills::types::CastAction;
 use crate::world::{now_ms, NpcRef, PlayerRef, WorldObject};
 
 use super::super::super::broadcast;
@@ -611,6 +610,19 @@ fn is_instance_only_zone(server: &GameServer, zone_key: u32) -> bool {
             .any(|t| t.xml_world_zones().values().any(|z| z.zone_key == zone_key))
 }
 
+/// Resolve a Return gate's live instance for both cast validation and movement.
+/// The Library's Diamond Shores Door and both Armory exits target the main world.
+/// Gates in another instance template cannot select a channel.
+pub(crate) fn return_gate_instance(server: &GameServer, source: u32, zone: u32) -> Option<u32> {
+    if source == DEFAULT_INSTANCE_ID {
+        (!is_instance_only_zone(server, zone)).then_some(source)
+    } else if zone_in_instance_world(server, source, zone) {
+        Some(source)
+    } else {
+        zone_in_instance_world(server, DEFAULT_INSTANCE_ID, zone).then_some(DEFAULT_INSTANCE_ID)
+    }
+}
+
 /// The "Need to add information to worldgates.json" hint for a missing gate id.
 fn log_missing_gate(server: &GameServer, p: &PlayerRef, id: i32) {
     let tr = p.data().unit.transform;
@@ -710,75 +722,47 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         if trp.is_none() {
             tracing::warn!("Cannot find return WorldGate with id {}", v[0]);
         }
-        if let CastAction::Skill { skill_id, .. } = args.cast {
-            let zone_id = p.data().unit.transform.zone_id;
-            if indun::is_armory_exit(skill_id, v[0] as u32, instance_id, zone_id) {
-                let error = match &trp {
-                    Some(t)
-                        if !crate::world::session::zone_access_allowed(
-                            server,
-                            p,
-                            DEFAULT_INSTANCE_ID,
-                            t.zone_id,
-                            t.x,
-                            t.y,
-                        ) =>
-                    {
-                        crate::world::session::CLOSED_ZONE
-                    }
-                    Some(t) if indun::leave_armory_at_gate(server, p, t) => return,
-                    _ => err::NO_RETURN_POINT,
-                };
-                p.send(SCErrorMsgPacket::new(error, 0, true));
-                return;
-            }
-        }
-        // Deviation from C# (its Return.cs is a TODO placeholder that fell back to
-        // `MainWorldPosition`): a gate is only used in the world its zone belongs to.
-        let trp = trp.filter(|t| {
-            let usable = if in_instance {
-                zone_in_instance_world(server, instance_id, t.zone_id)
-            } else {
-                !is_instance_only_zone(server, t.zone_id)
-            };
-            if !usable {
+        // Return gates can move players within their current world or exit a dungeon to
+        // main_world. A zone in a different instance template cannot identify a live channel.
+        let trp = trp.and_then(|t| {
+            let destination = return_gate_instance(server, instance_id, t.zone_id);
+            if destination.is_none() {
                 tracing::warn!(
-                    "Return WorldGate {} (zone {}) does not belong to the caster's world (instance {})",
+                    "Return WorldGate {} (zone {}) has no destination from instance {}",
                     v[0],
                     t.zone_id,
                     instance_id
                 );
             }
-            usable
+            destination.map(|id| (t, id))
         });
-        if trp.is_none() && in_instance {
-            // Never eject the player to the main world: stay put.
-            log_missing_gate(server, p, v[0]);
-            p.send(SCErrorMsgPacket::new(err::NO_RETURN_POINT, 0, true));
+        if in_instance {
+            let Some((t, destination)) = trp else {
+                log_missing_gate(server, p, v[0]);
+                p.send(SCErrorMsgPacket::new(err::NO_RETURN_POINT, 0, true));
+                return;
+            };
+            if !crate::world::session::zone_access_allowed(
+                server,
+                p,
+                destination,
+                t.zone_id,
+                t.x,
+                t.y,
+            ) {
+                p.send(SCErrorMsgPacket::new(
+                    crate::world::session::CLOSED_ZONE,
+                    0,
+                    true,
+                ));
+            } else if destination == instance_id {
+                move_within_instance(server, p, &t);
+            } else if !indun::leave_at_gate(server, p, &t) {
+                p.send(SCErrorMsgPacket::new(err::NO_RETURN_POINT, 0, true));
+            }
             return;
         }
-        if let Some(t) = &trp {
-            if in_instance {
-                if !crate::world::session::zone_access_allowed(
-                    server,
-                    p,
-                    instance_id,
-                    t.zone_id,
-                    t.x,
-                    t.y,
-                ) {
-                    p.send(SCErrorMsgPacket::new(
-                        crate::world::session::CLOSED_ZONE,
-                        0,
-                        true,
-                    ));
-                    return;
-                }
-                move_within_instance(server, p, t);
-                return;
-            }
-        }
-        trp
+        trp.map(|(gate, _)| gate)
     };
     if let Some(t) = &trp {
         if !crate::world::session::zone_access_allowed(
