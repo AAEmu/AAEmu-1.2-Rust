@@ -724,6 +724,123 @@ fn spawner_force_spawn(server: &Arc<GameServer>, spawner_id: u32) -> Option<NpcR
         .and_then(|s| s.force_spawn(server, 0))
 }
 
+/// Apply compact effect 273 directly so the test controls the summoner's combat state.
+fn spawn_hadir_zero_lifetime_add(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    summoner: &NpcRef,
+) -> NpcRef {
+    spawn_hadir_zero_lifetime_add_by(server, world, WorldObject::from(summoner))
+}
+
+/// Applies Hadir spawn effect 273 (spawner 60909) with `caster` as the summoner.
+fn spawn_hadir_zero_lifetime_add_by(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    caster: WorldObject,
+) -> NpcRef {
+    use crate::systems::npcs::bridges::NpcSkills;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::ext::NpcSkillHooks;
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    let kind = EffectKind::NpcSpawnerSpawnEffect;
+    let template = server
+        .game_data
+        .systems
+        .skills
+        .effect(kind, 273)
+        .expect("Hadir spawn effect 273");
+    let EffectTemplate::NpcSpawnerSpawn(effect) = template else {
+        panic!("expected a spawner effect");
+    };
+    assert_eq!(effect.spawner_id, 60909);
+    assert_eq!(effect.life_time, 0.0);
+    assert!(effect.use_summoner_aggro_target);
+
+    let caster_id = caster.obj_id();
+    let args = EffectArgs {
+        caster: Some(caster.clone()),
+        caster_caster: SkillCaster::Unit(caster_id),
+        target: Target::Obj(caster),
+        target_caster: SkillCastTarget::Unit(caster_id),
+        cast: CastAction::Skill {
+            skill_id: 16726,
+            tl_id: 0,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    assert!(NpcSkills.apply_effect(server, kind, template, &args));
+    let mut adds = npcs_of(world, 9477);
+    assert_eq!(adds.len(), 1, "spawner 60909 fills one mobile add");
+    adds.pop().unwrap()
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_zero_lifetime_add_inherits_the_summoners_aggro_target() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    let world = server.world.world(0).unwrap();
+    let summoner = place_npc(&server, &world, 10021, [700.0, 580.0, 136.0]);
+    let player = place_player(&server, &world, 1, 701.0, 580.0, 136.0);
+    let victim = WorldObject::from(&player);
+    crate::systems::ai::hooks::engage(&server, &summoner, &victim);
+    crate::systems::ai::npc::set_current_aggro_target(&summoner, Some(&victim));
+
+    let add = spawn_hadir_zero_lifetime_add(&server, &world, &summoner);
+    let add = add.data();
+    let aggro = &add.unit.skill_state.aggro_table;
+    assert!(aggro.contains_key(&player.obj_id));
+    assert!(!aggro.contains_key(&summoner.obj_id));
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_zero_lifetime_add_stays_idle_without_a_summoner_target() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    let world = server.world.world(0).unwrap();
+    let summoner = place_npc(&server, &world, 10021, [700.0, 580.0, 136.0]);
+    assert_eq!(summoner.data().current_aggro_target, 0);
+
+    let add = spawn_hadir_zero_lifetime_add(&server, &world, &summoner);
+    let add = add.data();
+    assert!(add.unit.skill_state.aggro_table.is_empty());
+    assert!(!add.unit.is_in_battle);
+}
+
+/// A player summoner has no aggro table. An inheriting add aims at the player, as the
+/// quest-item summons (item skills 21684, 23291) did before the lifetime gate was dropped.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_inheriting_add_of_a_player_summoner_targets_the_player() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    load_shipped(&server);
+    let world = server.world.world(0).unwrap();
+    let player = place_player(&server, &world, 1, 700.0, 580.0, 136.0);
+
+    let add = spawn_hadir_zero_lifetime_add_by(&server, &world, WorldObject::from(&player));
+    let add = add.data();
+    assert!(add
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&player.obj_id));
+}
+
 fn tick_ai(server: &Arc<GameServer>, ticks: usize) {
     for _ in 0..ticks {
         crate::systems::ai::manager::tick_all(server, 100);
@@ -1078,6 +1195,9 @@ async fn real_data_hadir_spheres_run_the_buff_trigger_chains() {
     }
     let slave1 = npc_near(&world, 10076, 696.076, 579.37).expect("trigger NPC 10076 near 61971");
     assert_eq!(npcs_of(&world, 10076).len(), 4, "four plain 10076 rows");
+    let controller = server.game_data.systems.npcs.npc.template(10076).unwrap();
+    assert_eq!(controller.opacity, 0.0);
+    assert_eq!(slave1.data().current_aggro_target, 0);
     let in_camp = |npc: &NpcRef| {
         let t = npc.data().unit.transform;
         (680.0..=735.0).contains(&t.x) && (560.0..=596.0).contains(&t.y) && t.z < 139.0
@@ -1105,10 +1225,15 @@ async fn real_data_hadir_spheres_run_the_buff_trigger_chains() {
         npcs_at(&world, 9472, 688.126, 585.682) == 1,
         "a Restless Skeleton Peasant stands at spawner 61979's level placement"
     );
-    assert_eq!(
-        npcs_of(&world, 9472).iter().filter(|n| in_camp(n)).count(),
-        10
-    );
+    let skeletons: Vec<_> = npcs_of(&world, 9472).into_iter().filter(in_camp).collect();
+    assert_eq!(skeletons.len(), 10);
+    for skeleton in skeletons {
+        let skeleton = skeleton.data();
+        assert!(
+            skeleton.unit.skill_state.aggro_table.is_empty() && !skeleton.unit.is_in_battle,
+            "the invisible controller has no combat target for the skeleton to inherit"
+        );
+    }
     assert!(
         server.world.object(slave1.obj_id).is_none(),
         "the chain's KillNpcWithoutCorpseEffect consumes the trigger NPC"
