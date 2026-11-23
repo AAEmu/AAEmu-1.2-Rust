@@ -148,6 +148,7 @@ impl Fixture {
             group,
             FuncTemplate::Clout(DoodadFuncClout {
                 id: 720,
+                fx_group_id: 0,
                 duration: 0,
                 tick: 0,
                 target_relation: 0,

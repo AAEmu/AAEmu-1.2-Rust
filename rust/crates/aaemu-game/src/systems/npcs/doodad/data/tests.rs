@@ -521,6 +521,18 @@ fn count(c: &Connection, table: &str) -> usize {
 
 #[test]
 #[ignore]
+fn audit_clout_loads_authored_fx_group() {
+    let path = std::env::var("AAEMU_COMPACT_DB").unwrap();
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let data = DoodadData::load_from(&c).unwrap();
+    let Some(FuncTemplate::Clout(clout)) = data.phase_func_template(3, "DoodadFuncClout") else {
+        panic!("missing clout row 3");
+    };
+    assert_eq!(clout.fx_group_id, 226);
+}
+
+#[test]
+#[ignore]
 fn audit_climb_flags_filter_authored_interactions() {
     let path = std::env::var("AAEMU_COMPACT_DB").unwrap();
     let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();

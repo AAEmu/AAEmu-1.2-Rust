@@ -425,6 +425,8 @@ pub struct DoodadFuncClimb {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DoodadFuncClout {
     pub id: u32,
+    /// Authored FX group read by the r208022 clout loader at 0x7afec0.
+    pub fx_group_id: u32,
     pub duration: i32,
     pub tick: i32,
     /// `SkillTargetRelation` (byte enum).

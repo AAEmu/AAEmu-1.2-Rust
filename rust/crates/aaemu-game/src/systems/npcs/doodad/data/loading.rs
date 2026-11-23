@@ -225,6 +225,7 @@ impl DoodadData {
             |r| {
                 Ok(FuncTemplate::Clout(DoodadFuncClout {
                     id: r.u32("id")?,
+                    fx_group_id: r.u32_or("fx_group_id", 0)?,
                     duration: r.i32("duration")?,
                     tick: r.i32("tick")?,
                     target_relation: r.u32("target_relation_id")? as u8,
