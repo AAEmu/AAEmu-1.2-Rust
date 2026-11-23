@@ -222,6 +222,12 @@ async fn real_data_generic_clout_damage_uses_its_source_and_ends_with_its_phase(
 
         tasks.advance(&server, 200);
         assert!(attached[0].is_removed());
+        // 1650 advances to group 17740, whose clout 1695 is a non-pulsing wait.
+        let next = triggers.attached_to(hazard.obj_id);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].func_group_id, 17740);
+        assert_eq!(next[0].tick_rate, 0);
+        manager::delete(&server, &world, &hazard);
         assert!(triggers.attached_to(hazard.obj_id).is_empty());
         assert_eq!(prop.as_doodad().unwrap().data().func_group_id, prop_group);
     }
