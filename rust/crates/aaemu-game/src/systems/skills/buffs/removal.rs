@@ -319,13 +319,36 @@ pub(in crate::systems::skills) fn remove_on_damage(
 }
 
 pub(super) fn track_source_death(server: &GameServer, owner: &WorldObject, buff: &Buff) {
-    if let Some(source) = source_death_caster(server, owner, buff.template.id, buff.caster_obj_id) {
-        source.with_unit(|u| {
-            u.unit_mut()
-                .skill_state
-                .source_death_buffs
-                .insert(buff.instance_id, owner.obj_id());
-        });
+    let Some(source) = source_death_caster(server, owner, buff.template.id, buff.caster_obj_id)
+    else {
+        return;
+    };
+    // Registration and the death drain both take the caster's lock. A buff that starts after
+    // the caster's death was claimed (`try_claim_death` sets `death_processed` before the
+    // drain runs) may arrive after the drain, so it is removed here instead of indexed.
+    let caster_dead = source
+        .with_unit(|u| {
+            let u = u.unit_mut();
+            if u.death_processed {
+                true
+            } else {
+                u.skill_state
+                    .source_death_buffs
+                    .insert(buff.instance_id, owner.obj_id());
+                false
+            }
+        })
+        .unwrap_or(false);
+    if caster_dead {
+        let (instance_id, caster_id) = (buff.instance_id, source.obj_id());
+        trigger_remove_on_inner(
+            server,
+            owner,
+            BuffRemoveOn::SourceDead,
+            caster_id,
+            false,
+            |b| b.instance_id == instance_id && b.caster_obj_id == caster_id,
+        );
     }
 }
 

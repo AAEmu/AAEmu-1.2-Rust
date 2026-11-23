@@ -474,6 +474,30 @@ async fn buff_removal_source_death_reaches_every_holder_and_preserves_other_sour
     assert!(holder.with_base_unit(|u| u.buffs().check_buff(69)));
 }
 
+/// A `remove_on_source_dead` buff that starts after its caster's death was claimed (the death
+/// drain may already have run) is removed at once instead of outliving the caster.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn buff_removal_source_death_removes_a_buff_registered_after_the_caster_died() {
+    let Some((_db, data)) = removal_compact_data() else {
+        return;
+    };
+    let (server, _client, player, npc) =
+        crate::systems::skills::cast_validation_tests::fixture(data);
+    let source = WorldObject::from(&npc);
+    let holder = WorldObject::from(&player);
+    // The lethal hit claimed the death and the drain ran with nothing indexed yet.
+    assert!(crate::systems::skills::combat::try_claim_death(&source));
+    super::removal::remove_on_source_death(&server, &source);
+
+    super::add_buff_by_id(&server, &holder, 59, &source, 0);
+    assert!(!holder.with_base_unit(|u| u.buffs().check_buff(59)));
+    assert!(npc.data().unit.skill_state.source_death_buffs.is_empty());
+    // A buff of a living caster is still indexed.
+    super::add_buff_by_id(&server, &holder, 59, &holder, 0);
+    assert!(holder.with_base_unit(|u| u.buffs().check_buff(59)));
+}
+
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn buff_removal_exempt_grant_clears_matching_incumbents() {
