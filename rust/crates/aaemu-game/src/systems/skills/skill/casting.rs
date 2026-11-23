@@ -435,19 +435,22 @@ fn weapon_attack_anim_id(server: &GameServer, skill: &SkillRun, caster: &WorldOb
 
 /// Extends a running direct cast's end by `delay_ms` (`DisturbCasting` with a delay, WP-1:
 /// the 1.2 client adds the delay to the cast bar when it receives `SCCastingDelayed`). Returns
-/// the cast skill's id, or `None` when the unit is not in a direct `Cast` task (a plot or a
-/// channel is not extended), the task is being cancelled, or it is already completing.
-pub fn delay_cast(unit: &WorldObject, delay_ms: i64) -> Option<u32> {
+/// the active cast timeline, or `None` when there is no extendable direct cast task.
+pub fn delay_cast(unit: &WorldObject, delay_ms: i64) -> Option<u16> {
     if delay_ms <= 0 {
         return None;
     }
     unit.with_unit(|u| {
         let task = u.unit_mut().skill_state.skill_task.as_mut()?;
-        if task.kind != SkillTaskKind::Cast || task.skill.cancelled() {
+        if task.kind != SkillTaskKind::Cast {
+            return None;
+        }
+        let run = task.skill.state();
+        if run.cancelled || run.tl_id == 0 {
             return None;
         }
         task.extend_ms = task.extend_ms.saturating_add(delay_ms);
-        Some(task.skill.id)
+        Some(run.tl_id)
     })
     .flatten()
 }

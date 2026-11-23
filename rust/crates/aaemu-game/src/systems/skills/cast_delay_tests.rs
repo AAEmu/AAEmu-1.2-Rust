@@ -1,5 +1,5 @@
 //! WP-1: a `DisturbCasting` (special effect 5) that carries a delay extends a running direct
-//! cast and tells the client with `SCCastingDelayed` (`u16 skillId, u16 plotId, u32 delay`)
+//! cast and tells the client with `SCCastingDelayed` (`u16 tl, u16 plot_tl, u32 delay`)
 //! instead of interrupting it. A delay of 0 keeps the immediate interrupt.
 
 use std::time::Duration;
@@ -101,8 +101,28 @@ fn start_channel(f: &mut Fixture) -> SkillRef {
 #[tokio::test]
 async fn delayed_disturb_extends_the_cast_and_sends_casting_delayed() {
     let mut f = fixture_with(cast_data(CAST_MS));
-    let skill = start_timed_cast(&mut f);
+    start_skill(
+        &f.server,
+        &mut f.client.conn,
+        cast_packet(CAST_SKILL, SkillCastTarget::Unit(NPC_OBJ)),
+    );
     let accepted = now_ms();
+    let skill = f
+        .player
+        .data()
+        .unit
+        .skill_state
+        .skill_task
+        .as_ref()
+        .expect("skill task")
+        .skill
+        .clone();
+    let started = frames(&mut f.client)
+        .into_iter()
+        .find(|(op, _)| *op == sc::SCSkillStartedPacket)
+        .expect("skill started")
+        .1;
+    let timeline = u16::from_le_bytes(started[4..6].try_into().unwrap());
 
     let victim = WorldObject::from(&f.player);
     let disturber = WorldObject::from(&f.npc);
@@ -122,11 +142,10 @@ async fn delayed_disturb_extends_the_cast_and_sends_casting_delayed() {
         .iter()
         .find(|(op, _)| *op == sc::SCCastingDelayedPacket)
         .expect("SCCastingDelayed");
-    // Independent literals: skill 12390 = 0x3066, plot 0, delay 400 = 0x190.
-    assert_eq!(
-        delayed.1,
-        vec![0x66, 0x30, 0x00, 0x00, 0x90, 0x01, 0x00, 0x00]
-    );
+    assert_eq!(timeline, skill.tl_id());
+    assert_ne!(u32::from(timeline), CAST_SKILL);
+    let [lo, hi] = timeline.to_le_bytes();
+    assert_eq!(delayed.1, [lo, hi, 0, 0, 0x90, 0x01, 0, 0]);
 
     // The original 300 ms end has passed; the extended (300 + 400 ms) one has not.
     tokio::time::sleep(Duration::from_millis(500)).await;

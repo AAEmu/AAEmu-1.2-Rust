@@ -196,15 +196,12 @@ impl Marshal for SCCastingStoppedPacket {
     }
 }
 
-/// `SCCastingDelayedPacket(skillId, plotId, delay)`.
-///
-/// 1.2 reader `FUN_397ca570`: `u16 skillId (0x40) ; u16 plotId (0x40) ; u32 delay (0x3c)`.
-/// The client adds `delay` ms to the end of the running cast of that skill id
-/// (`FUN_39395760`) or of that plot id (`FUN_3938c520`); a direct cast sends plot id 0.
+/// Extends the direct skill timeline or the plot timeline named in the packet.
+/// r208022 dispatches them to RVAs 0x3a5760 and 0x39c520; zero leaves that timeline absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCCastingDelayedPacket {
-    pub skill_id: u16,
-    pub plot_id: u16,
+    pub tl: u16,
+    pub plot_tl: u16,
     pub delay: u32,
 }
 packet_def!(
@@ -214,8 +211,8 @@ packet_def!(
 );
 impl Marshal for SCCastingDelayedPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u16(self.skill_id)
-            .write_u16(self.plot_id)
+        s.write_u16(self.tl)
+            .write_u16(self.plot_tl)
             .write_u32(self.delay);
     }
 }
@@ -1126,10 +1123,9 @@ mod tests {
 
     #[test]
     fn casting_delayed_layout() {
-        // 1.2 reader FUN_397ca570: u16 skillId (0x40), u16 plotId (0x40), u32 delay (0x3c).
         let direct = SCCastingDelayedPacket {
-            skill_id: 12_390,
-            plot_id: 0,
+            tl: 12_390,
+            plot_tl: 0,
             delay: 1_000,
         };
         assert_eq!(
@@ -1137,8 +1133,8 @@ mod tests {
             vec![0x66, 0x30, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00]
         );
         let plot = SCCastingDelayedPacket {
-            skill_id: 0,
-            plot_id: 77,
+            tl: 0,
+            plot_tl: 77,
             delay: 70_000,
         };
         assert_eq!(

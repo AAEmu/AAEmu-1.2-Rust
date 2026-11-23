@@ -114,11 +114,11 @@ pub fn disturb_casting(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) 
         // WP-1: a delayed disturb extends a running direct cast instead of interrupting it
         // (the 1.2 client adds the delay to the cast bar, `SCCastingDelayed`). Only the victim
         // is told: whether viewers also receive it is capture-pending.
-        if let Some(skill_id) = delay_cast(&target, i64::from(v[1])) {
+        if let Some(tl) = delay_cast(&target, i64::from(v[1])) {
             if let Some(p) = target.as_player() {
                 p.send(SCCastingDelayedPacket {
-                    skill_id: skill_id as u16,
-                    plot_id: 0,
+                    tl,
+                    plot_tl: 0,
                     delay: v[1] as u32,
                 });
             }
