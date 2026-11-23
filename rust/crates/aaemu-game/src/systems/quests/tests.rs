@@ -506,7 +506,7 @@ fn sc_quest_context_packets_bytes() {
         component_id: 2,
     };
     let mut s = PacketStream::new();
-    s.write_u32(130).write_raw(&body8).write_u32(2);
+    s.write_u32(130).write_raw(&body8);
     assert_eq!(body(&p), s.into_bytes());
     assert_eq!(p.opcode(), sc::SCQuestContextResetPacket);
 
@@ -3224,9 +3224,7 @@ async fn daily_reset_and_item_destroy() {
         let sent = std::mem::take(&mut ctx.sent);
         assert_eq!(sent.len(), 1);
         let mut s = PacketStream::new();
-        s.write_u32(130)
-            .write_raw(&[0x08, 0, 0, 0, 0, 0, 0, 0])
-            .write_u32(2); // 131 still set
+        s.write_u32(130).write_raw(&[0x08, 0, 0, 0, 0, 0, 0, 0]); // 131 still set
         assert_eq!(sent[0], (sc::SCQuestContextResetPacket, s.into_bytes()));
         // Destroying the supply item (DropWhenDestroy) of quest 100 drops it
         assert!(ctx.add_quest(100, false, acceptor::NPC, 500));
