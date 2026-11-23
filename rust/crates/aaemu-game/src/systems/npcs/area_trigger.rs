@@ -587,7 +587,7 @@ impl AreaTrigger {
     }
 
     /// `ApplyEffects()`. A trigger without an inside buff applies the effects stored under key
-    /// 0 (the beneficial buffs of an effect-only `DoodadFuncClout`; the C# applied nothing).
+    /// 0 using the same relation and effect dispatch as a trigger with an inside buff.
     fn apply_effects(&self, server: &GameServer) {
         let Some(caster) = &self.caster else {
             return;
@@ -1206,9 +1206,8 @@ mod tests {
         }
     }
 
-    /// An effect-only `DoodadFuncClout` (Lake Bubbles 4336: clout 997, no buff, effect 17315 =
-    /// BuffEffect of Air Bubble 3036) keeps only its Good buffs, and its trigger applies them
-    /// to a player inside on its tick; a Bad buff of the same clout is not applied.
+    /// A clout restricted to Good buffs can still apply them through key 0. Use Lake Bubbles
+    /// 4336 (clout 997, effect 17315 applies Air Bubble 3036) and a synthetic Bad buff.
     #[tokio::test]
     async fn effect_only_clout_applies_its_good_buffs() {
         use crate::data::skills::{BuffKind, BuffTemplate as DataBuff};

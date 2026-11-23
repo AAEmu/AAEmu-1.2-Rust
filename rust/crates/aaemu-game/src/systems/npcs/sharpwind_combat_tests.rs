@@ -149,19 +149,82 @@ async fn real_data_sharpwind_frozen_zone_hits_enemies_only() {
     let (server, world) = fixture();
     let (_client, victim) = place_player(&server, 1, 410.0, 330.0, 166.0);
     victim.data().unit.hp = 10_000;
-    let illusionist = place_npc(&server, &world, 11111, 415.0, 330.0, 166.0);
+    let illusionist = place_npc(&server, &world, 11111, 410.5, 330.0, 166.0);
     let ally = place_npc(&server, &world, 11110, 411.0, 330.0, 166.0);
+    let friendly_hp = [&illusionist, &ally].map(|npc| npc.as_npc().unwrap().data().unit.hp);
+    let tasks = &server.systems.npcs.doodads.tasks;
+    tasks.set_manual(true);
     let pos = crate::systems::skills::geometry::pos_unit_from(
         &server,
         &Target::Obj(WorldObject::from(&victim)),
     );
     super::doodad::interactions::summon_doodad_at(&server, &illusionist, &pos, 5150);
-    for _ in 0..24 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        server.systems.npcs.area_triggers.tick(&server);
-    }
+    let hazard = world
+        .all_doodads()
+        .into_iter()
+        .find(|d| d.data().template_id == 5150)
+        .expect("Frozen Zone");
+    tasks.advance(&server, 2_000);
+    let triggers = &server.systems.npcs.area_triggers;
+    let attached = triggers.attached_to(hazard.obj_id);
+    assert_eq!(attached.len(), 1);
+    assert_eq!(attached[0].inside_buff_id, None);
     assert!(victim.data().unit.buffs.check_buff(3903));
-    assert!(!ally.with_base_unit(|unit| unit.buffs().check_buff(3903)));
+    assert!(victim.data().unit.hp < 10_000, "1152 applies direct damage");
+    for (npc, hp) in [&illusionist, &ally].into_iter().zip(friendly_hp) {
+        assert!(!npc.with_base_unit(|unit| unit.buffs().check_buff(3903)));
+        assert_eq!(npc.as_npc().unwrap().data().unit.hp, hp);
+    }
+    tasks.advance(&server, 200);
+    assert!(attached[0].is_removed());
+    assert!(triggers.attached_to(hazard.obj_id).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_generic_clout_damage_uses_its_source_and_ends_with_its_phase() {
+    use super::doodad::manager;
+
+    let (server, world) = fixture();
+    let tasks = &server.systems.npcs.doodads.tasks;
+    tasks.set_manual(true);
+    let (_source_client, player) = place_player(&server, 1, 410.0, 330.0, 166.0);
+    let (_ally_client, ally) = place_player(&server, 2, 410.5, 330.0, 166.0);
+    let enemy = place_npc(&server, &world, 11111, 411.0, 330.0, 166.0);
+    let prop = place_doodad(&server, &world, 5362, 409.0, 330.0, 166.0);
+    let prop_group = prop.as_doodad().unwrap().data().func_group_id;
+
+    // Use the real 1650 pulse (Hostile, no inside buff, no origin lookup) with a player
+    // source and with a summoning NPC whose source would otherwise resolve to the doodad.
+    let player_source = WorldObject::from(&player);
+    let triggers = &server.systems.npcs.area_triggers;
+    for source in [&enemy, &player_source] {
+        let hazard = manager::create(&server, &world, 0, 6599, Some(source), true).unwrap();
+        hazard.data().transform = player_source.transform();
+        manager::spawn(&server, &world, &hazard);
+        let hp = enemy.as_npc().unwrap().data().unit.hp;
+        manager::do_change_phase(&server, &world, &hazard, Some(source), 17461);
+        let attached = triggers.attached_to(hazard.obj_id);
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].inside_buff_id, None);
+        assert!(triggers.attached_to(prop.obj_id()).is_empty());
+        if source.as_player().is_some() {
+            assert!(enemy.as_npc().unwrap().data().unit.hp < hp);
+        } else {
+            assert_eq!(
+                enemy.as_npc().unwrap().data().unit.hp,
+                hp,
+                "the faction-less clout cannot harm its summoner"
+            );
+        }
+        assert_eq!(player.data().unit.hp, 100);
+        assert_eq!(ally.data().unit.hp, 100);
+
+        tasks.advance(&server, 200);
+        assert!(attached[0].is_removed());
+        assert!(triggers.attached_to(hazard.obj_id).is_empty());
+        assert_eq!(prop.as_doodad().unwrap().data().func_group_id, prop_group);
+    }
 }
 
 #[tokio::test(start_paused = true)]

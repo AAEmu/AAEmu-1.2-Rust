@@ -843,6 +843,60 @@ async fn real_data_hadir_slam_lands_and_the_poison_pool_ticks() {
     assert!(player.data().unit.hp < hp, "poison deals damage over time");
 }
 
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_data_hadir_clout_payloads_spare_the_summoner_and_allies() {
+    use super::doodad::manager;
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_server(&db);
+    let world = server.world.world(0).unwrap();
+    let tasks = &server.systems.npcs.doodads.tasks;
+    tasks.set_manual(true);
+    let xyz = [700.0, 580.0, 136.8];
+    let owner = place_npc(&server, &world, 9473, xyz);
+    let ally = place_npc(&server, &world, 9472, xyz);
+    let player = place_player(&server, &world, 1, xyz[0], xyz[1], xyz[2]);
+    let caster = WorldObject::from(&owner);
+    let friendly_hp = [&owner, &ally].map(|npc| npc.data().unit.hp);
+
+    // 941 applies poison 2850 as a linked effect, while 1038 links direct damage.
+    for (template, phase, duration) in [(3874, 11008, 100), (3956, 9614, 2_000)] {
+        let hazard = manager::create(&server, &world, 0, template, Some(&caster), true).unwrap();
+        hazard.data().transform = caster.transform();
+        manager::spawn(&server, &world, &hazard);
+        let hp = player.data().unit.hp;
+        manager::do_change_phase(&server, &world, &hazard, None, phase);
+        let triggers = &server.systems.npcs.area_triggers;
+        let attached = triggers.attached_to(hazard.obj_id);
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].inside_buff_id, None);
+        triggers.tick(&server);
+        if template == 3874 {
+            assert!(player.data().unit.hp < hp, "1038 deals direct damage");
+        } else {
+            assert!(player.data().unit.buffs.check_buff(2850));
+        }
+        for (npc, hp) in [&owner, &ally].into_iter().zip(friendly_hp) {
+            let unit = &npc.data().unit;
+            assert!(!unit.buffs.check_buff(2850));
+            assert_eq!(unit.hp, hp);
+        }
+
+        tasks.advance(&server, duration);
+        assert!(attached[0].is_removed());
+        assert!(triggers.attached_to(hazard.obj_id).is_empty());
+        if template == 3956 {
+            assert!(
+                player.data().unit.buffs.check_buff(2850),
+                "the poison keeps its own duration"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
 async fn real_data_hadir_velarre_tombstone_summons_hostile_souls() {
