@@ -9,59 +9,133 @@ fn round_even(v: f64) -> f64 {
 }
 
 impl<'a> Ctx<'a> {
+    /// Count newly occupied bag slots across the entire payout, including repeated
+    /// definitions sharing a grade and quantities that span multiple stacks.
+    fn reward_items_fit_bag(&self, pool: &[ItemCreationDefinition]) -> bool {
+        let mut batches = std::collections::BTreeMap::new();
+        let items = &self.server.game_data.items;
+        for item in pool {
+            let Some(template) = items.template(item.template_id) else {
+                continue;
+            };
+            let grade = if template.fixed_grade >= 0 {
+                template.fixed_grade
+            } else {
+                i32::from(item.grade_id)
+            };
+            *batches.entry((item.template_id, grade)).or_insert(0_i64) += i64::from(item.count);
+        }
+        let bag = self.c.inventory.bag().lock().expect("bag poisoned");
+        let mut slots = i64::from(bag.free_slot_count());
+        for ((template_id, grade), amount) in batches {
+            let Some(template) = items.template(template_id) else {
+                continue;
+            };
+            let needed = bag.acquisition_slots(template, grade, amount);
+            if needed > slots {
+                return false;
+            }
+            slots -= needed;
+        }
+        true
+    }
+
     /// `DistributeRewards(addBaseQuestReward)`.
     pub fn distribute_rewards(&mut self, h: QuestHandle, add_base: bool) -> bool {
-        let res = true;
         let hooks = self.hooks.clone();
         let player = self.player.clone();
         let Some(q) = self.quest(h) else {
             return true;
         };
         let template_id = q.template_id;
-        // Distribute Items if needed. Filter the pool once, before the free-slot check and the
-        // mail fallback: a reward item without a template (282 rows of the 1.2
-        // `quest_act_supply_items`) yields nothing and must not push the rest into the mail.
+        let data = self.data;
+        let (mut exp, mut copper) = (q.reward_exp, q.reward_coins);
+        let mut exp_ratio = q.reward_ratio;
+        let mut copper_ratio = q.reward_ratio;
+        if add_base && q.step == kind::REWARD {
+            if let Some(t) = data.template(template_id) {
+                // Keep the server's completion ratios. The separate r208022 0x4ab090
+                // display adjustment needs verified values for game parameters 0x10 and 0x11.
+                if t.let_it_done {
+                    exp_ratio = match self.objective_status(h) {
+                        ObjectiveStatus::NotReady => 0.0,
+                        ObjectiveStatus::CanEarlyComplete => f64::from(0.3f32),
+                        ObjectiveStatus::QuestComplete | ObjectiveStatus::ExtraProgress => 1.0,
+                        ObjectiveStatus::Overachieved => f64::from(1.2f32),
+                    };
+                }
+                if let Some(supply) = data.supplies(t.level).filter(|_| t.level > 0) {
+                    if !t.let_it_done {
+                        exp_ratio = 1.0;
+                    }
+                    copper_ratio = exp_ratio;
+                    // r208022 0x4b1370 and 0x4b0fd0 suppress fallback on act presence,
+                    // including explicit zeroes. Compute fallback locally so retries don't add it.
+                    let mut explicit_exp = false;
+                    let mut explicit_copper = false;
+                    for component in t.components_of(&data.components, kind::REWARD) {
+                        for &act in &component.acts {
+                            match data.acts[act].kind {
+                                ActKind::SupplyExp { .. } => explicit_exp = true,
+                                ActKind::SupplyCopper { .. } => explicit_copper = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    let scaling = self.server.config.get().quest.reward_scaling;
+                    if !explicit_exp {
+                        let fallback = if scaling {
+                            gap_exp(
+                                scaled_supply_exp(supply.exp, t.degree),
+                                t.level,
+                                self.c.unit.level,
+                            )
+                        } else {
+                            supply.exp
+                        };
+                        exp = exp.wrapping_add(fallback);
+                    }
+                    if !explicit_copper {
+                        let fallback = if scaling {
+                            scaled_supply_copper(supply.copper, t.degree)
+                        } else {
+                            supply.copper
+                        };
+                        copper = copper.wrapping_add(fallback);
+                    }
+                }
+            }
+        }
+        let xp = round_even(f64::from(exp) * exp_ratio) as i32;
+        let mut copper = round_even(f64::from(copper) * copper_ratio) as i32;
+
         if !q.reward_items.is_empty() && q.allow_item_rewards {
-            let server = self.server;
+            let items = &self.server.game_data.items;
             let pool: Vec<ItemCreationDefinition> = q
                 .reward_items
                 .iter()
-                .filter(|item| {
-                    let known = server.game_data.items.template(item.template_id).is_some();
-                    if !known {
-                        tracing::debug!(
-                            "Quest {template_id}: skipping unknown reward item template {}",
-                            item.template_id
-                        );
-                    }
-                    known
-                })
+                .filter(|item| item.count > 0 && items.template(item.template_id).is_some())
                 .cloned()
                 .collect();
-            let coins = q.reward_coins;
-            let free = self
-                .c
-                .inventory
-                .bag()
-                .lock()
-                .expect("bag poisoned")
-                .free_slot_count();
-            if free < pool.len() as i32 {
+            if let Some(q) = self.quest_mut(h) {
+                q.reward_items = pool.clone();
+            }
+            if !self.reward_items_fit_bag(&pool) {
                 let failed = hooks.send_quest_reward_mails(
                     self.server,
                     player.as_ref(),
                     self.c,
                     template_id,
                     &pool,
-                    coins,
+                    copper,
                 );
                 if failed > 0 {
                     self.send_error(error_msg::MAIL_UNKNOWN_FAILURE);
                     return false;
                 }
-                // Coins will be distributed in mail if any mail needed to be sent
+                copper = 0;
                 if let Some(q) = self.quest_mut(h) {
-                    q.reward_coins = 0;
+                    q.reward_items.clear();
                 }
                 self.send(SCQuestRewardedByMailPacket {
                     success: true,
@@ -69,8 +143,8 @@ impl<'a> Ctx<'a> {
                 });
             } else {
                 for item in &pool {
-                    if hooks.is_auto_equip_trade_pack(self.server, item.template_id) {
-                        if !hooks.try_equip_new_backpack(
+                    let acquire = if hooks.is_auto_equip_trade_pack(self.server, item.template_id) {
+                        hooks.try_equip_new_backpack(
                             self.server,
                             player.as_ref(),
                             self.c,
@@ -78,11 +152,9 @@ impl<'a> Ctx<'a> {
                             item.template_id,
                             item.count,
                             item.grade_id,
-                        ) {
-                            return false;
-                        }
+                        )
                     } else {
-                        if !hooks.acquire_default_item(
+                        hooks.acquire_default_item(
                             self.server,
                             player.as_ref(),
                             self.c,
@@ -90,110 +162,29 @@ impl<'a> Ctx<'a> {
                             item.template_id,
                             item.count,
                             item.grade_id,
-                        ) {
-                            return false;
-                        }
+                        )
+                    };
+                    if !acquire {
+                        return false;
                     }
-                }
-            }
-            if let Some(q) = self.quest_mut(h) {
-                q.reward_items.clear();
-            }
-        }
-
-        // Add quest level based rewards
-        let data = self.data;
-        let (level, let_it_done, degree) = data
-            .template(template_id)
-            .map_or((0, false, 0), |t| (t.level, t.let_it_done, t.degree));
-        let step = self.quest(h).map_or(0, |q| q.step);
-        // Retail 1.2 replaces the level based supply with the Reward component's own
-        // `QuestActSupplyExp` / `QuestActSupplyCopper` act instead of adding both (the client's
-        // `X2Quest.GetQuestContextRewardExp` scans the Reward component and falls back to
-        // `quest_supplies` only when the act is absent; see PORTING.md). Data point: 376
-        // category 79 (exploration, level 50) quests carry a Reward act with exp 0 / copper 0
-        // and would otherwise be paid the full level supply.
-        let (reward_exp_act, reward_copper_act) = data
-            .template(template_id)
-            .map(|t| {
-                let mut exp = false;
-                let mut copper = false;
-                for c in t.components_of(&data.components, kind::REWARD) {
-                    for &a in &c.acts {
-                        match &data.acts[a].kind {
-                            ActKind::SupplyExp { .. } => exp = true,
-                            ActKind::SupplyCopper { .. } => copper = true,
-                            _ => {}
-                        }
-                    }
-                }
-                (exp, copper)
-            })
-            .unwrap_or((false, false));
-        if add_base && level > 0 && step == kind::REWARD {
-            if let Some(lb) = data.supplies(level).copied() {
-                let ratio = if let_it_done {
-                    match self.objective_status(h) {
-                        ObjectiveStatus::NotReady => 0f32,
-                        ObjectiveStatus::CanEarlyComplete => 0.3f32,
-                        ObjectiveStatus::QuestComplete => 1f32,
-                        ObjectiveStatus::ExtraProgress => 1f32,
-                        ObjectiveStatus::Overachieved => 1.2f32,
-                    }
-                } else {
-                    1f32
-                };
-                // `Quest:RewardScaling`: the client scales the supplies fallback by the quest
-                // degree and exp by the quest-vs-player level gap (see `reward_scale`). The
-                // act values replace the fallback per field, so each keeps its own path.
-                let scaling = self.server.config.get().quest.reward_scaling;
-                let player_level = self.c.unit.level;
-                if let Some(q) = self.quest_mut(h) {
-                    q.reward_ratio = f64::from(ratio);
-                    if !reward_exp_act {
-                        let exp = if scaling {
-                            gap_exp(scaled_supply_exp(lb.exp, degree), level, player_level)
-                        } else {
-                            lb.exp
-                        };
-                        q.reward_exp = q.reward_exp.wrapping_add(exp);
-                    }
-                    if !reward_copper_act {
-                        let copper = if scaling {
-                            scaled_supply_copper(lb.copper, degree)
-                        } else {
-                            lb.copper
-                        };
-                        q.reward_coins = q.reward_coins.wrapping_add(copper);
+                    if let Some(q) = self.quest_mut(h) {
+                        q.reward_items.remove(0);
                     }
                 }
             }
         }
 
-        // Add XP
-        let Some(q) = self.quest(h) else {
-            return res;
-        };
-        let (exp_pool, coin_pool, ratio) = (q.reward_exp, q.reward_coins, q.reward_ratio);
-        if exp_pool > 0 {
-            let xp = round_even(f64::from(exp_pool) * ratio) as i32;
-            if xp > 0 {
-                hooks.add_exp(self.server, player.as_ref(), self.c, xp, true);
-            }
-            if let Some(q) = self.quest_mut(h) {
-                q.reward_exp = 0;
-            }
+        if xp > 0 {
+            hooks.add_exp(self.server, player.as_ref(), self.c, xp, true);
         }
-        // Add copper coins
-        if coin_pool > 0 {
-            let copper = round_even(f64::from(coin_pool) * ratio) as i32;
-            if copper > 0 {
-                hooks.change_money(self.server, player.as_ref(), self.c, copper);
-            }
-            if let Some(q) = self.quest_mut(h) {
-                q.reward_coins = 0;
-            }
+        if copper > 0 {
+            hooks.change_money(self.server, player.as_ref(), self.c, copper);
         }
+        if let Some(q) = self.quest_mut(h) {
+            q.reward_exp = 0;
+            q.reward_coins = 0;
+        }
+
         // Cleanup used Items from quest
         let cleanup = self
             .quest(h)
@@ -215,6 +206,6 @@ impl<'a> Ctx<'a> {
                 q.cleanup_items.clear();
             }
         }
-        res
+        true
     }
 }

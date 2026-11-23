@@ -1,5 +1,5 @@
 use super::{
-    kind, status, ActPath, Ctx, EnvView, ObjectiveStatus, OwnerView, QResult, QuestHandle,
+    kind, status, ActKind, ActPath, Ctx, EnvView, ObjectiveStatus, OwnerView, QResult, QuestHandle,
     TargetView, Throw, UnitReq,
 };
 
@@ -213,8 +213,9 @@ impl<'a> Ctx<'a> {
         }
 
         // Handle Supply/Reward Distribution
-        let d = self.distribute_rewards(h, true);
-        res &= d;
+        if this_step != kind::REWARD || res {
+            res &= self.distribute_rewards(h, true);
+        }
 
         // LetItBeDone type of quests, are always forced forward using the Report Acts
         if this_step == kind::PROGRESS && t.let_it_done {
@@ -240,39 +241,41 @@ impl<'a> Ctx<'a> {
         let n = comp.acts.len();
         let cid = comp.template_id;
         let or_check = (step_kind == kind::START || step_kind == kind::READY) && n > 0;
-        let mut res = true;
-        if or_check {
-            // Or checks, needed to handle quests with multiple starters or multiple report NPCs
-            res = false;
-            for ai in 0..n {
-                let r = self.run_act(
-                    h,
-                    ActPath {
-                        step: si,
-                        component: ci,
-                        act: ai,
-                    },
-                );
-                res |= r;
+        let mut res = !or_check;
+        let mut has_checks = false;
+        let mut removals = Vec::new();
+        for ai in 0..n {
+            let path = ActPath {
+                step: si,
+                component: ci,
+                act: ai,
+            };
+            if or_check
+                && self.act_ref(h, path).is_some_and(|index| {
+                    matches!(self.data.acts[index].kind, ActKind::SupplyRemoveItem { .. })
+                })
+            {
+                removals.push(path);
+                continue;
             }
-        } else {
-            for ai in 0..n {
-                let r = self.run_act(
-                    h,
-                    ActPath {
-                        step: si,
-                        component: ci,
-                        act: ai,
-                    },
-                );
-                res &= r;
+            has_checks = true;
+            let result = self.run_act(h, path);
+            if or_check {
+                res |= result;
+            } else {
+                res &= result;
             }
         }
+        res |= !has_checks;
         res |= self
             .quest(h)
             .and_then(|q| q.steps.get(si))
             .and_then(|s| s.components.get(ci))
             .is_some_and(|c| c.override_completed);
+        // Compact 1.2 Ready components such as quest 2043 pair an NPC report
+        // with a removal. A report satisfies the alternative checks, then the
+        // removal must succeed before the quest advances.
+        res = res && removals.into_iter().all(|path| self.run_act(h, path));
         // If acts completed, handle skill and buff effects
         if res {
             self.use_skill_and_buff(cid);
