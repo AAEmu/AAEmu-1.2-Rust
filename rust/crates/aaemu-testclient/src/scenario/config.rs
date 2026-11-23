@@ -219,7 +219,7 @@ pub struct BotConfig {
 }
 
 /// The client packet that asks a stablehand to revive the dead mate. The real protocol is still
-/// being reverse-engineered: the request is isolated in [`send_revive_request`] so another
+/// being reverse-engineered: the request is isolated in `mate_revive::send_revive_request` so another
 /// variant can be added without touching the scenario.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
