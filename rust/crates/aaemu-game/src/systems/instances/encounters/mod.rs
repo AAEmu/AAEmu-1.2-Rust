@@ -1,14 +1,9 @@
-//! Dungeon encounters: the template, skill, command-set, cinema, clout and buff ids that the
-//! shared engine treats specially for one dungeon, and the dungeon behaviour that goes with them.
+//! Content encounters and their hooks into the shared engine.
 //!
-//! Each dungeon has its own file. It starts with the dungeon's keys (`// ---- keys`: its zone and
-//! world template), then holds the id tables (`// ---- tables`), with the original id lists and
-//! their comments, and ends with its behaviour (`// ---- hooks`): the free functions moved from
-//! the engine and the dungeon's [`hooks::Encounter`] implementation, which only delegates to
-//! them. Engine code does not call the dungeon files for a lookup: it asks [`registry`], the
-//! facade, which delegates to the dungeons a lookup concerns. It runs the behaviour through
-//! [`hooks`], which picks the dungeons by zone, by world or (for id-keyed hooks) all of them.
-//!
+//! Each encounter file starts with its keys (`// ---- keys`), followed by its lookups
+//! (`// ---- tables`) and behaviour (`// ---- hooks`). Its [`hooks::Encounter`] implementation
+//! delegates to the moved free functions. Engine code asks [`registry`] for lookups and
+//! dispatches behaviour through [`hooks`] by zone, world or id.
 //! Most tables are keyed by an id (template, skill, command set, cinema, clout) and apply in every
 //! world, as the code they came from did; only the lookups that tested a zone or a world test one
 //! here.
@@ -16,11 +11,17 @@
 pub mod armory;
 pub mod cradle;
 pub mod hadir;
+mod halcyona;
 pub mod hooks;
 pub mod howling_abyss;
+mod library;
 pub mod palace_cellar;
+mod red_dragon;
 pub mod registry;
+mod rookborne;
 pub mod sharpwind;
+mod wind_sealstone;
+mod windscour;
 
 #[cfg(test)]
 mod tests;

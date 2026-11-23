@@ -2071,10 +2071,9 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             true,
         );
     }
-    if skill.id == 17_539 && caster.transform().instance_id == 0 {
-        if let Some(player) = caster.as_player() {
-            // Wind Sealstone's area-sphere requirement was validated before firing.
-            crate::world::move_guard::grant_quest_launch(server, player);
+    if encounters::is_wind_sealstone_launch_skill(skill.id) {
+        for encounter in encounter_hooks::all() {
+            encounter.on_skill_fired(server, skill, caster);
         }
     }
     broadcast(server, caster, &fired, true);
@@ -2406,20 +2405,11 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     // Serialize the readiness check, phase change and reward or spawn. A
     // concurrent cast may finish after the first changed the doodad phase.
-    let egg_cast = t.id == super::validation::RED_DRAGON_EGG_SKILL;
+    let egg_cast = encounters::is_red_dragon_egg_skill(t.id);
     let cradle_chest = t.id == super::validation::CRADLE_CHEST_SKILL;
     let _doodad_operation =
         (egg_cast || cradle_chest).then(|| server.systems.economy.operation_scope());
-    let ready = if egg_cast {
-        super::validation::check_red_dragon_egg(server, caster, target_self)
-    } else if let Some(ready) = encounter_hooks::all()
-        .iter()
-        .find_map(|encounter| encounter.effects_ready(server, &t, caster, target_self))
-    {
-        ready
-    } else {
-        Ok(())
-    };
+    let ready = encounter_hooks::effects_ready(server, &t, caster, target_self);
     if let Err((result, _)) = ready {
         if let Some(player) = player.as_ref().filter(|_| result == skill_result::BAG_FULL) {
             player.send(crate::packets::world::SCErrorMsgPacket::new(
@@ -3010,7 +3000,8 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     let mut current_weight = 0;
     let mut packets = CompressedGamePackets::new();
-    let mut self_destruct_removal = None;
+    let mut deferred_application = None;
+    let replaces_effects = encounters::is_combuster_self_destruct_skill(t.id);
     let mut effect_source = EffectSource::from_skill(skill.clone());
     if save_portal {
         effect_source.cast_target = target_self.as_obj().cloned();
@@ -3037,22 +3028,14 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             );
             continue;
         };
-        // The Combuster actually casts Self-Destruct 16444. Its source-only damage (2729)
-        // can leave it alive, so use the corpse-free removal authored for the same NPC
-        // on Self-Destruct 15992. The explosion's damage and buff on nearby targets are
-        // separate effects.
-        let combuster_self_destruct = t.id == 16_444
-            && kind == EffectKind::DamageEffect
-            && id == 2729
-            && target.obj_id() == caster.obj_id()
-            && caster
-                .as_npc()
-                .is_some_and(|npc| npc.data().unit.template_id == 986);
-        let (kind, id) = if combuster_self_destruct {
-            (EffectKind::KillNpcWithoutCorpseEffect, 647)
+        let deferred_effect = if replaces_effects {
+            encounter_hooks::all().iter().find_map(|encounter| {
+                encounter.deferred_effect_replacement(&t, kind, id, caster, target)
+            })
         } else {
-            (kind, id)
+            None
         };
+        let (kind, id) = deferred_effect.unwrap_or((kind, id));
         let Some(template) = data.effect(kind, id) else {
             tracing::debug!(
                 skill_id = t.id,
@@ -3145,9 +3128,8 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 if let Some(n) = npc {
                     args.caster = Some(WorldObject::from(n));
                 }
-                if combuster_self_destruct {
-                    // Broadcast the explosion from the caster's region before it disappears.
-                    self_destruct_removal = Some((kind, template, args));
+                if deferred_effect.is_some() {
+                    deferred_application = Some((kind, template, args));
                 } else {
                     effects::apply(server, kind, template, &args, Some(&mut packets));
                 }
@@ -3202,7 +3184,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     if !packets.is_empty() {
         broadcast(server, caster, &packets, true);
     }
-    if let Some((kind, template, args)) = self_destruct_removal {
+    if let Some((kind, template, args)) = deferred_application {
         effects::apply(server, kind, template, &args, None);
     }
     // Hack to consume TreasureMap items (as the C#).

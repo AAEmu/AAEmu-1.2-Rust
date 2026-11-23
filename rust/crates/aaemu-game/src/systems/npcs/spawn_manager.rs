@@ -43,6 +43,7 @@ use crate::data::world_templates::REGION_SIZE;
 use crate::models::doodad::doodad_owner_type;
 use crate::models::npc::Npc;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::npcs::doodad::spawner::{
     parse_list, DoodadSpawner, DoodadSpawnerDef, NpcSpawnerDef, SimpleSpawnerDef,
 };
@@ -1068,10 +1069,9 @@ pub(crate) enum SpawnerSkip {
 /// `arche_mall_world`'s vendors (Wardrobe Stylist, Fairmoon Clerks, Veroe Weapons Dealer, Premium
 /// Potion Merchant, ...) and `racing_test_world`'s NPCs are all 'f', and so are `main_world`'s
 /// quest givers (Liteia, Baron Alfonso, Bard Pagos, the Alliance Quartermasters, the five capital
-/// Arena Managers). `instance_library` is excluded too: only 3 of its 49 'f' spawner ids have
-/// a schedule binding and no spawn effect or quest component names the other 46.
+/// Arena Managers).
 fn skips_inactive_at_start(world_name: &str) -> bool {
-    world_name.starts_with("instance_") && world_name != "instance_library"
+    world_name.starts_with("instance_") && !encounters::keeps_inactive_spawners(world_name)
 }
 
 /// [`SpawnerSkip`] for a plain row in `world_name`, `None` when the spawner may start.

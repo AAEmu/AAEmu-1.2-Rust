@@ -1,16 +1,9 @@
-//! The encounter hooks: the dungeon behaviour and geometry that the shared engine runs at its
-//! seams (AI ticks, leashes and chases, walker floors, doodad funcs, casts, knockbacks, buffs
-//! and water).
+//! Encounter behaviour and geometry at the shared engine seams.
 //!
-//! Each dungeon implements [`Encounter`] in its own file; every method has a no-op default, and
-//! a dungeon's `impl` only delegates to its free functions. The engine picks the dungeons with
-//! the key its old code tested:
-//! - [`for_zone`] for the AI hooks and the walker floor (the NPC's zone),
-//! - [`for_world`] for the character water hook (the world template's name),
-//! - [`all`] for the hooks keyed by an id that apply in every world (skills, doodads, gimmicks,
-//!   buffs), asked in the order Armory, Palace Cellar, Hadir Farm, Sharpwind Mines, Kroloal
-//!   Cradle, Howling Abyss. Their ids do not overlap, so at most one dungeon acts.
-
+//! Each encounter implements [`Encounter`] in its own file and delegates to its free
+//! functions. Every method has a no-op default. The engine dispatches with the original
+//! key. AI and walker floors use [`for_zone`], character water uses [`for_world`], and
+//! id-keyed behaviour uses [`all`]. The six dungeons precede the world content modules.
 use crate::models::buff::Buff;
 use crate::models::transform::PositionAndRotation;
 use crate::server::GameServer;
@@ -20,7 +13,7 @@ use crate::systems::npcs::doodad::templates::{DoodadFuncSpawnGimmick, DoodadFunc
 use crate::systems::npcs::gimmick::manager::SpawnGimmickParams;
 use crate::systems::skills::controllers::Vec3;
 use crate::systems::skills::data::effects::SpawnGimmickEffect;
-use crate::systems::skills::data::SkillTemplate;
+use crate::systems::skills::data::{EffectKind, SkillControllerTemplate, SkillTemplate};
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::geometry::Target;
 use crate::systems::skills::state::SkillRef;
@@ -28,7 +21,7 @@ use crate::world::{PlayerRef, WorldInstance, WorldObject};
 
 use super::{armory, cradle, hadir, howling_abyss, palace_cellar, sharpwind};
 
-/// A dungeon's behaviour at the engine's seams. Every method is a no-op by default.
+/// Content behaviour at the engine's seams. Every method is a no-op by default.
 pub trait Encounter: Sync {
     /// Before a behaviour's tick: `true` when the encounter moved the NPC itself and the
     /// behaviour does not tick.
@@ -99,6 +92,9 @@ pub trait Encounter: Sync {
         None
     }
 
+    /// A validated cast is about to broadcast its fire packet.
+    fn on_skill_fired(&self, _server: &GameServer, _skill: &SkillRef, _caster: &WorldObject) {}
+
     /// The start of `ApplyEffects`: `true` skips the cast's effects.
     fn on_apply_effects(
         &self,
@@ -119,6 +115,15 @@ pub trait Encounter: Sync {
     ) {
     }
 
+    /// Content-specific target validation after zone bans and before effect readiness.
+    fn cast_target_ready(
+        &self,
+        _template: &SkillTemplate,
+        _target: &Target,
+    ) -> Result<(), (u8, u32)> {
+        Ok(())
+    }
+
     /// The readiness check of a cast's effects: `Some` is the check of this skill.
     fn effects_ready(
         &self,
@@ -128,6 +133,28 @@ pub trait Encounter: Sync {
         _target: &Target,
     ) -> Option<Result<(), (u8, u32)>> {
         None
+    }
+
+    /// Replace an effect with a corpse-free removal that runs after the cast's packet batch.
+    fn deferred_effect_replacement(
+        &self,
+        _t: &SkillTemplate,
+        _kind: EffectKind,
+        _id: u32,
+        _caster: &WorldObject,
+        _target: &Target,
+    ) -> Option<(EffectKind, u32)> {
+        None
+    }
+
+    /// A controller applied to a player whose movement is driven by the client.
+    fn on_player_skill_controller(
+        &self,
+        _server: &GameServer,
+        _t: &SkillControllerTemplate,
+        _caster: &WorldObject,
+        _player: &PlayerRef,
+    ) {
     }
 
     /// A `KnockBack` of a player, from `target_pos` to `end`: `true` when the encounter sent
@@ -172,18 +199,24 @@ pub trait Encounter: Sync {
     }
 }
 
-/// Outside the dungeons: every hook is the default.
+/// For an unregistered zone or world, every hook is the default.
 struct NoEncounter;
 
 impl Encounter for NoEncounter {}
 
-static ALL: [&dyn Encounter; 6] = [
+static ALL: [&dyn Encounter; 12] = [
     &armory::Armory,
     &palace_cellar::PalaceCellar,
     &hadir::HadirFarm,
     &sharpwind::SharpwindMines,
     &cradle::KroloalCradle,
     &howling_abyss::HowlingAbyss,
+    &super::library::Library,
+    &super::red_dragon::RedDragon,
+    &super::halcyona::Halcyona,
+    &super::windscour::Windscour,
+    &super::rookborne::Rookborne,
+    &super::wind_sealstone::WindSealstone,
 ];
 
 /// The encounter of a zone.
@@ -212,8 +245,20 @@ pub fn for_world(name: &str) -> &'static dyn Encounter {
     }
 }
 
-/// Every dungeon's encounter, for the hooks keyed by an id: Armory, Palace Cellar, Hadir Farm,
-/// Sharpwind Mines, Kroloal Cradle, Howling Abyss.
+/// Every encounter, for hooks keyed by an id.
 pub fn all() -> &'static [&'static dyn Encounter] {
     &ALL
+}
+
+/// The applicable encounter's readiness check for a skill.
+pub(crate) fn effects_ready(
+    server: &GameServer,
+    t: &SkillTemplate,
+    caster: &WorldObject,
+    target: &Target,
+) -> Result<(), (u8, u32)> {
+    all()
+        .iter()
+        .find_map(|encounter| encounter.effects_ready(server, t, caster, target))
+        .unwrap_or(Ok(()))
 }

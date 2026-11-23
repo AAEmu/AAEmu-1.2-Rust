@@ -15,7 +15,8 @@ use crate::systems::economy::inventory::Inv;
 pub(crate) const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
-pub(super) const RED_DRAGON_EGG_SKILL: u32 = 23_150;
+#[cfg(test)]
+pub(super) use encounters::RED_DRAGON_EGG_SKILL;
 pub(super) const PORTABLE_HARPOON_MIN_RANGE: f64 = 4.0;
 pub(super) const PORTABLE_HARPOON_MAX_RANGE: f64 = 45.0;
 
@@ -33,42 +34,6 @@ pub(crate) const OBSTACLE_RAY_HEIGHT: f32 = 1.0;
 
 pub(crate) fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))
-}
-
-/// The egg's authored skill uses Dancing Goddess's Hunt as an effect-level
-/// cost. The bow is required for the whole cast, including its spawn effect.
-pub(super) fn check_red_dragon_egg(
-    server: &GameServer,
-    caster: &WorldObject,
-    target: &Target,
-) -> Result<(), (u8, u32)> {
-    const RED_DRAGON_EGG: u32 = 7056;
-    const READY_PHASE: u32 = 18_936;
-    const DANCING_GODDESS_HUNT: u32 = 29_301;
-
-    let Some(player) = caster.as_player() else {
-        return fail("skill_invalid_source");
-    };
-    let ready = target
-        .as_obj()
-        .and_then(WorldObject::as_doodad)
-        .is_some_and(|egg| {
-            let egg = egg.data();
-            egg.template_id == RED_DRAGON_EGG && egg.func_group_id == READY_PHASE
-        });
-    if !ready {
-        return fail("skill_invalid_target");
-    }
-    let items = server.systems.skills.ext.items();
-    if items.item_count(server, player, DANCING_GODDESS_HUNT) > 0 {
-        return Ok(());
-    }
-    let result = if Inv::of(player).items_count(DANCING_GODDESS_HUNT, -1) > 0 {
-        skill_result::ITEM_LOCKED
-    } else {
-        skill_result_for_key("skill_need_reagent")
-    };
-    Err((result, DANCING_GODDESS_HUNT))
 }
 
 pub(super) const CRADLE_CHEST_SKILL: u32 = encounters::CRADLE_CHEST_SKILL;
@@ -364,8 +329,9 @@ pub(super) fn check(
     {
         return fail("skill_need_reagent");
     }
-    if template.id == RED_DRAGON_EGG_SKILL {
-        check_red_dragon_egg(server, caster, target)?;
+    let egg_cast = encounters::is_red_dragon_egg_skill(template.id);
+    if egg_cast {
+        encounter_hooks::effects_ready(server, template, caster, target)?;
     }
     // Like the other cast restrictions, this also applies to administrators. A GM's
     // cooldown override does not grant permission to use forbidden tags.
@@ -381,18 +347,10 @@ pub(super) fn check(
         // Native 1.2 x2game12.c:1983345: SkillResult 58 = ZONE_BANNED.
         return fail("SKILL_CANNOT_USE_HERE");
     }
-    // Tosare's portal skill casts a Return effect directly, so it never runs Doodad.Use.
-    // Require the machinery's open phase, where the client gets this skill.
-    if template.id == 17_292
-        && !target
-            .as_obj()
-            .and_then(WorldObject::as_doodad)
-            .is_some_and(|doodad| {
-                let d = doodad.data();
-                d.template_id == 4499 && d.func_group_id == 10_996
-            })
-    {
-        return fail("skill_invalid_target");
+    if encounters::is_tosare_portal_skill(template.id) {
+        encounter_hooks::all()
+            .iter()
+            .try_for_each(|encounter| encounter.cast_target_ready(template, target))?;
     }
     // Leave Burnt Castle Armory also applies Return directly. It is offered on the
     // entrance exit and on the rear exit only after skill 18024 reveals it.
@@ -407,11 +365,8 @@ pub(super) fn check(
     {
         return fail("skill_invalid_target");
     }
-    if let Some(ready) = encounter_hooks::all()
-        .iter()
-        .find_map(|encounter| encounter.effects_ready(server, template, caster, target))
-    {
-        ready?;
+    if !egg_cast {
+        encounter_hooks::effects_ready(server, template, caster, target)?;
     }
     if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)

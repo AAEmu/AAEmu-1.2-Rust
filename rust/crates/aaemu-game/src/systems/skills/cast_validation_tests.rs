@@ -2395,3 +2395,117 @@ async fn an_instant_triggered_skill_goes_through_a_timed_cast_in_progress() {
         "the timed cast keeps its task slot"
     );
 }
+
+#[tokio::test]
+async fn tosare_portal_requires_the_open_machinery() {
+    let (server, _client, player, _) = fixture(GameData::empty());
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            id: 17_292,
+            max_range: 10,
+            ..Default::default()
+        }),
+        1,
+    );
+    let caster = WorldObject::from(&player);
+    for (template_id, phase, expected) in [
+        (4499, 10_996, Ok(())),
+        (4499, 10_995, Err((skill_result::INVALID_TARGET, 0))),
+        (4498, 10_996, Err((skill_result::INVALID_TARGET, 0))),
+    ] {
+        let mut doodad = crate::models::doodad::Doodad::new(template_id);
+        doodad.func_group_id = phase;
+        doodad.transform.set_xyz(100.0, 100.0, 100.0);
+        let target = Target::Obj(WorldObject::from(Entity::new(0x300, doodad)));
+        assert_eq!(
+            super::validation::check(&server, &skill, &caster, &target),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn ameds_cannon_releases_its_operator_and_grants_the_launch() {
+    use crate::models::slave::Slave;
+    use crate::systems::vehicles::{data::attach_point, slaves};
+
+    for (controller_id, slave_template_id, launches) in
+        [(6678, 99, true), (6679, 99, false), (6678, 100, false)]
+    {
+        let (server, _client, player, _) = fixture(GameData::empty());
+        let world = server.world.world(0).unwrap();
+        let mut slave = Slave::new(1, slave_template_id);
+        slave.unit.hp = 100;
+        slave.unit.tl_id = 1;
+        slave.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let slave = Entity::new(0x300, slave);
+        world.spawn(&slave, &server.view_ctx());
+        slaves::bind_slave(
+            &server,
+            &player,
+            slave.obj_id,
+            attach_point::DRIVER,
+            0,
+            None,
+        );
+        assert!(slaves::get_is_mounted(&world, player.obj_id).is_some());
+        let caster = WorldObject::from(&player);
+        super::effects::combat::skill_controller(
+            &server,
+            &super::data::SkillControllerTemplate {
+                id: controller_id,
+                ..Default::default()
+            },
+            &super::effects::EffectArgs {
+                caster: Some(caster.clone()),
+                caster_caster: SkillCaster::Unit(player.obj_id),
+                target: Target::Obj(caster),
+                target_caster: SkillCastTarget::Unit(player.obj_id),
+                cast: crate::systems::skills::types::CastAction::Skill {
+                    skill_id: 0,
+                    tl_id: 0,
+                },
+                source: super::effects::EffectSource::default(),
+                skill_object: &SkillObject::None,
+            },
+        );
+        assert_eq!(
+            slaves::get_is_mounted(&world, player.obj_id).is_none(),
+            launches
+        );
+        assert_eq!(
+            server.systems.services.move_guard.len(),
+            usize::from(launches)
+        );
+    }
+}
+
+#[tokio::test]
+async fn wind_sealstone_grants_the_launch_when_the_skill_fires() {
+    for (skill_id, launches) in [(17_539, true), (17_538, false)] {
+        let (server, _client, player, _) = fixture(GameData::empty());
+        let caster = WorldObject::from(&player);
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                id: skill_id,
+                ..Default::default()
+            }),
+            1,
+        );
+        super::skill::schedule_effects(
+            &server,
+            &skill,
+            &CastCtx {
+                caster: caster.clone(),
+                caster_caster: SkillCaster::Unit(player.obj_id),
+                target: Target::Obj(caster),
+                target_caster: SkillCastTarget::Unit(player.obj_id),
+                skill_object: SkillObject::None,
+            },
+        );
+        assert_eq!(
+            server.systems.services.move_guard.len(),
+            usize::from(launches)
+        );
+    }
+}

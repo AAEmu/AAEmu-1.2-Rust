@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use crate::data::formulas::FormulaKind;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
+use crate::systems::instances::encounters::hooks as encounter_hooks;
+use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{now_ms, WorldObject};
 
 use super::super::buffs;
@@ -1563,21 +1565,9 @@ pub fn skill_controller(server: &GameServer, t: &SkillControllerTemplate, args: 
         return;
     };
     if let Some(player) = caster.as_player() {
-        // Amed's cannon starts the player's native launch with its first floating
-        // controller. Release the cannon seat so the subsequent flight can replicate.
-        if t.id == 6678 {
-            let seated_in_cannon = super::super::geometry::world_of(server, caster)
-                .and_then(|world| {
-                    crate::systems::vehicles::slaves::get_is_mounted(&world, player.obj_id)
-                })
-                .is_some_and(|(slave, _)| slave.data().unit.template_id == 99);
-            if seated_in_cannon {
-                crate::systems::vehicles::force_dismount(
-                    server,
-                    player,
-                    crate::systems::vehicles::slaves::attach_reason::NONE,
-                );
-                crate::world::move_guard::grant_quest_launch(server, player);
+        if encounters::is_amed_cannon_controller(t.id) {
+            for encounter in encounter_hooks::all() {
+                encounter.on_player_skill_controller(server, t, caster, player);
             }
         }
         return;

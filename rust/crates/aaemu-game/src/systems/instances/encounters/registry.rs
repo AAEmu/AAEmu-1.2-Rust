@@ -1,7 +1,7 @@
-//! The encounter registry: the one place engine code asks about dungeon-specific ids.
+//! The encounter registry: the one place engine code asks about encounter-specific ids.
 //!
-//! Each function delegates to the tables of the dungeons it concerns. A lookup that more than
-//! one dungeon answers asks them in the order of the id list it replaced; the lists do not
+//! Each function delegates to the tables of the encounters it concerns. A lookup that more than
+//! one encounter answers asks them in the order of the id list it replaced; the lists do not
 //! overlap, so the order never changes a result. Arguments that cost a lock are passed as
 //! closures and are only called where the replaced code read them.
 
@@ -361,4 +361,39 @@ pub fn water_cells(template_name: &str) -> WaterCells {
 /// closed mesh for the open animation (Palace Cellar).
 pub fn door_reuses_closed_mesh(template_id: u32, func_group: u32) -> bool {
     palace_cellar::door_reuses_closed_mesh(template_id, func_group)
+}
+
+// ---- World content
+
+/// Whether a world with the instance prefix keeps its inactive-at-start spawners.
+pub fn keeps_inactive_spawners(world_name: &str) -> bool {
+    super::library::keeps_inactive_spawners(world_name)
+}
+
+#[cfg(test)]
+pub(crate) use super::red_dragon::RED_DRAGON_EGG_SKILL;
+
+/// The egg's summon skill needs its doodad operation serialized.
+pub fn is_red_dragon_egg_skill(skill_id: u32) -> bool {
+    super::red_dragon::is_red_dragon_egg_skill(skill_id)
+}
+
+/// Whether a cast uses Tosare's machinery portal.
+pub fn is_tosare_portal_skill(skill_id: u32) -> bool {
+    super::halcyona::is_tosare_portal_skill(skill_id)
+}
+
+/// Whether a cast uses the Combuster's Self-Destruct.
+pub fn is_combuster_self_destruct_skill(skill_id: u32) -> bool {
+    super::windscour::is_combuster_self_destruct_skill(skill_id)
+}
+
+/// Whether a controller starts Amed's cannon launch.
+pub fn is_amed_cannon_controller(controller_id: u32) -> bool {
+    super::rookborne::is_amed_cannon_controller(controller_id)
+}
+
+/// Whether a cast uses the Wind Sealstone launch skill.
+pub fn is_wind_sealstone_launch_skill(skill_id: u32) -> bool {
+    super::wind_sealstone::is_wind_sealstone_launch_skill(skill_id)
 }
