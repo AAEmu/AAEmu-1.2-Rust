@@ -109,7 +109,7 @@ use crate::systems::ai::framework::{AiCtx, BehaviorKind};
 use crate::systems::ai::npc;
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::DoodadFuncSpawnGimmick;
-use crate::systems::npcs::gimmick::manager::{despawn, do_gimmick_skill, spawn_from_doodad};
+use crate::systems::npcs::gimmick::manager::cast_from_doodad_gimmick;
 use crate::systems::skills::controllers::Vec3;
 use crate::world::{now_ms, WorldInstance, WorldObject};
 
@@ -231,24 +231,16 @@ pub(super) fn spawn_gimmick(
     None
 }
 
-/// The placed keg's five-second fuse has fired. Gimmick 56 carries the explosion
-/// as its contact skill, but a stationary keg does not make a physics contact.
-pub(crate) fn detonate_powder_keg(
+/// The placed keg's five-second fuse fires gimmick 56's contact skill at the keg.
+/// The compact data permits contact at zero speed, so the caster is transient
+/// while phase 15332 waits for the doodad's authored Final.
+fn detonate_powder_keg(
     server: &GameServer,
     world: &Arc<WorldInstance>,
     source: &WorldObject,
-    template: &crate::systems::npcs::doodad::templates::DoodadFuncSpawnGimmick,
+    template: &DoodadFuncSpawnGimmick,
 ) -> bool {
-    let Some(gimmick) = spawn_from_doodad(server, world, source, template) else {
-        return false;
-    };
-    let Some(active) = server.systems.npcs.gimmicks.find(gimmick.obj_id) else {
-        return false;
-    };
-    do_gimmick_skill(server, world, &active, KEG_BLAST_SKILL);
-    active.state().despawned = true;
-    despawn(server, &active);
-    true
+    cast_from_doodad_gimmick(server, world, source, template, KEG_BLAST_SKILL)
 }
 
 /// Sharpwind Mines' encounter hooks.

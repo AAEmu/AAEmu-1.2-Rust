@@ -337,6 +337,83 @@ async fn real_data_sharpwind_powder_keg_consumes_the_pack_then_breaks_the_wall()
     assert!(!rock_intact(), "the explosion breaks the wall");
 }
 
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_data_sharpwind_powder_keg_blast_fires_once_with_player_in_contact() {
+    use crate::systems::instances::encounters::sharpwind::{
+        KEG_BLAST_SKILL, KEG_SPENT_PHASE, POWDER_KEG_DOODAD,
+    };
+    use crate::systems::npcs::{gimmick::manager::tick_all, hooks::SkillsBridge};
+
+    struct TickDuringDetonation(Arc<dyn SkillsBridge>);
+
+    impl SkillsBridge for TickDuringDetonation {
+        fn use_gimmick_skill(
+            &self,
+            server: &GameServer,
+            caster: Option<&WorldObject>,
+            gimmick: &WorldObject,
+            skill_id: u32,
+            pos: (f32, f32, f32),
+        ) -> bool {
+            let fired = self
+                .0
+                .use_gimmick_skill(server, caster, gimmick, skill_id, pos);
+            // Run the real contact scan after the fuse's cast and before it removes the
+            // gimmick, reproducing the two live casts without racing the tick task.
+            tick_all(server, Duration::from_millis(50));
+            fired
+        }
+
+        fn use_gimmick_collision_skill(
+            &self,
+            server: &GameServer,
+            gimmick: &WorldObject,
+            unit: &WorldObject,
+            skill_id: u32,
+        ) -> bool {
+            self.0
+                .use_gimmick_collision_skill(server, gimmick, unit, skill_id)
+        }
+    }
+
+    let (server, world) = fixture();
+    let skills = &server.systems.npcs.hooks.skills;
+    skills.install(Arc::new(TickDuringDetonation(skills.get().unwrap())));
+    let tasks = &server.systems.npcs.doodads.tasks;
+    tasks.set_manual(true);
+    let (mut client, player) = place_player(&server, 1, 519.932, 362.755, 169.029);
+    player.data().unit.hp = 10_000;
+    let keg = place_doodad(
+        &server,
+        &world,
+        POWDER_KEG_DOODAD,
+        519.932,
+        363.755,
+        169.029,
+    );
+    let blast_count = |client: &mut TestClient| {
+        client
+            .drain()
+            .iter()
+            .filter(|(opcode, body)| {
+                *opcode == crate::opcodes::sc::SCSkillFiredPacket
+                    && body.starts_with(&KEG_BLAST_SKILL.to_le_bytes())
+            })
+            .count()
+    };
+
+    tasks.advance(&server, 4_999);
+    assert_eq!(blast_count(&mut client), 0);
+    tasks.advance(&server, 1);
+    assert_eq!(
+        keg.as_doodad().unwrap().data().func_group_id,
+        KEG_SPENT_PHASE as u32
+    );
+    assert_eq!(blast_count(&mut client), 1);
+    assert!(world.all_of_kind(ObjectKind::Gimmick).is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_data_sharpwind_colossus_smashes_hit_in_front() {

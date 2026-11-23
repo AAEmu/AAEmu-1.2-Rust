@@ -25,6 +25,7 @@ use crate::models::transform::{PositionAndRotation, Quaternion};
 use crate::packets::world::SCChatMessagePacket;
 use crate::server::GameServer;
 use crate::systems::instances::encounters::registry as encounters;
+use crate::systems::npcs::doodad::templates::DoodadFuncSpawnGimmick;
 use crate::world::object::Entity;
 use crate::world::{self, session, GimmickRef, WorldInstance, WorldObject};
 
@@ -131,8 +132,10 @@ pub struct GimmickState {
     pub last_pos: [f32; 3],
     /// `LastRot`.
     pub last_rot: [f32; 3],
-    /// `SkillStarted`.
-    pub skill_started: bool,
+    /// The skill claimed by a timer or an explicit cast. A contact cannot cast the same skill.
+    skill_started: Option<u32>,
+    /// The contact scan has claimed the collision skill until the cast is refused or recorded.
+    collision_casting: bool,
     /// `Despawn != DateTime.MinValue`.
     pub despawned: bool,
     /// `Respawn` (unix ms, 0 = `DateTime.MinValue`).
@@ -337,7 +340,7 @@ impl GimmickState {
     }
 }
 
-/// A gimmick in `GimmickManager._activeGimmicks`.
+/// Runtime state for a spawned gimmick. Activation registers it for ticks.
 #[derive(Debug)]
 pub struct ActiveGimmick {
     pub gimmick: GimmickRef,
@@ -355,6 +358,17 @@ pub struct ActiveGimmick {
 impl ActiveGimmick {
     pub fn state(&self) -> MutexGuard<'_, GimmickState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn activate(self, server: &GameServer) -> GimmickRef {
+        let gimmick = self.gimmick.clone();
+        server
+            .systems
+            .npcs
+            .gimmicks
+            .for_world(self.world_id)
+            .add(Arc::new(self));
+        gimmick
     }
 }
 
@@ -459,14 +473,13 @@ impl GimmickManager {
 /// later write of the flag would take the gimmick for a non-authored one and overwrite its
 /// authored `vel` / `ang_vel` with the position delta. The same goes for `owner_character_id`: a
 /// tick before a later write would see an ownerless gimmick.
-fn add_active_gimmick(
-    server: &GameServer,
+fn new_active_gimmick(
     world_id: u32,
     gimmick: GimmickRef,
     spawner: Arc<GimmickSpawner>,
     template: Option<GimmickTemplate>,
     mut state: GimmickState,
-) -> Arc<ActiveGimmick> {
+) -> ActiveGimmick {
     let (template_id, entity_guid) = {
         let g = gimmick.data();
         (g.unit.template_id, g.entity_guid)
@@ -480,21 +493,14 @@ fn add_active_gimmick(
         None
     };
     state.time = time_of_day_ms(world::now_ms());
-    let active = Arc::new(ActiveGimmick {
+    ActiveGimmick {
         gimmick,
         world_id,
         spawner,
         template,
         handler,
         state: Mutex::new(state),
-    });
-    server
-        .systems
-        .npcs
-        .gimmicks
-        .for_world(world_id)
-        .add(active.clone());
-    active
+    }
 }
 
 fn new_gimmick(
@@ -529,7 +535,7 @@ fn create(
     obj_id: u32,
     template_id: u32,
     spawner: Arc<GimmickSpawner>,
-) -> Option<Arc<ActiveGimmick>> {
+) -> Option<ActiveGimmick> {
     // For elevators: templateId = 0 and Template = null, but EntityGuid is used.
     let template = server
         .game_data
@@ -588,8 +594,7 @@ fn create(
     let changes = world.spawn(&gimmick, &server.view_ctx());
     session::handle_zone_changes(server, changes);
     // A spawner gimmick (an elevator, a raft) belongs to nobody.
-    Some(add_active_gimmick(
-        server,
+    Some(new_active_gimmick(
         world.id,
         gimmick,
         spawner,
@@ -607,7 +612,7 @@ pub fn spawn_from_spawner(
     spawner: &GimmickSpawner,
 ) -> Option<GimmickRef> {
     match create(server, world, 0, spawner.unit_id, Arc::new(spawner.clone())) {
-        Some(a) => Some(a.gimmick.clone()),
+        Some(active) => Some(active.activate(server)),
         None => {
             warn!("Gimmick {}, from spawn not exist at db", spawner.unit_id);
             None
@@ -648,19 +653,18 @@ pub fn spawn_from_effect(
     params: &SpawnGimmickParams,
     caster: &WorldObject,
 ) -> Option<GimmickRef> {
-    spawn_effect_gimmick(server, world, params, caster, false)
+    Some(spawn_effect_gimmick(server, world, params, caster, false)?.activate(server))
 }
 
-/// [`spawn_from_effect`]; `doodad_motion` = the caller writes the authored `vel` / `ang_vel`
-/// itself right after the spawn (a doodad phase spawn), so the gimmick is registered as authored
-/// from the start.
+/// Spawns the world object. Callers that need ticking activate it after initialization.
+/// With `doodad_motion`, the caller supplies the authored velocities before activation.
 fn spawn_effect_gimmick(
     server: &GameServer,
     world: &Arc<WorldInstance>,
     params: &SpawnGimmickParams,
     caster: &WorldObject,
     doodad_motion: bool,
-) -> Option<GimmickRef> {
+) -> Option<ActiveGimmick> {
     let template = server
         .game_data
         .systems
@@ -862,10 +866,9 @@ fn spawn_effect_gimmick(
     let gimmick: GimmickRef = Entity::new(obj_id, g);
     let changes = world.spawn(&gimmick, &server.view_ctx());
     session::handle_zone_changes(server, changes);
-    add_active_gimmick(
-        server,
+    Some(new_active_gimmick(
         world.id,
-        gimmick.clone(),
+        gimmick,
         spawner,
         Some(template),
         GimmickState {
@@ -885,8 +888,7 @@ fn spawn_effect_gimmick(
             },
             ..Default::default()
         },
-    );
-    Some(gimmick)
+    ))
 }
 
 /// Doodad phase spawns use the doodad's world transform and the authored world offsets,
@@ -895,8 +897,34 @@ pub fn spawn_from_doodad(
     server: &GameServer,
     world: &Arc<WorldInstance>,
     source: &WorldObject,
-    f: &crate::systems::npcs::doodad::templates::DoodadFuncSpawnGimmick,
+    f: &DoodadFuncSpawnGimmick,
 ) -> Option<GimmickRef> {
+    Some(spawn_doodad_gimmick(server, world, source, f)?.activate(server))
+}
+
+/// Spawn a transient caster for a scripted blast. The world needs the caster for targeting
+/// and packets, but the gimmick tick must never see it as an active collision actor.
+pub(crate) fn cast_from_doodad_gimmick(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    source: &WorldObject,
+    f: &DoodadFuncSpawnGimmick,
+    skill_id: u32,
+) -> bool {
+    let Some(active) = spawn_doodad_gimmick(server, world, source, f) else {
+        return false;
+    };
+    let fired = do_gimmick_skill(server, world, &active, skill_id);
+    despawn(server, &active);
+    fired
+}
+
+fn spawn_doodad_gimmick(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    source: &WorldObject,
+    f: &DoodadFuncSpawnGimmick,
+) -> Option<ActiveGimmick> {
     let params = SpawnGimmickParams {
         gimmick_id: f.gimmick_id,
         offset_from_source: true,
@@ -907,26 +935,34 @@ pub fn spawn_from_doodad(
         scale: f.scale,
         ..Default::default()
     };
-    let gimmick = spawn_effect_gimmick(server, world, &params, source, true)?;
+    let active = spawn_effect_gimmick(server, world, &params, source, true)?;
     {
-        let mut g = gimmick.data();
+        let mut g = active.gimmick.data();
         g.unit.faction_id = f.faction_id;
         g.vel = [f.velocity_x, f.velocity_y, f.velocity_z];
         g.ang_vel = [f.angle_x, f.angle_y, f.angle_z];
     }
-    Some(gimmick)
+    Some(active)
 }
 
 /// `GimmickSpawner.Despawn(gimmick)`: removes it from the manager and the world; releases its
-/// ids unless a respawn is pending.
+/// ids unless a respawn is pending. A retained tick snapshot may still hold the handle.
 pub fn despawn(server: &GameServer, active: &ActiveGimmick) {
+    let release_ids = {
+        let mut st = active.state();
+        if st.despawned {
+            return;
+        }
+        st.despawned = true;
+        st.respawn_ms == 0
+    };
     if let Some(gimmicks) = server.systems.npcs.gimmicks.existing(active.world_id) {
         gimmicks.remove(active.gimmick.obj_id);
     }
     if let Some(world) = server.world.world_if_exists(active.world_id) {
         world.delete(&active.gimmick);
     }
-    if active.state().respawn_ms == 0 {
+    if release_ids {
         if active.gimmick.obj_id > 0 {
             server.ids.object.release_id(active.gimmick.obj_id);
         }
@@ -937,24 +973,33 @@ pub fn despawn(server: &GameServer, active: &ActiveGimmick) {
     }
 }
 
-/// `Gimmick.DoGimmickSkill(skillId)`: runs the skill once through the skills hook (caster =
-/// the spawner unit, a `SkillDoodad` caster of the gimmick, cast at the gimmick's position) and
-/// announces it in the system chat around the gimmick.
-pub(crate) fn do_gimmick_skill(
+/// Casts a skill at the gimmick's position and announces an accepted cast in system chat.
+///
+/// The 1.2 data can name the same skill for the fuse and for contact (e.g. the Triste bolts
+/// and the collapsing ceiling). The cast claims that skill before invoking effects so the
+/// contact path cannot fire it again. If contact fired first, it has already spent the fuse.
+fn do_gimmick_skill(
     server: &GameServer,
     world: &WorldInstance,
     active: &ActiveGimmick,
     skill_id: u32,
-) {
+) -> bool {
     if skill_id == 0 {
-        return;
+        return false;
     }
     {
         let mut st = active.state();
-        if st.skill_started {
-            return;
+        if st.despawned
+            || st.skill_started.is_some()
+            || (active
+                .template
+                .as_ref()
+                .is_some_and(|t| t.collision_skill_id == skill_id)
+                && (st.collision_casting || !st.collision_hits.is_empty()))
+        {
+            return false;
         }
-        st.skill_started = true;
+        st.skill_started = Some(skill_id);
     }
     let (spawner_unit_id, pos) = {
         let g = active.gimmick.data();
@@ -962,14 +1007,18 @@ pub(crate) fn do_gimmick_skill(
     };
     let caster = world.unit(spawner_unit_id);
     let me = WorldObject::from(&active.gimmick);
-    if let Some(h) = server.systems.npcs.hooks.skills.get() {
+    let fired = server.systems.npcs.hooks.skills.get().is_some_and(|h| {
         h.use_gimmick_skill(
             server,
             caster.as_ref(),
             &me,
             skill_id,
             (pos.x, pos.y, pos.z),
-        );
+        )
+    });
+    if !fired {
+        active.state().skill_started = None;
+        return false;
     }
     let msg = SCChatMessagePacket {
         chat_type: chat_type::SYSTEM,
@@ -979,6 +1028,7 @@ pub(crate) fn do_gimmick_skill(
         language_type: 0,
     };
     world::broadcast(world, &me, &msg, false);
+    true
 }
 
 /// `Gimmick.StopMovement()` (NPC AI gimmicks): uses the template skill when it has a target.
@@ -1130,19 +1180,28 @@ fn collision_tick(
     }
     // The unlatched contacts, in world order. A full latch ignores every further touch (the cap
     // is checked first, so an unlatchable unit cannot fire the skill on every tick).
+    let Some(h) = server.systems.npcs.hooks.skills.get() else {
+        return false;
+    };
     let unlatched: Vec<&WorldObject> = {
-        let st = active.state();
-        if st.collision_hits.len() >= MAX_COLLISION_HITS {
+        let mut st = active.state();
+        if st.despawned
+            || st.collision_casting
+            || st.skill_started == Some(template.collision_skill_id)
+            || st.collision_hits.len() >= MAX_COLLISION_HITS
+        {
             return false;
         }
-        contacts
+        let units: Vec<_> = contacts
             .iter()
             .filter(|(id, _)| !st.collision_hits.contains(id))
             .map(|(_, unit)| unit)
-            .collect()
-    };
-    let Some(h) = server.systems.npcs.hooks.skills.get() else {
-        return false;
+            .collect();
+        if units.is_empty() {
+            return false;
+        }
+        st.collision_casting = true;
+        units
     };
     // No lock is held across the cast. The first contact whose cast is accepted is the firing.
     let mut fired: Option<&WorldObject> = None;
@@ -1160,8 +1219,13 @@ fn collision_tick(
         }
     }
     let Some(fired) = fired else {
+        active.state().collision_casting = false;
         return false;
     };
+    if template.disappear_by_collision {
+        despawn(server, active);
+        return true;
+    }
     {
         // Only a firing latches units, and only the units the firing reached: the touching units
         // and the units inside the skill's area around its centre (a unit merely nearby, or
@@ -1203,11 +1267,7 @@ fn collision_tick(
                 st.collision_hits.push(id);
             }
         }
-    }
-    if template.disappear_by_collision {
-        active.state().despawned = true;
-        despawn(server, active);
-        return true;
+        st.collision_casting = false;
     }
     false
 }
@@ -1452,9 +1512,14 @@ pub fn gimmick_tick(
     // on the owner (Peace, no-PvP, siege hostility, tagging, crime evidence) no longer apply to
     // it, so it goes with its thrower instead of fighting on ownerless (a disconnect must not
     // lift the protection of a player a bomb is about to reach).
-    let owner = active.state().owner_character_id;
+    let owner = {
+        let st = active.state();
+        if st.despawned {
+            return;
+        }
+        st.owner_character_id
+    };
     if owner != 0 && server.world.character_by_id(owner).is_none() {
-        active.state().despawned = true;
         despawn(server, active);
         return;
     }
@@ -1591,7 +1656,6 @@ pub fn gimmick_tick(
             (g.unit.transform.x, g.unit.transform.y)
         };
         if world.region_by_pos(x, y).is_none() {
-            active.state().despawned = true;
             despawn(server, active);
             return;
         }
@@ -1599,14 +1663,22 @@ pub fn gimmick_tick(
 
     // Handle Delayed Skills
     if let Some(t) = &active.template {
-        let started = active.state().skill_started;
         let total = active.state().total_life_time;
         if t.skill_delay > 0
-            && !started
             && last_life_time.as_secs_f64() * 1000.0 < f64::from(t.skill_delay)
             && total.as_secs_f64() * 1000.0 >= f64::from(t.skill_delay)
         {
-            do_gimmick_skill(server, world, active, t.skill_id);
+            let fired = do_gimmick_skill(server, world, active, t.skill_id);
+            // Glider Bomb and Nuclear Bomb have no lifetime. Once their fuse spends the
+            // collision skill, remove them here because no later hit can remove them.
+            if fired
+                && t.disappear_by_collision
+                && t.skill_id == t.collision_skill_id
+                && t.life_time == 0
+            {
+                despawn(server, active);
+                return;
+            }
         }
     }
     // Contact hits (`GimmickTemplate.CollisionSkillId`): after the movement of this tick.
@@ -1616,7 +1688,6 @@ pub fn gimmick_tick(
         }
         if scenery_hit && t.disappear_by_collision {
             do_gimmick_skill(server, world, active, t.collision_skill_id);
-            active.state().despawned = true;
             despawn(server, active);
             return;
         }
@@ -1696,14 +1767,8 @@ pub fn gimmick_tick(
     // Check LifeTime and apply despawn time if needed
     if let Some(t) = &active.template {
         let despawn_now = {
-            let mut st = active.state();
-            let due = t.life_time > 0
-                && !st.despawned
-                && st.total_life_time.as_secs_f64() * 1000.0 >= f64::from(t.life_time);
-            if due {
-                st.despawned = true;
-            }
-            due
+            let st = active.state();
+            t.life_time > 0 && st.total_life_time.as_secs_f64() * 1000.0 >= f64::from(t.life_time)
         };
         if despawn_now {
             despawn(server, active);
@@ -1836,6 +1901,9 @@ mod tests {
         use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 
         let mut data = crate::data::GameData::empty();
+        let mut impact = crate::systems::skills::tests::skill_template(17741);
+        impact.target_type = 6; // Pos
+        data.systems.skills.add_skill(impact);
         data.systems.npcs.gimmick.templates.insert(
             45,
             GimmickTemplate {
@@ -1848,6 +1916,7 @@ mod tests {
             },
         );
         let server = test_server_with(data);
+        crate::systems::skills::bridges::install(&server);
         crate::systems::ai::collision::flow_tests::enable_collision(&server, 90.0);
         let world = test_world(&server);
         let client = TestClient::new(&server, 1, 1);
@@ -1896,7 +1965,7 @@ mod tests {
 
         gimmick_tick(&server, &world, &shot, Duration::from_millis(50), 1000);
 
-        assert!(shot.state().skill_started);
+        assert_eq!(shot.state().skill_started, Some(17741));
         assert!(world.gimmick(shot.gimmick.obj_id).is_none());
         let y = shot.gimmick.data().unit.transform.y;
         assert!((y - 101.22).abs() < 0.05, "impact y={y}");
@@ -1908,7 +1977,7 @@ mod tests {
         let shot = fire_cannon(&server, &world, &shooter, -20.0);
         gimmick_tick(&server, &world, &shot, Duration::from_millis(150), 1000);
 
-        assert!(shot.state().skill_started);
+        assert_eq!(shot.state().skill_started, Some(17741));
         assert!(world.gimmick(shot.gimmick.obj_id).is_none());
         let z = shot.gimmick.data().unit.transform.z;
         assert!((z - 100.03).abs() < 0.05, "impact z={z}");
@@ -1970,7 +2039,7 @@ mod tests {
         let shot = fire_cannon(&server, &world, &shooter, 0.0);
         gimmick_tick(&server, &world, &shot, Duration::from_millis(100), 1000);
 
-        assert!(shot.state().skill_started);
+        assert_eq!(shot.state().skill_started, Some(17741));
         assert!(world.gimmick(shot.gimmick.obj_id).is_none());
         let y = shot.gimmick.data().unit.transform.y;
         assert!((y - 103.47).abs() < 0.05, "impact y={y}");
@@ -2184,6 +2253,76 @@ mod tests {
             .find(g.obj_id)
             .expect("active gimmick");
         (g, active)
+    }
+
+    #[tokio::test]
+    async fn a_shared_timer_and_contact_skill_spends_the_fuse_once() {
+        // A disappearing projectile can reach a unit on its fuse tick. A persistent
+        // gimmick can also hit first and still be present when its fuse comes due.
+        for (disappear_by_collision, life_time, skill_delay) in
+            [(true, 0, 50), (true, 1_000, 50), (false, 0, 100)]
+        {
+            let template = GimmickTemplate {
+                collision_skill_id: TIMER_SKILL,
+                skill_id: TIMER_SKILL,
+                skill_delay,
+                life_time,
+                ..contact_template(disappear_by_collision)
+            };
+            let f = contact_fixture_with_data(timer_data(template), (100.0, 100.0));
+            let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+            let (_, active) = spawn_contact_gimmick(&f, &source, [2.0, 0.0, 0.0]);
+
+            for now in [1_000, 1_050] {
+                gimmick_tick(&f.server, &f.world, &active, Duration::from_millis(50), now);
+            }
+
+            assert_eq!(f.victim.data().unit.hp, 400, "fuse at {skill_delay} ms");
+            assert_eq!(
+                active.state().despawned,
+                disappear_by_collision && life_time == 0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shared_fuse_despawns_a_disappearing_gimmick_without_a_lifetime() {
+        for life_time in [0, 1_000] {
+            let template = GimmickTemplate {
+                collision_skill_id: TIMER_SKILL,
+                skill_id: TIMER_SKILL,
+                skill_delay: 100,
+                life_time,
+                ..contact_template(true)
+            };
+            let f = contact_fixture_with_data(timer_data(template), (100.0, 100.0));
+            let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+            // Keep the gimmick below the collision speed threshold so only its fuse can cast.
+            let (g, active) = spawn_contact_gimmick(&f, &source, [0.0; 3]);
+            let manager = &f.server.systems.npcs.gimmicks;
+            let dt = Duration::from_millis(50);
+
+            gimmick_tick(&f.server, &f.world, &active, dt, 1_000);
+            assert_eq!(f.victim.data().unit.hp, 500);
+            assert!(f.world.gimmick(g.obj_id).is_some());
+            assert!(manager.find(g.obj_id).is_some());
+
+            gimmick_tick(&f.server, &f.world, &active, dt, 1_050);
+            assert_eq!(f.victim.data().unit.hp, 400, "the fuse deals one hit");
+            assert_eq!(
+                f.world.gimmick(g.obj_id).is_none(),
+                life_time == 0,
+                "world lookup after the fuse with lifetime {life_time}"
+            );
+            assert_eq!(
+                manager.find(g.obj_id).is_none(),
+                life_time == 0,
+                "manager lookup after the fuse with lifetime {life_time}"
+            );
+
+            gimmick_tick(&f.server, &f.world, &active, dt, 1_100);
+            assert_eq!(f.victim.data().unit.hp, 400, "the fuse stays spent");
+        }
     }
 
     #[tokio::test]

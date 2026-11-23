@@ -271,16 +271,13 @@ impl SkillsBridge for SkillsForNpcs {
         gimmick: &WorldObject,
         skill_id: u32,
         pos: (f32, f32, f32),
-    ) {
+    ) -> bool {
         // `Gimmick.DoGimmickSkill` casts at the gimmick's position. The C# used the spawner unit
         // as the caster; once the gimmick moved (a thrown barrel bomb), the caster-to-position
         // range check refused the cast, and a doodad-spawned gimmick has no spawner unit at all.
         // Cast from the gimmick itself (a unit in the object model) at its current position: the
         // spawner unit's faction is copied to the gimmick at spawn, and the gimmick-source
         // validation bypass (no health, no range, no obstacle ray) applies.
-        if server.game_data.systems.skills.skill(skill_id).is_none() {
-            return;
-        }
         let gimmick_id = gimmick.obj_id();
         use_skill_with(
             server,
@@ -297,7 +294,8 @@ impl SkillsBridge for SkillsForNpcs {
             },
             skill_id,
             Some(SkillObject::default()),
-        );
+        )
+        .is_some_and(|r| r == skill_result::SUCCESS)
     }
 
     fn use_gimmick_collision_skill(
