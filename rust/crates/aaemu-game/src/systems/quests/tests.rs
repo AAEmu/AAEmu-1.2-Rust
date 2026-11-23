@@ -7137,3 +7137,36 @@ async fn zone_kill_objective_self_only_uses_killer_instead_of_credit_recipient()
         1
     );
 }
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_aggro_2432_requires_kill_within_range() {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data.act_template(4, "QuestActObjAggro").unwrap();
+    assert_eq!(act.quest_id, 2432);
+    let (server, _) = server_with(|data| {
+        single_act_quest(data, 2432, act.count, act.kind.clone());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 2432);
+        let quest = ctx.st.quest_mut(h).unwrap();
+        quest.acceptor_type = acceptor::NPC;
+        quest.acceptor_id = 600;
+        for (distance, expected) in [(30.1, 0), (30.0, 1)] {
+            ctx.dispatch(&QuestEvent::Kill {
+                target: None,
+                killer: None,
+                victim: Some(super::engine::KillUnitInfo {
+                    npc_template_id: Some(600),
+                    position: (distance, 0.0, 0.0),
+                    aggro_percent: 10.0,
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], expected);
+        }
+    });
+}

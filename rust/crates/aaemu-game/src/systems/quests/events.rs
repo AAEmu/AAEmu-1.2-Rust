@@ -903,6 +903,7 @@ pub fn kill_unit(server: &GameServer, o: &WorldObject, aggro_for: Option<u32>) -
         faction_id: s.faction_id,
         level: s.level,
         aggro_percent,
+        position: s.position,
     }
 }
 

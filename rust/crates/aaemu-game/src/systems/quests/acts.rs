@@ -1247,6 +1247,7 @@ impl Ctx<'_> {
             }
             (
                 ObjAggro {
+                    range,
                     rank1,
                     rank1_ratio,
                     rank1_item,
@@ -1271,6 +1272,14 @@ impl Ctx<'_> {
                     return Ok(());
                 };
                 if acc_type != acceptor::NPC || npc_template != acc_id {
+                    return Ok(());
+                }
+                // Server rule inferred from the compact: the authored aggro range
+                // (r208022 loader 0x8a0450) limits credit to owners near the dying NPC.
+                let (x, y, z) = self.env.position;
+                let (tx, ty, tz) = t.position;
+                let distance_squared = (x - tx).powi(2) + (y - ty).powi(2) + (z - tz).powi(2);
+                if *range > 0 && distance_squared > (*range as f32).powi(2) {
                     return Ok(());
                 }
                 let rate = t.aggro_percent;
