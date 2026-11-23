@@ -5622,6 +5622,55 @@ async fn restart_request_requires_restart_on_fail_and_main_detail() {
 }
 
 #[tokio::test]
+async fn daily_quota_counts_active_and_completed_contexts_once() {
+    let (server, _) = server_with(|d| {
+        for (id, detail_id) in [
+            (130, detail::DAILY),
+            (131, detail::DAILY_GROUP),
+            (132, detail::DAILY_HUNT),
+            (133, detail::DAILY_LIVELIHOOD),
+            (134, detail::MAIN),
+        ] {
+            d.add_template(QuestTemplate {
+                detail_id,
+                ..quest(id)
+            });
+            d.add_component(component(id * 10, id, kind::START));
+            d.add_act(id * 10, id * 10, id * 10, 0, ActKind::ConAutoComplete);
+            d.add_component(component(id * 10 + 1, id, kind::READY));
+            d.add_act(
+                id * 10 + 1,
+                id * 10 + 1,
+                id * 10 + 1,
+                0,
+                ActKind::ConReportJournal,
+            );
+        }
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(130, false, 0, 0));
+        ctx.set_completed_quest_flag(130, true);
+        ctx.set_completed_quest_flag(131, true);
+        ctx.set_completed_quest_flag(134, true);
+        assert!(ctx.start_refusal(132, false).is_none());
+        server.config.update(|config| config.quest.daily_limit = 3);
+        assert!(ctx.start_refusal(132, false).is_none());
+        assert!(ctx.add_quest(132, false, 0, 0));
+        ctx.sent.clear();
+        ctx.answer_start_refusals = true;
+        assert!(!ctx.add_quest(133, false, 0, 0));
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, failed_bytes(133, 0x1f))]
+        );
+        assert!(ctx.start_refusal(133, true).is_none());
+        ctx.reset_daily_quests(false);
+        assert!(ctx.start_refusal(133, false).is_none());
+    });
+}
+
+#[tokio::test]
 async fn restart_request_is_throttled_per_character() {
     let (server, _) = server_with(|d| timed_restart_quest(d, 95, true, 60_000));
     let mut c = character();

@@ -58,6 +58,8 @@ pub enum StartRefusal {
     UnknownQuest,
     /// `game_schedule_quests`: the quest's schedule window is not in progress.
     ScheduleWindow,
+    /// The configured daily quota has been reached.
+    DailyQuota,
     /// `CanAcceptSupplyItems`: this auto-equip trade pack cannot go to the backpack slot.
     SupplyItem(u32),
     /// The Start component's `unit_reqs` are not met.

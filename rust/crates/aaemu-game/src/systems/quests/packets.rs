@@ -141,6 +141,7 @@ impl Marshal for SCQuestContextResetPacket {
 pub mod quest_error {
     pub const ALREADY_HAVE: u8 = 1;
     pub const INVALID_QUEST: u8 = 2;
+    pub const DAILY_QUOTA: u8 = 0x1f;
     pub const INVALID_NPC_OR_QUEST: u8 = 7;
     pub const INVALID_QUEST_STATUS: u8 = 12;
     pub const INVALID_DOODAD: u8 = 19;
