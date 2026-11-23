@@ -1281,3 +1281,57 @@ async fn loot_item_failure_with_room_keeps_the_invalid_item_error() {
         )]
     );
 }
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_loot_item_uses_exact_chance_and_inclusive_quantity() {
+    use rand::{
+        rngs::{mock::StepRng, StdRng},
+        SeedableRng,
+    };
+
+    let path = std::env::var("AAEMU_COMPACT_DB").expect("AAEMU_COMPACT_DB");
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = crate::systems::npcs::doodad::data::DoodadData::load_from(&conn).unwrap();
+    let Some(FuncTemplate::LootItem(authored)) = data.func_template(1017, "DoodadFuncLootItem")
+    else {
+        panic!("missing loot item 1017");
+    };
+    assert_eq!(data.func_group(3600).unwrap().almighty, 1855);
+    assert!(data
+        .funcs_for_group(3600)
+        .iter()
+        .any(|f| { f.func_id == 1017 && f.func_type == "DoodadFuncLootItem" }));
+    assert_eq!(authored.item_id, ITEM_COINS);
+    let f = fixture(Rec {
+        money_ok: true,
+        ..Rec::default()
+    });
+    let world = f.server.world.world(0).unwrap();
+    let ctx = DoodadCtx::new(&f.server, world, f.doodad.clone());
+    let caster = WorldObject::from(&f.player);
+
+    let mut seeded = StdRng::seed_from_u64(1017);
+    for _ in 0..128 {
+        items::loot_item_with_rng(authored, &ctx, Some(&caster), 0, -1, &mut seeded);
+    }
+    assert_eq!(f.rec.calls().len(), 128);
+    assert!(
+        f.rec
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("money 10 ")),
+        "authored quantity 10 is reachable"
+    );
+
+    let zero = DoodadFuncLootItem {
+        percent: 0,
+        ..authored.clone()
+    };
+    let before = f.rec.calls().len();
+    items::loot_item_with_rng(&zero, &ctx, Some(&caster), 0, -1, &mut StepRng::new(0, 0));
+    assert_eq!(f.rec.calls().len(), before);
+    assert!(f.doodad.data().phase.loot_missed);
+}

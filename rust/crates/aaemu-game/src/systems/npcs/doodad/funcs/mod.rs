@@ -365,14 +365,3 @@ pub(crate) fn quests_hook(server: &GameServer) -> Arc<dyn QuestsBridge> {
         .get()
         .unwrap_or_else(|| Arc::new(NoBridge))
 }
-
-/// `Random.Shared.Next(min, max)` (`max` exclusive, `min` when equal). `None` where the C#
-/// throws (`min > max`).
-pub(crate) fn random_next(min: i32, max: i32) -> Option<i32> {
-    use rand::Rng;
-    match min.cmp(&max) {
-        std::cmp::Ordering::Greater => None,
-        std::cmp::Ordering::Equal => Some(min),
-        std::cmp::Ordering::Less => Some(rand::thread_rng().gen_range(min..max)),
-    }
-}

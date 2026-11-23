@@ -1,9 +1,10 @@
 //! Item / loot funcs: `DoodadFuncLootItem`, `LootPack`, `RecoverItem`, `RemoveItem`,
 //! `Purchase`, `BuyFish`, `ConvertFish`, `ConsumeChanger`.
 
+use rand::Rng;
+
 use super::{
-    economy, error_message as err, is_player, item_task, random_next, send_error,
-    set_to_next_phase, ITEM_COINS,
+    economy, error_message as err, is_player, item_task, send_error, set_to_next_phase, ITEM_COINS,
 };
 use crate::models::container::{equip_slot, slot_type};
 use crate::models::doodad::{doodad_owner_type, PendingDoodadLoot};
@@ -109,13 +110,33 @@ fn cast_character(caster: Option<&WorldObject>) -> Result<Option<&PlayerRef>, ()
     }
 }
 
-/// `DoodadFuncLootItem.Use`.
+/// LootItem uses the compact percent in ten-thousandths and an inclusive count range.
+/// This server rule is inferred from the item 1017 data read by r208022 RVA 0x7b0c80,
+/// following the shared loot resolver's half-open chance and inclusive quantity.
 pub fn loot_item(
     f: &DoodadFuncLootItem,
     ctx: &DoodadCtx<'_>,
     caster: Option<&WorldObject>,
     skill_id: u32,
     next_phase: i32,
+) {
+    loot_item_with_rng(
+        f,
+        ctx,
+        caster,
+        skill_id,
+        next_phase,
+        &mut rand::thread_rng(),
+    );
+}
+
+pub(super) fn loot_item_with_rng(
+    f: &DoodadFuncLootItem,
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    skill_id: u32,
+    next_phase: i32,
+    rng: &mut impl Rng,
 ) {
     let msg = format!(
         "DoodadFuncLootItem: skillId {skill_id}, nextPhase {next_phase},  ItemId {}, CountMin {}, CountMax {},  Percent {}, RemainTime {}, GroupId {}",
@@ -138,12 +159,12 @@ pub fn loot_item(
     let count = if let Some(count) = pending_count {
         count
     } else {
-        let chance = random_next(0, 10000).unwrap_or(0);
-        if chance > f.percent {
+        let chance = rng.gen_range(0..10_000);
+        if chance >= f.percent {
             ctx.doodad.data().phase.loot_missed = true;
             return;
         }
-        let Some(count) = random_next(f.count_min, f.count_max) else {
+        if f.count_min > f.count_max {
             tracing::error!(
                 "DoodadFuncLootItem {}: CountMin {} > CountMax {}",
                 f.id,
@@ -151,8 +172,12 @@ pub fn loot_item(
                 f.count_max
             );
             return;
-        };
-        count
+        }
+        if f.count_min == f.count_max {
+            f.count_min
+        } else {
+            rng.gen_range(f.count_min..=f.count_max)
+        }
     };
     let eco = economy(ctx.server);
     let res = if f.item_id == ITEM_COINS {
