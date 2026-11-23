@@ -13,7 +13,7 @@ use crate::systems::npcs::doodad::templates::{DoodadFuncSpawnGimmick, DoodadFunc
 use crate::systems::npcs::gimmick::manager::SpawnGimmickParams;
 use crate::systems::skills::controllers::Vec3;
 use crate::systems::skills::data::effects::SpawnGimmickEffect;
-use crate::systems::skills::data::SkillTemplate;
+use crate::systems::skills::data::{EffectKind, SkillTemplate};
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::geometry::Target;
 use crate::systems::skills::state::SkillRef;
@@ -129,6 +129,18 @@ pub trait Encounter: Sync {
         _caster: &WorldObject,
         _target: &Target,
     ) -> Option<Result<(), (u8, u32)>> {
+        None
+    }
+
+    /// Replace an effect with a corpse-free removal that runs after the cast's packet batch.
+    fn deferred_effect_replacement(
+        &self,
+        _t: &SkillTemplate,
+        _kind: EffectKind,
+        _id: u32,
+        _caster: &WorldObject,
+        _target: &Target,
+    ) -> Option<(EffectKind, u32)> {
         None
     }
 
