@@ -558,8 +558,10 @@ group; `/towerdef next <id> <wave>` advances exactly one wave (numbered from 1),
 and `/towerdef end <id>` stops it and removes its active controllers and summons.
 Dead NPCs keep their normal corpse timers so wave changes and event completion do
 not remove loot before players can collect it. Removing an instance clears its corpses too.
-The `tower_def` spelling is also supported. Players entering a zone receive the
-active event list, including the current wave.
+The `tower_def` spelling is also supported. Start, wave and end notices go to
+players in the event's zone group within its world instance. The active event
+list remains visible across that world. Entering the event's zone group sends
+the start and current wave state for events already in progress.
 
 To schedule a verified definition, add this section to the game's `Config.Local.json`
 and replace the event identity with the values for its zone:
@@ -613,8 +615,10 @@ starting the scheduler. Use an empty `Events` list or `Enabled: false` to leave
 automatic scheduling off. Disabling the scheduler does not cancel a running event;
 use `/towerdef end` for that.
 
-Schedules follow compact `tod` / `tod_day_interval` on the accelerated game clock;
-day intervals restart from day 0 when the scheduler starts. Wave delays and force-end
+Schedules follow compact `tod` / `tod_day_interval` on the accelerated game clock.
+Day intervals use the epoch-derived game day and survive server restarts. A GM
+/time set or a discontinuous clock jump skips any crossed schedules. Use
+/towerdef start to launch an event manually. Wave delays and force-end
 times use real seconds. A configured event matching a conflict zone's
 `war_tower_def_id` starts on entering War and ends on leaving War, instead of using
 `tod`. Events do not replay during the same clock crossing or War period.

@@ -56,6 +56,15 @@ fn fixture() -> Arc<GameServer> {
             ..Default::default()
         },
     );
+    data.zones.zones.insert(
+        TEST_ZONE + 1,
+        Zone {
+            id: 78,
+            zone_key: TEST_ZONE + 1,
+            group_id: 6,
+            ..Default::default()
+        },
+    );
     let td = &mut data.systems.instances.tower_defs;
     td.tower_defs.insert(
         12,
@@ -536,7 +545,7 @@ async fn tower_def_lifecycle_broadcasts_progresses_and_cleans_up() {
     spawn_player(&server, &c2, test_character(2, "Two", 100.0, 100.0), 5001);
     c1.drain();
     c2.drain();
-    send_zone_list(&server, &p1);
+    send_zone_list(&server, &p1, 0);
     assert!(c1.drain().is_empty());
     assert!(
         server
@@ -619,7 +628,7 @@ async fn tower_def_lifecycle_broadcasts_progresses_and_cleans_up() {
     assert!(server.world.object(child.obj_id).is_none());
     assert!(server.world.object(summoned.obj_id).is_none());
     assert!(server.world.object(unrelated.obj_id).is_some());
-    send_zone_list(&server, &p1);
+    send_zone_list(&server, &p1, 0);
     assert!(c1.drain_ops().contains(&sc::SCTowerDefListPacket));
     advance(10);
     tick(&server);
@@ -861,7 +870,7 @@ async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() 
                 zone_id: TEST_ZONE,
             })
     });
-    let clock = ManualClock::new(unix_at(0, 17.0));
+    let clock = ManualClock::new(unix_at(0, 17.95));
     server.time.set_test_clock(clock.clock(), 0.0);
     initialize(&server).unwrap();
     move_clock(&server, &clock, unix_at(0, 18.0));
@@ -870,9 +879,9 @@ async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() 
     server
         .config
         .update(|c| c.dungeons.tower_defense.enabled = true);
-    move_clock(&server, &clock, unix_at(0, 17.0));
+    move_clock(&server, &clock, unix_at(0, 17.95));
     initialize(&server).unwrap();
-    move_clock(&server, &clock, unix_at(0, 18.1));
+    move_clock(&server, &clock, unix_at(0, 18.01));
     tick(&server);
     assert_eq!(infos(&server, 0).len(), 1);
     end(&server, KEY).unwrap();
@@ -901,6 +910,110 @@ async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() 
     move_clock(&server, &clock, unix_at(2, 0.0));
     tick(&server);
     assert_eq!(infos(&server, 0).len(), 1, "day 2 starts at midnight");
+    end(&server, KEY).unwrap();
+    tick(&server);
+    assert!(active_ids(&server).is_empty(), "midnight starts only once");
+}
+
+#[tokio::test]
+async fn tower_def_clock_sets_and_forward_jumps_skip_crossings() {
+    let mut server = fixture();
+    server.config.update(|c| {
+        c.dungeons.tower_defense.enabled = true;
+        c.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
+            id: 12,
+            world_id: 0,
+            zone_group_id: 5,
+            zone_id: TEST_ZONE,
+        }];
+    });
+    let clock = ManualClock::new(unix_at(8, 13.94));
+    server.time.set_test_clock(clock.clock(), 0.0);
+    initialize(&server).unwrap();
+
+    // A rewind from 13:56 to 13:00 previously fired the 18:00 event as yesterday's.
+    server.time.set(13.0);
+    tick(&server);
+    assert!(active_ids(&server).is_empty());
+
+    // Even a small explicit forward set across the scheduled hour is a discontinuity.
+    server.time.set(17.98);
+    tick(&server);
+    server.time.set(18.01);
+    tick(&server);
+    assert!(active_ids(&server).is_empty());
+
+    server.time.set(13.0);
+    tick(&server);
+
+    clock.advance(3100.0); // large wall-clock jump takes time past 18:00
+    server.time.tick();
+    tick(&server);
+    assert!(active_ids(&server).is_empty());
+
+    server.time.set(17.99);
+    tick(&server);
+    clock.advance(12.0);
+    server.time.tick();
+    tick(&server);
+    assert_eq!(active_ids(&server), vec![12]);
+
+    // Rewinding and crossing again on the same day must not replay the event.
+    end(&server, KEY).unwrap();
+    server.time.set(17.99);
+    tick(&server);
+    clock.advance(12.0);
+    server.time.tick();
+    tick(&server);
+    assert!(active_ids(&server).is_empty());
+}
+
+#[tokio::test]
+async fn tower_def_notices_follow_players_entering_the_event_group() {
+    let server = fixture();
+    let mut local = TestClient::new(&server, 1, 1);
+    let mut remote = TestClient::new(&server, 2, 2);
+    spawn_player(
+        &server,
+        &local,
+        test_character(1, "Local", 100.0, 100.0),
+        5000,
+    );
+    let traveler = spawn_player(
+        &server,
+        &remote,
+        test_character(2, "Traveler", 100.0, 100.0),
+        5001,
+    );
+    let other_zone = TEST_ZONE + 1;
+    traveler.data().unit.transform.zone_id = other_zone;
+    local.drain();
+    remote.drain();
+
+    start(&server, KEY, TEST_ZONE).unwrap();
+    next_wave(&server, KEY, 1).unwrap();
+    let local_ops = local.drain_ops();
+    let remote_ops = remote.drain_ops();
+    for op in [sc::SCTowerDefStartPacket, sc::SCTowerDefWaveStartPacket] {
+        assert!(local_ops.contains(&op));
+        assert!(!remote_ops.contains(&op));
+    }
+    assert!(remote_ops.contains(&sc::SCTowerDefListPacket));
+
+    traveler.data().unit.transform.zone_id = TEST_ZONE;
+    crate::world::session::on_zone_change(&server, &traveler, other_zone, TEST_ZONE);
+    let entered = remote.drain();
+    assert!(entered
+        .iter()
+        .any(|(op, _)| *op == sc::SCTowerDefStartPacket));
+    assert!(entered.iter().any(|(op, body)| {
+        *op == sc::SCTowerDefWaveStartPacket && body.ends_with(&0u32.to_le_bytes())
+    }));
+
+    traveler.data().unit.transform.zone_id = other_zone;
+    end(&server, KEY).unwrap();
+    assert!(local.drain_ops().contains(&sc::SCTowerDefEndPacket));
+    assert!(!remote.drain_ops().contains(&sc::SCTowerDefEndPacket));
 }
 
 /// A boot before an event's `tod` sees the crossing and starts it once; the game day number is
@@ -977,6 +1090,8 @@ async fn tower_def_boot_after_the_tod_waits_for_the_next_game_day() {
     move_clock(&server, &clock, unix_at(9, 0.0));
     tick(&server);
     assert!(infos(&server, 0).is_empty(), "midnight does not fire it");
+    move_clock(&server, &clock, unix_at(9, 13.95));
+    tick(&server);
     move_clock(&server, &clock, unix_at(9, 14.0));
     tick(&server);
     assert_eq!(

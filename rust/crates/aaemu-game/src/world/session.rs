@@ -172,7 +172,12 @@ pub fn handle_zone_changes(server: &GameServer, changes: Vec<crate::world::ZoneC
 
 /// `Character.OnZoneChange(lastZoneKey, newZoneKey)`.
 pub fn on_zone_change(server: &GameServer, p: &PlayerRef, last_zone: u32, new_zone: u32) {
-    crate::systems::instances::tower_def::send_zone_list(server, p);
+    crate::systems::instances::tower_def::send_zone_list(server, p, last_zone);
+    refresh_zone(server, p, last_zone, new_zone);
+}
+
+/// Refresh zone services when recomputing a position without actually entering a zone.
+pub(crate) fn refresh_zone(server: &GameServer, p: &PlayerRef, last_zone: u32, new_zone: u32) {
     // base.OnZoneChange (Unit: zone group buffs) -> the skills subsystem's hook.
     if let Some(h) = server.systems.hooks.unit.get() {
         h.on_unit_zone_change(server, &WorldObject::from(p), last_zone, new_zone);
@@ -304,8 +309,11 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
         if let Some(world) = world {
             world.add_object(p);
         }
-    }
-    if old.zone_id != destination.zone_id {
+        crate::systems::instances::tower_def::send_zone_list(server, p, 0);
+        if old.zone_id != destination.zone_id {
+            refresh_zone(server, p, old.zone_id, destination.zone_id);
+        }
+    } else if old.zone_id != destination.zone_id {
         on_zone_change(server, p, old.zone_id, destination.zone_id);
     }
     true

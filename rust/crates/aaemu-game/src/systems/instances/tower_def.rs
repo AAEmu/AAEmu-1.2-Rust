@@ -99,12 +99,7 @@ struct Event {
 struct State {
     active: BTreeMap<EventKey, Event>,
     ever_started: bool,
-    previous_hour: Option<f32>,
-    /// The epoch-derived game day of the same clock snapshot as `previous_hour`
-    /// (`TimeManager::get_time_and_day`), read every tick: `scheduled_days` and
-    /// `tod_day_interval` stay restart-stable and a crossing is attributed to the day it
-    /// happened.
-    day: i64,
+    previous_clock: Option<(f32, i64, u64)>,
     scheduled_days: HashMap<EventKey, i64>,
     war_active: HashSet<EventKey>,
     /// Victory follow-ups (and the zone of the event that triggered them) waiting for the next
@@ -609,15 +604,14 @@ pub fn initialize(server: &GameServer) -> anyhow::Result<()> {
         );
     }
     {
-        let (hour, day) = server.time.get_time_and_day();
+        let clock = server.time.schedule_snapshot();
         let mut state = manager(server)
             .state
             .lock()
             .expect("tower defense poisoned");
         state.events = accepted;
         state.events_from_config = explicit;
-        state.previous_hour = Some(hour);
-        state.day = day;
+        state.previous_clock = Some(clock);
     }
     Ok(())
 }
@@ -650,9 +644,9 @@ pub fn start(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Result
         end(server, key)?;
         return Err(error);
     }
-    broadcast(
+    announce(
         server,
-        key.world_id,
+        key,
         SCTowerDefStartPacket {
             key: key.wire(),
             event_zone_id: zone_id,
@@ -756,9 +750,9 @@ pub fn next_wave(server: &GameServer, key: EventKey, step: u32) -> anyhow::Resul
             return Err(error);
         }
     }
-    broadcast(
+    announce(
         server,
-        key.world_id,
+        key,
         SCTowerDefWaveStartPacket {
             key: key.wire(),
             event_zone_id: zone_id,
@@ -801,9 +795,9 @@ fn end_event(server: &GameServer, key: EventKey, keep_corpses: bool) -> anyhow::
         event.owned.into_values().map(|n| n.npc).collect(),
         keep_corpses,
     );
-    broadcast(
+    announce(
         server,
-        key.world_id,
+        key,
         SCTowerDefEndPacket {
             key: key.wire(),
             event_zone_id: event.zone_id,
@@ -1229,7 +1223,8 @@ fn schedule_tick(server: &GameServer) {
     if !config.enabled {
         return;
     }
-    let (hour, day) = server.time.get_time_and_day();
+    let clock = server.time.schedule_snapshot();
+    let (hour, day, revision) = clock;
     if !hour.is_finite() || !(0.0..=24.0).contains(&hour) {
         return;
     }
@@ -1278,12 +1273,16 @@ fn schedule_tick(server: &GameServer) {
             .state
             .lock()
             .expect("tower defense poisoned");
-        let previous = state.previous_hour.replace(hour).unwrap_or(hour);
-        let wrapped = hour < previous;
-        // The hour and the day are one clock snapshot: the cached hour may still be the one
-        // refreshed just before midnight while the wall clock (and a separate `get_day`) has
-        // already crossed it, and a 23:59 crossing must stay on the day it happened.
-        state.day = day;
+        let (previous, previous_day, previous_revision) =
+            state.previous_clock.replace(clock).unwrap_or(clock);
+        let wrapped = previous_day.checked_add(1) == Some(day);
+        let elapsed_hours = if wrapped { 24.0 } else { 0.0 } + hour - previous;
+        // The clock normally publishes every ten real seconds. Allow delayed ticks up
+        // to two real minutes (twelve game minutes), then re-baseline without catch-up.
+        let continuous = revision == previous_revision
+            && (day == previous_day || wrapped)
+            && elapsed_hours > 0.0
+            && elapsed_hours <= 0.2;
         for c in &events {
             let key = EventKey::from(c);
             let Some(def) = server
@@ -1314,10 +1313,12 @@ fn schedule_tick(server: &GameServer) {
                 }
                 continue;
             }
-            let occurrence = if wrapped && def.time_of_day > previous {
-                Some(state.day - 1)
+            let occurrence = if !continuous {
+                None
+            } else if wrapped && def.time_of_day > previous {
+                Some(previous_day)
             } else if (wrapped || previous < def.time_of_day) && def.time_of_day <= hour {
-                Some(state.day)
+                Some(day)
             } else {
                 None
             };
@@ -1412,15 +1413,41 @@ pub fn send_list(server: &GameServer, player: &PlayerRef) {
 }
 
 /// Preserve ordinary zone-entry flows before any event has run. After the first event,
-/// also send empty lists so switching worlds clears an event's old client map marker.
-pub fn send_zone_list(server: &GameServer, player: &PlayerRef) {
+/// also send empty lists so switching worlds clears any previous list state.
+pub fn send_zone_list(server: &GameServer, player: &PlayerRef, last_zone: u32) {
     let started = manager(server)
         .state
         .lock()
         .expect("tower defense poisoned")
         .ever_started;
     if started {
+        let transform = player.data().unit.transform;
         send_list(server, player);
+        let group = zone_group(server, transform.zone_id);
+        if group == zone_group(server, last_zone) {
+            return;
+        }
+        let active: Vec<_> = manager(server)
+            .state
+            .lock()
+            .expect("tower defense poisoned")
+            .active
+            .iter()
+            .filter(|(key, _)| {
+                key.world_id == transform.instance_id && group == Some(u32::from(key.zone_group_id))
+            })
+            .map(|(key, event)| (key.wire(), event.zone_id, event.step))
+            .collect();
+        for (key, event_zone_id, step) in active {
+            player.send(SCTowerDefStartPacket { key, event_zone_id });
+            if step > 0 {
+                player.send(SCTowerDefWaveStartPacket {
+                    key,
+                    event_zone_id,
+                    wave_index: step - 1,
+                });
+            }
+        }
     }
 }
 
@@ -1432,6 +1459,25 @@ fn send_world_list(server: &GameServer, world_id: u32) {
             infos: infos(server, world_id),
         },
     );
+}
+
+fn zone_group(server: &GameServer, zone_id: u32) -> Option<u32> {
+    server
+        .game_data
+        .zones
+        .zone_by_key(zone_id)
+        .map(|zone| zone.group_id)
+}
+
+fn announce(server: &GameServer, key: EventKey, packet: impl ServerPacket + Clone + 'static) {
+    for player in server.world.all_characters() {
+        let transform = player.data().unit.transform;
+        if transform.instance_id == key.world_id
+            && zone_group(server, transform.zone_id) == Some(u32::from(key.zone_group_id))
+        {
+            player.send(packet.clone());
+        }
+    }
 }
 
 fn broadcast(server: &GameServer, world_id: u32, packet: impl ServerPacket + Clone + 'static) {
