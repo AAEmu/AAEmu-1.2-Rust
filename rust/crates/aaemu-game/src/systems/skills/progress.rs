@@ -948,15 +948,19 @@ pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
         remove_passive_buff(server, p, b);
     }
     let obj = WorldObject::from(p);
-    broadcast(
-        server,
-        &obj,
-        &SCSkillsResetPacket {
-            obj_id: p.obj_id,
-            ability: old,
-        },
-        true,
-    );
+    // Filling an empty slot resets nothing. The client has no name for the sentinel 11, so a
+    // reset of it printed "The $$ skillset has been reset." (`chat_msg_event.alb` SKILLS_RESET).
+    if old != ability::NONE {
+        broadcast(
+            server,
+            &obj,
+            &SCSkillsResetPacket {
+                obj_id: p.obj_id,
+                ability: old,
+            },
+            true,
+        );
+    }
     if cost > 0 {
         p.send(SCItemTaskSuccessPacket {
             action: task_type::ABILITY_CHANGE,
@@ -1189,6 +1193,13 @@ mod tests {
         assert_eq!(s.read_bc().unwrap(), 0x100);
         assert_eq!(s.read_u8().unwrap(), 3);
         assert_eq!(s.read_u8().unwrap(), 4);
+        let (_, reset) = frames
+            .iter()
+            .find(|(op, _)| *op == sc::SCSkillsResetPacket)
+            .expect("the replaced skillset is reset");
+        let mut s = PacketStream::from_bytes(reset.clone());
+        assert_eq!(s.read_bc().unwrap(), 0x100);
+        assert_eq!(s.read_u8().unwrap(), 3);
     }
 
     #[tokio::test]
@@ -1281,6 +1292,8 @@ mod tests {
         assert!(frames
             .iter()
             .any(|(op, _)| *op == sc::SCAbilitySwappedPacket));
+        // No reset of the empty sentinel (the client printed "The $$ skillset has been reset.").
+        assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillsResetPacket));
     }
 
     #[tokio::test]
