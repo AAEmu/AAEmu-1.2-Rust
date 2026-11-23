@@ -6282,15 +6282,15 @@ mod engine_fixes {
     }
 
     #[tokio::test]
-    async fn selective_reward_requires_a_choice_and_honours_valid_indices() {
+    async fn reported_selective_reward_requires_a_choice_and_honours_valid_indices() {
         let (server, rec) = server_with(|d| {
-            selective_quest(d, 310, None);
+            selective_quest(d, 310, Some(7));
             selective_quest(d, 311, Some(7));
             selective_quest(d, 312, Some(7));
         });
         let mut c = character();
         with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
-            // A reward step reached without a choice must wait before granting anything.
+            // A quest with a report dialogue waits for the player to report and choose.
             start(ctx, 310);
             rec.take();
             ctx.dispatch(&QuestEvent::Craft { craft_id: 310 }).unwrap();
