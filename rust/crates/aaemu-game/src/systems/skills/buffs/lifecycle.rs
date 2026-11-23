@@ -4,6 +4,7 @@ use rand::Rng;
 
 use crate::models::buff::{effect_state, Buff};
 use crate::models::unit::{Bonus, DynamicBonus};
+use crate::packets::world::SCUnitPointsPacket;
 use crate::server::GameServer;
 use crate::systems::instances::encounters::registry as encounters;
 use crate::world::{now_ms, WorldObject};
@@ -89,6 +90,11 @@ pub fn schedule_effect(server: &GameServer, owner: &WorldObject, index: u32, rep
             });
             match step {
                 Some(TimerStep::Tick) => {
+                    if template.tick_mana_cost > 0
+                        && !pay_fixed_tick_mana(server, owner, &b, template.tick_mana_cost)
+                    {
+                        return;
+                    }
                     let caster = find_obj(server, b.caster_obj_id);
                     time_to_time_apply(server, &template, caster.as_ref(), owner, &b);
                     return;
@@ -115,6 +121,33 @@ pub fn schedule_effect(server: &GameServer, owner: &WorldObject, index: u32, rep
     if finishing {
         stop_effect_task(server, owner, index, timed_out);
     }
+}
+
+fn pay_fixed_tick_mana(server: &GameServer, owner: &WorldObject, buff: &Buff, cost: i32) -> bool {
+    let points = owner
+        .with_unit(|u| {
+            let u = u.unit_mut();
+            let current = u.buffs.effect_by_index(buff.index).is_some_and(|live| {
+                live.same_instance(buff) && live.task_gen == buff.task_gen && !live.is_ended()
+            });
+            // Retail insufficient-mana behavior is unverified. Skip the unpaid tick and let
+            // the existing timer retry at the next interval, preserving normal expiry.
+            if !current || u.is_dead() || u.mp < cost {
+                return None;
+            }
+            u.mp -= cost;
+            Some(SCUnitPointsPacket {
+                obj_id: owner.obj_id(),
+                hp: u.hp,
+                mp: u.mp,
+            })
+        })
+        .flatten();
+    let Some(points) = points else {
+        return false;
+    };
+    broadcast(server, owner, &points, true);
+    true
 }
 
 /// What one `Buff.ScheduleEffect` timer step of an ACTING buff does.

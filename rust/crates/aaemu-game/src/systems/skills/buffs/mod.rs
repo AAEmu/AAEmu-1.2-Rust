@@ -432,7 +432,10 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     };
     // 10.x NpcAggroTable::TauntedBy on buff creation (10x-ONLY; see PORTING.md).
     combat::on_taunt_buff_applied(server, owner, &b);
-    if b.duration > 0 || !template.tick_effects.is_empty() {
+    if b.duration > 0
+        || !template.tick_effects.is_empty()
+        || (template.on_action_time() && template.tick_mana_cost > 0)
+    {
         // SetInUse(true, false) -> ScheduleEffect(false)
         schedule_effect(server, owner, b.index, false);
     } else {

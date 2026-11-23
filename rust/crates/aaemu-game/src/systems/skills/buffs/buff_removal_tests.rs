@@ -492,3 +492,40 @@ async fn buff_removal_exempt_grant_clears_matching_incumbents() {
     super::add_buff_by_id(&server, &holder, 419, &holder, 0);
     assert!(player.data().unit.buffs.check_buff(419));
 }
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn buff_removal_fixed_tick_mana_is_paid_by_the_holder_only_on_positive_ticks() {
+    let Some((_db, data)) = removal_compact_data() else {
+        return;
+    };
+    let (server, _client, player, npc) =
+        crate::systems::skills::cast_validation_tests::fixture(data);
+    let caster = WorldObject::from(&npc);
+    let holder = WorldObject::from(&player);
+    for (id, cost) in [(40, 50), (59, 19), (108, 4), (4140, 0)] {
+        player.data().unit.mp = 60;
+        let source_mp = npc.data().unit.mp;
+        super::add_buff_by_id(&server, &holder, id, &caster, 0);
+        assert_eq!(player.data().unit.mp, 60);
+        let index = player
+            .data()
+            .unit
+            .buffs
+            .effects
+            .iter()
+            .find(|e| e.template.id == id)
+            .unwrap()
+            .index;
+        super::schedule_effect(&server, &holder, index, false);
+        assert_eq!(player.data().unit.mp, 60 - cost, "buff {id}");
+        assert_eq!(npc.data().unit.mp, source_mp);
+        if cost > 0 {
+            player.data().unit.mp = cost - 1;
+            super::schedule_effect(&server, &holder, index, false);
+            assert_eq!(player.data().unit.mp, cost - 1, "unpaid buff {id}");
+            assert!(player.data().unit.buffs.check_buff(id));
+        }
+        super::remove_buff(&server, &holder, id);
+    }
+}
