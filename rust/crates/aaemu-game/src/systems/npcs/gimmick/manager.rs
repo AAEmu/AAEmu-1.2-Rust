@@ -2286,6 +2286,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_shared_fuse_despawns_a_disappearing_gimmick_without_a_lifetime() {
+        for life_time in [0, 1_000] {
+            let template = GimmickTemplate {
+                collision_skill_id: TIMER_SKILL,
+                skill_id: TIMER_SKILL,
+                skill_delay: 100,
+                life_time,
+                ..contact_template(true)
+            };
+            let f = contact_fixture_with_data(timer_data(template), (100.0, 100.0));
+            let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
+            // Keep the gimmick below the collision speed threshold so only its fuse can cast.
+            let (g, active) = spawn_contact_gimmick(&f, &source, [0.0; 3]);
+            let manager = &f.server.systems.npcs.gimmicks;
+            let dt = Duration::from_millis(50);
+
+            gimmick_tick(&f.server, &f.world, &active, dt, 1_000);
+            assert_eq!(f.victim.data().unit.hp, 500);
+            assert!(f.world.gimmick(g.obj_id).is_some());
+            assert!(manager.find(g.obj_id).is_some());
+
+            gimmick_tick(&f.server, &f.world, &active, dt, 1_050);
+            assert_eq!(f.victim.data().unit.hp, 400, "the fuse deals one hit");
+            assert_eq!(
+                f.world.gimmick(g.obj_id).is_none(),
+                life_time == 0,
+                "world lookup after the fuse with lifetime {life_time}"
+            );
+            assert_eq!(
+                manager.find(g.obj_id).is_none(),
+                life_time == 0,
+                "manager lookup after the fuse with lifetime {life_time}"
+            );
+
+            gimmick_tick(&f.server, &f.world, &active, dt, 1_100);
+            assert_eq!(f.victim.data().unit.hp, 400, "the fuse stays spent");
+        }
+    }
+
+    #[tokio::test]
     async fn contact_gimmick_hits_a_unit_in_its_path_once() {
         let f = contact_fixture(contact_template(false), (100.0, 100.0));
         let source = doodad_at(&f.server, &f.world, (100.0, 100.0, 100.0));
