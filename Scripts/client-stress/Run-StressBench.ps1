@@ -138,6 +138,7 @@ function Measure-Route {
     $threadsBefore = (Call-Dev threads).threads
     $stats = Call-Dev stats @{history=$true}
     $previous = [long]$stats.gfx.frames
+    $previousMs = $null
     $nextSample = 0
     $nextStep = 2000
     Call-Dev io_stats @{reset=$true} | Out-Null
@@ -154,20 +155,25 @@ function Measure-Route {
             }
             $count = [long]$stats.gfx.frames - $previous
             $history = @($stats.gfx.history)
-            $gap += [Math]::Max(0, $count - $history.Count)
+            $missed = [Math]::Max(0, $count - $history.Count)
+            $gap += $missed
             $new = [int][Math]::Min($count, $history.Count)
-            $timestamp = [double]$stats.uptime_ms - [double]$stats.gfx.present_age_ms
-            $batch = @()
-            for ($i = $history.Count - 1; $i -ge $history.Count - $new; $i--) {
-                $ms = [double]$history[$i]
-                $batch += [pscustomobject]@{
-                    frame = [long]$stats.gfx.frames - ($history.Count - 1 - $i)
-                    client_uptime_ms = [Math]::Round($timestamp, 3)
-                    frame_ms = $ms
+            $first = $history.Count - $new
+            if ($new -and ($null -eq $previousMs -or $missed)) {
+                $previousMs = [double]$stats.uptime_ms - [double]$stats.gfx.present_age_ms
+                for ($i = $first; $i -lt $history.Count; $i++) {
+                    $previousMs -= [double]$history[$i]
                 }
-                $timestamp -= $ms
             }
-            for ($i = $batch.Count - 1; $i -ge 0; $i--) { $frames.Add($batch[$i]) }
+            for ($i = $first; $i -lt $history.Count; $i++) {
+                $ms = [double]$history[$i]
+                $previousMs += $ms
+                $frames.Add([pscustomobject]@{
+                    frame = [long]$stats.gfx.frames - ($history.Count - 1 - $i)
+                    client_uptime_ms = [Math]::Round($previousMs, 3)
+                    frame_ms = $ms
+                })
+            }
             $previous = [long]$stats.gfx.frames
             if ($clock.ElapsedMilliseconds -ge $nextSample) {
                 Assert-BotsActive
