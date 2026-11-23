@@ -546,7 +546,7 @@ With no `Events` list, the server derives the 1.2 open-world events from the dat
 runs them by default: the Halcyona war (18, started when zone group 22 reaches War) and
 its victory follow-ups (19, 20), the Crimson Rift (3, 5), the Grimghast Rift (13, 15),
 the Hasla Rift (12) and the Oblivion Rift / Clockwork Rebellion (28, 29, 31, 32).
-`"Enabled": false` turns every event off; a non-empty `Events` list replaces the
+`"Enabled": false` disables automatic events. A non-empty `Events` list replaces the
 derived schedule, and an event the data cannot run (no authored controller positions
 or a closed zone) is skipped at startup with a warning and is not listed as enabled.
 The startup log prints the enabled list with each event's zone group and zone.
@@ -558,8 +558,11 @@ group; `/towerdef next <id> <wave>` advances exactly one wave (numbered from 1),
 and `/towerdef end <id>` stops it and removes its active controllers and summons.
 Dead NPCs keep their normal corpse timers so wave changes and event completion do
 not remove loot before players can collect it. Removing an instance clears its corpses too.
-The `tower_def` spelling is also supported. Players entering a zone receive the
-active event list, including the current wave.
+The `tower_def` spelling is also supported. Start, wave and end notices go to
+players in the event's zone group within its world instance. The server still
+sends the active event list throughout that world. On entering the event's zone
+group, players receive the start and current wave state after a short delay for
+the client to finish loading.
 
 To schedule a verified definition, add this section to the game's `Config.Local.json`
 and replace the event identity with the values for its zone:
@@ -609,12 +612,14 @@ the shipped compact and still needs its event content restored.
 `WorldId` is the server instance id (0 for main_world),
 `ZoneId` is the zone key, and `ZoneGroupId` is its compact zone group. The server
 validates every selected definition, wave, target and controller position before
-starting the scheduler. Use an empty `Events` list or `Enabled: false` to leave
-automatic scheduling off. Disabling the scheduler does not cancel a running event;
-use `/towerdef end` for that.
+starting the scheduler. An empty `Events` list uses the data-derived defaults.
+Set `Enabled: false` to turn automatic scheduling off. Use `/towerdef end` to
+stop an event already in progress.
 
-Schedules follow compact `tod` / `tod_day_interval` on the accelerated game clock;
-day intervals restart from day 0 when the scheduler starts. Wave delays and force-end
+Schedules follow compact `tod` / `tod_day_interval` on the accelerated game clock.
+Day intervals use the epoch-derived game day and survive server restarts. A GM
+/time set or a discontinuous clock jump skips any crossed schedules. Use
+/towerdef start to launch an event manually. Wave delays and force-end
 times use real seconds. A configured event matching a conflict zone's
 `war_tower_def_id` starts on entering War and ends on leaving War, instead of using
 `tod`. Events do not replay during the same clock crossing or War period.

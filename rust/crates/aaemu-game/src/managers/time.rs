@@ -62,6 +62,7 @@ struct State {
     /// offset, moved by `Set`).
     offset: f64,
     clock: UnixClock,
+    schedule_revision: u64,
     /// Observers by subscription id (`IObserver<float>` of a character).
     observers: HashMap<u64, Observer>,
     next_id: u64,
@@ -121,6 +122,7 @@ impl TimeManager {
                 day,
                 offset: offset_seconds,
                 clock,
+                schedule_revision: 0,
                 observers: HashMap::new(),
                 next_id: 1,
                 stopped: false,
@@ -167,6 +169,12 @@ impl TimeManager {
         (st.time as f32 / 3600.0, st.day)
     }
 
+    /// The cached hour, day, and revision of the wall-clock mapping.
+    pub(crate) fn schedule_snapshot(&self) -> (f32, i64, u64) {
+        let st = self.state.lock().expect("time poisoned");
+        (st.time as f32 / 3600.0, st.day, st.schedule_revision)
+    }
+
     /// `Set(hours)`: moves the wall-clock mapping so the time of day is `hours`, keeping the
     /// current game day (the C# only had a float and no day). `hours` is normalised into
     /// `[0, 24)`, so `/time set 24 0` is midnight of the same day, not of the next one.
@@ -181,6 +189,7 @@ impl TimeManager {
         st.offset = day as f64 * MAX_TIME + hours * 3600.0 - now * GAME_SECONDS_PER_REAL_SECOND;
         st.time = game_seconds(now, st.offset);
         st.day = day;
+        st.schedule_revision = st.schedule_revision.wrapping_add(1);
     }
 
     /// `Subscribe(connection, observer)`: sends `SCDetailedTimeOfDayPacket` and registers the

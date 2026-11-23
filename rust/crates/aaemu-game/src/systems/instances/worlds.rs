@@ -308,7 +308,7 @@ pub fn clone_detached(server: &GameServer, p: &PlayerRef) -> Transform {
         parent_obj_id: 0,
     };
     if clone.zone_id != 0 {
-        session::on_zone_change(server, p, 0, clone.zone_id);
+        session::refresh_zone(server, p, 0, clone.zone_id);
     }
     clone
 }
