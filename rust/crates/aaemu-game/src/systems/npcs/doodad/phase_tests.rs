@@ -1385,6 +1385,21 @@ async fn use_then_timer_returns_to_start_phase() {
 }
 
 #[tokio::test]
+async fn audit_negative_use_override_takes_priority_over_row_destination() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d.clone());
+    d.data().phase.override_phase = -1;
+    let func = ctx.data().funcs_for_group(10).first().unwrap();
+    assert!(do_func(&ctx, Some(&f.caster()), 0, Some(func)));
+    assert_eq!(d.data().phase.override_phase, 0);
+    assert!(d.data().phase.deleted);
+}
+
+#[tokio::test]
 async fn audit_puzzle_input_sets_model_and_outcome_waits_for_authored_delay() {
     let b = Builder::default()
         .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2)])
