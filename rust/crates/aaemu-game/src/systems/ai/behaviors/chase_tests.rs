@@ -44,15 +44,23 @@ impl BaiFiles for Files {
 }
 
 fn fixture() -> (crate::server::GameServer, NpcRef, WorldObject) {
+    fixture_with_template(NpcTemplate {
+        id: 1,
+        attack_start_range_scale: 2.0,
+        ..NpcTemplate::default()
+    })
+}
+
+fn fixture_with_template(
+    template: NpcTemplate,
+) -> (crate::server::GameServer, NpcRef, WorldObject) {
+    let template_id = template.id;
     let mut data = GameData::empty();
-    data.systems.npcs.npc.templates.insert(
-        1,
-        NpcTemplate {
-            id: 1,
-            attack_start_range_scale: 2.0,
-            ..NpcTemplate::default()
-        },
-    );
+    data.systems
+        .npcs
+        .npc
+        .templates
+        .insert(template_id, template);
     let server = test_server_with(data);
     server.config.update(|cfg| cfg.world.geo_data_mode = true);
     let files = Files(HashMap::from([(
@@ -70,7 +78,7 @@ fn fixture() -> (crate::server::GameServer, NpcRef, WorldObject) {
         Arc::new(UsedAreaNames::default()),
         None,
     )));
-    let mut n = Npc::new(1);
+    let mut n = Npc::new(template_id);
     n.unit.hp = 1000;
     n.unit.max_hp = 1000;
     n.unit.transform.set_xyz(100.0, 100.0, 100.0);
@@ -666,5 +674,31 @@ async fn directional_self_skills_turn_the_caster_towards_its_victim() {
                 assert_eq!(rot, AWAY, "self-target skill {id} turns the caster");
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn plateau_earth_elemental_range_correction_is_keyed_by_stats() {
+    for (template_id, base_skill_id, moves) in [(7927, 2, true), (1, 2, true), (1, 3, false)] {
+        let (server, npc, target) = fixture_with_template(NpcTemplate {
+            id: template_id,
+            attack_start_range_scale: 4.0,
+            base_skill_id,
+            ..Default::default()
+        });
+        target.with_transform(|t| t.set_xyz(103.5, 100.0, 100.0));
+        let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+        let mut c = AiCtx {
+            server: &server,
+            npc: npc.clone(),
+            obj: WorldObject::from(&npc),
+            ai: &mut ai,
+        };
+        tick(&mut c, &target);
+        assert_eq!(
+            npc.data().unit.transform.x > 100.0,
+            moves,
+            "NPC {template_id}, skill {base_skill_id}"
+        );
     }
 }
