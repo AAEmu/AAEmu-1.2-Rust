@@ -59,6 +59,8 @@ pub enum Request {
     Window(bool),
     /// Controls pak read-ahead, raw I/O profiling, or engine read byte verification.
     PakIo(String),
+    /// Performance patch status (`status`): one line per patch id with its state and reason.
+    PerfPatches(String),
     /// Posts bounded keyboard events to CryInput; release runs in the client even after disconnect.
     Input(String),
     /// Controls bounded DXGI frame interval recording.
@@ -88,6 +90,7 @@ impl Request {
             }
             Request::Unload => vec![b'X'],
             Request::PakIo(action) => [b"F".as_slice(), action.as_bytes()].concat(),
+            Request::PerfPatches(command) => [b"Q".as_slice(), command.as_bytes()].concat(),
             Request::Input(action) => [b"I".as_slice(), action.as_bytes()].concat(),
             Request::FrameProfile(action) => [b"V".as_slice(), action.as_bytes()].concat(),
             Request::Trace(command) => [b"R".as_slice(), command.as_bytes()].concat(),
@@ -264,6 +267,7 @@ mod tests {
         assert_eq!(Request::Window(false).payload(), b"Whide".to_vec());
         assert_eq!(Request::Unload.payload(), b"X".to_vec());
         assert_eq!(Request::PakIo("profile".into()).payload(), b"Fprofile");
+        assert_eq!(Request::PerfPatches("status".into()).payload(), b"Qstatus");
         assert_eq!(Request::Input("w 1000".into()).payload(), b"Iw 1000");
         assert_eq!(Request::FrameProfile("off".into()).payload(), b"Voff");
         assert_eq!(

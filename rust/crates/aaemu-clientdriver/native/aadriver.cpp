@@ -21,6 +21,7 @@
 //                  (t = 'S'/'U'/'T'; no result value, only ok / failed)
 //      'R' <cmd>   skill trace: "start [kinds]" | "stop" | "drain" | "status" (skilltrace.cpp)
 //      'M' <cmd>   video: "start<LF>fps<LF>ffmpeg<LF>path" | "stop" | "status" (video.cpp)
+//      'Q' status  performance patch status, one line per patch id (perfpatch.cpp)
 //      'P'         ping: driver / client info
 //      'X'         unhook and unload the driver
 //    response: status (1 byte: '0' ok, '1' Lua error, '2' driver error) + UTF-8 text
@@ -38,6 +39,7 @@
 #include "pakio.h"
 #include "virtualpak.h"
 #include "startup.h"
+#include "perfpatch.h"
 #ifndef AADRIVER_PLAYER
 #include "visuals.h"
 #include "input.h"
@@ -99,6 +101,8 @@ static std::string g_questMapUiScript;
 static bool g_questMapUiApplied;
 static bool g_questMapUiFailed;
 static ULONGLONG g_questMapUiNextCheck;
+static bool g_perfTickDone;
+static std::string g_perfTickReply;
 #ifndef AADRIVER_PLAYER
 static CRITICAL_SECTION g_lock;
 static bool g_hideOnStart;
@@ -253,6 +257,12 @@ static void __fastcall HookUpdate(void* self, void* /*edx*/) {
                 "if a~=nil and a~=0 then System.SetCVar('s_SoundEnable',0) end "
                 "if b~=nil and b~=0 then System.SetCVar('s_MusicEnable',0) end end");
 #endif
+            // Patch status into ArcheAge.log and the requested CVars (-aaemu-cvars=), once.
+            if (!g_perfTickDone) {
+                std::string chunk = perfpatch::first_tick_lua(g_perfTickReply);
+                if (chunk.empty()) g_perfTickDone = true;
+                else g_perfTickReply = runLua('S', chunk);
+            }
             // The game registers this CVar after command-line processing. Apply it at the
             // first script tick, on the Lua owner thread, before the logo stages advance.
             if (g_fastStart && !g_fastCVarApplied) {
@@ -472,6 +482,7 @@ static std::string pingInfo() {
                 env ? *(void**)(env + OFF_gEnv_SSUI) : NULL,
                 env ? *(void**)(env + OFF_gEnv_SSThird) : NULL, g_hooked, g_mainTid);
     return std::string(buf) + visuals::info() + skilltrace::info() + video::info() + startup::info() + virtualpak::info() +
+        perfpatch::info() +
         " fast=" + (g_fastApplied ? "1" : "0") + " silent=" + (g_silent ? "1" : "0") +
         " auction_ui=" + (g_auctionUiApplied ? "1" : "0") +
         " quest_map_ui=" + (g_questMapUiApplied ? "1" : "0");
@@ -507,6 +518,7 @@ static DWORD WINAPI unloadThread(LPVOID) {
     visuals::remove();
     pakio::remove();
     startup::remove();
+    perfpatch::remove();
     // let in-flight hook calls leave our code before the module goes away
     for (int i = 0; i < 200 && g_inHook; ++i) Sleep(10);
     Sleep(200);
@@ -575,6 +587,7 @@ static DWORD WINAPI serverThread(LPVOID) {
                 reply = req.size() < 2 ? std::string("2missing target") : submit('B', req[1], req.substr(2), 30000);
                 break;
             case 'C': reply = visuals::capture(); break;
+            case 'Q': reply = perfpatch::control(req.substr(1)); break;
             case 'F':
                 reply = req.substr(1) == "verify" ? submit('F', 0, "", 30000) : pakio::control(req.substr(1));
                 break;
@@ -642,6 +655,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 #else
         logf("aadriver loaded into pid %lu", GetCurrentProcessId());
 #endif
+        // Before crysystem.dll / cryrenderd3d10.dll load (the launcher injects into the suspended client).
+        perfpatch::attach(hModule, logf);
         CreateThread(NULL, 0, serverThread, NULL, 0, NULL);
     }
     return TRUE;

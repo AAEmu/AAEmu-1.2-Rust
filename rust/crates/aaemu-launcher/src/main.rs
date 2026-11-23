@@ -37,6 +37,14 @@ aaemu-launcher: start the ArcheAge 1.2 (Trion) client with a launcher ticket
   --no-fast-start        use the original timed login logo stages
   --no-fast-pak          use the original 1 MB pak read-ahead
   --no-smooth-start      use the original CPU clock calibration priorities
+  --patch LIST           client performance patches for the driver, comma-separated and in order:
+                         ID or +ID on, -ID off, all, none, default, key=value (repeatable;
+                         ids and defaults: aaemu-clientdriver/native/perfpatch.cpp)
+  --no-patch ID          turn one patch off (same as --patch -ID)
+  --frame-latency N      at most N queued frames (DXGI SetMaximumFrameLatency, 1..16)
+  --min-time-step SECS   CVar min_time_step (built-in frame limiter; 0 = off, default 1/150 s)
+  --cvar NAME=VALUE      set a numeric CVar at the first script tick (repeatable)
+  --cvar-preset NAME     streaming | view-near (CVar groups; untested defaults, see the patch README)
   --hidden               render in a hidden 1280x720 DX10 window (needs the driver)
   --multi-client         accept this client's built-in confirmation for another instance
   --driver-dll PATH      x86 aadriver.dll (required for startup audio policy)
@@ -72,6 +80,47 @@ struct Cli {
     multi_client: bool,
     pak_manifest: Option<PathBuf>,
     compressed_pak: bool,
+    patches: Vec<String>,
+    cvars: Vec<(String, String)>,
+}
+
+/// CVar groups for `--cvar-preset`. Values come from the r223748 research
+/// (`C:\aa-re\devclient\data\cvar-presets.tsv`); every name exists in the r208022 engine modules.
+fn cvar_preset(name: &str) -> anyhow::Result<&'static [(&'static str, &'static str)]> {
+    Ok(match name {
+        // more texture requests in flight after a load, larger static-geometry stream pool
+        "streaming" => &[
+            ("r_TexturesStreamingMaxRequestedMB", "8"),
+            ("e_StreamCgfPoolSize", "128"),
+        ],
+        // vegetation drawn to a shorter distance (main-thread culling and the instancing loop)
+        "view-near" => &[("e_view_dist_ratio_vegetation", "20")],
+        _ => bail!("unknown --cvar-preset '{name}' (streaming, view-near)"),
+    })
+}
+
+/// Driver switch tokens and CVars travel as single client arguments; keep them to safe characters.
+fn plain_token(s: &str, what: &str) -> anyhow::Result<()> {
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '_' | '=' | '.'))
+    {
+        bail!("{what} '{s}' may only use letters, digits and - + _ = .");
+    }
+    Ok(())
+}
+
+fn add_cvar(cli: &mut Cli, name: &str, value: &str) -> anyhow::Result<()> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        bail!("CVar name '{name}' may only use letters, digits and _");
+    }
+    if value.parse::<f64>().is_err() {
+        bail!("CVar {name}: value '{value}' is not a number");
+    }
+    cli.cvars.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+    cli.cvars.push((name.to_owned(), value.to_owned()));
+    Ok(())
 }
 
 fn parse_cli() -> anyhow::Result<Cli> {
@@ -101,6 +150,8 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
         multi_client: false,
         pak_manifest: std::env::var_os("AAEMU_PAK_MANIFEST").map(PathBuf::from),
         compressed_pak: true,
+        patches: vec![],
+        cvars: vec![],
     };
     while let Some(a) = it.next() {
         let mut val = || it.next().with_context(|| format!("{a} needs a value"));
@@ -122,6 +173,39 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
             "--no-smooth-start" => cli.smooth_start = false,
             "--hidden" => cli.hidden = true,
             "--multi-client" => cli.multi_client = true,
+            "--patch" => {
+                for t in val()?.split([',', ' ']).filter(|t| !t.is_empty()) {
+                    plain_token(t, "patch switch")?;
+                    cli.patches.push(t.to_owned());
+                }
+            }
+            "--no-patch" => {
+                let id = val()?;
+                plain_token(&id, "patch id")?;
+                cli.patches.push(format!("-{id}"));
+            }
+            "--frame-latency" => {
+                let n: u32 = val()?.parse().context("--frame-latency needs 1..16")?;
+                if !(1..=16).contains(&n) {
+                    bail!("--frame-latency needs 1..16");
+                }
+                cli.patches.push("frame-latency".into());
+                cli.patches.push(format!("frame_latency={n}"));
+            }
+            "--min-time-step" => {
+                let v = val()?;
+                add_cvar(&mut cli, "min_time_step", &v)?;
+            }
+            "--cvar" => {
+                let v = val()?;
+                let (n, x) = v.split_once('=').context("--cvar needs NAME=VALUE")?;
+                add_cvar(&mut cli, n, x)?;
+            }
+            "--cvar-preset" => {
+                for (n, x) in cvar_preset(&val()?)? {
+                    add_cvar(&mut cli, n, x)?;
+                }
+            }
             "--pak-manifest" => {
                 cli.pak_manifest = Some(val()?.into());
                 cli.compressed_pak = true;
@@ -145,6 +229,25 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> anyhow::Result<Cli> {
         }
     }
     Ok(cli)
+}
+
+/// `-aaemu-patches=` and `-aaemu-cvars=` for aadriver.dll (native/perfpatch.cpp). `--no-fast-pak`
+/// becomes `-pak-readahead-64k` first, so an explicit `--patch` list still wins.
+fn driver_switch_args(cli: &Cli) -> Vec<String> {
+    let mut patches = Vec::new();
+    if !cli.fast_pak {
+        patches.push("-pak-readahead-64k".to_owned());
+    }
+    patches.extend(cli.patches.iter().cloned());
+    let mut out = Vec::new();
+    if !patches.is_empty() {
+        out.push(format!("-aaemu-patches={}", patches.join(",")));
+    }
+    if !cli.cvars.is_empty() {
+        let list: Vec<String> = cli.cvars.iter().map(|(n, v)| format!("{n}:{v}")).collect();
+        out.push(format!("-aaemu-cvars={}", list.join(";")));
+    }
+    out
 }
 
 fn read_password(cli: &Cli) -> anyhow::Result<String> {
@@ -226,6 +329,7 @@ fn main() -> anyhow::Result<()> {
     if cli.multi_client {
         cli.extra.push("-aaemu-multi-client".into());
     }
+    cli.extra.extend(driver_switch_args(&cli));
     if cli.hidden {
         cli.extra.extend(
             [
@@ -459,6 +563,59 @@ mod tests {
             .chain(["--fast-start", "--fast-pak", "--smooth-start"]);
         let cli = parse_args(args.map(str::to_owned)).unwrap();
         assert!(cli.fast_start && cli.fast_pak && cli.smooth_start);
+    }
+
+    fn parse(args: &[&str]) -> anyhow::Result<Cli> {
+        parse_args(args.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn default_launch_sends_no_patch_or_cvar_switches() {
+        let cli = parse(&[]).unwrap();
+        assert!(driver_switch_args(&cli).is_empty());
+    }
+
+    #[test]
+    fn patch_switches_keep_their_order_and_follow_the_fast_pak_profile() {
+        let cli = parse(&[
+            "--no-fast-pak",
+            "--patch",
+            "frame-latency, -fast-splitpath",
+            "--no-patch",
+            "shader-async-poll-5ms",
+            "--frame-latency",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(
+            driver_switch_args(&cli),
+            vec!["-aaemu-patches=-pak-readahead-64k,frame-latency,-fast-splitpath,-shader-async-poll-5ms,frame-latency,frame_latency=2"]
+        );
+        assert!(parse(&["--frame-latency", "0"]).is_err());
+        assert!(parse(&["--patch", "a\"b"]).is_err());
+        assert!(parse(&["--no-patch", "x y"]).is_err());
+    }
+
+    #[test]
+    fn cvars_are_numeric_deduplicated_and_presets_expand() {
+        let cli = parse(&[
+            "--cvar-preset",
+            "streaming",
+            "--min-time-step",
+            "0",
+            "--cvar",
+            "e_StreamCgfPoolSize=96",
+        ])
+        .unwrap();
+        assert_eq!(
+            driver_switch_args(&cli),
+            vec!["-aaemu-cvars=r_TexturesStreamingMaxRequestedMB:8;min_time_step:0;e_StreamCgfPoolSize:96"]
+        );
+        assert!(parse(&["--cvar", "min_time_step=fast"]).is_err());
+        assert!(parse(&["--cvar", "bad-name=1"]).is_err());
+        assert!(parse(&["--cvar", "novalue"]).is_err());
+        assert!(parse(&["--cvar-preset", "ultra"]).is_err());
+        assert!(USAGE.contains("--cvar-preset NAME"));
     }
 
     #[test]
