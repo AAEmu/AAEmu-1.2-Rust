@@ -3044,6 +3044,75 @@ async fn quest_reward_retry_keeps_only_undelivered_items() {
 }
 
 #[tokio::test]
+async fn quest_reward_short_remove_act_leaves_bag_and_quest_intact() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(401, 40, kind::REWARD));
+        d.add_act(401, 1, 1, 2, ActKind::SupplyRemoveItem { item_id: 4988 });
+        d.add_act(401, 2, 2, 0, ActKind::SupplyExp { exp: 25 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    give_item(&mut c, 4988, 1);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(40, 1);
+        ctx.set_step(h, kind::REWARD);
+        assert!(!ctx.run_current_step(h));
+        assert!(rec.take().is_empty());
+        give_item(ctx.c, 4988, 1);
+        assert!(ctx.run_current_step(h));
+        let calls = rec.take();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls.contains(&"exp 25 true".to_string()), "{calls:?}");
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_ready_report_requires_item_removal() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(401, 40, kind::START));
+        d.add_act(401, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(402, 40, kind::READY));
+        d.add_act(402, 2, 2, 2, ActKind::SupplyRemoveItem { item_id: 4988 });
+        d.add_act(
+            402,
+            3,
+            3,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 7,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_component(component(403, 40, kind::REWARD));
+        d.add_act(403, 4, 4, 0, ActKind::SupplyExp { exp: 25 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    give_item(&mut c, 4988, 1);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 40);
+        let report = QuestEvent::ReportNpc {
+            quest_id: 40,
+            npc_id: 7,
+            selected: 0,
+        };
+        ctx.dispatch(&report).unwrap();
+        drain(ctx);
+        assert_eq!(step_of(ctx, h), kind::READY);
+        assert!(rec.take().is_empty());
+        give_item(ctx.c, 4988, 1);
+        ctx.dispatch(&report).unwrap();
+        drain(ctx);
+        assert!(!ctx.has_quest(40));
+        let calls = rec.take();
+        assert!(calls.contains(&"exp 25 true".to_string()), "{calls:?}");
+    });
+}
+
+#[tokio::test]
 async fn selective_rewards_and_mail_when_bag_full() {
     let (server, rec) = server_with(|d| {
         d.add_template(quest(40));

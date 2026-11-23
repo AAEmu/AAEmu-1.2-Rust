@@ -522,6 +522,10 @@ impl<'a> Ctx<'a> {
             self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
             return;
         }
+        if !self.valid_reward_choice(quest_id, selected) {
+            self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
+            return;
+        }
         if let Some(q) = self.quest_mut(h) {
             q.selected_reward_index = selected;
         }

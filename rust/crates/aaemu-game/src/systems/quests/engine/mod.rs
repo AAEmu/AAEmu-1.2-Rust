@@ -527,6 +527,11 @@ impl<'a> Ctx<'a> {
         let Some(si) = q.step_index(q.step) else {
             return false;
         };
+        if q.step == kind::REWARD
+            && !self.valid_reward_choice(q.template_id, q.selected_reward_index)
+        {
+            return false;
+        }
         let mut res = self.run_components(h, si);
 
         // A LetItBeDone quest normally waits for a report. When it has no Ready step, an
@@ -719,26 +724,10 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// A quest that reaches its Reward step without a valid choice (no report act carried one:
-    /// auto-completing and journal-reported quests send 0) gets the first selective item
-    /// instead of none. The client UI sends a 1-based index and refuses to send 0 when the
-    /// quest has selective items.
-    fn default_selective_reward(&mut self, h: QuestHandle) {
-        let template_id = self.template_id_of(h);
+    /// r208022 0x4b1f30 indexes the authored Reward choices from one.
+    pub(crate) fn valid_reward_choice(&self, template_id: u32, selected: i32) -> bool {
         let count = self.selective_reward_count(template_id);
-        if count <= 0 {
-            return;
-        }
-        let who = format!("{} ({})", self.c.unit.name, self.c.id);
-        if let Some(q) = self.quest_mut(h) {
-            if q.selected_reward_index < 1 || q.selected_reward_index > count {
-                tracing::debug!(
-                    "Quest {template_id}, {who}: selective reward {} is not in 1..={count}, giving the first",
-                    q.selected_reward_index
-                );
-                q.selected_reward_index = 1;
-            }
-        }
+        count == 0 || (1..=count).contains(&selected)
     }
 
     /// `Step` setter (`SetStep`).
@@ -752,9 +741,6 @@ impl<'a> Ctx<'a> {
         // Finalize old Step (if any)
         if let Some(old) = q.step_index(q.step) {
             self.finalize_step(h, old);
-        }
-        if value == kind::REWARD {
-            self.default_selective_reward(h);
         }
         let template_id = {
             let Some(q) = self.quest_mut(h) else {

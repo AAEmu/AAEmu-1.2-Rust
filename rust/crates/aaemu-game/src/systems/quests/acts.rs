@@ -388,8 +388,22 @@ impl Ctx<'_> {
                 true
             }
             SupplyRemoveItem { item_id } => {
-                let (_, units) = items_by_template(self.c, &[slot_type::INVENTORY], *item_id);
-                let to_remove = units.min(at.count);
+                // r208022 0x89e5d0 imports the required item and count. Refuse a partial hand-in.
+                if at.count <= 0 {
+                    return true;
+                }
+                let units = self
+                    .c
+                    .inventory
+                    .bag()
+                    .lock()
+                    .expect("bag poisoned")
+                    .items_by_template_unlocked(*item_id, -1)
+                    .1;
+                if units < at.count {
+                    return false;
+                }
+                let to_remove = at.count;
                 let removed = hooks.consume_item(
                     self.server,
                     player.as_ref(),
@@ -406,7 +420,7 @@ impl Ctx<'_> {
                         at.count
                     );
                 }
-                true
+                removed == at.count
             }
             SupplySelectiveItem { item_id, grade_id } => {
                 let selected = self.st.quest(h).map_or(0, |q| q.selected_reward_index);
@@ -1195,6 +1209,10 @@ impl Ctx<'_> {
                     self.report_reply().matched_refusal = Some(quest_error::INVALID_QUEST_STATUS);
                     return Ok(());
                 }
+                if !self.valid_reward_choice(quest_template, *selected) {
+                    self.report_reply().matched_refusal = Some(quest_error::INVALID_QUEST_STATUS);
+                    return Ok(());
+                }
                 if let Some(q) = self.st.quest_mut(h) {
                     q.selected_reward_index = *selected;
                 }
@@ -1233,6 +1251,10 @@ impl Ctx<'_> {
                         quest_template,
                         &format!("doodad {d}: the objectives are not complete ({status:?})"),
                     );
+                    self.report_reply().matched_refusal = Some(quest_error::INVALID_QUEST_STATUS);
+                    return Ok(());
+                }
+                if !self.valid_reward_choice(quest_template, *selected) {
                     self.report_reply().matched_refusal = Some(quest_error::INVALID_QUEST_STATUS);
                     return Ok(());
                 }

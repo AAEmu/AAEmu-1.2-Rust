@@ -736,7 +736,23 @@ fn report(
                 ctx.send_report_refused(quest_id, quest_error::INVALID_QUEST);
                 return;
             };
+            if !ctx.valid_reward_choice(quest_id, selected) {
+                ctx.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
+                return;
+            }
             let step = ctx.st.quest(h).map(|q| q.step);
+            if step == Some(super::model::kind::REWARD)
+                && ctx
+                    .st
+                    .quest(h)
+                    .is_some_and(|q| !ctx.valid_reward_choice(quest_id, q.selected_reward_index))
+            {
+                if let Some(q) = ctx.st.quest_mut(h) {
+                    q.selected_reward_index = selected;
+                }
+                ctx.run_current_step(h);
+                return;
+            }
             if step == Some(super::model::kind::PROGRESS) {
                 // The existing early-completion path checks both the template flag and
                 // the objective threshold before granting any reward.
