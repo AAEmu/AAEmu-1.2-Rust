@@ -492,6 +492,18 @@ pub trait EconomyBridge: Send + Sync {
         0
     }
 
+    /// Debit the full quantity from unlocked bag stacks, or leave them unchanged.
+    fn try_bag_consume_item(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _task: u8,
+        _template_id: u32,
+        _count: i32,
+    ) -> bool {
+        false
+    }
+
     /// `Inventory.Bag.ConsumeItem(task, templateId, count, null)`; returns the number consumed.
     fn bag_consume_item(
         &self,

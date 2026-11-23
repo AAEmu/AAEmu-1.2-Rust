@@ -246,6 +246,7 @@ pub fn use_func(
             );
             set_to_next_phase(ctx, is_player(caster) && f.is_enter && next_phase > 0);
         }
+        F::InsertCounter(f) => items::insert_counter(f, ctx, caster),
         // --- C# stubs (logging only) ---
         // A phase-func contribution for the crime system (`social/bridges.rs`); the `Use`
         // arm has nothing to answer.
@@ -262,7 +263,6 @@ pub fn use_func(
         | F::CraftPack(_)
         | F::CraftStart(_)
         | F::HousingArea(_)
-        | F::InsertCounter(_)
         | F::NaviMarkPosToMap(_)
         | F::NaviNaming(_)
         | F::NaviOpenBounty(_)

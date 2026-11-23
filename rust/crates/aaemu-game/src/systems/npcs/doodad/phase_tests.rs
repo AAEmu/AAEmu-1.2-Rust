@@ -4939,3 +4939,84 @@ async fn real_data_growth_scale_uses_client_endpoints_and_remaining_delay() {
         250
     );
 }
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_doodad_insert_counter_debits_and_restores_progress() {
+    use crate::systems::npcs::doodad::natural;
+    use crate::systems::npcs::hooks::EconomyBridge;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    #[derive(Default)]
+    struct Contributions(AtomicI32);
+
+    impl EconomyBridge for Contributions {
+        fn try_bag_consume_item(
+            &self,
+            _server: &GameServer,
+            _player: &PlayerRef,
+            _task: u8,
+            template_id: u32,
+            count: i32,
+        ) -> bool {
+            assert_eq!((template_id, count), (27301, 1));
+            self.0
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |balance| {
+                    (balance >= count).then(|| balance - count)
+                })
+                .is_ok()
+        }
+    }
+
+    let f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let contributions = Arc::new(Contributions::default());
+    f.server
+        .systems
+        .npcs
+        .hooks
+        .economy
+        .install(contributions.clone());
+    let store = &f.server.systems.npcs.doodads.persistence.natural;
+    store.enable_for_test(Vec::new());
+    let spawner = new_spawner(7229, 501);
+    let d = spawner.spawn(&f.server, 0).expect("counter doodad");
+    set_func_group_id(&f.server, &d, 19752);
+
+    let caster = f.caster();
+    let use_counter = |d: &DoodadRef| {
+        manager::use_doodad(&f.server, &f.world, d, Some(&caster), 23780, 0);
+    };
+    use_counter(&d);
+    assert!(d.data().phase.interaction_counts.is_empty());
+    contributions.0.store(4, Ordering::Relaxed);
+    for _ in 0..4 {
+        use_counter(&d);
+    }
+    assert_eq!(group(&d), 19752);
+    assert_eq!(contributions.0.load(Ordering::Relaxed), 0);
+    assert_eq!(d.data().phase.interaction_counts.get(&15994), Some(&4));
+
+    let key = natural::spawn_key(7229, 120.0, 130.0, 100.0);
+    let (_, saved) = store
+        .pending_for_test()
+        .into_iter()
+        .find(|((_, name), _)| name == &key)
+        .expect("counter has a pending save");
+    spawner.despawn(&f.server, &d);
+    store.enable_for_test(vec![saved.expect("counter was saved")]);
+    let d = spawner.spawn(&f.server, 0).expect("restored counter");
+    assert_eq!(group(&d), 19752);
+    assert_eq!(d.data().phase.interaction_counts.get(&15994), Some(&4));
+    contributions.0.store(6, Ordering::Relaxed);
+    for _ in 0..5 {
+        use_counter(&d);
+        assert_eq!(group(&d), 19752);
+    }
+    use_counter(&d);
+    assert_eq!(group(&d), 19755);
+    assert_eq!(contributions.0.load(Ordering::Relaxed), 0);
+    assert!(d.data().phase.interaction_counts.is_empty());
+}

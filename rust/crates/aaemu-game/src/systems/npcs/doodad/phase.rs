@@ -765,7 +765,12 @@ pub fn do_func(
     }
 
     // then perform the function (DoodadFunc.Use -> template?.Use)
+    let (mut contribution, mut required) = (1, func.count);
     if let Some(t) = ctx.data().func_template(func.func_id, &func.func_type) {
+        if let FuncTemplate::InsertCounter(counter) = t {
+            contribution = counter.item_count as u32;
+            required = counter.count;
+        }
         if !crate::systems::instances::mentoring::authorize(ctx, caster, skill_id, t) {
             return true;
         }
@@ -792,12 +797,12 @@ pub fn do_func(
         return pending_loot || func.func_type != "DoodadFuncLootItem";
     }
     crate::systems::instances::mentoring::succeeded(ctx, caster);
-    if func.count > 1 {
+    if required > 1 {
         let complete = {
             let mut d = ctx.doodad.data();
             let count = d.phase.interaction_counts.entry(func.func_key).or_default();
-            *count += 1;
-            *count >= func.count as u32
+            *count = count.saturating_add(contribution);
+            *count >= required as u32
         };
         if !complete {
             ctx.doodad.data().phase.to_next_phase = false;

@@ -10,8 +10,9 @@ use crate::models::container::{equip_slot, slot_type};
 use crate::models::doodad::{doodad_owner_type, PendingDoodadLoot};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::{
-    doodad_func_group_kind, DoodadFuncBuyFish, DoodadFuncConsumeChanger, DoodadFuncLootItem,
-    DoodadFuncLootPack, DoodadFuncPurchase, DoodadFuncRecoverItem, DoodadFuncRemoveItem,
+    doodad_func_group_kind, DoodadFuncBuyFish, DoodadFuncConsumeChanger, DoodadFuncInsertCounter,
+    DoodadFuncLootItem, DoodadFuncLootPack, DoodadFuncPurchase, DoodadFuncRecoverItem,
+    DoodadFuncRemoveItem,
 };
 use crate::systems::npcs::hooks::CargoRecovery;
 use crate::systems::social::achievement::char_record_kind;
@@ -443,6 +444,27 @@ pub fn recover_item(
         d.item_template_id = 0;
     }
     d.phase.to_next_phase = added_item;
+}
+
+/// Debits one contribution using the count and item columns read by r208022 RVA 0x6835a0.
+/// The phase machine records the contribution only after the full debit succeeds.
+pub(super) fn insert_counter(
+    f: &DoodadFuncInsertCounter,
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+) {
+    let accepted = DoodadCtx::as_player(caster).is_some_and(|player| {
+        f.count > 0
+            && f.item_count > 0
+            && economy(ctx.server).try_bag_consume_item(
+                ctx.server,
+                player,
+                item_task::DOODAD_ITEM_CHANGER,
+                f.item_id,
+                f.item_count,
+            )
+    });
+    set_to_next_phase(ctx, accepted);
 }
 
 /// `DoodadFuncRemoveItem.Use`.
