@@ -170,7 +170,7 @@ struct NoEncounter;
 
 impl Encounter for NoEncounter {}
 
-static ALL: [&dyn Encounter; 9] = [
+static ALL: [&dyn Encounter; 10] = [
     &armory::Armory,
     &palace_cellar::PalaceCellar,
     &hadir::HadirFarm,
@@ -180,6 +180,7 @@ static ALL: [&dyn Encounter; 9] = [
     &super::plateau::Plateau,
     &super::library::Library,
     &super::red_dragon::RedDragon,
+    &super::halcyona::Halcyona,
 ];
 
 /// The encounter of a zone.

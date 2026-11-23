@@ -385,3 +385,8 @@ pub(crate) use super::red_dragon::RED_DRAGON_EGG_SKILL;
 pub fn is_red_dragon_egg_skill(skill_id: u32) -> bool {
     super::red_dragon::is_red_dragon_egg_skill(skill_id)
 }
+
+/// Whether a cast uses Tosare's machinery portal.
+pub fn is_tosare_portal_skill(skill_id: u32) -> bool {
+    super::halcyona::is_tosare_portal_skill(skill_id)
+}

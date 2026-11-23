@@ -11,6 +11,7 @@
 pub mod armory;
 pub mod cradle;
 pub mod hadir;
+mod halcyona;
 pub mod hooks;
 pub mod howling_abyss;
 mod library;

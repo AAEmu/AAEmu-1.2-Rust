@@ -384,7 +384,7 @@ pub(super) fn check(
     }
     // Tosare's portal skill casts a Return effect directly, so it never runs Doodad.Use.
     // Require the machinery's open phase, where the client gets this skill.
-    if template.id == 17_292
+    if encounters::is_tosare_portal_skill(template.id)
         && !target
             .as_obj()
             .and_then(WorldObject::as_doodad)
