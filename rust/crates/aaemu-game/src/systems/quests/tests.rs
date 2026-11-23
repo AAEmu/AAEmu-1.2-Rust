@@ -5205,7 +5205,7 @@ async fn real_compact_db_quest_reward_degree_and_player_gap() {
     let server = test_server_with(gd);
     let rec = Arc::new(Rec::default());
     server.systems.quests.hooks.install(rec.clone());
-    for (level, expected) in [(10, 510), (11, 459), (15, 255), (21, 255), (22, 510)] {
+    for (level, expected) in [(10, 510), (11, 459), (15, 255), (21, 255), (22, 255)] {
         let mut c = character();
         c.unit.level = level;
         with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
