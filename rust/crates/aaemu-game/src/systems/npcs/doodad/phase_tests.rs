@@ -1385,6 +1385,38 @@ async fn use_then_timer_returns_to_start_phase() {
 }
 
 #[tokio::test]
+async fn audit_timer_only_passes_requester_when_authored() {
+    for keep_requester in [true, false] {
+        let b = Builder::default()
+            .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2), (13, 2)])
+            .fake_use(10, 1, 11)
+            .phase_func(
+                11,
+                FuncTemplate::Timer(DoodadFuncTimer {
+                    id: 5,
+                    delay: 500,
+                    next_phase: 12,
+                    keep_requester,
+                    ..DoodadFuncTimer::default()
+                }),
+            )
+            .phase_func(
+                12,
+                FuncTemplate::CraftDirect(DoodadFuncCraftDirect {
+                    id: 6,
+                    next_phase: 13,
+                }),
+            );
+        let mut f = fx(b);
+        let d = f.doodad(TEMPLATE);
+        f.use_(&d);
+        assert_eq!(group(&d), 11);
+        assert_eq!(f.advance(500), 1);
+        assert_eq!(group(&d), if keep_requester { 13 } else { 12 });
+    }
+}
+
+#[tokio::test]
 async fn audit_negative_use_override_takes_priority_over_row_destination() {
     let b = Builder::default()
         .template(TEMPLATE, &[(10, 1), (11, 2)])

@@ -37,7 +37,7 @@ fn override_if_character(
     caster: Option<&WorldObject>,
     next_phase: i32,
 ) -> bool {
-    if DoodadCtx::as_player(caster).is_some() {
+    if ctx.phase_requester(caster).is_some() {
         ctx.doodad.data().phase.override_phase = next_phase;
         return true;
     }
@@ -129,6 +129,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                     caster,
                     FuncTaskKind::Timer {
                         next_phase: f.next_phase,
+                        keep_requester: f.keep_requester && ctx.carries_phase_requester,
                     },
                     tasks::ms(time_left),
                 );
@@ -324,7 +325,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             }
             false
         }
-        FuncTemplate::RequireItem(f) => match DoodadCtx::as_player(caster) {
+        FuncTemplate::RequireItem(f) => match ctx.phase_requester(caster) {
             Some(p) => {
                 let count = server
                     .systems
@@ -337,7 +338,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             }
             None => true,
         },
-        FuncTemplate::RequireQuest(f) => match DoodadCtx::as_player(caster) {
+        FuncTemplate::RequireQuest(f) => match ctx.phase_requester(caster) {
             Some(p) => !server
                 .systems
                 .npcs
@@ -402,7 +403,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 f.min_time,
                 f.max_time
             );
-            if let Some(p) = DoodadCtx::as_player(caster) {
+            if let Some(p) = ctx.phase_requester(caster) {
                 use_respawn(ctx, p);
             }
             false
@@ -422,7 +423,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             false
         }
         FuncTemplate::PuzzleOut(f) => {
-            if DoodadCtx::as_player(caster).is_none() {
+            if ctx.phase_requester(caster).is_none() {
                 return false;
             }
             if !f.anim.is_empty() || f.projectile_id != 0 {
@@ -502,7 +503,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         }
         FuncTemplate::Coffer(_) => {
             ctx.doodad.data().phase.to_next_phase = false;
-            if let Some(p) = DoodadCtx::as_player(caster) {
+            if let Some(p) = ctx.phase_requester(caster) {
                 let (is_coffer, opened_by) = {
                     let d = ctx.doodad.data();
                     (

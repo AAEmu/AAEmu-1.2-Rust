@@ -26,7 +26,11 @@ use crate::world::{DoodadRef, WorldInstance, WorldObject};
 #[derive(Debug, Clone)]
 pub enum FuncTaskKind {
     /// `DoodadFuncTimerTask(caster, owner, 0, nextPhase)`.
-    Timer { next_phase: i32 },
+    Timer {
+        next_phase: i32,
+        /// Inferred from 1.2 timer rows such as 5461. This controls the next phase requester.
+        keep_requester: bool,
+    },
     /// Complete the single outcome selected from the 1.2 puzzle-out rows.
     PuzzleOutcome {
         token: u64,
@@ -477,7 +481,7 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
     if task.generation != 0 && task.holder.data().phase.func_task != task.generation {
         return; // cancelled
     }
-    let ctx = DoodadCtx::new(server, world, task.doodad.clone());
+    let mut ctx = DoodadCtx::new(server, world, task.doodad.clone());
     let caster = task.caster.as_ref();
     let (template_id, func_group_id) = {
         let d = ctx.doodad.data();
@@ -503,7 +507,19 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                 phase::do_change_phase(&ctx, caster, next_phase);
             }
         }
-        FuncTaskKind::Timer { next_phase } => {
+        FuncTaskKind::Timer {
+            next_phase,
+            keep_requester,
+        } => {
+            let caster = caster.filter(|object| {
+                object.as_player().is_none_or(|requester| {
+                    ctx.world.object(object.obj_id()).is_some_and(|current| {
+                        current
+                            .as_player()
+                            .is_some_and(|p| Arc::ptr_eq(p, requester))
+                    })
+                })
+            });
             tracing::trace!(
                 "[Doodad] DoodadFuncTimerTask: Doodad {}, TemplateId {template_id}. Using skill 0 with doodad phase {next_phase}",
                 ctx.doodad.obj_id
@@ -517,6 +533,9 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                     return;
                 }
             }
+            // Compact Sal Temple timers 4565–4567 clear keep_requester, but their
+            // phases still emit pulses. Keep the effect actor through the timer chain.
+            ctx.carries_phase_requester = keep_requester;
             phase::do_change_phase(&ctx, caster, next_phase);
             // The phase state does not allow us to interact with the object, so we will
             // automatically get items from ID=6121 & ID=6125, "Treasure Chest" in Palace
