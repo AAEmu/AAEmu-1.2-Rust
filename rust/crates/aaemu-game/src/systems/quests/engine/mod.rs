@@ -205,6 +205,11 @@ const WIRE_QUEST_ID_LIMIT: u32 = (u16::MAX as u32 + 1) * 64;
 /// Minimum time between two WARN lines for the same refusal of the same quest.
 const REFUSAL_REPEAT_MS: i64 = 60_000;
 
+/// r208022 0x7e71b0 and 0x7e5d70 round up at 150% of the target.
+fn overdone_threshold(target: i32) -> i32 {
+    (target as f32 * 1.5).ceil() as i32
+}
+
 impl<'a> Ctx<'a> {
     // ----- plumbing -----
 
@@ -847,7 +852,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             let ceil = |f: f32| (t.score as f32 * f).ceil() as i32;
-            if t.let_it_done && score >= ceil(3.0 / 2.0) {
+            if t.let_it_done && score >= overdone_threshold(t.score) {
                 return ObjectiveStatus::Overachieved;
             }
             if t.let_it_done && score > t.score {
@@ -870,7 +875,7 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 let o = obj(at.objective_index);
-                let s = if t.let_it_done && o >= at.count * 3 / 2 {
+                let s = if t.let_it_done && o >= overdone_threshold(at.count) {
                     ObjectiveStatus::Overachieved
                 } else if t.let_it_done && o > at.count {
                     ObjectiveStatus::ExtraProgress
@@ -947,11 +952,10 @@ impl<'a> Ctx<'a> {
                     score = score.wrapping_add(at.count.wrapping_mul(obj(at.objective_index)));
                 }
             }
-            let cap = (t.score as f32 * 3.0 / 2.0).ceil() as i32;
-            if t.let_it_done && score >= cap {
-                return cap as f32;
+            if t.let_it_done {
+                score = score.min(overdone_threshold(t.score));
             }
-            return 1.0 / t.score as f32 * score as f32;
+            return score as f32 / t.score as f32;
         }
         let mut highest = 0f32;
         for c in step.components.iter().filter(|c| c.is_active) {
@@ -960,12 +964,14 @@ impl<'a> Ctx<'a> {
                 if at.objective_index == 0xFF {
                     continue;
                 }
-                let o = obj(at.objective_index);
-                if t.let_it_done && o >= at.count * 3 / 2 {
-                    highest = highest.max(at.count as f32 * 3.0 / 2.0);
+                if at.count <= 0 {
                     continue;
                 }
-                highest = highest.max(1.0 / at.count as f32 * o as f32);
+                let mut count = obj(at.objective_index);
+                if t.let_it_done {
+                    count = count.min(overdone_threshold(at.count));
+                }
+                highest = highest.max(count as f32 / at.count as f32);
             }
         }
         highest

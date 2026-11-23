@@ -1,4 +1,4 @@
-//! 1.2 client quest reward scaling (`Quest:RewardScaling`, default off).
+//! 1.2 client quest reward scaling (`Quest:RewardScaling`, enabled by default).
 //!
 //! `X2Quest.GetQuestContextRewardExp` (`FUN_394a1370`) and `...RewardCopper`
 //! (`FUN_394a0fd0`) compute the number the quest window shows from the client tables:
@@ -10,12 +10,8 @@
 //! * Exp, act value or scaled supply, is then reduced by the quest-vs-player level gap
 //!   (`FUN_397d3810`). Copper has no gap factor.
 //!
-//! The amounts are display-only in the client: the server decides what it pays (the quest
-//! packets carry no reward figure). Whether the original zone server applied these factors is
-//! INFERRED from the client UI (a window showing a different number than the payout would be a
-//! visible bug); no capture of a retail grant exists. The flag keeps today's unscaled payout
-//! until the live check (quest-window number vs. exp / copper actually gained) settles it
-//! (`porting-md#2`, capture-pending; see `PORTING.md`).
+//! The server uses the r208022 display formulas for payout. The flag restores unscaled
+//! base amounts for servers that need the previous behavior.
 
 /// Degree factor of the `quest_supplies` fallback (`FUN_397d5eb0` / `FUN_397d5dd0`).
 pub fn degree_factor(degree: i32) -> f32 {

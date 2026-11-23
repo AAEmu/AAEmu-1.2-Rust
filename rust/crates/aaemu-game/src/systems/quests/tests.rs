@@ -39,6 +39,7 @@ pub(super) struct Rec {
     trade_packs: Vec<u32>,
     /// Failed mails reported by `send_quest_reward_mails`.
     failed_mails: usize,
+    fail_item: Mutex<Option<u32>>,
     team: Mutex<Vec<PlayerRef>>,
 }
 
@@ -93,6 +94,9 @@ impl QuestHooks for Rec {
         count: i32,
         grade: u8,
     ) -> bool {
+        if *self.fail_item.lock().unwrap() == Some(template_id) {
+            return false;
+        }
         give_item(c, template_id, count);
         self.push(format!("item {task} {template_id} {count} {grade}"));
         true
@@ -1020,6 +1024,11 @@ fn fallback_reward_quest(d: &mut QuestData, id: u32, level: u8, degree: i32) {
         ActKind::ConAutoComplete,
     );
     d.add_component(component(id * 10 + 2, id, kind::REWARD));
+}
+
+#[tokio::test]
+async fn quest_reward_scaling_defaults_to_client_factors() {
+    assert!(super::config::QuestConfig::default().reward_scaling);
 }
 
 #[tokio::test]
@@ -2687,6 +2696,84 @@ async fn arming_a_saved_deadline_beyond_the_limit_clamps_time_ms_to_the_limit() 
 }
 
 #[tokio::test]
+async fn quest_reward_early_completion_scales_exp_act() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(20)
+        });
+        d.add_component(component(201, 20, kind::START));
+        d.add_act(201, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(202, 20, kind::PROGRESS));
+        d.add_act(
+            202,
+            2,
+            2,
+            4,
+            ActKind::ObjCraft {
+                craft_id: 1,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        d.add_component(component(203, 20, kind::REWARD));
+        d.add_act(203, 3, 3, 0, ActKind::SupplyExp { exp: 365 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        start(ctx, 20);
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::Craft { craft_id: 1 }).unwrap();
+        }
+        drain(ctx);
+        ctx.try_complete_quest_as_let_it_done(20, 0);
+        drain(ctx);
+        assert_eq!(rec.take(), vec!["exp 110 true"]);
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_odd_objective_overdone_rounds_up() {
+    let (server, _) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(20)
+        });
+        d.add_component(component(201, 20, kind::START));
+        d.add_act(201, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(202, 20, kind::PROGRESS));
+        d.add_act(
+            202,
+            2,
+            2,
+            3,
+            ActKind::ObjCraft {
+                craft_id: 1,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 20);
+        for (count, status) in [
+            (4, ObjectiveStatus::ExtraProgress),
+            (5, ObjectiveStatus::Overachieved),
+        ] {
+            ctx.st.quest_mut(h).unwrap().objectives[0] = count;
+            assert_eq!(ctx.objective_status(h), status);
+            assert!((ctx.objective_percent(h) - count as f32 / 3.0).abs() < 1e-6);
+        }
+    });
+}
+
+#[tokio::test]
 async fn let_it_done_and_score() {
     let (server, rec) = server_with(|d| {
         d.add_template(QuestTemplate {
@@ -2839,6 +2926,120 @@ async fn report_doodad_and_complete_quest_acts() {
             .st
             .subscribers(super::state::EventKind::ReportDoodad)
             .is_empty());
+    });
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_reward_fixed_grade_merges_into_existing_stack() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.items = ItemData::load(&conn).unwrap();
+    let server = test_server_with(gd);
+    let items = &server.game_data.items;
+    let template = items.template(28859).unwrap();
+    assert_eq!(template.fixed_grade, 3);
+    let mut c = character();
+    c.inventory = crate::models::character::Inventory::standalone(1, 1, 0);
+    let bag = c.inventory.bag().clone();
+    {
+        let mut bag = bag.lock().unwrap();
+        let mut item = Item::create(1, template, 1, 0, 1, items, 0);
+        item.slot = 0;
+        bag.items.push(item);
+        bag.update_free_slot_count();
+    }
+    let hooks = crate::systems::economy::bridges::EconomyForQuests;
+    assert!(hooks.acquire_default_item(&server, None, &mut c, 38, 28859, 1, 0));
+    assert_eq!(bag.lock().unwrap().items_by_template(28859, 3).1, 2);
+}
+
+#[tokio::test]
+async fn quest_reward_overflow_uses_stack_capacity_and_final_copper() {
+    let (server, rec) = server_with(|d| {
+        fallback_reward_quest(d, 40, 10, 2);
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 0,
+                copper: 152,
+            },
+        );
+        d.add_act(
+            402,
+            10,
+            10,
+            1,
+            ActKind::SupplySelectiveItem {
+                item_id: 11,
+                grade_id: 0,
+            },
+        );
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    c.inventory = crate::models::character::Inventory::standalone(1, 1, 0);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(40, 1);
+        ctx.set_step(h, kind::REWARD);
+        ctx.st
+            .quest_mut(h)
+            .unwrap()
+            .reward_items
+            .push(ItemCreationDefinition {
+                template_id: 11,
+                count: 1001,
+                grade_id: 0,
+            });
+        rec.take();
+        assert!(ctx.distribute_rewards(h, true));
+        assert_eq!(rec.take(), vec!["mail 40 1 114"]);
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_retry_keeps_only_undelivered_items() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(402, 40, kind::REWARD));
+        for id in [11, 12] {
+            d.add_act(
+                402,
+                id,
+                id,
+                1,
+                ActKind::SupplySelectiveItem {
+                    item_id: id,
+                    grade_id: 0,
+                },
+            );
+        }
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(40, 1);
+        ctx.set_step(h, kind::REWARD);
+        for id in [11, 12] {
+            ctx.st
+                .quest_mut(h)
+                .unwrap()
+                .reward_items
+                .push(ItemCreationDefinition {
+                    template_id: id,
+                    count: 1,
+                    grade_id: 0,
+                });
+        }
+        *rec.fail_item.lock().unwrap() = Some(12);
+        assert!(!ctx.distribute_rewards(h, true));
+        assert_eq!(rec.take(), vec!["item 38 11 1 0"]);
+        *rec.fail_item.lock().unwrap() = None;
+        assert!(ctx.distribute_rewards(h, true));
+        assert_eq!(rec.take(), vec!["item 38 12 1 0"]);
     });
 }
 
@@ -4919,6 +5120,66 @@ async fn real_compact_db_report_doodads_are_ready_doodad_func_quests() {
 
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_quest_reward_degree_and_player_gap() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    for (level, expected) in [(10, 510), (11, 459), (15, 255), (21, 255), (22, 510)] {
+        let mut c = character();
+        c.unit.level = level;
+        with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+            let h = ctx.new_quest(97, 1);
+            ctx.set_step(h, kind::REWARD);
+            assert!(ctx.distribute_rewards(h, true));
+        });
+        assert_eq!(
+            rec.take(),
+            vec![format!("exp {expected} true"), "money 57".to_string()]
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn real_compact_db_quest_reward_first_exp_act_wins() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        for (quest_id, expected) in [
+            (6315, vec!["exp 40800 true"]),
+            (4805, vec![]),
+            (2785, vec!["exp 8400 true"]),
+        ] {
+            let h = ctx.new_quest(quest_id, 1);
+            ctx.set_step(h, kind::REWARD);
+            rec.take();
+            ctx.run_current_step(h);
+            let calls = rec.take();
+            let xp: Vec<_> = calls
+                .iter()
+                .filter(|call| call.starts_with("exp "))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(xp, expected, "quest {quest_id}");
+        }
+    });
+}
+
+#[tokio::test]
+#[ignore]
 async fn real_compact_db_reward_acts_replace_level_supplies() {
     let Some(conn) = real_db() else {
         return;

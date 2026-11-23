@@ -213,8 +213,9 @@ impl<'a> Ctx<'a> {
         }
 
         // Handle Supply/Reward Distribution
-        let d = self.distribute_rewards(h, true);
-        res &= d;
+        if this_step != kind::REWARD || res {
+            res &= self.distribute_rewards(h, true);
+        }
 
         // LetItBeDone type of quests, are always forced forward using the Report Acts
         if this_step == kind::PROGRESS && t.let_it_done {

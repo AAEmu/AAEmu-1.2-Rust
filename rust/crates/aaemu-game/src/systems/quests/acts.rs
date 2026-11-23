@@ -301,14 +301,28 @@ impl Ctx<'_> {
                 true
             }
             SupplyExp { exp } => {
-                // `Quest:RewardScaling`: the act value has no degree factor, but the client
-                // applies the quest-vs-player level gap to the reward exp (see `reward_scale`).
+                // r208022 0x4b1370 returns from the first Reward XP act, including zero.
+                if at.component_kind == kind::REWARD
+                    && t.components_of(&data.components, kind::REWARD)
+                        .iter()
+                        .flat_map(|component| component.acts.iter().copied())
+                        .find(|&index| matches!(data.acts[index].kind, SupplyExp { .. }))
+                        != Some(a)
+                {
+                    return true;
+                }
                 let exp = if self.server.config.get().quest.reward_scaling {
                     gap_exp(*exp, t.level, self.c.unit.level)
                 } else {
                     *exp
                 };
-                hooks.add_exp(self.server, player.as_ref(), self.c, exp, true);
+                if at.component_kind == kind::REWARD {
+                    if let Some(q) = self.st.quest_mut(h) {
+                        q.reward_exp = exp;
+                    }
+                } else {
+                    hooks.add_exp(self.server, player.as_ref(), self.c, exp, true);
+                }
                 true
             }
             SupplyHonorPoint { point } => {
