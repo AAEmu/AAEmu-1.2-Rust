@@ -601,9 +601,8 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     let palace_flame = clout == Some(CloutClass::PalaceFlame);
     // An NPC skill summoned this doodad, and the clout uses that NPC as its source
     // (Kroloal Cradle's Miasma, Poison Belch and Toxic Globe). See `npc_origin_clout`.
-    // The encounter areas handled above keep their own caster and payload rules (the
-    // Burnt Castle Howl ward is summoned by its marker NPC, and its protection runs as
-    // the doodad).
+    // Encounter areas above keep their own caster rules. The Burnt Castle Howl ward is
+    // summoned by its marker NPC and casts protection from the doodad.
     let npc_origin = !(is_fish_school
         || howl_ward
         || howling_hazard
@@ -655,6 +654,10 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     if frozen_zone && caster.is_none() {
         return;
     }
+    let supplied_unit_id = caster
+        .as_ref()
+        .filter(|unit| unit.is_unit())
+        .map(WorldObject::obj_id);
     let trigger_caster = match caster {
         Some(c) if hadir_hazard || frozen_zone => c,
         Some(c)
@@ -672,7 +675,10 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .buffs
         .contains_key(&f.buff_id)
         .then_some(f.buff_id);
-    let func_group_id = ctx.doodad.data().func_group_id;
+    let (func_group_id, owner_obj_id) = {
+        let doodad = ctx.doodad.data();
+        (doodad.func_group_id, doodad.owner_obj_id)
+    };
     let mut trigger = AreaTrigger::default();
     trigger.shape = shape;
     trigger.owner = Some(owner.clone());
@@ -698,33 +704,25 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // Poison (stepping stone pools) and Lava (Arkanis's room).
     trigger.requires_submersion =
         encounters::clout_requires_submersion(&ctx.world.template.name, f.buff_id);
+    // The linked effects are independent of the inside buff. For unit-owned clouts, require
+    // the owner's faction and a sided relation: Any admits allies, and Hostile with a
+    // faction-less caster admits even the summoner. A placed environmental hazard can pulse
+    // without a unit source. Restrict an explicitly supplied unit that was lost as a source
+    // too, since the doodad cannot tell its side.
+    use area_trigger::skill_target_relation::{FRIENDLY, HOSTILE};
+    let uses_owner_relation = trigger_caster.obj_id() == owner_obj_id
+        && matches!(trigger.target_relation, FRIENDLY | HOSTILE)
+        && crate::systems::social::nation::faction_exists(
+            server,
+            trigger_caster.with_base_unit(|unit| unit.faction_id()),
+        );
+    let lost_unit_source = supplied_unit_id.is_some_and(|id| id != trigger_caster.obj_id());
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
-        // Deviation: a clout without an inside buff (401 of the 447 clouts with effects) never
-        // applied its effects in the C# (`ApplyEffects` needs `InsideBuffTemplate`). Its
-        // beneficial buffs now reach the units inside (key 0, see `AreaTrigger::apply_effects`):
-        // Lake Bubbles (4336) gives Air Bubble 3036 at the Soundless Lake sealstone. Its damage,
-        // debuff and hidden-buff effects (traps, boss mechanics) stay off until verified.
-        // These encounter clouts carry their payload without an inside buff.
-        None if hadir_hazard
-            || frozen_zone
-            || encounters::clout_payload_without_inside_buff(f.id) =>
-        {
-            HashMap::from([(0, f.effects.clone())])
+        None if (owner_obj_id != 0 && !uses_owner_relation) || lost_unit_source => {
+            HashMap::from([(0, good_buff_effects(server, &f.effects))])
         }
-        // An NPC's hazard picks its side through the relation, so its damage and debuffs
-        // reach the NPC's enemies (a Friendly one its allies). An Any / Others area would
-        // also take the NPC and its allies and stays limited to its beneficial buffs.
-        None if npc_origin
-            && matches!(
-                f.target_relation,
-                area_trigger::skill_target_relation::FRIENDLY
-                    | area_trigger::skill_target_relation::HOSTILE
-            ) =>
-        {
-            HashMap::from([(0, f.effects.clone())])
-        }
-        None => HashMap::from([(0, good_buff_effects(server, &f.effects))]),
+        None => HashMap::from([(0, f.effects.clone())]),
     };
     trigger.tick_rate = f.tick;
     let trigger = Arc::new(trigger);

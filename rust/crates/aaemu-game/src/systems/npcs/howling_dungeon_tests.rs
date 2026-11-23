@@ -656,12 +656,18 @@ async fn real_howling_normal_spike_injury_outlasts_the_pulse() {
         let t = spike.data().transform;
         let (_client, victim) = player_in(&server, i as u32 + 1, [t.x, t.y, t.z], NORMAL_ZONE);
         super::doodad::manager::do_change_phase(&server, &world, &spike, None, pulse);
+        let triggers = &server.systems.npcs.area_triggers;
+        let attached = triggers.attached_to(spike.obj_id);
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].inside_buff_id, Some(3999));
         assert!(
             victim.data().unit.buffs.check_buff(3999),
             "spike {template}'s pulse injures the player on it"
         );
         server.systems.npcs.doodads.tasks.advance(&server, 250);
-        server.systems.npcs.area_triggers.tick(&server);
+        triggers.tick(&server);
+        assert!(attached[0].is_removed());
+        assert!(triggers.attached_to(spike.obj_id).is_empty());
         assert!(
             victim.data().unit.buffs.check_buff(3999),
             "spike {template}'s injury outlasts its pulse"

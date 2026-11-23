@@ -277,15 +277,6 @@ fn clout_requires_submersion() {
 }
 
 #[test]
-fn clout_payload_without_inside_buff() {
-    table(
-        r::clout_payload_without_inside_buff,
-        &[1415, 1542],
-        &[0, 1414, 1416, 1541, 1543, 1152],
-    );
-}
-
-#[test]
 fn powder_keg_ids() {
     assert_eq!(r::POWDER_KEG_DOODAD, 5951);
     assert_eq!(r::POWDER_KEG_ITEM, 25002);

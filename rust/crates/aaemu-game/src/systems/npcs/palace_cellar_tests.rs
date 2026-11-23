@@ -155,6 +155,34 @@ async fn real_palace_cellar_barrier_and_both_ways_to_extinguish_the_door_fire() 
 
 #[tokio::test(start_paused = true)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_palace_cellar_flame_947_releases_its_inside_buff_on_phase_change() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let (server, world) = super::burntcastle_dungeon_tests::real_encounter_server(&db, WORLD, ZONE);
+    let (_client, player) = place_player(&server, 1, 541.52, 250.008, 144.033);
+    let (_other_client, outside) = place_player(&server, 2, 555.52, 250.008, 144.033);
+    let flame = doodad::create(&server, &world, 0, 4109, None, true).unwrap();
+    flame.data().transform = WorldObject::from(&player).transform();
+    doodad::spawn(&server, &world, &flame);
+
+    doodad::do_change_phase(&server, &world, &flame, None, 9972);
+    let triggers = &server.systems.npcs.area_triggers;
+    let attached = triggers.attached_to(flame.obj_id);
+    assert_eq!(attached.len(), 1);
+    assert_eq!(attached[0].inside_buff_id, Some(2783));
+    triggers.tick(&server);
+    assert!(player.data().unit.buffs.check_buff(2783));
+    assert!(!outside.data().unit.buffs.check_buff(2783));
+
+    doodad::do_change_phase(&server, &world, &flame, None, 10390);
+    assert!(attached[0].is_removed());
+    assert!(triggers.attached_to(flame.obj_id).is_empty());
+    assert!(!player.data().unit.buffs.check_buff(2783));
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_palace_cellar_boss_deaths_open_their_own_gates_and_drop_keys() {
     use crate::models::item_task::task_type;
     use crate::net::registry::ClientPacket;

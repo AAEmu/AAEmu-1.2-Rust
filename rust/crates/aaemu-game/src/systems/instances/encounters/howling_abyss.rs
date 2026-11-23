@@ -53,11 +53,6 @@ pub(super) fn clout_reapplies_contact(clout_id: u32) -> bool {
     matches!(clout_id, 1295 | 1334 | 1336)
 }
 
-/// Calleil's Hellfire clouts carry their payload without an inside buff.
-pub(super) fn clout_payload_without_inside_buff(clout_id: u32) -> bool {
-    matches!(clout_id, 1415 | 1542)
-}
-
 /// The thrown traps: the Bomber keg (49) and the Triste family's secret weapons (64, 66). They
 /// fly ballistically, and their offset turns with the thrower.
 pub(super) fn is_thrown_trap(template_id: u32) -> bool {
