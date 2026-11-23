@@ -492,7 +492,7 @@ async fn modifier_native_channel_upgrade_adds_four_seconds() {
         }),
         1,
     );
-    for (boosted, expected) in [(false, 1800), (true, 2200)] {
+    for (boosted, expected) in [(false, 1810), (true, 2210)] {
         if boosted {
             apply_boost(&server, &player, 5326);
         }
@@ -685,7 +685,7 @@ async fn modifier_channel_packet_and_ticks_share_a_snapshot_of_duration() {
         // Native sub_397CA390: ID, timeline, caster, target, object, two msec fields.
         // Pin the current wire's duration field independently of the packet encoder.
         let wire_duration = u16::from_le_bytes(fired[17..19].try_into().unwrap());
-        assert_eq!(wire_duration, if boosted { 40 } else { 20 });
+        assert_eq!(wire_duration, if boosted { 50 } else { 30 });
         skills::buffs::remove_buff(&server, &WorldObject::from(&player), 5326);
         // Install the spawned timers, then visit each deadline. Wall-clock sleeps
         // can skip a tick under unrelated machine load and don't test this snapshot.

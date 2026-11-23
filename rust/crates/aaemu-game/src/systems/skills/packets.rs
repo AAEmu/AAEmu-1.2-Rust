@@ -119,6 +119,16 @@ pub(super) fn wire_duration_div10(duration_ms: i32) -> u16 {
     (duration_ms / 10).clamp(0, i32::from(u16::MAX)) as u16
 }
 
+/// The fired packet's delay and channel fields keep the server's long-standing 100 ms bias
+/// (`ms / 10 + 10`). The client codec has no bias of its own, and whether native servers
+/// added one is unverified, so this keeps the client timing unchanged and only stops the
+/// value from wrapping.
+fn wire_fired_duration_div10(duration_ms: i32) -> u16 {
+    (duration_ms / 10)
+        .saturating_add(10)
+        .clamp(0, i32::from(u16::MAX)) as u16
+}
+
 /// `SCSkillFiredPacket`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SCSkillFiredPacket {
@@ -144,8 +154,8 @@ impl Marshal for SCSkillFiredPacket {
         self.caster.write(s);
         self.target.write(s);
         self.skill_object.write(s);
-        s.write_u16(wire_duration_div10(self.computed_delay))
-            .write_u16(wire_duration_div10(self.channeling_time))
+        s.write_u16(wire_fired_duration_div10(self.computed_delay))
+            .write_u16(wire_fired_duration_div10(self.channeling_time))
             .write_u8(0) // f
             .write_u32(self.fire_anim_id)
             .write_u8(0); // flag
@@ -1183,8 +1193,8 @@ mod tests {
             .write_bc(0)
             .write_bc(0)
             .write_u8(0)
-            .write_u16(45)
-            .write_u16(200)
+            .write_u16(55)
+            .write_u16(210)
             .write_u8(0)
             .write_u32(87)
             .write_u8(0);

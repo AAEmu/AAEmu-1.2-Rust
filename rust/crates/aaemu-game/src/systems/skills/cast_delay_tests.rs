@@ -296,7 +296,8 @@ async fn a_delayed_disturb_interrupts_a_channel_after_the_delay() {
 
 #[tokio::test(start_paused = true)]
 async fn long_fire_delay_uses_full_milliseconds_on_the_wire_and_in_the_scheduler() {
-    for (delay, expected) in [(40_000, [0xA0, 0x0F]), (90_000, [0x28, 0x23])] {
+    // ms / 10 + 10: 4010 = 0x0FAA and 9010 = 0x2332 (the 90 s value wrapped as i16 before).
+    for (delay, expected) in [(40_000, [0xAA, 0x0F]), (90_000, [0x32, 0x23])] {
         // 90,000 ms is the effect_delay authored for skill 16385.
         let mut d = cast_data(0);
         let mut t = (**d.systems.skills.skill(CAST_SKILL).unwrap()).clone();
@@ -315,7 +316,8 @@ async fn long_fire_delay_uses_full_milliseconds_on_the_wire_and_in_the_scheduler
             .expect("skill fired")
             .1;
         // Skill id, timeline, caster, target and skill object precede the two u16 times.
-        assert_eq!(fired[15..19], [expected[0], expected[1], 0, 0]);
+        // No channel: 0 ms -> 10 with the bias.
+        assert_eq!(fired[15..19], [expected[0], expected[1], 10, 0]);
 
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(delay as u64 - 10)).await;
@@ -359,7 +361,8 @@ async fn long_channel_keeps_its_server_duration_when_the_wire_value_saturates() 
         .find(|(op, _)| *op == sc::SCSkillFiredPacket)
         .expect("channel fired")
         .1;
-    assert_eq!(fired[15..19], [0, 0, 0xFF, 0xFF]);
+    // Fire delay 0 -> 10 (the 100 ms bias); the channel saturates at u16::MAX.
+    assert_eq!(fired[15..19], [0x0A, 0, 0xFF, 0xFF]);
 
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(655_350)).await;
